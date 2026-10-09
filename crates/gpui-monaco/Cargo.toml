@@ -1,0 +1,19 @@
+[package]
+name = "gpui-monaco"
+description = "A Monaco-like code editor component for GPUI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui.workspace = true
+gpui-monaco-text.workspace = true
+gpui-monaco-syntax.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

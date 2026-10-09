@@ -1,0 +1,17 @@
+[package]
+name = "gpui-monaco-syntax"
+description = "Pluggable highlighting, tree-sitter backend and language registry for gpui-monaco."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "syntax"
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui-monaco-text.workspace = true
