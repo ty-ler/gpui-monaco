@@ -21,8 +21,6 @@ use crate::widgets::{ContentWidgetPreference, OverlayPosition};
 
 /// Width of the glyph margin when enabled (Monaco `glyphMarginWidth`).
 const GLYPH_MARGIN_WIDTH: f32 = 18.;
-/// Monaco `lineDecorationsWidth` default.
-const LINE_DECORATIONS_WIDTH: f32 = 10.;
 /// Minimum scrollbar slider length.
 const MIN_SLIDER: f32 = 20.;
 
@@ -706,7 +704,7 @@ fn prepaint_editor(
         px(0.)
     };
     let gutter_width =
-        (glyph_width + numbers_width + px(LINE_DECORATIONS_WIDTH) + folding_width).round();
+        (glyph_width + numbers_width + options.line_decorations_width + folding_width).round();
 
     let vbar = options.vertical_scrollbar_size;
     let hbar = options.horizontal_scrollbar_size;
@@ -978,7 +976,7 @@ fn prepaint_editor(
     if options.folding {
         let buffer = editor.model().read(cx).buffer().clone();
         let collapsed = editor.folds.collapsed_rows(&buffer);
-        let left = bounds.left() + glyph_width + numbers_width + px(LINE_DECORATIONS_WIDTH);
+        let left = bounds.left() + glyph_width + numbers_width + options.line_decorations_width;
         for line in lines.iter().filter(|line| line.columns.start == 0) {
             let top = bounds.top() + zones.line_y(line.view_line, line_height) - scroll_top;
             let is_collapsed = collapsed.iter().any(|(start, _)| *start == line.row);

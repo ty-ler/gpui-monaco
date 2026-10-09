@@ -493,6 +493,13 @@ impl Buffer {
         }
     }
 
+    /// Drops undo and redo history (Monaco `setValue` does this). Versions
+    /// and patches are kept so anchors and consumers stay valid.
+    pub fn clear_history(&mut self) {
+        self.history.undo.clear();
+        self.history.redo.clear();
+    }
+
     pub fn last_transaction_id(&self) -> Option<TransactionId> {
         self.history.undo.last().map(|t| t.id)
     }

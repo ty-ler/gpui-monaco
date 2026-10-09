@@ -106,6 +106,7 @@ pub struct CodeEditor {
     pub(crate) folds: FoldState,
     pub(crate) gutter_hovered: bool,
     pub(crate) widgets: Widgets,
+    pub(crate) find: crate::find::FindState,
     fold_task: Option<Task<()>>,
     pub(crate) autoscroll_requested: bool,
     pub(crate) cursor_visible: bool,
@@ -167,6 +168,7 @@ impl CodeEditor {
             folds: FoldState::default(),
             gutter_hovered: false,
             widgets: Widgets::default(),
+            find: Default::default(),
             fold_task: None,
             _blink_task: None,
             _subscriptions: subscriptions,
@@ -250,6 +252,12 @@ impl CodeEditor {
     pub fn set_selections(&mut self, selections: &[Selection], cx: &mut Context<Self>) {
         if selections.is_empty() {
             return;
+        }
+        // The model may have changed since our last event (e.g. `set_value`
+        // just now); the new selections refer to its current text.
+        let latest = self.model.read(cx).snapshot();
+        if latest.version() != self.snapshot.version() {
+            self.snapshot = latest;
         }
         self.cursors.set_selections(selections);
         self.cursors.validate(self.snapshot.rope());
@@ -446,6 +454,7 @@ impl CodeEditor {
                 if *kind == EditKind::SetValue {
                     self.marked_range = None;
                 }
+                self.refresh_find_matches(cx);
                 if !own {
                     self.prev_edit_kind = None;
                 }
@@ -636,6 +645,10 @@ impl CodeEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.options.single_line {
+            cx.propagate();
+            return;
+        }
         let primary = self.cursors.primary().clone();
         if self.cursors.all().len() > 1 {
             self.cursors.set_states(vec![primary]);
@@ -653,6 +666,13 @@ impl CodeEditor {
 
     /// Types `text` at every cursor, as if from the keyboard.
     pub fn type_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let single_line;
+        let text = if self.options.single_line && text.contains('\n') {
+            single_line = text.replace(['\r', '\n'], " ");
+            single_line.as_str()
+        } else {
+            text
+        };
         let config = self.cursor_config(cx);
         let operation = cursor::type_text(
             &config,
@@ -697,14 +717,26 @@ impl CodeEditor {
     }
 
     fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
+        if self.options.single_line {
+            cx.propagate();
+            return;
+        }
         self.run_edit(cx, cursor::tab);
     }
 
     fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.options.single_line {
+            cx.propagate();
+            return;
+        }
         self.run_edit(cx, cursor::outdent);
     }
 
     fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
+        if self.options.single_line {
+            cx.propagate();
+            return;
+        }
         self.run_edit(cx, cursor::line_break);
     }
 
@@ -792,9 +824,14 @@ impl CodeEditor {
     }
 
     fn paste_item(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
-        let Some(text) = item.text() else {
+        let Some(mut text) = item.text() else {
             return;
         };
+        if self.options.single_line {
+            text = text
+                .trim_end_matches(['\r', '\n'])
+                .replace(['\r', '\n'], " ");
+        }
         let metadata = item.entries().iter().find_map(|entry| match entry {
             gpui::ClipboardEntry::String(string) => string.metadata_json::<ClipboardMetadata>(),
             _ => None,
@@ -1450,9 +1487,14 @@ macro_rules! move_action {
 
 impl Render for CodeEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut key_context = gpui::KeyContext::new_with_defaults();
+        key_context.add(KEY_CONTEXT);
+        if self.options.single_line {
+            key_context.add("single_line");
+        }
         let root = div()
             .id("code-editor")
-            .key_context(KEY_CONTEXT)
+            .key_context(key_context)
             .track_focus(&self.focus_handle)
             .size_full()
             .cursor(MouseCursor::IBeam);
@@ -1521,6 +1563,81 @@ impl Render for CodeEditor {
                 } else {
                     this.fold(cx);
                 }
+            }))
+            .on_action(cx.listener(|this, _: &StartFind, window, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.open_find(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &StartFindReplace, window, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.open_find(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NextMatch, _, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.find_next(cx)
+            }))
+            .on_action(cx.listener(|this, _: &PreviousMatch, _, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.find_previous(cx)
+            }))
+            .on_action(cx.listener(|this, _: &ReplaceOne, _, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.replace_one(cx)
+            }))
+            .on_action(cx.listener(|this, _: &ReplaceAll, _, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.replace_all(cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectAllMatches, window, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.select_all_matches(cx);
+                this.close_find(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleCaseSensitive, _, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                let mut options = this.find_options().clone();
+                options.match_case = !options.match_case;
+                this.set_find_options(options, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleRegex, _, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                let mut options = this.find_options().clone();
+                options.is_regex = !options.is_regex;
+                this.set_find_options(options, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleWholeWord, _, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                let mut options = this.find_options().clone();
+                options.whole_word = !options.whole_word;
+                this.set_find_options(options, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleFindInSelection, _, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                let mut options = this.find_options().clone();
+                options.in_selection = !options.in_selection;
+                this.set_find_options(options, cx);
             }))
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))

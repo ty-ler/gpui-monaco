@@ -275,3 +275,53 @@ fn view_zone_follows_its_line(cx: &mut TestAppContext) {
     let line_4_top = editor.read_with(cx, |e, _| e.layout_for_tests().unwrap().0);
     assert_eq!(line_4_top, line_height * 6.);
 }
+
+#[gpui::test]
+fn find_and_replace_through_the_widget(cx: &mut TestAppContext) {
+    let (editor, cx) = editor_with_text("foo bar\nfoo baz foo\nqux", cx);
+    // Cmd-F seeds the query with the word under the cursor.
+    cx.simulate_keystrokes("secondary-f");
+    cx.run_until_parked();
+    let (visible, query) = editor.read_with(cx, |e, _| {
+        (e.is_find_visible(), e.find_options().query.clone())
+    });
+    assert!(visible);
+    assert_eq!(query, "foo");
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.find_status()),
+        Some("1 of 3".into())
+    );
+    // Typing in the (focused) find input replaces the selected seed.
+    cx.simulate_input("ba");
+    cx.run_until_parked();
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.find_options().query.clone()),
+        "ba"
+    );
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.find_status()),
+        Some("1 of 2".into())
+    );
+    assert_eq!(heads(&editor, cx), vec![(1, 7)]);
+    // Enter moves to the next match; shift-enter back.
+    cx.simulate_keystrokes("enter");
+    assert_eq!(heads(&editor, cx), vec![(2, 7)]);
+    cx.simulate_keystrokes("shift-enter");
+    assert_eq!(heads(&editor, cx), vec![(1, 7)]);
+    // Regex toggle + replace all.
+    editor.update(cx, |e, cx| {
+        let mut options = e.find_options().clone();
+        options.query = "ba(.)".into();
+        options.is_regex = true;
+        options.replace = "B$1!".into();
+        e.set_find_options(options, cx);
+        e.replace_all(cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "foo Br!\nfoo Bz! foo\nqux");
+    // Escape closes the widget and returns focus to the editor.
+    cx.simulate_keystrokes("escape");
+    assert!(!editor.read_with(cx, |e, _| e.is_find_visible()));
+    cx.simulate_input("!");
+    assert!(text(&editor, cx).contains('!'));
+}

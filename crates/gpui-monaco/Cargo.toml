@@ -14,6 +14,7 @@ workspace = true
 gpui.workspace = true
 gpui-monaco-text.workspace = true
 gpui-monaco-syntax.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 unicode-segmentation.workspace = true

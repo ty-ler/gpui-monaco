@@ -274,24 +274,19 @@ impl TextModel {
     }
 
     /// Replaces the whole text and clears undo history (Monaco `setValue`).
+    /// It's a whole-text edit, so versions keep increasing and anchors,
+    /// decorations and syntax update normally.
     pub fn set_value(&mut self, text: &str, cx: &mut Context<Self>) {
-        let old_len = self.buffer.len();
-        let line_ending = self.buffer.line_ending();
-        self.buffer = Buffer::with_default_line_ending(text, line_ending);
-        self.decorations.clear();
-        // Versions restart with a new buffer; old syntax can't be reused.
-        if let Some(syntax) = self.syntax.as_mut() {
-            syntax.latest = None;
-            syntax.task = None;
-            syntax.dirty = false;
-        }
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        let len = self.buffer.len();
+        let Ok(patch) = self.buffer.edit([(0..len, text)]) else {
+            return;
+        };
+        self.buffer.clear_history();
+        self.decorations.apply_patch(&patch);
         self.reparse(cx);
-        let new_len = self.buffer.len();
         cx.emit(TextModelEvent::Edited {
-            patch: Patch::new(vec![text::Edit {
-                old: 0..old_len,
-                new: 0..new_len,
-            }]),
+            patch,
             version: self.buffer.version(),
             kind: EditKind::SetValue,
             source: None,

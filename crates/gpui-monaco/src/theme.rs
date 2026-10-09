@@ -35,6 +35,20 @@ pub struct EditorColors {
     pub scrollbar_slider_active: Hsla,
     pub scrollbar_shadow: Hsla,
     pub ime_underline: Hsla,
+    /// Current find match (`editor.findMatchBackground`).
+    pub find_match_background: Hsla,
+    /// Other find matches (`editor.findMatchHighlightBackground`).
+    pub find_match_highlight_background: Hsla,
+    /// Find matches in the overview ruler (`editorOverviewRuler.findMatchForeground`).
+    pub find_match_overview: Hsla,
+    /// Widget chrome (`editorWidget.background` / `.foreground` / `.border`).
+    pub widget_background: Hsla,
+    pub widget_foreground: Hsla,
+    pub widget_border: Hsla,
+    /// Input boxes in widgets (`input.background` / `inputOption.activeBackground`).
+    pub input_background: Hsla,
+    pub input_option_active_background: Hsla,
+    pub input_option_active_border: Hsla,
 }
 
 fn c(color: Rgba) -> Hsla {
@@ -60,6 +74,15 @@ impl EditorColors {
             scrollbar_slider_active: c(rgba(0xbfbfbf66)),
             scrollbar_shadow: c(rgb(0x000000)),
             ime_underline: c(rgb(0xd4d4d4)),
+            find_match_background: c(rgb(0x515c6a)),
+            find_match_highlight_background: c(rgba(0xea5c0055)),
+            find_match_overview: c(rgba(0xd186167e)),
+            widget_background: c(rgb(0x252526)),
+            widget_foreground: c(rgb(0xcccccc)),
+            widget_border: c(rgb(0x454545)),
+            input_background: c(rgb(0x3c3c3c)),
+            input_option_active_background: c(rgba(0x007fd466)),
+            input_option_active_border: c(rgb(0x007acc)),
         }
     }
 
@@ -81,6 +104,15 @@ impl EditorColors {
             scrollbar_slider_active: c(rgba(0x00000099)),
             scrollbar_shadow: c(rgb(0xdddddd)),
             ime_underline: c(rgb(0x000000)),
+            find_match_background: c(rgb(0xa8ac94)),
+            find_match_highlight_background: c(rgba(0xea5c0055)),
+            find_match_overview: c(rgba(0xd186167e)),
+            widget_background: c(rgb(0xf3f3f3)),
+            widget_foreground: c(rgb(0x616161)),
+            widget_border: c(rgb(0xc8c8c8)),
+            input_background: c(rgb(0xffffff)),
+            input_option_active_background: c(rgba(0x007fd433)),
+            input_option_active_border: c(rgb(0x007acc)),
         }
     }
 
@@ -115,6 +147,30 @@ impl EditorColors {
             "scrollbarSlider.activeBackground",
         );
         set(&mut self.scrollbar_shadow, "scrollbar.shadow");
+        set(
+            &mut self.find_match_background,
+            "editor.findMatchBackground",
+        );
+        set(
+            &mut self.find_match_highlight_background,
+            "editor.findMatchHighlightBackground",
+        );
+        set(
+            &mut self.find_match_overview,
+            "editorOverviewRuler.findMatchForeground",
+        );
+        set(&mut self.widget_background, "editorWidget.background");
+        set(&mut self.widget_foreground, "editorWidget.foreground");
+        set(&mut self.widget_border, "editorWidget.border");
+        set(&mut self.input_background, "input.background");
+        set(
+            &mut self.input_option_active_background,
+            "inputOption.activeBackground",
+        );
+        set(
+            &mut self.input_option_active_border,
+            "inputOption.activeBorder",
+        );
         self.gutter_background = get("editorGutter.background").unwrap_or(self.background);
         if let Some(color) = get("editor.lineHighlightBackground") {
             self.line_highlight_background = Some(color);
