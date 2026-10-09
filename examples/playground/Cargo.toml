@@ -1,0 +1,21 @@
+[package]
+name = "playground"
+description = "Monaco-playground-like demo app for gpui-monaco."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+# Enables `PLAYGROUND_SCREENSHOT=out.png`: render the first frames offscreen,
+# save a PNG and quit. Used to verify rendering without screen recording.
+screenshot = ["gpui/test-support", "gpui_platform/test-support", "dep:image"]
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui-monaco.workspace = true

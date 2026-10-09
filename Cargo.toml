@@ -1,0 +1,56 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/text",
+    "crates/syntax",
+    "crates/gpui-monaco",
+    "crates/gpui-monaco-languages",
+    "examples/playground",
+]
+default-members = ["crates/text", "crates/syntax", "crates/gpui-monaco", "crates/gpui-monaco-languages"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ty-ler/gpui-monaco"
+publish = false
+
+[workspace.dependencies]
+gpui-monaco-text = { path = "crates/text" }
+gpui-monaco-syntax = { path = "crates/syntax" }
+gpui-monaco = { path = "crates/gpui-monaco" }
+gpui-monaco-languages = { path = "crates/gpui-monaco-languages" }
+
+# Upstream zed, pinned. Bump all three together; see CONTRIBUTING.md.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "f16f9652ec57bf806e65b2a0d51bb92a63644914" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f16f9652ec57bf806e65b2a0d51bb92a63644914", features = ["font-kit"] }
+sum_tree = { git = "https://github.com/zed-industries/zed", rev = "f16f9652ec57bf806e65b2a0d51bb92a63644914" }
+
+anyhow = "1.0"
+proptest = "1.5"
+rand = "0.9"
+regex = "1.11"
+smallvec = { version = "1.13", features = ["union", "const_generics"] }
+unicode-segmentation = "1.12"
+
+# Mirrors the [patch.crates-io] of upstream zed at the pinned rev. Git
+# dependencies do not inherit their workspace's patches, so gpui needs these.
+[patch.crates-io]
+tree-sitter-language = { git = "https://github.com/tree-sitter/tree-sitter", rev = "43623ec9bf0eaaf7113285c46e8a09018f181b18" }
+async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
+khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+
+[profile.dev.package.gpui]
+opt-level = 3
+[profile.dev.package.taffy]
+opt-level = 3

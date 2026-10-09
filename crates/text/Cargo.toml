@@ -1,0 +1,21 @@
+[package]
+name = "gpui-monaco-text"
+description = "Rope, coordinates, anchors and undo history for gpui-monaco. No gpui dependency."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "text"
+
+[lints]
+workspace = true
+
+[dependencies]
+sum_tree.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+rand.workspace = true
