@@ -102,8 +102,10 @@ pub struct TextModel {
     buffer: Buffer,
     options: ModelOptions,
     language_id: Option<SharedString>,
+    uri: Option<SharedString>,
     syntax: Option<Syntax>,
     decorations: DecorationSet,
+    pub(crate) markers: crate::markers::MarkerSet,
     /// Set when `language_id` hasn't been resolved against the registry yet.
     language_pending: bool,
 }
@@ -116,8 +118,10 @@ impl TextModel {
             buffer: Buffer::new(text),
             options: ModelOptions::default(),
             language_id: None,
+            uri: None,
             syntax: None,
             decorations: DecorationSet::default(),
+            markers: Default::default(),
             language_pending: false,
         }
     }
@@ -128,6 +132,25 @@ impl TextModel {
         self.language_id = Some(language_id.into());
         self.language_pending = true;
         self
+    }
+
+    /// Identifies the document for providers (Monaco model uris).
+    pub fn with_uri(mut self, uri: impl Into<SharedString>) -> Self {
+        self.uri = Some(uri.into());
+        self
+    }
+
+    pub fn uri(&self) -> Option<&SharedString> {
+        self.uri.as_ref()
+    }
+
+    /// What language feature providers see about this model.
+    pub fn provider_context(&self) -> crate::providers::ProviderContext {
+        crate::providers::ProviderContext {
+            uri: self.uri.clone(),
+            language_id: self.language_id.clone(),
+            snapshot: self.buffer.snapshot(),
+        }
     }
 
     pub fn buffer(&self) -> &Buffer {

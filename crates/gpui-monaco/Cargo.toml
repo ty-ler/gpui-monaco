@@ -11,6 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+anyhow.workspace = true
+pulldown-cmark = { version = "0.13", default-features = false }
 gpui.workspace = true
 gpui-monaco-text.workspace = true
 gpui-monaco-syntax.workspace = true

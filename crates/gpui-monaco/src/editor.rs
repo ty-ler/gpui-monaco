@@ -38,6 +38,8 @@ pub enum CodeEditorEvent {
     ScrollChanged,
     Focused,
     Blurred,
+    /// Go to definition led to another model: the host should open it.
+    OpenLocation(crate::providers::Location),
 }
 
 /// Saved per-model view state (Monaco `saveViewState`/`restoreViewState`).
@@ -111,6 +113,10 @@ pub struct CodeEditor {
     pub(crate) find: crate::find::FindState,
     pub(crate) multi_cursor: Option<crate::multi_cursor::MultiCursorSession>,
     pub(crate) bracket_decorations: Vec<crate::decorations::DecorationId>,
+    pub(crate) hover: crate::hover::HoverState,
+    pub(crate) marker_navigation: crate::markers::MarkerNavigation,
+    pub(crate) definition: crate::definition::DefinitionLink,
+    pub(crate) signature_help: crate::signature_help::SignatureHelpState,
     fold_task: Option<Task<()>>,
     pub(crate) autoscroll_requested: bool,
     pub(crate) cursor_visible: bool,
@@ -145,6 +151,7 @@ impl CodeEditor {
             }),
             cx.on_blur(&focus_handle, window, |this, _, cx| {
                 this.mouse_selection = None;
+                this.hide_hover(cx);
                 cx.emit(CodeEditorEvent::Blurred);
                 cx.notify();
             }),
@@ -175,6 +182,10 @@ impl CodeEditor {
             find: Default::default(),
             multi_cursor: None,
             bracket_decorations: Vec::new(),
+            hover: Default::default(),
+            marker_navigation: Default::default(),
+            definition: Default::default(),
+            signature_help: Default::default(),
             fold_task: None,
             _blink_task: None,
             _subscriptions: subscriptions,
@@ -374,6 +385,17 @@ impl CodeEditor {
         buffer.anchor_before(buffer.point_utf16_to_offset(position))
     }
 
+    /// Window position of the top-left of `point`'s character, if it's laid
+    /// out (Monaco `getScrolledVisiblePosition`).
+    pub fn scrolled_visible_position(&self, point: PointUtf16) -> Option<Point<Pixels>> {
+        let layout = self.layout.as_ref()?;
+        let line = layout.line_for_point(point)?;
+        Some(gpui::point(
+            layout.text_origin_x() + line.x_for_column(point.column),
+            layout.line_top(line.view_line),
+        ))
+    }
+
     /// (content y of the last view line, line height) from the last layout.
     #[doc(hidden)]
     pub fn layout_for_tests(&self) -> Option<(Pixels, Pixels)> {
@@ -493,6 +515,7 @@ impl CodeEditor {
     /// ranges, pushes it to the model with undo grouping and cursor metadata,
     /// then moves the cursors to the operation's resulting selections.
     pub(crate) fn apply(&mut self, operation: EditOperation, cx: &mut Context<Self>) {
+        self.hide_hover(cx);
         if operation.edits.is_empty() {
             if operation.selections_after != self.cursors.selections() {
                 self.cursors.set_selections(&operation.selections_after);
@@ -590,6 +613,12 @@ impl CodeEditor {
     // ----- navigation ---------------------------------------------------------
 
     fn move_cursors(&mut self, command: MoveCommand, select: bool, cx: &mut Context<Self>) {
+        if !select
+            && matches!(command, MoveCommand::Up | MoveCommand::Down)
+            && self.cycle_signature(if command == MoveCommand::Up { -1 } else { 1 }, cx)
+        {
+            return;
+        }
         let config = self.cursor_config(cx);
         let page = self.page_lines();
         let before = self.cursors.selections();
@@ -674,6 +703,17 @@ impl CodeEditor {
             cx.propagate();
             return;
         }
+        if self.close_marker_zone(cx) {
+            return;
+        }
+        if self.is_signature_help_visible() {
+            self.hide_signature_help(cx);
+            return;
+        }
+        if self.is_hover_visible() {
+            self.hide_hover(cx);
+            return;
+        }
         let primary = self.cursors.primary().clone();
         if self.cursors.all().len() > 1 {
             self.cursors.set_states(vec![primary]);
@@ -703,6 +743,7 @@ impl CodeEditor {
             cursor::type_with_language(config, rope, cursors, text, prev, lang)
         });
         self.apply(operation, cx);
+        self.signature_help_after_typing(text, cx);
     }
 
     /// Runs `f` with the model's language context (configuration plus token
@@ -752,6 +793,9 @@ impl CodeEditor {
             cursor::delete_left_with_language(config, rope, cursors, prev, lang)
         });
         self.apply(operation, cx);
+        if self.is_signature_help_visible() {
+            self.trigger_signature_help(crate::providers::SignatureHelpTrigger::ContentChange, cx);
+        }
     }
 
     fn delete_right(&mut self, _: &DeleteRight, _: &mut Window, cx: &mut Context<Self>) {
@@ -1155,6 +1199,9 @@ impl CodeEditor {
         }
 
         let position = self.position_for_point(event.position, window, cx);
+        if event.modifiers.secondary() && self.follow_definition_link(position, cx) {
+            return;
+        }
         let in_gutter = event.position.x < layout.text_bounds.left();
         let config = self.cursor_config(cx);
         let mode = if in_gutter {
@@ -1225,6 +1272,24 @@ impl CodeEditor {
         self.cursors_changed(false, cx);
     }
 
+    /// The text position under the mouse, or `None` when the mouse isn't
+    /// over text (gutter, past the end of a line, scrollbars).
+    fn text_position_under_mouse(
+        &self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &App,
+    ) -> Option<PointUtf16> {
+        let layout = self.layout.as_ref()?;
+        if !layout.text_bounds.contains(&position) {
+            return None;
+        }
+        let point = self.position_for_point(position, window, cx);
+        let line = layout.line_for_point(point)?;
+        let x = position.x - layout.text_origin_x();
+        (x <= line.width()).then_some(point)
+    }
+
     /// Visible column under the mouse, past the end of text too (box
     /// selection).
     fn mouse_visible_column(&self, position: Point<Pixels>) -> u32 {
@@ -1260,6 +1325,23 @@ impl CodeEditor {
         if gutter_hovered != self.gutter_hovered {
             self.gutter_hovered = gutter_hovered;
             cx.notify();
+        }
+        if event.pressed_button.is_none() && self.mouse_selection.is_none() {
+            let over_widget = self.layout.as_ref().is_some_and(|layout| {
+                layout
+                    .widget_bounds
+                    .iter()
+                    .any(|bounds| bounds.contains(&event.position))
+            });
+            if !over_widget {
+                let position = self.text_position_under_mouse(event.position, window, cx);
+                if event.modifiers.secondary() {
+                    self.definition_mouse_move(position, cx);
+                } else if self.has_definition_link() {
+                    self.clear_definition_link(cx);
+                }
+                self.hover_mouse_move(position, cx);
+            }
         }
         if self.scrollbar_drag.is_some() {
             if event.pressed_button == Some(MouseButton::Left) {
@@ -1392,6 +1474,7 @@ impl CodeEditor {
         if event.modifiers.shift && delta.x == px(0.) {
             delta = point(delta.y, px(0.));
         }
+        self.hide_hover(cx);
         self.scroll_top = (self.scroll_top - delta.y).max(px(0.));
         self.scroll_left = (self.scroll_left - delta.x).max(px(0.));
         cx.emit(CodeEditorEvent::ScrollChanged);
@@ -1602,7 +1685,11 @@ impl Render for CodeEditor {
             .key_context(key_context)
             .track_focus(&self.focus_handle)
             .size_full()
-            .cursor(MouseCursor::IBeam);
+            .cursor(if self.has_definition_link() {
+                MouseCursor::PointingHand
+            } else {
+                MouseCursor::IBeam
+            });
         let root = move_action!(root, cx,
             CursorLeft => (MoveCommand::Left, false),
             CursorLeftSelect => (MoveCommand::Left, true),
@@ -1759,6 +1846,15 @@ impl Render for CodeEditor {
             )
             .on_action(cx.listener(|this, _: &JumpToBracket, _, cx| this.jump_to_bracket(cx)))
             .on_action(cx.listener(|this, _: &SelectToBracket, _, cx| this.select_to_bracket(cx)))
+            .on_action(cx.listener(|this, _: &GoToNextMarker, _, cx| this.go_to_marker(true, cx)))
+            .on_action(
+                cx.listener(|this, _: &GoToPreviousMarker, _, cx| this.go_to_marker(false, cx)),
+            )
+            .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| this.go_to_definition(cx)))
+            .on_action(cx.listener(|this, _: &ShowHover, _, cx| this.show_hover_at_cursor(cx)))
+            .on_action(cx.listener(|this, _: &TriggerParameterHints, _, cx| {
+                this.trigger_signature_help(crate::providers::SignatureHelpTrigger::Invoke, cx)
+            }))
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))
             .on_action(cx.listener(Self::copy))
