@@ -26,6 +26,13 @@ khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42
 
 You need Rust 1.98 or newer, the toolchain pinned in the repository's `rust-toolchain.toml`.
 
+While the repository is private, cargo's built-in git client can't authenticate. Tell cargo to use the `git` CLI, which uses your GitHub credentials, in `.cargo/config.toml`:
+
+```toml
+[net]
+git-fetch-with-cli = true
+```
+
 `gpui-monaco-languages` enables every language by default. To keep fewer grammars, pick features:
 
 ```toml
