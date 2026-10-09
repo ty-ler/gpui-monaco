@@ -1909,6 +1909,8 @@ dependencies = [
  "gpui",
  "gpui-monaco-syntax",
  "gpui-monaco-text",
+ "serde",
+ "unicode-segmentation",
 ]
 
 [[package]]

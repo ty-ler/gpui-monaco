@@ -1,0 +1,105 @@
+//! Editor (view) options, mirroring the subset of Monaco's `IEditorOptions`
+//! implemented so far.
+
+use gpui::{Pixels, SharedString, px};
+
+/// Monaco `lineNumbers`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineNumbers {
+    #[default]
+    On,
+    Off,
+    Relative,
+    /// Every 10th line, plus the current line.
+    Interval,
+}
+
+/// Monaco `renderLineHighlight`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RenderLineHighlight {
+    None,
+    Gutter,
+    #[default]
+    Line,
+    All,
+}
+
+/// Monaco `cursorStyle`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorStyle {
+    #[default]
+    Line,
+    Block,
+    Underline,
+    LineThin,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditorOptions {
+    pub font_family: SharedString,
+    pub font_size: Pixels,
+    /// `None` computes it from the font size like Monaco
+    /// (`GOLDEN_LINE_HEIGHT_RATIO`, 1.5 on macOS and 1.35 elsewhere).
+    pub line_height: Option<Pixels>,
+    pub line_numbers: LineNumbers,
+    pub line_numbers_min_chars: u32,
+    pub glyph_margin: bool,
+    pub render_line_highlight: RenderLineHighlight,
+    pub cursor_style: CursorStyle,
+    pub cursor_width: Pixels,
+    pub cursor_blinking: bool,
+    pub scroll_beyond_last_line: bool,
+    pub read_only: bool,
+    pub word_separators: SharedString,
+    pub vertical_scrollbar_size: Pixels,
+    pub horizontal_scrollbar_size: Pixels,
+    /// Pixels scrolled per wheel "line" step is the line height; this scales it
+    /// (Monaco `mouseWheelScrollSensitivity`).
+    pub mouse_wheel_scroll_sensitivity: f32,
+    pub empty_selection_clipboard: bool,
+    pub sticky_tab_stops: bool,
+}
+
+impl Default for EditorOptions {
+    fn default() -> Self {
+        Self {
+            font_family: if cfg!(target_os = "macos") {
+                "Menlo".into()
+            } else if cfg!(target_os = "windows") {
+                "Consolas".into()
+            } else {
+                "Droid Sans Mono".into()
+            },
+            font_size: if cfg!(target_os = "macos") {
+                px(12.)
+            } else {
+                px(14.)
+            },
+            line_height: None,
+            line_numbers: LineNumbers::On,
+            line_numbers_min_chars: 5,
+            glyph_margin: true,
+            render_line_highlight: RenderLineHighlight::Line,
+            cursor_style: CursorStyle::Line,
+            cursor_width: px(2.),
+            cursor_blinking: true,
+            scroll_beyond_last_line: true,
+            read_only: false,
+            word_separators: "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?".into(),
+            vertical_scrollbar_size: px(14.),
+            horizontal_scrollbar_size: px(12.),
+            mouse_wheel_scroll_sensitivity: 1.0,
+            empty_selection_clipboard: true,
+            sticky_tab_stops: false,
+        }
+    }
+}
+
+impl EditorOptions {
+    pub fn resolved_line_height(&self) -> Pixels {
+        self.line_height.unwrap_or_else(|| {
+            let ratio = if cfg!(target_os = "macos") { 1.5 } else { 1.35 };
+            px((f32::from(self.font_size) * ratio).round())
+        })
+    }
+}
