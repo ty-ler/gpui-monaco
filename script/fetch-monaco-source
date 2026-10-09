@@ -9,5 +9,7 @@ if [ -d "$dest/.git" ]; then
 else
   git clone --quiet --depth 1 --filter=blob:none --sparse https://github.com/microsoft/vscode.git "$dest"
 fi
-git -C "$dest" sparse-checkout set src/vs/editor src/vs/base/common
+git -C "$dest" sparse-checkout set src/vs/editor src/vs/base/common \
+  extensions/rust extensions/javascript extensions/typescript-basics extensions/json \
+  extensions/yaml extensions/markdown-basics extensions/html extensions/css
 echo "vscode @ $(git -C "$dest" rev-parse --short HEAD) in $dest"
