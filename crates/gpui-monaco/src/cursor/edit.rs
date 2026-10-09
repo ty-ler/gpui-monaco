@@ -15,6 +15,7 @@
 
 use std::ops::Range;
 
+use super::auto_closed::AutoClosedPair;
 use super::{CursorModel, Position, Selection};
 
 /// The kind of an edit, used to decide where undo stops go (Monaco
@@ -49,6 +50,16 @@ pub struct EditOperation {
     pub push_stack_element_before: bool,
     /// Push an undo stop after applying the edits.
     pub push_stack_element_after: bool,
+    /// Closing characters this operation auto-inserted, in POST-edit
+    /// coordinates. Pass them to
+    /// [`super::CursorCollection::track_auto_closed`] (see
+    /// [`super::AutoClosedRanges`]).
+    pub auto_closed: Vec<AutoClosedPair>,
+    /// A second operation to apply right after this one (after its undo
+    /// stop), in coordinates of the text after this one's edits. Monaco uses
+    /// this to auto-close multi-character pairs such as `begin`/`end` so
+    /// that undo first removes only the auto-inserted closing text.
+    pub follow_up: Option<Box<EditOperation>>,
 }
 
 impl EditOperation {
@@ -60,6 +71,8 @@ impl EditOperation {
             kind,
             push_stack_element_before: false,
             push_stack_element_after: false,
+            auto_closed: Vec::new(),
+            follow_up: None,
         }
     }
 }
@@ -267,6 +280,11 @@ impl CursorStateHelper<'_> {
 pub(crate) trait Command {
     fn edit_operations(&mut self, model: &dyn CursorModel, builder: &mut EditBuilder);
     fn compute_cursor_state(&self, helper: &CursorStateHelper) -> Selection;
+    /// The closing character this command auto-inserted (Monaco
+    /// `BaseTypeWithAutoClosingCommand.closeCharacterRange`/`enclosingRange`).
+    fn auto_closed(&self, _helper: &CursorStateHelper) -> Option<AutoClosedPair> {
+        None
+    }
 }
 
 /// Monaco `ReplaceCommand`: replaces `range`, cursor after the new text.
@@ -570,6 +588,8 @@ pub(crate) fn execute_commands(
         kind,
         push_stack_element_before,
         push_stack_element_after,
+        auto_closed: Vec::new(),
+        follow_up: None,
     };
 
     let mut builder = EditBuilder {
@@ -652,6 +672,7 @@ pub(crate) fn execute_commands(
         .collect();
 
     let mut selections_after = Vec::with_capacity(selections_before.len());
+    let mut auto_closed = Vec::new();
     for (i, before) in selections_before.iter().enumerate() {
         let mut own: Vec<(usize, Range<Position>)> = ops
             .iter()
@@ -667,6 +688,11 @@ pub(crate) fn execute_commands(
                     inverse: own.into_iter().map(|(_, r)| r).collect(),
                     tracked: &tracked,
                 };
+                if !losers.contains(&i)
+                    && let Some(pair) = command.auto_closed(&helper)
+                {
+                    auto_closed.push(pair);
+                }
                 command.compute_cursor_state(&helper)
             }
             _ => {
@@ -695,7 +721,42 @@ pub(crate) fn execute_commands(
         .map(|op| (op.range, op.text))
         .collect();
     result.selections_after = selections_after;
+    result.auto_closed = auto_closed;
     result
+}
+
+/// Carries `ranges` (in pre-edit coordinates) through `edits` (a batch as in
+/// [`EditOperation::edits`]) the way Monaco moves decorations with
+/// `TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges`.
+pub(crate) fn transform_ranges(
+    model: &dyn CursorModel,
+    ranges: &mut [Range<Position>],
+    edits: &[(Range<Position>, String)],
+) {
+    if edits.is_empty() {
+        return;
+    }
+    let mut sorted: Vec<&(Range<Position>, String)> = edits.iter().collect();
+    sorted.sort_by(|a, b| cmp_using_ends(&a.0, &b.0));
+    let applied: Vec<AppliedOp> = sorted
+        .iter()
+        .map(|(range, text)| AppliedOp {
+            start: range.start,
+            end: range.end,
+            text,
+            deleting: offset_between(model, range.start, range.end),
+            inserting: text.encode_utf16().count() as u64,
+            force_move_markers: false,
+        })
+        .collect();
+    for range in ranges {
+        *range = adjust_range(
+            model,
+            range.clone(),
+            Stickiness::NeverGrowsWhenTypingAtEdges,
+            &applied,
+        );
+    }
 }
 
 #[cfg(test)]

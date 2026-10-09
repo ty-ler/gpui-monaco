@@ -51,6 +51,7 @@ pub struct Comments {
 pub enum NotIn {
     String,
     Comment,
+    Regex,
     #[serde(other)]
     Other,
 }

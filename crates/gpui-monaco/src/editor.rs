@@ -110,6 +110,7 @@ pub struct CodeEditor {
     pub(crate) widgets: Widgets,
     pub(crate) find: crate::find::FindState,
     pub(crate) multi_cursor: Option<crate::multi_cursor::MultiCursorSession>,
+    pub(crate) bracket_decorations: Vec<crate::decorations::DecorationId>,
     fold_task: Option<Task<()>>,
     pub(crate) autoscroll_requested: bool,
     pub(crate) cursor_visible: bool,
@@ -173,6 +174,7 @@ impl CodeEditor {
             widgets: Widgets::default(),
             find: Default::default(),
             multi_cursor: None,
+            bracket_decorations: Vec::new(),
             fold_task: None,
             _blink_task: None,
             _subscriptions: subscriptions,
@@ -392,6 +394,13 @@ impl CodeEditor {
             word_separators: self.options.word_separators.to_string(),
             sticky_tab_stops: self.options.sticky_tab_stops,
             empty_selection_clipboard: self.options.empty_selection_clipboard,
+            auto_closing_brackets: self.options.auto_closing_brackets,
+            auto_closing_quotes: self.options.auto_closing_quotes,
+            auto_closing_comments: self.options.auto_closing_comments,
+            auto_closing_overtype: self.options.auto_closing_overtype,
+            auto_closing_delete: self.options.auto_closing_delete,
+            auto_surround: self.options.auto_surround,
+            auto_indent: self.options.auto_indent,
             ..CursorConfig::default()
         }
     }
@@ -453,6 +462,9 @@ impl CodeEditor {
                         .collect();
                     self.cursors.set_selections(&selections);
                 }
+                // Undo/redo and edits from elsewhere: stop treating closing
+                // characters as auto-inserted rather than tracking them.
+                self.cursors.auto_closed_ranges_mut().clear();
                 self.snapshot = latest;
                 self.cursors.validate(self.snapshot.rope());
                 if *kind == EditKind::SetValue {
@@ -467,9 +479,12 @@ impl CodeEditor {
                 }
                 cx.notify();
             }
+            TextModelEvent::SyntaxUpdated => {
+                self.update_bracket_highlights(cx);
+                cx.notify();
+            }
             TextModelEvent::OptionsChanged
             | TextModelEvent::LanguageChanged
-            | TextModelEvent::SyntaxUpdated
             | TextModelEvent::DecorationsChanged => cx.notify(),
         }
     }
@@ -520,17 +535,23 @@ impl CodeEditor {
         if result.is_err() {
             return;
         }
+        self.cursors
+            .track_auto_closed(snapshot.rope(), &operation.edits, &operation.auto_closed);
         self.snapshot = self.model.read(cx).snapshot();
         self.cursors.set_selections(&operation.selections_after);
         self.cursors.validate(self.snapshot.rope());
         self.prev_edit_kind = Some(operation.kind);
         self.cursors_changed(true, cx);
+        if let Some(follow_up) = operation.follow_up {
+            self.apply(*follow_up, cx);
+        }
     }
 
     fn cursors_changed(&mut self, autoscroll: bool, cx: &mut Context<Self>) {
         if autoscroll {
             self.autoscroll_requested = true;
         }
+        self.update_bracket_highlights(cx);
         self.restart_blink(cx);
         cx.emit(CodeEditorEvent::SelectionsChanged);
         cx.notify();
@@ -677,15 +698,42 @@ impl CodeEditor {
         } else {
             text
         };
-        let config = self.cursor_config(cx);
-        let operation = cursor::type_text(
-            &config,
-            self.snapshot.rope(),
-            &self.cursors,
-            text,
-            self.prev_edit_kind,
-        );
+        let prev = self.prev_edit_kind;
+        let operation = self.with_language(cx, |config, rope, cursors, lang| {
+            cursor::type_with_language(config, rope, cursors, text, prev, lang)
+        });
         self.apply(operation, cx);
+    }
+
+    /// Runs `f` with the model's language context (configuration plus token
+    /// types from syntax highlighting), if it has a language.
+    fn with_language<R>(
+        &self,
+        cx: &App,
+        f: impl FnOnce(
+            &CursorConfig,
+            &text::Rope,
+            &CursorCollection,
+            Option<&cursor::LanguageContext>,
+        ) -> R,
+    ) -> R {
+        let config = self.cursor_config(cx);
+        let rope = self.snapshot.rope();
+        let model = self.model.read(cx);
+        match model.language() {
+            Some(language) => {
+                let token_type = |p: PointUtf16| {
+                    if p.column == 0 {
+                        return cursor::StandardTokenType::Other;
+                    }
+                    let offset = rope.point_utf16_to_offset(PointUtf16::new(p.row, p.column - 1));
+                    model.token_type_at(offset)
+                };
+                let context = cursor::LanguageContext::new(&language.config, &token_type);
+                f(&config, rope, &self.cursors, Some(&context))
+            }
+            None => f(&config, rope, &self.cursors, None),
+        }
     }
 
     fn run_edit(
@@ -700,7 +748,10 @@ impl CodeEditor {
 
     fn delete_left(&mut self, _: &DeleteLeft, _: &mut Window, cx: &mut Context<Self>) {
         let prev = self.prev_edit_kind;
-        self.run_edit(cx, |c, m, s| cursor::delete_left(c, m, s, prev));
+        let operation = self.with_language(cx, |config, rope, cursors, lang| {
+            cursor::delete_left_with_language(config, rope, cursors, prev, lang)
+        });
+        self.apply(operation, cx);
     }
 
     fn delete_right(&mut self, _: &DeleteRight, _: &mut Window, cx: &mut Context<Self>) {
@@ -725,7 +776,10 @@ impl CodeEditor {
             cx.propagate();
             return;
         }
-        self.run_edit(cx, cursor::tab);
+        let operation = self.with_language(cx, |config, rope, cursors, lang| {
+            cursor::tab_with_language(config, rope, cursors, lang)
+        });
+        self.apply(operation, cx);
     }
 
     fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
@@ -741,7 +795,10 @@ impl CodeEditor {
             cx.propagate();
             return;
         }
-        self.run_edit(cx, cursor::line_break);
+        let operation = self.with_language(cx, |config, rope, cursors, lang| {
+            cursor::line_break_with_language(config, rope, cursors, lang)
+        });
+        self.apply(operation, cx);
     }
 
     fn indent_lines(&mut self, _: &IndentLines, _: &mut Window, cx: &mut Context<Self>) {
@@ -1386,6 +1443,8 @@ impl CodeEditor {
                 kind: EditOperationType::Other,
                 push_stack_element_before: true,
                 push_stack_element_after: true,
+                auto_closed: Vec::new(),
+                follow_up: None,
             },
             cx,
         );
@@ -1698,6 +1757,8 @@ impl Render for CodeEditor {
                     this.select_all_occurrences(cx)
                 }),
             )
+            .on_action(cx.listener(|this, _: &JumpToBracket, _, cx| this.jump_to_bracket(cx)))
+            .on_action(cx.listener(|this, _: &SelectToBracket, _, cx| this.select_to_bracket(cx)))
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))
             .on_action(cx.listener(Self::copy))

@@ -7,6 +7,7 @@
 //! Call [`init`] once at startup to bind Monaco's default keybindings.
 
 pub mod actions;
+mod bracket_matching;
 pub mod cursor;
 pub mod decorations;
 mod editor;

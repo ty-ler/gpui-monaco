@@ -325,3 +325,65 @@ fn find_and_replace_through_the_widget(cx: &mut TestAppContext) {
     cx.simulate_input("!");
     assert!(text(&editor, cx).contains('!'));
 }
+
+fn rust_editor<'a>(
+    text: &str,
+    cx: &'a mut TestAppContext,
+) -> (Entity<CodeEditor>, &'a mut VisualTestContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
+    });
+    let text = text.to_string();
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new(&text).with_language("rust"));
+        CodeEditor::new(model, window, cx)
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    cx.run_until_parked();
+    (editor, cx)
+}
+
+#[gpui::test]
+fn rust_auto_close_and_indent(cx: &mut TestAppContext) {
+    let (editor, cx) = rust_editor("", cx);
+    cx.simulate_input("fn main() {");
+    assert_eq!(text(&editor, cx), "fn main() {}");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(text(&editor, cx), "fn main() {\n    \n}");
+    assert_eq!(heads(&editor, cx), vec![(2, 5)]);
+    cx.simulate_input("let s = \"");
+    assert_eq!(text(&editor, cx), "fn main() {\n    let s = \"\"\n}");
+    // Typing the closing quote overtypes the auto-inserted one.
+    cx.simulate_input("x\"");
+    assert_eq!(text(&editor, cx), "fn main() {\n    let s = \"x\"\n}");
+    // Backspace between an auto-closed pair deletes both.
+    cx.simulate_input("(");
+    assert_eq!(text(&editor, cx), "fn main() {\n    let s = \"x\"()\n}");
+    cx.simulate_keystrokes("backspace");
+    assert_eq!(text(&editor, cx), "fn main() {\n    let s = \"x\"\n}");
+}
+
+#[gpui::test]
+fn bracket_matching_highlights_and_jumps(cx: &mut TestAppContext) {
+    let (editor, cx) = rust_editor("fn f() { let v = [1, (2)]; }", cx);
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    let editor_id = editor.entity_id();
+    // Cursor right after `[`.
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 19))], cx)
+    });
+    cx.run_until_parked();
+    let highlighted: Vec<std::ops::Range<usize>> = model.update(cx, |m, _| {
+        m.decorations_in_range(0..100, Some(editor_id))
+            .into_iter()
+            .map(|d| d.range)
+            .collect()
+    });
+    // `[` is byte 17 and its `]` byte 24.
+    assert_eq!(highlighted, vec![17..18, 24..25]);
+    cx.simulate_keystrokes("secondary-shift-\\");
+    assert_eq!(heads(&editor, cx), vec![(1, 25)]);
+    cx.simulate_keystrokes("secondary-shift-\\");
+    assert_eq!(heads(&editor, cx), vec![(1, 18)]);
+}
