@@ -1907,6 +1907,7 @@ name = "gpui-monaco"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "criterion",
  "gpui",
  "gpui-monaco-languages",
  "gpui-monaco-syntax",

@@ -476,6 +476,36 @@ impl Rope {
     }
 
     /// Iterates lines (without newlines).
+    /// Calls `f` with each line's start offset and text (without the `\n`)
+    /// for the lines in `range`, which should start at a line start, until
+    /// `f` returns `false`. Much faster than [`Rope::line`] per row.
+    pub fn for_each_line(&self, range: Range<usize>, mut f: impl FnMut(usize, &str) -> bool) {
+        let mut line = String::new();
+        let mut line_start = range.start;
+        for chunk in self.chunks_in_range(range) {
+            let mut rest = chunk;
+            while let Some(newline) = rest.find('\n') {
+                // Lines within one chunk are borrowed; only lines spanning
+                // chunks are copied.
+                let piece = &rest[..newline];
+                let (keep_going, len) = if line.is_empty() {
+                    (f(line_start, piece), piece.len())
+                } else {
+                    line.push_str(piece);
+                    (f(line_start, &line), line.len())
+                };
+                if !keep_going {
+                    return;
+                }
+                line_start += len + 1;
+                line.clear();
+                rest = &rest[newline + 1..];
+            }
+            line.push_str(rest);
+        }
+        f(line_start, &line);
+    }
+
     pub fn lines(&self) -> impl Iterator<Item = String> + '_ {
         (0..self.line_count()).map(|row| self.line(row))
     }

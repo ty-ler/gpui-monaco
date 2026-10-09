@@ -22,5 +22,10 @@ serde_json.workspace = true
 unicode-segmentation.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 gpui-monaco-languages.workspace = true
+
+[[bench]]
+name = "large_file"
+harness = false

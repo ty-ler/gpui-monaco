@@ -115,7 +115,7 @@ proptest! {
     #[test]
     fn incremental_reparse_matches_fresh_parse(
         edits in proptest::collection::vec((any::<usize>(), 0usize..6, prop_oneof![
-            Just(""), Just("{"), Just("}"), Just("\n"), Just("let y = 1;"), Just("\"str"), Just("// c\n"), Just("```rust\nfn f() {}\n```\n"),
+            Just(""), Just("{"), Just("}"), Just("\n"), Just("let y = 1;"), Just("\"str"), Just("// c\n"), Just("```rust\nfn f() {}\n```\n"), Just("m!(z);"), Just(")"), Just("v![a, b]"),
         ]), 1..8),
         markdown in any::<bool>(),
     ) {
@@ -123,7 +123,7 @@ proptest! {
         let (language, source) = if markdown {
             (registry.language_for_id("markdown").unwrap(), "# T\n\ntext *a*\n\n```rust\nfn main() { let x = 1; }\n```\n\nend\n")
         } else {
-            (registry.language_for_id("rust").unwrap(), "fn main() {\n    let x = vec![1, 2];\n    println!(\"{}\", x[0]);\n}\n")
+            (registry.language_for_id("rust").unwrap(), "fn main() {\n    let x = vec![1, 2];\n    println!(\"{}\", x[0]);\n}\n\nfn g() {\n    assert!(true);\n    m!{ a b };\n}\n")
         };
         let mut buffer = Buffer::new(source);
         let mut old = buffer.snapshot();
@@ -142,6 +142,17 @@ proptest! {
         // incremental and a fresh parse, so only compare error-free trees.
         let has_error = fresh.layers().iter().any(|layer| layer.tree.root_node().has_error());
         prop_assume!(!has_error);
+        // Injection layers (cached and updated piecewise on reparse) match.
+        let layers = |syntax: &SyntaxSnapshot| {
+            let mut layers: Vec<_> = syntax
+                .layers()
+                .iter()
+                .map(|l| (l.depth, l.language.id.to_string(), l.ranges.clone()))
+                .collect();
+            layers.sort_by(|a, b| (a.0, &a.2.first().map(|r| r.start)).cmp(&(b.0, &b.2.first().map(|r| r.start))));
+            layers
+        };
+        prop_assert_eq!(layers(&syntax), layers(&fresh));
         let range = 0..buffer.len();
         prop_assert_eq!(
             syntax.highlights(buffer.rope(), range.clone()),

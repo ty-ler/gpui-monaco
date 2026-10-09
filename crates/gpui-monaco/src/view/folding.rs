@@ -57,22 +57,30 @@ pub fn compute_indent_ranges(
         end_above: line_count + 1,
         line: line_count + 1,
     }];
+    // (indent, is marker start, is marker end) per row.
+    let mut rows: Vec<(Option<u32>, bool, bool)> = Vec::with_capacity(line_count as usize);
+    rope.for_each_line(0..rope.len(), |_, content| {
+        let indent = indent_level(content, tab_size);
+        let (is_start, is_end) = match (indent, markers) {
+            (Some(_), Some((start, end))) => {
+                let is_start = start.is_match(content);
+                (is_start, !is_start && end.is_match(content))
+            }
+            _ => (false, false),
+        };
+        rows.push((indent, is_start, is_end));
+        true
+    });
+
     for line in (1..=line_count).rev() {
-        let content = rope.line(line - 1);
-        let Some(indent) = indent_level(&content, tab_size) else {
+        let (indent, is_start, is_end) = rows[line as usize - 1];
+        let Some(indent) = indent else {
             if off_side && let Some(last) = previous.last_mut() {
                 last.end_above = line;
             }
             continue;
         };
         let indent = indent as i64;
-        let (is_start, is_end) = match markers {
-            Some((start, end)) => {
-                let is_start = start.is_match(&content);
-                (is_start, !is_start && end.is_match(&content))
-            }
-            None => (false, false),
-        };
         if is_start {
             let mut i = previous.len() - 1;
             while i > 0 && previous[i].indent != -2 {
@@ -373,6 +381,53 @@ mod tests {
             true,
         );
     }
+
+    #[test]
+    fn enclosing_lookups_match_brute_force() {
+        // Deterministic pseudo-random indentation.
+        let mut seed = 7u64;
+        let mut lines = Vec::new();
+        for _ in 0..400 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let indent = (seed >> 33) % 6;
+            lines.push(format!("{}x", "  ".repeat(indent as usize)));
+        }
+        let rope = Rope::from(lines.join("\n").as_str());
+        let mut state = FoldState::default();
+        state.set_ranges(
+            compute_indent_ranges(&rope, 4, false, None),
+            text::Buffer::new("").version(),
+        );
+        for row in 0..402 {
+            let brute: Vec<_> = state
+                .ranges()
+                .iter()
+                .filter(|r| r.start_row < row && row <= r.end_row)
+                .map(|r| (r.start_row, r.end_row))
+                .collect();
+            let fast: Vec<_> = state
+                .ranges_enclosing(row)
+                .iter()
+                .map(|r| (r.start_row, r.end_row))
+                .collect();
+            assert_eq!(fast, brute, "row {row}");
+            let innermost = state
+                .ranges()
+                .iter()
+                .filter(|r| r.start_row <= row && row <= r.end_row)
+                .max_by_key(|r| r.start_row)
+                .map(|r| (r.start_row, r.end_row));
+            assert_eq!(
+                state
+                    .innermost_range_containing(row)
+                    .map(|r| (r.start_row, r.end_row)),
+                innermost,
+                "row {row}"
+            );
+        }
+    }
 }
 
 /// Fold ranges plus which are collapsed. Collapsed regions are tracked with
@@ -432,14 +487,39 @@ impl FoldState {
     /// The innermost fold range containing `row` (whose start row is `row`
     /// or above it).
     pub fn innermost_range_containing(&self, row: u32) -> Option<&FoldRange> {
-        self.ranges
-            .iter()
-            .filter(|range| range.start_row <= row && row <= range.end_row)
-            .max_by_key(|range| range.start_row)
+        self.chain_from(self.ranges.partition_point(|r| r.start_row <= row), row)
+            .next()
+    }
+
+    /// The ranges starting above `row` and ending at or below it, outermost
+    /// first (the sticky scroll headers for `row`).
+    pub fn ranges_enclosing(&self, row: u32) -> Vec<&FoldRange> {
+        let mut chain: Vec<&FoldRange> = self
+            .chain_from(self.ranges.partition_point(|r| r.start_row < row), row)
+            .collect();
+        chain.reverse();
+        chain
+    }
+
+    /// Ranges sorted by start and nested via `parent`: the last range
+    /// starting before `end` that contains `row`, then its ancestors.
+    fn chain_from(&self, end: usize, row: u32) -> impl Iterator<Item = &FoldRange> {
+        // A range starting before `end` that contains `row` encloses the last
+        // such range or ends before it starts, so walk up the parents.
+        let mut ix = end.checked_sub(1);
+        while let Some(i) = ix
+            && self.ranges[i].end_row < row
+        {
+            ix = self.ranges[i].parent;
+        }
+        std::iter::successors(ix.map(|i| &self.ranges[i]), |range| {
+            range.parent.map(|p| &self.ranges[p])
+        })
     }
 
     pub fn range_starting_at(&self, row: u32) -> Option<&FoldRange> {
-        self.ranges.iter().find(|range| range.start_row == row)
+        let ix = self.ranges.partition_point(|range| range.start_row < row);
+        self.ranges.get(ix).filter(|range| range.start_row == row)
     }
 
     pub fn collapse(&mut self, buffer: &text::Buffer, start_row: u32, end_row: u32) {

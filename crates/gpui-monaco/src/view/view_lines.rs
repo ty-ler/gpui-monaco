@@ -23,6 +23,21 @@ pub struct WrapSettings {
     pub keep_all: bool,
 }
 
+/// Hidden row ranges sorted, with empty ones dropped and overlapping or
+/// adjacent ones merged (the form [`ViewLines::hidden`] returns).
+pub fn normalize_hidden(mut hidden: Vec<Range<u32>>) -> Vec<Range<u32>> {
+    hidden.retain(|r| !r.is_empty());
+    hidden.sort_by_key(|r| r.start);
+    let mut merged: Vec<Range<u32>> = Vec::new();
+    for range in hidden {
+        match merged.last_mut() {
+            Some(last) if last.end >= range.start => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
 /// One view line: a segment of a model row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ViewLine {
@@ -120,9 +135,27 @@ impl ViewLines {
             return;
         }
         self.wrap = wrap;
-        self.breaks = (0..self.rope.line_count())
-            .map(|row| self.compute_row(row))
-            .collect();
+        self.breaks = match &self.wrap {
+            None => vec![None; self.rope.line_count() as usize],
+            Some(wrap) => {
+                let mut breaks = Vec::with_capacity(self.rope.line_count() as usize);
+                self.rope.for_each_line(0..self.rope.len(), |_, line| {
+                    breaks.push(
+                        compute_line_breaks(
+                            &self.classifier,
+                            line,
+                            wrap.tab_size,
+                            Some(wrap.column),
+                            wrap.indent,
+                            wrap.keep_all,
+                        )
+                        .map(Arc::new),
+                    );
+                    true
+                });
+                breaks
+            }
+        };
         self.rebuild_counts();
     }
 
@@ -133,16 +166,8 @@ impl ViewLines {
     }
 
     /// Sets the hidden (folded) model rows. Ranges are normalized.
-    pub fn set_hidden(&mut self, mut hidden: Vec<Range<u32>>) {
-        hidden.retain(|r| !r.is_empty());
-        hidden.sort_by_key(|r| r.start);
-        let mut merged: Vec<Range<u32>> = Vec::new();
-        for range in hidden {
-            match merged.last_mut() {
-                Some(last) if last.end >= range.start => last.end = last.end.max(range.end),
-                _ => merged.push(range),
-            }
-        }
+    pub fn set_hidden(&mut self, hidden: Vec<Range<u32>>) {
+        let merged = normalize_hidden(hidden);
         if merged != self.hidden {
             self.hidden = merged;
             self.rebuild_counts();
@@ -195,9 +220,27 @@ impl ViewLines {
                 hidden.push((range.start as i64 + delta) as u32..(range.end as i64 + delta) as u32);
             }
         }
+        let unchanged_rows = hidden.len() == self.hidden.len()
+            && spans.iter().all(|(old, new)| old.len() == new.len());
         self.hidden = hidden;
         debug_assert_eq!(self.breaks.len(), self.rope.line_count() as usize);
-        self.rebuild_counts();
+        if unchanged_rows {
+            // Typing within lines: update just the edited rows' counts.
+            for (_, rows) in &spans {
+                for row in rows.clone() {
+                    let count = if self.hidden.iter().any(|hidden| hidden.contains(&row)) {
+                        0
+                    } else {
+                        self.breaks[row as usize]
+                            .as_ref()
+                            .map_or(1, |b| b.output_line_count() as u32)
+                    };
+                    self.counts.set(row as usize, count);
+                }
+            }
+        } else {
+            self.rebuild_counts();
+        }
     }
 
     pub fn line_count(&self) -> u32 {
@@ -370,11 +413,15 @@ mod tests {
         let mut lines = ViewLines::new(buffer.rope().clone(), buffer.version());
         lines.set_wrap(wrap(8));
         lines.set_hidden(std::iter::once(3..4).collect());
-        let edits: [(Range<usize>, &str); 4] = [
+        // In-line edits take the incremental count update; the rest rebuild.
+        let edits: [(Range<usize>, &str); 7] = [
             (3..3, " and more words"),
+            (1..1, "abcdefghijklmnopqrstuvwxyz"),
             (10..20, "\n\nnew lines here\n"),
             (0..0, "x"),
             (5..9, ""),
+            (2..6, "y"),
+            (0..0, "z"),
         ];
         for (range, text) in edits {
             buffer.edit([(range, text)]).unwrap();
@@ -386,6 +433,10 @@ mod tests {
             assert_eq!(lines.line_count(), fresh.line_count());
             for line in 0..lines.line_count() {
                 assert_eq!(lines.line_content(line), fresh.line_content(line));
+                assert_eq!(lines.view_line(line), fresh.view_line(line));
+            }
+            for row in 0..buffer.rope().line_count() {
+                assert_eq!(lines.is_row_hidden(row), fresh.is_row_hidden(row));
             }
         }
     }

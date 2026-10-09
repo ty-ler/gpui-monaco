@@ -191,6 +191,12 @@ pub fn compute_line_breaks(
     keep_all: bool,
 ) -> Option<LineBreakData> {
     let first_break_column = wrapping_column?;
+    // Fast path for the common short line: without tabs or other control
+    // characters (2 columns wide) no character is wider than its UTF-8
+    // length, so it fits.
+    if line.len() <= first_break_column as usize && line.bytes().all(|b| b >= b' ') {
+        return None;
+    }
     let units: Vec<u16> = line.encode_utf16().collect();
     let len = units.len();
     if len <= 1 {

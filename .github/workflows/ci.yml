@@ -31,6 +31,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
+  # The large-file budget (docs/PERFORMANCE.md), doubled for shared runners.
+  perf-budget:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release -p gpui-monaco --test perf_budget -- --ignored --nocapture
+        env:
+          PERF_BUDGET_SCALE: "2"
+      - run: cargo bench -p gpui-monaco --bench large_file -- --quick
+
   # Linux and Windows are best-effort: they must build, but are not release blockers.
   build-linux:
     runs-on: ubuntu-latest

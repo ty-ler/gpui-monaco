@@ -23,7 +23,7 @@ use crate::model::{EditKind, TextModel, TextModelEvent, metadata};
 use crate::options::EditorOptions;
 use crate::theme::{EditorColors, Theme};
 use crate::view::folding::{FoldState, compute_indent_ranges};
-use crate::view::view_lines::{ViewLines, WrapSettings};
+use crate::view::view_lines::{ViewLines, WrapSettings, normalize_hidden};
 use crate::widgets::{
     ContentWidget, ContentWidgetState, OverlayWidget, OverlayWidgetState, ViewZone, WidgetId,
     Widgets, ZoneHeight, ZoneState,
@@ -106,7 +106,9 @@ pub struct CodeEditor {
     pub(crate) scroll_left: Pixels,
     pub(crate) layout: Option<EditorLayout>,
     #[doc(hidden)]
-    pub view_lines: ViewLines,
+    /// Shared with in-flight background work (the minimap) and the frame
+    /// being painted, so changes go through `Arc::make_mut`.
+    pub view_lines: Arc<ViewLines>,
     pub(crate) folds: FoldState,
     pub(crate) gutter_hovered: bool,
     pub(crate) widgets: Widgets,
@@ -179,7 +181,7 @@ impl CodeEditor {
             mouse_selection: None,
             scrollbar_drag: None,
             blink_epoch: 0,
-            view_lines: ViewLines::new(snapshot.rope().clone(), snapshot.version()),
+            view_lines: Arc::new(ViewLines::new(snapshot.rope().clone(), snapshot.version())),
             folds: FoldState::default(),
             gutter_hovered: false,
             widgets: Widgets::default(),
@@ -216,7 +218,10 @@ impl CodeEditor {
         self._subscriptions[0] = cx.subscribe(&model, Self::on_model_event);
         model.update(cx, |model, cx| model.ensure_syntax(cx));
         self.snapshot = model.read(cx).snapshot();
-        self.view_lines = ViewLines::new(self.snapshot.rope().clone(), self.snapshot.version());
+        self.view_lines = Arc::new(ViewLines::new(
+            self.snapshot.rope().clone(),
+            self.snapshot.version(),
+        ));
         self.folds = FoldState::default();
         self.fold_task = None;
         self.model = model;
@@ -1052,31 +1057,39 @@ impl CodeEditor {
     /// folds, and (re)computes fold ranges in the background when stale.
     pub(crate) fn sync_view_lines(&mut self, wrap: Option<WrapSettings>, cx: &mut Context<Self>) {
         if self.view_lines.version() != self.snapshot.version() {
-            let buffer = self.model.read(cx).buffer().clone();
+            let model = self.model.clone();
+            let buffer = model.read(cx).buffer();
             let patch = buffer.edits_since(self.view_lines.version());
             // Like Monaco, editing inside a collapsed region expands it.
             for edit in patch.edits() {
                 let start = self.snapshot.offset_to_point(edit.new.start).row;
                 let end = self.snapshot.offset_to_point(edit.new.end).row;
-                self.folds.expand_intersecting(&buffer, start..end + 1);
+                self.folds.expand_intersecting(buffer, start..end + 1);
             }
-            self.view_lines.apply_edits(
+            Arc::make_mut(&mut self.view_lines).apply_edits(
                 self.snapshot.rope().clone(),
                 self.snapshot.version(),
                 &patch,
             );
         }
-        self.view_lines.set_wrap(wrap);
-        if self.options.folding {
-            let hidden = self.folds.hidden_rows(self.model.read(cx).buffer());
-            self.view_lines.set_hidden(hidden);
-            if self.folds.ranges_version() != Some(self.snapshot.version())
-                && self.fold_task.is_none()
-            {
-                self.compute_fold_ranges(cx);
-            }
+        // Only touch the view lines when something changed, so a clone held
+        // elsewhere isn't copied every frame.
+        if self.view_lines.wrap() != wrap.as_ref() {
+            Arc::make_mut(&mut self.view_lines).set_wrap(wrap);
+        }
+        let hidden = if self.options.folding {
+            normalize_hidden(self.folds.hidden_rows(self.model.read(cx).buffer()))
         } else {
-            self.view_lines.set_hidden(Vec::new());
+            Vec::new()
+        };
+        if self.view_lines.hidden() != hidden {
+            Arc::make_mut(&mut self.view_lines).set_hidden(hidden);
+        }
+        if self.options.folding
+            && self.folds.ranges_version() != Some(self.snapshot.version())
+            && self.fold_task.is_none()
+        {
+            self.compute_fold_ranges(cx);
         }
     }
 

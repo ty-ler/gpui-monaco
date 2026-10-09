@@ -180,21 +180,18 @@ pub fn find_matches(
     }
     let first_row = rope.offset_to_point(range.start).row;
     let last_row = rope.offset_to_point(range.end).row;
-    'rows: for row in first_row..=last_row {
-        let line_range = rope.line_range(row);
-        let line = rope.text_for_range(line_range.clone());
-        let from = range.start.saturating_sub(line_range.start).min(line.len());
-        let until = range.end.saturating_sub(line_range.start);
-        for m in data.matches_in(&line, from) {
-            if m.end > until {
+    let lines = rope.line_range(first_row).start..rope.line_range(last_row).end;
+    rope.for_each_line(lines, |line_start, line| {
+        let from = range.start.saturating_sub(line_start).min(line.len());
+        let until = range.end.saturating_sub(line_start);
+        for m in data.matches_in(line, from) {
+            if m.end > until || result.len() >= limit {
                 break;
             }
-            result.push(line_range.start + m.start..line_range.start + m.end);
-            if result.len() >= limit {
-                break 'rows;
-            }
+            result.push(line_start + m.start..line_start + m.end);
         }
-    }
+        result.len() < limit
+    });
     result
 }
 

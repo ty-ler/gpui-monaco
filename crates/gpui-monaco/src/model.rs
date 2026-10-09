@@ -268,6 +268,43 @@ impl TextModel {
             .map(|span| span.highlight.name())
     }
 
+    /// Byte ranges of strings and comments intersecting `range` (Monaco's
+    /// tokens that bracket matching skips), from one highlights query.
+    pub fn string_and_comment_ranges(&self, range: Range<usize>) -> Vec<Range<usize>> {
+        let Some(syntax) = self.syntax_snapshot() else {
+            return Vec::new();
+        };
+        let patch = (syntax.text.version() != self.buffer.version())
+            .then(|| self.buffer.edits_since(syntax.text.version()));
+        let old_range = match &patch {
+            Some(patch) => {
+                let inverse = patch.invert();
+                inverse.transform_offset(range.start, text::Bias::Left)
+                    ..inverse.transform_offset(range.end, text::Bias::Right)
+            }
+            None => range,
+        };
+        syntax
+            .highlighter
+            .highlights(&syntax.state, syntax.text.rope(), old_range)
+            .into_iter()
+            .filter(|span| {
+                let name = span.highlight.name();
+                name.starts_with("comment")
+                    || name.starts_with("string")
+                    || name.starts_with("character")
+            })
+            .filter_map(|span| match &patch {
+                Some(patch) => {
+                    let start = patch.transform_offset(span.range.start, text::Bias::Right);
+                    let end = patch.transform_offset(span.range.end, text::Bias::Left);
+                    (start < end).then_some(start..end)
+                }
+                None => Some(span.range),
+            })
+            .collect()
+    }
+
     /// Monaco's standard token type of the character at byte `offset`.
     pub fn token_type_at(&self, offset: usize) -> crate::cursor::StandardTokenType {
         use crate::cursor::StandardTokenType;
