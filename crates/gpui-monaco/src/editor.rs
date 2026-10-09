@@ -1,6 +1,7 @@
 //! [`CodeEditor`]: the editor view entity.
 
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
@@ -20,7 +21,7 @@ use crate::cursor::{
 use crate::element::{EditorElement, EditorLayout, TextMetrics, layout_row};
 use crate::model::{EditKind, TextModel, TextModelEvent, metadata};
 use crate::options::EditorOptions;
-use crate::theme::EditorColors;
+use crate::theme::{EditorColors, Theme};
 
 /// Events emitted by [`CodeEditor`].
 #[derive(Clone, Debug, PartialEq)]
@@ -90,7 +91,7 @@ pub struct CodeEditor {
     pub(crate) focus_handle: FocusHandle,
     pub(crate) cursors: CursorCollection,
     pub(crate) options: EditorOptions,
-    pub(crate) colors: EditorColors,
+    pub(crate) theme: Arc<Theme>,
     pub(crate) scroll_top: Pixels,
     pub(crate) scroll_left: Pixels,
     pub(crate) layout: Option<EditorLayout>,
@@ -131,6 +132,7 @@ impl CodeEditor {
                 cx.notify();
             }),
         ];
+        model.update(cx, |model, cx| model.ensure_syntax(cx));
         let snapshot = model.read(cx).snapshot();
         Self {
             model,
@@ -138,7 +140,7 @@ impl CodeEditor {
             focus_handle,
             cursors: CursorCollection::new(SingleCursorState::from_position(PointUtf16::zero())),
             options: EditorOptions::default(),
-            colors: EditorColors::default(),
+            theme: Arc::new(Theme::vs_dark()),
             scroll_top: px(0.),
             scroll_left: px(0.),
             layout: None,
@@ -168,6 +170,7 @@ impl CodeEditor {
     /// `setModel`). Save and restore [`ViewState`] to keep them per model.
     pub fn set_model(&mut self, model: Entity<TextModel>, cx: &mut Context<Self>) {
         self._subscriptions[0] = cx.subscribe(&model, Self::on_model_event);
+        model.update(cx, |model, cx| model.ensure_syntax(cx));
         self.snapshot = model.read(cx).snapshot();
         self.model = model;
         self.cursors = CursorCollection::new(SingleCursorState::from_position(PointUtf16::zero()));
@@ -206,11 +209,16 @@ impl CodeEditor {
     }
 
     pub fn colors(&self) -> &EditorColors {
-        &self.colors
+        &self.theme.colors
     }
 
-    pub fn set_colors(&mut self, colors: EditorColors, cx: &mut Context<Self>) {
-        self.colors = colors;
+    pub fn theme(&self) -> &Arc<Theme> {
+        &self.theme
+    }
+
+    /// Sets the theme (Monaco `editor.setTheme`).
+    pub fn set_theme(&mut self, theme: Arc<Theme>, cx: &mut Context<Self>) {
+        self.theme = theme;
         cx.notify();
     }
 
@@ -322,7 +330,9 @@ impl CodeEditor {
                 }
                 cx.notify();
             }
-            TextModelEvent::OptionsChanged | TextModelEvent::LanguageChanged => cx.notify(),
+            TextModelEvent::OptionsChanged
+            | TextModelEvent::LanguageChanged
+            | TextModelEvent::SyntaxUpdated => cx.notify(),
         }
     }
 
@@ -677,7 +687,8 @@ impl CodeEditor {
                     row,
                     tab_size,
                     metrics,
-                    self.colors.foreground,
+                    self.theme.colors.foreground,
+                    &[],
                     None,
                     window,
                 )

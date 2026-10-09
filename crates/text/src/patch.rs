@@ -79,6 +79,19 @@ impl Patch {
         }
     }
 
+    /// The inverse patch, mapping the new version back to the old one.
+    pub fn invert(&self) -> Patch {
+        Patch(
+            self.0
+                .iter()
+                .map(|edit| Edit {
+                    old: edit.new.clone(),
+                    new: edit.old.clone(),
+                })
+                .collect(),
+        )
+    }
+
     /// The patch equivalent to applying `self` and then `next`.
     pub fn compose(&self, next: &Patch) -> Patch {
         compose(&self.0, &next.0)
@@ -261,6 +274,7 @@ mod tests {
             let (v2, b) = random_edit(&v1, &second);
             let composed = a.compose(&b);
             prop_assert_eq!(apply(&text, &v2, &composed), v2.clone());
+            prop_assert_eq!(apply(&v2, &text, &composed.invert()), text.clone());
             for w in composed.edits().windows(2) {
                 prop_assert!(w[0].old.end < w[1].old.start, "{:?}", composed);
                 prop_assert!(w[0].new.end < w[1].new.start, "{:?}", composed);
