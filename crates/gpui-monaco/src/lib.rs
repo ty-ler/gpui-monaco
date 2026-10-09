@@ -8,6 +8,7 @@
 
 pub mod actions;
 mod bracket_matching;
+mod completion;
 pub mod cursor;
 pub mod decorations;
 mod definition;
@@ -24,6 +25,8 @@ pub mod options;
 pub mod providers;
 pub mod search;
 mod signature_help;
+pub mod suggest;
+mod suggest_widget;
 pub mod theme;
 pub mod view;
 pub mod widgets;
@@ -43,6 +46,7 @@ pub use model::{
 };
 pub use options::EditorOptions;
 pub use signature_help::SignatureHelpWidget;
+pub use suggest_widget::SuggestWidget;
 pub use syntax;
 pub use text;
 pub use theme::{EditorColors, Theme, ThemeKind, TokenStyle};
