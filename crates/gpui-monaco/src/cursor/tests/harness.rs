@@ -5,11 +5,13 @@
 
 use std::sync::Arc;
 
+use syntax::LanguageConfiguration;
 use text::Buffer;
 
+use super::tokenizer::Tokenizer;
 use crate::cursor::{
-    self, CursorCollection, CursorConfig, EditOperation, EditOperationType, MoveCommand, Position,
-    Selection, WordNavigationType,
+    self, CursorCollection, CursorConfig, EditOperation, EditOperationType, LanguageContext,
+    MoveCommand, Position, Selection, StandardTokenType, WordNavigationType,
 };
 
 /// Monaco `Position(lineNumber, column)`.
@@ -36,6 +38,10 @@ pub struct TestEditor {
     pub config: CursorConfig,
     pub prev: Option<EditOperationType>,
     pub page_lines: u32,
+    /// The language configuration, like Monaco's `languageId` option.
+    pub language: Option<LanguageConfiguration>,
+    /// Where token types come from (only used with a `language`).
+    pub tokenizer: Tokenizer,
 }
 
 impl TestEditor {
@@ -54,7 +60,61 @@ impl TestEditor {
             config,
             prev: None,
             page_lines: 10,
+            language: None,
+            tokenizer: Tokenizer::None,
         }
+    }
+
+    /// Sets the language configuration (Monaco's `languageId`).
+    pub fn with_language(mut self, config: LanguageConfiguration) -> Self {
+        self.language = Some(config);
+        self
+    }
+
+    pub fn with_tokenizer(mut self, tokenizer: Tokenizer) -> Self {
+        self.tokenizer = tokenizer;
+        self
+    }
+
+    fn model_lines(&self) -> Vec<String> {
+        let rope = self.buffer.rope();
+        (0..rope.line_count()).map(|row| rope.line(row)).collect()
+    }
+
+    /// Runs `f` with the language context for the current text (`None`
+    /// without a language).
+    pub fn with_lang<R>(&self, f: impl FnOnce(Option<&LanguageContext>) -> R) -> R {
+        let Some(config) = &self.language else {
+            return f(None);
+        };
+        let lines = self.model_lines();
+        let tokens = self.tokenizer.tokenize(&lines);
+        let at = |p: Position| -> StandardTokenType {
+            if p.column == 0 {
+                return StandardTokenType::Other;
+            }
+            tokens
+                .get(p.row as usize)
+                .and_then(|line| line.get(p.column as usize - 1))
+                .copied()
+                .unwrap_or_default()
+        };
+        let inserting = |p: Position, ch: char| -> StandardTokenType {
+            let mut lines = lines.clone();
+            let line = &mut lines[p.row as usize];
+            let mut units: Vec<u16> = line.encode_utf16().collect();
+            let column = (p.column as usize).min(units.len());
+            let mut buf = [0u16; 2];
+            let inserted = ch.encode_utf16(&mut buf);
+            units.splice(column..column, inserted.iter().copied());
+            *line = String::from_utf16_lossy(&units);
+            self.tokenizer.tokenize(&lines)[p.row as usize]
+                .get(column)
+                .copied()
+                .unwrap_or_default()
+        };
+        let ctx = LanguageContext::new(config, &at).with_token_type_if_inserting(&inserting);
+        f(Some(&ctx))
     }
 
     pub fn lines_with_config(lines: &[&str], config: CursorConfig) -> Self {
@@ -83,8 +143,17 @@ impl TestEditor {
         let end = rope.point_utf16_to_offset(pos(range.2, range.3));
         self.buffer.edit([(start..end, text)]).unwrap();
         self.prev = None;
+        self.cursors.auto_closed_ranges_mut().clear();
         let buffer = &self.buffer;
         self.cursors.validate(buffer);
+    }
+
+    /// Monaco `model.setValue`: replaces the text and resets the cursors.
+    pub fn set_value(&mut self, text: &str) {
+        let len = self.buffer.rope().len();
+        self.buffer.edit([(0..len, text)]).unwrap();
+        self.prev = None;
+        self.cursors = CursorCollection::default();
     }
 
     // --- cursors
@@ -238,6 +307,9 @@ impl TestEditor {
         if op.push_stack_element_before {
             self.buffer.push_stack_element();
         }
+        let follow_up = op.follow_up.clone();
+        self.cursors
+            .track_auto_closed(&self.buffer, &op.edits, &op.auto_closed);
         if !op.edits.is_empty() {
             let rope = self.buffer.rope();
             let edits: Vec<_> = op
@@ -274,6 +346,9 @@ impl TestEditor {
         if op.push_stack_element_after {
             self.buffer.push_stack_element();
         }
+        if let Some(follow_up) = follow_up {
+            self.apply(*follow_up);
+        }
     }
 
     /// Monaco `viewModel.type(text, 'keyboard')`: one character (grapheme) at
@@ -281,7 +356,17 @@ impl TestEditor {
     pub fn type_keyboard(&mut self, text: &str) {
         use unicode_segmentation::UnicodeSegmentation;
         for g in text.graphemes(true) {
-            self.type_raw(g);
+            let op = self.with_lang(|lang| {
+                cursor::type_with_language(
+                    &self.config,
+                    &self.buffer,
+                    &self.cursors,
+                    g,
+                    self.prev,
+                    lang,
+                )
+            });
+            self.apply(op);
         }
     }
 
@@ -293,14 +378,22 @@ impl TestEditor {
     }
 
     pub fn line_break(&mut self) {
-        let buffer = &self.buffer;
-        let op = cursor::line_break(&self.config, buffer, &self.cursors);
+        let op = self.with_lang(|lang| {
+            cursor::line_break_with_language(&self.config, &self.buffer, &self.cursors, lang)
+        });
         self.apply(op);
     }
 
     pub fn delete_left(&mut self) {
-        let buffer = &self.buffer;
-        let op = cursor::delete_left(&self.config, buffer, &self.cursors, self.prev);
+        let op = self.with_lang(|lang| {
+            cursor::delete_left_with_language(
+                &self.config,
+                &self.buffer,
+                &self.cursors,
+                self.prev,
+                lang,
+            )
+        });
         self.apply(op);
     }
 
@@ -311,8 +404,9 @@ impl TestEditor {
     }
 
     pub fn tab(&mut self) {
-        let buffer = &self.buffer;
-        let op = cursor::tab(&self.config, buffer, &self.cursors);
+        let op = self.with_lang(|lang| {
+            cursor::tab_with_language(&self.config, &self.buffer, &self.cursors, lang)
+        });
         self.apply(op);
     }
 
@@ -374,6 +468,7 @@ impl TestEditor {
             self.cursors.set_selections(&selections);
         }
         self.prev = None;
+        self.cursors.auto_closed_ranges_mut().clear();
         let buffer = &self.buffer;
         self.cursors.validate(buffer);
     }
@@ -386,6 +481,7 @@ impl TestEditor {
             self.cursors.set_selections(&selections);
         }
         self.prev = None;
+        self.cursors.auto_closed_ranges_mut().clear();
         let buffer = &self.buffer;
         self.cursors.validate(buffer);
     }

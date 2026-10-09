@@ -7,6 +7,7 @@
 
 use std::ops::Range;
 
+use super::auto_closed::{AutoClosedPair, AutoClosedRanges};
 use super::column::ColumnSelectData;
 use super::{CursorModel, Position, Selection, validate_position, validate_range};
 
@@ -134,6 +135,8 @@ pub struct CursorCollection {
     /// The rectangle of an ongoing column selection; cleared whenever the
     /// cursors are set by anything else.
     column_select_data: Option<ColumnSelectData>,
+    /// Closing characters the editor auto-inserted.
+    auto_closed: AutoClosedRanges,
 }
 
 impl Default for CursorCollection {
@@ -148,6 +151,7 @@ impl CursorCollection {
             states: vec![state],
             last_added_cursor_index: 0,
             column_select_data: None,
+            auto_closed: AutoClosedRanges::default(),
         }
     }
 
@@ -194,6 +198,7 @@ impl CursorCollection {
         }
         self.states = states;
         self.normalize();
+        self.validate_auto_closed();
     }
 
     /// Like [`CursorCollection::set_states`] with plain selections (Monaco
@@ -221,6 +226,41 @@ impl CursorCollection {
     pub fn kill_secondary_cursors(&mut self) {
         self.states.truncate(1);
         self.last_added_cursor_index = 0;
+        self.validate_auto_closed();
+    }
+
+    /// The closing characters the editor auto-inserted (see
+    /// [`AutoClosedRanges`]). Validated against the cursors whenever they
+    /// change.
+    pub fn auto_closed_ranges(&self) -> &AutoClosedRanges {
+        &self.auto_closed
+    }
+
+    pub fn auto_closed_ranges_mut(&mut self) -> &mut AutoClosedRanges {
+        &mut self.auto_closed
+    }
+
+    /// Keeps [`Self::auto_closed_ranges`] in sync with an edit operation:
+    /// carries the existing ranges through `edits` and records the newly
+    /// `auto_closed` pairs. Call it with the text *before* the edits are
+    /// applied (`edits` and `auto_closed` are an [`super::EditOperation`]'s
+    /// fields), then apply the edits and set the operation's
+    /// `selections_after`, which drops pairs the cursors have left.
+    pub fn track_auto_closed(
+        &mut self,
+        model_before: &impl CursorModel,
+        edits: &[(Range<Position>, String)],
+        auto_closed: &[AutoClosedPair],
+    ) {
+        self.auto_closed.transform(model_before, edits);
+        self.auto_closed.push(auto_closed);
+    }
+
+    fn validate_auto_closed(&mut self) {
+        if !self.auto_closed.is_empty() {
+            let selections = self.selections();
+            self.auto_closed.validate(&selections);
+        }
     }
 
     /// Clamps every cursor into `model` (e.g. after an external edit) and
@@ -231,6 +271,7 @@ impl CursorCollection {
             *state = state.validated(model);
         }
         self.normalize();
+        self.validate_auto_closed();
     }
 
     pub(crate) fn validated_states(
