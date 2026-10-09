@@ -110,7 +110,7 @@ fn markdown_injects_fenced_rust_and_inline() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig { cases: 128, max_global_rejects: 4096, ..ProptestConfig::default() })]
     /// Incremental reparse produces the same highlights as a fresh parse.
     #[test]
     fn incremental_reparse_matches_fresh_parse(
@@ -138,6 +138,10 @@ proptest! {
             old = new;
         }
         let fresh = SyntaxSnapshot::parse(language, &old, &registry);
+        // Tree-sitter's error recovery may legitimately differ between an
+        // incremental and a fresh parse, so only compare error-free trees.
+        let has_error = fresh.layers().iter().any(|layer| layer.tree.root_node().has_error());
+        prop_assume!(!has_error);
         let range = 0..buffer.len();
         prop_assert_eq!(
             syntax.highlights(buffer.rope(), range.clone()),

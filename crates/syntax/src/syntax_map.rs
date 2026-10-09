@@ -276,8 +276,9 @@ impl SyntaxSnapshot {
 
     /// Sorted, non-overlapping highlight spans intersecting `range`. Deeper
     /// (injected) layers take precedence over their parents; within a layer
-    /// the innermost node wins, and for the same node the earliest pattern in
-    /// the query wins (tree-sitter-highlight semantics).
+    /// the innermost node wins, and for the same node the **last** matching
+    /// pattern in the query wins (tree-sitter-highlight semantics, which is
+    /// why queries put generic patterns like `(identifier) @variable` first).
     pub fn highlights(&self, text: &Rope, range: Range<usize>) -> Vec<HighlightSpan> {
         let mut result: Vec<HighlightSpan> = Vec::new();
         let mut layers: Vec<&SyntaxLayer> = self.layers.iter().collect();
@@ -420,8 +421,8 @@ fn layer_highlights(layer: &SyntaxLayer, text: &Rope, range: Range<usize>) -> Ve
             *highlight,
         ));
     }
-    // Outer nodes first; for the same node, the earliest pattern first.
-    captures.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+    // Outer nodes first; for the same node, the latest pattern first.
+    captures.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)).then(b.2.cmp(&a.2)));
 
     let mut spans: Vec<HighlightSpan> = Vec::new();
     let mut push = |start: usize, end: usize, highlight: HighlightId| {
@@ -456,7 +457,7 @@ fn layer_highlights(layer: &SyntaxLayer, text: &Rope, range: Range<usize>) -> Ve
         }
         if let Some(&(top_start, top_end, top_hl)) = stack.last() {
             if top_start == start && top_end == end {
-                continue; // same node: earlier pattern already won
+                continue; // same node: the later pattern already won
             }
             push(pos, start, top_hl);
         }
