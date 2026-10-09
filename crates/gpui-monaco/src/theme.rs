@@ -433,9 +433,19 @@ impl Theme {
     ) -> Result<Self, serde_json::Error> {
         let mut merged = VsCodeTheme::default();
         load_vscode_theme(json, resolve, 0, &mut merged)?;
+        // VS Code's bundled themes leave `type` to the extension manifest
+        // (`uiTheme`), so fall back to the background's lightness.
         let kind = match merged.kind.as_deref() {
             Some("light") | Some("hcLight") => ThemeKind::Light,
-            _ => ThemeKind::Dark,
+            Some(_) => ThemeKind::Dark,
+            None => match merged
+                .colors
+                .get("editor.background")
+                .and_then(|c| parse_hex_color(c))
+            {
+                Some(background) if background.l > 0.5 => ThemeKind::Light,
+                _ => ThemeKind::Dark,
+            },
         };
         let mut colors = match kind {
             ThemeKind::Light => EditorColors::vs(),

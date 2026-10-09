@@ -1,4 +1,4 @@
-//! Mock language feature providers for the playground (`PLAYGROUND_PROVIDERS=1`).
+//! Mock language feature providers for the playground (off with `PLAYGROUND_PLAIN=1`).
 
 use gpui::{App, Entity, Task};
 use gpui_monaco::providers::*;
@@ -145,7 +145,45 @@ impl CompletionProvider for DemoCompletions {
     }
 }
 
+/// Jumps to the first `fn`, `struct`, `enum` or `trait` declaring the word.
+struct DemoDefinitions;
+impl DefinitionProvider for DemoDefinitions {
+    fn provide_definition(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<Location>>> {
+        let word = word_at(context, position);
+        if word.is_empty() {
+            return Task::ready(Ok(Vec::new()));
+        }
+        let rows = context.snapshot.rope().max_point().row + 1;
+        let found = (0..rows).find_map(|row| {
+            let line = context.snapshot.line(row);
+            ["fn ", "struct ", "enum ", "trait "]
+                .iter()
+                .find_map(|keyword| {
+                    let declaration = format!("{keyword}{word}");
+                    let column = line.find(&declaration)? + keyword.len();
+                    let after = line[column + word.len()..].chars().next();
+                    if after.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                        return None;
+                    }
+                    let column = line[..column].encode_utf16().count() as u32;
+                    Some(Location {
+                        uri: None,
+                        range: PointUtf16::new(row, column)
+                            ..PointUtf16::new(row, column + word.encode_utf16().count() as u32),
+                    })
+                })
+        });
+        Task::ready(Ok(found.into_iter().collect()))
+    }
+}
+
 pub fn register(cx: &mut App) {
+    register_definition_provider(cx, LanguageSelector::All, DemoDefinitions);
     register_completion_provider(cx, LanguageSelector::All, DemoCompletions);
     register_hover_provider(cx, LanguageSelector::All, DemoHover);
     register_signature_help_provider(cx, LanguageSelector::All, DemoSignatures);

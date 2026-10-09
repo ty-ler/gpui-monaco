@@ -1,0 +1,38 @@
+# Playground
+
+A Monaco-playground-style app for trying every editor feature.
+
+```sh
+cargo run -p playground
+```
+
+The toolbar has these controls:
+
+- **Open…** opens a file. Its language is picked from the file name.
+- **Language** cycles through the registered languages.
+- **Theme** cycles through `vs-dark`, `vs` and the bundled VS Code themes (see `themes/`).
+- **Wrap, Minimap, Sticky scroll, Line numbers, Folding** and **Read-only** toggle editor options.
+- **Add demo widgets** adds sample decorations, a view zone, a content widget and an overlay widget.
+
+The status bar shows the cursor position, selection count, language, line endings and file.
+
+Demo providers are registered by default:
+
+- hover on `Edit` / `Patch`
+- completions (`Ctrl+Space`) with docs
+- signature help inside `(`
+- go to definition (`F12` / Cmd+click)
+- diagnostics (`F8`)
+
+## Environment variables
+
+| Variable | Effect |
+|---|---|
+| `PLAYGROUND_FILE=path` | Open `path` instead of the sample |
+| `PLAYGROUND_THEME=name\|path.json` | Start with a bundled theme (`Light+`, `Dark+`, …) or a VS Code theme file |
+| `PLAYGROUND_WRAP=on\|<column>` | Start with word wrap on, or wrapped at a column |
+| `PLAYGROUND_DEMO=1` | Add the demo decorations and widgets at startup |
+| `PLAYGROUND_PLAIN=1` | Don't register the demo providers or markers |
+| `PLAYGROUND_DEBUG=1` | Log selection changes |
+| `PLAYGROUND_SCREENSHOT=out.png` | Save a screenshot and exit (needs `--features screenshot`) |
+| `PLAYGROUND_KEYS="cmd-down text:hi wait"` | Keystrokes to play before the screenshot (`text:` types, `_` is a space, `wait` pauses 150ms) |
