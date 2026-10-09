@@ -53,6 +53,13 @@ gpui-monaco-languages = { git = "https://github.com/ty-ler/gpui-monaco", tag = "
 
 Use the same gpui revision. Git dependencies don't inherit their workspace's `[patch]` section, so also copy the `[patch.crates-io]` block from this repo's `Cargo.toml` into your workspace. See [Getting started](book/src/getting-started.md) for a complete example. Rust 1.98 or newer is required.
 
+While the repository is private, cargo's built-in git client can't authenticate. Tell cargo to use the `git` CLI, which uses your GitHub credentials, in `.cargo/config.toml`:
+
+```toml
+[net]
+git-fetch-with-cli = true
+```
+
 ## Development
 
 ```bash
