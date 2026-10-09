@@ -20,10 +20,16 @@ struct Languages(Arc<LanguageRegistry>);
 
 impl Global for Languages {}
 
+/// Sets the process-wide language registry that [`TextModel`] language ids are
+/// resolved against (e.g. `gpui_monaco_languages::registry()`).
+///
+/// Models that already resolved their language keep it; set the registry before
+/// showing any model.
 pub fn set_language_registry(cx: &mut App, registry: Arc<LanguageRegistry>) {
     cx.set_global(Languages(registry));
 }
 
+/// The registry set with [`set_language_registry`], or an empty one.
 pub fn language_registry(cx: &App) -> Arc<LanguageRegistry> {
     cx.try_global::<Languages>()
         .map(|languages| languages.0.clone())
@@ -33,7 +39,9 @@ pub fn language_registry(cx: &App) -> Arc<LanguageRegistry> {
 /// The highlighter and the latest highlight state with the text it describes.
 #[derive(Clone)]
 pub struct SyntaxSnapshot {
+    /// Computes highlights from `state`.
     pub highlighter: Arc<dyn Highlighter>,
+    /// The parse state for `text`.
     pub state: HighlightState,
     /// The text `state` was computed from; may be older than the model.
     pub text: BufferSnapshot,
@@ -50,8 +58,11 @@ struct Syntax {
 /// Per-model options (Monaco `ITextModelUpdateOptions`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelOptions {
+    /// Monaco `tabSize`: columns per tab character (default 4).
     pub tab_size: u32,
+    /// Monaco `indentSize`: columns per indentation level (default 4).
     pub indent_size: u32,
+    /// Monaco `insertSpaces`: indent with spaces instead of tabs (default `true`).
     pub insert_spaces: bool,
 }
 
@@ -68,19 +79,28 @@ impl Default for ModelOptions {
 /// Why the text changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditKind {
+    /// An edit through [`TextModel::edit`] or [`TextModel::edit_from`], including
+    /// editing commands.
     Edit,
+    /// [`TextModel::undo`].
     Undo,
+    /// [`TextModel::redo`].
     Redo,
+    /// [`TextModel::set_value`]; undo history was cleared.
     SetValue,
 }
 
+/// Events emitted by a [`TextModel`].
 #[derive(Clone, Debug)]
 pub enum TextModelEvent {
     /// The text changed from `version - 1` (or older, for `SetValue`) to
     /// `version`. `patch` is in byte offsets of the previous snapshot.
     Edited {
+        /// The changes, in byte offsets of the previous text.
         patch: Patch,
+        /// The model's version after the change.
         version: Version,
+        /// What caused the change.
         kind: EditKind,
         /// The editor that made the edit, which has already updated its own
         /// cursors. Other editors should transform theirs through `patch`.
@@ -89,7 +109,9 @@ pub enum TextModelEvent {
         /// original edit).
         restore: Option<TransactionMetadata>,
     },
+    /// [`TextModel::update_options`] changed the options.
     OptionsChanged,
+    /// [`TextModel::set_language`] changed the language id.
     LanguageChanged,
     /// New highlights are available (background parse finished).
     SyntaxUpdated,
@@ -113,6 +135,9 @@ pub struct TextModel {
 impl EventEmitter<TextModelEvent> for TextModel {}
 
 impl TextModel {
+    /// A model holding `text`, with default options and no language or uri. Line
+    /// breaks are normalized to `\n` and the original line ending is detected
+    /// (LF when there are none); a leading byte order mark is stripped.
     pub fn new(text: &str) -> Self {
         Self {
             buffer: Buffer::new(text),
@@ -140,6 +165,7 @@ impl TextModel {
         self
     }
 
+    /// The uri set with [`TextModel::with_uri`].
     pub fn uri(&self) -> Option<&SharedString> {
         self.uri.as_ref()
     }
@@ -153,14 +179,17 @@ impl TextModel {
         }
     }
 
+    /// The underlying text buffer.
     pub fn buffer(&self) -> &Buffer {
         &self.buffer
     }
 
+    /// An immutable snapshot of the current text.
     pub fn snapshot(&self) -> BufferSnapshot {
         self.buffer.snapshot()
     }
 
+    /// The current version; it changes with every edit, undo and redo.
     pub fn version(&self) -> Version {
         self.buffer.version()
     }
@@ -170,18 +199,24 @@ impl TextModel {
         self.buffer.text()
     }
 
+    /// The line ending [`TextModel::text`] joins lines with.
     pub fn line_ending(&self) -> LineEnding {
         self.buffer.line_ending()
     }
 
+    /// Sets the line ending [`TextModel::text`] joins lines with. The stored text
+    /// is unchanged, so this isn't an undoable edit and no event is emitted.
     pub fn set_line_ending(&mut self, line_ending: LineEnding) {
         self.buffer.set_line_ending(line_ending);
     }
 
+    /// The model options.
     pub fn options(&self) -> &ModelOptions {
         &self.options
     }
 
+    /// Replaces the options, emitting [`TextModelEvent::OptionsChanged`] if they
+    /// differ.
     pub fn update_options(&mut self, options: ModelOptions, cx: &mut Context<Self>) {
         if self.options != options {
             self.options = options;
@@ -190,6 +225,8 @@ impl TextModel {
         }
     }
 
+    /// The language id set with [`TextModel::with_language`] or
+    /// [`TextModel::set_language`].
     pub fn language_id(&self) -> Option<&SharedString> {
         self.language_id.as_ref()
     }
@@ -199,6 +236,8 @@ impl TextModel {
         self.syntax.as_ref().map(|syntax| &syntax.language)
     }
 
+    /// Changes the language id (Monaco `setModelLanguage`), resolving it right away
+    /// and emitting [`TextModelEvent::LanguageChanged`] if it differs.
     pub fn set_language(&mut self, language_id: Option<SharedString>, cx: &mut Context<Self>) {
         if self.language_id != language_id {
             self.language_id = language_id;
@@ -223,9 +262,12 @@ impl TextModel {
                 .or_else(|| registry.language_for_name(id))
         });
         self.syntax = language
-            .filter(|l| l.grammar.is_some())
+            .filter(|l| l.has_highlighter())
             .map(|language| Syntax {
-                highlighter: Arc::new(TreeSitterHighlighter::new(language.clone(), registry)),
+                highlighter: match &language.highlighter {
+                    Some(factory) => factory(&language, &registry),
+                    None => Arc::new(TreeSitterHighlighter::new(language.clone(), registry)),
+                },
                 language,
                 latest: None,
                 task: None,
@@ -469,6 +511,7 @@ impl TextModel {
         self.decorations.all(editor)
     }
 
+    /// The decoration with `id`, if it still exists.
     pub fn decoration(&self, id: DecorationId) -> Option<&Decoration> {
         self.decorations.get(id)
     }
@@ -482,23 +525,33 @@ impl TextModel {
         self.buffer.set_last_transaction_metadata(before, after);
     }
 
+    /// Ends the current undo step, so the next grouped edit starts a new one (Monaco
+    /// `pushStackElement`).
     pub fn push_stack_element(&mut self) {
         self.buffer.push_stack_element();
     }
 
+    /// Whether there's an undo step to undo.
     pub fn can_undo(&self) -> bool {
         self.buffer.can_undo()
     }
 
+    /// Whether there's an undone step to redo.
     pub fn can_redo(&self) -> bool {
         self.buffer.can_redo()
     }
 
+    /// Undoes the last undo step on behalf of `source`, emitting
+    /// [`TextModelEvent::Edited`] with [`EditKind::Undo`]. Returns whether anything
+    /// was undone.
     pub fn undo(&mut self, source: Option<EntityId>, cx: &mut Context<Self>) -> bool {
         let outcome = self.buffer.undo();
         self.emit_undo(outcome, EditKind::Undo, source, cx)
     }
 
+    /// Redoes the last undone step on behalf of `source`, emitting
+    /// [`TextModelEvent::Edited`] with [`EditKind::Redo`]. Returns whether anything
+    /// was redone.
     pub fn redo(&mut self, source: Option<EntityId>, cx: &mut Context<Self>) -> bool {
         let outcome = self.buffer.redo();
         self.emit_undo(outcome, EditKind::Redo, source, cx)

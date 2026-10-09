@@ -9,15 +9,19 @@ use sum_tree::Bias;
 /// the next version's byte offsets.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Edit {
+    /// Replaced range, in byte offsets of the previous version.
     pub old: Range<usize>,
+    /// Replacement range, in byte offsets of the next version.
     pub new: Range<usize>,
 }
 
 impl Edit {
+    /// Length of the replaced text in bytes.
     pub fn old_len(&self) -> usize {
         self.old.end - self.old.start
     }
 
+    /// Length of the replacement text in bytes.
     pub fn new_len(&self) -> usize {
         self.new.end - self.new.start
     }
@@ -45,14 +49,17 @@ impl Patch {
         Self(edits)
     }
 
+    /// The edits, sorted by position.
     pub fn edits(&self) -> &[Edit] {
         &self.0
     }
 
+    /// Whether the patch leaves the text unchanged.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    /// Consumes the patch, returning its edits.
     pub fn into_inner(self) -> Vec<Edit> {
         self.0
     }

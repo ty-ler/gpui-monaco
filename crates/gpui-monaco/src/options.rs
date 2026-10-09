@@ -6,9 +6,12 @@ use gpui::{Pixels, SharedString, px};
 /// Monaco `lineNumbers`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LineNumbers {
+    /// Absolute line numbers (the default).
     #[default]
     On,
+    /// No line numbers; the gutter has no number column.
     Off,
+    /// Distance from the primary cursor's line; that line shows its absolute number.
     Relative,
     /// Every 10th line, plus the current line.
     Interval,
@@ -17,16 +20,21 @@ pub enum LineNumbers {
 /// Monaco `renderLineHighlight`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RenderLineHighlight {
+    /// No current-line highlight.
     None,
+    /// Highlight only the gutter of the current line.
     Gutter,
+    /// Highlight the text area of the current line (the default).
     #[default]
     Line,
+    /// Highlight both the gutter and the text area of the current line.
     All,
 }
 
 /// Monaco `wordWrap`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WordWrap {
+    /// No wrapping (the default).
     #[default]
     Off,
     /// Wrap at the viewport width.
@@ -40,15 +48,20 @@ pub enum WordWrap {
 /// Monaco `showFoldingControls`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ShowFoldingControls {
+    /// Always show the fold chevrons.
     Always,
+    /// Show the fold chevrons while the mouse is over the gutter (the default).
     #[default]
     Mouseover,
+    /// Never show the fold chevrons.
     Never,
 }
 
 /// Monaco `minimap` options.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MinimapOptions {
+    /// Whether the minimap is shown (Monaco `minimap.enabled`, default `true`). Never shown
+    /// for [`EditorOptions::single_line`] editors.
     pub enabled: bool,
     /// Columns rendered (Monaco `minimap.maxColumn`).
     pub max_column: u32,
@@ -72,7 +85,9 @@ impl Default for MinimapOptions {
 /// Monaco `stickyScroll` options.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StickyScrollOptions {
+    /// Whether sticky scroll is on (Monaco `stickyScroll.enabled`, default `true`).
     pub enabled: bool,
+    /// Most header lines pinned at once (Monaco `stickyScroll.maxLineCount`, default 5).
     pub max_line_count: u32,
 }
 
@@ -88,51 +103,94 @@ impl Default for StickyScrollOptions {
 /// Monaco `cursorStyle`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorStyle {
+    /// A vertical bar [`EditorOptions::cursor_width`] pixels wide (the default).
     #[default]
     Line,
+    /// A box covering the character after the cursor.
     Block,
+    /// A 2px bar under the character after the cursor.
     Underline,
+    /// A 1px vertical bar.
     LineThin,
 }
 
+/// Options for one [`CodeEditor`](crate::CodeEditor) view (Monaco `IEditorOptions`).
+///
+/// The model-level options (tab size, insert spaces, …) live in
+/// [`ModelOptions`](crate::ModelOptions).
 #[derive(Clone, Debug, PartialEq)]
 pub struct EditorOptions {
+    /// Monaco `fontFamily`. Defaults to Menlo on macOS, Consolas on Windows and
+    /// Droid Sans Mono elsewhere.
     pub font_family: SharedString,
+    /// Monaco `fontSize`. Defaults to 12px on macOS and 14px elsewhere.
     pub font_size: Pixels,
     /// `None` computes it from the font size like Monaco
     /// (`GOLDEN_LINE_HEIGHT_RATIO`, 1.5 on macOS and 1.35 elsewhere).
     pub line_height: Option<Pixels>,
+    /// Monaco `lineNumbers`.
     pub line_numbers: LineNumbers,
+    /// Monaco `lineNumbersMinChars`: the number column is at least this many digits
+    /// wide (default 5).
     pub line_numbers_min_chars: u32,
     /// Monaco `lineDecorationsWidth`: space between line numbers and text.
     pub line_decorations_width: Pixels,
+    /// Monaco `glyphMargin`: show the gutter column for glyph decorations (default
+    /// `true`).
     pub glyph_margin: bool,
+    /// Monaco `renderLineHighlight`.
     pub render_line_highlight: RenderLineHighlight,
+    /// Monaco `cursorStyle`.
     pub cursor_style: CursorStyle,
+    /// Monaco `cursorWidth`: width of the [`CursorStyle::Line`] cursor (default 2px).
     pub cursor_width: Pixels,
+    /// Whether the cursor blinks (default `true`). Monaco's `cursorBlinking` has more
+    /// styles; `false` is `solid`.
     pub cursor_blinking: bool,
+    /// Monaco `scrollBeyondLastLine`: allow scrolling the last line to the top of the
+    /// viewport (default `true`).
     pub scroll_beyond_last_line: bool,
+    /// Monaco `readOnly`: ignore edits from typing, IME and editing commands (default
+    /// `false`).
     pub read_only: bool,
+    /// Monaco `wordSeparators`: characters that end a word for word navigation,
+    /// double-click selection and whole-word search.
     pub word_separators: SharedString,
+    /// Monaco `scrollbar.verticalScrollbarSize` (default 14px; 0 hides it).
     pub vertical_scrollbar_size: Pixels,
+    /// Monaco `scrollbar.horizontalScrollbarSize` (default 12px; 0 hides it).
     pub horizontal_scrollbar_size: Pixels,
     /// Pixels scrolled per wheel "line" step is the line height; this scales it
     /// (Monaco `mouseWheelScrollSensitivity`).
     pub mouse_wheel_scroll_sensitivity: f32,
+    /// Monaco `emptySelectionClipboard`: copy and cut with an empty selection act on
+    /// the whole line (default `true`).
     pub empty_selection_clipboard: bool,
+    /// Monaco `stickyTabStops`: move the cursor over indentation spaces as if they were
+    /// tabs (default `false`).
     pub sticky_tab_stops: bool,
+    /// Monaco `wordWrap`.
     pub word_wrap: WordWrap,
+    /// Monaco `wordWrapColumn`, in characters (default 80); used by
+    /// [`WordWrap::WordWrapColumn`] and [`WordWrap::Bounded`].
     pub word_wrap_column: u32,
+    /// Monaco `wrappingIndent`: indentation of wrapped continuation lines (default
+    /// same as the first line).
     pub wrapping_indent: crate::view::line_breaks::WrappingIndent,
+    /// Monaco `folding`: enable code folding and its gutter column (default `true`).
     pub folding: bool,
+    /// Monaco `showFoldingControls`.
     pub show_folding_controls: ShowFoldingControls,
     /// Monaco `autoClosingBrackets` / `autoClosingQuotes` /
     /// `autoClosingComments`.
     pub auto_closing_brackets: crate::cursor::AutoClosingStrategy,
+    /// Monaco `autoClosingQuotes`.
     pub auto_closing_quotes: crate::cursor::AutoClosingStrategy,
+    /// Monaco `autoClosingComments`.
     pub auto_closing_comments: crate::cursor::AutoClosingStrategy,
     /// Monaco `autoClosingOvertype` / `autoClosingDelete`.
     pub auto_closing_overtype: crate::cursor::AutoClosingEditStrategy,
+    /// Monaco `autoClosingDelete`.
     pub auto_closing_delete: crate::cursor::AutoClosingEditStrategy,
     /// Monaco `autoSurround`.
     pub auto_surround: crate::cursor::AutoSurroundStrategy,
@@ -143,7 +201,9 @@ pub struct EditorOptions {
     /// Monaco `quickSuggestions`: suggest while typing in code (not in
     /// strings or comments).
     pub quick_suggestions: bool,
+    /// Monaco `minimap`.
     pub minimap: MinimapOptions,
+    /// Monaco `stickyScroll`.
     pub sticky_scroll: StickyScrollOptions,
     /// A one-line input (like Monaco's find input): Enter, Tab and Escape
     /// propagate to the parent and pasted line breaks become spaces.
@@ -231,6 +291,8 @@ impl EditorOptions {
 }
 
 impl EditorOptions {
+    /// The line height in pixels: [`line_height`](Self::line_height), or the font size
+    /// times 1.5 on macOS and 1.35 elsewhere, rounded.
     pub fn resolved_line_height(&self) -> Pixels {
         self.line_height.unwrap_or_else(|| {
             let ratio = if cfg!(target_os = "macos") { 1.5 } else { 1.35 };

@@ -3,6 +3,7 @@
 //!
 //! This crate intentionally has no gpui dependency so it can be tested fast
 //! and in isolation.
+#![warn(missing_docs)]
 
 mod buffer;
 mod line_ending;

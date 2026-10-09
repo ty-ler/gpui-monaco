@@ -26,8 +26,11 @@ thread_local! {
 /// One parsed tree: the root language at depth 0, injections deeper.
 #[derive(Clone)]
 pub struct SyntaxLayer {
+    /// The language this layer was parsed as.
     pub language: Arc<Language>,
+    /// The parsed tree, with byte offsets into the whole buffer text.
     pub tree: Tree,
+    /// Injection nesting depth: 0 for the root.
     pub depth: usize,
     /// Byte ranges this layer was parsed from (the whole text for the root).
     pub ranges: Vec<Range<usize>>,
@@ -59,7 +62,9 @@ impl SyntaxLayer {
 /// A highlighted span of text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HighlightSpan {
+    /// Byte range in the buffer text.
     pub range: Range<usize>,
+    /// The capture to style the range with.
     pub highlight: HighlightId,
 }
 
@@ -197,7 +202,11 @@ impl SyntaxSnapshot {
         registry: &LanguageRegistry,
     ) -> Self {
         let Some(root) = self.layers.first() else {
-            return self.clone();
+            // Nothing parsed (the root parse failed): stay empty, but at the
+            // new version.
+            let mut snapshot = self.clone();
+            snapshot.version = text.version();
+            return snapshot;
         };
         let edits = input_edits(old_text, text.rope(), patch);
         let edited: Vec<Range<usize>> = patch.edits().iter().map(|e| e.new.clone()).collect();
@@ -348,14 +357,18 @@ impl SyntaxSnapshot {
         self.by_start = by_start.into();
     }
 
+    /// The buffer version these trees were parsed from.
     pub fn version(&self) -> text::Version {
         self.version
     }
 
+    /// All layers, the root first and then injections breadth-first, so in
+    /// increasing depth.
     pub fn layers(&self) -> &[SyntaxLayer] {
         &self.layers
     }
 
+    /// The root layer, or `None` if the language has no grammar or parsing failed.
     pub fn root(&self) -> Option<&SyntaxLayer> {
         self.layers.first()
     }

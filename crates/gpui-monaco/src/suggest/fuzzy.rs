@@ -18,6 +18,7 @@ use std::ops::Range;
 /// A fuzzy match: its score (higher is better) and the matched ranges.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FuzzyScore {
+    /// The match quality; higher is better.
     pub score: i32,
     /// Matched char ranges in the *word* (target), in UTF-16 code units, like
     /// Monaco's `createMatches`.
@@ -29,6 +30,8 @@ impl FuzzyScore {
     /// the range real matches get.
     pub const DEFAULT_SCORE: i32 = -100;
 
+    /// A score of [`Self::DEFAULT_SCORE`] with no matches (Monaco
+    /// `FuzzyScore.Default`).
     pub fn default_score() -> Self {
         Self {
             score: Self::DEFAULT_SCORE,

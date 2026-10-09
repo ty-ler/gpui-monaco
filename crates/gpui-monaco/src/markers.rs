@@ -19,9 +19,13 @@ use crate::widgets::{ViewZone, WidgetId, ZoneHeight};
 /// Monaco `MarkerSeverity`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MarkerSeverity {
+    /// A hint; no squiggle, only a hover message.
     Hint,
+    /// Information: blue squiggle.
     Info,
+    /// A warning: yellow squiggle and overview ruler mark.
     Warning,
+    /// An error: red squiggle and overview ruler mark.
     Error,
 }
 
@@ -40,11 +44,16 @@ impl MarkerSeverity {
 /// Monaco `IMarkerData`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Marker {
+    /// How serious it is; picks the color and whether it's marked in the overview ruler.
     pub severity: MarkerSeverity,
+    /// The message, shown on hover and by marker navigation.
     pub message: SharedString,
+    /// The range (0-based rows, UTF-16 columns). An empty range is widened to one
+    /// character.
     pub range: Range<PointUtf16>,
     /// E.g. `rustc`; shown after the message.
     pub source: Option<SharedString>,
+    /// E.g. a lint name; shown after the message with the source.
     pub code: Option<SharedString>,
 }
 
@@ -232,6 +241,8 @@ impl CodeEditor {
         self.marker_navigation.index = Some(index);
     }
 
+    /// Closes the marker zone opened by [`CodeEditor::go_to_marker`]. Returns
+    /// whether one was open.
     pub fn close_marker_zone(&mut self, cx: &mut Context<Self>) -> bool {
         self.marker_navigation.index = None;
         match self.marker_navigation.zone.take() {

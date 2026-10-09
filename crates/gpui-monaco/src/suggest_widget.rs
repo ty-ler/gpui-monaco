@@ -50,6 +50,8 @@ impl SuggestWidgetState {
     }
 }
 
+/// The completion list, shown below or above the cursor while suggestions are
+/// open.
 pub struct SuggestWidget {
     editor: WeakEntity<CodeEditor>,
     state: SuggestWidgetState,

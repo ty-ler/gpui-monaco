@@ -6,26 +6,36 @@
 
 use serde::Deserialize;
 
+/// A parsed `language-configuration.json`. Unknown keys are ignored and missing
+/// ones default to empty.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LanguageConfiguration {
+    /// `comments`: line and block comment tokens.
     #[serde(default)]
     pub comments: Comments,
+    /// `brackets`: open/close pairs used for bracket matching and indentation.
     #[serde(default)]
     pub brackets: Vec<(String, String)>,
+    /// `autoClosingPairs`: pairs closed automatically when the open text is typed.
     #[serde(default)]
     pub auto_closing_pairs: Vec<AutoClosingPair>,
     /// Characters before which auto-closing happens (Monaco `autoCloseBefore`).
     #[serde(default)]
     pub auto_close_before: Option<String>,
+    /// `surroundingPairs`: pairs that wrap the selection when the open text is typed.
     #[serde(default)]
     pub surrounding_pairs: Vec<SurroundingPair>,
+    /// `wordPattern`: what counts as a word, for word navigation and selection.
     #[serde(default)]
     pub word_pattern: Option<Pattern>,
+    /// `indentationRules`: how typing and Enter adjust indentation.
     #[serde(default)]
     pub indentation_rules: Option<IndentationRules>,
+    /// `onEnterRules`: special Enter handling, such as continuing doc comments.
     #[serde(default)]
     pub on_enter_rules: Vec<OnEnterRule>,
+    /// `folding`: indentation-based folding settings and region markers.
     #[serde(default)]
     pub folding: Option<Folding>,
 }
@@ -38,10 +48,13 @@ impl LanguageConfiguration {
     }
 }
 
+/// The `comments` section of a language configuration.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Comments {
+    /// `lineComment`, e.g. `//`.
     pub line_comment: Option<String>,
+    /// `blockComment` as `(open, close)`, e.g. `("/*", "*/")`.
     pub block_comment: Option<(String, String)>,
 }
 
@@ -49,17 +62,26 @@ pub struct Comments {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NotIn {
+    /// Inside a string token.
     String,
+    /// Inside a comment token.
     Comment,
+    /// Inside a regular expression literal.
     Regex,
+    /// Any other value; ignored.
     #[serde(other)]
     Other,
 }
 
+/// An `autoClosingPairs` entry, given as `["open", "close"]` or
+/// `{ "open", "close", "notIn" }`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AutoClosingPair {
+    /// Text whose typing triggers auto-closing.
     pub open: String,
+    /// Text inserted after the cursor.
     pub close: String,
+    /// Contexts where the pair is not auto-closed (`notIn`).
     pub not_in: Vec<NotIn>,
 }
 
@@ -95,9 +117,13 @@ impl<'de> Deserialize<'de> for AutoClosingPair {
     }
 }
 
+/// A `surroundingPairs` entry, given as `["open", "close"]` or
+/// `{ "open", "close" }`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SurroundingPair {
+    /// Text inserted before the selection.
     pub open: String,
+    /// Text inserted after the selection.
     pub close: String,
 }
 
@@ -118,12 +144,16 @@ impl<'de> Deserialize<'de> for SurroundingPair {
 /// A JavaScript regex, given either as a string or `{ "pattern", "flags" }`.
 #[derive(Clone, Debug)]
 pub struct Pattern {
+    /// The pattern source, as written in JavaScript.
     pub source: String,
+    /// JavaScript regex flags. `i`, `m` and `s` are honored; others are ignored.
     pub flags: String,
     regex: Option<fancy_regex::Regex>,
 }
 
 impl Pattern {
+    /// Compiles a JavaScript pattern with `flags`. A pattern that fails to compile
+    /// is kept, but [`Pattern::regex`] returns `None` and it never matches.
     pub fn new(source: impl Into<String>, flags: impl Into<String>) -> Self {
         let source = source.into();
         let flags = flags.into();
@@ -179,59 +209,88 @@ impl<'de> Deserialize<'de> for Pattern {
     }
 }
 
+/// The `indentationRules` section of a language configuration.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndentationRules {
+    /// `increaseIndentPattern`: a line matching this indents the lines after it.
     pub increase_indent_pattern: Pattern,
+    /// `decreaseIndentPattern`: a line matching this is outdented.
     pub decrease_indent_pattern: Pattern,
+    /// `indentNextLinePattern`: a line matching this indents only the next line.
     #[serde(default)]
     pub indent_next_line_pattern: Option<Pattern>,
+    /// `unIndentedLinePattern`: a line matching this keeps its indentation and is
+    /// ignored by the other rules.
     #[serde(default)]
     pub un_indented_line_pattern: Option<Pattern>,
 }
 
+/// What Enter does to indentation (VS Code `IndentAction`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum IndentAction {
+    /// Keep the previous line's indentation.
     None,
+    /// Indent the new line once relative to the previous line.
     Indent,
+    /// Insert two lines: an indented one for the cursor and one at the previous
+    /// line's indentation (e.g. between brackets).
     IndentOutdent,
+    /// Outdent the new line once relative to the previous line.
     Outdent,
 }
 
+/// The `action` of an [`OnEnterRule`].
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnterAction {
+    /// `indent`: how to indent the new line.
     pub indent: IndentAction,
+    /// `appendText`: text to insert after the new line's indentation.
     #[serde(default)]
     pub append_text: Option<String>,
+    /// `removeText`: number of characters to remove from the new line's indentation.
     #[serde(default)]
     pub remove_text: Option<u32>,
 }
 
+/// An `onEnterRules` entry: applies [`EnterAction`] when Enter is pressed and
+/// all of its patterns match.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OnEnterRule {
+    /// `beforeText`: must match the line's text before the cursor.
     pub before_text: Pattern,
+    /// `afterText`: must match the line's text after the cursor.
     #[serde(default)]
     pub after_text: Option<Pattern>,
+    /// `previousLineText`: must match the line above the cursor's line.
     #[serde(default)]
     pub previous_line_text: Option<Pattern>,
+    /// `action`: what to do.
     pub action: EnterAction,
 }
 
+/// The `folding` section of a language configuration.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Folding {
+    /// `offSide`: the language uses the off-side rule (e.g. Python), so blank
+    /// lines below an indented block are not folded with it.
     #[serde(default)]
     pub off_side: bool,
+    /// `markers`: patterns for explicit region markers such as `#region`.
     #[serde(default)]
     pub markers: Option<FoldingMarkers>,
 }
 
+/// The `folding.markers` patterns.
 #[derive(Clone, Debug, Deserialize)]
 pub struct FoldingMarkers {
+    /// `start`: a line matching this opens a folding region.
     pub start: Pattern,
+    /// `end`: a line matching this closes the region opened by the nearest `start`.
     pub end: Pattern,
 }
 

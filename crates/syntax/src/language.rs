@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use tree_sitter::Query;
 
 use crate::config::LanguageConfiguration;
+use crate::highlighter::Highlighter;
 
 /// An interned highlight capture name such as `keyword` or `string.special`.
 ///
@@ -63,6 +64,7 @@ pub(crate) struct InjectionQuery {
 }
 
 impl Grammar {
+    /// A grammar with no queries; add them with the `with_*_query` methods.
     pub fn new(ts_language: tree_sitter::Language) -> Self {
         Self {
             ts_language,
@@ -75,10 +77,13 @@ impl Grammar {
         }
     }
 
+    /// The tree-sitter language.
     pub fn ts_language(&self) -> &tree_sitter::Language {
         &self.ts_language
     }
 
+    /// `highlights.scm`: captures are interned as [`HighlightId`]s, except names
+    /// starting with `_`, which are helpers and produce no highlight.
     pub fn with_highlights_query(mut self, source: &str) -> Result<Self, tree_sitter::QueryError> {
         let query = Query::new(&self.ts_language, source)?;
         self.highlight_ids = query
@@ -90,6 +95,8 @@ impl Grammar {
         Ok(self)
     }
 
+    /// `injections.scm`: `@injection.content` captures are parsed as the language
+    /// named by `@injection.language` or the `injection.language` property.
     pub fn with_injections_query(mut self, source: &str) -> Result<Self, tree_sitter::QueryError> {
         let query = Query::new(&self.ts_language, source)?;
         let content_capture = query.capture_index_for_name("injection.content");
@@ -127,18 +134,22 @@ impl Grammar {
         Ok(self)
     }
 
+    /// The highlights query, if set.
     pub fn highlights_query(&self) -> Option<&Query> {
         self.highlights.as_ref()
     }
 
+    /// The brackets query, if set.
     pub fn brackets_query(&self) -> Option<&Query> {
         self.brackets.as_ref()
     }
 
+    /// The folds query, if set.
     pub fn folds_query(&self) -> Option<&Query> {
         self.folds.as_ref()
     }
 
+    /// The indents query, if set.
     pub fn indents_query(&self) -> Option<&Query> {
         self.indents.as_ref()
     }
@@ -147,20 +158,34 @@ impl Grammar {
 /// A language: identity, file associations, editing configuration and an
 /// optional grammar.
 pub struct Language {
+    /// Stable identifier, like Monaco's language id (e.g. `typescriptreact`).
     pub id: Arc<str>,
+    /// Display name.
     pub name: Arc<str>,
     /// Other names, matched case-insensitively (e.g. code fence info strings).
     pub aliases: Vec<String>,
-    /// File extensions without the dot, and exact file names.
+    /// File extensions without the dot, matched case-insensitively.
     pub extensions: Vec<String>,
+    /// Exact file names, matched case-sensitively (e.g. `Cargo.lock`).
     pub file_names: Vec<String>,
+    /// Editing rules from `language-configuration.json`.
     pub config: LanguageConfiguration,
+    /// The tree-sitter grammar; `None` means no syntax highlighting.
     pub grammar: Option<Grammar>,
     /// Hidden languages (e.g. `markdown_inline`) are only used as injections.
     pub hidden: bool,
+    /// Builds a custom [`Highlighter`] for models of this language instead of
+    /// the tree-sitter one; see [`Language::with_highlighter`].
+    pub highlighter: Option<HighlighterFactory>,
 }
 
+/// Creates a [`Highlighter`] for a language (with the registry, for
+/// injections).
+pub type HighlighterFactory =
+    Arc<dyn Fn(&Arc<Language>, &Arc<LanguageRegistry>) -> Arc<dyn Highlighter> + Send + Sync>;
+
 impl Language {
+    /// A language with no file associations, default configuration and no grammar.
     pub fn new(id: impl Into<Arc<str>>, name: impl Into<Arc<str>>) -> Self {
         Self {
             id: id.into(),
@@ -171,34 +196,62 @@ impl Language {
             config: LanguageConfiguration::default(),
             grammar: None,
             hidden: false,
+            highlighter: None,
         }
     }
 
+    /// Sets [`Language::aliases`].
     pub fn with_aliases(mut self, aliases: &[&str]) -> Self {
         self.aliases = aliases.iter().map(|a| a.to_string()).collect();
         self
     }
 
+    /// Sets [`Language::extensions`].
     pub fn with_extensions(mut self, extensions: &[&str]) -> Self {
         self.extensions = extensions.iter().map(|e| e.to_string()).collect();
         self
     }
 
+    /// Sets [`Language::file_names`].
     pub fn with_file_names(mut self, names: &[&str]) -> Self {
         self.file_names = names.iter().map(|e| e.to_string()).collect();
         self
     }
 
+    /// Sets [`Language::config`].
     pub fn with_config(mut self, config: LanguageConfiguration) -> Self {
         self.config = config;
         self
     }
 
+    /// Sets [`Language::grammar`].
     pub fn with_grammar(mut self, grammar: Grammar) -> Self {
         self.grammar = Some(grammar);
         self
     }
 
+    /// Highlights this language's models with a custom [`Highlighter`] (e.g.
+    /// TextMate grammars or LSP semantic tokens) instead of
+    /// [`TreeSitterHighlighter`](crate::TreeSitterHighlighter). Its
+    /// [`update`](Highlighter::update) runs on a background thread after
+    /// edits, like tree-sitter parsing.
+    pub fn with_highlighter(
+        mut self,
+        factory: impl Fn(&Arc<Language>, &Arc<LanguageRegistry>) -> Arc<dyn Highlighter>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.highlighter = Some(Arc::new(factory));
+        self
+    }
+
+    /// Whether models of this language get syntax highlighting.
+    pub fn has_highlighter(&self) -> bool {
+        self.grammar.is_some() || self.highlighter.is_some()
+    }
+
+    /// Marks the language [`hidden`](Language::hidden).
     pub fn hidden(mut self) -> Self {
         self.hidden = true;
         self
@@ -225,6 +278,7 @@ pub struct LanguageRegistry {
 }
 
 impl LanguageRegistry {
+    /// An empty registry.
     pub fn new() -> Self {
         Self::default()
     }
@@ -238,6 +292,7 @@ impl LanguageRegistry {
         language
     }
 
+    /// Every registered language, in registration order.
     pub fn languages(&self) -> Vec<Arc<Language>> {
         self.languages
             .read()
@@ -245,6 +300,7 @@ impl LanguageRegistry {
             .clone()
     }
 
+    /// The language with exactly this id.
     pub fn language_for_id(&self, id: &str) -> Option<Arc<Language>> {
         self.languages
             .read()

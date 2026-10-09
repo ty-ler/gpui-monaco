@@ -862,7 +862,7 @@ pub fn cut(
     let mut selections = cursors.selections();
     // Monaco sorts the selections it is given (and so reports the resulting
     // selections in this order).
-    selections.sort_by(|a, b| a.start().cmp(&b.end()));
+    selections.sort_by_key(|s| (s.start(), s.end()));
     let line_count = model.line_count();
     let mut last_cut_range: Option<Range<Position>> = None;
     let commands: Commands = selections

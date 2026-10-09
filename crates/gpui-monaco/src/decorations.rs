@@ -19,16 +19,22 @@ pub struct DecorationId(pub u64);
 /// Underline drawn under the decorated text (Monaco uses CSS for squiggles).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DecorationUnderline {
+    /// Underline color.
     pub color: Hsla,
+    /// Draw a squiggle instead of a straight line.
     pub wavy: bool,
 }
 
 /// Monaco `OverviewRulerLane`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverviewRulerLane {
+    /// Left third of the overview ruler.
     Left,
+    /// Middle third of the overview ruler.
     Center,
+    /// Right third of the overview ruler.
     Right,
+    /// The full width of the overview ruler.
     Full,
 }
 
@@ -36,8 +42,11 @@ pub enum OverviewRulerLane {
 /// `before`/`after`). It's rendered inline but isn't part of the text.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InjectedText {
+    /// The text to show.
     pub content: SharedString,
+    /// Its color and font style.
     pub style: TokenStyle,
+    /// Background behind the injected text.
     pub background: Option<Hsla>,
 }
 
@@ -48,6 +57,7 @@ pub struct DecorationOptions {
     pub background: Option<Hsla>,
     /// 1px border around the range on each line.
     pub border: Option<Hsla>,
+    /// An underline under the range (e.g. diagnostic squiggles).
     pub underline: Option<DecorationUnderline>,
     /// Text color and font style for the range (Monaco `inlineClassName`).
     pub text: Option<TokenStyle>,
@@ -62,20 +72,29 @@ pub struct DecorationOptions {
     /// A colored bar in the line decorations gutter area (Monaco
     /// `linesDecorationsClassName`, e.g. dirty-diff markers).
     pub gutter_bar: Option<Hsla>,
+    /// A mark in the overview ruler (the vertical scrollbar track) at the start row
+    /// (Monaco `overviewRuler`).
     pub overview_ruler: Option<(Hsla, OverviewRulerLane)>,
+    /// Text shown before the range start (Monaco `before`).
     pub before: Option<InjectedText>,
+    /// Text shown after the range end (Monaco `after`).
     pub after: Option<InjectedText>,
     /// Shown when hovering the range.
     pub hover_message: Option<SharedString>,
+    /// How the range grows when text is typed at its edges (Monaco `stickiness`).
     pub stickiness: Stickiness,
     /// Higher paints on top.
     pub z_index: i32,
 }
 
+/// A decoration as stored in the model.
 #[derive(Clone, Debug)]
 pub struct Decoration {
+    /// Its id.
     pub id: DecorationId,
+    /// The decorated byte range in the current text.
     pub range: Range<usize>,
+    /// How it's drawn.
     pub options: Arc<DecorationOptions>,
     /// `None` shows in every editor; `Some(editor)` only in that editor.
     pub owner: Option<EntityId>,
@@ -93,10 +112,12 @@ pub struct DecorationSet {
 }
 
 impl DecorationSet {
+    /// The number of decorations, for all editors.
     pub fn len(&self) -> usize {
         self.decorations.len()
     }
 
+    /// Whether there are no decorations.
     pub fn is_empty(&self) -> bool {
         self.decorations.is_empty()
     }
@@ -129,11 +150,13 @@ impl DecorationSet {
         ids
     }
 
+    /// Removes every decoration.
     pub fn clear(&mut self) {
         self.decorations.clear();
         self.max_len = 0;
     }
 
+    /// The decoration with `id`, if it still exists.
     pub fn get(&self, id: DecorationId) -> Option<&Decoration> {
         self.decorations.iter().find(|d| d.id == id)
     }

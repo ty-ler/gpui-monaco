@@ -11,7 +11,9 @@ use text::Rope;
 /// `start_row + 1 ..= end_row` hide when collapsed. Rows are 0-based.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FoldRange {
+    /// The header row, which stays visible.
     pub start_row: u32,
+    /// The last row hidden when collapsed (inclusive).
     pub end_row: u32,
     /// Index of the enclosing range in the same list.
     pub parent: Option<usize>,
@@ -441,14 +443,20 @@ pub struct FoldState {
 }
 
 impl FoldState {
+    /// The fold ranges, sorted by start row (as from
+    /// [`compute_indent_ranges`]).
     pub fn ranges(&self) -> &[FoldRange] {
         &self.ranges
     }
 
+    /// The text version [`Self::ranges`] were computed for; `None` until
+    /// [`Self::set_ranges`] is first called.
     pub fn ranges_version(&self) -> Option<text::Version> {
         self.ranges_version
     }
 
+    /// Replaces the fold ranges with ones computed for text `version`.
+    /// Collapsed regions are kept.
     pub fn set_ranges(&mut self, ranges: Vec<FoldRange>, version: text::Version) {
         self.ranges = ranges;
         self.ranges_version = Some(version);
@@ -478,6 +486,7 @@ impl FoldState {
             .collect()
     }
 
+    /// True if a collapsed region starts at model row `start_row`.
     pub fn is_collapsed(&self, buffer: &text::Buffer, start_row: u32) -> bool {
         self.collapsed_rows(buffer)
             .iter()
@@ -517,11 +526,15 @@ impl FoldState {
         })
     }
 
+    /// The first fold range whose start row is `row`, if any.
     pub fn range_starting_at(&self, row: u32) -> Option<&FoldRange> {
         let ix = self.ranges.partition_point(|range| range.start_row < row);
         self.ranges.get(ix).filter(|range| range.start_row == row)
     }
 
+    /// Collapses model rows `start_row + 1 ..= end_row` under `start_row`.
+    /// Does nothing if `end_row <= start_row` or a region starting at
+    /// `start_row` is already collapsed.
     pub fn collapse(&mut self, buffer: &text::Buffer, start_row: u32, end_row: u32) {
         if end_row <= start_row || self.is_collapsed(buffer, start_row) {
             return;
@@ -554,6 +567,7 @@ impl FoldState {
         self.collapsed.len() != before
     }
 
+    /// Collapses every fold range.
     pub fn collapse_all(&mut self, buffer: &text::Buffer) {
         let ranges = self.ranges.clone();
         for range in ranges {
@@ -561,10 +575,12 @@ impl FoldState {
         }
     }
 
+    /// Expands every collapsed region.
     pub fn expand_all(&mut self) {
         self.collapsed.clear();
     }
 
+    /// True if any region is collapsed.
     pub fn has_collapsed(&self) -> bool {
         !self.collapsed.is_empty()
     }

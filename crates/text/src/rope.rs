@@ -36,18 +36,22 @@ pub struct TextSummary {
     pub last_line_chars: u32,
     /// Row (relative to the start of the span) of the longest line by chars.
     pub longest_row: u32,
+    /// Chars on [`longest_row`](Self::longest_row), excluding the newline.
     pub longest_row_chars: u32,
 }
 
 impl TextSummary {
+    /// Length in bytes.
     pub fn len(&self) -> usize {
         self.extent.offset
     }
 
+    /// Whether the span contains no text.
     pub fn is_empty(&self) -> bool {
         self.extent.offset == 0
     }
 
+    /// The extent as a [`Point`]: the number of newlines and the byte length of the last line.
     pub fn lines(&self) -> Point {
         self.extent.point
     }
@@ -159,22 +163,27 @@ pub struct Rope {
 }
 
 impl Rope {
+    /// Creates an empty rope.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Summary of the whole text.
     pub fn summary(&self) -> TextSummary {
         *self.chunks.summary()
     }
 
+    /// Length in bytes.
     pub fn len(&self) -> usize {
         self.chunks.summary().extent.offset
     }
 
+    /// Whether the rope contains no text.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Length in UTF-16 code units.
     pub fn len_utf16(&self) -> OffsetUtf16 {
         self.chunks.summary().extent.offset_utf16
     }
@@ -184,6 +193,7 @@ impl Rope {
         self.chunks.summary().extent.point
     }
 
+    /// [`Rope::max_point`] with a UTF-16 column.
     pub fn max_point_utf16(&self) -> PointUtf16 {
         self.chunks.summary().extent.point_utf16
     }
@@ -302,34 +312,42 @@ impl Rope {
         location
     }
 
+    /// Converts a byte offset to a [`Point`], clamping like [`Rope::locate`].
     pub fn offset_to_point(&self, offset: usize) -> Point {
         self.locate(offset).point
     }
 
+    /// Converts a [`Point`] to a byte offset, clamping like [`Rope::locate`].
     pub fn point_to_offset(&self, point: Point) -> usize {
         self.locate(point).offset
     }
 
+    /// Converts a byte offset to a [`PointUtf16`], clamping like [`Rope::locate`].
     pub fn offset_to_point_utf16(&self, offset: usize) -> PointUtf16 {
         self.locate(offset).point_utf16
     }
 
+    /// Converts a [`PointUtf16`] to a byte offset, clamping like [`Rope::locate`].
     pub fn point_utf16_to_offset(&self, point: PointUtf16) -> usize {
         self.locate(point).offset
     }
 
+    /// Converts a byte-column [`Point`] to a UTF-16 [`PointUtf16`], clamping like [`Rope::locate`].
     pub fn point_to_point_utf16(&self, point: Point) -> PointUtf16 {
         self.locate(point).point_utf16
     }
 
+    /// Converts a UTF-16 [`PointUtf16`] to a byte-column [`Point`], clamping like [`Rope::locate`].
     pub fn point_utf16_to_point(&self, point: PointUtf16) -> Point {
         self.locate(point).point
     }
 
+    /// Converts a byte offset to a UTF-16 offset, clamping like [`Rope::locate`].
     pub fn offset_to_offset_utf16(&self, offset: usize) -> OffsetUtf16 {
         self.locate(offset).offset_utf16
     }
 
+    /// Converts a UTF-16 offset to a byte offset, clamping like [`Rope::locate`].
     pub fn offset_utf16_to_offset(&self, offset: OffsetUtf16) -> usize {
         self.locate(offset).offset
     }
@@ -454,6 +472,7 @@ impl Rope {
         }
     }
 
+    /// Iterates the whole text as `&str` pieces.
     pub fn chunks(&self) -> Chunks<'_> {
         self.chunks_in_range(0..self.len())
     }
@@ -475,7 +494,6 @@ impl Rope {
         self.chunks_in_range(range).collect()
     }
 
-    /// Iterates lines (without newlines).
     /// Calls `f` with each line's start offset and text (without the `\n`)
     /// for the lines in `range`, which should start at a line start, until
     /// `f` returns `false`. Much faster than [`Rope::line`] per row.
@@ -506,6 +524,8 @@ impl Rope {
         f(line_start, &line);
     }
 
+    /// The text of every row, without newlines. Allocates per line; prefer
+    /// [`Rope::for_each_line`] for bulk scans.
     pub fn lines(&self) -> impl Iterator<Item = String> + '_ {
         (0..self.line_count()).map(|row| self.line(row))
     }

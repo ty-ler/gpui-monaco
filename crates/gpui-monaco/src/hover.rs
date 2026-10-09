@@ -80,6 +80,7 @@ impl CodeEditor {
         }
     }
 
+    /// Whether a hover card is showing.
     pub fn is_hover_visible(&self) -> bool {
         self.hover.widget.is_some()
     }

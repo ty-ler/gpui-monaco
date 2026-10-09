@@ -17,10 +17,15 @@ use crate::theme::Theme;
 /// Colors and fonts for rendered markdown.
 #[derive(Clone, Debug)]
 pub struct MarkdownStyle {
+    /// Text color; also tints horizontal rules.
     pub foreground: Hsla,
+    /// Color of link text and its underline.
     pub link: Hsla,
+    /// Background of inline code spans and fenced code blocks.
     pub code_background: Hsla,
+    /// Font family of fenced code blocks.
     pub code_font: SharedString,
+    /// Base text size; headings are scaled up from it.
     pub font_size: Pixels,
 }
 

@@ -18,10 +18,16 @@ pub const MATCHES_LIMIT: usize = 19_999;
 /// The find widget's inputs and toggles.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FindOptions {
+    /// The search string.
     pub query: String,
+    /// The replacement. In regex mode `$1`, `$&` and `$$` expand as in Monaco.
     pub replace: String,
+    /// Treat `query` as a regular expression.
     pub is_regex: bool,
+    /// Match case exactly.
     pub match_case: bool,
+    /// Only match whole words, as delimited by
+    /// [`EditorOptions::word_separators`](crate::EditorOptions::word_separators).
     pub whole_word: bool,
     /// Search only within the selection captured when this was turned on.
     pub in_selection: bool,
@@ -68,10 +74,12 @@ impl FindState {
 }
 
 impl CodeEditor {
+    /// The find widget's current query and toggles.
     pub fn find_options(&self) -> &FindOptions {
         &self.find.options
     }
 
+    /// Whether the find widget is open.
     pub fn is_find_visible(&self) -> bool {
         self.find.visible
     }
@@ -269,11 +277,12 @@ impl CodeEditor {
             .first()
             .is_some_and(|m| *m == selection);
         if is_match && !self.options.read_only {
-            let matched = self.snapshot.text_for_range(selection.clone());
+            let (haystack, start) = search::match_context(self.snapshot.rope(), &data, &selection);
             let replacement = search::expand_replacement(
                 &data,
                 self.find.options.is_regex,
-                &matched,
+                &haystack,
+                selection.start - start..selection.end - start,
                 &self.find.options.replace,
             );
             let start = self.snapshot.offset_to_point_utf16(selection.start);
@@ -317,14 +326,25 @@ impl CodeEditor {
         if matches.is_empty() {
             return;
         }
+        // A multiline search's context is the whole text: copy it once.
+        let whole = data
+            .is_multiline()
+            .then(|| rope.text_for_range(0..rope.len()));
         let edits: Vec<(Range<usize>, String)> = matches
             .iter()
             .map(|m| {
-                let matched = rope.text_for_range(m.clone());
+                let (haystack, start) = match &whole {
+                    Some(text) => (std::borrow::Cow::Borrowed(text.as_str()), 0),
+                    None => {
+                        let (line, start) = search::match_context(&rope, &data, m);
+                        (std::borrow::Cow::Owned(line), start)
+                    }
+                };
                 let replacement = search::expand_replacement(
                     &data,
                     self.find.options.is_regex,
-                    &matched,
+                    &haystack,
+                    m.start - start..m.end - start,
                     &self.find.options.replace,
                 );
                 (m.clone(), replacement)
@@ -358,6 +378,20 @@ impl CodeEditor {
         if !selections.is_empty() {
             self.set_selections(&selections, cx);
         }
+    }
+
+    /// Removes match decorations from the current model and forgets
+    /// model-specific state, before the editor switches models. The query and
+    /// widget stay.
+    pub(crate) fn detach_find_from_model(&mut self, cx: &mut Context<Self>) {
+        self.set_find_decorations(Vec::new(), cx);
+        self.update_current_match_decoration(None, cx);
+        self.find.task = None;
+        self.find.matches.clear();
+        self.find.matches_version = None;
+        self.find.current = None;
+        self.find.scope = None;
+        self.find.search_start = None;
     }
 
     /// Recomputes match highlights in the background.

@@ -16,88 +16,211 @@ const SINGLE_LINE: Option<&str> = Some("CodeEditor && single_line");
 actions!(
     code_editor,
     [
+        /// Moves the cursor one character left (Monaco `cursorLeft`).
         CursorLeft,
+        /// Extends the selection one character left (Monaco `cursorLeftSelect`).
         CursorLeftSelect,
+        /// Moves the cursor one character right (Monaco `cursorRight`).
         CursorRight,
+        /// Extends the selection one character right (Monaco `cursorRightSelect`).
         CursorRightSelect,
+        /// Moves the cursor one line up (Monaco `cursorUp`).
         CursorUp,
+        /// Extends the selection one line up (Monaco `cursorUpSelect`).
         CursorUpSelect,
+        /// Moves the cursor one line down (Monaco `cursorDown`).
         CursorDown,
+        /// Extends the selection one line down (Monaco `cursorDownSelect`).
         CursorDownSelect,
+        /// Moves the cursor to the previous word start (Monaco `cursorWordLeft`).
         CursorWordLeft,
+        /// Extends the selection to the previous word start (Monaco
+        /// `cursorWordLeftSelect`).
         CursorWordLeftSelect,
+        /// Moves the cursor to the next word end (Monaco `cursorWordRight`).
         CursorWordRight,
+        /// Extends the selection to the next word end (Monaco
+        /// `cursorWordRightSelect`).
         CursorWordRightSelect,
+        /// Moves the cursor to the previous camelCase or snake_case word part (Monaco
+        /// `cursorWordPartLeft`).
         CursorWordPartLeft,
+        /// Extends the selection to the previous word part (Monaco
+        /// `cursorWordPartLeftSelect`).
         CursorWordPartLeftSelect,
+        /// Moves the cursor to the next camelCase or snake_case word part (Monaco
+        /// `cursorWordPartRight`).
         CursorWordPartRight,
+        /// Extends the selection to the next word part (Monaco
+        /// `cursorWordPartRightSelect`).
         CursorWordPartRightSelect,
+        /// Moves the cursor to the line's first non-whitespace character, or to column 0
+        /// if already there (Monaco `cursorHome`).
         CursorHome,
+        /// Like [`CursorHome`], extending the selection (Monaco `cursorHomeSelect`).
         CursorHomeSelect,
+        /// Moves the cursor to the end of the line (Monaco `cursorEnd`).
         CursorEnd,
+        /// Extends the selection to the end of the line (Monaco `cursorEndSelect`).
         CursorEndSelect,
+        /// Moves the cursor to the start of the text (Monaco `cursorTop`).
         CursorTop,
+        /// Extends the selection to the start of the text (Monaco `cursorTopSelect`).
         CursorTopSelect,
+        /// Moves the cursor to the end of the text (Monaco `cursorBottom`).
         CursorBottom,
+        /// Extends the selection to the end of the text (Monaco
+        /// `cursorBottomSelect`).
         CursorBottomSelect,
+        /// Moves the cursor up one page (Monaco `cursorPageUp`).
         CursorPageUp,
+        /// Extends the selection up one page (Monaco `cursorPageUpSelect`).
         CursorPageUpSelect,
+        /// Moves the cursor down one page (Monaco `cursorPageDown`).
         CursorPageDown,
+        /// Extends the selection down one page (Monaco `cursorPageDownSelect`).
         CursorPageDownSelect,
+        /// Selects the whole text (Monaco `editor.action.selectAll`).
         SelectAll,
+        /// Extends each selection to whole lines, then one more line per repeat (Monaco
+        /// `expandLineSelection`).
         ExpandLineSelection,
+        /// Adds a cursor on the line above (Monaco `editor.action.insertCursorAbove`).
         AddCursorAbove,
+        /// Adds a cursor on the line below (Monaco `editor.action.insertCursorBelow`).
         AddCursorBelow,
+        /// Escape: closes the suggest widget, marker zone, parameter hints, hover
+        /// or find widget if one is open; otherwise keeps only the primary
+        /// cursor, then clears its selection (Monaco `removeSecondaryCursors`).
         RemoveSecondaryCursors,
+        /// Deletes the selection or the character before each cursor (Monaco
+        /// `deleteLeft`).
         DeleteLeft,
+        /// Deletes the selection or the character after each cursor (Monaco
+        /// `deleteRight`).
         DeleteRight,
+        /// Deletes to the previous word start (Monaco `deleteWordLeft`).
         DeleteWordLeft,
+        /// Deletes to the next word end (Monaco `deleteWordRight`).
         DeleteWordRight,
+        /// Deletes from each cursor to the start of its line (Monaco `deleteAllLeft`).
         DeleteAllLeft,
+        /// Accepts the selected suggestion, or indents (Monaco `tab`).
         Tab,
+        /// Outdents the selected lines (Monaco `outdent`, Shift+Tab).
         Outdent,
+        /// Accepts the selected suggestion, or inserts a line break with auto-indent.
         Newline,
+        /// Indents the selected lines (Monaco `editor.action.indentLines`).
         IndentLines,
+        /// Outdents the selected lines (Monaco `editor.action.outdentLines`).
         OutdentLines,
+        /// Moves the selected lines up one line (Monaco `editor.action.moveLinesUpAction`).
         MoveLinesUp,
+        /// Moves the selected lines down one line (Monaco
+        /// `editor.action.moveLinesDownAction`).
         MoveLinesDown,
+        /// Duplicates the selected lines above them (Monaco
+        /// `editor.action.copyLinesUpAction`).
         CopyLinesUp,
+        /// Duplicates the selected lines below them (Monaco
+        /// `editor.action.copyLinesDownAction`).
         CopyLinesDown,
+        /// Deletes the lines touched by each selection (Monaco
+        /// `editor.action.deleteLines`).
         DeleteLines,
+        /// Inserts an empty line below the cursor's line and moves there (Monaco
+        /// `editor.action.insertLineAfter`).
         InsertLineAfter,
+        /// Inserts an empty line above the cursor's line and moves there (Monaco
+        /// `editor.action.insertLineBefore`).
         InsertLineBefore,
+        /// Undoes the last edit (Monaco `undo`).
         Undo,
+        /// Redoes the last undone edit (Monaco `redo`).
         Redo,
+        /// Copies the selections; with an empty selection, the whole line when
+        /// [`empty_selection_clipboard`](crate::EditorOptions::empty_selection_clipboard)
+        /// is on.
         Copy,
+        /// Cuts the selections; with an empty selection, the whole line when
+        /// [`empty_selection_clipboard`](crate::EditorOptions::empty_selection_clipboard)
+        /// is on.
         Cut,
+        /// Pastes the clipboard; text copied from as many cursors as there are now is
+        /// distributed one piece per cursor (Monaco `editor.action.clipboardPasteAction`).
         Paste,
+        /// Opens the platform's emoji and symbols picker.
         ShowCharacterPalette,
+        /// Collapses the innermost expanded region at each cursor (Monaco `editor.fold`).
         Fold,
+        /// Expands collapsed regions at each cursor (Monaco `editor.unfold`).
         Unfold,
+        /// Collapses every region (Monaco `editor.foldAll`).
         FoldAll,
+        /// Expands every region (Monaco `editor.unfoldAll`).
         UnfoldAll,
+        /// Expands the collapsed region at the cursor, or collapses the innermost one
+        /// (Monaco `editor.toggleFold`).
         ToggleFold,
+        /// Opens the find widget, seeded from the selection or word at the cursor (Monaco
+        /// `actions.find`).
         StartFind,
+        /// Opens the find widget with the replace input (Monaco
+        /// `editor.action.startFindReplaceAction`).
         StartFindReplace,
+        /// Selects the next find match (Monaco `editor.action.nextMatchFindAction`).
         NextMatch,
+        /// Selects the previous find match (Monaco
+        /// `editor.action.previousMatchFindAction`).
         PreviousMatch,
+        /// Replaces the selected match and moves to the next (Monaco
+        /// `editor.action.replaceOne`).
         ReplaceOne,
+        /// Replaces every match (Monaco `editor.action.replaceAll`).
         ReplaceAll,
+        /// Selects every find match and closes the find widget (Monaco
+        /// `editor.action.selectAllMatches`).
         SelectAllMatches,
+        /// Toggles the find widget's match case option (Monaco
+        /// `toggleFindCaseSensitive`).
         ToggleCaseSensitive,
+        /// Toggles the find widget's regex option (Monaco `toggleFindRegex`).
         ToggleRegex,
+        /// Toggles the find widget's whole word option (Monaco `toggleFindWholeWord`).
         ToggleWholeWord,
+        /// Toggles searching only in the selection (Monaco `toggleFindInSelection`).
         ToggleFindInSelection,
+        /// Selects the word at the cursor, or adds the next occurrence of the selection
+        /// (Monaco `editor.action.addSelectionToNextFindMatch`).
         AddSelectionToNextFindMatch,
+        /// Moves the last selection to the next occurrence of its text (Monaco
+        /// `editor.action.moveSelectionToNextFindMatch`).
         MoveSelectionToNextFindMatch,
+        /// Selects every occurrence of the selection or the word at the cursor (Monaco
+        /// `editor.action.selectHighlights`).
         SelectAllOccurrences,
+        /// Moves each cursor to the matching bracket (Monaco
+        /// `editor.action.jumpToBracket`).
         JumpToBracket,
+        /// Selects to the matching bracket, brackets included (Monaco
+        /// `editor.action.selectToBracket`). Unbound by default.
         SelectToBracket,
+        /// Moves to the next marker and shows it inline (Monaco
+        /// `editor.action.marker.next`).
         GoToNextMarker,
+        /// Moves to the previous marker and shows it inline (Monaco
+        /// `editor.action.marker.prev`).
         GoToPreviousMarker,
+        /// Goes to the definition of the symbol at the cursor (Monaco
+        /// `editor.action.revealDefinition`).
         GoToDefinition,
+        /// Requests parameter hints at the cursor (Monaco
+        /// `editor.action.triggerParameterHints`).
         TriggerParameterHints,
+        /// Requests completions at the cursor (Monaco `editor.action.triggerSuggest`).
         TriggerSuggest,
+        /// Shows the hover for the cursor position (Monaco `editor.action.showHover`).
         ShowHover,
     ]
 );

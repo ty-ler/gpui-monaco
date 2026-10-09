@@ -29,10 +29,14 @@ use super::{
 /// (Monaco `StandardTokenType`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StandardTokenType {
+    /// Code, or anything not covered below.
     #[default]
     Other,
+    /// Inside a comment.
     Comment,
+    /// Inside a string literal.
     String,
+    /// Inside a regular expression literal.
     RegEx,
 }
 
@@ -66,6 +70,8 @@ pub struct LanguageContext<'a> {
 }
 
 impl<'a> LanguageContext<'a> {
+    /// A context with `token_type_at` and no
+    /// [`Self::token_type_if_inserting`].
     pub fn new(
         config: &'a LanguageConfiguration,
         token_type_at: &'a dyn Fn(Position) -> StandardTokenType,
@@ -83,6 +89,7 @@ impl<'a> LanguageContext<'a> {
         Self::new(config, &all_other)
     }
 
+    /// Sets [`Self::token_type_if_inserting`].
     pub fn with_token_type_if_inserting(
         mut self,
         f: &'a dyn Fn(Position, char) -> StandardTokenType,

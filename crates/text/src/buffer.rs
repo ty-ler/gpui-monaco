@@ -11,21 +11,26 @@ use crate::line_ending::{LineEnding, normalize_line_endings};
 use crate::patch::{Edit, Patch};
 use crate::rope::Rope;
 
-/// Monotonic version number. Every edit, undo and redo bumps it by one.
+/// Monotonic version number: the count of applied patches. An edit bumps it
+/// by one; an undo or redo bumps it once per edit it reverts or reapplies.
 pub type Version = usize;
 
 /// Opaque state saved with an undo transaction, typically the editor's cursor
 /// state before and after the change (Monaco's `beforeCursorState`).
 pub type TransactionMetadata = Arc<dyn Any + Send + Sync>;
 
+/// Identifies one undo step. Ids increase in creation order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TransactionId(u64);
 
+/// Why [`Buffer::edit`] rejected a batch of edits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditError {
     /// Two edits in a batch overlap. Monaco rejects these too.
     OverlappingRanges {
+        /// The earlier range, after clipping and merging touching ranges.
         first: Range<usize>,
+        /// The range that overlaps it.
         second: Range<usize>,
     },
 }
@@ -74,6 +79,7 @@ impl Anchor {
         version: 0,
     };
 
+    /// Which side of an insertion at this position the anchor stays on.
     pub fn bias(&self) -> Bias {
         self.bias
     }
@@ -83,10 +89,14 @@ impl Anchor {
 /// Monaco's `TrackedRangeStickiness`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Stickiness {
+    /// Text typed at either edge is included in the range.
     #[default]
     AlwaysGrowsWhenTypingAtEdges,
+    /// Text typed at either edge is excluded from the range.
     NeverGrowsWhenTypingAtEdges,
+    /// Text typed at the start is included; text typed at the end is not.
     GrowsOnlyWhenTypingBefore,
+    /// Text typed at the end is included; text typed at the start is not.
     GrowsOnlyWhenTypingAfter,
 }
 
@@ -111,14 +121,17 @@ pub struct BufferSnapshot {
 }
 
 impl BufferSnapshot {
+    /// The buffer version this snapshot was taken at.
     pub fn version(&self) -> Version {
         self.version
     }
 
+    /// The text, with `\n` line breaks.
     pub fn rope(&self) -> &Rope {
         &self.rope
     }
 
+    /// The buffer's line ending at the time of the snapshot.
     pub fn line_ending(&self) -> LineEnding {
         self.line_ending
     }
@@ -135,7 +148,9 @@ impl Deref for BufferSnapshot {
 /// Result of [`Buffer::undo`] or [`Buffer::redo`].
 #[derive(Clone)]
 pub struct UndoOutcome {
+    /// The undone or redone transaction.
     pub transaction_id: TransactionId,
+    /// How the text changed, from the version before the call to the current one.
     pub patch: Patch,
     /// The cursor state to restore: the transaction's `before` metadata for
     /// undo, `after` for redo.
@@ -218,6 +233,8 @@ impl Buffer {
         Self::with_default_line_ending(text, LineEnding::Lf)
     }
 
+    /// Like [`Buffer::new`], but uses `default` as the line ending when `text`
+    /// has no line breaks.
     pub fn with_default_line_ending(text: &str, default: LineEnding) -> Self {
         let (text, has_bom) = match text.strip_prefix('\u{feff}') {
             Some(rest) => (rest, true),
@@ -232,14 +249,18 @@ impl Buffer {
         }
     }
 
+    /// The current version. Each applied edit batch bumps it by one; undo and
+    /// redo bump it once per batch in the transaction.
     pub fn version(&self) -> Version {
         self.patches.len()
     }
 
+    /// The text, with `\n` line breaks.
     pub fn rope(&self) -> &Rope {
         &self.rope
     }
 
+    /// A cheap immutable copy of the current text and version.
     pub fn snapshot(&self) -> BufferSnapshot {
         BufferSnapshot {
             rope: self.rope.clone(),
@@ -248,6 +269,7 @@ impl Buffer {
         }
     }
 
+    /// The line ending used by [`Buffer::text`].
     pub fn line_ending(&self) -> LineEnding {
         self.line_ending
     }
@@ -258,6 +280,7 @@ impl Buffer {
         self.line_ending = line_ending;
     }
 
+    /// Whether the original text started with a UTF-8 BOM.
     pub fn has_bom(&self) -> bool {
         self.has_bom
     }
@@ -500,14 +523,17 @@ impl Buffer {
         self.history.redo.clear();
     }
 
+    /// The id of the most recent undo step, if any.
     pub fn last_transaction_id(&self) -> Option<TransactionId> {
         self.history.undo.last().map(|t| t.id)
     }
 
+    /// Whether there is an undo step to revert.
     pub fn can_undo(&self) -> bool {
         !self.history.undo.is_empty()
     }
 
+    /// Whether there is an undone step to re-apply.
     pub fn can_redo(&self) -> bool {
         !self.history.redo.is_empty()
     }
@@ -572,10 +598,12 @@ impl Buffer {
         }
     }
 
+    /// An anchor at `offset` with [`Bias::Left`]: it stays before text inserted there.
     pub fn anchor_before(&self, offset: usize) -> Anchor {
         self.anchor_at(offset, Bias::Left)
     }
 
+    /// An anchor at `offset` with [`Bias::Right`]: it moves after text inserted there.
     pub fn anchor_after(&self, offset: usize) -> Anchor {
         self.anchor_at(offset, Bias::Right)
     }

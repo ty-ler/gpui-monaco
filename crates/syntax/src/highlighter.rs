@@ -14,10 +14,12 @@ use crate::syntax_map::{HighlightSpan, SyntaxSnapshot};
 pub struct HighlightState(Arc<dyn Any + Send + Sync>);
 
 impl HighlightState {
+    /// Wraps a highlighter's state.
     pub fn new<T: Any + Send + Sync>(state: T) -> Self {
         Self(Arc::new(state))
     }
 
+    /// The state as a `T`, if that is its type.
     pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
         self.0.downcast_ref()
     }
@@ -59,6 +61,8 @@ pub struct TreeSitterHighlighter {
 }
 
 impl TreeSitterHighlighter {
+    /// A highlighter for buffers in `language`, resolving injected languages
+    /// through `registry`.
     pub fn new(language: Arc<Language>, registry: Arc<LanguageRegistry>) -> Self {
         Self { language, registry }
     }

@@ -34,6 +34,7 @@ fn is_word_char(ch: char) -> bool {
 }
 
 impl CodeEditor {
+    /// Whether the suggest widget is showing.
     pub fn is_suggest_visible(&self) -> bool {
         self.suggest.widget.is_some()
     }

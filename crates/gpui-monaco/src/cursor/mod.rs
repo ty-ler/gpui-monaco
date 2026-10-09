@@ -148,12 +148,22 @@ pub enum AutoIndent {
 /// The subset of Monaco's `CursorConfiguration` that the cursor core uses.
 #[derive(Clone, Debug)]
 pub struct CursorConfig {
+    /// Width of a tab character in visible columns (Monaco `tabSize`).
     pub tab_size: u32,
+    /// Visible columns per indentation level (Monaco `indentSize`).
     pub indent_size: u32,
+    /// Whether indenting inserts spaces rather than tabs (Monaco
+    /// `insertSpaces`).
     pub insert_spaces: bool,
+    /// Characters that separate words (Monaco `editor.wordSeparators`).
     pub word_separators: String,
+    /// Monaco `editor.stickyTabStops`: Left/Right move over a tab stop's
+    /// worth of leading spaces at once.
     pub sticky_tab_stops: bool,
+    /// Monaco `editor.multiCursorPaste`.
     pub multi_cursor_paste: MultiCursorPaste,
+    /// Monaco `editor.emptySelectionClipboard`: copy and cut with an empty
+    /// selection act on the whole line.
     pub empty_selection_clipboard: bool,
     /// Monaco `editor.useTabStops`: backspace inside indentation deletes to
     /// the previous indent stop, and Tab/Shift+Tab snap to indent stops.
@@ -268,15 +278,19 @@ impl CursorModel for text::Buffer {
 /// `head` is the cursor position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Selection {
+    /// Where the selection started; stays fixed while extending.
     pub anchor: Position,
+    /// The cursor position.
     pub head: Position,
 }
 
 impl Selection {
+    /// A selection from `anchor` to `head`.
     pub fn new(anchor: Position, head: Position) -> Self {
         Self { anchor, head }
     }
 
+    /// An empty selection (a plain cursor) at `p`.
     pub fn collapsed(p: Position) -> Self {
         Self { anchor: p, head: p }
     }
@@ -291,14 +305,17 @@ impl Selection {
         }
     }
 
+    /// The earlier of `anchor` and `head`.
     pub fn start(&self) -> Position {
         self.anchor.min(self.head)
     }
 
+    /// The later of `anchor` and `head`.
     pub fn end(&self) -> Position {
         self.anchor.max(self.head)
     }
 
+    /// True if `anchor` and `head` coincide.
     pub fn is_empty(&self) -> bool {
         self.anchor == self.head
     }
@@ -309,6 +326,7 @@ impl Selection {
         self.head < self.anchor
     }
 
+    /// The selected range, `start()..end()`, regardless of direction.
     pub fn range(&self) -> Range<Position> {
         self.start()..self.end()
     }

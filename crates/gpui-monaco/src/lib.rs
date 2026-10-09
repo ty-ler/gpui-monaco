@@ -5,6 +5,7 @@
 //! [`CodeEditor`] entities render and edit it.
 //!
 //! Call [`init`] once at startup to bind Monaco's default keybindings.
+#![warn(missing_docs)]
 
 pub mod actions;
 mod bracket_matching;
