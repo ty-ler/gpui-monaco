@@ -13,6 +13,9 @@ gpui-monaco aims to *behave* like Monaco. Where it differs, it's usually because
 
 ## Behavior
 
+The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco/blob/main/docs/MONACO_PARITY.md) has a full feature-by-feature audit with tracking issues. The highlights:
+
+
 - **Find regexes:** use the Rust [`regex`](https://docs.rs/regex) crate (linear time). It has no lookahead, lookbehind or backreferences.
   - `\n` in a pattern still enables multiline search, as in Monaco.
   - Replacement patterns support `$1`, `$&`, `$$`, `\n` and `\t`. Monaco's case-changing escapes (`\u`, `\U`, `\l`, `\L`) are not supported.
