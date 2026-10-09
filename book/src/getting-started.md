@@ -4,16 +4,27 @@
 
 gpui-monaco builds against gpui from Zed's git repository at a pinned revision, because the gpui on crates.io is out of date. For the same reason, gpui-monaco is distributed through git for now.
 
+Add gpui at the **same revision** gpui-monaco uses, plus the editor crates:
+
 ```toml
 [dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "f16f9652ec57bf806e65b2a0d51bb92a63644914" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f16f9652ec57bf806e65b2a0d51bb92a63644914", features = ["font-kit"] }
 gpui-monaco = { git = "https://github.com/ty-ler/gpui-monaco", tag = "v0.1.0" }
 # Optional: bundled tree-sitter grammars and language configurations.
 gpui-monaco-languages = { git = "https://github.com/ty-ler/gpui-monaco", tag = "v0.1.0" }
 ```
 
-Your app must use the **same gpui revision** as gpui-monaco; the revision is in gpui-monaco's workspace `Cargo.toml`.
+Git dependencies don't inherit their workspace's `[patch]` section, so also copy gpui's patches into your workspace root `Cargo.toml`. These are the ones for v0.1.0:
 
-Git dependencies don't inherit their workspace's `[patch]` section, so you also need to copy the `[patch.crates-io]` block from gpui-monaco's `Cargo.toml` into your own workspace.
+```toml
+[patch.crates-io]
+async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
+khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
+```
+
+You need Rust 1.98 or newer, the toolchain pinned in the repository's `rust-toolchain.toml`.
 
 `gpui-monaco-languages` enables every language by default. To keep fewer grammars, pick features:
 
@@ -26,7 +37,7 @@ The language features are `lang-rust`, `lang-js`, `lang-ts` (TypeScript and TSX)
 ## A minimal editor
 
 ```rust,ignore
-use gpui::{App, AppContext as _, Application, Bounds, WindowBounds, WindowOptions, px, size};
+use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
 use gpui_monaco::{CodeEditor, TextModel};
 
 fn main() {
