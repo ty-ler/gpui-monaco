@@ -1,3 +1,4 @@
+mod providers;
 mod screenshot;
 
 use gpui::{
@@ -43,6 +44,10 @@ impl Playground {
         if std::env::var_os("PLAYGROUND_DEMO").is_some() {
             add_demo_decorations(&editor, cx);
             add_demo_widgets(&editor, cx);
+        }
+        if std::env::var_os("PLAYGROUND_PROVIDERS").is_some() {
+            providers::register(cx);
+            providers::add_markers(&editor, cx);
         }
         if let Ok(theme) = std::env::var("PLAYGROUND_THEME") {
             let theme = match theme.as_str() {

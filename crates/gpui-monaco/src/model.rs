@@ -105,6 +105,7 @@ pub struct TextModel {
     uri: Option<SharedString>,
     syntax: Option<Syntax>,
     decorations: DecorationSet,
+    pub(crate) markers: crate::markers::MarkerSet,
     /// Set when `language_id` hasn't been resolved against the registry yet.
     language_pending: bool,
 }
@@ -120,6 +121,7 @@ impl TextModel {
             uri: None,
             syntax: None,
             decorations: DecorationSet::default(),
+            markers: Default::default(),
             language_pending: false,
         }
     }
