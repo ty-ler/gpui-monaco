@@ -24,6 +24,10 @@ use crate::options::EditorOptions;
 use crate::theme::{EditorColors, Theme};
 use crate::view::folding::{FoldState, compute_indent_ranges};
 use crate::view::view_lines::{ViewLines, WrapSettings};
+use crate::widgets::{
+    ContentWidget, ContentWidgetState, OverlayWidget, OverlayWidgetState, ViewZone, WidgetId,
+    Widgets, ZoneHeight, ZoneState,
+};
 
 /// Events emitted by [`CodeEditor`].
 #[derive(Clone, Debug, PartialEq)]
@@ -101,6 +105,7 @@ pub struct CodeEditor {
     pub view_lines: ViewLines,
     pub(crate) folds: FoldState,
     pub(crate) gutter_hovered: bool,
+    pub(crate) widgets: Widgets,
     fold_task: Option<Task<()>>,
     pub(crate) autoscroll_requested: bool,
     pub(crate) cursor_visible: bool,
@@ -161,6 +166,7 @@ impl CodeEditor {
             view_lines: ViewLines::new(snapshot.rope().clone(), snapshot.version()),
             folds: FoldState::default(),
             gutter_hovered: false,
+            widgets: Widgets::default(),
             fold_task: None,
             _blink_task: None,
             _subscriptions: subscriptions,
@@ -261,6 +267,110 @@ impl CodeEditor {
         cx.notify();
     }
 
+    /// Inserts a host view between lines (Monaco `changeViewZones` +
+    /// `addZone`).
+    pub fn add_view_zone(&mut self, zone: ViewZone, cx: &mut Context<Self>) -> WidgetId {
+        let id = self.widgets.next_id();
+        let buffer = self.model.read(cx).buffer();
+        let anchor = (zone.after_line > 0).then(|| {
+            let row = (zone.after_line - 1).min(buffer.max_point().row);
+            buffer.anchor_before(buffer.point_to_offset(text::Point::new(row, u32::MAX)))
+        });
+        self.widgets.zones.push(ZoneState {
+            id,
+            anchor,
+            height: zone.height,
+            view: zone.view,
+        });
+        cx.notify();
+        id
+    }
+
+    pub fn set_view_zone_height(
+        &mut self,
+        id: WidgetId,
+        height: ZoneHeight,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(zone) = self.widgets.zones.iter_mut().find(|z| z.id == id) {
+            zone.height = height;
+            cx.notify();
+        }
+    }
+
+    /// Adds a host view anchored to a text position (Monaco
+    /// `addContentWidget`).
+    pub fn add_content_widget(
+        &mut self,
+        widget: ContentWidget,
+        cx: &mut Context<Self>,
+    ) -> WidgetId {
+        let id = self.widgets.next_id();
+        let anchor = self.anchor_for(widget.position, cx);
+        self.widgets.content.push(ContentWidgetState {
+            id,
+            anchor,
+            preference: widget.preference,
+            view: widget.view,
+        });
+        cx.notify();
+        id
+    }
+
+    /// Moves a content widget (Monaco `layoutContentWidget`).
+    pub fn set_content_widget_position(
+        &mut self,
+        id: WidgetId,
+        position: PointUtf16,
+        cx: &mut Context<Self>,
+    ) {
+        let anchor = self.anchor_for(position, cx);
+        if let Some(widget) = self.widgets.content.iter_mut().find(|w| w.id == id) {
+            widget.anchor = anchor;
+            cx.notify();
+        }
+    }
+
+    /// Adds a host view pinned to the editor (Monaco `addOverlayWidget`).
+    pub fn add_overlay_widget(
+        &mut self,
+        widget: OverlayWidget,
+        cx: &mut Context<Self>,
+    ) -> WidgetId {
+        let id = self.widgets.next_id();
+        self.widgets.overlays.push(OverlayWidgetState {
+            id,
+            position: widget.position,
+            view: widget.view,
+        });
+        cx.notify();
+        id
+    }
+
+    /// Removes a view zone, content widget or overlay widget.
+    pub fn remove_widget(&mut self, id: WidgetId, cx: &mut Context<Self>) {
+        if self.widgets.remove(id) {
+            cx.notify();
+        }
+    }
+
+    fn anchor_for(&self, position: PointUtf16, cx: &App) -> text::Anchor {
+        let buffer = self.model.read(cx).buffer();
+        let position = buffer.clip_point_utf16(position, Bias::Left);
+        buffer.anchor_before(buffer.point_utf16_to_offset(position))
+    }
+
+    /// (content y of the last view line, line height) from the last layout.
+    #[doc(hidden)]
+    pub fn layout_for_tests(&self) -> Option<(Pixels, Pixels)> {
+        let layout = self.layout.as_ref()?;
+        let last = self.view_lines.line_count().saturating_sub(1);
+        Some((
+            layout.zones.line_y(last, layout.metrics.line_height),
+            layout.metrics.line_height,
+        ))
+    }
+
     pub(crate) fn cursor_config(&self, cx: &App) -> CursorConfig {
         let model_options = self.model.read(cx).options();
         CursorConfig {
@@ -346,7 +456,8 @@ impl CodeEditor {
             }
             TextModelEvent::OptionsChanged
             | TextModelEvent::LanguageChanged
-            | TextModelEvent::SyntaxUpdated => cx.notify(),
+            | TextModelEvent::SyntaxUpdated
+            | TextModelEvent::DecorationsChanged => cx.notify(),
         }
     }
 
@@ -474,6 +585,17 @@ impl CodeEditor {
                 .collect(),
         );
         self.cursors.validate(self.snapshot.rope());
+        // Like Monaco, paging also scrolls the viewport by a page.
+        if matches!(command, MoveCommand::PageUp | MoveCommand::PageDown)
+            && let Some(layout) = self.layout.as_ref()
+        {
+            let delta = layout.metrics.line_height * page as f32;
+            self.scroll_top = if command == MoveCommand::PageDown {
+                self.scroll_top + delta
+            } else {
+                (self.scroll_top - delta).max(px(0.))
+            };
+        }
         self.prev_edit_kind = None;
         if self.cursors.selections() != before {
             self.model.update(cx, |model, _| model.push_stack_element());
@@ -703,10 +825,11 @@ impl CodeEditor {
         if y < px(0.) {
             return PointUtf16::zero();
         }
-        let view_line = (y / line_height).floor() as u32;
-        if view_line >= self.view_lines.line_count() {
+        let count = self.view_lines.line_count();
+        if y >= layout.zones.line_y(count, line_height) {
             return self.snapshot.max_point_utf16();
         }
+        let view_line = layout.zones.line_at(y, line_height, count);
         let x = position.x - layout.text_origin_x();
         match layout.view_line(view_line) {
             Some(line) => PointUtf16::new(line.row, line.column_for_x(x)),
@@ -719,6 +842,7 @@ impl CodeEditor {
                     tab_size,
                     &layout.metrics,
                     self.theme.colors.foreground,
+                    &[],
                     &[],
                     None,
                     window,
@@ -916,6 +1040,13 @@ impl CodeEditor {
             return;
         }
 
+        if layout
+            .widget_bounds
+            .iter()
+            .any(|bounds| bounds.contains(&event.position))
+        {
+            return;
+        }
         if let Some(control) = layout
             .fold_controls
             .iter()

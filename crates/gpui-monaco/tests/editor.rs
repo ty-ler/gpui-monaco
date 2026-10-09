@@ -216,3 +216,62 @@ fn folding_hides_rows_and_cursor_skips_them(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("secondary-alt-]");
     assert_eq!(editor.read_with(cx, |e, _| e.view_lines.line_count()), 5);
 }
+
+#[gpui::test]
+fn decorations_follow_edits_and_respect_owner(cx: &mut TestAppContext) {
+    use gpui_monaco::DecorationOptions;
+    let (editor, cx) = editor_with_text("let value = 1;", cx);
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    let editor_id = editor.entity_id();
+    let ids = model.update(cx, |model, cx| {
+        let shared =
+            model.delta_decorations(None, &[], vec![(4..9, DecorationOptions::default())], cx);
+        let own = model.delta_decorations(
+            Some(editor_id),
+            &[],
+            vec![(0..3, DecorationOptions::default())],
+            cx,
+        );
+        [shared[0], own[0]]
+    });
+    cx.simulate_keystrokes("secondary-right");
+    cx.simulate_input(" // done");
+    cx.simulate_keystrokes("secondary-left");
+    cx.simulate_input("  ");
+    model.update(cx, |model, _| {
+        assert_eq!(model.decoration(ids[0]).unwrap().range, 6..11);
+        // Default stickiness grows when typing at the start edge.
+        assert_eq!(model.decoration(ids[1]).unwrap().range, 0..5);
+        assert_eq!(model.decorations_in_range(0..100, None).len(), 1);
+        assert_eq!(model.decorations_in_range(0..100, Some(editor_id)).len(), 2);
+    });
+}
+
+#[gpui::test]
+fn view_zone_follows_its_line(cx: &mut TestAppContext) {
+    use gpui_monaco::{ViewZone, ZoneHeight};
+    let (editor, cx) = editor_with_text("a\nb\nc", cx);
+    let view = cx.update(|_, cx| cx.new(|_| gpui::Empty).into());
+    editor.update(cx, |editor, cx| {
+        editor.add_view_zone(
+            ViewZone {
+                after_line: 2,
+                height: ZoneHeight::Lines(3.),
+                view,
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    // Clicking below the zone lands on line 3; the zone pushed it down.
+    let line_3_top = editor.read_with(cx, |e, _| {
+        let layout = e.layout_for_tests().unwrap();
+        layout.0
+    });
+    let line_height = editor.read_with(cx, |e, _| e.layout_for_tests().unwrap().1);
+    assert_eq!(line_3_top, line_height * 5.);
+    // Typing a newline above moves the zone with line 2.
+    cx.simulate_keystrokes("enter");
+    let line_4_top = editor.read_with(cx, |e, _| e.layout_for_tests().unwrap().0);
+    assert_eq!(line_4_top, line_height * 6.);
+}

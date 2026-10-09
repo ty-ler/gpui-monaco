@@ -8,13 +8,18 @@
 
 pub mod actions;
 pub mod cursor;
+pub mod decorations;
 mod editor;
 mod element;
 mod model;
 pub mod options;
 pub mod theme;
 pub mod view;
+pub mod widgets;
 
+pub use decorations::{
+    DecorationId, DecorationOptions, DecorationUnderline, InjectedText, OverviewRulerLane,
+};
 pub use editor::{CodeEditor, CodeEditorEvent, ViewState};
 pub use element::EditorElement;
 pub use model::{
@@ -25,6 +30,10 @@ pub use options::EditorOptions;
 pub use syntax;
 pub use text;
 pub use theme::{EditorColors, Theme, ThemeKind, TokenStyle};
+pub use widgets::{
+    ContentWidget, ContentWidgetPreference, OverlayPosition, OverlayWidget, ViewZone, WidgetId,
+    ZoneHeight,
+};
 
 /// Binds Monaco's default keybindings in the editor's key context.
 pub fn init(cx: &mut gpui::App) {

@@ -6,6 +6,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{App, Context, EntityId, EventEmitter, Global, SharedString, Task};
+
+use crate::decorations::{Decoration, DecorationId, DecorationOptions, DecorationSet};
 use syntax::{HighlightState, Highlighter, Language, LanguageRegistry, TreeSitterHighlighter};
 use text::{
     Buffer, BufferSnapshot, EditError, LineEnding, Patch, TransactionMetadata, UndoOutcome, Version,
@@ -91,6 +93,8 @@ pub enum TextModelEvent {
     LanguageChanged,
     /// New highlights are available (background parse finished).
     SyntaxUpdated,
+    /// Decorations were added, removed or changed.
+    DecorationsChanged,
 }
 
 /// A text document: buffer, undo history, language and options.
@@ -99,6 +103,7 @@ pub struct TextModel {
     options: ModelOptions,
     language_id: Option<SharedString>,
     syntax: Option<Syntax>,
+    decorations: DecorationSet,
     /// Set when `language_id` hasn't been resolved against the registry yet.
     language_pending: bool,
 }
@@ -112,6 +117,7 @@ impl TextModel {
             options: ModelOptions::default(),
             language_id: None,
             syntax: None,
+            decorations: DecorationSet::default(),
             language_pending: false,
         }
     }
@@ -272,6 +278,7 @@ impl TextModel {
         let old_len = self.buffer.len();
         let line_ending = self.buffer.line_ending();
         self.buffer = Buffer::with_default_line_ending(text, line_ending);
+        self.decorations.clear();
         // Versions restart with a new buffer; old syntax can't be reused.
         if let Some(syntax) = self.syntax.as_mut() {
             syntax.latest = None;
@@ -317,6 +324,7 @@ impl TextModel {
             None => self.buffer.edit(edits)?,
         };
         if !patch.is_empty() {
+            self.decorations.apply_patch(&patch);
             self.reparse(cx);
             cx.emit(TextModelEvent::Edited {
                 patch: patch.clone(),
@@ -328,6 +336,49 @@ impl TextModel {
             cx.notify();
         }
         Ok(patch)
+    }
+
+    /// Replaces decorations `old` with `new` (byte ranges), returning the new
+    /// ids (Monaco `deltaDecorations`). `owner` restricts them to one editor.
+    pub fn delta_decorations(
+        &mut self,
+        owner: Option<EntityId>,
+        old: &[DecorationId],
+        new: Vec<(Range<usize>, DecorationOptions)>,
+        cx: &mut Context<Self>,
+    ) -> Vec<DecorationId> {
+        let len = self.buffer.len();
+        let new = new.into_iter().map(|(range, options)| {
+            let start = self
+                .buffer
+                .clip_offset(range.start.min(len), text::Bias::Left);
+            let end = self
+                .buffer
+                .clip_offset(range.end.min(len), text::Bias::Right);
+            (start..end, options)
+        });
+        let ids = self.decorations.delta(owner, old, new);
+        cx.emit(TextModelEvent::DecorationsChanged);
+        cx.notify();
+        ids
+    }
+
+    /// Decorations intersecting byte `range`, as seen by `editor`.
+    pub fn decorations_in_range(
+        &mut self,
+        range: Range<usize>,
+        editor: Option<EntityId>,
+    ) -> Vec<Decoration> {
+        self.decorations.in_range(range, editor)
+    }
+
+    /// All decorations visible to `editor`.
+    pub fn all_decorations(&mut self, editor: Option<EntityId>) -> Vec<Decoration> {
+        self.decorations.all(editor)
+    }
+
+    pub fn decoration(&self, id: DecorationId) -> Option<&Decoration> {
+        self.decorations.get(id)
     }
 
     /// Records cursor state with the most recent undo step.
@@ -371,6 +422,7 @@ impl TextModel {
         let Some(outcome) = outcome else {
             return false;
         };
+        self.decorations.apply_patch(&outcome.patch);
         self.reparse(cx);
         cx.emit(TextModelEvent::Edited {
             patch: outcome.patch,
