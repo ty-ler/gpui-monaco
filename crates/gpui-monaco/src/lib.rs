@@ -17,6 +17,7 @@ mod find_widget;
 mod model;
 mod multi_cursor;
 pub mod options;
+pub mod providers;
 pub mod search;
 pub mod theme;
 pub mod view;

@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+anyhow.workspace = true
 gpui.workspace = true
 gpui-monaco-text.workspace = true
 gpui-monaco-syntax.workspace = true
