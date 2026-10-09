@@ -475,15 +475,16 @@ impl Buffer {
         }
     }
 
-    /// Sets the cursor state saved with the most recent undo step, e.g. after
-    /// grouped typing moved the cursor further.
+    /// Sets the cursor state saved with the most recent undo step. `before` is
+    /// only recorded if the step has none yet, so grouped typing keeps the
+    /// state from before its first edit; `after` always replaces.
     pub fn set_last_transaction_metadata(
         &mut self,
         before: Option<TransactionMetadata>,
         after: Option<TransactionMetadata>,
     ) {
         if let Some(last) = self.history.undo.last_mut() {
-            if before.is_some() {
+            if last.before.is_none() {
                 last.before = before;
             }
             if after.is_some() {

@@ -1,8 +1,28 @@
 //! A Monaco-like code editor component for GPUI.
 //!
-//! The public API is split like Monaco's: a `TextModel` entity holds the text,
-//! language, undo history, decorations and markers, and any number of
-//! `CodeEditor` entities render and edit it.
+//! The public API is split like Monaco's: a [`TextModel`] entity holds the
+//! text, language, undo history, decorations and markers, and any number of
+//! [`CodeEditor`] entities render and edit it.
+//!
+//! Call [`init`] once at startup to bind Monaco's default keybindings.
 
+pub mod actions;
+pub mod cursor;
+mod editor;
+mod element;
+mod model;
+pub mod options;
+pub mod theme;
+
+pub use editor::{CodeEditor, CodeEditorEvent, ViewState};
+pub use element::EditorElement;
+pub use model::{EditKind, ModelOptions, TextModel, TextModelEvent};
+pub use options::EditorOptions;
 pub use syntax;
 pub use text;
+pub use theme::EditorColors;
+
+/// Binds Monaco's default keybindings in the editor's key context.
+pub fn init(cx: &mut gpui::App) {
+    actions::bind_default_keys(cx);
+}

@@ -1,3 +1,4 @@
 /target
 .DS_Store
 /vendor
+/.claude/worktrees
