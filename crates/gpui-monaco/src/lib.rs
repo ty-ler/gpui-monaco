@@ -6,3 +6,5 @@
 
 pub use syntax;
 pub use text;
+
+pub mod cursor;
