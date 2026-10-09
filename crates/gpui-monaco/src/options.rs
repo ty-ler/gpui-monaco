@@ -87,6 +87,20 @@ pub struct EditorOptions {
     pub wrapping_indent: crate::view::line_breaks::WrappingIndent,
     pub folding: bool,
     pub show_folding_controls: ShowFoldingControls,
+    /// Monaco `autoClosingBrackets` / `autoClosingQuotes` /
+    /// `autoClosingComments`.
+    pub auto_closing_brackets: crate::cursor::AutoClosingStrategy,
+    pub auto_closing_quotes: crate::cursor::AutoClosingStrategy,
+    pub auto_closing_comments: crate::cursor::AutoClosingStrategy,
+    /// Monaco `autoClosingOvertype` / `autoClosingDelete`.
+    pub auto_closing_overtype: crate::cursor::AutoClosingEditStrategy,
+    pub auto_closing_delete: crate::cursor::AutoClosingEditStrategy,
+    /// Monaco `autoSurround`.
+    pub auto_surround: crate::cursor::AutoSurroundStrategy,
+    /// Monaco `autoIndent`.
+    pub auto_indent: crate::cursor::AutoIndent,
+    /// Monaco `matchBrackets`: highlight the bracket pair at the cursor.
+    pub match_brackets: bool,
     /// A one-line input (like Monaco's find input): Enter, Tab and Escape
     /// propagate to the parent and pasted line breaks become spaces.
     pub single_line: bool,
@@ -130,6 +144,14 @@ impl Default for EditorOptions {
             folding: true,
             show_folding_controls: ShowFoldingControls::Mouseover,
             single_line: false,
+            auto_closing_brackets: Default::default(),
+            auto_closing_quotes: Default::default(),
+            auto_closing_comments: Default::default(),
+            auto_closing_overtype: Default::default(),
+            auto_closing_delete: Default::default(),
+            auto_surround: Default::default(),
+            auto_indent: Default::default(),
+            match_brackets: true,
         }
     }
 }

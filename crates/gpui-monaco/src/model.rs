@@ -223,6 +223,43 @@ impl TextModel {
         })
     }
 
+    /// The innermost highlight capture name at byte `offset` of the current
+    /// text (e.g. `string`, `comment.documentation`), using the latest syntax
+    /// state mapped through any pending edits.
+    pub fn highlight_name_at(&self, offset: usize) -> Option<Arc<str>> {
+        let syntax = self.syntax_snapshot()?;
+        let offset = if syntax.text.version() == self.buffer.version() {
+            offset
+        } else {
+            self.buffer
+                .edits_since(syntax.text.version())
+                .invert()
+                .transform_offset(offset, text::Bias::Left)
+        };
+        let end = (offset + 1).min(syntax.text.len());
+        syntax
+            .highlighter
+            .highlights(&syntax.state, syntax.text.rope(), offset..end)
+            .into_iter()
+            .find(|span| span.range.start <= offset && offset < span.range.end)
+            .map(|span| span.highlight.name())
+    }
+
+    /// Monaco's standard token type of the character at byte `offset`.
+    pub fn token_type_at(&self, offset: usize) -> crate::cursor::StandardTokenType {
+        use crate::cursor::StandardTokenType;
+        match self.highlight_name_at(offset) {
+            Some(name) if name.starts_with("comment") => StandardTokenType::Comment,
+            Some(name) if name.contains("regex") || name.contains("regexp") => {
+                StandardTokenType::RegEx
+            }
+            Some(name) if name.starts_with("string") || name.starts_with("character") => {
+                StandardTokenType::String
+            }
+            _ => StandardTokenType::Other,
+        }
+    }
+
     /// Whether a background parse is in flight.
     pub fn is_parsing(&self) -> bool {
         self.syntax

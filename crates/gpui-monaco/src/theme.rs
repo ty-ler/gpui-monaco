@@ -49,6 +49,9 @@ pub struct EditorColors {
     pub input_background: Hsla,
     pub input_option_active_background: Hsla,
     pub input_option_active_border: Hsla,
+    /// `editorBracketMatch.background` / `.border`.
+    pub bracket_match_background: Hsla,
+    pub bracket_match_border: Hsla,
 }
 
 fn c(color: Rgba) -> Hsla {
@@ -83,6 +86,8 @@ impl EditorColors {
             input_background: c(rgb(0x3c3c3c)),
             input_option_active_background: c(rgba(0x007fd466)),
             input_option_active_border: c(rgb(0x007acc)),
+            bracket_match_background: c(rgba(0x0064001a)),
+            bracket_match_border: c(rgb(0x888888)),
         }
     }
 
@@ -113,6 +118,8 @@ impl EditorColors {
             input_background: c(rgb(0xffffff)),
             input_option_active_background: c(rgba(0x007fd433)),
             input_option_active_border: c(rgb(0x007acc)),
+            bracket_match_background: c(rgba(0x0064001a)),
+            bracket_match_border: c(rgb(0xb9b9b9)),
         }
     }
 

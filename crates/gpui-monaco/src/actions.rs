@@ -91,6 +91,8 @@ actions!(
         AddSelectionToNextFindMatch,
         MoveSelectionToNextFindMatch,
         SelectAllOccurrences,
+        JumpToBracket,
+        SelectToBracket,
     ]
 );
 
@@ -139,6 +141,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-d", AddSelectionToNextFindMatch, ctx),
         KeyBinding::new("secondary-shift-l", SelectAllOccurrences, ctx),
         KeyBinding::new("secondary-f2", SelectAllOccurrences, ctx),
+        KeyBinding::new("secondary-shift-\\", JumpToBracket, ctx),
         KeyBinding::new("f3", NextMatch, ctx),
         KeyBinding::new("shift-f3", PreviousMatch, ctx),
         // Inside the find widget's inputs.
