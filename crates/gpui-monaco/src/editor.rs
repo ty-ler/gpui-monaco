@@ -317,6 +317,9 @@ impl CodeEditor {
                         .collect();
                     self.cursors.set_selections(&selections);
                 }
+                // Undo/redo and edits from elsewhere: stop treating closing
+                // characters as auto-inserted rather than tracking them.
+                self.cursors.auto_closed_ranges_mut().clear();
                 self.snapshot = latest;
                 self.cursors.validate(self.snapshot.rope());
                 if *kind == EditKind::SetValue {
@@ -382,11 +385,16 @@ impl CodeEditor {
         if result.is_err() {
             return;
         }
+        self.cursors
+            .track_auto_closed(snapshot.rope(), &operation.edits, &operation.auto_closed);
         self.snapshot = self.model.read(cx).snapshot();
         self.cursors.set_selections(&operation.selections_after);
         self.cursors.validate(self.snapshot.rope());
         self.prev_edit_kind = Some(operation.kind);
         self.cursors_changed(true, cx);
+        if let Some(follow_up) = operation.follow_up {
+            self.apply(*follow_up, cx);
+        }
     }
 
     fn cursors_changed(&mut self, autoscroll: bool, cx: &mut Context<Self>) {
@@ -973,6 +981,8 @@ impl CodeEditor {
                 kind: EditOperationType::Other,
                 push_stack_element_before: true,
                 push_stack_element_after: true,
+                auto_closed: Vec::new(),
+                follow_up: None,
             },
             cx,
         );

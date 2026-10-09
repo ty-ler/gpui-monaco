@@ -4,18 +4,9 @@
 //! Skipped (by reason):
 //! - Language configuration (auto-closing pairs and overtyping, surround
 //!   selection, onEnter rules, indentation rules, electric characters,
-//!   tokenization): `issue #47733`, `bug #11476`, `issue #206774`,
-//!   `Enter auto-indents with insertSpaces setting 1/2/3`, `issue #115033`,
-//!   `issue #6862`, every `Enter honors ...`/`Enter supports ...`/`Enter
-//!   should ...` test, `issue microsoft/monaco-editor#108 part 1/2 and 2/2`,
-//!   `bug #16543`, `bug #2938 (1)-(4)`, `bug #31015`, `type honors ...`,
-//!   `Auto indent on type ...`, `bug 29972`, `issue #38261`, `issue #57197`,
-//!   `typing in json`, `issue #111128`, `issue #122714`, all
-//!   `ElectricCharacter - ...`, all `autoClosingPairs - ...`, and issues
-//!   #61070, #132912, #338693 (x4), #72177, #55314, #27937, #6841, #25658,
-//!   #37315 (x4), #205598, #118270, #78527, #85983, #78975, #78833, #15825,
-//!   #90016, #53357, #84998, #2773, #26820, #144690, #144693, #82701, #20891,
-//!   #41825, `All cursors should do the same thing when deleting left`.
+//!   tokenization): ported in `cursor_language_test.rs`, which lists the
+//!   ones still skipped there (IME composition, reentrant listeners,
+//!   snippets).
 //! - Auto-whitespace trimming (a text model feature, `trimAutoWhitespace`):
 //!   `removeAutoWhitespace on: ...` (x3), `issue #15118`.
 //! - Word wrap / view model: `issue #36740`, `issue #110376`, `issue #98320`,

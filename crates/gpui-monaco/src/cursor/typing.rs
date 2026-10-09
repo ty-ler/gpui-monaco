@@ -12,12 +12,12 @@
 //! `ViewModel.getPlainTextToCopy` from
 //! `src/vs/editor/common/viewModel/viewModelImpl.ts` (MIT).
 //!
-//! Not ported (they need language configuration, which a later layer adds by
-//! intercepting typed characters before these fallbacks): auto-closing pairs
-//! and their overtyping/deletion, surround-selection, electric characters,
-//! onEnter rules and indentation rules. Overtype (insert key) mode and
-//! Monaco's auto-whitespace trimming (a text model feature) are not ported
-//! either.
+//! The language-aware parts (auto-closing pairs and their overtyping and
+//! deletion, surround-selection, electric characters, onEnter rules and
+//! indentation rules) are in `language_typing.rs`, which falls back to the
+//! functions here. Not ported: overtype (insert key) mode, Monaco's
+//! auto-whitespace trimming (a text model feature), and `ShiftCommand`'s
+//! onEnter-based alignment of continuation lines.
 
 use std::ops::Range;
 
@@ -211,7 +211,18 @@ pub fn tab(
     model: &impl CursorModel,
     cursors: &CursorCollection,
 ) -> EditOperation {
-    let model: &dyn CursorModel = model;
+    // Without language rules there is no "good indent" for a line.
+    tab_with_good_indent(config, model, cursors, &|_| None)
+}
+
+/// Monaco `TabOperation.getCommands`; `good_indent` is
+/// `TabOperation._goodIndentForLine` for a row.
+pub(crate) fn tab_with_good_indent(
+    config: &CursorConfig,
+    model: &dyn CursorModel,
+    cursors: &CursorCollection,
+    good_indent: &dyn Fn(u32) -> Option<String>,
+) -> EditOperation {
     let selections = cursors.selections();
     let commands: Commands = selections
         .iter()
@@ -221,8 +232,8 @@ pub fn tab(
             if selection.is_empty() {
                 let line = model.line_content(start.row);
                 if line.chars().all(char::is_whitespace) {
-                    // Without language rules Monaco's "good indent" is one tab.
-                    let possible_type_text = config.normalize_indentation("\t");
+                    let good_indent = good_indent(start.row).unwrap_or_else(|| "\t".to_string());
+                    let possible_type_text = config.normalize_indentation(&good_indent);
                     if !line.starts_with(&possible_type_text) {
                         let len = model.line_max_column(start.row);
                         return ReplaceCommand::boxed(
@@ -831,6 +842,8 @@ pub fn delete_all_left(
         kind: EditOperationType::Other,
         push_stack_element_before: true,
         push_stack_element_after: true,
+        auto_closed: Vec::new(),
+        follow_up: None,
     }
 }
 

@@ -366,6 +366,8 @@ pub fn delete_lines(
         kind: EditOperationType::Other,
         push_stack_element_before: true,
         push_stack_element_after: true,
+        auto_closed: Vec::new(),
+        follow_up: None,
     }
 }
 

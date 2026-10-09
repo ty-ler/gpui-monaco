@@ -11,16 +11,24 @@
 //! applies atomically (and records for undo) before calling
 //! [`CursorCollection::set_selections`].
 //!
-//! Language-aware behaviour (auto-closing pairs, surround selection, onEnter
-//! rules, electric characters, auto-indent) is intentionally absent: the
-//! editing functions here are the language-agnostic fallbacks Monaco uses
-//! when no language configuration applies, and a later language layer can
-//! intercept typed characters before falling back to [`type_text`] and
-//! [`line_break`].
+//! Language-aware behaviour (auto-closing pairs and their overtyping and
+//! deletion, surround selection, electric characters, onEnter rules and
+//! indentation rules) lives in the `*_with_language` functions
+//! ([`type_with_language`], [`line_break_with_language`],
+//! [`delete_left_with_language`], [`tab_with_language`]), which take an
+//! optional [`LanguageContext`]; without one they are exactly the
+//! language-agnostic [`type_text`], [`line_break`], [`delete_left`] and
+//! [`tab`]. Which closing characters the editor auto-inserted is remembered
+//! across calls in [`CursorCollection::auto_closed_ranges`] (see
+//! [`AutoClosedRanges`] for how to keep it up to date).
 
+mod auto_closed;
+mod brackets;
 mod collection;
 mod column;
 mod edit;
+mod language;
+mod language_typing;
 mod lines;
 mod movement;
 mod strings;
@@ -32,9 +40,15 @@ mod tests;
 
 use std::ops::Range;
 
+pub use auto_closed::{AutoClosedPair, AutoClosedRanges};
+pub use brackets::matching_bracket;
 pub use collection::{CursorCollection, SelectionStartKind, SingleCursorState};
 pub use column::{ColumnSelectCommand, ColumnSelectData, column_select, column_select_to};
 pub use edit::{EditOperation, EditOperationType};
+pub use language::{LanguageContext, StandardTokenType};
+pub use language_typing::{
+    delete_left_with_language, line_break_with_language, tab_with_language, type_with_language,
+};
 pub use lines::{
     copy_lines_down, copy_lines_up, delete_lines, indent_lines, insert_line_above,
     insert_line_below, move_lines_down, move_lines_up, outdent_lines,
@@ -66,6 +80,71 @@ pub enum MultiCursorPaste {
     Full,
 }
 
+/// When typing an opening character auto-inserts its closing pair (Monaco
+/// `EditorAutoClosingStrategy`, used by `editor.autoClosingBrackets`,
+/// `editor.autoClosingQuotes` and `editor.autoClosingComments`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AutoClosingStrategy {
+    /// Always auto-close.
+    Always,
+    /// Auto-close when the next character is in the language's
+    /// `autoCloseBefore` set (or Monaco's default set).
+    #[default]
+    LanguageDefined,
+    /// Auto-close only before whitespace.
+    BeforeWhitespace,
+    /// Never auto-close.
+    Never,
+}
+
+/// When typing over or deleting an auto-inserted closing character applies
+/// (Monaco `EditorAutoClosingEditStrategy`, used by
+/// `editor.autoClosingOvertype` and `editor.autoClosingDelete`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AutoClosingEditStrategy {
+    /// For any matching closing character.
+    Always,
+    /// Only for closing characters the editor inserted itself (see
+    /// [`AutoClosedRanges`]).
+    #[default]
+    Auto,
+    /// Never.
+    Never,
+}
+
+/// Which typed characters wrap a selection (Monaco
+/// `EditorAutoSurroundStrategy`, `editor.autoSurround`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AutoSurroundStrategy {
+    /// Quotes and brackets from the language's surrounding pairs.
+    #[default]
+    LanguageDefined,
+    /// Only quotes.
+    Quotes,
+    /// Only brackets.
+    Brackets,
+    /// Never.
+    Never,
+}
+
+/// How much the editor adjusts indentation when typing and pressing Enter
+/// (Monaco `EditorAutoIndentStrategy`, `editor.autoIndent`). The variants
+/// are ordered: each level includes the ones before it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AutoIndent {
+    /// No automatic indentation; Enter inserts a bare line break.
+    None,
+    /// Keep the current line's indentation.
+    Keep,
+    /// Also honor the language's brackets (`{|}` + Enter indents).
+    Brackets,
+    /// Also apply the language's onEnter rules.
+    Advanced,
+    /// Also apply the language's indentation rules.
+    #[default]
+    Full,
+}
+
 /// The subset of Monaco's `CursorConfiguration` that the cursor core uses.
 #[derive(Clone, Debug)]
 pub struct CursorConfig {
@@ -82,6 +161,21 @@ pub struct CursorConfig {
     /// Monaco `editor.trimWhitespaceOnDelete`: deleting a line break also
     /// deletes the next line's leading whitespace.
     pub trim_whitespace_on_delete: bool,
+    /// Monaco `editor.autoClosingBrackets`.
+    pub auto_closing_brackets: AutoClosingStrategy,
+    /// Monaco `editor.autoClosingQuotes`.
+    pub auto_closing_quotes: AutoClosingStrategy,
+    /// Monaco `editor.autoClosingComments`.
+    pub auto_closing_comments: AutoClosingStrategy,
+    /// Monaco `editor.autoClosingOvertype`.
+    pub auto_closing_overtype: AutoClosingEditStrategy,
+    /// Monaco `editor.autoClosingDelete`.
+    pub auto_closing_delete: AutoClosingEditStrategy,
+    /// Monaco `editor.autoSurround`.
+    pub auto_surround: AutoSurroundStrategy,
+    /// Monaco `editor.autoIndent`. Only the `*_with_language` functions
+    /// honor it, and only when given a [`LanguageContext`].
+    pub auto_indent: AutoIndent,
 }
 
 impl Default for CursorConfig {
@@ -96,6 +190,13 @@ impl Default for CursorConfig {
             empty_selection_clipboard: true,
             use_tab_stops: true,
             trim_whitespace_on_delete: false,
+            auto_closing_brackets: AutoClosingStrategy::LanguageDefined,
+            auto_closing_quotes: AutoClosingStrategy::LanguageDefined,
+            auto_closing_comments: AutoClosingStrategy::LanguageDefined,
+            auto_closing_overtype: AutoClosingEditStrategy::Auto,
+            auto_closing_delete: AutoClosingEditStrategy::Auto,
+            auto_surround: AutoSurroundStrategy::LanguageDefined,
+            auto_indent: AutoIndent::Full,
         }
     }
 }
