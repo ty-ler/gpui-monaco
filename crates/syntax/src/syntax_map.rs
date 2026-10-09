@@ -6,6 +6,7 @@
 //! callers can run it on a background thread and swap the result in.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -30,7 +31,21 @@ pub struct SyntaxLayer {
     pub depth: usize,
     /// Byte ranges this layer was parsed from (the whole text for the root).
     pub ranges: Vec<Range<usize>>,
+    /// This layer's injections, cached so a reparse that reuses the tree
+    /// skips the injection query (Rust makes a layer per macro invocation).
+    injections: Option<Arc<Injections>>,
 }
+
+#[derive(Clone)]
+struct Injection {
+    language: Arc<Language>,
+    ranges: Vec<Range<usize>>,
+    /// Everything the match captured (e.g. a fence's info string too): an
+    /// edit here may change the injection even outside `ranges`.
+    extent: Range<usize>,
+}
+
+type Injections = Vec<Injection>;
 
 impl SyntaxLayer {
     /// The byte range spanned by this layer.
@@ -53,6 +68,13 @@ pub struct HighlightSpan {
 pub struct SyntaxSnapshot {
     layers: Vec<SyntaxLayer>,
     version: text::Version,
+    /// Injected layers' (extent, index) sorted by start, so highlighting a
+    /// range skips the thousands of layers elsewhere (Rust has one per macro
+    /// invocation).
+    by_start: Arc<[(Range<usize>, usize)]>,
+    /// The longest injected extent, bounding how far before a range an
+    /// intersecting layer can start.
+    max_extent: usize,
 }
 
 impl std::fmt::Debug for SyntaxSnapshot {
@@ -157,6 +179,8 @@ impl SyntaxSnapshot {
         let mut snapshot = Self {
             layers: Vec::new(),
             version: text.version(),
+            by_start: Arc::new([]),
+            max_extent: 0,
         };
         snapshot.build(language, text, &[], &[], registry);
         snapshot
@@ -176,6 +200,7 @@ impl SyntaxSnapshot {
             return self.clone();
         };
         let edits = input_edits(old_text, text.rope(), patch);
+        let edited: Vec<Range<usize>> = patch.edits().iter().map(|e| e.new.clone()).collect();
         let old_layers: Vec<SyntaxLayer> = self
             .layers
             .iter()
@@ -184,22 +209,45 @@ impl SyntaxSnapshot {
                 for edit in &edits {
                     layer.tree.edit(edit);
                 }
-                layer.ranges = layer
-                    .ranges
-                    .iter()
-                    .map(|r| {
-                        patch.transform_offset(r.start, text::Bias::Right)
-                            ..patch.transform_offset(r.end, text::Bias::Left)
-                    })
-                    .collect();
+                let transform = |ranges: &[Range<usize>]| -> Vec<Range<usize>> {
+                    ranges
+                        .iter()
+                        .map(|r| {
+                            patch.transform_offset(r.start, text::Bias::Right)
+                                ..patch.transform_offset(r.end, text::Bias::Left)
+                        })
+                        .collect()
+                };
+                layer.ranges = transform(&layer.ranges);
+                // Only an untouched layer is reused, and its injections then
+                // just shift with the edits around it.
+                // The root's are updated piecewise by `update_root_injections`.
+                if layer.depth == 0 || !touched(&layer.ranges, &edited) {
+                    layer.injections = layer.injections.as_ref().map(|injections| {
+                        Arc::new(
+                            injections
+                                .iter()
+                                .map(|injection| Injection {
+                                    language: injection.language.clone(),
+                                    ranges: transform(&injection.ranges),
+                                    extent: transform(std::slice::from_ref(&injection.extent))
+                                        .remove(0),
+                                })
+                                .collect(),
+                        )
+                    });
+                } else {
+                    layer.injections = None;
+                }
                 layer
             })
             .collect();
         let mut snapshot = Self {
             layers: Vec::new(),
             version: text.version(),
+            by_start: Arc::new([]),
+            max_extent: 0,
         };
-        let edited: Vec<Range<usize>> = patch.edits().iter().map(|e| e.new.clone()).collect();
         snapshot.build(root.language.clone(), text, &old_layers, &edited, registry);
         snapshot
     }
@@ -222,41 +270,82 @@ impl SyntaxSnapshot {
             tree: root_tree,
             depth: 0,
             ranges: std::iter::once(0..rope.len()).collect(),
+            injections: None,
         });
+
+        // Old injection layers by (depth, language, ranges), since there can
+        // be thousands of them.
+        let old_by_key: HashMap<(usize, usize, &[Range<usize>]), &SyntaxLayer> = old_layers
+            .iter()
+            .skip(1)
+            .map(|old| {
+                let key = (
+                    old.depth,
+                    Arc::as_ptr(&old.language) as usize,
+                    &old.ranges[..],
+                );
+                (key, old)
+            })
+            .collect();
 
         // Breadth-first over injections.
         let mut ix = 0;
         while ix < self.layers.len() {
-            let parent = self.layers[ix].clone();
+            let parent_ix = ix;
             ix += 1;
-            if parent.depth >= MAX_INJECTION_DEPTH {
+            let depth = self.layers[parent_ix].depth + 1;
+            if depth > MAX_INJECTION_DEPTH {
                 continue;
             }
-            for (language, ranges) in find_injections(&parent, rope, registry) {
+            let injections = match self.layers[parent_ix].injections.clone() {
+                Some(cached) => cached,
+                None => {
+                    let layer = &self.layers[parent_ix];
+                    let found = Arc::new(match old_layers.first() {
+                        Some(old_root) if parent_ix == 0 => {
+                            update_root_injections(layer, old_root, rope, edited, registry)
+                        }
+                        _ => find_injections(layer, rope, registry, None),
+                    });
+                    self.layers[parent_ix].injections = Some(found.clone());
+                    found
+                }
+            };
+            for Injection {
+                language, ranges, ..
+            } in injections.iter().cloned()
+            {
                 // Injected layers are small, so instead of incremental
                 // reparsing (which some grammars' external scanners get wrong,
                 // e.g. tree-sitter-md's inline grammar) an untouched layer
                 // keeps its tree and a touched one is parsed from scratch.
-                let untouched = old_layers.iter().find(|old| {
-                    old.depth == parent.depth + 1
-                        && Arc::ptr_eq(&old.language, &language)
-                        && old.ranges == ranges
-                        && !touched(&ranges, edited)
-                });
-                let tree = match untouched {
-                    Some(old) => Some(old.tree.clone()),
-                    None => parse(&language, rope, &ranges, None),
+                let key = (depth, Arc::as_ptr(&language) as usize, &ranges[..]);
+                let untouched = old_by_key.get(&key).filter(|_| !touched(&ranges, edited));
+                let (tree, injections) = match untouched {
+                    Some(old) => (Some(old.tree.clone()), old.injections.clone()),
+                    None => (parse(&language, rope, &ranges, None), None),
                 };
                 if let Some(tree) = tree {
                     self.layers.push(SyntaxLayer {
                         language,
                         tree,
-                        depth: parent.depth + 1,
+                        depth,
                         ranges,
+                        injections,
                     });
                 }
             }
         }
+        let mut by_start: Vec<(Range<usize>, usize)> = self
+            .layers
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(ix, layer)| (layer.extent(), ix))
+            .collect();
+        by_start.sort_unstable_by_key(|(extent, _)| extent.start);
+        self.max_extent = by_start.iter().map(|(e, _)| e.len()).max().unwrap_or(0);
+        self.by_start = by_start.into();
     }
 
     pub fn version(&self) -> text::Version {
@@ -291,14 +380,31 @@ impl SyntaxSnapshot {
     /// why queries put generic patterns like `(identifier) @variable` first).
     pub fn highlights(&self, text: &Rope, range: Range<usize>) -> Vec<HighlightSpan> {
         let mut result: Vec<HighlightSpan> = Vec::new();
-        let mut layers: Vec<&SyntaxLayer> = self.layers.iter().collect();
-        layers.sort_by_key(|layer| layer.depth);
-        for layer in layers {
-            let extent = layer.extent();
-            if extent.end < range.start || extent.start > range.end {
-                continue;
-            }
-            let spans = layer_highlights(layer, text, range.clone());
+        let intersects =
+            |extent: &Range<usize>| extent.end >= range.start && extent.start <= range.end;
+        let first = self
+            .by_start
+            .partition_point(|(extent, _)| extent.start + self.max_extent < range.start);
+        let last = self
+            .by_start
+            .partition_point(|(extent, _)| extent.start <= range.end);
+        let mut layers: Vec<usize> = self.by_start[first..last.max(first)]
+            .iter()
+            .filter(|(extent, _)| intersects(extent))
+            .map(|(_, ix)| *ix)
+            .collect();
+        // `build` adds layers breadth-first, so index order is depth order.
+        debug_assert!(self.layers.is_sorted_by_key(|layer| layer.depth));
+        layers.sort_unstable();
+        if self
+            .layers
+            .first()
+            .is_some_and(|root| intersects(&root.extent()))
+        {
+            layers.insert(0, 0);
+        }
+        for ix in layers {
+            let spans = layer_highlights(&self.layers[ix], text, range.clone());
             if !spans.is_empty() {
                 result = overlay(&result, &spans);
             }
@@ -316,11 +422,72 @@ fn touched(ranges: &[Range<usize>], edited: &[Range<usize>]) -> bool {
     })
 }
 
+/// The root layer's injections after a reparse: the old ones away from the
+/// changes, shifted, plus a query over just the changed ranges. Falls back to
+/// a full query for queries with combined injections.
+fn update_root_injections(
+    root: &SyntaxLayer,
+    old_root: &SyntaxLayer,
+    rope: &Rope,
+    edited: &[Range<usize>],
+    registry: &LanguageRegistry,
+) -> Injections {
+    let (Some(old), Some(query)) = (
+        old_root.injections.as_ref(),
+        root.language
+            .grammar
+            .as_ref()
+            .and_then(|g| g.injections.as_ref()),
+    ) else {
+        return find_injections(root, rope, registry, None);
+    };
+    if query.has_combined {
+        return find_injections(root, rope, registry, None);
+    }
+    let mut changed: Vec<Range<usize>> = edited.to_vec();
+    changed.extend(
+        old_root
+            .tree
+            .changed_ranges(&root.tree)
+            .map(|r| r.start_byte..r.end_byte),
+    );
+    let (dropped, mut result): (Injections, Injections) = old
+        .iter()
+        .cloned()
+        .partition(|injection| touched(std::slice::from_ref(&injection.extent), &changed));
+    // Re-query the changes and wherever a dropped injection was, padded so
+    // empty edits and nodes merely adjacent to an edit are matched too.
+    changed.extend(dropped.iter().map(|injection| injection.extent.clone()));
+    changed.sort_by_key(|r| r.start);
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for range in changed {
+        let range = range.start.saturating_sub(1)..(range.end + 1).min(rope.len());
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    let mut seen: std::collections::HashSet<Vec<Range<usize>>> = result
+        .iter()
+        .map(|injection| injection.ranges.clone())
+        .collect();
+    for range in &merged {
+        for injection in find_injections(root, rope, registry, Some(range.clone())) {
+            if seen.insert(injection.ranges.clone()) {
+                result.push(injection);
+            }
+        }
+    }
+    result.sort_by_key(|injection| injection.extent.start);
+    result
+}
+
 fn find_injections(
     parent: &SyntaxLayer,
     rope: &Rope,
     registry: &LanguageRegistry,
-) -> Vec<(Arc<Language>, Vec<Range<usize>>)> {
+    within: Option<Range<usize>>,
+) -> Injections {
     let Some(injections) = parent
         .language
         .grammar
@@ -331,8 +498,11 @@ fn find_injections(
     };
     let query = &injections.query;
     let mut cursor = QueryCursor::new();
+    if let Some(within) = within {
+        cursor.set_byte_range(within);
+    }
     let mut combined: Vec<(Arc<Language>, Vec<Range<usize>>)> = Vec::new();
-    let mut separate: Vec<(Arc<Language>, Vec<Range<usize>>)> = Vec::new();
+    let mut separate: Injections = Vec::new();
     let mut matches = cursor.matches(query, parent.tree.root_node(), RopeTextProvider(rope));
     while let Some(m) = matches.next() {
         let mut language_name: Option<String> = None;
@@ -347,6 +517,17 @@ fn find_injections(
             }
         }
         let mut content: Vec<Node> = Vec::new();
+        let extent = m
+            .captures()
+            .iter()
+            .map(|capture| capture.node.start_byte())
+            .min()
+            .unwrap_or(0)
+            ..m.captures()
+                .iter()
+                .map(|capture| capture.node.end_byte())
+                .max()
+                .unwrap_or(0);
         for capture in m.captures() {
             if Some(capture.index) == injections.language_capture {
                 let name = rope.text_for_range(capture.node.byte_range());
@@ -378,13 +559,22 @@ fn find_injections(
                 None => combined.push((language, ranges)),
             }
         } else {
-            separate.push((language, ranges));
+            separate.push(Injection {
+                language,
+                ranges,
+                extent,
+            });
         }
     }
-    for (_, ranges) in &mut combined {
+    for (language, mut ranges) in combined {
         ranges.sort_by_key(|r| r.start);
+        let extent = ranges.first().map_or(0, |r| r.start)..ranges.last().map_or(0, |r| r.end);
+        separate.push(Injection {
+            language,
+            ranges,
+            extent,
+        });
     }
-    separate.extend(combined);
     separate
 }
 

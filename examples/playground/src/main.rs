@@ -1,3 +1,4 @@
+mod perf;
 mod providers;
 mod screenshot;
 
@@ -394,7 +395,8 @@ impl Render for Playground {
 }
 
 fn main() {
-    gpui_platform::application().run(|cx: &mut App| {
+    let started = std::time::Instant::now();
+    gpui_platform::application().run(move |cx: &mut App| {
         gpui_monaco::init(cx);
         gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
         let bounds = Bounds::centered(None, size(px(1100.), px(760.)), cx);
@@ -409,6 +411,7 @@ fn main() {
             .expect("failed to open window");
         cx.activate(true);
         screenshot::capture_if_requested(window.into(), cx);
+        perf::run_if_requested(started, window, cx);
     });
 }
 

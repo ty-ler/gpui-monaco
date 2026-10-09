@@ -1,12 +1,14 @@
 //! Bracket pair highlighting and jump-to-bracket (Monaco's
 //! `contrib/bracketMatching`).
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
 
 use gpui::Context;
-use text::PointUtf16;
+use text::{Point, PointUtf16};
 
-use crate::cursor::{self, Selection, StandardTokenType};
+use crate::cursor::{self, Selection};
 use crate::decorations::DecorationOptions;
 use crate::editor::CodeEditor;
 
@@ -27,11 +29,27 @@ impl CodeEditor {
         let model = self.model().read(cx);
         let language = model.language()?;
         let rope = self.snapshot.rope();
+        // Strings and comments, queried a block of rows at a time: the search
+        // can visit hundreds of brackets, and one query per bracket is slow.
+        const BLOCK_ROWS: u32 = 64;
+        let blocks: RefCell<HashMap<u32, Vec<Range<usize>>>> = Default::default();
         let skippable = |p: PointUtf16| {
-            matches!(
-                model.token_type_at(rope.point_utf16_to_offset(p)),
-                StandardTokenType::String | StandardTokenType::Comment
-            )
+            let offset = rope.point_utf16_to_offset(p);
+            let block = p.row / BLOCK_ROWS;
+            let mut blocks = blocks.borrow_mut();
+            let ranges = blocks.entry(block).or_insert_with(|| {
+                let max_row = rope.max_point().row;
+                let start = rope.point_to_offset(Point::new((block * BLOCK_ROWS).min(max_row), 0));
+                let end_row = (block + 1) * BLOCK_ROWS;
+                let end = if end_row > max_row {
+                    rope.len()
+                } else {
+                    rope.point_to_offset(Point::new(end_row, 0))
+                };
+                model.string_and_comment_ranges(start..end)
+            });
+            let ix = ranges.partition_point(|r| r.end <= offset);
+            ranges.get(ix).is_some_and(|r| r.start <= offset)
         };
         cursor::matching_bracket(rope, &language.config, position, &skippable)
     }

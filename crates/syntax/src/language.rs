@@ -57,6 +57,9 @@ pub(crate) struct InjectionQuery {
     pub query: Query,
     pub content_capture: Option<u32>,
     pub language_capture: Option<u32>,
+    /// Whether any pattern sets `injection.combined` (such injections can't
+    /// be updated piecewise).
+    pub has_combined: bool,
 }
 
 impl Grammar {
@@ -91,10 +94,17 @@ impl Grammar {
         let query = Query::new(&self.ts_language, source)?;
         let content_capture = query.capture_index_for_name("injection.content");
         let language_capture = query.capture_index_for_name("injection.language");
+        let has_combined = (0..query.pattern_count()).any(|ix| {
+            query
+                .property_settings(ix)
+                .iter()
+                .any(|p| &*p.key == "injection.combined")
+        });
         self.injections = Some(InjectionQuery {
             query,
             content_capture,
             language_capture,
+            has_combined,
         });
         Ok(self)
     }

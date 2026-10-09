@@ -338,33 +338,57 @@ pub(crate) fn current_highlights(
     theme: &Theme,
     range: Range<usize>,
 ) -> Vec<(Range<usize>, TokenStyle)> {
-    let Some(syntax) = model.syntax_snapshot() else {
-        return Vec::new();
-    };
-    let buffer = model.buffer();
-    let style = |span: &syntax::HighlightSpan| theme.style_for(span.highlight);
-    if syntax.text.version() == buffer.version() {
-        return syntax
-            .highlighter
-            .highlights(&syntax.state, syntax.text.rope(), range)
-            .iter()
-            .map(|span| (span.range.clone(), style(span)))
-            .collect();
+    HighlightSource::new(model).map_or_else(Vec::new, |source| source.highlights(theme, range))
+}
+
+/// The latest highlights of a model, detached from it so they can be read on
+/// a background thread.
+pub(crate) struct HighlightSource {
+    syntax: crate::model::SyntaxSnapshot,
+    /// Edits since `syntax` was parsed, if any.
+    patch: Option<text::Patch>,
+}
+
+impl HighlightSource {
+    pub(crate) fn new(model: &crate::model::TextModel) -> Option<Self> {
+        let syntax = model.syntax_snapshot()?;
+        let buffer = model.buffer();
+        let patch = (syntax.text.version() != buffer.version())
+            .then(|| buffer.edits_since(syntax.text.version()));
+        Some(Self { syntax, patch })
     }
-    let patch = buffer.edits_since(syntax.text.version());
-    let inverse = patch.invert();
-    let old_range = inverse.transform_offset(range.start, text::Bias::Left)
-        ..inverse.transform_offset(range.end, text::Bias::Right);
-    syntax
-        .highlighter
-        .highlights(&syntax.state, syntax.text.rope(), old_range)
-        .iter()
-        .filter_map(|span| {
-            let start = patch.transform_offset(span.range.start, text::Bias::Right);
-            let end = patch.transform_offset(span.range.end, text::Bias::Left);
-            (start < end).then(|| (start..end, style(span)))
-        })
-        .collect()
+
+    /// Styled spans in `range` of the current text, with the parsed
+    /// highlights shifted through any newer edits.
+    pub(crate) fn highlights(
+        &self,
+        theme: &Theme,
+        range: Range<usize>,
+    ) -> Vec<(Range<usize>, TokenStyle)> {
+        let syntax = &self.syntax;
+        let style = |span: &syntax::HighlightSpan| theme.style_for(span.highlight);
+        let Some(patch) = &self.patch else {
+            return syntax
+                .highlighter
+                .highlights(&syntax.state, syntax.text.rope(), range)
+                .iter()
+                .map(|span| (span.range.clone(), style(span)))
+                .collect();
+        };
+        let inverse = patch.invert();
+        let old_range = inverse.transform_offset(range.start, text::Bias::Left)
+            ..inverse.transform_offset(range.end, text::Bias::Right);
+        syntax
+            .highlighter
+            .highlights(&syntax.state, syntax.text.rope(), old_range)
+            .iter()
+            .filter_map(|span| {
+                let start = patch.transform_offset(span.range.start, text::Bias::Right);
+                let end = patch.transform_offset(span.range.end, text::Bias::Left);
+                (start < end).then(|| (start..end, style(span)))
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -390,10 +414,18 @@ pub(crate) struct MinimapLayout {
 /// Cached minimap blocks for one view of the minimap.
 #[derive(Clone, Default)]
 pub(crate) struct MinimapCache {
-    key: Option<(text::Version, u32, u32, usize, u32)>,
+    key: Option<MinimapKey>,
+    /// The view line `blocks` start at.
+    first: u32,
     /// Blocks relative to the minimap's first drawn line.
     blocks: Vec<(Bounds<Pixels>, Hsla)>,
+    /// A rebuild running in the background; until it lands the old blocks
+    /// are drawn (a frame-stale minimap is invisible, ~3ms per keystroke on
+    /// the main thread is not).
+    pending: Option<(MinimapKey, std::sync::Arc<gpui::Task<()>>)>,
 }
+
+type MinimapKey = (text::Version, u32, u32, usize, u32);
 
 /// A fold control in the gutter.
 #[derive(Clone, Copy, Debug)]
@@ -771,7 +803,8 @@ fn prepaint_editor(
     // View zones: after the last view line of their row; hidden in folds.
     let mut zone_specs: Vec<(i64, Pixels, gpui::AnyView)> = Vec::new();
     {
-        let buffer = editor.model().read(cx).buffer().clone();
+        let model = editor.model().clone();
+        let buffer = model.read(cx).buffer();
         for zone in &editor.widgets.zones {
             let after = match &zone.anchor {
                 None => -1,
@@ -1006,8 +1039,9 @@ fn prepaint_editor(
     let mut fold_controls = Vec::new();
     let mut fold_placeholders = Vec::new();
     if options.folding {
-        let buffer = editor.model().read(cx).buffer().clone();
-        let collapsed = editor.folds.collapsed_rows(&buffer);
+        let model = editor.model().clone();
+        let buffer = model.read(cx).buffer();
+        let collapsed = editor.folds.collapsed_rows(buffer);
         let left = bounds.left() + glyph_width + numbers_width + options.line_decorations_width;
         for line in lines.iter().filter(|line| line.columns.start == 0) {
             let top = bounds.top() + zones.line_y(line.view_line, line_height) - scroll_top;
@@ -1078,22 +1112,56 @@ fn prepaint_editor(
             theme_key,
             wrap_column.unwrap_or(0),
         );
-        if editor.minimap_cache.key != Some(key) {
-            editor.minimap_cache = MinimapCache {
-                key: Some(key),
-                blocks: minimap_blocks_for(
-                    editor,
-                    &view_lines,
-                    &snapshot,
-                    &theme,
-                    first..last + 1,
-                    tab_size,
-                    &options,
-                    cx,
-                ),
+        let cache = &editor.minimap_cache;
+        if cache.key != Some(key) && cache.pending.as_ref().is_none_or(|(k, _)| *k != key) {
+            let source = HighlightSource::new(editor.model().read(cx));
+            let build = {
+                let (view_lines, snapshot, theme, options) = (
+                    view_lines.clone(),
+                    snapshot.clone(),
+                    theme.clone(),
+                    options.clone(),
+                );
+                move || {
+                    minimap_blocks_for(
+                        source.as_ref(),
+                        &view_lines,
+                        &snapshot,
+                        &theme,
+                        first..last + 1,
+                        tab_size,
+                        &options,
+                    )
+                }
             };
+            if cache.key.is_none() {
+                // Nothing to show yet: build the first one now.
+                editor.minimap_cache = MinimapCache {
+                    key: Some(key),
+                    first,
+                    blocks: build(),
+                    pending: None,
+                };
+            } else {
+                let task = cx.spawn(async move |this, cx| {
+                    let blocks = cx.background_executor().spawn(async move { build() }).await;
+                    this.update(cx, |editor, cx| {
+                        let cache = &mut editor.minimap_cache;
+                        if cache.pending.as_ref().is_some_and(|(k, _)| *k == key) {
+                            cache.key = Some(key);
+                            cache.first = first;
+                            cache.blocks = blocks;
+                            cache.pending = None;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                });
+                editor.minimap_cache.pending = Some((key, std::sync::Arc::new(task)));
+            }
         }
-        let origin_y = minimap_bounds.top() + mline * first as f32 - minimap_scroll;
+        let origin_y =
+            minimap_bounds.top() + mline * editor.minimap_cache.first as f32 - minimap_scroll;
         minimap_blocks = editor
             .minimap_cache
             .blocks
@@ -1133,21 +1201,24 @@ fn prepaint_editor(
     if options.sticky_scroll.enabled && !options.single_line && scroll_top > px(0.) {
         let max = options.sticky_scroll.max_line_count as usize;
         let mut sticky_rows: Vec<(u32, u32)> = Vec::new();
-        for range in editor.folds.ranges() {
-            if sticky_rows.len() >= max {
-                break;
-            }
+        while sticky_rows.len() < max {
             let probe_y = scroll_top + line_height * sticky_rows.len() as f32;
             let probe_row = view_lines
                 .view_line(zones.line_at(probe_y, line_height, view_line_count))
                 .row;
-            if range.start_row < probe_row
-                && probe_row <= range.end_row
-                && sticky_rows
-                    .last()
-                    .is_none_or(|(start, _)| *start < range.start_row)
-            {
-                sticky_rows.push((range.start_row, range.end_row));
+            // The outermost range enclosing the probe below the last header.
+            let next = editor
+                .folds
+                .ranges_enclosing(probe_row)
+                .into_iter()
+                .find(|range| {
+                    sticky_rows
+                        .last()
+                        .is_none_or(|(start, _)| *start < range.start_row)
+                });
+            match next {
+                Some(range) => sticky_rows.push((range.start_row, range.end_row)),
+                None => break,
             }
         }
         for (ix, (row, end_row)) in sticky_rows.iter().enumerate() {
@@ -1396,7 +1467,8 @@ fn prepaint_editor(
         ix = group_end;
     }
     {
-        let buffer = editor.model().read(cx).buffer().clone();
+        let model = editor.model().clone();
+        let buffer = model.read(cx).buffer();
         for widget in &editor.widgets.content {
             let position = buffer.offset_to_point_utf16(buffer.resolve(&widget.anchor));
             let Some(line) = layout.line_for_point(position) else {
@@ -1901,14 +1973,13 @@ pub(crate) enum Embedded {
 /// Minimap blocks for view lines `lines`, relative to the first one.
 #[allow(clippy::too_many_arguments)]
 fn minimap_blocks_for(
-    editor: &CodeEditor,
+    highlights: Option<&HighlightSource>,
     view_lines: &ViewLines,
     snapshot: &text::BufferSnapshot,
     theme: &Theme,
     lines: Range<u32>,
     tab_size: u32,
     options: &EditorOptions,
-    cx: &App,
 ) -> Vec<(Bounds<Pixels>, Hsla)> {
     let scale = options.minimap.scale;
     let mline = 2. * scale;
@@ -1918,9 +1989,12 @@ fn minimap_blocks_for(
     let last_row = view_lines.view_line(lines.end.saturating_sub(1)).row;
     let range = snapshot.point_to_offset(text::Point::new(first_row, 0))
         ..snapshot.point_to_offset(text::Point::new(last_row, u32::MAX));
-    let highlights = current_highlights(editor.model().read(cx), theme, range);
+    let highlights = highlights.map_or_else(Vec::new, |source| source.highlights(theme, range));
     let tab_size = tab_size.max(1) as usize;
     let mut blocks = Vec::new();
+    // Highlights are sorted and offsets only increase, so walk them with a
+    // cursor.
+    let mut next_highlight = 0;
     for (ix, view_line) in lines.enumerate() {
         let segment = row_segment(view_lines, view_line);
         let full = snapshot.line(segment.row);
@@ -1964,9 +2038,15 @@ fn minimap_blocks_for(
                 flush(&mut run, &mut blocks);
             } else {
                 let offset = line_start + byte_start + byte;
+                while highlights
+                    .get(next_highlight)
+                    .is_some_and(|(r, _)| r.end <= offset)
+                {
+                    next_highlight += 1;
+                }
                 let color = highlights
-                    .iter()
-                    .find(|(r, _)| r.start <= offset && offset < r.end)
+                    .get(next_highlight)
+                    .filter(|(r, _)| r.start <= offset)
                     .and_then(|(_, style)| style.foreground)
                     .map_or(foreground, |c| c.opacity(0.75));
                 match run.as_mut() {
