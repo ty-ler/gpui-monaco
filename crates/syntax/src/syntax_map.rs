@@ -158,7 +158,7 @@ impl SyntaxSnapshot {
             layers: Vec::new(),
             version: text.version(),
         };
-        snapshot.build(language, text, &[], registry);
+        snapshot.build(language, text, &[], &[], registry);
         snapshot
     }
 
@@ -199,7 +199,8 @@ impl SyntaxSnapshot {
             layers: Vec::new(),
             version: text.version(),
         };
-        snapshot.build(root.language.clone(), text, &old_layers, registry);
+        let edited: Vec<Range<usize>> = patch.edits().iter().map(|e| e.new.clone()).collect();
+        snapshot.build(root.language.clone(), text, &old_layers, &edited, registry);
         snapshot
     }
 
@@ -208,6 +209,7 @@ impl SyntaxSnapshot {
         root_language: Arc<Language>,
         text: &BufferSnapshot,
         old_layers: &[SyntaxLayer],
+        edited: &[Range<usize>],
         registry: &LanguageRegistry,
     ) {
         let rope = text.rope();
@@ -231,13 +233,21 @@ impl SyntaxSnapshot {
                 continue;
             }
             for (language, ranges) in find_injections(&parent, rope, registry) {
-                let start = ranges[0].start;
-                let old = old_layers.iter().find(|old| {
+                // Injected layers are small, so instead of incremental
+                // reparsing (which some grammars' external scanners get wrong,
+                // e.g. tree-sitter-md's inline grammar) an untouched layer
+                // keeps its tree and a touched one is parsed from scratch.
+                let untouched = old_layers.iter().find(|old| {
                     old.depth == parent.depth + 1
                         && Arc::ptr_eq(&old.language, &language)
-                        && old.ranges.first().map(|r| r.start) == Some(start)
+                        && old.ranges == ranges
+                        && !touched(&ranges, edited)
                 });
-                if let Some(tree) = parse(&language, rope, &ranges, old.map(|l| &l.tree)) {
+                let tree = match untouched {
+                    Some(old) => Some(old.tree.clone()),
+                    None => parse(&language, rope, &ranges, None),
+                };
+                if let Some(tree) = tree {
                     self.layers.push(SyntaxLayer {
                         language,
                         tree,
@@ -295,6 +305,15 @@ impl SyntaxSnapshot {
         }
         result
     }
+}
+
+/// Whether any edited range (in new offsets) touches `ranges`.
+fn touched(ranges: &[Range<usize>], edited: &[Range<usize>]) -> bool {
+    edited.iter().any(|edit| {
+        ranges
+            .iter()
+            .any(|range| edit.start <= range.end && edit.end >= range.start)
+    })
 }
 
 fn find_injections(
