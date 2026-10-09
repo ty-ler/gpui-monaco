@@ -1,30 +1,73 @@
 mod providers;
 mod screenshot;
 
+use std::sync::Arc;
+
 use gpui::{
-    App, AppContext as _, Bounds, Context, Entity, Focusable, Window, WindowBounds, WindowOptions,
-    div, prelude::*, px, size,
+    App, AppContext as _, Bounds, Context, Entity, Focusable, PathPromptOptions, SharedString,
+    Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
-use gpui_monaco::{CodeEditor, TextModel};
+use gpui_monaco::options::{LineNumbers, WordWrap};
+use gpui_monaco::text::LineEnding;
+use gpui_monaco::{CodeEditor, CodeEditorEvent, EditorColors, EditorOptions, TextModel, Theme};
 
 const SAMPLE: &str = include_str!("../samples/sample.rs");
 
+/// Bundled VS Code themes (MIT, see `themes/README.md`).
+const THEME_FILES: &[(&str, &str)] = &[
+    ("dark_vs.json", include_str!("../themes/dark_vs.json")),
+    ("dark_plus.json", include_str!("../themes/dark_plus.json")),
+    (
+        "dark_modern.json",
+        include_str!("../themes/dark_modern.json"),
+    ),
+    ("light_vs.json", include_str!("../themes/light_vs.json")),
+    ("light_plus.json", include_str!("../themes/light_plus.json")),
+];
+
+fn themes() -> Vec<(&'static str, Arc<Theme>)> {
+    let vscode = |file: &str| {
+        let json = THEME_FILES
+            .iter()
+            .find(|(name, _)| *name == file)
+            .map(|(_, json)| *json)
+            .unwrap_or("{}");
+        Theme::from_vscode_json_with_includes(json, &|include| {
+            let include = include.trim_start_matches("./");
+            THEME_FILES
+                .iter()
+                .find(|(name, _)| *name == include)
+                .map(|(_, json)| json.to_string())
+        })
+        .expect("bundled theme parses")
+    };
+    vec![
+        ("vs-dark", Arc::new(Theme::vs_dark())),
+        ("vs", Arc::new(Theme::vs())),
+        ("Dark Modern", Arc::new(vscode("dark_modern.json"))),
+        ("Dark+", Arc::new(vscode("dark_plus.json"))),
+        ("Light+", Arc::new(vscode("light_plus.json"))),
+    ]
+}
+
 struct Playground {
     editor: Entity<CodeEditor>,
+    themes: Vec<(&'static str, Arc<Theme>)>,
+    theme: usize,
+    languages: Vec<SharedString>,
+    file_name: SharedString,
 }
 
 impl Playground {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (text, language) = match std::env::var("PLAYGROUND_FILE") {
+        let (text, language, file_name) = match std::env::var("PLAYGROUND_FILE") {
             Ok(path) => {
                 let text =
                     std::fs::read_to_string(&path).unwrap_or_else(|e| format!("{path}: {e}"));
-                let language = gpui_monaco::language_registry(cx)
-                    .language_for_path(path.as_ref())
-                    .map_or_else(|| "plaintext".to_string(), |l| l.id.to_string());
-                (text, language)
+                let language = language_for_path(&path, cx);
+                (text, language, path.into())
             }
-            Err(_) => (SAMPLE.to_string(), "rust".to_string()),
+            Err(_) => (SAMPLE.to_string(), "rust".into(), "sample.rs".into()),
         };
         let model = cx.new(|_| TextModel::new(&text).with_language(language));
         let editor = cx.new(|cx| CodeEditor::new(model, window, cx));
@@ -33,52 +76,320 @@ impl Playground {
                 let mut options = editor.options().clone();
                 match wrap.parse::<u32>() {
                     Ok(column) => {
-                        options.word_wrap = gpui_monaco::options::WordWrap::WordWrapColumn;
+                        options.word_wrap = WordWrap::WordWrapColumn;
                         options.word_wrap_column = column;
                     }
-                    Err(_) => options.word_wrap = gpui_monaco::options::WordWrap::On,
+                    Err(_) => options.word_wrap = WordWrap::On,
                 }
                 editor.update_options(options, cx);
             });
         }
+        // Demos are on unless disabled (`PLAYGROUND_PLAIN=1`).
+        let plain = std::env::var_os("PLAYGROUND_PLAIN").is_some();
         if std::env::var_os("PLAYGROUND_DEMO").is_some() {
             add_demo_decorations(&editor, cx);
             add_demo_widgets(&editor, cx);
         }
-        if std::env::var_os("PLAYGROUND_PROVIDERS").is_some() {
+        if !plain || std::env::var_os("PLAYGROUND_PROVIDERS").is_some() {
             providers::register(cx);
             providers::add_markers(&editor, cx);
         }
-        if let Ok(theme) = std::env::var("PLAYGROUND_THEME") {
-            let theme = match theme.as_str() {
-                "vs" => gpui_monaco::Theme::vs(),
-                "vs-dark" => gpui_monaco::Theme::vs_dark(),
-                path => gpui_monaco::Theme::from_vscode_file(path.as_ref())
-                    .unwrap_or_else(|e| panic!("failed to load theme {path}: {e}")),
-            };
-            editor.update(cx, |editor, cx| {
-                editor.set_theme(std::sync::Arc::new(theme), cx)
-            });
+        let themes = themes();
+        let mut theme = 0;
+        if let Ok(name) = std::env::var("PLAYGROUND_THEME") {
+            match themes.iter().position(|(n, _)| *n == name) {
+                Some(ix) => theme = ix,
+                None => {
+                    let loaded = Theme::from_vscode_file(name.as_ref())
+                        .unwrap_or_else(|e| panic!("failed to load theme {name}: {e}"));
+                    editor.update(cx, |editor, cx| editor.set_theme(Arc::new(loaded), cx));
+                    theme = usize::MAX;
+                }
+            }
+        }
+        if theme != usize::MAX {
+            let selected = themes[theme].1.clone();
+            editor.update(cx, |editor, cx| editor.set_theme(selected, cx));
         }
         window.focus(&editor.focus_handle(cx), cx);
         if std::env::var_os("PLAYGROUND_DEBUG").is_some() {
-            cx.subscribe(
-                &editor,
-                |_, editor, event: &gpui_monaco::CodeEditorEvent, cx| {
-                    if *event == gpui_monaco::CodeEditorEvent::SelectionsChanged {
-                        eprintln!("selections: {:?}", editor.read(cx).selections());
-                    }
-                },
-            )
+            cx.subscribe(&editor, |_, editor, event: &CodeEditorEvent, cx| {
+                if *event == CodeEditorEvent::SelectionsChanged {
+                    eprintln!("selections: {:?}", editor.read(cx).selections());
+                }
+            })
             .detach();
         }
-        Self { editor }
+        cx.subscribe(&editor, |_, _, _: &CodeEditorEvent, cx| cx.notify())
+            .detach();
+        let languages = gpui_monaco::language_registry(cx)
+            .languages()
+            .iter()
+            .filter(|l| !l.hidden)
+            .map(|l| SharedString::from(l.id.to_string()))
+            .collect();
+        Self {
+            editor,
+            themes,
+            theme: theme.min(usize::MAX - 1),
+            languages,
+            file_name,
+        }
+    }
+
+    fn open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Open".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                return;
+            };
+            this.update_in(cx, |this, window, cx| {
+                let path = path.to_string_lossy().to_string();
+                let language = language_for_path(&path, cx);
+                let model = cx.new(|_| TextModel::new(&text).with_language(language));
+                this.editor
+                    .update(cx, |editor, cx| editor.set_model(model, cx));
+                this.file_name = path.into();
+                window.focus(&this.editor.focus_handle(cx), cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn cycle_language(&mut self, cx: &mut Context<Self>) {
+        let model = self.editor.read(cx).model().clone();
+        let current = model.read(cx).language_id().cloned();
+        let ix = current
+            .and_then(|id| self.languages.iter().position(|l| *l == id))
+            .map_or(0, |ix| (ix + 1) % self.languages.len().max(1));
+        if let Some(next) = self.languages.get(ix).cloned() {
+            model.update(cx, |model, cx| model.set_language(Some(next), cx));
+        }
+        cx.notify();
+    }
+
+    fn cycle_theme(&mut self, cx: &mut Context<Self>) {
+        self.theme = (self.theme + 1) % self.themes.len();
+        let theme = self.themes[self.theme].1.clone();
+        self.editor
+            .update(cx, |editor, cx| editor.set_theme(theme, cx));
+        cx.notify();
+    }
+
+    fn toggle(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut EditorOptions)) {
+        self.editor.update(cx, |editor, cx| {
+            let mut options = editor.options().clone();
+            f(&mut options);
+            editor.update_options(options, cx);
+        });
+        cx.notify();
     }
 }
 
+fn language_for_path(path: &str, cx: &App) -> SharedString {
+    gpui_monaco::language_registry(cx)
+        .language_for_path(path.as_ref())
+        .map_or_else(|| "plaintext".into(), |l| l.id.to_string().into())
+}
+
+fn button(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    active: bool,
+    colors: &EditorColors,
+    on_click: impl Fn(&mut Playground, &mut Window, &mut Context<Playground>) + 'static,
+    cx: &mut Context<Playground>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .px_2()
+        .py(px(2.))
+        .rounded_sm()
+        .cursor_pointer()
+        .border_1()
+        .border_color(if active {
+            colors.input_option_active_border
+        } else {
+            colors.widget_border
+        })
+        .when(active, |this| {
+            this.bg(colors.input_option_active_background)
+        })
+        .hover(|style| style.bg(gpui::hsla(0., 0., 0.5, 0.2)))
+        .child(label.into())
+        .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
+}
+
 impl Render for Playground {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(self.editor.clone())
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let editor = self.editor.read(cx);
+        let colors = editor.colors().clone();
+        let options = editor.options().clone();
+        let model = editor.model().read(cx);
+        let language: SharedString = model
+            .language_id()
+            .cloned()
+            .unwrap_or_else(|| "plaintext".into());
+        let selections = editor.selections();
+        let (line, column) = selections[0].head.to_monaco();
+        let eol = match model.line_ending() {
+            LineEnding::Lf => "LF",
+            LineEnding::Crlf => "CRLF",
+        };
+        let mut status = vec![format!("Ln {line}, Col {column}")];
+        if selections.len() > 1 {
+            status.push(format!("{} selections", selections.len()));
+        }
+        status.extend([
+            language.to_string(),
+            eol.to_string(),
+            self.file_name.to_string(),
+        ]);
+        let theme_name = self.themes.get(self.theme).map_or("custom", |(n, _)| *n);
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(colors.background)
+            .text_color(colors.widget_foreground)
+            .text_size(px(12.))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_1()
+                    .p_1()
+                    .bg(colors.widget_background)
+                    .border_b_1()
+                    .border_color(colors.widget_border)
+                    .child(button(
+                        "open",
+                        "Open…",
+                        false,
+                        &colors,
+                        |this, window, cx| this.open_file(window, cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "language",
+                        format!("Language: {language}"),
+                        false,
+                        &colors,
+                        |this, _, cx| this.cycle_language(cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "theme",
+                        format!("Theme: {theme_name}"),
+                        false,
+                        &colors,
+                        |this, _, cx| this.cycle_theme(cx),
+                        cx,
+                    ))
+                    .child(button(
+                        "wrap",
+                        "Wrap",
+                        options.word_wrap != WordWrap::Off,
+                        &colors,
+                        |this, _, cx| {
+                            this.toggle(cx, |o| {
+                                o.word_wrap = if o.word_wrap == WordWrap::Off {
+                                    WordWrap::On
+                                } else {
+                                    WordWrap::Off
+                                }
+                            })
+                        },
+                        cx,
+                    ))
+                    .child(button(
+                        "minimap",
+                        "Minimap",
+                        options.minimap.enabled,
+                        &colors,
+                        |this, _, cx| this.toggle(cx, |o| o.minimap.enabled = !o.minimap.enabled),
+                        cx,
+                    ))
+                    .child(button(
+                        "sticky",
+                        "Sticky scroll",
+                        options.sticky_scroll.enabled,
+                        &colors,
+                        |this, _, cx| {
+                            this.toggle(cx, |o| o.sticky_scroll.enabled = !o.sticky_scroll.enabled)
+                        },
+                        cx,
+                    ))
+                    .child(button(
+                        "numbers",
+                        "Line numbers",
+                        options.line_numbers != LineNumbers::Off,
+                        &colors,
+                        |this, _, cx| {
+                            this.toggle(cx, |o| {
+                                o.line_numbers = if o.line_numbers == LineNumbers::Off {
+                                    LineNumbers::On
+                                } else {
+                                    LineNumbers::Off
+                                }
+                            })
+                        },
+                        cx,
+                    ))
+                    .child(button(
+                        "folding",
+                        "Folding",
+                        options.folding,
+                        &colors,
+                        |this, _, cx| this.toggle(cx, |o| o.folding = !o.folding),
+                        cx,
+                    ))
+                    .child(button(
+                        "readonly",
+                        "Read-only",
+                        options.read_only,
+                        &colors,
+                        |this, _, cx| this.toggle(cx, |o| o.read_only = !o.read_only),
+                        cx,
+                    ))
+                    .child(button(
+                        "demo",
+                        "Add demo widgets",
+                        false,
+                        &colors,
+                        |this, _, cx| {
+                            let editor = this.editor.clone();
+                            add_demo_decorations(&editor, cx);
+                            add_demo_widgets(&editor, cx);
+                        },
+                        cx,
+                    )),
+            )
+            .child(div().flex_1().min_h_0().child(self.editor.clone()))
+            .child(
+                div()
+                    .px_2()
+                    .py(px(2.))
+                    .bg(colors.input_option_active_border)
+                    .text_color(gpui::white())
+                    .flex()
+                    .gap_4()
+                    .children(status),
+            )
     }
 }
 
@@ -86,7 +397,7 @@ fn main() {
     gpui_platform::application().run(|cx: &mut App| {
         gpui_monaco::init(cx);
         gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
-        let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);
+        let bounds = Bounds::centered(None, size(px(1100.), px(760.)), cx);
         let window = cx
             .open_window(
                 WindowOptions {
@@ -103,7 +414,7 @@ fn main() {
 
 /// A small label view for demo widgets.
 struct DemoLabel {
-    text: gpui::SharedString,
+    text: SharedString,
     background: gpui::Hsla,
 }
 

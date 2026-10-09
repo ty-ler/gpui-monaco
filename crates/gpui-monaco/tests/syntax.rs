@@ -64,3 +64,17 @@ fn loads_vscode_dark_modern_with_includes() {
         parse_hex_color("#CE9178")
     );
 }
+
+#[test]
+fn vscode_theme_without_type_infers_light_from_background() {
+    use gpui_monaco::theme::{ThemeKind, parse_hex_color};
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/themes/light_plus.json");
+    let theme = gpui_monaco::Theme::from_vscode_file(&path).unwrap();
+    assert_eq!(theme.kind, ThemeKind::Light);
+    // Unset colors fall back to Monaco's `vs` defaults, not `vs-dark`.
+    assert_eq!(
+        theme.colors.widget_background,
+        parse_hex_color("#F3F3F3").unwrap()
+    );
+}
