@@ -14,8 +14,14 @@ name = "text"
 workspace = true
 
 [dependencies]
+arrayvec = "0.7"
 sum_tree.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
 rand.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "rope"
+harness = false
