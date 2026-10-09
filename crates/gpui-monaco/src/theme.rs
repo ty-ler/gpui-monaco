@@ -95,7 +95,10 @@ impl EditorColors {
         set(&mut self.background, "editor.background");
         set(&mut self.foreground, "editor.foreground");
         set(&mut self.line_number, "editorLineNumber.foreground");
-        set(&mut self.active_line_number, "editorLineNumber.activeForeground");
+        set(
+            &mut self.active_line_number,
+            "editorLineNumber.activeForeground",
+        );
         set(&mut self.selection_background, "editor.selectionBackground");
         set(
             &mut self.inactive_selection_background,
@@ -103,8 +106,14 @@ impl EditorColors {
         );
         set(&mut self.cursor, "editorCursor.foreground");
         set(&mut self.scrollbar_slider, "scrollbarSlider.background");
-        set(&mut self.scrollbar_slider_hover, "scrollbarSlider.hoverBackground");
-        set(&mut self.scrollbar_slider_active, "scrollbarSlider.activeBackground");
+        set(
+            &mut self.scrollbar_slider_hover,
+            "scrollbarSlider.hoverBackground",
+        );
+        set(
+            &mut self.scrollbar_slider_active,
+            "scrollbarSlider.activeBackground",
+        );
         set(&mut self.scrollbar_shadow, "scrollbar.shadow");
         self.gutter_background = get("editorGutter.background").unwrap_or(self.background);
         if let Some(color) = get("editor.lineHighlightBackground") {
@@ -223,7 +232,12 @@ macro_rules! monaco_rules {
 }
 
 impl Theme {
-    pub fn new(name: impl Into<String>, kind: ThemeKind, colors: EditorColors, rules: Vec<TokenRule>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        kind: ThemeKind,
+        colors: EditorColors,
+        rules: Vec<TokenRule>,
+    ) -> Self {
         Self {
             name: name.into(),
             kind,
@@ -314,51 +328,34 @@ impl Theme {
         rules: Vec<TokenRule>,
         colors: &HashMap<String, String>,
     ) -> Self {
-        let mut all_rules = if inherit { base.rules.clone() } else { Vec::new() };
+        let mut all_rules = if inherit {
+            base.rules.clone()
+        } else {
+            Vec::new()
+        };
         all_rules.extend(rules);
         let mut editor_colors = base.colors.clone();
         editor_colors.apply_vscode_colors(colors);
         Self::new(name, base.kind, editor_colors, all_rules)
     }
 
-    /// Loads a VS Code color theme (`colors` + `tokenColors`). `include` is
-    /// not followed; merge included themes beforehand if needed.
+    /// Loads a VS Code color theme (`colors` + `tokenColors`). An `include`
+    /// is ignored; use [`Theme::from_vscode_json_with_includes`] or
+    /// [`Theme::from_vscode_file`] to follow it.
     pub fn from_vscode_json(json: &str) -> Result<Self, serde_json::Error> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct VsCodeTheme {
-            #[serde(default)]
-            name: Option<String>,
-            #[serde(default, rename = "type")]
-            kind: Option<String>,
-            #[serde(default)]
-            colors: HashMap<String, String>,
-            #[serde(default)]
-            token_colors: Vec<TokenColor>,
-        }
-        #[derive(Deserialize)]
-        struct TokenColor {
-            #[serde(default)]
-            scope: Option<Scope>,
-            settings: Settings,
-        }
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Scope {
-            One(String),
-            Many(Vec<String>),
-        }
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Settings {
-            #[serde(default)]
-            foreground: Option<String>,
-            #[serde(default)]
-            font_style: Option<String>,
-        }
+        Self::from_vscode_json_with_includes(json, &|_| None)
+    }
 
-        let theme: VsCodeTheme = serde_json::from_str(&strip_json_comments(json))?;
-        let kind = match theme.kind.as_deref() {
+    /// Like [`Theme::from_vscode_json`], resolving `include` paths (as written
+    /// in the JSON, e.g. `./dark_vs.json`) with `resolve`. Included themes are
+    /// applied first, so the including theme's colors and rules win.
+    pub fn from_vscode_json_with_includes(
+        json: &str,
+        resolve: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, serde_json::Error> {
+        let mut merged = VsCodeTheme::default();
+        load_vscode_theme(json, resolve, 0, &mut merged)?;
+        let kind = match merged.kind.as_deref() {
             Some("light") | Some("hcLight") => ThemeKind::Light,
             _ => ThemeKind::Dark,
         };
@@ -366,9 +363,9 @@ impl Theme {
             ThemeKind::Light => EditorColors::vs(),
             ThemeKind::Dark => EditorColors::vs_dark(),
         };
-        colors.apply_vscode_colors(&theme.colors);
+        colors.apply_vscode_colors(&merged.colors);
         let mut rules = Vec::new();
-        for token_color in theme.token_colors {
+        for token_color in merged.token_colors {
             let style = TokenStyle::from_font_style(
                 token_color
                     .settings
@@ -399,11 +396,24 @@ impl Theme {
             }
         }
         Ok(Self::new(
-            theme.name.unwrap_or_else(|| "VS Code theme".into()),
+            merged.name.unwrap_or_else(|| "VS Code theme".into()),
             kind,
             colors,
             rules,
         ))
+    }
+
+    /// Loads a VS Code theme file, following `include`s relative to it.
+    pub fn from_vscode_file(path: &std::path::Path) -> std::io::Result<Self> {
+        let json = std::fs::read_to_string(path)?;
+        let dir = path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default();
+        Self::from_vscode_json_with_includes(&json, &|include| {
+            std::fs::read_to_string(dir.join(include)).ok()
+        })
+        .map_err(std::io::Error::other)
     }
 
     /// The style for a highlight capture.
@@ -430,6 +440,69 @@ impl Theme {
         }
         TokenStyle::default()
     }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VsCodeTheme {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    include: Option<String>,
+    #[serde(default)]
+    colors: HashMap<String, String>,
+    #[serde(default)]
+    token_colors: Vec<TokenColor>,
+}
+
+#[derive(Deserialize)]
+struct TokenColor {
+    #[serde(default)]
+    scope: Option<Scope>,
+    settings: Settings,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Scope {
+    One(String),
+    Many(Vec<String>),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Settings {
+    #[serde(default)]
+    foreground: Option<String>,
+    #[serde(default)]
+    font_style: Option<String>,
+}
+
+/// Merges `json` (and, first, whatever it includes) into `merged`.
+fn load_vscode_theme(
+    json: &str,
+    resolve: &dyn Fn(&str) -> Option<String>,
+    depth: usize,
+    merged: &mut VsCodeTheme,
+) -> Result<(), serde_json::Error> {
+    let theme: VsCodeTheme = serde_json::from_str(&syntax::strip_jsonc(json))?;
+    if depth < 8
+        && let Some(include) = theme.include.as_deref()
+        && let Some(included) = resolve(include)
+    {
+        load_vscode_theme(&included, resolve, depth + 1, merged)?;
+    }
+    if theme.name.is_some() {
+        merged.name = theme.name;
+    }
+    if theme.kind.is_some() {
+        merged.kind = theme.kind;
+    }
+    merged.colors.extend(theme.colors);
+    merged.token_colors.extend(theme.token_colors);
+    Ok(())
 }
 
 /// `selector` matches `name` if equal or a dot-segment prefix of it.
@@ -488,14 +561,24 @@ pub fn textmate_scopes_for_capture(capture: &str) -> &'static [&'static str] {
     let first = capture.split('.').next().unwrap_or(capture);
     match capture {
         "comment.documentation" | "comment.doc" => &["comment.block.documentation", "comment"],
-        "string.special.key" => &["support.type.property-name.json", "support.type.property-name", "string"],
+        "string.special.key" => &[
+            "support.type.property-name.json",
+            "support.type.property-name",
+            "string",
+        ],
         "string.escape" | "escape" => &["constant.character.escape"],
         "string.regex" | "string.regexp" => &["string.regexp"],
         "string.special" | "string.special.symbol" => &["constant.other.symbol", "string"],
         "constant.builtin" | "boolean" => &["constant.language"],
         "keyword.operator" | "operator" => &["keyword.operator"],
-        "keyword.control" | "keyword.return" | "keyword.conditional" | "keyword.repeat"
-        | "conditional" | "repeat" | "keyword.exception" | "exception" => &["keyword.control"],
+        "keyword.control"
+        | "keyword.return"
+        | "keyword.conditional"
+        | "keyword.repeat"
+        | "conditional"
+        | "repeat"
+        | "keyword.exception"
+        | "exception" => &["keyword.control"],
         "keyword.function" | "keyword.storage" | "keyword.type" => &["storage.type", "keyword"],
         "function.macro" => &["entity.name.function.macro", "entity.name.function"],
         "function.builtin" => &["support.function", "entity.name.function"],
@@ -503,7 +586,11 @@ pub fn textmate_scopes_for_capture(capture: &str) -> &'static [&'static str] {
         "type.builtin" => &["support.type.primitive", "support.type", "entity.name.type"],
         "variable.builtin" => &["variable.language"],
         "variable.parameter" => &["variable.parameter"],
-        "variable.member" | "property" => &["variable.other.property", "support.type.property-name", "variable"],
+        "variable.member" | "property" => &[
+            "variable.other.property",
+            "support.type.property-name",
+            "variable",
+        ],
         "text.title" | "markup.heading" => &["markup.heading", "entity.name.section"],
         "text.emphasis" | "markup.italic" => &["markup.italic"],
         "text.strong" | "markup.bold" => &["markup.bold"],
@@ -517,7 +604,11 @@ pub fn textmate_scopes_for_capture(capture: &str) -> &'static [&'static str] {
             "keyword" => &["keyword", "storage.type"],
             "function" => &["entity.name.function", "support.function"],
             "type" => &["entity.name.type", "support.type", "storage.type"],
-            "constructor" => &["entity.name.type.class", "entity.name.type", "entity.name.function"],
+            "constructor" => &[
+                "entity.name.type.class",
+                "entity.name.type",
+                "entity.name.function",
+            ],
             "variable" => &["variable.other.readwrite", "variable"],
             "constant" => &["variable.other.constant", "constant"],
             "attribute" => &["entity.other.attribute-name"],
@@ -529,60 +620,6 @@ pub fn textmate_scopes_for_capture(capture: &str) -> &'static [&'static str] {
             _ => &[],
         },
     }
-}
-
-/// Removes `//` and `/* */` comments outside strings (VS Code themes are JSONC).
-fn strip_json_comments(json: &str) -> String {
-    let mut out = String::with_capacity(json.len());
-    let mut chars = json.chars().peekable();
-    let mut in_string = false;
-    while let Some(ch) = chars.next() {
-        if in_string {
-            out.push(ch);
-            if ch == '\\' {
-                if let Some(next) = chars.next() {
-                    out.push(next);
-                }
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => {
-                in_string = true;
-                out.push(ch);
-            }
-            '/' if chars.peek() == Some(&'/') => {
-                for next in chars.by_ref() {
-                    if next == '\n' {
-                        out.push('\n');
-                        break;
-                    }
-                }
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
-                let mut prev = '\0';
-                for next in chars.by_ref() {
-                    if prev == '*' && next == '/' {
-                        break;
-                    }
-                    prev = next;
-                }
-            }
-            ',' => {
-                // Drop trailing commas before `}` / `]`.
-                let rest: String = chars.clone().take_while(|c| c.is_whitespace()).collect();
-                let after = chars.clone().nth(rest.chars().count());
-                if !matches!(after, Some('}') | Some(']')) {
-                    out.push(ch);
-                }
-            }
-            _ => out.push(ch),
-        }
-    }
-    out
 }
 
 /// A shared theme handle.
@@ -607,7 +644,10 @@ mod tests {
         let key = theme.style_for(HighlightId::intern("string.special.key"));
         assert_eq!(key.foreground, parse_hex_color("#9CDCFE"));
         let function = theme.style_for(HighlightId::intern("function"));
-        assert_eq!(function.foreground, None, "Monaco's vs-dark doesn't color functions");
+        assert_eq!(
+            function.foreground, None,
+            "Monaco's vs-dark doesn't color functions"
+        );
     }
 
     #[test]

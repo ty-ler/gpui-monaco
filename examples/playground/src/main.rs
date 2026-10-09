@@ -27,6 +27,17 @@ impl Playground {
         };
         let model = cx.new(|_| TextModel::new(&text).with_language(language));
         let editor = cx.new(|cx| CodeEditor::new(model, window, cx));
+        if let Ok(theme) = std::env::var("PLAYGROUND_THEME") {
+            let theme = match theme.as_str() {
+                "vs" => gpui_monaco::Theme::vs(),
+                "vs-dark" => gpui_monaco::Theme::vs_dark(),
+                path => gpui_monaco::Theme::from_vscode_file(path.as_ref())
+                    .unwrap_or_else(|e| panic!("failed to load theme {path}: {e}")),
+            };
+            editor.update(cx, |editor, cx| {
+                editor.set_theme(std::sync::Arc::new(theme), cx)
+            });
+        }
         window.focus(&editor.focus_handle(cx), cx);
         if std::env::var_os("PLAYGROUND_DEBUG").is_some() {
             cx.subscribe(

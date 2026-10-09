@@ -18,7 +18,11 @@ fn model_parses_in_background_and_after_edits(cx: &mut TestAppContext) {
             .map(|span| span.highlight.name().to_string())
             .collect::<Vec<_>>()
     };
-    assert!(model.read_with(cx, |m, _| names(m)).contains(&"keyword".to_string()));
+    assert!(
+        model
+            .read_with(cx, |m, _| names(m))
+            .contains(&"keyword".to_string())
+    );
 
     model.update(cx, |model, cx| model.edit([(0..0, "// hi\n")], cx).unwrap());
     cx.run_until_parked();
@@ -27,4 +31,36 @@ fn model_parses_in_background_and_after_edits(cx: &mut TestAppContext) {
         assert_eq!(syntax.text.version(), model.version());
         assert!(names(model).contains(&"comment".to_string()));
     });
+}
+
+#[test]
+fn loads_vscode_dark_modern_with_includes() {
+    use gpui_monaco::syntax::HighlightId;
+    use gpui_monaco::theme::parse_hex_color;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/themes/dark_modern.json");
+    let theme = gpui_monaco::Theme::from_vscode_file(&path).unwrap();
+    assert_eq!(theme.name, "Dark Modern");
+    // From dark_modern.json itself.
+    assert_eq!(theme.colors.background, parse_hex_color("#1F1F1F").unwrap());
+    // From dark_plus.json (included).
+    assert_eq!(
+        theme.style_for(HighlightId::intern("function")).foreground,
+        parse_hex_color("#DCDCAA")
+    );
+    assert_eq!(
+        theme
+            .style_for(HighlightId::intern("keyword.return"))
+            .foreground,
+        parse_hex_color("#C586C0")
+    );
+    // From dark_vs.json (included by dark_plus).
+    assert_eq!(
+        theme.style_for(HighlightId::intern("comment")).foreground,
+        parse_hex_color("#6A9955")
+    );
+    assert_eq!(
+        theme.style_for(HighlightId::intern("string")).foreground,
+        parse_hex_color("#CE9178")
+    );
 }

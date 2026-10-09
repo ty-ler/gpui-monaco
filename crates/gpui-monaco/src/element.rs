@@ -3,10 +3,10 @@
 use std::ops::Range;
 
 use gpui::{
-    App, BorderStyle, Bounds, FontStyle, FontWeight, ContentMask, Corners, Edges, Element, ElementId, ElementInputHandler,
-    Entity, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, Pixels,
-    ShapedLine, SharedString, Size, Style, TextAlign, TextRun, UnderlineStyle, Window, fill, font,
-    point, px, quad, relative, size,
+    App, BorderStyle, Bounds, ContentMask, Corners, Edges, Element, ElementId, ElementInputHandler,
+    Entity, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement,
+    LayoutId, Pixels, ShapedLine, SharedString, Size, Style, TextAlign, TextRun, UnderlineStyle,
+    Window, fill, font, point, px, quad, relative, size,
 };
 use text::{BufferSnapshot, PointUtf16, Rope};
 
@@ -468,7 +468,8 @@ fn prepaint_editor(
     let mut lines = Vec::with_capacity((last_row + 1).saturating_sub(first_row) as usize);
     for row in first_row..=last_row {
         let line_range = snapshot.line_range(row);
-        while highlight_ix < highlights.len() && highlights[highlight_ix].0.end <= line_range.start {
+        while highlight_ix < highlights.len() && highlights[highlight_ix].0.end <= line_range.start
+        {
             highlight_ix += 1;
         }
         let row_highlights: Vec<(Range<usize>, TokenStyle)> = highlights[highlight_ix..]

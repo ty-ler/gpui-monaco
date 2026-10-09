@@ -188,17 +188,20 @@ impl TextModel {
         }
         self.language_pending = false;
         let registry = language_registry(cx);
-        let language = self
-            .language_id
-            .as_ref()
-            .and_then(|id| registry.language_for_id(id).or_else(|| registry.language_for_name(id)));
-        self.syntax = language.filter(|l| l.grammar.is_some()).map(|language| Syntax {
-            highlighter: Arc::new(TreeSitterHighlighter::new(language.clone(), registry)),
-            language,
-            latest: None,
-            task: None,
-            dirty: false,
+        let language = self.language_id.as_ref().and_then(|id| {
+            registry
+                .language_for_id(id)
+                .or_else(|| registry.language_for_name(id))
         });
+        self.syntax = language
+            .filter(|l| l.grammar.is_some())
+            .map(|language| Syntax {
+                highlighter: Arc::new(TreeSitterHighlighter::new(language.clone(), registry)),
+                language,
+                latest: None,
+                task: None,
+                dirty: false,
+            });
         self.reparse(cx);
     }
 
@@ -216,7 +219,9 @@ impl TextModel {
 
     /// Whether a background parse is in flight.
     pub fn is_parsing(&self) -> bool {
-        self.syntax.as_ref().is_some_and(|syntax| syntax.task.is_some())
+        self.syntax
+            .as_ref()
+            .is_some_and(|syntax| syntax.task.is_some())
     }
 
     /// Starts (or queues) a background parse of the current text.
