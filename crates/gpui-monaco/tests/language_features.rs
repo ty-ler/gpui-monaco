@@ -243,3 +243,85 @@ fn signature_help_opens_on_trigger_and_closes(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("escape");
     assert!(!editor.read_with(cx, |e, _| e.is_signature_help_visible()));
 }
+
+struct Completions;
+impl CompletionProvider for Completions {
+    fn trigger_characters(&self) -> Vec<char> {
+        vec!['.']
+    }
+
+    fn provide_completions(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        trigger: CompletionTrigger,
+        _: &mut App,
+    ) -> Task<anyhow::Result<CompletionList>> {
+        let items = match trigger {
+            CompletionTrigger::TriggerCharacter('.') => vec![
+                CompletionItem {
+                    commit_characters: vec!['('],
+                    ..CompletionItem::new("length", CompletionItemKind::Property)
+                },
+                CompletionItem::new("push", CompletionItemKind::Method),
+            ],
+            _ => ["print", "println", "process", "private"]
+                .into_iter()
+                .map(|label| CompletionItem::new(label, CompletionItemKind::Function))
+                .collect(),
+        };
+        Task::ready(Ok(CompletionList {
+            items,
+            incomplete: false,
+        }))
+    }
+}
+
+fn suggest_labels(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Option<Vec<String>> {
+    editor.read_with(cx, |e, _| e.suggest_labels_for_tests())
+}
+
+#[gpui::test]
+fn completion_filters_navigates_and_accepts(cx: &mut TestAppContext) {
+    cx.update(|cx| register_completion_provider(cx, LanguageSelector::All, Completions));
+    let (editor, cx) = setup("", cx);
+    cx.simulate_input("pr");
+    cx.run_until_parked();
+    assert_eq!(
+        suggest_labels(&editor, cx).unwrap(),
+        vec!["print", "println", "private", "process"]
+    );
+    cx.simulate_input("in");
+    cx.run_until_parked();
+    assert_eq!(
+        suggest_labels(&editor, cx).unwrap(),
+        vec!["print", "println"]
+    );
+    cx.simulate_keystrokes("down enter");
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.model().read(cx).text()),
+        "println"
+    );
+    assert!(!editor.read_with(cx, |e, _| e.is_suggest_visible()));
+    // Trigger character, commit character.
+    cx.simulate_input(".");
+    cx.run_until_parked();
+    assert_eq!(suggest_labels(&editor, cx).unwrap(), vec!["length", "push"]);
+    cx.simulate_input("(");
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.model().read(cx).text()),
+        "println.length("
+    );
+    // Escape closes; Ctrl+Space reopens.
+    cx.simulate_input(" pri");
+    cx.run_until_parked();
+    assert!(editor.read_with(cx, |e, _| e.is_suggest_visible()));
+    cx.simulate_keystrokes("escape");
+    assert!(!editor.read_with(cx, |e, _| e.is_suggest_visible()));
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert!(editor.read_with(cx, |e, _| e.is_suggest_visible()));
+    // Deleting before the word start closes it.
+    cx.simulate_keystrokes("backspace backspace backspace backspace");
+    assert!(!editor.read_with(cx, |e, _| e.is_suggest_visible()));
+}

@@ -82,7 +82,71 @@ impl SignatureHelpProvider for DemoSignatures {
     }
 }
 
+struct DemoCompletions;
+impl CompletionProvider for DemoCompletions {
+    fn trigger_characters(&self) -> Vec<char> {
+        vec!['.']
+    }
+
+    fn provide_completions(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        _: CompletionTrigger,
+        _: &mut App,
+    ) -> Task<anyhow::Result<CompletionList>> {
+        let item = |label: &str, kind, detail: &str, docs: &str| CompletionItem {
+            detail: Some(detail.to_string().into()),
+            documentation: Some(docs.into()),
+            ..CompletionItem::new(label.to_string(), kind)
+        };
+        let items = vec![
+            item(
+                "self",
+                CompletionItemKind::Keyword,
+                "keyword",
+                "The current value.",
+            ),
+            item(
+                "selections",
+                CompletionItemKind::Method,
+                "fn(&self) -> Vec<Selection>",
+                "All selections; the first is the primary one.\n\n```rust\nlet s = editor.selections();\n```",
+            ),
+            item(
+                "set_selections",
+                CompletionItemKind::Method,
+                "fn(&mut self, &[Selection])",
+                "Replaces the selections.",
+            ),
+            item(
+                "Selection",
+                CompletionItemKind::Struct,
+                "struct Selection",
+                "An anchor and a head.",
+            ),
+            item(
+                "snapshot",
+                CompletionItemKind::Field,
+                "BufferSnapshot",
+                "The text as of the last sync.",
+            ),
+            item(
+                "select_all",
+                CompletionItemKind::Function,
+                "fn(&mut self)",
+                "Selects everything.",
+            ),
+        ];
+        Task::ready(Ok(CompletionList {
+            items,
+            incomplete: false,
+        }))
+    }
+}
+
 pub fn register(cx: &mut App) {
+    register_completion_provider(cx, LanguageSelector::All, DemoCompletions);
     register_hover_provider(cx, LanguageSelector::All, DemoHover);
     register_signature_help_provider(cx, LanguageSelector::All, DemoSignatures);
 }

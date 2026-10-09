@@ -117,6 +117,7 @@ pub struct CodeEditor {
     pub(crate) marker_navigation: crate::markers::MarkerNavigation,
     pub(crate) definition: crate::definition::DefinitionLink,
     pub(crate) signature_help: crate::signature_help::SignatureHelpState,
+    pub(crate) suggest: crate::completion::SuggestState,
     pub(crate) minimap_cache: crate::element::MinimapCache,
     pub(crate) minimap_hovered: bool,
     minimap_drag: Option<Pixels>,
@@ -189,6 +190,7 @@ impl CodeEditor {
             marker_navigation: Default::default(),
             definition: Default::default(),
             signature_help: Default::default(),
+            suggest: Default::default(),
             minimap_cache: Default::default(),
             minimap_hovered: false,
             minimap_drag: None,
@@ -631,6 +633,23 @@ impl CodeEditor {
     // ----- navigation ---------------------------------------------------------
 
     fn move_cursors(&mut self, command: MoveCommand, select: bool, cx: &mut Context<Self>) {
+        if !select && self.is_suggest_visible() {
+            let page = crate::suggest_widget::page_size() as isize;
+            let delta = match command {
+                MoveCommand::Up => Some(-1),
+                MoveCommand::Down => Some(1),
+                MoveCommand::PageUp => Some(-page),
+                MoveCommand::PageDown => Some(page),
+                _ => None,
+            };
+            if let Some(delta) = delta {
+                if self.suggest_navigate(delta, cx) {
+                    return;
+                }
+            } else {
+                self.hide_suggest(cx);
+            }
+        }
         if !select
             && matches!(command, MoveCommand::Up | MoveCommand::Down)
             && self.cycle_signature(if command == MoveCommand::Up { -1 } else { 1 }, cx)
@@ -721,6 +740,10 @@ impl CodeEditor {
             cx.propagate();
             return;
         }
+        if self.is_suggest_visible() {
+            self.hide_suggest(cx);
+            return;
+        }
         if self.close_marker_zone(cx) {
             return;
         }
@@ -756,11 +779,15 @@ impl CodeEditor {
         } else {
             text
         };
+        if let Some(ch) = text.chars().next().filter(|_| text.chars().count() == 1) {
+            self.commit_suggestion_on(ch, cx);
+        }
         let prev = self.prev_edit_kind;
         let operation = self.with_language(cx, |config, rope, cursors, lang| {
             cursor::type_with_language(config, rope, cursors, text, prev, lang)
         });
         self.apply(operation, cx);
+        self.suggest_after_typing(text, cx);
         self.signature_help_after_typing(text, cx);
     }
 
@@ -811,6 +838,9 @@ impl CodeEditor {
             cursor::delete_left_with_language(config, rope, cursors, prev, lang)
         });
         self.apply(operation, cx);
+        if self.suggest.session.is_some() {
+            self.refilter_suggest(cx);
+        }
         if self.is_signature_help_visible() {
             self.trigger_signature_help(crate::providers::SignatureHelpTrigger::ContentChange, cx);
         }
@@ -838,6 +868,9 @@ impl CodeEditor {
             cx.propagate();
             return;
         }
+        if self.is_suggest_visible() && self.accept_suggestion(cx) {
+            return;
+        }
         let operation = self.with_language(cx, |config, rope, cursors, lang| {
             cursor::tab_with_language(config, rope, cursors, lang)
         });
@@ -855,6 +888,9 @@ impl CodeEditor {
     fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
         if self.options.single_line {
             cx.propagate();
+            return;
+        }
+        if self.is_suggest_visible() && self.accept_suggestion(cx) {
             return;
         }
         let operation = self.with_language(cx, |config, rope, cursors, lang| {
@@ -1259,6 +1295,7 @@ impl CodeEditor {
         if event.modifiers.secondary() && self.follow_definition_link(position, cx) {
             return;
         }
+        self.hide_suggest(cx);
         let in_gutter = event.position.x < layout.text_bounds.left();
         let config = self.cursor_config(cx);
         let mode = if in_gutter {
@@ -1931,6 +1968,9 @@ impl Render for CodeEditor {
             )
             .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| this.go_to_definition(cx)))
             .on_action(cx.listener(|this, _: &ShowHover, _, cx| this.show_hover_at_cursor(cx)))
+            .on_action(cx.listener(|this, _: &TriggerSuggest, _, cx| {
+                this.trigger_suggest(crate::providers::CompletionTrigger::Invoke, cx)
+            }))
             .on_action(cx.listener(|this, _: &TriggerParameterHints, _, cx| {
                 this.trigger_signature_help(crate::providers::SignatureHelpTrigger::Invoke, cx)
             }))

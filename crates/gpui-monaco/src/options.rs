@@ -140,6 +140,9 @@ pub struct EditorOptions {
     pub auto_indent: crate::cursor::AutoIndent,
     /// Monaco `matchBrackets`: highlight the bracket pair at the cursor.
     pub match_brackets: bool,
+    /// Monaco `quickSuggestions`: suggest while typing in code (not in
+    /// strings or comments).
+    pub quick_suggestions: bool,
     pub minimap: MinimapOptions,
     pub sticky_scroll: StickyScrollOptions,
     /// A one-line input (like Monaco's find input): Enter, Tab and Escape
@@ -193,6 +196,7 @@ impl Default for EditorOptions {
             auto_surround: Default::default(),
             auto_indent: Default::default(),
             match_brackets: true,
+            quick_suggestions: true,
             minimap: MinimapOptions::default(),
             sticky_scroll: StickyScrollOptions::default(),
         }
