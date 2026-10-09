@@ -14,6 +14,7 @@ mod element;
 mod find;
 mod find_widget;
 mod model;
+mod multi_cursor;
 pub mod options;
 pub mod search;
 pub mod theme;

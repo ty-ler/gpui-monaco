@@ -88,6 +88,9 @@ actions!(
         ToggleRegex,
         ToggleWholeWord,
         ToggleFindInSelection,
+        AddSelectionToNextFindMatch,
+        MoveSelectionToNextFindMatch,
+        SelectAllOccurrences,
     ]
 );
 
@@ -133,6 +136,9 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-x", Cut, ctx),
         KeyBinding::new("secondary-v", Paste, ctx),
         KeyBinding::new("secondary-f", StartFind, ctx),
+        KeyBinding::new("secondary-d", AddSelectionToNextFindMatch, ctx),
+        KeyBinding::new("secondary-shift-l", SelectAllOccurrences, ctx),
+        KeyBinding::new("secondary-f2", SelectAllOccurrences, ctx),
         KeyBinding::new("f3", NextMatch, ctx),
         KeyBinding::new("shift-f3", PreviousMatch, ctx),
         // Inside the find widget's inputs.
@@ -178,6 +184,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("cmd-k cmd-j", UnfoldAll, ctx),
             KeyBinding::new("cmd-k cmd-l", ToggleFold, ctx),
             KeyBinding::new("cmd-alt-f", StartFindReplace, ctx),
+            KeyBinding::new("cmd-k cmd-d", MoveSelectionToNextFindMatch, ctx),
             KeyBinding::new("cmd-g", NextMatch, ctx),
             KeyBinding::new("cmd-shift-g", PreviousMatch, ctx),
             KeyBinding::new("cmd-alt-enter", ReplaceAll, ctx),
@@ -212,6 +219,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-k ctrl-j", UnfoldAll, ctx),
             KeyBinding::new("ctrl-k ctrl-l", ToggleFold, ctx),
             KeyBinding::new("ctrl-h", StartFindReplace, ctx),
+            KeyBinding::new("ctrl-k ctrl-d", MoveSelectionToNextFindMatch, ctx),
             KeyBinding::new("ctrl-alt-enter", ReplaceAll, ctx),
             KeyBinding::new("ctrl-shift-1", ReplaceOne, ctx),
             KeyBinding::new("alt-c", ToggleCaseSensitive, ctx),

@@ -61,6 +61,8 @@ enum MouseSelectMode {
     Character,
     Word,
     Line,
+    /// Shift+Alt drag: box (column) selection.
+    Column,
 }
 
 struct MouseSelection {
@@ -107,6 +109,7 @@ pub struct CodeEditor {
     pub(crate) gutter_hovered: bool,
     pub(crate) widgets: Widgets,
     pub(crate) find: crate::find::FindState,
+    pub(crate) multi_cursor: Option<crate::multi_cursor::MultiCursorSession>,
     fold_task: Option<Task<()>>,
     pub(crate) autoscroll_requested: bool,
     pub(crate) cursor_visible: bool,
@@ -169,6 +172,7 @@ impl CodeEditor {
             gutter_hovered: false,
             widgets: Widgets::default(),
             find: Default::default(),
+            multi_cursor: None,
             fold_task: None,
             _blink_task: None,
             _subscriptions: subscriptions,
@@ -1106,7 +1110,7 @@ impl CodeEditor {
             }
         };
         let clicked = match mode {
-            MouseSelectMode::Character => Selection::collapsed(position),
+            MouseSelectMode::Character | MouseSelectMode::Column => Selection::collapsed(position),
             MouseSelectMode::Word => cursor::word_at(&config, self.snapshot.rope(), position)
                 .map(|range| Selection {
                     anchor: range.start,
@@ -1116,6 +1120,24 @@ impl CodeEditor {
             MouseSelectMode::Line => self.line_selection(position.row),
         };
 
+        if event.modifiers.shift && event.modifiers.alt && !in_gutter {
+            let visible_column = self.mouse_visible_column(event.position);
+            cursor::column_select_to(
+                &config,
+                self.snapshot.rope(),
+                &mut self.cursors,
+                position,
+                visible_column,
+                false,
+            );
+            self.mouse_selection = Some(MouseSelection {
+                mode: MouseSelectMode::Column,
+                origin: Selection::collapsed(position),
+                cursor_index: 0,
+            });
+            self.cursors_changed(false, cx);
+            return;
+        }
         let add_cursor = event.modifiers.alt;
         let mut states: Vec<SingleCursorState> = self.cursors.all().to_vec();
         let cursor_index;
@@ -1144,6 +1166,16 @@ impl CodeEditor {
         self.prev_edit_kind = None;
         self.model.update(cx, |model, _| model.push_stack_element());
         self.cursors_changed(false, cx);
+    }
+
+    /// Visible column under the mouse, past the end of text too (box
+    /// selection).
+    fn mouse_visible_column(&self, position: Point<Pixels>) -> u32 {
+        self.layout.as_ref().map_or(0, |layout| {
+            ((position.x - layout.text_origin_x()) / layout.metrics.em_width)
+                .round()
+                .max(0.) as u32
+        })
     }
 
     fn line_selection(&self, row: u32) -> Selection {
@@ -1202,6 +1234,19 @@ impl CodeEditor {
 
         let position = self.position_for_point(event.position, window, cx);
         let config = self.cursor_config(cx);
+        if mode == MouseSelectMode::Column {
+            let visible_column = self.mouse_visible_column(event.position);
+            cursor::column_select_to(
+                &config,
+                self.snapshot.rope(),
+                &mut self.cursors,
+                position,
+                visible_column,
+                true,
+            );
+            self.cursors_changed(false, cx);
+            return;
+        }
         let selection = match mode {
             MouseSelectMode::Character => Selection {
                 anchor: origin.anchor,
@@ -1222,6 +1267,7 @@ impl CodeEditor {
                     }
                 }
             }
+            MouseSelectMode::Column => return,
             MouseSelectMode::Line => {
                 let line = self.line_selection(position.row);
                 if position.row < origin.start().row {
@@ -1639,6 +1685,19 @@ impl Render for CodeEditor {
                 options.in_selection = !options.in_selection;
                 this.set_find_options(options, cx);
             }))
+            .on_action(cx.listener(|this, _: &AddSelectionToNextFindMatch, _, cx| {
+                this.add_selection_to_next_find_match(cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &MoveSelectionToNextFindMatch, _, cx| {
+                    this.move_selection_to_next_find_match(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &SelectAllOccurrences, _, cx| {
+                    this.select_all_occurrences(cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))
             .on_action(cx.listener(Self::copy))
