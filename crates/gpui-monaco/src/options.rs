@@ -24,6 +24,28 @@ pub enum RenderLineHighlight {
     All,
 }
 
+/// Monaco `wordWrap`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WordWrap {
+    #[default]
+    Off,
+    /// Wrap at the viewport width.
+    On,
+    /// Wrap at `word_wrap_column`.
+    WordWrapColumn,
+    /// Wrap at the smaller of the viewport width and `word_wrap_column`.
+    Bounded,
+}
+
+/// Monaco `showFoldingControls`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShowFoldingControls {
+    Always,
+    #[default]
+    Mouseover,
+    Never,
+}
+
 /// Monaco `cursorStyle`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorStyle {
@@ -58,6 +80,11 @@ pub struct EditorOptions {
     pub mouse_wheel_scroll_sensitivity: f32,
     pub empty_selection_clipboard: bool,
     pub sticky_tab_stops: bool,
+    pub word_wrap: WordWrap,
+    pub word_wrap_column: u32,
+    pub wrapping_indent: crate::view::line_breaks::WrappingIndent,
+    pub folding: bool,
+    pub show_folding_controls: ShowFoldingControls,
 }
 
 impl Default for EditorOptions {
@@ -91,6 +118,11 @@ impl Default for EditorOptions {
             mouse_wheel_scroll_sensitivity: 1.0,
             empty_selection_clipboard: true,
             sticky_tab_stops: false,
+            word_wrap: WordWrap::Off,
+            word_wrap_column: 80,
+            wrapping_indent: crate::view::line_breaks::WrappingIndent::Same,
+            folding: true,
+            show_folding_controls: ShowFoldingControls::Mouseover,
         }
     }
 }

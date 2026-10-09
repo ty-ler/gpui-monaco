@@ -27,6 +27,19 @@ impl Playground {
         };
         let model = cx.new(|_| TextModel::new(&text).with_language(language));
         let editor = cx.new(|cx| CodeEditor::new(model, window, cx));
+        if let Ok(wrap) = std::env::var("PLAYGROUND_WRAP") {
+            editor.update(cx, |editor, cx| {
+                let mut options = editor.options().clone();
+                match wrap.parse::<u32>() {
+                    Ok(column) => {
+                        options.word_wrap = gpui_monaco::options::WordWrap::WordWrapColumn;
+                        options.word_wrap_column = column;
+                    }
+                    Err(_) => options.word_wrap = gpui_monaco::options::WordWrap::On,
+                }
+                editor.update_options(options, cx);
+            });
+        }
         if let Ok(theme) = std::env::var("PLAYGROUND_THEME") {
             let theme = match theme.as_str() {
                 "vs" => gpui_monaco::Theme::vs(),

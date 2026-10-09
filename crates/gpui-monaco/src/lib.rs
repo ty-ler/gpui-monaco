@@ -13,6 +13,7 @@ mod element;
 mod model;
 pub mod options;
 pub mod theme;
+pub mod view;
 
 pub use editor::{CodeEditor, CodeEditorEvent, ViewState};
 pub use element::EditorElement;

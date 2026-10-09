@@ -69,6 +69,11 @@ actions!(
         Cut,
         Paste,
         ShowCharacterPalette,
+        Fold,
+        Unfold,
+        FoldAll,
+        UnfoldAll,
+        ToggleFold,
     ]
 );
 
@@ -146,6 +151,11 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-d", DeleteRight, ctx),
             KeyBinding::new("cmd-shift-z", Redo, ctx),
             KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, ctx),
+            KeyBinding::new("cmd-alt-[", Fold, ctx),
+            KeyBinding::new("cmd-alt-]", Unfold, ctx),
+            KeyBinding::new("cmd-k cmd-0", FoldAll, ctx),
+            KeyBinding::new("cmd-k cmd-j", UnfoldAll, ctx),
+            KeyBinding::new("cmd-k cmd-l", ToggleFold, ctx),
         ]);
     } else {
         bindings.extend([
@@ -166,6 +176,11 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("shift-delete", Cut, ctx),
             KeyBinding::new("ctrl-insert", Copy, ctx),
             KeyBinding::new("shift-insert", Paste, ctx),
+            KeyBinding::new("ctrl-shift-[", Fold, ctx),
+            KeyBinding::new("ctrl-shift-]", Unfold, ctx),
+            KeyBinding::new("ctrl-k ctrl-0", FoldAll, ctx),
+            KeyBinding::new("ctrl-k ctrl-j", UnfoldAll, ctx),
+            KeyBinding::new("ctrl-k ctrl-l", ToggleFold, ctx),
         ]);
         if cfg!(target_os = "windows") {
             bindings.extend([

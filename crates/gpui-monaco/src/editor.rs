@@ -18,10 +18,12 @@ use crate::cursor::{
     self, CursorCollection, CursorConfig, EditOperation, EditOperationType, MoveCommand, Selection,
     SingleCursorState,
 };
-use crate::element::{EditorElement, EditorLayout, TextMetrics, layout_row};
+use crate::element::{EditorElement, EditorLayout, layout_segment, row_segment};
 use crate::model::{EditKind, TextModel, TextModelEvent, metadata};
 use crate::options::EditorOptions;
 use crate::theme::{EditorColors, Theme};
+use crate::view::folding::{FoldState, compute_indent_ranges};
+use crate::view::view_lines::{ViewLines, WrapSettings};
 
 /// Events emitted by [`CodeEditor`].
 #[derive(Clone, Debug, PartialEq)]
@@ -95,6 +97,11 @@ pub struct CodeEditor {
     pub(crate) scroll_top: Pixels,
     pub(crate) scroll_left: Pixels,
     pub(crate) layout: Option<EditorLayout>,
+    #[doc(hidden)]
+    pub view_lines: ViewLines,
+    pub(crate) folds: FoldState,
+    pub(crate) gutter_hovered: bool,
+    fold_task: Option<Task<()>>,
     pub(crate) autoscroll_requested: bool,
     pub(crate) cursor_visible: bool,
     /// IME composition range, in byte offsets.
@@ -136,7 +143,7 @@ impl CodeEditor {
         let snapshot = model.read(cx).snapshot();
         Self {
             model,
-            snapshot,
+            snapshot: snapshot.clone(),
             focus_handle,
             cursors: CursorCollection::new(SingleCursorState::from_position(PointUtf16::zero())),
             options: EditorOptions::default(),
@@ -151,6 +158,10 @@ impl CodeEditor {
             mouse_selection: None,
             scrollbar_drag: None,
             blink_epoch: 0,
+            view_lines: ViewLines::new(snapshot.rope().clone(), snapshot.version()),
+            folds: FoldState::default(),
+            gutter_hovered: false,
+            fold_task: None,
             _blink_task: None,
             _subscriptions: subscriptions,
         }
@@ -172,6 +183,9 @@ impl CodeEditor {
         self._subscriptions[0] = cx.subscribe(&model, Self::on_model_event);
         model.update(cx, |model, cx| model.ensure_syntax(cx));
         self.snapshot = model.read(cx).snapshot();
+        self.view_lines = ViewLines::new(self.snapshot.rope().clone(), self.snapshot.version());
+        self.folds = FoldState::default();
+        self.fold_task = None;
         self.model = model;
         self.cursors = CursorCollection::new(SingleCursorState::from_position(PointUtf16::zero()));
         self.scroll_top = px(0.);
@@ -434,14 +448,32 @@ impl CodeEditor {
         let config = self.cursor_config(cx);
         let page = self.page_lines();
         let before = self.cursors.selections();
-        cursor::move_cursors(
-            &config,
-            self.snapshot.rope(),
-            &mut self.cursors,
-            command,
-            select,
-            page,
+        // Like Monaco, movement runs on view lines (wrapped segments, folded
+        // rows skipped); edits run on the model.
+        let lines = self.view_lines.clone();
+        let to_view = |p: PointUtf16| {
+            let (line, column) = lines.to_view(p, false);
+            PointUtf16::new(line, column)
+        };
+        let to_model = |p: PointUtf16| lines.to_model(p.row, p.column);
+        let mut view_cursors = self.cursors.clone();
+        view_cursors.set_states(
+            self.cursors
+                .all()
+                .iter()
+                .map(|state| map_state(state, to_view))
+                .collect(),
         );
+        let model = ViewCursorModel(&lines);
+        cursor::move_cursors(&config, &model, &mut view_cursors, command, select, page);
+        self.cursors.set_states(
+            view_cursors
+                .all()
+                .iter()
+                .map(|state| map_state(state, to_model))
+                .collect(),
+        );
+        self.cursors.validate(self.snapshot.rope());
         self.prev_edit_kind = None;
         if self.cursors.selections() != before {
             self.model.update(cx, |model, _| model.push_stack_element());
@@ -668,34 +700,185 @@ impl CodeEditor {
         };
         let line_height = layout.metrics.line_height;
         let y = position.y - layout.bounds.top() + layout.scroll_top;
-        let max_row = self.snapshot.max_point_utf16().row;
         if y < px(0.) {
             return PointUtf16::zero();
         }
-        let row = (y / line_height).floor() as u32;
-        if row > max_row {
+        let view_line = (y / line_height).floor() as u32;
+        if view_line >= self.view_lines.line_count() {
             return self.snapshot.max_point_utf16();
         }
         let x = position.x - layout.text_origin_x();
-        let column = match layout.line(row) {
-            Some(line) => line.column_for_x(x),
+        match layout.view_line(view_line) {
+            Some(line) => PointUtf16::new(line.row, line.column_for_x(x)),
             None => {
-                let metrics: &TextMetrics = &layout.metrics;
+                let segment = row_segment(&self.view_lines, view_line);
                 let tab_size = self.cursor_config(cx).tab_size;
-                layout_row(
+                let line = layout_segment(
                     self.snapshot.rope(),
-                    row,
+                    &segment,
                     tab_size,
-                    metrics,
+                    &layout.metrics,
                     self.theme.colors.foreground,
                     &[],
                     None,
                     window,
-                )
-                .column_for_x(x)
+                );
+                PointUtf16::new(line.row, line.column_for_x(x))
             }
+        }
+    }
+
+    /// Brings the view lines up to date with the text, wrap settings and
+    /// folds, and (re)computes fold ranges in the background when stale.
+    pub(crate) fn sync_view_lines(&mut self, wrap: Option<WrapSettings>, cx: &mut Context<Self>) {
+        if self.view_lines.version() != self.snapshot.version() {
+            let buffer = self.model.read(cx).buffer().clone();
+            let patch = buffer.edits_since(self.view_lines.version());
+            // Like Monaco, editing inside a collapsed region expands it.
+            for edit in patch.edits() {
+                let start = self.snapshot.offset_to_point(edit.new.start).row;
+                let end = self.snapshot.offset_to_point(edit.new.end).row;
+                self.folds.expand_intersecting(&buffer, start..end + 1);
+            }
+            self.view_lines.apply_edits(
+                self.snapshot.rope().clone(),
+                self.snapshot.version(),
+                &patch,
+            );
+        }
+        self.view_lines.set_wrap(wrap);
+        if self.options.folding {
+            let hidden = self.folds.hidden_rows(self.model.read(cx).buffer());
+            self.view_lines.set_hidden(hidden);
+            if self.folds.ranges_version() != Some(self.snapshot.version())
+                && self.fold_task.is_none()
+            {
+                self.compute_fold_ranges(cx);
+            }
+        } else {
+            self.view_lines.set_hidden(Vec::new());
+        }
+    }
+
+    fn compute_fold_ranges(&mut self, cx: &mut Context<Self>) {
+        let snapshot = self.snapshot.clone();
+        let model = self.model.read(cx);
+        let tab_size = model.options().tab_size;
+        let config = model
+            .language()
+            .map(|language| language.config.folding.clone());
+        self.fold_task = Some(cx.spawn(async move |this, cx| {
+            let version = snapshot.version();
+            let ranges = cx
+                .background_executor()
+                .spawn(async move {
+                    let folding = config.flatten();
+                    let off_side = folding.as_ref().is_some_and(|f| f.off_side);
+                    let markers = folding
+                        .as_ref()
+                        .and_then(|f| f.markers.as_ref())
+                        .map(|m| (&m.start, &m.end));
+                    compute_indent_ranges(snapshot.rope(), tab_size, off_side, markers)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.folds.set_ranges(ranges, version);
+                this.fold_task = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Collapses the innermost expanded region containing each cursor
+    /// (Monaco `editor.fold`).
+    pub fn fold(&mut self, cx: &mut Context<Self>) {
+        let buffer = self.model.read(cx).buffer().clone();
+        let rows: Vec<u32> = self
+            .cursors
+            .selections()
+            .iter()
+            .map(|s| s.head.row)
+            .collect();
+        let collapsed = self.folds.collapsed_rows(&buffer);
+        for row in rows {
+            let candidate = self
+                .folds
+                .ranges()
+                .iter()
+                .filter(|r| r.start_row <= row && row <= r.end_row)
+                .filter(|r| !collapsed.iter().any(|(start, _)| *start == r.start_row))
+                .max_by_key(|r| r.start_row)
+                .cloned();
+            if let Some(range) = candidate {
+                self.folds.collapse(&buffer, range.start_row, range.end_row);
+            }
+        }
+        self.after_fold_change(cx);
+    }
+
+    /// Expands collapsed regions at or containing each cursor's row (Monaco
+    /// `editor.unfold`).
+    pub fn unfold(&mut self, cx: &mut Context<Self>) {
+        let buffer = self.model.read(cx).buffer().clone();
+        let rows: Vec<u32> = self
+            .cursors
+            .selections()
+            .iter()
+            .map(|s| s.head.row)
+            .collect();
+        for (start, end) in self.folds.collapsed_rows(&buffer) {
+            if rows.iter().any(|row| start <= *row && *row <= end) {
+                self.folds.expand(&buffer, start);
+            }
+        }
+        self.after_fold_change(cx);
+    }
+
+    /// Toggles the region starting at `row` (gutter chevron click).
+    pub fn toggle_fold_at(&mut self, row: u32, cx: &mut Context<Self>) {
+        let buffer = self.model.read(cx).buffer().clone();
+        if !self.folds.expand(&buffer, row)
+            && let Some(range) = self.folds.range_starting_at(row).cloned()
+        {
+            self.folds.collapse(&buffer, range.start_row, range.end_row);
+        }
+        self.after_fold_change(cx);
+    }
+
+    pub fn fold_all(&mut self, cx: &mut Context<Self>) {
+        let buffer = self.model.read(cx).buffer().clone();
+        self.folds.collapse_all(&buffer);
+        self.after_fold_change(cx);
+    }
+
+    pub fn unfold_all(&mut self, cx: &mut Context<Self>) {
+        self.folds.expand_all();
+        self.after_fold_change(cx);
+    }
+
+    /// Moves cursors out of hidden rows to the end of their fold's start row.
+    fn after_fold_change(&mut self, cx: &mut Context<Self>) {
+        let buffer = self.model.read(cx).buffer().clone();
+        let collapsed = self.folds.collapsed_rows(&buffer);
+        let fix = |p: PointUtf16| match collapsed
+            .iter()
+            .find(|(start, end)| *start < p.row && p.row <= *end)
+        {
+            Some((start, _)) => PointUtf16::new(*start, self.snapshot.line_len_utf16(*start)),
+            None => p,
         };
-        PointUtf16::new(row, column)
+        let selections: Vec<Selection> = self
+            .cursors
+            .selections()
+            .into_iter()
+            .map(|s| Selection {
+                anchor: fix(s.anchor),
+                head: fix(s.head),
+            })
+            .collect();
+        self.cursors.set_selections(&selections);
+        self.cursors_changed(true, cx);
     }
 
     fn on_mouse_down(
@@ -730,6 +913,15 @@ impl CodeEditor {
             };
             self.scrollbar_drag = Some(ScrollbarDrag::Horizontal { grab_offset });
             self.drag_scrollbar(event.position, cx);
+            return;
+        }
+
+        if let Some(control) = layout
+            .fold_controls
+            .iter()
+            .find(|control| control.bounds.contains(&event.position))
+        {
+            self.toggle_fold_at(control.row, cx);
             return;
         }
 
@@ -805,6 +997,13 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let gutter_hovered = self.layout.as_ref().is_some_and(|layout| {
+            layout.bounds.contains(&event.position) && event.position.x < layout.text_bounds.left()
+        });
+        if gutter_hovered != self.gutter_hovered {
+            self.gutter_hovered = gutter_hovered;
+            cx.notify();
+        }
         if self.scrollbar_drag.is_some() {
             if event.pressed_button == Some(MouseButton::Left) {
                 self.drag_scrollbar(event.position, cx);
@@ -1081,9 +1280,9 @@ impl EntityInputHandler for CodeEditor {
         let layout = self.layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
         let start = self.snapshot.offset_to_point_utf16(range.start);
-        let line = layout.line(start.row)?;
+        let line = layout.line_for_point(start)?;
         let x = layout.text_origin_x() + line.x_for_column(start.column);
-        let top = layout.row_top(start.row);
+        let top = layout.line_top(line.view_line);
         Some(Bounds::new(
             point(x, top),
             gpui::size(px(1.), layout.metrics.line_height),
@@ -1178,6 +1377,20 @@ impl Render for CodeEditor {
             .on_action(cx.listener(Self::delete_lines))
             .on_action(cx.listener(Self::insert_line_after))
             .on_action(cx.listener(Self::insert_line_before))
+            .on_action(cx.listener(|this, _: &Fold, _, cx| this.fold(cx)))
+            .on_action(cx.listener(|this, _: &Unfold, _, cx| this.unfold(cx)))
+            .on_action(cx.listener(|this, _: &FoldAll, _, cx| this.fold_all(cx)))
+            .on_action(cx.listener(|this, _: &UnfoldAll, _, cx| this.unfold_all(cx)))
+            .on_action(cx.listener(|this, _: &ToggleFold, _, cx| {
+                let row = this.cursors.primary().position.row;
+                let buffer = this.model.read(cx).buffer().clone();
+                let collapsed = this.folds.collapsed_rows(&buffer);
+                if let Some((start, _)) = collapsed.iter().find(|(s, e)| *s <= row && row <= *e) {
+                    this.toggle_fold_at(*start, cx);
+                } else {
+                    this.fold(cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))
             .on_action(cx.listener(Self::copy))
@@ -1194,5 +1407,31 @@ impl Render for CodeEditor {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .child(EditorElement::new(cx.entity()))
+    }
+}
+
+/// Applies `f` to every position in a cursor state.
+fn map_state(state: &SingleCursorState, f: impl Fn(PointUtf16) -> PointUtf16) -> SingleCursorState {
+    SingleCursorState {
+        selection_start: f(state.selection_start.start)..f(state.selection_start.end),
+        position: f(state.position),
+        ..state.clone()
+    }
+}
+
+/// The cursor core's view of the view lines (Monaco's view model lines).
+struct ViewCursorModel<'a>(&'a ViewLines);
+
+impl cursor::CursorModel for ViewCursorModel<'_> {
+    fn line_count(&self) -> u32 {
+        self.0.line_count().max(1)
+    }
+
+    fn line_content(&self, row: u32) -> String {
+        self.0.line_content(row)
+    }
+
+    fn line_max_column(&self, row: u32) -> u32 {
+        self.0.line_content(row).encode_utf16().count() as u32
     }
 }

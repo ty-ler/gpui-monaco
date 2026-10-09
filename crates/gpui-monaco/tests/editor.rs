@@ -189,3 +189,30 @@ fn shift_end_after_merging_multicursor_selections(cx: &mut TestAppContext) {
         "{selections:?}"
     );
 }
+
+#[gpui::test]
+fn folding_hides_rows_and_cursor_skips_them(cx: &mut TestAppContext) {
+    let (editor, cx) = editor_with_text("fn a() {\n    one\n    two\n}\nafter", cx);
+    // Let the background fold-range computation finish.
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    cx.simulate_keystrokes("down");
+    cx.simulate_keystrokes("secondary-alt-[");
+    let lines = editor.read_with(cx, |e, _| e.view_lines.line_count());
+    assert_eq!(lines, 3, "rows 1-2 hidden");
+    // The cursor moved out of the hidden row to the end of the fold start.
+    assert_eq!(heads(&editor, cx), vec![(1, 9)]);
+    cx.simulate_keystrokes("down");
+    assert_eq!(heads(&editor, cx), vec![(4, 2)]);
+    // Back up restores the remembered column; up again on the first line
+    // goes to column 1, like Monaco.
+    cx.simulate_keystrokes("up");
+    assert_eq!(heads(&editor, cx), vec![(1, 9)]);
+    cx.simulate_keystrokes("up");
+    assert_eq!(heads(&editor, cx), vec![(1, 1)]);
+    // Typing inside the region's visible start line keeps it folded;
+    // unfold restores the rows.
+    cx.simulate_keystrokes("secondary-alt-]");
+    assert_eq!(editor.read_with(cx, |e, _| e.view_lines.line_count()), 5);
+}

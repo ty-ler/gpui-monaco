@@ -1,58 +1,77 @@
-//! The [`EditorElement`]: lays out and paints only the visible rows.
+//! The [`EditorElement`]: lays out and paints only the visible view lines.
 
 use std::ops::Range;
 
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Corners, Edges, Element, ElementId, ElementInputHandler,
     Entity, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement,
-    LayoutId, Pixels, ShapedLine, SharedString, Size, Style, TextAlign, TextRun, UnderlineStyle,
-    Window, fill, font, point, px, quad, relative, size,
+    LayoutId, PathBuilder, Pixels, ShapedLine, SharedString, Size, Style, TextAlign, TextRun,
+    UnderlineStyle, Window, fill, font, point, px, quad, relative, size,
 };
-use text::{BufferSnapshot, PointUtf16, Rope};
+use text::{PointUtf16, Rope};
 
 use crate::cursor::Selection;
 use crate::editor::CodeEditor;
-use crate::options::{CursorStyle, EditorOptions, LineNumbers, RenderLineHighlight};
+use crate::options::{
+    CursorStyle, EditorOptions, LineNumbers, RenderLineHighlight, ShowFoldingControls, WordWrap,
+};
 use crate::theme::{EditorColors, Theme, TokenStyle};
+use crate::view::view_lines::{ViewLine, ViewLines, WrapSettings, utf16_to_byte};
 
 /// Width of the glyph margin when enabled (Monaco `glyphMarginWidth`).
 const GLYPH_MARGIN_WIDTH: f32 = 18.;
 /// Monaco `lineDecorationsWidth` default.
 const LINE_DECORATIONS_WIDTH: f32 = 10.;
-/// Minimum scrollbar slider length (Monaco `minimumSliderSize`... rounded).
+/// Minimum scrollbar slider length.
 const MIN_SLIDER: f32 = 20.;
 
-/// One shaped buffer row and the mapping from UTF-16 columns to positions in
-/// the shaped (tab-expanded) text.
+/// One shaped view line: a (possibly wrapped) segment of a model row.
 #[derive(Clone)]
 pub(crate) struct LineLayout {
+    pub view_line: u32,
     pub row: u32,
+    /// UTF-16 columns of the model row on this view line.
+    pub columns: Range<u32>,
+    pub is_last_segment: bool,
+    /// X of the first column (continuation indent).
+    pub indent_x: Pixels,
     pub shaped: ShapedLine,
-    /// `display_index[col]` is the byte index into the shaped text for UTF-16
-    /// column `col`, for `col` in `0..=line_len_utf16`.
+    /// Byte index into the shaped text for each column in `columns`,
+    /// inclusive of the end.
     pub display_index: Vec<usize>,
 }
 
 impl LineLayout {
     pub fn x_for_column(&self, column: u32) -> Pixels {
-        let ix = (column as usize).min(self.display_index.len() - 1);
-        self.shaped.x_for_index(self.display_index[ix])
+        let column = column.clamp(self.columns.start, self.columns.end);
+        let ix = ((column - self.columns.start) as usize).min(self.display_index.len() - 1);
+        self.indent_x + self.shaped.x_for_index(self.display_index[ix])
     }
 
     pub fn column_for_x(&self, x: Pixels) -> u32 {
-        let ix = self.shaped.closest_index_for_x(x);
+        let ix = self.shaped.closest_index_for_x(x - self.indent_x);
         let col = self.display_index.partition_point(|&d| d < ix);
         let col = col.min(self.display_index.len() - 1);
         // Never land between the halves of a surrogate pair.
-        if col > 0 && self.display_index[col] == self.display_index[col - 1] {
-            (col - 1) as u32
+        let col = if col > 0 && self.display_index[col] == self.display_index[col - 1] {
+            col - 1
         } else {
-            col as u32
-        }
+            col
+        };
+        self.columns.start + col as u32
     }
 
+    /// Width up to the end of the text on this line.
     pub fn width(&self) -> Pixels {
-        self.shaped.width
+        self.indent_x + self.shaped.width
+    }
+
+    /// Whether `point` displays on this line.
+    pub fn contains(&self, point: PointUtf16) -> bool {
+        point.row == self.row
+            && self.columns.start <= point.column
+            && (point.column < self.columns.end
+                || (point.column == self.columns.end && self.is_last_segment))
     }
 }
 
@@ -93,13 +112,23 @@ fn run(len: usize, font: &Font, color: Hsla) -> TextRun {
     }
 }
 
-/// Shapes one buffer row. `highlights` are styled spans in line-relative
-/// byte offsets, sorted and non-overlapping. `marked` is an IME composition
-/// range in UTF-16 columns on this row, drawn underlined.
+/// What to shape for one view line.
+pub(crate) struct RowSegment {
+    pub view_line: u32,
+    pub row: u32,
+    pub columns: Range<u32>,
+    pub start_visible_column: u32,
+    pub indent: u32,
+    pub is_last_segment: bool,
+}
+
+/// Shapes one view line. `highlights` are styled spans in row-relative byte
+/// offsets, sorted and non-overlapping. `marked` is an IME composition range
+/// in UTF-16 columns of the row, drawn underlined.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn layout_row(
+pub(crate) fn layout_segment(
     rope: &Rope,
-    row: u32,
+    segment: &RowSegment,
     tab_size: u32,
     metrics: &TextMetrics,
     color: Hsla,
@@ -107,18 +136,21 @@ pub(crate) fn layout_row(
     marked: Option<(Range<u32>, Hsla)>,
     window: &mut Window,
 ) -> LineLayout {
-    let line = rope.line(row);
+    let full = rope.line(segment.row);
+    let byte_start = utf16_to_byte(&full, segment.columns.start);
+    let byte_end = utf16_to_byte(&full, segment.columns.end);
+    let line = &full[byte_start..byte_end];
     let tab_size = tab_size.max(1) as usize;
     let mut display = String::with_capacity(line.len());
     let mut display_index = Vec::with_capacity(line.len() + 1);
-    // (line byte offset, display offset) for each char start.
+    // (row byte offset, display offset) for each char start.
     let mut char_starts = Vec::with_capacity(line.len());
-    let mut visible_column = 0usize;
+    let mut visible_column = segment.start_visible_column as usize;
     for (byte, ch) in line.char_indices() {
         for _ in 0..ch.len_utf16() {
             display_index.push(display.len());
         }
-        char_starts.push((byte, display.len()));
+        char_starts.push((byte_start + byte, display.len()));
         if ch == '\t' {
             let spaces = tab_size - visible_column % tab_size;
             display.extend(std::iter::repeat_n(' ', spaces));
@@ -131,17 +163,23 @@ pub(crate) fn layout_row(
     display_index.push(display.len());
     let display_len = display.len();
     let to_display = |byte: usize| -> usize {
-        if byte >= line.len() {
+        if byte >= byte_end {
             return display_len;
+        }
+        if byte <= byte_start {
+            return 0;
         }
         let ix = char_starts.partition_point(|&(b, _)| b < byte);
         char_starts.get(ix).map_or(display_len, |&(_, d)| d)
     };
+    let column_to_display = |column: u32| -> usize {
+        let column = column.clamp(segment.columns.start, segment.columns.end);
+        display_index[((column - segment.columns.start) as usize).min(display_index.len() - 1)]
+    };
 
-    // Segment boundaries in display offsets.
     let marked_display = marked.as_ref().and_then(|(range, underline)| {
-        let start = display_index[(range.start as usize).min(display_index.len() - 1)];
-        let end = display_index[(range.end as usize).min(display_index.len() - 1)];
+        let start = column_to_display(range.start);
+        let end = column_to_display(range.end);
         (end > start).then_some((start..end, *underline))
     });
     let styled: Vec<(Range<usize>, TokenStyle)> = highlights
@@ -212,9 +250,27 @@ pub(crate) fn layout_row(
         None,
     );
     LineLayout {
-        row,
+        view_line: segment.view_line,
+        row: segment.row,
+        columns: segment.columns.clone(),
+        is_last_segment: segment.is_last_segment,
+        indent_x: metrics.em_width * segment.indent as f32,
         shaped,
         display_index,
+    }
+}
+
+/// The segment shown on `view_line`.
+pub(crate) fn row_segment(view_lines: &ViewLines, view_line: u32) -> RowSegment {
+    let ViewLine { row, segment } = view_lines.view_line(view_line);
+    let info = view_lines.segment_info(ViewLine { row, segment });
+    RowSegment {
+        view_line,
+        row,
+        columns: info.columns,
+        start_visible_column: info.start_visible_column,
+        indent: info.indent,
+        is_last_segment: info.is_last,
     }
 }
 
@@ -262,6 +318,14 @@ pub(crate) struct ScrollbarLayout {
     pub ratio: f32,
 }
 
+/// A fold control in the gutter.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FoldControl {
+    pub row: u32,
+    pub bounds: Bounds<Pixels>,
+    pub collapsed: bool,
+}
+
 /// Everything about the last frame that event handlers need for hit testing.
 #[derive(Clone)]
 pub(crate) struct EditorLayout {
@@ -273,19 +337,25 @@ pub(crate) struct EditorLayout {
     pub scroll_top: Pixels,
     pub scroll_left: Pixels,
     pub lines: Vec<LineLayout>,
+    pub fold_controls: Vec<FoldControl>,
     pub vertical_scrollbar: Option<ScrollbarLayout>,
     pub horizontal_scrollbar: Option<ScrollbarLayout>,
 }
 
 impl EditorLayout {
-    /// Visible rows that fit fully, for page up/down.
+    /// Visible view lines that fit fully, for page up/down.
     pub fn page_rows(&self) -> u32 {
         ((self.text_bounds.size.height / self.metrics.line_height).floor() as u32).max(1)
     }
 
-    pub fn line(&self, row: u32) -> Option<&LineLayout> {
-        let first = self.lines.first()?.row;
-        self.lines.get(row.checked_sub(first)? as usize)
+    /// The laid-out view line showing `point`, if visible.
+    pub fn line_for_point(&self, point: PointUtf16) -> Option<&LineLayout> {
+        self.lines.iter().find(|line| line.contains(point))
+    }
+
+    pub fn view_line(&self, view_line: u32) -> Option<&LineLayout> {
+        let first = self.lines.first()?.view_line;
+        self.lines.get(view_line.checked_sub(first)? as usize)
     }
 
     /// X of the start of text (column 0) in window coordinates.
@@ -293,8 +363,8 @@ impl EditorLayout {
         self.text_bounds.left() - self.scroll_left
     }
 
-    pub fn row_top(&self, row: u32) -> Pixels {
-        self.bounds.top() + self.metrics.line_height * row as f32 - self.scroll_top
+    pub fn line_top(&self, view_line: u32) -> Pixels {
+        self.bounds.top() + self.metrics.line_height * view_line as f32 - self.scroll_top
     }
 }
 
@@ -319,9 +389,13 @@ impl IntoElement for EditorElement {
 pub struct PrepaintState {
     layout: EditorLayout,
     selections: Vec<Selection>,
-    primary_row: u32,
+    /// View lines with a cursor (for the current line highlight).
+    cursor_view_lines: Vec<u32>,
     cursor_quads: Vec<Bounds<Pixels>>,
     gutter_numbers: Vec<(Pixels, ShapedLine, Pixels)>,
+    /// (x after the text, top) of rows whose region is collapsed.
+    fold_placeholders: Vec<(Pixels, Pixels)>,
+    show_fold_controls: bool,
     colors: EditorColors,
     options: EditorOptions,
     focused: bool,
@@ -397,11 +471,10 @@ fn prepaint_editor(
     let colors = theme.colors.clone();
     let metrics = TextMetrics::new(&options, window);
     let line_height = metrics.line_height;
-    let snapshot: BufferSnapshot = editor.snapshot.clone();
     let tab_size = editor.cursor_config(cx).tab_size;
-    let line_count = snapshot.line_count();
+    let line_count = editor.snapshot.line_count();
 
-    // Gutter: [glyph margin][line numbers][line decorations].
+    // Gutter: [glyph margin][line numbers][line decorations + folding].
     let digits = line_count.to_string().len() as u32;
     let number_chars = digits.max(options.line_numbers_min_chars);
     let numbers_width = if options.line_numbers == LineNumbers::Off {
@@ -414,12 +487,45 @@ fn prepaint_editor(
     } else {
         px(0.)
     };
-    let gutter_width = (glyph_width + numbers_width + px(LINE_DECORATIONS_WIDTH)).round();
+    let folding_width = if options.folding {
+        line_height.min(px(18.))
+    } else {
+        px(0.)
+    };
+    let gutter_width =
+        (glyph_width + numbers_width + px(LINE_DECORATIONS_WIDTH) + folding_width).round();
 
     let vbar = options.vertical_scrollbar_size;
     let hbar = options.horizontal_scrollbar_size;
     let viewport_height = bounds.size.height;
-    let content_height = line_height * line_count as f32
+    let text_width = bounds.size.width - gutter_width - vbar;
+
+    // Bring the view lines up to date: edits, wrapping, folds.
+    let wrap_column = {
+        let viewport_columns = ((text_width - metrics.em_width) / metrics.em_width)
+            .floor()
+            .max(1.) as u32;
+        match options.word_wrap {
+            WordWrap::Off => None,
+            WordWrap::On => Some(viewport_columns),
+            WordWrap::WordWrapColumn => Some(options.word_wrap_column.max(1)),
+            WordWrap::Bounded => Some(viewport_columns.min(options.word_wrap_column.max(1))),
+        }
+    };
+    editor.sync_view_lines(
+        wrap_column.map(|column| WrapSettings {
+            column,
+            tab_size,
+            indent: options.wrapping_indent,
+            keep_all: false,
+        }),
+        cx,
+    );
+    let view_lines = editor.view_lines.clone();
+    let view_line_count = view_lines.line_count().max(1);
+    let snapshot = editor.snapshot.clone();
+
+    let content_height = line_height * view_line_count as f32
         + if options.scroll_beyond_last_line {
             (viewport_height - line_height).max(px(0.))
         } else {
@@ -427,10 +533,12 @@ fn prepaint_editor(
         };
     let max_scroll_top = (content_height - viewport_height).max(px(0.));
 
-    // Rough content width from the longest row; refined by shaped rows below.
-    let longest = snapshot.summary().longest_row_chars as f32;
-    let text_width = bounds.size.width - gutter_width - vbar;
-    let mut content_width = metrics.em_width * (longest + 2.);
+    // Rough content width from the longest row; refined by shaped lines below.
+    let mut content_width = if wrap_column.is_some() {
+        text_width
+    } else {
+        metrics.em_width * (snapshot.summary().longest_row_chars as f32 + 2.)
+    };
     let show_hbar = content_width > text_width;
     let text_height = if show_hbar {
         viewport_height - hbar
@@ -438,11 +546,12 @@ fn prepaint_editor(
         viewport_height
     };
 
-    // Vertical autoscroll before choosing rows.
+    // Vertical autoscroll before choosing lines.
     let selections = editor.cursors.selections();
     let primary = selections[0].head;
+    let (primary_view_line, _) = view_lines.to_view(primary, false);
     if editor.autoscroll_requested {
-        let top = line_height * primary.row as f32;
+        let top = line_height * primary_view_line as f32;
         let bottom = top + line_height;
         if top < editor.scroll_top {
             editor.scroll_top = top;
@@ -453,21 +562,29 @@ fn prepaint_editor(
     editor.scroll_top = editor.scroll_top.clamp(px(0.), max_scroll_top);
     let scroll_top = editor.scroll_top;
 
-    let first_row = (scroll_top / line_height).floor() as u32;
-    let last_row = (((scroll_top + viewport_height) / line_height).ceil() as u32)
-        .min(line_count.saturating_sub(1));
+    let first_line = (scroll_top / line_height).floor() as u32;
+    let last_line = (((scroll_top + viewport_height) / line_height).ceil() as u32)
+        .min(view_line_count.saturating_sub(1));
+    let segments: Vec<RowSegment> = (first_line..=last_line)
+        .map(|view_line| row_segment(&view_lines, view_line))
+        .collect();
 
     let marked = editor.marked_range_points();
-    let visible_start = snapshot.point_to_offset(text::Point::new(first_row, 0));
-    let visible_end = snapshot.point_to_offset(text::Point::new(last_row, u32::MAX));
+    let (visible_start, visible_end) = match (segments.first(), segments.last()) {
+        (Some(first), Some(last)) => (
+            snapshot.point_to_offset(text::Point::new(first.row, 0)),
+            snapshot.point_to_offset(text::Point::new(last.row, u32::MAX)),
+        ),
+        _ => (0, 0),
+    };
     let highlights = {
         let model = editor.model().read(cx);
         current_highlights(model, &theme, visible_start..visible_end)
     };
     let mut highlight_ix = 0;
-    let mut lines = Vec::with_capacity((last_row + 1).saturating_sub(first_row) as usize);
-    for row in first_row..=last_row {
-        let line_range = snapshot.line_range(row);
+    let mut lines = Vec::with_capacity(segments.len());
+    for segment in &segments {
+        let line_range = snapshot.line_range(segment.row);
         while highlight_ix < highlights.len() && highlights[highlight_ix].0.end <= line_range.start
         {
             highlight_ix += 1;
@@ -482,12 +599,12 @@ fn prepaint_editor(
             })
             .collect();
         let marked_cols = marked.as_ref().and_then(|range| {
-            (range.start.row == row && range.end.row == row)
+            (range.start.row == segment.row && range.end.row == segment.row)
                 .then_some((range.start.column..range.end.column, colors.ime_underline))
         });
-        let line = layout_row(
+        let line = layout_segment(
             &snapshot,
-            row,
+            segment,
             tab_size,
             &metrics,
             colors.foreground,
@@ -504,7 +621,7 @@ fn prepaint_editor(
     if editor.autoscroll_requested {
         let primary_x = lines
             .iter()
-            .find(|line| line.row == primary.row)
+            .find(|line| line.contains(primary))
             .map(|line| line.x_for_column(primary.column))
             .unwrap_or(px(0.));
         let padding = metrics.em_width * 2.;
@@ -558,6 +675,38 @@ fn prepaint_editor(
         }
     });
 
+    // Fold controls and placeholders.
+    let mut fold_controls = Vec::new();
+    let mut fold_placeholders = Vec::new();
+    if options.folding {
+        let buffer = editor.model().read(cx).buffer().clone();
+        let collapsed = editor.folds.collapsed_rows(&buffer);
+        let left = bounds.left() + glyph_width + numbers_width + px(LINE_DECORATIONS_WIDTH);
+        for line in lines.iter().filter(|line| line.columns.start == 0) {
+            let top = bounds.top() + line_height * line.view_line as f32 - scroll_top;
+            let is_collapsed = collapsed.iter().any(|(start, _)| *start == line.row);
+            if is_collapsed || editor.folds.range_starting_at(line.row).is_some() {
+                fold_controls.push(FoldControl {
+                    row: line.row,
+                    bounds: Bounds::new(point(left, top), size(folding_width, line_height)),
+                    collapsed: is_collapsed,
+                });
+            }
+        }
+        for line in lines.iter().filter(|line| line.is_last_segment) {
+            if collapsed.iter().any(|(start, _)| *start == line.row) {
+                let top = bounds.top() + line_height * line.view_line as f32 - scroll_top;
+                let x = text_bounds.left() - scroll_left + line.width() + metrics.em_width / 2.;
+                fold_placeholders.push((x, top));
+            }
+        }
+    }
+    let show_fold_controls = match options.show_folding_controls {
+        ShowFoldingControls::Always => true,
+        ShowFoldingControls::Mouseover => editor.gutter_hovered,
+        ShowFoldingControls::Never => false,
+    };
+
     let layout = EditorLayout {
         bounds,
         gutter_width,
@@ -566,18 +715,25 @@ fn prepaint_editor(
         scroll_top,
         scroll_left,
         lines,
+        fold_controls,
         vertical_scrollbar,
         horizontal_scrollbar,
     };
 
     // Cursors.
     let mut cursor_quads = Vec::new();
+    let mut cursor_view_lines = Vec::new();
     for selection in &selections {
         let head = selection.head;
-        if let Some(line) = layout.line(head.row) {
+        let (view_line, _) = view_lines.to_view(head, false);
+        cursor_view_lines.push(view_line);
+        if let Some(line) = layout
+            .view_line(view_line)
+            .filter(|line| line.contains(head))
+        {
             let x = layout.text_origin_x() + line.x_for_column(head.column);
-            let y = layout.row_top(head.row);
-            let char_width = if head.column < line.display_index.len() as u32 - 1 {
+            let y = layout.line_top(line.view_line);
+            let char_width = if head.column < line.columns.end {
                 (line.x_for_column(head.column + 1) - line.x_for_column(head.column))
                     .max(metrics.em_width / 2.)
             } else {
@@ -597,11 +753,11 @@ fn prepaint_editor(
         }
     }
 
-    // Gutter numbers.
+    // Gutter numbers: on the first view line of each row.
     let mut gutter_numbers = Vec::new();
     if options.line_numbers != LineNumbers::Off {
         let right = bounds.left() + glyph_width + numbers_width;
-        for line in &layout.lines {
+        for line in layout.lines.iter().filter(|line| line.columns.start == 0) {
             let row = line.row;
             let is_active = selections.iter().any(|s| s.head.row == row);
             let label = match options.line_numbers {
@@ -622,7 +778,7 @@ fn prepaint_editor(
                 &[run(label.len(), &metrics.font, color)],
                 None,
             );
-            gutter_numbers.push((layout.row_top(row), shaped, right));
+            gutter_numbers.push((layout.line_top(line.view_line), shaped, right));
         }
     }
 
@@ -631,9 +787,11 @@ fn prepaint_editor(
     PrepaintState {
         layout,
         selections,
-        primary_row: primary.row,
+        cursor_view_lines,
         cursor_quads,
         gutter_numbers,
+        fold_placeholders,
+        show_fold_controls,
         colors,
         options,
         focused,
@@ -664,7 +822,7 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
     window.with_content_mask(Some(ContentMask { bounds }), |window| {
         // Current line highlight (Monaco only draws it without a selection).
         if !has_selection && (highlight_line || highlight_gutter) {
-            let top = layout.row_top(state.primary_row);
+            let top = layout.line_top(state.cursor_view_lines[0]);
             let left = if highlight_gutter {
                 bounds.left()
             } else {
@@ -697,6 +855,13 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                 .ok();
         }
 
+        // Fold controls: always for collapsed regions, otherwise per option.
+        for control in &layout.fold_controls {
+            if control.collapsed || state.show_fold_controls {
+                paint_chevron(control, colors.line_number, window);
+            }
+        }
+
         window.with_content_mask(
             Some(ContentMask {
                 bounds: layout.text_bounds,
@@ -716,10 +881,22 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                 }
 
                 for line in &layout.lines {
-                    let origin = point(origin_x, layout.row_top(line.row));
+                    let top = layout.line_top(line.view_line);
                     line.shaped
-                        .paint(origin, line_height, TextAlign::Left, None, window, cx)
+                        .paint(
+                            point(origin_x + line.indent_x, top),
+                            line_height,
+                            TextAlign::Left,
+                            None,
+                            window,
+                            cx,
+                        )
                         .ok();
+                }
+
+                // Folded region placeholder ("⋯").
+                for (x, top) in &state.fold_placeholders {
+                    paint_fold_placeholder(*x, *top, layout, colors, window);
                 }
 
                 if state.focused && state.cursor_visible {
@@ -747,6 +924,61 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
     });
 }
 
+fn paint_fold_placeholder(
+    x: Pixels,
+    top: Pixels,
+    layout: &EditorLayout,
+    colors: &EditorColors,
+    window: &mut Window,
+) {
+    let line_height = layout.metrics.line_height;
+    let width = layout.metrics.em_width * 2.;
+    let box_bounds = Bounds::new(
+        point(x, top + line_height * 0.15),
+        size(width, line_height * 0.7),
+    );
+    window.paint_quad(quad(
+        box_bounds,
+        Corners::all(px(3.)),
+        colors.selection_background.opacity(0.4),
+        Edges::default(),
+        gpui::transparent_black(),
+        BorderStyle::Solid,
+    ));
+    let dot = px(2.);
+    for i in 0..3 {
+        let x = box_bounds.left() + width * (0.25 + 0.25 * i as f32) - dot / 2.;
+        let y = box_bounds.center().y - dot / 2.;
+        window.paint_quad(quad(
+            Bounds::new(point(x, y), size(dot, dot)),
+            Corners::all(dot / 2.),
+            colors.foreground.opacity(0.7),
+            Edges::default(),
+            gpui::transparent_black(),
+            BorderStyle::Solid,
+        ));
+    }
+}
+
+/// A chevron: pointing down when expanded, right when collapsed.
+fn paint_chevron(control: &FoldControl, color: Hsla, window: &mut Window) {
+    let center = control.bounds.center();
+    let half = control.bounds.size.width.min(control.bounds.size.height) * 0.18;
+    let mut path = PathBuilder::stroke(px(1.5));
+    if control.collapsed {
+        path.move_to(point(center.x - half / 2., center.y - half));
+        path.line_to(point(center.x + half / 2., center.y));
+        path.line_to(point(center.x - half / 2., center.y + half));
+    } else {
+        path.move_to(point(center.x - half, center.y - half / 2.));
+        path.line_to(point(center.x, center.y + half / 2.));
+        path.line_to(point(center.x + half, center.y - half / 2.));
+    }
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color);
+    }
+}
+
 fn paint_selection(
     layout: &EditorLayout,
     selection: &Selection,
@@ -762,19 +994,27 @@ fn paint_selection(
         if row < start.row || row > end.row {
             continue;
         }
-        let from = if row == start.row {
-            line.x_for_column(start.column)
+        // Selected columns of this row, clipped to this view line.
+        let sel_start = if row == start.row { start.column } else { 0 };
+        let sel_end = if row == end.row { end.column } else { u32::MAX };
+        if sel_end < line.columns.start || sel_start > line.columns.end {
+            continue;
+        }
+        let from = line.x_for_column(sel_start.max(line.columns.start));
+        let to = if sel_end > line.columns.end {
+            // Continues past this view line.
+            line.width()
+                + if line.is_last_segment {
+                    eol_width
+                } else {
+                    px(0.)
+                }
         } else {
-            px(0.)
-        };
-        let to = if row == end.row {
-            line.x_for_column(end.column)
-        } else {
-            line.width() + eol_width
+            line.x_for_column(sel_end)
         };
         if to > from {
             let bounds = Bounds::new(
-                point(origin_x + from, layout.row_top(row)),
+                point(origin_x + from, layout.line_top(line.view_line)),
                 size(to - from, layout.metrics.line_height),
             );
             window.paint_quad(fill(bounds, color));
