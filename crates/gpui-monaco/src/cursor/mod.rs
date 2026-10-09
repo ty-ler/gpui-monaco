@@ -23,7 +23,7 @@ mod column;
 mod edit;
 mod lines;
 mod movement;
-mod strings;
+pub(crate) mod strings;
 mod typing;
 mod word;
 

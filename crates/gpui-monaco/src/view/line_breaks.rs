@@ -1,0 +1,509 @@
+//! Soft-wrap break computation for monospace text.
+//!
+//! Ported from Monaco's `common/viewModel/monospaceLineBreaksComputer.ts`
+//! (MIT) and `modelLineProjectionData.ts`, minus injected text and
+//! `wrapOnEscapedLineFeeds`. Offsets are UTF-16 code units within the line,
+//! widths are visible columns (full-width characters take two).
+
+use crate::cursor::strings::is_full_width_character;
+
+/// Monaco `wordWrapBreakBeforeCharacters` default.
+pub const DEFAULT_BREAK_BEFORE: &str = "([{‘“〈《「『【〔（［｛｢£¥＄￡￥+＋";
+/// Monaco `wordWrapBreakAfterCharacters` default.
+pub const DEFAULT_BREAK_AFTER: &str = " \t})]?|/&.,;¢°′″‰℃、。｡､￠，．：；？！％・･ゝゞヽヾーァィゥェォッャュョヮヵヶぁぃぅぇぉっゃゅょゎゕゖㇰㇱㇲㇳㇴㇵㇶㇷㇸㇹㇺㇻㇼㇽㇾㇿ々〻ｧｨｩｪｫｬｭｮｯｰ”〉》」』】〕）］｝｣";
+
+/// Monaco `wrappingIndent`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WrappingIndent {
+    None,
+    #[default]
+    Same,
+    Indent,
+    DeepIndent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CharClass {
+    None,
+    BreakBefore,
+    BreakAfter,
+    BreakIdeographic,
+}
+
+/// Classifies UTF-16 code units for wrapping.
+#[derive(Clone, Debug)]
+pub struct WrapClassifier {
+    ascii: [CharClass; 256],
+    other: Vec<(u32, CharClass)>,
+}
+
+impl Default for WrapClassifier {
+    fn default() -> Self {
+        Self::new(DEFAULT_BREAK_BEFORE, DEFAULT_BREAK_AFTER)
+    }
+}
+
+impl WrapClassifier {
+    pub fn new(break_before: &str, break_after: &str) -> Self {
+        let mut ascii = [CharClass::None; 256];
+        let mut other = Vec::new();
+        let mut set = |code: u32, class: CharClass| {
+            if code < 256 {
+                ascii[code as usize] = class;
+            } else {
+                other.retain(|(c, _)| *c != code);
+                other.push((code, class));
+            }
+        };
+        for unit in break_before.encode_utf16() {
+            set(unit as u32, CharClass::BreakBefore);
+        }
+        for unit in break_after.encode_utf16() {
+            set(unit as u32, CharClass::BreakAfter);
+        }
+        Self { ascii, other }
+    }
+
+    fn get(&self, code: u32) -> CharClass {
+        if code < 256 {
+            return self.ascii[code as usize];
+        }
+        if (0x3040..=0x30FF).contains(&code)
+            || (0x3400..=0x4DBF).contains(&code)
+            || (0x4E00..=0x9FFF).contains(&code)
+        {
+            return CharClass::BreakIdeographic;
+        }
+        self.other
+            .iter()
+            .find(|(c, _)| *c == code)
+            .map_or(CharClass::None, |(_, class)| *class)
+    }
+}
+
+/// Where one model line wraps. `break_offsets` ends with the line length.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineBreakData {
+    pub break_offsets: Vec<u32>,
+    pub break_offsets_visible_column: Vec<u32>,
+    /// Visible columns of indentation added to continuation lines.
+    pub wrapped_text_indent_length: u32,
+}
+
+impl LineBreakData {
+    pub fn output_line_count(&self) -> usize {
+        self.break_offsets.len()
+    }
+
+    /// Input (model) offsets covered by output line `index`.
+    pub fn input_range(&self, index: usize) -> std::ops::Range<u32> {
+        let start = if index == 0 {
+            0
+        } else {
+            self.break_offsets[index - 1]
+        };
+        start..self.break_offsets[index]
+    }
+
+    /// The output line containing `input_offset`. An offset exactly at a
+    /// break belongs to the next line, unless `prefer_previous`.
+    pub fn output_line_for(&self, input_offset: u32, prefer_previous: bool) -> usize {
+        let ix = if prefer_previous {
+            self.break_offsets.partition_point(|&b| b < input_offset)
+        } else {
+            self.break_offsets.partition_point(|&b| b <= input_offset)
+        };
+        ix.min(self.break_offsets.len() - 1)
+    }
+}
+
+fn is_high_surrogate(unit: u32) -> bool {
+    (0xD800..=0xDBFF).contains(&unit)
+}
+
+fn char_width(code: u32, visible_column: u32, tab_size: u32) -> u32 {
+    if code == '\t' as u32 {
+        return tab_size - visible_column % tab_size;
+    }
+    if is_full_width_character(code) || code < 32 {
+        return 2;
+    }
+    1
+}
+
+fn can_break(prev_code: u32, prev: CharClass, code: u32, class: CharClass, keep_all: bool) -> bool {
+    let _ = prev_code;
+    code != ' ' as u32
+        && ((prev == CharClass::BreakAfter && class != CharClass::BreakAfter)
+            || (prev != CharClass::BreakBefore && class == CharClass::BreakBefore)
+            || (!keep_all && prev == CharClass::BreakIdeographic && class != CharClass::BreakAfter)
+            || (!keep_all
+                && class == CharClass::BreakIdeographic
+                && prev != CharClass::BreakBefore))
+}
+
+fn wrapped_text_indent_length(
+    line: &[u16],
+    tab_size: u32,
+    first_break_column: u32,
+    indent: WrappingIndent,
+) -> u32 {
+    if indent == WrappingIndent::None {
+        return 0;
+    }
+    let Some(first_non_ws) = line
+        .iter()
+        .position(|&u| u != b' ' as u16 && u != b'\t' as u16)
+    else {
+        return 0;
+    };
+    let mut length = 0;
+    for &unit in &line[..first_non_ws] {
+        length += if unit == b'\t' as u16 {
+            tab_size - length % tab_size
+        } else {
+            1
+        };
+    }
+    let extra_tabs = match indent {
+        WrappingIndent::DeepIndent => 2,
+        WrappingIndent::Indent => 1,
+        _ => 0,
+    };
+    for _ in 0..extra_tabs {
+        length += tab_size - length % tab_size;
+    }
+    // Stick to the start if nothing but the indentation would fit.
+    if length + 2 > first_break_column {
+        length = 0;
+    }
+    length
+}
+
+/// Computes wrap points for `line` at `wrapping_column` visible columns, or
+/// `None` if it fits (or wrapping is off: `wrapping_column == None`).
+pub fn compute_line_breaks(
+    classifier: &WrapClassifier,
+    line: &str,
+    tab_size: u32,
+    wrapping_column: Option<u32>,
+    wrapping_indent: WrappingIndent,
+    keep_all: bool,
+) -> Option<LineBreakData> {
+    let first_break_column = wrapping_column?;
+    let units: Vec<u16> = line.encode_utf16().collect();
+    let len = units.len();
+    if len <= 1 {
+        return None;
+    }
+    let tab_size = tab_size.max(1);
+    let indent = wrapped_text_indent_length(&units, tab_size, first_break_column, wrapping_indent);
+    let wrapped_line_break_width = first_break_column as i64 - indent as i64;
+
+    let mut offsets: Vec<u32> = Vec::new();
+    let mut offsets_visible: Vec<u32> = Vec::new();
+    let mut break_offset = 0usize;
+    let mut break_offset_visible = 0u32;
+    let mut break_offset_width = 0i64;
+    let mut breaking_width = first_break_column as i64;
+
+    let mut prev_code = units[0] as u32;
+    let mut visible = char_width(prev_code, 0, tab_size);
+    let mut width = visible as i64;
+    let mut start = 1;
+    if is_high_surrogate(prev_code) {
+        visible += 1;
+        width += 1;
+        prev_code = units[1] as u32;
+        start = 2;
+    }
+    let mut prev_class = classifier.get(prev_code);
+
+    let mut i = start;
+    while i < len {
+        let char_start = i;
+        let code = units[i] as u32;
+        let (class, char_w) = if is_high_surrogate(code) {
+            i += 1;
+            (CharClass::None, 2)
+        } else {
+            (classifier.get(code), char_width(code, visible, tab_size))
+        };
+
+        if can_break(prev_code, prev_class, code, class, keep_all) {
+            break_offset = char_start;
+            break_offset_visible = visible;
+            break_offset_width = width;
+        }
+
+        visible += char_w;
+        width += char_w as i64;
+
+        if width > breaking_width {
+            if break_offset == 0 || width - break_offset_width > wrapped_line_break_width {
+                break_offset = char_start;
+                break_offset_visible = visible - char_w;
+                break_offset_width = width - char_w as i64;
+            }
+            let line_start = offsets.last().copied().unwrap_or(0) as usize;
+            if break_offset > line_start {
+                offsets.push(break_offset as u32);
+                offsets_visible.push(break_offset_visible);
+                breaking_width = break_offset_width + wrapped_line_break_width;
+                break_offset = 0;
+            }
+        }
+
+        prev_code = code;
+        prev_class = class;
+        i += 1;
+    }
+
+    if offsets.is_empty() {
+        return None;
+    }
+    offsets.push(len as u32);
+    offsets_visible.push(visible);
+    Some(LineBreakData {
+        break_offsets: offsets,
+        break_offsets_visible_column: offsets_visible,
+        wrapped_text_indent_length: indent,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    //! Ported from Monaco's
+    //! `test/common/viewModel/monospaceLineBreaksComputer.test.ts`. Skipped:
+    //! injected-text and escaped-line-feed cases (not ported), incremental
+    //! re-wrapping (we always recompute), and fractional full-width ratios
+    //! (we assume two-cell full-width characters).
+    use super::*;
+
+    fn assert_line_breaks(
+        classifier: &WrapClassifier,
+        tab_size: u32,
+        break_after: i32,
+        annotated: &str,
+        indent: WrappingIndent,
+        keep_all: bool,
+    ) -> Option<LineBreakData> {
+        let text: String = annotated.chars().filter(|&c| c != '|').collect();
+        let column = (break_after >= 0).then_some(break_after as u32);
+        let data = compute_line_breaks(classifier, &text, tab_size, column, indent, keep_all);
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let mut actual = String::new();
+        let mut prev_line = 0;
+        let mut ix = 0;
+        while ix < units.len() {
+            let ch_len = if is_high_surrogate(units[ix] as u32) {
+                2
+            } else {
+                1
+            };
+            if let Some(data) = &data {
+                let line = data.output_line_for(ix as u32, false);
+                if line != prev_line {
+                    prev_line = line;
+                    actual.push('|');
+                }
+            }
+            actual.push_str(&String::from_utf16_lossy(&units[ix..ix + ch_len]));
+            ix += ch_len;
+        }
+        assert_eq!(actual, annotated);
+        data
+    }
+
+    fn basic(annotated: &str) {
+        let classifier = WrapClassifier::new("(", "\t).");
+        assert_line_breaks(&classifier, 4, 5, annotated, WrappingIndent::None, false);
+    }
+
+    #[test]
+    fn monospace_line_breaks_computer() {
+        basic("");
+        basic("aaa");
+        basic("aaaaa");
+        let classifier = WrapClassifier::new("(", "\t).");
+        assert_line_breaks(
+            &classifier,
+            4,
+            -1,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            WrappingIndent::None,
+            false,
+        );
+        basic("aaaaa|a");
+        basic("aaaaa|.");
+        basic("aaaaa|a.|aaa.|aa");
+        basic("aaaaa|a..|aaa.|aa");
+        basic("aaaaa|a...|aaa.|aa");
+        basic("aaaaa|a....|aaa.|aa");
+        basic("\t");
+        basic("\t|aaa");
+        basic("\t|a\t|aa");
+        basic("aa\ta");
+        basic("aa\t|aa");
+        basic("aaa.|aa");
+        basic("aaa(.|aa");
+        basic("aaa))|).aaa");
+        basic("aaa))|).|aaaa");
+        basic("aaa)|().|aaa");
+        basic("aaa|(().|aaa");
+        basic("aa.|(().|aaa");
+        basic("aa.|(.).|aaa");
+    }
+
+    #[test]
+    fn cjk_and_kinsoku_shori() {
+        let c = WrapClassifier::new("(", "\t)");
+        for text in [
+            "aa \u{5b89}|\u{5b89}",
+            "\u{3042} \u{5b89}|\u{5b89}",
+            "\u{3042}\u{3042}|\u{5b89}\u{5b89}",
+            "aa |\u{5b89})\u{5b89}|\u{5b89}",
+            "aa \u{3042}|\u{5b89}\u{3042})|\u{5b89}",
+            "aa |(\u{5b89}aa|\u{5b89}",
+        ] {
+            assert_line_breaks(&c, 4, 5, text, WrappingIndent::None, false);
+        }
+    }
+
+    #[test]
+    fn wrapping_indent_same() {
+        let c = WrapClassifier::new("", "\t ");
+        assert_line_breaks(
+            &c,
+            4,
+            38,
+            " *123456789012345678901234567890123456|7890",
+            WrappingIndent::Same,
+            false,
+        );
+    }
+
+    #[test]
+    fn issue_16332_scroll_bar_overlaying_on_top_of_text() {
+        let c = WrapClassifier::new("", "\t ");
+        assert_line_breaks(
+            &c,
+            4,
+            24,
+            "a/ very/long/line/of/tex|t/that/expands/beyon|d/your/typical/line/|of/code/",
+            WrappingIndent::Indent,
+            false,
+        );
+    }
+
+    #[test]
+    fn issue_35162_wrapping_indent_not_consistently_working() {
+        let c = WrapClassifier::new("", "\t ");
+        let data = assert_line_breaks(
+            &c,
+            4,
+            24,
+            "                t h i s |i s |a l |o n |g l |i n |e",
+            WrappingIndent::Indent,
+            false,
+        )
+        .unwrap();
+        assert_eq!(data.wrapped_text_indent_length, 20);
+    }
+
+    #[test]
+    fn issue_75494_surrogate_pairs() {
+        let c = WrapClassifier::new("\t", " ");
+        assert_line_breaks(
+            &c,
+            4,
+            49,
+            "🐇👬🌖🌞🏇🍼🐇👬🌖🌞🏇🍼🐇👬🌖🌞🏇🍼🐇👬🌖🌞🏇🍼|🐇👬🌖🌞🏇🍼🐇👬🌖🌞🏇🍼🐇👬🌖🌞🏇🍼🐇👬🌖🌞🏇🍼|🐇👬",
+            WrappingIndent::Same,
+            false,
+        );
+    }
+
+    #[test]
+    fn issue_75494_surrogate_pairs_overrun() {
+        let c = WrapClassifier::default();
+        assert_line_breaks(&c, 4, 4, "🐇👬|&|🌞🌖", WrappingIndent::Same, false);
+        assert_line_breaks(
+            &c,
+            4,
+            17,
+            "factory, |\"xtxtfunc|(x\"🌞🏇🍼🌞🏇🍼🐇|&👬🌖🌞👬🌖🌞🏇🍼|🐇👬x\"",
+            WrappingIndent::Same,
+            false,
+        );
+    }
+
+    #[test]
+    fn wrapping_indent_deep_indent() {
+        let c = WrapClassifier::new("", "\t ");
+        let data = assert_line_breaks(
+            &c,
+            4,
+            26,
+            "        W e A r e T e s t |i n g D e |e p I n d |e n t a t |i o n",
+            WrappingIndent::DeepIndent,
+            false,
+        )
+        .unwrap();
+        assert_eq!(data.wrapped_text_indent_length, 16);
+    }
+
+    #[test]
+    fn issue_33366_and_152773_punctuation() {
+        let c = WrapClassifier::default();
+        assert_line_breaks(
+            &c,
+            4,
+            23,
+            "this is a line of |text, text that sits |on a line",
+            WrappingIndent::Same,
+            false,
+        );
+        assert_line_breaks(
+            &c,
+            4,
+            24,
+            "this is a line of |(text), text that sits |on a line",
+            WrappingIndent::Same,
+            false,
+        );
+    }
+
+    #[test]
+    fn issue_112382_control_characters() {
+        let c = WrapClassifier::default();
+        assert_line_breaks(
+            &c,
+            4,
+            6,
+            "\x06\x06\x06|\x06\x06\x06",
+            WrappingIndent::Same,
+            false,
+        );
+    }
+
+    #[test]
+    fn cjk_word_break_normal_and_keep_all() {
+        let c = WrapClassifier::default();
+        assert_line_breaks(&c, 4, 5, "你好|1111", WrappingIndent::Same, false);
+        assert_line_breaks(&c, 4, 8, "你好1111", WrappingIndent::Same, true);
+    }
+
+    #[test]
+    fn issue_95686_loop_forever() {
+        let c = WrapClassifier::default();
+        assert_line_breaks(
+            &c,
+            4,
+            179,
+            "\t\t\t\t\t\t<tr dmx-class:table-danger=\"(alt <= 50)\" dmx-class:table-warning=\"(alt <= 200)\" dmx-class:table-primary=\"(alt <= 400)\" dmx-class:table-info=\"(alt <= 800)\" |dmx-class:table-success=\"(alt >= 400)\">",
+            WrappingIndent::Same,
+            false,
+        );
+    }
+}
