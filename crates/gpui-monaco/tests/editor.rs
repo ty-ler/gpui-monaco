@@ -173,3 +173,27 @@ fn view_state_round_trip(cx: &mut TestAppContext) {
     editor.update(cx, |e, cx| e.restore_view_state(&state, cx));
     assert_eq!(heads(&editor, cx), vec![(3, 1)]);
 }
+
+#[gpui::test]
+fn shift_end_after_merging_multicursor_selections(cx: &mut TestAppContext) {
+    let (editor, cx) = editor_with_text("aa\nbb\ncc\n    dddd\nee", cx);
+    cx.simulate_keystrokes("secondary-alt-down secondary-alt-down");
+    assert_eq!(heads(&editor, cx).len(), 3);
+    cx.simulate_keystrokes("down shift-down shift-down");
+    eprintln!(
+        "after shift-down: {:?}",
+        editor.read_with(cx, |e, _| e.selections())
+    );
+    cx.simulate_keystrokes("shift-end");
+    eprintln!(
+        "after shift-end: {:?}",
+        editor.read_with(cx, |e, _| e.selections())
+    );
+    let selections = editor.read_with(cx, |e, _| e.selections());
+    assert!(
+        selections
+            .iter()
+            .all(|s| s.head.column == if s.head.row == 3 { 8 } else { 2 }),
+        "{selections:?}"
+    );
+}

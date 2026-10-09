@@ -371,7 +371,7 @@ fn prepaint_editor(
     for row in first_row..=last_row {
         let marked_cols = marked.as_ref().and_then(|range| {
             (range.start.row == row && range.end.row == row)
-                .then(|| (range.start.column..range.end.column, colors.ime_underline))
+                .then_some((range.start.column..range.end.column, colors.ime_underline))
         });
         let line = layout_row(
             &snapshot,

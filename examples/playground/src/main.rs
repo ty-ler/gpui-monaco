@@ -21,6 +21,17 @@ impl Playground {
         let model = cx.new(|_| TextModel::new(&text).with_language("rust"));
         let editor = cx.new(|cx| CodeEditor::new(model, window, cx));
         window.focus(&editor.focus_handle(cx), cx);
+        if std::env::var_os("PLAYGROUND_DEBUG").is_some() {
+            cx.subscribe(
+                &editor,
+                |_, editor, event: &gpui_monaco::CodeEditorEvent, cx| {
+                    if *event == gpui_monaco::CodeEditorEvent::SelectionsChanged {
+                        eprintln!("selections: {:?}", editor.read(cx).selections());
+                    }
+                },
+            )
+            .detach();
+        }
         Self { editor }
     }
 }
