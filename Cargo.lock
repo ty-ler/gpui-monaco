@@ -1910,6 +1910,7 @@ dependencies = [
  "gpui-monaco-languages",
  "gpui-monaco-syntax",
  "gpui-monaco-text",
+ "regex",
  "serde",
  "serde_json",
  "unicode-segmentation",

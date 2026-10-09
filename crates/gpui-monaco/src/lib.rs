@@ -11,8 +11,12 @@ pub mod cursor;
 pub mod decorations;
 mod editor;
 mod element;
+mod find;
+mod find_widget;
 mod model;
+mod multi_cursor;
 pub mod options;
+pub mod search;
 pub mod theme;
 pub mod view;
 pub mod widgets;
@@ -22,6 +26,8 @@ pub use decorations::{
 };
 pub use editor::{CodeEditor, CodeEditorEvent, ViewState};
 pub use element::EditorElement;
+pub use find::{FindOptions, MATCHES_LIMIT};
+pub use find_widget::FindWidget;
 pub use model::{
     EditKind, ModelOptions, SyntaxSnapshot, TextModel, TextModelEvent, language_registry,
     set_language_registry,

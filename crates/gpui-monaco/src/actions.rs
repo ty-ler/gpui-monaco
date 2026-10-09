@@ -10,6 +10,9 @@ use gpui::{App, KeyBinding, actions};
 /// The key context the editor element establishes.
 pub const KEY_CONTEXT: &str = "CodeEditor";
 
+/// Single-line editors (e.g. the find input) also set `single_line`.
+const SINGLE_LINE: Option<&str> = Some("CodeEditor && single_line");
+
 actions!(
     code_editor,
     [
@@ -74,6 +77,20 @@ actions!(
         FoldAll,
         UnfoldAll,
         ToggleFold,
+        StartFind,
+        StartFindReplace,
+        NextMatch,
+        PreviousMatch,
+        ReplaceOne,
+        ReplaceAll,
+        SelectAllMatches,
+        ToggleCaseSensitive,
+        ToggleRegex,
+        ToggleWholeWord,
+        ToggleFindInSelection,
+        AddSelectionToNextFindMatch,
+        MoveSelectionToNextFindMatch,
+        SelectAllOccurrences,
     ]
 );
 
@@ -118,6 +135,16 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-c", Copy, ctx),
         KeyBinding::new("secondary-x", Cut, ctx),
         KeyBinding::new("secondary-v", Paste, ctx),
+        KeyBinding::new("secondary-f", StartFind, ctx),
+        KeyBinding::new("secondary-d", AddSelectionToNextFindMatch, ctx),
+        KeyBinding::new("secondary-shift-l", SelectAllOccurrences, ctx),
+        KeyBinding::new("secondary-f2", SelectAllOccurrences, ctx),
+        KeyBinding::new("f3", NextMatch, ctx),
+        KeyBinding::new("shift-f3", PreviousMatch, ctx),
+        // Inside the find widget's inputs.
+        KeyBinding::new("shift-enter", PreviousMatch, SINGLE_LINE),
+        KeyBinding::new("alt-enter", SelectAllMatches, SINGLE_LINE),
+        KeyBinding::new("secondary-enter", ReplaceAll, SINGLE_LINE),
     ];
 
     if cfg!(target_os = "macos") {
@@ -156,6 +183,16 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("cmd-k cmd-0", FoldAll, ctx),
             KeyBinding::new("cmd-k cmd-j", UnfoldAll, ctx),
             KeyBinding::new("cmd-k cmd-l", ToggleFold, ctx),
+            KeyBinding::new("cmd-alt-f", StartFindReplace, ctx),
+            KeyBinding::new("cmd-k cmd-d", MoveSelectionToNextFindMatch, ctx),
+            KeyBinding::new("cmd-g", NextMatch, ctx),
+            KeyBinding::new("cmd-shift-g", PreviousMatch, ctx),
+            KeyBinding::new("cmd-alt-enter", ReplaceAll, ctx),
+            KeyBinding::new("cmd-shift-1", ReplaceOne, ctx),
+            KeyBinding::new("cmd-alt-c", ToggleCaseSensitive, ctx),
+            KeyBinding::new("cmd-alt-r", ToggleRegex, ctx),
+            KeyBinding::new("cmd-alt-w", ToggleWholeWord, ctx),
+            KeyBinding::new("cmd-alt-l", ToggleFindInSelection, ctx),
         ]);
     } else {
         bindings.extend([
@@ -181,6 +218,14 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-k ctrl-0", FoldAll, ctx),
             KeyBinding::new("ctrl-k ctrl-j", UnfoldAll, ctx),
             KeyBinding::new("ctrl-k ctrl-l", ToggleFold, ctx),
+            KeyBinding::new("ctrl-h", StartFindReplace, ctx),
+            KeyBinding::new("ctrl-k ctrl-d", MoveSelectionToNextFindMatch, ctx),
+            KeyBinding::new("ctrl-alt-enter", ReplaceAll, ctx),
+            KeyBinding::new("ctrl-shift-1", ReplaceOne, ctx),
+            KeyBinding::new("alt-c", ToggleCaseSensitive, ctx),
+            KeyBinding::new("alt-r", ToggleRegex, ctx),
+            KeyBinding::new("alt-w", ToggleWholeWord, ctx),
+            KeyBinding::new("alt-l", ToggleFindInSelection, ctx),
         ]);
         if cfg!(target_os = "windows") {
             bindings.extend([

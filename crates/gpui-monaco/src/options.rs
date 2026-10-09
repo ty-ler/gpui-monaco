@@ -65,6 +65,8 @@ pub struct EditorOptions {
     pub line_height: Option<Pixels>,
     pub line_numbers: LineNumbers,
     pub line_numbers_min_chars: u32,
+    /// Monaco `lineDecorationsWidth`: space between line numbers and text.
+    pub line_decorations_width: Pixels,
     pub glyph_margin: bool,
     pub render_line_highlight: RenderLineHighlight,
     pub cursor_style: CursorStyle,
@@ -85,6 +87,9 @@ pub struct EditorOptions {
     pub wrapping_indent: crate::view::line_breaks::WrappingIndent,
     pub folding: bool,
     pub show_folding_controls: ShowFoldingControls,
+    /// A one-line input (like Monaco's find input): Enter, Tab and Escape
+    /// propagate to the parent and pasted line breaks become spaces.
+    pub single_line: bool,
 }
 
 impl Default for EditorOptions {
@@ -105,6 +110,7 @@ impl Default for EditorOptions {
             line_height: None,
             line_numbers: LineNumbers::On,
             line_numbers_min_chars: 5,
+            line_decorations_width: px(10.),
             glyph_margin: true,
             render_line_highlight: RenderLineHighlight::Line,
             cursor_style: CursorStyle::Line,
@@ -123,6 +129,26 @@ impl Default for EditorOptions {
             wrapping_indent: crate::view::line_breaks::WrappingIndent::Same,
             folding: true,
             show_folding_controls: ShowFoldingControls::Mouseover,
+            single_line: false,
+        }
+    }
+}
+
+impl EditorOptions {
+    /// Options for a one-line input box: no gutter, scrollbars or line
+    /// highlight.
+    pub fn single_line_input() -> Self {
+        Self {
+            line_numbers: LineNumbers::Off,
+            glyph_margin: false,
+            folding: false,
+            render_line_highlight: RenderLineHighlight::None,
+            scroll_beyond_last_line: false,
+            vertical_scrollbar_size: px(0.),
+            horizontal_scrollbar_size: px(0.),
+            line_decorations_width: px(2.),
+            single_line: true,
+            ..Self::default()
         }
     }
 }
