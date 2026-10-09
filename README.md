@@ -36,6 +36,7 @@ wasm, and huge single lines (minified files). See the `post-mvp` issues.
 
 - **Guide:** [`book/`](book/src/SUMMARY.md). Build it with `mdbook build book`; it covers embedding, models and editors, options, keybindings, themes, languages, decorations, widgets, providers and diagnostics.
 - **API docs:** `cargo doc --open -p gpui-monaco`.
+- **Monaco parity:** [`docs/MONACO_PARITY.md`](docs/MONACO_PARITY.md) lists what's implemented and links the issue for each gap.
 - **Performance:** [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) has the large-file budget and how to measure it.
 - **Playground:** [`examples/playground`](examples/playground/README.md) is a demo app with every feature.
 
