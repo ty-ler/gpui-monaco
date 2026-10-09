@@ -14,12 +14,30 @@ struct Playground {
 
 impl Playground {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let text = match std::env::var("PLAYGROUND_FILE") {
-            Ok(path) => std::fs::read_to_string(&path).unwrap_or_else(|e| format!("{path}: {e}")),
-            Err(_) => SAMPLE.to_string(),
+        let (text, language) = match std::env::var("PLAYGROUND_FILE") {
+            Ok(path) => {
+                let text =
+                    std::fs::read_to_string(&path).unwrap_or_else(|e| format!("{path}: {e}"));
+                let language = gpui_monaco::language_registry(cx)
+                    .language_for_path(path.as_ref())
+                    .map_or_else(|| "plaintext".to_string(), |l| l.id.to_string());
+                (text, language)
+            }
+            Err(_) => (SAMPLE.to_string(), "rust".to_string()),
         };
-        let model = cx.new(|_| TextModel::new(&text).with_language("rust"));
+        let model = cx.new(|_| TextModel::new(&text).with_language(language));
         let editor = cx.new(|cx| CodeEditor::new(model, window, cx));
+        if let Ok(theme) = std::env::var("PLAYGROUND_THEME") {
+            let theme = match theme.as_str() {
+                "vs" => gpui_monaco::Theme::vs(),
+                "vs-dark" => gpui_monaco::Theme::vs_dark(),
+                path => gpui_monaco::Theme::from_vscode_file(path.as_ref())
+                    .unwrap_or_else(|e| panic!("failed to load theme {path}: {e}")),
+            };
+            editor.update(cx, |editor, cx| {
+                editor.set_theme(std::sync::Arc::new(theme), cx)
+            });
+        }
         window.focus(&editor.focus_handle(cx), cx);
         if std::env::var_os("PLAYGROUND_DEBUG").is_some() {
             cx.subscribe(
@@ -45,6 +63,7 @@ impl Render for Playground {
 fn main() {
     gpui_platform::application().run(|cx: &mut App| {
         gpui_monaco::init(cx);
+        gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
         let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);
         let window = cx
             .open_window(

@@ -180,15 +180,7 @@ fn shift_end_after_merging_multicursor_selections(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("secondary-alt-down secondary-alt-down");
     assert_eq!(heads(&editor, cx).len(), 3);
     cx.simulate_keystrokes("down shift-down shift-down");
-    eprintln!(
-        "after shift-down: {:?}",
-        editor.read_with(cx, |e, _| e.selections())
-    );
     cx.simulate_keystrokes("shift-end");
-    eprintln!(
-        "after shift-end: {:?}",
-        editor.read_with(cx, |e, _| e.selections())
-    );
     let selections = editor.read_with(cx, |e, _| e.selections());
     assert!(
         selections

@@ -4,16 +4,16 @@ use std::ops::Range;
 
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Corners, Edges, Element, ElementId, ElementInputHandler,
-    Entity, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, Pixels,
-    ShapedLine, SharedString, Size, Style, TextAlign, TextRun, UnderlineStyle, Window, fill, font,
-    point, px, quad, relative, size,
+    Entity, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement,
+    LayoutId, Pixels, ShapedLine, SharedString, Size, Style, TextAlign, TextRun, UnderlineStyle,
+    Window, fill, font, point, px, quad, relative, size,
 };
 use text::{BufferSnapshot, PointUtf16, Rope};
 
 use crate::cursor::Selection;
 use crate::editor::CodeEditor;
 use crate::options::{CursorStyle, EditorOptions, LineNumbers, RenderLineHighlight};
-use crate::theme::EditorColors;
+use crate::theme::{EditorColors, Theme, TokenStyle};
 
 /// Width of the glyph margin when enabled (Monaco `glyphMarginWidth`).
 const GLYPH_MARGIN_WIDTH: f32 = 18.;
@@ -93,14 +93,17 @@ fn run(len: usize, font: &Font, color: Hsla) -> TextRun {
     }
 }
 
-/// Shapes one buffer row. `marked` is an IME composition range in UTF-16
-/// columns on this row, drawn underlined.
+/// Shapes one buffer row. `highlights` are styled spans in line-relative
+/// byte offsets, sorted and non-overlapping. `marked` is an IME composition
+/// range in UTF-16 columns on this row, drawn underlined.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn layout_row(
     rope: &Rope,
     row: u32,
     tab_size: u32,
     metrics: &TextMetrics,
     color: Hsla,
+    highlights: &[(Range<usize>, TokenStyle)],
     marked: Option<(Range<u32>, Hsla)>,
     window: &mut Window,
 ) -> LineLayout {
@@ -108,11 +111,14 @@ pub(crate) fn layout_row(
     let tab_size = tab_size.max(1) as usize;
     let mut display = String::with_capacity(line.len());
     let mut display_index = Vec::with_capacity(line.len() + 1);
+    // (line byte offset, display offset) for each char start.
+    let mut char_starts = Vec::with_capacity(line.len());
     let mut visible_column = 0usize;
-    for ch in line.chars() {
+    for (byte, ch) in line.char_indices() {
         for _ in 0..ch.len_utf16() {
             display_index.push(display.len());
         }
+        char_starts.push((byte, display.len()));
         if ch == '\t' {
             let spaces = tab_size - visible_column % tab_size;
             display.extend(std::iter::repeat_n(' ', spaces));
@@ -123,33 +129,81 @@ pub(crate) fn layout_row(
         }
     }
     display_index.push(display.len());
+    let display_len = display.len();
+    let to_display = |byte: usize| -> usize {
+        if byte >= line.len() {
+            return display_len;
+        }
+        let ix = char_starts.partition_point(|&(b, _)| b < byte);
+        char_starts.get(ix).map_or(display_len, |&(_, d)| d)
+    };
+
+    // Segment boundaries in display offsets.
+    let marked_display = marked.as_ref().and_then(|(range, underline)| {
+        let start = display_index[(range.start as usize).min(display_index.len() - 1)];
+        let end = display_index[(range.end as usize).min(display_index.len() - 1)];
+        (end > start).then_some((start..end, *underline))
+    });
+    let styled: Vec<(Range<usize>, TokenStyle)> = highlights
+        .iter()
+        .map(|(range, style)| (to_display(range.start)..to_display(range.end), *style))
+        .filter(|(range, _)| !range.is_empty())
+        .collect();
+    let mut bounds = vec![0, display_len];
+    for (range, _) in &styled {
+        bounds.extend([range.start, range.end]);
+    }
+    if let Some((range, _)) = &marked_display {
+        bounds.extend([range.start, range.end]);
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
 
     let mut runs = Vec::new();
-    match marked {
-        Some((range, underline)) if !range.is_empty() => {
-            let start = display_index[(range.start as usize).min(display_index.len() - 1)];
-            let end = display_index[(range.end as usize).min(display_index.len() - 1)];
-            if start > 0 {
-                runs.push(run(start, &metrics.font, color));
-            }
-            if end > start {
-                let mut marked_run = run(end - start, &metrics.font, color);
-                marked_run.underline = Some(UnderlineStyle {
-                    color: Some(underline),
-                    thickness: px(1.),
-                    wavy: false,
-                });
-                runs.push(marked_run);
-            }
-            if display.len() > end {
-                runs.push(run(display.len() - end, &metrics.font, color));
-            }
+    let mut span_ix = 0;
+    for pair in bounds.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        if start >= end || end > display_len {
+            continue;
         }
-        _ => {
-            if !display.is_empty() {
-                runs.push(run(display.len(), &metrics.font, color));
-            }
+        while span_ix < styled.len() && styled[span_ix].0.end <= start {
+            span_ix += 1;
         }
+        let style = styled
+            .get(span_ix)
+            .filter(|(range, _)| range.start <= start)
+            .map(|(_, style)| *style)
+            .unwrap_or_default();
+        let mut font = metrics.font.clone();
+        if style.bold {
+            font.weight = FontWeight::BOLD;
+        }
+        if style.italic {
+            font.style = FontStyle::Italic;
+        }
+        let mut text_run = run(end - start, &font, style.foreground.unwrap_or(color));
+        let is_marked = marked_display
+            .as_ref()
+            .is_some_and(|(range, _)| range.start <= start && end <= range.end);
+        if is_marked || style.underline {
+            text_run.underline = Some(UnderlineStyle {
+                color: Some(
+                    marked_display
+                        .as_ref()
+                        .filter(|_| is_marked)
+                        .map_or(text_run.color, |(_, underline)| *underline),
+                ),
+                thickness: px(1.),
+                wavy: false,
+            });
+        }
+        if style.strikethrough {
+            text_run.strikethrough = Some(gpui::StrikethroughStyle {
+                thickness: px(1.),
+                color: Some(text_run.color),
+            });
+        }
+        runs.push(text_run);
     }
     let shaped = window.text_system().shape_line(
         SharedString::from(display),
@@ -162,6 +216,42 @@ pub(crate) fn layout_row(
         shaped,
         display_index,
     }
+}
+
+/// Highlight spans for byte `range` of the current text, using the model's
+/// latest (possibly older) syntax state mapped through the edits since.
+pub(crate) fn current_highlights(
+    model: &crate::model::TextModel,
+    theme: &Theme,
+    range: Range<usize>,
+) -> Vec<(Range<usize>, TokenStyle)> {
+    let Some(syntax) = model.syntax_snapshot() else {
+        return Vec::new();
+    };
+    let buffer = model.buffer();
+    let style = |span: &syntax::HighlightSpan| theme.style_for(span.highlight);
+    if syntax.text.version() == buffer.version() {
+        return syntax
+            .highlighter
+            .highlights(&syntax.state, syntax.text.rope(), range)
+            .iter()
+            .map(|span| (span.range.clone(), style(span)))
+            .collect();
+    }
+    let patch = buffer.edits_since(syntax.text.version());
+    let inverse = patch.invert();
+    let old_range = inverse.transform_offset(range.start, text::Bias::Left)
+        ..inverse.transform_offset(range.end, text::Bias::Right);
+    syntax
+        .highlighter
+        .highlights(&syntax.state, syntax.text.rope(), old_range)
+        .iter()
+        .filter_map(|span| {
+            let start = patch.transform_offset(span.range.start, text::Bias::Right);
+            let end = patch.transform_offset(span.range.end, text::Bias::Left);
+            (start < end).then(|| (start..end, style(span)))
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -303,7 +393,8 @@ fn prepaint_editor(
     cx: &mut gpui::Context<CodeEditor>,
 ) -> PrepaintState {
     let options = editor.options.clone();
-    let colors = editor.colors.clone();
+    let theme = editor.theme.clone();
+    let colors = theme.colors.clone();
     let metrics = TextMetrics::new(&options, window);
     let line_height = metrics.line_height;
     let snapshot: BufferSnapshot = editor.snapshot.clone();
@@ -367,8 +458,29 @@ fn prepaint_editor(
         .min(line_count.saturating_sub(1));
 
     let marked = editor.marked_range_points();
+    let visible_start = snapshot.point_to_offset(text::Point::new(first_row, 0));
+    let visible_end = snapshot.point_to_offset(text::Point::new(last_row, u32::MAX));
+    let highlights = {
+        let model = editor.model().read(cx);
+        current_highlights(model, &theme, visible_start..visible_end)
+    };
+    let mut highlight_ix = 0;
     let mut lines = Vec::with_capacity((last_row + 1).saturating_sub(first_row) as usize);
     for row in first_row..=last_row {
+        let line_range = snapshot.line_range(row);
+        while highlight_ix < highlights.len() && highlights[highlight_ix].0.end <= line_range.start
+        {
+            highlight_ix += 1;
+        }
+        let row_highlights: Vec<(Range<usize>, TokenStyle)> = highlights[highlight_ix..]
+            .iter()
+            .take_while(|(range, _)| range.start < line_range.end)
+            .map(|(range, style)| {
+                let start = range.start.max(line_range.start) - line_range.start;
+                let end = range.end.min(line_range.end) - line_range.start;
+                (start..end, *style)
+            })
+            .collect();
         let marked_cols = marked.as_ref().and_then(|range| {
             (range.start.row == row && range.end.row == row)
                 .then_some((range.start.column..range.end.column, colors.ime_underline))
@@ -379,6 +491,7 @@ fn prepaint_editor(
             tab_size,
             &metrics,
             colors.foreground,
+            &row_highlights,
             marked_cols,
             window,
         );

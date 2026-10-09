@@ -234,8 +234,9 @@ pub struct FoldingMarkers {
     pub end: Pattern,
 }
 
-/// Removes `//` and `/* */` comments and trailing commas outside strings.
-fn strip_jsonc(json: &str) -> String {
+/// Removes `//` and `/* */` comments and trailing commas outside strings,
+/// turning JSONC (VS Code's configuration format) into JSON.
+pub fn strip_jsonc(json: &str) -> String {
     let mut out = String::with_capacity(json.len());
     let mut chars = json.chars().peekable();
     let mut in_string = false;

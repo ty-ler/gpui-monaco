@@ -16,11 +16,14 @@ pub mod theme;
 
 pub use editor::{CodeEditor, CodeEditorEvent, ViewState};
 pub use element::EditorElement;
-pub use model::{EditKind, ModelOptions, TextModel, TextModelEvent};
+pub use model::{
+    EditKind, ModelOptions, SyntaxSnapshot, TextModel, TextModelEvent, language_registry,
+    set_language_registry,
+};
 pub use options::EditorOptions;
 pub use syntax;
 pub use text;
-pub use theme::EditorColors;
+pub use theme::{EditorColors, Theme, ThemeKind, TokenStyle};
 
 /// Binds Monaco's default keybindings in the editor's key context.
 pub fn init(cx: &mut gpui::App) {

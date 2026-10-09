@@ -19,3 +19,4 @@ image = { version = "0.25", default-features = false, features = ["png"], option
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui-monaco.workspace = true
+gpui-monaco-languages.workspace = true

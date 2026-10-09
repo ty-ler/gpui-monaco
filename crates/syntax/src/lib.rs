@@ -10,6 +10,7 @@ mod syntax_map;
 pub use config::{
     AutoClosingPair, Comments, EnterAction, Folding, FoldingMarkers, IndentAction,
     IndentationRules, LanguageConfiguration, NotIn, OnEnterRule, Pattern, SurroundingPair,
+    strip_jsonc,
 };
 pub use highlighter::{HighlightState, Highlighter, TreeSitterHighlighter};
 pub use language::{Grammar, HighlightId, Language, LanguageRegistry};
