@@ -24,6 +24,7 @@ pub mod options;
 pub mod providers;
 pub mod search;
 mod signature_help;
+pub mod suggest;
 pub mod theme;
 pub mod view;
 pub mod widgets;
