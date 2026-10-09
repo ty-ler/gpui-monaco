@@ -52,6 +52,13 @@ pub struct EditorColors {
     /// `editorBracketMatch.background` / `.border`.
     pub bracket_match_background: Hsla,
     pub bracket_match_border: Hsla,
+    /// `minimap.background` (defaults to the editor background).
+    pub minimap_background: Option<Hsla>,
+    /// `minimapSlider.background` / `.hoverBackground`.
+    pub minimap_slider: Hsla,
+    pub minimap_slider_hover: Hsla,
+    /// `editorStickyScroll.background` (defaults to the editor background).
+    pub sticky_scroll_background: Option<Hsla>,
 }
 
 fn c(color: Rgba) -> Hsla {
@@ -88,6 +95,10 @@ impl EditorColors {
             input_option_active_border: c(rgb(0x007acc)),
             bracket_match_background: c(rgba(0x0064001a)),
             bracket_match_border: c(rgb(0x888888)),
+            minimap_background: None,
+            minimap_slider: c(rgba(0x79797933)),
+            minimap_slider_hover: c(rgba(0x64646459)),
+            sticky_scroll_background: None,
         }
     }
 
@@ -120,6 +131,10 @@ impl EditorColors {
             input_option_active_border: c(rgb(0x007acc)),
             bracket_match_background: c(rgba(0x0064001a)),
             bracket_match_border: c(rgb(0xb9b9b9)),
+            minimap_background: None,
+            minimap_slider: c(rgba(0x79797933)),
+            minimap_slider_hover: c(rgba(0x64646459)),
+            sticky_scroll_background: None,
         }
     }
 

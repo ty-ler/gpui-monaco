@@ -375,6 +375,26 @@ pub(crate) struct ScrollbarLayout {
     pub ratio: f32,
 }
 
+/// Where the minimap is and how it maps to content.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MinimapLayout {
+    pub bounds: Bounds<Pixels>,
+    pub slider: Bounds<Pixels>,
+    /// Content scroll pixels per slider pixel when dragging.
+    pub drag_ratio: f32,
+    pub line_height: Pixels,
+    /// Minimap pixels scrolled off the top.
+    pub scroll: Pixels,
+}
+
+/// Cached minimap blocks for one view of the minimap.
+#[derive(Clone, Default)]
+pub(crate) struct MinimapCache {
+    key: Option<(text::Version, u32, u32, usize, u32)>,
+    /// Blocks relative to the minimap's first drawn line.
+    blocks: Vec<(Bounds<Pixels>, Hsla)>,
+}
+
 /// A fold control in the gutter.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FoldControl {
@@ -448,6 +468,9 @@ pub(crate) struct EditorLayout {
     pub zones: ZoneLayout,
     /// Bounds of embedded views; the editor ignores clicks inside them.
     pub widget_bounds: Vec<Bounds<Pixels>>,
+    pub minimap: Option<MinimapLayout>,
+    /// Sticky scroll lines: (model row, bounds).
+    pub sticky_lines: Vec<(u32, Bounds<Pixels>)>,
     pub vertical_scrollbar: Option<ScrollbarLayout>,
     pub horizontal_scrollbar: Option<ScrollbarLayout>,
 }
@@ -512,6 +535,10 @@ pub struct PrepaintState {
     glyphs: Vec<(gpui::Point<Pixels>, ShapedLine)>,
     ruler_marks: Vec<(Bounds<Pixels>, Hsla)>,
     embedded: Vec<Embedded>,
+    minimap_blocks: Vec<(Bounds<Pixels>, Hsla)>,
+    minimap_slider_visible: bool,
+    sticky: Vec<(u32, Pixels, LineLayout, Option<ShapedLine>)>,
+    numbers_right: Pixels,
     zone_elements: Vec<gpui::AnyElement>,
     widget_elements: Vec<gpui::AnyElement>,
     colors: EditorColors,
@@ -709,7 +736,12 @@ fn prepaint_editor(
     let vbar = options.vertical_scrollbar_size;
     let hbar = options.horizontal_scrollbar_size;
     let viewport_height = bounds.size.height;
-    let text_width = bounds.size.width - gutter_width - vbar;
+    let minimap_width = if options.minimap.enabled && !options.single_line {
+        px(options.minimap.max_column as f32 * options.minimap.scale).min(bounds.size.width / 4.)
+    } else {
+        px(0.)
+    };
+    let text_width = bounds.size.width - gutter_width - vbar - minimap_width;
 
     // Bring the view lines up to date: edits, wrapping, folds.
     let wrap_column = {
@@ -1002,7 +1034,7 @@ fn prepaint_editor(
         ShowFoldingControls::Never => false,
     };
 
-    let layout = EditorLayout {
+    let mut layout = EditorLayout {
         bounds,
         gutter_width,
         text_bounds,
@@ -1013,9 +1045,165 @@ fn prepaint_editor(
         fold_controls,
         zones: zones.clone(),
         widget_bounds: Vec::new(),
+        minimap: None,
+        sticky_lines: Vec::new(),
         vertical_scrollbar,
         horizontal_scrollbar,
     };
+
+    // Minimap: token-colored blocks, `scale` px per column and 2*scale px
+    // per view line, scrolled proportionally (Monaco `minimap`).
+    let mut minimap_blocks = Vec::new();
+    if minimap_width > px(0.) {
+        let scale = options.minimap.scale;
+        let mline = px(2. * scale);
+        let minimap_bounds = Bounds::new(
+            point(bounds.right() - vbar - minimap_width, bounds.top()),
+            size(minimap_width, viewport_height),
+        );
+        let total = mline * view_line_count as f32;
+        let minimap_scroll = if total > viewport_height && max_scroll_top > px(0.) {
+            (total - viewport_height) * (scroll_top / max_scroll_top)
+        } else {
+            px(0.)
+        };
+        let first = (minimap_scroll / mline).floor() as u32;
+        let last = (((minimap_scroll + viewport_height) / mline).ceil() as u32)
+            .min(view_line_count.saturating_sub(1));
+        let theme_key = std::sync::Arc::as_ptr(&theme) as usize;
+        let key = (
+            snapshot.version(),
+            first,
+            last,
+            theme_key,
+            wrap_column.unwrap_or(0),
+        );
+        if editor.minimap_cache.key != Some(key) {
+            editor.minimap_cache = MinimapCache {
+                key: Some(key),
+                blocks: minimap_blocks_for(
+                    editor,
+                    &view_lines,
+                    &snapshot,
+                    &theme,
+                    first..last + 1,
+                    tab_size,
+                    &options,
+                    cx,
+                ),
+            };
+        }
+        let origin_y = minimap_bounds.top() + mline * first as f32 - minimap_scroll;
+        minimap_blocks = editor
+            .minimap_cache
+            .blocks
+            .iter()
+            .map(|(b, color)| {
+                (
+                    Bounds::new(
+                        point(minimap_bounds.left() + b.origin.x, origin_y + b.origin.y),
+                        b.size,
+                    ),
+                    *color,
+                )
+            })
+            .collect();
+        let first_visible = zones.line_at(scroll_top, line_height, view_line_count);
+        let visible_lines = (viewport_height / line_height).max(1.);
+        let slider = Bounds::new(
+            point(
+                minimap_bounds.left(),
+                minimap_bounds.top() + mline * first_visible as f32 - minimap_scroll,
+            ),
+            size(minimap_width, mline * visible_lines),
+        );
+        let travel = (total.min(viewport_height) - slider.size.height).max(px(1.));
+        layout.minimap = Some(MinimapLayout {
+            bounds: minimap_bounds,
+            slider,
+            drag_ratio: max_scroll_top / travel,
+            line_height: mline,
+            scroll: minimap_scroll,
+        });
+    }
+
+    // Sticky scroll: headers of the fold ranges enclosing the top of the
+    // viewport (Monaco `stickyScroll`, folding-provider model).
+    let mut sticky_shaped: Vec<(u32, Pixels, LineLayout, Option<ShapedLine>)> = Vec::new();
+    if options.sticky_scroll.enabled && !options.single_line && scroll_top > px(0.) {
+        let max = options.sticky_scroll.max_line_count as usize;
+        let mut sticky_rows: Vec<(u32, u32)> = Vec::new();
+        for range in editor.folds.ranges() {
+            if sticky_rows.len() >= max {
+                break;
+            }
+            let probe_y = scroll_top + line_height * sticky_rows.len() as f32;
+            let probe_row = view_lines
+                .view_line(zones.line_at(probe_y, line_height, view_line_count))
+                .row;
+            if range.start_row < probe_row
+                && probe_row <= range.end_row
+                && sticky_rows
+                    .last()
+                    .is_none_or(|(start, _)| *start < range.start_row)
+            {
+                sticky_rows.push((range.start_row, range.end_row));
+            }
+        }
+        for (ix, (row, end_row)) in sticky_rows.iter().enumerate() {
+            let mut top = line_height * ix as f32;
+            // The last header slides up as its range scrolls out.
+            let end_line = view_lines.first_view_line_of_row(end_row + 1).max(1) - 1;
+            let end_bottom = zones.line_y(end_line, line_height) + line_height - scroll_top;
+            if ix + 1 == sticky_rows.len() {
+                top = top.min(end_bottom - line_height);
+            }
+            let segment = row_segment(&view_lines, view_lines.first_view_line_of_row(*row));
+            let line_range = snapshot.line_range(*row);
+            let row_highlights: Vec<(Range<usize>, TokenStyle)> = {
+                let model = editor.model().read(cx);
+                current_highlights(model, &theme, line_range.clone())
+                    .into_iter()
+                    .map(|(range, style)| {
+                        (
+                            range.start.max(line_range.start) - line_range.start
+                                ..range.end.min(line_range.end) - line_range.start,
+                            style,
+                        )
+                    })
+                    .collect()
+            };
+            let shaped = layout_segment(
+                &snapshot,
+                &segment,
+                tab_size,
+                &metrics,
+                colors.foreground,
+                &row_highlights,
+                &[],
+                None,
+                window,
+            );
+            let number = (options.line_numbers != LineNumbers::Off).then(|| {
+                let label = (row + 1).to_string();
+                window.text_system().shape_line(
+                    label.clone().into(),
+                    metrics.font_size,
+                    &[run(label.len(), &metrics.font, colors.line_number)],
+                    None,
+                )
+            });
+            layout.sticky_lines.push((
+                *row,
+                Bounds::new(
+                    point(bounds.left(), bounds.top() + top),
+                    size(gutter_width + text_width, line_height),
+                ),
+            ));
+            sticky_shaped.push((*row, top, shaped, number));
+        }
+    }
+    let numbers_right = bounds.left() + glyph_width + numbers_width;
 
     // Decoration geometry.
     let mut decoration_quads: Vec<(Bounds<Pixels>, Option<Hsla>, Option<Hsla>)> = Vec::new();
@@ -1245,6 +1433,10 @@ fn prepaint_editor(
         glyphs,
         ruler_marks,
         embedded,
+        minimap_blocks,
+        minimap_slider_visible: options.minimap.always_show_slider || editor.minimap_hovered,
+        sticky: sticky_shaped,
+        numbers_right,
         zone_elements: Vec::new(),
         widget_elements: Vec::new(),
         colors,
@@ -1413,6 +1605,62 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
             },
         );
 
+        if !state.sticky.is_empty() {
+            let background = colors.sticky_scroll_background.unwrap_or(colors.background);
+            let height = state
+                .sticky
+                .iter()
+                .map(|(_, top, _, _)| *top + line_height)
+                .fold(px(0.), |a, b| a.max(b));
+            let area = Bounds::new(
+                bounds.origin,
+                size(layout.text_bounds.right() - bounds.left(), height),
+            );
+            window.with_content_mask(Some(ContentMask { bounds: area }), |window| {
+                window.paint_quad(fill(area, background));
+                for (_, top, line, number) in &state.sticky {
+                    let y = bounds.top() + *top;
+                    if let Some(number) = number {
+                        number
+                            .paint(
+                                point(state.numbers_right - number.width, y),
+                                line_height,
+                                TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            )
+                            .ok();
+                    }
+                    window.with_content_mask(
+                        Some(ContentMask {
+                            bounds: Bounds::new(
+                                point(layout.text_bounds.left(), area.top()),
+                                size(layout.text_bounds.size.width, area.size.height),
+                            ),
+                        }),
+                        |window| {
+                            line.shaped
+                                .paint(
+                                    point(layout.text_origin_x() + line.indent_x, y),
+                                    line_height,
+                                    TextAlign::Left,
+                                    None,
+                                    window,
+                                    cx,
+                                )
+                                .ok();
+                        },
+                    );
+                }
+                let shadow = Bounds::new(
+                    point(area.left(), area.bottom() - px(1.)),
+                    size(area.size.width, px(1.)),
+                );
+                window.paint_quad(fill(shadow, colors.scrollbar_shadow.opacity(0.6)));
+            });
+        }
+
         for element in &mut widget_elements {
             element.paint(window, cx);
         }
@@ -1425,6 +1673,24 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
             .flatten()
         {
             window.paint_quad(fill(scrollbar.thumb, colors.scrollbar_slider));
+        }
+        if let Some(minimap) = layout.minimap {
+            if let Some(background) = colors.minimap_background {
+                window.paint_quad(fill(minimap.bounds, background));
+            }
+            window.with_content_mask(
+                Some(ContentMask {
+                    bounds: minimap.bounds,
+                }),
+                |window| {
+                    for (block, color) in &state.minimap_blocks {
+                        window.paint_quad(fill(*block, *color));
+                    }
+                    if state.minimap_slider_visible {
+                        window.paint_quad(fill(minimap.slider, colors.minimap_slider));
+                    }
+                },
+            );
         }
         // Monaco draws a thin shadow under the top edge once scrolled.
         if layout.scroll_top > px(0.) {
@@ -1630,4 +1896,92 @@ pub(crate) enum Embedded {
         view: gpui::AnyView,
         position: OverlayPosition,
     },
+}
+
+/// Minimap blocks for view lines `lines`, relative to the first one.
+#[allow(clippy::too_many_arguments)]
+fn minimap_blocks_for(
+    editor: &CodeEditor,
+    view_lines: &ViewLines,
+    snapshot: &text::BufferSnapshot,
+    theme: &Theme,
+    lines: Range<u32>,
+    tab_size: u32,
+    options: &EditorOptions,
+    cx: &App,
+) -> Vec<(Bounds<Pixels>, Hsla)> {
+    let scale = options.minimap.scale;
+    let mline = 2. * scale;
+    let max_column = options.minimap.max_column as usize;
+    let foreground = theme.colors.foreground.opacity(0.6);
+    let first_row = view_lines.view_line(lines.start).row;
+    let last_row = view_lines.view_line(lines.end.saturating_sub(1)).row;
+    let range = snapshot.point_to_offset(text::Point::new(first_row, 0))
+        ..snapshot.point_to_offset(text::Point::new(last_row, u32::MAX));
+    let highlights = current_highlights(editor.model().read(cx), theme, range);
+    let tab_size = tab_size.max(1) as usize;
+    let mut blocks = Vec::new();
+    for (ix, view_line) in lines.enumerate() {
+        let segment = row_segment(view_lines, view_line);
+        let full = snapshot.line(segment.row);
+        let line_start = snapshot.point_to_offset(text::Point::new(segment.row, 0));
+        let byte_start = utf16_to_byte(&full, segment.columns.start);
+        let byte_end = utf16_to_byte(&full, segment.columns.end);
+        let y = px(mline * ix as f32);
+        let mut column = segment.indent as usize + segment.start_visible_column as usize
+            - if segment.columns.start > 0 {
+                segment.start_visible_column as usize
+            } else {
+                0
+            };
+        let mut run: Option<(usize, usize, Hsla)> = None;
+        let flush = |run: &mut Option<(usize, usize, Hsla)>,
+                     blocks: &mut Vec<(Bounds<Pixels>, Hsla)>| {
+            if let Some((start, end, color)) = run.take() {
+                let start = start.min(max_column);
+                let end = end.min(max_column);
+                if end > start {
+                    blocks.push((
+                        Bounds::new(
+                            point(px(start as f32 * scale), y),
+                            size(px((end - start) as f32 * scale), px(mline * 0.8)),
+                        ),
+                        color,
+                    ));
+                }
+            }
+        };
+        for (byte, ch) in full[byte_start..byte_end].char_indices() {
+            if column >= max_column {
+                break;
+            }
+            let width = if ch == '\t' {
+                tab_size - column % tab_size
+            } else {
+                1
+            };
+            if ch.is_whitespace() {
+                flush(&mut run, &mut blocks);
+            } else {
+                let offset = line_start + byte_start + byte;
+                let color = highlights
+                    .iter()
+                    .find(|(r, _)| r.start <= offset && offset < r.end)
+                    .and_then(|(_, style)| style.foreground)
+                    .map_or(foreground, |c| c.opacity(0.75));
+                match run.as_mut() {
+                    Some((_, end, run_color)) if *run_color == color && *end == column => {
+                        *end += width
+                    }
+                    _ => {
+                        flush(&mut run, &mut blocks);
+                        run = Some((column, column + width, color));
+                    }
+                }
+            }
+            column += width;
+        }
+        flush(&mut run, &mut blocks);
+    }
+    blocks
 }

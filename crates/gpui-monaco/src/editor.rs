@@ -117,6 +117,9 @@ pub struct CodeEditor {
     pub(crate) marker_navigation: crate::markers::MarkerNavigation,
     pub(crate) definition: crate::definition::DefinitionLink,
     pub(crate) signature_help: crate::signature_help::SignatureHelpState,
+    pub(crate) minimap_cache: crate::element::MinimapCache,
+    pub(crate) minimap_hovered: bool,
+    minimap_drag: Option<Pixels>,
     fold_task: Option<Task<()>>,
     pub(crate) autoscroll_requested: bool,
     pub(crate) cursor_visible: bool,
@@ -186,6 +189,9 @@ impl CodeEditor {
             marker_navigation: Default::default(),
             definition: Default::default(),
             signature_help: Default::default(),
+            minimap_cache: Default::default(),
+            minimap_hovered: false,
+            minimap_drag: None,
             fold_task: None,
             _blink_task: None,
             _subscriptions: subscriptions,
@@ -394,6 +400,18 @@ impl CodeEditor {
             layout.text_origin_x() + line.x_for_column(point.column),
             layout.line_top(line.view_line),
         ))
+    }
+
+    /// (sticky scroll rows, whether a minimap is laid out) from the last
+    /// layout.
+    #[doc(hidden)]
+    pub fn sticky_rows_for_tests(&self) -> (Vec<u32>, bool) {
+        self.layout.as_ref().map_or((Vec::new(), false), |layout| {
+            (
+                layout.sticky_lines.iter().map(|(row, _)| *row).collect(),
+                layout.minimap.is_some(),
+            )
+        })
     }
 
     /// (content y of the last view line, line height) from the last layout.
@@ -1157,6 +1175,45 @@ impl CodeEditor {
         let Some(layout) = self.layout.clone() else {
             return;
         };
+        if let Some(minimap) = layout.minimap
+            && minimap.bounds.contains(&event.position)
+        {
+            // Clicking outside the slider centers the clicked line; then drag.
+            if !minimap.slider.contains(&event.position) {
+                let line = ((event.position.y - minimap.bounds.top() + minimap.scroll)
+                    / minimap.line_height)
+                    .floor()
+                    .max(0.);
+                let visible = layout.text_bounds.size.height;
+                self.scroll_top = (layout.metrics.line_height * line - visible / 2.).max(px(0.));
+                self.minimap_drag = Some(minimap.slider.size.height / 2.);
+            } else {
+                self.minimap_drag = Some(event.position.y - minimap.slider.top());
+            }
+            cx.emit(CodeEditorEvent::ScrollChanged);
+            cx.notify();
+            return;
+        }
+        if let Some((row, _)) = layout
+            .sticky_lines
+            .iter()
+            .find(|(_, bounds)| bounds.contains(&event.position))
+        {
+            // Monaco reveals the clicked scope header at the top.
+            let row = *row;
+            let ix = layout
+                .sticky_lines
+                .iter()
+                .position(|(r, _)| *r == row)
+                .unwrap_or(0);
+            let line = self.view_lines.first_view_line_of_row(row);
+            self.scroll_top = (layout.zones.line_y(line, layout.metrics.line_height)
+                - layout.metrics.line_height * ix as f32)
+                .max(px(0.));
+            self.set_selections(&[Selection::collapsed(PointUtf16::new(row, 0))], cx);
+            self.autoscroll_requested = false;
+            return;
+        }
         if let Some(vbar) = layout.vertical_scrollbar
             && vbar.track.contains(&event.position)
         {
@@ -1319,6 +1376,27 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let minimap_hovered = self
+            .layout
+            .as_ref()
+            .and_then(|layout| layout.minimap)
+            .is_some_and(|minimap| minimap.bounds.contains(&event.position));
+        if minimap_hovered != self.minimap_hovered {
+            self.minimap_hovered = minimap_hovered;
+            cx.notify();
+        }
+        if let Some(grab) = self.minimap_drag {
+            if event.pressed_button == Some(MouseButton::Left) {
+                if let Some(minimap) = self.layout.as_ref().and_then(|layout| layout.minimap) {
+                    let slider_top = event.position.y - grab - minimap.bounds.top();
+                    self.scroll_top = (slider_top * minimap.drag_ratio).max(px(0.));
+                    cx.emit(CodeEditorEvent::ScrollChanged);
+                    cx.notify();
+                }
+                return;
+            }
+            self.minimap_drag = None;
+        }
         let gutter_hovered = self.layout.as_ref().is_some_and(|layout| {
             layout.bounds.contains(&event.position) && event.position.x < layout.text_bounds.left()
         });
@@ -1431,6 +1509,7 @@ impl CodeEditor {
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+        self.minimap_drag = None;
         self.mouse_selection = None;
         self.scrollbar_drag = None;
     }
