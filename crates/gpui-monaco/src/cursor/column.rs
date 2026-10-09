@@ -14,9 +14,13 @@ use super::{
 /// columns (Monaco `IColumnSelectData`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ColumnSelectData {
+    /// Row where the column selection started.
     pub from_row: u32,
+    /// 0-based visible column where the column selection started.
     pub from_visible_column: u32,
+    /// Row of the moving corner (the primary cursor's row).
     pub to_row: u32,
+    /// 0-based visible column of the moving corner.
     pub to_visible_column: u32,
 }
 
@@ -24,11 +28,18 @@ pub struct ColumnSelectData {
 /// on macOS with Cmd).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColumnSelectCommand {
+    /// One visible column left (Monaco `cursorColumnSelectLeft`).
     Left,
+    /// One visible column right, up to the widest selected line's end
+    /// (Monaco `cursorColumnSelectRight`).
     Right,
+    /// One row up (Monaco `cursorColumnSelectUp`).
     Up,
+    /// One row down (Monaco `cursorColumnSelectDown`).
     Down,
+    /// `page_lines` rows up (Monaco `cursorColumnSelectPageUp`).
     PageUp,
+    /// `page_lines` rows down (Monaco `cursorColumnSelectPageDown`).
     PageDown,
 }
 

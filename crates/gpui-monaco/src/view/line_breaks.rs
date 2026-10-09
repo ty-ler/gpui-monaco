@@ -15,10 +15,16 @@ pub const DEFAULT_BREAK_AFTER: &str = " \t})]?|/&.,;¢°′″‰℃、。｡､
 /// Monaco `wrappingIndent`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WrappingIndent {
+    /// Continuation lines start at column 0.
     None,
+    /// Continuation lines get the wrapped line's indentation.
     #[default]
     Same,
+    /// Continuation lines get the wrapped line's indentation plus one tab
+    /// stop.
     Indent,
+    /// Continuation lines get the wrapped line's indentation plus two tab
+    /// stops.
     DeepIndent,
 }
 
@@ -44,6 +50,11 @@ impl Default for WrapClassifier {
 }
 
 impl WrapClassifier {
+    /// A classifier that breaks before any character of `break_before` and
+    /// after any character of `break_after` (Monaco
+    /// `editor.wordWrapBreakBeforeCharacters`/`wordWrapBreakAfterCharacters`),
+    /// and around CJK ideographs and kana. A character in both sets breaks
+    /// after.
     pub fn new(break_before: &str, break_after: &str) -> Self {
         let mut ascii = [CharClass::None; 256];
         let mut other = Vec::new();
@@ -84,13 +95,17 @@ impl WrapClassifier {
 /// Where one model line wraps. `break_offsets` ends with the line length.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LineBreakData {
+    /// UTF-16 offset in the model line where each output line ends.
     pub break_offsets: Vec<u32>,
+    /// Visible column in the model line of each entry of `break_offsets`
+    /// (without continuation indentation).
     pub break_offsets_visible_column: Vec<u32>,
     /// Visible columns of indentation added to continuation lines.
     pub wrapped_text_indent_length: u32,
 }
 
 impl LineBreakData {
+    /// Number of output (view) lines the model line wraps into.
     pub fn output_line_count(&self) -> usize {
         self.break_offsets.len()
     }

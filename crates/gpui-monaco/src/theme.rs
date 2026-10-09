@@ -18,22 +18,41 @@ use gpui::{Hsla, Rgba, rgb, rgba};
 use serde::Deserialize;
 use syntax::HighlightId;
 
+/// Editor chrome colors, named after the VS Code color keys they come from.
+///
+/// Defaults to [`EditorColors::vs_dark`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct EditorColors {
+    /// Text area background (`editor.background`).
     pub background: Hsla,
+    /// Default text color (`editor.foreground`).
     pub foreground: Hsla,
+    /// Line numbers (`editorLineNumber.foreground`).
     pub line_number: Hsla,
+    /// The cursor's line number (`editorLineNumber.activeForeground`).
     pub active_line_number: Hsla,
+    /// Current line fill (`editor.lineHighlightBackground`); `None` draws no fill.
     pub line_highlight_background: Option<Hsla>,
+    /// Current line outline (`editor.lineHighlightBorder`); `None` draws no outline.
     pub line_highlight_border: Option<Hsla>,
+    /// Selections in the focused editor (`editor.selectionBackground`).
     pub selection_background: Hsla,
+    /// Selections in an unfocused editor (`editor.inactiveSelectionBackground`).
     pub inactive_selection_background: Hsla,
+    /// The cursor (`editorCursor.foreground`).
     pub cursor: Hsla,
+    /// Gutter background (`editorGutter.background`, else the editor background).
     pub gutter_background: Hsla,
+    /// Scrollbar thumb (`scrollbarSlider.background`).
     pub scrollbar_slider: Hsla,
+    /// Hovered scrollbar thumb (`scrollbarSlider.hoverBackground`).
     pub scrollbar_slider_hover: Hsla,
+    /// Dragged scrollbar thumb (`scrollbarSlider.activeBackground`).
     pub scrollbar_slider_active: Hsla,
+    /// Shadow drawn when the content is scrolled (`scrollbar.shadow`).
     pub scrollbar_shadow: Hsla,
+    /// Underline of IME composition text; follows the foreground when loading VS Code
+    /// colors.
     pub ime_underline: Hsla,
     /// Current find match (`editor.findMatchBackground`).
     pub find_match_background: Hsla,
@@ -43,19 +62,25 @@ pub struct EditorColors {
     pub find_match_overview: Hsla,
     /// Widget chrome (`editorWidget.background` / `.foreground` / `.border`).
     pub widget_background: Hsla,
+    /// `editorWidget.foreground`.
     pub widget_foreground: Hsla,
+    /// `editorWidget.border`.
     pub widget_border: Hsla,
     /// Input boxes in widgets (`input.background` / `inputOption.activeBackground`).
     pub input_background: Hsla,
+    /// `inputOption.activeBackground`: an enabled toggle (e.g. match case).
     pub input_option_active_background: Hsla,
+    /// `inputOption.activeBorder`; also used for links in widgets.
     pub input_option_active_border: Hsla,
     /// `editorBracketMatch.background` / `.border`.
     pub bracket_match_background: Hsla,
+    /// `editorBracketMatch.border`.
     pub bracket_match_border: Hsla,
     /// `minimap.background` (defaults to the editor background).
     pub minimap_background: Option<Hsla>,
     /// `minimapSlider.background` / `.hoverBackground`.
     pub minimap_slider: Hsla,
+    /// `minimapSlider.hoverBackground`.
     pub minimap_slider_hover: Hsla,
     /// `editorStickyScroll.background` (defaults to the editor background).
     pub sticky_scroll_background: Option<Hsla>,
@@ -146,6 +171,7 @@ impl EditorColors {
                 *slot = color;
             }
         };
+        let previous_background = self.background;
         set(&mut self.background, "editor.background");
         set(&mut self.foreground, "editor.foreground");
         set(&mut self.line_number, "editorLineNumber.foreground");
@@ -193,7 +219,31 @@ impl EditorColors {
             &mut self.input_option_active_border,
             "inputOption.activeBorder",
         );
-        self.gutter_background = get("editorGutter.background").unwrap_or(self.background);
+        set(
+            &mut self.bracket_match_background,
+            "editorBracketMatch.background",
+        );
+        set(&mut self.bracket_match_border, "editorBracketMatch.border");
+        set(&mut self.minimap_slider, "minimapSlider.background");
+        set(
+            &mut self.minimap_slider_hover,
+            "minimapSlider.hoverBackground",
+        );
+        if let Some(color) = get("minimap.background") {
+            self.minimap_background = Some(color);
+        }
+        if let Some(color) = get("editorStickyScroll.background") {
+            self.sticky_scroll_background = Some(color);
+        }
+        // The gutter defaults to the editor background (and keeps following
+        // it unless a base theme gave it its own color).
+        match get("editorGutter.background") {
+            Some(color) => self.gutter_background = color,
+            None if self.gutter_background == previous_background => {
+                self.gutter_background = self.background
+            }
+            None => {}
+        }
         if let Some(color) = get("editor.lineHighlightBackground") {
             self.line_highlight_background = Some(color);
         }
@@ -227,12 +277,18 @@ pub fn parse_hex_color(value: &str) -> Option<Hsla> {
     Some(rgba(value).into())
 }
 
+/// How a token is drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TokenStyle {
+    /// Text color; `None` uses the editor foreground.
     pub foreground: Option<Hsla>,
+    /// Bold text.
     pub bold: bool,
+    /// Italic text.
     pub italic: bool,
+    /// Underlined text.
     pub underline: bool,
+    /// Struck-through text.
     pub strikethrough: bool,
 }
 
@@ -249,6 +305,7 @@ impl TokenStyle {
     }
 }
 
+/// The vocabulary a [`TokenRule`] selector uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuleKind {
     /// Selector is a Monarch token name.
@@ -257,23 +314,34 @@ pub enum RuleKind {
     TextMate,
 }
 
+/// A theme rule: tokens matching `selector` get `style`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TokenRule {
+    /// Which vocabulary `selector` is in.
     pub kind: RuleKind,
+    /// A dotted token name or scope; matches itself and names extending it with `.`
+    /// (`keyword` matches `keyword.control`). The longest match wins, later rules on ties.
     pub selector: String,
+    /// The style for matching tokens.
     pub style: TokenStyle,
 }
 
+/// Whether a theme is light or dark (Monaco `base`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThemeKind {
+    /// A light theme.
     Light,
+    /// A dark theme.
     Dark,
 }
 
 /// Editor colors and token rules.
 pub struct Theme {
+    /// Display name.
     pub name: String,
+    /// Light or dark.
     pub kind: ThemeKind,
+    /// Editor chrome colors.
     pub colors: EditorColors,
     rules: Vec<TokenRule>,
     cache: Mutex<HashMap<HighlightId, TokenStyle>>,
@@ -310,6 +378,7 @@ macro_rules! monaco_rules {
 }
 
 impl Theme {
+    /// A theme from its parts. Token styles are resolved lazily and cached.
     pub fn new(
         name: impl Into<String>,
         kind: ThemeKind,
@@ -325,6 +394,7 @@ impl Theme {
         }
     }
 
+    /// The token rules, in order.
     pub fn rules(&self) -> &[TokenRule] {
         &self.rules
     }

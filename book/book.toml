@@ -1,0 +1,10 @@
+[book]
+title = "gpui-monaco"
+description = "A Monaco-like code editor component for GPUI"
+authors = ["gpui-monaco contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/ty-ler/gpui-monaco"
+edit-url-template = "https://github.com/ty-ler/gpui-monaco/edit/main/book/{path}"

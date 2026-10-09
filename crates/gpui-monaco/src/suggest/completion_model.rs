@@ -37,6 +37,8 @@ pub struct LineContext {
 pub struct ScoredCompletion {
     /// Index into the items passed to [`CompletionModel::new`].
     pub index: usize,
+    /// The typed word's score against the item's filter text (or label);
+    /// [`FuzzyScore::default_score`] when the word is empty or whitespace.
     pub score: FuzzyScore,
     /// Ranges (UTF-16) in the item's label to highlight.
     pub highlights: Vec<Range<usize>>,
@@ -172,10 +174,12 @@ impl CompletionModel {
         self.refilter(kind);
     }
 
+    /// What the user has typed, as last set.
     pub fn line_context(&self) -> &LineContext {
         &self.line_context
     }
 
+    /// All items, unfiltered, in the order they were passed in.
     pub fn items(&self) -> &[CompletionItem] {
         &self.items
     }

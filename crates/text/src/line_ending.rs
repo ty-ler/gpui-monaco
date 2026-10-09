@@ -4,12 +4,15 @@ use std::borrow::Cow;
 /// ending is applied when text is exported.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum LineEnding {
+    /// `\n` (Unix).
     #[default]
     Lf,
+    /// `\r\n` (Windows).
     Crlf,
 }
 
 impl LineEnding {
+    /// The line break sequence: `"\n"` or `"\r\n"`.
     pub fn as_str(self) -> &'static str {
         match self {
             LineEnding::Lf => "\n",

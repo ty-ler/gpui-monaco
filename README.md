@@ -31,6 +31,13 @@ wasm, and huge single lines (minified files). See the `post-mvp` issues.
 | `gpui-monaco-languages` | `crates/gpui-monaco-languages` | Feature-flagged grammars and queries. |
 | `playground` | `examples/playground` | Monaco-playground-like demo app. |
 
+## Documentation
+
+- **Guide:** [`book/`](book/src/SUMMARY.md). Build it with `mdbook build book`; it covers embedding, models and editors, options, keybindings, themes, languages, decorations, widgets, providers and diagnostics.
+- **API docs:** `cargo doc --open -p gpui-monaco`.
+- **Performance:** [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) has the large-file budget and how to measure it.
+- **Playground:** [`examples/playground`](examples/playground/README.md) is a demo app with every feature.
+
 ## Using it
 
 gpui-monaco depends on gpui from git (crates.io's gpui is out of date), so it is

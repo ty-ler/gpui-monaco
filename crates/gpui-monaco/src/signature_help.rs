@@ -22,6 +22,8 @@ pub(crate) struct SignatureHelpState {
     widget: Option<(Entity<SignatureHelpWidget>, WidgetId)>,
 }
 
+/// The parameter hints card, shown by [`CodeEditor::trigger_signature_help`]
+/// as a content widget.
 pub struct SignatureHelpWidget {
     help: SignatureHelp,
     style: MarkdownStyle,
@@ -134,10 +136,12 @@ impl Render for SignatureHelpWidget {
 use gpui::prelude::FluentBuilder as _;
 
 impl CodeEditor {
+    /// Whether parameter hints are showing.
     pub fn is_signature_help_visible(&self) -> bool {
         self.signature_help.widget.is_some()
     }
 
+    /// Closes parameter hints and cancels a pending request.
     pub fn hide_signature_help(&mut self, cx: &mut Context<Self>) {
         self.signature_help.task = None;
         if let Some((_, id)) = self.signature_help.widget.take() {

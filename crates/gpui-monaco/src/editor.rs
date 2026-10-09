@@ -36,7 +36,9 @@ pub enum CodeEditorEvent {
     SelectionsChanged,
     /// The scroll position changed (Monaco `onDidScrollChange`).
     ScrollChanged,
+    /// The editor gained focus (Monaco `onDidFocusEditorText`).
     Focused,
+    /// The editor lost focus (Monaco `onDidBlurEditorText`).
     Blurred,
     /// Go to definition led to another model: the host should open it.
     OpenLocation(crate::providers::Location),
@@ -45,8 +47,11 @@ pub enum CodeEditorEvent {
 /// Saved per-model view state (Monaco `saveViewState`/`restoreViewState`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewState {
+    /// The selections; the first is the primary one.
     pub selections: Vec<Selection>,
+    /// Vertical scroll offset in pixels.
     pub scroll_top: Pixels,
+    /// Horizontal scroll offset in pixels.
     pub scroll_left: Pixels,
 }
 
@@ -208,6 +213,7 @@ impl CodeEditor {
         Self::new(model, window, cx)
     }
 
+    /// The model this editor shows.
     pub fn model(&self) -> &Entity<TextModel> {
         &self.model
     }
@@ -215,6 +221,22 @@ impl CodeEditor {
     /// Shows a different model, resetting cursors and scroll (Monaco
     /// `setModel`). Save and restore [`ViewState`] to keep them per model.
     pub fn set_model(&mut self, model: Entity<TextModel>, cx: &mut Context<Self>) {
+        // Popups and decorations this editor owns refer to the old model: its
+        // decoration ids would name unrelated decorations in the new one.
+        self.hide_hover(cx);
+        self.hide_suggest(cx);
+        self.hide_signature_help(cx);
+        self.close_marker_zone(cx);
+        self.clear_definition_link(cx);
+        self.detach_find_from_model(cx);
+        let brackets = std::mem::take(&mut self.bracket_decorations);
+        if !brackets.is_empty() {
+            self.model.update(cx, |model, cx| {
+                model.delta_decorations(None, &brackets, Vec::new(), cx)
+            });
+        }
+        self.minimap_cache = Default::default();
+
         self._subscriptions[0] = cx.subscribe(&model, Self::on_model_event);
         model.update(cx, |model, cx| model.ensure_syntax(cx));
         self.snapshot = model.read(cx).snapshot();
@@ -230,10 +252,13 @@ impl CodeEditor {
         self.scroll_left = px(0.);
         self.marked_range = None;
         self.prev_edit_kind = None;
+        self.refresh_find_matches(cx);
         cx.emit(CodeEditorEvent::SelectionsChanged);
+        cx.emit(CodeEditorEvent::ScrollChanged);
         cx.notify();
     }
 
+    /// Captures the selections and scroll position (Monaco `saveViewState`).
     pub fn save_view_state(&self) -> ViewState {
         ViewState {
             selections: self.cursors.selections(),
@@ -242,28 +267,36 @@ impl CodeEditor {
         }
     }
 
+    /// Restores a [`ViewState`] from [`CodeEditor::save_view_state`], clamping
+    /// selections to the current text (Monaco `restoreViewState`). Emits
+    /// [`CodeEditorEvent::SelectionsChanged`].
     pub fn restore_view_state(&mut self, state: &ViewState, cx: &mut Context<Self>) {
         self.cursors.set_selections(&state.selections);
         self.cursors.validate(self.snapshot.rope());
         self.scroll_top = state.scroll_top;
         self.scroll_left = state.scroll_left;
         cx.emit(CodeEditorEvent::SelectionsChanged);
+        cx.emit(CodeEditorEvent::ScrollChanged);
         cx.notify();
     }
 
+    /// The editor options.
     pub fn options(&self) -> &EditorOptions {
         &self.options
     }
 
+    /// Replaces the editor options (Monaco `updateOptions`, but with a full set).
     pub fn update_options(&mut self, options: EditorOptions, cx: &mut Context<Self>) {
         self.options = options;
         cx.notify();
     }
 
+    /// The current theme's chrome colors.
     pub fn colors(&self) -> &EditorColors {
         &self.theme.colors
     }
 
+    /// The current theme. Defaults to [`Theme::vs_dark`].
     pub fn theme(&self) -> &Arc<Theme> {
         &self.theme
     }
@@ -279,6 +312,8 @@ impl CodeEditor {
         self.cursors.selections()
     }
 
+    /// Replaces the selections (the first becomes primary), clamped to the text, and
+    /// emits [`CodeEditorEvent::SelectionsChanged`]. An empty slice is ignored.
     pub fn set_selections(&mut self, selections: &[Selection], cx: &mut Context<Self>) {
         if selections.is_empty() {
             return;
@@ -294,10 +329,13 @@ impl CodeEditor {
         self.cursors_changed(true, cx);
     }
 
+    /// The scroll offset in pixels (`x` is the left, `y` the top).
     pub fn scroll_position(&self) -> Point<Pixels> {
         point(self.scroll_left, self.scroll_top)
     }
 
+    /// Scrolls to `position` in pixels (negative values clamp to 0) and emits
+    /// [`CodeEditorEvent::ScrollChanged`].
     pub fn set_scroll_position(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         self.scroll_left = position.x.max(px(0.));
         self.scroll_top = position.y.max(px(0.));
@@ -324,6 +362,7 @@ impl CodeEditor {
         id
     }
 
+    /// Changes the height of a zone added with [`CodeEditor::add_view_zone`].
     pub fn set_view_zone_height(
         &mut self,
         id: WidgetId,
@@ -738,7 +777,7 @@ impl CodeEditor {
     fn remove_secondary_cursors(
         &mut self,
         _: &RemoveSecondaryCursors,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.options.single_line {
@@ -758,6 +797,11 @@ impl CodeEditor {
         }
         if self.is_hover_visible() {
             self.hide_hover(cx);
+            return;
+        }
+        // Monaco's `closeFindWidget` outranks `removeSecondaryCursors`.
+        if self.find.visible {
+            self.close_find(window, cx);
             return;
         }
         let primary = self.cursors.primary().clone();
@@ -940,13 +984,23 @@ impl CodeEditor {
         self.run_edit(cx, cursor::insert_line_above);
     }
 
+    /// Undoes the model's last undo step (Monaco `undo`), restoring the cursors it
+    /// was made with.
     pub fn undo(&mut self, cx: &mut Context<Self>) {
+        if self.options.read_only {
+            return;
+        }
         let source = Some(cx.entity_id());
         self.prev_edit_kind = None;
         self.model.update(cx, |model, cx| model.undo(source, cx));
     }
 
+    /// Redoes the model's last undone step (Monaco `redo`), restoring the cursors
+    /// from after it.
     pub fn redo(&mut self, cx: &mut Context<Self>) {
+        if self.options.read_only {
+            return;
+        }
         let source = Some(cx.entity_id());
         self.prev_edit_kind = None;
         self.model.update(cx, |model, cx| model.redo(source, cx));
@@ -1179,12 +1233,14 @@ impl CodeEditor {
         self.after_fold_change(cx);
     }
 
+    /// Collapses every foldable region (Monaco `editor.foldAll`).
     pub fn fold_all(&mut self, cx: &mut Context<Self>) {
         let buffer = self.model.read(cx).buffer().clone();
         self.folds.collapse_all(&buffer);
         self.after_fold_change(cx);
     }
 
+    /// Expands every collapsed region (Monaco `editor.unfoldAll`).
     pub fn unfold_all(&mut self, cx: &mut Context<Self>) {
         self.folds.expand_all();
         self.after_fold_change(cx);

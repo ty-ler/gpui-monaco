@@ -15,8 +15,13 @@ use super::{CursorModel, Position, Selection, validate_position, validate_range}
 /// (Monaco `SelectionStartKind`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectionStartKind {
+    /// A plain position or selection; extending moves only the head.
     Simple,
+    /// Started by selecting a word; extending keeps that word selected and
+    /// snaps the head to word boundaries.
     Word,
+    /// Started by selecting a line; extending keeps that line selected and
+    /// snaps the head to whole lines.
     Line,
 }
 
@@ -30,14 +35,22 @@ pub enum SelectionStartKind {
 /// snapped to the right of its desired visible column (e.g. past a tab).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SingleCursorState {
+    /// The range the selection was started from; empty for a
+    /// [`SelectionStartKind::Simple`] start.
     pub selection_start: Range<Position>,
+    /// How the selection was started.
     pub selection_start_kind: SelectionStartKind,
+    /// Leftover visible columns of the selection start, used when it moves
+    /// vertically (e.g. [`super::add_cursor_above`]).
     pub selection_start_leftover_visible_columns: i32,
+    /// The cursor position (the selection's head).
     pub position: Position,
+    /// Leftover visible columns of `position`.
     pub leftover_visible_columns: i32,
 }
 
 impl SingleCursorState {
+    /// A collapsed cursor at `p` with no leftover columns.
     pub fn from_position(p: Position) -> Self {
         Self {
             selection_start: p..p,
@@ -69,6 +82,8 @@ impl SingleCursorState {
         }
     }
 
+    /// True if the selection or the selection start is non-empty (Monaco
+    /// `SingleCursorState.hasSelection`).
     pub fn has_selection(&self) -> bool {
         !self.selection().is_empty() || self.selection_start.start != self.selection_start.end
     }
@@ -146,6 +161,7 @@ impl Default for CursorCollection {
 }
 
 impl CursorCollection {
+    /// A collection holding just `state` as the primary cursor.
     pub fn new(state: SingleCursorState) -> Self {
         Self {
             states: vec![state],
@@ -155,14 +171,17 @@ impl CursorCollection {
         }
     }
 
+    /// The primary cursor.
     pub fn primary(&self) -> &SingleCursorState {
         &self.states[0]
     }
 
+    /// All cursors, primary first.
     pub fn all(&self) -> &[SingleCursorState] {
         &self.states
     }
 
+    /// The selection of every cursor, primary first.
     pub fn selections(&self) -> Vec<Selection> {
         self.states.iter().map(|s| s.selection()).collect()
     }
@@ -236,6 +255,7 @@ impl CursorCollection {
         &self.auto_closed
     }
 
+    /// Mutable access to [`Self::auto_closed_ranges`].
     pub fn auto_closed_ranges_mut(&mut self) -> &mut AutoClosedRanges {
         &mut self.auto_closed
     }

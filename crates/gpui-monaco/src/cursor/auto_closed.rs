@@ -86,6 +86,7 @@ impl AutoClosedRanges {
             .collect()
     }
 
+    /// True if no auto-closed characters are tracked.
     pub fn is_empty(&self) -> bool {
         self.actions.is_empty()
     }

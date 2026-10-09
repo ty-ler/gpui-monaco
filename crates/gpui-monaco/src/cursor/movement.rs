@@ -15,29 +15,54 @@ use super::{
 /// A cursor movement, as bound to keys by Monaco's default keymap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MoveCommand {
+    /// Monaco `cursorLeft`: one grapheme left, wrapping to the end of the
+    /// previous line; without `select`, collapses a selection to its start.
     Left,
+    /// Monaco `cursorRight`: one grapheme right, wrapping to the start of the
+    /// next line; without `select`, collapses a selection to its end.
     Right,
+    /// Monaco `cursorUp`: one line up, keeping the visible column.
     Up,
+    /// Monaco `cursorDown`: one line down, keeping the visible column.
     Down,
     /// Monaco `cursorWordLeft` (Ctrl+Left / Alt+Left on macOS): word starts,
     /// skipping single separators glued to a word.
     WordLeft,
     /// Monaco `cursorWordRight` (Ctrl+Right / Alt+Right on macOS): word ends.
     WordRight,
+    /// Monaco `cursorWordStartLeft`: the previous word start.
     WordStartLeft,
+    /// Monaco `cursorWordStartRight`: the next word start.
     WordStartRight,
+    /// Monaco `cursorWordEndLeft`: the previous word end.
     WordEndLeft,
+    /// Monaco `cursorWordEndRight`: the next word end.
     WordEndRight,
+    /// Monaco `cursorWordPartLeft`: the previous camelCase, `snake_case` or
+    /// `kebab-case` word part boundary.
     WordPartLeft,
+    /// Monaco `cursorWordPartRight`: the next camelCase, `snake_case` or
+    /// `kebab-case` word part boundary.
     WordPartRight,
     /// Toggles between the first non-whitespace column and column 0.
     Home,
+    /// Monaco `cursorEnd`: the end of the line.
     End,
+    /// Monaco `cursorTop`: the start of the text.
     Top,
+    /// Monaco `cursorBottom`: the end of the text.
     Bottom,
+    /// Monaco `cursorPageUp`: up by the `page_lines` passed to
+    /// [`move_cursors`].
     PageUp,
+    /// Monaco `cursorPageDown`: down by the `page_lines` passed to
+    /// [`move_cursors`].
     PageDown,
+    /// Column 0 of the previous blank line, past any blank lines the cursor
+    /// is on (Monaco `cursorMove` to `prevBlankLine`); the first line if none.
     PrevBlankLine,
+    /// Column 0 of the next blank line, past any blank lines the cursor is
+    /// on (Monaco `cursorMove` to `nextBlankLine`); the last line if none.
     NextBlankLine,
 }
 

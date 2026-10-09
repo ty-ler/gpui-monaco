@@ -31,6 +31,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
+  docs:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Rustdoc (missing_docs and broken links are errors)
+        run: cargo doc --no-deps -p gpui-monaco -p gpui-monaco-text -p gpui-monaco-syntax -p gpui-monaco-languages
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Guide
+        run: |
+          cargo install mdbook --locked --version 0.4.52
+          mdbook build book
+
   # The large-file budget (docs/PERFORMANCE.md), doubled for shared runners.
   perf-budget:
     runs-on: macos-latest

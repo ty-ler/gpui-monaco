@@ -14,12 +14,17 @@ use text::{Patch, PointUtf16, Rope, Version};
 use super::line_breaks::{LineBreakData, WrapClassifier, WrappingIndent, compute_line_breaks};
 use super::prefix_sum::PrefixSum;
 
+/// How [`ViewLines`] soft-wraps model rows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WrapSettings {
     /// Wrap at this many visible columns.
     pub column: u32,
+    /// Width of a tab character in visible columns.
     pub tab_size: u32,
+    /// Indentation of continuation lines (Monaco `editor.wrappingIndent`).
     pub indent: WrappingIndent,
+    /// Don't break between CJK characters (Monaco `editor.wordBreak:
+    /// keepAll`).
     pub keep_all: bool,
 }
 
@@ -41,7 +46,9 @@ pub fn normalize_hidden(mut hidden: Vec<Range<u32>>) -> Vec<Range<u32>> {
 /// One view line: a segment of a model row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ViewLine {
+    /// The model row.
     pub row: u32,
+    /// Index of the wrapped segment within the row; 0 for the first.
     pub segment: u32,
 }
 
@@ -54,9 +61,12 @@ pub struct SegmentInfo {
     pub indent: u32,
     /// Visible column of `columns.start` in the model row (for tab stops).
     pub start_visible_column: u32,
+    /// True if this is the row's last segment.
     pub is_last: bool,
 }
 
+/// The mapping from model rows to view lines for one snapshot of the text,
+/// given the hidden (folded) rows and the wrap settings.
 #[derive(Clone)]
 pub struct ViewLines {
     rope: Rope,
@@ -70,6 +80,8 @@ pub struct ViewLines {
 }
 
 impl ViewLines {
+    /// View lines for `rope` at `version`, with no wrapping and nothing
+    /// hidden.
     pub fn new(rope: Rope, version: Version) -> Self {
         let mut this = Self {
             breaks: vec![None; rope.line_count() as usize],
@@ -84,18 +96,23 @@ impl ViewLines {
         this
     }
 
+    /// The text version this mapping is for.
     pub fn version(&self) -> Version {
         self.version
     }
 
+    /// The text this mapping is for.
     pub fn rope(&self) -> &Rope {
         &self.rope
     }
 
+    /// The wrap settings; `None` when wrapping is off.
     pub fn wrap(&self) -> Option<&WrapSettings> {
         self.wrap.as_ref()
     }
 
+    /// The hidden model row ranges, sorted and disjoint (see
+    /// [`normalize_hidden`]).
     pub fn hidden(&self) -> &[Range<u32>] {
         &self.hidden
     }
@@ -159,6 +176,8 @@ impl ViewLines {
         self.rebuild_counts();
     }
 
+    /// Changes which characters wrapping may break around, rewrapping every
+    /// row.
     pub fn set_classifier(&mut self, classifier: WrapClassifier) {
         self.classifier = Arc::new(classifier);
         let wrap = self.wrap.take();
@@ -243,10 +262,13 @@ impl ViewLines {
         }
     }
 
+    /// Number of view lines.
     pub fn line_count(&self) -> u32 {
         self.counts.total() as u32
     }
 
+    /// True if model `row` is hidden by a fold. Rows past the end are not
+    /// hidden.
     pub fn is_row_hidden(&self, row: u32) -> bool {
         self.counts.len() > row as usize && self.counts.value(row as usize) == 0
     }
@@ -266,6 +288,8 @@ impl ViewLines {
         self.counts.prefix(row as usize) as u32
     }
 
+    /// Which part of its model row `line` shows. A segment past the row's
+    /// last is clamped to the last.
     pub fn segment_info(&self, line: ViewLine) -> SegmentInfo {
         match self.breaks.get(line.row as usize).and_then(|b| b.as_ref()) {
             None => SegmentInfo {

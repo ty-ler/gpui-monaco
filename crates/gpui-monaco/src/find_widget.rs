@@ -15,6 +15,8 @@ use crate::model::TextModelEvent;
 use crate::options::EditorOptions;
 use crate::theme::EditorColors;
 
+/// The find and replace widget, shown as an overlay at the top right of the
+/// editor by the find commands.
 pub struct FindWidget {
     editor: WeakEntity<CodeEditor>,
     find_input: Entity<CodeEditor>,

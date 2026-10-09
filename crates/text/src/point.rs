@@ -8,24 +8,30 @@ use std::ops::{Add, AddAssign, Sub};
 /// [`PointUtf16::to_monaco`] / [`PointUtf16::from_monaco`] at API boundaries.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Point {
+    /// Zero-based line index.
     pub row: u32,
+    /// Byte offset within the line.
     pub column: u32,
 }
 
 impl Point {
+    /// The largest representable point; resolves to the end of any text.
     pub const MAX: Self = Self {
         row: u32::MAX,
         column: u32::MAX,
     };
 
+    /// Creates a point from a zero-based row and byte column.
     pub const fn new(row: u32, column: u32) -> Self {
         Self { row, column }
     }
 
+    /// The start of the text.
     pub const fn zero() -> Self {
         Self::new(0, 0)
     }
 
+    /// Whether this is the start of the text.
     pub fn is_zero(&self) -> bool {
         self.row == 0 && self.column == 0
     }
@@ -69,15 +75,19 @@ impl Sub for Point {
 /// Like [`Point`], but `column` counts UTF-16 code units (Monaco's column unit).
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PointUtf16 {
+    /// Zero-based line index.
     pub row: u32,
+    /// Offset within the line in UTF-16 code units.
     pub column: u32,
 }
 
 impl PointUtf16 {
+    /// Creates a point from a zero-based row and UTF-16 column.
     pub const fn new(row: u32, column: u32) -> Self {
         Self { row, column }
     }
 
+    /// The start of the text.
     pub const fn zero() -> Self {
         Self::new(0, 0)
     }
@@ -123,10 +133,15 @@ impl AddAssign for OffsetUtf16 {
 /// [`Rope::locate`](crate::Rope::locate).
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct Location {
+    /// Byte offset from the start of the text.
     pub offset: usize,
+    /// Row and byte column.
     pub point: Point,
+    /// Row and UTF-16 column.
     pub point_utf16: PointUtf16,
+    /// Offset in UTF-16 code units from the start of the text.
     pub offset_utf16: OffsetUtf16,
+    /// Number of chars (Unicode scalar values) from the start of the text.
     pub chars: usize,
 }
 

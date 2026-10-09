@@ -5,6 +5,7 @@
 //! Grammars and highlight queries come from the official tree-sitter grammar
 //! crates (MIT). Editing rules come from VS Code's `language-configuration.json`
 //! files (MIT), copied into `configs/`.
+#![warn(missing_docs)]
 
 use std::sync::Arc;
 
@@ -32,6 +33,8 @@ fn grammar(language: TsLanguage, highlights: &[&str], injections: Option<&str>) 
     grammar
 }
 
+/// Rust (`.rs`), with tree-sitter-rust highlights and injections and VS Code's
+/// Rust configuration.
 #[cfg(feature = "lang-rust")]
 pub fn rust() -> Language {
     Language::new("rust", "Rust")
@@ -45,6 +48,8 @@ pub fn rust() -> Language {
         ))
 }
 
+/// JavaScript and JSX (`.js`, `.mjs`, `.cjs`, `.jsx`), with tree-sitter-javascript
+/// highlights (including JSX) and injections.
 #[cfg(feature = "lang-js")]
 pub fn javascript() -> Language {
     Language::new("javascript", "JavaScript")
@@ -79,6 +84,8 @@ pub fn typescript() -> Language {
         ))
 }
 
+/// TypeScript React (`.tsx`), layering the JavaScript and JSX queries under the
+/// TypeScript one like [`typescript`].
 #[cfg(feature = "lang-ts")]
 pub fn tsx() -> Language {
     Language::new("typescriptreact", "TypeScript React")
@@ -96,6 +103,7 @@ pub fn tsx() -> Language {
         ))
 }
 
+/// JSON, including JSONC and JSON5 files and common `.*rc` config files.
 #[cfg(feature = "lang-json")]
 pub fn json() -> Language {
     Language::new("json", "JSON")
@@ -115,6 +123,7 @@ pub fn json() -> Language {
         ))
 }
 
+/// YAML (`.yaml`, `.yml`).
 #[cfg(feature = "lang-yaml")]
 pub fn yaml() -> Language {
     Language::new("yaml", "YAML")
@@ -146,6 +155,9 @@ pub fn toml() -> Language {
         ))
 }
 
+/// Markdown's block grammar. Paragraph text is injected as [`markdown_inline`],
+/// fenced code blocks as the language named by their info string, and HTML
+/// blocks and front matter as HTML, YAML or TOML.
 #[cfg(feature = "lang-markdown")]
 pub fn markdown() -> Language {
     Language::new("markdown", "Markdown")
@@ -171,6 +183,7 @@ pub fn markdown_inline() -> Language {
         ))
 }
 
+/// HTML, with `<script>` and `<style>` contents injected as JavaScript and CSS.
 #[cfg(feature = "lang-html")]
 pub fn html() -> Language {
     Language::new("html", "HTML")
@@ -184,6 +197,7 @@ pub fn html() -> Language {
         ))
 }
 
+/// CSS (`.css`).
 #[cfg(feature = "lang-css")]
 pub fn css() -> Language {
     Language::new("css", "CSS")

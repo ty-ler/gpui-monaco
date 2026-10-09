@@ -533,11 +533,14 @@ impl EditorLayout {
     }
 }
 
+/// The GPUI element that lays out and paints a [`CodeEditor`]. [`CodeEditor`]
+/// renders one itself; use this to embed the editor in a custom element tree.
 pub struct EditorElement {
     editor: Entity<CodeEditor>,
 }
 
 impl EditorElement {
+    /// An element painting `editor`.
     pub fn new(editor: Entity<CodeEditor>) -> Self {
         Self { editor }
     }

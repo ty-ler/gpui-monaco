@@ -22,11 +22,17 @@ use super::{CursorModel, Position, Selection};
 /// `EditOperationType`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditOperationType {
+    /// Any other edit (paste, cut, word deletion, line operations, ...).
     Other,
+    /// Backspace ([`super::delete_left`]).
     DeletingLeft,
+    /// Delete ([`super::delete_right`]).
     DeletingRight,
+    /// Typing anything other than a single space.
     TypingOther,
+    /// Typing a space after something other than a space.
     TypingFirstSpace,
+    /// Typing a space right after another typed space.
     TypingConsecutiveSpace,
 }
 

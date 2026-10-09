@@ -12,8 +12,11 @@ use text::Rope;
 /// What to search for (Monaco `SearchParams`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchParams {
+    /// The text or regular expression to find.
     pub query: String,
+    /// Treat `query` as a regular expression rather than literal text.
     pub is_regex: bool,
+    /// Match case exactly; otherwise case-insensitive.
     pub match_case: bool,
     /// Word separators for whole-word matching; `None` matches anywhere.
     pub word_separators: Option<String>,
@@ -55,6 +58,7 @@ pub fn is_multiline_regex_source(source: &str) -> bool {
 }
 
 impl SearchParams {
+    /// Search parameters from their parts.
     pub fn new(
         query: impl Into<String>,
         is_regex: bool,
@@ -99,6 +103,9 @@ impl SearchParams {
 }
 
 impl SearchData {
+    /// True if matches can span lines (the regex can match a line break, or
+    /// the literal query contains one), so the search runs over the whole
+    /// text instead of line by line.
     pub fn is_multiline(&self) -> bool {
         self.multiline
     }
@@ -257,18 +264,39 @@ pub fn find_previous(rope: &Rope, data: &SearchData, before: usize) -> Option<Ra
     None
 }
 
+/// The text a match was found in and where it starts: the match's line, or
+/// the whole text for multiline searches (as [`find_matches`] searches).
+/// Pass it to [`expand_replacement`] so captures see the same context.
+pub fn match_context(rope: &Rope, data: &SearchData, matched: &Range<usize>) -> (String, usize) {
+    if data.multiline {
+        (rope.text_for_range(0..rope.len()), 0)
+    } else {
+        let row = rope.offset_to_point(matched.start).row;
+        let line = rope.line_range(row);
+        (rope.text_for_range(line.clone()), line.start)
+    }
+}
+
 /// Expands `$1`, `$&` and `$$` in a regex replace pattern (Monaco
-/// `ReplacePattern`, minus case-changing escapes).
+/// `ReplacePattern`, minus case-changing escapes) for the match at `matched`
+/// (byte range) in `haystack`, the text it was found in (see
+/// [`match_context`]): re-matching just the matched text could see different
+/// captures when the pattern depends on its surroundings (`\b`, `^`, `$`).
 pub fn expand_replacement(
     data: &SearchData,
     is_regex: bool,
-    matched: &str,
+    haystack: &str,
+    matched: Range<usize>,
     replacement: &str,
 ) -> String {
     if !is_regex {
         return replacement.to_string();
     }
-    let Some(captures) = data.regex.captures(matched) else {
+    let Some(captures) = data
+        .regex
+        .captures_at(haystack, matched.start)
+        .filter(|c| c.get(0).is_some_and(|m| m.range() == matched))
+    else {
         return replacement.to_string();
     };
     let mut out = String::new();
@@ -695,9 +723,18 @@ mod tests {
             .parse()
             .unwrap();
         assert_eq!(
-            expand_replacement(&data, true, "user@host", "$2:$1 ($&) $$"),
+            expand_replacement(&data, true, "user@host", 0..9, "$2:$1 ($&) $$"),
             "host:user (user@host) $"
         );
-        assert_eq!(expand_replacement(&data, false, "user@host", "$1"), "$1");
+        assert_eq!(
+            expand_replacement(&data, false, "user@host", 0..9, "$1"),
+            "$1"
+        );
+        // Captures come from the match in context: `^` only matches at the
+        // line start, not at the start of the matched text.
+        let data = SearchParams::new("(^a|b)(a)", true, true, None)
+            .parse()
+            .unwrap();
+        assert_eq!(expand_replacement(&data, true, "xba", 1..3, "[$1]"), "[b]");
     }
 }

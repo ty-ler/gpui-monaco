@@ -326,6 +326,57 @@ fn find_and_replace_through_the_widget(cx: &mut TestAppContext) {
     assert!(text(&editor, cx).contains('!'));
 }
 
+#[gpui::test]
+fn escape_in_editor_closes_find(cx: &mut TestAppContext) {
+    let (editor, cx) = editor_with_text("foo bar foo", cx);
+    cx.simulate_keystrokes("secondary-f");
+    cx.run_until_parked();
+    assert!(editor.read_with(cx, |e, _| e.is_find_visible()));
+    // Focus the editor again (as by clicking into the text), then Escape.
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    cx.simulate_keystrokes("escape");
+    assert!(!editor.read_with(cx, |e, _| e.is_find_visible()));
+}
+
+#[gpui::test]
+fn read_only_blocks_undo(cx: &mut TestAppContext) {
+    let (editor, cx) = editor_with_text("", cx);
+    cx.simulate_input("abc");
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.read_only = true;
+        e.update_options(options, cx);
+    });
+    cx.simulate_keystrokes("secondary-z");
+    assert_eq!(text(&editor, cx), "abc");
+}
+
+#[gpui::test]
+fn set_model_drops_decorations_owned_in_the_old_model(cx: &mut TestAppContext) {
+    use gpui_monaco::DecorationOptions;
+    // Bracket highlights are decorations the editor owns in its model.
+    let (editor, cx) = editor_with_text("(a)", cx);
+    let old_model = editor.read_with(cx, |e, _| e.model().clone());
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 1))], cx)
+    });
+    cx.run_until_parked();
+    let other = cx.new(|_| TextModel::new("x\ny"));
+    let host = other.update(cx, |model, cx| {
+        model.delta_decorations(None, &[], vec![(0..1, DecorationOptions::default())], cx)
+    });
+    editor.update(cx, |e, cx| e.set_model(other.clone(), cx));
+    // Moving the cursor updates bracket highlights in the new model; that
+    // must not delete the host's decoration with a stale id.
+    cx.simulate_keystrokes("right right");
+    cx.run_until_parked();
+    other.read_with(cx, |model, _| assert!(model.decoration(host[0]).is_some()));
+    let editor_id = editor.entity_id();
+    old_model.update(cx, |model, _| {
+        assert!(model.all_decorations(Some(editor_id)).is_empty())
+    });
+}
+
 fn rust_editor<'a>(
     text: &str,
     cx: &'a mut TestAppContext,

@@ -2,6 +2,8 @@
 //! this position" in `O(log n)` (Monaco uses a prefix-sum computer for the
 //! same job: mapping view lines to model lines).
 
+/// Per-index `u32` counts with `O(log n)` prefix sums, point updates and
+/// position lookup (a Fenwick tree).
 #[derive(Clone, Debug, Default)]
 pub struct PrefixSum {
     values: Vec<u32>,
@@ -9,6 +11,7 @@ pub struct PrefixSum {
 }
 
 impl PrefixSum {
+    /// A prefix sum over `values`, built in `O(n)`.
     pub fn new(values: Vec<u32>) -> Self {
         let mut this = Self {
             values,
@@ -32,18 +35,22 @@ impl PrefixSum {
         }
     }
 
+    /// Number of values.
     pub fn len(&self) -> usize {
         self.values.len()
     }
 
+    /// True if there are no values.
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
 
+    /// The value at `index`. Panics if out of bounds.
     pub fn value(&self, index: usize) -> u32 {
         self.values[index]
     }
 
+    /// Sets the value at `index` in `O(log n)`. Panics if out of bounds.
     pub fn set(&mut self, index: usize, value: u32) {
         let old = self.values[index] as i64;
         self.values[index] = value;
@@ -76,6 +83,7 @@ impl PrefixSum {
         sum
     }
 
+    /// Sum of all values.
     pub fn total(&self) -> u64 {
         self.prefix(self.values.len())
     }
