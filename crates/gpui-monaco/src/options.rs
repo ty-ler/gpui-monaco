@@ -46,6 +46,45 @@ pub enum ShowFoldingControls {
     Never,
 }
 
+/// Monaco `minimap` options.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MinimapOptions {
+    pub enabled: bool,
+    /// Columns rendered (Monaco `minimap.maxColumn`).
+    pub max_column: u32,
+    /// 1 or 2: pixels per character column and half the line height.
+    pub scale: f32,
+    /// Monaco `minimap.showSlider`: `true` always, `false` on mouse over.
+    pub always_show_slider: bool,
+}
+
+impl Default for MinimapOptions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_column: 120,
+            scale: 1.,
+            always_show_slider: false,
+        }
+    }
+}
+
+/// Monaco `stickyScroll` options.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StickyScrollOptions {
+    pub enabled: bool,
+    pub max_line_count: u32,
+}
+
+impl Default for StickyScrollOptions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_line_count: 5,
+        }
+    }
+}
+
 /// Monaco `cursorStyle`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorStyle {
@@ -101,6 +140,8 @@ pub struct EditorOptions {
     pub auto_indent: crate::cursor::AutoIndent,
     /// Monaco `matchBrackets`: highlight the bracket pair at the cursor.
     pub match_brackets: bool,
+    pub minimap: MinimapOptions,
+    pub sticky_scroll: StickyScrollOptions,
     /// A one-line input (like Monaco's find input): Enter, Tab and Escape
     /// propagate to the parent and pasted line breaks become spaces.
     pub single_line: bool,
@@ -152,6 +193,8 @@ impl Default for EditorOptions {
             auto_surround: Default::default(),
             auto_indent: Default::default(),
             match_brackets: true,
+            minimap: MinimapOptions::default(),
+            sticky_scroll: StickyScrollOptions::default(),
         }
     }
 }
@@ -170,6 +213,14 @@ impl EditorOptions {
             horizontal_scrollbar_size: px(0.),
             line_decorations_width: px(2.),
             single_line: true,
+            minimap: MinimapOptions {
+                enabled: false,
+                ..MinimapOptions::default()
+            },
+            sticky_scroll: StickyScrollOptions {
+                enabled: false,
+                ..StickyScrollOptions::default()
+            },
             ..Self::default()
         }
     }

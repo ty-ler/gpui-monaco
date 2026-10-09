@@ -387,3 +387,24 @@ fn bracket_matching_highlights_and_jumps(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("secondary-shift-\\");
     assert_eq!(heads(&editor, cx), vec![(1, 18)]);
 }
+
+#[gpui::test]
+fn sticky_scroll_and_minimap_layout(cx: &mut TestAppContext) {
+    let mut text = String::from("fn outer() {\n    fn inner() {\n");
+    for i in 0..200 {
+        text.push_str(&format!("        let v{i} = {i};\n"));
+    }
+    text.push_str("    }\n}\n");
+    let (editor, cx) = editor_with_text(&text, cx);
+    cx.run_until_parked();
+    // Scroll into the inner body: both scope headers stick.
+    editor.update(cx, |e, cx| {
+        e.set_scroll_position(gpui::point(gpui::px(0.), gpui::px(1000.)), cx)
+    });
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let (sticky_rows, has_minimap) = editor.read_with(cx, |e, _| e.sticky_rows_for_tests());
+    assert_eq!(sticky_rows, vec![0, 1]);
+    assert!(has_minimap);
+}
