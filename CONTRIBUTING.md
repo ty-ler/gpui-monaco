@@ -58,3 +58,17 @@ Grammar crates compile their C parsers through `script/wasm/cc` (set in
 from the `tree-sitter-language` crate) and a few inline ctype functions. It needs a `clang`
 that targets wasm32; Apple's does, and you can choose another with `WASM_CLANG`. Use
 `web_time::Instant`, not `std::time::Instant`, which panics in browsers.
+
+## Releasing
+
+The five library crates publish to crates.io; the examples don't (`publish = false`).
+
+1. Bump `version` in the workspace `Cargo.toml`, and the `version` on each internal
+   dependency in `[workspace.dependencies]`.
+2. Move the CHANGELOG's `[Unreleased]` entries under the new version.
+3. Dry run: `cargo package --workspace` packages every crate and builds each one from
+   its package, against the others through a temporary registry.
+4. Publish in dependency order: `gpui-monaco-text`, `gpui-monaco-syntax`,
+   `gpui-monaco`, `gpui-monaco-languages`, `gpui-monaco-lsp`. Or run
+   `cargo publish --workspace`, which orders them itself.
+5. Tag `vX.Y.Z` and push the tag.
