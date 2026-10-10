@@ -333,6 +333,16 @@ fn the_accessible_diff_viewer(cx: &mut TestAppContext) {
         diff.read_with(cx, |d, cx| d.accessible_viewer_state_for_tests(cx)),
         Some((2, 0, 0))
     );
+    let signals = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let collected = signals.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&diff, move |_, event: &gpui_monaco::DiffEditorEvent, _| {
+            if let gpui_monaco::DiffEditorEvent::AccessibilitySignal(signal) = event {
+                collected.borrow_mut().push(*signal);
+            }
+        })
+        .detach()
+    });
     // Down moves through the group: three lines of context, then the
     // change.
     cx.simulate_keystrokes("down down down down");
@@ -349,6 +359,14 @@ fn the_accessible_diff_viewer(cx: &mut TestAppContext) {
     assert_eq!(
         diff.read_with(cx, |d, cx| d.accessible_viewer_current_for_tests(cx)),
         Some("added")
+    );
+    // Monaco's audio cues for the deleted and the added line.
+    assert_eq!(
+        *signals.borrow(),
+        vec![
+            gpui_monaco::AccessibilitySignal::DiffLineDeleted,
+            gpui_monaco::AccessibilitySignal::DiffLineInserted
+        ]
     );
     // F7 again: the next change; then it cycles back.
     cx.simulate_keystrokes("f7");

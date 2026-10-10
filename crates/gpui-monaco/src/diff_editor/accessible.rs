@@ -235,6 +235,15 @@ impl AccessibleDiffViewer {
     /// Monaco's "select lines in editor": the modified cursor follows the
     /// current line, so editor commands like revert apply to it.
     fn element_changed(&mut self, cx: &mut Context<Self>) {
+        // Monaco's "play audio-cue for diff".
+        let signal = match self.current() {
+            Some(ViewElement::Deleted { .. }) => Some(super::AccessibilitySignal::DiffLineDeleted),
+            Some(ViewElement::Added { .. }) => Some(super::AccessibilitySignal::DiffLineInserted),
+            _ => None,
+        };
+        if let (Some(signal), Some(diff)) = (signal, self.diff.upgrade()) {
+            cx.defer(move |cx| diff.update(cx, |diff, cx| diff.play_signal(signal, cx)));
+        }
         let line = match self.current() {
             Some(ViewElement::Unchanged { modified, .. })
             | Some(ViewElement::Deleted { modified, .. })
