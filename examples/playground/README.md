@@ -11,7 +11,8 @@ The toolbar has these controls:
 - **Open…** opens a file. Its language is picked from the file name.
 - **Language** cycles through the registered languages.
 - **Theme** cycles through `vs-dark`, `vs` and the bundled VS Code themes (see `themes/`).
-- **Wrap, Minimap, Sticky scroll, Line numbers, Folding** and **Read-only** toggle editor options. `// #region` and `// MARK:` comments show as section headers in the minimap.
+- **Wrap, Minimap, Sticky scroll, Line numbers, Folding** and **Read-only** toggle editor options.
+- **Drop and paste:** dropping files inserts their paths, and after a paste the "Paste options" button offers "Insert as String Literal" from a demo paste provider. `// #region` and `// MARK:` comments show as section headers in the minimap.
 - **Add demo widgets** adds sample decorations, a view zone, a content widget and an overlay widget.
 
 Clicking the glyph margin, left of the line numbers, toggles a breakpoint dot. It uses the editor's mouse target events.

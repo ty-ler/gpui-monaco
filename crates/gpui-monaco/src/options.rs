@@ -896,6 +896,53 @@ impl Default for UnicodeHighlightOptions {
     }
 }
 
+/// When to show the button that switches between drop or paste edits
+/// (Monaco `showDropSelector`/`showPasteSelector`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShowEditSelector {
+    /// After the drop or paste (`afterDrop`, `afterPaste`).
+    #[default]
+    AfterEdit,
+    /// Never.
+    Never,
+}
+
+/// Monaco `dropIntoEditor`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DropIntoEditorOptions {
+    /// Accept drops (default `true`).
+    pub enabled: bool,
+    /// Monaco `showDropSelector`.
+    pub show_drop_selector: ShowEditSelector,
+}
+
+impl Default for DropIntoEditorOptions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            show_drop_selector: ShowEditSelector::AfterEdit,
+        }
+    }
+}
+
+/// Monaco `pasteAs`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PasteAsOptions {
+    /// Let paste edit providers handle pastes (default `true`).
+    pub enabled: bool,
+    /// Monaco `showPasteSelector`.
+    pub show_paste_selector: ShowEditSelector,
+}
+
+impl Default for PasteAsOptions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            show_paste_selector: ShowEditSelector::AfterEdit,
+        }
+    }
+}
+
 /// Monaco `unusualLineTerminators`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UnusualLineTerminators {
@@ -1091,6 +1138,12 @@ pub struct EditorOptions {
     /// Monaco `doubleClickSelectsBlock`: double-clicking just inside
     /// brackets or quotes selects their content (default `true`).
     pub double_click_selects_block: bool,
+    /// Monaco `dropIntoEditor`: files dropped on the editor are inserted by
+    /// the drop edit providers.
+    pub drop_into_editor: DropIntoEditorOptions,
+    /// Monaco `pasteAs`: paste edit providers may decide how the clipboard
+    /// is pasted.
+    pub paste_as: PasteAsOptions,
     /// Monaco `wordSeparators`: characters that end a word for word navigation,
     /// double-click selection and whole-word search.
     pub word_separators: SharedString,
@@ -1342,6 +1395,8 @@ impl Default for EditorOptions {
             unicode_highlight: UnicodeHighlightOptions::default(),
             drag_and_drop: true,
             double_click_selects_block: true,
+            drop_into_editor: DropIntoEditorOptions::default(),
+            paste_as: PasteAsOptions::default(),
             word_separators: "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?".into(),
             vertical_scrollbar_size: px(14.),
             horizontal_scrollbar_size: px(12.),

@@ -25,6 +25,7 @@ pub mod cursor;
 pub mod decorations;
 mod definition;
 mod dnd;
+mod drop_paste;
 mod editor;
 mod editor_actions;
 mod element;

@@ -1344,6 +1344,7 @@ fn prepaint_editor(
     editor.refresh_section_headers(cx);
     editor.check_unusual_line_terminators(window, cx);
     editor.refresh_unicode_highlights(cx);
+    editor.refresh_post_edit(cx);
     editor.resolve_visible_code_lenses(cx);
     let bracket_colors = editor.bracket_colors_in(visible_start..visible_end, cx);
     let mut highlight_ix = 0;

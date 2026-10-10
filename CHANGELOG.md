@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Drop and paste edit providers (#92, part 2):** ports `dropOrPasteInto`.
+  - **Providers:** `DocumentDropEditProvider` and `DocumentPasteEditProvider` offer edits (`DocumentDropOrPasteEdit`) for dropped or pasted data (`DataTransfer`). Register them with `register_document_drop_edit_provider` and `register_document_paste_edit_provider`. Edits are ordered by `yield_to`, as in Monaco.
+  - **Built-in providers:** plain text, paths from a `text/uri-list` ("Insert Path"), and HTML (for Paste As only).
+  - **Drops:** files dropped on the editor are inserted by the drop providers (`CodeEditor::drop_files`, `drop_data`). A caret follows the drag.
+  - **Pastes:** when providers other than the plain text one handle the clipboard, they decide how it's pasted.
+  - **Options button:** when several edits apply, a "Paste options"/"Drop options" button switches between them (`editor.changePasteType`/`changeDropType`, Cmd/Ctrl+.; Escape hides it).
+  - **Commands:** `editor.action.pasteAs` ("Paste As...", `CodeEditor::paste_as`) and `editor.action.pasteAsText`.
+  - **Options:** `drop_into_editor` and `paste_as` (`enabled`, `show_drop_selector`/`show_paste_selector`).
 - **Drag and drop (#92, part 1):**
   - **`EditorOptions::drag_and_drop`** (Monaco `dragAndDrop`, on by default): dragging the selection moves it, and holding Alt (Ctrl elsewhere) copies it. A dotted caret shows the drop position, and the mouse cursor shows a copy. Escape cancels the drag.
   - **Clicks:** a click on the selection without dragging places the cursor, as in Monaco. The edits and the resulting selection port `DragAndDropCommand`.

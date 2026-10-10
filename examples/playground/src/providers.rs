@@ -519,8 +519,44 @@ impl InlineCompletionsProvider for DemoInlineCompletions {
     }
 }
 
+/// Offers pasting text as a quoted string literal, from the "Paste
+/// options" button after a paste.
+struct DemoPasteAsString;
+
+impl DocumentPasteEditProvider for DemoPasteAsString {
+    fn paste_mime_types(&self) -> Vec<gpui::SharedString> {
+        vec!["text/plain".into()]
+    }
+
+    fn provided_paste_edit_kinds(&self) -> Vec<gpui::SharedString> {
+        vec!["text.string-literal".into()]
+    }
+
+    fn provide_document_paste_edits(
+        &self,
+        _: &ProviderContext,
+        _: &[std::ops::Range<PointUtf16>],
+        data: &DataTransfer,
+        _: DocumentPasteTriggerKind,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>> {
+        let Some(text) = data.text("text/plain") else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        Task::ready(Ok(vec![DocumentDropOrPasteEdit {
+            title: "Insert as String Literal".into(),
+            kind: Some("text.string-literal".into()),
+            insert_text: EditInsertText::Text(format!("{text:?}")),
+            // Plain text first; this one is in the options.
+            yield_to: vec![EditYieldTo::MimeType("text/plain".into())],
+            ..Default::default()
+        }]))
+    }
+}
+
 pub fn register(cx: &mut App) {
     register_code_lens_provider(cx, LanguageSelector::All, DemoCodeLens);
+    register_document_paste_edit_provider(cx, LanguageSelector::All, DemoPasteAsString);
     gpui_monaco::register_command(cx, "playground.references", |args, _| {
         eprintln!("references to {args:?}");
     });
