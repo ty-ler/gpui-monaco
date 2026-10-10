@@ -130,7 +130,7 @@ Issues are linked by number.
 |---|---|---|
 | Diff editor, multi-diff editor | ❌ | #52 |
 | Screen readers, tab focus mode, ARIA options | ✅ | #53 |
-| wasm / web | ❌ | #58 |
+| wasm / web | 🟡 compiles for `wasm32-unknown-unknown`; browser runner pending | #58 |
 | crates.io release | ❌ | #57 |
 | Monaco migration notes | ✅ (book: Migrating from Monaco) | #60 |
 | Small correctness follow-ups | — | #76 |

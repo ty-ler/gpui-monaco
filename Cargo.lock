@@ -1934,6 +1934,7 @@ dependencies = [
  "similar",
  "unicode-segmentation",
  "uuid",
+ "web-time",
 ]
 
 [[package]]

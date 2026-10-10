@@ -1,0 +1,4 @@
+# wasm32-unknown-unknown: compile tree-sitter grammars against tree-sitter's
+# wasm libc headers (see script/wasm/cc).
+[env]
+CC_wasm32_unknown_unknown = { value = "script/wasm/cc", relative = true }

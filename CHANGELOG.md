@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **wasm32 builds (#58, part 1):** `gpui-monaco` and `gpui-monaco-languages` compile for `wasm32-unknown-unknown`, checked in CI.
+  - **Grammars:** they compile against tree-sitter's wasm libc headers through `script/wasm/cc`, set up in `.cargo/config.toml`.
+  - **Time:** timing uses `web_time::Instant`, which works in browsers and is std's `Instant` elsewhere.
+  - **Running in a browser** through `gpui_web` comes in part 2.
 - **Accessibility (#53):** the editor is a text input for screen readers, through GPUI's AccessKit support.
   - **Content:** the lines of the selection's page (`accessibility_page_size`, 500 lines) are exposed as text runs, with the selection (Monaco's screen reader content).
   - **Interaction:** assistive technology can move the caret and selection.

@@ -41,3 +41,18 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+## wasm
+
+The editor crates compile for `wasm32-unknown-unknown` (CI's `check-wasm` job):
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo check --target wasm32-unknown-unknown -p gpui-monaco -p gpui-monaco-languages
+```
+
+Grammar crates compile their C parsers through `script/wasm/cc` (set in
+`.cargo/config.toml`). It uses tree-sitter's minimal libc headers (`script/wasm/include`, MIT,
+from the `tree-sitter-language` crate) and a few inline ctype functions. It needs a `clang`
+that targets wasm32; Apple's does, and you can choose another with `WASM_CLANG`. Use
+`web_time::Instant`, not `std::time::Instant`, which panics in browsers.

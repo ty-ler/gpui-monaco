@@ -136,7 +136,7 @@ fn parse(
     let grammar = language.grammar.as_ref()?;
     PARSER.with(|parser| {
         let mut parser = parser.borrow_mut();
-        parser.set_language(&grammar.ts_language).ok()?;
+        parser.set_language(&grammar.ts_language.0).ok()?;
         let included: Vec<tree_sitter::Range> = ranges
             .iter()
             .map(|range| tree_sitter::Range {

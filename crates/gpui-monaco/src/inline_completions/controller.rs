@@ -8,7 +8,9 @@
 use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use web_time::Instant;
 
 use gpui::{
     AppContext as _, Context, IntoElement, ParentElement, Render, SharedString, Styled, Task,

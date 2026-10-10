@@ -1064,7 +1064,7 @@ impl CodeEditor {
         use crate::options::CursorBlinking;
         self.cursor_visible = true;
         self.blink_epoch += 1;
-        self.animation.blink_started = std::time::Instant::now();
+        self.animation.blink_started = web_time::Instant::now();
         let epoch = self.blink_epoch;
         match self.cursor_blinking() {
             CursorBlinking::Solid => {
@@ -1077,7 +1077,7 @@ impl CodeEditor {
                 // run 20 half-second iterations; repaint while they run.
                 self._blink_task = Some(cx.spawn(async move |this, cx| {
                     let end = crate::view::animation::BLINK_ANIMATION_END;
-                    let start = std::time::Instant::now();
+                    let start = web_time::Instant::now();
                     while start.elapsed() < end {
                         cx.background_executor()
                             .timer(Duration::from_millis(16))
@@ -3834,7 +3834,7 @@ impl Render for CodeEditor {
                 let scrollbars = &mut this.animation.scrollbars;
                 scrollbars.mouse_over = *hovered;
                 if !*hovered {
-                    scrollbars.left_at = Some(std::time::Instant::now());
+                    scrollbars.left_at = Some(web_time::Instant::now());
                     scrollbars.mouse_position = None;
                 }
                 cx.notify();

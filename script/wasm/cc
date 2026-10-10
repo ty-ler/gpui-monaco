@@ -1,0 +1,19 @@
+#!/bin/sh
+# The C compiler for wasm32-unknown-unknown builds (set in .cargo/config.toml):
+# clang with tree-sitter's minimal libc headers (from the `tree-sitter-language`
+# crate, MIT), which the grammar crates' build scripts don't add themselves.
+#
+# Older grammar crates (tree-sitter-md, tree-sitter-css) also compile
+# `tree-sitter-language`'s legacy libc sources, which deliberately fail with
+# tree-sitter 0.27: it provides those functions itself, so they compile to
+# nothing here.
+dir="$(dirname "$0")"
+for arg do
+    shift
+    case "$arg" in
+        */wasm/unsupported/*.c) set -- "$@" "$dir/empty.c" ;;
+        *) set -- "$@" "$arg" ;;
+    esac
+done
+# Some scanners call ctype functions without including <ctype.h>.
+exec "${WASM_CLANG:-clang}" -isystem "$dir/include" -include "$dir/ctype_extra.h" "$@"

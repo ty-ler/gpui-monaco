@@ -3,7 +3,9 @@
 //! when they scroll into view; clicking one runs its command.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use web_time::Instant;
 
 use crate::editor::{CodeEditor, CodeEditorEvent};
 use crate::providers::{CodeLens, CodeLensProvider, Command, code_lens_providers};

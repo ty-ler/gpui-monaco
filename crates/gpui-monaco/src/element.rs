@@ -1841,7 +1841,7 @@ fn prepaint_editor(
         .as_ref()
         .is_some_and(|l| l.scroll_top != scroll_top || l.scroll_left != scroll_left)
     {
-        editor.animation.scrollbars.revealed_at = Some(std::time::Instant::now());
+        editor.animation.scrollbars.revealed_at = Some(web_time::Instant::now());
     }
 
     // Fold controls and placeholders.
