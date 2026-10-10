@@ -55,6 +55,7 @@ pub mod quick_access;
 mod rename;
 pub mod replace_pattern;
 pub mod search;
+mod section_headers;
 mod semantic_theme;
 mod semantic_tokens;
 mod signature_help;

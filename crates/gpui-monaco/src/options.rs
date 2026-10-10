@@ -77,6 +77,20 @@ pub struct MinimapOptions {
     pub render_characters: bool,
     /// Monaco `minimap.size` (default proportional).
     pub size: MinimapSize,
+    /// Monaco `minimap.showRegionSectionHeaders`: label `#region`s
+    /// (default `true`).
+    pub show_region_section_headers: bool,
+    /// Monaco `minimap.showMarkSectionHeaders`: label `MARK:` comments
+    /// (default `true`).
+    pub show_mark_section_headers: bool,
+    /// Monaco `minimap.markSectionHeaderRegex`, with `label` and
+    /// `separator` groups.
+    pub mark_section_header_regex: SharedString,
+    /// Monaco `minimap.sectionHeaderFontSize` (default 9).
+    pub section_header_font_size: f32,
+    /// Monaco `minimap.sectionHeaderLetterSpacing` (default 1). Not applied:
+    /// GPUI text has no letter spacing.
+    pub section_header_letter_spacing: f32,
 }
 
 /// Monaco `minimap.side`.
@@ -111,6 +125,11 @@ impl Default for MinimapOptions {
             side: MinimapSide::Right,
             render_characters: true,
             size: MinimapSize::Proportional,
+            show_region_section_headers: true,
+            show_mark_section_headers: true,
+            mark_section_header_regex: r"\bMARK:\s*(?<separator>-?)\s*(?<label>.*)$".into(),
+            section_header_font_size: 9.,
+            section_header_letter_spacing: 1.,
         }
     }
 }

@@ -36,7 +36,7 @@ editor.update(cx, |editor, cx| {
 | `vertical_scrollbar_size`, `horizontal_scrollbar_size` | `scrollbar.verticalScrollbarSize`, … | |
 | `scrollbar` | `scrollbar.*` | `vertical`/`horizontal` (`Auto` shows while hovered or just scrolled, `Visible`, `Hidden`), `use_shadows`, `*_has_arrows`, `arrow_size`, `*_slider_size`, `handle_mouse_wheel`, `always_consume_mouse_wheel`, `scroll_by_page` |
 | `overview_ruler_lanes`, `overview_ruler_border`, `hide_cursor_in_overview_ruler` | same names | lanes (3; 0 hides the marks), a left border, the cursor marks |
-| `minimap` | `minimap` | `enabled`, `max_column`, `scale`, `always_show_slider`, `side` (right or left), `render_characters`, `size` (`Proportional`, `Fill`, `Fit`) |
+| `minimap` | `minimap` | `enabled`, `max_column`, `scale`, `always_show_slider`, `side` (right or left), `render_characters`, `size` (`Proportional`, `Fill`, `Fit`), section headers (`show_region_section_headers`, `show_mark_section_headers`, `mark_section_header_regex`, `section_header_font_size`, `section_header_letter_spacing`) |
 | `sticky_scroll` | `stickyScroll` | `enabled`, `max_line_count`, `default_model`, `scroll_with_editor` |
 | `auto_closing_brackets`, `auto_closing_quotes`, `auto_closing_comments` | `autoClosingBrackets`, … | `Always`, `LanguageDefined`, `BeforeWhitespace`, `Never` |
 | `auto_closing_overtype`, `auto_closing_delete`, `auto_surround` | same names | |

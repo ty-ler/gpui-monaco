@@ -60,7 +60,7 @@ Issues are linked by number.
 | Syntax and provider folding (`foldingStrategy`, `foldingMaximumRegions`) | `folding` | ✅ | #102 |
 | Fold level and recursive commands, fold navigation, manual ranges, unfold on `⋯` click, `foldingHighlight`, `foldingImportsByDefault` | `folding` | ✅ | #102 |
 | Minimap | `minimap` | ✅ | |
-| Minimap options (side, render characters, size), section headers | `minimap`, `sectionHeaders` | ❌ | #88 |
+| Minimap options (side, render characters, size), section headers | `minimap`, `sectionHeaders` | ✅ | #88 |
 | Sticky scroll (outline, folding and indentation models) | `stickyScroll` | ✅ | |
 | Sticky scroll keyboard focus, toggle, folding controls, hover, scroll with editor | `stickyScroll` | ✅ | #106 |
 | Render whitespace, indent guides, rulers, control characters | view parts | ✅ | #84 |

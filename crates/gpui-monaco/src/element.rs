@@ -638,6 +638,16 @@ impl IntoElement for EditorElement {
     }
 }
 
+/// A minimap section header (Monaco `_renderSectionHeaders`).
+struct MinimapSectionHeader {
+    /// The translucent band behind the label.
+    band: Bounds<Pixels>,
+    /// The label and where it goes.
+    label: Option<(ShapedLine, gpui::Point<Pixels>)>,
+    /// The separator line above it.
+    separator: Option<Bounds<Pixels>>,
+}
+
 /// The `·` and `→` glyphs, and where each goes (`true` for a tab).
 type WhitespaceMarks = (ShapedLine, ShapedLine, Vec<(gpui::Point<Pixels>, bool)>);
 
@@ -663,6 +673,7 @@ pub struct PrepaintState {
     /// Rendered whitespace.
     whitespace: Option<WhitespaceMarks>,
     embedded: Vec<Embedded>,
+    section_headers: Vec<MinimapSectionHeader>,
     /// The minimap's image and where it goes; replaced images to free.
     minimap_image: Option<(std::sync::Arc<gpui::RenderImage>, Bounds<Pixels>)>,
     minimap_stale: Vec<std::sync::Arc<gpui::RenderImage>>,
@@ -1138,6 +1149,7 @@ fn prepaint_editor(
     editor.refresh_code_lenses(cx);
     editor.refresh_sticky_model(cx);
     editor.refresh_colors(cx);
+    editor.refresh_section_headers(cx);
     editor.resolve_visible_code_lenses(cx);
     let bracket_colors = editor.bracket_colors_in(visible_start..visible_end, cx);
     let mut highlight_ix = 0;
@@ -1465,6 +1477,7 @@ fn prepaint_editor(
     // Minimap: token-colored characters or blocks (Monaco `minimap`), sized
     // per `minimap.size` (`EditorLayoutInfoComputer`).
     let mut minimap_image = None;
+    let mut section_headers = Vec::new();
     if minimap_width > px(0.) {
         use crate::options::MinimapSize;
         let pixel_ratio = window.scale_factor();
@@ -1634,6 +1647,60 @@ fn prepaint_editor(
             ),
             size(minimap_width, (per_view_line * visible_lines).max(px(2.))),
         );
+        // Monaco `_renderSectionHeaders`: a label over a translucent band
+        // and/or a separator line, at each header's minimap line.
+        let font_size = px(minimap_options.section_header_font_size);
+        let band = font_size * 1.5;
+        let label_font = Font {
+            weight: FontWeight::MEDIUM,
+            ..font(".SystemUIFont")
+        };
+        for header in &editor.section_headers.headers {
+            let (view_line, _) = view_lines.to_view(header.range.start, false);
+            let top = minimap_bounds.top() + per_view_line * view_line as f32 - minimap_scroll;
+            if top + band < minimap_bounds.top() || top > minimap_bounds.bottom() {
+                continue;
+            }
+            let label = (!header.text.is_empty()).then(|| {
+                let shape = |text: String| {
+                    window.text_system().shape_line(
+                        text.clone().into(),
+                        font_size,
+                        &[run(text.len(), &label_font, colors.foreground)],
+                        None,
+                    )
+                };
+                // Monaco's `MINIMAP_GUTTER_WIDTH` left of the label.
+                let max_width = minimap_width - px(8.);
+                let mut shaped = shape(header.text.clone());
+                if shaped.width > max_width {
+                    let chars = header.text.chars().count().max(1);
+                    let average = shaped.width / chars as f32;
+                    let count = ((max_width - average) / average).floor() as usize;
+                    shaped = shape(crate::section_headers::fit_section_header(
+                        &header.text,
+                        count.saturating_sub(1),
+                    ));
+                }
+                (
+                    shaped,
+                    point(
+                        minimap_bounds.left() + px(8.),
+                        top + (band - font_size) / 2.,
+                    ),
+                )
+            });
+            section_headers.push(MinimapSectionHeader {
+                band: Bounds::new(point(minimap_bounds.left(), top), size(minimap_width, band)),
+                label,
+                separator: header.has_separator_line.then(|| {
+                    Bounds::new(
+                        point(minimap_bounds.left(), top + px(2.)),
+                        size(minimap_width, px(1.)),
+                    )
+                }),
+            });
+        }
         let travel = (total.min(viewport_height) - slider.size.height).max(px(1.));
         layout.minimap = Some(MinimapLayout {
             bounds: minimap_bounds,
@@ -2368,6 +2435,7 @@ fn prepaint_editor(
         whitespace,
         embedded,
         minimap_image,
+        section_headers,
         minimap_stale: std::mem::take(&mut editor.minimap_cache.stale),
         minimap_slider_visible: options.minimap.always_show_slider || editor.minimap_hovered,
         sticky: sticky_shaped,
@@ -2804,6 +2872,22 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                                 false,
                             )
                             .ok();
+                    }
+                    for MinimapSectionHeader {
+                        band,
+                        label,
+                        separator,
+                    } in &state.section_headers
+                    {
+                        if let Some((label, origin)) = label {
+                            window.paint_quad(fill(*band, colors.background.opacity(0.7)));
+                            label
+                                .paint(*origin, band.size.height, TextAlign::Left, None, window, cx)
+                                .ok();
+                        }
+                        if let Some(separator) = separator {
+                            window.paint_quad(fill(*separator, colors.foreground.opacity(0.4)));
+                        }
                     }
                     if state.minimap_slider_visible {
                         window.paint_quad(fill(minimap.slider, colors.minimap_slider));
