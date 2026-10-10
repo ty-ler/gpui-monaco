@@ -666,6 +666,19 @@ impl CodeEditor {
         ))
     }
 
+    /// The minimap's bounds and height per view line, and the text area's
+    /// left edge, for tests.
+    #[doc(hidden)]
+    pub fn minimap_for_tests(&self) -> Option<(Bounds<Pixels>, Pixels, Pixels)> {
+        let layout = self.layout.as_ref()?;
+        let minimap = layout.minimap?;
+        Some((
+            minimap.bounds,
+            minimap.line_height,
+            layout.text_bounds.left(),
+        ))
+    }
+
     /// The vertical scrollbar's (bar, thumb) bounds, for tests.
     #[doc(hidden)]
     pub fn vertical_scrollbar_for_tests(&self) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {

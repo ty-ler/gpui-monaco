@@ -190,3 +190,54 @@ fn arrows_scroll_wheel_steps(cx: &mut TestAppContext) {
     let (top, _, _, _) = metrics(&editor, cx);
     assert_eq!(top, 50.);
 }
+
+#[gpui::test]
+fn minimap_side_and_size(cx: &mut TestAppContext) {
+    use gpui_monaco::options::{MinimapSide, MinimapSize};
+    let text = (0..20)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (editor, cx) = setup(&text, |o| o.minimap.side = MinimapSide::Left, cx);
+    paint(cx);
+    let (minimap, line, text_left) = editor.read_with(cx, |e, _| e.minimap_for_tests().unwrap());
+    // Left of everything else.
+    assert!(minimap.right() <= text_left);
+    assert_eq!(line, px(2.));
+
+    // Fill: a short document's lines grow to fill the height.
+    editor.update(cx, |e, cx| {
+        let mut o = e.options().clone();
+        o.minimap.side = MinimapSide::Right;
+        o.minimap.size = MinimapSize::Fill;
+        e.update_options(o, cx);
+    });
+    paint(cx);
+    let (minimap, line, text_left) = editor.read_with(cx, |e, _| e.minimap_for_tests().unwrap());
+    assert!(minimap.left() > text_left);
+    assert!(line > px(2.), "{line:?}");
+    // Fit doesn't grow them.
+    editor.update(cx, |e, cx| {
+        let mut o = e.options().clone();
+        o.minimap.size = MinimapSize::Fit;
+        e.update_options(o, cx);
+    });
+    paint(cx);
+    let (_, line, _) = editor.read_with(cx, |e, _| e.minimap_for_tests().unwrap());
+    assert_eq!(line, px(2.));
+}
+
+#[gpui::test]
+fn minimap_fit_samples_long_documents(cx: &mut TestAppContext) {
+    use gpui_monaco::options::MinimapSize;
+    let text = (0..20_000)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (editor, cx) = setup(&text, |o| o.minimap.size = MinimapSize::Fit, cx);
+    paint(cx);
+    let (minimap, line, _) = editor.read_with(cx, |e, _| e.minimap_for_tests().unwrap());
+    // Every view line takes less than a pixel; the whole document fits.
+    assert!(line < px(1.));
+    assert!(line * 20_000. <= minimap.size.height * 1.5);
+}

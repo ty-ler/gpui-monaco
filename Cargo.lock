@@ -1924,6 +1924,7 @@ dependencies = [
  "gpui-monaco-syntax",
  "gpui-monaco-text",
  "iana-time-zone",
+ "image",
  "log",
  "pulldown-cmark",
  "rand 0.9.5",

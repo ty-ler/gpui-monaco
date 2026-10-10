@@ -16,6 +16,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 iana-time-zone = "0.1"
 pulldown-cmark = { version = "0.13", default-features = false }
 gpui.workspace = true
+# The minimap's image (the version gpui uses).
+image = { version = "0.25", default-features = false }
 gpui-monaco-text.workspace = true
 gpui-monaco-syntax.workspace = true
 log = "0.4"
