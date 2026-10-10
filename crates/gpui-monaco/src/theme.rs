@@ -66,6 +66,12 @@ pub struct EditorColors {
     pub symbol_highlight_background: Hsla,
     /// A link while Cmd/Ctrl is held over it (`editorLink.activeForeground`).
     pub link_active_foreground: Hsla,
+    /// Ghost text (`editorGhostText.foreground`).
+    pub ghost_text_foreground: Hsla,
+    /// `editorGhostText.background` (transparent: none).
+    pub ghost_text_background: Hsla,
+    /// `editorGhostText.border` (transparent: none).
+    pub ghost_text_border: Hsla,
     /// Inline messages such as "No definition found"
     /// (`inputValidation.infoBackground`).
     pub message_background: Hsla,
@@ -228,6 +234,9 @@ impl EditorColors {
             find_match_overview: c(rgba(0xd186167e)),
             symbol_highlight_background: c(rgba(0xea5c0055)),
             link_active_foreground: c(rgb(0x4e94ce)),
+            ghost_text_foreground: c(rgba(0xffffff56)),
+            ghost_text_background: gpui::transparent_black(),
+            ghost_text_border: gpui::transparent_black(),
             message_background: c(rgb(0x063b49)),
             message_border: c(rgb(0x007acc)),
             fold_background: c(rgba(0x264f784d)),
@@ -321,6 +330,9 @@ impl EditorColors {
             find_match_overview: c(rgba(0xd186167e)),
             symbol_highlight_background: c(rgba(0xea5c0055)),
             link_active_foreground: c(rgb(0x0000ff)),
+            ghost_text_foreground: c(rgba(0x00000077)),
+            ghost_text_background: gpui::transparent_black(),
+            ghost_text_border: gpui::transparent_black(),
             message_background: c(rgb(0xd6ecf2)),
             message_border: c(rgb(0x007acc)),
             fold_background: c(rgba(0xadd6ff4d)),
