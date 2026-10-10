@@ -109,7 +109,7 @@ Issues are linked by number.
 | Inlay hints (no label part navigation, tooltips, double-click edits or smaller font) | `inlayHints` | ✅ | #56 |
 | Code lens | `codelens` | ✅ | #96 |
 | Color decorators (providers, default finder) | `colorDecorators` | ✅ | #97 |
-| Color picker | `colorPicker` | ❌ | #97 |
+| Color picker (hover and standalone) | `colorPicker` | ✅ | #97 |
 | Links | `links` | ✅ | #93 |
 | Semantic tokens | `semanticTokens` | ✅ | #98 |
 | Inline completions (ghost text) | `inlineCompletions` | ✅ | #99 |

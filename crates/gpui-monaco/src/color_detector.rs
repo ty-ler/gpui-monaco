@@ -155,31 +155,58 @@ impl CodeEditor {
         } else {
             Duration::ZERO
         };
+        drop(providers);
         self.colors.pending = Some(key.clone());
         let enablement = key.3;
         self.colors.task = Some(cx.spawn(async move |this, cx| {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
             }
-            let Ok(requests) = this.update(cx, |this, cx| {
-                let context = this.model().read(cx).provider_context();
-                let mut providers: Vec<(Arc<dyn DocumentColorProvider>, bool)> = providers
-                    .into_iter()
-                    .map(|provider| (provider, false))
-                    .collect();
-                providers.push((Arc::new(DefaultDocumentColorProvider), true));
-                providers
-                    .into_iter()
-                    .map(|(provider, is_default)| {
-                        let task = provider.provide_document_colors(&context, cx);
-                        (provider, is_default, task)
-                    })
-                    .collect::<Vec<_>>()
-            }) else {
+            let Ok(request) = this.update(cx, |this, cx| this.request_colors(enablement, cx))
+            else {
                 return;
             };
-            // Monaco `_findColorData`: the default finder only counts
-            // when no provider answered, unless it's always on.
+            let datas = request.await;
+            this.update(cx, |this, cx| {
+                this.colors.pending = None;
+                this.colors.task = None;
+                if this.model().read(cx).buffer().version() != key.0 {
+                    cx.notify();
+                    return;
+                }
+                this.colors.key = Some(key);
+                this.render_colors(datas, cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// The document's colors (Monaco `getColors`): every provider's, or
+    /// the built-in finder's when no provider answered (per `enablement`).
+    pub(crate) fn request_colors(
+        &self,
+        enablement: DefaultColorDecorators,
+        cx: &mut Context<Self>,
+    ) -> Task<Vec<ColorData>> {
+        let model = self.model().read(cx);
+        let context = model.provider_context();
+        let language = model.language_id().map(|l| l.to_string());
+        let mut providers: Vec<(Arc<dyn DocumentColorProvider>, bool)> =
+            color_providers(cx, language.as_deref())
+                .into_iter()
+                .map(|provider| (provider, false))
+                .collect();
+        providers.push((Arc::new(DefaultDocumentColorProvider), true));
+        let requests: Vec<_> = providers
+            .into_iter()
+            .map(|(provider, is_default)| {
+                let task = provider.provide_document_colors(&context, cx);
+                (provider, is_default, task)
+            })
+            .collect();
+        cx.spawn(async move |_, _| {
+            // Monaco `_findColorData`: the default finder only counts when
+            // no provider answered, unless it's always on.
             let mut found = false;
             let mut datas = Vec::new();
             let mut defaults = Vec::new();
@@ -205,18 +232,8 @@ impl CodeEditor {
             if !found && enablement != DefaultColorDecorators::Never {
                 datas = defaults;
             }
-            this.update(cx, |this, cx| {
-                this.colors.pending = None;
-                this.colors.task = None;
-                if this.model().read(cx).buffer().version() != key.0 {
-                    cx.notify();
-                    return;
-                }
-                this.colors.key = Some(key);
-                this.render_colors(datas, cx);
-            })
-            .ok();
-        }));
+            datas
+        })
     }
 
     /// Monaco `updateDecorations` and `updateColorDecorators`.

@@ -71,6 +71,10 @@ pub struct EditorColors {
     /// The border of color decorator swatches (Monaco's
     /// `.colorpicker-color-decoration` CSS, not a theme color).
     pub color_decoration_border: Hsla,
+    /// Button background (`button.background`).
+    pub button_background: Hsla,
+    /// Button text (`button.foreground`).
+    pub button_foreground: Hsla,
     /// Code lens text (`editorCodeLens.foreground`).
     pub code_lens_foreground: Hsla,
     /// Linked editing ranges (`editor.linkedEditingBackground`).
@@ -245,6 +249,8 @@ impl EditorColors {
             link_active_foreground: c(rgb(0x4e94ce)),
             range_highlight_background: c(rgba(0xffffff0b)),
             color_decoration_border: c(rgba(0xeeeeeeff)),
+            button_background: c(rgb(0x0e639c)),
+            button_foreground: c(rgb(0xffffff)),
             code_lens_foreground: c(rgb(0x999999)),
             linked_editing_background: c(rgba(0xff00004d)),
             ghost_text_foreground: c(rgba(0xffffff56)),
@@ -345,6 +351,8 @@ impl EditorColors {
             link_active_foreground: c(rgb(0x0000ff)),
             range_highlight_background: c(rgba(0xfdff0033)),
             color_decoration_border: c(rgba(0x000000ff)),
+            button_background: c(rgb(0x007acc)),
+            button_foreground: c(rgb(0xffffff)),
             code_lens_foreground: c(rgb(0x999999)),
             linked_editing_background: c(rgba(0xff00004d)),
             ghost_text_foreground: c(rgba(0x00000077)),
@@ -675,6 +683,8 @@ impl EditorColors {
             "editorSuggestWidget.focusHighlightForeground",
         );
         set(&mut self.input_background, "input.background");
+        set(&mut self.button_background, "button.background");
+        set(&mut self.button_foreground, "button.foreground");
         set(
             &mut self.input_option_active_background,
             "inputOption.activeBackground",
