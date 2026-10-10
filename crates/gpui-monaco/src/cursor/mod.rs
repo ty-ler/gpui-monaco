@@ -34,6 +34,7 @@ mod language_typing;
 mod lines;
 mod movement;
 mod reindent;
+pub mod smart_select;
 pub(crate) mod strings;
 mod transforms;
 mod typing;

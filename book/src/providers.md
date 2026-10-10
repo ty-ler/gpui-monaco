@@ -12,6 +12,7 @@ gpui-monaco has no language server or other language intelligence built in. Your
 | `TypeDefinitionProvider` | `TypeDefinitionProvider` | go to and peek type definition |
 | `ImplementationProvider` | `ImplementationProvider` | Cmd/Ctrl+F12 and Cmd/Ctrl+Shift+F12 (peek) |
 | `RenameProvider` | `RenameProvider` | F2 (rename box) |
+| `SelectionRangeProvider` | `SelectionRangeProvider` | expand and shrink selection |
 | `FoldingRangeProvider` | `FoldingRangeProvider` | folding ranges, with kinds (comment, imports, region) |
 | `InlayHintsProvider` | `InlayHintsProvider` | inline type and parameter hints |
 | `CodeActionProvider` | `CodeActionProvider` | the lightbulb, Cmd/Ctrl+. and the refactor, source, organize imports, fix all and auto fix commands |

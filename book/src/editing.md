@@ -96,6 +96,14 @@ Fold ranges come from these sources, in order (Monaco's `foldingStrategy: auto`)
 Block comments and regions are found by kind when a folding range provider gives kinds. Otherwise they're found by the first line matching the language's block comment or region marker, as in Monaco. `folding_imports_by_default` collapses import ranges when a model is first shown.
 - **Editing:** editing inside a collapsed region expands it, as in Monaco.
 
+## Smart select
+
+Expand Selection grows each selection through the enclosing syntax nodes: word part, word, call, statement, block and so on. Shrink Selection steps back. The keys are Ctrl+Cmd+Shift+Right/Left (or Ctrl+Shift+Right/Left) on macOS and Shift+Alt+Right/Left elsewhere; the methods are `expand_selection` and `shrink_selection`.
+
+- **Range sources:** `SelectionRangeProvider`s (for example a language server's). Without one, the syntax tree's nodes are used, or bracket pairs when there's no grammar. Monaco's word ranges are always added: camelCase and snake_case parts, the word and the whole text.
+- **Whole lines:** when a step crosses onto new lines, the lines without and with their indentation come in between (`smart_select.select_leading_and_trailing_whitespace`). `smart_select.select_subwords` turns off the word parts.
+- **Reset:** moving the cursor starts over.
+
 ## Occurrences
 
 - **Symbol at the cursor:** after the cursor rests on a word, its occurrences are highlighted.

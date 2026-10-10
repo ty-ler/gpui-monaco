@@ -532,6 +532,23 @@ pub trait CodeActionProvider: 'static {
     }
 }
 
+// ----- selection ranges ------------------------------------------------------------
+
+/// Supplies the ranges smart select grows through (Monaco
+/// `SelectionRangeProvider`).
+///
+/// Register with [`register_selection_range_provider`]. With none, the
+/// syntax tree (or brackets) and words are used.
+pub trait SelectionRangeProvider: 'static {
+    /// For each of `positions`, ranges containing it (in any order).
+    fn provide_selection_ranges(
+        &self,
+        context: &ProviderContext,
+        positions: &[PointUtf16],
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<Vec<Range<PointUtf16>>>>>;
+}
+
 // ----- folding -------------------------------------------------------------------
 
 /// What a folding range holds (Monaco `FoldingRangeKind`); commands such as
@@ -859,6 +876,7 @@ struct LanguageFeatures {
     code_action: Vec<Entry<dyn CodeActionProvider>>,
     inlay_hints: Vec<Entry<dyn InlayHintsProvider>>,
     folding: Vec<Entry<dyn FoldingRangeProvider>>,
+    selection_range: Vec<Entry<dyn SelectionRangeProvider>>,
     declaration: Vec<Entry<dyn DeclarationProvider>>,
     type_definition: Vec<Entry<dyn TypeDefinitionProvider>>,
     implementation: Vec<Entry<dyn ImplementationProvider>>,
@@ -934,6 +952,13 @@ register_fn!(
     SignatureHelpProvider
 );
 
+register_fn!(
+    /// Registers a selection range provider for the models `selector` matches (Monaco
+    /// `registerSelectionRangeProvider`). Results from all matching providers are merged.
+    register_selection_range_provider,
+    selection_range,
+    SelectionRangeProvider
+);
 register_fn!(
     /// Registers a folding range provider for the models `selector` matches (Monaco
     /// `registerFoldingRangeProvider`). Results from all matching providers are merged.
@@ -1029,6 +1054,7 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.code_action.retain(|e| e.id != registration);
     features.inlay_hints.retain(|e| e.id != registration);
     features.folding.retain(|e| e.id != registration);
+    features.selection_range.retain(|e| e.id != registration);
     features.type_definition.retain(|e| e.id != registration);
     features.implementation.retain(|e| e.id != registration);
     features.references.retain(|e| e.id != registration);
@@ -1207,6 +1233,17 @@ pub fn folding_range_providers(
 ) -> Vec<Arc<dyn FoldingRangeProvider>> {
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.folding, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered selection range providers whose selector matches
+/// `language_id`, in registration order.
+pub fn selection_range_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn SelectionRangeProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.selection_range, language_id))
         .unwrap_or_default()
 }
 

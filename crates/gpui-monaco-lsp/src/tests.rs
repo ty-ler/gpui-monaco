@@ -68,6 +68,7 @@ fn capabilities() -> Value {
         "renameProvider": { "prepareProvider": true },
         "inlayHintProvider": true,
         "foldingRangeProvider": true,
+        "selectionRangeProvider": true,
         "codeActionProvider": { "codeActionKinds": ["quickfix", "refactor"], "resolveProvider": true },
         "executeCommandProvider": { "commands": ["fake.doIt"] },
         "declarationProvider": true,
@@ -240,6 +241,10 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
                 assert_eq!(params["context"]["triggerCharacter"], ".");
                 json!({ "isIncomplete": true, "items": [{ "label": "len", "kind": 2 }] })
             }
+            "textDocument/selectionRange" => json!([{
+                "range": { "start": { "line": 0, "character": 3 }, "end": { "line": 0, "character": 7 } },
+                "parent": { "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 1, "character": 0 } } },
+            }]),
             "textDocument/foldingRange" => json!([
                 { "startLine": 0, "endLine": 2, "kind": "imports" },
             ]),
@@ -443,6 +448,13 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
         .unwrap();
     cx.run_until_parked();
     assert_eq!(server.messages("workspace/executeCommand").len(), 1);
+
+    // Selection ranges, with parents flattened.
+    let selection = cx
+        .update(|cx| features.provide_selection_ranges(&context, &[p(0, 4)], cx))
+        .await
+        .unwrap();
+    assert_eq!(selection, [vec![p(0, 3)..p(0, 7), p(0, 0)..p(1, 0)]]);
 
     // Folding ranges.
     let folds = cx

@@ -204,3 +204,30 @@ fn bundled_fold_queries() {
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
+
+#[test]
+fn syntax_selection_ranges_nest() {
+    // Smart select's syntax ranges, inside out, for every bundled language.
+    let registry = gpui_monaco_languages::registry();
+    for (path, text, _) in FOLD_SAMPLES {
+        let language = registry
+            .language_for_path(std::path::Path::new(path))
+            .unwrap();
+        let buffer = Buffer::new(text);
+        let syntax = SyntaxSnapshot::parse(language, &buffer.snapshot(), &registry);
+        let offset = text.find('\n').unwrap() + 3;
+        let ranges = syntax.selection_ranges(offset);
+        assert!(ranges.len() >= 2, "{path}: {ranges:?}");
+        // Every range is around the position, and the root layer's chain
+        // (injected layers follow it) grows outward.
+        assert!(
+            ranges.iter().all(|r| r.start <= offset && offset <= r.end),
+            "{path}: {ranges:?}"
+        );
+        let chain = ranges
+            .windows(2)
+            .take_while(|w| w[1].start <= w[0].start && w[0].end <= w[1].end)
+            .count();
+        assert!(chain >= 1, "{path}: {ranges:?}");
+    }
+}

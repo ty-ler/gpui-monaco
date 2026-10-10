@@ -386,6 +386,30 @@ impl SyntaxSnapshot {
             .max_by_key(|layer| layer.depth)
     }
 
+    /// Byte ranges of every node containing `offset`, in every layer around
+    /// it (smart select's syntax ranges), innermost first per layer.
+    pub fn selection_ranges(&self, offset: usize) -> Vec<Range<usize>> {
+        let mut ranges = Vec::new();
+        for layer in &self.layers {
+            let extent = layer.extent();
+            if layer.depth > 0 && !(extent.start <= offset && offset <= extent.end) {
+                continue;
+            }
+            let mut node = layer
+                .tree
+                .root_node()
+                .descendant_for_byte_range(offset, offset);
+            while let Some(current) = node {
+                let range = current.byte_range();
+                if !range.is_empty() {
+                    ranges.push(range);
+                }
+                node = current.parent();
+            }
+        }
+        ranges
+    }
+
     /// Foldable regions from the layers' `folds.scm` queries: each `@fold`
     /// node from its first row to the row before its closing line (a line
     /// starting with a closing bracket or tag, or a node ending at a line

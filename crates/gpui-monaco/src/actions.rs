@@ -420,6 +420,10 @@ actions!(
         RemoveManualFoldingRanges,
         /// Toggles the import ranges (Monaco `editor.toggleImportFold`).
         ToggleImportFold,
+        /// Expands the selection (Monaco `editor.action.smartSelect.expand`).
+        ExpandSelection,
+        /// Shrinks the selection (Monaco `editor.action.smartSelect.shrink`).
+        ShrinkSelection,
         /// Opens the find widget, seeded from the selection or word at the cursor (Monaco
         /// `actions.find`).
         StartFind,
@@ -705,6 +709,10 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("cmd-k cmd-0", FoldAll, ctx),
             KeyBinding::new("cmd-k cmd-j", UnfoldAll, ctx),
             KeyBinding::new("cmd-k cmd-l", ToggleFold, ctx),
+            KeyBinding::new("ctrl-cmd-shift-right", ExpandSelection, ctx),
+            KeyBinding::new("ctrl-shift-right", ExpandSelection, ctx),
+            KeyBinding::new("ctrl-cmd-shift-left", ShrinkSelection, ctx),
+            KeyBinding::new("ctrl-shift-left", ShrinkSelection, ctx),
             KeyBinding::new("cmd-k cmd-[", FoldRecursively, ctx),
             KeyBinding::new("cmd-k cmd-]", UnfoldRecursively, ctx),
             KeyBinding::new("cmd-k cmd-shift-l", ToggleFoldRecursively, ctx),
@@ -745,8 +753,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-shift-left", CursorWordLeftSelect, ctx),
             KeyBinding::new("ctrl-right", CursorWordRight, ctx),
             KeyBinding::new("ctrl-shift-right", CursorWordRightSelect, ctx),
-            KeyBinding::new("alt-shift-left", CursorWordPartLeftSelect, ctx),
-            KeyBinding::new("alt-shift-right", CursorWordPartRightSelect, ctx),
+            KeyBinding::new("shift-alt-right", ExpandSelection, ctx),
+            KeyBinding::new("shift-alt-left", ShrinkSelection, ctx),
             KeyBinding::new("ctrl-home", CursorTop, ctx),
             KeyBinding::new("ctrl-shift-home", CursorTopSelect, ctx),
             KeyBinding::new("ctrl-end", CursorBottom, ctx),

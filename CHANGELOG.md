@@ -71,6 +71,12 @@ All notable changes to this project are documented here. The format follows [Kee
   - `register_model`, `model_for_uri` and `set_model_resolver`, so other documents can be previewed.
   - The LSP bridge forwards references, declaration, type definition and implementation requests.
 - Clicks in view zones and widgets no longer focus the editor.
+- **Smart select (#82):**
+  - Expand and shrink selection through `SelectionRangeProvider`s, the syntax tree (`SyntaxSnapshot::selection_ranges`), or brackets, plus Monaco's word ranges and whole-line steps.
+  - The `smart_select` options.
+  - Ports `smartSelect.ts`, `wordSelections.ts` and `bracketSelections.ts` with their tests.
+  - The LSP bridge forwards `textDocument/selectionRange`.
+  - On Linux and Windows, Shift+Alt+Left/Right is now smart select, as in Monaco, instead of word-part selection (Monaco leaves word-part selection unbound there).
 - **Folding commands (#102):**
   - Commands: fold and unfold recursively, toggle recursively, Fold Level 1–7, fold all block comments and regions, fold and unfold all except the selection, go to parent, previous and next fold, manual folding ranges from the selection (and removing them), and toggle import fold.
   - Monaco's gutter Shift- and Alt-clicks; clicking `⋯` unfolds.
