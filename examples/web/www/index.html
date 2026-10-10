@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>gpui-monaco on the web</title>
+<style>
+  html, body { width: 100%; height: 100%; margin: 0; background: #1e1e1e; overflow: hidden; }
+  body > canvas { position: fixed; inset: 0; display: block; width: 100%; height: 100%; }
+  #status { position: fixed; inset: 0; display: grid; place-items: center; color: #a3a3a3; font-family: system-ui; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="status">Loading…</div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>

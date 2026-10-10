@@ -8,6 +8,7 @@ members = [
     "crates/gpui-monaco-lsp",
     "examples/playground",
     "examples/with-gpui-component",
+    "examples/web",
 ]
 default-members = [
     "crates/text",

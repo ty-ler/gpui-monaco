@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 - **gpui from crates.io snapshots (#188, breaking):** gpui, gpui_platform and sum_tree now come from the `gpui-pre` crates (`=0.3.8`, zed@279fe07), the same snapshot gpui-component pins, instead of zed's git. Apps depend on `gpui = { package = "gpui-pre", version = "=0.3.8" }`, and the `[patch.crates-io]` block is gone. No API changes were needed.
+- **Web example (#58):** `examples/web` is an editor in the browser through gpui's web platform (`gpui-pre-web`). The page passes in a font, since the web platform ships none. Building it needs a nightly toolchain and the `wasm-bindgen` CLI (see its README).
 - **Using gpui-component (#188):** `examples/with-gpui-component` shows gpui-component buttons above an editor in a gpui-component `Root`. A test checks typing, focus and the editor's keybindings there.
 
 ### Added
