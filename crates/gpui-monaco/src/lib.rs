@@ -53,6 +53,7 @@ mod peek;
 pub mod providers;
 pub mod quick_access;
 mod rename;
+pub mod replace_pattern;
 pub mod search;
 mod semantic_theme;
 mod semantic_tokens;

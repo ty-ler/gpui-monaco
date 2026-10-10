@@ -349,6 +349,14 @@ impl Render for FindWidget {
                         .gap(px(4.))
                         .pl(px(18.))
                         .child(input_box(&self.replace_input, false))
+                        .child(toggle(
+                            "preserve-case",
+                            "AB",
+                            options.preserve_case,
+                            &colors,
+                            cx,
+                            |o| o.preserve_case = !o.preserve_case,
+                        ))
                         .child(button("replace", "Replace", cx, |this, _, cx| {
                             this.with_editor(cx, |editor, cx| editor.replace_one(cx))
                         }))

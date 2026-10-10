@@ -43,7 +43,8 @@ Issues are linked by number.
 | Snippet sessions: tab stops, choices, nesting, completion integration | `snippet` | ✅ | #55 |
 | Drag and drop text | `dnd` | ❌ | #92 |
 | Find/replace: case, word, regex, in selection, replace all | `find` | ✅ | |
-| Find history, preserve case, seed and loop options, case escapes in replace | `find` | ❌ | #104 |
+| Find model (Monaco's `FindModel`), preserve case, case escapes in replace, loop, seed and auto find in selection options | `find` | ✅ | #104 |
+| Find history, extra space on top, widget width and states | `find` | ❌ | #104 |
 | Bracket matching and jump | `bracketMatching` | ✅ | |
 
 ## View

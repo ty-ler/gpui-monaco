@@ -266,7 +266,7 @@ pub fn find_previous(rope: &Rope, data: &SearchData, before: usize) -> Option<Ra
 
 /// The text a match was found in and where it starts: the match's line, or
 /// the whole text for multiline searches (as [`find_matches`] searches).
-/// Pass it to [`expand_replacement`] so captures see the same context.
+/// Pass it to [`captures`] so they see the same context.
 pub fn match_context(rope: &Rope, data: &SearchData, matched: &Range<usize>) -> (String, usize) {
     if data.multiline {
         (rope.text_for_range(0..rope.len()), 0)
@@ -277,77 +277,25 @@ pub fn match_context(rope: &Rope, data: &SearchData, matched: &Range<usize>) -> 
     }
 }
 
-/// Expands `$1`, `$&` and `$$` in a regex replace pattern (Monaco
-/// `ReplacePattern`, minus case-changing escapes) for the match at `matched`
-/// (byte range) in `haystack`, the text it was found in (see
-/// [`match_context`]): re-matching just the matched text could see different
+/// The captures of the match at `matched` (byte range) in `haystack`, the
+/// text it was found in (see [`match_context`]), whole match first (Monaco's
+/// `captureMatches`). Re-matching just the matched text could see different
 /// captures when the pattern depends on its surroundings (`\b`, `^`, `$`).
-pub fn expand_replacement(
+pub fn captures(
     data: &SearchData,
-    is_regex: bool,
     haystack: &str,
     matched: Range<usize>,
-    replacement: &str,
-) -> String {
-    if !is_regex {
-        return replacement.to_string();
-    }
-    let Some(captures) = data
+) -> Option<Vec<Option<String>>> {
+    let captures = data
         .regex
         .captures_at(haystack, matched.start)
-        .filter(|c| c.get(0).is_some_and(|m| m.range() == matched))
-    else {
-        return replacement.to_string();
-    };
-    let mut out = String::new();
-    let mut chars = replacement.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch != '$' {
-            if ch == '\\' {
-                match chars.peek() {
-                    Some('n') => {
-                        chars.next();
-                        out.push('\n');
-                        continue;
-                    }
-                    Some('t') => {
-                        chars.next();
-                        out.push('\t');
-                        continue;
-                    }
-                    Some('\\') => {
-                        chars.next();
-                        out.push('\\');
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
-            out.push(ch);
-            continue;
-        }
-        match chars.peek().copied() {
-            Some('$') => {
-                chars.next();
-                out.push('$');
-            }
-            Some('&') => {
-                chars.next();
-                out.push_str(captures.get(0).map_or("", |m| m.as_str()));
-            }
-            Some(d) if d.is_ascii_digit() => {
-                let mut digits = String::new();
-                while let Some(d) = chars.peek().copied().filter(char::is_ascii_digit) {
-                    digits.push(d);
-                    chars.next();
-                }
-                let index: usize = digits.parse().unwrap_or(0);
-                out.push_str(captures.get(index).map_or("", |m| m.as_str()));
-            }
-            _ => out.push('$'),
-        }
-    }
-    out
+        .filter(|c| c.get(0).is_some_and(|m| m.range() == matched))?;
+    Some(
+        captures
+            .iter()
+            .map(|m| m.map(|m| m.as_str().to_string()))
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -718,23 +666,26 @@ mod tests {
     }
 
     #[test]
-    fn replacement_patterns() {
+    fn replacement_captures() {
         let data = SearchParams::new("(\\w+)@(\\w+)", true, false, None)
             .parse()
             .unwrap();
         assert_eq!(
-            expand_replacement(&data, true, "user@host", 0..9, "$2:$1 ($&) $$"),
-            "host:user (user@host) $"
-        );
-        assert_eq!(
-            expand_replacement(&data, false, "user@host", 0..9, "$1"),
-            "$1"
+            captures(&data, "user@host", 0..9),
+            Some(vec![
+                Some("user@host".to_string()),
+                Some("user".to_string()),
+                Some("host".to_string())
+            ])
         );
         // Captures come from the match in context: `^` only matches at the
         // line start, not at the start of the matched text.
         let data = SearchParams::new("(^a|b)(a)", true, true, None)
             .parse()
             .unwrap();
-        assert_eq!(expand_replacement(&data, true, "xba", 1..3, "[$1]"), "[b]");
+        assert_eq!(
+            captures(&data, "xba", 1..3).unwrap()[1].as_deref(),
+            Some("b")
+        );
     }
 }

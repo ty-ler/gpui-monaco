@@ -473,6 +473,8 @@ actions!(
         ToggleWholeWord,
         /// Toggles searching only in the selection (Monaco `toggleFindInSelection`).
         ToggleFindInSelection,
+        /// Toggles keeping the case of replaced text (Monaco `togglePreserveCase`).
+        TogglePreserveCase,
         /// Selects the word at the cursor, or adds the next occurrence of the selection
         /// (Monaco `editor.action.addSelectionToNextFindMatch`).
         AddSelectionToNextFindMatch,
@@ -922,6 +924,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("cmd-alt-r", ToggleRegex, ctx),
             KeyBinding::new("cmd-alt-w", ToggleWholeWord, ctx),
             KeyBinding::new("cmd-alt-l", ToggleFindInSelection, ctx),
+            KeyBinding::new("cmd-alt-p", TogglePreserveCase, ctx),
         ]);
     } else {
         bindings.extend([
@@ -994,6 +997,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("alt-r", ToggleRegex, ctx),
             KeyBinding::new("alt-w", ToggleWholeWord, ctx),
             KeyBinding::new("alt-l", ToggleFindInSelection, ctx),
+            KeyBinding::new("alt-p", TogglePreserveCase, ctx),
         ]);
         bindings.extend([
             KeyBinding::new("ctrl-up", ScrollLineUp, ctx),

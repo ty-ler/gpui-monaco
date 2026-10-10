@@ -60,6 +60,8 @@ pub struct EditorColors {
     pub find_match_highlight_background: Hsla,
     /// Find matches in the overview ruler (`editorOverviewRuler.findMatchForeground`).
     pub find_match_overview: Hsla,
+    /// The find in selection scope (`editor.findRangeHighlightBackground`).
+    pub find_range_highlight_background: Hsla,
     /// The target of go to definition and similar jumps, briefly
     /// (`editor.symbolHighlightBackground`; defaults to the find match
     /// highlight).
@@ -249,6 +251,7 @@ impl EditorColors {
             find_match_background: c(rgb(0x515c6a)),
             find_match_highlight_background: c(rgba(0xea5c0055)),
             find_match_overview: c(rgba(0xd186167e)),
+            find_range_highlight_background: c(rgba(0x3a3d4166)),
             symbol_highlight_background: c(rgba(0xea5c0055)),
             link_active_foreground: c(rgb(0x4e94ce)),
             range_highlight_background: c(rgba(0xffffff0b)),
@@ -353,6 +356,7 @@ impl EditorColors {
             find_match_background: c(rgb(0xa8ac94)),
             find_match_highlight_background: c(rgba(0xea5c0055)),
             find_match_overview: c(rgba(0xd186167e)),
+            find_range_highlight_background: c(rgba(0xb4b4b44c)),
             symbol_highlight_background: c(rgba(0xea5c0055)),
             link_active_foreground: c(rgb(0x0000ff)),
             range_highlight_background: c(rgba(0xfdff0033)),
@@ -475,6 +479,10 @@ impl EditorColors {
         set(
             &mut self.find_match_highlight_background,
             "editor.findMatchHighlightBackground",
+        );
+        set(
+            &mut self.find_range_highlight_background,
+            "editor.findRangeHighlightBackground",
         );
         set(
             &mut self.find_match_overview,

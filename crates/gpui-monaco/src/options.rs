@@ -83,6 +83,62 @@ impl Default for MinimapOptions {
     }
 }
 
+/// Monaco `find` options.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FindEditorOptions {
+    /// Jump to matches while typing the search string (Monaco
+    /// `find.cursorMoveOnType`, default `true`).
+    pub cursor_move_on_type: bool,
+    /// Where opening find takes its search string from (Monaco
+    /// `find.seedSearchStringFromSelection`, default always).
+    pub seed_search_string_from_selection: SeedSearchString,
+    /// When opening find turns on find in selection (Monaco
+    /// `find.autoFindInSelection`, default never).
+    pub auto_find_in_selection: AutoFindInSelection,
+    /// Scroll the text down so the widget doesn't cover the first line
+    /// (Monaco `find.addExtraSpaceOnTop`, default `true`).
+    pub add_extra_space_on_top: bool,
+    /// Wrap around at the first and last match (Monaco `find.loop`,
+    /// default `true`).
+    pub loop_: bool,
+}
+
+impl Default for FindEditorOptions {
+    fn default() -> Self {
+        Self {
+            cursor_move_on_type: true,
+            seed_search_string_from_selection: SeedSearchString::Always,
+            auto_find_in_selection: AutoFindInSelection::Never,
+            add_extra_space_on_top: true,
+            loop_: true,
+        }
+    }
+}
+
+/// Monaco `find.seedSearchStringFromSelection`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SeedSearchString {
+    /// Never.
+    Never,
+    /// From the selection, or the word at the cursor.
+    #[default]
+    Always,
+    /// Only from a selection.
+    Selection,
+}
+
+/// Monaco `find.autoFindInSelection`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AutoFindInSelection {
+    /// Never.
+    #[default]
+    Never,
+    /// Whenever there's a selection.
+    Always,
+    /// When the selection spans lines.
+    Multiline,
+}
+
 /// Monaco `stickyScroll` options.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StickyScrollOptions {
@@ -758,6 +814,8 @@ pub struct EditorOptions {
     pub minimap: MinimapOptions,
     /// Monaco `stickyScroll`.
     pub sticky_scroll: StickyScrollOptions,
+    /// Monaco `find`.
+    pub find: FindEditorOptions,
     /// Monaco `bracketPairColorization.enabled`: color brackets by nesting
     /// level (default `true`).
     pub bracket_pair_colorization: bool,
@@ -916,6 +974,7 @@ impl Default for EditorOptions {
             format_on_paste: false,
             minimap: MinimapOptions::default(),
             sticky_scroll: StickyScrollOptions::default(),
+            find: FindEditorOptions::default(),
             comments: Default::default(),
             overtype_cursor_style: CursorStyle::Block,
             bracket_pair_colorization: true,

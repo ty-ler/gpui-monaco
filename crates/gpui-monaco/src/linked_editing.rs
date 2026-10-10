@@ -61,7 +61,11 @@ impl CodeEditor {
             .collect()
     }
 
-    fn decoration_point_range(&self, id: DecorationId, cx: &App) -> Option<Range<PointUtf16>> {
+    pub(crate) fn decoration_point_range(
+        &self,
+        id: DecorationId,
+        cx: &App,
+    ) -> Option<Range<PointUtf16>> {
         let model = self.model().read(cx);
         let range = model.decoration(id)?.range.clone();
         let rope = model.buffer().rope();
