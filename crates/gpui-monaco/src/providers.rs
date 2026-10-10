@@ -132,9 +132,15 @@ pub struct CompletionItem {
     pub sort_text: Option<SharedString>,
     /// Text matched against what was typed; defaults to the label.
     pub filter_text: Option<SharedString>,
-    /// Inserted on accept; defaults to the label. (Snippet syntax isn't
-    /// expanded yet.)
+    /// Inserted on accept; defaults to the label. Snippet syntax if
+    /// [`insert_text_is_snippet`](Self::insert_text_is_snippet).
     pub insert_text: Option<SharedString>,
+    /// `insert_text` is a snippet (Monaco's `InsertAsSnippet` rule): its
+    /// tab stops, placeholders and variables are expanded.
+    pub insert_text_is_snippet: bool,
+    /// Insert the text's indentation as is (Monaco's `KeepWhitespace`
+    /// rule) instead of indenting its lines like the cursor's line.
+    pub keep_whitespace: bool,
     /// The single-line range to replace; defaults to the word before the
     /// cursor.
     pub range: Option<Range<PointUtf16>>,

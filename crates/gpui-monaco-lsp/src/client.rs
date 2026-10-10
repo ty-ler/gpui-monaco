@@ -742,7 +742,8 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
             "synchronization": { "didSave": true, "dynamicRegistration": false },
             "completion": {
                 "completionItem": {
-                    "snippetSupport": false,
+                    "snippetSupport": true,
+                    "insertTextModeSupport": { "valueSet": [1, 2] },
                     "commitCharactersSupport": true,
                     "documentationFormat": ["markdown", "plaintext"],
                     "preselectSupport": true,

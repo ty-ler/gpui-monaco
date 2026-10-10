@@ -601,6 +601,23 @@ impl TextModel {
         ids
     }
 
+    /// Starts an explicit transaction: every edit until the matching
+    /// [`TextModel::end_transaction`] becomes one undo step. Nests.
+    pub fn start_transaction(&mut self) {
+        self.buffer.start_transaction(None);
+    }
+
+    /// Ends the transaction [`TextModel::start_transaction`] started.
+    pub fn end_transaction(&mut self) -> Option<text::TransactionId> {
+        self.buffer.end_transaction(None)
+    }
+
+    /// The id of the undo step being recorded or the most recent one (ids
+    /// increase), e.g. to tell whether an edit was undone.
+    pub fn last_transaction_id(&self) -> Option<text::TransactionId> {
+        self.buffer.current_transaction_id()
+    }
+
     /// Replaces the options of decoration `id`, keeping its range and id
     /// (Monaco `changeDecorationOptions`), e.g. to change its stickiness.
     pub fn change_decoration_options(

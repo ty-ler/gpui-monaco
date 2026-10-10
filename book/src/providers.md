@@ -85,7 +85,7 @@ Which item is selected first follows `suggest_selection`: the best match, or the
 
 Filtering and ranking use Monaco's `fuzzyScore`, and the editor re-filters as you type without asking the provider again. If you return `incomplete: true`, the editor asks again as the word grows.
 
-On accept, the editor inserts `insert_text`, falling back to the label. In insert mode it replaces `range` (by default the word before the cursor); in replace mode (`suggest.insert_mode`) it replaces `replace_range` (by default the whole word). Shift+Enter and Shift+Tab accept in the other mode. The editor applies any `additional_text_edits`, then runs the item's `command`. Typing a character in `commit_characters` accepts the item and inserts the character.
+On accept, the editor inserts `insert_text`, falling back to the label. It is expanded as a [snippet](editing.md#snippets) if `insert_text_is_snippet` is set, and its lines are indented like the cursor's line unless `keep_whitespace` is set. In insert mode it replaces `range` (by default the word before the cursor); in replace mode (`suggest.insert_mode`) it replaces `replace_range` (by default the whole word). Shift+Enter and Shift+Tab accept in the other mode. The editor applies any `additional_text_edits`, then runs the item's `command`. Typing a character in `commit_characters` accepts the item and inserts the character.
 
 `resolve_completion_item` fills in an item lazily, e.g. its docs or an import. The editor resolves the focused item. If you accept an item before it resolves, additional edits that arrive later are still applied, unless the text changed before them. Items tagged `CompletionItemTag::Deprecated` are struck through, or hidden with `suggest.show_deprecated: false`.
 

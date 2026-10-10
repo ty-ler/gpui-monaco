@@ -1427,9 +1427,11 @@ fn prepaint_editor(
                     decoration_x_range(line, *start, *end)
                 };
                 if let Some((from, to)) = range {
+                    // Monaco gives empty ranges (e.g. a snippet's final tab
+                    // stop) a 2px minimum width.
                     let bounds = Bounds::new(
                         point(origin_x + from, top),
-                        size((to - from).max(px(1.)), line_height),
+                        size((to - from).max(px(2.)), line_height),
                     );
                     decoration_quads.push((bounds, options.background, options.border));
                 }

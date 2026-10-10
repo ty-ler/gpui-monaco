@@ -506,7 +506,13 @@ impl Buffer {
         before: Option<TransactionMetadata>,
         after: Option<TransactionMetadata>,
     ) {
-        if let Some(last) = self.history.undo.last_mut() {
+        // An open transaction is the step being recorded.
+        let history = &mut self.history;
+        let last = match history.open.as_mut() {
+            Some(open) => Some(open),
+            None => history.undo.last_mut(),
+        };
+        if let Some(last) = last {
             if last.before.is_none() {
                 last.before = before;
             }
@@ -533,6 +539,15 @@ impl Buffer {
     /// The id of the most recent undo step, if any.
     pub fn last_transaction_id(&self) -> Option<TransactionId> {
         self.history.undo.last().map(|t| t.id)
+    }
+
+    /// The id of the transaction being recorded, if one is open, else of the
+    /// most recent undo step.
+    pub fn current_transaction_id(&self) -> Option<TransactionId> {
+        match &self.history.open {
+            Some(open) => Some(open.id),
+            None => self.last_transaction_id(),
+        }
     }
 
     /// Whether there is an undo step to revert.

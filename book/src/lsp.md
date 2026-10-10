@@ -51,7 +51,7 @@ Positions need no conversion: both the editor and LSP use 0-based lines and UTF-
 
 | Server capability | Editor feature |
 |---|---|
-| `completionProvider` | The suggest widget, with the server's trigger characters, insert-and-replace edits, deprecated tags, commands and `completionItem/resolve`. Snippet text is inserted as plain text until snippets land (#55). |
+| `completionProvider` | The suggest widget, with the server's trigger characters, insert-and-replace edits, deprecated tags, commands and `completionItem/resolve`. Snippet items are expanded as snippets, and `insertTextMode: asIs` keeps their indentation. |
 | `hoverProvider` | Hovers. Markdown and code blocks render as markdown; plain text is escaped. |
 | `definitionProvider` | Go to definition. Locations in other documents come back with their uri, as `OpenLocation`. |
 | `referencesProvider`, `declarationProvider`, `typeDefinitionProvider`, `implementationProvider` | Go to and peek references, declarations, type definitions and implementations. |
