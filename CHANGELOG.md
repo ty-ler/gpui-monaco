@@ -71,6 +71,11 @@ All notable changes to this project are documented here. The format follows [Kee
   - `register_model`, `model_for_uri` and `set_model_resolver`, so other documents can be previewed.
   - The LSP bridge forwards references, declaration, type definition and implementation requests.
 - Clicks in view zones and widgets no longer focus the editor.
+- **Folding commands (#102):**
+  - Commands: fold and unfold recursively, toggle recursively, Fold Level 1–7, fold all block comments and regions, fold and unfold all except the selection, go to parent, previous and next fold, manual folding ranges from the selection (and removing them), and toggle import fold.
+  - Monaco's gutter Shift- and Alt-clicks; clicking `⋯` unfolds.
+  - Options: `folding_highlight` (`editor.foldBackground`), `unfold_on_click_after_end_of_line` and `folding_imports_by_default`. `folding_maximum_regions` also caps indentation ranges.
+  - Ports `foldingModel.ts`'s commands and its tests.
 - **Folding sources (#102):**
   - `FoldingRangeProvider` with `FoldingRangeKind`.
   - Syntax folding from tree-sitter `folds.scm` queries, now bundled for every language (`SyntaxSnapshot::fold_ranges`, `Highlighter::fold_ranges`).

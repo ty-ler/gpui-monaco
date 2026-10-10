@@ -23,6 +23,9 @@ pub struct FoldRange {
     pub parent: Option<usize>,
     /// What the range holds; markers make [`FoldingRangeKind::Region`]s.
     pub kind: Option<FoldingRangeKind>,
+    /// Made by "Create Folding Range from Selection" (Monaco
+    /// `FoldSource.userDefined`).
+    pub manual: bool,
 }
 
 /// Monaco `computeIndentLevel`: visible indent width, or `None` for a
@@ -53,6 +56,18 @@ pub fn compute_indent_ranges(
     tab_size: u32,
     off_side: bool,
     markers: Option<(&Pattern, &Pattern)>,
+) -> Vec<FoldRange> {
+    compute_indent_ranges_limited(rope, tab_size, off_side, markers, usize::MAX)
+}
+
+/// [`compute_indent_ranges`] keeping at most `limit` ranges (Monaco's
+/// indent `RangesCollector`): the least indented first.
+pub fn compute_indent_ranges_limited(
+    rope: &Rope,
+    tab_size: u32,
+    off_side: bool,
+    markers: Option<(&Pattern, &Pattern)>,
+    limit: usize,
 ) -> Vec<FoldRange> {
     let tab_size = tab_size.max(1);
     let line_count = rope.line_count();
@@ -132,6 +147,41 @@ pub fn compute_indent_ranges(
         }
     }
     collected.reverse();
+    if collected.len() > limit {
+        let indent = |line: u32| indent_level(&rope.line(line - 1), tab_size).unwrap_or(0) as usize;
+        let mut occurrences: Vec<usize> = Vec::new();
+        for (start, _, _) in &collected {
+            let i = indent(*start);
+            if i < 1000 {
+                if i >= occurrences.len() {
+                    occurrences.resize(i + 1, 0);
+                }
+                occurrences[i] += 1;
+            }
+        }
+        let mut entries = 0;
+        let mut max_indent = occurrences.len();
+        for (i, n) in occurrences.iter().enumerate() {
+            if *n > 0 {
+                if n + entries > limit {
+                    max_indent = i;
+                    break;
+                }
+                entries += n;
+            }
+        }
+        collected.retain(|(start, _, _)| {
+            let i = indent(*start);
+            if i < max_indent {
+                true
+            } else if i == max_indent && entries < limit {
+                entries += 1;
+                true
+            } else {
+                false
+            }
+        });
+    }
     let mut ranges: Vec<FoldRange> = Vec::with_capacity(collected.len());
     let mut stack: Vec<usize> = Vec::new();
     for (start, end, is_marker) in collected {
@@ -149,6 +199,7 @@ pub fn compute_indent_ranges(
             end_row: end - 1,
             parent,
             kind: is_marker.then_some(FoldingRangeKind::Region),
+            manual: false,
         });
         stack.push(ranges.len() - 1);
     }
@@ -167,6 +218,8 @@ pub struct FoldingRangeData {
     pub rank: usize,
     /// Kind.
     pub kind: Option<FoldingRangeKind>,
+    /// A manual range.
+    pub manual: bool,
 }
 
 /// Monaco `sanitizeRanges` and `RangesCollector`: sorts ranges, drops
@@ -176,12 +229,18 @@ pub struct FoldingRangeData {
 pub fn sanitize_ranges(mut data: Vec<FoldingRangeData>, limit: usize) -> (Vec<FoldRange>, bool) {
     data.sort_by(|a, b| a.start.cmp(&b.start).then(a.rank.cmp(&b.rank)));
     // (start, end, kind, nesting level)
-    let mut collected: Vec<(u32, u32, Option<FoldingRangeKind>, usize)> = Vec::new();
+    let mut collected: Vec<(u32, u32, Option<FoldingRangeKind>, bool, usize)> = Vec::new();
     let mut top: Option<FoldingRangeData> = None;
     let mut previous: Vec<FoldingRangeData> = Vec::new();
     for entry in data {
         let Some(current) = top.clone() else {
-            collected.push((entry.start, entry.end, entry.kind.clone(), previous.len()));
+            collected.push((
+                entry.start,
+                entry.end,
+                entry.kind.clone(),
+                entry.manual,
+                previous.len(),
+            ));
             top = Some(entry);
             continue;
         };
@@ -190,7 +249,13 @@ pub fn sanitize_ranges(mut data: Vec<FoldingRangeData>, limit: usize) -> (Vec<Fo
         }
         if entry.end <= current.end {
             previous.push(current);
-            collected.push((entry.start, entry.end, entry.kind.clone(), previous.len()));
+            collected.push((
+                entry.start,
+                entry.end,
+                entry.kind.clone(),
+                entry.manual,
+                previous.len(),
+            ));
             top = Some(entry);
         } else {
             if entry.start > current.end {
@@ -201,11 +266,23 @@ pub fn sanitize_ranges(mut data: Vec<FoldingRangeData>, limit: usize) -> (Vec<Fo
                 if let Some(next) = next {
                     previous.push(next);
                 }
-                collected.push((entry.start, entry.end, entry.kind.clone(), previous.len()));
+                collected.push((
+                    entry.start,
+                    entry.end,
+                    entry.kind.clone(),
+                    entry.manual,
+                    previous.len(),
+                ));
                 top = Some(entry);
             } else {
                 // Crosses the enclosing range's end: Monaco still adds it.
-                collected.push((entry.start, entry.end, entry.kind.clone(), previous.len()));
+                collected.push((
+                    entry.start,
+                    entry.end,
+                    entry.kind.clone(),
+                    entry.manual,
+                    previous.len(),
+                ));
             }
         }
     }
@@ -214,7 +291,7 @@ pub fn sanitize_ranges(mut data: Vec<FoldingRangeData>, limit: usize) -> (Vec<Fo
         // Keep whole nesting levels from the top while they fit, then fill
         // with the next level in order.
         let mut counts: Vec<usize> = Vec::new();
-        for (_, _, _, level) in &collected {
+        for (_, _, _, _, level) in &collected {
             if *level >= counts.len() {
                 counts.resize(level + 1, 0);
             }
@@ -231,7 +308,7 @@ pub fn sanitize_ranges(mut data: Vec<FoldingRangeData>, limit: usize) -> (Vec<Fo
                 entries += n;
             }
         }
-        collected.retain(|(_, _, _, level)| {
+        collected.retain(|(_, _, _, _, level)| {
             if *level < max_level {
                 true
             } else if *level == max_level && entries < limit {
@@ -244,7 +321,7 @@ pub fn sanitize_ranges(mut data: Vec<FoldingRangeData>, limit: usize) -> (Vec<Fo
     }
     let mut ranges: Vec<FoldRange> = Vec::with_capacity(collected.len());
     let mut stack: Vec<usize> = Vec::new();
-    for (start, end, kind, _) in collected {
+    for (start, end, kind, manual, _) in collected {
         while let Some(&parent) = stack.last() {
             if ranges[parent].start_row < start && end <= ranges[parent].end_row {
                 break;
@@ -256,6 +333,7 @@ pub fn sanitize_ranges(mut data: Vec<FoldingRangeData>, limit: usize) -> (Vec<Fo
             end_row: end,
             parent: stack.last().copied(),
             kind,
+            manual,
         });
         stack.push(ranges.len() - 1);
     }
@@ -310,6 +388,7 @@ mod syntax_tests {
                     end: end - 1,
                     rank: 0,
                     kind: None,
+                    manual: false,
                 })
                 .collect::<Vec<_>>()
         };
@@ -345,6 +424,7 @@ mod syntax_tests {
                     end,
                     rank,
                     kind: None,
+                    manual: false,
                 })
                 .collect()
         };
@@ -634,9 +714,11 @@ mod tests {
         }
         let rope = Rope::from(lines.join("\n").as_str());
         let mut state = FoldState::default();
+        let buffer = text::Buffer::new("");
         state.set_ranges(
             compute_indent_ranges(&rope, 4, false, None),
-            text::Buffer::new("").version(),
+            buffer.version(),
+            &buffer,
         );
         for row in 0..402 {
             let brute: Vec<_> = state
@@ -672,15 +754,23 @@ mod tests {
 /// anchors so they follow edits.
 #[derive(Clone, Default)]
 pub struct FoldState {
+    /// Computed and manual ranges, merged.
     ranges: Vec<FoldRange>,
+    /// The computed ranges.
+    computed: Vec<FoldRange>,
     ranges_version: Option<text::Version>,
     /// (start of the start row, end of the end row).
     collapsed: Vec<std::ops::Range<text::Anchor>>,
+    /// Manual ranges (Monaco's user-defined folding ranges), which survive
+    /// recomputing.
+    manual: Vec<std::ops::Range<text::Anchor>>,
+    /// The computed ranges came from providers, with kinds (Monaco
+    /// `FoldingRegions.hasTypes`).
+    has_types: bool,
 }
 
 impl FoldState {
-    /// The fold ranges, sorted by start row (as from
-    /// [`compute_indent_ranges`]).
+    /// The fold ranges (computed and manual), sorted by start row.
     pub fn ranges(&self) -> &[FoldRange] {
         &self.ranges
     }
@@ -691,11 +781,133 @@ impl FoldState {
         self.ranges_version
     }
 
-    /// Replaces the fold ranges with ones computed for text `version`.
-    /// Collapsed regions are kept.
-    pub fn set_ranges(&mut self, ranges: Vec<FoldRange>, version: text::Version) {
-        self.ranges = ranges;
+    /// Replaces the computed fold ranges with ones for text `version`.
+    /// Collapsed regions and manual ranges are kept.
+    pub fn set_ranges(
+        &mut self,
+        ranges: Vec<FoldRange>,
+        version: text::Version,
+        buffer: &text::Buffer,
+    ) {
+        self.computed = ranges;
         self.ranges_version = Some(version);
+        self.merge(buffer);
+    }
+
+    fn anchor_rows(buffer: &text::Buffer, range: &std::ops::Range<text::Anchor>) -> (u32, u32) {
+        let start = buffer.offset_to_point(buffer.resolve(&range.start)).row;
+        let end = buffer.offset_to_point(buffer.resolve(&range.end)).row;
+        (start, end.max(start))
+    }
+
+    /// Monaco `FoldingRegions.sanitizeAndMerge`: the manual ranges join the
+    /// computed ones, winning ties.
+    fn merge(&mut self, buffer: &text::Buffer) {
+        if self.manual.is_empty() {
+            self.ranges = self.computed.clone();
+            return;
+        }
+        let mut data: Vec<FoldingRangeData> = self
+            .manual
+            .iter()
+            .map(|range| Self::anchor_rows(buffer, range))
+            .filter(|(start, end)| end > start)
+            .map(|(start, end)| FoldingRangeData {
+                start,
+                end,
+                rank: 0,
+                kind: None,
+                manual: true,
+            })
+            .collect();
+        data.extend(self.computed.iter().map(|range| FoldingRangeData {
+            start: range.start_row,
+            end: range.end_row,
+            rank: 1,
+            kind: range.kind.clone(),
+            manual: false,
+        }));
+        self.ranges = sanitize_ranges(data, usize::MAX).0;
+    }
+
+    /// Adds a collapsed manual range over rows `start_row ..= end_row`
+    /// (Monaco "Create Folding Range from Selection").
+    pub fn add_manual(&mut self, buffer: &text::Buffer, start_row: u32, end_row: u32) {
+        if end_row <= start_row {
+            return;
+        }
+        let start = buffer.anchor_before(buffer.point_to_offset(text::Point::new(start_row, 0)));
+        let end = buffer.anchor_after(buffer.point_to_offset(text::Point::new(end_row, u32::MAX)));
+        self.manual.push(start..end);
+        self.merge(buffer);
+        self.expand(buffer, start_row);
+        self.collapse(buffer, start_row, end_row);
+    }
+
+    /// Removes manual ranges (Monaco "Remove Manual Folding Ranges") and
+    /// expands them.
+    pub fn remove_manual(
+        &mut self,
+        buffer: &text::Buffer,
+        selections: &[crate::view::fold_model::SelectedRows],
+    ) {
+        let collapsed = self.collapsed_flags(buffer);
+        let model = crate::view::fold_model::FoldingModel::new(&self.ranges, collapsed);
+        let removed: Vec<(u32, u32)> =
+            crate::view::fold_model::manual_ranges_to_remove(&model, selections)
+                .into_iter()
+                .map(|ix| (self.ranges[ix].start_row, self.ranges[ix].end_row))
+                .collect();
+        if removed.is_empty() {
+            return;
+        }
+        self.manual
+            .retain(|range| !removed.contains(&Self::anchor_rows(buffer, range)));
+        for (start, _) in &removed {
+            self.expand(buffer, *start);
+        }
+        self.merge(buffer);
+    }
+
+    /// Whether the ranges came from providers, with kinds: commands then
+    /// pick comments and regions by kind rather than by their first line.
+    pub fn has_types(&self) -> bool {
+        self.has_types
+    }
+
+    /// Records whether the computed ranges came from providers.
+    pub fn set_has_types(&mut self, has_types: bool) {
+        self.has_types = has_types;
+    }
+
+    /// For each range, whether it's collapsed.
+    pub fn collapsed_flags(&self, buffer: &text::Buffer) -> Vec<bool> {
+        let collapsed: Vec<u32> = self
+            .collapsed_rows(buffer)
+            .into_iter()
+            .map(|(start, _)| start)
+            .collect();
+        self.ranges
+            .iter()
+            .map(|range| collapsed.binary_search(&range.start_row).is_ok())
+            .collect()
+    }
+
+    /// Toggles the ranges at `indexes` (Monaco
+    /// `FoldingModel.toggleCollapseState`): each once, however often listed.
+    pub fn toggle(&mut self, buffer: &text::Buffer, mut indexes: Vec<usize>) {
+        indexes.sort_unstable();
+        indexes.dedup();
+        let collapsed = self.collapsed_flags(buffer);
+        for ix in indexes {
+            let range = &self.ranges[ix];
+            let (start, end) = (range.start_row, range.end_row);
+            if collapsed[ix] {
+                self.expand(buffer, start);
+            } else {
+                self.collapse(buffer, start, end);
+            }
+        }
     }
 
     /// Collapsed regions as inclusive model row ranges `(start, end)`.

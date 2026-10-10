@@ -2,6 +2,9 @@
 //! and soft wrapping are applied (Monaco's `viewModel`).
 
 pub mod bracket_pairs;
+pub mod fold_model;
+#[cfg(test)]
+mod fold_model_tests;
 pub mod folding;
 pub mod guides;
 pub mod line_breaks;

@@ -372,6 +372,54 @@ actions!(
         /// Expands the collapsed region at the cursor, or collapses the innermost one
         /// (Monaco `editor.toggleFold`).
         ToggleFold,
+        /// Collapses the region at each cursor and all inside it (Monaco
+        /// `editor.foldRecursively`).
+        FoldRecursively,
+        /// Expands the region at each cursor and all inside it (Monaco
+        /// `editor.unfoldRecursively`).
+        UnfoldRecursively,
+        /// Toggles the region at each cursor and all inside it (Monaco
+        /// `editor.toggleFoldRecursively`).
+        ToggleFoldRecursively,
+        /// Collapses every block comment (Monaco `editor.foldAllBlockComments`).
+        FoldAllBlockComments,
+        /// Collapses every marker region (Monaco `editor.foldAllMarkerRegions`).
+        FoldAllMarkerRegions,
+        /// Expands every marker region (Monaco `editor.unfoldAllMarkerRegions`).
+        UnfoldAllMarkerRegions,
+        /// Collapses every region not around a cursor (Monaco
+        /// `editor.foldAllExcept`).
+        FoldAllExcept,
+        /// Expands every region not around a cursor (Monaco
+        /// `editor.unfoldAllExcept`).
+        UnfoldAllExcept,
+        /// Collapses the regions at level 1 (Monaco `editor.foldLevel1`).
+        FoldLevel1,
+        /// Level 2 (Monaco `editor.foldLevel2`).
+        FoldLevel2,
+        /// Level 3 (Monaco `editor.foldLevel3`).
+        FoldLevel3,
+        /// Level 4 (Monaco `editor.foldLevel4`).
+        FoldLevel4,
+        /// Level 5 (Monaco `editor.foldLevel5`).
+        FoldLevel5,
+        /// Level 6 (Monaco `editor.foldLevel6`).
+        FoldLevel6,
+        /// Level 7 (Monaco `editor.foldLevel7`).
+        FoldLevel7,
+        /// Moves to the enclosing fold's start (Monaco `editor.gotoParentFold`).
+        GoToParentFold,
+        /// Moves to the previous fold (Monaco `editor.gotoPreviousFold`).
+        GoToPreviousFold,
+        /// Moves to the next fold (Monaco `editor.gotoNextFold`).
+        GoToNextFold,
+        /// Folds the selection (Monaco `editor.createFoldingRangeFromSelection`).
+        CreateFoldFromSelection,
+        /// Removes manual folding ranges (Monaco
+        /// `editor.removeManualFoldingRanges`).
+        RemoveManualFoldingRanges,
+        /// Toggles the import ranges (Monaco `editor.toggleImportFold`).
+        ToggleImportFold,
         /// Opens the find widget, seeded from the selection or word at the cursor (Monaco
         /// `actions.find`).
         StartFind,
@@ -657,6 +705,23 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("cmd-k cmd-0", FoldAll, ctx),
             KeyBinding::new("cmd-k cmd-j", UnfoldAll, ctx),
             KeyBinding::new("cmd-k cmd-l", ToggleFold, ctx),
+            KeyBinding::new("cmd-k cmd-[", FoldRecursively, ctx),
+            KeyBinding::new("cmd-k cmd-]", UnfoldRecursively, ctx),
+            KeyBinding::new("cmd-k cmd-shift-l", ToggleFoldRecursively, ctx),
+            KeyBinding::new("cmd-k cmd-/", FoldAllBlockComments, ctx),
+            KeyBinding::new("cmd-k cmd-8", FoldAllMarkerRegions, ctx),
+            KeyBinding::new("cmd-k cmd-9", UnfoldAllMarkerRegions, ctx),
+            KeyBinding::new("cmd-k cmd--", FoldAllExcept, ctx),
+            KeyBinding::new("cmd-k cmd-=", UnfoldAllExcept, ctx),
+            KeyBinding::new("cmd-k cmd-1", FoldLevel1, ctx),
+            KeyBinding::new("cmd-k cmd-2", FoldLevel2, ctx),
+            KeyBinding::new("cmd-k cmd-3", FoldLevel3, ctx),
+            KeyBinding::new("cmd-k cmd-4", FoldLevel4, ctx),
+            KeyBinding::new("cmd-k cmd-5", FoldLevel5, ctx),
+            KeyBinding::new("cmd-k cmd-6", FoldLevel6, ctx),
+            KeyBinding::new("cmd-k cmd-7", FoldLevel7, ctx),
+            KeyBinding::new("cmd-k cmd-,", CreateFoldFromSelection, ctx),
+            KeyBinding::new("cmd-k cmd-.", RemoveManualFoldingRanges, ctx),
             KeyBinding::new("cmd-alt-f", StartFindReplace, ctx),
             KeyBinding::new("cmd-k cmd-d", MoveSelectionToNextFindMatch, ctx),
             KeyBinding::new("cmd-k cmd-i", ShowHover, ctx),
@@ -698,6 +763,23 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-k ctrl-0", FoldAll, ctx),
             KeyBinding::new("ctrl-k ctrl-j", UnfoldAll, ctx),
             KeyBinding::new("ctrl-k ctrl-l", ToggleFold, ctx),
+            KeyBinding::new("ctrl-k ctrl-[", FoldRecursively, ctx),
+            KeyBinding::new("ctrl-k ctrl-]", UnfoldRecursively, ctx),
+            KeyBinding::new("ctrl-k ctrl-shift-l", ToggleFoldRecursively, ctx),
+            KeyBinding::new("ctrl-k ctrl-/", FoldAllBlockComments, ctx),
+            KeyBinding::new("ctrl-k ctrl-8", FoldAllMarkerRegions, ctx),
+            KeyBinding::new("ctrl-k ctrl-9", UnfoldAllMarkerRegions, ctx),
+            KeyBinding::new("ctrl-k ctrl--", FoldAllExcept, ctx),
+            KeyBinding::new("ctrl-k ctrl-=", UnfoldAllExcept, ctx),
+            KeyBinding::new("ctrl-k ctrl-1", FoldLevel1, ctx),
+            KeyBinding::new("ctrl-k ctrl-2", FoldLevel2, ctx),
+            KeyBinding::new("ctrl-k ctrl-3", FoldLevel3, ctx),
+            KeyBinding::new("ctrl-k ctrl-4", FoldLevel4, ctx),
+            KeyBinding::new("ctrl-k ctrl-5", FoldLevel5, ctx),
+            KeyBinding::new("ctrl-k ctrl-6", FoldLevel6, ctx),
+            KeyBinding::new("ctrl-k ctrl-7", FoldLevel7, ctx),
+            KeyBinding::new("ctrl-k ctrl-,", CreateFoldFromSelection, ctx),
+            KeyBinding::new("ctrl-k ctrl-.", RemoveManualFoldingRanges, ctx),
             KeyBinding::new("ctrl-h", StartFindReplace, ctx),
             KeyBinding::new("ctrl-k ctrl-d", MoveSelectionToNextFindMatch, ctx),
             KeyBinding::new("ctrl-k ctrl-i", ShowHover, ctx),

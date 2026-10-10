@@ -69,6 +69,8 @@ pub struct EditorColors {
     pub message_background: Hsla,
     /// Their border (`inputValidation.infoBorder`).
     pub message_border: Hsla,
+    /// Collapsed regions' first lines (`editor.foldBackground`).
+    pub fold_background: Hsla,
     /// Inlay hint text (`editorInlayHint.foreground`).
     pub inlay_hint_foreground: Hsla,
     /// Inlay hint background (`editorInlayHint.background`).
@@ -194,6 +196,7 @@ impl EditorColors {
             symbol_highlight_background: c(rgba(0xea5c0055)),
             message_background: c(rgb(0x063b49)),
             message_border: c(rgb(0x007acc)),
+            fold_background: c(rgba(0x264f784d)),
             inlay_hint_foreground: c(rgb(0x969696)),
             inlay_hint_background: c(rgba(0x4d4d4d1a)),
             inlay_hint_type_foreground: c(rgb(0x969696)),
@@ -272,6 +275,7 @@ impl EditorColors {
             symbol_highlight_background: c(rgba(0xea5c0055)),
             message_background: c(rgb(0xd6ecf2)),
             message_border: c(rgb(0x007acc)),
+            fold_background: c(rgba(0xadd6ff4d)),
             inlay_hint_foreground: c(rgb(0x969696)),
             inlay_hint_background: c(rgba(0xc4c4c41a)),
             inlay_hint_type_foreground: c(rgb(0x969696)),
@@ -380,6 +384,7 @@ impl EditorColors {
             "inputValidation.infoBackground",
         );
         set(&mut self.message_border, "inputValidation.infoBorder");
+        set(&mut self.fold_background, "editor.foldBackground");
         set(
             &mut self.inlay_hint_foreground,
             "editorInlayHint.foreground",

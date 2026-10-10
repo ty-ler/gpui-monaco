@@ -522,6 +522,8 @@ pub(crate) struct EditorLayout {
     pub max_scroll: gpui::Point<Pixels>,
     pub lines: Vec<LineLayout>,
     pub fold_controls: Vec<FoldControl>,
+    /// The `⋯` after each collapsed line, with its row, for clicks.
+    pub fold_placeholders: Vec<(u32, Bounds<Pixels>)>,
     pub zones: ZoneLayout,
     /// Bounds of embedded views; the editor ignores clicks inside them.
     pub widget_bounds: Vec<Bounds<Pixels>>,
@@ -595,6 +597,7 @@ pub struct PrepaintState {
     gutter_numbers: Vec<(Pixels, ShapedLine, Pixels)>,
     /// (x after the text, top) of rows whose region is collapsed.
     fold_placeholders: Vec<(Pixels, Pixels)>,
+    fold_highlights: Vec<Bounds<Pixels>>,
     show_fold_controls: bool,
     decoration_quads: Vec<(Bounds<Pixels>, Option<Hsla>, Option<Hsla>)>,
     decoration_underlines: Vec<(gpui::Point<Pixels>, Pixels, UnderlineStyle)>,
@@ -1138,6 +1141,8 @@ fn prepaint_editor(
     // Fold controls and placeholders.
     let mut fold_controls = Vec::new();
     let mut fold_placeholders = Vec::new();
+    let mut fold_placeholder_bounds = Vec::new();
+    let mut fold_highlights = Vec::new();
     if options.folding {
         let model = editor.model().clone();
         let buffer = model.read(cx).buffer();
@@ -1159,6 +1164,25 @@ fn prepaint_editor(
                 let top = bounds.top() + zones.line_y(line.view_line, line_height) - scroll_top;
                 let x = text_bounds.left() - scroll_left + line.width() + metrics.em_width / 2.;
                 fold_placeholders.push((x, top));
+                fold_placeholder_bounds.push((
+                    line.row,
+                    Bounds::new(
+                        point(x, top + line_height * 0.15),
+                        size(metrics.em_width * 2., line_height * 0.7),
+                    ),
+                ));
+            }
+        }
+        // Monaco `foldingHighlight`: the collapsed regions' first lines.
+        if options.folding_highlight {
+            for line in lines.iter() {
+                if collapsed.iter().any(|(start, _)| *start == line.row) {
+                    let top = bounds.top() + zones.line_y(line.view_line, line_height) - scroll_top;
+                    fold_highlights.push(Bounds::new(
+                        point(text_bounds.left(), top),
+                        size(text_bounds.size.width, line_height),
+                    ));
+                }
             }
         }
     }
@@ -1180,6 +1204,7 @@ fn prepaint_editor(
         max_scroll: point(max_scroll_left, max_scroll_top),
         lines,
         fold_controls,
+        fold_placeholders: fold_placeholder_bounds,
         zones: zones.clone(),
         widget_bounds: Vec::new(),
         widget_kinds: Vec::new(),
@@ -1799,6 +1824,7 @@ fn prepaint_editor(
         cursor_quads,
         gutter_numbers,
         fold_placeholders,
+        fold_highlights,
         show_fold_controls,
         decoration_quads,
         decoration_underlines,
@@ -1873,6 +1899,10 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                     BorderStyle::Solid,
                 ));
             }
+        }
+        // Monaco `foldingHighlight` (`editor.foldBackground`).
+        for highlight in &state.fold_highlights {
+            window.paint_quad(fill(*highlight, colors.fold_background));
         }
 
         // Gutter numbers.
