@@ -1340,6 +1340,8 @@ fn prepaint_editor(
     editor.refresh_sticky_model(cx);
     editor.refresh_colors(cx);
     editor.refresh_section_headers(cx);
+    editor.check_unusual_line_terminators(window, cx);
+    editor.refresh_unicode_highlights(cx);
     editor.resolve_visible_code_lenses(cx);
     let bracket_colors = editor.bracket_colors_in(visible_start..visible_end, cx);
     let mut highlight_ix = 0;

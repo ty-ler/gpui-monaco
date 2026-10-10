@@ -68,6 +68,9 @@ mod sticky_model;
 pub mod suggest;
 mod suggest_widget;
 pub mod theme;
+pub mod unicode_highlight;
+mod unicode_highlighter;
+mod unusual_line_terminators;
 pub mod view;
 pub mod widgets;
 

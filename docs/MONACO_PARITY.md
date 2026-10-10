@@ -67,7 +67,7 @@ Issues are linked by number.
 | Bracket pair guides | view parts | ✅ | #118 |
 | Bracket pair colorization | `bracketPairColorization` | ✅ | #85 |
 | Occurrence and selection highlight | `wordHighlighter` | ✅ | #83 |
-| Unicode highlighting, unusual line terminators | `unicodeHighlighter`, `unusualLineTerminators` | ❌ | #86 |
+| Unicode highlighting, unusual line terminators | `unicodeHighlighter`, `unusualLineTerminators` | ✅ | #86 |
 | Font weight, ligatures, zoom, mouse wheel zoom | `fontZoom`, options | ✅ | #87 |
 | Variable line heights (`lineHeight` decorations, `allowVariableLineHeights`) | decorations | ✅ | #87 |
 | Letter spacing, font variations, per-decoration fonts | options | ❌ | #87 |

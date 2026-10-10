@@ -33,6 +33,8 @@ editor.update(cx, |editor, cx| {
 | `read_only` | `readOnly` | edits are refused and show `read_only_message` |
 | `read_only_message` | `readOnlyMessage` | markdown; defaults to "Cannot edit in read-only editor" |
 | `placeholder` | `placeholder` | shown while the model is empty |
+| `unicode_highlight` | `unicodeHighlight.*` | `non_basic_ascii`, `invisible_characters`, `ambiguous_characters`, `include_comments`, `include_strings`, `allowed_characters`, `allowed_locales` |
+| `unusual_line_terminators` | `unusualLineTerminators` | `Prompt` (default), `Auto` or `Off` for LS and PS characters |
 | `word_separators` | `wordSeparators` | used by word movement and whole-word find |
 | `word_wrap`, `word_wrap_column`, `wrapping_indent` | `wordWrap`, `wordWrapColumn`, `wrappingIndent` | `Off`, `On`, `WordWrapColumn`, `Bounded` |
 | `wrapping_strategy` | `wrappingStrategy` | `Simple` counts monospace columns; `Advanced` measures characters, for proportional fonts |

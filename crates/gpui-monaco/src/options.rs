@@ -858,6 +858,56 @@ impl GotoLocationOptions {
     }
 }
 
+/// Monaco `unicodeHighlight`: which characters get a warning border.
+///
+/// Monaco's `inUntrustedWorkspace` defaults resolve as in a trusted
+/// workspace, as the standalone editor does.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnicodeHighlightOptions {
+    /// Every character outside basic ASCII (default `false`).
+    pub non_basic_ascii: bool,
+    /// Invisible characters, such as zero-width spaces (default `true`).
+    pub invisible_characters: bool,
+    /// Characters that look like ASCII ones, such as Cyrillic `а` (default
+    /// `true`).
+    pub ambiguous_characters: bool,
+    /// Also in comments (default `false`).
+    pub include_comments: bool,
+    /// Also in strings (default `true`).
+    pub include_strings: bool,
+    /// Characters never highlighted.
+    pub allowed_characters: Vec<char>,
+    /// Locales whose common characters aren't ambiguous. `_os` and
+    /// `_vscode` (the defaults) stand for the system's locale.
+    pub allowed_locales: Vec<SharedString>,
+}
+
+impl Default for UnicodeHighlightOptions {
+    fn default() -> Self {
+        Self {
+            non_basic_ascii: false,
+            invisible_characters: true,
+            ambiguous_characters: true,
+            include_comments: false,
+            include_strings: true,
+            allowed_characters: Vec::new(),
+            allowed_locales: vec!["_os".into(), "_vscode".into()],
+        }
+    }
+}
+
+/// Monaco `unusualLineTerminators`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UnusualLineTerminators {
+    /// Remove them as they appear.
+    Auto,
+    /// Leave them.
+    Off,
+    /// Ask whether to remove them.
+    #[default]
+    Prompt,
+}
+
 /// Monaco `wrappingStrategy`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WrappingStrategy {
@@ -1030,6 +1080,11 @@ pub struct EditorOptions {
     pub read_only_message: Option<SharedString>,
     /// Monaco `placeholder`: shown while the model is empty.
     pub placeholder: Option<SharedString>,
+    /// Monaco `unusualLineTerminators`: remove LS and PS characters
+    /// (`Auto`), ask first (`Prompt`, the default) or leave them (`Off`).
+    pub unusual_line_terminators: UnusualLineTerminators,
+    /// Monaco `unicodeHighlight`.
+    pub unicode_highlight: UnicodeHighlightOptions,
     /// Monaco `wordSeparators`: characters that end a word for word navigation,
     /// double-click selection and whole-word search.
     pub word_separators: SharedString,
@@ -1277,6 +1332,8 @@ impl Default for EditorOptions {
             read_only: false,
             read_only_message: None,
             placeholder: None,
+            unusual_line_terminators: UnusualLineTerminators::Prompt,
+            unicode_highlight: UnicodeHighlightOptions::default(),
             word_separators: "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?".into(),
             vertical_scrollbar_size: px(14.),
             horizontal_scrollbar_size: px(12.),

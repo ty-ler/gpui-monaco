@@ -55,7 +55,12 @@ pub(crate) enum QuickAction {
     },
     /// Run the editor action with this id.
     Run(SharedString),
+    /// Choose item `.0` of a [`CodeEditor::show_quick_pick`] list.
+    Pick(usize),
 }
+
+/// What happens when a quick pick item is chosen.
+type PickHandler = Box<dyn FnOnce(&mut CodeEditor, usize, &mut Window, &mut Context<CodeEditor>)>;
 
 /// One row of the list.
 #[derive(Clone, Debug)]
@@ -104,6 +109,8 @@ pub(crate) struct QuickAccessState {
     _symbols_task: Option<Task<()>>,
     /// The keys bound to each action, looked up when it opened.
     action_keys: HashMap<SharedString, SharedString>,
+    /// A [`CodeEditor::show_quick_pick`] list instead of the providers.
+    pick: Option<(Vec<SharedString>, Option<PickHandler>)>,
 }
 
 /// The quick input: an input box and a list (an overlay widget at the top
@@ -116,6 +123,8 @@ pub struct QuickInput {
     scroll: usize,
     visible_rows: usize,
     width: Pixels,
+    /// Monaco's title bar above the input (quick picks).
+    title: Option<SharedString>,
     colors: crate::theme::EditorColors,
     _subscriptions: Vec<Subscription>,
 }
@@ -228,6 +237,7 @@ impl QuickInput {
             scroll: 0,
             visible_rows,
             width,
+            title: None,
             colors,
             _subscriptions: subscriptions,
         };
@@ -336,6 +346,24 @@ impl QuickInput {
                     editor.update(cx, |editor, cx| editor.quick_access_go_to(selection, cx));
                 }
                 self.close(true, cx);
+            }
+            QuickAction::Pick(ix) => {
+                let editor = self.editor.clone();
+                window.defer(cx, move |window, cx| {
+                    if let Some(editor) = editor.upgrade() {
+                        editor.update(cx, |editor, cx| {
+                            let handler = editor
+                                .quick
+                                .as_mut()
+                                .and_then(|state| state.pick.as_mut())
+                                .and_then(|(_, handler)| handler.take());
+                            editor.close_quick_access(true, cx);
+                            if let Some(handler) = handler {
+                                handler(editor, ix, window, cx);
+                            }
+                        });
+                    }
+                });
             }
             QuickAction::Run(id) => {
                 // Monaco hides the picker, then runs the command.
@@ -488,6 +516,16 @@ impl Render for QuickInput {
             }))
             .on_action(cx.listener(|this, _: &Newline, window, cx| this.accept(window, cx)))
             .on_action(cx.listener(|this, _: &RemoveSecondaryCursors, _, cx| this.close(false, cx)))
+            .when_some(self.title.clone(), |this, title| {
+                this.child(
+                    div()
+                        .pt(px(6.))
+                        .flex()
+                        .justify_center()
+                        .text_size(px(11.))
+                        .child(title),
+                )
+            })
             .child(
                 div().p(px(6.)).child(
                     div()
@@ -510,6 +548,36 @@ impl CodeEditor {
     /// `quickInputService.quickAccess.show(prefix)`): `":"` goes to a line,
     /// `"@"` to a symbol, `""` shows the help.
     pub fn open_quick_access(&mut self, value: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_quick_input(value, None, None, window, cx);
+    }
+
+    /// Shows `items` in the quick input and calls `on_pick` with the chosen
+    /// one's index (Monaco `quickInputService.pick`). Typing filters them.
+    pub fn show_quick_pick(
+        &mut self,
+        title: Option<SharedString>,
+        items: Vec<SharedString>,
+        on_pick: impl FnOnce(&mut CodeEditor, usize, &mut Window, &mut Context<CodeEditor>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_quick_input(
+            "",
+            title,
+            Some((items, Some(Box::new(on_pick)))),
+            window,
+            cx,
+        );
+    }
+
+    fn open_quick_input(
+        &mut self,
+        value: &str,
+        title: Option<SharedString>,
+        pick: Option<(Vec<SharedString>, Option<PickHandler>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.close_quick_access(false, cx);
         let (width, height) = self.layout.as_ref().map_or((px(600.), px(400.)), |layout| {
             (layout.bounds.size.width, layout.bounds.size.height)
@@ -525,6 +593,7 @@ impl CodeEditor {
             symbols: None,
             _symbols_task: None,
             action_keys: self.action_keybindings(window, cx),
+            pick,
         });
         // The first rows come from here: the widget can't update this
         // editor while it's being updated.
@@ -533,6 +602,7 @@ impl CodeEditor {
         let theme = self.theme.clone();
         let widget = cx
             .new(|cx| QuickInput::new(editor, value, rows, width, visible_rows, theme, window, cx));
+        widget.update(cx, |widget, _| widget.title = title);
         if let Some(action) = widget.read(cx).active_action() {
             self.quick_access_preview(&action, cx);
         }
@@ -639,6 +709,23 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) -> (Vec<QuickRow>, Option<usize>) {
         let trimmed = value.trim();
+        if let Some((items, _)) = self.quick.as_ref().and_then(|state| state.pick.as_ref()) {
+            let rows: Vec<QuickRow> = items
+                .iter()
+                .enumerate()
+                .filter_map(|(ix, label)| {
+                    let matches = if trimmed.is_empty() {
+                        Vec::new()
+                    } else {
+                        word_filter(trimmed, label)?
+                    };
+                    let mut item = QuickItem::message(label.clone(), QuickAction::Pick(ix));
+                    item.highlights = char_ranges_to_bytes(label, &matches);
+                    Some(QuickRow::Item(item))
+                })
+                .collect();
+            return (rows, None);
+        }
         if let Some(rest) = trimmed.strip_prefix("::") {
             (vec![QuickRow::Item(self.goto_offset_item(rest, cx))], None)
         } else if let Some(rest) = trimmed.strip_prefix(':') {

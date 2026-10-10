@@ -188,6 +188,9 @@ pub struct TextModel {
     uri: Option<SharedString>,
     syntax: Option<Syntax>,
     decorations: DecorationSet,
+    /// The user chose to keep this model's unusual line terminators
+    /// (Monaco's `ignoreUnusualLineTerminators` model property).
+    pub(crate) ignore_unusual_line_terminators: bool,
     pub(crate) markers: crate::markers::MarkerSet,
     /// Set when `language_id` hasn't been resolved against the registry yet.
     language_pending: bool,
@@ -207,6 +210,7 @@ impl TextModel {
             uri: None,
             syntax: None,
             decorations: DecorationSet::default(),
+            ignore_unusual_line_terminators: false,
             markers: Default::default(),
             language_pending: false,
         }
