@@ -5,7 +5,7 @@
 //! [`crate::init`], or skip [`default_key_bindings`] entirely and bind their
 //! own.
 
-use gpui::{App, KeyBinding, actions};
+use gpui::{Action, App, KeyBinding, actions};
 
 /// The key context the editor element establishes.
 pub const KEY_CONTEXT: &str = "CodeEditor";
@@ -19,6 +19,16 @@ const SUGGEST: Option<&str> = Some("CodeEditor && suggest_widget_visible");
 const QUICK_INPUT: Option<&str> = Some("QuickInput > CodeEditor");
 /// The editor while ghost text shows (Monaco's `inlineSuggestionVisible`).
 const INLINE: Option<&str> = Some("CodeEditor && inline_suggestion_visible");
+
+/// Runs the editor action `id` (Monaco `editor.trigger(source, id)`): a
+/// built-in one such as `"editor.action.formatDocument"`, or one added with
+/// [`crate::CodeEditor::add_action`].
+#[derive(Clone, Debug, PartialEq, Eq, Action)]
+#[action(namespace = code_editor, no_json)]
+pub struct RunAction {
+    /// The action's id.
+    pub id: String,
+}
 
 actions!(
     code_editor,
@@ -507,6 +517,8 @@ actions!(
         /// Opens quick access to go to a symbol (Monaco
         /// `editor.action.quickOutline`).
         QuickOutline,
+        /// Opens the command palette (Monaco `editor.action.quickCommand`).
+        QuickCommand,
         /// The next quick access item.
         QuickInputNext,
         /// The previous quick access item.
@@ -700,6 +712,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         // Monaco binds Ctrl+G on every platform.
         KeyBinding::new("ctrl-g", GotoLine, ctx),
         KeyBinding::new("secondary-shift-o", QuickOutline, ctx),
+        KeyBinding::new("f1", QuickCommand, ctx),
         // In the quick access input (the list's keys win over the input's).
         KeyBinding::new("down", QuickInputNext, QUICK_INPUT),
         KeyBinding::new("up", QuickInputPrevious, QUICK_INPUT),

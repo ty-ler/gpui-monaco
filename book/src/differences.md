@@ -22,7 +22,7 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
   - Language configuration patterns (`wordPattern`, `indentationRules`, …) use `fancy-regex`, so VS Code's configurations work unchanged.
 - **Quick access:**
   - Symbols are matched with the suggest widget's fuzzy scorer, not VS Code's quick open scorer.
-  - The help list has no command palette entry yet.
+  - The command palette has no similar-command or TF-IDF suggestions (those are VS Code workbench features), and accents aren't folded when matching.
   - Icons are glyphs, not codicons.
 - **Inline completions:**
   - There is no toolbar (`showToolbar`).

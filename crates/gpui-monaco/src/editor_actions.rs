@@ -1,0 +1,466 @@
+//! The editor's actions (Monaco `IEditorAction`): the built-in ones with a
+//! label, and the host's from [`CodeEditor::add_action`] (Monaco
+//! `addAction`). The command palette lists the supported ones.
+
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use gpui::{App, Context, Global, KeyBinding, SharedString, Window};
+
+use crate::actions::{KEY_CONTEXT, RunAction};
+use crate::editor::CodeEditor;
+use crate::providers;
+
+/// Whether an action can run in an editor (Monaco's precondition).
+type Precondition = fn(&CodeEditor, &App) -> bool;
+
+/// A host action's body.
+pub type ActionRun = Rc<dyn Fn(&mut CodeEditor, &mut Window, &mut Context<CodeEditor>)>;
+
+/// A host action's precondition.
+pub type ActionPrecondition = Rc<dyn Fn(&CodeEditor, &App) -> bool>;
+
+/// An action added with [`CodeEditor::add_action`] (Monaco
+/// `IActionDescriptor`).
+#[derive(Clone)]
+pub struct EditorActionDescriptor {
+    /// A unique id; adding another action with it replaces this one.
+    pub id: SharedString,
+    /// The label in the command palette.
+    pub label: SharedString,
+    /// Another name the command palette matches.
+    pub alias: Option<SharedString>,
+    /// Keystrokes (GPUI syntax, e.g. `"cmd-k cmd-m"`) that run it in the
+    /// editor's key context.
+    pub keybindings: Vec<SharedString>,
+    /// Whether it can run; without one it always can.
+    pub precondition: Option<ActionPrecondition>,
+    /// Runs it.
+    pub run: ActionRun,
+}
+
+impl EditorActionDescriptor {
+    /// An action with `id`, `label` and its body.
+    pub fn new(
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        run: impl Fn(&mut CodeEditor, &mut Window, &mut Context<CodeEditor>) + 'static,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            alias: None,
+            keybindings: Vec::new(),
+            precondition: None,
+            run: Rc::new(run),
+        }
+    }
+
+    /// Sets the alias.
+    pub fn alias(mut self, alias: impl Into<SharedString>) -> Self {
+        self.alias = Some(alias.into());
+        self
+    }
+
+    /// Adds a keybinding.
+    pub fn keybinding(mut self, keystrokes: impl Into<SharedString>) -> Self {
+        self.keybindings.push(keystrokes.into());
+        self
+    }
+
+    /// Sets the precondition.
+    pub fn precondition(
+        mut self,
+        precondition: impl Fn(&CodeEditor, &App) -> bool + 'static,
+    ) -> Self {
+        self.precondition = Some(Rc::new(precondition));
+        self
+    }
+}
+
+/// An action the editor supports (Monaco `IEditorAction`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditorActionInfo {
+    /// Its Monaco id, e.g. `"editor.action.formatDocument"`.
+    pub id: SharedString,
+    /// Its label.
+    pub label: SharedString,
+    /// Another name, if any.
+    pub alias: Option<SharedString>,
+}
+
+/// A built-in action: Monaco id, GPUI action name, label, precondition.
+struct Builtin(&'static str, &'static str, &'static str, Precondition);
+
+fn always(_: &CodeEditor, _: &App) -> bool {
+    true
+}
+
+fn writable(editor: &CodeEditor, _: &App) -> bool {
+    !editor.options.read_only
+}
+
+/// Whether some `providers::$lookup` serves the editor's language.
+macro_rules! has_provider {
+    ($name:ident, $lookup:ident) => {
+        fn $name(editor: &CodeEditor, cx: &App) -> bool {
+            let language = editor.model().read(cx).language_id().map(|l| l.to_string());
+            !providers::$lookup(cx, language.as_deref()).is_empty()
+        }
+    };
+    ($name:ident, writable, $lookup:ident) => {
+        fn $name(editor: &CodeEditor, cx: &App) -> bool {
+            let language = editor.model().read(cx).language_id().map(|l| l.to_string());
+            writable(editor, cx) && !providers::$lookup(cx, language.as_deref()).is_empty()
+        }
+    };
+}
+
+has_provider!(has_definition, definition_providers);
+has_provider!(has_declaration, declaration_providers);
+has_provider!(has_type_definition, type_definition_providers);
+has_provider!(has_implementation, implementation_providers);
+has_provider!(has_references, reference_providers);
+has_provider!(has_signature_help, signature_help_providers);
+has_provider!(can_format, writable, document_formatting_providers);
+has_provider!(
+    can_format_selection,
+    writable,
+    document_range_formatting_providers
+);
+has_provider!(can_rename, writable, rename_providers);
+has_provider!(can_code_action, writable, code_action_providers);
+
+/// Monaco's labelled editor actions that this editor implements.
+#[rustfmt::skip]
+static BUILTINS: &[Builtin] = &[
+    Builtin("editor.action.quickCommand", "code_editor::QuickCommand", "Command Palette", always),
+    Builtin("editor.action.gotoLine", "code_editor::GotoLine", "Go to Line/Column...", always),
+    Builtin("editor.action.quickOutline", "code_editor::QuickOutline", "Go to Symbol...", always),
+    // Cursors and selections.
+    Builtin("expandLineSelection", "code_editor::ExpandLineSelection", "Expand Line Selection", always),
+    Builtin("editor.action.insertCursorAbove", "code_editor::AddCursorAbove", "Add Cursor Above", always),
+    Builtin("editor.action.insertCursorBelow", "code_editor::AddCursorBelow", "Add Cursor Below", always),
+    Builtin("editor.action.insertCursorAtEndOfEachLineSelected", "code_editor::InsertCursorAtEndOfEachLineSelected", "Add Cursors to Line Ends", always),
+    Builtin("editor.action.addCursorsToBottom", "code_editor::AddCursorsToBottom", "Add Cursors to Bottom", always),
+    Builtin("editor.action.addCursorsToTop", "code_editor::AddCursorsToTop", "Add Cursors to Top", always),
+    Builtin("editor.action.addSelectionToNextFindMatch", "code_editor::AddSelectionToNextFindMatch", "Add Selection to Next Find Match", always),
+    Builtin("editor.action.addSelectionToPreviousFindMatch", "code_editor::AddSelectionToPreviousFindMatch", "Add Selection to Previous Find Match", always),
+    Builtin("editor.action.moveSelectionToNextFindMatch", "code_editor::MoveSelectionToNextFindMatch", "Move Last Selection to Next Find Match", always),
+    Builtin("editor.action.moveSelectionToPreviousFindMatch", "code_editor::MoveSelectionToPreviousFindMatch", "Move Last Selection to Previous Find Match", always),
+    Builtin("editor.action.selectHighlights", "code_editor::SelectAllOccurrences", "Select All Occurrences of Find Match", always),
+    Builtin("editor.action.focusNextCursor", "code_editor::FocusNextCursor", "Focus Next Cursor", always),
+    Builtin("editor.action.focusPreviousCursor", "code_editor::FocusPreviousCursor", "Focus Previous Cursor", always),
+    Builtin("cursorUndo", "code_editor::CursorUndo", "Cursor Undo", always),
+    Builtin("cursorRedo", "code_editor::CursorRedo", "Cursor Redo", always),
+    Builtin("editor.action.setSelectionAnchor", "code_editor::SetSelectionAnchor", "Set Selection Anchor", always),
+    Builtin("editor.action.goToSelectionAnchor", "code_editor::GoToSelectionAnchor", "Go to Selection Anchor", always),
+    Builtin("editor.action.selectFromAnchorToCursor", "code_editor::SelectFromAnchorToCursor", "Select from Anchor to Cursor", always),
+    Builtin("editor.action.cancelSelectionAnchor", "code_editor::CancelSelectionAnchor", "Cancel Selection Anchor", always),
+    Builtin("editor.action.smartSelect.expand", "code_editor::ExpandSelection", "Expand Selection", always),
+    Builtin("editor.action.smartSelect.shrink", "code_editor::ShrinkSelection", "Shrink Selection", always),
+    Builtin("editor.action.toggleOvertypeInsertMode", "code_editor::ToggleOvertypeInsertMode", "Toggle Overtype/Insert Mode", always),
+    // Find.
+    Builtin("actions.find", "code_editor::StartFind", "Find", always),
+    Builtin("editor.action.startFindReplaceAction", "code_editor::StartFindReplace", "Replace", always),
+    Builtin("editor.action.nextMatchFindAction", "code_editor::NextMatch", "Find Next", always),
+    Builtin("editor.action.previousMatchFindAction", "code_editor::PreviousMatch", "Find Previous", always),
+    // Brackets, problems, highlights.
+    Builtin("editor.action.jumpToBracket", "code_editor::JumpToBracket", "Go to Bracket", always),
+    Builtin("editor.action.selectToBracket", "code_editor::SelectToBracket", "Select to Bracket", always),
+    Builtin("editor.action.marker.next", "code_editor::GoToNextMarker", "Go to Next Problem (Error, Warning, Info)", always),
+    Builtin("editor.action.marker.prev", "code_editor::GoToPreviousMarker", "Go to Previous Problem (Error, Warning, Info)", always),
+    Builtin("editor.action.wordHighlight.next", "code_editor::WordHighlightNext", "Go to Next Symbol Highlight", always),
+    Builtin("editor.action.wordHighlight.prev", "code_editor::WordHighlightPrev", "Go to Previous Symbol Highlight", always),
+    Builtin("editor.action.wordHighlight.trigger", "code_editor::WordHighlightTrigger", "Trigger Symbol Highlight", always),
+    Builtin("editor.action.showHover", "code_editor::ShowHover", "Show or Focus Hover", always),
+    Builtin("editor.action.openLink", "code_editor::OpenLink", "Open Link", always),
+    // Editing.
+    Builtin("deleteAllLeft", "code_editor::DeleteAllLeft", "Delete All Left", writable),
+    Builtin("deleteAllRight", "code_editor::DeleteAllRight", "Delete All Right", writable),
+    Builtin("editor.action.sortLinesAscending", "code_editor::SortLinesAscending", "Sort Lines Ascending", writable),
+    Builtin("editor.action.sortLinesDescending", "code_editor::SortLinesDescending", "Sort Lines Descending", writable),
+    Builtin("editor.action.removeDuplicateLines", "code_editor::DeleteDuplicateLines", "Delete Duplicate Lines", writable),
+    Builtin("editor.action.reverseLines", "code_editor::ReverseLines", "Reverse lines", writable),
+    Builtin("editor.action.trimTrailingWhitespace", "code_editor::TrimTrailingWhitespace", "Trim Trailing Whitespace", writable),
+    Builtin("editor.action.deleteLines", "code_editor::DeleteLines", "Delete Line", writable),
+    Builtin("editor.action.joinLines", "code_editor::JoinLines", "Join Lines", writable),
+    Builtin("editor.action.transpose", "code_editor::Transpose", "Transpose Characters around the Cursor", writable),
+    Builtin("editor.action.transposeLetters", "code_editor::TransposeLetters", "Transpose Letters", writable),
+    Builtin("editor.action.transformToUppercase", "code_editor::TransformToUppercase", "Transform to Uppercase", writable),
+    Builtin("editor.action.transformToLowercase", "code_editor::TransformToLowercase", "Transform to Lowercase", writable),
+    Builtin("editor.action.transformToTitlecase", "code_editor::TransformToTitlecase", "Transform to Title Case", writable),
+    Builtin("editor.action.transformToSnakecase", "code_editor::TransformToSnakecase", "Transform to Snake Case", writable),
+    Builtin("editor.action.transformToCamelcase", "code_editor::TransformToCamelcase", "Transform to Camel Case", writable),
+    Builtin("editor.action.transformToPascalcase", "code_editor::TransformToPascalcase", "Transform to Pascal Case", writable),
+    Builtin("editor.action.transformToKebabcase", "code_editor::TransformToKebabcase", "Transform to Kebab Case", writable),
+    Builtin("editor.action.duplicateSelection", "code_editor::DuplicateSelection", "Duplicate Selection", writable),
+    Builtin("editor.action.moveCarretLeftAction", "code_editor::MoveCaretLeft", "Move Selected Text Left", writable),
+    Builtin("editor.action.moveCarretRightAction", "code_editor::MoveCaretRight", "Move Selected Text Right", writable),
+    Builtin("editor.action.reindentlines", "code_editor::ReindentLines", "Reindent Lines", writable),
+    Builtin("editor.action.reindentselectedlines", "code_editor::ReindentSelectedLines", "Reindent Selected Lines", writable),
+    Builtin("editor.action.inPlaceReplace.up", "code_editor::InPlaceReplaceUp", "Replace with Previous Value", writable),
+    Builtin("editor.action.inPlaceReplace.down", "code_editor::InPlaceReplaceDown", "Replace with Next Value", writable),
+    Builtin("editor.action.removeBrackets", "code_editor::RemoveBrackets", "Remove Brackets", writable),
+    Builtin("editor.action.commentLine", "code_editor::CommentLine", "Toggle Line Comment", writable),
+    Builtin("editor.action.addCommentLine", "code_editor::AddCommentLine", "Add Line Comment", writable),
+    Builtin("editor.action.removeCommentLine", "code_editor::RemoveCommentLine", "Remove Line Comment", writable),
+    Builtin("editor.action.blockComment", "code_editor::BlockComment", "Toggle Block Comment", writable),
+    Builtin("editor.action.indentLines", "code_editor::IndentLines", "Indent Line", writable),
+    Builtin("editor.action.outdentLines", "code_editor::OutdentLines", "Outdent Line", writable),
+    Builtin("editor.action.moveLinesUpAction", "code_editor::MoveLinesUp", "Move Line Up", writable),
+    Builtin("editor.action.moveLinesDownAction", "code_editor::MoveLinesDown", "Move Line Down", writable),
+    Builtin("editor.action.copyLinesUpAction", "code_editor::CopyLinesUp", "Copy Line Up", writable),
+    Builtin("editor.action.copyLinesDownAction", "code_editor::CopyLinesDown", "Copy Line Down", writable),
+    Builtin("editor.action.insertLineAfter", "code_editor::InsertLineAfter", "Insert Line Below", writable),
+    Builtin("editor.action.insertLineBefore", "code_editor::InsertLineBefore", "Insert Line Above", writable),
+    Builtin("editor.action.linkedEditing", "code_editor::StartLinkedEditing", "Start Linked Editing", writable),
+    Builtin("editor.action.triggerSuggest", "code_editor::TriggerSuggest", "Trigger Suggest", writable),
+    Builtin("editor.action.inlineSuggest.trigger", "code_editor::TriggerInlineSuggest", "Trigger Inline Suggestion", writable),
+    Builtin("editor.action.triggerParameterHints", "code_editor::TriggerParameterHints", "Trigger Parameter Hints", has_signature_help),
+    // Folding.
+    Builtin("editor.fold", "code_editor::Fold", "Fold", always),
+    Builtin("editor.unfold", "code_editor::Unfold", "Unfold", always),
+    Builtin("editor.toggleFold", "code_editor::ToggleFold", "Toggle Fold", always),
+    Builtin("editor.foldRecursively", "code_editor::FoldRecursively", "Fold Recursively", always),
+    Builtin("editor.unfoldRecursively", "code_editor::UnfoldRecursively", "Unfold Recursively", always),
+    Builtin("editor.toggleFoldRecursively", "code_editor::ToggleFoldRecursively", "Toggle Fold Recursively", always),
+    Builtin("editor.foldAll", "code_editor::FoldAll", "Fold All", always),
+    Builtin("editor.unfoldAll", "code_editor::UnfoldAll", "Unfold All", always),
+    Builtin("editor.foldAllBlockComments", "code_editor::FoldAllBlockComments", "Fold All Block Comments", always),
+    Builtin("editor.foldAllMarkerRegions", "code_editor::FoldAllMarkerRegions", "Fold All Regions", always),
+    Builtin("editor.unfoldAllMarkerRegions", "code_editor::UnfoldAllMarkerRegions", "Unfold All Regions", always),
+    Builtin("editor.foldAllExcept", "code_editor::FoldAllExcept", "Fold All Except Selected", always),
+    Builtin("editor.unfoldAllExcept", "code_editor::UnfoldAllExcept", "Unfold All Except Selected", always),
+    Builtin("editor.foldLevel1", "code_editor::FoldLevel1", "Fold Level 1", always),
+    Builtin("editor.foldLevel2", "code_editor::FoldLevel2", "Fold Level 2", always),
+    Builtin("editor.foldLevel3", "code_editor::FoldLevel3", "Fold Level 3", always),
+    Builtin("editor.foldLevel4", "code_editor::FoldLevel4", "Fold Level 4", always),
+    Builtin("editor.foldLevel5", "code_editor::FoldLevel5", "Fold Level 5", always),
+    Builtin("editor.foldLevel6", "code_editor::FoldLevel6", "Fold Level 6", always),
+    Builtin("editor.foldLevel7", "code_editor::FoldLevel7", "Fold Level 7", always),
+    Builtin("editor.gotoParentFold", "code_editor::GoToParentFold", "Go to Parent Fold", always),
+    Builtin("editor.gotoPreviousFold", "code_editor::GoToPreviousFold", "Go to Previous Folding Range", always),
+    Builtin("editor.gotoNextFold", "code_editor::GoToNextFold", "Go to Next Folding Range", always),
+    Builtin("editor.createFoldingRangeFromSelection", "code_editor::CreateFoldFromSelection", "Create Folding Range from Selection", always),
+    Builtin("editor.removeManualFoldingRanges", "code_editor::RemoveManualFoldingRanges", "Remove Manual Folding Ranges", always),
+    Builtin("editor.toggleImportFold", "code_editor::ToggleImportFold", "Toggle Import Fold", always),
+    // Language features.
+    Builtin("editor.action.formatDocument", "code_editor::FormatDocument", "Format Document", can_format),
+    Builtin("editor.action.formatSelection", "code_editor::FormatSelection", "Format Selection", can_format_selection),
+    Builtin("editor.action.rename", "code_editor::Rename", "Rename Symbol", can_rename),
+    Builtin("editor.action.quickFix", "code_editor::QuickFix", "Quick Fix...", can_code_action),
+    Builtin("editor.action.refactor", "code_editor::Refactor", "Refactor...", can_code_action),
+    Builtin("editor.action.sourceAction", "code_editor::SourceAction", "Source Action...", can_code_action),
+    Builtin("editor.action.organizeImports", "code_editor::OrganizeImports", "Organize Imports", can_code_action),
+    Builtin("editor.action.fixAll", "code_editor::FixAll", "Fix All", can_code_action),
+    Builtin("editor.action.autoFix", "code_editor::AutoFix", "Auto Fix...", can_code_action),
+    Builtin("editor.action.revealDefinition", "code_editor::GoToDefinition", "Go to Definition", has_definition),
+    Builtin("editor.action.peekDefinition", "code_editor::PeekDefinition", "Peek Definition", has_definition),
+    Builtin("editor.action.revealDeclaration", "code_editor::GoToDeclaration", "Go to Declaration", has_declaration),
+    Builtin("editor.action.peekDeclaration", "code_editor::PeekDeclaration", "Peek Declaration", has_declaration),
+    Builtin("editor.action.goToTypeDefinition", "code_editor::GoToTypeDefinition", "Go to Type Definition", has_type_definition),
+    Builtin("editor.action.peekTypeDefinition", "code_editor::PeekTypeDefinition", "Peek Type Definition", has_type_definition),
+    Builtin("editor.action.goToImplementation", "code_editor::GoToImplementation", "Go to Implementations", has_implementation),
+    Builtin("editor.action.peekImplementation", "code_editor::PeekImplementation", "Peek Implementations", has_implementation),
+    Builtin("editor.action.goToReferences", "code_editor::GoToReferences", "Go to References", has_references),
+    Builtin("editor.action.referenceSearch.trigger", "code_editor::PeekReferences", "Peek References", has_references),
+];
+
+fn builtin(id: &str) -> Option<&'static Builtin> {
+    BUILTINS.iter().find(|b| b.0 == id)
+}
+
+/// The command palette's history (Monaco `CommandsHistory`): recently run
+/// action ids, shared by every editor.
+#[derive(Default)]
+struct CommandsHistory {
+    counter: u64,
+    entries: HashMap<SharedString, u64>,
+}
+
+impl Global for CommandsHistory {}
+
+/// Monaco's default `workbench.commandPalette.history`.
+const HISTORY_SIZE: usize = 50;
+
+/// Records that the palette ran `id`.
+pub(crate) fn push_command_history(id: SharedString, cx: &mut App) {
+    let history = cx.default_global::<CommandsHistory>();
+    history.counter += 1;
+    let counter = history.counter;
+    history.entries.insert(id, counter);
+    if history.entries.len() > HISTORY_SIZE {
+        let oldest = history
+            .entries
+            .iter()
+            .min_by_key(|(_, counter)| **counter)
+            .map(|(id, _)| id.clone());
+        if let Some(oldest) = oldest {
+            history.entries.remove(&oldest);
+        }
+    }
+}
+
+/// When the palette last ran `id` (higher is more recent).
+pub(crate) fn command_history(id: &str, cx: &App) -> Option<u64> {
+    cx.try_global::<CommandsHistory>()?.entries.get(id).copied()
+}
+
+impl CodeEditor {
+    /// Adds an action (Monaco `addAction`): the command palette lists it,
+    /// [`CodeEditor::run_action`] and [`RunAction`] run it, and its
+    /// keybindings are bound to [`RunAction`] in the editor's key context.
+    pub fn add_action(&mut self, descriptor: EditorActionDescriptor, cx: &mut Context<Self>) {
+        let bindings: Vec<KeyBinding> = descriptor
+            .keybindings
+            .iter()
+            .map(|keystrokes| {
+                KeyBinding::new(
+                    keystrokes,
+                    RunAction {
+                        id: descriptor.id.to_string(),
+                    },
+                    Some(KEY_CONTEXT),
+                )
+            })
+            .collect();
+        if !bindings.is_empty() {
+            cx.bind_keys(bindings);
+        }
+        self.added_actions.retain(|a| a.id != descriptor.id);
+        self.added_actions.push(descriptor);
+    }
+
+    /// Removes an action added with [`CodeEditor::add_action`]. Its
+    /// keybindings stay bound but do nothing in this editor.
+    pub fn remove_action(&mut self, id: &str) -> bool {
+        let len = self.added_actions.len();
+        self.added_actions.retain(|a| a.id.as_ref() != id);
+        self.added_actions.len() != len
+    }
+
+    /// The actions that can run now (Monaco `getSupportedActions`): the
+    /// built-in ones whose precondition holds, then the added ones.
+    pub fn supported_actions(&self, cx: &App) -> Vec<EditorActionInfo> {
+        let builtins = BUILTINS
+            .iter()
+            .filter(|b| (b.3)(self, cx))
+            .map(|b| EditorActionInfo {
+                id: b.0.into(),
+                label: b.2.into(),
+                alias: None,
+            });
+        let added = self
+            .added_actions
+            .iter()
+            .filter(|a| a.precondition.as_ref().is_none_or(|p| p(self, cx)))
+            .map(|a| EditorActionInfo {
+                id: a.id.clone(),
+                label: a.label.clone(),
+                alias: a.alias.clone(),
+            });
+        builtins.chain(added).collect()
+    }
+
+    /// Runs the action `id` if it's supported (Monaco
+    /// `getAction(id).run()`); built-in ones run as if their key were
+    /// pressed.
+    pub fn run_action(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some(action) = self.added_actions.iter().find(|a| a.id.as_ref() == id) {
+            if !action.precondition.as_ref().is_none_or(|p| p(self, cx)) {
+                return false;
+            }
+            let run = action.run.clone();
+            run(self, window, cx);
+            return true;
+        }
+        let Some(builtin) = builtin(id) else {
+            return false;
+        };
+        if !(builtin.3)(self, cx) {
+            return false;
+        }
+        let Ok(action) = cx.build_action(builtin.1, None) else {
+            return false;
+        };
+        window.focus(&self.focus_handle, cx);
+        window.dispatch_action(action, cx);
+        true
+    }
+
+    /// The keystrokes bound to each supported action in this editor, for
+    /// display.
+    pub(crate) fn action_keybindings(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> HashMap<SharedString, SharedString> {
+        let text = |binding: KeyBinding| -> SharedString {
+            binding
+                .keystrokes()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" ")
+                .into()
+        };
+        let mut keys = HashMap::new();
+        for b in BUILTINS {
+            let Ok(action) = cx.build_action(b.1, None) else {
+                continue;
+            };
+            if let Some(binding) =
+                window.highest_precedence_binding_for_action_in(action.as_ref(), &self.focus_handle)
+            {
+                keys.insert(SharedString::from(b.0), text(binding));
+            }
+        }
+        for a in &self.added_actions {
+            let action = RunAction {
+                id: a.id.to_string(),
+            };
+            if let Some(binding) =
+                window.highest_precedence_binding_for_action_in(&action, &self.focus_handle)
+            {
+                keys.insert(a.id.clone(), text(binding));
+            }
+        }
+        keys
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[gpui::test]
+    fn builtins_name_real_actions(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            for b in BUILTINS {
+                assert!(
+                    cx.build_action(b.1, None).is_ok(),
+                    "{} is not an action",
+                    b.1
+                );
+            }
+        });
+        let mut ids: Vec<_> = BUILTINS.iter().map(|b| b.0).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), BUILTINS.len());
+    }
+
+    #[gpui::test]
+    fn history_keeps_the_most_recent(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            for i in 0..=HISTORY_SIZE {
+                push_command_history(format!("a{i}").into(), cx);
+            }
+            assert_eq!(command_history("a0", cx), None);
+            assert!(command_history("a50", cx) > command_history("a49", cx));
+            push_command_history("a1".into(), cx);
+            assert!(command_history("a1", cx) > command_history("a50", cx));
+        });
+    }
+}

@@ -117,9 +117,25 @@ Ctrl+G opens go to line, and Cmd/Ctrl+Shift+O opens go to symbol. Both use a qui
 
 - **`:line` or `:line:column`:** goes to a line, previewing it as you type. Negative numbers count from the end, and `::offset` goes to a character offset.
 - **`@name`:** goes to a symbol from the [document symbols](providers.md#document-symbols), with fuzzy matching. A second word matches the container. `@:` groups the symbols by kind.
+- **`>command`:** the command palette (F1). It runs any supported editor action by label, and recently used actions come first.
 - **Anything else:** lists the prefixes.
 
 Up, Down, Page Up and Page Down move through the list. Enter goes to the item, while Escape (or clicking elsewhere) closes the list and restores the view. `CodeEditor::open_quick_access(prefix, …)` opens it from code.
+
+Hosts add their own actions to the palette with Monaco's `addAction`:
+
+```rust,ignore
+editor.add_action(
+    EditorActionDescriptor::new("my.format", "Format with Tool", |editor, window, cx| {
+        // …
+    })
+    .alias("Prettify")
+    .keybinding("cmd-k cmd-p")
+    .precondition(|editor, _| !editor.options().read_only),
+    cx,
+);
+editor.run_action("my.format", window, cx); // or dispatch RunAction { id }
+```
 
 ## Snippets
 

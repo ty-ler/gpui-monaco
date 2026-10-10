@@ -168,6 +168,8 @@ pub struct CodeEditor {
     pub(crate) linked: crate::linked_editing::LinkedEditingState,
     pub(crate) code_lens: crate::code_lens::CodeLensState,
     pub(crate) quick: Option<crate::quick_access::QuickAccessState>,
+    /// Actions from [`CodeEditor::add_action`].
+    pub(crate) added_actions: Vec<crate::editor_actions::EditorActionDescriptor>,
     pub(crate) minimap_cache: crate::element::MinimapCache,
     pub(crate) minimap_hovered: bool,
     minimap_drag: Option<Pixels>,
@@ -311,6 +313,7 @@ impl CodeEditor {
             linked: Default::default(),
             code_lens: Default::default(),
             quick: None,
+            added_actions: Vec::new(),
             minimap_cache: Default::default(),
             minimap_hovered: false,
             minimap_drag: None,
@@ -3039,6 +3042,17 @@ impl Render for CodeEditor {
                     return cx.propagate();
                 }
                 this.open_quick_access("@", window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &QuickCommand, window, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.open_quick_access(">", window, cx)
+            }))
+            .on_action(cx.listener(|this, action: &RunAction, window, cx| {
+                if !this.run_action(&action.id, window, cx) {
+                    cx.propagate();
+                }
             }))
             .on_action(cx.listener(|this, _: &StartLinkedEditing, _, cx| {
                 this.update_linked_editing(true, cx)

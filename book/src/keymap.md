@@ -15,7 +15,7 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **F8:** next problem
 - **F12:** go to definition
 - **Ctrl+Space:** trigger completion
-- **Ctrl+G / Cmd+Shift+O:** go to line, go to symbol
+- **F1 / Ctrl+G / Cmd+Shift+O:** command palette, go to line, go to symbol
 - **Tab / Cmd+Right / Alt+] / Alt+[ / Alt+\\** with ghost text: accept, accept a word, next, previous, ask explicitly
 - **Tab / Shift+Tab / Escape** in a snippet: next and previous tab stop, leave the snippet
 - **Ctrl+Space (or Cmd+I)** in the suggest widget: show or hide the details

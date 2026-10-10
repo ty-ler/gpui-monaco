@@ -3,12 +3,14 @@
 //! provider:
 //! - `:` goes to a line and column (`::` to a character offset), Ctrl+G,
 //! - `@` goes to a symbol (`@:` grouped by kind), Cmd/Ctrl+Shift+O,
+//! - `>` runs an editor action (the command palette), F1,
 //! - anything else lists the prefixes (help).
 //!
-//! Ports `gotoLineQuickAccess.ts`, `gotoSymbolQuickAccess.ts` and
-//! `editorNavigationQuickAccess.ts` (MIT); the widget follows VS Code's
-//! quick input.
+//! Ports `gotoLineQuickAccess.ts`, `gotoSymbolQuickAccess.ts`,
+//! `editorNavigationQuickAccess.ts`, `commandsQuickAccess.ts` and the word
+//! filters of `filters.ts` (MIT); the widget follows VS Code's quick input.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 use gpui::{
@@ -51,6 +53,8 @@ pub(crate) enum QuickAction {
         selection: PointUtf16,
         highlight: Range<PointUtf16>,
     },
+    /// Run the editor action with this id.
+    Run(SharedString),
 }
 
 /// One row of the list.
@@ -70,6 +74,8 @@ pub(crate) struct QuickItem {
     pub description: Option<SharedString>,
     pub icon: Option<(&'static str, Hsla)>,
     pub strikethrough: bool,
+    /// The keys that run it, shown on the right.
+    pub keybinding: Option<SharedString>,
     pub action: QuickAction,
 }
 
@@ -81,6 +87,7 @@ impl QuickItem {
             description: None,
             icon: None,
             strikethrough: false,
+            keybinding: None,
             action,
         }
     }
@@ -95,6 +102,8 @@ pub(crate) struct QuickAccessState {
     /// The document's symbols, fetched once per session.
     symbols: Option<Vec<DocumentSymbol>>,
     _symbols_task: Option<Task<()>>,
+    /// The keys bound to each action, looked up when it opened.
+    action_keys: HashMap<SharedString, SharedString>,
 }
 
 /// The quick input: an input box and a list (an overlay widget at the top
@@ -307,7 +316,7 @@ impl QuickInput {
         }
     }
 
-    fn accept(&mut self, cx: &mut Context<Self>) {
+    fn accept(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(action) = self.active_item().map(|item| item.action.clone()) else {
             return;
         };
@@ -327,6 +336,19 @@ impl QuickInput {
                     editor.update(cx, |editor, cx| editor.quick_access_go_to(selection, cx));
                 }
                 self.close(true, cx);
+            }
+            QuickAction::Run(id) => {
+                // Monaco hides the picker, then runs the command.
+                crate::editor_actions::push_command_history(id.clone(), cx);
+                let editor = self.editor.clone();
+                window.defer(cx, move |window, cx| {
+                    if let Some(editor) = editor.upgrade() {
+                        editor.update(cx, |editor, cx| {
+                            editor.close_quick_access(true, cx);
+                            editor.run_action(&id, window, cx);
+                        });
+                    }
+                });
             }
         }
     }
@@ -387,10 +409,10 @@ impl QuickInput {
             })
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
+                cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     this.active = Some(ix);
-                    this.accept(cx);
+                    this.accept(window, cx);
                 }),
             )
             .children(
@@ -403,6 +425,15 @@ impl QuickInput {
                     .clone()
                     .map(|description| div().opacity(0.7).text_size(px(12.)).child(description)),
             )
+            .children(item.keybinding.clone().map(|keys| {
+                div()
+                    .ml_auto()
+                    .pl(px(8.))
+                    .flex_none()
+                    .opacity(0.8)
+                    .text_size(px(11.))
+                    .child(keys)
+            }))
             .into_any_element()
     }
 }
@@ -455,7 +486,7 @@ impl Render for QuickInput {
             .on_action(cx.listener(|this, _: &QuickInputLast, _, cx| {
                 this.move_active(this.rows.len() as isize, cx)
             }))
-            .on_action(cx.listener(|this, _: &Newline, _, cx| this.accept(cx)))
+            .on_action(cx.listener(|this, _: &Newline, window, cx| this.accept(window, cx)))
             .on_action(cx.listener(|this, _: &RemoveSecondaryCursors, _, cx| this.close(false, cx)))
             .child(
                 div().p(px(6.)).child(
@@ -493,6 +524,7 @@ impl CodeEditor {
             decorations: Vec::new(),
             symbols: None,
             _symbols_task: None,
+            action_keys: self.action_keybindings(window, cx),
         });
         // The first rows come from here: the widget can't update this
         // editor while it's being updated.
@@ -550,6 +582,18 @@ impl CodeEditor {
             highlight,
         } = action
         else {
+            // Other items have nothing to preview.
+            let old = self
+                .quick
+                .as_mut()
+                .map(|q| std::mem::take(&mut q.decorations))
+                .unwrap_or_default();
+            if !old.is_empty() {
+                let owner = Some(cx.entity_id());
+                self.model().update(cx, |model, cx| {
+                    model.delta_decorations(owner, &old, Vec::new(), cx)
+                });
+            }
             return;
         };
         let rope = self.model().read(cx).buffer().rope().clone();
@@ -601,6 +645,8 @@ impl CodeEditor {
             (vec![QuickRow::Item(self.goto_line_item(rest, cx))], None)
         } else if let Some(rest) = trimmed.strip_prefix('@') {
             self.goto_symbol_rows(rest, cx)
+        } else if let Some(rest) = trimmed.strip_prefix('>') {
+            (self.command_rows(rest.trim(), cx), None)
         } else {
             (help_rows(), None)
         }
@@ -750,6 +796,7 @@ impl CodeEditor {
                     description: container.clone().map(Into::into),
                     icon: Some(symbol_icon(symbol.kind)),
                     strikethrough: symbol.deprecated,
+                    keybinding: None,
                     action: QuickAction::GoTo {
                         selection: symbol.selection_range.start,
                         highlight: symbol.range.clone(),
@@ -854,10 +901,14 @@ impl CodeEditor {
                 QuickRow::Separator(label) => format!("[{label}]"),
                 QuickRow::Item(item) => {
                     let active = if widget.active == Some(ix) { "> " } else { "" };
-                    match &item.description {
-                        Some(description) => format!("{active}{} ({description})", item.label),
-                        None => format!("{active}{}", item.label),
+                    let mut row = format!("{active}{}", item.label);
+                    if let Some(description) = &item.description {
+                        row.push_str(&format!(" ({description})"));
                     }
+                    if let Some(keys) = &item.keybinding {
+                        row.push_str(&format!(" [{keys}]"));
+                    }
+                    row
                 }
             })
             .collect()
@@ -877,6 +928,68 @@ impl QuickInput {
     }
 }
 
+impl CodeEditor {
+    /// Monaco `AbstractCommandsQuickAccessProvider._getPicks` over the
+    /// supported actions: matched by label or alias (or exactly by id),
+    /// recently used first, then by label.
+    fn command_rows(&self, filter: &str, cx: &gpui::App) -> Vec<QuickRow> {
+        let history = |id: &str| crate::editor_actions::command_history(id, cx);
+        let mut picks: Vec<(crate::EditorActionInfo, Vec<Range<usize>>)> = Vec::new();
+        for action in self.supported_actions(cx) {
+            let label = word_filter(filter, &action.label);
+            let alias = action.alias.as_deref().and_then(|a| word_filter(filter, a));
+            if label.is_some() || alias.is_some() || filter == action.id.as_ref() {
+                let highlights = label
+                    .map(|m| char_ranges_to_bytes(&action.label, &m))
+                    .unwrap_or_default();
+                picks.push((action, highlights));
+            }
+        }
+        // Monaco describes commands that share a label with their ids.
+        let mut label_counts: HashMap<SharedString, usize> = HashMap::new();
+        for (action, _) in &picks {
+            *label_counts.entry(action.label.clone()).or_default() += 1;
+        }
+        picks.sort_by(|(a, _), (b, _)| match (history(&a.id), history(&b.id)) {
+            (Some(a), Some(b)) => b.cmp(&a),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.label.to_lowercase().cmp(&b.label.to_lowercase()),
+        });
+        if picks.is_empty() {
+            return vec![QuickRow::Item(QuickItem::message(
+                "No matching commands",
+                QuickAction::None,
+            ))];
+        }
+        let keys = self.quick.as_ref().map(|q| &q.action_keys);
+        let mut rows = Vec::new();
+        let mut add_other_separator = false;
+        for (ix, (action, highlights)) in picks.into_iter().enumerate() {
+            let recent = history(&action.id).is_some();
+            if ix == 0 && recent {
+                rows.push(QuickRow::Separator("recently used".into()));
+                add_other_separator = true;
+            }
+            if add_other_separator && !recent {
+                rows.push(QuickRow::Separator("other commands".into()));
+                add_other_separator = false;
+            }
+            let duplicate = label_counts.get(&action.label).is_some_and(|n| *n > 1);
+            rows.push(QuickRow::Item(QuickItem {
+                label: action.label.clone(),
+                highlights,
+                description: duplicate.then(|| action.id.clone()),
+                icon: None,
+                strikethrough: false,
+                keybinding: keys.and_then(|keys| keys.get(&action.id).cloned()),
+                action: QuickAction::Run(action.id),
+            }));
+        }
+        rows
+    }
+}
+
 /// Monaco's help provider: one item per prefix.
 fn help_rows() -> Vec<QuickRow> {
     [
@@ -884,6 +997,7 @@ fn help_rows() -> Vec<QuickRow> {
         ("::", "Go to Offset..."),
         ("@", "Go to Symbol..."),
         ("@:", "Go to Symbol by Category..."),
+        (">", "Show And Run Commands"),
     ]
     .into_iter()
     .map(|(prefix, help)| {
@@ -893,6 +1007,7 @@ fn help_rows() -> Vec<QuickRow> {
             description: Some(help.into()),
             icon: None,
             strikethrough: false,
+            keybinding: None,
             action: QuickAction::SetValue(prefix.to_string()),
         })
     })
@@ -914,9 +1029,201 @@ fn utf16_matches_to_bytes(text: &str, matches: &[Range<usize>]) -> Vec<Range<usi
         .collect()
 }
 
+/// Monaco `AbstractCommandsQuickAccessProvider.WORD_FILTER`:
+/// `or(matchesPrefix, matchesWords, matchesContiguousSubString)`, as char
+/// ranges of `target`.
+fn word_filter(word: &str, target: &str) -> Option<Vec<Range<usize>>> {
+    let word: Vec<char> = word.chars().map(lower).collect();
+    let target: Vec<char> = target.chars().map(lower).collect();
+    matches_prefix(&word, &target)
+        .or_else(|| matches_words(&word, &target, false))
+        .or_else(|| matches_contiguous_substring(&word, &target))
+}
+
+/// Lowercases one char (Monaco's `tryNormalizeToBase`, without removing
+/// accents).
+fn lower(c: char) -> char {
+    c.to_lowercase().next().unwrap_or(c)
+}
+
+/// Monaco `matchesPrefix` (case-insensitive).
+#[allow(clippy::single_range_in_vec_init)]
+fn matches_prefix(word: &[char], target: &[char]) -> Option<Vec<Range<usize>>> {
+    if target.is_empty() || target.len() < word.len() || !target.starts_with(word) {
+        return None;
+    }
+    Some(if word.is_empty() {
+        Vec::new()
+    } else {
+        vec![0..word.len()]
+    })
+}
+
+/// Monaco `matchesContiguousSubString`.
+#[allow(clippy::single_range_in_vec_init)]
+fn matches_contiguous_substring(word: &[char], target: &[char]) -> Option<Vec<Range<usize>>> {
+    if word.len() > target.len() {
+        return None;
+    }
+    let start = (0..=target.len() - word.len()).find(|&i| target[i..].starts_with(word))?;
+    Some(vec![start..start + word.len()])
+}
+
+fn is_word_separator(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r') || "()[]{}<>`'\"-/;:,.?!".contains(c)
+}
+
+fn characters_match(a: char, b: char) -> bool {
+    a == b || (is_word_separator(a) && is_word_separator(b))
+}
+
+/// Monaco `nextWord`: the next index that starts a word or is a separator.
+fn next_word(target: &[char], start: usize) -> usize {
+    (start..target.len())
+        .find(|&i| is_word_separator(target[i]) || (i > 0 && is_word_separator(target[i - 1])))
+        .unwrap_or(target.len())
+}
+
+/// Monaco `join`: prepends `head`, merging it with an adjacent first match.
+fn join(head: Range<usize>, mut tail: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    match tail.first_mut() {
+        None => tail.push(head),
+        Some(first) if first.start == head.end => first.start = head.start,
+        Some(_) => tail.insert(0, head),
+    }
+    tail
+}
+
+type WordsMemo = HashMap<(usize, usize), Option<Vec<Range<usize>>>>;
+
+/// Monaco `matchesWords`: each char of `word` matches the start of a word in
+/// `target` (or continues the previous match), e.g. "gp" in "Git: Pull".
+fn matches_words(word: &[char], target: &[char], contiguous: bool) -> Option<Vec<Range<usize>>> {
+    if target.is_empty() {
+        return None;
+    }
+    let mut memo = WordsMemo::new();
+    let mut target_index = 0;
+    while target_index < target.len() {
+        if let Some(result) = matches_words_at(word, target, 0, target_index, contiguous, &mut memo)
+        {
+            return Some(result);
+        }
+        target_index = next_word(target, target_index + 1);
+    }
+    None
+}
+
+fn matches_words_at(
+    word: &[char],
+    target: &[char],
+    word_index: usize,
+    target_index: usize,
+    contiguous: bool,
+    memo: &mut WordsMemo,
+) -> Option<Vec<Range<usize>>> {
+    if word_index == word.len() {
+        return Some(Vec::new());
+    }
+    if target_index == target.len() {
+        return None;
+    }
+    if let Some(cached) = memo.get(&(word_index, target_index)) {
+        return cached.clone();
+    }
+    let computed = (|| {
+        if !characters_match(word[word_index], target[target_index]) {
+            return None;
+        }
+        let mut next = target_index + 1;
+        let mut result = matches_words_at(word, target, word_index + 1, next, contiguous, memo);
+        if !contiguous {
+            while result.is_none() {
+                next = next_word(target, next);
+                if next >= target.len() {
+                    break;
+                }
+                result = matches_words_at(word, target, word_index + 1, next, contiguous, memo);
+                next += 1;
+            }
+        }
+        let result = result?;
+        // Matching separators aren't highlighted.
+        if word[word_index] != target[target_index] {
+            return Some(result);
+        }
+        Some(join(target_index..target_index + 1, result))
+    })();
+    memo.insert((word_index, target_index), computed.clone());
+    computed
+}
+
+/// Char ranges of `text` as byte ranges.
+fn char_ranges_to_bytes(text: &str, ranges: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut byte_at: Vec<usize> = text.char_indices().map(|(ix, _)| ix).collect();
+    byte_at.push(text.len());
+    ranges
+        .iter()
+        .map(|r| byte_at[r.start.min(byte_at.len() - 1)]..byte_at[r.end.min(byte_at.len() - 1)])
+        .collect()
+}
+
 #[cfg(test)]
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
+
+    fn words(word: &str, target: &str) -> Option<Vec<Range<usize>>> {
+        let word: Vec<char> = word.chars().map(lower).collect();
+        let target: Vec<char> = target.chars().map(lower).collect();
+        matches_words(&word, &target, false)
+    }
+
+    /// From VS Code's `filters.test.ts` (`matchesWords`).
+    #[test]
+    fn matches_words_like_monaco() {
+        assert_eq!(words("alpha", "alpha"), Some(vec![0..5]));
+        assert_eq!(words("alpha", "alphasomething"), Some(vec![0..5]));
+        assert_eq!(words("alpha", "alp"), None);
+        assert_eq!(words("a", "alpha"), Some(vec![0..1]));
+        assert_eq!(words("x", "alpha"), None);
+        assert_eq!(words("AlPh", "alPHA"), Some(vec![0..4]));
+        assert!(words("Debug Console", "Open: Debug Console").is_some());
+        assert_eq!(words("gp", "Git: Pull"), Some(vec![0..1, 5..6]));
+        assert_eq!(words("g p", "Git: Pull"), Some(vec![0..1, 5..6]));
+        assert_eq!(words("gipu", "Git: Pull"), Some(vec![0..2, 5..7]));
+        assert_eq!(
+            words("gp", "Category: Git: Pull"),
+            Some(vec![10..11, 15..16])
+        );
+        assert_eq!(
+            words("gipu", "Category: Git: Pull"),
+            Some(vec![10..12, 15..17])
+        );
+        assert_eq!(words("it", "Git: Pull"), None);
+        assert_eq!(words("ll", "Git: Pull"), None);
+        assert_eq!(words("C++", "C/C++: command"), Some(vec![2..5]));
+        assert_eq!(words(".", ":"), Some(vec![]));
+        assert_eq!(words(".", "."), Some(vec![0..1]));
+        assert!(words("bar", "foo-bar").is_some());
+        assert!(words("foo bar", "foo-bar").is_some());
+        assert!(words("foo bar", "123 foo-bar 456").is_some());
+        assert!(words("foo-bar", "foo bar").is_some());
+        assert!(words("foo:bar", "foo:bar").is_some());
+    }
+
+    #[test]
+    fn word_filter_tries_prefix_words_then_substring() {
+        assert_eq!(word_filter("fold a", "Fold All"), Some(vec![0..6]));
+        assert_eq!(word_filter("fa", "Fold All"), Some(vec![0..1, 5..6]));
+        assert_eq!(word_filter("old", "Fold All"), Some(vec![1..4]));
+        assert_eq!(word_filter("", "Fold All"), Some(vec![]));
+        assert_eq!(word_filter("xyz", "Fold All"), None);
+        assert_eq!(
+            char_ranges_to_bytes("äb c", &[1..2, 3..4]),
+            vec![2..3, 4..5]
+        );
+    }
 
     #[test]
     fn visible_columns() {

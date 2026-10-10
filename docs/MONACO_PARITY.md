@@ -81,7 +81,7 @@ Issues are linked by number.
 | Custom commands and keybindings | `addAction`, `addCommand` | ✅ (GPUI actions) | |
 | Context menu, with host items | `contextmenu` | ❌ | #91 |
 | Go to line, quick outline (quick input) | `quickAccess` | ✅ | #100 |
-| Command palette | `quickAccess` | ❌ | #100 |
+| Command palette, `addAction` | `quickAccess` | ✅ | #100 |
 | Reveal APIs, `executeEdits`, mouse hit-test events, word and position helpers, content-change details, cursor change reasons, decorations collections | editor API | ✅ | #105 |
 | Custom highlighter | tokenization support | ✅ (`Language::with_highlighter`) | |
 | Static colorize and tokenize | `colorizer` | ❌ | #108 |

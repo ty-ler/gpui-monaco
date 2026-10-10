@@ -19,6 +19,7 @@ pub mod cursor;
 pub mod decorations;
 mod definition;
 mod editor;
+mod editor_actions;
 mod element;
 pub mod events;
 mod find;
@@ -65,6 +66,7 @@ pub use decorations::{
     DecorationId, DecorationOptions, DecorationUnderline, InjectedText, OverviewRulerLane,
 };
 pub use editor::{CodeEditor, CodeEditorEvent, ViewState};
+pub use editor_actions::{ActionPrecondition, ActionRun, EditorActionDescriptor, EditorActionInfo};
 pub use element::EditorElement;
 pub use events::{ContentChange, CursorChangeReason, CursorChangeSource, SelectionChange};
 pub use find::{FindOptions, MATCHES_LIMIT};
