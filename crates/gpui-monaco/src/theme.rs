@@ -147,6 +147,15 @@ pub struct EditorColors {
     pub widget_foreground: Hsla,
     /// `editorWidget.border`.
     pub widget_border: Hsla,
+    /// Snippet tab stops (`editor.snippetTabstopHighlightBackground`).
+    pub snippet_tabstop_background: Hsla,
+    /// `editor.snippetTabstopHighlightBorder` (transparent: none).
+    pub snippet_tabstop_border: Hsla,
+    /// The final tab stop (`editor.snippetFinalTabstopHighlightBackground`;
+    /// transparent: none).
+    pub snippet_final_tabstop_background: Hsla,
+    /// `editor.snippetFinalTabstopHighlightBorder`.
+    pub snippet_final_tabstop_border: Hsla,
     /// The suggest widget (`editorSuggestWidget.background`, defaulting to
     /// the widget background).
     pub suggest_background: Hsla,
@@ -255,6 +264,10 @@ impl EditorColors {
             widget_background: c(rgb(0x252526)),
             widget_foreground: c(rgb(0xcccccc)),
             widget_border: c(rgb(0x454545)),
+            snippet_tabstop_background: c(rgba(0x7c7c7c4d)),
+            snippet_tabstop_border: gpui::transparent_black(),
+            snippet_final_tabstop_background: gpui::transparent_black(),
+            snippet_final_tabstop_border: c(rgb(0x525252)),
             suggest_background: c(rgb(0x252526)),
             suggest_border: c(rgb(0x454545)),
             suggest_foreground: c(rgb(0xd4d4d4)),
@@ -341,6 +354,10 @@ impl EditorColors {
             widget_background: c(rgb(0xf3f3f3)),
             widget_foreground: c(rgb(0x616161)),
             widget_border: c(rgb(0xc8c8c8)),
+            snippet_tabstop_background: c(rgba(0x0a32641a)),
+            snippet_tabstop_border: gpui::transparent_black(),
+            snippet_final_tabstop_background: gpui::transparent_black(),
+            snippet_final_tabstop_border: c(rgba(0x0a326480)),
             suggest_background: c(rgb(0xf3f3f3)),
             suggest_border: c(rgb(0xc8c8c8)),
             suggest_foreground: c(rgb(0x000000)),
@@ -542,6 +559,22 @@ impl EditorColors {
         set(&mut self.widget_background, "editorWidget.background");
         set(&mut self.widget_foreground, "editorWidget.foreground");
         set(&mut self.widget_border, "editorWidget.border");
+        set(
+            &mut self.snippet_tabstop_background,
+            "editor.snippetTabstopHighlightBackground",
+        );
+        set(
+            &mut self.snippet_tabstop_border,
+            "editor.snippetTabstopHighlightBorder",
+        );
+        set(
+            &mut self.snippet_final_tabstop_background,
+            "editor.snippetFinalTabstopHighlightBackground",
+        );
+        set(
+            &mut self.snippet_final_tabstop_border,
+            "editor.snippetFinalTabstopHighlightBorder",
+        );
         self.suggest_background = self.widget_background;
         self.suggest_border = self.widget_border;
         self.suggest_foreground = self.foreground;

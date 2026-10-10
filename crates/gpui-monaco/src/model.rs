@@ -601,6 +601,20 @@ impl TextModel {
         ids
     }
 
+    /// Replaces the options of decoration `id`, keeping its range and id
+    /// (Monaco `changeDecorationOptions`), e.g. to change its stickiness.
+    pub fn change_decoration_options(
+        &mut self,
+        id: DecorationId,
+        options: DecorationOptions,
+        cx: &mut Context<Self>,
+    ) {
+        if self.decorations.change_options(id, options) {
+            cx.emit(TextModelEvent::DecorationsChanged);
+            cx.notify();
+        }
+    }
+
     /// Decorations intersecting byte `range`, as seen by `editor`.
     pub fn decorations_in_range(
         &mut self,

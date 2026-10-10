@@ -12,16 +12,20 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+iana-time-zone = "0.1"
 pulldown-cmark = { version = "0.13", default-features = false }
 gpui.workspace = true
 gpui-monaco-text.workspace = true
 gpui-monaco-syntax.workspace = true
 log = "0.4"
 similar = "2"
+rand.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 unicode-segmentation.workspace = true
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 async-channel = "2"
