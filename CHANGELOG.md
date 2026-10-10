@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Added
 - Comment toggling: `editor.action.commentLine` (Cmd+/), `addCommentLine`, `removeCommentLine` and `blockComment` (Shift+Alt+A), using the language at the cursor (injections included). This is a port of Monaco's comment commands and their tests (#79).
+- Word commands: `cursorWordStart/End{Left,Right}{,Select}`, `deleteWordStart/End{Left,Right}`, `deleteWordPart{Left,Right}` (Ctrl+Alt+Backspace/Delete on macOS) and `deleteInsideWord`. Also `lineBreakInsert` (Ctrl+O on macOS) (#81).
+- Multi-cursor commands: `addSelectionToPreviousFindMatch`, `moveSelectionToPreviousFindMatch`, `insertCursorAtEndOfEachLineSelected` (Shift+Alt+I), `addCursorsToBottom`/`Top` and `focusNext`/`PreviousCursor` (#81).
 - `TextModel::language_at` (Monaco `getLanguageIdAtPosition`), and the `comments` editor option.
 - Language configurations accept `lineComment` as `{ "comment", "noIndent" }`.
 

@@ -136,7 +136,11 @@ pub fn composition_type(
 /// Monaco `EnterOperation._enter` with `autoIndent: 'keep'`: a line break
 /// followed by the current line's leading whitespace (up to the cursor),
 /// normalized to the indentation settings.
-fn enter_text(config: &CursorConfig, model: &dyn CursorModel, range: &Range<Position>) -> String {
+pub(crate) fn enter_text(
+    config: &CursorConfig,
+    model: &dyn CursorModel,
+    range: &Range<Position>,
+) -> String {
     let line = model.line_content(range.start.row);
     let indentation = strings::utf16_prefix(strings::leading_whitespace(&line), range.start.column);
     format!("\n{}", config.normalize_indentation(indentation))

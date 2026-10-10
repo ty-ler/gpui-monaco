@@ -36,7 +36,7 @@ use super::language::{
     indent_action_for_type, indent_for_enter, indentation_at_position, is_electric_character,
     is_quote, on_electric_character, unshift_indent,
 };
-use super::typing::{delete_left, line_break, tab, tab_with_good_indent, type_text};
+use super::typing::{delete_left, enter_text, line_break, tab, tab_with_good_indent, type_text};
 use super::word::{WordCharClass, WordClassifier};
 use super::{
     AutoClosedPair, AutoClosingEditStrategy, AutoClosingStrategy, AutoIndent, AutoSurroundStrategy,
@@ -128,6 +128,45 @@ pub fn line_break_with_language<M: CursorModel>(
         &selections,
         commands,
         EditOperationType::TypingOther,
+        true,
+        false,
+    )
+}
+
+/// Inserts a line break after every cursor without moving it (Monaco
+/// `EnterOperation.lineBreakInsert`, Ctrl+O on macOS). The new line is
+/// indented like Enter would.
+pub fn line_break_insert<M: CursorModel>(
+    config: &CursorConfig,
+    model: &M,
+    cursors: &CursorCollection,
+    lang: Option<&LanguageContext>,
+) -> EditOperation {
+    let dm: &dyn CursorModel = model;
+    let selections = cursors.selections();
+    let commands: Commands = match lang {
+        Some(ctx) => {
+            let lang = LanguageSupport::new(ctx);
+            selections
+                .iter()
+                .map(|s| enter_command_with_language(config, &lang, dm, true, s.range()))
+                .collect()
+        }
+        None => selections
+            .iter()
+            .map(|s| {
+                Some(Box::new(ReplaceCommandWithoutChangingPosition {
+                    range: s.range(),
+                    text: enter_text(config, dm, &s.range()),
+                }) as Box<dyn Command>)
+            })
+            .collect(),
+    };
+    execute_commands(
+        dm,
+        &selections,
+        commands,
+        EditOperationType::Other,
         true,
         false,
     )

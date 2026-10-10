@@ -3,9 +3,9 @@
 //! endCol)` with the anchor at the start.
 //!
 //! Skipped: word-wrap and paste-order tests (covered by the cursor core),
-//! the find-widget option matrix (partially covered below), and the
-//! "previous" variants (Monaco's add/move-to-previous commands aren't
-//! bound by default and aren't implemented).
+//! and most of the find-widget option matrix (`selectedTextMatchMode` isn't
+//! an option here; selected text matches case-sensitively, Monaco's
+//! `caseSensitive` mode).
 
 use gpui::{Entity, Focusable, TestAppContext, VisualTestContext};
 use gpui_monaco::cursor::Selection;
@@ -230,4 +230,85 @@ fn keybindings(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("escape");
     cx.simulate_keystrokes("secondary-shift-l");
     assert_eq!(get(&editor, cx).len(), 3);
+}
+
+const OCCURRENCES: [&str; 5] = ["foo", "FOObar", "foobar", "FOO", "foo"];
+
+/// Monaco: addSelectionToPreviousFindMatch: selected text, match case true,
+/// Find visible false.
+#[gpui::test]
+fn add_previous_selected_text_case_sensitive(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&OCCURRENCES, cx);
+    set(&editor, cx, &[(5, 1, 5, 4)]);
+    editor.update(cx, |e, cx| e.add_selection_to_previous_find_match(cx));
+    assert_eq!(get(&editor, cx), vec![(5, 1, 5, 4), (3, 1, 3, 4)]);
+}
+
+/// Monaco: addSelectionToPreviousFindMatch: empty selection always starts
+/// whole-word and case-sensitive.
+#[gpui::test]
+fn add_previous_from_empty_selection(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&OCCURRENCES, cx);
+    set(&editor, cx, &[(5, 2, 5, 2)]);
+    editor.update(cx, |e, cx| e.add_selection_to_previous_find_match(cx));
+    editor.update(cx, |e, cx| e.add_selection_to_previous_find_match(cx));
+    assert_eq!(get(&editor, cx), vec![(5, 1, 5, 4), (1, 1, 1, 4)]);
+}
+
+/// Monaco: moveSelectionToPreviousFindMatch: selected text and empty
+/// selection, case-sensitive.
+#[gpui::test]
+fn move_previous(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&OCCURRENCES, cx);
+    set(&editor, cx, &[(5, 1, 5, 4)]);
+    editor.update(cx, |e, cx| e.move_selection_to_previous_find_match(cx));
+    assert_eq!(get(&editor, cx), vec![(3, 1, 3, 4)]);
+
+    set(&editor, cx, &[(5, 2, 5, 2)]);
+    editor.update(cx, |e, cx| e.move_selection_to_previous_find_match(cx));
+    editor.update(cx, |e, cx| e.move_selection_to_previous_find_match(cx));
+    assert_eq!(get(&editor, cx), vec![(1, 1, 1, 4)]);
+}
+
+#[gpui::test]
+fn insert_cursor_at_end_of_each_line_selected(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&["one", "two", "three", "four"], cx);
+    // The last line counts only if the selection ends inside it.
+    set(&editor, cx, &[(1, 2, 3, 3)]);
+    cx.simulate_keystrokes("shift-alt-i");
+    assert_eq!(
+        get(&editor, cx),
+        vec![(1, 4, 1, 4), (2, 4, 2, 4), (3, 3, 3, 3)]
+    );
+    set(&editor, cx, &[(1, 1, 3, 1)]);
+    cx.simulate_keystrokes("shift-alt-i");
+    assert_eq!(get(&editor, cx), vec![(1, 4, 1, 4), (2, 4, 2, 4)]);
+}
+
+#[gpui::test]
+fn add_cursors_to_bottom_and_top(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&["abcd", "ab", "abcd", "abcd"], cx);
+    set(&editor, cx, &[(2, 2, 2, 3)]);
+    editor.update(cx, |e, cx| e.add_cursors_to_edge(true, cx));
+    assert_eq!(
+        get(&editor, cx),
+        vec![(2, 2, 2, 3), (3, 2, 3, 3), (4, 2, 4, 3)]
+    );
+    set(&editor, cx, &[(3, 1, 3, 1)]);
+    editor.update(cx, |e, cx| e.add_cursors_to_edge(false, cx));
+    assert_eq!(
+        get(&editor, cx),
+        vec![(3, 1, 3, 1), (2, 1, 2, 1), (1, 1, 1, 1)]
+    );
+}
+
+#[gpui::test]
+fn focus_next_and_previous_cursor(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&["a", "b", "c"], cx);
+    set(&editor, cx, &[(1, 1, 1, 1), (2, 1, 2, 1), (3, 1, 3, 1)]);
+    editor.update(cx, |e, cx| e.focus_next_cursor(true, cx));
+    assert_eq!(get(&editor, cx)[0], (2, 1, 2, 1));
+    editor.update(cx, |e, cx| e.focus_next_cursor(false, cx));
+    editor.update(cx, |e, cx| e.focus_next_cursor(false, cx));
+    assert_eq!(get(&editor, cx)[0], (3, 1, 3, 1));
 }
