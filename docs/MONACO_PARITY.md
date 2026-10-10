@@ -128,7 +128,7 @@ Issues are linked by number.
 
 | Feature | Status | Issue |
 |---|---|---|
-| Diff editor, multi-diff editor | ❌ | #52 |
+| Diff editor, multi-diff editor | 🟡 diff computation (`diff::compute_diff`); the editor widget is in progress | #52 |
 | Screen readers, tab focus mode, ARIA options | ✅ | #53 |
 | wasm / web | 🟡 compiles for `wasm32-unknown-unknown`; browser runner pending | #58 |
 | crates.io release | ❌ | #57 |

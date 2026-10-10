@@ -26,6 +26,7 @@ mod completion;
 pub mod cursor;
 pub mod decorations;
 mod definition;
+pub mod diff;
 mod dnd;
 mod drop_paste;
 mod editor;

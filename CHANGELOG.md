@@ -5,6 +5,9 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Diff computation (#52, part 1):** `gpui_monaco::diff::compute_diff` ports Monaco's `DefaultLinesDiffComputer`: line changes with character-level inner changes, moved blocks, `ignore_trim_whitespace`, sub-word extension and the time limit.
+  - **Conformance:** all 58 of Monaco's diffing fixtures pass.
+  - **Coordinates:** results keep Monaco's 1-based line ranges, with helpers to convert to `PointUtf16`.
 - **wasm32 builds (#58, part 1):** `gpui-monaco` and `gpui-monaco-languages` compile for `wasm32-unknown-unknown`, checked in CI.
   - **Grammars:** they compile against tree-sitter's wasm libc headers through `script/wasm/cc`, set up in `.cargo/config.toml`.
   - **Time:** timing uses `web_time::Instant`, which works in browsers and is std's `Instant` elsewhere.
