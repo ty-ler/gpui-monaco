@@ -408,6 +408,14 @@ pub struct EditorOptions {
     /// Monaco `foldingMaximumRegions`: provider and syntax ranges beyond
     /// this many are dropped, the most deeply nested first.
     pub folding_maximum_regions: usize,
+    /// Monaco `foldingHighlight`: shade collapsed regions' first lines.
+    pub folding_highlight: bool,
+    /// Monaco `unfoldOnClickAfterEndOfLine`: a click after the end of a
+    /// collapsed line unfolds it (a click on its `⋯` always does).
+    pub unfold_on_click_after_end_of_line: bool,
+    /// Monaco `foldingImportsByDefault`: collapse import ranges when a
+    /// model is first shown.
+    pub folding_imports_by_default: bool,
     /// Monaco `showFoldingControls`.
     pub show_folding_controls: ShowFoldingControls,
     /// Monaco `autoClosingBrackets` / `autoClosingQuotes` /
@@ -536,6 +544,9 @@ impl Default for EditorOptions {
             folding: true,
             folding_strategy: FoldingStrategy::Auto,
             folding_maximum_regions: 5000,
+            folding_highlight: true,
+            unfold_on_click_after_end_of_line: false,
+            folding_imports_by_default: false,
             show_folding_controls: ShowFoldingControls::Mouseover,
             single_line: false,
             auto_closing_brackets: Default::default(),

@@ -73,10 +73,27 @@ Fold ranges come from these sources, in order (Monaco's `foldingStrategy: auto`)
 `folding_strategy: Indentation` uses only the last source. Provider and syntax ranges are capped at `folding_maximum_regions` (5000); the most deeply nested are dropped first, as in Monaco. Recomputing waits for a 200ms pause in edits. `editor.folding_ranges()` and `editor.collapsed_folds(cx)` read the current state.
 
 - **Gutter:** chevrons show on hover, or always with `show_folding_controls: Always`.
-- **Keys:**
-  - Cmd+Alt+[ folds and Cmd+Alt+] unfolds.
-  - Cmd+K Cmd+0 folds all and Cmd+K Cmd+J unfolds all.
-- **Placeholder:** a collapsed region shows `⋯` after its first line. Unfold it with its gutter chevron or Cmd+Alt+].
+  - Shift-click (or middle-click) a chevron to toggle the region with everything inside it.
+  - Alt-click it to fold the regions around it instead (or unfold them if any are folded).
+- **Placeholder:** a collapsed region shows `⋯` after its first line. Clicking it unfolds the region, and so does clicking after the end of the line with `unfold_on_click_after_end_of_line`. With `folding_highlight` (the default), the line gets the `editor.foldBackground` color.
+- **Commands:** Monaco's, with Cmd on macOS and Ctrl elsewhere:
+
+| Keys | Command |
+|---|---|
+| Cmd+Alt+[ / Cmd+Alt+] | Fold / Unfold (Ctrl+Shift+[ / ] elsewhere) |
+| Cmd+K Cmd+L | Toggle Fold |
+| Cmd+K Cmd+[ / Cmd+K Cmd+] | Fold / Unfold Recursively |
+| Cmd+K Cmd+Shift+L | Toggle Fold Recursively |
+| Cmd+K Cmd+0 / Cmd+K Cmd+J | Fold All / Unfold All |
+| Cmd+K Cmd+1 … 7 | Fold Level 1 … 7, except regions around the cursors |
+| Cmd+K Cmd+- / Cmd+K Cmd+= | Fold / Unfold All Except the regions around the cursors |
+| Cmd+K Cmd+/ | Fold All Block Comments |
+| Cmd+K Cmd+8 / Cmd+K Cmd+9 | Fold / Unfold All Regions (`#region` markers) |
+| Cmd+K Cmd+, | Create a manual folding range from the selection (it's collapsed and kept across edits) |
+| Cmd+K Cmd+. | Remove manual folding ranges at the cursor or in the selection |
+| – | Go to Parent / Previous / Next Fold, Toggle Import Fold |
+
+Block comments and regions are found by kind when a folding range provider gives kinds. Otherwise they're found by the first line matching the language's block comment or region marker, as in Monaco. `folding_imports_by_default` collapses import ranges when a model is first shown.
 - **Editing:** editing inside a collapsed region expands it, as in Monaco.
 
 ## Occurrences

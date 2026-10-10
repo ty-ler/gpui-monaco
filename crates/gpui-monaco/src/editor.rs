@@ -26,7 +26,7 @@ use crate::options::EditorOptions;
 use crate::options::LocationKind;
 use crate::theme::{EditorColors, Theme};
 use crate::view::folding::{
-    FoldState, FoldingRangeData, compute_indent_ranges, marker_ranges, sanitize_ranges,
+    FoldState, FoldingRangeData, compute_indent_ranges_limited, marker_ranges, sanitize_ranges,
 };
 use crate::view::view_lines::{ViewLines, WrapSettings, normalize_hidden};
 use crate::widgets::{
@@ -828,7 +828,7 @@ impl CodeEditor {
         }
     }
 
-    fn cursors_changed(&mut self, autoscroll: bool, cx: &mut Context<Self>) {
+    pub(crate) fn cursors_changed(&mut self, autoscroll: bool, cx: &mut Context<Self>) {
         // Monaco `multiCursorLimit`: extra cursors are dropped.
         let limit = self.options.multi_cursor_limit.max(1);
         if self.cursors.all().len() > limit {
@@ -1559,6 +1559,7 @@ impl CodeEditor {
                                 end: r.end_row,
                                 rank,
                                 kind: r.kind,
+                                manual: false,
                             }),
                     ),
                     Ok(None) => {}
@@ -1570,7 +1571,27 @@ impl CodeEditor {
                 .spawn(async move { compute(provided) })
                 .await;
             this.update(cx, |this, cx| {
-                this.folds.set_ranges(ranges, version);
+                let (ranges, has_types) = ranges;
+                let model = this.model.clone();
+                let first = this.folds.ranges_version().is_none();
+                this.folds.set_has_types(has_types);
+                this.folds
+                    .set_ranges(ranges, version, model.read(cx).buffer());
+                // Monaco `foldingImportsByDefault`: imports start folded.
+                if first && this.options.folding_imports_by_default {
+                    let buffer = model.read(cx).buffer().clone();
+                    let imports: Vec<usize> = this
+                        .folds
+                        .ranges()
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, r)| {
+                            r.kind == Some(crate::providers::FoldingRangeKind::Imports)
+                        })
+                        .map(|(ix, _)| ix)
+                        .collect();
+                    this.folds.toggle(&buffer, imports);
+                }
                 this.fold_task = None;
                 cx.notify();
             })
@@ -1589,7 +1610,9 @@ impl CodeEditor {
         text::Version,
         Vec<Task<anyhow::Result<Option<Vec<crate::providers::FoldingRange>>>>>,
         Box<
-            dyn FnOnce(Option<Vec<FoldingRangeData>>) -> Vec<crate::view::folding::FoldRange>
+            dyn FnOnce(
+                    Option<Vec<FoldingRangeData>>,
+                ) -> (Vec<crate::view::folding::FoldRange>, bool)
                 + Send,
         >,
     ) {
@@ -1619,7 +1642,7 @@ impl CodeEditor {
             let folding = config.flatten();
             let markers = folding.as_ref().and_then(|f| f.markers.as_ref());
             if let Some(data) = provided {
-                return sanitize_ranges(data, limit).0;
+                return (sanitize_ranges(data, limit).0, true);
             }
             let syntax_ranges = syntax.and_then(|syntax| {
                 syntax
@@ -1635,6 +1658,7 @@ impl CodeEditor {
                         end,
                         rank: 0,
                         kind: None,
+                        manual: false,
                     })
                     .collect();
                 if let Some(markers) = markers {
@@ -1646,14 +1670,18 @@ impl CodeEditor {
                                 end,
                                 rank: 1,
                                 kind: Some(crate::providers::FoldingRangeKind::Region),
+                                manual: false,
                             }),
                     );
                 }
-                return sanitize_ranges(data, limit).0;
+                return (sanitize_ranges(data, limit).0, false);
             }
             let off_side = folding.as_ref().is_some_and(|f| f.off_side);
             let markers = markers.map(|m| (&m.start, &m.end));
-            compute_indent_ranges(text.rope(), tab_size, off_side, markers)
+            (
+                compute_indent_ranges_limited(text.rope(), tab_size, off_side, markers, limit),
+                false,
+            )
         });
         (snapshot, version, providers, compute)
     }
@@ -1674,99 +1702,6 @@ impl CodeEditor {
     /// The collapsed regions, as (header row, last hidden row).
     pub fn collapsed_folds(&self, cx: &App) -> Vec<(u32, u32)> {
         self.folds.collapsed_rows(self.model.read(cx).buffer())
-    }
-
-    /// Collapses the innermost expanded region containing each cursor
-    /// (Monaco `editor.fold`).
-    pub fn fold(&mut self, cx: &mut Context<Self>) {
-        let buffer = self.model.read(cx).buffer().clone();
-        let rows: Vec<u32> = self
-            .cursors
-            .selections()
-            .iter()
-            .map(|s| s.head.row)
-            .collect();
-        let collapsed = self.folds.collapsed_rows(&buffer);
-        for row in rows {
-            let candidate = self
-                .folds
-                .ranges()
-                .iter()
-                .filter(|r| r.start_row <= row && row <= r.end_row)
-                .filter(|r| !collapsed.iter().any(|(start, _)| *start == r.start_row))
-                .max_by_key(|r| r.start_row)
-                .cloned();
-            if let Some(range) = candidate {
-                self.folds.collapse(&buffer, range.start_row, range.end_row);
-            }
-        }
-        self.after_fold_change(cx);
-    }
-
-    /// Expands collapsed regions at or containing each cursor's row (Monaco
-    /// `editor.unfold`).
-    pub fn unfold(&mut self, cx: &mut Context<Self>) {
-        let buffer = self.model.read(cx).buffer().clone();
-        let rows: Vec<u32> = self
-            .cursors
-            .selections()
-            .iter()
-            .map(|s| s.head.row)
-            .collect();
-        for (start, end) in self.folds.collapsed_rows(&buffer) {
-            if rows.iter().any(|row| start <= *row && *row <= end) {
-                self.folds.expand(&buffer, start);
-            }
-        }
-        self.after_fold_change(cx);
-    }
-
-    /// Toggles the region starting at `row` (gutter chevron click).
-    pub fn toggle_fold_at(&mut self, row: u32, cx: &mut Context<Self>) {
-        let buffer = self.model.read(cx).buffer().clone();
-        if !self.folds.expand(&buffer, row)
-            && let Some(range) = self.folds.range_starting_at(row).cloned()
-        {
-            self.folds.collapse(&buffer, range.start_row, range.end_row);
-        }
-        self.after_fold_change(cx);
-    }
-
-    /// Collapses every foldable region (Monaco `editor.foldAll`).
-    pub fn fold_all(&mut self, cx: &mut Context<Self>) {
-        let buffer = self.model.read(cx).buffer().clone();
-        self.folds.collapse_all(&buffer);
-        self.after_fold_change(cx);
-    }
-
-    /// Expands every collapsed region (Monaco `editor.unfoldAll`).
-    pub fn unfold_all(&mut self, cx: &mut Context<Self>) {
-        self.folds.expand_all();
-        self.after_fold_change(cx);
-    }
-
-    /// Moves cursors out of hidden rows to the end of their fold's start row.
-    fn after_fold_change(&mut self, cx: &mut Context<Self>) {
-        let buffer = self.model.read(cx).buffer().clone();
-        let collapsed = self.folds.collapsed_rows(&buffer);
-        let fix = |p: PointUtf16| match collapsed
-            .iter()
-            .find(|(start, end)| *start < p.row && p.row <= *end)
-        {
-            Some((start, _)) => PointUtf16::new(*start, self.snapshot.line_len_utf16(*start)),
-            None => p,
-        };
-        let selections: Vec<Selection> = self
-            .cursors
-            .selections()
-            .into_iter()
-            .map(|s| Selection {
-                anchor: fix(s.anchor),
-                head: fix(s.head),
-            })
-            .collect();
-        self.cursors.set_selections(&selections);
-        self.cursors_changed(true, cx);
     }
 
     fn emit_mouse(
@@ -1912,7 +1847,32 @@ impl CodeEditor {
             .iter()
             .find(|control| control.bounds.contains(&event.position))
         {
-            self.toggle_fold_at(control.row, cx);
+            let recursive = event.modifiers.shift || event.button == MouseButton::Middle;
+            self.click_fold(control.row, true, recursive, event.modifiers.alt, cx);
+            return;
+        }
+        // The `⋯` after a collapsed line unfolds it, as does empty space
+        // after the line with `unfold_on_click_after_end_of_line`.
+        let recursive = event.modifiers.shift || event.button == MouseButton::Middle;
+        if let Some((row, _)) = layout
+            .fold_placeholders
+            .iter()
+            .find(|(_, bounds)| bounds.contains(&event.position))
+        {
+            self.click_fold(*row, false, recursive, event.modifiers.alt, cx);
+            return;
+        }
+        if self.options.unfold_on_click_after_end_of_line
+            && matches!(
+                mouse.target.kind,
+                crate::mouse_target::MouseTargetKind::ContentEmpty { after_lines: false }
+            )
+            && let Some(position) = mouse.target.position
+            && self
+                .folds
+                .is_collapsed(self.model.read(cx).buffer(), position.row)
+        {
+            self.click_fold(position.row, false, recursive, event.modifiers.alt, cx);
             return;
         }
 
@@ -2816,16 +2776,48 @@ impl Render for CodeEditor {
             .on_action(cx.listener(|this, _: &Unfold, _, cx| this.unfold(cx)))
             .on_action(cx.listener(|this, _: &FoldAll, _, cx| this.fold_all(cx)))
             .on_action(cx.listener(|this, _: &UnfoldAll, _, cx| this.unfold_all(cx)))
-            .on_action(cx.listener(|this, _: &ToggleFold, _, cx| {
-                let row = this.cursors.primary().position.row;
-                let buffer = this.model.read(cx).buffer().clone();
-                let collapsed = this.folds.collapsed_rows(&buffer);
-                if let Some((start, _)) = collapsed.iter().find(|(s, e)| *s <= row && row <= *e) {
-                    this.toggle_fold_at(*start, cx);
-                } else {
-                    this.fold(cx);
-                }
+            .on_action(cx.listener(|this, _: &ToggleFold, _, cx| this.toggle_fold(cx)))
+            .on_action(cx.listener(|this, _: &FoldRecursively, _, cx| this.fold_recursively(cx)))
+            .on_action(
+                cx.listener(|this, _: &UnfoldRecursively, _, cx| this.unfold_recursively(cx)),
+            )
+            .on_action(cx.listener(|this, _: &ToggleFoldRecursively, _, cx| {
+                this.toggle_fold_recursively(cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &FoldAllBlockComments, _, cx| {
+                    this.fold_all_block_comments(cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &FoldAllMarkerRegions, _, cx| {
+                this.fold_all_marker_regions(true, cx)
+            }))
+            .on_action(cx.listener(|this, _: &UnfoldAllMarkerRegions, _, cx| {
+                this.fold_all_marker_regions(false, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FoldAllExcept, _, cx| this.fold_all_except(true, cx)))
+            .on_action(
+                cx.listener(|this, _: &UnfoldAllExcept, _, cx| this.fold_all_except(false, cx)),
+            )
+            .on_action(cx.listener(|this, _: &FoldLevel1, _, cx| this.fold_level(1, cx)))
+            .on_action(cx.listener(|this, _: &FoldLevel2, _, cx| this.fold_level(2, cx)))
+            .on_action(cx.listener(|this, _: &FoldLevel3, _, cx| this.fold_level(3, cx)))
+            .on_action(cx.listener(|this, _: &FoldLevel4, _, cx| this.fold_level(4, cx)))
+            .on_action(cx.listener(|this, _: &FoldLevel5, _, cx| this.fold_level(5, cx)))
+            .on_action(cx.listener(|this, _: &FoldLevel6, _, cx| this.fold_level(6, cx)))
+            .on_action(cx.listener(|this, _: &FoldLevel7, _, cx| this.fold_level(7, cx)))
+            .on_action(cx.listener(|this, _: &GoToParentFold, _, cx| this.go_to_parent_fold(cx)))
+            .on_action(
+                cx.listener(|this, _: &GoToPreviousFold, _, cx| this.go_to_previous_fold(cx)),
+            )
+            .on_action(cx.listener(|this, _: &GoToNextFold, _, cx| this.go_to_next_fold(cx)))
+            .on_action(cx.listener(|this, _: &CreateFoldFromSelection, _, cx| {
+                this.create_fold_from_selection(cx)
+            }))
+            .on_action(cx.listener(|this, _: &RemoveManualFoldingRanges, _, cx| {
+                this.remove_manual_folding_ranges(cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleImportFold, _, cx| this.toggle_import_fold(cx)))
             .on_action(cx.listener(|this, _: &StartFind, window, cx| {
                 if this.options.single_line {
                     return cx.propagate();

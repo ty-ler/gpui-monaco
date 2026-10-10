@@ -22,6 +22,7 @@ mod element;
 pub mod events;
 mod find;
 mod find_widget;
+mod folding_commands;
 mod format;
 mod goto;
 mod hover;

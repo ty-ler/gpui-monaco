@@ -35,6 +35,9 @@ editor.update(cx, |editor, cx| {
 | `inlay_hints` | `inlayHints` | whether inlay hints show (`On`, `OnUnlessPressed`, `OffUnlessPressed`, `Off`), padding and the per-line maximum length |
 | `folding_strategy` | `foldingStrategy` | `Auto` (providers, then syntax, then indentation) or `Indentation` |
 | `folding_maximum_regions` | `foldingMaximumRegions` | at most this many provider or syntax fold ranges (5000) |
+| `folding_highlight` | `foldingHighlight` | shade the first line of collapsed regions (on) |
+| `unfold_on_click_after_end_of_line` | `unfoldOnClickAfterEndOfLine` | unfold when clicking after a collapsed line (off) |
+| `folding_imports_by_default` | `foldingImportsByDefault` | collapse import ranges at first (off) |
 | `lightbulb` | `lightbulb.enabled` | when the code action lightbulb asks for actions: `Off`, `OnCode` (default) or `On` |
 | `goto_location` | `gotoLocation` | what go to definition, references and the other navigation commands do with several results, and their alternative commands |
 | `format_on_type` | `formatOnType` | format with the on-type formatter after its trigger characters (off) |
