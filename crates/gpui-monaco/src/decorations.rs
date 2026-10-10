@@ -85,6 +85,15 @@ pub struct DecorationOptions {
     pub stickiness: Stickiness,
     /// Higher paints on top.
     pub z_index: i32,
+    /// A diagnostic's decoration (Monaco `isForValidation`), hidden as the
+    /// editor's `render_validation_decorations` says.
+    pub validation: bool,
+    /// Unnecessary (e.g. unused) code, faded when the editor's
+    /// `show_unused` is on (Monaco `squiggly-inline-unnecessary`).
+    pub unnecessary: bool,
+    /// Deprecated code, struck through when the editor's `show_deprecated`
+    /// is on (Monaco `squiggly-inline-deprecated`).
+    pub deprecated: bool,
 }
 
 /// A decoration as stored in the model.

@@ -62,7 +62,7 @@ pub use find::{FindOptions, MATCHES_LIMIT};
 pub use find_widget::FindWidget;
 pub use goto::has_symbol_navigation;
 pub use hover::{HOVER_DELAY, HoverWidget};
-pub use markers::{Marker, MarkerSeverity, MarkerZone};
+pub use markers::{Marker, MarkerSeverity, MarkerTag, MarkerZone, RelatedInformation};
 pub use model::{
     EditKind, ModelOptions, SyntaxSnapshot, TextModel, TextModelEvent, language_registry,
     model_for_uri, register_model, set_language_registry, set_model_resolver,

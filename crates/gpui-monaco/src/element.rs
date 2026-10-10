@@ -291,7 +291,11 @@ pub(crate) fn layout_segment(
         if style.italic {
             font.style = FontStyle::Italic;
         }
-        let mut text_run = run(end - start, &font, style.foreground.unwrap_or(color));
+        let mut foreground = style.foreground.unwrap_or(color);
+        if let Some(opacity) = style.opacity {
+            foreground.a *= opacity;
+        }
+        let mut text_run = run(end - start, &font, foreground);
         let is_marked = marked_display
             .as_ref()
             .is_some_and(|(range, _)| range.start <= start && end <= range.end);
@@ -962,6 +966,11 @@ fn prepaint_editor(
     let decorations = editor.model().update(cx, |model, _| {
         model.decorations_in_range(visible_start..visible_end, Some(editor_id))
     });
+    let show_validation = editor.shows_validation_decorations();
+    let decorations: Vec<_> = decorations
+        .into_iter()
+        .filter(|d| show_validation || !d.options.validation)
+        .collect();
     // Decorations in model points.
     let decoration_points: Vec<(PointUtf16, PointUtf16, &crate::decorations::Decoration)> =
         decorations
@@ -1019,7 +1028,24 @@ fn prepaint_editor(
                 continue;
             }
             let options = &decoration.options;
-            if let Some(style) = options.text {
+            // Monaco's tag classes, when the editor shows them.
+            let tag_style = TokenStyle {
+                opacity: (options.unnecessary && editor.options.show_unused)
+                    .then_some(colors.unnecessary_code_opacity.a),
+                strikethrough: options.deprecated && editor.options.show_deprecated,
+                ..Default::default()
+            };
+            let style = match (options.text, tag_style == TokenStyle::default()) {
+                (Some(style), true) => Some(style),
+                (Some(style), false) => Some(TokenStyle {
+                    opacity: tag_style.opacity,
+                    strikethrough: style.strikethrough || tag_style.strikethrough,
+                    ..style
+                }),
+                (None, false) => Some(tag_style),
+                (None, true) => None,
+            };
+            if let Some(style) = style {
                 let from = if start.row == segment.row {
                     decoration.range.start - line_range.start
                 } else {
@@ -1436,7 +1462,18 @@ fn prepaint_editor(
                     decoration_quads.push((bounds, options.background, options.border));
                 }
             }
-            if let Some(underline) = options.underline
+            // Monaco `squiggly-unnecessary`: a themed underline for unused
+            // code without a squiggle.
+            let underline = options.underline.or_else(|| {
+                (options.unnecessary
+                    && editor.options.show_unused
+                    && colors.unnecessary_code_border.a > 0.)
+                    .then_some(crate::decorations::DecorationUnderline {
+                        color: colors.unnecessary_code_border,
+                        wavy: false,
+                    })
+            });
+            if let Some(underline) = underline
                 && let Some((from, to)) = decoration_x_range(line, *start, *end)
             {
                 decoration_underlines.push((
@@ -1553,7 +1590,10 @@ fn prepaint_editor(
     }) {
         let all = editor
             .model()
-            .update(cx, |model, _| model.all_decorations(Some(editor_id)));
+            .update(cx, |model, _| model.all_decorations(Some(editor_id)))
+            .into_iter()
+            .filter(|d| editor.shows_validation_decorations() || !d.options.validation)
+            .collect::<Vec<_>>();
         let total = view_line_count.max(1) as f32;
         for decoration in all {
             let Some((color, lane)) = decoration.options.overview_ruler else {
@@ -2347,6 +2387,10 @@ fn overlay_styles(
                 italic: base.italic || top.italic,
                 underline: base.underline || top.underline,
                 strikethrough: base.strikethrough || top.strikethrough,
+                opacity: match (base.opacity, top.opacity) {
+                    (Some(a), Some(b)) => Some(a * b),
+                    (a, b) => a.or(b),
+                },
             },
         };
         match result.last_mut() {

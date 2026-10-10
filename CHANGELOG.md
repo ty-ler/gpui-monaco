@@ -140,6 +140,15 @@ All notable changes to this project are documented here. The format follows [Kee
   - `set_snippet_workspace`.
   - The LSP bridge advertises `snippetSupport` and maps `insertTextMode`.
   - `TextModel::start_transaction`, `end_transaction` and `last_transaction_id`.
+- **Diagnostic tags and related information (#90):**
+  - `Marker::tags` (`MarkerTag::Unnecessary` fades, `MarkerTag::Deprecated` strikes through) and `Marker::related_information`.
+  - The options `show_unused`, `show_deprecated` and `render_validation_decorations`.
+  - Marker hovers list related information as links, with "View Problem" (`CodeEditor::show_marker`) and "Quick Fix..." actions. The marker zone also lists the related information.
+  - Untagged hints cover two columns, as in Monaco.
+  - `DecorationOptions` gains `validation`, `unnecessary` and `deprecated`, and `TokenStyle` gains `opacity`.
+  - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
+  - The LSP bridge maps diagnostic tags and related information.
+  - `Marker` and `MarkerSeverity` now implement `Default`.
 - **Rename (#56):** `RenameProvider` (with optional `resolve_rename_location`), F2 with Monaco's rename box, `WorkspaceEdit` and `CodeEditor::apply_workspace_edit`. The LSP bridge forwards `prepareRename` and `rename`.
 
 ### Changed

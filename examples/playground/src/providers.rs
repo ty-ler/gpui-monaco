@@ -3,7 +3,7 @@
 use gpui::{App, Entity, Task};
 use gpui_monaco::providers::*;
 use gpui_monaco::text::PointUtf16;
-use gpui_monaco::{CodeEditor, Marker, MarkerSeverity};
+use gpui_monaco::{CodeEditor, Marker, MarkerSeverity, MarkerTag, RelatedInformation};
 
 fn word_at(context: &ProviderContext, position: PointUtf16) -> String {
     let line = context.snapshot.line(position.row);
@@ -465,7 +465,31 @@ pub fn add_markers(editor: &Entity<CodeEditor>, cx: &mut App) {
             range: PointUtf16::new(row, 4)..PointUtf16::new(row, 14),
             source: Some("demo".into()),
             code: Some("E0308".into()),
+            related_information: vec![RelatedInformation {
+                uri: None,
+                range: PointUtf16::new(0, 0)..PointUtf16::new(0, 3),
+                message: "expected because of this".into(),
+            }],
+            ..Default::default()
         })
+        .chain([
+            // Faded and struck-through code (Monaco `showUnused`,
+            // `showDeprecated`).
+            Marker {
+                severity: MarkerSeverity::Hint,
+                message: "unused import".into(),
+                range: PointUtf16::new(3, 0)..PointUtf16::new(3, 20),
+                tags: vec![MarkerTag::Unnecessary],
+                ..Default::default()
+            },
+            Marker {
+                severity: MarkerSeverity::Hint,
+                message: "deprecated".into(),
+                range: PointUtf16::new(5, 4)..PointUtf16::new(5, 12),
+                tags: vec![MarkerTag::Deprecated],
+                ..Default::default()
+            },
+        ])
         .collect();
         model.set_markers("demo", markers, cx);
     });

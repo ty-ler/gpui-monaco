@@ -136,6 +136,12 @@ pub struct EditorColors {
     pub indent_guide_active: Hsla,
     /// Rulers (`editorRuler.foreground`).
     pub ruler: Hsla,
+    /// `editorUnnecessaryCode.opacity`: its alpha is how opaque unused code
+    /// is drawn.
+    pub unnecessary_code_opacity: Hsla,
+    /// `editorUnnecessaryCode.border` (transparent: none): an underline for
+    /// unused code instead of fading.
+    pub unnecessary_code_border: Hsla,
     /// Other occurrences of the selected text (`editor.selectionHighlightBackground`).
     pub selection_highlight_background: Hsla,
     /// Selection occurrences in the overview ruler
@@ -260,6 +266,8 @@ impl EditorColors {
             indent_guide: c(rgb(0x404040)),
             indent_guide_active: c(rgb(0x707070)),
             ruler: c(rgb(0x5a5a5a)),
+            unnecessary_code_opacity: c(rgba(0x000000aa)),
+            unnecessary_code_border: gpui::transparent_black(),
             selection_highlight_overview: c(rgba(0xa0a0a0cc)),
             widget_background: c(rgb(0x252526)),
             widget_foreground: c(rgb(0xcccccc)),
@@ -350,6 +358,8 @@ impl EditorColors {
             indent_guide: c(rgb(0xd3d3d3)),
             indent_guide_active: c(rgb(0x939393)),
             ruler: c(rgb(0xd3d3d3)),
+            unnecessary_code_opacity: c(rgba(0x00000077)),
+            unnecessary_code_border: gpui::transparent_black(),
             selection_highlight_overview: c(rgba(0xa0a0a0cc)),
             widget_background: c(rgb(0xf3f3f3)),
             widget_foreground: c(rgb(0x616161)),
@@ -556,6 +566,14 @@ impl EditorColors {
             "editorIndentGuide.activeBackground1",
         );
         set(&mut self.ruler, "editorRuler.foreground");
+        set(
+            &mut self.unnecessary_code_opacity,
+            "editorUnnecessaryCode.opacity",
+        );
+        set(
+            &mut self.unnecessary_code_border,
+            "editorUnnecessaryCode.border",
+        );
         set(&mut self.widget_background, "editorWidget.background");
         set(&mut self.widget_foreground, "editorWidget.foreground");
         set(&mut self.widget_border, "editorWidget.border");
@@ -708,6 +726,8 @@ pub struct TokenStyle {
     pub underline: bool,
     /// Struck-through text.
     pub strikethrough: bool,
+    /// Opacity multiplied into the color (e.g. faded unused code).
+    pub opacity: Option<f32>,
 }
 
 impl TokenStyle {
@@ -719,6 +739,7 @@ impl TokenStyle {
             italic: font_style.contains("italic"),
             underline: font_style.contains("underline"),
             strikethrough: font_style.contains("strikethrough"),
+            opacity: None,
         }
     }
 }
