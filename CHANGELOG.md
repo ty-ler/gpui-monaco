@@ -149,6 +149,12 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Sticky scroll models (#100, part 4):** `StickyScrollOptions::default_model` (Monaco `stickyScroll.defaultModel`).
+  - **Outline** is the default and follows Monaco's outline sticky model: headers are document symbols (from providers, or the tags query), from the name's line to the line before the symbol's end.
+  - **FoldingProvider** uses the folding ranges, and **Indentation** uses indentation.
+  - An empty outline falls back to the folding ranges.
+  - The model updates 300ms after edits.
+  - Tags-based document symbols are now computed off the main thread.
 - **Command palette (#100, part 3):** F1 opens quick access with `>` and lists the editor's actions with Monaco's labels and their keybindings.
   - It matches word starts, prefixes and substrings (Monaco's `matchesWords` filter), or the exact id.
   - Recently used actions come first ("recently used" / "other commands"); otherwise the list is alphabetical.

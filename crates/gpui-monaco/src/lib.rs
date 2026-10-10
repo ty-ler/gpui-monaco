@@ -54,6 +54,7 @@ mod signature_help;
 mod smart_select;
 pub mod snippet;
 mod snippet_session;
+mod sticky_model;
 pub mod suggest;
 mod suggest_widget;
 pub mod theme;

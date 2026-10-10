@@ -26,7 +26,7 @@ editor.update(cx, |editor, cx| {
 | `scroll_beyond_last_line`, `mouse_wheel_scroll_sensitivity` | same names | |
 | `vertical_scrollbar_size`, `horizontal_scrollbar_size` | `scrollbar.verticalScrollbarSize`, … | |
 | `minimap` | `minimap` | `enabled`, `max_column`, `scale`, `always_show_slider` |
-| `sticky_scroll` | `stickyScroll` | `enabled`, `max_line_count` |
+| `sticky_scroll` | `stickyScroll` | `enabled`, `max_line_count`, `default_model` |
 | `auto_closing_brackets`, `auto_closing_quotes`, `auto_closing_comments` | `autoClosingBrackets`, … | `Always`, `LanguageDefined`, `BeforeWhitespace`, `Never` |
 | `auto_closing_overtype`, `auto_closing_delete`, `auto_surround` | same names | |
 | `auto_indent` | `autoIndent` | `None`, `Keep`, `Brackets`, `Advanced`, `Full` |

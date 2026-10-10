@@ -13,7 +13,7 @@ pub use crate::providers::FoldingRangeKind;
 
 /// A foldable region: `start_row` stays visible; rows
 /// `start_row + 1 ..= end_row` hide when collapsed. Rows are 0-based.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FoldRange {
     /// The header row, which stays visible.
     pub start_row: u32,

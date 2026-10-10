@@ -1026,6 +1026,7 @@ fn prepaint_editor(
     editor.refresh_links(cx);
     editor.refresh_ghost_text(cx);
     editor.refresh_code_lenses(cx);
+    editor.refresh_sticky_model(cx);
     editor.resolve_visible_code_lenses(cx);
     let bracket_colors = editor.bracket_colors_in(visible_start..visible_end, cx);
     let mut highlight_ix = 0;
@@ -1394,7 +1395,7 @@ fn prepaint_editor(
     }
 
     // Sticky scroll: headers of the fold ranges enclosing the top of the
-    // viewport (Monaco `stickyScroll`, folding-provider model).
+    // viewport (Monaco `stickyScroll`; see `sticky_model`).
     let mut sticky_shaped: Vec<(u32, Pixels, LineLayout, Option<ShapedLine>)> = Vec::new();
     if options.sticky_scroll.enabled && !options.single_line && scroll_top > px(0.) {
         let max = options.sticky_scroll.max_line_count as usize;
@@ -1405,17 +1406,17 @@ fn prepaint_editor(
                 .view_line(zones.line_at(probe_y, line_height, view_line_count))
                 .row;
             // The outermost range enclosing the probe below the last header.
-            let next = editor
-                .folds
-                .ranges_enclosing(probe_row)
-                .into_iter()
-                .find(|range| {
-                    sticky_rows
-                        .last()
-                        .is_none_or(|(start, _)| *start < range.start_row)
-                });
+            let next =
+                editor
+                    .sticky_ranges_enclosing(probe_row)
+                    .into_iter()
+                    .find(|(start_row, _)| {
+                        sticky_rows
+                            .last()
+                            .is_none_or(|(start, _)| *start < *start_row)
+                    });
             match next {
-                Some(range) => sticky_rows.push((range.start_row, range.end_row)),
+                Some(range) => sticky_rows.push(range),
                 None => break,
             }
         }
