@@ -5,6 +5,7 @@
 
 pub mod completion_model;
 pub mod fuzzy;
+pub mod memory;
 
 #[cfg(test)]
 mod tests;

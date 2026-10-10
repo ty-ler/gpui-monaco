@@ -75,11 +75,15 @@ impl CompletionProvider for MyCompletions {
 }
 ```
 
-Completion is triggered by Ctrl+Space, by trigger characters, or automatically while typing in code, unless `quick_suggestions` is off.
+Completion is triggered by Ctrl+Space, by trigger characters (`suggest_on_trigger_characters`), or automatically after `quick_suggestions_delay` while typing a word. `quick_suggestions` turns that on separately for code, comments and strings. When no provider has items, the editor suggests words from open documents (`word_based_suggestions`).
+
+Which item is selected first follows `suggest_selection`: the best match, or the item you picked last (for the same prefix).
 
 Filtering and ranking use Monaco's `fuzzyScore`, and the editor re-filters as you type without asking the provider again. If you return `incomplete: true`, the editor asks again as the word grows.
 
-On accept, the editor inserts `insert_text`, falling back to the label, over `range`, falling back to the word before the cursor. It then applies any `additional_text_edits`. Typing a character in `commit_characters` accepts the item and inserts the character.
+On accept, the editor inserts `insert_text`, falling back to the label. In insert mode it replaces `range` (by default the word before the cursor); in replace mode (`suggest.insert_mode`) it replaces `replace_range` (by default the whole word). Shift+Enter and Shift+Tab accept in the other mode. The editor applies any `additional_text_edits`, then runs the item's `command`. Typing a character in `commit_characters` accepts the item and inserts the character.
+
+`resolve_completion_item` fills in an item lazily, e.g. its docs or an import. The editor resolves the focused item. If you accept an item before it resolves, additional edits that arrive later are still applied, unless the text changed before them. Items tagged `CompletionItemTag::Deprecated` are struck through, or hidden with `suggest.show_deprecated: false`.
 
 ## Go to definition, references and the peek view
 

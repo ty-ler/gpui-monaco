@@ -179,6 +179,14 @@ impl CompletionModel {
         &self.line_context
     }
 
+    /// Replaces item `index` with its resolved version (Monaco assigns the
+    /// resolved fields onto the item); its filtering is unchanged.
+    pub fn replace_item(&mut self, index: usize, item: CompletionItem) {
+        if let Some(slot) = self.items.get_mut(index) {
+            *slot = item;
+        }
+    }
+
     /// All items, unfiltered, in the order they were passed in.
     pub fn items(&self) -> &[CompletionItem] {
         &self.items

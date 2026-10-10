@@ -1,6 +1,7 @@
 //! Editor (view) options, mirroring the subset of Monaco's `IEditorOptions`
 //! implemented so far.
 
+pub use crate::suggest::memory::SuggestSelection;
 use gpui::{Pixels, SharedString, px};
 
 /// Monaco `lineNumbers`.
@@ -180,6 +181,112 @@ pub enum CursorStyle {
     Underline,
     /// A 1px vertical bar.
     LineThin,
+}
+
+/// Monaco `acceptSuggestionOnEnter`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AcceptSuggestionOnEnter {
+    /// Enter accepts.
+    #[default]
+    On,
+    /// Enter accepts unless the suggestion would change nothing (the word
+    /// is already typed) in a session that opened by itself.
+    Smart,
+    /// Only Tab accepts.
+    Off,
+}
+
+/// Monaco `suggest.insertMode`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SuggestInsertMode {
+    /// Insert before the rest of the word (the item's `range`).
+    #[default]
+    Insert,
+    /// Replace the rest of the word too (the item's `replace_range`).
+    Replace,
+}
+
+/// Monaco `quickSuggestions`: where suggestions open while typing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuickSuggestions {
+    /// In code.
+    pub other: bool,
+    /// In comments.
+    pub comments: bool,
+    /// In strings.
+    pub strings: bool,
+}
+
+impl QuickSuggestions {
+    /// Everywhere.
+    pub const ON: Self = Self {
+        other: true,
+        comments: true,
+        strings: true,
+    };
+    /// Nowhere.
+    pub const OFF: Self = Self {
+        other: false,
+        comments: false,
+        strings: false,
+    };
+}
+
+impl Default for QuickSuggestions {
+    /// Monaco's default: in code only.
+    fn default() -> Self {
+        Self {
+            other: true,
+            comments: false,
+            strings: false,
+        }
+    }
+}
+
+/// Monaco `wordBasedSuggestions`: completions from words in documents,
+/// offered when no other provider has any.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WordBasedSuggestions {
+    /// None.
+    Off,
+    /// Monaco's default: on unless inline suggestions are available (there
+    /// are none yet, so the same as `MatchingDocuments`).
+    #[default]
+    OffWithInlineSuggestions,
+    /// Words of this document.
+    CurrentDocument,
+    /// Words of open documents in the same language.
+    MatchingDocuments,
+    /// Words of all open documents.
+    AllDocuments,
+}
+
+/// Monaco `editor.suggest`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SuggestOptions {
+    /// `insertMode`.
+    pub insert_mode: SuggestInsertMode,
+    /// `filterGraceful`: tolerate small typos when filtering.
+    pub filter_graceful: bool,
+    /// `matchOnWordStartOnly`: the first character must match a word start.
+    pub match_on_word_start_only: bool,
+    /// `showDeprecated`.
+    pub show_deprecated: bool,
+    /// Kinds hidden from the list (Monaco's `show*` options set to false,
+    /// e.g. `showWords: false` hides `Text`).
+    pub hidden_kinds: Vec<crate::providers::CompletionItemKind>,
+}
+
+impl Default for SuggestOptions {
+    fn default() -> Self {
+        Self {
+            insert_mode: SuggestInsertMode::Insert,
+            filter_graceful: true,
+            match_on_word_start_only: true,
+            show_deprecated: true,
+            hidden_kinds: Vec::new(),
+        }
+    }
 }
 
 /// Where folding ranges come from (Monaco `foldingStrategy`).
@@ -435,9 +542,24 @@ pub struct EditorOptions {
     pub auto_indent: crate::cursor::AutoIndent,
     /// Monaco `matchBrackets`: highlight the bracket pair at the cursor.
     pub match_brackets: bool,
-    /// Monaco `quickSuggestions`: suggest while typing in code (not in
-    /// strings or comments).
-    pub quick_suggestions: bool,
+    /// Monaco `quickSuggestions`: where suggestions open while typing.
+    pub quick_suggestions: QuickSuggestions,
+    /// Monaco `quickSuggestionsDelay`: how long after typing they open.
+    pub quick_suggestions_delay: std::time::Duration,
+    /// Monaco `suggestOnTriggerCharacters`.
+    pub suggest_on_trigger_characters: bool,
+    /// Monaco `acceptSuggestionOnEnter`.
+    pub accept_suggestion_on_enter: AcceptSuggestionOnEnter,
+    /// Monaco `acceptSuggestionOnCommitCharacter`.
+    pub accept_suggestion_on_commit_character: bool,
+    /// Monaco `suggestSelection`.
+    pub suggest_selection: SuggestSelection,
+    /// Monaco `wordBasedSuggestions`.
+    pub word_based_suggestions: WordBasedSuggestions,
+    /// Monaco `snippetSuggestions` (`None` hides snippets).
+    pub snippet_suggestions: Option<crate::suggest::SnippetSortOrder>,
+    /// Monaco `suggest`.
+    pub suggest: SuggestOptions,
     /// Monaco `gotoLocation`.
     pub goto_location: GotoLocationOptions,
     /// Monaco `lightbulb.enabled`.
@@ -559,7 +681,15 @@ impl Default for EditorOptions {
             auto_surround: Default::default(),
             auto_indent: Default::default(),
             match_brackets: true,
-            quick_suggestions: true,
+            quick_suggestions: QuickSuggestions::default(),
+            quick_suggestions_delay: std::time::Duration::from_millis(10),
+            suggest_on_trigger_characters: true,
+            accept_suggestion_on_enter: AcceptSuggestionOnEnter::On,
+            accept_suggestion_on_commit_character: true,
+            suggest_selection: Default::default(),
+            word_based_suggestions: WordBasedSuggestions::OffWithInlineSuggestions,
+            snippet_suggestions: Some(crate::suggest::SnippetSortOrder::Inline),
+            suggest: SuggestOptions::default(),
             goto_location: GotoLocationOptions::default(),
             lightbulb: LightbulbMode::OnCode,
             inlay_hints: InlayHintsOptions::default(),

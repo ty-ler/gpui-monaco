@@ -70,6 +70,13 @@ pub fn set_model_resolver(
     cx.default_global::<Models>().resolver = Some(std::rc::Rc::new(resolver));
 }
 
+/// Every live model registered with [`register_model`].
+pub(crate) fn registered_models(cx: &App) -> Vec<gpui::Entity<TextModel>> {
+    cx.try_global::<Models>()
+        .map(|models| models.by_uri.values().filter_map(|m| m.upgrade()).collect())
+        .unwrap_or_default()
+}
+
 /// The live model with `uri`, or one from the resolver (Monaco
 /// `getModel`, then `createModelReference`).
 pub fn model_for_uri(cx: &mut App, uri: &str) -> Option<gpui::Entity<TextModel>> {

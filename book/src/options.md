@@ -31,7 +31,15 @@ editor.update(cx, |editor, cx| {
 | `auto_closing_overtype`, `auto_closing_delete`, `auto_surround` | same names | |
 | `auto_indent` | `autoIndent` | `None`, `Keep`, `Brackets`, `Advanced`, `Full` |
 | `match_brackets` | `matchBrackets` | |
-| `quick_suggestions` | `quickSuggestions` | completion while typing |
+| `quick_suggestions` | `quickSuggestions` | completion while typing, per token type: `other` (on), `comments`, `strings` |
+| `quick_suggestions_delay` | `quickSuggestionsDelay` | wait before quick suggestions (10ms) |
+| `suggest_on_trigger_characters` | `suggestOnTriggerCharacters` | open on provider trigger characters (on) |
+| `accept_suggestion_on_enter` | `acceptSuggestionOnEnter` | `On`, `Smart` (Enter types a new line when the word is already complete) or `Off` |
+| `accept_suggestion_on_commit_character` | `acceptSuggestionOnCommitCharacter` | (on) |
+| `suggest_selection` | `suggestSelection` | `First`, `RecentlyUsed` or `RecentlyUsedByPrefix` |
+| `word_based_suggestions` | `wordBasedSuggestions` | words of the current, matching-language or all registered documents when providers have nothing |
+| `snippet_suggestions` | `snippetSuggestions` | where snippets sort; `None` hides them |
+| `suggest` | `suggest.*` | `insert_mode`, `filter_graceful`, `match_on_word_start_only`, `show_deprecated`, `hidden_kinds` |
 | `inlay_hints` | `inlayHints` | whether inlay hints show (`On`, `OnUnlessPressed`, `OffUnlessPressed`, `Off`), padding and the per-line maximum length |
 | `folding_strategy` | `foldingStrategy` | `Auto` (providers, then syntax, then indentation) or `Indentation` |
 | `folding_maximum_regions` | `foldingMaximumRegions` | at most this many provider or syntax fold ranges (5000) |

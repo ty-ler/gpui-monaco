@@ -12,6 +12,9 @@ pub const KEY_CONTEXT: &str = "CodeEditor";
 
 /// Single-line editors (e.g. the find input) also set `single_line`.
 const SINGLE_LINE: Option<&str> = Some("CodeEditor && single_line");
+/// The editor while the suggest widget is open (Monaco's
+/// `suggestWidgetVisible`).
+const SUGGEST: Option<&str> = Some("CodeEditor && suggest_widget_visible");
 
 actions!(
     code_editor,
@@ -481,6 +484,13 @@ actions!(
         TriggerParameterHints,
         /// Requests completions at the cursor (Monaco `editor.action.triggerSuggest`).
         TriggerSuggest,
+        /// Accepts the selected suggestion in the other insert mode (Monaco
+        /// `acceptAlternativeSelectedSuggestion`).
+        AcceptAlternativeSuggestion,
+        /// Selects the first suggestion (Monaco `selectFirstSuggestion`).
+        SelectFirstSuggestion,
+        /// Selects the last suggestion (Monaco `selectLastSuggestion`).
+        SelectLastSuggestion,
         /// Shows the hover for the cursor position (Monaco `editor.action.showHover`).
         ShowHover,
         /// Formats the document (Monaco `editor.action.formatDocument`).
@@ -636,6 +646,26 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-f4", GoToPreviousReference, ctx),
         KeyBinding::new("secondary-shift-space", TriggerParameterHints, ctx),
         KeyBinding::new("ctrl-space", TriggerSuggest, ctx),
+        KeyBinding::new("shift-enter", AcceptAlternativeSuggestion, SUGGEST),
+        KeyBinding::new("shift-tab", AcceptAlternativeSuggestion, SUGGEST),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-up"
+            } else {
+                "ctrl-home"
+            },
+            SelectFirstSuggestion,
+            SUGGEST,
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-down"
+            } else {
+                "ctrl-end"
+            },
+            SelectLastSuggestion,
+            SUGGEST,
+        ),
         KeyBinding::new("shift-f8", GoToPreviousMarker, ctx),
         KeyBinding::new("shift-f3", PreviousMatch, ctx),
         // Inside the find widget's inputs.

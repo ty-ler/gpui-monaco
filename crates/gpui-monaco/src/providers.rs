@@ -144,6 +144,16 @@ pub struct CompletionItem {
     pub commit_characters: Vec<char>,
     /// Edits applied elsewhere (e.g. imports) when accepted.
     pub additional_text_edits: Vec<(Range<PointUtf16>, String)>,
+    /// The range replaced in replace mode (Monaco `range.replace`, e.g.
+    /// the whole word); `range` is then the insert-mode range, which must
+    /// start at the same position. See `suggest.insert_mode`.
+    pub replace_range: Option<Range<PointUtf16>>,
+    /// Tags, such as [`CompletionItemTag::Deprecated`] (shown struck out).
+    pub tags: Vec<CompletionItemTag>,
+    /// A command run after the item is inserted.
+    pub command: Option<Command>,
+    /// Data for [`CompletionProvider::resolve_completion_item`].
+    pub data: Option<serde_json::Value>,
 }
 
 impl CompletionItem {
@@ -170,6 +180,14 @@ impl CompletionItem {
     pub fn insert_text(&self) -> &str {
         self.insert_text.as_deref().unwrap_or(&self.label)
     }
+}
+
+/// Monaco `CompletionItemTag`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CompletionItemTag {
+    /// Deprecated: shown struck out, and hidden with
+    /// `suggest.show_deprecated` off.
+    Deprecated,
 }
 
 /// Monaco `CompletionList`.
@@ -216,6 +234,18 @@ pub trait CompletionProvider: 'static {
         trigger: CompletionTrigger,
         cx: &mut App,
     ) -> Task<anyhow::Result<CompletionList>>;
+
+    /// Fills in an item's documentation, detail or additional edits once it's
+    /// selected (Monaco `resolveCompletionItem`); every field of the
+    /// returned item replaces the original. `None` (the default) when
+    /// there's nothing to resolve.
+    fn resolve_completion_item(
+        &self,
+        _item: &CompletionItem,
+        _cx: &mut App,
+    ) -> Option<Task<anyhow::Result<CompletionItem>>> {
+        None
+    }
 }
 
 // ----- hover ---------------------------------------------------------------------
