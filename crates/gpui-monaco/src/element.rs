@@ -1449,6 +1449,11 @@ fn prepaint_editor(
             }
         }
     }
+    // Inlay hints follow the viewport.
+    if let (Some(first), Some(last)) = (layout.lines.first(), layout.lines.last()) {
+        editor.inlay_hints_viewport(first.row..last.row + 1, cx);
+    }
+
     // The code action lightbulb (Monaco `LightBulbWidget`).
     let mut lightbulb = None;
     if let Some(bulb) = editor.code_actions.lightbulb.clone() {

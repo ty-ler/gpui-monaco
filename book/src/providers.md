@@ -12,6 +12,7 @@ gpui-monaco has no language server or other language intelligence built in. Your
 | `TypeDefinitionProvider` | `TypeDefinitionProvider` | go to and peek type definition |
 | `ImplementationProvider` | `ImplementationProvider` | Cmd/Ctrl+F12 and Cmd/Ctrl+Shift+F12 (peek) |
 | `RenameProvider` | `RenameProvider` | F2 (rename box) |
+| `InlayHintsProvider` | `InlayHintsProvider` | inline type and parameter hints |
 | `CodeActionProvider` | `CodeActionProvider` | the lightbulb, Cmd/Ctrl+. and the refactor, source, organize imports, fix all and auto fix commands |
 | `SignatureHelpProvider` | `SignatureHelpProvider` | parameter hints while typing a call |
 | `DocumentHighlightProvider` | `DocumentHighlightProvider` | occurrence highlights of the symbol at the cursor (textual occurrences without one) |
@@ -184,6 +185,22 @@ As in Monaco:
 
 - **No actions:** with none available, a message says so, such as "No code actions available". If the action that would have been applied is disabled, its reason is shown instead.
 - **Your own commands:** `trigger_code_actions(filter, auto_apply, message, cx)`.
+
+## Inlay hints
+
+`provide_inlay_hints` gets a range covering the visible lines plus a screen above and below. It returns `InlayHint`s:
+
+- a `position` and `label`;
+- a `kind` (`Type` or `Parameter`), which picks the `editorInlayHint.*` colors;
+- `padding_left` and `padding_right`;
+- a `tooltip`.
+
+The editor shows them as injected text that moves with edits. As in Monaco:
+
+- **Requests:** made again when you scroll past the covered lines, shortly after edits, and when you call `refresh_inlay_hints(cx)`.
+- **Options:** `options.inlay_hints.enabled` is `On`, `OnUnlessPressed` or `OffUnlessPressed` (Ctrl+Alt toggles), or `Off`. Line text is cut at `maximum_length` (43) with `…`.
+
+Unlike Monaco, hints use the editor's font size, and their label parts, tooltips and edits aren't interactive yet.
 
 ## Hover from decorations and markers
 

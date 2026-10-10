@@ -532,6 +532,64 @@ pub trait CodeActionProvider: 'static {
     }
 }
 
+// ----- inlay hints ---------------------------------------------------------------
+
+/// Monaco `InlayHintKind`: picks the hint's colors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InlayHintKind {
+    /// A type annotation.
+    Type,
+    /// A parameter name.
+    Parameter,
+}
+
+/// Inline text the editor shows but that isn't part of the document
+/// (Monaco `InlayHint`), such as inferred types or parameter names.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlayHint {
+    /// Where it shows (0-based row, UTF-16 column).
+    pub position: PointUtf16,
+    /// Its text. (Monaco's label parts are joined; their locations and
+    /// commands aren't supported yet.)
+    pub label: SharedString,
+    /// Its kind, if any.
+    pub kind: Option<InlayHintKind>,
+    /// Shown on hover.
+    pub tooltip: Option<MarkdownString>,
+    /// A little space before the hint.
+    pub padding_left: bool,
+    /// A little space after it.
+    pub padding_right: bool,
+}
+
+/// Supplies inlay hints for a range (Monaco `InlayHintsProvider`).
+///
+/// Register with [`register_inlay_hints_provider`]. Call
+/// [`refresh_inlay_hints`] when they change without an edit.
+pub trait InlayHintsProvider: 'static {
+    /// The hints in `range` (the visible lines and a screen's worth around
+    /// them).
+    fn provide_inlay_hints(
+        &self,
+        context: &ProviderContext,
+        range: Range<PointUtf16>,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<InlayHint>>>;
+}
+
+/// Bumped by [`refresh_inlay_hints`]; editors re-request when it changes.
+#[derive(Default)]
+pub(crate) struct InlayHintsEpoch(pub u64);
+
+impl Global for InlayHintsEpoch {}
+
+/// Asks every editor to request inlay hints again (Monaco
+/// `onDidChangeInlayHints`), e.g. after a language server's
+/// `workspace/inlayHint/refresh`.
+pub fn refresh_inlay_hints(cx: &mut App) {
+    cx.default_global::<InlayHintsEpoch>().0 += 1;
+}
+
 // ----- document highlights -------------------------------------------------------
 
 /// What an occurrence highlight marks (Monaco `DocumentHighlightKind`).
@@ -756,6 +814,7 @@ struct LanguageFeatures {
     document_highlight: Vec<Entry<dyn DocumentHighlightProvider>>,
     rename: Vec<Entry<dyn RenameProvider>>,
     code_action: Vec<Entry<dyn CodeActionProvider>>,
+    inlay_hints: Vec<Entry<dyn InlayHintsProvider>>,
     declaration: Vec<Entry<dyn DeclarationProvider>>,
     type_definition: Vec<Entry<dyn TypeDefinitionProvider>>,
     implementation: Vec<Entry<dyn ImplementationProvider>>,
@@ -831,6 +890,13 @@ register_fn!(
     SignatureHelpProvider
 );
 
+register_fn!(
+    /// Registers an inlay hints provider for the models `selector` matches (Monaco
+    /// `registerInlayHintsProvider`). Results from all matching providers are merged.
+    register_inlay_hints_provider,
+    inlay_hints,
+    InlayHintsProvider
+);
 register_fn!(
     /// Registers a code action provider for the models `selector` matches (Monaco
     /// `registerCodeActionProvider`). Results from all matching providers are merged.
@@ -910,6 +976,7 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.declaration.retain(|e| e.id != registration);
     features.rename.retain(|e| e.id != registration);
     features.code_action.retain(|e| e.id != registration);
+    features.inlay_hints.retain(|e| e.id != registration);
     features.type_definition.retain(|e| e.id != registration);
     features.implementation.retain(|e| e.id != registration);
     features.references.retain(|e| e.id != registration);
@@ -1066,6 +1133,17 @@ pub fn code_action_providers(
 ) -> Vec<Arc<dyn CodeActionProvider>> {
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.code_action, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered inlay hints providers whose selector matches
+/// `language_id`, in registration order.
+pub fn inlay_hints_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn InlayHintsProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.inlay_hints, language_id))
         .unwrap_or_default()
 }
 

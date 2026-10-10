@@ -32,6 +32,7 @@ editor.update(cx, |editor, cx| {
 | `auto_indent` | `autoIndent` | `None`, `Keep`, `Brackets`, `Advanced`, `Full` |
 | `match_brackets` | `matchBrackets` | |
 | `quick_suggestions` | `quickSuggestions` | completion while typing |
+| `inlay_hints` | `inlayHints` | whether inlay hints show (`On`, `OnUnlessPressed`, `OffUnlessPressed`, `Off`), padding and the per-line maximum length |
 | `lightbulb` | `lightbulb.enabled` | when the code action lightbulb asks for actions: `Off`, `OnCode` (default) or `On` |
 | `goto_location` | `gotoLocation` | what go to definition, references and the other navigation commands do with several results, and their alternative commands |
 | `format_on_type` | `formatOnType` | format with the on-type formatter after its trigger characters (off) |

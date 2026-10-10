@@ -66,6 +66,7 @@ fn capabilities() -> Value {
         "documentFormattingProvider": true,
         "referencesProvider": true,
         "renameProvider": { "prepareProvider": true },
+        "inlayHintProvider": true,
         "codeActionProvider": { "codeActionKinds": ["quickfix", "refactor"], "resolveProvider": true },
         "executeCommandProvider": { "commands": ["fake.doIt"] },
         "declarationProvider": true,
@@ -238,6 +239,9 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
                 assert_eq!(params["context"]["triggerCharacter"], ".");
                 json!({ "isIncomplete": true, "items": [{ "label": "len", "kind": 2 }] })
             }
+            "textDocument/inlayHint" => json!([
+                { "position": { "line": 0, "character": 7 }, "label": [{ "value": ": " }, { "value": "Foo" }], "kind": 1, "paddingLeft": true },
+            ]),
             "textDocument/codeAction" => {
                 assert_eq!(params["context"]["only"], json!(["quickfix"]));
                 assert_eq!(params["context"]["triggerKind"], 1);
@@ -435,6 +439,21 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
         .unwrap();
     cx.run_until_parked();
     assert_eq!(server.messages("workspace/executeCommand").len(), 1);
+
+    // Inlay hints, with label parts joined.
+    let hints = cx
+        .update(|cx| features.provide_inlay_hints(&context, p(0, 0)..p(1, 0), cx))
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            hints[0].position,
+            hints[0].label.as_ref(),
+            hints[0].kind,
+            hints[0].padding_left
+        ),
+        (p(0, 7), ": Foo", Some(InlayHintKind::Type), true)
+    );
 
     // Rename.
     let location = cx

@@ -71,6 +71,11 @@ All notable changes to this project are documented here. The format follows [Kee
   - `register_model`, `model_for_uri` and `set_model_resolver`, so other documents can be previewed.
   - The LSP bridge forwards references, declaration, type definition and implementation requests.
 - Clicks in view zones and widgets no longer focus the editor.
+- **Inlay hints (#56):**
+  - `InlayHintsProvider`, shown as injected text, with Monaco's request triggers (viewport, edits, `refresh_inlay_hints`).
+  - The `inlay_hints` options, including Ctrl+Alt modes and maximum length.
+  - The `editorInlayHint.*` colors.
+  - The LSP bridge forwards `textDocument/inlayHint` and refresh.
 - **Code actions (#56):**
   - `CodeActionProvider` with hierarchical `CodeActionKind`s and `resolve_code_action`.
   - The lightbulb, and Monaco's grouped menu.

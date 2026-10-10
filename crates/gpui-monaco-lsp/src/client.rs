@@ -571,9 +571,9 @@ impl LspClient {
         cx: &mut Context<Self>,
     ) -> Result<Value, ResponseError> {
         use lsp::request::{
-            ApplyWorkspaceEdit, RegisterCapability, Request as _, ShowMessageRequest,
-            UnregisterCapability, WorkDoneProgressCreate, WorkspaceConfiguration,
-            WorkspaceFoldersRequest,
+            ApplyWorkspaceEdit, InlayHintRefreshRequest, RegisterCapability, Request as _,
+            ShowMessageRequest, UnregisterCapability, WorkDoneProgressCreate,
+            WorkspaceConfiguration, WorkspaceFoldersRequest,
         };
         let invalid = |err: anyhow::Error| ResponseError {
             code: -32602,
@@ -589,6 +589,10 @@ impl LspClient {
                         .map(|item| setting(&self.options.settings, item.section.as_deref()))
                         .collect(),
                 ))
+            }
+            InlayHintRefreshRequest::METHOD => {
+                gpui_monaco::providers::refresh_inlay_hints(cx);
+                Ok(Value::Null)
             }
             RegisterCapability::METHOD
             | UnregisterCapability::METHOD
@@ -729,6 +733,7 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
         "workspace": {
             "applyEdit": true,
             "executeCommand": {},
+            "inlayHint": { "refreshSupport": true },
             "configuration": true,
             "workspaceFolders": true,
             "workspaceEdit": { "documentChanges": true },
@@ -761,6 +766,7 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
             "implementation": { "linkSupport": true },
             "references": {},
             "rename": { "prepareSupport": true },
+            "inlayHint": {},
             "codeAction": {
                 "codeActionLiteralSupport": {
                     "codeActionKind": {

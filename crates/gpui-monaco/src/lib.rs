@@ -25,6 +25,7 @@ mod find_widget;
 mod format;
 mod goto;
 mod hover;
+mod inlay_hints;
 pub mod markdown;
 mod markers;
 mod message;
