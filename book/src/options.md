@@ -38,6 +38,8 @@ editor.update(cx, |editor, cx| {
 | `column_selection` | `columnSelection` | mouse drags and Shift+arrows make column selections |
 | `overtype_cursor_style`, `overtype_on_paste` | `overtypeCursorStyle`, `overtypeOnPaste` | overtype mode (Insert) |
 | `comments` | `comments` | `insert_space`, `ignore_empty_lines` |
+| `render_whitespace`, `render_control_characters`, `render_final_newline` | same names | `·` and `→` for whitespace; `␇` for control characters |
+| `guides`, `rulers` | `guides`, `rulers` | indent guides (with the active one highlighted) and vertical rulers |
 | `single_line` | — | a one-line input. Enter, Tab and Escape go to the parent, and pasted line breaks become spaces. |
 
 Model-level settings live in `ModelOptions` (Monaco `ITextModelUpdateOptions`), set with `model.update_options(…)`:

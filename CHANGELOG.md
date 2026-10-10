@@ -29,6 +29,13 @@ All notable changes to this project are documented here. The format follows [Kee
   - F7 / Shift+F7 move between the highlights.
   - Options: `occurrences_highlight`, `occurrences_highlight_delay`, `selection_highlight`, `selection_highlight_max_length` and `selection_highlight_multiline`.
   - Theme colors: `editor.wordHighlight*` and `editor.selectionHighlightBackground`.
+- Rendering options (#84):
+  - `render_whitespace`: none, boundary, selection (default), trailing or all.
+  - Indent guides with the active guide highlighted (`guides`), using a port of Monaco's guide computation.
+  - `rulers`.
+  - `render_control_characters`: shows ␇-style control pictures.
+  - `render_final_newline`.
+  - Theme colors: `editorWhitespace.foreground`, `editorIndentGuide.*` and `editorRuler.foreground`.
 - `TextModel::language_at` (Monaco `getLanguageIdAtPosition`), and the `comments` editor option.
 - Language configurations accept `lineComment` as `{ "comment", "noIndent" }`.
 
