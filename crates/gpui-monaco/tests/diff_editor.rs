@@ -465,3 +465,41 @@ fn moved_blocks(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("escape");
     assert_eq!(diff.read_with(cx, |d, _| d.move_to_compare()), None);
 }
+
+#[gpui::test]
+fn dragging_hidden_lines_bars(cx: &mut TestAppContext) {
+    let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let modified = original.replace("line 50\n", "changed\n");
+    let (diff, cx) = setup(&original, &modified, cx);
+    hide_unchanged(&diff, cx);
+    let line_height = diff.read_with(cx, |d, cx| {
+        d.modified_editor()
+            .read(cx)
+            .options()
+            .resolved_line_height()
+    });
+    // Dragging the second bar's top edge down three lines shows three.
+    diff.update(cx, |d, cx| {
+        d.drag_unchanged_for_tests(1, true, px(100.), px(100.) + line_height * 3., cx)
+    });
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests()),
+        vec![1..48, 58..102]
+    );
+    // Dragging the bottom edge up shows lines above the end.
+    diff.update(cx, |d, cx| {
+        d.drag_unchanged_for_tests(1, false, px(100.), px(100.) - line_height * 2., cx)
+    });
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests()),
+        vec![1..48, 58..100]
+    );
+    // A click without moving shows 20 more.
+    diff.update(cx, |d, cx| {
+        d.drag_unchanged_for_tests(0, false, px(5.), px(6.), cx)
+    });
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests()),
+        vec![1..28, 58..100]
+    );
+}
