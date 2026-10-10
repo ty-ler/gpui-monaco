@@ -22,14 +22,17 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ty-ler/gpui-monaco"
-publish = false
+publish = true
+homepage = "https://github.com/ty-ler/gpui-monaco"
+keywords = ["gpui", "editor", "monaco", "code-editor", "text-editor"]
+categories = ["gui", "text-editors"]
 
 [workspace.dependencies]
-gpui-monaco-text = { path = "crates/text" }
-gpui-monaco-syntax = { path = "crates/syntax" }
-gpui-monaco = { path = "crates/gpui-monaco" }
-gpui-monaco-languages = { path = "crates/gpui-monaco-languages" }
-gpui-monaco-lsp = { path = "crates/gpui-monaco-lsp" }
+gpui-monaco-text = { path = "crates/text", version = "0.1.0" }
+gpui-monaco-syntax = { path = "crates/syntax", version = "0.1.0" }
+gpui-monaco = { path = "crates/gpui-monaco", version = "0.1.0" }
+gpui-monaco-languages = { path = "crates/gpui-monaco-languages", version = "0.1.0" }
+gpui-monaco-lsp = { path = "crates/gpui-monaco-lsp", version = "0.1.0" }
 
 # gpui from the `gpui-pre` crates.io snapshots of zed (0.3.8 is zed@279fe07),
 # pinned exactly like gpui-component does, so apps can use both. Bump all
