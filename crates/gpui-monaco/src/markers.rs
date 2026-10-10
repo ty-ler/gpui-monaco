@@ -127,6 +127,7 @@ impl TextModel {
         if !markers.is_empty() {
             self.markers.by_owner.insert(owner, (markers, ids));
         }
+        cx.emit(crate::TextModelEvent::MarkersChanged);
     }
 
     /// All markers with their current ranges (they move with edits), sorted

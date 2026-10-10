@@ -477,6 +477,26 @@ actions!(
         ClosePeek,
         /// Renames the symbol at the cursor (Monaco `editor.action.rename`).
         Rename,
+        /// Shows code actions (Monaco `editor.action.quickFix`).
+        QuickFix,
+        /// Shows refactorings (Monaco `editor.action.refactor`).
+        Refactor,
+        /// Shows source actions (Monaco `editor.action.sourceAction`).
+        SourceAction,
+        /// Organizes imports (Monaco `editor.action.organizeImports`).
+        OrganizeImports,
+        /// Fixes all auto-fixable problems (Monaco `editor.action.fixAll`).
+        FixAll,
+        /// Applies the preferred quick fix (Monaco `editor.action.autoFix`).
+        AutoFix,
+        /// Code action menu: the next action.
+        CodeActionMenuNext,
+        /// Code action menu: the previous action.
+        CodeActionMenuPrevious,
+        /// Code action menu: apply the focused action.
+        CodeActionMenuAccept,
+        /// Code action menu: close it.
+        CodeActionMenuHide,
         /// Formats the selections, or the cursor's line (Monaco
         /// `editor.action.formatSelection`).
         FormatSelection,
@@ -548,6 +568,18 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("f12", GoToDefinition, ctx),
         KeyBinding::new("shift-f12", GoToReferences, ctx),
         KeyBinding::new("f2", Rename, ctx),
+        KeyBinding::new("secondary-.", QuickFix, ctx),
+        KeyBinding::new("ctrl-shift-r", Refactor, ctx),
+        KeyBinding::new("shift-alt-o", OrganizeImports, ctx),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-alt-."
+            } else {
+                "shift-alt-."
+            },
+            AutoFix,
+            ctx,
+        ),
         KeyBinding::new("f4", GoToNextReference, ctx),
         KeyBinding::new("shift-f4", GoToPreviousReference, ctx),
         KeyBinding::new("secondary-shift-space", TriggerParameterHints, ctx),
@@ -728,6 +760,21 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
                 KeyBinding::new("ctrl-shift-alt-down", CopyLinesDown, ctx),
             ]);
         }
+    }
+    // The code action menu.
+    let menu = Some(crate::code_action::CODE_ACTION_MENU_KEY_CONTEXT);
+    bindings.extend([
+        KeyBinding::new("down", CodeActionMenuNext, menu),
+        KeyBinding::new("up", CodeActionMenuPrevious, menu),
+        KeyBinding::new("enter", CodeActionMenuAccept, menu),
+        KeyBinding::new("escape", CodeActionMenuHide, menu),
+        KeyBinding::new("shift-escape", CodeActionMenuHide, menu),
+    ]);
+    if cfg!(target_os = "macos") {
+        bindings.extend([
+            KeyBinding::new("ctrl-n", CodeActionMenuNext, menu),
+            KeyBinding::new("ctrl-p", CodeActionMenuPrevious, menu),
+        ]);
     }
     // The peek view's results list.
     let peek = Some(crate::peek::PEEK_KEY_CONTEXT);

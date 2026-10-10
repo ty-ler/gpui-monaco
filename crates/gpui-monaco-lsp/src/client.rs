@@ -89,6 +89,8 @@ pub struct LspClient {
     server_info: Option<lsp::ServerInfo>,
     documents: HashMap<String, Document>,
     registrations: Vec<ProviderRegistration>,
+    /// Command ids registered for the server.
+    commands: Vec<String>,
     running: bool,
     _tasks: Vec<Task<()>>,
     _child: Option<async_process::Child>,
@@ -191,6 +193,7 @@ impl LspClient {
                     server_info: result.server_info,
                     documents: HashMap::new(),
                     registrations: Vec::new(),
+                    commands: Vec::new(),
                     running: true,
                     _tasks: tasks,
                     _child: child,
@@ -461,11 +464,40 @@ impl LspClient {
         };
         let features = LspFeatures::new(cx.weak_entity(), &self.capabilities);
         self.registrations = features.register(selector, &self.capabilities, cx);
+        // The server's commands run on the server (`workspace/executeCommand`).
+        self.commands = self
+            .capabilities
+            .execute_command_provider
+            .as_ref()
+            .map(|options| options.commands.clone())
+            .unwrap_or_default();
+        for id in &self.commands {
+            let connection = self.connection.clone();
+            let command = id.clone();
+            gpui_monaco::register_command(cx, id.clone(), move |arguments, cx| {
+                let request =
+                    connection.request::<lsp::request::ExecuteCommand>(lsp::ExecuteCommandParams {
+                        command: command.clone(),
+                        arguments: arguments.to_vec(),
+                        work_done_progress_params: Default::default(),
+                    });
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Err(err) = request.await {
+                            log::warn!("{err:#}");
+                        }
+                    })
+                    .detach();
+            });
+        }
     }
 
     fn unregister(&mut self, cx: &mut App) {
         for registration in self.registrations.drain(..) {
             unregister_provider(cx, registration);
+        }
+        for id in self.commands.drain(..) {
+            gpui_monaco::unregister_command(cx, &id);
         }
     }
 
@@ -696,6 +728,7 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
         "window": { "workDoneProgress": true, "showMessage": {} },
         "workspace": {
             "applyEdit": true,
+            "executeCommand": {},
             "configuration": true,
             "workspaceFolders": true,
             "workspaceEdit": { "documentChanges": true },
@@ -728,6 +761,21 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
             "implementation": { "linkSupport": true },
             "references": {},
             "rename": { "prepareSupport": true },
+            "codeAction": {
+                "codeActionLiteralSupport": {
+                    "codeActionKind": {
+                        "valueSet": [
+                            "", "quickfix", "refactor", "refactor.extract", "refactor.inline",
+                            "refactor.rewrite", "refactor.move", "source",
+                            "source.organizeImports", "source.fixAll",
+                        ],
+                    },
+                },
+                "isPreferredSupport": true,
+                "disabledSupport": true,
+                "dataSupport": true,
+                "resolveSupport": { "properties": ["edit"] },
+            },
             "documentHighlight": {},
             "formatting": {},
             "rangeFormatting": {},

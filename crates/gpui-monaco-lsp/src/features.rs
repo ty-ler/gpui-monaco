@@ -5,6 +5,10 @@ use gpui::{App, Task, WeakEntity};
 use std::ops::Range;
 
 use gpui_monaco::providers::{
+    CodeAction, CodeActionContext, CodeActionKind, CodeActionProvider, CodeActionTrigger,
+    register_code_action_provider,
+};
+use gpui_monaco::providers::{
     CompletionList, CompletionProvider, CompletionTrigger, DefinitionProvider,
     DocumentFormattingProvider, DocumentHighlight, DocumentHighlightProvider,
     DocumentRangeFormattingProvider, FormattingOptions, Hover, HoverProvider, LanguageSelector,
@@ -41,6 +45,10 @@ pub(crate) struct LspFeatures {
     on_type_triggers: Vec<char>,
     /// The server answers `textDocument/prepareRename`.
     prepare_rename: bool,
+    /// The server answers `codeAction/resolve`.
+    resolve_code_actions: bool,
+    /// The code action kinds the server returns, if it says.
+    code_action_kinds: Option<Vec<CodeActionKind>>,
 }
 
 fn chars(strings: Option<&Vec<String>>) -> Vec<char> {
@@ -79,6 +87,26 @@ impl LspFeatures {
                 })
                 .filter_map(|s| s.chars().next())
                 .collect(),
+            resolve_code_actions: matches!(
+                &capabilities.code_action_provider,
+                Some(lsp::CodeActionProviderCapability::Options(
+                    lsp::CodeActionOptions {
+                        resolve_provider: Some(true),
+                        ..
+                    }
+                ))
+            ),
+            code_action_kinds: match &capabilities.code_action_provider {
+                Some(lsp::CodeActionProviderCapability::Options(options)) => {
+                    options.code_action_kinds.as_ref().map(|kinds| {
+                        kinds
+                            .iter()
+                            .map(|kind| CodeActionKind::new(kind.as_str().to_string()))
+                            .collect()
+                    })
+                }
+                _ => None,
+            },
             prepare_rename: matches!(
                 &capabilities.rename_provider,
                 Some(lsp::OneOf::Right(lsp::RenameOptions {
@@ -148,6 +176,18 @@ impl LspFeatures {
             .is_some_and(|c| !matches!(c, lsp::ImplementationProviderCapability::Simple(false)))
         {
             registrations.push(register_implementation_provider(
+                cx,
+                selector.clone(),
+                self.clone(),
+            ));
+        }
+        let code_actions = match &capabilities.code_action_provider {
+            Some(lsp::CodeActionProviderCapability::Simple(enabled)) => *enabled,
+            Some(lsp::CodeActionProviderCapability::Options(_)) => true,
+            None => false,
+        };
+        if code_actions {
+            registrations.push(register_code_action_provider(
                 cx,
                 selector.clone(),
                 self.clone(),
@@ -640,5 +680,70 @@ impl RenameProvider for LspFeatures {
                 None => Ok(None),
             }
         })
+    }
+}
+
+impl CodeActionProvider for LspFeatures {
+    fn provided_kinds(&self) -> Option<Vec<CodeActionKind>> {
+        self.code_action_kinds.clone()
+    }
+
+    fn provide_code_actions(
+        &self,
+        context: &ProviderContext,
+        range: Range<PointUtf16>,
+        action_context: &CodeActionContext,
+        cx: &mut App,
+    ) -> Task<Result<Vec<CodeAction>>> {
+        let Some((connection, position)) = self.prepare(context, range.start, cx) else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let request =
+            connection.request::<lsp::request::CodeActionRequest>(lsp::CodeActionParams {
+                text_document: position.text_document,
+                range: convert::lsp_range(&range),
+                context: lsp::CodeActionContext {
+                    diagnostics: action_context
+                        .markers
+                        .iter()
+                        .map(convert::diagnostic)
+                        .collect(),
+                    only: action_context
+                        .only
+                        .as_ref()
+                        .map(|kind| vec![lsp::CodeActionKind::from(kind.0.to_string())]),
+                    trigger_kind: Some(match action_context.trigger {
+                        CodeActionTrigger::Invoke => lsp::CodeActionTriggerKind::INVOKED,
+                        CodeActionTrigger::Auto => lsp::CodeActionTriggerKind::AUTOMATIC,
+                    }),
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            });
+        cx.background_executor().spawn(async move {
+            request
+                .await?
+                .unwrap_or_default()
+                .into_iter()
+                .map(convert::code_action)
+                .collect()
+        })
+    }
+
+    fn resolve_code_action(
+        &self,
+        action: &CodeAction,
+        cx: &mut App,
+    ) -> Option<Task<Result<CodeAction>>> {
+        if !self.resolve_code_actions || action.edit.is_some() {
+            return None;
+        }
+        let original: lsp::CodeAction = serde_json::from_value(action.data.clone()?).ok()?;
+        let client = self.client.upgrade()?;
+        let connection = client.read(cx).connection().clone();
+        let request = connection.request::<lsp::request::CodeActionResolveRequest>(original);
+        Some(cx.background_executor().spawn(async move {
+            convert::code_action(lsp::CodeActionOrCommand::CodeAction(request.await?))
+        }))
     }
 }

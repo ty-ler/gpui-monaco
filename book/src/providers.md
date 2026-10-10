@@ -12,6 +12,7 @@ gpui-monaco has no language server or other language intelligence built in. Your
 | `TypeDefinitionProvider` | `TypeDefinitionProvider` | go to and peek type definition |
 | `ImplementationProvider` | `ImplementationProvider` | Cmd/Ctrl+F12 and Cmd/Ctrl+Shift+F12 (peek) |
 | `RenameProvider` | `RenameProvider` | F2 (rename box) |
+| `CodeActionProvider` | `CodeActionProvider` | the lightbulb, Cmd/Ctrl+. and the refactor, source, organize imports, fix all and auto fix commands |
 | `SignatureHelpProvider` | `SignatureHelpProvider` | parameter hints while typing a call |
 | `DocumentHighlightProvider` | `DocumentHighlightProvider` | occurrence highlights of the symbol at the cursor (textual occurrences without one) |
 | `DocumentFormattingProvider` | `DocumentFormattingEditProvider` | Format Document (Shift+Alt+F; Ctrl+Shift+I on Linux) |
@@ -146,6 +147,43 @@ F2 (`editor.rename(cx)`) renames the symbol at the cursor, as in Monaco:
 2. **Rename box:** a box under the symbol shows the name, selected. Enter accepts; Escape, clicking elsewhere, or a text change cancels.
 3. **Edits:** `provide_rename_edits` returns a `WorkspaceEdit`, which is text edits by document uri (`None` for this one). Providers are asked in order until one answers; if none does, their reasons are shown inline.
 4. **Apply:** `editor.apply_workspace_edit(edit, cx)` applies the edits. This document gets one undo step and the cursors follow the edits. Other documents are found with `model_for_uri`. If one can't be found, nothing is applied and "Rename failed to apply edits" is shown.
+
+## Code actions
+
+`provide_code_actions` gets the range (the selection) and a `CodeActionContext`:
+
+- **`only`:** the kind a command wants.
+- **`trigger`:** `Invoke` or `Auto`.
+- **`markers`:** the markers touching the range.
+
+It returns `CodeAction`s:
+
+- `title` and `kind`. Kinds are hierarchical, like `quickfix` or `refactor.extract`.
+- `edit` (a `WorkspaceEdit`) and/or `command`. The edit is applied first, then the command runs through `execute_command`. Register commands with `register_command`.
+- `diagnostics`, `is_preferred`, and `disabled` (a reason).
+- **Lazy edits:** leave `edit` out and implement `resolve_code_action` to compute it on apply. `provided_kinds` lets commands skip providers that can't help.
+
+As in Monaco:
+
+- **Lightbulb:** 250ms after the cursor rests on code (`options.lightbulb`, default `OnCode`), the editor asks for actions (`Auto`). A lightbulb then shows in the indentation, on a neighboring line, or in the glyph margin. It's blue (`editorLightBulbAutoFix.foreground`) when a preferred quick fix exists. Clicking it opens the menu.
+- **Menu:**
+  - Actions are grouped under headers: Quick Fix, Extract, Inline, Rewrite, Move, Surround With, Source Action and More Actions.
+  - Fixes for diagnostics come first, then preferred actions.
+  - Up/Down, Enter and Escape work, and hovering focuses.
+  - The focused action's diagnostics are highlighted.
+- **Commands:**
+
+| Command | Keys | Asks for | Applies without the menu |
+|---|---|---|---|
+| Quick Fix (`quick_fix`) | Cmd/Ctrl+. | everything but source actions | never |
+| Refactor (`refactor`) | Ctrl+Shift+R | `refactor` | never |
+| Source Action (`source_action`) | – | `source` | never |
+| Organize Imports (`organize_imports`) | Shift+Alt+O | `source.organizeImports` | if it's the only one |
+| Fix All (`fix_all`) | – | `source.fixAll` | if it's the only one |
+| Auto Fix (`auto_fix`) | Cmd+Alt+. (Shift+Alt+. elsewhere) | preferred `quickfix` | if it's the only one |
+
+- **No actions:** with none available, a message says so, such as "No code actions available". If the action that would have been applied is disabled, its reason is shown instead.
+- **Your own commands:** `trigger_code_actions(filter, auto_apply, message, cx)`.
 
 ## Hover from decorations and markers
 

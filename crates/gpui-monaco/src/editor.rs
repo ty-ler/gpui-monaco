@@ -168,6 +168,8 @@ pub struct CodeEditor {
     pub(crate) peek: crate::peek::PeekState,
     /// The rename box and requests.
     pub(crate) rename: crate::rename::RenameState,
+    /// The lightbulb, the code action menu and requests.
+    pub(crate) code_actions: crate::code_action::CodeActionState,
     /// This editor is a peek view's preview: F4 and unhandled Escape go to
     /// the editor around it.
     pub(crate) in_peek: bool,
@@ -239,6 +241,7 @@ impl CodeEditor {
             goto: Default::default(),
             peek: Default::default(),
             rename: Default::default(),
+            code_actions: Default::default(),
             in_peek: false,
             refocus: false,
             format_task: None,
@@ -301,6 +304,8 @@ impl CodeEditor {
         self.close_message(cx);
         self.close_peek(cx);
         self.cancel_rename(false, cx);
+        self.hide_code_action_menu(cx);
+        self.code_actions.lightbulb = None;
         self.close_marker_zone(cx);
         self.clear_definition_link(cx);
         self.detach_find_from_model(cx);
@@ -713,6 +718,10 @@ impl CodeEditor {
                 self.close_peek(cx);
                 cx.notify();
             }
+            TextModelEvent::MarkersChanged => {
+                self.schedule_auto_code_actions(cx);
+                cx.notify();
+            }
             TextModelEvent::OptionsChanged
             | TextModelEvent::LineEndingChanged
             | TextModelEvent::DecorationsChanged => cx.notify(),
@@ -810,6 +819,7 @@ impl CodeEditor {
         self.close_message(cx);
         self.check_symbol_navigation(cx);
         self.check_rename(cx);
+        self.schedule_auto_code_actions(cx);
         self.update_bracket_highlights(cx);
         self.update_occurrence_highlights(cx);
         self.restart_blink(cx);
@@ -1677,6 +1687,15 @@ impl CodeEditor {
         let Some(layout) = self.layout.clone() else {
             return;
         };
+        // The lightbulb opens its code actions (Monaco `onClick`).
+        if event.button == MouseButton::Left
+            && layout
+                .lightbulb
+                .is_some_and(|bulb| bulb.contains(&event.position))
+        {
+            self.show_lightbulb_menu(cx);
+            return;
+        }
         if let Some(minimap) = layout.minimap
             && minimap.bounds.contains(&event.position)
         {
@@ -2757,6 +2776,12 @@ impl Render for CodeEditor {
             .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| this.go_to_definition(cx)))
             .on_action(cx.listener(|this, _: &ShowHover, _, cx| this.show_hover_at_cursor(cx)))
             .on_action(cx.listener(|this, _: &Rename, _, cx| this.rename(cx)))
+            .on_action(cx.listener(|this, _: &QuickFix, _, cx| this.quick_fix(cx)))
+            .on_action(cx.listener(|this, _: &Refactor, _, cx| this.refactor(cx)))
+            .on_action(cx.listener(|this, _: &SourceAction, _, cx| this.source_action(cx)))
+            .on_action(cx.listener(|this, _: &OrganizeImports, _, cx| this.organize_imports(cx)))
+            .on_action(cx.listener(|this, _: &FixAll, _, cx| this.fix_all(cx)))
+            .on_action(cx.listener(|this, _: &AutoFix, _, cx| this.auto_fix(cx)))
             .on_action(cx.listener(|this, _: &GoToDeclaration, _, cx| {
                 this.go_to(LocationKind::Declaration, cx)
             }))

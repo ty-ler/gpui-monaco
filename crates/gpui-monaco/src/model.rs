@@ -165,6 +165,8 @@ pub enum TextModelEvent {
     LanguageChanged,
     /// [`TextModel::set_line_ending`] changed the line ending.
     LineEndingChanged,
+    /// [`TextModel::set_markers`] changed the markers.
+    MarkersChanged,
     /// New highlights are available (background parse finished).
     SyntaxUpdated,
     /// Decorations were added, removed or changed.

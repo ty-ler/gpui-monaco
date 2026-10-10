@@ -69,6 +69,11 @@ pub struct EditorColors {
     pub message_background: Hsla,
     /// Their border (`inputValidation.infoBorder`).
     pub message_border: Hsla,
+    /// The code action lightbulb (`editorLightBulb.foreground`).
+    pub lightbulb_foreground: Hsla,
+    /// The lightbulb when a preferred quick fix exists
+    /// (`editorLightBulbAutoFix.foreground`).
+    pub lightbulb_auto_fix_foreground: Hsla,
     /// The peek view's frame and arrow (`peekView.border`).
     pub peek_view_border: Hsla,
     /// Its title bar (`peekViewTitle.background`).
@@ -177,6 +182,8 @@ impl EditorColors {
             symbol_highlight_background: c(rgba(0xea5c0055)),
             message_background: c(rgb(0x063b49)),
             message_border: c(rgb(0x007acc)),
+            lightbulb_foreground: c(rgb(0xffcc00)),
+            lightbulb_auto_fix_foreground: c(rgb(0x75beff)),
             peek_view_border: c(rgb(0x3794ff)),
             peek_view_title_background: c(rgb(0x252526)),
             peek_view_title_foreground: c(rgb(0xffffff)),
@@ -247,6 +254,8 @@ impl EditorColors {
             symbol_highlight_background: c(rgba(0xea5c0055)),
             message_background: c(rgb(0xd6ecf2)),
             message_border: c(rgb(0x007acc)),
+            lightbulb_foreground: c(rgb(0xddb100)),
+            lightbulb_auto_fix_foreground: c(rgb(0x007acc)),
             peek_view_border: c(rgb(0x1a85ff)),
             peek_view_title_background: c(rgb(0xf3f3f3)),
             peek_view_title_foreground: c(rgb(0x000000)),
@@ -347,6 +356,11 @@ impl EditorColors {
             "inputValidation.infoBackground",
         );
         set(&mut self.message_border, "inputValidation.infoBorder");
+        set(&mut self.lightbulb_foreground, "editorLightBulb.foreground");
+        set(
+            &mut self.lightbulb_auto_fix_foreground,
+            "editorLightBulbAutoFix.foreground",
+        );
         set(&mut self.peek_view_border, "peekView.border");
         set(
             &mut self.peek_view_title_background,

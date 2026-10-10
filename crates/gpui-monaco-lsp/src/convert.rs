@@ -5,6 +5,7 @@
 use std::ops::Range;
 
 use gpui::SharedString;
+use gpui_monaco::providers::{CodeAction, CodeActionKind, Command};
 use gpui_monaco::providers::{
     CompletionItem, CompletionItemKind, CompletionList, DocumentHighlight, DocumentHighlightKind,
     Hover, Location, MarkdownString, ParameterInformation, ParameterLabel, SignatureHelp,
@@ -423,6 +424,67 @@ pub fn workspace_edit(edit: lsp::WorkspaceEdit) -> anyhow::Result<WorkspaceEdit>
         }
     }
     Ok(result)
+}
+
+/// A marker as the diagnostic a server sent (servers match the diagnostics
+/// in a code action request against their own).
+pub fn diagnostic(marker: &Marker) -> lsp::Diagnostic {
+    lsp::Diagnostic {
+        range: lsp_range(&marker.range),
+        severity: Some(match marker.severity {
+            MarkerSeverity::Error => lsp::DiagnosticSeverity::ERROR,
+            MarkerSeverity::Warning => lsp::DiagnosticSeverity::WARNING,
+            MarkerSeverity::Info => lsp::DiagnosticSeverity::INFORMATION,
+            MarkerSeverity::Hint => lsp::DiagnosticSeverity::HINT,
+        }),
+        code: marker
+            .code
+            .as_ref()
+            .map(|code| lsp::NumberOrString::String(code.to_string())),
+        source: marker.source.as_ref().map(|source| source.to_string()),
+        message: marker.message.to_string(),
+        ..Default::default()
+    }
+}
+
+/// A server command.
+pub fn command(command: lsp::Command) -> Command {
+    Command {
+        id: command.command.into(),
+        title: command.title.into(),
+        arguments: command.arguments.unwrap_or_default(),
+    }
+}
+
+/// A code action or bare command. The original is kept in `data` so it
+/// can be sent back to `codeAction/resolve`.
+pub fn code_action(action: lsp::CodeActionOrCommand) -> anyhow::Result<CodeAction> {
+    Ok(match action {
+        lsp::CodeActionOrCommand::Command(c) => CodeAction {
+            title: c.title.clone().into(),
+            command: Some(command(c)),
+            ..Default::default()
+        },
+        lsp::CodeActionOrCommand::CodeAction(action) => CodeAction {
+            title: action.title.clone().into(),
+            kind: action
+                .kind
+                .as_ref()
+                .map(|kind| CodeActionKind::new(kind.as_str().to_string())),
+            diagnostics: action
+                .diagnostics
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(marker)
+                .collect(),
+            edit: action.edit.clone().map(workspace_edit).transpose()?,
+            command: action.command.clone().map(command),
+            is_preferred: action.is_preferred.unwrap_or(false),
+            disabled: action.disabled.as_ref().map(|d| d.reason.clone().into()),
+            data: Some(serde_json::to_value(&action)?),
+        },
+    })
 }
 
 #[cfg(test)]

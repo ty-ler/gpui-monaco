@@ -388,6 +388,150 @@ pub trait RenameProvider: 'static {
     ) -> Task<anyhow::Result<Option<WorkspaceEdit>>>;
 }
 
+// ----- code actions --------------------------------------------------------------
+
+/// A hierarchical, dot-separated code action kind (Monaco
+/// `CodeActionKind`), e.g. `quickfix` or `refactor.extract`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CodeActionKind(pub SharedString);
+
+impl CodeActionKind {
+    /// Fixes for diagnostics (`quickfix`).
+    pub const QUICK_FIX: &str = "quickfix";
+    /// Refactorings (`refactor`).
+    pub const REFACTOR: &str = "refactor";
+    /// Extracting a method, variable, … (`refactor.extract`).
+    pub const REFACTOR_EXTRACT: &str = "refactor.extract";
+    /// Inlining (`refactor.inline`).
+    pub const REFACTOR_INLINE: &str = "refactor.inline";
+    /// Moving code (`refactor.move`).
+    pub const REFACTOR_MOVE: &str = "refactor.move";
+    /// Rewriting code (`refactor.rewrite`).
+    pub const REFACTOR_REWRITE: &str = "refactor.rewrite";
+    /// Whole-file actions (`source`).
+    pub const SOURCE: &str = "source";
+    /// Organize imports (`source.organizeImports`).
+    pub const SOURCE_ORGANIZE_IMPORTS: &str = "source.organizeImports";
+    /// Fix all auto-fixable problems (`source.fixAll`).
+    pub const SOURCE_FIX_ALL: &str = "source.fixAll";
+    /// Surround with (`surround`).
+    pub const SURROUND_WITH: &str = "surround";
+
+    /// A kind from its dotted name.
+    pub fn new(kind: impl Into<SharedString>) -> Self {
+        Self(kind.into())
+    }
+
+    /// Whether `other` is this kind or a sub-kind of it (Monaco
+    /// `HierarchicalKind.contains`); the empty kind contains everything.
+    pub fn contains(&self, other: &CodeActionKind) -> bool {
+        self.0.is_empty()
+            || self.0 == other.0
+            || other
+                .0
+                .strip_prefix(self.0.as_ref())
+                .is_some_and(|rest| rest.starts_with('.'))
+    }
+
+    /// Whether either kind contains the other (Monaco
+    /// `HierarchicalKind.intersects`).
+    pub fn intersects(&self, other: &CodeActionKind) -> bool {
+        self.contains(other) || other.contains(self)
+    }
+}
+
+impl From<&str> for CodeActionKind {
+    fn from(kind: &str) -> Self {
+        Self(SharedString::from(kind.to_string()))
+    }
+}
+
+/// A command to run (Monaco `Command`), executed with
+/// [`execute_command`](crate::execute_command).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Command {
+    /// The registered command id.
+    pub id: SharedString,
+    /// Its title.
+    pub title: SharedString,
+    /// Its arguments.
+    pub arguments: Vec<serde_json::Value>,
+}
+
+/// A change offered at a position (Monaco `CodeAction`): an edit, a
+/// command, or both (the edit first).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CodeAction {
+    /// The menu text.
+    pub title: SharedString,
+    /// Its kind; it decides the menu group and which commands offer it.
+    pub kind: Option<CodeActionKind>,
+    /// The diagnostics it fixes.
+    pub diagnostics: Vec<crate::Marker>,
+    /// Edits to apply.
+    pub edit: Option<WorkspaceEdit>,
+    /// A command to run after the edit.
+    pub command: Option<Command>,
+    /// The best fix for its diagnostics; auto fix applies preferred fixes.
+    pub is_preferred: bool,
+    /// Why the action can't be applied now; it's shown greyed out.
+    pub disabled: Option<SharedString>,
+    /// Data for [`CodeActionProvider::resolve_code_action`].
+    pub data: Option<serde_json::Value>,
+}
+
+/// How code actions were asked for (Monaco `CodeActionTriggerType`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeActionTrigger {
+    /// A command or the lightbulb's menu.
+    Invoke,
+    /// Automatically, for the lightbulb, as the cursor moves.
+    Auto,
+}
+
+/// What a code action request is about (Monaco `CodeActionContext`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CodeActionContext {
+    /// Only actions of this kind are wanted, if set.
+    pub only: Option<CodeActionKind>,
+    /// How they were asked for.
+    pub trigger: CodeActionTrigger,
+    /// The markers (diagnostics) in the range.
+    pub markers: Vec<crate::Marker>,
+}
+
+/// Offers code actions: quick fixes, refactorings and source actions
+/// (Monaco `CodeActionProvider`).
+///
+/// Register with [`register_code_action_provider`].
+pub trait CodeActionProvider: 'static {
+    /// The kinds this provider can return, to skip it for others (Monaco
+    /// `providedCodeActionKinds`). `None` means any.
+    fn provided_kinds(&self) -> Option<Vec<CodeActionKind>> {
+        None
+    }
+
+    /// The actions for `range`.
+    fn provide_code_actions(
+        &self,
+        context: &ProviderContext,
+        range: Range<PointUtf16>,
+        action_context: &CodeActionContext,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<CodeAction>>>;
+
+    /// Fills in an action's edit before it's applied (Monaco
+    /// `resolveCodeAction`); `None` (the default) when there's nothing to
+    /// resolve.
+    fn resolve_code_action(
+        &self,
+        _action: &CodeAction,
+        _cx: &mut App,
+    ) -> Option<Task<anyhow::Result<CodeAction>>> {
+        None
+    }
+}
+
 // ----- document highlights -------------------------------------------------------
 
 /// What an occurrence highlight marks (Monaco `DocumentHighlightKind`).
@@ -611,6 +755,7 @@ struct LanguageFeatures {
     signature_help: Vec<Entry<dyn SignatureHelpProvider>>,
     document_highlight: Vec<Entry<dyn DocumentHighlightProvider>>,
     rename: Vec<Entry<dyn RenameProvider>>,
+    code_action: Vec<Entry<dyn CodeActionProvider>>,
     declaration: Vec<Entry<dyn DeclarationProvider>>,
     type_definition: Vec<Entry<dyn TypeDefinitionProvider>>,
     implementation: Vec<Entry<dyn ImplementationProvider>>,
@@ -687,6 +832,13 @@ register_fn!(
 );
 
 register_fn!(
+    /// Registers a code action provider for the models `selector` matches (Monaco
+    /// `registerCodeActionProvider`). Results from all matching providers are merged.
+    register_code_action_provider,
+    code_action,
+    CodeActionProvider
+);
+register_fn!(
     /// Registers a rename provider for the models `selector` matches (Monaco
     /// `registerRenameProvider`). Providers are tried in registration order.
     register_rename_provider,
@@ -757,6 +909,7 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.range_formatting.retain(|e| e.id != registration);
     features.declaration.retain(|e| e.id != registration);
     features.rename.retain(|e| e.id != registration);
+    features.code_action.retain(|e| e.id != registration);
     features.type_definition.retain(|e| e.id != registration);
     features.implementation.retain(|e| e.id != registration);
     features.references.retain(|e| e.id != registration);
@@ -903,4 +1056,31 @@ pub fn rename_providers(cx: &App, language_id: Option<&str>) -> Vec<Arc<dyn Rena
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.rename, language_id))
         .unwrap_or_default()
+}
+
+/// The registered code action providers whose selector matches
+/// `language_id`, in registration order.
+pub fn code_action_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn CodeActionProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.code_action, language_id))
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kinds_are_hierarchical() {
+        let refactor = CodeActionKind::from(CodeActionKind::REFACTOR);
+        let extract = CodeActionKind::from(CodeActionKind::REFACTOR_EXTRACT);
+        assert!(refactor.contains(&extract));
+        assert!(!extract.contains(&refactor));
+        assert!(extract.intersects(&refactor));
+        assert!(!refactor.contains(&CodeActionKind::from("refactoring")));
+        assert!(CodeActionKind::from("").contains(&refactor));
+    }
 }

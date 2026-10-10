@@ -100,7 +100,8 @@ Issues are linked by number.
 | Document highlights | `wordHighlighter` | ✅ | #83 |
 | Formatting: document, range, on type, on paste | `format` | ✅ | #94 |
 | Rename | `rename` | ✅ | #56 |
-| Code actions and lightbulb, inlay hints | `codeAction`, `inlayHints` | ❌ | #56 |
+| Code actions and lightbulb (no AI actions, "Show Disabled" toggle, refactor preview or nearby quick fixes) | `codeAction` | ✅ | #56 |
+| Inlay hints | `inlayHints` | ❌ | #56 |
 | Code lens | `codelens` | ❌ | #96 |
 | Colors and color picker | `colorPicker` | ❌ | #97 |
 | Links | `links` | ❌ | #93 |

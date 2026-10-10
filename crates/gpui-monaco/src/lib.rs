@@ -11,6 +11,8 @@ pub mod actions;
 mod api;
 mod bracket_colors;
 mod bracket_matching;
+pub mod code_action;
+mod commands;
 mod completion;
 pub mod cursor;
 pub mod decorations;
@@ -44,6 +46,7 @@ pub mod view;
 pub mod widgets;
 
 pub use api::{DecorationsCollection, WordAtPosition};
+pub use commands::{execute_command, register_command, unregister_command};
 pub use decorations::{
     DecorationId, DecorationOptions, DecorationUnderline, InjectedText, OverviewRulerLane,
 };

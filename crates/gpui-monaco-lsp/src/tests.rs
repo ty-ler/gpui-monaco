@@ -66,6 +66,8 @@ fn capabilities() -> Value {
         "documentFormattingProvider": true,
         "referencesProvider": true,
         "renameProvider": { "prepareProvider": true },
+        "codeActionProvider": { "codeActionKinds": ["quickfix", "refactor"], "resolveProvider": true },
+        "executeCommandProvider": { "commands": ["fake.doIt"] },
         "declarationProvider": true,
         "typeDefinitionProvider": true,
         "implementationProvider": true,
@@ -236,6 +238,35 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
                 assert_eq!(params["context"]["triggerCharacter"], ".");
                 json!({ "isIncomplete": true, "items": [{ "label": "len", "kind": 2 }] })
             }
+            "textDocument/codeAction" => {
+                assert_eq!(params["context"]["only"], json!(["quickfix"]));
+                assert_eq!(params["context"]["triggerKind"], 1);
+                assert_eq!(params["context"]["diagnostics"][0]["message"], "unused");
+                json!([
+                    { "title": "Run it", "command": "fake.doIt", "arguments": [1] },
+                    {
+                        "title": "Remove it",
+                        "kind": "quickfix",
+                        "isPreferred": true,
+                        "data": { "id": 7 },
+                    },
+                ])
+            }
+            "codeAction/resolve" => {
+                assert_eq!(params["data"]["id"], 7);
+                json!({
+                    "title": "Remove it",
+                    "kind": "quickfix",
+                    "edit": { "changes": { "file:///project/main.rs": [
+                        { "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 3 } }, "newText": "" },
+                    ] } },
+                })
+            }
+            "workspace/executeCommand" => {
+                assert_eq!(params["command"], "fake.doIt");
+                assert_eq!(params["arguments"], json!([1]));
+                Value::Null
+            }
             "textDocument/prepareRename" => json!({
                 "range": { "start": { "line": 0, "character": 3 }, "end": { "line": 0, "character": 7 } },
                 "placeholder": "main",
@@ -364,6 +395,46 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
         help.signatures[0].parameters[0].label,
         ParameterLabel::Range(2..3)
     );
+
+    // Code actions: bare commands and actions, resolved for their edit.
+    assert_eq!(
+        features.provided_kinds(),
+        Some(vec!["quickfix".into(), "refactor".into()])
+    );
+    let actions = cx
+        .update(|cx| {
+            features.provide_code_actions(
+                &context,
+                p(0, 0)..p(0, 3),
+                &CodeActionContext {
+                    only: Some("quickfix".into()),
+                    trigger: CodeActionTrigger::Invoke,
+                    markers: vec![gpui_monaco::Marker {
+                        severity: gpui_monaco::MarkerSeverity::Warning,
+                        message: "unused".into(),
+                        range: p(0, 0)..p(0, 3),
+                        source: None,
+                        code: None,
+                    }],
+                },
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(actions[0].command.as_ref().unwrap().id, "fake.doIt");
+    assert!(actions[1].is_preferred && actions[1].edit.is_none());
+    let resolved = cx
+        .update(|cx| features.resolve_code_action(&actions[1], cx))
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(resolved.edit.unwrap().edits[0].1[0].0, p(0, 0)..p(0, 3));
+    // Server commands run on the server.
+    cx.update(|cx| gpui_monaco::execute_command(cx, actions[0].command.as_ref().unwrap()))
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(server.messages("workspace/executeCommand").len(), 1);
 
     // Rename.
     let location = cx
