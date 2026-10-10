@@ -208,6 +208,75 @@ actions!(
         ScrollEditorBottom,
         /// Collapses the primary selection (Monaco `cancelSelection`).
         CancelSelection,
+        /// Sorts the selected lines, or the document (Monaco
+        /// `editor.action.sortLinesAscending`).
+        SortLinesAscending,
+        /// Sorts the selected lines in descending order (Monaco
+        /// `editor.action.sortLinesDescending`).
+        SortLinesDescending,
+        /// Removes duplicate lines (Monaco `editor.action.removeDuplicateLines`).
+        DeleteDuplicateLines,
+        /// Reverses the selected lines (Monaco `editor.action.reverseLines`).
+        ReverseLines,
+        /// Removes trailing whitespace (Monaco
+        /// `editor.action.trimTrailingWhitespace`, Cmd/Ctrl+K Cmd/Ctrl+X).
+        TrimTrailingWhitespace,
+        /// Deletes to the end of the line (Monaco `deleteAllRight`, Ctrl+K /
+        /// Cmd+Delete on macOS).
+        DeleteAllRight,
+        /// Joins lines (Monaco `editor.action.joinLines`, Ctrl+J on macOS).
+        JoinLines,
+        /// Swaps the characters around the cursor (Monaco
+        /// `editor.action.transpose`).
+        Transpose,
+        /// Swaps the letters around the cursor (Monaco
+        /// `editor.action.transposeLetters`, Ctrl+T on macOS).
+        TransposeLetters,
+        /// Uppercases the selection or word (Monaco
+        /// `editor.action.transformToUppercase`).
+        TransformToUppercase,
+        /// Lowercases the selection or word (Monaco
+        /// `editor.action.transformToLowercase`).
+        TransformToLowercase,
+        /// Title-cases the selection or word (Monaco
+        /// `editor.action.transformToTitlecase`).
+        TransformToTitlecase,
+        /// `snake_case`s the selection or word (Monaco
+        /// `editor.action.transformToSnakecase`).
+        TransformToSnakecase,
+        /// `camelCase`s the selection or word (Monaco
+        /// `editor.action.transformToCamelcase`).
+        TransformToCamelcase,
+        /// `PascalCase`s the selection or word (Monaco
+        /// `editor.action.transformToPascalcase`).
+        TransformToPascalcase,
+        /// `kebab-case`s the selection or word (Monaco
+        /// `editor.action.transformToKebabcase`).
+        TransformToKebabcase,
+        /// Duplicates the selection, or the line (Monaco
+        /// `editor.action.duplicateSelection`).
+        DuplicateSelection,
+        /// Moves the selected text one character left (Monaco
+        /// `editor.action.moveCarretLeftAction`).
+        MoveCaretLeft,
+        /// Moves the selected text one character right (Monaco
+        /// `editor.action.moveCarretRightAction`).
+        MoveCaretRight,
+        /// Reindents the document with the language's indentation rules
+        /// (Monaco `editor.action.reindentlines`).
+        ReindentLines,
+        /// Reindents the selected lines (Monaco
+        /// `editor.action.reindentselectedlines`).
+        ReindentSelectedLines,
+        /// Steps the number or value at the cursor up: `1` → `2`, `true` →
+        /// `false` (Monaco `editor.action.inPlaceReplace.up`, Cmd/Ctrl+Shift+.).
+        InPlaceReplaceUp,
+        /// Steps the number or value at the cursor down (Monaco
+        /// `editor.action.inPlaceReplace.down`, Cmd/Ctrl+Shift+,).
+        InPlaceReplaceDown,
+        /// Removes the brackets around the cursor (Monaco
+        /// `editor.action.removeBrackets`, Cmd/Ctrl+Alt+Backspace).
+        RemoveBrackets,
         /// Toggles line comments on the selected lines (Monaco
         /// `editor.action.commentLine`, Cmd+/).
         CommentLine,
@@ -401,6 +470,10 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-d", AddSelectionToNextFindMatch, ctx),
         KeyBinding::new("secondary-/", CommentLine, ctx),
         KeyBinding::new("secondary-u", CursorUndo, ctx),
+        KeyBinding::new("secondary-shift-.", InPlaceReplaceUp, ctx),
+        KeyBinding::new("secondary-shift-,", InPlaceReplaceDown, ctx),
+        KeyBinding::new("secondary-alt-backspace", RemoveBrackets, ctx),
+        KeyBinding::new("secondary-k secondary-x", TrimTrailingWhitespace, ctx),
         KeyBinding::new("insert", ToggleOvertypeInsertMode, ctx),
         KeyBinding::new("secondary-k secondary-b", SetSelectionAnchor, ctx),
         KeyBinding::new("secondary-k secondary-k", SelectFromAnchorToCursor, ctx),
@@ -443,6 +516,10 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-alt-backspace", DeleteWordPartLeft, ctx),
             KeyBinding::new("ctrl-alt-delete", DeleteWordPartRight, ctx),
             KeyBinding::new("ctrl-o", LineBreakInsert, ctx),
+            KeyBinding::new("ctrl-k", DeleteAllRight, ctx),
+            KeyBinding::new("cmd-delete", DeleteAllRight, ctx),
+            KeyBinding::new("ctrl-j", JoinLines, ctx),
+            KeyBinding::new("ctrl-t", TransposeLetters, ctx),
             KeyBinding::new("ctrl-a", CursorLineStart, ctx),
             KeyBinding::new("cmd-shift-alt-left", CursorColumnSelectLeft, ctx),
             KeyBinding::new("cmd-shift-alt-right", CursorColumnSelectRight, ctx),

@@ -624,3 +624,83 @@ fn overtype_mode_typing_and_composition(cx: &mut TestAppContext) {
     cx.simulate_input("b");
     assert_eq!(text(&editor, cx), "12a4セb6789");
 }
+
+#[gpui::test]
+fn line_and_text_transform_actions(cx: &mut TestAppContext) {
+    use gpui_monaco::actions::*;
+    let (editor, cx) = editor_with_text("gamma\nalpha\nbeta  \nalpha", cx);
+    cx.dispatch_action(SortLinesAscending);
+    assert_eq!(text(&editor, cx), "alpha\nalpha\nbeta  \ngamma");
+    cx.dispatch_action(DeleteDuplicateLines);
+    assert_eq!(text(&editor, cx), "alpha\nbeta  \ngamma");
+    cx.simulate_keystrokes("secondary-k secondary-x");
+    assert_eq!(text(&editor, cx), "alpha\nbeta\ngamma");
+    cx.dispatch_action(ReverseLines);
+    assert_eq!(text(&editor, cx), "gamma\nbeta\nalpha");
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 3))], cx)
+    });
+    cx.dispatch_action(TransformToUppercase);
+    assert_eq!(text(&editor, cx), "GAMMA\nbeta\nalpha");
+    cx.dispatch_action(JoinLines);
+    assert_eq!(text(&editor, cx), "GAMMA beta\nalpha");
+    cx.dispatch_action(DuplicateSelection);
+    assert_eq!(text(&editor, cx), "GAMMA beta\nGAMMA beta\nalpha");
+}
+
+#[gpui::test]
+fn reindent_lines_and_selected_lines(cx: &mut TestAppContext) {
+    use gpui_monaco::actions::*;
+    let (editor, cx) = rust_editor("fn a() {\nif x {\nb();\n}\n}", cx);
+    cx.dispatch_action(ReindentLines);
+    assert_eq!(
+        text(&editor, cx),
+        "fn a() {\n    if x {\n        b();\n    }\n}"
+    );
+
+    editor.update(cx, |e, cx| {
+        e.model().clone().update(cx, |m, cx| {
+            m.set_value("fn a() {\n    x();\ny();\n        z();\n}", cx)
+        });
+    });
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[Selection {
+                anchor: p(3, 1),
+                head: p(3, 4),
+            }],
+            cx,
+        )
+    });
+    cx.dispatch_action(ReindentSelectedLines);
+    // Only the selected line changes, based on the line above it.
+    assert_eq!(
+        text(&editor, cx),
+        "fn a() {\n    x();\n    y();\n        z();\n}"
+    );
+}
+
+#[gpui::test]
+fn in_place_replace_and_remove_brackets(cx: &mut TestAppContext) {
+    use gpui_monaco::actions::*;
+    let (editor, cx) = rust_editor("let x = foo(1, true);", cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 13))], cx)
+    });
+    cx.simulate_keystrokes("secondary-shift-.");
+    assert_eq!(text(&editor, cx), "let x = foo(2, true);");
+    cx.simulate_keystrokes("secondary-shift-, secondary-shift-,");
+    assert_eq!(text(&editor, cx), "let x = foo(0, true);");
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 16))], cx)
+    });
+    cx.dispatch_action(InPlaceReplaceUp);
+    assert_eq!(text(&editor, cx), "let x = foo(0, false);");
+    // Inside the parentheses: the enclosing pair goes.
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 14))], cx)
+    });
+    cx.dispatch_action(RemoveBrackets);
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "let x = foo0, false;");
+}

@@ -944,6 +944,69 @@ impl CodeEditor {
         self.apply(operation, cx);
     }
 
+    /// Like `run_edit` for commands that may have nothing to do.
+    fn run_optional_edit(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&CursorConfig, &text::Rope, &CursorCollection) -> Option<EditOperation>,
+    ) {
+        let config = self.cursor_config(cx);
+        if let Some(operation) = f(&config, self.snapshot.rope(), &self.cursors) {
+            self.apply(operation, cx);
+        }
+    }
+
+    /// Steps the number or value at the cursor up or down (Monaco
+    /// `editor.action.inPlaceReplace.up` / `.down`), briefly highlighting it.
+    pub fn in_place_replace(&mut self, up: bool, cx: &mut Context<Self>) {
+        let config = self.cursor_config(cx);
+        let word_pattern = self
+            .model
+            .read(cx)
+            .language()
+            .and_then(|l| l.config.word_pattern.clone());
+        let Some((operation, highlight)) = cursor::in_place_replace(
+            &config,
+            self.snapshot.rope(),
+            &self.cursors,
+            word_pattern.as_ref(),
+            up,
+        ) else {
+            return;
+        };
+        self.apply(operation, cx);
+        // Monaco flashes the new value for 350ms.
+        let rope = self.snapshot.rope();
+        let range =
+            rope.point_utf16_to_offset(highlight.start)..rope.point_utf16_to_offset(highlight.end);
+        let options = crate::decorations::DecorationOptions {
+            border: Some(self.theme.colors.input_option_active_border),
+            ..Default::default()
+        };
+        let owner = Some(cx.entity_id());
+        let ids = self.model.update(cx, |model, cx| {
+            model.delta_decorations(owner, &[], vec![(range, options)], cx)
+        });
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(350))
+                .await;
+            this.update(cx, |this, cx| {
+                this.model.update(cx, |model, cx| {
+                    model.delta_decorations(None, &ids, Vec::new(), cx)
+                });
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Applies a case transform to each selection or word (Monaco's
+    /// `editor.action.transformTo*`).
+    pub fn transform_case(&mut self, transform: cursor::CaseTransform, cx: &mut Context<Self>) {
+        self.run_edit(cx, |c, m, s| cursor::transform_case(c, m, s, transform));
+    }
+
     fn delete_left(&mut self, _: &DeleteLeft, _: &mut Window, cx: &mut Context<Self>) {
         let prev = self.prev_edit_kind;
         let operation = self.with_language(cx, |config, rope, cursors, lang| {
@@ -2144,6 +2207,90 @@ impl Render for CodeEditor {
                 this.column_select(cursor::ColumnSelectCommand::PageDown, cx)
             }))
             .on_action(cx.listener(|this, _: &CursorUndo, _, cx| this.cursor_undo(cx)))
+            .on_action(
+                cx.listener(|this, _: &InPlaceReplaceUp, _, cx| this.in_place_replace(true, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &InPlaceReplaceDown, _, cx| this.in_place_replace(false, cx)),
+            )
+            .on_action(cx.listener(|this, _: &RemoveBrackets, _, cx| this.remove_brackets(cx)))
+            .on_action(cx.listener(|this, _: &ReindentLines, _, cx| {
+                let operation = this.with_language(cx, |config, rope, cursors, lang| {
+                    lang.and_then(|lang| cursor::reindent_lines(config, rope, cursors, lang))
+                });
+                if let Some(operation) = operation {
+                    this.apply(operation, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ReindentSelectedLines, _, cx| {
+                let operation = this.with_language(cx, |config, rope, cursors, lang| {
+                    lang.and_then(|lang| {
+                        cursor::reindent_selected_lines(config, rope, cursors, lang)
+                    })
+                });
+                if let Some(operation) = operation {
+                    this.apply(operation, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SortLinesAscending, _, cx| {
+                this.run_optional_edit(cx, |c, m, s| cursor::sort_lines(c, m, s, false))
+            }))
+            .on_action(cx.listener(|this, _: &SortLinesDescending, _, cx| {
+                this.run_optional_edit(cx, |c, m, s| cursor::sort_lines(c, m, s, true))
+            }))
+            .on_action(cx.listener(|this, _: &DeleteDuplicateLines, _, cx| {
+                this.run_optional_edit(cx, cursor::delete_duplicate_lines)
+            }))
+            .on_action(
+                cx.listener(|this, _: &ReverseLines, _, cx| {
+                    this.run_edit(cx, cursor::reverse_lines)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &TrimTrailingWhitespace, _, cx| {
+                this.run_edit(cx, cursor::trim_trailing_whitespace)
+            }))
+            .on_action(cx.listener(|this, _: &DeleteAllRight, _, cx| {
+                this.run_edit(cx, cursor::delete_all_right)
+            }))
+            .on_action(
+                cx.listener(|this, _: &JoinLines, _, cx| this.run_edit(cx, cursor::join_lines)),
+            )
+            .on_action(
+                cx.listener(|this, _: &Transpose, _, cx| this.run_edit(cx, cursor::transpose)),
+            )
+            .on_action(cx.listener(|this, _: &TransposeLetters, _, cx| {
+                this.run_optional_edit(cx, cursor::transpose_letters)
+            }))
+            .on_action(cx.listener(|this, _: &DuplicateSelection, _, cx| {
+                this.run_edit(cx, cursor::duplicate_selection)
+            }))
+            .on_action(cx.listener(|this, _: &MoveCaretLeft, _, cx| {
+                this.run_edit(cx, |c, m, s| cursor::move_caret(c, m, s, true))
+            }))
+            .on_action(cx.listener(|this, _: &MoveCaretRight, _, cx| {
+                this.run_edit(cx, |c, m, s| cursor::move_caret(c, m, s, false))
+            }))
+            .on_action(cx.listener(|this, _: &TransformToUppercase, _, cx| {
+                this.transform_case(cursor::CaseTransform::Upper, cx)
+            }))
+            .on_action(cx.listener(|this, _: &TransformToLowercase, _, cx| {
+                this.transform_case(cursor::CaseTransform::Lower, cx)
+            }))
+            .on_action(cx.listener(|this, _: &TransformToTitlecase, _, cx| {
+                this.transform_case(cursor::CaseTransform::Title, cx)
+            }))
+            .on_action(cx.listener(|this, _: &TransformToSnakecase, _, cx| {
+                this.transform_case(cursor::CaseTransform::Snake, cx)
+            }))
+            .on_action(cx.listener(|this, _: &TransformToCamelcase, _, cx| {
+                this.transform_case(cursor::CaseTransform::Camel, cx)
+            }))
+            .on_action(cx.listener(|this, _: &TransformToPascalcase, _, cx| {
+                this.transform_case(cursor::CaseTransform::Pascal, cx)
+            }))
+            .on_action(cx.listener(|this, _: &TransformToKebabcase, _, cx| {
+                this.transform_case(cursor::CaseTransform::Kebab, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &ToggleOvertypeInsertMode, _, cx| this.toggle_overtype(cx)),
             )

@@ -13,6 +13,16 @@ All notable changes to this project are documented here. The format follows [Kee
 - Scroll commands: `scrollLineUp`/`Down`, `scrollPageUp`/`Down` and `scrollEditorTop`/`Bottom`, plus `CodeEditor::scroll_by`, `scroll_lines` and `scroll_pages` (#81).
 - Overtype mode (`toggleOvertypeInsertMode`, Insert), with `overtype_cursor_style` and `overtype_on_paste`, including IME compositions (#81).
 - Options: `multi_cursor_modifier` (Alt or Cmd/Ctrl), `multi_cursor_paste`, `multi_cursor_limit`, `multi_cursor_merge_overlapping` and `column_selection` (#81).
+- Line and text commands (#80):
+  - Sort lines ascending/descending, delete duplicate lines and reverse lines.
+  - Trim trailing whitespace (Cmd+K Cmd+X) and `deleteAllRight` (Ctrl+K / Cmd+Delete on macOS).
+  - Join lines (Ctrl+J), `transpose`, `transposeLetters` (Ctrl+T) and move caret left/right.
+  - Case transforms: upper, lower, title, snake, camel, Pascal and kebab.
+  - Duplicate selection.
+  - Reindent lines and reindent selected lines.
+  - In-place replace (Cmd+Shift+. / ,).
+  - Remove brackets (Cmd+Alt+Backspace).
+- `EditOperation::from_edits`.
 - `TextModel::language_at` (Monaco `getLanguageIdAtPosition`), and the `comments` editor option.
 - Language configurations accept `lineComment` as `{ "comment", "noIndent" }`.
 

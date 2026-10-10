@@ -54,6 +54,26 @@ impl CodeEditor {
         cursor::matching_bracket(rope, &language.config, position, &skippable)
     }
 
+    /// Deletes the bracket pair at or around each cursor (Monaco
+    /// `editor.action.removeBrackets`, Cmd/Ctrl+Alt+Backspace).
+    pub fn remove_brackets(&mut self, cx: &mut Context<Self>) {
+        let mut ranges: Vec<Range<PointUtf16>> = Vec::new();
+        for selection in self.cursors.selections() {
+            if let Some((open, close)) = self.bracket_pair(selection.head, cx) {
+                ranges.extend([open, close]);
+            }
+        }
+        ranges.sort_by_key(|r| (r.start, r.end));
+        ranges.dedup();
+        if ranges.is_empty() {
+            return;
+        }
+        let rope = self.snapshot.rope();
+        let edits = ranges.into_iter().map(|r| (r, String::new())).collect();
+        let operation = cursor::EditOperation::from_edits(rope, &self.cursors.selections(), edits);
+        self.apply(operation, cx);
+    }
+
     /// Re-highlights the bracket pairs next to the cursors (Monaco
     /// `matchBrackets: "always"`).
     pub(crate) fn update_bracket_highlights(&mut self, cx: &mut Context<Self>) {
