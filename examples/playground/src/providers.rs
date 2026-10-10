@@ -438,7 +438,47 @@ impl OnTypeFormattingProvider for DemoFormatter {
     }
 }
 
+/// Ghost text completing a few lines from what's typed.
+struct DemoInlineCompletions;
+impl InlineCompletionsProvider for DemoInlineCompletions {
+    fn provide_inline_completions(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        _: InlineCompletionContext,
+        _: &mut App,
+    ) -> Task<anyhow::Result<InlineCompletionList>> {
+        const LINES: &[&str] = &[
+            "println!(\"{}\", total);",
+            "let total = items.iter().sum::<usize>();",
+            "fn render(&self) -> usize {\n    self.items.len()\n}",
+        ];
+        let line = context.snapshot.line(position.row);
+        let before: String = line.chars().take(position.column as usize).collect();
+        let typed = before.trim_start();
+        let indent = &before[..before.len() - typed.len()];
+        let items = if typed.len() < 2 {
+            Vec::new()
+        } else {
+            LINES
+                .iter()
+                .filter(|l| l.starts_with(typed))
+                .map(|l| InlineCompletion {
+                    insert_text: format!("{indent}{}", l.replace('\n', &format!("\n{indent}"))),
+                    range: Some(PointUtf16::new(position.row, 0)..position),
+                    ..Default::default()
+                })
+                .collect()
+        };
+        Task::ready(Ok(InlineCompletionList {
+            items,
+            suppress_suggestions: None,
+        }))
+    }
+}
+
 pub fn register(cx: &mut App) {
+    register_inline_completions_provider(cx, LanguageSelector::All, DemoInlineCompletions);
     register_document_formatting_provider(cx, LanguageSelector::All, DemoFormatter);
     register_document_range_formatting_provider(cx, LanguageSelector::All, DemoFormatter);
     register_on_type_formatting_provider(cx, LanguageSelector::All, DemoFormatter);

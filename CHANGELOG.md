@@ -149,6 +149,15 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Inline completions, part 2 (#99):** ported from Monaco's `InlineCompletionsModel`, `InlineCompletionsSource` and controller.
+  - Typing, pasting, Tab and deleting ask providers for completions after a 50ms debounce. Completions stay valid while what's typed matches them (`inlineCompletionIsVisible`).
+  - The selected one shows as italic ghost text after the cursor, with extra lines in a view zone.
+  - Tab accepts it, except when the ghost text starts with a full indent inside the indentation. Cmd/Ctrl+Right accepts the next word, and `AcceptNextInlineLine` the next line.
+  - Alt+] and Alt+[ cycle (asking explicitly first; `inline_suggestion_index`). Alt+\\ requests explicitly. Escape, explicit cursor moves and blur (unless `keep_on_blur`) hide it.
+  - It hides in snippet mode and during IME composition. Accepting runs the item's command.
+  - `suppress_suggestions` keeps the suggest widget closed.
+  - `suggest.preview` shows the selected suggestion as ghost text.
+  - `handle_item_did_show` and `handle_partial_accept` are called.
 - **Inline completions, part 1 (#99):**
   - A port of Monaco's `computeGhostText` (with its char diff and tests).
   - The `InlineCompletionsProvider` API and the `inline_suggest` options.

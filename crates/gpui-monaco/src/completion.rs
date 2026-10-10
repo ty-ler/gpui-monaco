@@ -173,6 +173,29 @@ impl CodeEditor {
             .is_some_and(|(widget, _)| widget.read(cx).details_shown(cx))
     }
 
+    /// What accepting the selected suggestion in insert mode would replace
+    /// and insert (Monaco's `SuggestWidgetAdaptor` selected item), for the
+    /// suggest preview.
+    pub(crate) fn selected_suggestion_edit(&self) -> Option<(std::ops::Range<PointUtf16>, String)> {
+        let session = self.suggest.session.as_ref()?;
+        let scored = session.model.filtered().get(session.selected)?;
+        let item = &session.model.items()[scored.index];
+        let head = self.cursors.primary().position;
+        let start = item
+            .range
+            .as_ref()
+            .filter(|r| r.start.row == head.row)
+            .map_or(session.word_start, |r| r.start.column);
+        let text = if item.insert_text_is_snippet {
+            crate::snippet::parser::SnippetParser::new()
+                .parse(item.insert_text(), false, false)
+                .to_string()
+        } else {
+            item.insert_text().to_string()
+        };
+        Some((PointUtf16::new(head.row, start)..head, text))
+    }
+
     /// The selected suggestion's label and its index in the list.
     pub fn selected_suggestion(&self) -> Option<(usize, CompletionItem)> {
         let session = self.suggest.session.as_ref()?;
@@ -185,7 +208,7 @@ impl CodeEditor {
 
     /// Start column of the word ending at the cursor (Monaco
     /// `getWordUntilPosition`).
-    fn word_start_at(&self, position: PointUtf16) -> u32 {
+    pub(crate) fn word_start_at(&self, position: PointUtf16) -> u32 {
         let line = self.snapshot.line(position.row);
         let mut column = 0u32;
         let mut start = 0u32;
@@ -919,8 +942,14 @@ impl CodeEditor {
         if self.options.read_only {
             return;
         }
+        // Typing triggers inline completions too.
+        self.trigger_inline_completions(cx);
         let language = self.model().read(cx).language_id().map(|l| l.to_string());
         let providers = completion_providers(cx, language.as_deref());
+        // Monaco `suppressSuggestions`: ghost text keeps the widget closed.
+        if self.inline_suppresses_suggestions(cx) && self.suggest.session.is_none() {
+            return;
+        }
         if self.options.suggest_on_trigger_characters
             && providers
                 .iter()

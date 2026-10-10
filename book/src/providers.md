@@ -212,6 +212,38 @@ The editor shows them as injected text that moves with edits. As in Monaco:
 
 Unlike Monaco, hints use the editor's font size, and their label parts, tooltips and edits aren't interactive yet.
 
+## Inline completions
+
+An `InlineCompletionsProvider` offers ghost text at the cursor, such as AI completions:
+
+```rust,ignore
+impl InlineCompletionsProvider for MyCompletions {
+    fn provide_inline_completions(&self, context: &ProviderContext, position: PointUtf16,
+        completion_context: InlineCompletionContext, cx: &mut App)
+        -> Task<anyhow::Result<InlineCompletionList>> {
+        // Replace from the line start with the whole suggested line.
+        Task::ready(Ok(InlineCompletionList {
+            items: vec![InlineCompletion {
+                insert_text: "println!(\"hi\");".into(),
+                range: Some(PointUtf16::new(position.row, 0)..position),
+                ..Default::default()
+            }],
+            suppress_suggestions: None,
+        }))
+    }
+}
+```
+
+Typing asks for completions after a short pause. A completion keeps showing, without a new request, while what you type matches it. The rest shows as faded italic text after the cursor, and lines after the first go in a zone below.
+
+To accept:
+- Tab takes it all.
+- Cmd/Ctrl+Right takes the next word, and `AcceptNextInlineLine` the next line.
+
+Alt+] and Alt+[ show the other completions, and Alt+\\ asks explicitly. Escape or moving the cursor hides it.
+
+The `inline_suggest` options control this; see [Options](options.md). With `suggest.preview`, the suggest widget's selected item shows as ghost text too.
+
 ## Semantic tokens
 
 A `DocumentSemanticTokensProvider` colors identifiers by meaning, such as parameters, read-only variables and macros. It works as in LSP: a legend of token types and modifiers, plus five numbers per token. It can return all tokens, or edits against the result it returned last (`last_result_id`). A `DocumentRangeSemanticTokensProvider` colors the visible lines until a full result arrives.

@@ -20,6 +20,13 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
   - `\n` in a pattern still enables multiline search, as in Monaco.
   - Replacement patterns support `$1`, `$&`, `$$`, `\n` and `\t`. Monaco's case-changing escapes (`\u`, `\U`, `\l`, `\L`) are not supported.
   - Language configuration patterns (`wordPattern`, `indentationRules`, …) use `fancy-regex`, so VS Code's configurations work unchanged.
+- **Inline completions:**
+  - There is no toolbar (`showToolbar`).
+  - Ghost text isn't syntax highlighted.
+  - Secondary cursors don't get it.
+  - Provider groups (`yieldsToGroupIds`) and `completeBracketPairs` aren't supported.
+  - The suggest widget's items aren't extended by inline completions.
+  - A multi-line completion inserted mid-line keeps the rest of the line after its first line, rather than moving it to the end of the ghost text.
 - **Snippets:**
   - Transform regexes run on Rust's regex engine (via JavaScript translation), so exotic JavaScript syntax may not compile.
   - `$CURRENT_*` day and month names are English.
