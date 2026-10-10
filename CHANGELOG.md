@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Drag and drop (#92, part 1):**
+  - **`EditorOptions::drag_and_drop`** (Monaco `dragAndDrop`, on by default): dragging the selection moves it, and holding Alt (Ctrl elsewhere) copies it. A dotted caret shows the drop position, and the mouse cursor shows a copy. Escape cancels the drag.
+  - **Clicks:** a click on the selection without dragging places the cursor, as in Monaco. The edits and the resulting selection port `DragAndDropCommand`.
+  - **`double_click_selects_block`** (Monaco `doubleClickSelectsBlock`, on by default): double-clicking just inside brackets or quotes selects their content.
 - **Unicode highlighting (#86):** `EditorOptions::unicode_highlight` (Monaco `unicodeHighlight`) borders ambiguous characters (such as Cyrillic `а`) and invisible ones (such as zero-width spaces). With `non_basic_ascii`, it borders every non-ASCII character.
   - **Options:** `include_comments`, `include_strings`, `allowed_characters` and `allowed_locales` (`_os` and `_vscode` mean the system's locale). Defaults follow Monaco in a trusted workspace.
   - **Hover:** says why a character is highlighted. Its "Adjust settings" link offers to allow the character or the locale, or to turn the kind off, by changing the editor's options.

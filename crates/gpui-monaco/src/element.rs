@@ -851,6 +851,8 @@ pub struct PrepaintState {
     section_headers: Vec<MinimapSectionHeader>,
     /// The placeholder's lines and where they go.
     placeholder: Vec<(ShapedLine, gpui::Point<Pixels>)>,
+    /// Where a dragged selection would drop.
+    dnd_target: Option<Bounds<Pixels>>,
     /// The minimap's image and where it goes; replaced images to free.
     minimap_image: Option<(std::sync::Arc<gpui::RenderImage>, Bounds<Pixels>)>,
     minimap_stale: Vec<std::sync::Arc<gpui::RenderImage>>,
@@ -2647,6 +2649,15 @@ fn prepaint_editor(
             ));
         }
     }
+    // Monaco's `dnd-target`: a 2px dotted line where the drag would drop.
+    let dnd_target = editor.dnd.target.and_then(|position| {
+        let line = layout.line_for_point(position)?;
+        let x = layout.text_origin_x() + line.x_for_column(position.column);
+        Some(Bounds::new(
+            point(x, layout.text_top(line.view_line)),
+            size(px(2.), line_height),
+        ))
+    });
     let focused = editor.focus_handle.is_focused(window);
     editor.layout = Some(layout.clone());
     PrepaintState {
@@ -2670,6 +2681,7 @@ fn prepaint_editor(
         minimap_image,
         section_headers,
         placeholder,
+        dnd_target,
         minimap_stale: std::mem::take(&mut editor.minimap_cache.stale),
         minimap_slider_visible: options.minimap.always_show_slider || editor.minimap_hovered,
         sticky: sticky_shaped,
@@ -2906,6 +2918,18 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                     paint_fold_placeholder(*x, *top, layout, colors, window);
                 }
 
+                if let Some(target) = state.dnd_target {
+                    // Dotted: 2px dashes with 2px gaps.
+                    let mut y = target.top();
+                    while y < target.bottom() {
+                        let dash = Bounds::new(
+                            point(target.left(), y),
+                            size(target.size.width, px(2.).min(target.bottom() - y)),
+                        );
+                        window.paint_quad(fill(dash, colors.cursor));
+                        y += px(4.);
+                    }
+                }
                 if state.focused && state.cursor_visible {
                     for cursor in &state.cursor_quads {
                         let height = cursor.size.height * state.cursor_scale;

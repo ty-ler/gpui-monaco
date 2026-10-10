@@ -24,6 +24,7 @@ mod completion;
 pub mod cursor;
 pub mod decorations;
 mod definition;
+mod dnd;
 mod editor;
 mod editor_actions;
 mod element;
