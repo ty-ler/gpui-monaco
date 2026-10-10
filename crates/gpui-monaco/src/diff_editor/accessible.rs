@@ -500,6 +500,7 @@ impl Render for AccessibleDiffViewer {
                 viewer.child(
                     div()
                         .id("diff-review-close")
+                        .tooltip(crate::tooltip::tooltip("Close", &colors))
                         .absolute()
                         .top(px(2.))
                         .right(px(10.))

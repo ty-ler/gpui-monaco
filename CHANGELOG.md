@@ -5,6 +5,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Hover titles (#181):** the diff editors' buttons show Monaco's titles on hover, in the editor widget colors. They cover "Revert Block", "Revert Change", "Show Unchanged Region", "Click or drag to show more above", "Double click to unfold", "Compare" and "Close".
 - **Glyph margin widgets and margin revert arrows (#181):**
   - **Widgets:** `CodeEditor::add_glyph_margin_widget` (`GlyphMarginWidget`, Monaco `addGlyphMarginWidget`) puts a host view in the glyph margin beside a line, following edits.
   - **Arrows:** with `render_gutter_menu` off, the diff editor shows Monaco's older margin revert arrows (`render_margin_revert_icon`, on by default). There's one beside each change, one in a deletion's padding, or one for the selection.
