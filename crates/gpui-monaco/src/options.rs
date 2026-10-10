@@ -100,6 +100,63 @@ impl Default for StickyScrollOptions {
     }
 }
 
+/// Which whitespace is drawn as `·` and `→` (Monaco `renderWhitespace`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RenderWhitespace {
+    /// None.
+    None,
+    /// All except single spaces between words.
+    Boundary,
+    /// Only whitespace inside selections (the default).
+    #[default]
+    Selection,
+    /// Only trailing whitespace.
+    Trailing,
+    /// All whitespace.
+    All,
+}
+
+/// How the last line's number shows when the file ends with a newline
+/// (Monaco `renderFinalNewline`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RenderFinalNewline {
+    /// Numbered like any line (the default).
+    #[default]
+    On,
+    /// No line number.
+    Off,
+    /// A dimmed line number.
+    Dimmed,
+}
+
+/// A vertical ruler (Monaco `IRulerOption`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ruler {
+    /// The visible column it's drawn at.
+    pub column: u32,
+    /// Its color; `None` uses the theme's `editorRuler.foreground`.
+    pub color: Option<gpui::Hsla>,
+}
+
+/// Monaco `guides`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GuideOptions {
+    /// Draw indent guides (Monaco `guides.indentation`, default `true`).
+    pub indentation: bool,
+    /// Highlight the guide of the block with the cursor (Monaco
+    /// `guides.highlightActiveIndentation`, default `true`).
+    pub highlight_active_indentation: bool,
+}
+
+impl Default for GuideOptions {
+    fn default() -> Self {
+        Self {
+            indentation: true,
+            highlight_active_indentation: true,
+        }
+    }
+}
+
 /// Which modifier adds a cursor on click (Monaco `multiCursorModifier`); the
 /// other one opens definitions.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -216,6 +273,17 @@ pub struct EditorOptions {
     pub minimap: MinimapOptions,
     /// Monaco `stickyScroll`.
     pub sticky_scroll: StickyScrollOptions,
+    /// Monaco `renderWhitespace`.
+    pub render_whitespace: RenderWhitespace,
+    /// Monaco `renderControlCharacters`: show control characters as visible
+    /// symbols such as `␇` (default `true`).
+    pub render_control_characters: bool,
+    /// Monaco `renderFinalNewline`.
+    pub render_final_newline: RenderFinalNewline,
+    /// Monaco `guides`.
+    pub guides: GuideOptions,
+    /// Monaco `rulers`: vertical lines at visible columns.
+    pub rulers: Vec<Ruler>,
     /// Monaco `occurrencesHighlight`: highlight the occurrences of the symbol
     /// at the cursor (default `true`).
     pub occurrences_highlight: bool,
@@ -306,6 +374,11 @@ impl Default for EditorOptions {
             sticky_scroll: StickyScrollOptions::default(),
             comments: Default::default(),
             overtype_cursor_style: CursorStyle::Block,
+            render_whitespace: RenderWhitespace::Selection,
+            render_control_characters: true,
+            render_final_newline: RenderFinalNewline::On,
+            guides: GuideOptions::default(),
+            rulers: Vec::new(),
             occurrences_highlight: true,
             occurrences_highlight_delay: std::time::Duration::from_millis(250),
             selection_highlight: true,

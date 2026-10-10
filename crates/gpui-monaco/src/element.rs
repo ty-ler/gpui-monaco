@@ -84,6 +84,8 @@ pub(crate) struct TextMetrics {
     pub font_size: Pixels,
     pub line_height: Pixels,
     pub em_width: Pixels,
+    /// Show control characters as their Unicode control pictures.
+    pub render_control_characters: bool,
 }
 
 impl TextMetrics {
@@ -99,6 +101,7 @@ impl TextMetrics {
             font_size,
             line_height: options.resolved_line_height(),
             em_width,
+            render_control_characters: options.render_control_characters,
         }
     }
 }
@@ -111,6 +114,16 @@ fn run(len: usize, font: &Font, color: Hsla) -> TextRun {
         background_color: None,
         underline: None,
         strikethrough: None,
+    }
+}
+
+/// The Unicode control picture for a C0 control character or DEL.
+fn control_picture(ch: char) -> Option<char> {
+    match ch {
+        '\t' => None,
+        '\u{0}'..='\u{1f}' => char::from_u32(0x2400 + ch as u32),
+        '\u{7f}' => Some('\u{2421}'),
+        _ => None,
     }
 }
 
@@ -194,6 +207,12 @@ pub(crate) fn layout_segment(
             let spaces = tab_size - visible_column % tab_size;
             display.extend(std::iter::repeat_n(' ', spaces));
             visible_column += spaces;
+        } else if let Some(picture) =
+            control_picture(ch).filter(|_| metrics.render_control_characters)
+        {
+            // Monaco `renderControlCharacters`: `\u{7}` shows as `␇`.
+            display.push(picture);
+            visible_column += 1;
         } else {
             display.push(ch);
             visible_column += 1;
@@ -554,6 +573,9 @@ impl IntoElement for EditorElement {
     }
 }
 
+/// The `·` and `→` glyphs, and where each goes (`true` for a tab).
+type WhitespaceMarks = (ShapedLine, ShapedLine, Vec<(gpui::Point<Pixels>, bool)>);
+
 pub struct PrepaintState {
     layout: EditorLayout,
     selections: Vec<Selection>,
@@ -569,6 +591,10 @@ pub struct PrepaintState {
     gutter_bars: Vec<(Bounds<Pixels>, Hsla)>,
     glyphs: Vec<(gpui::Point<Pixels>, ShapedLine)>,
     ruler_marks: Vec<(Bounds<Pixels>, Hsla)>,
+    /// Indent guides and rulers.
+    guides: Vec<(Bounds<Pixels>, Hsla)>,
+    /// Rendered whitespace.
+    whitespace: Option<WhitespaceMarks>,
     embedded: Vec<Embedded>,
     minimap_blocks: Vec<(Bounds<Pixels>, Hsla)>,
     minimap_slider_visible: bool,
@@ -1415,6 +1441,105 @@ fn prepaint_editor(
         }
     }
 
+    // Indent guides (Monaco `IndentGuidesOverlay`) and rulers.
+    let mut guides = Vec::new();
+    if let (Some(first), Some(last)) = (layout.lines.first(), layout.lines.last())
+        && options.guides.indentation
+    {
+        let rope = snapshot.rope();
+        let model = editor.model().read(cx);
+        let ctx = crate::view::guides::GuideContext {
+            tab_size,
+            indent_size: model.options().indent_size,
+            off_side: model
+                .language()
+                .and_then(|l| l.config.folding.as_ref())
+                .is_some_and(|f| f.off_side),
+        };
+        let rows = first.row..last.row + 1;
+        let counts = crate::view::guides::lines_indent_guides(rope, rows.clone(), ctx);
+        let active = options.guides.highlight_active_indentation.then(|| {
+            crate::view::guides::active_indent_guide(rope, primary.row, rows.start, last.row, ctx)
+        });
+        let origin_x = layout.text_origin_x();
+        for line in &layout.lines {
+            let count = counts[(line.row - rows.start) as usize];
+            let top = layout.line_top(line.view_line);
+            for level in 1..=count {
+                let x = origin_x + metrics.em_width * ((level - 1) * ctx.indent_size) as f32;
+                let is_active = active.is_some_and(|a| {
+                    a.indent == level && a.start_row <= line.row && line.row <= a.end_row
+                });
+                let color = if is_active {
+                    colors.indent_guide_active
+                } else {
+                    colors.indent_guide
+                };
+                guides.push((Bounds::new(point(x, top), size(px(1.), line_height)), color));
+            }
+        }
+    }
+    for ruler in &options.rulers {
+        let x = layout.text_origin_x() + metrics.em_width * ruler.column as f32;
+        guides.push((
+            Bounds::new(
+                point(x, text_bounds.top()),
+                size(px(1.), text_bounds.size.height),
+            ),
+            ruler.color.unwrap_or(colors.ruler),
+        ));
+    }
+
+    // Rendered whitespace (Monaco `renderWhitespace`).
+    let whitespace =
+        (options.render_whitespace != crate::options::RenderWhitespace::None).then(|| {
+            let shape = |text: &'static str| {
+                window.text_system().shape_line(
+                    text.into(),
+                    metrics.font_size,
+                    &[run(text.len(), &metrics.font, colors.whitespace)],
+                    None,
+                )
+            };
+            let (dot, arrow) = (shape("\u{b7}"), shape("\u{2192}"));
+            let rope = snapshot.rope();
+            let mut marks = Vec::new();
+            for line in &layout.lines {
+                let text = rope.line(line.row);
+                let selected: Vec<Range<u32>> = selections
+                    .iter()
+                    .filter(|s| s.start().row <= line.row && line.row <= s.end().row)
+                    .map(|s| {
+                        let start = if s.start().row == line.row {
+                            s.start().column
+                        } else {
+                            0
+                        };
+                        let end = if s.end().row == line.row {
+                            s.end().column
+                        } else {
+                            u32::MAX
+                        };
+                        start..end
+                    })
+                    .collect();
+                let top = layout.line_top(line.view_line);
+                for column in crate::view::guides::whitespace_columns(
+                    &text,
+                    options.render_whitespace,
+                    &selected,
+                ) {
+                    if column < line.columns.start || column >= line.columns.end {
+                        continue;
+                    }
+                    let is_tab = text.encode_utf16().nth(column as usize) == Some(b'\t' as u16);
+                    let x = layout.text_origin_x() + line.x_for_column(column);
+                    marks.push((point(x, top), is_tab));
+                }
+            }
+            (dot, arrow, marks)
+        });
+
     // Gutter numbers: on the first view line of each row.
     let mut gutter_numbers = Vec::new();
     if options.line_numbers != LineNumbers::Off {
@@ -1422,6 +1547,15 @@ fn prepaint_editor(
         for line in layout.lines.iter().filter(|line| line.columns.start == 0) {
             let row = line.row;
             let is_active = selections.iter().any(|s| s.head.row == row);
+            // Monaco `renderFinalNewline`: the empty line after a final
+            // newline.
+            let is_final_newline =
+                row > 0 && row + 1 == snapshot.line_count() && snapshot.line_len(row) == 0;
+            if is_final_newline
+                && options.render_final_newline == crate::options::RenderFinalNewline::Off
+            {
+                continue;
+            }
             let label = match options.line_numbers {
                 LineNumbers::Relative if !is_active => primary.row.abs_diff(row).to_string(),
                 LineNumbers::Interval if !is_active && (row + 1) % 10 != 0 && row != 0 => {
@@ -1438,6 +1572,13 @@ fn prepaint_editor(
                 } else {
                     colors.line_number
                 });
+            let color = if is_final_newline
+                && options.render_final_newline == crate::options::RenderFinalNewline::Dimmed
+            {
+                color.opacity(0.4)
+            } else {
+                color
+            };
             let shaped = window.text_system().shape_line(
                 label.clone().into(),
                 metrics.font_size,
@@ -1512,6 +1653,8 @@ fn prepaint_editor(
         gutter_bars,
         glyphs,
         ruler_marks,
+        guides,
+        whitespace,
         embedded,
         minimap_blocks,
         minimap_slider_visible: options.minimap.always_show_slider || editor.minimap_hovered,
@@ -1643,6 +1786,9 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                         }
                     }
                 }
+                for (bounds, color) in &state.guides {
+                    window.paint_quad(fill(*bounds, *color));
+                }
                 for selection in &state.selections {
                     if selection.is_empty() {
                         continue;
@@ -1662,6 +1808,15 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                             cx,
                         )
                         .ok();
+                }
+
+                if let Some((dot, arrow, marks)) = &state.whitespace {
+                    for (origin, is_tab) in marks {
+                        let glyph = if *is_tab { arrow } else { dot };
+                        glyph
+                            .paint(*origin, line_height, TextAlign::Left, None, window, cx)
+                            .ok();
+                    }
                 }
 
                 for element in &mut zone_elements {

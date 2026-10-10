@@ -8,7 +8,7 @@ use gpui::{
     App, AppContext as _, Bounds, Context, Entity, Focusable, PathPromptOptions, SharedString,
     Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
-use gpui_monaco::options::{LineNumbers, WordWrap};
+use gpui_monaco::options::{LineNumbers, RenderWhitespace, Ruler, WordWrap};
 use gpui_monaco::text::LineEnding;
 use gpui_monaco::{CodeEditor, CodeEditorEvent, EditorColors, EditorOptions, TextModel, Theme};
 
@@ -82,6 +82,17 @@ impl Playground {
                     }
                     Err(_) => options.word_wrap = WordWrap::On,
                 }
+                editor.update_options(options, cx);
+            });
+        }
+        if std::env::var_os("PLAYGROUND_WHITESPACE").is_some() {
+            editor.update(cx, |editor, cx| {
+                let mut options = editor.options().clone();
+                options.render_whitespace = RenderWhitespace::All;
+                options.rulers = vec![Ruler {
+                    column: 40,
+                    color: None,
+                }];
                 editor.update_options(options, cx);
             });
         }
@@ -365,6 +376,23 @@ impl Render for Playground {
                         options.read_only,
                         &colors,
                         |this, _, cx| this.toggle(cx, |o| o.read_only = !o.read_only),
+                        cx,
+                    ))
+                    .child(button(
+                        "whitespace",
+                        "Whitespace",
+                        options.render_whitespace == RenderWhitespace::All,
+                        &colors,
+                        |this, _, cx| {
+                            this.toggle(cx, |o| {
+                                o.render_whitespace =
+                                    if o.render_whitespace == RenderWhitespace::All {
+                                        RenderWhitespace::Selection
+                                    } else {
+                                        RenderWhitespace::All
+                                    }
+                            })
+                        },
                         cx,
                     ))
                     .child(button(

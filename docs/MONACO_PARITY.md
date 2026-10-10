@@ -60,7 +60,8 @@ Issues are linked by number.
 | Minimap options (side, render characters, size), section headers | `minimap`, `sectionHeaders` | ❌ | #88 |
 | Sticky scroll (indentation folding model) | `stickyScroll` | ✅ | |
 | Sticky scroll outline model, keyboard focus, toggle | `stickyScroll` | ❌ | #106 |
-| Render whitespace, indent guides, bracket pair guides, rulers, control characters | view parts | ❌ | #84 |
+| Render whitespace, indent guides, rulers, control characters | view parts | ✅ | #84 |
+| Bracket pair guides | view parts | ❌ | #85 |
 | Bracket pair colorization | `bracketPairColorization` | ❌ | #85 |
 | Occurrence and selection highlight | `wordHighlighter` | ✅ | #83 |
 | Unicode highlighting, unusual line terminators | `unicodeHighlighter`, `unusualLineTerminators` | ❌ | #86 |

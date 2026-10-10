@@ -71,6 +71,14 @@ pub struct EditorColors {
     /// Write occurrences in the overview ruler
     /// (`editorOverviewRuler.wordHighlightStrongForeground`).
     pub word_highlight_strong_overview: Hsla,
+    /// Rendered whitespace (`editorWhitespace.foreground`).
+    pub whitespace: Hsla,
+    /// Indent guides (`editorIndentGuide.background1`).
+    pub indent_guide: Hsla,
+    /// The active indent guide (`editorIndentGuide.activeBackground1`).
+    pub indent_guide_active: Hsla,
+    /// Rulers (`editorRuler.foreground`).
+    pub ruler: Hsla,
     /// Other occurrences of the selected text (`editor.selectionHighlightBackground`).
     pub selection_highlight_background: Hsla,
     /// Selection occurrences in the overview ruler
@@ -133,6 +141,10 @@ impl EditorColors {
             word_highlight_overview: c(rgba(0xa0a0a0cc)),
             word_highlight_strong_overview: c(rgba(0xc0a0c0cc)),
             selection_highlight_background: c(rgba(0xadd6ff26)),
+            whitespace: c(rgba(0xe3e4e229)),
+            indent_guide: c(rgb(0x404040)),
+            indent_guide_active: c(rgb(0x707070)),
+            ruler: c(rgb(0x5a5a5a)),
             selection_highlight_overview: c(rgba(0xa0a0a0cc)),
             widget_background: c(rgb(0x252526)),
             widget_foreground: c(rgb(0xcccccc)),
@@ -175,6 +187,10 @@ impl EditorColors {
             word_highlight_overview: c(rgba(0xa0a0a0cc)),
             word_highlight_strong_overview: c(rgba(0xc0a0c0cc)),
             selection_highlight_background: c(rgba(0xadd6ff80)),
+            whitespace: c(rgba(0x33333333)),
+            indent_guide: c(rgb(0xd3d3d3)),
+            indent_guide_active: c(rgb(0x939393)),
+            ruler: c(rgb(0xd3d3d3)),
             selection_highlight_overview: c(rgba(0xa0a0a0cc)),
             widget_background: c(rgb(0xf3f3f3)),
             widget_foreground: c(rgb(0x616161)),
@@ -259,6 +275,18 @@ impl EditorColors {
             &mut self.selection_highlight_overview,
             "editorOverviewRuler.selectionHighlightForeground",
         );
+        set(&mut self.whitespace, "editorWhitespace.foreground");
+        set(&mut self.indent_guide, "editorIndentGuide.background");
+        set(&mut self.indent_guide, "editorIndentGuide.background1");
+        set(
+            &mut self.indent_guide_active,
+            "editorIndentGuide.activeBackground",
+        );
+        set(
+            &mut self.indent_guide_active,
+            "editorIndentGuide.activeBackground1",
+        );
+        set(&mut self.ruler, "editorRuler.foreground");
         set(&mut self.widget_background, "editorWidget.background");
         set(&mut self.widget_foreground, "editorWidget.foreground");
         set(&mut self.widget_border, "editorWidget.border");
