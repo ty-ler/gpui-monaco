@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Side-by-side diff editor (#52, part 2):** `DiffEditor` ports Monaco's `DiffEditorWidget`.
+  - **Display:** the original and modified models side by side, with changed lines and characters highlighted and `+`/`−` gutter signs. Monaco's `computeRangeAlignment` view zones (striped) keep the sides aligned, wrapped lines included.
+  - **Behavior:** synchronized scrolling, a resizable split, overview ruler marks, and `go_to_diff` (Alt+F5 / Shift+Alt+F5). The diff is recomputed in the background after edits.
+  - **Options:** `DiffEditorOptions`.
+  - **Decorations:** gain `margin_background` (Monaco `marginClassName`) and `lines_decoration_text` (an icon in the line decorations area).
+  - **Theme colors:** the `diffEditor.*` colors.
 - **Diff computation (#52, part 1):** `gpui_monaco::diff::compute_diff` ports Monaco's `DefaultLinesDiffComputer`: line changes with character-level inner changes, moved blocks, `ignore_trim_whitespace`, sub-word extension and the time limit.
   - **Conformance:** all 58 of Monaco's diffing fixtures pass.
   - **Coordinates:** results keep Monaco's 1-based line ranges, with helpers to convert to `PointUtf16`.

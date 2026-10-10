@@ -632,6 +632,32 @@ fn main() {
             Some(cx.new(|_| TextModel::new(&text).with_language(language).with_uri(uri)))
         });
         let bounds = Bounds::centered(None, size(px(1100.), px(760.)), cx);
+        // `PLAYGROUND_DIFF=original` compares it with `PLAYGROUND_FILE`.
+        if let (Ok(original), Ok(modified)) = (
+            std::env::var("PLAYGROUND_DIFF"),
+            std::env::var("PLAYGROUND_FILE"),
+        ) {
+            let load = |path: &str, cx: &mut App| {
+                let text = std::fs::read_to_string(path).unwrap_or_else(|e| format!("{path}: {e}"));
+                let language = language_for_path(path, cx);
+                cx.new(|_| TextModel::new(&text).with_language(language))
+            };
+            let (original, modified) = (load(&original, cx), load(&modified, cx));
+            let window = cx
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        ..Default::default()
+                    },
+                    |window, cx| {
+                        cx.new(|cx| gpui_monaco::DiffEditor::new(original, modified, window, cx))
+                    },
+                )
+                .expect("failed to open window");
+            cx.activate(true);
+            screenshot::capture_if_requested(window.into(), cx);
+            return;
+        }
         let window = cx
             .open_window(
                 WindowOptions {

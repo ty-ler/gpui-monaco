@@ -75,6 +75,13 @@ pub struct DecorationOptions {
     /// A colored bar in the line decorations gutter area (Monaco
     /// `linesDecorationsClassName`, e.g. dirty-diff markers).
     pub gutter_bar: Option<Hsla>,
+    /// Text centered in the line decorations area on every decorated line
+    /// (Monaco `linesDecorationsClassName` with an icon, e.g. the diff
+    /// editor's `+` and `-`).
+    pub lines_decoration_text: Option<(SharedString, Hsla)>,
+    /// A background across the whole gutter on the decorated lines (Monaco
+    /// `marginClassName`).
+    pub margin_background: Option<Hsla>,
     /// A mark in the overview ruler (the vertical scrollbar track) at the start row
     /// (Monaco `overviewRuler`).
     pub overview_ruler: Option<(Hsla, OverviewRulerLane)>,
