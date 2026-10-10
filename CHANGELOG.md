@@ -5,6 +5,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Migration notes (#60):** the book's new "Migrating from Monaco" page maps Monaco's editor, model, event, provider and option APIs to gpui-monaco's.
 - **Colorize and tokenize without an editor (#108):** `gpui_monaco::colorize` ports Monaco's `colorize`, `colorizeElement` and `tokenize`.
   - **`tokenize(text, language, registry)`:** each line's tokens, with UTF-16 offsets and Monaco token types such as `keyword.rust`.
   - **`colorize(...)`:** each line's text, with tabs expanded, and its highlights.

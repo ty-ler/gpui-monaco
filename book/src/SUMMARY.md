@@ -16,3 +16,4 @@
 - [Editing features](editing.md)
 - [Performance](performance.md)
 - [Differences from Monaco](differences.md)
+- [Migrating from Monaco](migrating.md)
