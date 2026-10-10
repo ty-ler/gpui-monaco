@@ -83,6 +83,11 @@ pub struct EditorColors {
     pub diff_move_border: Hsla,
     /// The active moved block's (`diffEditor.moveActive.border`).
     pub diff_move_active_border: Hsla,
+    /// A multi-diff editor's file headers
+    /// (`multiDiffEditor.headerBackground`).
+    pub multi_diff_header_background: Hsla,
+    /// The border above them (`multiDiffEditor.border`).
+    pub multi_diff_border: Hsla,
     /// Selections in an unfocused editor (`editor.inactiveSelectionBackground`).
     pub inactive_selection_background: Hsla,
     /// The cursor (`editorCursor.foreground`).
@@ -322,6 +327,8 @@ impl EditorColors {
             menu_separator_background: c(rgb(0x606060)),
             diff_move_border: c(rgba(0x8b8b8b9c)),
             diff_move_active_border: c(rgb(0xffa500)),
+            multi_diff_header_background: c(rgb(0x262626)),
+            multi_diff_border: c(rgba(0x00000000)),
             inactive_selection_background: c(rgb(0x3a3d41)),
             cursor: c(rgb(0xaeafad)),
             gutter_background: c(rgb(0x1e1e1e)),
@@ -453,6 +460,8 @@ impl EditorColors {
             menu_separator_background: c(rgb(0xd4d4d4)),
             diff_move_border: c(rgba(0x8b8b8b9c)),
             diff_move_active_border: c(rgb(0xffa500)),
+            multi_diff_header_background: c(rgb(0xececec)),
+            multi_diff_border: c(rgba(0xccccccff)),
             inactive_selection_background: c(rgb(0xe5ebf1)),
             cursor: c(rgb(0x000000)),
             gutter_background: c(rgb(0xfffffe)),
@@ -593,6 +602,8 @@ impl EditorColors {
             menu_separator_background: c(rgb(0x6fc3df)),
             diff_move_border: c(rgba(0x8b8b8b9c)),
             diff_move_active_border: c(rgb(0xffa500)),
+            multi_diff_header_background: c(rgb(0x000000)),
+            multi_diff_border: c(rgba(0x6fc3dfff)),
             inactive_selection_background: c(rgba(0xf3f518b3)),
             cursor: c(rgb(0xffffff)),
             gutter_background: c(rgb(0x000000)),
@@ -740,6 +751,8 @@ impl EditorColors {
             menu_separator_background: c(rgb(0x0f4a85)),
             diff_move_border: c(rgba(0x8b8b8b9c)),
             diff_move_active_border: c(rgb(0xffa500)),
+            multi_diff_header_background: c(rgb(0xffffff)),
+            multi_diff_border: c(rgba(0x0f4a85ff)),
             inactive_selection_background: c(rgba(0x0f4a8580)),
             cursor: c(rgb(0x0f4a85)),
             gutter_background: c(rgb(0xffffff)),

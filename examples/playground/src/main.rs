@@ -632,6 +632,42 @@ fn main() {
             Some(cx.new(|_| TextModel::new(&text).with_language(language).with_uri(uri)))
         });
         let bounds = Bounds::centered(None, size(px(1100.), px(760.)), cx);
+        // `PLAYGROUND_MULTI_DIFF=old1:new1,old2:new2` opens a multi-diff editor.
+        if let Ok(pairs) = std::env::var("PLAYGROUND_MULTI_DIFF") {
+            let load = |path: &str, cx: &mut App| {
+                let text = std::fs::read_to_string(path).unwrap_or_else(|e| format!("{path}: {e}"));
+                let language = language_for_path(path, cx);
+                cx.new(|_| TextModel::new(&text).with_language(language))
+            };
+            let documents: Vec<_> = pairs
+                .split(',')
+                .filter_map(|pair| pair.split_once(':'))
+                .map(|(original, modified)| {
+                    let label = std::path::Path::new(modified)
+                        .file_name()
+                        .map_or(modified.to_string(), |n| n.to_string_lossy().into_owned());
+                    gpui_monaco::MultiDiffDocument::new(
+                        label,
+                        load(original, cx),
+                        load(modified, cx),
+                    )
+                })
+                .collect();
+            let window = cx
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        ..Default::default()
+                    },
+                    |window, cx| {
+                        cx.new(|cx| gpui_monaco::MultiDiffEditor::new(documents, window, cx))
+                    },
+                )
+                .expect("failed to open window");
+            cx.activate(true);
+            screenshot::capture_if_requested(window.into(), cx);
+            return;
+        }
         // `PLAYGROUND_DIFF=original` compares it with `PLAYGROUND_FILE`
         // (`PLAYGROUND_DIFF_INLINE=1` for the inline view).
         if let (Ok(original), Ok(modified)) = (
