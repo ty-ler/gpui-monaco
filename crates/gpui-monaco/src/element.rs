@@ -984,6 +984,8 @@ pub struct PrepaintState {
     fold_highlights: Vec<Bounds<Pixels>>,
     show_fold_controls: bool,
     decoration_quads: Vec<(Bounds<Pixels>, Option<Hsla>, Option<Hsla>)>,
+    /// Block decorations' boxes, colors and border widths.
+    block_borders: Vec<(Bounds<Pixels>, Hsla, Pixels)>,
     decoration_underlines: Vec<(gpui::Point<Pixels>, Pixels, UnderlineStyle)>,
     gutter_bars: Vec<(Bounds<Pixels>, Hsla)>,
     /// Monaco `marginClassName` backgrounds.
@@ -2275,6 +2277,42 @@ fn prepaint_editor(
 
     // Decoration geometry.
     let mut decoration_quads: Vec<(Bounds<Pixels>, Option<Hsla>, Option<Hsla>)> = Vec::new();
+    // Monaco `BlockDecorations`: from above the first line's view zones to
+    // after the last line's.
+    let mut block_borders: Vec<(Bounds<Pixels>, Hsla, Pixels)> = Vec::new();
+    for (start, end, decoration) in &decoration_points {
+        let Some(block) = decoration.options.block else {
+            continue;
+        };
+        let first = view_lines.first_view_line_of_row(start.row);
+        let end_line = view_lines.first_view_line_of_row(end.row + 1);
+        if end_line <= first {
+            continue;
+        }
+        let top = if first == 0 {
+            px(0.)
+        } else {
+            layout.zones.line_y(first - 1, line_height)
+                + layout.zones.height(first - 1, line_height)
+        };
+        let bottom = layout.zones.line_y(end_line, line_height);
+        let [padding_top, padding_right, padding_bottom, padding_left] = block.padding;
+        let text = layout.text_bounds;
+        block_borders.push((
+            Bounds::from_corners(
+                point(
+                    text.left() - padding_left,
+                    bounds.top() + top - layout.scroll_top - padding_top,
+                ),
+                point(
+                    text.right() + padding_right,
+                    bounds.top() + bottom - layout.scroll_top + padding_bottom,
+                ),
+            ),
+            block.border,
+            block.border_width,
+        ));
+    }
     let mut decoration_underlines: Vec<(gpui::Point<Pixels>, Pixels, UnderlineStyle)> = Vec::new();
     let mut gutter_bars: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
     let mut margin_backgrounds: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
@@ -2944,6 +2982,7 @@ fn prepaint_editor(
         fold_highlights,
         show_fold_controls,
         decoration_quads,
+        block_borders,
         decoration_underlines,
         gutter_bars,
         margin_backgrounds,
@@ -3238,6 +3277,16 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
             |window| {
                 for element in &mut full_width_zone_elements {
                     element.paint(window, cx);
+                }
+                for (bounds, color, width) in &state.block_borders {
+                    window.paint_quad(quad(
+                        *bounds,
+                        Corners::default(),
+                        gpui::transparent_black(),
+                        Edges::all(*width),
+                        *color,
+                        BorderStyle::Solid,
+                    ));
                 }
             },
         );

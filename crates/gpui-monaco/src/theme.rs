@@ -79,6 +79,10 @@ pub struct EditorColors {
     pub gutter_item_glyph_foreground: Hsla,
     /// Separators in menus and toolbars (`menu.separatorBackground`).
     pub menu_separator_background: Hsla,
+    /// Moved blocks' borders and arrows (`diffEditor.move.border`).
+    pub diff_move_border: Hsla,
+    /// The active moved block's (`diffEditor.moveActive.border`).
+    pub diff_move_active_border: Hsla,
     /// Selections in an unfocused editor (`editor.inactiveSelectionBackground`).
     pub inactive_selection_background: Hsla,
     /// The cursor (`editorCursor.foreground`).
@@ -316,6 +320,8 @@ impl EditorColors {
             gutter_item_background: c(rgb(0x37373d)),
             gutter_item_glyph_foreground: c(rgb(0xd4d4d4)),
             menu_separator_background: c(rgb(0x606060)),
+            diff_move_border: c(rgba(0x8b8b8b9c)),
+            diff_move_active_border: c(rgb(0xffa500)),
             inactive_selection_background: c(rgb(0x3a3d41)),
             cursor: c(rgb(0xaeafad)),
             gutter_background: c(rgb(0x1e1e1e)),
@@ -445,6 +451,8 @@ impl EditorColors {
             gutter_item_background: c(rgb(0xd4d7e9)),
             gutter_item_glyph_foreground: c(rgb(0x000000)),
             menu_separator_background: c(rgb(0xd4d4d4)),
+            diff_move_border: c(rgba(0x8b8b8b9c)),
+            diff_move_active_border: c(rgb(0xffa500)),
             inactive_selection_background: c(rgb(0xe5ebf1)),
             cursor: c(rgb(0x000000)),
             gutter_background: c(rgb(0xfffffe)),
@@ -583,6 +591,8 @@ impl EditorColors {
             gutter_item_background: c(rgb(0xffffff)),
             gutter_item_glyph_foreground: c(rgb(0x000000)),
             menu_separator_background: c(rgb(0x6fc3df)),
+            diff_move_border: c(rgba(0x8b8b8b9c)),
+            diff_move_active_border: c(rgb(0xffa500)),
             inactive_selection_background: c(rgba(0xf3f518b3)),
             cursor: c(rgb(0xffffff)),
             gutter_background: c(rgb(0x000000)),
@@ -728,6 +738,8 @@ impl EditorColors {
             gutter_item_background: c(rgb(0x000000)),
             gutter_item_glyph_foreground: c(rgb(0xffffff)),
             menu_separator_background: c(rgb(0x0f4a85)),
+            diff_move_border: c(rgba(0x8b8b8b9c)),
+            diff_move_active_border: c(rgb(0xffa500)),
             inactive_selection_background: c(rgba(0x0f4a8580)),
             cursor: c(rgb(0x0f4a85)),
             gutter_background: c(rgb(0xffffff)),

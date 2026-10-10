@@ -18,6 +18,7 @@ let diff = cx.new(|cx| DiffEditor::new(original, modified, window, cx));
 - **Unchanged regions:** with `hide_unchanged_regions.enabled`, long runs of unchanged lines collapse into "N hidden lines" bars, leaving `context_line_count` lines (default 3) around each change. Click a bar's top or bottom edge to show `reveal_line_count` (default 20) more lines, or its `↕` button (or double-click the label) to show them all. Moving the cursor into hidden lines reveals them. `collapse_all_unchanged_regions` and `show_all_unchanged_regions` reset them.
 - **Reverting:** a gutter between the sides (or left of the inline view) shows a "Revert Block" button beside the change at the cursor, and beside every change while the mouse is over it. With text selected, the button reverts only the selected changes. `revert(change, cx)`, `revert_range_mappings(changes, cx)` and the `Revert` action (the changes at the modified editor's cursor) do the same from code. The gutter is hidden when `render_gutter_menu` is off or the modified editor is read-only.
 - **Accessible diff viewer:** F7 (or `accessible_diff_viewer_next`) opens a list of the changes for screen reader and keyboard users, like Monaco's. Each change shows with three lines of context and both line numbers. F7 and Shift+F7 move between changes, Up and Down between lines, Enter or Space jumps to the line in its editor, and Escape closes the list. `only_show_accessible_diff_viewer` shows only the list.
+- **Moved blocks:** with `show_moves`, code that moved gets a border and a "Code moved to line …" caption on both sides, and a line joins the two places. The block at the cursor is highlighted.
 - **Options:** `DiffEditorOptions` (Monaco `IDiffEditorOptions`):
   - `ignore_trim_whitespace`
   - `max_computation_time_ms`
@@ -25,7 +26,7 @@ let diff = cx.new(|cx| DiffEditor::new(original, modified, window, cx));
   - `render_overview_ruler`
   - `original_editable`
   - `enable_split_view_resizing` and `split_view_default_ratio` (drag the sash between the sides)
-  - `show_moves`
+  - `show_moves` (detect and show moved blocks)
   - `hide_unchanged_regions` (`enabled`, `context_line_count`, `minimum_line_count`, `reveal_line_count`)
   - `render_gutter_menu`
   - `only_show_accessible_diff_viewer`

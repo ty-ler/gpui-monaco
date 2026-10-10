@@ -5,6 +5,9 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Moved blocks (#52, part 7):** with `show_moves`, the diff editor shows moved code like Monaco's `MovedBlocksLinesFeature`.
+  - **Display:** each moved block has a border and a "Code moved to/from line X-Y" caption on both sides, and a line with an arrow in a column between the sides joins the two places. The block at the cursor is highlighted (`diffEditor.moveActive.border`).
+  - **Block decorations:** the new `DecorationOptions::block` (`BlockDecoration`, Monaco `blockClassName` + `blockPadding`) draws a bordered box around whole lines and the view zones above them.
 - **Accessible diff viewer (#52, part 6):** F7 and Shift+F7 in a diff editor open Monaco's accessible diff viewer, a keyboard-driven list of each change with three lines of context.
   - **Keys:** F7 and Shift+F7 move between changes, Up and Down between lines, Enter or Space reveals the line in its editor, and Escape closes the viewer.
   - **Screen readers:** rows carry Monaco's labels ("+ text modified line 12", "Difference 1 of 3: …"), and the modified cursor follows the current line, so `Revert` applies to it.

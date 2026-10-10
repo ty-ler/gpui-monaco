@@ -671,6 +671,14 @@ fn main() {
                                 options.hide_unchanged_regions.enabled = true;
                                 diff.update_options(options, cx);
                             }
+                            // `PLAYGROUND_DIFF_MOVES=1` shows moved blocks.
+                            if std::env::var_os("PLAYGROUND_DIFF_MOVES")
+                                .is_some_and(|v| !v.is_empty())
+                            {
+                                let mut options = diff.options().clone();
+                                options.show_moves = true;
+                                diff.update_options(options, cx);
+                            }
                             diff
                         });
                         // Typing goes to the modified side.

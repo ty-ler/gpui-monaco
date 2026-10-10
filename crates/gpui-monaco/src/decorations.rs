@@ -108,6 +108,22 @@ pub struct DecorationOptions {
     /// height (Monaco `lineHeight`). The tallest decoration on a line wins;
     /// the editor's `allow_variable_line_heights` turns it off.
     pub line_height: Option<f32>,
+    /// A bordered box around the decorated lines and the view zones above
+    /// them (Monaco `blockClassName` with `blockPadding`).
+    pub block: Option<BlockDecoration>,
+}
+
+/// Monaco's block decoration: a box spanning the content width around
+/// whole lines.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlockDecoration {
+    /// The border's color.
+    pub border: Hsla,
+    /// The border's width.
+    pub border_width: gpui::Pixels,
+    /// Monaco `blockPadding`: top, right, bottom and left, outside the
+    /// lines.
+    pub padding: [gpui::Pixels; 4],
 }
 
 /// A decoration as stored in the model.
