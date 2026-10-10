@@ -400,3 +400,48 @@ fn only_showing_the_accessible_diff_viewer(cx: &mut TestAppContext) {
     // It can't be closed.
     assert!(diff.read_with(cx, |d, _| d.is_accessible_diff_viewer_visible()));
 }
+
+#[gpui::test]
+fn moved_blocks(cx: &mut TestAppContext) {
+    let block: String = (0..6)
+        .map(|i| format!("fn moved_{i}() {{ body_{i}(); }}\n"))
+        .collect();
+    let filler: String = (0..10).map(|i| format!("let x{i} = {i};\n")).collect();
+    let original = format!("{block}{filler}");
+    let modified = format!("{filler}{block}");
+    let (diff, cx) = setup(&original, &modified, cx);
+    diff.update(cx, |d, cx| {
+        let mut options = d.options().clone();
+        options.show_moves = true;
+        d.update_options(options, cx);
+    });
+    paint(cx);
+    let moves = diff.read_with(cx, |d, _| d.diff().unwrap().moves.len());
+    assert_eq!(moves, 1);
+    // A caption on each side, besides the alignment padding.
+    let (original_zones, modified_zones) = diff.read_with(cx, |d, _| d.alignment_zones_for_tests());
+    assert!(original_zones >= 1 && modified_zones >= 1);
+    // The cursor in the moved block makes it active.
+    let modified_editor = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    modified_editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                12, 0,
+            ))],
+            cx,
+        )
+    });
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.active_move_for_tests()),
+        Some(0)
+    );
+    modified_editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                2, 0,
+            ))],
+            cx,
+        )
+    });
+    assert_eq!(diff.read_with(cx, |d, _| d.active_move_for_tests()), None);
+}

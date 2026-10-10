@@ -47,6 +47,7 @@ Demo providers are registered by default:
 | `PLAYGROUND_DIFF=old.rs` | Open a diff editor comparing `old.rs` with `PLAYGROUND_FILE` |
 | `PLAYGROUND_DIFF_INLINE=1` | Show that diff inline |
 | `PLAYGROUND_DIFF_HIDE_UNCHANGED=1` | Hide that diff's unchanged regions |
+| `PLAYGROUND_DIFF_MOVES=1` | Show that diff's moved blocks |
 | `PLAYGROUND_FONT="JetBrains Mono"` | Use another font family |
 | `PLAYGROUND_PLACEHOLDER="Type here"` | Show a placeholder while the file is empty |
 | `PLAYGROUND_READ_ONLY=1` | Start read-only (typing shows the read-only message) |

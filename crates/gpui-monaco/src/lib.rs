@@ -86,7 +86,8 @@ pub mod widgets;
 pub use api::{DecorationsCollection, WordAtPosition};
 pub use commands::{execute_command, register_command, unregister_command};
 pub use decorations::{
-    DecorationId, DecorationOptions, DecorationUnderline, InjectedText, OverviewRulerLane,
+    BlockDecoration, DecorationId, DecorationOptions, DecorationUnderline, InjectedText,
+    OverviewRulerLane,
 };
 pub use editor::{CodeEditor, CodeEditorEvent, ViewState};
 pub use editor_actions::{ActionPrecondition, ActionRun, EditorActionDescriptor, EditorActionInfo};

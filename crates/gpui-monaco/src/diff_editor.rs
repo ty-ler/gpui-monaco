@@ -21,7 +21,7 @@ use gpui::{
 use text::{Point, PointUtf16};
 
 use crate::cursor::Selection;
-use crate::decorations::{DecorationId, DecorationOptions, OverviewRulerLane};
+use crate::decorations::{BlockDecoration, DecorationId, DecorationOptions, OverviewRulerLane};
 use crate::diff::{
     DetailedLineRangeMapping, DiffOptions, LineRange, LineRangeMapping, LinesDiff, RangeMapping,
     compute_diff,
@@ -403,6 +403,85 @@ impl Render for DiagonalFill {
             },
         )
         .size_full()
+    }
+}
+
+/// The height of a moved block's caption (Monaco's 18px placeholder zone).
+const MOVE_CAPTION_HEIGHT: f32 = 18.;
+/// The arrow at the end of a moved block's line.
+const MOVE_ARROW_WIDTH: f32 = 15.;
+
+/// Sorts `(line, pixels)` extra heights and sums those of the same line.
+fn merge_extra_heights(extra: &mut Vec<(usize, f32)>) {
+    extra.sort_by_key(|(line, _)| *line);
+    extra.dedup_by(|b, a| {
+        if a.0 == b.0 {
+            a.1 += b.1;
+            true
+        } else {
+            false
+        }
+    });
+}
+
+/// Monaco `LinesLayout.compute`: a track for each line spanning
+/// `top..bottom`, the first whose lines it doesn't overlap, with at most 6
+/// tracks (then the least overlapped).
+fn move_line_tracks(lines: &[(Pixels, Pixels)]) -> Vec<usize> {
+    const MAX_TRACKS: usize = 6;
+    let mut tracks: Vec<Vec<(Pixels, Pixels)>> = Vec::new();
+    let overlap =
+        |a: &(Pixels, Pixels), b: &(Pixels, Pixels)| (a.1.min(b.1) - a.0.max(b.0)).max(px(0.));
+    lines
+        .iter()
+        .map(|line| {
+            let free = tracks
+                .iter()
+                .position(|set| set.iter().all(|r| overlap(r, line) == px(0.)));
+            let ix = match free {
+                Some(ix) => ix,
+                None if tracks.len() < MAX_TRACKS => {
+                    tracks.push(Vec::new());
+                    tracks.len() - 1
+                }
+                None => (0..tracks.len())
+                    .max_by(|&a, &b| {
+                        let length = |t: usize| {
+                            tracks[t]
+                                .iter()
+                                .map(|r| overlap(r, line))
+                                .fold(px(0.), |a, b| a + b)
+                        };
+                        length(a)
+                            .partial_cmp(&length(b))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .unwrap_or(0),
+            };
+            tracks[ix].push(*line);
+            ix
+        })
+        .collect()
+}
+
+/// A moved block's caption (Monaco `MovedBlockOverlayWidget`), right
+/// aligned.
+struct MoveCaption {
+    text: SharedString,
+    color: Hsla,
+}
+
+impl Render for MoveCaption {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .justify_end()
+            .items_center()
+            .pr(px(20.))
+            .text_size(px(12.))
+            .text_color(self.color.opacity(0.8))
+            .child(self.text.clone())
     }
 }
 
@@ -820,6 +899,10 @@ pub struct DiffEditor {
     gutter_hovered: bool,
     /// The accessible diff viewer, while it shows.
     accessible_viewer: Option<Entity<AccessibleDiffViewer>>,
+    /// Moved blocks' borders on each side.
+    move_decorations: (Vec<DecorationId>, Vec<DecorationId>),
+    /// The moved block at the last moved cursor (Monaco `activeMovedText`).
+    active_move: Option<usize>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -869,6 +952,8 @@ impl DiffEditor {
             unchanged_zones: Default::default(),
             gutter_hovered: false,
             accessible_viewer: None,
+            move_decorations: Default::default(),
+            active_move: None,
             focus_handle: cx.focus_handle(),
             _subscriptions: Vec::new(),
         };
@@ -896,7 +981,8 @@ impl DiffEditor {
                 |this, _, event: &CodeEditorEvent, cx| match event {
                     CodeEditorEvent::ScrollChanged => this.sync_scroll(true, cx),
                     CodeEditorEvent::SelectionsChanged(_) => {
-                        this.ensure_selections_visible(true, cx)
+                        this.ensure_selections_visible(true, cx);
+                        this.update_active_move(true, cx);
                     }
                     _ => {}
                 },
@@ -911,6 +997,7 @@ impl DiffEditor {
                     }
                     CodeEditorEvent::SelectionsChanged(_) => {
                         this.ensure_selections_visible(false, cx);
+                        this.update_active_move(false, cx);
                         cx.notify();
                     }
                     _ => {}
@@ -1000,6 +1087,12 @@ impl DiffEditor {
                 && width < options.render_side_by_side_inline_breakpoint)
     }
 
+    /// The moved block under the last moved cursor, for tests.
+    #[doc(hidden)]
+    pub fn active_move_for_tests(&self) -> Option<usize> {
+        self.active_move
+    }
+
     /// The alignment view zones on each side, for tests.
     #[doc(hidden)]
     pub fn alignment_zones_for_tests(&self) -> (usize, usize) {
@@ -1053,6 +1146,8 @@ impl DiffEditor {
         clear_side(&self.modified, modified, modified_zones, cx);
         self.unchanged.clear();
         self.apply_unchanged(cx);
+        self.active_move = None;
+        self.apply_move_decorations(cx);
     }
 
     /// Decorates both sides and aligns them with view zones.
@@ -1084,6 +1179,7 @@ impl DiffEditor {
         });
         self.decorations = (original_ids, modified_ids);
         self.apply_alignment(&diff, &colors, cx);
+        self.apply_move_decorations(cx);
         self.update_unchanged_regions(&diff, cx);
         if let Some(viewer) = self.accessible_viewer.clone() {
             let mappings = diff_mappings(&diff);
@@ -1111,8 +1207,22 @@ impl DiffEditor {
             f32::from(self.original.read(cx).options().resolved_line_height());
         let modified_line_height =
             f32::from(self.modified.read(cx).options().resolved_line_height());
-        let original_extra = self.original.read(cx).wrap_extra_heights();
-        let modified_extra = self.modified.read(cx).wrap_extra_heights();
+        let mut original_extra = self.original.read(cx).wrap_extra_heights();
+        let mut modified_extra = self.modified.read(cx).wrap_extra_heights();
+        // The moved blocks' captions count like any other view zone.
+        let moves = self.shown_moves(diff);
+        for m in moves {
+            original_extra.push((
+                m.line_range_mapping.original.start_line_number - 1,
+                MOVE_CAPTION_HEIGHT,
+            ));
+            modified_extra.push((
+                m.line_range_mapping.modified.start_line_number - 1,
+                MOVE_CAPTION_HEIGHT,
+            ));
+        }
+        merge_extra_heights(&mut original_extra);
+        merge_extra_heights(&mut modified_extra);
         let original_rope = self
             .original
             .read(cx)
@@ -1168,7 +1278,236 @@ impl DiffEditor {
             });
             ids.push(id);
         }
+        // Monaco `MovedBlockOverlayWidget`: "Code moved to line …" above
+        // each moved block, on both sides.
+        for m in self.shown_moves(diff) {
+            let mapping = m.line_range_mapping;
+            let with_changes = if m.changes.is_empty() {
+                ""
+            } else {
+                " with changes"
+            };
+            let captions = [
+                (
+                    &self.original,
+                    mapping.original.start_line_number - 1,
+                    format!(
+                        "Code moved{with_changes} to line {}-{}",
+                        mapping.modified.start_line_number,
+                        mapping.modified.end_line_number_exclusive - 1
+                    ),
+                    &mut zones.0,
+                ),
+                (
+                    &self.modified,
+                    mapping.modified.start_line_number - 1,
+                    format!(
+                        "Code moved{with_changes} from line {}-{}",
+                        mapping.original.start_line_number,
+                        mapping.original.end_line_number_exclusive - 1
+                    ),
+                    &mut zones.1,
+                ),
+            ];
+            for (editor, after, text, ids) in captions {
+                let color = colors.foreground;
+                let view = cx.new(|_| MoveCaption {
+                    text: text.into(),
+                    color,
+                });
+                let id = editor.update(cx, |editor, cx| {
+                    editor.add_view_zone(
+                        ViewZone {
+                            after_line: after as u32,
+                            height: ZoneHeight::Pixels(px(MOVE_CAPTION_HEIGHT)),
+                            view: view.into(),
+                        },
+                        cx,
+                    )
+                });
+                ids.push(id);
+            }
+        }
         self.zones = zones;
+    }
+
+    /// The moved blocks to show (Monaco shows them side by side).
+    fn shown_moves<'a>(&self, diff: &'a LinesDiff) -> &'a [crate::diff::MovedText] {
+        if self.options.show_moves && !self.inline {
+            &diff.moves
+        } else {
+            &[]
+        }
+    }
+
+    /// Monaco's `movedOriginal`/`movedModified` block decorations: a border
+    /// around each moved block, highlighted for the active one.
+    fn apply_move_decorations(&mut self, cx: &mut Context<Self>) {
+        let colors = self.modified.read(cx).colors().clone();
+        let moves = self
+            .diff
+            .as_deref()
+            .map(|diff| self.shown_moves(diff).to_vec())
+            .unwrap_or_default();
+        let block = |active: bool| DecorationOptions {
+            block: Some(BlockDecoration {
+                border: if active {
+                    colors.diff_move_active_border
+                } else {
+                    colors.diff_move_border
+                },
+                border_width: px(2.),
+                padding: [px(4.), px(0.), px(4.), px(4.)],
+            }),
+            ..Default::default()
+        };
+        let (old_original, old_modified) = std::mem::take(&mut self.move_decorations);
+        let active = self.active_move;
+        let decorate = |editor: &Entity<CodeEditor>,
+                        old: Vec<DecorationId>,
+                        original: bool,
+                        cx: &mut Context<Self>| {
+            let id = editor.entity_id();
+            let model = editor.read(cx).model().clone();
+            model.update(cx, |model, cx| {
+                let new = moves
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, m)| {
+                        let lines = if original {
+                            m.line_range_mapping.original
+                        } else {
+                            m.line_range_mapping.modified
+                        };
+                        (
+                            Side::Lines(lines).to_offsets(model.buffer().rope()),
+                            block(active == Some(ix)),
+                        )
+                    })
+                    .collect();
+                model.delta_decorations(Some(id), &old, new, cx)
+            })
+        };
+        self.move_decorations = (
+            decorate(&self.original, old_original, true, cx),
+            decorate(&self.modified, old_modified, false, cx),
+        );
+    }
+
+    /// Monaco `setActiveMovedTextFromCursor`: the moved block under the
+    /// cursor of the editor whose cursor moved last.
+    fn update_active_move(&mut self, original: bool, cx: &mut Context<Self>) {
+        let Some(diff) = self.diff.clone() else {
+            return;
+        };
+        let editor = if original {
+            &self.original
+        } else {
+            &self.modified
+        };
+        let line = editor.read(cx).selections()[0].head.row as usize + 1;
+        let active = self.shown_moves(&diff).iter().position(|m| {
+            if original {
+                m.line_range_mapping.original.contains(line)
+            } else {
+                m.line_range_mapping.modified.contains(line)
+            }
+        });
+        if active != self.active_move {
+            self.active_move = active;
+            self.apply_move_decorations(cx);
+            cx.notify();
+        }
+    }
+
+    /// Monaco `MovedBlocksLinesFeature`: a column between the sides with a
+    /// line from each moved block to where it went.
+    fn render_move_lines(&self, cx: &App) -> Option<gpui::AnyElement> {
+        let diff = self.diff.as_deref()?;
+        let moves = self.shown_moves(diff);
+        if moves.is_empty() {
+            return None;
+        }
+        let original = self.original.read(cx);
+        let modified = self.modified.read(cx);
+        let middle = |editor: &CodeEditor, lines: LineRange| {
+            let (top, bottom) = editor.rows_y_span(lines.to_rows())?;
+            Some((top + bottom) / 2.)
+        };
+        let mut lines: Vec<(Pixels, Pixels, bool)> = moves
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, m)| {
+                Some((
+                    middle(original, m.line_range_mapping.original)?,
+                    middle(modified, m.line_range_mapping.modified)?,
+                    self.active_move == Some(ix),
+                ))
+            })
+            .collect();
+        // Monaco sorts downward moves first, then by where they start.
+        lines.sort_by(|a, b| {
+            let down = |l: &(Pixels, Pixels, bool)| l.0 > l.1;
+            let key = |l: &(Pixels, Pixels, bool)| if down(l) { l.0 } else { -l.1 };
+            down(a).cmp(&down(b)).then(
+                key(a)
+                    .partial_cmp(&key(b))
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+        });
+        let tracks = move_line_tracks(
+            &lines
+                .iter()
+                .map(|&(from, to, _)| (from.min(to), from.max(to)))
+                .collect::<Vec<_>>(),
+        );
+        let track_count = tracks.iter().copied().max().map_or(1, |t| t + 1);
+        let padding = 10.;
+        let width = (track_count - 1) as f32 * 10. + padding * 2. + MOVE_ARROW_WIDTH;
+        let colors = modified.colors().clone();
+        let background = colors.background;
+        Some(
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+                        for ((from, to, active), track) in lines.iter().zip(&tracks) {
+                            let color = if *active {
+                                colors.diff_move_active_border
+                            } else {
+                                colors.diff_move_border
+                            };
+                            let x = |x: f32| bounds.left() + px(x);
+                            let y = |y: Pixels| bounds.top() + y;
+                            let vertical = padding + *track as f32 * 10.;
+                            let right = f32::from(bounds.size.width);
+                            let mut path = PathBuilder::stroke(px(2.));
+                            path.move_to(point(x(0.), y(*from)));
+                            path.line_to(point(x(vertical), y(*from)));
+                            path.line_to(point(x(vertical), y(*to)));
+                            path.line_to(point(x(right - MOVE_ARROW_WIDTH), y(*to)));
+                            if let Ok(path) = path.build() {
+                                window.paint_path(path, color);
+                            }
+                            let half = px(MOVE_ARROW_WIDTH / 2.);
+                            let mut arrow = PathBuilder::fill();
+                            arrow.move_to(point(x(right - MOVE_ARROW_WIDTH), y(*to) - half));
+                            arrow.line_to(point(x(right), y(*to)));
+                            arrow.line_to(point(x(right - MOVE_ARROW_WIDTH), y(*to) + half));
+                            arrow.close();
+                            if let Ok(arrow) = arrow.build() {
+                                window.paint_path(arrow, color);
+                            }
+                        }
+                    });
+                },
+            )
+            .h_full()
+            .w(px(width))
+            .flex_none()
+            .bg(background)
+            .into_any_element(),
+        )
     }
 
     /// Monaco's inline view (`renderSideBySide: false`): each change's
@@ -2114,6 +2453,7 @@ impl Render for DiffEditor {
             self.apply_diff(cx);
         }
         let gutter = self.render_gutter(cx);
+        let move_lines = (!self.inline).then(|| self.render_move_lines(cx)).flatten();
         let bounds = self.bounds.clone();
         let ratio = self.ratio.clamp(0.1, 0.9);
         let border = self.modified.read(cx).colors().widget_border;
@@ -2202,6 +2542,7 @@ impl Render for DiffEditor {
                         }),
                 )
             })
+            .children(move_lines)
             .children(gutter)
             .child(div().h_full().flex_1().child(self.modified.clone()))
             // Monaco hides both editors behind the viewer.
