@@ -93,7 +93,7 @@ Issues are linked by number.
 | Completion: fuzzy filter, docs, commit characters, additional edits | `suggest` | ✅ | |
 | Completion: resolve, tags, insert/replace modes, word suggestions, accept and selection options | `suggest` | ✅ | #103 |
 | Completion: tab completion, locality bonus, retrigger rules | `suggest` | ✅ | #103 |
-| Completion widget: details toggle, side docs, resizing, status bar, loading and empty messages | `suggest` | ❌ | #103 |
+| Completion widget: details toggle, side docs, resizing, status bar, loading and empty messages | `suggest` | ✅ | #103 |
 | Hover | `hover` | ✅ | |
 | Signature help (with cycling) | `parameterHints` | ✅ | |
 | Go to definition (link, F12) | `gotoSymbol` | ✅ | |

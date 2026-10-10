@@ -22,7 +22,8 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
   - Language configuration patterns (`wordPattern`, `indentationRules`, …) use `fancy-regex`, so VS Code's configurations work unchanged.
 - **Completion:** snippet syntax in `insert_text` is inserted literally; snippets are post-MVP.
 - **Word-based suggestions:** words are not ranked by distance from the cursor, and the documents are the models registered with `register_model`.
-- **Suggestion memories:** they are kept in memory for the app's lifetime, not persisted.
+- **Suggestion memories:** they are kept in memory for the app's lifetime, not persisted. The same goes for the suggest widget's size and whether details are expanded.
+- **Suggest widget:** the details panel goes beside the list or below it, never to the left or above. Its contents can't be focused or scrolled with the keyboard, and explain mode (`toggleExplainMode`) isn't ported. Icons are glyphs, not codicons.
 - **Missing commands:** code actions, rename, formatting, inlay hints, color decorators and links are not built in.
 - **Folding:** clicking the `⋯` placeholder doesn't unfold the region, and there is no folding by tree-sitter fold queries yet. Ranges come from indentation and markers.
 - **Paste:** pasted text is not reindented (Monaco's `autoIndentOnPaste`).

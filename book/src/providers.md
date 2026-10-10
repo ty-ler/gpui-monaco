@@ -77,6 +77,8 @@ impl CompletionProvider for MyCompletions {
 
 Completion is triggered by Ctrl+Space, by trigger characters (`suggest_on_trigger_characters`), or automatically after `quick_suggestions_delay` while typing a word. `quick_suggestions` turns that on separately for code, comments and strings. When no provider has items, the editor suggests words from open documents (`word_based_suggestions`).
 
+The widget shows each item's `label_detail` right after the label and its `label_description` at the right. The focused item's `detail` also shows at the right. Ctrl+Space while the list is open toggles the details panel with the item's `detail` and `documentation`; it is collapsed by default, as in Monaco. Drag the list's right or bottom edge to resize it.
+
 With `tab_completion: On`, Tab at the end of a word inserts the best suggestion without showing the list. Tab and Shift+Tab then swap in the next or previous one, until the cursor moves.
 
 Which item is selected first follows `suggest_selection`: the best match, or the item you picked last (for the same prefix).

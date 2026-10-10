@@ -685,3 +685,106 @@ fn deleting_before_the_request_asks_again(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(!visible(&editor, cx));
 }
+
+fn message(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Option<&'static str> {
+    editor.read_with(cx, |e, cx| e.suggest_message_for_tests(cx))
+}
+
+#[gpui::test]
+fn no_suggestions_only_when_requested(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "",
+        |o| o.word_based_suggestions = WordBasedSuggestions::Off,
+        cx,
+    );
+    provide(cx, |_| Vec::new());
+    // Typing: nothing shows.
+    cx.simulate_input("ab");
+    settle(cx);
+    assert!(!visible(&editor, cx));
+    // Ctrl+Space: "No suggestions.", until the cursor leaves.
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert_eq!(message(&editor, cx), Some("No suggestions."));
+    cx.simulate_keystrokes("escape");
+    assert!(!visible(&editor, cx));
+}
+
+/// Answers after 200ms.
+struct Slow;
+impl CompletionProvider for Slow {
+    fn provide_completions(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        _: CompletionTrigger,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<CompletionList>> {
+        let timer = cx.background_executor().timer(Duration::from_millis(200));
+        cx.background_executor().spawn(async move {
+            timer.await;
+            Ok(CompletionList {
+                items: vec![CompletionItem::new("print", CompletionItemKind::Function)],
+                incomplete: false,
+            })
+        })
+    }
+}
+
+#[gpui::test]
+fn loading_message_for_slow_explicit_requests(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |_| {}, cx);
+    cx.update(|_, cx| register_completion_provider(cx, LanguageSelector::All, Slow));
+    // Automatic requests never show it.
+    cx.simulate_input("p");
+    settle(cx);
+    assert!(!visible(&editor, cx));
+    cx.executor().advance_clock(Duration::from_millis(300));
+    cx.run_until_parked();
+    assert_eq!(labels(&editor, cx), Some(vec!["print".to_string()]));
+    cx.simulate_keystrokes("escape ctrl-space");
+    cx.run_until_parked();
+    assert!(!visible(&editor, cx), "not before 50ms");
+    cx.executor().advance_clock(Duration::from_millis(60));
+    cx.run_until_parked();
+    assert_eq!(message(&editor, cx), Some("Loading..."));
+    cx.executor().advance_clock(Duration::from_millis(300));
+    cx.run_until_parked();
+    assert_eq!(message(&editor, cx), None);
+    assert_eq!(labels(&editor, cx), Some(vec!["print".to_string()]));
+}
+
+#[gpui::test]
+fn ctrl_space_toggles_details(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    provide(cx, |_| {
+        vec![
+            CompletionItem {
+                documentation: Some("Prints.".into()),
+                ..CompletionItem::new("print", CompletionItemKind::Function)
+            },
+            CompletionItem::new("process", CompletionItemKind::Function),
+        ]
+    });
+    let details = |cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, cx| e.is_suggestion_details_visible(cx))
+    };
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    // Collapsed by default, as in Monaco.
+    assert!(!details(cx));
+    cx.simulate_keystrokes("ctrl-space");
+    assert!(details(cx));
+    // Nothing to show for an item without docs or detail.
+    cx.simulate_keystrokes("down");
+    assert!(!details(cx));
+    cx.simulate_keystrokes("up");
+    assert!(details(cx));
+    // Remembered for the next session.
+    cx.simulate_keystrokes("escape ctrl-space");
+    cx.run_until_parked();
+    assert!(details(cx));
+    cx.simulate_keystrokes("ctrl-space");
+    assert!(!details(cx));
+    assert!(visible(&editor, cx));
+}

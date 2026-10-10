@@ -147,6 +147,22 @@ pub struct EditorColors {
     pub widget_foreground: Hsla,
     /// `editorWidget.border`.
     pub widget_border: Hsla,
+    /// The suggest widget (`editorSuggestWidget.background`, defaulting to
+    /// the widget background).
+    pub suggest_background: Hsla,
+    /// `editorSuggestWidget.border` (defaults to the widget border).
+    pub suggest_border: Hsla,
+    /// `editorSuggestWidget.foreground` (defaults to the editor foreground).
+    pub suggest_foreground: Hsla,
+    /// `editorSuggestWidget.selectedForeground`: the focused row's text.
+    pub suggest_selected_foreground: Hsla,
+    /// `editorSuggestWidget.selectedBackground`: the focused row.
+    pub suggest_selected_background: Hsla,
+    /// `editorSuggestWidget.highlightForeground`: matched characters.
+    pub suggest_highlight_foreground: Hsla,
+    /// `editorSuggestWidget.focusHighlightForeground`: matched characters on
+    /// the focused row.
+    pub suggest_focus_highlight_foreground: Hsla,
     /// Input boxes in widgets (`input.background` / `inputOption.activeBackground`).
     pub input_background: Hsla,
     /// `inputOption.activeBackground`: an enabled toggle (e.g. match case).
@@ -239,6 +255,13 @@ impl EditorColors {
             widget_background: c(rgb(0x252526)),
             widget_foreground: c(rgb(0xcccccc)),
             widget_border: c(rgb(0x454545)),
+            suggest_background: c(rgb(0x252526)),
+            suggest_border: c(rgb(0x454545)),
+            suggest_foreground: c(rgb(0xd4d4d4)),
+            suggest_selected_foreground: c(rgb(0xffffff)),
+            suggest_selected_background: c(rgb(0x04395e)),
+            suggest_highlight_foreground: c(rgb(0x2aaaff)),
+            suggest_focus_highlight_foreground: c(rgb(0x2aaaff)),
             input_background: c(rgb(0x3c3c3c)),
             input_option_active_background: c(rgba(0x007fd466)),
             input_option_active_border: c(rgb(0x007acc)),
@@ -318,6 +341,13 @@ impl EditorColors {
             widget_background: c(rgb(0xf3f3f3)),
             widget_foreground: c(rgb(0x616161)),
             widget_border: c(rgb(0xc8c8c8)),
+            suggest_background: c(rgb(0xf3f3f3)),
+            suggest_border: c(rgb(0xc8c8c8)),
+            suggest_foreground: c(rgb(0x000000)),
+            suggest_selected_foreground: c(rgb(0xffffff)),
+            suggest_selected_background: c(rgb(0x0060c0)),
+            suggest_highlight_foreground: c(rgb(0x0066bf)),
+            suggest_focus_highlight_foreground: c(rgb(0xbbe7ff)),
             input_background: c(rgb(0xffffff)),
             input_option_active_background: c(rgba(0x007fd433)),
             input_option_active_border: c(rgb(0x007acc)),
@@ -512,6 +542,50 @@ impl EditorColors {
         set(&mut self.widget_background, "editorWidget.background");
         set(&mut self.widget_foreground, "editorWidget.foreground");
         set(&mut self.widget_border, "editorWidget.border");
+        self.suggest_background = self.widget_background;
+        self.suggest_border = self.widget_border;
+        self.suggest_foreground = self.foreground;
+        set(
+            &mut self.suggest_background,
+            "editorSuggestWidget.background",
+        );
+        set(&mut self.suggest_border, "editorSuggestWidget.border");
+        set(
+            &mut self.suggest_foreground,
+            "editorSuggestWidget.foreground",
+        );
+        set(
+            &mut self.suggest_selected_foreground,
+            "quickInputList.focusForeground",
+        );
+        set(
+            &mut self.suggest_selected_foreground,
+            "editorSuggestWidget.selectedForeground",
+        );
+        set(
+            &mut self.suggest_selected_background,
+            "quickInputList.focusBackground",
+        );
+        set(
+            &mut self.suggest_selected_background,
+            "editorSuggestWidget.selectedBackground",
+        );
+        set(
+            &mut self.suggest_highlight_foreground,
+            "list.highlightForeground",
+        );
+        set(
+            &mut self.suggest_highlight_foreground,
+            "editorSuggestWidget.highlightForeground",
+        );
+        set(
+            &mut self.suggest_focus_highlight_foreground,
+            "list.focusHighlightForeground",
+        );
+        set(
+            &mut self.suggest_focus_highlight_foreground,
+            "editorSuggestWidget.focusHighlightForeground",
+        );
         set(&mut self.input_background, "input.background");
         set(
             &mut self.input_option_active_background,

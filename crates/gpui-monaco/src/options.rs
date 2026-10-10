@@ -292,6 +292,16 @@ pub struct SuggestOptions {
     /// `localityBonus`: among equal matches, prefer words used in the
     /// innermost bracket block around the cursor.
     pub locality_bonus: bool,
+    /// `fontSize`: the widget's font size; 0 uses the editor's.
+    pub font_size: f32,
+    /// `lineHeight`: the widget's row height; 0 uses the editor's.
+    pub line_height: f32,
+    /// `showIcons`: kind icons next to labels.
+    pub show_icons: bool,
+    /// `showStatusBar`: the insert/replace and details hints under the list.
+    pub show_status_bar: bool,
+    /// `showInlineDetails`: details at the right of the focused row.
+    pub show_inline_details: bool,
 }
 
 impl Default for SuggestOptions {
@@ -303,6 +313,11 @@ impl Default for SuggestOptions {
             show_deprecated: true,
             hidden_kinds: Vec::new(),
             locality_bonus: false,
+            font_size: 0.,
+            line_height: 0.,
+            show_icons: true,
+            show_status_bar: false,
+            show_inline_details: true,
         }
     }
 }
