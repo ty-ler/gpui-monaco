@@ -95,6 +95,9 @@ pub struct EditorColors {
     pub ghost_text_background: Hsla,
     /// `editorGhostText.border` (transparent: none).
     pub ghost_text_border: Hsla,
+    /// The `placeholder` text (`editor.placeholder.foreground`; Monaco
+    /// defaults it to the ghost text color).
+    pub placeholder_foreground: Hsla,
     /// Inline messages such as "No definition found"
     /// (`inputValidation.infoBackground`).
     pub message_background: Hsla,
@@ -275,6 +278,7 @@ impl EditorColors {
             ghost_text_foreground: c(rgba(0xffffff56)),
             ghost_text_background: gpui::transparent_black(),
             ghost_text_border: gpui::transparent_black(),
+            placeholder_foreground: c(rgba(0xffffff56)),
             message_background: c(rgb(0x063b49)),
             message_border: c(rgb(0x007acc)),
             fold_background: c(rgba(0x264f784d)),
@@ -384,6 +388,7 @@ impl EditorColors {
             ghost_text_foreground: c(rgba(0x00000077)),
             ghost_text_background: gpui::transparent_black(),
             ghost_text_border: gpui::transparent_black(),
+            placeholder_foreground: c(rgba(0x00000077)),
             message_background: c(rgb(0xd6ecf2)),
             message_border: c(rgb(0x007acc)),
             fold_background: c(rgba(0xadd6ff4d)),
@@ -478,6 +483,18 @@ impl EditorColors {
             "editor.inactiveSelectionBackground",
         );
         set(&mut self.cursor, "editorCursor.foreground");
+        set(
+            &mut self.ghost_text_foreground,
+            "editorGhostText.foreground",
+        );
+        set(
+            &mut self.ghost_text_background,
+            "editorGhostText.background",
+        );
+        set(&mut self.ghost_text_border, "editorGhostText.border");
+        self.placeholder_foreground = get("editor.placeholder.foreground")
+            .or_else(|| get("editorGhostText.foreground"))
+            .unwrap_or(self.placeholder_foreground);
         set(&mut self.scrollbar_slider, "scrollbarSlider.background");
         set(
             &mut self.scrollbar_slider_hover,

@@ -216,6 +216,12 @@ impl Playground {
             if std::env::var("PLAYGROUND_WRAPPING").as_deref() == Ok("advanced") {
                 options.wrapping_strategy = gpui_monaco::options::WrappingStrategy::Advanced;
             }
+            if let Ok(placeholder) = std::env::var("PLAYGROUND_PLACEHOLDER") {
+                options.placeholder = Some(placeholder.into());
+            }
+            if std::env::var_os("PLAYGROUND_READ_ONLY").is_some() {
+                options.read_only = true;
+            }
             if std::env::var_os("PLAYGROUND_LIGATURES").is_some() {
                 options.font_ligatures = gpui_monaco::options::FontLigatures::On;
             }

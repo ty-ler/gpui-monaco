@@ -849,6 +849,8 @@ pub struct PrepaintState {
     whitespace: Option<WhitespaceMarks>,
     embedded: Vec<Embedded>,
     section_headers: Vec<MinimapSectionHeader>,
+    /// The placeholder's lines and where they go.
+    placeholder: Vec<(ShapedLine, gpui::Point<Pixels>)>,
     /// The minimap's image and where it goes; replaced images to free.
     minimap_image: Option<(std::sync::Arc<gpui::RenderImage>, Bounds<Pixels>)>,
     minimap_stale: Vec<std::sync::Arc<gpui::RenderImage>>,
@@ -2611,6 +2613,38 @@ fn prepaint_editor(
         });
     }
 
+    // Monaco `PlaceholderTextContribution`: the placeholder while the
+    // model is empty, each line cut off with an ellipsis.
+    let mut placeholder = Vec::new();
+    if editor.is_placeholder_visible()
+        && let Some(text) = &options.placeholder
+    {
+        let mut wrapper = window
+            .text_system()
+            .line_wrapper(metrics.font.clone(), metrics.font_size);
+        let top = layout.line_top(0);
+        for (ix, line) in text.lines().enumerate() {
+            let runs = [run(
+                line.len(),
+                &metrics.font,
+                colors.placeholder_foreground,
+            )];
+            let (line, runs) = wrapper.truncate_line(
+                SharedString::from(line.to_string()),
+                text_bounds.size.width,
+                "…",
+                &runs,
+                gpui::TruncateFrom::End,
+            );
+            let shaped = window
+                .text_system()
+                .shape_line(line, metrics.font_size, &runs, None);
+            placeholder.push((
+                shaped,
+                point(text_bounds.left(), top + line_height * ix as f32),
+            ));
+        }
+    }
     let focused = editor.focus_handle.is_focused(window);
     editor.layout = Some(layout.clone());
     PrepaintState {
@@ -2633,6 +2667,7 @@ fn prepaint_editor(
         embedded,
         minimap_image,
         section_headers,
+        placeholder,
         minimap_stale: std::mem::take(&mut editor.minimap_cache.stale),
         minimap_slider_visible: options.minimap.always_show_slider || editor.minimap_hovered,
         sticky: sticky_shaped,
@@ -2828,6 +2863,11 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                     );
                 }
 
+                for (shaped, origin) in &state.placeholder {
+                    shaped
+                        .paint(*origin, line_height, TextAlign::Left, None, window, cx)
+                        .ok();
+                }
                 for line in &layout.lines {
                     let top = layout.text_top(line.view_line);
                     line.shaped

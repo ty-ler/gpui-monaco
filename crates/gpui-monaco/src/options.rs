@@ -1024,6 +1024,12 @@ pub struct EditorOptions {
     /// Monaco `readOnly`: ignore edits from typing, IME and editing commands (default
     /// `false`).
     pub read_only: bool,
+    /// Monaco `readOnlyMessage`: markdown shown when typing into a
+    /// read-only editor. `None` shows "Cannot edit in read-only editor"
+    /// ("input" for single-line editors).
+    pub read_only_message: Option<SharedString>,
+    /// Monaco `placeholder`: shown while the model is empty.
+    pub placeholder: Option<SharedString>,
     /// Monaco `wordSeparators`: characters that end a word for word navigation,
     /// double-click selection and whole-word search.
     pub word_separators: SharedString,
@@ -1269,6 +1275,8 @@ impl Default for EditorOptions {
             scroll_beyond_last_line: true,
             allow_variable_line_heights: true,
             read_only: false,
+            read_only_message: None,
+            placeholder: None,
             word_separators: "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?".into(),
             vertical_scrollbar_size: px(14.),
             horizontal_scrollbar_size: px(12.),

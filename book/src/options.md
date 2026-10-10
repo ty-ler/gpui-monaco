@@ -30,7 +30,9 @@ editor.update(cx, |editor, cx| {
 | `scroll_on_middle_click` | `scrollOnMiddleClick` | a middle click scrolls toward the mouse until the next click (off) |
 | `padding` | `padding` | `top` and `bottom` space |
 | `rounded_selection`, `render_line_highlight_only_when_focus` | same names | (on, off) |
-| `read_only` | `readOnly` | |
+| `read_only` | `readOnly` | edits are refused and show `read_only_message` |
+| `read_only_message` | `readOnlyMessage` | markdown; defaults to "Cannot edit in read-only editor" |
+| `placeholder` | `placeholder` | shown while the model is empty |
 | `word_separators` | `wordSeparators` | used by word movement and whole-word find |
 | `word_wrap`, `word_wrap_column`, `wrapping_indent` | `wordWrap`, `wordWrapColumn`, `wrappingIndent` | `Off`, `On`, `WordWrapColumn`, `Bounded` |
 | `wrapping_strategy` | `wrappingStrategy` | `Simple` counts monospace columns; `Advanced` measures characters, for proportional fonts |

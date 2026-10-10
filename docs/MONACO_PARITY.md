@@ -72,7 +72,7 @@ Issues are linked by number.
 | Variable line heights (`lineHeight` decorations, `allowVariableLineHeights`) | decorations | ✅ | #87 |
 | Letter spacing, font variations, per-decoration fonts | options | ❌ | #87 |
 | Smooth scrolling, caret animation, blinking styles, cursor surrounding lines, padding, wheel and middle-click options | options | ✅ | #88 |
-| Placeholder text, read-only message | `placeholderText`, `readOnlyMessage`, `message` | ❌ | #89 |
+| Placeholder text, read-only message | `placeholderText`, `readOnlyMessage`, `message` | ✅ | #89 |
 | Very long lines | `longLinesHelper` | ❌ | #59 |
 
 ## Extensibility
