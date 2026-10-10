@@ -239,6 +239,7 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) -> bool {
         if self.options.read_only {
+            self.read_only_edit_attempt(cx);
             return false;
         }
         let selections = self.cursors.selections();

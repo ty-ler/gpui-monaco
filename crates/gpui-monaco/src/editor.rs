@@ -42,6 +42,9 @@ pub enum CodeEditorEvent {
     SelectionsChanged(SelectionChange),
     /// The scroll position changed (Monaco `onDidScrollChange`).
     ScrollChanged,
+    /// An edit was refused because the editor is read-only (Monaco
+    /// `onDidAttemptReadOnlyEdit`).
+    ReadOnlyEditAttempt,
     /// The editor gained focus (Monaco `onDidFocusEditorText`).
     Focused,
     /// The editor lost focus (Monaco `onDidBlurEditorText`).
@@ -879,6 +882,12 @@ impl CodeEditor {
     /// ranges, pushes it to the model with undo grouping and cursor metadata,
     /// then moves the cursors to the operation's resulting selections.
     pub(crate) fn apply(&mut self, operation: EditOperation, cx: &mut Context<Self>) {
+        // Monaco `_executeCursorEdit`: read-only editors refuse cursor
+        // edits, and say so.
+        if self.options.read_only {
+            self.read_only_edit_attempt(cx);
+            return;
+        }
         // The hover's color picker edits the text without closing.
         if !self.color_picker.editing {
             self.hide_hover(cx);
@@ -888,9 +897,6 @@ impl CodeEditor {
                 self.cursors.set_selections(&operation.selections_after);
                 self.cursors_changed(true, cx);
             }
-            return;
-        }
-        if self.options.read_only {
             return;
         }
         let snapshot = self.snapshot.clone();
@@ -2752,6 +2758,7 @@ impl EntityInputHandler for CodeEditor {
         cx: &mut Context<Self>,
     ) {
         if self.options.read_only {
+            self.read_only_edit_attempt(cx);
             return;
         }
         let from_composition = range_utf16.is_none() && self.marked_range.is_some();
@@ -2779,6 +2786,7 @@ impl EntityInputHandler for CodeEditor {
         cx: &mut Context<Self>,
     ) {
         if self.options.read_only {
+            self.read_only_edit_attempt(cx);
             return;
         }
         let range = range_utf16

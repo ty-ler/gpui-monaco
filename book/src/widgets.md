@@ -48,6 +48,10 @@ editor.update(cx, |editor, cx| {
 
 To move a widget, call `set_content_widget_position(id, position, cx)`.
 
+## Messages
+
+`show_message(text, position, cx)` and `show_markdown_message(markdown, position, cx)` show a short message above a position (Monaco `MessageController`). It closes when the cursor moves, the editor loses focus, the mouse moves away or Escape is pressed. The editor uses it for "No definition found" and the read-only message.
+
 ## Overlay widgets
 
 An overlay widget (Monaco `IOverlayWidget`) is pinned to the editor's viewport and doesn't scroll. Monaco's find widget is one. Positions are `TopRight`, `BottomRight`, `TopCenter` or `Custom(point)`.

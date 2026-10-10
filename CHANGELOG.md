@@ -5,6 +5,11 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Placeholder and read-only message (#89):**
+  - **`EditorOptions::placeholder`** (Monaco `placeholder`) shows while the model is empty, in the theme's `editor.placeholder.foreground`. Each line is cut off with an ellipsis.
+  - **Read-only edits:** typing, IME input, editing commands and `execute_edits` in a read-only editor emit `CodeEditorEvent::ReadOnlyEditAttempt` (Monaco `onDidAttemptReadOnlyEdit`). They also show `read_only_message` (markdown) at the cursor, or Monaco's default "Cannot edit in read-only editor".
+  - **Messages:** `CodeEditor::show_markdown_message` renders markdown messages. `message_text` returns the visible one. Messages now use Monaco's overlay message styling.
+  - **Theme:** VS Code themes' `editorGhostText.*` colors are now read.
 - **Variable line heights (#87, part 3):** `DecorationOptions::line_height` (Monaco `lineHeight`), a multiple of the editor's line height for the lines a decoration covers. The tallest decoration on a line wins.
   - **Rendering:** text, line numbers and glyphs are centered in a taller line. Selections, the cursor, line highlights, backgrounds and guides fill it.
   - **Hit testing, reveal and widgets** follow the new heights.

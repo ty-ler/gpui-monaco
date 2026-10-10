@@ -4,8 +4,8 @@
 use std::ops::Range;
 
 use gpui::{
-    AppContext as _, Context, Hsla, IntoElement, ParentElement, Pixels, Render, SharedString,
-    Styled, Window, div, px,
+    AnyElement, AppContext as _, Context, Hsla, IntoElement, ParentElement, Pixels, Render,
+    SharedString, Styled, Window, div, px,
 };
 use text::PointUtf16;
 
@@ -20,27 +20,35 @@ pub(crate) struct InlineMessage {
     /// Rows the mouse may move within (Monaco: three lines around the
     /// position and the mouse's first row) before it closes.
     bounds: Option<Range<u32>>,
+    /// The message's source text.
+    text: SharedString,
 }
 
 struct MessageView {
-    text: SharedString,
+    content: AnyElementBuilder,
     background: Hsla,
     border: Hsla,
     foreground: Hsla,
     font_size: Pixels,
 }
 
+/// Builds the message's content each render: plain text, or rendered
+/// markdown.
+type AnyElementBuilder = Box<dyn Fn(&mut gpui::App) -> AnyElement>;
+
 impl Render for MessageView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Monaco `.monaco-editor-overlaymessage .message`.
         div()
-            .px(px(8.))
-            .py(px(3.))
+            .px(px(4.))
+            .py(px(2.))
+            .rounded(px(3.))
             .bg(self.background)
             .border_1()
             .border_color(self.border)
             .text_color(self.foreground)
             .text_size(self.font_size)
-            .child(self.text.clone())
+            .child((self.content)(cx))
     }
 }
 
@@ -54,10 +62,49 @@ impl CodeEditor {
         position: PointUtf16,
         cx: &mut Context<Self>,
     ) {
+        let text: SharedString = message.into();
+        let content = text.clone();
+        self.show_message_content(
+            text,
+            Box::new(move |_| content.clone().into_any_element()),
+            position,
+            cx,
+        );
+    }
+
+    /// [`show_message`](Self::show_message) with markdown (Monaco's
+    /// `IMarkdownString` messages). Links open on click.
+    pub fn show_markdown_message(
+        &mut self,
+        markdown: impl Into<SharedString>,
+        position: PointUtf16,
+        cx: &mut Context<Self>,
+    ) {
+        let markdown: SharedString = markdown.into();
+        let style = self.markdown_style();
+        let theme = self.theme.clone();
+        self.show_message_content(
+            markdown.clone(),
+            Box::new(move |cx| {
+                let registry = crate::model::language_registry(cx);
+                crate::markdown::render_markdown(&markdown, &style, &theme, &registry)
+            }),
+            position,
+            cx,
+        );
+    }
+
+    fn show_message_content(
+        &mut self,
+        text: SharedString,
+        content: AnyElementBuilder,
+        position: PointUtf16,
+        cx: &mut Context<Self>,
+    ) {
         self.close_message(cx);
         let colors = &self.theme.colors;
         let view = cx.new(|_| MessageView {
-            text: message.into(),
+            content,
             background: colors.message_background,
             border: colors.message_border,
             foreground: colors.widget_foreground,
@@ -78,7 +125,36 @@ impl CodeEditor {
             widget: Some(id),
             row: position.row,
             bounds: None,
+            text,
         };
+    }
+
+    /// Monaco `ReadOnlyMessageController`: an edit was refused, so say why
+    /// at the cursor.
+    pub(crate) fn read_only_edit_attempt(&mut self, cx: &mut Context<Self>) {
+        cx.emit(crate::editor::CodeEditorEvent::ReadOnlyEditAttempt);
+        let message = self.options.read_only_message.clone().unwrap_or_else(|| {
+            if self.options.single_line {
+                "Cannot edit in read-only input".into()
+            } else {
+                "Cannot edit in read-only editor".into()
+            }
+        });
+        let position = self.cursors.primary().position;
+        self.show_markdown_message(message, position, cx);
+    }
+
+    /// The visible message's text (markdown source for markdown ones).
+    pub fn message_text(&self) -> Option<SharedString> {
+        self.message
+            .widget
+            .is_some()
+            .then(|| self.message.text.clone())
+    }
+
+    /// Whether the `placeholder` shows: set, and the model is empty.
+    pub fn is_placeholder_visible(&self) -> bool {
+        self.options.placeholder.is_some() && self.snapshot.is_empty()
     }
 
     /// Whether an inline message is showing.

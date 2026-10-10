@@ -44,6 +44,8 @@ Demo providers are registered by default:
 | `PLAYGROUND_PLAIN=1` | Don't register the demo providers or markers |
 | `PLAYGROUND_LSP="rust-analyzer"` | Start a language server for `PLAYGROUND_FILE`, rooted at the nearest project directory, instead of the demo providers |
 | `PLAYGROUND_FONT="JetBrains Mono"` | Use another font family |
+| `PLAYGROUND_PLACEHOLDER="Type here"` | Show a placeholder while the file is empty |
+| `PLAYGROUND_READ_ONLY=1` | Start read-only (typing shows the read-only message) |
 | `PLAYGROUND_LIGATURES=1` | Turn font ligatures on |
 | `PLAYGROUND_WRAPPING=advanced` | Wrap by measured widths (for proportional fonts) |
 | `PLAYGROUND_ZOOM=2` | Start at a font zoom level (Cmd+wheel zooms too) |
