@@ -24,6 +24,7 @@ Demo providers are registered by default:
 - completions (`Ctrl+Space`; press it again for details) with docs, label details, a deprecated item, one resolved lazily, and two snippets (`for` with tab stops, `derive` with a choice)
 - signature help inside `(`
 - go to definition (`F12` / Cmd+click)
+- go to line (`Ctrl+G`) and go to symbol (`Cmd+Shift+O`)
 - references in a peek view (`Shift+F12`): every whole-word occurrence
 - rename (`F2`) of every whole-word occurrence
 - code actions: a lightbulb and `Cmd+.` with a quick fix per diagnostic and an UPPERCASE rewrite

@@ -15,6 +15,8 @@ const SINGLE_LINE: Option<&str> = Some("CodeEditor && single_line");
 /// The editor while the suggest widget is open (Monaco's
 /// `suggestWidgetVisible`).
 const SUGGEST: Option<&str> = Some("CodeEditor && suggest_widget_visible");
+/// The quick access input (inside the quick input widget).
+const QUICK_INPUT: Option<&str> = Some("QuickInput > CodeEditor");
 /// The editor while ghost text shows (Monaco's `inlineSuggestionVisible`).
 const INLINE: Option<&str> = Some("CodeEditor && inline_suggestion_visible");
 
@@ -500,6 +502,23 @@ actions!(
         ShowHover,
         /// Opens the link at the cursor (Monaco `editor.action.openLink`).
         OpenLink,
+        /// Opens quick access to go to a line (Monaco `editor.action.gotoLine`).
+        GotoLine,
+        /// Opens quick access to go to a symbol (Monaco
+        /// `editor.action.quickOutline`).
+        QuickOutline,
+        /// The next quick access item.
+        QuickInputNext,
+        /// The previous quick access item.
+        QuickInputPrevious,
+        /// A page down in the quick access list.
+        QuickInputPageNext,
+        /// A page up in the quick access list.
+        QuickInputPagePrevious,
+        /// The first quick access item.
+        QuickInputFirst,
+        /// The last quick access item.
+        QuickInputLast,
         /// Starts linked editing at the cursor, even with the option off
         /// (Monaco `editor.action.linkedEditing`).
         StartLinkedEditing,
@@ -678,6 +697,18 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-space", ToggleSuggestionDetails, SUGGEST),
         KeyBinding::new("alt-\\", TriggerInlineSuggest, ctx),
         KeyBinding::new("secondary-shift-f2", StartLinkedEditing, ctx),
+        // Monaco binds Ctrl+G on every platform.
+        KeyBinding::new("ctrl-g", GotoLine, ctx),
+        KeyBinding::new("secondary-shift-o", QuickOutline, ctx),
+        // In the quick access input (the list's keys win over the input's).
+        KeyBinding::new("down", QuickInputNext, QUICK_INPUT),
+        KeyBinding::new("up", QuickInputPrevious, QUICK_INPUT),
+        KeyBinding::new("pagedown", QuickInputPageNext, QUICK_INPUT),
+        KeyBinding::new("pageup", QuickInputPagePrevious, QUICK_INPUT),
+        KeyBinding::new("secondary-home", QuickInputFirst, QUICK_INPUT),
+        KeyBinding::new("secondary-end", QuickInputLast, QUICK_INPUT),
+        KeyBinding::new("ctrl-n", QuickInputNext, QUICK_INPUT),
+        KeyBinding::new("ctrl-p", QuickInputPrevious, QUICK_INPUT),
         KeyBinding::new("alt-]", ShowNextInlineSuggestion, INLINE),
         KeyBinding::new("alt-[", ShowPreviousInlineSuggestion, INLINE),
         KeyBinding::new(

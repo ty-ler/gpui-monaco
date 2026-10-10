@@ -44,6 +44,7 @@ pub mod options;
 pub mod outline;
 mod peek;
 pub mod providers;
+pub mod quick_access;
 mod rename;
 pub mod search;
 mod semantic_theme;

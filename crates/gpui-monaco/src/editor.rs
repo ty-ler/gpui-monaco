@@ -167,6 +167,7 @@ pub struct CodeEditor {
     pub(crate) inline: crate::inline_completions::controller::InlineCompletionsState,
     pub(crate) linked: crate::linked_editing::LinkedEditingState,
     pub(crate) code_lens: crate::code_lens::CodeLensState,
+    pub(crate) quick: Option<crate::quick_access::QuickAccessState>,
     pub(crate) minimap_cache: crate::element::MinimapCache,
     pub(crate) minimap_hovered: bool,
     minimap_drag: Option<Pixels>,
@@ -309,6 +310,7 @@ impl CodeEditor {
             inline: Default::default(),
             linked: Default::default(),
             code_lens: Default::default(),
+            quick: None,
             minimap_cache: Default::default(),
             minimap_hovered: false,
             minimap_drag: None,
@@ -3026,6 +3028,18 @@ impl Render for CodeEditor {
             .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| this.go_to_definition(cx)))
             .on_action(cx.listener(|this, _: &ShowHover, _, cx| this.show_hover_at_cursor(cx)))
             .on_action(cx.listener(|this, _: &OpenLink, _, cx| this.open_link(cx)))
+            .on_action(cx.listener(|this, _: &GotoLine, window, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.open_quick_access(":", window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &QuickOutline, window, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.open_quick_access("@", window, cx)
+            }))
             .on_action(cx.listener(|this, _: &StartLinkedEditing, _, cx| {
                 this.update_linked_editing(true, cx)
             }))

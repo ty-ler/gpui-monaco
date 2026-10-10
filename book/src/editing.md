@@ -111,6 +111,16 @@ Expand Selection grows each selection through the enclosing syntax nodes: word p
   - F7 and Shift+F7 select the next and previous occurrence.
 - **Selected text:** other occurrences of the selected text are highlighted. The highlight skips whitespace-only and multi-line selections, and selections longer than 200 characters.
 
+## Quick access
+
+Ctrl+G opens go to line, and Cmd/Ctrl+Shift+O opens go to symbol. Both use a quick input at the top of the editor:
+
+- **`:line` or `:line:column`:** goes to a line, previewing it as you type. Negative numbers count from the end, and `::offset` goes to a character offset.
+- **`@name`:** goes to a symbol from the [document symbols](providers.md#document-symbols), with fuzzy matching. A second word matches the container. `@:` groups the symbols by kind.
+- **Anything else:** lists the prefixes.
+
+Up, Down, Page Up and Page Down move through the list. Enter goes to the item, while Escape (or clicking elsewhere) closes the list and restores the view. `CodeEditor::open_quick_access(prefix, …)` opens it from code.
+
 ## Snippets
 
 `insert_snippet` inserts a TextMate snippet at every cursor and selects its first tab stop:

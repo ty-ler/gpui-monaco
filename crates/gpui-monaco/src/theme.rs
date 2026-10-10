@@ -66,6 +66,8 @@ pub struct EditorColors {
     pub symbol_highlight_background: Hsla,
     /// A link while Cmd/Ctrl is held over it (`editorLink.activeForeground`).
     pub link_active_foreground: Hsla,
+    /// Quick access previews (`editor.rangeHighlightBackground`).
+    pub range_highlight_background: Hsla,
     /// Code lens text (`editorCodeLens.foreground`).
     pub code_lens_foreground: Hsla,
     /// Linked editing ranges (`editor.linkedEditingBackground`).
@@ -238,6 +240,7 @@ impl EditorColors {
             find_match_overview: c(rgba(0xd186167e)),
             symbol_highlight_background: c(rgba(0xea5c0055)),
             link_active_foreground: c(rgb(0x4e94ce)),
+            range_highlight_background: c(rgba(0xffffff0b)),
             code_lens_foreground: c(rgb(0x999999)),
             linked_editing_background: c(rgba(0xff00004d)),
             ghost_text_foreground: c(rgba(0xffffff56)),
@@ -336,6 +339,7 @@ impl EditorColors {
             find_match_overview: c(rgba(0xd186167e)),
             symbol_highlight_background: c(rgba(0xea5c0055)),
             link_active_foreground: c(rgb(0x0000ff)),
+            range_highlight_background: c(rgba(0xfdff0033)),
             code_lens_foreground: c(rgb(0x999999)),
             linked_editing_background: c(rgba(0xff00004d)),
             ghost_text_foreground: c(rgba(0x00000077)),
