@@ -149,6 +149,11 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Inline completions, part 1 (#99):**
+  - A port of Monaco's `computeGhostText` (with its char diff and tests).
+  - The `InlineCompletionsProvider` API and the `inline_suggest` options.
+  - `suggest.preview` and `preview_mode`.
+  - Theme colors: `editorGhostText.*`.
 - **Semantic tokens (#98):**
   - `DocumentSemanticTokensProvider` (full results or edits against the last result) and `DocumentRangeSemanticTokensProvider` (for the viewport until a full result arrives).
   - Ported from Monaco's `documentSemanticTokens` and `viewportSemanticTokens`, with its adaptive debounce. Edits made during a request are replayed onto the result.

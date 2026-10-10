@@ -679,6 +679,94 @@ pub trait InlayHintsProvider: 'static {
     ) -> Task<anyhow::Result<Vec<InlayHint>>>;
 }
 
+// ----- inline completions --------------------------------------------------------
+
+/// Why inline completions are requested (Monaco
+/// `InlineCompletionTriggerKind`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InlineCompletionTriggerKind {
+    /// While typing.
+    Automatic,
+    /// By `editor.action.inlineSuggest.trigger` or cycling.
+    Explicit,
+}
+
+/// The suggest widget's selected item, for previews (Monaco
+/// `SelectedSuggestionInfo`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SelectedSuggestionInfo {
+    /// The range it replaces.
+    pub range: Range<PointUtf16>,
+    /// Its text.
+    pub text: String,
+    /// Its kind.
+    pub completion_kind: CompletionItemKind,
+    /// Whether `text` is a snippet.
+    pub is_snippet_text: bool,
+}
+
+/// Monaco `InlineCompletionContext`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlineCompletionContext {
+    /// Why they're requested.
+    pub trigger_kind: InlineCompletionTriggerKind,
+    /// The suggest widget's selection, while it's open.
+    pub selected_suggestion_info: Option<SelectedSuggestionInfo>,
+}
+
+/// One inline completion (Monaco `InlineCompletion`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InlineCompletion {
+    /// The text to insert.
+    pub insert_text: String,
+    /// `insert_text` is a snippet.
+    pub is_snippet: bool,
+    /// The single-line range it replaces; by default from the start of the
+    /// word at the cursor to the end of the line.
+    pub range: Option<Range<PointUtf16>>,
+    /// Run after accepting.
+    pub command: Option<Command>,
+    /// Edits elsewhere applied on accept.
+    pub additional_text_edits: Vec<(Range<PointUtf16>, String)>,
+}
+
+/// What an inline completions provider returns (Monaco
+/// `InlineCompletions`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InlineCompletionList {
+    /// The completions, best first.
+    pub items: Vec<InlineCompletion>,
+    /// Keep the suggest widget from opening by itself while one shows.
+    pub suppress_suggestions: Option<bool>,
+}
+
+/// Supplies ghost text at the cursor (Monaco `InlineCompletionsProvider`).
+///
+/// Register with [`register_inline_completions_provider`].
+pub trait InlineCompletionsProvider: 'static {
+    /// Completions at `position`.
+    fn provide_inline_completions(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        completion_context: InlineCompletionContext,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<InlineCompletionList>>;
+
+    /// How long to wait after typing before asking (Monaco
+    /// `debounceDelayMs`); `None` uses the editor's 50ms.
+    fn debounce_delay(&self) -> Option<std::time::Duration> {
+        None
+    }
+
+    /// `item` was shown for the first time.
+    fn handle_item_did_show(&self, _item: &InlineCompletion) {}
+
+    /// The first `accepted_length` UTF-16 units of `item` were accepted
+    /// word by word or line by line.
+    fn handle_partial_accept(&self, _item: &InlineCompletion, _accepted_length: usize) {}
+}
+
 // ----- semantic tokens -------------------------------------------------------------
 
 /// The token types and modifiers a semantic tokens provider's data
@@ -1073,6 +1161,7 @@ struct LanguageFeatures {
     inlay_hints: Vec<Entry<dyn InlayHintsProvider>>,
     links: Vec<Entry<dyn LinkProvider>>,
     semantic_tokens: Vec<Entry<dyn DocumentSemanticTokensProvider>>,
+    inline_completions: Vec<Entry<dyn InlineCompletionsProvider>>,
     range_semantic_tokens: Vec<Entry<dyn DocumentRangeSemanticTokensProvider>>,
     folding: Vec<Entry<dyn FoldingRangeProvider>>,
     selection_range: Vec<Entry<dyn SelectionRangeProvider>>,
@@ -1164,6 +1253,13 @@ register_fn!(
     register_folding_range_provider,
     folding,
     FoldingRangeProvider
+);
+register_fn!(
+    /// Registers an inline completions provider for the models `selector`
+    /// matches (Monaco `registerInlineCompletionsProvider`).
+    register_inline_completions_provider,
+    inline_completions,
+    InlineCompletionsProvider
 );
 register_fn!(
     /// Registers a document semantic tokens provider for the models
@@ -1276,6 +1372,7 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.inlay_hints.retain(|e| e.id != registration);
     features.links.retain(|e| e.id != registration);
     features.semantic_tokens.retain(|e| e.id != registration);
+    features.inline_completions.retain(|e| e.id != registration);
     features
         .range_semantic_tokens
         .retain(|e| e.id != registration);
@@ -1437,6 +1534,17 @@ pub fn code_action_providers(
 ) -> Vec<Arc<dyn CodeActionProvider>> {
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.code_action, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered inline completions providers whose selector matches
+/// `language_id`, in registration order.
+pub fn inline_completions_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn InlineCompletionsProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.inline_completions, language_id))
         .unwrap_or_default()
 }
 

@@ -261,6 +261,50 @@ pub enum WordBasedSuggestions {
     AllDocuments,
 }
 
+/// How ghost text relates to the text at the cursor (Monaco
+/// `inlineSuggest.mode`, also `suggest.previewMode`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InlineSuggestMode {
+    /// Only text appended at the cursor.
+    Prefix,
+    /// Insertions anywhere in the rest of the word.
+    Subword,
+    /// Insertions in the rest of the word, but none before the cursor.
+    #[default]
+    SubwordSmart,
+}
+
+/// Monaco `inlineSuggest`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlineSuggestOptions {
+    /// `enabled`: show inline completions (on).
+    pub enabled: bool,
+    /// `mode`.
+    pub mode: InlineSuggestMode,
+    /// `suppressSuggestions`: keep the suggest widget from opening by itself
+    /// while ghost text shows (off).
+    pub suppress_suggestions: bool,
+    /// `keepOnBlur`: keep ghost text when the editor loses focus (off).
+    pub keep_on_blur: bool,
+    /// `minShowDelay`: show results no sooner than this after the request.
+    pub min_show_delay: std::time::Duration,
+    /// `suppressInSnippetMode`: no ghost text inside a snippet (on).
+    pub suppress_in_snippet_mode: bool,
+}
+
+impl Default for InlineSuggestOptions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: InlineSuggestMode::SubwordSmart,
+            suppress_suggestions: false,
+            keep_on_blur: false,
+            min_show_delay: std::time::Duration::ZERO,
+            suppress_in_snippet_mode: true,
+        }
+    }
+}
+
 /// Monaco `semanticHighlighting.enabled`: whether semantic tokens color
 /// the text.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -328,6 +372,10 @@ pub struct SuggestOptions {
     pub show_status_bar: bool,
     /// `showInlineDetails`: details at the right of the focused row.
     pub show_inline_details: bool,
+    /// `preview`: show the selected suggestion as ghost text (off).
+    pub preview: bool,
+    /// `previewMode`: how the preview relates to the typed text.
+    pub preview_mode: InlineSuggestMode,
 }
 
 impl Default for SuggestOptions {
@@ -344,6 +392,8 @@ impl Default for SuggestOptions {
             show_icons: true,
             show_status_bar: false,
             show_inline_details: true,
+            preview: false,
+            preview_mode: InlineSuggestMode::SubwordSmart,
         }
     }
 }
@@ -672,6 +722,8 @@ pub struct EditorOptions {
     /// Monaco `multiCursorPaste`: how pasting with several cursors splits
     /// the text.
     pub multi_cursor_paste: crate::cursor::MultiCursorPaste,
+    /// Monaco `inlineSuggest`.
+    pub inline_suggest: InlineSuggestOptions,
     /// Monaco `semanticHighlighting.enabled`.
     pub semantic_highlighting: SemanticHighlighting,
     /// Monaco `links`: detect links and follow them with Cmd/Ctrl+click.
@@ -786,6 +838,7 @@ impl Default for EditorOptions {
             selection_highlight_multiline: false,
             multi_cursor_modifier: MultiCursorModifier::Alt,
             multi_cursor_paste: Default::default(),
+            inline_suggest: InlineSuggestOptions::default(),
             semantic_highlighting: SemanticHighlighting::ConfiguredByTheme,
             links: true,
             show_unused: true,
