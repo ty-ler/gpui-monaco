@@ -21,11 +21,13 @@ fn contains(range: &Range<PointUtf16>, p: PointUtf16) -> bool {
 
 impl CodeEditor {
     /// The bracket pair at (or, with `enclosing`, around) `position`.
-    fn bracket_pair(
+    /// Runs `f` with the text, the language configuration and whether the
+    /// bracket at a position is in a string or comment (so it's ignored).
+    pub(crate) fn with_bracket_context<R>(
         &self,
-        position: PointUtf16,
         cx: &gpui::App,
-    ) -> Option<(Range<PointUtf16>, Range<PointUtf16>)> {
+        f: impl FnOnce(&text::Rope, &syntax::LanguageConfiguration, &dyn Fn(PointUtf16) -> bool) -> R,
+    ) -> Option<R> {
         let model = self.model().read(cx);
         let language = model.language()?;
         let rope = self.snapshot.rope();
@@ -51,7 +53,17 @@ impl CodeEditor {
             let ix = ranges.partition_point(|r| r.end <= offset);
             ranges.get(ix).is_some_and(|r| r.start <= offset)
         };
-        cursor::matching_bracket(rope, &language.config, position, &skippable)
+        Some(f(rope, &language.config, &skippable))
+    }
+
+    fn bracket_pair(
+        &self,
+        position: PointUtf16,
+        cx: &gpui::App,
+    ) -> Option<(Range<PointUtf16>, Range<PointUtf16>)> {
+        self.with_bracket_context(cx, |rope, config, skippable| {
+            cursor::matching_bracket(rope, config, position, skippable)
+        })?
     }
 
     /// Deletes the bracket pair at or around each cursor (Monaco

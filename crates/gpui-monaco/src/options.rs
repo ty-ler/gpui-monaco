@@ -444,6 +444,8 @@ pub struct EditorOptions {
     pub lightbulb: LightbulbMode,
     /// Monaco `inlayHints`.
     pub inlay_hints: InlayHintsOptions,
+    /// Monaco `smartSelect`.
+    pub smart_select: crate::cursor::smart_select::SmartSelectOptions,
     /// Monaco `formatOnType`: format with the on-type formatter when one of
     /// its trigger characters is typed.
     pub format_on_type: bool,
@@ -561,6 +563,7 @@ impl Default for EditorOptions {
             goto_location: GotoLocationOptions::default(),
             lightbulb: LightbulbMode::OnCode,
             inlay_hints: InlayHintsOptions::default(),
+            smart_select: Default::default(),
             format_on_type: false,
             format_on_paste: false,
             minimap: MinimapOptions::default(),

@@ -58,6 +58,16 @@ pub trait Highlighter: Send + Sync {
     fn fold_ranges(&self, _state: &HighlightState, _text: &Rope) -> Option<Vec<(u32, u32)>> {
         None
     }
+
+    /// Byte ranges of the syntax nodes around `offset`, for smart select,
+    /// or `None` if this highlighter doesn't know.
+    fn selection_ranges(
+        &self,
+        _state: &HighlightState,
+        _offset: usize,
+    ) -> Option<Vec<Range<usize>>> {
+        None
+    }
 }
 
 /// The tree-sitter [`Highlighter`]; its state is a [`SyntaxSnapshot`].
@@ -104,5 +114,9 @@ impl Highlighter for TreeSitterHighlighter {
 
     fn fold_ranges(&self, state: &HighlightState, text: &Rope) -> Option<Vec<(u32, u32)>> {
         state.syntax()?.fold_ranges(text)
+    }
+
+    fn selection_ranges(&self, state: &HighlightState, offset: usize) -> Option<Vec<Range<usize>>> {
+        Some(state.syntax()?.selection_ranges(offset))
     }
 }

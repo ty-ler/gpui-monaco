@@ -393,3 +393,103 @@ pub fn matching_bracket(
     }
     None
 }
+
+/// Monaco `BracketSelectionRangeProvider` for one position: the inside and
+/// outside of each bracket pair around `position`, innermost first, plus
+/// the leading text before a multi-line pair's opening bracket. `skip`
+/// tells whether the bracket starting at a position is in a string or
+/// comment.
+pub fn bracket_selection_ranges(
+    model: &dyn CursorModel,
+    config: &LanguageConfiguration,
+    position: Position,
+    skip: &dyn Fn(Position) -> bool,
+) -> Vec<Range<Position>> {
+    let brackets = Brackets::configured_or_default(config);
+    let line_count = model.line_count();
+    // Closing brackets with nothing open after `position`, by pair.
+    let mut closings: Vec<std::collections::VecDeque<Range<Position>>> =
+        vec![Default::default(); brackets.pairs.len()];
+    let mut counts = vec![0i64; brackets.pairs.len()];
+    let last_row = (position.row + MAX_BALANCE_LINES).min(line_count.saturating_sub(1));
+    for row in position.row..=last_row {
+        let line = line_units(model, row);
+        for found in brackets.in_line(&line, &|i| skip(Position::new(row, i))) {
+            if row == position.row && found.start < position.column {
+                continue;
+            }
+            if found.is_open {
+                counts[found.pair] += 1;
+            } else {
+                let value = counts[found.pair] - 1;
+                counts[found.pair] = value.max(0);
+                if value < 0 {
+                    closings[found.pair].push_back(found_range(row, &found));
+                }
+            }
+        }
+    }
+    let mut ranges = Vec::new();
+    let mut counts = vec![0i64; brackets.pairs.len()];
+    let first_row = position.row.saturating_sub(MAX_BALANCE_LINES);
+    'rows: for row in (first_row..=position.row).rev() {
+        if closings.iter().all(|c| c.is_empty()) {
+            break;
+        }
+        let line = line_units(model, row);
+        let found = brackets.in_line(&line, &|i| skip(Position::new(row, i)));
+        for found in found.iter().rev() {
+            if row == position.row && found.start + found.len > position.column {
+                continue;
+            }
+            if !found.is_open {
+                counts[found.pair] += 1;
+                continue;
+            }
+            let value = counts[found.pair] - 1;
+            counts[found.pair] = value.max(0);
+            if value < 0
+                && let Some(closing) = closings[found.pair].pop_front()
+            {
+                let open = found_range(row, found);
+                let outer = open.start..closing.end;
+                ranges.push(open.end..closing.start);
+                ranges.push(outer.clone());
+                add_bracket_leading(model, &outer, &mut ranges);
+                if closings.iter().all(|c| c.is_empty()) {
+                    break 'rows;
+                }
+            }
+        }
+    }
+    ranges
+}
+
+/// Monaco `_addBracketLeading`: for a multi-line pair, the text before the
+/// opening bracket on its line, or the line above when the bracket starts
+/// its own line.
+fn add_bracket_leading(
+    model: &dyn CursorModel,
+    bracket: &Range<Position>,
+    ranges: &mut Vec<Range<Position>>,
+) {
+    if bracket.start.row == bracket.end.row {
+        return;
+    }
+    let row = bracket.start.row;
+    if let Some(column) = super::first_non_whitespace_column(model, row)
+        && column != bracket.start.column
+    {
+        ranges.push(Position::new(row, column)..bracket.end);
+        ranges.push(Position::new(row, 0)..bracket.end);
+    }
+    if row > 0 {
+        let above = row - 1;
+        if let Some(column) = super::first_non_whitespace_column(model, above)
+            && column == bracket.start.column
+        {
+            ranges.push(Position::new(above, column)..bracket.end);
+            ranges.push(Position::new(above, 0)..bracket.end);
+        }
+    }
+}

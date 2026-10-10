@@ -31,6 +31,7 @@ use gpui_monaco::providers::{InlayHint, InlayHintsProvider, register_inlay_hints
 use gpui_monaco::providers::{
     RenameLocation, RenameProvider, WorkspaceEdit, register_rename_provider,
 };
+use gpui_monaco::providers::{SelectionRangeProvider, register_selection_range_provider};
 use gpui_monaco::text::PointUtf16;
 use lsp_types as lsp;
 
@@ -203,6 +204,17 @@ impl LspFeatures {
             .is_some_and(|c| !matches!(c, lsp::FoldingRangeProviderCapability::Simple(false)))
         {
             registrations.push(register_folding_range_provider(
+                cx,
+                selector.clone(),
+                self.clone(),
+            ));
+        }
+        if capabilities
+            .selection_range_provider
+            .as_ref()
+            .is_some_and(|c| !matches!(c, lsp::SelectionRangeProviderCapability::Simple(false)))
+        {
+            registrations.push(register_selection_range_provider(
                 cx,
                 selector.clone(),
                 self.clone(),
@@ -826,6 +838,43 @@ impl FoldingRangeProvider for LspFeatures {
                     })
                     .collect()
             }))
+        })
+    }
+}
+
+impl SelectionRangeProvider for LspFeatures {
+    fn provide_selection_ranges(
+        &self,
+        context: &ProviderContext,
+        positions: &[PointUtf16],
+        cx: &mut App,
+    ) -> Task<Result<Vec<Vec<Range<PointUtf16>>>>> {
+        let Some((connection, position)) = self.prepare(context, PointUtf16::zero(), cx) else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let request =
+            connection.request::<lsp::request::SelectionRangeRequest>(lsp::SelectionRangeParams {
+                text_document: position.text_document,
+                positions: positions.iter().map(|p| convert::position(*p)).collect(),
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            });
+        cx.background_executor().spawn(async move {
+            Ok(request
+                .await?
+                .unwrap_or_default()
+                .into_iter()
+                .map(|selection| {
+                    // Each range with its parents, outward.
+                    let mut ranges = Vec::new();
+                    let mut current = Some(Box::new(selection));
+                    while let Some(range) = current {
+                        ranges.push(convert::range(range.range));
+                        current = range.parent;
+                    }
+                    ranges
+                })
+                .collect())
         })
     }
 }

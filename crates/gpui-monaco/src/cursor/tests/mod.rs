@@ -13,6 +13,7 @@ mod lines_command_cases;
 mod lines_test;
 mod on_enter_test;
 mod overtype_test;
+mod smart_select_test;
 mod tokenizer;
 mod transforms_test;
 mod word_operations_test;

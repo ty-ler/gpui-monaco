@@ -179,6 +179,8 @@ pub struct CodeEditor {
     pub(crate) code_actions: crate::code_action::CodeActionState,
     /// Inlay hints and their requests.
     pub(crate) inlay: crate::inlay_hints::InlayHintState,
+    /// Expand and shrink selection state.
+    pub(crate) smart_select: crate::smart_select::SmartSelectState,
     /// This editor is a peek view's preview: F4 and unhandled Escape go to
     /// the editor around it.
     pub(crate) in_peek: bool,
@@ -252,6 +254,7 @@ impl CodeEditor {
             rename: Default::default(),
             code_actions: Default::default(),
             inlay: Default::default(),
+            smart_select: Default::default(),
             in_peek: false,
             refocus: false,
             format_task: None,
@@ -842,6 +845,7 @@ impl CodeEditor {
         self.close_message(cx);
         self.check_symbol_navigation(cx);
         self.check_rename(cx);
+        self.smart_select_cursor_changed();
         self.schedule_auto_code_actions(cx);
         self.update_bracket_highlights(cx);
         self.update_occurrence_highlights(cx);
@@ -2818,6 +2822,8 @@ impl Render for CodeEditor {
                 this.remove_manual_folding_ranges(cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleImportFold, _, cx| this.toggle_import_fold(cx)))
+            .on_action(cx.listener(|this, _: &ExpandSelection, _, cx| this.expand_selection(cx)))
+            .on_action(cx.listener(|this, _: &ShrinkSelection, _, cx| this.shrink_selection(cx)))
             .on_action(cx.listener(|this, _: &StartFind, window, cx| {
                 if this.options.single_line {
                     return cx.propagate();
