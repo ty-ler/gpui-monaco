@@ -317,3 +317,86 @@ fn the_revert_action_reverts_changes_at_the_cursor(cx: &mut TestAppContext) {
     cx.dispatch_action(gpui_monaco::diff_editor::Revert);
     assert_eq!(modified_text(&diff, cx), "a\nB\nc\nd\ne");
 }
+
+#[gpui::test]
+fn the_accessible_diff_viewer(cx: &mut TestAppContext) {
+    let original: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    let modified = original
+        .replace("line 5\n", "five\n")
+        .replace("line 30\n", "");
+    let (diff, cx) = setup(&original, &modified, cx);
+    let editor = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    cx.update(|window, cx| window.focus(&editor.read(cx).focus_handle(cx), cx));
+    // F7 in the editor opens it at the first change.
+    cx.simulate_keystrokes("f7");
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.accessible_viewer_state_for_tests(cx)),
+        Some((2, 0, 0))
+    );
+    // Down moves through the group: three lines of context, then the
+    // change.
+    cx.simulate_keystrokes("down down down down");
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.accessible_viewer_current_for_tests(cx)),
+        Some("deleted")
+    );
+    // The modified cursor follows (line 6, the change's start).
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.selections()[0].head),
+        PointUtf16::new(5, 0)
+    );
+    cx.simulate_keystrokes("down");
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.accessible_viewer_current_for_tests(cx)),
+        Some("added")
+    );
+    // F7 again: the next change; then it cycles back.
+    cx.simulate_keystrokes("f7");
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.accessible_viewer_state_for_tests(cx)),
+        Some((2, 1, 0))
+    );
+    cx.simulate_keystrokes("f7");
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.accessible_viewer_state_for_tests(cx)),
+        Some((2, 0, 0))
+    );
+    // Escape closes it and focuses the modified editor.
+    cx.simulate_keystrokes("escape");
+    paint(cx);
+    assert!(!diff.read_with(cx, |d, _| d.is_accessible_diff_viewer_visible()));
+    assert!(cx.update(|window, cx| editor.read(cx).focus_handle(cx).is_focused(window)));
+    // Shift+F7 opens it at the previous change.
+    cx.simulate_keystrokes("shift-f7");
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.accessible_viewer_state_for_tests(cx)),
+        Some((2, 1, 0))
+    );
+    // Enter on a line reveals it in the editor.
+    cx.simulate_keystrokes("down down down down");
+    cx.simulate_keystrokes("enter");
+    paint(cx);
+    assert!(!diff.read_with(cx, |d, _| d.is_accessible_diff_viewer_visible()));
+    let original_editor = diff.read_with(cx, |d, _| d.original_editor().clone());
+    assert!(cx.update(|window, cx| original_editor.read(cx).focus_handle(cx).is_focused(window)));
+    assert_eq!(
+        original_editor.read_with(cx, |e, _| e.selections()[0].head),
+        PointUtf16::new(30, 0)
+    );
+}
+
+#[gpui::test]
+fn only_showing_the_accessible_diff_viewer(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb", "a\nc", cx);
+    diff.update(cx, |d, cx| {
+        let mut options = d.options().clone();
+        options.only_show_accessible_diff_viewer = true;
+        d.update_options(options, cx);
+    });
+    paint(cx);
+    cx.simulate_keystrokes("f7");
+    cx.simulate_keystrokes("escape");
+    paint(cx);
+    // It can't be closed.
+    assert!(diff.read_with(cx, |d, _| d.is_accessible_diff_viewer_visible()));
+}
