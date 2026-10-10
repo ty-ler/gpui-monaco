@@ -455,15 +455,28 @@ pub(crate) struct MinimapCache {
     key: Option<MinimapKey>,
     /// The view line `blocks` start at.
     first: u32,
-    /// Blocks relative to the minimap's first drawn line.
-    blocks: Vec<(Bounds<Pixels>, Hsla)>,
+    /// The rendered lines from `first` on (Monaco draws the minimap into a
+    /// canvas too), with its size in device pixels.
+    image: Option<(std::sync::Arc<gpui::RenderImage>, (u32, u32))>,
+    /// Replaced images, to free from the atlas at the next paint.
+    stale: Vec<std::sync::Arc<gpui::RenderImage>>,
     /// A rebuild running in the background; until it lands the old blocks
     /// are drawn (a frame-stale minimap is invisible, ~3ms per keystroke on
     /// the main thread is not).
     pending: Option<(MinimapKey, std::sync::Arc<gpui::Task<()>>)>,
 }
 
-type MinimapKey = (text::Version, u32, u32, usize, u32);
+/// (text, parsed text, first line, last line, theme, wrap column, render
+/// settings): it's redrawn once the syntax tree catches up, for colors.
+type MinimapKey = (
+    text::Version,
+    Option<text::Version>,
+    u32,
+    u32,
+    usize,
+    u32,
+    [u32; 4],
+);
 
 /// A fold control in the gutter.
 #[derive(Clone, Copy, Debug)]
@@ -650,7 +663,9 @@ pub struct PrepaintState {
     /// Rendered whitespace.
     whitespace: Option<WhitespaceMarks>,
     embedded: Vec<Embedded>,
-    minimap_blocks: Vec<(Bounds<Pixels>, Hsla)>,
+    /// The minimap's image and where it goes; replaced images to free.
+    minimap_image: Option<(std::sync::Arc<gpui::RenderImage>, Bounds<Pixels>)>,
+    minimap_stale: Vec<std::sync::Arc<gpui::RenderImage>>,
     minimap_slider_visible: bool,
     sticky: Vec<(usize, Pixels, LineLayout, Option<ShapedLine>)>,
     /// The keyboard-focused and hovered sticky lines.
@@ -872,7 +887,19 @@ fn prepaint_editor(
     } else {
         px(0.)
     };
-    let text_width = bounds.size.width - gutter_width - vbar - minimap_width;
+    // Monaco `minimap.side: left`: the minimap comes before the gutter.
+    let full_bounds = bounds;
+    let minimap_left = options.minimap.side == crate::options::MinimapSide::Left;
+    let bounds = if minimap_left {
+        Bounds::new(
+            point(bounds.left() + minimap_width, bounds.top()),
+            size(bounds.size.width - minimap_width, bounds.size.height),
+        )
+    } else {
+        bounds
+    };
+    let text_width =
+        bounds.size.width - gutter_width - vbar - if minimap_left { px(0.) } else { minimap_width };
 
     // Bring the view lines up to date: edits, wrapping, folds.
     let wrap_column = {
@@ -1435,61 +1462,135 @@ fn prepaint_editor(
         horizontal_scrollbar,
     };
 
-    // Minimap: token-colored blocks, `scale` px per column and 2*scale px
-    // per view line, scrolled proportionally (Monaco `minimap`).
-    let mut minimap_blocks = Vec::new();
+    // Minimap: token-colored characters or blocks (Monaco `minimap`), sized
+    // per `minimap.size` (`EditorLayoutInfoComputer`).
+    let mut minimap_image = None;
     if minimap_width > px(0.) {
-        let scale = options.minimap.scale;
-        let mline = px(2. * scale);
+        use crate::options::MinimapSize;
+        let pixel_ratio = window.scale_factor();
+        let minimap_options = &options.minimap;
+        let base = if minimap_options.render_characters {
+            2.
+        } else {
+            3.
+        };
+        let mut scale = if pixel_ratio >= 2. {
+            (minimap_options.scale * 2.).round()
+        } else {
+            minimap_options.scale
+        };
+        // Device pixels per minimap line.
+        let mut line_px = base * scale;
+        let mut fills = false;
+        let mut sample_ratio = 1.;
+        if minimap_options.size != MinimapSize::Proportional {
+            let height = f32::from(viewport_height);
+            let lh = f32::from(line_height);
+            let typical = height / lh;
+            let before = (f32::from(options.padding.top) / lh).floor();
+            let mut after = (f32::from(options.padding.bottom) / lh).floor();
+            if options.scroll_beyond_last_line {
+                after = after.max(typical - 1.);
+            }
+            let count = view_line_count.max(1) as f32;
+            let desired = (before + count + after) / (pixel_ratio * height);
+            let minimap_lines = (count / desired).floor().max(1.);
+            let ratio = count / minimap_lines;
+            if ratio > 1. {
+                // More lines than pixels: one pixel per sampled line.
+                fills = true;
+                sample_ratio = ratio;
+                scale = 1.;
+                line_px = 1.;
+            } else {
+                let fit_becomes_fill = minimap_options.size == MinimapSize::Fit
+                    && ((before + count + after) * line_px).ceil() > pixel_ratio * height;
+                if minimap_options.size == MinimapSize::Fill || fit_becomes_fill {
+                    fills = true;
+                    let max_scale = scale + 1.;
+                    line_px = (lh * pixel_ratio).min((1. / desired).floor().max(1.));
+                    scale = max_scale.min((line_px / base).floor().max(1.));
+                }
+            }
+        }
+        let mline = px(line_px / pixel_ratio);
+        let char_width = if pixel_ratio >= 2. { scale / 2. } else { scale };
+        let render = MinimapRender {
+            char_width: scale,
+            line_height: line_px,
+            characters: minimap_options.render_characters,
+            max_column: (f32::from(minimap_width) / char_width.max(0.1)) as usize,
+        };
+        let image_width = (f32::from(minimap_width) * pixel_ratio).ceil() as u32;
         let minimap_bounds = Bounds::new(
-            point(bounds.right() - vbar - minimap_width, bounds.top()),
+            if minimap_left {
+                full_bounds.origin
+            } else {
+                point(bounds.right() - vbar - minimap_width, bounds.top())
+            },
             size(minimap_width, viewport_height),
         );
-        let total = mline * view_line_count as f32;
-        let minimap_scroll = if total > viewport_height && max_scroll_top > px(0.) {
+        // Minimap lines, and the view line each shows.
+        let minimap_line_count = (view_line_count as f32 / sample_ratio).ceil().max(1.) as u32;
+        let total = mline * minimap_line_count as f32;
+        let minimap_scroll = if !fills && total > viewport_height && max_scroll_top > px(0.) {
             (total - viewport_height) * (scroll_top / max_scroll_top)
         } else {
             px(0.)
         };
         let first = (minimap_scroll / mline).floor() as u32;
         let last = (((minimap_scroll + viewport_height) / mline).ceil() as u32)
-            .min(view_line_count.saturating_sub(1));
+            .min(minimap_line_count.saturating_sub(1));
+        let lines: Vec<u32> = (first..=last)
+            .map(|i| ((i as f32 * sample_ratio) as u32).min(view_line_count.saturating_sub(1)))
+            .collect();
         let theme_key = std::sync::Arc::as_ptr(&theme) as usize;
+        let parsed = editor
+            .model()
+            .read(cx)
+            .syntax_snapshot()
+            .map(|syntax| syntax.text.version());
         let key = (
             snapshot.version(),
+            parsed,
             first,
             last,
             theme_key,
             wrap_column.unwrap_or(0),
+            [
+                render.char_width.to_bits(),
+                render.line_height.to_bits(),
+                render.characters as u32,
+                sample_ratio.to_bits(),
+            ],
         );
         let cache = &editor.minimap_cache;
         if cache.key != Some(key) && cache.pending.as_ref().is_none_or(|(k, _)| *k != key) {
             let source = HighlightSource::new(editor.model().read(cx));
             let build = {
-                let (view_lines, snapshot, theme, options) = (
-                    view_lines.clone(),
-                    snapshot.clone(),
-                    theme.clone(),
-                    options.clone(),
-                );
+                let (view_lines, snapshot, theme) =
+                    (view_lines.clone(), snapshot.clone(), theme.clone());
                 move || {
-                    minimap_blocks_for(
+                    minimap_image_for(
                         source.as_ref(),
                         &view_lines,
                         &snapshot,
                         &theme,
-                        first..last + 1,
+                        &lines,
                         tab_size,
-                        &options,
+                        render,
+                        image_width,
                     )
                 }
             };
             if cache.key.is_none() {
                 // Nothing to show yet: build the first one now.
+                let stale = std::mem::take(&mut editor.minimap_cache.stale);
                 editor.minimap_cache = MinimapCache {
                     key: Some(key),
                     first,
-                    blocks: build(),
+                    image: build(),
+                    stale,
                     pending: None,
                 };
             } else {
@@ -1500,7 +1601,9 @@ fn prepaint_editor(
                         if cache.pending.as_ref().is_some_and(|(k, _)| *k == key) {
                             cache.key = Some(key);
                             cache.first = first;
-                            cache.blocks = blocks;
+                            if let Some((old, _)) = std::mem::replace(&mut cache.image, blocks) {
+                                cache.stale.push(old);
+                            }
                             cache.pending = None;
                             cx.notify();
                         }
@@ -1512,35 +1615,32 @@ fn prepaint_editor(
         }
         let origin_y =
             minimap_bounds.top() + mline * editor.minimap_cache.first as f32 - minimap_scroll;
-        minimap_blocks = editor
-            .minimap_cache
-            .blocks
-            .iter()
-            .map(|(b, color)| {
-                (
-                    Bounds::new(
-                        point(minimap_bounds.left() + b.origin.x, origin_y + b.origin.y),
-                        b.size,
-                    ),
-                    *color,
-                )
-            })
-            .collect();
+        minimap_image = editor.minimap_cache.image.clone().map(|(image, (w, h))| {
+            (
+                image,
+                Bounds::new(
+                    point(minimap_bounds.left(), origin_y),
+                    size(px(w as f32 / pixel_ratio), px(h as f32 / pixel_ratio)),
+                ),
+            )
+        });
+        // The slider covers the visible lines, in minimap lines.
         let first_visible = zones.line_at(scroll_top, line_height, view_line_count);
         let visible_lines = (viewport_height / line_height).max(1.);
+        let per_view_line = mline / sample_ratio;
         let slider = Bounds::new(
             point(
                 minimap_bounds.left(),
-                minimap_bounds.top() + mline * first_visible as f32 - minimap_scroll,
+                minimap_bounds.top() + per_view_line * first_visible as f32 - minimap_scroll,
             ),
-            size(minimap_width, mline * visible_lines),
+            size(minimap_width, (per_view_line * visible_lines).max(px(2.))),
         );
         let travel = (total.min(viewport_height) - slider.size.height).max(px(1.));
         layout.minimap = Some(MinimapLayout {
             bounds: minimap_bounds,
             slider,
             drag_ratio: max_scroll_top / travel,
-            line_height: mline,
+            line_height: per_view_line,
             scroll: minimap_scroll,
         });
     }
@@ -2268,7 +2368,8 @@ fn prepaint_editor(
         guides,
         whitespace,
         embedded,
-        minimap_blocks,
+        minimap_image,
+        minimap_stale: std::mem::take(&mut editor.minimap_cache.stale),
         minimap_slider_visible: options.minimap.always_show_slider || editor.minimap_hovered,
         sticky: sticky_shaped,
         sticky_focused: editor.sticky.focused,
@@ -2678,17 +2779,32 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                 }
             }
         }
+        // Free replaced minimap images from the atlas.
+        for image in &state.minimap_stale {
+            window.drop_image(image.clone()).ok();
+        }
         if let Some(minimap) = layout.minimap {
-            if let Some(background) = colors.minimap_background {
-                window.paint_quad(fill(minimap.bounds, background));
-            }
+            // Its own background, also where it sits left of the gutter.
+            window.paint_quad(fill(
+                minimap.bounds,
+                colors.minimap_background.unwrap_or(colors.background),
+            ));
             window.with_content_mask(
                 Some(ContentMask {
                     bounds: minimap.bounds,
                 }),
                 |window| {
-                    for (block, color) in &state.minimap_blocks {
-                        window.paint_quad(fill(*block, *color));
+                    if let Some((image, image_bounds)) = &state.minimap_image {
+                        window
+                            .paint_image(
+                                minimap.bounds,
+                                *image_bounds,
+                                Corners::default(),
+                                image.clone(),
+                                0,
+                                false,
+                            )
+                            .ok();
                     }
                     if state.minimap_slider_visible {
                         window.paint_quad(fill(minimap.slider, colors.minimap_slider));
@@ -3048,71 +3164,122 @@ pub(crate) enum Embedded {
 
 /// Minimap blocks for view lines `lines`, relative to the first one.
 #[allow(clippy::too_many_arguments)]
-fn minimap_blocks_for(
+/// How the minimap draws (Monaco's minimap layout: char width and line
+/// height in device pixels, and `renderCharacters`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MinimapRender {
+    char_width: f32,
+    line_height: f32,
+    /// Monaco `renderCharacters`: a two-pixel-row impression of each
+    /// character rather than solid blocks.
+    characters: bool,
+    max_column: usize,
+}
+
+/// How dark a character is in the top and bottom halves of its minimap
+/// cell, standing in for Monaco's prerendered minimap glyphs.
+fn minimap_glyph(ch: char) -> (f32, f32) {
+    match ch {
+        'g' | 'j' | 'p' | 'q' | 'y' => (0.45, 0.9),
+        'b' | 'd' | 'f' | 'h' | 'k' | 'l' | 't' | 'i' => (0.75, 0.7),
+        c if c.is_lowercase() => (0.35, 0.8),
+        c if c.is_uppercase() || c.is_ascii_digit() => (0.8, 0.75),
+        '.' | ',' | '_' => (0., 0.6),
+        ':' | ';' => (0.35, 0.5),
+        '-' | '=' | '+' | '~' | '*' => (0.4, 0.3),
+        '\'' | '"' | '`' | '^' => (0.6, 0.),
+        _ => (0.6, 0.6),
+    }
+}
+
+fn minimap_image_for(
     highlights: Option<&HighlightSource>,
     view_lines: &ViewLines,
     snapshot: &text::BufferSnapshot,
     theme: &Theme,
-    lines: Range<u32>,
+    lines: &[u32],
     tab_size: u32,
-    options: &EditorOptions,
-) -> Vec<(Bounds<Pixels>, Hsla)> {
-    let scale = options.minimap.scale;
-    let mline = 2. * scale;
-    let max_column = options.minimap.max_column as usize;
+    render: MinimapRender,
+    width: u32,
+) -> Option<(std::sync::Arc<gpui::RenderImage>, (u32, u32))> {
+    // Device pixels per character and per line.
+    let char_px = render.char_width.max(1.).round() as u32;
+    let line_px = render.line_height.max(1.).round() as u32;
+    let height = line_px * lines.len() as u32;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    let mut fill = |x: u32, y: u32, w: u32, h: u32, color: Hsla| {
+        let rgba = gpui::Rgba::from(color);
+        let bgra = [
+            (rgba.b * 255.) as u8,
+            (rgba.g * 255.) as u8,
+            (rgba.r * 255.) as u8,
+            (rgba.a * 255.) as u8,
+        ];
+        for row in y..(y + h).min(height) {
+            let start = ((row * width + x.min(width)) * 4) as usize;
+            let end = ((row * width + (x + w).min(width)) * 4) as usize;
+            for pixel in pixels[start..end].chunks_exact_mut(4) {
+                pixel.copy_from_slice(&bgra);
+            }
+        }
+    };
+    let max_column = render.max_column;
     let foreground = theme.colors.foreground.opacity(0.6);
-    let first_row = view_lines.view_line(lines.start).row;
-    let last_row = view_lines.view_line(lines.end.saturating_sub(1)).row;
-    let range = snapshot.point_to_offset(text::Point::new(first_row, 0))
-        ..snapshot.point_to_offset(text::Point::new(last_row, u32::MAX));
-    let highlights = highlights.map_or_else(Vec::new, |source| source.highlights(theme, range));
+    let (Some(first), Some(last)) = (lines.first(), lines.last()) else {
+        return None;
+    };
+    let first_row = view_lines.view_line(*first).row;
+    let last_row = view_lines.view_line(*last).row;
+    // Contiguous lines share one highlight query; sampled ones get their own.
+    let contiguous = (*last - *first) as usize + 1 == lines.len();
+    let row_range = |first_row: u32, last_row: u32| {
+        snapshot.point_to_offset(text::Point::new(first_row, 0))
+            ..snapshot.point_to_offset(text::Point::new(last_row, u32::MAX))
+    };
+    let shared = if contiguous {
+        highlights.map_or_else(Vec::new, |source| {
+            source.highlights(theme, row_range(first_row, last_row))
+        })
+    } else {
+        Vec::new()
+    };
     let tab_size = tab_size.max(1) as usize;
-    let mut blocks = Vec::new();
-    // Highlights are sorted and offsets only increase, so walk them with a
-    // cursor.
-    let mut next_highlight = 0;
-    for (ix, view_line) in lines.enumerate() {
+    for (ix, view_line) in lines.iter().copied().enumerate() {
         let segment = row_segment(view_lines, view_line);
+        let line_highlights;
+        let highlights: &[(Range<usize>, TokenStyle)] = if contiguous {
+            &shared
+        } else {
+            line_highlights = highlights.map_or_else(Vec::new, |source| {
+                source.highlights(theme, row_range(segment.row, segment.row))
+            });
+            &line_highlights
+        };
+        let mut next_highlight = 0;
         let full = snapshot.line(segment.row);
         let line_start = snapshot.point_to_offset(text::Point::new(segment.row, 0));
         let byte_start = utf16_to_byte(&full, segment.columns.start);
         let byte_end = utf16_to_byte(&full, segment.columns.end);
-        let y = px(mline * ix as f32);
+        let y = line_px * ix as u32;
         let mut column = segment.indent as usize + segment.start_visible_column as usize
             - if segment.columns.start > 0 {
                 segment.start_visible_column as usize
             } else {
                 0
             };
-        let mut run: Option<(usize, usize, Hsla)> = None;
-        let flush = |run: &mut Option<(usize, usize, Hsla)>,
-                     blocks: &mut Vec<(Bounds<Pixels>, Hsla)>| {
-            if let Some((start, end, color)) = run.take() {
-                let start = start.min(max_column);
-                let end = end.min(max_column);
-                if end > start {
-                    blocks.push((
-                        Bounds::new(
-                            point(px(start as f32 * scale), y),
-                            size(px((end - start) as f32 * scale), px(mline * 0.8)),
-                        ),
-                        color,
-                    ));
-                }
-            }
-        };
         for (byte, ch) in full[byte_start..byte_end].char_indices() {
             if column >= max_column {
                 break;
             }
-            let width = if ch == '\t' {
+            let span = if ch == '\t' {
                 tab_size - column % tab_size
             } else {
                 1
             };
-            if ch.is_whitespace() {
-                flush(&mut run, &mut blocks);
-            } else {
+            if !ch.is_whitespace() {
                 let offset = line_start + byte_start + byte;
                 while highlights
                     .get(next_highlight)
@@ -3125,19 +3292,29 @@ fn minimap_blocks_for(
                     .filter(|(r, _)| r.start <= offset)
                     .and_then(|(_, style)| style.foreground)
                     .map_or(foreground, |c| c.opacity(0.75));
-                match run.as_mut() {
-                    Some((_, end, run_color)) if *run_color == color && *end == column => {
-                        *end += width
-                    }
-                    _ => {
-                        flush(&mut run, &mut blocks);
-                        run = Some((column, column + width, color));
-                    }
+                let x = column as u32 * char_px;
+                let w = span as u32 * char_px;
+                if render.characters && line_px >= 2 {
+                    // Monaco's glyphs, as two bands of darkness.
+                    let (top, bottom) = minimap_glyph(ch);
+                    let half = line_px / 2;
+                    fill(x, y, w, half, color.opacity(top));
+                    fill(x, y + half, w, line_px - half, color.opacity(bottom));
+                } else if render.characters {
+                    let (top, bottom) = minimap_glyph(ch);
+                    fill(x, y, w, 1, color.opacity((top + bottom) / 2.));
+                } else {
+                    // Blocks leave a gap between lines.
+                    let h = (line_px - (line_px / 3).max(1)).max(1);
+                    fill(x, y, w, h, color);
                 }
             }
-            column += width;
+            column += span;
         }
-        flush(&mut run, &mut blocks);
     }
-    blocks
+    let buffer = image::RgbaImage::from_raw(width, height, pixels)?;
+    Some((
+        std::sync::Arc::new(gpui::RenderImage::new(vec![image::Frame::new(buffer)])),
+        (width, height),
+    ))
 }

@@ -70,6 +70,35 @@ pub struct MinimapOptions {
     pub scale: f32,
     /// Monaco `minimap.showSlider`: `true` always, `false` on mouse over.
     pub always_show_slider: bool,
+    /// Monaco `minimap.side` (default right).
+    pub side: MinimapSide,
+    /// Monaco `minimap.renderCharacters`: an impression of each character
+    /// rather than solid blocks (default `true`).
+    pub render_characters: bool,
+    /// Monaco `minimap.size` (default proportional).
+    pub size: MinimapSize,
+}
+
+/// Monaco `minimap.side`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MinimapSide {
+    /// Right of the text.
+    #[default]
+    Right,
+    /// Left of the gutter.
+    Left,
+}
+
+/// Monaco `minimap.size`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MinimapSize {
+    /// Fixed-size lines; the minimap scrolls with long documents.
+    #[default]
+    Proportional,
+    /// Lines stretch or shrink so the document fills the editor's height.
+    Fill,
+    /// Lines shrink as needed so the document never overflows it.
+    Fit,
 }
 
 impl Default for MinimapOptions {
@@ -79,6 +108,9 @@ impl Default for MinimapOptions {
             max_column: 120,
             scale: 1.,
             always_show_slider: false,
+            side: MinimapSide::Right,
+            render_characters: true,
+            size: MinimapSize::Proportional,
         }
     }
 }

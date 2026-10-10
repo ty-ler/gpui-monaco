@@ -149,6 +149,10 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Minimap options (#88, part 3):** `MinimapOptions::side` (left or right), `render_characters` (characters or blocks) and `size`.
+  - **Sizes:** `Proportional`, `Fill` or `Fit`, following Monaco's layout computation. Documents longer than the editor's height are sampled.
+  - **Rendering:** the minimap is now drawn into an image in the background, as Monaco draws into a canvas. Painting it is one image instead of thousands of quads, and typing got faster.
+  - **Fix:** the minimap's colors arrive once the syntax tree has been parsed; before, it could stay grey.
 - **Scrollbar and overview ruler options (#88, part 2):**
   - **Scrollbar:** `EditorOptions::scrollbar` (Monaco `scrollbar.*`).
     - Visibility: `auto` (the default, now as in Monaco) shows the sliders while the mouse is over the editor or for 500ms after scrolling, then fades them over 800ms. `visible` and `hidden` do what they say.
