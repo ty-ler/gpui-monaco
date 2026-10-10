@@ -444,4 +444,24 @@ fn moved_blocks(cx: &mut TestAppContext) {
         )
     });
     assert_eq!(diff.read_with(cx, |d, _| d.active_move_for_tests()), None);
+
+    // Comparing the move: the block's two places scroll together. It's at
+    // line 1 on the left and line 11 on the right.
+    let original_editor = diff.read_with(cx, |d, _| d.original_editor().clone());
+    diff.update(cx, |d, cx| d.set_move_to_compare(Some(0), cx));
+    paint(cx);
+    original_editor.update(cx, |e, cx| e.set_scroll_position(point(px(0.), px(0.)), cx));
+    paint(cx);
+    let (original_top, modified_top) = (
+        original_editor.read_with(cx, |e, _| e.scroll_position().y),
+        modified_editor.read_with(cx, |e, _| e.scroll_position().y),
+    );
+    assert!(
+        modified_top > original_top,
+        "{original_top:?} {modified_top:?}"
+    );
+    // Escape in an editor stops comparing.
+    cx.update(|window, cx| window.focus(&modified_editor.read(cx).focus_handle(cx), cx));
+    cx.simulate_keystrokes("escape");
+    assert_eq!(diff.read_with(cx, |d, _| d.move_to_compare()), None);
 }
