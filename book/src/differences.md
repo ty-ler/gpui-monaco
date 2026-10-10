@@ -54,7 +54,7 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
 - **Folding:** clicking the `⋯` placeholder doesn't unfold the region, and there is no folding by tree-sitter fold queries yet. Ranges come from indentation and markers.
 - **Accessibility:** screen reader support is post-MVP. GPUI's accessibility support is still in progress upstream.
 - **Diff editor:** not available.
-- **Long lines:** very long lines, such as minified files, are not virtualized horizontally yet.
+- **Long lines:** as in Monaco, very long lines stop rendering after `stop_rendering_line_after` with a "Show more (…)" chip. Clicking the chip doesn't expand the line; set the option to `None` to draw everything.
 
 ## Platform
 

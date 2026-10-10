@@ -156,6 +156,27 @@ impl<'a, T: Target> SeekTarget<'a, TextSummary, TextSummary> for Seek<T> {
     }
 }
 
+/// The point of `offset` in `chunk`, which starts at `start` (clamped to a
+/// char boundary, like [`Rope::locate`]).
+fn point_in_chunk(start: Location, chunk: Option<&Chunk>, offset: usize) -> Point {
+    let Some(chunk) = chunk else {
+        return start.point;
+    };
+    let text = chunk.0.as_str();
+    let mut local = offset.saturating_sub(start.offset).min(text.len());
+    while !text.is_char_boundary(local) {
+        local -= 1;
+    }
+    let prefix = &text.as_bytes()[..local];
+    match prefix.iter().rposition(|&b| b == b'\n') {
+        Some(last) => Point::new(
+            start.point.row + prefix.iter().filter(|&&b| b == b'\n').count() as u32,
+            (local - last - 1) as u32,
+        ),
+        None => Point::new(start.point.row, start.point.column + local as u32),
+    }
+}
+
 /// An immutable-by-default, cheaply clonable text buffer.
 #[derive(Clone, Default)]
 pub struct Rope {
@@ -314,7 +335,24 @@ impl Rope {
 
     /// Converts a byte offset to a [`Point`], clamping like [`Rope::locate`].
     pub fn offset_to_point(&self, offset: usize) -> Point {
-        self.locate(offset).point
+        // `locate` without its char-by-char walk: count line breaks in the
+        // chunk's bytes (this is hot, e.g. for thousands of view zones).
+        let mut cursor = self.chunks.cursor::<TextSummary>(());
+        cursor.seek(&Seek(offset), Bias::Left);
+        point_in_chunk(cursor.start().extent, cursor.item(), offset)
+    }
+
+    /// [`Rope::offset_to_point`] for each of `offsets`, which must be
+    /// sorted: one cursor moves forward through them, much cheaper than a
+    /// seek each.
+    pub fn offsets_to_points(&self, offsets: &[usize]) -> Vec<Point> {
+        let mut cursor = self.chunks.cursor::<TextSummary>(());
+        let mut points = Vec::with_capacity(offsets.len());
+        for &offset in offsets {
+            cursor.seek_forward(&Seek(offset), Bias::Left);
+            points.push(point_in_chunk(cursor.start().extent, cursor.item(), offset));
+        }
+        points
     }
 
     /// Converts a [`Point`] to a byte offset, clamping like [`Rope::locate`].
@@ -744,6 +782,27 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn offset_to_point_matches_locate() {
+        let mut text = String::new();
+        for i in 0..400 {
+            text.push_str(&format!("line {i} é 😀\n"));
+        }
+        let rope = Rope::from(text.as_str());
+        for offset in 0..=text.len() + 3 {
+            assert_eq!(
+                rope.offset_to_point(offset),
+                rope.locate(offset).point,
+                "{offset}"
+            );
+        }
+        let offsets: Vec<usize> = (0..=text.len() + 3).step_by(7).collect();
+        let points = rope.offsets_to_points(&offsets);
+        for (offset, point) in offsets.iter().zip(points) {
+            assert_eq!(point, rope.locate(*offset).point, "{offset}");
         }
     }
 }

@@ -37,6 +37,7 @@ editor.update(cx, |editor, cx| {
 | `drag_and_drop`, `double_click_selects_block` | `dragAndDrop`, `doubleClickSelectsBlock` | drag the selection to move it (Alt/Ctrl copies); double-click inside brackets or quotes selects their content |
 | `auto_indent_on_paste`, `auto_indent_on_paste_within_string` | `autoIndentOnPaste`, `autoIndentOnPasteWithinString` | re-indent pasted lines (off by default; needs `auto_indent: Full`) |
 | `selection_clipboard` | `selectionClipboard` | Linux primary selection: selected text is copied to it, and a middle click pastes it (default on) |
+| `stop_rendering_line_after` | `stopRenderingLineAfter` | draw at most this many characters of a line, then "Show more" (default 10 000) |
 | `drop_into_editor`, `paste_as` | `dropIntoEditor`, `pasteAs` | `enabled` and when to show the button that switches edits |
 | `unusual_line_terminators` | `unusualLineTerminators` | `Prompt` (default), `Auto` or `Off` for LS and PS characters |
 | `word_separators` | `wordSeparators` | used by word movement and whole-word find |
@@ -100,5 +101,6 @@ Model-level settings live in `ModelOptions` (Monaco `ITextModelUpdateOptions`), 
 - `tab_size`
 - `indent_size`
 - `insert_spaces`
+- `max_tokenization_line_length` (Monaco `maxTokenizationLineLength`, default 20 000): longer lines aren't highlighted
 
 Changing options takes effect on the next frame. Wrapping, folding and the minimap update incrementally.

@@ -464,19 +464,28 @@ impl CodeLensProvider for DemoCodeLens {
         &self,
         context: &ProviderContext,
         lens: &CodeLens,
-        _: &mut App,
+        cx: &mut App,
     ) -> Option<Task<anyhow::Result<CodeLens>>> {
         let name = word_at(context, lens.range.start);
-        let text = context.snapshot.rope().to_string();
-        let count = text.matches(name.as_str()).count().saturating_sub(1);
-        Some(Task::ready(Ok(CodeLens {
-            command: Some(Command {
-                id: "playground.references".into(),
-                title: format!("{count} reference{}", if count == 1 { "" } else { "s" }).into(),
-                arguments: vec![name.into()],
-            }),
-            ..lens.clone()
-        })))
+        let rope = context.snapshot.rope().clone();
+        let lens = lens.clone();
+        // Counting scans the document: off the main thread.
+        Some(cx.background_executor().spawn(async move {
+            let count = rope
+                .chunks()
+                .collect::<String>()
+                .matches(name.as_str())
+                .count()
+                .saturating_sub(1);
+            Ok(CodeLens {
+                command: Some(Command {
+                    id: "playground.references".into(),
+                    title: format!("{count} reference{}", if count == 1 { "" } else { "s" }).into(),
+                    arguments: vec![name.into()],
+                }),
+                ..lens
+            })
+        }))
     }
 }
 

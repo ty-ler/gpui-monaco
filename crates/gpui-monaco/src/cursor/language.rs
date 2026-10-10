@@ -67,6 +67,9 @@ pub struct LanguageContext<'a> {
     /// quote that closes a string. When `None` it is guessed from the
     /// neighbouring characters' token types.
     pub token_type_if_inserting: Option<&'a dyn Fn(Position, char) -> StandardTokenType>,
+    /// Monaco `maxTokenizationLineLength`: longer lines are one plain
+    /// token, so they're processed without asking for token types.
+    pub max_tokenization_line_length: u32,
 }
 
 impl<'a> LanguageContext<'a> {
@@ -80,7 +83,14 @@ impl<'a> LanguageContext<'a> {
             config,
             token_type_at,
             token_type_if_inserting: None,
+            max_tokenization_line_length: u32::MAX,
         }
+    }
+
+    /// Sets [`Self::max_tokenization_line_length`].
+    pub fn with_max_tokenization_line_length(mut self, length: u32) -> Self {
+        self.max_tokenization_line_length = length;
+        self
     }
 
     /// A context without token information: every character is
@@ -434,6 +444,10 @@ impl<'a> LanguageSupport<'a> {
     /// brackets removed from strings, comments and regexes (Monaco
     /// `IndentationLineProcessor.getProcessedTokens`).
     pub fn processed(&self, model: &dyn CursorModel, row: u32, from: u32, to: u32) -> String {
+        // An untokenized long line is one plain token: no brackets to drop.
+        if model.line_max_column(row) >= self.ctx.max_tokenization_line_length {
+            return model.line_slice(row, from..to);
+        }
         let units = line_units(model, row);
         let to = (to as usize).min(units.len());
         let from = (from as usize).min(to);

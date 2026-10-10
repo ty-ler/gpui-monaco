@@ -19,6 +19,8 @@ What makes this possible:
   - find
   - minimap rendering
 
+Huge files and minified code stay usable: a 1M-line file types in about 2ms per keystroke, and a 2MB single-line file in about 11ms. Like Monaco, lines longer than `stop_rendering_line_after` (10 000) end in a "Show more" chip, and lines longer than `max_tokenization_line_length` (20 000) aren't highlighted.
+
 ## Tips for hosts
 
 - **Decorations:** keep decorations proportional to what's useful. Thousands are fine. Each frame queries only the visible range, but every decoration's range is updated on each edit.

@@ -138,6 +138,7 @@ impl Ed<'_> {
                     tab_size,
                     indent_size,
                     insert_spaces,
+                    ..Default::default()
                 },
                 cx,
             )

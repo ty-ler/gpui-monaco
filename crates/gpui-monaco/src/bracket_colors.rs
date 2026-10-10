@@ -31,6 +31,11 @@ pub(crate) struct BracketColors {
     /// The version the running `task` computes.
     pending: Option<text::Version>,
     task: Option<Task<()>>,
+    /// A background pass is running: dropping `task` wouldn't stop it, so
+    /// newer versions wait for it (huge documents take seconds).
+    computing: bool,
+    /// A newer version came in while `computing`.
+    rerun: bool,
 }
 
 impl CodeEditor {
@@ -63,6 +68,10 @@ impl CodeEditor {
         if syntax.as_ref().is_some_and(|s| s.text.version() != version) || model.is_parsing() {
             return;
         }
+        if self.bracket_colors.computing {
+            self.bracket_colors.rerun = true;
+            return;
+        }
         let rope = model.buffer().rope().clone();
         let tab_size = model.options().tab_size;
         self.bracket_colors.pending = Some(version);
@@ -77,6 +86,12 @@ impl CodeEditor {
         self.bracket_colors.task = Some(cx.spawn(async move |this, cx| {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
+            }
+            if this
+                .update(cx, |this, _| this.bracket_colors.computing = true)
+                .is_err()
+            {
+                return;
             }
             let (tokens, pairs) = cx
                 .background_executor()
@@ -111,6 +126,10 @@ impl CodeEditor {
                 this.bracket_colors.version = Some(version);
                 this.bracket_colors.pending = None;
                 this.bracket_colors.task = None;
+                this.bracket_colors.computing = false;
+                if std::mem::take(&mut this.bracket_colors.rerun) {
+                    this.refresh_bracket_colors(cx);
+                }
                 cx.notify();
             })
             .ok();
