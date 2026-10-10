@@ -532,3 +532,69 @@ fn word_start_end_and_delete_commands(cx: &mut TestAppContext) {
     cx.dispatch_action(DeleteWordPartLeft);
     assert_eq!(text(&editor, cx), "baz\n");
 }
+
+#[gpui::test]
+fn cursor_undo_and_redo(cx: &mut TestAppContext) {
+    use gpui_monaco::actions::*;
+    let (editor, cx) = editor_with_text("one\ntwo\nthree", cx);
+    cx.simulate_keystrokes("down down end");
+    assert_eq!(heads(&editor, cx), vec![(3, 6)]);
+    cx.simulate_keystrokes("secondary-u");
+    assert_eq!(heads(&editor, cx), vec![(3, 1)]);
+    cx.simulate_keystrokes("secondary-u secondary-u");
+    assert_eq!(heads(&editor, cx), vec![(1, 1)]);
+    cx.dispatch_action(CursorRedo);
+    assert_eq!(heads(&editor, cx), vec![(2, 1)]);
+    // An edit clears the cursor history.
+    cx.simulate_input("x");
+    cx.simulate_keystrokes("secondary-u");
+    assert_eq!(heads(&editor, cx), vec![(2, 2)]);
+}
+
+#[gpui::test]
+fn selection_anchor(cx: &mut TestAppContext) {
+    let (editor, cx) = editor_with_text("hello world", cx);
+    cx.simulate_keystrokes("right right secondary-k secondary-b");
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.selection_anchor(cx)),
+        Some(p(1, 3))
+    );
+    cx.simulate_keystrokes("end secondary-k secondary-k");
+    let selection = editor.read_with(cx, |e, _| e.selections()[0]);
+    assert_eq!((selection.anchor, selection.head), (p(1, 3), p(1, 12)));
+    // Selecting consumes the anchor.
+    assert_eq!(editor.read_with(cx, |e, cx| e.selection_anchor(cx)), None);
+    cx.simulate_keystrokes("secondary-k secondary-b escape");
+    assert_eq!(editor.read_with(cx, |e, cx| e.selection_anchor(cx)), None);
+}
+
+#[gpui::test]
+fn keyboard_column_select_and_scroll_commands(cx: &mut TestAppContext) {
+    use gpui_monaco::actions::*;
+    let (editor, cx) = editor_with_text("abcd\nabcd\nabcd", cx);
+    cx.dispatch_action(CursorColumnSelectRight);
+    cx.dispatch_action(CursorColumnSelectRight);
+    cx.dispatch_action(CursorColumnSelectDown);
+    let selections: Vec<_> = editor.read_with(cx, |e, _| {
+        e.selections()
+            .iter()
+            .map(|s| (s.anchor.to_monaco(), s.head.to_monaco()))
+            .collect()
+    });
+    assert_eq!(selections, vec![((1, 1), (1, 3)), ((2, 1), (2, 3))]);
+
+    cx.dispatch_action(CancelSelection);
+    cx.dispatch_action(CursorLineEnd);
+    cx.dispatch_action(CursorLineStartSelect);
+    let selection = editor.read_with(cx, |e, _| e.selections()[0]);
+    assert!(selection.head.column == 0 && !selection.is_empty());
+
+    cx.dispatch_action(ScrollLineDown);
+    let top = editor.read_with(cx, |e, _| e.scroll_position().y);
+    assert!(top > gpui::px(0.));
+    cx.dispatch_action(ScrollEditorTop);
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.scroll_position().y),
+        gpui::px(0.)
+    );
+}

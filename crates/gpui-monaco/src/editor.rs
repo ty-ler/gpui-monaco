@@ -120,6 +120,7 @@ pub struct CodeEditor {
     pub(crate) find: crate::find::FindState,
     pub(crate) multi_cursor: Option<crate::multi_cursor::MultiCursorSession>,
     pub(crate) bracket_decorations: Vec<crate::decorations::DecorationId>,
+    pub(crate) navigation: crate::navigation_history::NavigationHistory,
     pub(crate) hover: crate::hover::HoverState,
     pub(crate) marker_navigation: crate::markers::MarkerNavigation,
     pub(crate) definition: crate::definition::DefinitionLink,
@@ -193,6 +194,10 @@ impl CodeEditor {
             find: Default::default(),
             multi_cursor: None,
             bracket_decorations: Vec::new(),
+            navigation: crate::navigation_history::NavigationHistory::starting_at(
+                vec![Selection::collapsed(PointUtf16::zero())],
+                snapshot.version(),
+            ),
             hover: Default::default(),
             marker_navigation: Default::default(),
             definition: Default::default(),
@@ -236,6 +241,8 @@ impl CodeEditor {
             });
         }
         self.minimap_cache = Default::default();
+        self.cancel_selection_anchor(cx);
+        self.reset_navigation_history();
 
         self._subscriptions[0] = cx.subscribe(&model, Self::on_model_event);
         model.update(cx, |model, cx| model.ensure_syntax(cx));
@@ -252,6 +259,7 @@ impl CodeEditor {
         self.scroll_left = px(0.);
         self.marked_range = None;
         self.prev_edit_kind = None;
+        self.record_cursor_change();
         self.refresh_find_matches(cx);
         cx.emit(CodeEditorEvent::SelectionsChanged);
         cx.emit(CodeEditorEvent::ScrollChanged);
@@ -638,6 +646,7 @@ impl CodeEditor {
         if autoscroll {
             self.autoscroll_requested = true;
         }
+        self.record_cursor_change();
         self.update_bracket_highlights(cx);
         self.restart_blink(cx);
         cx.emit(CodeEditorEvent::SelectionsChanged);
@@ -799,9 +808,13 @@ impl CodeEditor {
             self.hide_hover(cx);
             return;
         }
-        // Monaco's `closeFindWidget` outranks `removeSecondaryCursors`.
+        // Monaco's `closeFindWidget` and `cancelSelectionAnchor` outrank
+        // `removeSecondaryCursors`.
         if self.find.visible {
             self.close_find(window, cx);
+            return;
+        }
+        if self.cancel_selection_anchor(cx) {
             return;
         }
         let primary = self.cursors.primary().clone();
@@ -970,6 +983,15 @@ impl CodeEditor {
 
     fn copy_lines_down(&mut self, _: &CopyLinesDown, _: &mut Window, cx: &mut Context<Self>) {
         self.run_edit(cx, cursor::copy_lines_down);
+    }
+
+    /// Keyboard column selection (Monaco `cursorColumnSelect*`).
+    fn column_select(&mut self, command: cursor::ColumnSelectCommand, cx: &mut Context<Self>) {
+        let config = self.cursor_config(cx);
+        let page = self.page_lines();
+        let rope = self.snapshot.rope().clone();
+        cursor::column_select(&config, &rope, &mut self.cursors, command, page);
+        self.cursors_changed(true, cx);
     }
 
     /// Runs a comment command with the comment tokens of the language at
@@ -1933,6 +1955,10 @@ impl Render for CodeEditor {
             CursorPageUpSelect => (MoveCommand::PageUp, true),
             CursorPageDown => (MoveCommand::PageDown, false),
             CursorPageDownSelect => (MoveCommand::PageDown, true),
+            CursorLineStart => (MoveCommand::LineStart, false),
+            CursorLineStartSelect => (MoveCommand::LineStart, true),
+            CursorLineEnd => (MoveCommand::LineEnd, false),
+            CursorLineEndSelect => (MoveCommand::LineEnd, true),
         );
         root.on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::expand_line_selection))
@@ -2009,6 +2035,54 @@ impl Render for CodeEditor {
                     this.focus_next_cursor(false, cx)
                 }),
             )
+            .on_action(cx.listener(|this, _: &CursorColumnSelectLeft, _, cx| {
+                this.column_select(cursor::ColumnSelectCommand::Left, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CursorColumnSelectRight, _, cx| {
+                this.column_select(cursor::ColumnSelectCommand::Right, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CursorColumnSelectUp, _, cx| {
+                this.column_select(cursor::ColumnSelectCommand::Up, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CursorColumnSelectDown, _, cx| {
+                this.column_select(cursor::ColumnSelectCommand::Down, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CursorColumnSelectPageUp, _, cx| {
+                this.column_select(cursor::ColumnSelectCommand::PageUp, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CursorColumnSelectPageDown, _, cx| {
+                this.column_select(cursor::ColumnSelectCommand::PageDown, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CursorUndo, _, cx| this.cursor_undo(cx)))
+            .on_action(cx.listener(|this, _: &CursorRedo, _, cx| this.cursor_redo(cx)))
+            .on_action(
+                cx.listener(|this, _: &SetSelectionAnchor, _, cx| this.set_selection_anchor(cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &GoToSelectionAnchor, _, cx| this.go_to_selection_anchor(cx)),
+            )
+            .on_action(cx.listener(|this, _: &SelectFromAnchorToCursor, _, cx| {
+                this.select_from_anchor_to_cursor(cx)
+            }))
+            .on_action(cx.listener(|this, _: &CancelSelectionAnchor, _, cx| {
+                this.cancel_selection_anchor(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ScrollLineUp, _, cx| this.scroll_lines(-1., cx)))
+            .on_action(cx.listener(|this, _: &ScrollLineDown, _, cx| this.scroll_lines(1., cx)))
+            .on_action(cx.listener(|this, _: &ScrollPageUp, _, cx| this.scroll_pages(-1., cx)))
+            .on_action(cx.listener(|this, _: &ScrollPageDown, _, cx| this.scroll_pages(1., cx)))
+            .on_action(
+                cx.listener(|this, _: &ScrollEditorTop, _, cx| this.scroll_to_edge(false, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ScrollEditorBottom, _, cx| this.scroll_to_edge(true, cx)),
+            )
+            .on_action(cx.listener(|this, _: &CancelSelection, _, cx| {
+                let primary = this.cursors.primary().position;
+                if !this.cursors.primary().selection().is_empty() {
+                    this.set_selections(&[Selection::collapsed(primary)], cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &LineBreakInsert, _, cx| {
                 let operation = this.with_language(cx, |config, rope, cursors, lang| {
                     cursor::line_break_insert(config, rope, cursors, lang)
