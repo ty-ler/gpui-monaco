@@ -39,9 +39,22 @@ pub struct HoverWidget {
     quick_fix: bool,
     editor: gpui::WeakEntity<CodeEditor>,
     contents: Vec<MarkdownString>,
+    /// Monaco's color picker hover part.
+    color_picker: Option<Entity<crate::ColorPickerWidget>>,
     style: MarkdownStyle,
     theme: std::sync::Arc<crate::Theme>,
 }
+
+/// What asked for a hover (Monaco `HoverStartSource`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HoverSource {
+    Mouse,
+    Click,
+    Keyboard,
+}
+
+/// A pending color picker hover part.
+type PickerTask = Option<Task<Option<Entity<crate::ColorPickerWidget>>>>;
 
 impl Render for HoverWidget {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -53,6 +66,12 @@ impl Render for HoverWidget {
                 sections.push(div().h(px(1.)).bg(colors.widget_border).into_any_element());
             }
             sections.push(self.render_marker(marker));
+        }
+        if let Some(picker) = &self.color_picker {
+            if !sections.is_empty() {
+                sections.push(div().h(px(1.)).bg(colors.widget_border).into_any_element());
+            }
+            sections.push(picker.clone().into_any_element());
         }
         for content in &self.contents {
             if !sections.is_empty() {
@@ -213,8 +232,13 @@ impl CodeEditor {
         let range =
             cursor::word_at(&config, self.snapshot.rope(), position).unwrap_or(position..position);
         let (markers, mut contents, tasks) = self.hover_requests(position, cx);
+        let picker = self.color_picker_request(position, HoverSource::Keyboard, cx);
         self.hover.range = Some(range.clone());
         self.hover.task = Some(cx.spawn(async move |this, cx| {
+            let picker = match picker {
+                Some(task) => task.await,
+                None => None,
+            };
             let mut hover_range = None;
             for task in tasks {
                 if let Ok(Some(hover)) = task.await {
@@ -223,8 +247,9 @@ impl CodeEditor {
                 }
             }
             this.update(cx, |this, cx| {
-                if !contents.is_empty() || !markers.is_empty() {
-                    this.show_hover(hover_range.unwrap_or(range), markers, contents, cx);
+                if !contents.is_empty() || !markers.is_empty() || picker.is_some() {
+                    let range = hover_range.unwrap_or(range);
+                    this.show_hover(range, markers, contents, picker, cx);
                 }
             })
             .ok();
@@ -257,10 +282,18 @@ impl CodeEditor {
         self.hover.range = Some(range.clone());
         self.hover.task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(HOVER_DELAY).await;
-            let Ok(requests) = this.update(cx, |this, cx| this.hover_requests(position, cx)) else {
+            let Ok(requests) = this.update(cx, |this, cx| {
+                let requests = this.hover_requests(position, cx);
+                let picker = this.color_picker_request(position, HoverSource::Mouse, cx);
+                (requests, picker)
+            }) else {
                 return;
             };
-            let (markers, mut contents, tasks) = requests;
+            let ((markers, mut contents, tasks), picker) = requests;
+            let picker = match picker {
+                Some(task) => task.await,
+                None => None,
+            };
             let mut hover_range = None;
             for task in tasks {
                 if let Ok(Some(hover)) = task.await {
@@ -269,11 +302,11 @@ impl CodeEditor {
                 }
             }
             this.update(cx, |this, cx| {
-                if contents.is_empty() && markers.is_empty() {
+                if contents.is_empty() && markers.is_empty() && picker.is_none() {
                     return;
                 }
                 let range = hover_range.unwrap_or(range);
-                this.show_hover(range, markers, contents, cx);
+                this.show_hover(range, markers, contents, picker, cx);
             })
             .ok();
         }));
@@ -319,13 +352,69 @@ impl CodeEditor {
         (markers, messages, tasks)
     }
 
+    /// Monaco `HoverColorPickerParticipant`: a picker for the color at
+    /// `position`, if `source` may open one.
+    pub(crate) fn color_picker_request(
+        &mut self,
+        position: PointUtf16,
+        source: HoverSource,
+        cx: &mut Context<Self>,
+    ) -> PickerTask {
+        use crate::options::ColorDecoratorsActivatedOn as On;
+        let activated = self.options.color_decorators_activated_on;
+        let valid = match source {
+            HoverSource::Mouse => activated != On::Click,
+            HoverSource::Click => activated != On::Hover,
+            HoverSource::Keyboard => true,
+        };
+        if !valid {
+            return None;
+        }
+        let data = self.color_data_at(position, cx)?;
+        Some(self.create_color_picker(data, None, cx))
+    }
+
+    /// Shows the color picker hover for a click on the swatch at
+    /// `position` (Monaco `HoverColorPickerContribution`).
+    pub(crate) fn show_color_picker_hover(&mut self, position: PointUtf16, cx: &mut Context<Self>) {
+        let Some(picker) = self.color_picker_request(position, HoverSource::Click, cx) else {
+            return;
+        };
+        self.hide_hover(cx);
+        self.hover.range = Some(position..position);
+        self.hover.task = Some(cx.spawn(async move |this, cx| {
+            let Some(picker) = picker.await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.show_hover(position..position, Vec::new(), Vec::new(), Some(picker), cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// The color picker in the hover, if any.
+    pub(crate) fn hover_color_picker(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<Entity<crate::ColorPickerWidget>> {
+        let (widget, _) = self.hover.widget.as_ref()?;
+        widget.read(cx).color_picker.clone()
+    }
+
     fn show_hover(
         &mut self,
         range: Range<PointUtf16>,
         markers: Vec<crate::Marker>,
         contents: Vec<MarkdownString>,
+        color_picker: Option<Entity<crate::ColorPickerWidget>>,
         cx: &mut Context<Self>,
     ) {
+        // Monaco shows the color picker at the color (`forceShowAtRange`).
+        let range = match &color_picker {
+            Some(picker) => picker.read(cx).range().clone(),
+            None => range,
+        };
         let style = self.markdown_style();
         let theme = self.theme.clone();
         let language = self.model().read(cx).language_id().map(|l| l.to_string());
@@ -337,6 +426,7 @@ impl CodeEditor {
             quick_fix,
             editor,
             contents,
+            color_picker,
             style,
             theme,
         });

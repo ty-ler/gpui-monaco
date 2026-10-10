@@ -175,6 +175,7 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.wordHighlight.trigger", "code_editor::WordHighlightTrigger", "Trigger Symbol Highlight", always),
     Builtin("editor.action.showHover", "code_editor::ShowHover", "Show or Focus Hover", always),
     Builtin("editor.action.openLink", "code_editor::OpenLink", "Open Link", always),
+    Builtin("editor.action.showOrFocusStandaloneColorPicker", "code_editor::ShowOrFocusStandaloneColorPicker", "Show or Focus Standalone Color Picker", always),
     // Editing.
     Builtin("deleteAllLeft", "code_editor::DeleteAllLeft", "Delete All Left", writable),
     Builtin("deleteAllRight", "code_editor::DeleteAllRight", "Delete All Right", writable),

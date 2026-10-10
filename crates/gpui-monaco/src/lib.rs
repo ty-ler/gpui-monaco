@@ -14,6 +14,8 @@ mod bracket_matching;
 pub mod code_action;
 mod code_lens;
 pub mod color;
+mod color_picker;
+pub use color_picker::{ColorPickerWidget, STANDALONE_COLOR_PICKER_KEY_CONTEXT};
 mod color_detector;
 mod commands;
 mod completion;

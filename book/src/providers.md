@@ -304,6 +304,11 @@ Without color providers, a built-in finder decorates hex, `rgb()`, `rgba()`, `hs
 - **Always:** alongside providers.
 - **Never:** off.
 
+Hovering a color, or clicking its swatch, opens the color picker; `color_decorators_activated_on` picks which.
+- Letting go of the saturation box or a strip writes the color using the provider's first presentation, or the one written like the original text.
+- Clicking the header cycles through the presentations, and clicking the original color restores it.
+- `ShowOrFocusStandaloneColorPicker` opens a standalone picker at the cursor. Enter inserts its color (or replaces the color under the cursor), and Escape closes it.
+
 The `gpui_monaco::color` module has Monaco's `Color` for conversions and CSS formatting.
 
 ## Hover from decorations and markers

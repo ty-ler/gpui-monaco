@@ -149,6 +149,13 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Color picker (#97, part 2):** Monaco's color picker.
+  - **Header:** the picked color in the chosen presentation (click it to cycle rgb/hsl/hex) next to the original color (click it to restore).
+  - **Body:** a saturation box plus opacity and hue strips, which you drag.
+  - **In the hover:** it opens over a color, or when you click its swatch (`color_decorators_activated_on`). Letting go writes the color in the chosen presentation as one undo step, and the hover stays open.
+  - **Standalone:** "Show or Focus Standalone Color Picker" (`ShowOrFocusStandaloneColorPicker`) opens it at the cursor. "Insert" (Enter) writes at the selections; on a color it selects it and "Replace"s it. Escape hides it.
+  - **Presentations:** the one written like the text is chosen (Monaco's `guessColorPresentation`).
+  - New theme colors: `button.background` and `button.foreground`.
 - **Color decorators (#97, part 1):** a swatch before each color, as Monaco's `ColorDetector` draws them.
   - Colors come from `DocumentColorProvider`s (`register_color_provider`, with color presentations). Without providers, Monaco's built-in finder handles hex, `rgb()`, `rgba()`, `hsl()` and `hsla()`.
   - New options: `color_decorators`, `color_decorators_limit` (500), `color_decorators_activated_on` and `default_color_decorators` (auto/always/never).

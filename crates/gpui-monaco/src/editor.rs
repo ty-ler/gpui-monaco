@@ -171,6 +171,7 @@ pub struct CodeEditor {
     /// Actions from [`CodeEditor::add_action`].
     pub(crate) sticky: crate::sticky_model::StickyModelState,
     pub(crate) colors: crate::color_detector::ColorDetectorState,
+    pub(crate) color_picker: crate::color_picker::ColorPickerState,
     pub(crate) added_actions: Vec<crate::editor_actions::EditorActionDescriptor>,
     pub(crate) minimap_cache: crate::element::MinimapCache,
     pub(crate) minimap_hovered: bool,
@@ -318,6 +319,7 @@ impl CodeEditor {
             added_actions: Vec::new(),
             sticky: Default::default(),
             colors: Default::default(),
+            color_picker: Default::default(),
             minimap_cache: Default::default(),
             minimap_hovered: false,
             minimap_drag: None,
@@ -801,7 +803,10 @@ impl CodeEditor {
     /// ranges, pushes it to the model with undo grouping and cursor metadata,
     /// then moves the cursors to the operation's resulting selections.
     pub(crate) fn apply(&mut self, operation: EditOperation, cx: &mut Context<Self>) {
-        self.hide_hover(cx);
+        // The hover's color picker edits the text without closing.
+        if !self.color_picker.editing {
+            self.hide_hover(cx);
+        }
         if operation.edits.is_empty() {
             if operation.selections_after != self.cursors.selections() {
                 self.cursors.set_selections(&operation.selections_after);
@@ -905,6 +910,7 @@ impl CodeEditor {
         } else if self.is_signature_help_visible() {
             self.trigger_signature_help(crate::providers::SignatureHelpTrigger::ContentChange, cx);
         }
+        self.color_picker_cursor_changed(cx);
         cx.emit(CodeEditorEvent::SelectionsChanged(change));
         cx.notify();
     }
@@ -1967,6 +1973,12 @@ impl CodeEditor {
         {
             self.click_fold(*row, false, recursive, event.modifiers.alt, cx);
             return;
+        }
+        // Clicking a color swatch opens the color picker.
+        if event.button == MouseButton::Left
+            && let Some(position) = self.swatch_at(event.position)
+        {
+            self.show_color_picker_hover(position, cx);
         }
         if self.options.unfold_on_click_after_end_of_line
             && matches!(
@@ -3047,6 +3059,14 @@ impl Render for CodeEditor {
                 }
                 this.open_quick_access("@", window, cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &ShowOrFocusStandaloneColorPicker, window, cx| {
+                    if this.options.single_line {
+                        return cx.propagate();
+                    }
+                    this.show_or_focus_standalone_color_picker(window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &QuickCommand, window, cx| {
                 if this.options.single_line {
                     return cx.propagate();

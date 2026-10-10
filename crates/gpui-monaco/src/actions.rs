@@ -17,6 +17,8 @@ const SINGLE_LINE: Option<&str> = Some("CodeEditor && single_line");
 const SUGGEST: Option<&str> = Some("CodeEditor && suggest_widget_visible");
 /// The quick access input (inside the quick input widget).
 const QUICK_INPUT: Option<&str> = Some("QuickInput > CodeEditor");
+/// The standalone color picker.
+const STANDALONE_COLOR_PICKER: Option<&str> = Some("StandaloneColorPicker");
 /// The editor while ghost text shows (Monaco's `inlineSuggestionVisible`).
 const INLINE: Option<&str> = Some("CodeEditor && inline_suggestion_visible");
 
@@ -519,6 +521,15 @@ actions!(
         QuickOutline,
         /// Opens the command palette (Monaco `editor.action.quickCommand`).
         QuickCommand,
+        /// Shows the standalone color picker at the cursor, or focuses it
+        /// (Monaco `editor.action.showOrFocusStandaloneColorPicker`).
+        ShowOrFocusStandaloneColorPicker,
+        /// Hides the standalone color picker (Monaco
+        /// `editor.action.hideColorPicker`, Escape).
+        HideColorPicker,
+        /// Writes the standalone color picker's color and hides it (Monaco
+        /// `editor.action.insertColorWithStandaloneColorPicker`, Enter).
+        InsertColorWithStandaloneColorPicker,
         /// The next quick access item.
         QuickInputNext,
         /// The previous quick access item.
@@ -713,6 +724,12 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-g", GotoLine, ctx),
         KeyBinding::new("secondary-shift-o", QuickOutline, ctx),
         KeyBinding::new("f1", QuickCommand, ctx),
+        KeyBinding::new("escape", HideColorPicker, STANDALONE_COLOR_PICKER),
+        KeyBinding::new(
+            "enter",
+            InsertColorWithStandaloneColorPicker,
+            STANDALONE_COLOR_PICKER,
+        ),
         // In the quick access input (the list's keys win over the input's).
         KeyBinding::new("down", QuickInputNext, QUICK_INPUT),
         KeyBinding::new("up", QuickInputPrevious, QUICK_INPUT),
