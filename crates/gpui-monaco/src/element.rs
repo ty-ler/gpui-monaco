@@ -1520,8 +1520,8 @@ fn prepaint_editor(
             line_height: line_px,
             characters: minimap_options.render_characters,
             max_column: (f32::from(minimap_width) / char_width.max(0.1)) as usize,
+            width: (f32::from(minimap_width) * pixel_ratio).ceil() as u32,
         };
-        let image_width = (f32::from(minimap_width) * pixel_ratio).ceil() as u32;
         let minimap_bounds = Bounds::new(
             if minimap_left {
                 full_bounds.origin
@@ -1579,7 +1579,6 @@ fn prepaint_editor(
                         &lines,
                         tab_size,
                         render,
-                        image_width,
                     )
                 }
             };
@@ -3174,6 +3173,8 @@ struct MinimapRender {
     /// character rather than solid blocks.
     characters: bool,
     max_column: usize,
+    /// The image's width in device pixels.
+    width: u32,
 }
 
 /// How dark a character is in the top and bottom halves of its minimap
@@ -3200,8 +3201,8 @@ fn minimap_image_for(
     lines: &[u32],
     tab_size: u32,
     render: MinimapRender,
-    width: u32,
 ) -> Option<(std::sync::Arc<gpui::RenderImage>, (u32, u32))> {
+    let width = render.width;
     // Device pixels per character and per line.
     let char_px = render.char_width.max(1.).round() as u32;
     let line_px = render.line_height.max(1.).round() as u32;
@@ -3221,7 +3222,7 @@ fn minimap_image_for(
         for row in y..(y + h).min(height) {
             let start = ((row * width + x.min(width)) * 4) as usize;
             let end = ((row * width + (x + w).min(width)) * 4) as usize;
-            for pixel in pixels[start..end].chunks_exact_mut(4) {
+            for pixel in pixels[start..end].as_chunks_mut::<4>().0 {
                 pixel.copy_from_slice(&bgra);
             }
         }
