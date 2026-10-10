@@ -1703,11 +1703,14 @@ fn prepaint_editor(
         }
     }
 
-    // Indent guides (Monaco `IndentGuidesOverlay`) and rulers.
+    // Indent and bracket pair guides (Monaco `IndentGuidesOverlay`) and
+    // rulers.
     let mut guides = Vec::new();
+    let bracket_guides_on = options.guides.bracket_pairs != crate::options::BracketPairGuides::Off;
     if let (Some(first), Some(last)) = (layout.lines.first(), layout.lines.last())
-        && options.guides.indentation
+        && (options.guides.indentation || bracket_guides_on)
     {
+        use crate::view::guides::{BracketGuide, BracketGuideOptions};
         let rope = snapshot.rope();
         let model = editor.model().read(cx);
         let ctx = crate::view::guides::GuideContext {
@@ -1719,25 +1722,114 @@ fn prepaint_editor(
                 .is_some_and(|f| f.off_side),
         };
         let rows = first.row..last.row + 1;
-        let counts = crate::view::guides::lines_indent_guides(rope, rows.clone(), ctx);
-        let active = options.guides.highlight_active_indentation.then(|| {
-            crate::view::guides::active_indent_guide(rope, primary.row, rows.start, last.row, ctx)
+        let counts = if options.guides.indentation {
+            crate::view::guides::lines_indent_guides(rope, rows.clone(), ctx)
+        } else {
+            vec![0; rows.len()]
+        };
+        let active = (options.guides.indentation && options.guides.highlight_active_indentation)
+            .then(|| {
+                crate::view::guides::active_indent_guide(
+                    rope,
+                    primary.row,
+                    rows.start,
+                    last.row,
+                    ctx,
+                )
+            });
+        let bracket_guides = bracket_guides_on.then(|| {
+            let pairs = editor.bracket_pairs_in_rows(rows.clone(), cx);
+            crate::view::guides::lines_bracket_guides(
+                rope,
+                rows.clone(),
+                &pairs,
+                Some(primary),
+                BracketGuideOptions {
+                    include_inactive: options.guides.bracket_pairs
+                        == crate::options::BracketPairGuides::On,
+                    horizontal: options.guides.bracket_pairs_horizontal,
+                    highlight_active: options.guides.highlight_active_bracket_pair,
+                },
+                tab_size,
+            )
         });
         let origin_x = layout.text_origin_x();
         for line in &layout.lines {
-            let count = counts[(line.row - rows.start) as usize];
+            let ix = (line.row - rows.start) as usize;
+            let count = counts[ix];
             let top = layout.line_top(line.view_line);
+            // Monaco: on wrapped lines, the opening line's guide shows after
+            // the bracket and the closing line's up to it.
+            let in_line: Vec<&BracketGuide> = bracket_guides
+                .as_ref()
+                .map(|all| {
+                    all[ix]
+                        .iter()
+                        .filter(|g| {
+                            g.for_wrapped_lines_after_column
+                                .is_none_or(|c| line.columns.start > c - 1)
+                                && g.for_wrapped_lines_before_or_at_column
+                                    .is_none_or(|c| line.columns.start < c)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let draw_bracket_guide =
+                |guide: &BracketGuide, guides: &mut Vec<(Bounds<Pixels>, Hsla)>| {
+                    let Some(color) = colors.bracket_color(guide.level) else {
+                        return;
+                    };
+                    let color = if guide.active {
+                        color
+                    } else {
+                        color.opacity(0.3)
+                    };
+                    let left = match guide.column {
+                        Some(column) => origin_x + line.x_for_column(column - 1),
+                        None => origin_x + metrics.em_width * (guide.visible_column - 1) as f32,
+                    };
+                    let bounds = match guide.horizontal {
+                        Some(horizontal) => {
+                            let right = origin_x + line.x_for_column(horizontal.end_column - 1);
+                            let y = if horizontal.top {
+                                top
+                            } else {
+                                top + line_height - px(1.)
+                            };
+                            Bounds::new(point(left, y), size((right - left).max(px(0.)), px(1.)))
+                        }
+                        None => Bounds::new(point(left, top), size(px(1.), line_height)),
+                    };
+                    guides.push((bounds, color));
+                };
+            // Monaco `getGuidesByLine`: indent guides, minus those a
+            // vertical bracket guide replaces, in column order.
+            let mut queue = in_line.iter().copied().peekable();
             for level in 1..=count {
-                let x = origin_x + metrics.em_width * ((level - 1) * ctx.indent_size) as f32;
-                let is_active = active.is_some_and(|a| {
-                    a.indent == level && a.start_row <= line.row && line.row <= a.end_row
-                });
+                let indent_column = ((level - 1) * ctx.indent_size + 1) as i64;
+                while let Some(guide) = queue.next_if(|g| g.visible_column < indent_column) {
+                    draw_bracket_guide(guide, &mut guides);
+                }
+                if queue
+                    .peek()
+                    .is_some_and(|g| g.visible_column == indent_column && g.horizontal.is_none())
+                {
+                    continue;
+                }
+                let is_active = in_line.is_empty()
+                    && active.is_some_and(|a| {
+                        a.indent == level && a.start_row <= line.row && line.row <= a.end_row
+                    });
                 let color = if is_active {
                     colors.indent_guide_active
                 } else {
                     colors.indent_guide
                 };
+                let x = origin_x + metrics.em_width * ((level - 1) * ctx.indent_size) as f32;
                 guides.push((Bounds::new(point(x, top), size(px(1.), line_height)), color));
+            }
+            for guide in queue {
+                draw_bracket_guide(guide, &mut guides);
             }
         }
     }

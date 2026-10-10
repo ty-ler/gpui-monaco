@@ -14,11 +14,18 @@ use std::time::Duration;
 use gpui::{App, Context, Hsla, Task};
 
 use crate::editor::CodeEditor;
-use crate::view::bracket_pairs::{BracketToken, colorize_brackets};
+use crate::view::bracket_pairs::{BracketPair, BracketToken, bracket_pairs, colorize_brackets};
+use crate::view::guides::GuidePair;
 
 #[derive(Default)]
 pub(crate) struct BracketColors {
     tokens: Arc<Vec<BracketToken>>,
+    /// The closed pairs, for bracket pair guides.
+    pairs: Arc<Vec<BracketPair>>,
+    /// Whether `pairs` were computed (only with guides on), and whether
+    /// the running task computes them.
+    has_pairs: bool,
+    pending_pairs: bool,
     /// The text version `tokens` belong to.
     version: Option<text::Version>,
     /// The version the running `task` computes.
@@ -37,14 +44,17 @@ impl CodeEditor {
                 .clone()
                 .unwrap_or_else(|| config.brackets.clone())
         });
-        let Some(pairs) = pairs.filter(|p| !p.is_empty() && self.options.bracket_pair_colorization)
+        let guides = self.options.guides.bracket_pairs != crate::options::BracketPairGuides::Off;
+        let Some(pairs) =
+            pairs.filter(|p| !p.is_empty() && (self.options.bracket_pair_colorization || guides))
         else {
             self.bracket_colors = BracketColors::default();
             return;
         };
         let version = model.buffer().version();
-        if self.bracket_colors.version == Some(version)
-            || self.bracket_colors.pending == Some(version)
+        let state = &self.bracket_colors;
+        if (state.version == Some(version) && (state.has_pairs || !guides))
+            || (state.pending == Some(version) && (state.pending_pairs || !guides))
         {
             return;
         }
@@ -54,7 +64,9 @@ impl CodeEditor {
             return;
         }
         let rope = model.buffer().rope().clone();
+        let tab_size = model.options().tab_size;
         self.bracket_colors.pending = Some(version);
+        self.bracket_colors.pending_pairs = guides;
         // The first pass runs right away; later ones wait for a pause in
         // typing (stale colors are shifted through the edits meanwhile).
         let delay = if self.bracket_colors.version.is_some() {
@@ -66,7 +78,7 @@ impl CodeEditor {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
             }
-            let tokens = cx
+            let (tokens, pairs) = cx
                 .background_executor()
                 .spawn(async move {
                     let skip: Vec<Range<usize>> = syntax
@@ -85,11 +97,17 @@ impl CodeEditor {
                                 .collect()
                         })
                         .unwrap_or_default();
-                    colorize_brackets(&rope, &pairs, &skip)
+                    if guides {
+                        bracket_pairs(&rope, &pairs, &skip, tab_size)
+                    } else {
+                        (colorize_brackets(&rope, &pairs, &skip), Vec::new())
+                    }
                 })
                 .await;
             this.update(cx, |this, cx| {
                 this.bracket_colors.tokens = Arc::new(tokens);
+                this.bracket_colors.pairs = Arc::new(pairs);
+                this.bracket_colors.has_pairs = guides;
                 this.bracket_colors.version = Some(version);
                 this.bracket_colors.pending = None;
                 this.bracket_colors.task = None;
@@ -115,6 +133,9 @@ impl CodeEditor {
         let Some(version) = self.bracket_colors.version else {
             return Vec::new();
         };
+        if !self.options.bracket_pair_colorization {
+            return Vec::new();
+        }
         let tokens = &self.bracket_colors.tokens;
         let buffer = self.model().read(cx).buffer();
         let patch = (version != buffer.version()).then(|| buffer.edits_since(version));
@@ -145,6 +166,48 @@ impl CodeEditor {
                     None => t.range.clone(),
                 };
                 (range.start < range.end).then_some((range, color))
+            })
+            .collect()
+    }
+
+    /// The closed bracket pairs intersecting `rows`, in current
+    /// coordinates (shifted through edits since they were found).
+    pub(crate) fn bracket_pairs_in_rows(&self, rows: Range<u32>, cx: &App) -> Vec<GuidePair> {
+        let Some(version) = self.bracket_colors.version else {
+            return Vec::new();
+        };
+        let buffer = self.model().read(cx).buffer();
+        let rope = buffer.rope();
+        let patch = (version != buffer.version()).then(|| buffer.edits_since(version));
+        let start = rope.point_to_offset(text::Point::new(rows.start, 0));
+        let end = rope.point_to_offset(text::Point::new(rows.end, 0).min(rope.max_point()));
+        let (old_start, old_end) = match &patch {
+            Some(patch) => {
+                let inverse = patch.invert();
+                (
+                    inverse.transform_offset(start, text::Bias::Left),
+                    inverse.transform_offset(end, text::Bias::Right),
+                )
+            }
+            None => (start, end),
+        };
+        let map = |offset: usize, bias: text::Bias| match &patch {
+            Some(patch) => patch.transform_offset(offset, bias),
+            None => offset,
+        };
+        let point = |offset: usize| rope.offset_to_point_utf16(offset.min(rope.len()));
+        let pairs = &self.bracket_colors.pairs;
+        let last = pairs.partition_point(|p| p.open.start <= old_end);
+        pairs[..last]
+            .iter()
+            .filter(|p| p.close.end >= old_start)
+            .map(|p| GuidePair {
+                open: point(map(p.open.start, text::Bias::Left))
+                    ..point(map(p.open.end, text::Bias::Right)),
+                close: point(map(p.close.start, text::Bias::Left))
+                    ..point(map(p.close.end, text::Bias::Right)),
+                level: p.level,
+                min_indentation: p.min_indentation,
             })
             .collect()
     }

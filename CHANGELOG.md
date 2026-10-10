@@ -149,6 +149,12 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Bracket pair guides (#118):** `GuideOptions::bracket_pairs`, `bracket_pairs_horizontal` and `highlight_active_bracket_pair` (Monaco `guides.bracketPairs`, `guides.bracketPairsHorizontal` and `guides.highlightActiveBracketPair`).
+  - Defaults: off, active and on.
+  - **Vertical guides** sit at a pair's least indentation. **Horizontal guides** run to the brackets and turn along the bottom when text precedes the closing bracket. On wrapped lines they show after the opening bracket and up to the closing one.
+  - **Colors:** the bracket pair colors, at 30% for pairs other than the one around the cursor.
+  - **Indent guides** give way to bracket guides in the same column, as in Monaco's `getGuidesByLine`.
+  - Ports `getLinesBracketGuides` and Monaco's `computeMinIndentation`.
 - **Color picker (#97, part 2):** Monaco's color picker.
   - **Header:** the picked color in the chosen presentation (click it to cycle rgb/hsl/hex) next to the original color (click it to restore).
   - **Body:** a saturation box plus opacity and hue strips, which you drag.
