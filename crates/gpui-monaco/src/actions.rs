@@ -433,6 +433,48 @@ actions!(
         ShowHover,
         /// Formats the document (Monaco `editor.action.formatDocument`).
         FormatDocument,
+        /// Goes to the declaration (Monaco `editor.action.revealDeclaration`).
+        GoToDeclaration,
+        /// Goes to the type definition (Monaco
+        /// `editor.action.goToTypeDefinition`).
+        GoToTypeDefinition,
+        /// Goes to implementations (Monaco `editor.action.goToImplementation`).
+        GoToImplementation,
+        /// Goes to references (Monaco `editor.action.goToReferences`).
+        GoToReferences,
+        /// Peeks the definition (Monaco `editor.action.peekDefinition`).
+        PeekDefinition,
+        /// Peeks the declaration (Monaco `editor.action.peekDeclaration`).
+        PeekDeclaration,
+        /// Peeks the type definition (Monaco `editor.action.peekTypeDefinition`).
+        PeekTypeDefinition,
+        /// Peeks implementations (Monaco `editor.action.peekImplementation`).
+        PeekImplementation,
+        /// Peeks references (Monaco `editor.action.referenceSearch.trigger`).
+        PeekReferences,
+        /// The next result: in the peek view, or after going to one of
+        /// several results (Monaco `goToNextReference`,
+        /// `editor.gotoNextSymbolFromResult`).
+        GoToNextReference,
+        /// The previous result in the peek view (Monaco
+        /// `goToPreviousReference`).
+        GoToPreviousReference,
+        /// Peek view list: the next row.
+        PeekSelectNext,
+        /// Peek view list: the previous row.
+        PeekSelectPrevious,
+        /// Peek view list: the first result.
+        PeekSelectFirst,
+        /// Peek view list: the last result.
+        PeekSelectLast,
+        /// Peek view list: go to the selected result.
+        PeekOpen,
+        /// Peek view list: collapse the selected file.
+        PeekCollapse,
+        /// Peek view list: expand the selected file.
+        PeekExpand,
+        /// Closes the peek view (Monaco `closeReferenceSearch`).
+        ClosePeek,
         /// Formats the selections, or the cursor's line (Monaco
         /// `editor.action.formatSelection`).
         FormatSelection,
@@ -502,6 +544,9 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("f3", NextMatch, ctx),
         KeyBinding::new("f8", GoToNextMarker, ctx),
         KeyBinding::new("f12", GoToDefinition, ctx),
+        KeyBinding::new("shift-f12", GoToReferences, ctx),
+        KeyBinding::new("f4", GoToNextReference, ctx),
+        KeyBinding::new("shift-f4", GoToPreviousReference, ctx),
         KeyBinding::new("secondary-shift-space", TriggerParameterHints, ctx),
         KeyBinding::new("ctrl-space", TriggerSuggest, ctx),
         KeyBinding::new("shift-f8", GoToPreviousMarker, ctx),
@@ -582,6 +627,9 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("cmd-k cmd-i", ShowHover, ctx),
             KeyBinding::new("shift-alt-f", FormatDocument, ctx),
             KeyBinding::new("cmd-k cmd-f", FormatSelection, ctx),
+            KeyBinding::new("cmd-f12", GoToImplementation, ctx),
+            KeyBinding::new("cmd-shift-f12", PeekImplementation, ctx),
+            KeyBinding::new("alt-f12", PeekDefinition, ctx),
             KeyBinding::new("cmd-g", NextMatch, ctx),
             KeyBinding::new("cmd-shift-g", PreviousMatch, ctx),
             KeyBinding::new("cmd-alt-enter", ReplaceAll, ctx),
@@ -619,6 +667,17 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-k ctrl-d", MoveSelectionToNextFindMatch, ctx),
             KeyBinding::new("ctrl-k ctrl-i", ShowHover, ctx),
             KeyBinding::new("ctrl-k ctrl-f", FormatSelection, ctx),
+            KeyBinding::new("ctrl-f12", GoToImplementation, ctx),
+            KeyBinding::new("ctrl-shift-f12", PeekImplementation, ctx),
+            KeyBinding::new(
+                if cfg!(target_os = "linux") {
+                    "ctrl-shift-f10"
+                } else {
+                    "alt-f12"
+                },
+                PeekDefinition,
+                ctx,
+            ),
             KeyBinding::new(
                 if cfg!(target_os = "linux") {
                     "ctrl-shift-i"
@@ -667,6 +726,20 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             ]);
         }
     }
+    // The peek view's results list.
+    let peek = Some(crate::peek::PEEK_KEY_CONTEXT);
+    bindings.extend([
+        KeyBinding::new("down", PeekSelectNext, peek),
+        KeyBinding::new("up", PeekSelectPrevious, peek),
+        KeyBinding::new("home", PeekSelectFirst, peek),
+        KeyBinding::new("end", PeekSelectLast, peek),
+        KeyBinding::new("enter", PeekOpen, peek),
+        KeyBinding::new("left", PeekCollapse, peek),
+        KeyBinding::new("right", PeekExpand, peek),
+        KeyBinding::new("escape", ClosePeek, peek),
+        KeyBinding::new("f4", GoToNextReference, peek),
+        KeyBinding::new("shift-f4", GoToPreviousReference, peek),
+    ]);
     bindings
 }
 

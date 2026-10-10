@@ -60,6 +60,39 @@ pub struct EditorColors {
     pub find_match_highlight_background: Hsla,
     /// Find matches in the overview ruler (`editorOverviewRuler.findMatchForeground`).
     pub find_match_overview: Hsla,
+    /// The target of go to definition and similar jumps, briefly
+    /// (`editor.symbolHighlightBackground`; defaults to the find match
+    /// highlight).
+    pub symbol_highlight_background: Hsla,
+    /// Inline messages such as "No definition found"
+    /// (`inputValidation.infoBackground`).
+    pub message_background: Hsla,
+    /// Their border (`inputValidation.infoBorder`).
+    pub message_border: Hsla,
+    /// The peek view's frame and arrow (`peekView.border`).
+    pub peek_view_border: Hsla,
+    /// Its title bar (`peekViewTitle.background`).
+    pub peek_view_title_background: Hsla,
+    /// The title (`peekViewTitleLabel.foreground`).
+    pub peek_view_title_foreground: Hsla,
+    /// The title's description (the folder) (`peekViewTitleDescription.foreground`).
+    pub peek_view_title_description_foreground: Hsla,
+    /// The results list (`peekViewResult.background`).
+    pub peek_view_result_background: Hsla,
+    /// Result lines (`peekViewResult.lineForeground`).
+    pub peek_view_result_line_foreground: Hsla,
+    /// Result files (`peekViewResult.fileForeground`).
+    pub peek_view_result_file_foreground: Hsla,
+    /// The selected result (`peekViewResult.selectionBackground`).
+    pub peek_view_result_selection_background: Hsla,
+    /// The selected result's text (`peekViewResult.selectionForeground`).
+    pub peek_view_result_selection_foreground: Hsla,
+    /// The match in result lines (`peekViewResult.matchHighlightBackground`).
+    pub peek_view_result_match_highlight_background: Hsla,
+    /// The preview editor (`peekViewEditor.background`).
+    pub peek_view_editor_background: Hsla,
+    /// Matches in the preview editor (`peekViewEditor.matchHighlightBackground`).
+    pub peek_view_editor_match_highlight_background: Hsla,
     /// Occurrences of the symbol at the cursor (`editor.wordHighlightBackground`).
     pub word_highlight_background: Hsla,
     /// Write occurrences of the symbol at the cursor
@@ -141,6 +174,21 @@ impl EditorColors {
             find_match_background: c(rgb(0x515c6a)),
             find_match_highlight_background: c(rgba(0xea5c0055)),
             find_match_overview: c(rgba(0xd186167e)),
+            symbol_highlight_background: c(rgba(0xea5c0055)),
+            message_background: c(rgb(0x063b49)),
+            message_border: c(rgb(0x007acc)),
+            peek_view_border: c(rgb(0x3794ff)),
+            peek_view_title_background: c(rgb(0x252526)),
+            peek_view_title_foreground: c(rgb(0xffffff)),
+            peek_view_title_description_foreground: c(rgba(0xccccccb3)),
+            peek_view_result_background: c(rgb(0x252526)),
+            peek_view_result_line_foreground: c(rgb(0xbbbbbb)),
+            peek_view_result_file_foreground: c(rgb(0xffffff)),
+            peek_view_result_selection_background: c(rgba(0x3399ff33)),
+            peek_view_result_selection_foreground: c(rgb(0xffffff)),
+            peek_view_result_match_highlight_background: c(rgba(0xea5c004d)),
+            peek_view_editor_background: c(rgb(0x001f33)),
+            peek_view_editor_match_highlight_background: c(rgba(0xff8f0099)),
             word_highlight_background: c(rgba(0x575757b8)),
             word_highlight_strong_background: c(rgba(0x004972b8)),
             word_highlight_overview: c(rgba(0xa0a0a0cc)),
@@ -196,6 +244,21 @@ impl EditorColors {
             find_match_background: c(rgb(0xa8ac94)),
             find_match_highlight_background: c(rgba(0xea5c0055)),
             find_match_overview: c(rgba(0xd186167e)),
+            symbol_highlight_background: c(rgba(0xea5c0055)),
+            message_background: c(rgb(0xd6ecf2)),
+            message_border: c(rgb(0x007acc)),
+            peek_view_border: c(rgb(0x1a85ff)),
+            peek_view_title_background: c(rgb(0xf3f3f3)),
+            peek_view_title_foreground: c(rgb(0x000000)),
+            peek_view_title_description_foreground: c(rgba(0x00616161)),
+            peek_view_result_background: c(rgb(0xf3f3f3)),
+            peek_view_result_line_foreground: c(rgb(0x646465)),
+            peek_view_result_file_foreground: c(rgb(0x1e1e1e)),
+            peek_view_result_selection_background: c(rgba(0x3399ff33)),
+            peek_view_result_selection_foreground: c(rgb(0x6c6c6c)),
+            peek_view_result_match_highlight_background: c(rgba(0xea5c004d)),
+            peek_view_editor_background: c(rgb(0xf2f8fc)),
+            peek_view_editor_match_highlight_background: c(rgba(0xf5d802de)),
             word_highlight_background: c(rgba(0x57575740)),
             word_highlight_strong_background: c(rgba(0x0e639c40)),
             word_highlight_overview: c(rgba(0xa0a0a0cc)),
@@ -273,6 +336,61 @@ impl EditorColors {
         set(
             &mut self.find_match_overview,
             "editorOverviewRuler.findMatchForeground",
+        );
+        self.symbol_highlight_background = self.find_match_highlight_background;
+        set(
+            &mut self.symbol_highlight_background,
+            "editor.symbolHighlightBackground",
+        );
+        set(
+            &mut self.message_background,
+            "inputValidation.infoBackground",
+        );
+        set(&mut self.message_border, "inputValidation.infoBorder");
+        set(&mut self.peek_view_border, "peekView.border");
+        set(
+            &mut self.peek_view_title_background,
+            "peekViewTitle.background",
+        );
+        set(
+            &mut self.peek_view_title_foreground,
+            "peekViewTitleLabel.foreground",
+        );
+        set(
+            &mut self.peek_view_title_description_foreground,
+            "peekViewTitleDescription.foreground",
+        );
+        set(
+            &mut self.peek_view_result_background,
+            "peekViewResult.background",
+        );
+        set(
+            &mut self.peek_view_result_line_foreground,
+            "peekViewResult.lineForeground",
+        );
+        set(
+            &mut self.peek_view_result_file_foreground,
+            "peekViewResult.fileForeground",
+        );
+        set(
+            &mut self.peek_view_result_selection_background,
+            "peekViewResult.selectionBackground",
+        );
+        set(
+            &mut self.peek_view_result_selection_foreground,
+            "peekViewResult.selectionForeground",
+        );
+        set(
+            &mut self.peek_view_result_match_highlight_background,
+            "peekViewResult.matchHighlightBackground",
+        );
+        set(
+            &mut self.peek_view_editor_background,
+            "peekViewEditor.background",
+        );
+        set(
+            &mut self.peek_view_editor_match_highlight_background,
+            "peekViewEditor.matchHighlightBackground",
         );
         set(
             &mut self.word_highlight_background,

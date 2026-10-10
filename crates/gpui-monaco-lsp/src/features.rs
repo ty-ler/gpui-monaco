@@ -15,6 +15,11 @@ use gpui_monaco::providers::{
     register_hover_provider, register_on_type_formatting_provider,
     register_signature_help_provider,
 };
+use gpui_monaco::providers::{
+    DeclarationProvider, ImplementationProvider, ReferenceContext, ReferenceProvider,
+    TypeDefinitionProvider, register_declaration_provider, register_implementation_provider,
+    register_reference_provider, register_type_definition_provider,
+};
 use gpui_monaco::text::PointUtf16;
 use lsp_types as lsp;
 
@@ -98,6 +103,46 @@ impl LspFeatures {
         }
         if supported(capabilities.definition_provider.as_ref()) {
             registrations.push(register_definition_provider(
+                cx,
+                selector.clone(),
+                self.clone(),
+            ));
+        }
+        if capabilities
+            .declaration_provider
+            .as_ref()
+            .is_some_and(|c| !matches!(c, lsp::DeclarationCapability::Simple(false)))
+        {
+            registrations.push(register_declaration_provider(
+                cx,
+                selector.clone(),
+                self.clone(),
+            ));
+        }
+        if capabilities
+            .type_definition_provider
+            .as_ref()
+            .is_some_and(|c| !matches!(c, lsp::TypeDefinitionProviderCapability::Simple(false)))
+        {
+            registrations.push(register_type_definition_provider(
+                cx,
+                selector.clone(),
+                self.clone(),
+            ));
+        }
+        if capabilities
+            .implementation_provider
+            .as_ref()
+            .is_some_and(|c| !matches!(c, lsp::ImplementationProviderCapability::Simple(false)))
+        {
+            registrations.push(register_implementation_provider(
+                cx,
+                selector.clone(),
+                self.clone(),
+            ));
+        }
+        if supported(capabilities.references_provider.as_ref()) {
+            registrations.push(register_reference_provider(
                 cx,
                 selector.clone(),
                 self.clone(),
@@ -416,5 +461,99 @@ impl OnTypeFormattingProvider for LspFeatures {
         );
         cx.background_executor()
             .spawn(async move { Ok(text_edits(request.await?)) })
+    }
+}
+
+/// Sends a `GotoDefinition`-shaped request (`R`) and converts its locations.
+fn locations_request<R>(
+    features: &LspFeatures,
+    context: &ProviderContext,
+    position: PointUtf16,
+    cx: &mut App,
+) -> Task<Result<Vec<Location>>>
+where
+    R: lsp::request::Request<
+            Params = lsp::GotoDefinitionParams,
+            Result = Option<lsp::GotoDefinitionResponse>,
+        >,
+{
+    let Some((connection, position)) = features.prepare(context, position, cx) else {
+        return Task::ready(Ok(Vec::new()));
+    };
+    let queried = position.text_document.uri.as_str().to_string();
+    let request = connection.request::<R>(lsp::GotoDefinitionParams {
+        text_document_position_params: position,
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    });
+    cx.background_executor().spawn(async move {
+        Ok(request
+            .await?
+            .map(|response| convert::locations(response, &queried))
+            .unwrap_or_default())
+    })
+}
+
+impl DeclarationProvider for LspFeatures {
+    fn provide_declaration(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        cx: &mut App,
+    ) -> Task<Result<Vec<Location>>> {
+        locations_request::<lsp::request::GotoDeclaration>(self, context, position, cx)
+    }
+}
+
+impl TypeDefinitionProvider for LspFeatures {
+    fn provide_type_definition(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        cx: &mut App,
+    ) -> Task<Result<Vec<Location>>> {
+        locations_request::<lsp::request::GotoTypeDefinition>(self, context, position, cx)
+    }
+}
+
+impl ImplementationProvider for LspFeatures {
+    fn provide_implementation(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        cx: &mut App,
+    ) -> Task<Result<Vec<Location>>> {
+        locations_request::<lsp::request::GotoImplementation>(self, context, position, cx)
+    }
+}
+
+impl ReferenceProvider for LspFeatures {
+    fn provide_references(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        reference_context: ReferenceContext,
+        cx: &mut App,
+    ) -> Task<Result<Vec<Location>>> {
+        let Some((connection, position)) = self.prepare(context, position, cx) else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let queried = position.text_document.uri.as_str().to_string();
+        let request = connection.request::<lsp::request::References>(lsp::ReferenceParams {
+            text_document_position: position,
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+            context: lsp::ReferenceContext {
+                include_declaration: reference_context.include_declaration,
+            },
+        });
+        cx.background_executor().spawn(async move {
+            Ok(request
+                .await?
+                .map(|locations| {
+                    convert::locations(lsp::GotoDefinitionResponse::Array(locations), &queried)
+                })
+                .unwrap_or_default())
+        })
     }
 }

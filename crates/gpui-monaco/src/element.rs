@@ -609,6 +609,7 @@ pub struct PrepaintState {
     sticky: Vec<(u32, Pixels, LineLayout, Option<ShapedLine>)>,
     numbers_right: Pixels,
     zone_elements: Vec<gpui::AnyElement>,
+    full_width_zone_elements: Vec<gpui::AnyElement>,
     widget_elements: Vec<gpui::AnyElement>,
     colors: EditorColors,
     options: EditorOptions,
@@ -658,7 +659,11 @@ impl Element for EditorElement {
         let mut widget_kinds = Vec::new();
         for embedded in std::mem::take(&mut state.embedded) {
             match embedded {
-                Embedded::Zone { view, bounds: zone } => {
+                Embedded::Zone {
+                    view,
+                    bounds: zone,
+                    full_width,
+                } => {
                     let mut element = view.into_any_element();
                     element.layout_as_root(
                         size(
@@ -671,7 +676,11 @@ impl Element for EditorElement {
                     element.prepaint_at(zone.origin, window, cx);
                     widget_bounds.push(zone);
                     widget_kinds.push(crate::mouse_target::EmbeddedKind::ViewZone);
-                    state.zone_elements.push(element);
+                    if full_width {
+                        state.full_width_zone_elements.push(element);
+                    } else {
+                        state.zone_elements.push(element);
+                    }
                 }
                 Embedded::Content {
                     view,
@@ -833,7 +842,7 @@ fn prepaint_editor(
     let snapshot = editor.snapshot.clone();
 
     // View zones: after the last view line of their row; hidden in folds.
-    let mut zone_specs: Vec<(i64, Pixels, gpui::AnyView)> = Vec::new();
+    let mut zone_specs: Vec<(i64, Pixels, gpui::AnyView, bool)> = Vec::new();
     {
         let model = editor.model().clone();
         let buffer = model.read(cx).buffer();
@@ -854,10 +863,10 @@ fn prepaint_editor(
                 crate::widgets::ZoneHeight::Lines(lines) => line_height * lines,
                 crate::widgets::ZoneHeight::Pixels(height) => height,
             };
-            zone_specs.push((after, height, zone.view.clone()));
+            zone_specs.push((after, height, zone.view.clone(), zone.full_width));
         }
     }
-    let zones = ZoneLayout::new(zone_specs.iter().map(|(a, h, _)| (*a, *h)).collect());
+    let zones = ZoneLayout::new(zone_specs.iter().map(|(a, h, _, _)| (*a, *h)).collect());
 
     let content_height = line_height * view_line_count as f32
         + zones.total()
@@ -1656,7 +1665,7 @@ fn prepaint_editor(
     // host views may read the editor while rendering.
     let mut embedded = Vec::new();
     let mut zone_specs = zone_specs;
-    zone_specs.sort_by_key(|(after, _, _)| *after);
+    zone_specs.sort_by_key(|(after, _, _, _)| *after);
     let mut ix = 0;
     while ix < zone_specs.len() {
         // Zones after the same line stack in insertion order.
@@ -1664,15 +1673,24 @@ fn prepaint_editor(
         let group_end = ix + zone_specs[ix..].iter().take_while(|z| z.0 == after).count();
         let group_height = zone_specs[ix..group_end]
             .iter()
-            .map(|(_, h, _)| *h)
+            .map(|(_, h, _, _)| *h)
             .fold(px(0.), |a, b| a + b);
         let mut top = layout.bounds.top() + zones.line_y((after + 1) as u32, line_height)
             - group_height
             - scroll_top;
-        for (_, height, view) in &zone_specs[ix..group_end] {
+        for (_, height, view, full_width) in &zone_specs[ix..group_end] {
+            let left = if *full_width {
+                layout.bounds.left()
+            } else {
+                text_bounds.left()
+            };
             embedded.push(Embedded::Zone {
                 view: view.clone(),
-                bounds: Bounds::new(point(text_bounds.left(), top), size(text_width, *height)),
+                bounds: Bounds::new(
+                    point(left, top),
+                    size(text_bounds.left() + text_width - left, *height),
+                ),
+                full_width: *full_width,
             });
             top += *height;
         }
@@ -1724,6 +1742,7 @@ fn prepaint_editor(
         sticky: sticky_shaped,
         numbers_right,
         zone_elements: Vec::new(),
+        full_width_zone_elements: Vec::new(),
         widget_elements: Vec::new(),
         colors,
         options,
@@ -1734,6 +1753,7 @@ fn prepaint_editor(
 
 fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
     let mut zone_elements = std::mem::take(&mut state.zone_elements);
+    let mut full_width_zone_elements = std::mem::take(&mut state.full_width_zone_elements);
     let mut widget_elements = std::mem::take(&mut state.widget_elements);
     let state = &*state;
     let layout = &state.layout;
@@ -1899,6 +1919,23 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                     for cursor in &state.cursor_quads {
                         window.paint_quad(fill(*cursor, colors.cursor));
                     }
+                }
+            },
+        );
+
+        // Zones spanning the gutter, clipped to the text area's height.
+        let text = layout.text_bounds;
+        let full_width_area = Bounds::from_corners(
+            point(bounds.left(), text.top()),
+            point(text.right(), text.bottom()),
+        );
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds: full_width_area,
+            }),
+            |window| {
+                for element in &mut full_width_zone_elements {
+                    element.paint(window, cx);
                 }
             },
         );
@@ -2183,6 +2220,8 @@ pub(crate) enum Embedded {
     Zone {
         view: gpui::AnyView,
         bounds: Bounds<Pixels>,
+        /// Painted over the gutter, outside the text area's clip.
+        full_width: bool,
     },
     Content {
         view: gpui::AnyView,

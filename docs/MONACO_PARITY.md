@@ -94,7 +94,7 @@ Issues are linked by number.
 | Hover | `hover` | ✅ | |
 | Signature help (with cycling) | `parameterHints` | ✅ | |
 | Go to definition (link, F12) | `gotoSymbol` | ✅ | |
-| References, declaration, type definition, implementation, peek view | `gotoSymbol`, `peekView` | ❌ | #95 |
+| References, declaration, type definition, implementation, peek view | `gotoSymbol`, `peekView` | ✅ | #95 |
 | Diagnostics: squiggles, ruler, hover, F8 | `gotoError` | ✅ | |
 | Diagnostic tags (unused, deprecated), related information | `gotoError` | ❌ | #90 |
 | Document highlights | `wordHighlighter` | ✅ | #83 |

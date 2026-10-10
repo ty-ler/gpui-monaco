@@ -38,6 +38,51 @@ pub fn language_registry(cx: &App) -> Arc<LanguageRegistry> {
         .unwrap_or_default()
 }
 
+/// Models by uri (Monaco `editor.getModel(uri)`), held weakly, plus the
+/// host's resolver for documents that aren't open.
+#[derive(Default)]
+struct Models {
+    by_uri: std::collections::HashMap<SharedString, gpui::WeakEntity<TextModel>>,
+    resolver: Option<std::rc::Rc<ModelResolver>>,
+}
+
+type ModelResolver = dyn Fn(&str, &mut App) -> Option<gpui::Entity<TextModel>>;
+
+impl Global for Models {}
+
+/// Makes `model` findable by its uri with [`model_for_uri`] while it's
+/// alive. Editors register their models; register others (e.g. files a
+/// language server talks about) yourself.
+pub fn register_model(cx: &mut App, model: &gpui::Entity<TextModel>) {
+    if let Some(uri) = model.read(cx).uri().cloned() {
+        let models = cx.default_global::<Models>();
+        models.by_uri.retain(|_, model| model.upgrade().is_some());
+        models.by_uri.insert(uri, model.downgrade());
+    }
+}
+
+/// Supplies models for uris that aren't registered, e.g. by reading files,
+/// so peek views can show other documents (Monaco's text model resolver).
+pub fn set_model_resolver(
+    cx: &mut App,
+    resolver: impl Fn(&str, &mut App) -> Option<gpui::Entity<TextModel>> + 'static,
+) {
+    cx.default_global::<Models>().resolver = Some(std::rc::Rc::new(resolver));
+}
+
+/// The live model with `uri`, or one from the resolver (Monaco
+/// `getModel`, then `createModelReference`).
+pub fn model_for_uri(cx: &mut App, uri: &str) -> Option<gpui::Entity<TextModel>> {
+    let models = cx.default_global::<Models>();
+    if let Some(model) = models.by_uri.get(uri).and_then(|model| model.upgrade()) {
+        return Some(model);
+    }
+    let resolver = models.resolver.clone()?;
+    let model = resolver(uri, cx)?;
+    register_model(cx, &model);
+    Some(model)
+}
+
 /// The highlighter and the latest highlight state with the text it describes.
 #[derive(Clone)]
 pub struct SyntaxSnapshot {

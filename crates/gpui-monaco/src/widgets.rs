@@ -114,6 +114,8 @@ pub(crate) struct ZoneState {
     pub anchor: Option<Anchor>,
     pub height: ZoneHeight,
     pub view: AnyView,
+    /// Spans the gutter too, like Monaco's zone widgets (peek views).
+    pub full_width: bool,
 }
 
 #[derive(Clone)]
