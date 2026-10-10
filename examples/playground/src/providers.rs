@@ -184,6 +184,38 @@ impl ReferenceProvider for DemoReferences {
     }
 }
 
+/// Renames every whole-word occurrence (the demo references).
+struct DemoRename;
+impl RenameProvider for DemoRename {
+    fn provide_rename_edits(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        new_name: &str,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Option<WorkspaceEdit>>> {
+        let references = DemoReferences.provide_references(
+            context,
+            position,
+            ReferenceContext {
+                include_declaration: true,
+            },
+            cx,
+        );
+        let new_name = new_name.to_string();
+        cx.background_executor().spawn(async move {
+            let edits = references
+                .await?
+                .into_iter()
+                .map(|location| (location.range, new_name.clone()))
+                .collect();
+            Ok(Some(WorkspaceEdit {
+                edits: vec![(None, edits)],
+            }))
+        })
+    }
+}
+
 struct DemoDefinitions;
 impl DefinitionProvider for DemoDefinitions {
     fn provide_definition(
@@ -300,6 +332,7 @@ pub fn register(cx: &mut App) {
     register_on_type_formatting_provider(cx, LanguageSelector::All, DemoFormatter);
     register_definition_provider(cx, LanguageSelector::All, DemoDefinitions);
     register_reference_provider(cx, LanguageSelector::All, DemoReferences);
+    register_rename_provider(cx, LanguageSelector::All, DemoRename);
     register_completion_provider(cx, LanguageSelector::All, DemoCompletions);
     register_hover_provider(cx, LanguageSelector::All, DemoHover);
     register_signature_help_provider(cx, LanguageSelector::All, DemoSignatures);

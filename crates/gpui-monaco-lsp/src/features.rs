@@ -20,6 +20,9 @@ use gpui_monaco::providers::{
     TypeDefinitionProvider, register_declaration_provider, register_implementation_provider,
     register_reference_provider, register_type_definition_provider,
 };
+use gpui_monaco::providers::{
+    RenameLocation, RenameProvider, WorkspaceEdit, register_rename_provider,
+};
 use gpui_monaco::text::PointUtf16;
 use lsp_types as lsp;
 
@@ -36,6 +39,8 @@ pub(crate) struct LspFeatures {
     signature_triggers: Vec<char>,
     signature_retriggers: Vec<char>,
     on_type_triggers: Vec<char>,
+    /// The server answers `textDocument/prepareRename`.
+    prepare_rename: bool,
 }
 
 fn chars(strings: Option<&Vec<String>>) -> Vec<char> {
@@ -74,6 +79,13 @@ impl LspFeatures {
                 })
                 .filter_map(|s| s.chars().next())
                 .collect(),
+            prepare_rename: matches!(
+                &capabilities.rename_provider,
+                Some(lsp::OneOf::Right(lsp::RenameOptions {
+                    prepare_provider: Some(true),
+                    ..
+                }))
+            ),
         }
     }
 
@@ -140,6 +152,9 @@ impl LspFeatures {
                 selector.clone(),
                 self.clone(),
             ));
+        }
+        if supported(capabilities.rename_provider.as_ref()) {
+            registrations.push(register_rename_provider(cx, selector.clone(), self.clone()));
         }
         if supported(capabilities.references_provider.as_ref()) {
             registrations.push(register_reference_provider(
@@ -554,6 +569,76 @@ impl ReferenceProvider for LspFeatures {
                     convert::locations(lsp::GotoDefinitionResponse::Array(locations), &queried)
                 })
                 .unwrap_or_default())
+        })
+    }
+}
+
+impl RenameProvider for LspFeatures {
+    fn resolve_rename_location(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        cx: &mut App,
+    ) -> Option<Task<Result<Option<RenameLocation>>>> {
+        if !self.prepare_rename {
+            return None;
+        }
+        let Some((connection, params)) = self.prepare(context, position, cx) else {
+            return Some(Task::ready(Ok(None)));
+        };
+        let snapshot = context.snapshot.clone();
+        let request = connection.request::<lsp::request::PrepareRenameRequest>(params);
+        Some(cx.background_executor().spawn(async move {
+            let range_text = |range: lsp::Range| {
+                let range = convert::range(range);
+                let rope = snapshot.rope();
+                let text = rope.text_for_range(
+                    rope.point_utf16_to_offset(range.start)..rope.point_utf16_to_offset(range.end),
+                );
+                (range, text)
+            };
+            match request.await? {
+                // monaco-languageclient's message for a null result.
+                None => Err(anyhow::anyhow!("The element can't be renamed.")),
+                Some(lsp::PrepareRenameResponse::Range(range)) => {
+                    let (range, text) = range_text(range);
+                    Ok(Some(RenameLocation {
+                        range,
+                        text: text.into(),
+                    }))
+                }
+                Some(lsp::PrepareRenameResponse::RangeWithPlaceholder { range, placeholder }) => {
+                    Ok(Some(RenameLocation {
+                        range: convert::range(range),
+                        text: placeholder.into(),
+                    }))
+                }
+                // The word at the cursor.
+                Some(lsp::PrepareRenameResponse::DefaultBehavior { .. }) => Ok(None),
+            }
+        }))
+    }
+
+    fn provide_rename_edits(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        new_name: &str,
+        cx: &mut App,
+    ) -> Task<Result<Option<WorkspaceEdit>>> {
+        let Some((connection, position)) = self.prepare(context, position, cx) else {
+            return Task::ready(Ok(None));
+        };
+        let request = connection.request::<lsp::request::Rename>(lsp::RenameParams {
+            text_document_position: position,
+            new_name: new_name.to_string(),
+            work_done_progress_params: Default::default(),
+        });
+        cx.background_executor().spawn(async move {
+            match request.await? {
+                Some(edit) => convert::workspace_edit(edit).map(Some),
+                None => Ok(None),
+            }
         })
     }
 }

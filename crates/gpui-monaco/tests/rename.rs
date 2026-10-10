@@ -1,0 +1,248 @@
+//! Rename (Monaco `contrib/rename`) with test providers.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use gpui::{App, AppContext as _, Entity, Focusable, Task, TestAppContext, VisualTestContext};
+use gpui_monaco::cursor::Selection;
+use gpui_monaco::providers::*;
+use gpui_monaco::text::PointUtf16;
+use gpui_monaco::{CodeEditor, TextModel};
+
+fn p(row: u32, column: u32) -> PointUtf16 {
+    PointUtf16::new(row, column)
+}
+
+/// Renames every whole-word occurrence, here and in `lib.rs`.
+#[derive(Clone, Default)]
+struct Words {
+    /// Names asked for.
+    log: Rc<RefCell<Vec<String>>>,
+    /// Resolve with this error instead.
+    reject: Option<&'static str>,
+    /// Also edit a document nobody can open.
+    unknown_document: bool,
+}
+
+fn occurrences(text: &str, word: &str) -> Vec<std::ops::Range<PointUtf16>> {
+    let mut found = Vec::new();
+    for (row, line) in text.split('\n').enumerate() {
+        for (start, _) in line.match_indices(word) {
+            let end = start + word.len();
+            let is_word = |c: char| c.is_alphanumeric() || c == '_';
+            if line[..start].chars().next_back().is_some_and(is_word)
+                || line[end..].chars().next().is_some_and(is_word)
+            {
+                continue;
+            }
+            found.push(p(row as u32, start as u32)..p(row as u32, end as u32));
+        }
+    }
+    found
+}
+
+impl RenameProvider for Words {
+    fn resolve_rename_location(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        _: &mut App,
+    ) -> Option<Task<anyhow::Result<Option<RenameLocation>>>> {
+        let reject = self.reject?;
+        Some(Task::ready(Err(anyhow::anyhow!(reject))))
+    }
+
+    fn provide_rename_edits(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        new_name: &str,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Option<WorkspaceEdit>>> {
+        self.log.borrow_mut().push(new_name.to_string());
+        let text = context.snapshot.rope().to_string();
+        let line = context.snapshot.line(position.row);
+        let col = position.column as usize;
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let start = line[..col]
+            .rfind(|c: char| !is_word(c))
+            .map_or(0, |i| i + 1);
+        let end = line[col..]
+            .find(|c: char| !is_word(c))
+            .map_or(line.len(), |i| col + i);
+        let word = &line[start..end];
+        let edits = |text: &str| -> Vec<TextEdit> {
+            occurrences(text, word)
+                .into_iter()
+                .map(|range| (range, new_name.to_string()))
+                .collect()
+        };
+        let mut edit = WorkspaceEdit {
+            edits: vec![
+                (None, edits(&text)),
+                (Some("file:///lib.rs".into()), edits("pub fn foo() {}")),
+            ],
+        };
+        if self.unknown_document {
+            edit.edits
+                .push((Some("file:///missing.rs".into()), Vec::new()));
+        }
+        Task::ready(Ok(Some(edit)))
+    }
+}
+
+/// Passes to the next provider.
+struct Nothing;
+impl RenameProvider for Nothing {
+    fn provide_rename_edits(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        _: &str,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Option<WorkspaceEdit>>> {
+        Task::ready(Ok(None))
+    }
+}
+
+/// Registers providers.
+type Register = Box<dyn Fn(&mut App)>;
+
+const TEXT: &str = "fn foo() {}\nfn main() {\n    foo();\n}";
+
+fn setup(
+    providers: Vec<Register>,
+    cx: &mut TestAppContext,
+) -> (
+    Entity<CodeEditor>,
+    Entity<TextModel>,
+    &mut VisualTestContext,
+) {
+    cx.update(gpui_monaco::init);
+    let lib = cx.new(|_| TextModel::new("pub fn foo() {}").with_uri("file:///lib.rs"));
+    cx.update(|cx| {
+        gpui_monaco::register_model(cx, &lib);
+        for register in &providers {
+            register(cx);
+        }
+    });
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new(TEXT).with_uri("file:///main.rs"));
+        CodeEditor::new(model, window, cx)
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    draw(cx);
+    (editor, lib, cx)
+}
+
+fn draw(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+    });
+    cx.run_until_parked();
+}
+
+fn text(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> String {
+    editor.read_with(cx, |e, cx| e.model().read(cx).text())
+}
+
+fn words(words: Words) -> Register {
+    Box::new(move |cx| {
+        register_rename_provider(cx, LanguageSelector::All, words.clone());
+    })
+}
+
+#[gpui::test]
+fn f2_renames_across_documents(cx: &mut TestAppContext) {
+    let provider = Words::default();
+    let log = provider.log.clone();
+    let (editor, lib, cx) = setup(vec![words(provider)], cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(2, 5))], cx)
+    });
+    cx.simulate_keystrokes("f2");
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_rename_visible()));
+    // The name is selected in the box: typing replaces it.
+    cx.simulate_input("bar");
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert_eq!(*log.borrow(), ["bar"]);
+    assert!(!editor.read_with(cx, |e, _| e.is_rename_visible()));
+    assert_eq!(text(&editor, cx), "fn bar() {}\nfn main() {\n    bar();\n}");
+    assert_eq!(lib.read_with(cx, |m, _| m.text()), "pub fn bar() {}");
+    // The editor has focus back; one undo reverts it here.
+    assert!(cx.update(|window, cx| editor.focus_handle(cx).is_focused(window)));
+    editor.update(cx, |e, cx| e.undo(cx));
+    assert_eq!(text(&editor, cx), TEXT);
+}
+
+#[gpui::test]
+fn escape_and_unchanged_names_do_nothing(cx: &mut TestAppContext) {
+    let provider = Words::default();
+    let log = provider.log.clone();
+    let (editor, _, cx) = setup(vec![words(provider)], cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    cx.simulate_keystrokes("f2");
+    draw(cx);
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_rename_visible()));
+    assert!(cx.update(|window, cx| editor.focus_handle(cx).is_focused(window)));
+    cx.simulate_keystrokes("f2");
+    draw(cx);
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert!(log.borrow().is_empty());
+    assert_eq!(text(&editor, cx), TEXT);
+}
+
+#[gpui::test]
+fn rejections_and_failures_show_messages(cx: &mut TestAppContext) {
+    // A provider that can't rename here says why.
+    let (editor, _, cx) = setup(
+        vec![words(Words {
+            reject: Some("You cannot rename this element"),
+            ..Default::default()
+        })],
+        cx,
+    );
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    cx.simulate_keystrokes("f2");
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_rename_visible()));
+    assert!(editor.read_with(cx, |e, _| e.is_message_visible()));
+}
+
+#[gpui::test]
+fn providers_pass_on_and_unknown_documents_fail(cx: &mut TestAppContext) {
+    let provider = Words {
+        unknown_document: true,
+        ..Default::default()
+    };
+    let log = provider.log.clone();
+    let nothing: Register = Box::new(|cx| {
+        register_rename_provider(cx, LanguageSelector::All, Nothing);
+    });
+    let (editor, lib, cx) = setup(vec![nothing, words(provider)], cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    cx.simulate_keystrokes("f2");
+    draw(cx);
+    cx.simulate_input("baz");
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    // The second provider answered, but its edit names a document that
+    // can't be found: nothing changes and a message says so.
+    assert_eq!(*log.borrow(), ["baz"]);
+    assert_eq!(text(&editor, cx), TEXT);
+    assert_eq!(lib.read_with(cx, |m, _| m.text()), "pub fn foo() {}");
+    assert!(editor.read_with(cx, |e, _| e.is_message_visible()));
+}

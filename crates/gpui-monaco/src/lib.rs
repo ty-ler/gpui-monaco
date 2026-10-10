@@ -34,6 +34,7 @@ mod occurrences;
 pub mod options;
 mod peek;
 pub mod providers;
+mod rename;
 pub mod search;
 mod signature_help;
 pub mod suggest;

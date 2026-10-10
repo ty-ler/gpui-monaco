@@ -8,7 +8,7 @@ use gpui::SharedString;
 use gpui_monaco::providers::{
     CompletionItem, CompletionItemKind, CompletionList, DocumentHighlight, DocumentHighlightKind,
     Hover, Location, MarkdownString, ParameterInformation, ParameterLabel, SignatureHelp,
-    SignatureInformation,
+    SignatureInformation, WorkspaceEdit,
 };
 use gpui_monaco::text::PointUtf16;
 use gpui_monaco::{Marker, MarkerSeverity};
@@ -376,6 +376,53 @@ pub fn marker(diagnostic: lsp::Diagnostic) -> Marker {
             lsp::NumberOrString::String(s) => s.into(),
         }),
     }
+}
+
+/// A workspace edit's text edits, by document. File operations (create,
+/// rename, delete) aren't supported.
+pub fn workspace_edit(edit: lsp::WorkspaceEdit) -> anyhow::Result<WorkspaceEdit> {
+    let text_edits = |edits: Vec<lsp::TextEdit>| -> Vec<_> {
+        edits
+            .into_iter()
+            .map(|edit| (range(edit.range), edit.new_text))
+            .collect()
+    };
+    let mut result = WorkspaceEdit::default();
+    if let Some(changes) = edit.document_changes {
+        let edits = match changes {
+            lsp::DocumentChanges::Edits(edits) => edits,
+            lsp::DocumentChanges::Operations(operations) => operations
+                .into_iter()
+                .map(|operation| match operation {
+                    lsp::DocumentChangeOperation::Edit(edit) => Ok(edit),
+                    lsp::DocumentChangeOperation::Op(_) => {
+                        Err(anyhow::anyhow!("file operations aren't supported"))
+                    }
+                })
+                .collect::<anyhow::Result<_>>()?,
+        };
+        for edit in edits {
+            let edits = edit
+                .edits
+                .into_iter()
+                .map(|edit| match edit {
+                    lsp::OneOf::Left(edit) => edit,
+                    lsp::OneOf::Right(annotated) => annotated.text_edit,
+                })
+                .collect();
+            result.edits.push((
+                Some(edit.text_document.uri.as_str().to_string().into()),
+                text_edits(edits),
+            ));
+        }
+    } else if let Some(changes) = edit.changes {
+        for (uri, edits) in changes {
+            result
+                .edits
+                .push((Some(uri.as_str().to_string().into()), text_edits(edits)));
+        }
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

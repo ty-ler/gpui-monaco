@@ -166,6 +166,8 @@ pub struct CodeEditor {
     pub(crate) goto: crate::goto::GotoState,
     /// The peek view, if open.
     pub(crate) peek: crate::peek::PeekState,
+    /// The rename box and requests.
+    pub(crate) rename: crate::rename::RenameState,
     /// This editor is a peek view's preview: F4 and unhandled Escape go to
     /// the editor around it.
     pub(crate) in_peek: bool,
@@ -236,6 +238,7 @@ impl CodeEditor {
             message: Default::default(),
             goto: Default::default(),
             peek: Default::default(),
+            rename: Default::default(),
             in_peek: false,
             refocus: false,
             format_task: None,
@@ -297,6 +300,7 @@ impl CodeEditor {
         self.hide_signature_help(cx);
         self.close_message(cx);
         self.close_peek(cx);
+        self.cancel_rename(false, cx);
         self.close_marker_zone(cx);
         self.clear_definition_link(cx);
         self.detach_find_from_model(cx);
@@ -641,6 +645,8 @@ impl CodeEditor {
                 if latest.version() == self.snapshot.version() {
                     return;
                 }
+                // Monaco cancels the rename box when the text changes.
+                self.cancel_rename(false, cx);
                 self.folds.prune(model.read(cx).buffer());
                 let restored = own
                     && matches!(kind, EditKind::Undo | EditKind::Redo)
@@ -803,6 +809,7 @@ impl CodeEditor {
         self.record_cursor_change();
         self.close_message(cx);
         self.check_symbol_navigation(cx);
+        self.check_rename(cx);
         self.update_bracket_highlights(cx);
         self.update_occurrence_highlights(cx);
         self.restart_blink(cx);
@@ -2749,6 +2756,7 @@ impl Render for CodeEditor {
             )
             .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| this.go_to_definition(cx)))
             .on_action(cx.listener(|this, _: &ShowHover, _, cx| this.show_hover_at_cursor(cx)))
+            .on_action(cx.listener(|this, _: &Rename, _, cx| this.rename(cx)))
             .on_action(cx.listener(|this, _: &GoToDeclaration, _, cx| {
                 this.go_to(LocationKind::Declaration, cx)
             }))

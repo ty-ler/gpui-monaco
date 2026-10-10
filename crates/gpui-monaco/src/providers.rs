@@ -342,6 +342,52 @@ pub trait ReferenceProvider: 'static {
     ) -> Task<anyhow::Result<Vec<Location>>>;
 }
 
+/// Edits to one or more documents (Monaco `WorkspaceEdit` with text edits).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WorkspaceEdit {
+    /// Edits by document uri; `None` is the document the request was about.
+    pub edits: Vec<(Option<SharedString>, Vec<TextEdit>)>,
+}
+
+/// What a rename replaces (Monaco `RenameLocation`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenameLocation {
+    /// The range of the symbol.
+    pub range: Range<PointUtf16>,
+    /// Its current name, shown in the rename box.
+    pub text: SharedString,
+}
+
+/// Renames symbols (Monaco `RenameProvider`).
+///
+/// Register with [`register_rename_provider`].
+pub trait RenameProvider: 'static {
+    /// The symbol at `position` and its name (Monaco
+    /// `resolveRenameLocation`). `None` (the default) means the provider
+    /// doesn't resolve locations, and the word at the cursor is renamed.
+    /// The task returns `Ok(None)` to pass to the next provider, or an error
+    /// whose message says why the symbol can't be renamed.
+    fn resolve_rename_location(
+        &self,
+        _context: &ProviderContext,
+        _position: PointUtf16,
+        _cx: &mut App,
+    ) -> Option<Task<anyhow::Result<Option<RenameLocation>>>> {
+        None
+    }
+
+    /// The edits that rename the symbol at `position` to `new_name`.
+    /// `Ok(None)` or an error (its message is the reason) passes to the next
+    /// provider.
+    fn provide_rename_edits(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        new_name: &str,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Option<WorkspaceEdit>>>;
+}
+
 // ----- document highlights -------------------------------------------------------
 
 /// What an occurrence highlight marks (Monaco `DocumentHighlightKind`).
@@ -564,6 +610,7 @@ struct LanguageFeatures {
     definition: Vec<Entry<dyn DefinitionProvider>>,
     signature_help: Vec<Entry<dyn SignatureHelpProvider>>,
     document_highlight: Vec<Entry<dyn DocumentHighlightProvider>>,
+    rename: Vec<Entry<dyn RenameProvider>>,
     declaration: Vec<Entry<dyn DeclarationProvider>>,
     type_definition: Vec<Entry<dyn TypeDefinitionProvider>>,
     implementation: Vec<Entry<dyn ImplementationProvider>>,
@@ -640,6 +687,13 @@ register_fn!(
 );
 
 register_fn!(
+    /// Registers a rename provider for the models `selector` matches (Monaco
+    /// `registerRenameProvider`). Providers are tried in registration order.
+    register_rename_provider,
+    rename,
+    RenameProvider
+);
+register_fn!(
     /// Registers a declaration provider for the models `selector` matches (Monaco
     /// `registerDeclarationProvider`). Results from all matching providers are combined.
     register_declaration_provider,
@@ -702,6 +756,7 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
         .retain(|e| e.id != registration);
     features.range_formatting.retain(|e| e.id != registration);
     features.declaration.retain(|e| e.id != registration);
+    features.rename.retain(|e| e.id != registration);
     features.type_definition.retain(|e| e.id != registration);
     features.implementation.retain(|e| e.id != registration);
     features.references.retain(|e| e.id != registration);
@@ -839,5 +894,13 @@ pub fn implementation_providers(
 pub fn reference_providers(cx: &App, language_id: Option<&str>) -> Vec<Arc<dyn ReferenceProvider>> {
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.references, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered rename providers whose selector matches `language_id`, in
+/// registration order.
+pub fn rename_providers(cx: &App, language_id: Option<&str>) -> Vec<Arc<dyn RenameProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.rename, language_id))
         .unwrap_or_default()
 }
