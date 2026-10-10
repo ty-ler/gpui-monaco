@@ -37,6 +37,14 @@ Other common calls:
 | `model.undo(None, cx)` / `redo(None, cx)` / `push_stack_element()` | `undo` / `redo` / `pushStackElement` |
 | `model.snapshot()` | a cheap, immutable copy of the text for background work |
 
+More `ITextModel` helpers:
+
+- **Lines:** `line_count`, `line_content` and `line_len_utf16`.
+- **Positions:** `validate_position` and `validate_range`, plus `offset_at` and `position_at` (byte offsets).
+- **Text:** `value_in_range`.
+- **Words:** `word_at_position` and `word_until_position`, using the language's `wordPattern`.
+- **Search:** `find_matches`.
+
 A model emits `TextModelEvent::Edited` with a `Patch` describing each change. Subscribe to it with `cx.subscribe(&model, …)` to sync with something else, such as an LSP server.
 
 ### Coordinates
@@ -76,6 +84,17 @@ editor.update(cx, |editor, cx| {
     editor.restore_view_state(&state, cx);
 });
 ```
+
+### Revealing, edits and commands
+
+| Call | Monaco equivalent |
+|---|---|
+| `reveal_line`, `reveal_line_in_center`, `reveal_position`, `reveal_range(range, RevealType::…)` | `revealLine`, `revealLineInCenter`, `revealPosition`, `revealRange*` |
+| `visible_ranges(cx)` | `getVisibleRanges` |
+| `execute_edits(edits, Some(end_selections), cx)` | `executeEdits` |
+| `push_undo_stop(cx)` | `pushUndoStop` |
+| `trigger("code_editor::CommentLine", window, cx)` | `trigger` (with GPUI action names) |
+| `has_text_focus(window)` | `hasTextFocus` |
 
 ### Events
 

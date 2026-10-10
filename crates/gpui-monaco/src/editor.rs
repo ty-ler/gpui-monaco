@@ -123,6 +123,10 @@ pub struct CodeEditor {
     pub(crate) navigation: crate::navigation_history::NavigationHistory,
     pub(crate) occurrences: crate::occurrences::OccurrenceHighlights,
     pub(crate) bracket_colors: crate::bracket_colors::BracketColors,
+    /// A reveal requested by the API, done in the next prepaint.
+    pub(crate) pending_reveal: Option<(Range<PointUtf16>, crate::view::reveal::RevealType)>,
+    /// Where the next prepaint scrolls horizontally to (after a reveal).
+    pub(crate) pending_reveal_x: Option<PointUtf16>,
     /// Monaco's `overtype` input mode (Insert key).
     pub(crate) overtype: bool,
     pub(crate) hover: crate::hover::HoverState,
@@ -138,7 +142,7 @@ pub struct CodeEditor {
     pub(crate) cursor_visible: bool,
     /// IME composition range, in byte offsets.
     marked_range: Option<Range<usize>>,
-    prev_edit_kind: Option<EditOperationType>,
+    pub(crate) prev_edit_kind: Option<EditOperationType>,
     mouse_selection: Option<MouseSelection>,
     scrollbar_drag: Option<ScrollbarDrag>,
     blink_epoch: usize,
@@ -201,6 +205,8 @@ impl CodeEditor {
             overtype: false,
             occurrences: Default::default(),
             bracket_colors: Default::default(),
+            pending_reveal: None,
+            pending_reveal_x: None,
             navigation: crate::navigation_history::NavigationHistory::starting_at(
                 vec![Selection::collapsed(PointUtf16::zero())],
                 snapshot.version(),

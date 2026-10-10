@@ -8,6 +8,7 @@
 #![warn(missing_docs)]
 
 pub mod actions;
+mod api;
 mod bracket_colors;
 mod bracket_matching;
 mod completion;
@@ -35,6 +36,7 @@ pub mod theme;
 pub mod view;
 pub mod widgets;
 
+pub use api::WordAtPosition;
 pub use decorations::{
     DecorationId, DecorationOptions, DecorationUnderline, InjectedText, OverviewRulerLane,
 };
@@ -54,6 +56,7 @@ pub use suggest_widget::SuggestWidget;
 pub use syntax;
 pub use text;
 pub use theme::{EditorColors, Theme, ThemeKind, TokenStyle};
+pub use view::reveal::RevealType;
 pub use widgets::{
     ContentWidget, ContentWidgetPreference, OverlayPosition, OverlayWidget, ViewZone, WidgetId,
     ZoneHeight,

@@ -40,6 +40,9 @@ All notable changes to this project are documented here. The format follows [Kee
   - Brackets are colored by nesting level, skipping strings and comments, and unmatched brackets use the unexpected-bracket color.
   - It honors `colorizedBracketPairs` and the `editorBracketHighlight.*` theme colors (#85).
 - Faster whole-document highlighting: injection layers are merged per depth (5.5s → 0.24s on 100k lines of Rust).
+- Embedder API (#105):
+  - `TextModel`: `line_count`, `line_content`, `validate_position` and `validate_range`, `offset_at` and `position_at`, `value_in_range`, `word_at_position`, `word_until_position` and `find_matches`.
+  - `CodeEditor`: `reveal_*` (a port of Monaco's reveal math, with `RevealType`), `visible_ranges`, `execute_edits`, `push_undo_stop`, `trigger` by action name and `has_text_focus`.
 - `TextModel::language_at` (Monaco `getLanguageIdAtPosition`), and the `comments` editor option.
 - Language configurations accept `lineComment` as `{ "comment", "noIndent" }`.
 

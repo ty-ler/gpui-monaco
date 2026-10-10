@@ -882,6 +882,29 @@ fn prepaint_editor(
     let selections = editor.cursors.selections();
     let primary = selections[0].head;
     let (primary_view_line, _) = view_lines.to_view(primary, false);
+    if let Some((range, reveal)) = editor.pending_reveal.take() {
+        // Monaco `revealRange`: the box of the range's lines.
+        let start = view_lines.to_view(range.start, false).0;
+        let end = view_lines.to_view(range.end, false).0.max(start);
+        let surrounding = if options.sticky_scroll.enabled {
+            options.sticky_scroll.max_line_count as f32
+        } else {
+            0.
+        };
+        let top = crate::view::reveal::scroll_top_to_reveal(
+            crate::view::reveal::RevealRequest {
+                viewport_top: f32::from(editor.scroll_top),
+                viewport_height: f32::from(text_height),
+                box_start: f32::from(zones.line_y(start, line_height)),
+                box_end: f32::from(zones.line_y(end, line_height) + line_height),
+                line_height: f32::from(line_height),
+                surrounding_lines: surrounding,
+            },
+            reveal,
+        );
+        editor.scroll_top = px(top);
+        editor.pending_reveal_x = Some(range.start);
+    }
     if editor.autoscroll_requested {
         let top = zones.line_y(primary_view_line, line_height);
         let bottom = top + line_height;
@@ -1035,6 +1058,19 @@ fn prepaint_editor(
             editor.scroll_left = primary_x + padding - text_width;
         }
         editor.autoscroll_requested = false;
+    }
+    if let Some(position) = editor.pending_reveal_x.take()
+        && let Some(x) = lines
+            .iter()
+            .find(|line| line.contains(position))
+            .map(|line| line.x_for_column(position.column))
+    {
+        let padding = metrics.em_width * 2.;
+        if x < editor.scroll_left {
+            editor.scroll_left = (x - padding).max(px(0.));
+        } else if x + padding > editor.scroll_left + text_width {
+            editor.scroll_left = x + padding - text_width;
+        }
     }
     editor.scroll_left = editor.scroll_left.clamp(px(0.), max_scroll_left);
     let scroll_left = editor.scroll_left;
