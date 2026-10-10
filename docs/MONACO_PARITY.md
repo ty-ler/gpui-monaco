@@ -62,7 +62,7 @@ Issues are linked by number.
 | Sticky scroll outline model, keyboard focus, toggle | `stickyScroll` | ❌ | #106 |
 | Render whitespace, indent guides, bracket pair guides, rulers, control characters | view parts | ❌ | #84 |
 | Bracket pair colorization | `bracketPairColorization` | ❌ | #85 |
-| Occurrence and selection highlight | `wordHighlighter` | ❌ | #83 |
+| Occurrence and selection highlight | `wordHighlighter` | ✅ | #83 |
 | Unicode highlighting, unusual line terminators | `unicodeHighlighter`, `unusualLineTerminators` | ❌ | #86 |
 | Font weight, ligatures, letter spacing, zoom, variable line heights | `fontZoom`, options | ❌ | #87 |
 | Smooth scrolling, caret animation, cursor surrounding lines, padding | options | ❌ | #88 |
@@ -96,7 +96,7 @@ Issues are linked by number.
 | References, declaration, type definition, implementation, peek view | `gotoSymbol`, `peekView` | ❌ | #95 |
 | Diagnostics: squiggles, ruler, hover, F8 | `gotoError` | ✅ | |
 | Diagnostic tags (unused, deprecated), related information | `gotoError` | ❌ | #90 |
-| Document highlights | `wordHighlighter` | ❌ | #83 |
+| Document highlights | `wordHighlighter` | ✅ | #83 |
 | Formatting: document, range, on type, on paste | `format` | ❌ | #94 |
 | Code actions and lightbulb, rename, inlay hints | `codeAction`, `rename`, `inlayHints` | ❌ | #56 |
 | Code lens | `codelens` | ❌ | #96 |

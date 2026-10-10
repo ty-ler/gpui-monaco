@@ -23,6 +23,7 @@ mod markers;
 mod model;
 mod multi_cursor;
 mod navigation_history;
+mod occurrences;
 pub mod options;
 pub mod providers;
 pub mod search;

@@ -121,6 +121,7 @@ pub struct CodeEditor {
     pub(crate) multi_cursor: Option<crate::multi_cursor::MultiCursorSession>,
     pub(crate) bracket_decorations: Vec<crate::decorations::DecorationId>,
     pub(crate) navigation: crate::navigation_history::NavigationHistory,
+    pub(crate) occurrences: crate::occurrences::OccurrenceHighlights,
     /// Monaco's `overtype` input mode (Insert key).
     pub(crate) overtype: bool,
     pub(crate) hover: crate::hover::HoverState,
@@ -197,6 +198,7 @@ impl CodeEditor {
             multi_cursor: None,
             bracket_decorations: Vec::new(),
             overtype: false,
+            occurrences: Default::default(),
             navigation: crate::navigation_history::NavigationHistory::starting_at(
                 vec![Selection::collapsed(PointUtf16::zero())],
                 snapshot.version(),
@@ -246,6 +248,7 @@ impl CodeEditor {
         self.minimap_cache = Default::default();
         self.cancel_selection_anchor(cx);
         self.reset_navigation_history();
+        self.clear_occurrence_highlights(cx);
 
         self._subscriptions[0] = cx.subscribe(&model, Self::on_model_event);
         model.update(cx, |model, cx| model.ensure_syntax(cx));
@@ -577,6 +580,7 @@ impl CodeEditor {
                 self.refresh_find_matches(cx);
                 if !own {
                     self.prev_edit_kind = None;
+                    self.occurrences_after_edit(cx);
                 }
                 if !own || matches!(kind, EditKind::Undo | EditKind::Redo) {
                     self.cursors_changed(own, cx);
@@ -682,6 +686,7 @@ impl CodeEditor {
         }
         self.record_cursor_change();
         self.update_bracket_highlights(cx);
+        self.update_occurrence_highlights(cx);
         self.restart_blink(cx);
         cx.emit(CodeEditorEvent::SelectionsChanged);
         cx.notify();
@@ -2207,6 +2212,19 @@ impl Render for CodeEditor {
                 this.column_select(cursor::ColumnSelectCommand::PageDown, cx)
             }))
             .on_action(cx.listener(|this, _: &CursorUndo, _, cx| this.cursor_undo(cx)))
+            .on_action(
+                cx.listener(|this, _: &WordHighlightNext, _, cx| {
+                    this.go_to_word_highlight(true, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &WordHighlightPrev, _, cx| {
+                this.go_to_word_highlight(false, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &WordHighlightTrigger, _, cx| {
+                    this.trigger_word_highlight(cx)
+                }),
+            )
             .on_action(
                 cx.listener(|this, _: &InPlaceReplaceUp, _, cx| this.in_place_replace(true, cx)),
             )

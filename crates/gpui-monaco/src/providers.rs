@@ -277,6 +277,46 @@ pub trait DefinitionProvider: 'static {
     ) -> Task<anyhow::Result<Vec<Location>>>;
 }
 
+// ----- document highlights -------------------------------------------------------
+
+/// What an occurrence highlight marks (Monaco `DocumentHighlightKind`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DocumentHighlightKind {
+    /// A textual occurrence.
+    #[default]
+    Text,
+    /// A read of a symbol.
+    Read,
+    /// A write to a symbol; drawn with the stronger color.
+    Write,
+}
+
+/// One occurrence of the symbol at the cursor (Monaco `DocumentHighlight`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocumentHighlight {
+    /// The occurrence's range (0-based rows, UTF-16 columns).
+    pub range: Range<PointUtf16>,
+    /// Text, read or write.
+    pub kind: DocumentHighlightKind,
+}
+
+/// Finds the occurrences of the symbol at a position, for occurrence
+/// highlighting (Monaco `DocumentHighlightProvider`). Without one, the editor
+/// highlights the word's textual occurrences.
+///
+/// Register with [`register_document_highlight_provider`].
+pub trait DocumentHighlightProvider: 'static {
+    /// The occurrences to highlight for the symbol at `position` (0-based row,
+    /// UTF-16 column), or `None` for none. Called after the cursor rests on a
+    /// word for [`EditorOptions::occurrences_highlight_delay`](crate::EditorOptions::occurrences_highlight_delay).
+    fn provide_document_highlights(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Option<Vec<DocumentHighlight>>>>;
+}
+
 // ----- signature help ------------------------------------------------------------
 
 /// Monaco `ParameterInformation`; `label` is a substring of the signature
@@ -391,6 +431,7 @@ struct LanguageFeatures {
     hover: Vec<Entry<dyn HoverProvider>>,
     definition: Vec<Entry<dyn DefinitionProvider>>,
     signature_help: Vec<Entry<dyn SignatureHelpProvider>>,
+    document_highlight: Vec<Entry<dyn DocumentHighlightProvider>>,
 }
 
 impl Global for LanguageFeatures {}
@@ -442,6 +483,15 @@ register_fn!(
     DefinitionProvider
 );
 register_fn!(
+    /// Registers a document highlight provider for the models `selector` matches
+    /// (Monaco `registerDocumentHighlightProvider`). The first non-empty result, in
+    /// registration order, is shown; with none, the word's textual occurrences are.
+    register_document_highlight_provider,
+    document_highlight,
+    DocumentHighlightProvider
+);
+
+register_fn!(
     /// Registers a signature help provider for the models `selector` matches (Monaco
     /// `registerSignatureHelpProvider`). The first non-empty result, in registration order,
     /// is shown.
@@ -453,6 +503,7 @@ register_fn!(
 /// Removes a provider registered with any `register_*_provider`.
 pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     let features = features(cx);
+    features.document_highlight.retain(|e| e.id != registration);
     features.completion.retain(|e| e.id != registration);
     features.hover.retain(|e| e.id != registration);
     features.definition.retain(|e| e.id != registration);
@@ -505,5 +556,16 @@ pub fn signature_help_providers(
 ) -> Vec<Arc<dyn SignatureHelpProvider>> {
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.signature_help, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered document highlight providers whose selector matches
+/// `language_id`, in registration order.
+pub fn document_highlight_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn DocumentHighlightProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.document_highlight, language_id))
         .unwrap_or_default()
 }

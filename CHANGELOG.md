@@ -23,6 +23,12 @@ All notable changes to this project are documented here. The format follows [Kee
   - In-place replace (Cmd+Shift+. / ,).
   - Remove brackets (Cmd+Alt+Backspace).
 - `EditOperation::from_edits`.
+- Occurrence highlighting (#83):
+  - The symbol at the cursor is highlighted after a short delay, from a new `DocumentHighlightProvider` (with read and write kinds) or the word's textual occurrences.
+  - Other occurrences of the selected text are highlighted too.
+  - F7 / Shift+F7 move between the highlights.
+  - Options: `occurrences_highlight`, `occurrences_highlight_delay`, `selection_highlight`, `selection_highlight_max_length` and `selection_highlight_multiline`.
+  - Theme colors: `editor.wordHighlight*` and `editor.selectionHighlightBackground`.
 - `TextModel::language_at` (Monaco `getLanguageIdAtPosition`), and the `comments` editor option.
 - Language configurations accept `lineComment` as `{ "comment", "noIndent" }`.
 

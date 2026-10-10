@@ -60,6 +60,22 @@ pub struct EditorColors {
     pub find_match_highlight_background: Hsla,
     /// Find matches in the overview ruler (`editorOverviewRuler.findMatchForeground`).
     pub find_match_overview: Hsla,
+    /// Occurrences of the symbol at the cursor (`editor.wordHighlightBackground`).
+    pub word_highlight_background: Hsla,
+    /// Write occurrences of the symbol at the cursor
+    /// (`editor.wordHighlightStrongBackground`).
+    pub word_highlight_strong_background: Hsla,
+    /// Occurrences in the overview ruler
+    /// (`editorOverviewRuler.wordHighlightForeground`).
+    pub word_highlight_overview: Hsla,
+    /// Write occurrences in the overview ruler
+    /// (`editorOverviewRuler.wordHighlightStrongForeground`).
+    pub word_highlight_strong_overview: Hsla,
+    /// Other occurrences of the selected text (`editor.selectionHighlightBackground`).
+    pub selection_highlight_background: Hsla,
+    /// Selection occurrences in the overview ruler
+    /// (`editorOverviewRuler.selectionHighlightForeground`).
+    pub selection_highlight_overview: Hsla,
     /// Widget chrome (`editorWidget.background` / `.foreground` / `.border`).
     pub widget_background: Hsla,
     /// `editorWidget.foreground`.
@@ -112,6 +128,12 @@ impl EditorColors {
             find_match_background: c(rgb(0x515c6a)),
             find_match_highlight_background: c(rgba(0xea5c0055)),
             find_match_overview: c(rgba(0xd186167e)),
+            word_highlight_background: c(rgba(0x575757b8)),
+            word_highlight_strong_background: c(rgba(0x004972b8)),
+            word_highlight_overview: c(rgba(0xa0a0a0cc)),
+            word_highlight_strong_overview: c(rgba(0xc0a0c0cc)),
+            selection_highlight_background: c(rgba(0xadd6ff26)),
+            selection_highlight_overview: c(rgba(0xa0a0a0cc)),
             widget_background: c(rgb(0x252526)),
             widget_foreground: c(rgb(0xcccccc)),
             widget_border: c(rgb(0x454545)),
@@ -148,6 +170,12 @@ impl EditorColors {
             find_match_background: c(rgb(0xa8ac94)),
             find_match_highlight_background: c(rgba(0xea5c0055)),
             find_match_overview: c(rgba(0xd186167e)),
+            word_highlight_background: c(rgba(0x57575740)),
+            word_highlight_strong_background: c(rgba(0x0e639c40)),
+            word_highlight_overview: c(rgba(0xa0a0a0cc)),
+            word_highlight_strong_overview: c(rgba(0xc0a0c0cc)),
+            selection_highlight_background: c(rgba(0xadd6ff80)),
+            selection_highlight_overview: c(rgba(0xa0a0a0cc)),
             widget_background: c(rgb(0xf3f3f3)),
             widget_foreground: c(rgb(0x616161)),
             widget_border: c(rgb(0xc8c8c8)),
@@ -206,6 +234,30 @@ impl EditorColors {
         set(
             &mut self.find_match_overview,
             "editorOverviewRuler.findMatchForeground",
+        );
+        set(
+            &mut self.word_highlight_background,
+            "editor.wordHighlightBackground",
+        );
+        set(
+            &mut self.word_highlight_strong_background,
+            "editor.wordHighlightStrongBackground",
+        );
+        set(
+            &mut self.word_highlight_overview,
+            "editorOverviewRuler.wordHighlightForeground",
+        );
+        set(
+            &mut self.word_highlight_strong_overview,
+            "editorOverviewRuler.wordHighlightStrongForeground",
+        );
+        set(
+            &mut self.selection_highlight_background,
+            "editor.selectionHighlightBackground",
+        );
+        set(
+            &mut self.selection_highlight_overview,
+            "editorOverviewRuler.selectionHighlightForeground",
         );
         set(&mut self.widget_background, "editorWidget.background");
         set(&mut self.widget_foreground, "editorWidget.foreground");

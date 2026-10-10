@@ -277,6 +277,15 @@ actions!(
         /// Removes the brackets around the cursor (Monaco
         /// `editor.action.removeBrackets`, Cmd/Ctrl+Alt+Backspace).
         RemoveBrackets,
+        /// Selects the next occurrence of the symbol at the cursor (Monaco
+        /// `editor.action.wordHighlight.next`, F7).
+        WordHighlightNext,
+        /// Selects the previous occurrence (Monaco
+        /// `editor.action.wordHighlight.prev`, Shift+F7).
+        WordHighlightPrev,
+        /// Highlights the symbol's occurrences now (Monaco
+        /// `editor.action.wordHighlight.trigger`).
+        WordHighlightTrigger,
         /// Toggles line comments on the selected lines (Monaco
         /// `editor.action.commentLine`, Cmd+/).
         CommentLine,
@@ -470,6 +479,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-d", AddSelectionToNextFindMatch, ctx),
         KeyBinding::new("secondary-/", CommentLine, ctx),
         KeyBinding::new("secondary-u", CursorUndo, ctx),
+        KeyBinding::new("f7", WordHighlightNext, ctx),
+        KeyBinding::new("shift-f7", WordHighlightPrev, ctx),
         KeyBinding::new("secondary-shift-.", InPlaceReplaceUp, ctx),
         KeyBinding::new("secondary-shift-,", InPlaceReplaceDown, ctx),
         KeyBinding::new("secondary-alt-backspace", RemoveBrackets, ctx),
