@@ -985,6 +985,7 @@ fn prepaint_editor(
             .collect();
     // Monaco `bracketPairColorization`.
     editor.refresh_bracket_colors(cx);
+    editor.refresh_links(cx);
     let bracket_colors = editor.bracket_colors_in(visible_start..visible_end, cx);
     let mut highlight_ix = 0;
     let mut lines = Vec::with_capacity(segments.len());

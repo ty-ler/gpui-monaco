@@ -679,6 +679,42 @@ pub trait InlayHintsProvider: 'static {
     ) -> Task<anyhow::Result<Vec<InlayHint>>>;
 }
 
+// ----- links ---------------------------------------------------------------------
+
+/// A link in the text (Monaco `ILink`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DocumentLink {
+    /// Where it is.
+    pub range: Range<PointUtf16>,
+    /// Its target; `None` until [`LinkProvider::resolve_link`] fills it in.
+    pub url: Option<SharedString>,
+    /// The hover label instead of "Follow link".
+    pub tooltip: Option<SharedString>,
+}
+
+/// Finds links in a document (Monaco `LinkProvider`). The editor also
+/// detects URLs itself (Monaco's link computer); links from providers
+/// replace the ones they overlap.
+///
+/// Register with [`register_link_provider`].
+pub trait LinkProvider: 'static {
+    /// The document's links.
+    fn provide_links(
+        &self,
+        context: &ProviderContext,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<DocumentLink>>>;
+
+    /// Fills in the target of a link returned without one.
+    fn resolve_link(
+        &self,
+        _link: &DocumentLink,
+        _cx: &mut App,
+    ) -> Option<Task<anyhow::Result<DocumentLink>>> {
+        None
+    }
+}
+
 /// Bumped by [`refresh_inlay_hints`]; editors re-request when it changes.
 #[derive(Default)]
 pub(crate) struct InlayHintsEpoch(pub u64);
@@ -917,6 +953,7 @@ struct LanguageFeatures {
     rename: Vec<Entry<dyn RenameProvider>>,
     code_action: Vec<Entry<dyn CodeActionProvider>>,
     inlay_hints: Vec<Entry<dyn InlayHintsProvider>>,
+    links: Vec<Entry<dyn LinkProvider>>,
     folding: Vec<Entry<dyn FoldingRangeProvider>>,
     selection_range: Vec<Entry<dyn SelectionRangeProvider>>,
     declaration: Vec<Entry<dyn DeclarationProvider>>,
@@ -1009,6 +1046,13 @@ register_fn!(
     FoldingRangeProvider
 );
 register_fn!(
+    /// Registers a link provider for the models `selector` matches (Monaco
+    /// `registerLinkProvider`). Later registrations win where links overlap.
+    register_link_provider,
+    links,
+    LinkProvider
+);
+register_fn!(
     /// Registers an inlay hints provider for the models `selector` matches (Monaco
     /// `registerInlayHintsProvider`). Results from all matching providers are merged.
     register_inlay_hints_provider,
@@ -1095,6 +1139,7 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.rename.retain(|e| e.id != registration);
     features.code_action.retain(|e| e.id != registration);
     features.inlay_hints.retain(|e| e.id != registration);
+    features.links.retain(|e| e.id != registration);
     features.folding.retain(|e| e.id != registration);
     features.selection_range.retain(|e| e.id != registration);
     features.type_definition.retain(|e| e.id != registration);
@@ -1253,6 +1298,14 @@ pub fn code_action_providers(
 ) -> Vec<Arc<dyn CodeActionProvider>> {
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.code_action, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered link providers whose selector matches `language_id`, in
+/// registration order.
+pub fn link_providers(cx: &App, language_id: Option<&str>) -> Vec<Arc<dyn LinkProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.links, language_id))
         .unwrap_or_default()
 }
 

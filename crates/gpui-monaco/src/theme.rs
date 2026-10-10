@@ -64,6 +64,8 @@ pub struct EditorColors {
     /// (`editor.symbolHighlightBackground`; defaults to the find match
     /// highlight).
     pub symbol_highlight_background: Hsla,
+    /// A link while Cmd/Ctrl is held over it (`editorLink.activeForeground`).
+    pub link_active_foreground: Hsla,
     /// Inline messages such as "No definition found"
     /// (`inputValidation.infoBackground`).
     pub message_background: Hsla,
@@ -225,6 +227,7 @@ impl EditorColors {
             find_match_highlight_background: c(rgba(0xea5c0055)),
             find_match_overview: c(rgba(0xd186167e)),
             symbol_highlight_background: c(rgba(0xea5c0055)),
+            link_active_foreground: c(rgb(0x4e94ce)),
             message_background: c(rgb(0x063b49)),
             message_border: c(rgb(0x007acc)),
             fold_background: c(rgba(0x264f784d)),
@@ -317,6 +320,7 @@ impl EditorColors {
             find_match_highlight_background: c(rgba(0xea5c0055)),
             find_match_overview: c(rgba(0xd186167e)),
             symbol_highlight_background: c(rgba(0xea5c0055)),
+            link_active_foreground: c(rgb(0x0000ff)),
             message_background: c(rgb(0xd6ecf2)),
             message_border: c(rgb(0x007acc)),
             fold_background: c(rgba(0xadd6ff4d)),
@@ -442,6 +446,10 @@ impl EditorColors {
         );
         set(&mut self.message_border, "inputValidation.infoBorder");
         set(&mut self.fold_background, "editor.foldBackground");
+        set(
+            &mut self.link_active_foreground,
+            "editorLink.activeForeground",
+        );
         set(
             &mut self.inlay_hint_foreground,
             "editorInlayHint.foreground",

@@ -658,6 +658,8 @@ pub struct EditorOptions {
     /// Monaco `multiCursorPaste`: how pasting with several cursors splits
     /// the text.
     pub multi_cursor_paste: crate::cursor::MultiCursorPaste,
+    /// Monaco `links`: detect links and follow them with Cmd/Ctrl+click.
+    pub links: bool,
     /// Monaco `showUnused`: fade code diagnostics tag unnecessary.
     pub show_unused: bool,
     /// Monaco `showDeprecated`: strike through code diagnostics tag
@@ -768,6 +770,7 @@ impl Default for EditorOptions {
             selection_highlight_multiline: false,
             multi_cursor_modifier: MultiCursorModifier::Alt,
             multi_cursor_paste: Default::default(),
+            links: true,
             show_unused: true,
             show_deprecated: true,
             render_validation_decorations: RenderValidationDecorations::Editable,
