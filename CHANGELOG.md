@@ -5,6 +5,11 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Hide unchanged regions (#52, part 4):** `DiffEditorOptions::hide_unchanged_regions` (Monaco `hideUnchangedRegions`) collapses long runs of unchanged lines into "N hidden lines" bars, keeping `context_line_count` lines around each change.
+  - **Revealing:** a bar's top or bottom edge reveals `reveal_line_count` more lines, and its unfold button or a double click shows them all. Moving the cursor into hidden lines reveals them, and revealed lines stay revealed when the diff updates.
+  - **Commands:** `collapse_all_unchanged_regions` and `show_all_unchanged_regions` (actions `CollapseAllUnchangedRegions` and `ShowAllUnchangedRegions`).
+  - **Theme colors:** `diffEditor.unchangedRegionBackground`, `unchangedRegionForeground`, `unchangedRegionShadow` and `unchangedCodeBackground`.
+  - **Hidden areas:** `CodeEditor::set_hidden_areas` (Monaco `setHiddenAreas`) hides rows besides folds.
 - **Inline diff view (#52, part 3):** `DiffEditorOptions::render_side_by_side = false` shows deleted lines inline in the modified editor, like Monaco's inline diff. They appear as syntax-highlighted view zones with the changed characters marked and `−` in the margin.
   - **Narrow editors:** below `render_side_by_side_inline_breakpoint` (900px), diffs show inline unless `use_inline_view_when_space_is_limited` is off.
   - **Mode:** `renders_side_by_side()` reports which mode is showing.

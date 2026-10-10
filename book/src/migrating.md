@@ -72,6 +72,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `getSupportedActions()` | `supported_actions(cx)` |
 | `createDecorationsCollection(d)` | `create_decorations_collection(d, cx)` |
 | `deltaDecorations(old, new)` | the model's `delta_decorations(Some(editor_id), …)` (editor-owned) |
+| `setHiddenAreas(ranges)` | `set_hidden_areas(rows, cx)` (0-based rows, end exclusive) |
 | `changeViewZones(a => a.addZone(z))` | `add_view_zone(zone, cx)`, `set_view_zone_height`, `remove_widget` |
 | `addContentWidget(w)` / `layoutContentWidget(w)` | `add_content_widget(w, cx)` / `set_content_widget_position(…)` |
 | `addOverlayWidget(w)` | `add_overlay_widget(w, cx)` |

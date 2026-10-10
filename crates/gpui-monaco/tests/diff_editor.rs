@@ -159,3 +159,84 @@ fn narrow_diff_editors_show_inline(cx: &mut TestAppContext) {
     paint(cx);
     assert!(diff.read_with(cx, |d, _| d.renders_side_by_side()));
 }
+
+fn hide_unchanged(diff: &Entity<DiffEditor>, cx: &mut VisualTestContext) {
+    diff.update(cx, |d, cx| {
+        let mut options = d.options().clone();
+        options.hide_unchanged_regions.enabled = true;
+        d.update_options(options, cx);
+    });
+    paint(cx);
+}
+
+#[gpui::test]
+fn unchanged_regions_hide(cx: &mut TestAppContext) {
+    let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let modified = original.replace("line 50\n", "changed\n");
+    let (diff, cx) = setup(&original, &modified, cx);
+    hide_unchanged(&diff, cx);
+    // Line 51 changed: 3 lines of context around it.
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests()),
+        vec![1..48, 55..102]
+    );
+    let modified_editor = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    assert_eq!(
+        modified_editor.read_with(cx, |e, _| e.hidden_areas().to_vec()),
+        vec![0..47, 54..101]
+    );
+    // A bar's top edge reveals 20 lines above.
+    diff.update(cx, |d, cx| d.reveal_unchanged_for_tests(1, true, cx));
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests()),
+        vec![1..48, 75..102]
+    );
+    // Moving the cursor into hidden lines reveals them.
+    modified_editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                5, 0,
+            ))],
+            cx,
+        )
+    });
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests()),
+        vec![7..48, 75..102]
+    );
+    diff.update(cx, |d, cx| d.show_all_unchanged_regions(cx));
+    assert!(diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests().is_empty()));
+    diff.update(cx, |d, cx| d.collapse_all_unchanged_regions(cx));
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests()),
+        vec![1..48, 55..102]
+    );
+}
+
+#[gpui::test]
+fn revealed_lines_stay_revealed_after_edits(cx: &mut TestAppContext) {
+    let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let modified = original.replace("line 50\n", "changed\n");
+    let (diff, cx) = setup(&original, &modified, cx);
+    hide_unchanged(&diff, cx);
+    diff.update(cx, |d, cx| d.show_all_unchanged_regions(cx));
+    // An edit far below adds a change; what was shown before stays shown.
+    let model = diff.read_with(cx, |d, cx| d.modified_editor().read(cx).model().clone());
+    model.update(cx, |m, cx| {
+        let offset = m.text().find("line 90").unwrap();
+        m.edit([(offset..offset, "new\n")], cx).unwrap();
+    });
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(300));
+    paint(cx);
+    let hidden = diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests());
+    assert!(hidden.iter().all(|r| r.start > 51), "{hidden:?}");
+}
+
+#[gpui::test]
+fn identical_models_hide_nothing(cx: &mut TestAppContext) {
+    let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let (diff, cx) = setup(&text, &text, cx);
+    hide_unchanged(&diff, cx);
+    assert!(diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests().is_empty()));
+}

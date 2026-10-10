@@ -63,6 +63,15 @@ pub struct EditorColors {
     pub diff_gutter_removed_line_background: Hsla,
     /// The stripes where the other side has lines (`diffEditor.diagonalFill`).
     pub diff_diagonal_fill: Hsla,
+    /// The "hidden lines" bars (`diffEditor.unchangedRegionBackground`).
+    pub diff_unchanged_region_background: Hsla,
+    /// Their text (`diffEditor.unchangedRegionForeground`).
+    pub diff_unchanged_region_foreground: Hsla,
+    /// Their shadow (`diffEditor.unchangedRegionShadow`).
+    pub diff_unchanged_region_shadow: Hsla,
+    /// Unchanged lines that can be hidden
+    /// (`diffEditor.unchangedCodeBackground`).
+    pub diff_unchanged_code_background: Hsla,
     /// Selections in an unfocused editor (`editor.inactiveSelectionBackground`).
     pub inactive_selection_background: Hsla,
     /// The cursor (`editorCursor.foreground`).
@@ -293,6 +302,10 @@ impl EditorColors {
             diff_gutter_inserted_line_background: c(rgba(0x9bb95533)),
             diff_gutter_removed_line_background: c(rgba(0xff000033)),
             diff_diagonal_fill: c(rgba(0xcccccc33)),
+            diff_unchanged_region_background: c(rgb(0x1e1e1e)),
+            diff_unchanged_region_foreground: c(rgb(0xcccccc)),
+            diff_unchanged_region_shadow: c(rgba(0x000000ff)),
+            diff_unchanged_code_background: c(rgba(0x74747429)),
             inactive_selection_background: c(rgb(0x3a3d41)),
             cursor: c(rgb(0xaeafad)),
             gutter_background: c(rgb(0x1e1e1e)),
@@ -415,6 +428,10 @@ impl EditorColors {
             diff_gutter_inserted_line_background: c(rgba(0x9bb95533)),
             diff_gutter_removed_line_background: c(rgba(0xff000033)),
             diff_diagonal_fill: c(rgba(0x22222233)),
+            diff_unchanged_region_background: c(rgb(0xfffffe)),
+            diff_unchanged_region_foreground: c(rgb(0x616161)),
+            diff_unchanged_region_shadow: c(rgba(0x737373bf)),
+            diff_unchanged_code_background: c(rgba(0xb8b8b829)),
             inactive_selection_background: c(rgb(0xe5ebf1)),
             cursor: c(rgb(0x000000)),
             gutter_background: c(rgb(0xfffffe)),
@@ -546,6 +563,10 @@ impl EditorColors {
             diff_gutter_inserted_line_background: c(rgba(0x00000000)),
             diff_gutter_removed_line_background: c(rgba(0x00000000)),
             diff_diagonal_fill: c(rgba(0xcccccc33)),
+            diff_unchanged_region_background: c(rgb(0x000000)),
+            diff_unchanged_region_foreground: c(rgb(0xffffff)),
+            diff_unchanged_region_shadow: c(rgba(0x000000ff)),
+            diff_unchanged_code_background: c(rgba(0x00000000)),
             inactive_selection_background: c(rgba(0xf3f518b3)),
             cursor: c(rgb(0xffffff)),
             gutter_background: c(rgb(0x000000)),
@@ -684,6 +705,10 @@ impl EditorColors {
             diff_gutter_inserted_line_background: c(rgba(0x00000000)),
             diff_gutter_removed_line_background: c(rgba(0x00000000)),
             diff_diagonal_fill: c(rgba(0x22222233)),
+            diff_unchanged_region_background: c(rgb(0xffffff)),
+            diff_unchanged_region_foreground: c(rgb(0x292929)),
+            diff_unchanged_region_shadow: c(rgba(0x737373bf)),
+            diff_unchanged_code_background: c(rgba(0x00000000)),
             inactive_selection_background: c(rgba(0x0f4a8580)),
             cursor: c(rgb(0x0f4a85)),
             gutter_background: c(rgb(0xffffff)),
@@ -836,6 +861,22 @@ impl EditorColors {
         self.diff_gutter_removed_line_background = get("diffEditorGutter.removedLineBackground")
             .unwrap_or(self.diff_removed_line_background);
         set(&mut self.diff_diagonal_fill, "diffEditor.diagonalFill");
+        // The bars default to the editor's background and foreground.
+        self.diff_unchanged_region_background = get("diffEditor.unchangedRegionBackground")
+            .or_else(|| get("sideBySideEditor.background"))
+            .or_else(|| get("editor.background"))
+            .unwrap_or(self.diff_unchanged_region_background);
+        self.diff_unchanged_region_foreground = get("diffEditor.unchangedRegionForeground")
+            .or_else(|| get("foreground"))
+            .unwrap_or(self.diff_unchanged_region_foreground);
+        set(
+            &mut self.diff_unchanged_region_shadow,
+            "diffEditor.unchangedRegionShadow",
+        );
+        set(
+            &mut self.diff_unchanged_code_background,
+            "diffEditor.unchangedCodeBackground",
+        );
         if let Some(color) = get("editor.selectionForeground") {
             self.selection_foreground = Some(color);
         }

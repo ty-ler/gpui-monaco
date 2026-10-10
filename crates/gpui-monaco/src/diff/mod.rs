@@ -26,7 +26,7 @@ mod computer;
 mod heuristics;
 mod mapping;
 mod moves;
-mod range;
+pub(crate) mod range;
 mod sequences;
 #[cfg(test)]
 mod tests;
