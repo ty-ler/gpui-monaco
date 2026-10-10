@@ -563,6 +563,86 @@ pub fn inlay_hint(hint: lsp::InlayHint) -> InlayHint {
     }
 }
 
+/// Monaco's symbol kind for an LSP one.
+pub fn symbol_kind(kind: lsp::SymbolKind) -> gpui_monaco::providers::SymbolKind {
+    use gpui_monaco::providers::SymbolKind as K;
+    match kind {
+        lsp::SymbolKind::FILE => K::File,
+        lsp::SymbolKind::MODULE => K::Module,
+        lsp::SymbolKind::NAMESPACE => K::Namespace,
+        lsp::SymbolKind::PACKAGE => K::Package,
+        lsp::SymbolKind::CLASS => K::Class,
+        lsp::SymbolKind::METHOD => K::Method,
+        lsp::SymbolKind::PROPERTY => K::Property,
+        lsp::SymbolKind::FIELD => K::Field,
+        lsp::SymbolKind::CONSTRUCTOR => K::Constructor,
+        lsp::SymbolKind::ENUM => K::Enum,
+        lsp::SymbolKind::INTERFACE => K::Interface,
+        lsp::SymbolKind::VARIABLE => K::Variable,
+        lsp::SymbolKind::CONSTANT => K::Constant,
+        lsp::SymbolKind::STRING => K::String,
+        lsp::SymbolKind::NUMBER => K::Number,
+        lsp::SymbolKind::BOOLEAN => K::Boolean,
+        lsp::SymbolKind::ARRAY => K::Array,
+        lsp::SymbolKind::OBJECT => K::Object,
+        lsp::SymbolKind::KEY => K::Key,
+        lsp::SymbolKind::NULL => K::Null,
+        lsp::SymbolKind::ENUM_MEMBER => K::EnumMember,
+        lsp::SymbolKind::STRUCT => K::Struct,
+        lsp::SymbolKind::EVENT => K::Event,
+        lsp::SymbolKind::OPERATOR => K::Operator,
+        lsp::SymbolKind::TYPE_PARAMETER => K::TypeParameter,
+        _ => K::Function,
+    }
+}
+
+/// A `textDocument/documentSymbol` response: nested symbols as they are,
+/// flat ones (`SymbolInformation`) without children.
+pub fn document_symbols(
+    response: lsp::DocumentSymbolResponse,
+) -> Vec<gpui_monaco::providers::DocumentSymbol> {
+    fn nested(symbol: lsp::DocumentSymbol) -> gpui_monaco::providers::DocumentSymbol {
+        #[allow(deprecated)]
+        let deprecated = symbol.deprecated == Some(true)
+            || symbol
+                .tags
+                .as_ref()
+                .is_some_and(|tags| tags.contains(&lsp::SymbolTag::DEPRECATED));
+        gpui_monaco::providers::DocumentSymbol {
+            name: symbol.name.into(),
+            detail: symbol.detail.map(Into::into),
+            kind: symbol_kind(symbol.kind),
+            deprecated,
+            range: range(symbol.range),
+            selection_range: range(symbol.selection_range),
+            children: symbol
+                .children
+                .unwrap_or_default()
+                .into_iter()
+                .map(nested)
+                .collect(),
+        }
+    }
+    match response {
+        lsp::DocumentSymbolResponse::Nested(symbols) => symbols.into_iter().map(nested).collect(),
+        lsp::DocumentSymbolResponse::Flat(symbols) => symbols
+            .into_iter()
+            .map(|symbol| {
+                #[allow(deprecated)]
+                let deprecated = symbol.deprecated == Some(true);
+                gpui_monaco::providers::DocumentSymbol {
+                    name: symbol.name.into(),
+                    kind: symbol_kind(symbol.kind),
+                    deprecated,
+                    range: range(symbol.location.range),
+                    selection_range: range(symbol.location.range),
+                    ..Default::default()
+                }
+            })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,5 +758,35 @@ mod tests {
                 lsp::DiagnosticTag::DEPRECATED
             ])
         );
+    }
+
+    #[test]
+    fn nested_document_symbols() {
+        let response: lsp::DocumentSymbolResponse = serde_json::from_value(serde_json::json!([{
+            "name": "Point",
+            "kind": 23,
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 3, "character": 1 } },
+            "selectionRange": { "start": { "line": 0, "character": 7 }, "end": { "line": 0, "character": 12 } },
+            "children": [{
+                "name": "x",
+                "kind": 8,
+                "tags": [1],
+                "range": { "start": { "line": 1, "character": 4 }, "end": { "line": 1, "character": 10 } },
+                "selectionRange": { "start": { "line": 1, "character": 4 }, "end": { "line": 1, "character": 5 } }
+            }]
+        }]))
+        .unwrap();
+        let symbols = document_symbols(response);
+        assert_eq!(symbols[0].name.as_ref(), "Point");
+        assert_eq!(symbols[0].kind, gpui_monaco::providers::SymbolKind::Struct);
+        assert_eq!(
+            symbols[0].selection_range,
+            PointUtf16::new(0, 7)..PointUtf16::new(0, 12)
+        );
+        assert_eq!(
+            symbols[0].children[0].kind,
+            gpui_monaco::providers::SymbolKind::Field
+        );
+        assert!(symbols[0].children[0].deprecated);
     }
 }

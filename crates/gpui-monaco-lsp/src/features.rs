@@ -30,6 +30,9 @@ use gpui_monaco::providers::{
     register_document_range_semantic_tokens_provider, register_document_semantic_tokens_provider,
 };
 use gpui_monaco::providers::{
+    DocumentSymbol, DocumentSymbolProvider, register_document_symbol_provider,
+};
+use gpui_monaco::providers::{
     FoldingRange, FoldingRangeKind, FoldingRangeProvider, register_folding_range_provider,
 };
 use gpui_monaco::providers::{InlayHint, InlayHintsProvider, register_inlay_hints_provider};
@@ -287,6 +290,13 @@ impl LspFeatures {
                     self.clone(),
                 ));
             }
+        }
+        if supported(capabilities.document_symbol_provider.as_ref()) {
+            registrations.push(register_document_symbol_provider(
+                cx,
+                selector.clone(),
+                self.clone(),
+            ));
         }
         if supported(capabilities.inlay_hint_provider.as_ref()) {
             registrations.push(register_inlay_hints_provider(
@@ -1105,6 +1115,30 @@ impl DocumentRangeSemanticTokensProvider for LspFeatures {
                     data: flatten_tokens(&partial.data),
                 },
             }))
+        })
+    }
+}
+
+impl DocumentSymbolProvider for LspFeatures {
+    fn provide_document_symbols(
+        &self,
+        context: &ProviderContext,
+        cx: &mut App,
+    ) -> Task<Result<Vec<DocumentSymbol>>> {
+        let Some((connection, position)) = self.prepare(context, PointUtf16::default(), cx) else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let request =
+            connection.request::<lsp::request::DocumentSymbolRequest>(lsp::DocumentSymbolParams {
+                text_document: position.text_document,
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            });
+        cx.background_executor().spawn(async move {
+            Ok(request
+                .await?
+                .map(convert::document_symbols)
+                .unwrap_or_default())
         })
     }
 }

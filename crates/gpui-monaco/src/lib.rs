@@ -41,6 +41,7 @@ mod multi_cursor;
 mod navigation_history;
 mod occurrences;
 pub mod options;
+pub mod outline;
 mod peek;
 pub mod providers;
 mod rename;

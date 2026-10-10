@@ -111,7 +111,7 @@ Issues are linked by number.
 | Links | `links` | ✅ | #93 |
 | Semantic tokens | `semanticTokens` | ✅ | #98 |
 | Inline completions (ghost text) | `inlineCompletions` | ✅ | #99 |
-| Document symbols | `documentSymbols` | ❌ | #100 |
+| Document symbols | `documentSymbols` | ✅ | #100 |
 | Selection ranges | `smartSelect` | ✅ | #82 |
 | Folding ranges | `folding` | ✅ | #102 |
 | Linked editing ranges | `linkedEditing` | ✅ | #101 |

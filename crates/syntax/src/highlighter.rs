@@ -69,6 +69,11 @@ pub trait Highlighter: Send + Sync {
         None
     }
 
+    /// Definitions from `tags.scm` queries, for document symbols, or `None`.
+    fn tags(&self, _state: &HighlightState, _text: &Rope) -> Option<Vec<crate::syntax_map::Tag>> {
+        None
+    }
+
     /// The tag name at `offset` and its matching start or end tag's name,
     /// for linked editing, or `None`.
     fn linked_tag_ranges(
@@ -136,5 +141,9 @@ impl Highlighter for TreeSitterHighlighter {
         offset: usize,
     ) -> Option<Vec<Range<usize>>> {
         state.syntax()?.linked_tag_ranges(offset)
+    }
+
+    fn tags(&self, state: &HighlightState, text: &Rope) -> Option<Vec<crate::syntax_map::Tag>> {
+        state.syntax()?.tags(text)
     }
 }

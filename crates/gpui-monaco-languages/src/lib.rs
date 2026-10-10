@@ -28,6 +28,14 @@ fn with_folds(grammar: Grammar, folds: &[&str]) -> Grammar {
         .unwrap_or_else(|error| panic!("invalid bundled folds query: {error}"))
 }
 
+/// Adds `tags.scm` queries, for document symbols.
+#[allow(dead_code)]
+fn with_tags(grammar: Grammar, tags: &[&str]) -> Grammar {
+    grammar
+        .with_tags_query(&tags.join("\n"))
+        .unwrap_or_else(|error| panic!("invalid bundled tags query: {error}"))
+}
+
 #[allow(dead_code)]
 fn grammar(language: TsLanguage, highlights: &[&str], injections: Option<&str>) -> Grammar {
     let mut grammar = Grammar::new(language)
@@ -49,13 +57,19 @@ pub fn rust() -> Language {
         .with_aliases(&["rs"])
         .with_extensions(&["rs"])
         .with_config(config(include_str!("../configs/rust.json")))
-        .with_grammar(with_folds(
-            grammar(
-                tree_sitter_rust::LANGUAGE.into(),
-                &[tree_sitter_rust::HIGHLIGHTS_QUERY],
-                Some(tree_sitter_rust::INJECTIONS_QUERY),
+        .with_grammar(with_tags(
+            with_folds(
+                grammar(
+                    tree_sitter_rust::LANGUAGE.into(),
+                    &[tree_sitter_rust::HIGHLIGHTS_QUERY],
+                    Some(tree_sitter_rust::INJECTIONS_QUERY),
+                ),
+                &[include_str!("../queries/rust-folds.scm")],
             ),
-            &[include_str!("../queries/rust-folds.scm")],
+            &[
+                tree_sitter_rust::TAGS_QUERY,
+                include_str!("../queries/rust-tags.scm"),
+            ],
         ))
 }
 
@@ -67,19 +81,22 @@ pub fn javascript() -> Language {
         .with_aliases(&["js", "jsx", "javascriptreact"])
         .with_extensions(&["js", "mjs", "cjs", "jsx"])
         .with_config(config(include_str!("../configs/javascript.json")))
-        .with_grammar(with_folds(
-            grammar(
-                tree_sitter_javascript::LANGUAGE.into(),
+        .with_grammar(with_tags(
+            with_folds(
+                grammar(
+                    tree_sitter_javascript::LANGUAGE.into(),
+                    &[
+                        tree_sitter_javascript::HIGHLIGHT_QUERY,
+                        tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+                    ],
+                    Some(tree_sitter_javascript::INJECTIONS_QUERY),
+                ),
                 &[
-                    tree_sitter_javascript::HIGHLIGHT_QUERY,
-                    tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+                    include_str!("../queries/javascript-folds.scm"),
+                    include_str!("../queries/jsx-folds.scm"),
                 ],
-                Some(tree_sitter_javascript::INJECTIONS_QUERY),
             ),
-            &[
-                include_str!("../queries/javascript-folds.scm"),
-                include_str!("../queries/jsx-folds.scm"),
-            ],
+            &[tree_sitter_javascript::TAGS_QUERY],
         ))
 }
 
@@ -91,18 +108,24 @@ pub fn typescript() -> Language {
         .with_aliases(&["ts"])
         .with_extensions(&["ts", "mts", "cts"])
         .with_config(config(include_str!("../configs/typescript.json")))
-        .with_grammar(with_folds(
-            grammar(
-                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        .with_grammar(with_tags(
+            with_folds(
+                grammar(
+                    tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+                    &[
+                        tree_sitter_javascript::HIGHLIGHT_QUERY,
+                        tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                    ],
+                    Some(tree_sitter_javascript::INJECTIONS_QUERY),
+                ),
                 &[
-                    tree_sitter_javascript::HIGHLIGHT_QUERY,
-                    tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                    include_str!("../queries/javascript-folds.scm"),
+                    include_str!("../queries/typescript-folds.scm"),
                 ],
-                Some(tree_sitter_javascript::INJECTIONS_QUERY),
             ),
             &[
-                include_str!("../queries/javascript-folds.scm"),
-                include_str!("../queries/typescript-folds.scm"),
+                tree_sitter_javascript::TAGS_QUERY,
+                tree_sitter_typescript::TAGS_QUERY,
             ],
         ))
 }
@@ -115,20 +138,26 @@ pub fn tsx() -> Language {
         .with_aliases(&["tsx"])
         .with_extensions(&["tsx"])
         .with_config(config(include_str!("../configs/typescript.json")))
-        .with_grammar(with_folds(
-            grammar(
-                tree_sitter_typescript::LANGUAGE_TSX.into(),
+        .with_grammar(with_tags(
+            with_folds(
+                grammar(
+                    tree_sitter_typescript::LANGUAGE_TSX.into(),
+                    &[
+                        tree_sitter_javascript::HIGHLIGHT_QUERY,
+                        tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+                        tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                    ],
+                    Some(tree_sitter_javascript::INJECTIONS_QUERY),
+                ),
                 &[
-                    tree_sitter_javascript::HIGHLIGHT_QUERY,
-                    tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
-                    tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                    include_str!("../queries/javascript-folds.scm"),
+                    include_str!("../queries/jsx-folds.scm"),
+                    include_str!("../queries/typescript-folds.scm"),
                 ],
-                Some(tree_sitter_javascript::INJECTIONS_QUERY),
             ),
             &[
-                include_str!("../queries/javascript-folds.scm"),
-                include_str!("../queries/jsx-folds.scm"),
-                include_str!("../queries/typescript-folds.scm"),
+                tree_sitter_javascript::TAGS_QUERY,
+                tree_sitter_typescript::TAGS_QUERY,
             ],
         ))
 }
@@ -141,18 +170,21 @@ pub fn json() -> Language {
         .with_extensions(&["json", "jsonc", "json5"])
         .with_file_names(&[".prettierrc", ".babelrc", ".eslintrc"])
         .with_config(config(include_str!("../configs/json.json")))
-        .with_grammar(with_folds(
-            grammar(
-                tree_sitter_json::LANGUAGE.into(),
-                // tree-sitter-json lists the key pattern before `(string) @string`,
-                // but the last matching pattern wins, so repeat it at the end.
-                &[
-                    tree_sitter_json::HIGHLIGHTS_QUERY,
-                    "(pair key: (_) @string.special.key)",
-                ],
-                None,
+        .with_grammar(with_tags(
+            with_folds(
+                grammar(
+                    tree_sitter_json::LANGUAGE.into(),
+                    // tree-sitter-json lists the key pattern before `(string) @string`,
+                    // but the last matching pattern wins, so repeat it at the end.
+                    &[
+                        tree_sitter_json::HIGHLIGHTS_QUERY,
+                        "(pair key: (_) @string.special.key)",
+                    ],
+                    None,
+                ),
+                &[include_str!("../queries/json-folds.scm")],
             ),
-            &[include_str!("../queries/json-folds.scm")],
+            &[include_str!("../queries/json-tags.scm")],
         ))
 }
 
@@ -203,13 +235,16 @@ pub fn markdown() -> Language {
         .with_aliases(&["md"])
         .with_extensions(&["md", "markdown", "mdown", "mkd"])
         .with_config(config(include_str!("../configs/markdown.json")))
-        .with_grammar(with_folds(
-            grammar(
-                tree_sitter_md::LANGUAGE.into(),
-                &[tree_sitter_md::HIGHLIGHT_QUERY_BLOCK],
-                Some(tree_sitter_md::INJECTION_QUERY_BLOCK),
+        .with_grammar(with_tags(
+            with_folds(
+                grammar(
+                    tree_sitter_md::LANGUAGE.into(),
+                    &[tree_sitter_md::HIGHLIGHT_QUERY_BLOCK],
+                    Some(tree_sitter_md::INJECTION_QUERY_BLOCK),
+                ),
+                &[include_str!("../queries/markdown-folds.scm")],
             ),
-            &[include_str!("../queries/markdown-folds.scm")],
+            &[include_str!("../queries/markdown-tags.scm")],
         ))
 }
 
@@ -248,13 +283,16 @@ pub fn css() -> Language {
     Language::new("css", "CSS")
         .with_extensions(&["css"])
         .with_config(config(include_str!("../configs/css.json")))
-        .with_grammar(with_folds(
-            grammar(
-                tree_sitter_css::LANGUAGE.into(),
-                &[tree_sitter_css::HIGHLIGHTS_QUERY],
-                None,
+        .with_grammar(with_tags(
+            with_folds(
+                grammar(
+                    tree_sitter_css::LANGUAGE.into(),
+                    &[tree_sitter_css::HIGHLIGHTS_QUERY],
+                    None,
+                ),
+                &[include_str!("../queries/css-folds.scm")],
             ),
-            &[include_str!("../queries/css-folds.scm")],
+            &[include_str!("../queries/css-tags.scm")],
         ))
 }
 
