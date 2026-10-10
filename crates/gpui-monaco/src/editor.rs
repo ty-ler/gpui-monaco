@@ -25,7 +25,9 @@ use crate::model::{EditKind, TextModel, TextModelEvent, metadata};
 use crate::options::EditorOptions;
 use crate::options::LocationKind;
 use crate::theme::{EditorColors, Theme};
-use crate::view::folding::{FoldState, compute_indent_ranges};
+use crate::view::folding::{
+    FoldState, FoldingRangeData, compute_indent_ranges, marker_ranges, sanitize_ranges,
+};
 use crate::view::view_lines::{ViewLines, WrapSettings, normalize_hidden};
 use crate::widgets::{
     ContentWidget, ContentWidgetState, OverlayWidget, OverlayWidgetState, ViewZone, WidgetId,
@@ -58,6 +60,9 @@ pub enum CodeEditorEvent {
     /// `onContextMenu`); the editor shows none itself.
     ContextMenu(crate::mouse_target::EditorMouseEvent),
 }
+
+/// Monaco's folding update scheduler waits at least this long.
+const FOLD_UPDATE_DELAY: Duration = Duration::from_millis(200);
 
 /// Saved per-model view state (Monaco `saveViewState`/`restoreViewState`).
 #[derive(Clone, Debug, PartialEq)]
@@ -153,6 +158,8 @@ pub struct CodeEditor {
     pub(crate) minimap_hovered: bool,
     minimap_drag: Option<Pixels>,
     fold_task: Option<Task<()>>,
+    /// The version `fold_task` was started for.
+    fold_requested: Option<text::Version>,
     pub(crate) autoscroll_requested: bool,
     pub(crate) cursor_visible: bool,
     /// IME composition range, in byte offsets.
@@ -279,6 +286,7 @@ impl CodeEditor {
             minimap_hovered: false,
             minimap_drag: None,
             fold_task: None,
+            fold_requested: None,
             _blink_task: None,
             _subscriptions: subscriptions,
         }
@@ -334,6 +342,7 @@ impl CodeEditor {
         ));
         self.folds = FoldState::default();
         self.fold_task = None;
+        self.fold_requested = None;
         self.model = model;
         self.cursors = CursorCollection::new(SingleCursorState::from_position(PointUtf16::zero()));
         self.cursors
@@ -718,6 +727,12 @@ impl CodeEditor {
             TextModelEvent::SyntaxUpdated => {
                 self.update_bracket_highlights(cx);
                 self.refresh_bracket_colors(cx);
+                // Syntax folding follows the new trees.
+                if self.options.folding
+                    && self.options.folding_strategy == crate::options::FoldingStrategy::Auto
+                {
+                    self.compute_fold_ranges(cx);
+                }
                 cx.notify();
             }
             TextModelEvent::LanguageChanged => {
@@ -1499,34 +1514,60 @@ impl CodeEditor {
         if self.view_lines.hidden() != hidden {
             Arc::make_mut(&mut self.view_lines).set_hidden(hidden);
         }
+        // Each new version restarts the wait (Monaco's `Delayer`).
+        let version = self.snapshot.version();
         if self.options.folding
-            && self.folds.ranges_version() != Some(self.snapshot.version())
-            && self.fold_task.is_none()
+            && self.folds.ranges_version() != Some(version)
+            && self.fold_requested.as_ref() != Some(&version)
         {
+            self.fold_requested = Some(version);
             self.compute_fold_ranges(cx);
         }
     }
 
+    /// Monaco's `FoldingController`: folding range providers, else the
+    /// syntax tree's `folds.scm` ranges plus region markers, else
+    /// indentation (`folding_strategy: Indentation` skips the first two).
+    /// Once there are ranges, recomputing waits for a pause in edits, like
+    /// Monaco's update scheduler.
     fn compute_fold_ranges(&mut self, cx: &mut Context<Self>) {
-        let snapshot = self.snapshot.clone();
-        let model = self.model.read(cx);
-        let tab_size = model.options().tab_size;
-        let config = model
-            .language()
-            .map(|language| language.config.folding.clone());
+        let delay = if self.folds.ranges_version().is_some() {
+            FOLD_UPDATE_DELAY
+        } else {
+            Duration::ZERO
+        };
         self.fold_task = Some(cx.spawn(async move |this, cx| {
-            let version = snapshot.version();
+            if !delay.is_zero() {
+                cx.background_executor().timer(delay).await;
+            }
+            let Ok(inputs) = this.update(cx, |this, cx| this.fold_inputs(cx)) else {
+                return;
+            };
+            let (snapshot, version, providers, compute) = inputs;
+            let line_count = snapshot.rope().line_count();
+            // Monaco `collectSyntaxRanges`: valid ranges from every provider,
+            // ranked by registration order.
+            let mut provided: Option<Vec<FoldingRangeData>> = None;
+            for (rank, task) in providers.into_iter().enumerate() {
+                match task.await {
+                    Ok(Some(ranges)) => provided.get_or_insert_default().extend(
+                        ranges
+                            .into_iter()
+                            .filter(|r| r.start_row < r.end_row && r.end_row < line_count)
+                            .map(|r| FoldingRangeData {
+                                start: r.start_row,
+                                end: r.end_row,
+                                rank,
+                                kind: r.kind,
+                            }),
+                    ),
+                    Ok(None) => {}
+                    Err(err) => log::warn!("folding ranges failed: {err:#}"),
+                }
+            }
             let ranges = cx
                 .background_executor()
-                .spawn(async move {
-                    let folding = config.flatten();
-                    let off_side = folding.as_ref().is_some_and(|f| f.off_side);
-                    let markers = folding
-                        .as_ref()
-                        .and_then(|f| f.markers.as_ref())
-                        .map(|m| (&m.start, &m.end));
-                    compute_indent_ranges(snapshot.rope(), tab_size, off_side, markers)
-                })
+                .spawn(async move { compute(provided) })
                 .await;
             this.update(cx, |this, cx| {
                 this.folds.set_ranges(ranges, version);
@@ -1535,6 +1576,104 @@ impl CodeEditor {
             })
             .ok();
         }));
+    }
+
+    /// What computing fold ranges needs: the text, provider requests, and
+    /// the rest of the computation for a background thread.
+    #[allow(clippy::type_complexity)]
+    fn fold_inputs(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> (
+        BufferSnapshot,
+        text::Version,
+        Vec<Task<anyhow::Result<Option<Vec<crate::providers::FoldingRange>>>>>,
+        Box<
+            dyn FnOnce(Option<Vec<FoldingRangeData>>) -> Vec<crate::view::folding::FoldRange>
+                + Send,
+        >,
+    ) {
+        let snapshot = self.model.read(cx).snapshot();
+        let version = snapshot.version();
+        let model = self.model.read(cx);
+        let tab_size = model.options().tab_size;
+        let config = model
+            .language()
+            .map(|language| language.config.folding.clone());
+        let auto = self.options.folding_strategy == crate::options::FoldingStrategy::Auto;
+        let limit = self.options.folding_maximum_regions;
+        let language = model.language_id().map(|l| l.to_string());
+        let context = model.provider_context();
+        let syntax = if auto { model.syntax_snapshot() } else { None };
+        let providers: Vec<_> = if auto {
+            crate::providers::folding_range_providers(cx, language.as_deref())
+                .into_iter()
+                .map(|provider| provider.provide_folding_ranges(&context, cx))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let text = snapshot.clone();
+        let compute = Box::new(move |provided: Option<Vec<FoldingRangeData>>| {
+            let line_count = text.rope().line_count();
+            let folding = config.flatten();
+            let markers = folding.as_ref().and_then(|f| f.markers.as_ref());
+            if let Some(data) = provided {
+                return sanitize_ranges(data, limit).0;
+            }
+            let syntax_ranges = syntax.and_then(|syntax| {
+                syntax
+                    .highlighter
+                    .fold_ranges(&syntax.state, syntax.text.rope())
+            });
+            if let Some(folds) = syntax_ranges {
+                let mut data: Vec<FoldingRangeData> = folds
+                    .into_iter()
+                    .filter(|(_, end)| *end < line_count)
+                    .map(|(start, end)| FoldingRangeData {
+                        start,
+                        end,
+                        rank: 0,
+                        kind: None,
+                    })
+                    .collect();
+                if let Some(markers) = markers {
+                    data.extend(
+                        marker_ranges(text.rope(), &markers.start, &markers.end)
+                            .into_iter()
+                            .map(|(start, end)| FoldingRangeData {
+                                start,
+                                end,
+                                rank: 1,
+                                kind: Some(crate::providers::FoldingRangeKind::Region),
+                            }),
+                    );
+                }
+                return sanitize_ranges(data, limit).0;
+            }
+            let off_side = folding.as_ref().is_some_and(|f| f.off_side);
+            let markers = markers.map(|m| (&m.start, &m.end));
+            compute_indent_ranges(text.rope(), tab_size, off_side, markers)
+        });
+        (snapshot, version, providers, compute)
+    }
+
+    /// The current folding ranges, as of the last computation.
+    pub fn folding_ranges(&self) -> Vec<crate::providers::FoldingRange> {
+        self.folds
+            .ranges()
+            .iter()
+            .map(|range| crate::providers::FoldingRange {
+                start_row: range.start_row,
+                end_row: range.end_row,
+                kind: range.kind.clone(),
+            })
+            .collect()
+    }
+
+    /// The collapsed regions, as (header row, last hidden row).
+    pub fn collapsed_folds(&self, cx: &App) -> Vec<(u32, u32)> {
+        self.folds.collapsed_rows(self.model.read(cx).buffer())
     }
 
     /// Collapses the innermost expanded region containing each cursor

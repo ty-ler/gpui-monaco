@@ -50,6 +50,7 @@ The `language-configuration.json` keys behave as they do in VS Code:
 - `autoClosingPairs`, `autoCloseBefore` and `surroundingPairs`: auto-closing and auto-surround.
 - `indentationRules` and `onEnterRules`: auto-indent on Enter, typing and paste.
 - `wordPattern`: word movement, double-click and completion words.
+- `folding.markers`: region markers, added to syntax folding ranges too.
 - `comments`: which tokens count as comments, for auto-close and quick suggestions.
 - `folding.markers` and `folding.offSide`: indentation-based folding with `#region` markers.
 

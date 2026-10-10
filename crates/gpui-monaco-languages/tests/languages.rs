@@ -138,3 +138,69 @@ fn html_enter_between_tags_matches() {
     assert!(!rule.before_text.is_match("<br>"));
     assert!(rule.after_text.as_ref().unwrap().is_match("</my-tag>"));
 }
+
+/// (file name, text, expected folds as 0-based (first row, last row folded))
+type FoldSample = (&'static str, &'static str, &'static [(u32, u32)]);
+
+const FOLD_SAMPLES: &[FoldSample] = &[
+    (
+        "main.rs",
+        "fn main() {\n    let v = vec![\n        1,\n    ];\n}\n/* a\n b */\n",
+        &[(0, 3), (1, 2), (5, 6)],
+    ),
+    (
+        "app.js",
+        "function f(\n  a,\n) {\n  return {\n    b: 1,\n  };\n}\n",
+        &[(0, 1), (2, 5), (3, 4)],
+    ),
+    ("app.ts", "interface A {\n  b: number;\n}\n", &[(0, 1)]),
+    (
+        "view.tsx",
+        "const v = (\n  <div>\n    hi\n  </div>\n);\n",
+        &[(1, 2)],
+    ),
+    (
+        "data.json",
+        "{\n  \"a\": [\n    1\n  ]\n}\n",
+        &[(0, 3), (1, 2)],
+    ),
+    (
+        "conf.yaml",
+        "a:\n  b: 1\n  c:\n    - 2\n",
+        &[(0, 3), (2, 3)],
+    ),
+    (
+        "Cargo.toml",
+        "[package]\nname = \"x\"\n\n[deps]\ny = 1\n",
+        &[(0, 2), (3, 4)],
+    ),
+    (
+        "doc.md",
+        "# A\n\ntext\n\n## B\n\nmore\n\n```rs\nx\n```\n",
+        &[(0, 10), (4, 10), (8, 9)],
+    ),
+    (
+        "page.html",
+        "<div>\n  <p>\n    x\n  </p>\n</div>\n",
+        &[(0, 3), (1, 2)],
+    ),
+    ("style.css", "a {\n  color: red;\n}\n", &[(0, 1)]),
+];
+
+#[test]
+fn bundled_fold_queries() {
+    let registry = gpui_monaco_languages::registry();
+    let mut wrong = Vec::new();
+    for (path, text, expected) in FOLD_SAMPLES {
+        let language = registry
+            .language_for_path(std::path::Path::new(path))
+            .unwrap();
+        let buffer = Buffer::new(text);
+        let syntax = SyntaxSnapshot::parse(language, &buffer.snapshot(), &registry);
+        let folds = syntax.fold_ranges(buffer.rope()).unwrap();
+        if folds != *expected {
+            wrong.push(format!("{path}: {folds:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}

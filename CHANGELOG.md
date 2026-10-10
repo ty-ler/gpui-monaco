@@ -71,6 +71,13 @@ All notable changes to this project are documented here. The format follows [Kee
   - `register_model`, `model_for_uri` and `set_model_resolver`, so other documents can be previewed.
   - The LSP bridge forwards references, declaration, type definition and implementation requests.
 - Clicks in view zones and widgets no longer focus the editor.
+- **Folding sources (#102):**
+  - `FoldingRangeProvider` with `FoldingRangeKind`.
+  - Syntax folding from tree-sitter `folds.scm` queries, now bundled for every language (`SyntaxSnapshot::fold_ranges`, `Highlighter::fold_ranges`).
+  - The `folding_strategy` and `folding_maximum_regions` options, with Monaco's `sanitizeRanges` and nesting-level limit.
+  - Debounced recomputation, and `folding_ranges` / `collapsed_folds`.
+  - The LSP bridge forwards `textDocument/foldingRange`.
+  - Breaking: `FoldRange::is_marker` becomes `kind`.
 - **Inlay hints (#56):**
   - `InlayHintsProvider`, shown as injected text, with Monaco's request triggers (viewport, edits, `refresh_inlay_hints`).
   - The `inlay_hints` options, including Ctrl+Alt modes and maximum length.

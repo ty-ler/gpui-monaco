@@ -386,6 +386,48 @@ impl SyntaxSnapshot {
             .max_by_key(|layer| layer.depth)
     }
 
+    /// Foldable regions from the layers' `folds.scm` queries: each `@fold`
+    /// node from its first row to the row before its closing line (a line
+    /// starting with a closing bracket or tag, or a node ending at a line
+    /// start). `None` if no layer has a folds query. Injected layers in the
+    /// root's language are skipped.
+    pub fn fold_ranges(&self, text: &Rope) -> Option<Vec<(u32, u32)>> {
+        let mut any_query = false;
+        let mut ranges = Vec::new();
+        let root = self.layers.first().map(|layer| layer.language.id.clone());
+        for layer in &self.layers {
+            // Injections in the root's own language (Rust macro bodies) are
+            // covered by the root's ranges and would cost a query each.
+            if layer.depth > 0 && Some(&layer.language.id) == root.as_ref() {
+                continue;
+            }
+            let Some(query) = layer
+                .language
+                .grammar
+                .as_ref()
+                .and_then(|grammar| grammar.folds.as_ref())
+            else {
+                continue;
+            };
+            any_query = true;
+            let mut cursor = QueryCursor::new();
+            for range in &layer.ranges {
+                cursor.set_byte_range(range.clone());
+                let mut matches =
+                    cursor.captures(query, layer.tree.root_node(), RopeTextProvider(text));
+                while let Some((m, capture_ix)) = matches.next() {
+                    let node = m.captures()[*capture_ix].node;
+                    if let Some(rows) = fold_rows(node, text) {
+                        ranges.push(rows);
+                    }
+                }
+            }
+        }
+        ranges.sort_unstable();
+        ranges.dedup();
+        any_query.then_some(ranges)
+    }
+
     /// Sorted, non-overlapping highlight spans intersecting `range`. Deeper
     /// (injected) layers take precedence over their parents; within a layer
     /// the innermost node wins, and for the same node the **last** matching
@@ -449,6 +491,40 @@ impl SyntaxSnapshot {
         }
         result
     }
+}
+
+/// The rows a fold of `node` covers.
+fn fold_rows(node: Node, text: &Rope) -> Option<(u32, u32)> {
+    let start = node.start_position();
+    let end = node.end_position();
+    let mut last = end.row as u32;
+    if end.column == 0 {
+        // The node includes its line break.
+        last = last.checked_sub(1)?;
+    } else {
+        // Keep a closing line visible (`}`, `)`, `]`, `</tag>`).
+        let line_start = text.point_to_offset(Point::new(end.row as u32, 0));
+        let head = text.text_for_range(line_start..node.end_byte());
+        if is_closing_line(head.trim_start()) {
+            last = last.checked_sub(1)?;
+        }
+    }
+    // A fenced block (ending with its line break) keeps its closing fence.
+    let is_fence = |row: u32| {
+        let line_start = text.point_to_offset(Point::new(row, 0));
+        let line_end = text.point_to_offset(Point::new(row + 1, 0)).max(line_start);
+        let line = text.text_for_range(line_start..line_end);
+        let line = line.trim();
+        line.starts_with("```") || line.starts_with("~~~")
+    };
+    if end.column == 0 && last > start.row as u32 && is_fence(start.row as u32) && is_fence(last) {
+        last -= 1;
+    }
+    (last > start.row as u32).then_some((start.row as u32, last))
+}
+
+fn is_closing_line(line: &str) -> bool {
+    line.starts_with(['}', ')', ']']) || line.starts_with("</")
 }
 
 /// Whether any edited range (in new offsets) touches `ranges`.

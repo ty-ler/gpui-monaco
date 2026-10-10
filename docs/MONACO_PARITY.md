@@ -55,7 +55,8 @@ Issues are linked by number.
 | Word wrap: off, on, column, bounded; wrapping indent | `wordWrap` | ✅ | |
 | Wrap for proportional fonts (`wrappingStrategy: advanced`), configurable break characters | `wordWrap*` | ❌ | #87 |
 | Folding: indentation and markers, gutter chevrons | `folding` | ✅ | |
-| Syntax and provider folding, fold level and recursive commands, unfold on `⋯` click | `folding` | ❌ | #102 |
+| Syntax and provider folding (`foldingStrategy`, `foldingMaximumRegions`) | `folding` | ✅ | #102 |
+| Fold level and recursive commands, unfold on `⋯` click | `folding` | ❌ | #102 |
 | Minimap | `minimap` | ✅ | |
 | Minimap options (side, render characters, size), section headers | `minimap`, `sectionHeaders` | ❌ | #88 |
 | Sticky scroll (indentation folding model) | `stickyScroll` | ✅ | |
@@ -109,7 +110,7 @@ Issues are linked by number.
 | Inline completions (ghost text) | `inlineCompletions` | ❌ | #99 |
 | Document symbols | `documentSymbols` | ❌ | #100 |
 | Selection ranges | `smartSelect` | ❌ | #82 |
-| Folding ranges | `folding` | ❌ | #102 |
+| Folding ranges | `folding` | ✅ | #102 |
 | Linked editing ranges | `linkedEditing` | ❌ | #101 |
 | LSP bridge (`gpui-monaco-lsp`: sync, diagnostics, completion, hover, definition, highlights, signature help) | `monaco-languageclient` | ✅ | #54 |
 

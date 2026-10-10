@@ -64,7 +64,13 @@ Regexes use the Rust `regex` crate. It runs in linear time but has no lookaround
 
 ## Folding
 
-Fold ranges come from indentation, plus `#region` / `#endregion` markers where the language defines them.
+Fold ranges come from these sources, in order (Monaco's `foldingStrategy: auto`):
+
+1. **Providers:** folding range providers (`register_folding_range_provider`), for example a language server's.
+2. **Syntax tree:** the language's tree-sitter `folds.scm` query. Each `@fold` node folds from its first line to the line before its closing bracket or tag. Every bundled language has one. Region markers are added to these ranges.
+3. **Indentation:** indentation plus `#region` / `#endregion` markers, where the language defines them.
+
+`folding_strategy: Indentation` uses only the last source. Provider and syntax ranges are capped at `folding_maximum_regions` (5000); the most deeply nested are dropped first, as in Monaco. Recomputing waits for a 200ms pause in edits. `editor.folding_ranges()` and `editor.collapsed_folds(cx)` read the current state.
 
 - **Gutter:** chevrons show on hover, or always with `show_folding_controls: Always`.
 - **Keys:**

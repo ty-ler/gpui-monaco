@@ -67,6 +67,7 @@ fn capabilities() -> Value {
         "referencesProvider": true,
         "renameProvider": { "prepareProvider": true },
         "inlayHintProvider": true,
+        "foldingRangeProvider": true,
         "codeActionProvider": { "codeActionKinds": ["quickfix", "refactor"], "resolveProvider": true },
         "executeCommandProvider": { "commands": ["fake.doIt"] },
         "declarationProvider": true,
@@ -239,6 +240,9 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
                 assert_eq!(params["context"]["triggerCharacter"], ".");
                 json!({ "isIncomplete": true, "items": [{ "label": "len", "kind": 2 }] })
             }
+            "textDocument/foldingRange" => json!([
+                { "startLine": 0, "endLine": 2, "kind": "imports" },
+            ]),
             "textDocument/inlayHint" => json!([
                 { "position": { "line": 0, "character": 7 }, "label": [{ "value": ": " }, { "value": "Foo" }], "kind": 1, "paddingLeft": true },
             ]),
@@ -439,6 +443,21 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
         .unwrap();
     cx.run_until_parked();
     assert_eq!(server.messages("workspace/executeCommand").len(), 1);
+
+    // Folding ranges.
+    let folds = cx
+        .update(|cx| features.provide_folding_ranges(&context, cx))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        folds,
+        [FoldingRange {
+            start_row: 0,
+            end_row: 2,
+            kind: Some(FoldingRangeKind::Imports),
+        }]
+    );
 
     // Inlay hints, with label parts joined.
     let hints = cx

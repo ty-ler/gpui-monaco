@@ -3,9 +3,13 @@
 //! [`compute_indent_ranges`] is ported from Monaco's
 //! `contrib/folding/browser/indentRangeProvider.ts` (MIT): regions from
 //! indentation, plus `#region`-style markers from the language configuration.
+//! [`sanitize_ranges`] is `sanitizeRanges` from `syntaxRangeProvider.ts`,
+//! for provider and syntax ranges.
 
 use syntax::Pattern;
 use text::Rope;
+
+pub use crate::providers::FoldingRangeKind;
 
 /// A foldable region: `start_row` stays visible; rows
 /// `start_row + 1 ..= end_row` hide when collapsed. Rows are 0-based.
@@ -17,8 +21,8 @@ pub struct FoldRange {
     pub end_row: u32,
     /// Index of the enclosing range in the same list.
     pub parent: Option<usize>,
-    /// From a start/end marker rather than indentation.
-    pub is_marker: bool,
+    /// What the range holds; markers make [`FoldingRangeKind::Region`]s.
+    pub kind: Option<FoldingRangeKind>,
 }
 
 /// Monaco `computeIndentLevel`: visible indent width, or `None` for a
@@ -144,11 +148,230 @@ pub fn compute_indent_ranges(
             start_row: start - 1,
             end_row: end - 1,
             parent,
-            is_marker,
+            kind: is_marker.then_some(FoldingRangeKind::Region),
         });
         stack.push(ranges.len() - 1);
     }
     ranges
+}
+
+/// A range from a provider or the syntax tree, before sanitizing (Monaco
+/// `IFoldingRangeData`, 0-based).
+#[derive(Clone, Debug)]
+pub struct FoldingRangeData {
+    /// First row.
+    pub start: u32,
+    /// Last row folded.
+    pub end: u32,
+    /// Ranges with lower ranks win at the same start (provider order).
+    pub rank: usize,
+    /// Kind.
+    pub kind: Option<FoldingRangeKind>,
+}
+
+/// Monaco `sanitizeRanges` and `RangesCollector`: sorts ranges, drops
+/// those that would cross an enclosing one, and keeps at most `limit`,
+/// dropping the most deeply nested first. Returns the ranges with parents,
+/// and whether some were dropped for the limit.
+pub fn sanitize_ranges(mut data: Vec<FoldingRangeData>, limit: usize) -> (Vec<FoldRange>, bool) {
+    data.sort_by(|a, b| a.start.cmp(&b.start).then(a.rank.cmp(&b.rank)));
+    // (start, end, kind, nesting level)
+    let mut collected: Vec<(u32, u32, Option<FoldingRangeKind>, usize)> = Vec::new();
+    let mut top: Option<FoldingRangeData> = None;
+    let mut previous: Vec<FoldingRangeData> = Vec::new();
+    for entry in data {
+        let Some(current) = top.clone() else {
+            collected.push((entry.start, entry.end, entry.kind.clone(), previous.len()));
+            top = Some(entry);
+            continue;
+        };
+        if entry.start <= current.start {
+            continue;
+        }
+        if entry.end <= current.end {
+            previous.push(current);
+            collected.push((entry.start, entry.end, entry.kind.clone(), previous.len()));
+            top = Some(entry);
+        } else {
+            if entry.start > current.end {
+                let mut next = previous.pop();
+                while next.as_ref().is_some_and(|t| entry.start > t.end) {
+                    next = previous.pop();
+                }
+                if let Some(next) = next {
+                    previous.push(next);
+                }
+                collected.push((entry.start, entry.end, entry.kind.clone(), previous.len()));
+                top = Some(entry);
+            } else {
+                // Crosses the enclosing range's end: Monaco still adds it.
+                collected.push((entry.start, entry.end, entry.kind.clone(), previous.len()));
+            }
+        }
+    }
+    let limited = collected.len() > limit;
+    if limited {
+        // Keep whole nesting levels from the top while they fit, then fill
+        // with the next level in order.
+        let mut counts: Vec<usize> = Vec::new();
+        for (_, _, _, level) in &collected {
+            if *level >= counts.len() {
+                counts.resize(level + 1, 0);
+            }
+            counts[*level] += 1;
+        }
+        let mut entries = 0;
+        let mut max_level = counts.len();
+        for (level, n) in counts.iter().enumerate() {
+            if *n > 0 {
+                if n + entries > limit {
+                    max_level = level;
+                    break;
+                }
+                entries += n;
+            }
+        }
+        collected.retain(|(_, _, _, level)| {
+            if *level < max_level {
+                true
+            } else if *level == max_level && entries < limit {
+                entries += 1;
+                true
+            } else {
+                false
+            }
+        });
+    }
+    let mut ranges: Vec<FoldRange> = Vec::with_capacity(collected.len());
+    let mut stack: Vec<usize> = Vec::new();
+    for (start, end, kind, _) in collected {
+        while let Some(&parent) = stack.last() {
+            if ranges[parent].start_row < start && end <= ranges[parent].end_row {
+                break;
+            }
+            stack.pop();
+        }
+        ranges.push(FoldRange {
+            start_row: start,
+            end_row: end,
+            parent: stack.last().copied(),
+            kind,
+        });
+        stack.push(ranges.len() - 1);
+    }
+    (ranges, limited)
+}
+
+/// Region marker ranges (`#region` … `#endregion`), for syntax folding,
+/// whose trees don't know them.
+pub fn marker_ranges(rope: &Rope, start: &Pattern, end: &Pattern) -> Vec<(u32, u32)> {
+    let mut ranges = Vec::new();
+    let mut open: Vec<u32> = Vec::new();
+    for row in 0..rope.line_count() {
+        let line = rope.line(row);
+        if start.is_match(&line) {
+            open.push(row);
+        } else if end.is_match(&line)
+            && let Some(first) = open.pop()
+            && row > first
+        {
+            ranges.push((first, row));
+        }
+    }
+    ranges.sort_unstable();
+    ranges
+}
+
+#[cfg(test)]
+mod syntax_tests {
+    //! Ported from Monaco's `contrib/folding/test/browser/syntaxFold.test.ts`.
+    use super::*;
+
+    #[test]
+    fn limit_by_nesting_level() {
+        // Monaco's 1-based lines.
+        let r = |start: u32, end: u32| (start, end);
+        let (r1, r2, r3, r4, r5, r6, r7, r8, r9) = (
+            r(1, 20),
+            r(3, 19),
+            r(4, 5),
+            r(7, 18),
+            r(9, 10),
+            r(12, 17),
+            r(13, 16),
+            r(14, 15),
+            r(22, 23),
+        );
+        let all = [r1, r2, r3, r4, r5, r6, r7, r8, r9];
+        let data = || {
+            all.iter()
+                .map(|&(start, end)| FoldingRangeData {
+                    start: start - 1,
+                    end: end - 1,
+                    rank: 0,
+                    kind: None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let check = |limit: usize, expected: &[(u32, u32)]| {
+            let (ranges, limited) = sanitize_ranges(data(), limit);
+            let actual: Vec<(u32, u32)> = ranges
+                .iter()
+                .map(|r| (r.start_row + 1, r.end_row + 1))
+                .collect();
+            assert_eq!(actual, expected, "{limit}");
+            assert_eq!(limited, limit < 9, "limited {limit}");
+        };
+        check(1000, &all);
+        check(9, &all);
+        check(8, &[r1, r2, r3, r4, r5, r6, r7, r9]);
+        check(7, &[r1, r2, r3, r4, r5, r6, r9]);
+        check(6, &[r1, r2, r3, r4, r5, r9]);
+        check(5, &[r1, r2, r3, r4, r9]);
+        check(4, &[r1, r2, r3, r9]);
+        check(3, &[r1, r2, r9]);
+        check(2, &[r1, r9]);
+        check(1, &[r1]);
+        check(0, &[]);
+    }
+
+    #[test]
+    fn crossing_and_duplicate_starts() {
+        let data = |ranges: &[(u32, u32, usize)]| {
+            ranges
+                .iter()
+                .map(|&(start, end, rank)| FoldingRangeData {
+                    start,
+                    end,
+                    rank,
+                    kind: None,
+                })
+                .collect()
+        };
+        // The same start: the lower rank wins.
+        let (ranges, _) = sanitize_ranges(data(&[(0, 5, 1), (0, 3, 0)]), 100);
+        assert_eq!((ranges[0].start_row, ranges[0].end_row), (0, 3));
+        assert_eq!(ranges.len(), 1);
+        // Parents.
+        let (ranges, _) = sanitize_ranges(data(&[(0, 9, 0), (2, 4, 0), (6, 8, 0)]), 100);
+        let parents: Vec<_> = ranges.iter().map(|r| r.parent).collect();
+        assert_eq!(parents, [None, Some(0), Some(0)]);
+    }
+
+    #[test]
+    fn markers() {
+        let rope = Rope::from(
+            "#region a
+x
+  #region b
+  y
+  #endregion
+#endregion",
+        );
+        let start = Pattern::new(r"^\s*#region\b", "");
+        let end = Pattern::new(r"^\s*#endregion\b", "");
+        assert_eq!(marker_ranges(&rope, &start, &end), [(0, 5), (2, 4)]);
+    }
 }
 
 #[cfg(test)]
