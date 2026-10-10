@@ -163,8 +163,18 @@ pub struct GuideOptions {
     /// Draw indent guides (Monaco `guides.indentation`, default `true`).
     pub indentation: bool,
     /// Highlight the guide of the block with the cursor (Monaco
-    /// `guides.highlightActiveIndentation`, default `true`).
+    /// `guides.highlightActiveIndentation`, default `true`). Lines with
+    /// bracket pair guides don't highlight indent guides.
     pub highlight_active_indentation: bool,
+    /// Vertical bracket pair guides (Monaco `guides.bracketPairs`, default
+    /// off).
+    pub bracket_pairs: BracketPairGuides,
+    /// Horizontal bracket pair guides (Monaco
+    /// `guides.bracketPairsHorizontal`, default for the active pair).
+    pub bracket_pairs_horizontal: BracketPairGuides,
+    /// Highlight the guides of the pair around the cursor (Monaco
+    /// `guides.highlightActiveBracketPair`, default `true`).
+    pub highlight_active_bracket_pair: bool,
 }
 
 impl Default for GuideOptions {
@@ -172,8 +182,24 @@ impl Default for GuideOptions {
         Self {
             indentation: true,
             highlight_active_indentation: true,
+            bracket_pairs: BracketPairGuides::Off,
+            bracket_pairs_horizontal: BracketPairGuides::Active,
+            highlight_active_bracket_pair: true,
         }
     }
+}
+
+/// Which bracket pairs get guides (Monaco's `true`, `"active"` and
+/// `false`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BracketPairGuides {
+    /// None.
+    #[default]
+    Off,
+    /// Only the pair around the cursor.
+    Active,
+    /// Every pair.
+    On,
 }
 
 /// Which modifier adds a cursor on click (Monaco `multiCursorModifier`); the

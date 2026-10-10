@@ -68,7 +68,7 @@ editor.update(cx, |editor, cx| {
 | `overtype_cursor_style`, `overtype_on_paste` | `overtypeCursorStyle`, `overtypeOnPaste` | overtype mode (Insert) |
 | `comments` | `comments` | `insert_space`, `ignore_empty_lines` |
 | `render_whitespace`, `render_control_characters`, `render_final_newline` | same names | `·` and `→` for whitespace; `␇` for control characters |
-| `guides`, `rulers` | `guides`, `rulers` | indent guides (with the active one highlighted) and vertical rulers |
+| `guides`, `rulers` | `guides`, `rulers` | indent guides (with the active one highlighted), bracket pair guides (`bracket_pairs`: off, active or on, plus horizontal ones) and vertical rulers |
 | `bracket_pair_colorization` | `bracketPairColorization.enabled` | color brackets by nesting level |
 | `single_line` | — | a one-line input. Enter, Tab and Escape go to the parent, and pasted line breaks become spaces. |
 

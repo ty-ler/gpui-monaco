@@ -8,7 +8,7 @@
 
 use std::ops::Range;
 
-use text::Rope;
+use text::{PointUtf16, Rope};
 
 use crate::options::RenderWhitespace;
 use crate::view::folding::indent_level;
@@ -234,9 +234,332 @@ pub fn whitespace_columns(
     result
 }
 
+/// A bracket pair for guides, in current coordinates (0-based rows,
+/// UTF-16 columns).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuidePair {
+    /// The opening bracket.
+    pub open: Range<PointUtf16>,
+    /// The closing bracket.
+    pub close: Range<PointUtf16>,
+    /// Nesting level, for the color.
+    pub level: u32,
+    /// Monaco `minVisibleColumnIndentation`.
+    pub min_indentation: u32,
+}
+
+/// A horizontal guide (Monaco `IndentGuideHorizontalLine`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HorizontalGuide {
+    /// Along the top of the line, else the bottom.
+    pub top: bool,
+    /// Where it ends (1-based UTF-16 column).
+    pub end_column: u32,
+}
+
+/// A bracket pair guide on a line (Monaco `IndentGuide`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BracketGuide {
+    /// 1-based visible column, used when `column` is `None`.
+    pub visible_column: i64,
+    /// 1-based UTF-16 column it starts at instead.
+    pub column: Option<u32>,
+    /// Nesting level, for the color.
+    pub level: u32,
+    /// The pair around the cursor, highlighted.
+    pub active: bool,
+    /// A horizontal guide instead of a vertical one.
+    pub horizontal: Option<HorizontalGuide>,
+    /// On a wrapped line, only the parts after this (1-based) column.
+    pub for_wrapped_lines_after_column: Option<u32>,
+    /// On a wrapped line, only the parts up to this (1-based) column.
+    pub for_wrapped_lines_before_or_at_column: Option<u32>,
+}
+
+/// Monaco `BracketGuideOptions`.
+#[derive(Clone, Copy, Debug)]
+pub struct BracketGuideOptions {
+    /// Guides for every pair, not just the active one.
+    pub include_inactive: bool,
+    /// Which pairs get horizontal guides.
+    pub horizontal: crate::options::BracketPairGuides,
+    /// Mark the active pair's guides active.
+    pub highlight_active: bool,
+}
+
+/// Monaco `getLinesBracketGuides`: the guides of each of `rows`, sorted by
+/// visible column. `pairs` are the pairs intersecting the rows, sorted by
+/// opening bracket.
+pub fn lines_bracket_guides(
+    rope: &Rope,
+    rows: Range<u32>,
+    pairs: &[GuidePair],
+    active_position: Option<PointUtf16>,
+    options: BracketGuideOptions,
+    tab_size: u32,
+) -> Vec<Vec<BracketGuide>> {
+    use crate::options::BracketPairGuides;
+    let mut result: Vec<Vec<BracketGuide>> = rows.clone().map(|_| Vec::new()).collect();
+    if rows.is_empty() {
+        return result;
+    }
+    let (start_row, end_row) = (rows.start, rows.end - 1);
+    // Monaco: the innermost pair strictly containing the cursor.
+    let active = active_position.and_then(|position| {
+        pairs
+            .iter()
+            .rposition(|pair| pair.open.start < position && position < pair.close.end)
+    });
+    let visible = |point: PointUtf16| -> i64 {
+        crate::cursor::strings::visible_column_from_column(
+            &rope.line(point.row),
+            point.column,
+            tab_size,
+        ) as i64
+            + 1
+    };
+    let mut push = |row: u32, guide: BracketGuide| {
+        result[(row - start_row) as usize].push(guide);
+    };
+    for (ix, pair) in pairs.iter().enumerate() {
+        let is_active = active == Some(ix);
+        if !is_active && !options.include_inactive {
+            continue;
+        }
+        let active = options.highlight_active && is_active;
+        let start = pair.open.start;
+        let end = pair.close.start;
+        let horizontal_guides = options.horizontal == BracketPairGuides::On
+            || (options.horizontal == BracketPairGuides::Active && is_active);
+        let guide = |visible_column: i64| BracketGuide {
+            visible_column,
+            column: None,
+            level: pair.level,
+            active,
+            horizontal: None,
+            for_wrapped_lines_after_column: None,
+            for_wrapped_lines_before_or_at_column: None,
+        };
+        if pair.open.start.row == pair.close.end.row {
+            if horizontal_guides {
+                push(
+                    start.row,
+                    BracketGuide {
+                        column: Some(pair.open.end.column + 1),
+                        horizontal: Some(HorizontalGuide {
+                            top: false,
+                            end_column: end.column + 1,
+                        }),
+                        ..guide(-1)
+                    },
+                );
+            }
+            continue;
+        }
+        let end_visible = visible(end);
+        let start_visible = visible(start);
+        let guide_visible = start_visible
+            .min(end_visible)
+            .min(pair.min_indentation as i64 + 1);
+        // Text before the closing bracket: the guide runs through its line
+        // and turns along the bottom.
+        let close_line = rope.line(end.row);
+        let first_non_ws = close_line
+            .encode_utf16()
+            .position(|c| c != b' ' as u16 && c != b'\t' as u16)
+            .unwrap_or(close_line.encode_utf16().count()) as u32;
+        let bottom = first_non_ws < end.column;
+        let first = start.row.max(start_row);
+        let last = end.row.min(end_row) + u32::from(bottom);
+        for row in first..last {
+            if row > end_row {
+                break;
+            }
+            push(
+                row,
+                BracketGuide {
+                    for_wrapped_lines_after_column: (row == start.row).then_some(start.column + 1),
+                    for_wrapped_lines_before_or_at_column: (row == end.row)
+                        .then_some(end.column + 1),
+                    ..guide(guide_visible)
+                },
+            );
+        }
+        if horizontal_guides {
+            if start.row >= start_row && start_visible > guide_visible {
+                push(
+                    start.row,
+                    BracketGuide {
+                        horizontal: Some(HorizontalGuide {
+                            top: false,
+                            end_column: start.column + 1,
+                        }),
+                        ..guide(guide_visible)
+                    },
+                );
+            }
+            if end.row <= end_row && end_visible > guide_visible {
+                push(
+                    end.row,
+                    BracketGuide {
+                        horizontal: Some(HorizontalGuide {
+                            top: !bottom,
+                            end_column: end.column + 1,
+                        }),
+                        ..guide(guide_visible)
+                    },
+                );
+            }
+        }
+    }
+    for guides in &mut result {
+        guides.sort_by_key(|g| g.visible_column);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn guide_pairs(text: &str) -> Vec<GuidePair> {
+        let rope = Rope::from(text);
+        let pairs: Vec<(String, String)> = [("(", ")"), ("{", "}")]
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect();
+        let (_, found) = crate::view::bracket_pairs::bracket_pairs(&rope, &pairs, &[], 4);
+        found
+            .into_iter()
+            .map(|p| GuidePair {
+                open: rope.offset_to_point_utf16(p.open.start)
+                    ..rope.offset_to_point_utf16(p.open.end),
+                close: rope.offset_to_point_utf16(p.close.start)
+                    ..rope.offset_to_point_utf16(p.close.end),
+                level: p.level,
+                min_indentation: p.min_indentation,
+            })
+            .collect()
+    }
+
+    /// (visible column, column, level, active, horizontal) per guide.
+    type Summary = Vec<Vec<(i64, Option<u32>, u32, bool, Option<(bool, u32)>)>>;
+
+    fn summarize(guides: Vec<Vec<BracketGuide>>) -> Summary {
+        guides
+            .into_iter()
+            .map(|line| {
+                line.into_iter()
+                    .map(|g| {
+                        (
+                            g.visible_column,
+                            g.column,
+                            g.level,
+                            g.active,
+                            g.horizontal.map(|h| (h.top, h.end_column)),
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bracket_guides_follow_monaco() {
+        let text = "fn f() {\n    if x {\n        y\n    }\n}";
+        let rope = Rope::from(text);
+        let pairs = guide_pairs(text);
+        let options = BracketGuideOptions {
+            include_inactive: true,
+            horizontal: crate::options::BracketPairGuides::On,
+            highlight_active: true,
+        };
+        let guides =
+            lines_bracket_guides(&rope, 0..5, &pairs, Some(PointUtf16::new(2, 8)), options, 4);
+        assert_eq!(
+            summarize(guides.clone()),
+            vec![
+                vec![
+                    // `()` on one line: a horizontal guide under it.
+                    (-1, Some(6), 0, false, Some((false, 6))),
+                    // The outer block: at its least indentation, with a
+                    // horizontal line to its opening bracket.
+                    (1, None, 0, false, None),
+                    (1, None, 0, false, Some((false, 8))),
+                ],
+                vec![
+                    (1, None, 0, false, None),
+                    // The inner block (active: the cursor is inside).
+                    (5, None, 1, true, None),
+                    (5, None, 1, true, Some((false, 10))),
+                ],
+                vec![(1, None, 0, false, None), (5, None, 1, true, None)],
+                vec![(1, None, 0, false, None)],
+                vec![],
+            ]
+        );
+        // The opening line's vertical guide only shows on wrapped parts
+        // after the bracket.
+        assert_eq!(guides[0][1].for_wrapped_lines_after_column, Some(8));
+
+        // Only the active pair, with its horizontal guides.
+        let active_only = lines_bracket_guides(
+            &rope,
+            0..5,
+            &pairs,
+            Some(PointUtf16::new(2, 8)),
+            BracketGuideOptions {
+                include_inactive: false,
+                horizontal: crate::options::BracketPairGuides::Active,
+                highlight_active: true,
+            },
+            4,
+        );
+        assert_eq!(
+            summarize(active_only),
+            vec![
+                vec![],
+                vec![
+                    (5, None, 1, true, None),
+                    (5, None, 1, true, Some((false, 10)))
+                ],
+                vec![(5, None, 1, true, None)],
+                vec![],
+                vec![],
+            ]
+        );
+    }
+
+    #[test]
+    fn text_before_the_closing_bracket_turns_at_the_bottom() {
+        // `x }`: the guide runs through the closing line and turns along
+        // its bottom.
+        let text = "{\n  a\n  x }";
+        let rope = Rope::from(text);
+        let guides = lines_bracket_guides(
+            &rope,
+            0..3,
+            &guide_pairs(text),
+            None,
+            BracketGuideOptions {
+                include_inactive: true,
+                horizontal: crate::options::BracketPairGuides::On,
+                highlight_active: true,
+            },
+            4,
+        );
+        assert_eq!(
+            summarize(guides),
+            vec![
+                vec![(1, None, 0, false, None)],
+                vec![(1, None, 0, false, None)],
+                vec![
+                    (1, None, 0, false, None),
+                    (1, None, 0, false, Some((false, 5)))
+                ],
+            ]
+        );
+    }
 
     const CTX: GuideContext = GuideContext {
         tab_size: 4,
