@@ -5,6 +5,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Accessibility signals (#181):** `DiffEditorEvent::AccessibilitySignal` (`DiffLineInserted`, `DiffLineDeleted`) fires as the accessible diff viewer moves onto changed lines, like Monaco's `playSignal`. Standalone Monaco ignores these; a host can play VS Code's sounds.
 - **Diff editor gutter without lag (#181):** the gutter menu and the moved-block lines follow scrolling in the same frame. They used to lag one frame behind.
 - **Hover titles (#181):** the diff editors' buttons show Monaco's titles on hover, in the editor widget colors. They cover "Revert Block", "Revert Change", "Show Unchanged Region", "Click or drag to show more above", "Double click to unfold", "Compare" and "Close".
 - **Glyph margin widgets and margin revert arrows (#181):**

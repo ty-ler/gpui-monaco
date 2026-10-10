@@ -209,6 +209,21 @@ impl Default for DiffEditorOptions {
 pub enum DiffEditorEvent {
     /// A new diff is shown (Monaco `onDidUpdateDiff`).
     DiffUpdated,
+    /// A sound or announcement cue for screen reader users (Monaco
+    /// `IAccessibilitySignalService.playSignal`). Standalone Monaco ignores
+    /// these; hosts may play a sound, as VS Code does.
+    AccessibilitySignal(AccessibilitySignal),
+}
+
+/// Monaco `AccessibilitySignal`s a diff editor sends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessibilitySignal {
+    /// The accessible diff viewer moved to an inserted line
+    /// (`diffLineInserted`).
+    DiffLineInserted,
+    /// The accessible diff viewer moved to a deleted line
+    /// (`diffLineDeleted`).
+    DiffLineDeleted,
 }
 
 /// Monaco's delay after edits before the diff is computed again.
@@ -2598,6 +2613,11 @@ impl DiffEditor {
             viewer.update(cx, |viewer, cx| viewer.go_to_group_delta(-1, cx));
             window.focus(&viewer.read(cx).focus_handle(cx), cx);
         }
+    }
+
+    /// Sends an accessibility signal (Monaco `playSignal`).
+    pub(crate) fn play_signal(&mut self, signal: AccessibilitySignal, cx: &mut Context<Self>) {
+        cx.emit(DiffEditorEvent::AccessibilitySignal(signal));
     }
 
     /// Whether the accessible diff viewer shows.
