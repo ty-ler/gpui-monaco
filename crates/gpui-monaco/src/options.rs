@@ -101,6 +101,15 @@ pub struct FindEditorOptions {
     /// Wrap around at the first and last match (Monaco `find.loop`,
     /// default `true`).
     pub loop_: bool,
+    /// Remember search strings for Up and Down in the find input (Monaco
+    /// `find.history`, default on: Monaco's `workspace`, shared by every
+    /// editor).
+    pub history: bool,
+    /// The same for the replace input (Monaco `find.replaceHistory`).
+    pub replace_history: bool,
+    /// Close the widget when Find Next/Previous from the find input lands
+    /// on a match (Monaco `find.closeOnResult`, default `false`).
+    pub close_on_result: bool,
 }
 
 impl Default for FindEditorOptions {
@@ -111,6 +120,9 @@ impl Default for FindEditorOptions {
             auto_find_in_selection: AutoFindInSelection::Never,
             add_extra_space_on_top: true,
             loop_: true,
+            history: true,
+            replace_history: true,
+            close_on_result: false,
         }
     }
 }

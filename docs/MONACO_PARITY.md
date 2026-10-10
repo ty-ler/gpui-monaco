@@ -44,7 +44,7 @@ Issues are linked by number.
 | Drag and drop text | `dnd` | ❌ | #92 |
 | Find/replace: case, word, regex, in selection, replace all | `find` | ✅ | |
 | Find model (Monaco's `FindModel`), preserve case, case escapes in replace, loop, seed and auto find in selection options | `find` | ✅ | #104 |
-| Find history, extra space on top, widget width and states | `find` | ❌ | #104 |
+| Find controller commands, history, extra space on top, widget width and states, remembered toggles | `find` | ✅ | #104 |
 | Bracket matching and jump | `bracketMatching` | ✅ | |
 
 ## View

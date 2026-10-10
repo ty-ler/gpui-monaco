@@ -80,11 +80,111 @@ pub(crate) struct FindState {
     pub matches_count: usize,
     model: Option<FindModel>,
     widget: Option<(Entity<FindWidget>, WidgetId)>,
+    /// Monaco's `FindWidgetViewZone` (`find.addExtraSpaceOnTop`) and its
+    /// height.
+    zone: Option<(WidgetId, gpui::Pixels)>,
+}
+
+/// How `find_start` seeds the search string (Monaco
+/// `seedSearchStringFromSelection` in `IFindStartOptions`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SeedMode {
+    #[default]
+    None,
+    Single,
+    Multiple,
+}
+
+/// Monaco `FindStartFocusAction`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum StartFocus {
+    #[default]
+    NoChange,
+    FindInput,
+    ReplaceInput,
+}
+
+/// Monaco `IFindStartOptions`.
+#[derive(Clone, Copy, Debug, Default)]
+struct FindStart {
+    force_reveal_replace: bool,
+    seed: SeedMode,
+    seed_non_empty_only: bool,
+    focus: StartFocus,
+    update_search_scope: bool,
+}
+
+/// The search and replace strings entered in any editor's find widget
+/// (Monaco's `FindWidgetSearchHistory` and `ReplaceWidgetHistory`), oldest
+/// first, without repeats.
+#[derive(Default)]
+pub(crate) struct FindHistory {
+    pub find: Vec<String>,
+    pub replace: Vec<String>,
+}
+
+impl gpui::Global for FindHistory {}
+
+impl FindHistory {
+    /// Adds `value` as the newest entry.
+    pub fn add(list: &mut Vec<String>, value: &str) {
+        if value.is_empty() {
+            return;
+        }
+        list.retain(|v| v != value);
+        list.push(value.to_string());
+    }
+}
+
+/// The toggles find remembers across editors (Monaco stores
+/// `editor.isRegex`, `editor.matchCase`, `editor.wholeWord` and
+/// `editor.preserveCase` in workspace storage).
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct FindToggles {
+    is_regex: bool,
+    match_case: bool,
+    whole_word: bool,
+    preserve_case: bool,
+}
+
+impl gpui::Global for FindToggles {}
+
+impl FindToggles {
+    fn of(options: &FindOptions) -> Self {
+        Self {
+            is_regex: options.is_regex,
+            match_case: options.match_case,
+            whole_word: options.whole_word,
+            preserve_case: options.preserve_case,
+        }
+    }
+
+    /// Monaco `loadQueryState`.
+    pub(crate) fn load(options: &mut FindOptions, cx: &gpui::App) {
+        let toggles = cx.try_global::<Self>().copied().unwrap_or_default();
+        options.is_regex = toggles.is_regex;
+        options.match_case = toggles.match_case;
+        options.whole_word = toggles.whole_word;
+        options.preserve_case = toggles.preserve_case;
+    }
+}
+
+/// An empty view for the find widget's view zone.
+struct FindZoneSpacer;
+
+impl gpui::Render for FindZoneSpacer {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+        gpui::div()
+    }
 }
 
 impl FindState {
-    pub(crate) fn new() -> Self {
-        Self::default()
+    /// With the remembered toggles (Monaco loads them when the controller
+    /// is created).
+    pub(crate) fn new(cx: &gpui::App) -> Self {
+        let mut state = Self::default();
+        FindToggles::load(&mut state.options, cx);
+        state
     }
 
     /// "3 of 15", "No results", or `None` when there's no query (Monaco's
@@ -212,11 +312,22 @@ impl CodeEditor {
     ) {
         // Monaco's controller: turning on find in selection captures the
         // selections (whole lines when they span lines).
+        let mut options = options;
         let mut scope_changed = false;
         if options.in_selection != self.find.options.in_selection {
             let scope = options.in_selection.then(|| self.selection_scopes(cx));
-            self.find.search_scope = scope.filter(|s| !s.is_empty());
-            scope_changed = true;
+            match scope {
+                // Monaco `toggleSearchScope` needs a non-empty selection.
+                Some(scope) if scope.is_empty() => options.in_selection = false,
+                scope => {
+                    self.find.search_scope = scope;
+                    scope_changed = true;
+                }
+            }
+        }
+        // Monaco `saveQueryState`.
+        if FindToggles::of(&options) != FindToggles::of(&self.find.options) {
+            cx.set_global(FindToggles::of(&options));
         }
         let old = std::mem::replace(&mut self.find.options, options);
         let new = &self.find.options;
@@ -1138,6 +1249,8 @@ impl CodeEditor {
         self.stop_find_model(cx);
         self.find.search_scope = None;
         self.find.options.in_selection = false;
+        // Monaco reloads the stored toggles for the new model.
+        FindToggles::load(&mut self.find.options, cx);
     }
 
     /// Re-binds the find model to a new model while the widget shows.
@@ -1147,64 +1260,102 @@ impl CodeEditor {
         }
     }
 
-    /// Opens the find widget (Monaco `FindController._start` for
-    /// `actions.find`): the query comes from the selection or the word at
-    /// the cursor (`find.seedSearchStringFromSelection`), and selections may
-    /// turn on find in selection (`find.autoFindInSelection`).
-    pub fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
-        use crate::options::{AutoFindInSelection, SeedSearchString};
+    /// Monaco `getSelectionSearchString`: the selection's text (`multiple`
+    /// allows several lines), or the word at an empty cursor unless
+    /// `non_empty_only`.
+    fn selection_search_string(
+        &self,
+        multiple: bool,
+        non_empty_only: bool,
+        cx: &gpui::App,
+    ) -> Option<String> {
         let selection = self.cursors.primary().selection();
-        let rope = self.snapshot.rope().clone();
-        let find_options = self.options.find.clone();
-        // Monaco `getSelectionSearchString` ('single').
-        let seed = match find_options.seed_search_string_from_selection {
-            SeedSearchString::Never => None,
-            seed if selection.start().row == selection.end().row => {
-                if selection.is_empty() {
-                    let config = self.cursor_config(cx);
-                    (seed == SeedSearchString::Always)
-                        .then(|| cursor::word_at(&config, &rope, selection.head))
-                        .flatten()
-                        .map(|word| {
-                            rope.text_for_range(
-                                rope.point_utf16_to_offset(word.start)
-                                    ..rope.point_utf16_to_offset(word.end),
-                            )
-                        })
-                        .filter(|word| word.chars().any(|c| c.is_alphanumeric() || c == '_'))
-                } else {
-                    Some(rope.text_for_range(
-                        rope.point_utf16_to_offset(selection.start())
-                            ..rope.point_utf16_to_offset(selection.end()),
-                    ))
+        if !multiple && selection.start().row != selection.end().row {
+            return None;
+        }
+        let rope = self.snapshot.rope();
+        if selection.is_empty() {
+            if non_empty_only {
+                return None;
+            }
+            let config = self.cursor_config(cx);
+            cursor::word_at(&config, rope, selection.head)
+                .map(|word| {
+                    rope.text_for_range(
+                        rope.point_utf16_to_offset(word.start)
+                            ..rope.point_utf16_to_offset(word.end),
+                    )
+                })
+                .filter(|word| word.chars().any(|c| c.is_alphanumeric() || c == '_'))
+        } else {
+            let range = rope.point_utf16_to_offset(selection.start())
+                ..rope.point_utf16_to_offset(selection.end());
+            // Monaco `SEARCH_STRING_MAX_LENGTH`.
+            (range.len() < 524_288).then(|| rope.text_for_range(range))
+        }
+    }
+
+    /// Monaco `FindController._start`: shows the widget, seeds the search
+    /// string, maybe scopes to the selections, and binds a fresh find model.
+    fn find_start(&mut self, start: FindStart, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::options::AutoFindInSelection;
+        // The widget's controller: `find.autoFindInSelection`.
+        let selection = self.cursors.primary().selection();
+        let update_scope = start.update_search_scope
+            || match self.options.find.auto_find_in_selection {
+                AutoFindInSelection::Never => false,
+                AutoFindInSelection::Always => true,
+                AutoFindInSelection::Multiline => selection.start().row != selection.end().row,
+            };
+        self.stop_find_model(cx);
+        let mut options = self.find.options.clone();
+        match start.seed {
+            SeedMode::Single => {
+                if let Some(seed) =
+                    self.selection_search_string(false, start.seed_non_empty_only, cx)
+                {
+                    options.query = if options.is_regex {
+                        regex::escape(&seed)
+                    } else {
+                        seed
+                    };
                 }
             }
-            _ => None,
-        };
-        let multiline = selection.start().row != selection.end().row;
-        let update_scope = match find_options.auto_find_in_selection {
-            AutoFindInSelection::Never => false,
-            AutoFindInSelection::Always => true,
-            AutoFindInSelection::Multiline => multiline,
-        };
+            SeedMode::Multiple if !update_scope => {
+                if let Some(seed) = self.selection_search_string(true, false, cx) {
+                    options.query = seed;
+                }
+            }
+            _ => {}
+        }
+        let was_visible = self.find.visible;
+        if start.force_reveal_replace {
+            self.find.replace_visible = true;
+        } else if !was_visible {
+            self.find.replace_visible = false;
+        }
+        let mut scope = None;
+        if update_scope && self.cursors.selections().iter().any(|s| !s.is_empty()) {
+            // Monaco stores the selections as they are.
+            scope = Some(
+                self.cursors
+                    .selections()
+                    .iter()
+                    .map(|s| s.start()..s.end())
+                    .collect::<Vec<_>>(),
+            );
+        }
         self.find.visible = true;
-        self.find.replace_visible = replace;
+        if let Some(scope) = scope {
+            options.in_selection = true;
+            self.find.search_scope = Some(scope);
+            // Already set; don't recapture it from the selections.
+            self.find.options.in_selection = true;
+        }
+        self.change_find_options(options.clone(), false, cx);
         // Monaco's model starts incremental search at the cursor.
         self.start_find_model(cx);
-        let mut options = self.find.options.clone();
-        if let Some(seed) = seed {
-            // Monaco escapes the selection in regex mode.
-            options.query = if options.is_regex {
-                regex::escape(&seed)
-            } else {
-                seed
-            };
-        }
-        if update_scope && self.cursors.selections().iter().any(|s| !s.is_empty()) {
-            options.in_selection = true;
-            // A fresh scope from the current selections.
-            self.find.options.in_selection = false;
-        }
+        let replace = self.find.replace_visible;
         let widget = match &self.find.widget {
             Some((widget, _)) => widget.clone(),
             None => {
@@ -1222,12 +1373,240 @@ impl CodeEditor {
                 widget
             }
         };
-        self.change_find_options(options.clone(), false, cx);
+        self.update_find_view_zone(cx);
         widget.update(cx, |widget, cx| {
             widget.sync_from_editor(&options, replace, window, cx);
-            widget.focus_find(window, cx);
+            match start.focus {
+                StartFocus::FindInput => widget.focus_find(window, cx),
+                StartFocus::ReplaceInput => widget.focus_replace(window, cx),
+                StartFocus::NoChange => {}
+            }
         });
         cx.notify();
+    }
+
+    /// Whether the find input has focus (Monaco `findInputFocussed`).
+    fn is_find_input_focused(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.find
+            .widget
+            .as_ref()
+            .is_some_and(|(widget, _)| widget.read(cx).is_find_input_focused(window, cx))
+    }
+
+    fn seed_on_start(&self) -> (SeedMode, bool) {
+        use crate::options::SeedSearchString;
+        let option = self.options.find.seed_search_string_from_selection;
+        let seed = if option == SeedSearchString::Never {
+            SeedMode::None
+        } else {
+            SeedMode::Single
+        };
+        (seed, option == SeedSearchString::Selection)
+    }
+
+    /// Opens the find widget (Monaco `actions.find`, Cmd/Ctrl+F; with
+    /// `replace`, `editor.action.startFindReplaceAction`).
+    pub fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let (seed, seed_non_empty_only) = self.seed_on_start();
+        if !replace {
+            self.find_start(
+                FindStart {
+                    seed,
+                    seed_non_empty_only,
+                    focus: StartFocus::FindInput,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            return;
+        }
+        // Monaco `StartFindReplaceAction`: seeds only from a one-line
+        // selection while the find input isn't focused; focuses replace
+        // when there's something to replace.
+        if self.options.read_only {
+            return;
+        }
+        let selection = self.cursors.primary().selection();
+        let find_focused = self.is_find_input_focused(window, cx);
+        let seed_from_selection = !selection.is_empty()
+            && selection.start().row == selection.end().row
+            && seed != SeedMode::None
+            && !find_focused;
+        self.find_start(
+            FindStart {
+                force_reveal_replace: true,
+                seed: if seed_from_selection {
+                    SeedMode::Single
+                } else {
+                    SeedMode::None
+                },
+                seed_non_empty_only,
+                focus: if find_focused || seed_from_selection {
+                    StartFocus::ReplaceInput
+                } else {
+                    StartFocus::FindInput
+                },
+                update_search_scope: false,
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Opens find with the selection, even over several lines, as the
+    /// search string (Monaco `actions.findWithSelection`, Cmd+E on macOS).
+    pub fn start_find_with_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find_start(
+            FindStart {
+                seed: SeedMode::Multiple,
+                ..Default::default()
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Monaco `matchFindAction` (Find Next/Previous, F3, Cmd/Ctrl+G): moves
+    /// to the next match, first opening find (seeded from the cursor when
+    /// there's no search string) if that doesn't land on one. With
+    /// `find.closeOnResult`, landing on a match from the find input closes
+    /// the widget.
+    pub fn find_match_action(&mut self, next: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let was_visible = self.find.visible;
+        let run = |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| -> bool {
+            if this.find.model.is_none() {
+                return false;
+            }
+            let before = this.cursors.primary().selection();
+            if next {
+                let after = before.end();
+                this.move_to_next_match_after(after, cx);
+            } else {
+                let before = before.start();
+                this.move_to_prev_match_before(before, false, cx);
+            }
+            let after = this.cursors.primary().selection();
+            if after == before {
+                return false;
+            }
+            this.push_undo_stop(cx);
+            if this.options.find.close_on_result
+                && was_visible
+                && this.is_find_input_focused(window, cx)
+            {
+                this.close_find(window, cx);
+            }
+            true
+        };
+        if run(self, window, cx) {
+            return;
+        }
+        let (seed, seed_non_empty_only) = self.seed_on_start();
+        let seed = if self.find.options.query.is_empty() {
+            seed
+        } else {
+            SeedMode::None
+        };
+        self.find_start(
+            FindStart {
+                seed,
+                seed_non_empty_only,
+                ..Default::default()
+            },
+            window,
+            cx,
+        );
+        run(self, window, cx);
+    }
+
+    /// Monaco `SelectionMatchFindAction` (Find Next/Previous Selection,
+    /// Cmd/Ctrl+F3 and with Shift): searches for the selection or the word
+    /// at the cursor.
+    pub fn find_selection_match_action(
+        &mut self,
+        next: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(search) = self.selection_search_string(false, false, cx) {
+            // Monaco `setSearchString`, escaped in regex mode.
+            let mut options = self.find.options.clone();
+            options.query = if options.is_regex {
+                regex::escape(&search)
+            } else {
+                search
+            };
+            self.change_find_options(options, false, cx);
+        }
+        if self.find.model.is_none() {
+            self.find_start(FindStart::default(), window, cx);
+        }
+        if next {
+            let after = self.cursors.primary().selection().end();
+            self.move_to_next_match_after(after, cx);
+        } else {
+            let before = self.cursors.primary().selection().start();
+            self.move_to_prev_match_before(before, false, cx);
+        }
+    }
+
+    /// The find scope (Monaco `searchScope`), as captured from the
+    /// selections.
+    pub fn find_search_scope(&self) -> Option<&[Range<PointUtf16>]> {
+        self.find.search_scope.as_deref()
+    }
+
+    /// Whether the query is a regex that doesn't parse (the find input shows
+    /// an error).
+    pub fn is_find_query_invalid(&self) -> bool {
+        !self.find.options.query.is_empty() && self.search_data().is_none()
+    }
+
+    /// The find widget's height: one row, or two with replace (Monaco
+    /// `_getHeight`).
+    fn find_widget_height(&self) -> gpui::Pixels {
+        let row = self.options.resolved_line_height() + gpui::px(4.);
+        let rows = if self.find.replace_visible { 2. } else { 1. };
+        // Padding, borders and the gap between rows.
+        row * rows + gpui::px(10.) + gpui::px(4.) * (rows - 1.)
+    }
+
+    /// Monaco `_showViewZone`/`_removeViewZone`: while the widget shows,
+    /// space above the first line keeps it from covering text when
+    /// scrolled to the top; the scroll position moves with it so the text
+    /// doesn't jump.
+    pub(crate) fn update_find_view_zone(&mut self, cx: &mut Context<Self>) {
+        let wanted = (self.find.visible && self.options.find.add_extra_space_on_top)
+            .then(|| self.find_widget_height());
+        let current = self.find.zone.map(|(_, height)| height);
+        if wanted == current {
+            return;
+        }
+        if let Some((id, height)) = self.find.zone.take() {
+            self.remove_widget(id, cx);
+            self.scroll_top = (self.scroll_top - height).max(gpui::px(0.));
+        }
+        if let Some(height) = wanted {
+            let view = cx.new(|_| FindZoneSpacer);
+            let id = self.add_view_zone(
+                crate::widgets::ViewZone {
+                    after_line: 0,
+                    height: crate::widgets::ZoneHeight::Pixels(height),
+                    view: view.into(),
+                },
+                cx,
+            );
+            self.find.zone = Some((id, height));
+            self.scroll_top += height;
+        }
+        cx.notify();
+    }
+
+    /// Shows or hides the replace input (Monaco `isReplaceRevealed`).
+    pub fn set_find_replace_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.find.replace_visible = visible;
+        self.update_find_view_zone(cx);
     }
 
     /// Closes the find widget and returns focus to the editor.
@@ -1241,6 +1620,7 @@ impl CodeEditor {
         }
         // Monaco disposes the model and clears the scope when hidden.
         self.stop_find_model(cx);
+        self.update_find_view_zone(cx);
         if self.find.options.in_selection {
             self.find.options.in_selection = false;
             self.find.search_scope = None;

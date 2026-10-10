@@ -19,6 +19,8 @@ const SUGGEST: Option<&str> = Some("CodeEditor && suggest_widget_visible");
 const QUICK_INPUT: Option<&str> = Some("QuickInput > CodeEditor");
 /// The context menu.
 const CONTEXT_MENU: Option<&str> = Some("EditorContextMenu");
+/// The find widget's inputs.
+const FIND_INPUT: Option<&str> = Some("FindWidget > CodeEditor");
 /// The standalone color picker.
 const STANDALONE_COLOR_PICKER: Option<&str> = Some("StandaloneColorPicker");
 /// The editor while ghost text shows (Monaco's `inlineSuggestionVisible`).
@@ -475,6 +477,22 @@ actions!(
         ToggleFindInSelection,
         /// Toggles keeping the case of replaced text (Monaco `togglePreserveCase`).
         TogglePreserveCase,
+        /// Opens find with the selection, even over several lines, as the
+        /// search string (Monaco `actions.findWithSelection`, Cmd+E on macOS).
+        StartFindWithSelection,
+        /// Searches for the selection or word at the cursor and selects the
+        /// next match (Monaco `editor.action.nextSelectionMatchFindAction`,
+        /// Cmd/Ctrl+F3).
+        NextSelectionMatch,
+        /// The same, backwards (Monaco
+        /// `editor.action.previousSelectionMatchFindAction`).
+        PreviousSelectionMatch,
+        /// The previous search or replace string in the find widget (Monaco
+        /// `history.showPrevious`, Up).
+        FindHistoryPrevious,
+        /// The next search or replace string in the find widget (Monaco
+        /// `history.showNext`, Down).
+        FindHistoryNext,
         /// Selects the word at the cursor, or adds the next occurrence of the selection
         /// (Monaco `editor.action.addSelectionToNextFindMatch`).
         AddSelectionToNextFindMatch,
@@ -720,6 +738,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-f2", SelectAllOccurrences, ctx),
         KeyBinding::new("secondary-shift-\\", JumpToBracket, ctx),
         KeyBinding::new("f3", NextMatch, ctx),
+        KeyBinding::new("secondary-f3", NextSelectionMatch, ctx),
+        KeyBinding::new("secondary-shift-f3", PreviousSelectionMatch, ctx),
         KeyBinding::new("f8", GoToNextMarker, ctx),
         KeyBinding::new("f12", GoToDefinition, ctx),
         KeyBinding::new("shift-f12", GoToReferences, ctx),
@@ -748,6 +768,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-shift-o", QuickOutline, ctx),
         KeyBinding::new("f1", QuickCommand, ctx),
         KeyBinding::new("shift-f10", ShowContextMenu, ctx),
+        KeyBinding::new("up", FindHistoryPrevious, FIND_INPUT),
+        KeyBinding::new("down", FindHistoryNext, FIND_INPUT),
         KeyBinding::new("down", ContextMenuNext, CONTEXT_MENU),
         KeyBinding::new("up", ContextMenuPrevious, CONTEXT_MENU),
         KeyBinding::new("home", ContextMenuFirst, CONTEXT_MENU),
@@ -917,6 +939,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("cmd-shift-f12", PeekImplementation, ctx),
             KeyBinding::new("alt-f12", PeekDefinition, ctx),
             KeyBinding::new("cmd-g", NextMatch, ctx),
+            KeyBinding::new("cmd-e", StartFindWithSelection, ctx),
             KeyBinding::new("cmd-shift-g", PreviousMatch, ctx),
             KeyBinding::new("cmd-alt-enter", ReplaceAll, ctx),
             KeyBinding::new("cmd-shift-1", ReplaceOne, ctx),

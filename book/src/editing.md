@@ -61,6 +61,9 @@ Cmd+F opens the find widget, and Cmd+Alt+F (Ctrl+H elsewhere) opens it with repl
   - **Preserve case** (the `AB` toggle, Cmd+Alt+P / Alt+P) writes each replacement in the case of the text it replaces: `foo` → `bar`, `Foo` → `Bar`, `FOO` → `BAR`. Hyphenated and underscored words keep each part's case.
   - Navigation wraps at the first and last match unless `options.find.loop_` is off. Typing the query jumps to matches unless `options.find.cursor_move_on_type` is off.
   - Alt+Enter in the find input selects all matches.
+  - F3 / Cmd+G (Shift for previous) opens find if needed, seeded from the cursor, and moves to the next match. Cmd/Ctrl+F3 searches for the selection. Cmd+E (macOS) uses the selection, even over several lines.
+  - Up and Down in the inputs walk the search and replace history.
+  - Dragging the widget's left edge widens it. Toggles carry over to new editors.
 
 Regexes use the Rust `regex` crate. It runs in linear time but has no lookaround or backreferences; see [Differences from Monaco](differences.md).
 
