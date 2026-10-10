@@ -1018,6 +1018,9 @@ pub struct EditorOptions {
     /// Monaco `scrollBeyondLastLine`: allow scrolling the last line to the top of the
     /// viewport (default `true`).
     pub scroll_beyond_last_line: bool,
+    /// Monaco `allowVariableLineHeights`: decorations may change line
+    /// heights (default `true`).
+    pub allow_variable_line_heights: bool,
     /// Monaco `readOnly`: ignore edits from typing, IME and editing commands (default
     /// `false`).
     pub read_only: bool,
@@ -1264,6 +1267,7 @@ impl Default for EditorOptions {
             rounded_selection: true,
             render_line_highlight_only_when_focus: false,
             scroll_beyond_last_line: true,
+            allow_variable_line_heights: true,
             read_only: false,
             word_separators: "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?".into(),
             vertical_scrollbar_size: px(14.),

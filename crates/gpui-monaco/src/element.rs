@@ -599,6 +599,11 @@ pub(crate) struct ZoneLayout {
     zones: Vec<(i64, Pixels)>,
     /// `heights_before[i]`: the total height of zones `..i`.
     heights_before: Vec<Pixels>,
+    /// View lines taller (or shorter) than the line height (Monaco
+    /// `LineHeightsManager`): (view line, extra height), sorted.
+    lines: Vec<(u32, Pixels)>,
+    /// `extra_before[i]`: the total extra height of `lines[..i]`.
+    extra_before: Vec<Pixels>,
 }
 
 impl ZoneLayout {
@@ -614,11 +619,38 @@ impl ZoneLayout {
         Self {
             zones,
             heights_before,
+            lines: Vec::new(),
+            extra_before: vec![px(0.)],
         }
     }
 
+    /// With view lines of other heights: (view line, extra height), in any
+    /// order and with no duplicates.
+    pub fn with_line_heights(mut self, mut lines: Vec<(u32, Pixels)>) -> Self {
+        lines.sort_by_key(|(line, _)| *line);
+        let mut total = px(0.);
+        self.extra_before = Vec::with_capacity(lines.len() + 1);
+        self.extra_before.push(total);
+        for (_, extra) in &lines {
+            total += *extra;
+            self.extra_before.push(total);
+        }
+        self.lines = lines;
+        self
+    }
+
+    /// The height of zones and line height changes.
     pub fn total(&self) -> Pixels {
         self.heights_before.last().copied().unwrap_or_default()
+            + self.extra_before.last().copied().unwrap_or_default()
+    }
+
+    /// The height of view line `line`.
+    pub fn height(&self, line: u32, line_height: Pixels) -> Pixels {
+        match self.lines.binary_search_by_key(&line, |(line, _)| *line) {
+            Ok(ix) => line_height + self.lines[ix].1,
+            Err(_) => line_height,
+        }
     }
 
     /// Total height of zones above view line `line` (a binary search: there
@@ -632,7 +664,8 @@ impl ZoneLayout {
 
     /// Content y of the top of view line `line`.
     pub fn line_y(&self, line: u32, line_height: Pixels) -> Pixels {
-        line_height * line as f32 + self.above(line)
+        let taller = self.lines.partition_point(|(l, _)| *l < line);
+        line_height * line as f32 + self.above(line) + self.extra_before[taller]
     }
 
     /// The last view line starting at or above content y `y`.
@@ -648,6 +681,43 @@ impl ZoneLayout {
         }
         lo
     }
+}
+
+/// Monaco `LineHeightsManager`: the extra height of every view line a
+/// decoration with a `line_height` covers (the tallest one wins).
+fn decoration_line_heights(
+    editor: &CodeEditor,
+    view_lines: &ViewLines,
+    line_height: Pixels,
+    editor_id: gpui::EntityId,
+    cx: &App,
+) -> Vec<(u32, Pixels)> {
+    let model = editor.model().read(cx);
+    let decorations = model.decoration_line_heights(Some(editor_id));
+    if decorations.is_empty() {
+        return Vec::new();
+    }
+    let rope = view_lines.rope();
+    let mut heights: std::collections::BTreeMap<u32, Pixels> = Default::default();
+    for (range, multiplier) in decorations {
+        if multiplier.is_nan() || multiplier <= 0. {
+            continue;
+        }
+        let height = line_height * multiplier;
+        let start = rope.offset_to_point_utf16(range.start.min(rope.len()));
+        let end = rope.offset_to_point_utf16(range.end.min(rope.len()));
+        let first = view_lines.to_view(start, false).0;
+        let last = view_lines.to_view(end, true).0;
+        for line in first..=last {
+            let entry = heights.entry(line).or_insert(height);
+            *entry = (*entry).max(height);
+        }
+    }
+    heights
+        .into_iter()
+        .filter(|(_, height)| *height != line_height)
+        .map(|(line, height)| (line, height - line_height))
+        .collect()
 }
 
 /// Everything about the last frame that event handlers need for hit testing.
@@ -707,6 +777,18 @@ impl EditorLayout {
 
     pub fn line_top(&self, view_line: u32) -> Pixels {
         self.bounds.top() + self.zones.line_y(view_line, self.metrics.line_height) - self.scroll_top
+    }
+
+    /// The height of view line `view_line` (taller with a decoration's
+    /// `line_height`).
+    pub fn line_height_of(&self, view_line: u32) -> Pixels {
+        self.zones.height(view_line, self.metrics.line_height)
+    }
+
+    /// Where text-sized things go on view line `view_line`: centered in a
+    /// taller line, as Monaco's CSS line height centers its text.
+    pub fn text_top(&self, view_line: u32) -> Pixels {
+        self.line_top(view_line) + (self.line_height_of(view_line) - self.metrics.line_height) / 2.
     }
 }
 
@@ -831,7 +913,6 @@ impl Element for EditorElement {
         let mut state = self
             .editor
             .update(cx, |editor, cx| prepaint_editor(editor, bounds, window, cx));
-        let line_height = state.layout.metrics.line_height;
         let mut widget_bounds = Vec::new();
         let mut widget_kinds = Vec::new();
         for embedded in std::mem::take(&mut state.embedded) {
@@ -862,6 +943,7 @@ impl Element for EditorElement {
                 Embedded::Content {
                     view,
                     anchor,
+                    line_height,
                     preference,
                 } => {
                     let mut element = view.into_any_element();
@@ -1095,7 +1177,12 @@ fn prepaint_editor(
     if options.padding.top > px(0.) {
         zone_heights.push((-1, options.padding.top));
     }
-    let zones = ZoneLayout::new(zone_heights);
+    let zones =
+        ZoneLayout::new(zone_heights).with_line_heights(if options.allow_variable_line_heights {
+            decoration_line_heights(editor, &view_lines, line_height, cx.entity_id(), cx)
+        } else {
+            Vec::new()
+        });
 
     let content_height = line_height * view_line_count as f32
         + zones.total()
@@ -1153,7 +1240,7 @@ fn prepaint_editor(
                 viewport_top: f32::from(editor.scroll_top),
                 viewport_height: f32::from(text_height),
                 box_start: f32::from(zones.line_y(start, line_height)),
-                box_end: f32::from(zones.line_y(end, line_height) + line_height),
+                box_end: f32::from(zones.line_y(end, line_height) + zones.height(end, line_height)),
                 line_height: f32::from(line_height),
                 surrounding_lines: surrounding,
                 mouse: false,
@@ -1181,7 +1268,7 @@ fn prepaint_editor(
                 viewport_top: f32::from(editor.scroll_top),
                 viewport_height: f32::from(text_height),
                 box_start: f32::from(top),
-                box_end: f32::from(top + line_height),
+                box_end: f32::from(top + zones.height(primary_view_line, line_height)),
                 line_height: f32::from(line_height),
                 surrounding_lines: if mouse { 0. } else { surrounding },
                 mouse,
@@ -1510,18 +1597,21 @@ fn prepaint_editor(
         let left = bounds.left() + glyph_width + numbers_width + options.line_decorations_width;
         for line in lines.iter().filter(|line| line.columns.start == 0) {
             let top = bounds.top() + zones.line_y(line.view_line, line_height) - scroll_top;
+            let height = zones.height(line.view_line, line_height);
             let is_collapsed = collapsed.iter().any(|(start, _)| *start == line.row);
             if is_collapsed || editor.folds.range_starting_at(line.row).is_some() {
                 fold_controls.push(FoldControl {
                     row: line.row,
-                    bounds: Bounds::new(point(left, top), size(folding_width, line_height)),
+                    bounds: Bounds::new(point(left, top), size(folding_width, height)),
                     collapsed: is_collapsed,
                 });
             }
         }
         for line in lines.iter().filter(|line| line.is_last_segment) {
             if collapsed.iter().any(|(start, _)| *start == line.row) {
-                let top = bounds.top() + zones.line_y(line.view_line, line_height) - scroll_top;
+                // Centered on taller lines, with the text.
+                let top = bounds.top() + zones.line_y(line.view_line, line_height) - scroll_top
+                    + (zones.height(line.view_line, line_height) - line_height) / 2.;
                 let x = text_bounds.left() - scroll_left + line.width() + metrics.em_width / 2.;
                 fold_placeholders.push((x, top));
                 fold_placeholder_bounds.push((
@@ -1540,7 +1630,10 @@ fn prepaint_editor(
                     let top = bounds.top() + zones.line_y(line.view_line, line_height) - scroll_top;
                     fold_highlights.push(Bounds::new(
                         point(text_bounds.left(), top),
-                        size(text_bounds.size.width, line_height),
+                        size(
+                            text_bounds.size.width,
+                            zones.height(line.view_line, line_height),
+                        ),
                     ));
                 }
             }
@@ -1933,6 +2026,8 @@ fn prepaint_editor(
                 continue;
             }
             let top = layout.line_top(line.view_line);
+            let height = layout.line_height_of(line.view_line);
+            let text_top = layout.text_top(line.view_line);
             if options.background.is_some() || options.border.is_some() {
                 let range = if options.is_whole_line {
                     Some((px(0.) - layout.scroll_left, text_width + layout.scroll_left))
@@ -1944,7 +2039,7 @@ fn prepaint_editor(
                     // stop) a 2px minimum width.
                     let bounds = Bounds::new(
                         point(origin_x + from, top),
-                        size((to - from).max(px(2.)), line_height),
+                        size((to - from).max(px(2.)), height),
                     );
                     decoration_quads.push((bounds, options.background, options.border));
                 }
@@ -1964,7 +2059,7 @@ fn prepaint_editor(
                 && let Some((from, to)) = decoration_x_range(line, *start, *end)
             {
                 decoration_underlines.push((
-                    point(origin_x + from, top + line_height - px(3.)),
+                    point(origin_x + from, text_top + line_height - px(3.)),
                     (to - from).max(metrics.em_width / 2.),
                     UnderlineStyle {
                         thickness: px(1.),
@@ -1975,10 +2070,7 @@ fn prepaint_editor(
             }
             if let Some(color) = options.gutter_bar {
                 let left = bounds.left() + glyph_width + numbers_width + px(2.);
-                gutter_bars.push((
-                    Bounds::new(point(left, top), size(px(3.), line_height)),
-                    color,
-                ));
+                gutter_bars.push((Bounds::new(point(left, top), size(px(3.), height)), color));
             }
             if line.columns.start == 0 {
                 if let Some(color) = options.line_number_color {
@@ -1995,7 +2087,7 @@ fn prepaint_editor(
                         None,
                     );
                     let x = bounds.left() + (glyph_width - shaped.width) / 2.;
-                    glyphs.push((point(x, top), shaped));
+                    glyphs.push((point(x, text_top), shaped));
                 }
             }
         }
@@ -2035,7 +2127,7 @@ fn prepaint_editor(
         let bounds = match placement {
             Some(crate::code_action::LightbulbPlacement::Gutter(row)) if glyph_width > px(0.) => {
                 at(row).map(|line| {
-                    let top = layout.line_top(line.view_line) + (line_height - side) / 2.;
+                    let top = layout.text_top(line.view_line) + (line_height - side) / 2.;
                     Bounds::new(
                         point(bounds.left() + (glyph_width - side) / 2., top),
                         size(side, side),
@@ -2049,7 +2141,7 @@ fn prepaint_editor(
                     _ => 0,
                 };
                 at(row).map(|line| {
-                    let top = layout.line_top(line.view_line) + (line_height - side) / 2.;
+                    let top = layout.text_top(line.view_line) + (line_height - side) / 2.;
                     Bounds::new(
                         point(origin_x + line.x_for_column(column), top),
                         size(side, side),
@@ -2156,6 +2248,8 @@ fn prepaint_editor(
         {
             let x = layout.text_origin_x() + line.x_for_column(head.column);
             let y = layout.line_top(line.view_line);
+            // Monaco's cursor fills a taller line.
+            let line_height = layout.line_height_of(line.view_line);
             let char_width = if head.column < line.columns.end {
                 (line.x_for_column(head.column + 1) - line.x_for_column(head.column))
                     .max(metrics.em_width / 2.)
@@ -2267,6 +2361,7 @@ fn prepaint_editor(
             let ix = (line.row - rows.start) as usize;
             let count = counts[ix];
             let top = layout.line_top(line.view_line);
+            let line_height = layout.line_height_of(line.view_line);
             // Monaco: on wrapped lines, the opening line's guide shows after
             // the bracket and the closing line's up to it.
             let in_line: Vec<&BracketGuide> = bracket_guides
@@ -2386,7 +2481,7 @@ fn prepaint_editor(
                         start..end
                     })
                     .collect();
-                let top = layout.line_top(line.view_line);
+                let top = layout.text_top(line.view_line);
                 for column in crate::view::guides::whitespace_columns(
                     &text,
                     options.render_whitespace,
@@ -2448,7 +2543,7 @@ fn prepaint_editor(
                 &[run(label.len(), &metrics.font, color)],
                 None,
             );
-            gutter_numbers.push((layout.line_top(line.view_line), shaped, right));
+            gutter_numbers.push((layout.text_top(line.view_line), shaped, right));
         }
     }
 
@@ -2504,6 +2599,7 @@ fn prepaint_editor(
             embedded.push(Embedded::Content {
                 view: widget.view.clone(),
                 anchor: point(x, layout.line_top(line.view_line)),
+                line_height: layout.line_height_of(line.view_line),
                 preference: widget.preference.clone(),
             });
         }
@@ -2597,7 +2693,10 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
             };
             let line_bounds = Bounds::new(
                 point(left, top),
-                size(layout.text_bounds.right() - left, line_height),
+                size(
+                    layout.text_bounds.right() - left,
+                    layout.line_height_of(state.cursor_view_lines[0]),
+                ),
             );
             if let Some(background) = colors.line_highlight_background {
                 window.paint_quad(fill(line_bounds, background));
@@ -2678,7 +2777,7 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                             let from = line.shaped.x_for_index(range.start);
                             let to = line.shaped.x_for_index(range.end);
                             let side = (layout.metrics.font_size * 0.8).round();
-                            let top = layout.line_top(line.view_line);
+                            let top = layout.text_top(line.view_line);
                             window.paint_quad(quad(
                                 Bounds::new(
                                     point(
@@ -2697,7 +2796,7 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                         if let Some(background) = background {
                             let from = line.shaped.x_for_index(range.start);
                             let to = line.shaped.x_for_index(range.end);
-                            let top = layout.line_top(line.view_line);
+                            let top = layout.text_top(line.view_line);
                             window.paint_quad(quad(
                                 Bounds::new(
                                     point(origin_x + line.indent_x + from, top + px(1.)),
@@ -2730,7 +2829,7 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                 }
 
                 for line in &layout.lines {
-                    let top = layout.line_top(line.view_line);
+                    let top = layout.text_top(line.view_line);
                     line.shaped
                         .paint(
                             point(origin_x + line.indent_x, top),
@@ -3204,7 +3303,7 @@ fn paint_selection(
         if to > from {
             rows.push(Bounds::new(
                 point(origin_x + from, layout.line_top(line.view_line)),
-                size(to - from, layout.metrics.line_height),
+                size(to - from, layout.line_height_of(line.view_line)),
             ));
         }
     }
@@ -3213,7 +3312,11 @@ fn paint_selection(
         let span = |b: &Bounds<Pixels>| (b.left(), b.right());
         let adjacent = |other: Option<&Bounds<Pixels>>| {
             other
-                .filter(|o| (o.top() - bounds.top()).abs() <= layout.metrics.line_height + px(0.5))
+                .filter(|o| {
+                    // Touching rows, whatever their heights.
+                    (o.bottom() - bounds.top()).abs() <= px(0.5)
+                        || (bounds.bottom() - o.top()).abs() <= px(0.5)
+                })
                 .map(span)
         };
         let corners = if rounded {
@@ -3338,6 +3441,8 @@ pub(crate) enum Embedded {
         view: gpui::AnyView,
         /// Top-left of the anchored character's line.
         anchor: gpui::Point<Pixels>,
+        /// The line's height.
+        line_height: Pixels,
         preference: Vec<ContentWidgetPreference>,
     },
     Overlay {

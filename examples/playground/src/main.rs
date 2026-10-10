@@ -748,6 +748,8 @@ fn add_demo_decorations(editor: &Entity<CodeEditor>, cx: &mut App) {
                         gutter_bar: Some(rgb(0x2ea043).into()),
                         line_number_color: Some(rgb(0x2ea043).into()),
                         overview_ruler: Some((rgb(0x2ea043).into(), OverviewRulerLane::Left)),
+                        // Monaco `lineHeight`: a taller line.
+                        line_height: Some(1.8),
                         ..Default::default()
                     },
                 ),

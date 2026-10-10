@@ -69,7 +69,8 @@ Issues are linked by number.
 | Occurrence and selection highlight | `wordHighlighter` | ✅ | #83 |
 | Unicode highlighting, unusual line terminators | `unicodeHighlighter`, `unusualLineTerminators` | ❌ | #86 |
 | Font weight, ligatures, zoom, mouse wheel zoom | `fontZoom`, options | ✅ | #87 |
-| Letter spacing, font variations, variable line heights | options | ❌ | #87 |
+| Variable line heights (`lineHeight` decorations, `allowVariableLineHeights`) | decorations | ✅ | #87 |
+| Letter spacing, font variations, per-decoration fonts | options | ❌ | #87 |
 | Smooth scrolling, caret animation, blinking styles, cursor surrounding lines, padding, wheel and middle-click options | options | ✅ | #88 |
 | Placeholder text, read-only message | `placeholderText`, `readOnlyMessage`, `message` | ❌ | #89 |
 | Very long lines | `longLinesHelper` | ❌ | #59 |

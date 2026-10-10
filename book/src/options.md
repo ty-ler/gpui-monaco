@@ -36,6 +36,7 @@ editor.update(cx, |editor, cx| {
 | `wrapping_strategy` | `wrappingStrategy` | `Simple` counts monospace columns; `Advanced` measures characters, for proportional fonts |
 | `folding`, `show_folding_controls` | `folding`, `showFoldingControls` | |
 | `scroll_beyond_last_line`, `mouse_wheel_scroll_sensitivity` | same names | |
+| `allow_variable_line_heights` | `allowVariableLineHeights` | decorations' `line_height` applies (default on) |
 | `vertical_scrollbar_size`, `horizontal_scrollbar_size` | `scrollbar.verticalScrollbarSize`, … | |
 | `scrollbar` | `scrollbar.*` | `vertical`/`horizontal` (`Auto` shows while hovered or just scrolled, `Visible`, `Hidden`), `use_shadows`, `*_has_arrows`, `arrow_size`, `*_slider_size`, `handle_mouse_wheel`, `always_consume_mouse_wheel`, `scroll_by_page` |
 | `overview_ruler_lanes`, `overview_ruler_border`, `hide_cursor_in_overview_ruler` | same names | lanes (3; 0 hides the marks), a left border, the cursor marks |
