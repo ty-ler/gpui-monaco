@@ -767,6 +767,7 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
             "references": {},
             "rename": { "prepareSupport": true },
             "inlayHint": {},
+            "foldingRange": { "lineFoldingOnly": true },
             "codeAction": {
                 "codeActionLiteralSupport": {
                     "codeActionKind": {

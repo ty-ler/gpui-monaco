@@ -532,6 +532,49 @@ pub trait CodeActionProvider: 'static {
     }
 }
 
+// ----- folding -------------------------------------------------------------------
+
+/// What a folding range holds (Monaco `FoldingRangeKind`); commands such as
+/// "fold all block comments" pick ranges by kind.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum FoldingRangeKind {
+    /// A comment.
+    Comment,
+    /// Imports.
+    Imports,
+    /// A region from markers such as `#region`.
+    Region,
+    /// Another kind.
+    Other(SharedString),
+}
+
+/// A foldable range of lines (Monaco `FoldingRange`): `start_row` stays
+/// visible and the rows after it through `end_row` hide.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FoldingRange {
+    /// The first row (0-based).
+    pub start_row: u32,
+    /// The last row folded (0-based, inclusive).
+    pub end_row: u32,
+    /// What the range holds.
+    pub kind: Option<FoldingRangeKind>,
+}
+
+/// Computes folding ranges (Monaco `FoldingRangeProvider`), replacing the
+/// syntax and indentation ranges with `folding_strategy: Auto`.
+///
+/// Register with [`register_folding_range_provider`]. Ranges from several
+/// providers are merged.
+pub trait FoldingRangeProvider: 'static {
+    /// The ranges for the whole document, or `None` to leave folding to
+    /// the next fallback (syntax, then indentation).
+    fn provide_folding_ranges(
+        &self,
+        context: &ProviderContext,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Option<Vec<FoldingRange>>>>;
+}
+
 // ----- inlay hints ---------------------------------------------------------------
 
 /// Monaco `InlayHintKind`: picks the hint's colors.
@@ -815,6 +858,7 @@ struct LanguageFeatures {
     rename: Vec<Entry<dyn RenameProvider>>,
     code_action: Vec<Entry<dyn CodeActionProvider>>,
     inlay_hints: Vec<Entry<dyn InlayHintsProvider>>,
+    folding: Vec<Entry<dyn FoldingRangeProvider>>,
     declaration: Vec<Entry<dyn DeclarationProvider>>,
     type_definition: Vec<Entry<dyn TypeDefinitionProvider>>,
     implementation: Vec<Entry<dyn ImplementationProvider>>,
@@ -890,6 +934,13 @@ register_fn!(
     SignatureHelpProvider
 );
 
+register_fn!(
+    /// Registers a folding range provider for the models `selector` matches (Monaco
+    /// `registerFoldingRangeProvider`). Results from all matching providers are merged.
+    register_folding_range_provider,
+    folding,
+    FoldingRangeProvider
+);
 register_fn!(
     /// Registers an inlay hints provider for the models `selector` matches (Monaco
     /// `registerInlayHintsProvider`). Results from all matching providers are merged.
@@ -977,6 +1028,7 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.rename.retain(|e| e.id != registration);
     features.code_action.retain(|e| e.id != registration);
     features.inlay_hints.retain(|e| e.id != registration);
+    features.folding.retain(|e| e.id != registration);
     features.type_definition.retain(|e| e.id != registration);
     features.implementation.retain(|e| e.id != registration);
     features.references.retain(|e| e.id != registration);
@@ -1144,6 +1196,17 @@ pub fn inlay_hints_providers(
 ) -> Vec<Arc<dyn InlayHintsProvider>> {
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.inlay_hints, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered folding range providers whose selector matches
+/// `language_id`, in registration order.
+pub fn folding_range_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn FoldingRangeProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.folding, language_id))
         .unwrap_or_default()
 }
 

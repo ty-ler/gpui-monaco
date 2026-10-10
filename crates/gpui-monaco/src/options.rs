@@ -182,6 +182,17 @@ pub enum CursorStyle {
     LineThin,
 }
 
+/// Where folding ranges come from (Monaco `foldingStrategy`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FoldingStrategy {
+    /// Folding range providers, else the syntax tree (`folds.scm`), else
+    /// indentation.
+    #[default]
+    Auto,
+    /// Indentation (and region markers) only.
+    Indentation,
+}
+
 /// When inlay hints show (Monaco `inlayHints.enabled`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InlayHintsMode {
@@ -392,6 +403,11 @@ pub struct EditorOptions {
     pub wrapping_indent: crate::view::line_breaks::WrappingIndent,
     /// Monaco `folding`: enable code folding and its gutter column (default `true`).
     pub folding: bool,
+    /// Monaco `foldingStrategy`.
+    pub folding_strategy: FoldingStrategy,
+    /// Monaco `foldingMaximumRegions`: provider and syntax ranges beyond
+    /// this many are dropped, the most deeply nested first.
+    pub folding_maximum_regions: usize,
     /// Monaco `showFoldingControls`.
     pub show_folding_controls: ShowFoldingControls,
     /// Monaco `autoClosingBrackets` / `autoClosingQuotes` /
@@ -518,6 +534,8 @@ impl Default for EditorOptions {
             word_wrap_column: 80,
             wrapping_indent: crate::view::line_breaks::WrappingIndent::Same,
             folding: true,
+            folding_strategy: FoldingStrategy::Auto,
+            folding_maximum_regions: 5000,
             show_folding_controls: ShowFoldingControls::Mouseover,
             single_line: false,
             auto_closing_brackets: Default::default(),

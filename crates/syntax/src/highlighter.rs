@@ -52,6 +52,12 @@ pub trait Highlighter: Send + Sync {
         text: &Rope,
         range: Range<usize>,
     ) -> Vec<HighlightSpan>;
+
+    /// Foldable regions as (first row, last row folded), 0-based, or `None`
+    /// if this highlighter doesn't know (folding then uses indentation).
+    fn fold_ranges(&self, _state: &HighlightState, _text: &Rope) -> Option<Vec<(u32, u32)>> {
+        None
+    }
 }
 
 /// The tree-sitter [`Highlighter`]; its state is a [`SyntaxSnapshot`].
@@ -94,5 +100,9 @@ impl Highlighter for TreeSitterHighlighter {
             .syntax()
             .map(|syntax| syntax.highlights(text, range))
             .unwrap_or_default()
+    }
+
+    fn fold_ranges(&self, state: &HighlightState, text: &Rope) -> Option<Vec<(u32, u32)>> {
+        state.syntax()?.fold_ranges(text)
     }
 }

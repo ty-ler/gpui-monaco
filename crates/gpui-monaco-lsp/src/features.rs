@@ -24,6 +24,9 @@ use gpui_monaco::providers::{
     TypeDefinitionProvider, register_declaration_provider, register_implementation_provider,
     register_reference_provider, register_type_definition_provider,
 };
+use gpui_monaco::providers::{
+    FoldingRange, FoldingRangeKind, FoldingRangeProvider, register_folding_range_provider,
+};
 use gpui_monaco::providers::{InlayHint, InlayHintsProvider, register_inlay_hints_provider};
 use gpui_monaco::providers::{
     RenameLocation, RenameProvider, WorkspaceEdit, register_rename_provider,
@@ -189,6 +192,17 @@ impl LspFeatures {
         };
         if code_actions {
             registrations.push(register_code_action_provider(
+                cx,
+                selector.clone(),
+                self.clone(),
+            ));
+        }
+        if capabilities
+            .folding_range_provider
+            .as_ref()
+            .is_some_and(|c| !matches!(c, lsp::FoldingRangeProviderCapability::Simple(false)))
+        {
+            registrations.push(register_folding_range_provider(
                 cx,
                 selector.clone(),
                 self.clone(),
@@ -778,6 +792,40 @@ impl InlayHintsProvider for LspFeatures {
                 .into_iter()
                 .map(convert::inlay_hint)
                 .collect())
+        })
+    }
+}
+
+impl FoldingRangeProvider for LspFeatures {
+    fn provide_folding_ranges(
+        &self,
+        context: &ProviderContext,
+        cx: &mut App,
+    ) -> Task<Result<Option<Vec<FoldingRange>>>> {
+        let Some((connection, position)) = self.prepare(context, PointUtf16::zero(), cx) else {
+            return Task::ready(Ok(None));
+        };
+        let request =
+            connection.request::<lsp::request::FoldingRangeRequest>(lsp::FoldingRangeParams {
+                text_document: position.text_document,
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            });
+        cx.background_executor().spawn(async move {
+            Ok(request.await?.map(|ranges| {
+                ranges
+                    .into_iter()
+                    .map(|range| FoldingRange {
+                        start_row: range.start_line,
+                        end_row: range.end_line,
+                        kind: range.kind.map(|kind| match kind {
+                            lsp::FoldingRangeKind::Comment => FoldingRangeKind::Comment,
+                            lsp::FoldingRangeKind::Imports => FoldingRangeKind::Imports,
+                            lsp::FoldingRangeKind::Region => FoldingRangeKind::Region,
+                        }),
+                    })
+                    .collect()
+            }))
         })
     }
 }
