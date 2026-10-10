@@ -1337,6 +1337,206 @@ pub trait OnTypeFormattingProvider: 'static {
     ) -> Task<anyhow::Result<Vec<TextEdit>>>;
 }
 
+// ----- drop and paste ------------------------------------------------------------
+
+/// Data being dropped or pasted, of one MIME type (Monaco
+/// `IDataTransferItem`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum DataTransferItem {
+    /// Text, such as `text/plain` or a `text/uri-list`.
+    Text(String),
+    /// Files (Monaco's `files` entries).
+    Files(Vec<std::path::PathBuf>),
+}
+
+/// The data of a drop or paste by MIME type (Monaco `VSDataTransfer`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DataTransfer {
+    items: Vec<(SharedString, DataTransferItem)>,
+}
+
+impl DataTransfer {
+    /// Sets the data of `mime_type` (lowercased, as Monaco normalizes it).
+    pub fn insert(&mut self, mime_type: impl Into<SharedString>, item: DataTransferItem) {
+        let mime_type: SharedString = mime_type.into().to_lowercase().into();
+        self.items.retain(|(mime, _)| *mime != mime_type);
+        self.items.push((mime_type, item));
+    }
+
+    /// The data of `mime_type`.
+    pub fn get(&self, mime_type: &str) -> Option<&DataTransferItem> {
+        let mime_type = mime_type.to_lowercase();
+        self.items
+            .iter()
+            .find(|(mime, _)| **mime == mime_type)
+            .map(|(_, item)| item)
+    }
+
+    /// The text of `mime_type`.
+    pub fn text(&self, mime_type: &str) -> Option<&str> {
+        match self.get(mime_type)? {
+            DataTransferItem::Text(text) => Some(text),
+            DataTransferItem::Files(_) => None,
+        }
+    }
+
+    /// Whether there's data of `mime_type`.
+    pub fn has(&self, mime_type: &str) -> bool {
+        self.get(mime_type).is_some()
+    }
+
+    /// Removes the data of `mime_type`.
+    pub fn remove(&mut self, mime_type: &str) {
+        let mime_type = mime_type.to_lowercase();
+        self.items.retain(|(mime, _)| *mime != mime_type);
+    }
+
+    /// The MIME types with data.
+    pub fn mime_types(&self) -> impl Iterator<Item = &SharedString> {
+        self.items.iter().map(|(mime, _)| mime)
+    }
+
+    /// Whether any data matches `pattern` (Monaco `matchesMimeType`):
+    /// `*/*`, `type/*` or an exact type. Files match `files`.
+    pub fn matches(&self, pattern: &str) -> bool {
+        matches_mime_type(pattern, self.mime_types().map(|m| m.as_ref()))
+    }
+}
+
+/// Monaco `matchesMimeType`: whether `pattern` (`*/*`, `type/*` or a type)
+/// matches any of `mime_types`, ignoring case.
+pub fn matches_mime_type<'a>(pattern: &str, mime_types: impl IntoIterator<Item = &'a str>) -> bool {
+    let pattern = pattern.to_lowercase();
+    let Some((pattern_type, pattern_subtype)) = pattern.split_once('/') else {
+        return mime_types
+            .into_iter()
+            .any(|m| m.eq_ignore_ascii_case(&pattern));
+    };
+    mime_types.into_iter().any(|mime| {
+        let mime = mime.to_lowercase();
+        if pattern == "*/*" {
+            return true;
+        }
+        match mime.split_once('/') {
+            Some((ty, subtype)) => {
+                ty == pattern_type && (pattern_subtype == "*" || subtype == pattern_subtype)
+            }
+            None => false,
+        }
+    })
+}
+
+/// Monaco `HierarchicalKind.contains`: `parent` is `kind` or a dotted
+/// prefix of it (`text` contains `text.plain`; empty contains all).
+pub fn edit_kind_contains(parent: &str, kind: &str) -> bool {
+    parent.is_empty()
+        || kind == parent
+        || kind
+            .strip_prefix(parent)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
+/// What a drop or paste edit should rank below (Monaco `DropYieldTo`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EditYieldTo {
+    /// Edits whose kind this contains.
+    Kind(SharedString),
+    /// Edits handling this MIME type.
+    MimeType(SharedString),
+}
+
+/// The text a drop or paste edit inserts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EditInsertText {
+    /// Plain text.
+    Text(String),
+    /// A snippet (TextMate syntax).
+    Snippet(String),
+}
+
+impl Default for EditInsertText {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
+/// A way to drop or paste data (Monaco `DocumentDropEdit` and
+/// `DocumentPasteEdit`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DocumentDropOrPasteEdit {
+    /// Its label in the drop and paste pickers.
+    pub title: SharedString,
+    /// Its kind, such as `text.plain` or `uri.path.absolute` (Monaco
+    /// `HierarchicalKind`).
+    pub kind: Option<SharedString>,
+    /// The MIME type it handles, for [`EditYieldTo::MimeType`].
+    pub handled_mime_type: Option<SharedString>,
+    /// What it inserts at each selection (or the drop position).
+    pub insert_text: EditInsertText,
+    /// Other edits, applied with it.
+    pub additional_edits: Vec<TextEdit>,
+    /// Edits it should rank below.
+    pub yield_to: Vec<EditYieldTo>,
+}
+
+/// Offers ways to insert dropped data (Monaco `DocumentDropEditProvider`).
+///
+/// Register with [`register_document_drop_edit_provider`].
+pub trait DocumentDropEditProvider: 'static {
+    /// The MIME types it handles (`None`: any).
+    fn drop_mime_types(&self) -> Option<Vec<SharedString>> {
+        None
+    }
+
+    /// The edits for dropping `data` at `position`.
+    fn provide_document_drop_edits(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        data: &DataTransfer,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>>;
+}
+
+/// Why paste edits are asked for (Monaco `DocumentPasteTriggerKind`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocumentPasteTriggerKind {
+    /// A normal paste.
+    Automatic,
+    /// "Paste As...".
+    PasteAs,
+}
+
+/// Offers ways to insert pasted data (Monaco `DocumentPasteEditProvider`).
+///
+/// Register with [`register_document_paste_edit_provider`].
+pub trait DocumentPasteEditProvider: 'static {
+    /// The MIME types it handles.
+    fn paste_mime_types(&self) -> Vec<SharedString>;
+
+    /// The kinds of edits it returns, for "Paste As..." preferences.
+    fn provided_paste_edit_kinds(&self) -> Vec<SharedString> {
+        Vec::new()
+    }
+
+    /// The edits for pasting `data` over `ranges`.
+    fn provide_document_paste_edits(
+        &self,
+        context: &ProviderContext,
+        ranges: &[Range<PointUtf16>],
+        data: &DataTransfer,
+        trigger: DocumentPasteTriggerKind,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>>;
+
+    /// Whether it's the built-in plain text provider, which leaves the
+    /// paste to the editor when it's the only one.
+    #[doc(hidden)]
+    fn is_default_text_provider(&self) -> bool {
+        false
+    }
+}
+
 // ----- registry ------------------------------------------------------------------
 
 /// Identifies a registration, for [`unregister_provider`].
@@ -1387,6 +1587,8 @@ struct LanguageFeatures {
     document_formatting: Vec<Entry<dyn DocumentFormattingProvider>>,
     range_formatting: Vec<Entry<dyn DocumentRangeFormattingProvider>>,
     on_type_formatting: Vec<Entry<dyn OnTypeFormattingProvider>>,
+    drop_edits: Vec<Entry<dyn DocumentDropEditProvider>>,
+    paste_edits: Vec<Entry<dyn DocumentPasteEditProvider>>,
 }
 
 impl Global for LanguageFeatures {}
@@ -1522,6 +1724,22 @@ register_fn!(
     DocumentColorProvider
 );
 register_fn!(
+    /// Registers a drop edit provider for the models `selector` matches
+    /// (Monaco `registerDocumentDropEditProvider`). The editor has built-in
+    /// ones for plain text and paths.
+    register_document_drop_edit_provider,
+    drop_edits,
+    DocumentDropEditProvider
+);
+register_fn!(
+    /// Registers a paste edit provider for the models `selector` matches
+    /// (Monaco `registerDocumentPasteEditProvider`). The editor has built-in
+    /// ones for plain text, paths and HTML.
+    register_document_paste_edit_provider,
+    paste_edits,
+    DocumentPasteEditProvider
+);
+register_fn!(
     /// Registers a link provider for the models `selector` matches (Monaco
     /// `registerLinkProvider`). Later registrations win where links overlap.
     register_link_provider,
@@ -1631,6 +1849,38 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.implementation.retain(|e| e.id != registration);
     features.references.retain(|e| e.id != registration);
     features.on_type_formatting.retain(|e| e.id != registration);
+    features.drop_edits.retain(|e| e.id != registration);
+    features.paste_edits.retain(|e| e.id != registration);
+}
+
+/// The registered drop edit providers whose selector matches
+/// `language_id`, newest first, then the built-in ones (Monaco's order).
+pub fn drop_edit_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn DocumentDropEditProvider>> {
+    let mut providers = cx
+        .try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.drop_edits, language_id))
+        .unwrap_or_default();
+    providers.reverse();
+    providers.extend(crate::drop_paste::default_drop_providers());
+    providers
+}
+
+/// The registered paste edit providers whose selector matches
+/// `language_id`, newest first, then the built-in ones (Monaco's order).
+pub fn paste_edit_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn DocumentPasteEditProvider>> {
+    let mut providers = cx
+        .try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.paste_edits, language_id))
+        .unwrap_or_default();
+    providers.reverse();
+    providers.extend(crate::drop_paste::default_paste_providers());
+    providers
 }
 
 fn matching<T: ?Sized>(entries: &[Entry<T>], language_id: Option<&str>) -> Vec<Arc<T>> {

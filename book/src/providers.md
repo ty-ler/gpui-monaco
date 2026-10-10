@@ -311,6 +311,22 @@ Hovering a color, or clicking its swatch, opens the color picker; `color_decorat
 
 The `gpui_monaco::color` module has Monaco's `Color` for conversions and CSS formatting.
 
+## Drop and paste edits
+
+Monaco's `DocumentDropEditProvider` and `DocumentPasteEditProvider` decide how dropped files or pasted text get inserted. A provider returns `DocumentDropOrPasteEdit`s, each with:
+
+- a title for the picker;
+- a hierarchical `kind`, such as `text.plain` or `uri.path.absolute`;
+- the text or snippet to insert;
+- additional edits;
+- `yield_to`, the edits it should rank below.
+
+The editor has built-in providers for plain text, paths and HTML. When other providers handle a paste, the first edit is applied. If there are alternatives, a button (or Cmd/Ctrl+.) switches between them. "Paste As..." (`paste_as`) lists every edit.
+
+```rust
+register_document_paste_edit_provider(cx, LanguageSelector::All, MyProvider);
+```
+
 ## Hover from decorations and markers
 
 The hover also shows `hover_message` text from [decorations](decorations.md) and messages from [diagnostics](diagnostics.md) under the mouse, with no provider needed.

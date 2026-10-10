@@ -42,7 +42,7 @@ Issues are linked by number.
 | Snippet syntax: parser, variables, transforms | `snippet` | ✅ | #55 |
 | Snippet sessions: tab stops, choices, nesting, completion integration | `snippet` | ✅ | #55 |
 | Drag and drop text, double-click block selection | `dnd`, `doubleClickSelectsBlock` | ✅ | #92 |
-| External drops, paste as | `dropOrPasteInto` | ❌ | #92 |
+| External drops, paste as | `dropOrPasteInto` | ✅ | #92 |
 | Find/replace: case, word, regex, in selection, replace all | `find` | ✅ | |
 | Find model (Monaco's `FindModel`), preserve case, case escapes in replace, loop, seed and auto find in selection options | `find` | ✅ | #104 |
 | Find controller commands, history, extra space on top, widget width and states, remembered toggles | `find` | ✅ | #104 |

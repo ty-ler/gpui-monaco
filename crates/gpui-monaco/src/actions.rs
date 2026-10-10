@@ -19,6 +19,8 @@ const SUGGEST: Option<&str> = Some("CodeEditor && suggest_widget_visible");
 const QUICK_INPUT: Option<&str> = Some("QuickInput > CodeEditor");
 /// The editor while a sticky line has keyboard focus.
 const STICKY_FOCUSED: Option<&str> = Some("CodeEditor && sticky_scroll_focused");
+/// While the drop or paste options button shows.
+const POST_EDIT_WIDGET: Option<&str> = Some("CodeEditor && post_edit_widget");
 /// The context menu.
 const CONTEXT_MENU: Option<&str> = Some("EditorContextMenu");
 /// The find widget's inputs.
@@ -384,6 +386,20 @@ actions!(
         /// Pastes the clipboard; text copied from as many cursors as there are now is
         /// distributed one piece per cursor (Monaco `editor.action.clipboardPasteAction`).
         Paste,
+        /// Picks how to paste the clipboard (Monaco `editor.action.pasteAs`).
+        PasteAs,
+        /// Pastes the clipboard as plain text (Monaco
+        /// `editor.action.pasteAsText`).
+        PasteAsText,
+        /// Picks another way to insert what was just pasted (Monaco
+        /// `editor.changePasteType`, Cmd/Ctrl+. after a paste).
+        ChangePasteType,
+        /// Picks another way to insert what was just dropped (Monaco
+        /// `editor.changeDropType`, Cmd/Ctrl+. after a drop).
+        ChangeDropType,
+        /// Hides the paste or drop options button (Monaco
+        /// `editor.hidePasteWidget`, `editor.hideDropWidget`, Escape).
+        HidePostEditWidget,
         /// Opens the platform's emoji and symbols picker.
         ShowCharacterPalette,
         /// Collapses the innermost expanded region at each cursor (Monaco `editor.fold`).
@@ -796,6 +812,9 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-shift-o", QuickOutline, ctx),
         KeyBinding::new("f1", QuickCommand, ctx),
         KeyBinding::new("shift-f10", ShowContextMenu, ctx),
+        // After QuickFix's binding, so they win while the button shows.
+        KeyBinding::new("secondary-.", ChangePasteType, POST_EDIT_WIDGET),
+        KeyBinding::new("escape", HidePostEditWidget, POST_EDIT_WIDGET),
         KeyBinding::new("down", SelectNextStickyScrollLine, STICKY_FOCUSED),
         KeyBinding::new("up", SelectPreviousStickyScrollLine, STICKY_FOCUSED),
         KeyBinding::new("enter", GoToFocusedStickyScrollLine, STICKY_FOCUSED),

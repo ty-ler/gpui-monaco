@@ -279,6 +279,8 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.formatDocument", "code_editor::FormatDocument", "Format Document", can_format),
     Builtin("editor.action.formatSelection", "code_editor::FormatSelection", "Format Selection", can_format_selection),
     Builtin("editor.action.rename", "code_editor::Rename", "Rename Symbol", can_rename),
+    Builtin("editor.action.pasteAs", "code_editor::PasteAs", "Paste As...", writable),
+    Builtin("editor.action.pasteAsText", "code_editor::PasteAsText", "Paste as Text", writable),
     Builtin("editor.action.quickFix", "code_editor::QuickFix", "Quick Fix...", can_code_action),
     Builtin("editor.action.refactor", "code_editor::Refactor", "Refactor...", can_code_action),
     Builtin("editor.action.sourceAction", "code_editor::SourceAction", "Source Action...", can_code_action),

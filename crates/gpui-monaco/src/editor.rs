@@ -145,6 +145,7 @@ pub struct CodeEditor {
     pub(crate) unusual_line_terminators_pending: bool,
     pub(crate) unicode_highlights: crate::unicode_highlighter::UnicodeHighlightState,
     pub(crate) dnd: crate::dnd::DragAndDrop,
+    pub(crate) drop_paste: crate::drop_paste::DropPasteState,
     pub(crate) theme: Arc<Theme>,
     pub(crate) scroll_top: Pixels,
     pub(crate) scroll_left: Pixels,
@@ -299,6 +300,7 @@ impl CodeEditor {
             unusual_line_terminators_pending: true,
             unicode_highlights: Default::default(),
             dnd: Default::default(),
+            drop_paste: Default::default(),
             theme: Arc::new(Theme::vs_dark()),
             scroll_top: px(0.),
             scroll_left: px(0.),
@@ -1656,7 +1658,18 @@ impl CodeEditor {
         self.paste_item(item, cx);
     }
 
+    /// The editor's own paste, when paste edit providers leave it to it.
+    pub(crate) fn paste_item_for_providers(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
+        self.paste_item_inner(item, cx);
+        self.trigger_inline_completions(cx);
+    }
+
     fn paste_item(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
+        // Monaco `CopyPasteController`: providers may handle it.
+        let data = crate::drop_paste::clipboard_data(&item);
+        if self.paste_with_providers(data, item.clone(), cx) {
+            return;
+        }
         self.paste_item_inner(item, cx);
         self.trigger_inline_completions(cx);
     }
@@ -2927,6 +2940,9 @@ impl Render for CodeEditor {
         if self.sticky.focused.is_some() {
             key_context.add("sticky_scroll_focused");
         }
+        if self.is_post_edit_widget_visible() {
+            key_context.add("post_edit_widget");
+        }
         if self.inline_suggestion_visible(cx) {
             key_context.add("inline_suggestion_visible");
             if self.cursor_before_ghost_text(cx) {
@@ -3492,6 +3508,40 @@ impl Render for CodeEditor {
             ))
             .on_action(
                 cx.listener(|this, _: &ToggleStickyScroll, _, cx| this.toggle_sticky_scroll(cx)),
+            )
+            .on_action(cx.listener(|this, _: &PasteAs, window, cx| this.paste_as(None, window, cx)))
+            .on_action(cx.listener(|this, _: &PasteAsText, window, cx| {
+                this.paste_as(Some("text.plain".into()), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ChangePasteType, window, cx| {
+                this.show_post_edit_selector(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ChangeDropType, window, cx| {
+                this.show_post_edit_selector(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &HidePostEditWidget, _, cx| {
+                this.clear_post_edit(cx);
+            }))
+            // Monaco `dropIntoEditor`: a caret follows dragged files, and
+            // dropping them runs the drop providers.
+            .on_drag_move::<gpui::ExternalPaths>(cx.listener(
+                |this, event: &gpui::DragMoveEvent<gpui::ExternalPaths>, window, cx| {
+                    let inside = event.bounds.contains(&event.event.position);
+                    let target = (inside && this.options.drop_into_editor.enabled)
+                        .then(|| this.position_for_point(event.event.position, window, cx));
+                    if this.dnd.target != target {
+                        this.dnd.target = target;
+                        cx.notify();
+                    }
+                },
+            ))
+            .on_drop(
+                cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                    this.dnd.target = None;
+                    let position = this.position_for_point(window.mouse_position(), window, cx);
+                    window.focus(&this.focus_handle, cx);
+                    this.drop_files(paths.paths(), position, cx);
+                }),
             )
             .on_action(|_: &FontZoomIn, _, cx| {
                 crate::set_editor_zoom_level(crate::editor_zoom_level(cx) + 1., cx)
