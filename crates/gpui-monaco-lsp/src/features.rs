@@ -24,6 +24,7 @@ use gpui_monaco::providers::{
     TypeDefinitionProvider, register_declaration_provider, register_implementation_provider,
     register_reference_provider, register_type_definition_provider,
 };
+use gpui_monaco::providers::{InlayHint, InlayHintsProvider, register_inlay_hints_provider};
 use gpui_monaco::providers::{
     RenameLocation, RenameProvider, WorkspaceEdit, register_rename_provider,
 };
@@ -188,6 +189,13 @@ impl LspFeatures {
         };
         if code_actions {
             registrations.push(register_code_action_provider(
+                cx,
+                selector.clone(),
+                self.clone(),
+            ));
+        }
+        if supported(capabilities.inlay_hint_provider.as_ref()) {
+            registrations.push(register_inlay_hints_provider(
                 cx,
                 selector.clone(),
                 self.clone(),
@@ -745,5 +753,31 @@ impl CodeActionProvider for LspFeatures {
         Some(cx.background_executor().spawn(async move {
             convert::code_action(lsp::CodeActionOrCommand::CodeAction(request.await?))
         }))
+    }
+}
+
+impl InlayHintsProvider for LspFeatures {
+    fn provide_inlay_hints(
+        &self,
+        context: &ProviderContext,
+        range: Range<PointUtf16>,
+        cx: &mut App,
+    ) -> Task<Result<Vec<InlayHint>>> {
+        let Some((connection, position)) = self.prepare(context, range.start, cx) else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let request = connection.request::<lsp::request::InlayHintRequest>(lsp::InlayHintParams {
+            text_document: position.text_document,
+            range: convert::lsp_range(&range),
+            work_done_progress_params: Default::default(),
+        });
+        cx.background_executor().spawn(async move {
+            Ok(request
+                .await?
+                .unwrap_or_default()
+                .into_iter()
+                .map(convert::inlay_hint)
+                .collect())
+        })
     }
 }

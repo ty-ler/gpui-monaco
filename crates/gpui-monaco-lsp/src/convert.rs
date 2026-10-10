@@ -5,7 +5,7 @@
 use std::ops::Range;
 
 use gpui::SharedString;
-use gpui_monaco::providers::{CodeAction, CodeActionKind, Command};
+use gpui_monaco::providers::{CodeAction, CodeActionKind, Command, InlayHint, InlayHintKind};
 use gpui_monaco::providers::{
     CompletionItem, CompletionItemKind, CompletionList, DocumentHighlight, DocumentHighlightKind,
     Hover, Location, MarkdownString, ParameterInformation, ParameterLabel, SignatureHelp,
@@ -485,6 +485,32 @@ pub fn code_action(action: lsp::CodeActionOrCommand) -> anyhow::Result<CodeActio
             data: Some(serde_json::to_value(&action)?),
         },
     })
+}
+
+/// An inlay hint; label parts are joined.
+pub fn inlay_hint(hint: lsp::InlayHint) -> InlayHint {
+    InlayHint {
+        position: point(hint.position),
+        label: match hint.label {
+            lsp::InlayHintLabel::String(label) => label.into(),
+            lsp::InlayHintLabel::LabelParts(parts) => parts
+                .into_iter()
+                .map(|part| part.value)
+                .collect::<String>()
+                .into(),
+        },
+        kind: hint.kind.and_then(|kind| match kind {
+            lsp::InlayHintKind::TYPE => Some(InlayHintKind::Type),
+            lsp::InlayHintKind::PARAMETER => Some(InlayHintKind::Parameter),
+            _ => None,
+        }),
+        tooltip: hint.tooltip.map(|tooltip| match tooltip {
+            lsp::InlayHintTooltip::String(text) => escape_markdown(&text).into(),
+            lsp::InlayHintTooltip::MarkupContent(content) => markup(content),
+        }),
+        padding_left: hint.padding_left.unwrap_or(false),
+        padding_right: hint.padding_right.unwrap_or(false),
+    }
 }
 
 #[cfg(test)]

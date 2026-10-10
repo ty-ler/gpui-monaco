@@ -170,6 +170,8 @@ pub struct CodeEditor {
     pub(crate) rename: crate::rename::RenameState,
     /// The lightbulb, the code action menu and requests.
     pub(crate) code_actions: crate::code_action::CodeActionState,
+    /// Inlay hints and their requests.
+    pub(crate) inlay: crate::inlay_hints::InlayHintState,
     /// This editor is a peek view's preview: F4 and unhandled Escape go to
     /// the editor around it.
     pub(crate) in_peek: bool,
@@ -242,6 +244,7 @@ impl CodeEditor {
             peek: Default::default(),
             rename: Default::default(),
             code_actions: Default::default(),
+            inlay: Default::default(),
             in_peek: false,
             refocus: false,
             format_task: None,
@@ -306,6 +309,7 @@ impl CodeEditor {
         self.cancel_rename(false, cx);
         self.hide_code_action_menu(cx);
         self.code_actions.lightbulb = None;
+        self.reset_inlay_hints(cx);
         self.close_marker_zone(cx);
         self.clear_definition_link(cx);
         self.detach_find_from_model(cx);
@@ -385,6 +389,7 @@ impl CodeEditor {
             .set_merge_overlapping(self.options.multi_cursor_merge_overlapping);
         self.bracket_colors = Default::default();
         self.refresh_bracket_colors(cx);
+        self.reset_inlay_hints(cx);
         cx.notify();
     }
 
@@ -646,12 +651,14 @@ impl CodeEditor {
                 ..
             } => {
                 let own = *source == Some(cx.entity_id());
+                // Monaco cancels the rename box when the text changes, and
+                // asks for inlay hints again.
+                self.cancel_rename(false, cx);
+                self.inlay_hints_after_edit(cx);
                 let latest = model.read(cx).snapshot();
                 if latest.version() == self.snapshot.version() {
                     return;
                 }
-                // Monaco cancels the rename box when the text changes.
-                self.cancel_rename(false, cx);
                 self.folds.prune(model.read(cx).buffer());
                 let restored = own
                     && matches!(kind, EditKind::Undo | EditKind::Redo)
@@ -716,6 +723,7 @@ impl CodeEditor {
             TextModelEvent::LanguageChanged => {
                 // Monaco closes the peek view.
                 self.close_peek(cx);
+                self.reset_inlay_hints(cx);
                 cx.notify();
             }
             TextModelEvent::MarkersChanged => {
@@ -2775,6 +2783,11 @@ impl Render for CodeEditor {
             )
             .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| this.go_to_definition(cx)))
             .on_action(cx.listener(|this, _: &ShowHover, _, cx| this.show_hover_at_cursor(cx)))
+            .on_modifiers_changed(cx.listener(
+                |this, event: &gpui::ModifiersChangedEvent, _, cx| {
+                    this.inlay_hints_modifiers(&event.modifiers, cx)
+                },
+            ))
             .on_action(cx.listener(|this, _: &Rename, _, cx| this.rename(cx)))
             .on_action(cx.listener(|this, _: &QuickFix, _, cx| this.quick_fix(cx)))
             .on_action(cx.listener(|this, _: &Refactor, _, cx| this.refactor(cx)))

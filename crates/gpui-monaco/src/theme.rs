@@ -69,6 +69,18 @@ pub struct EditorColors {
     pub message_background: Hsla,
     /// Their border (`inputValidation.infoBorder`).
     pub message_border: Hsla,
+    /// Inlay hint text (`editorInlayHint.foreground`).
+    pub inlay_hint_foreground: Hsla,
+    /// Inlay hint background (`editorInlayHint.background`).
+    pub inlay_hint_background: Hsla,
+    /// Type hints (`editorInlayHint.typeForeground`).
+    pub inlay_hint_type_foreground: Hsla,
+    /// `editorInlayHint.typeBackground`.
+    pub inlay_hint_type_background: Hsla,
+    /// Parameter hints (`editorInlayHint.parameterForeground`).
+    pub inlay_hint_parameter_foreground: Hsla,
+    /// `editorInlayHint.parameterBackground`.
+    pub inlay_hint_parameter_background: Hsla,
     /// The code action lightbulb (`editorLightBulb.foreground`).
     pub lightbulb_foreground: Hsla,
     /// The lightbulb when a preferred quick fix exists
@@ -182,6 +194,12 @@ impl EditorColors {
             symbol_highlight_background: c(rgba(0xea5c0055)),
             message_background: c(rgb(0x063b49)),
             message_border: c(rgb(0x007acc)),
+            inlay_hint_foreground: c(rgb(0x969696)),
+            inlay_hint_background: c(rgba(0x4d4d4d1a)),
+            inlay_hint_type_foreground: c(rgb(0x969696)),
+            inlay_hint_type_background: c(rgba(0x4d4d4d1a)),
+            inlay_hint_parameter_foreground: c(rgb(0x969696)),
+            inlay_hint_parameter_background: c(rgba(0x4d4d4d1a)),
             lightbulb_foreground: c(rgb(0xffcc00)),
             lightbulb_auto_fix_foreground: c(rgb(0x75beff)),
             peek_view_border: c(rgb(0x3794ff)),
@@ -254,6 +272,12 @@ impl EditorColors {
             symbol_highlight_background: c(rgba(0xea5c0055)),
             message_background: c(rgb(0xd6ecf2)),
             message_border: c(rgb(0x007acc)),
+            inlay_hint_foreground: c(rgb(0x969696)),
+            inlay_hint_background: c(rgba(0xc4c4c41a)),
+            inlay_hint_type_foreground: c(rgb(0x969696)),
+            inlay_hint_type_background: c(rgba(0xc4c4c41a)),
+            inlay_hint_parameter_foreground: c(rgb(0x969696)),
+            inlay_hint_parameter_background: c(rgba(0xc4c4c41a)),
             lightbulb_foreground: c(rgb(0xddb100)),
             lightbulb_auto_fix_foreground: c(rgb(0x007acc)),
             peek_view_border: c(rgb(0x1a85ff)),
@@ -356,6 +380,35 @@ impl EditorColors {
             "inputValidation.infoBackground",
         );
         set(&mut self.message_border, "inputValidation.infoBorder");
+        set(
+            &mut self.inlay_hint_foreground,
+            "editorInlayHint.foreground",
+        );
+        set(
+            &mut self.inlay_hint_background,
+            "editorInlayHint.background",
+        );
+        // The kind colors default to the general ones.
+        self.inlay_hint_type_foreground = self.inlay_hint_foreground;
+        self.inlay_hint_type_background = self.inlay_hint_background;
+        self.inlay_hint_parameter_foreground = self.inlay_hint_foreground;
+        self.inlay_hint_parameter_background = self.inlay_hint_background;
+        set(
+            &mut self.inlay_hint_type_foreground,
+            "editorInlayHint.typeForeground",
+        );
+        set(
+            &mut self.inlay_hint_type_background,
+            "editorInlayHint.typeBackground",
+        );
+        set(
+            &mut self.inlay_hint_parameter_foreground,
+            "editorInlayHint.parameterForeground",
+        );
+        set(
+            &mut self.inlay_hint_parameter_background,
+            "editorInlayHint.parameterBackground",
+        );
         set(&mut self.lightbulb_foreground, "editorLightBulb.foreground");
         set(
             &mut self.lightbulb_auto_fix_foreground,

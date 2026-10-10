@@ -182,6 +182,42 @@ pub enum CursorStyle {
     LineThin,
 }
 
+/// When inlay hints show (Monaco `inlayHints.enabled`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InlayHintsMode {
+    /// Always.
+    #[default]
+    On,
+    /// Hidden while Ctrl+Alt is held.
+    OnUnlessPressed,
+    /// Shown only while Ctrl+Alt is held.
+    OffUnlessPressed,
+    /// Never (nothing is requested).
+    Off,
+}
+
+/// Monaco `inlayHints`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlayHintsOptions {
+    /// `enabled`.
+    pub enabled: InlayHintsMode,
+    /// `padding`: pad the hint's background.
+    pub padding: bool,
+    /// `maximumLength`: hint text per line, beyond which it's cut with
+    /// `…`; 0 for no limit.
+    pub maximum_length: usize,
+}
+
+impl Default for InlayHintsOptions {
+    fn default() -> Self {
+        Self {
+            enabled: InlayHintsMode::On,
+            padding: false,
+            maximum_length: 43,
+        }
+    }
+}
+
 /// When the lightbulb asks for code actions (Monaco
 /// `ShowLightbulbIconMode`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -382,6 +418,8 @@ pub struct EditorOptions {
     pub goto_location: GotoLocationOptions,
     /// Monaco `lightbulb.enabled`.
     pub lightbulb: LightbulbMode,
+    /// Monaco `inlayHints`.
+    pub inlay_hints: InlayHintsOptions,
     /// Monaco `formatOnType`: format with the on-type formatter when one of
     /// its trigger characters is typed.
     pub format_on_type: bool,
@@ -493,6 +531,7 @@ impl Default for EditorOptions {
             quick_suggestions: true,
             goto_location: GotoLocationOptions::default(),
             lightbulb: LightbulbMode::OnCode,
+            inlay_hints: InlayHintsOptions::default(),
             format_on_type: false,
             format_on_paste: false,
             minimap: MinimapOptions::default(),
