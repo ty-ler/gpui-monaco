@@ -256,6 +256,10 @@ impl Playground {
             {
                 this.toggle_breakpoint(&editor, position.row, cx);
             }
+            // The editor asks the host to open links (Cmd/Ctrl+click).
+            if let CodeEditorEvent::OpenLink(url) = event {
+                cx.open_url(url);
+            }
             cx.notify();
         })
         .detach();

@@ -27,6 +27,8 @@ mod format;
 mod goto;
 mod hover;
 mod inlay_hints;
+pub mod link_computer;
+mod links;
 pub mod markdown;
 mod markers;
 mod message;

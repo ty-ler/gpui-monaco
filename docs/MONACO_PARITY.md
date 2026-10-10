@@ -108,7 +108,7 @@ Issues are linked by number.
 | Inlay hints (no label part navigation, tooltips, double-click edits or smaller font) | `inlayHints` | ✅ | #56 |
 | Code lens | `codelens` | ❌ | #96 |
 | Colors and color picker | `colorPicker` | ❌ | #97 |
-| Links | `links` | ❌ | #93 |
+| Links | `links` | ✅ | #93 |
 | Semantic tokens | `semanticTokens` | ❌ | #98 |
 | Inline completions (ghost text) | `inlineCompletions` | ❌ | #99 |
 | Document symbols | `documentSymbols` | ❌ | #100 |

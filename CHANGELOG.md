@@ -149,6 +149,12 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Links (#93):**
+  - Monaco's link computer (ported with its tests) underlines URLs.
+  - `LinkProvider` (with `resolve_link`) adds or overrides links; later providers win where links overlap.
+  - Holding Cmd/Ctrl over a link highlights it (`editorLink.activeForeground`), and the hover says "Follow link (cmd + click)".
+  - Cmd/Ctrl+click and `editor.action.openLink` emit `CodeEditorEvent::OpenLink` for the host to open, with `file://./` links made relative to the model.
+  - The `links` option.
 - **Rename (#56):** `RenameProvider` (with optional `resolve_rename_location`), F2 with Monaco's rename box, `WorkspaceEdit` and `CodeEditor::apply_workspace_edit`. The LSP bridge forwards `prepareRename` and `rename`.
 
 ### Changed

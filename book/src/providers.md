@@ -212,6 +212,23 @@ The editor shows them as injected text that moves with edits. As in Monaco:
 
 Unlike Monaco, hints use the editor's font size, and their label parts, tooltips and edits aren't interactive yet.
 
+## Links
+
+The editor finds URLs (`http`, `https` and `file`) itself, using Monaco's link computer, and underlines them. A `LinkProvider` adds other links, such as issue numbers. Where links overlap, the later provider's link wins over the built-in one.
+
+```rust,ignore
+impl LinkProvider for Issues {
+    fn provide_links(&self, context: &ProviderContext, cx: &mut App)
+        -> Task<anyhow::Result<Vec<DocumentLink>>> { /* … */ }
+
+    // Optional: fill in `url` when the link is followed.
+    fn resolve_link(&self, link: &DocumentLink, cx: &mut App)
+        -> Option<Task<anyhow::Result<DocumentLink>>> { None }
+}
+```
+
+Holding Cmd/Ctrl over a link highlights it. Cmd/Ctrl+click, or the `OpenLink` action, emits `CodeEditorEvent::OpenLink(url)`; the editor never opens anything itself. Links are recomputed a second after edits. Turn them off with the `links` option.
+
 ## Hover from decorations and markers
 
 The hover also shows `hover_message` text from [decorations](decorations.md) and messages from [diagnostics](diagnostics.md) under the mouse, with no provider needed.

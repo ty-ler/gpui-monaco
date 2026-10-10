@@ -48,6 +48,10 @@ pub enum CodeEditorEvent {
     Blurred,
     /// Go to definition led to another model: the host should open it.
     OpenLocation(crate::providers::Location),
+    /// A link was followed (Cmd/Ctrl+click or `editor.action.openLink`):
+    /// the host opens it. Relative `file://./` links are resolved against
+    /// the model's URI.
+    OpenLink(gpui::SharedString),
     /// A mouse button went down over the editor (Monaco `onMouseDown`).
     MouseDown(crate::mouse_target::EditorMouseEvent),
     /// A mouse button went up (Monaco `onMouseUp`).
@@ -155,6 +159,7 @@ pub struct CodeEditor {
     pub(crate) signature_help: crate::signature_help::SignatureHelpState,
     pub(crate) suggest: crate::completion::SuggestState,
     pub(crate) snippet: crate::snippet_session::SnippetState,
+    pub(crate) links: crate::links::LinksState,
     pub(crate) minimap_cache: crate::element::MinimapCache,
     pub(crate) minimap_hovered: bool,
     minimap_drag: Option<Pixels>,
@@ -287,6 +292,7 @@ impl CodeEditor {
             signature_help: Default::default(),
             suggest: Default::default(),
             snippet: Default::default(),
+            links: Default::default(),
             minimap_cache: Default::default(),
             minimap_hovered: false,
             minimap_drag: None,
@@ -317,6 +323,7 @@ impl CodeEditor {
         self.hide_hover(cx);
         self.hide_suggest(cx);
         self.cancel_snippet(false, cx);
+        self.clear_links(cx);
         self.hide_signature_help(cx);
         self.close_message(cx);
         self.close_peek(cx);
@@ -1920,8 +1927,9 @@ impl CodeEditor {
         }
 
         let position = self.position_for_point(event.position, window, cx);
+        // Monaco: Cmd/Ctrl+click follows a link, else a definition.
         if self.is_definition_modifier(&event.modifiers)
-            && self.follow_definition_link(position, cx)
+            && (self.follow_link_at(position, cx) || self.follow_definition_link(position, cx))
         {
             return;
         }
@@ -2101,7 +2109,9 @@ impl CodeEditor {
             });
             if !over_widget {
                 let position = self.text_position_under_mouse(event.position, window, cx);
-                if self.is_definition_modifier(&event.modifiers) {
+                let link_modifier = self.is_definition_modifier(&event.modifiers);
+                self.links_mouse_move(position, link_modifier, cx);
+                if link_modifier {
                     self.definition_mouse_move(position, cx);
                 } else if self.has_definition_link() {
                     self.clear_definition_link(cx);
@@ -2518,7 +2528,7 @@ impl Render for CodeEditor {
             .key_context(key_context)
             .track_focus(&self.focus_handle)
             .size_full()
-            .cursor(if self.has_definition_link() {
+            .cursor(if self.has_definition_link() || self.has_active_link() {
                 MouseCursor::PointingHand
             } else {
                 MouseCursor::IBeam
@@ -2962,6 +2972,7 @@ impl Render for CodeEditor {
             )
             .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| this.go_to_definition(cx)))
             .on_action(cx.listener(|this, _: &ShowHover, _, cx| this.show_hover_at_cursor(cx)))
+            .on_action(cx.listener(|this, _: &OpenLink, _, cx| this.open_link(cx)))
             .on_modifiers_changed(cx.listener(
                 |this, event: &gpui::ModifiersChangedEvent, _, cx| {
                     this.inlay_hints_modifiers(&event.modifiers, cx)

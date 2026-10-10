@@ -496,6 +496,8 @@ actions!(
         SelectLastSuggestion,
         /// Shows the hover for the cursor position (Monaco `editor.action.showHover`).
         ShowHover,
+        /// Opens the link at the cursor (Monaco `editor.action.openLink`).
+        OpenLink,
         /// Formats the document (Monaco `editor.action.formatDocument`).
         FormatDocument,
         /// Goes to the declaration (Monaco `editor.action.revealDeclaration`).
