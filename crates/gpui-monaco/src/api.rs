@@ -258,15 +258,20 @@ impl CodeEditor {
         self.prev_edit_kind = None;
     }
 
-    /// Runs the GPUI action named `name` (e.g. `"code_editor::CommentLine"`)
-    /// as if its key were pressed in this editor (Monaco `trigger`). Fails
-    /// for unknown names.
+    /// Runs the editor action with Monaco id `name` (e.g.
+    /// `"editor.action.commentLine"`, or one from
+    /// [`CodeEditor::add_action`]), or else the GPUI action named `name`
+    /// (e.g. `"code_editor::CommentLine"`), as if its key were pressed in
+    /// this editor (Monaco `trigger`). Fails for unknown names.
     pub fn trigger(
         &mut self,
         name: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
+        if self.run_action(name, window, cx) {
+            return Ok(());
+        }
         let action = cx.build_action(name, None)?;
         window.focus(&self.focus_handle, cx);
         window.dispatch_action(action, cx);

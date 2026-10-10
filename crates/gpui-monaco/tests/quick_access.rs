@@ -1,5 +1,5 @@
 //! Quick access (Monaco's standalone quick access): go to line, go to
-//! symbol and the help list.
+//! symbol, the command palette and the help list.
 
 use gpui::{AppContext as _, Entity, Focusable, TestAppContext, VisualTestContext};
 use gpui_monaco::text::PointUtf16;
@@ -132,6 +132,7 @@ fn symbols_by_category_and_help(cx: &mut TestAppContext) {
             ":: (Go to Offset...)",
             "@ (Go to Symbol...)",
             "@: (Go to Symbol by Category...)",
+            "> (Show And Run Commands)",
         ]
     );
     // Choosing one switches to it.
@@ -140,4 +141,104 @@ fn symbols_by_category_and_help(cx: &mut TestAppContext) {
         rows(&editor, cx),
         vec!["> Type a line number to go to (from 1 to 14)."]
     );
+}
+
+fn text(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> String {
+    editor.read_with(cx, |e, cx| e.model().read(cx).text())
+}
+
+/// The rows without their keybindings (they differ per platform).
+fn labels(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<String> {
+    rows(editor, cx)
+        .into_iter()
+        .map(|row| match row.find(" [") {
+            Some(ix) if !row.starts_with('[') => row[..ix].to_string(),
+            _ => row,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn command_palette_runs_actions_and_remembers_them(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(RUST, cx);
+    cx.simulate_keystrokes("f1");
+    assert!(open(&editor, cx));
+    let all = rows(&editor, cx);
+    // Alphabetical, with keybindings.
+    assert_eq!(labels(&editor, cx)[0], "> Add Cursor Above");
+    assert!(
+        all.iter().any(|row| row.starts_with("Fold All [")),
+        "{all:?}"
+    );
+
+    // Word starts match: "delete line" matches "Delete Duplicate Lines" too.
+    cx.simulate_input("delete line");
+    assert_eq!(
+        labels(&editor, cx),
+        vec!["> Delete Duplicate Lines", "Delete Line"]
+    );
+    cx.simulate_keystrokes("down enter");
+    cx.run_until_parked();
+    assert!(!open(&editor, cx));
+    assert!(text(&editor, cx).starts_with("    x: i32,\n"));
+
+    // Recently used comes first.
+    cx.simulate_keystrokes("f1");
+    let rows = labels(&editor, cx);
+    assert_eq!(
+        rows[..3],
+        ["[recently used]", "> Delete Line", "[other commands]"]
+    );
+    assert_eq!(rows[3], "Add Cursor Above");
+    cx.simulate_input("zzz");
+    assert_eq!(labels(&editor, cx), vec!["> No matching commands"]);
+    cx.simulate_keystrokes("escape");
+}
+
+#[gpui::test]
+fn host_actions_and_preconditions(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(RUST, cx);
+    editor.update(cx, |editor, cx| {
+        editor.add_action(
+            gpui_monaco::EditorActionDescriptor::new("my.hello", "Say Hello", |editor, _, cx| {
+                editor
+                    .model()
+                    .update(cx, |model, cx| model.set_value("hello", cx));
+            })
+            .alias("Greet")
+            .keybinding("ctrl-alt-h"),
+            cx,
+        );
+        editor.update_options(
+            gpui_monaco::options::EditorOptions {
+                read_only: true,
+                ..editor.options().clone()
+            },
+            cx,
+        );
+    });
+    cx.simulate_keystrokes("f1");
+    cx.simulate_input("greet");
+    assert_eq!(labels(&editor, cx), vec!["> Say Hello"]);
+    // Read-only editors don't offer editing actions.
+    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("f1");
+    cx.simulate_input("delete line");
+    assert_eq!(labels(&editor, cx), vec!["> No matching commands"]);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    // Its keybinding runs it.
+    cx.simulate_keystrokes("ctrl-alt-h");
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "hello");
+    editor.update(cx, |editor, _| assert!(editor.remove_action("my.hello")));
+    let ids: Vec<_> = editor.read_with(cx, |e, cx| {
+        e.supported_actions(cx)
+            .into_iter()
+            .map(|a| a.id.to_string())
+            .collect()
+    });
+    assert!(!ids.contains(&"my.hello".to_string()));
+    assert!(ids.contains(&"editor.action.quickCommand".to_string()));
+    assert!(!ids.contains(&"editor.action.formatDocument".to_string()));
 }

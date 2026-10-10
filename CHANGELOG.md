@@ -149,6 +149,12 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Command palette (#100, part 3):** F1 opens quick access with `>` and lists the editor's actions with Monaco's labels and their keybindings.
+  - It matches word starts, prefixes and substrings (Monaco's `matchesWords` filter), or the exact id.
+  - Recently used actions come first ("recently used" / "other commands"); otherwise the list is alphabetical.
+  - Actions whose precondition fails are hidden: editing actions in read-only editors, and language features without a provider.
+  - New: `CodeEditor::add_action(EditorActionDescriptor)` (Monaco `addAction`, with alias, keybindings and precondition), `remove_action`, `supported_actions`, `run_action`, and the `RunAction { id }` and `QuickCommand` actions.
+  - `trigger` also accepts Monaco ids.
 - **Quick access (#100, part 2):** Monaco's standalone quick access in a quick input widget at the top of the editor.
   - Go to line and column with Ctrl+G (`:line[:,#]col`, negative lines from the end, visible columns) and go to offset (`::`). Both preview by revealing and highlighting the line.
   - Go to symbol with Cmd/Ctrl+Shift+O (`@`). It fuzzy-matches the name, with extra words matching the container. `@:` groups by kind. The symbol around the cursor starts active, and the active symbol is previewed.
