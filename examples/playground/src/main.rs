@@ -651,7 +651,7 @@ fn main() {
                         ..Default::default()
                     },
                     |window, cx| {
-                        cx.new(|cx| {
+                        let diff = cx.new(|cx| {
                             let mut diff =
                                 gpui_monaco::DiffEditor::new(original, modified, window, cx);
                             // `PLAYGROUND_DIFF_INLINE=1` shows the inline view.
@@ -672,7 +672,10 @@ fn main() {
                                 diff.update_options(options, cx);
                             }
                             diff
-                        })
+                        });
+                        // Typing goes to the modified side.
+                        window.focus(&diff.read(cx).focus_handle(cx), cx);
+                        diff
                     },
                 )
                 .expect("failed to open window");

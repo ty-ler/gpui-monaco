@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Revert buttons (#52, part 5):** the diff editor's gutter menu (Monaco `renderGutterMenu`, on by default when the modified side is editable) is a 35px column beside the modified editor.
+  - **Buttons:** "Revert Block" (`→`, or `↺` inline) for the change at the cursor, and for every change while the gutter is hovered. With text selected, "Revert Selection" reverts only the selected character changes.
+  - **API:** `revert`, `revert_range_mappings` and `revert_focused_range_mappings`, and the `Revert` action (Monaco `diffEditor.revert`). Each revert is one undo step.
+  - **Theme colors:** `editorGutter.itemBackground`, `editorGutter.itemGlyphForeground` and `menu.separatorBackground`.
 - **Hide unchanged regions (#52, part 4):** `DiffEditorOptions::hide_unchanged_regions` (Monaco `hideUnchangedRegions`) collapses long runs of unchanged lines into "N hidden lines" bars, keeping `context_line_count` lines around each change.
   - **Revealing:** a bar's top or bottom edge reveals `reveal_line_count` more lines, and its unfold button or a double click shows them all. Moving the cursor into hidden lines reveals them, and revealed lines stay revealed when the diff updates.
   - **Commands:** `collapse_all_unchanged_regions` and `show_all_unchanged_regions` (actions `CollapseAllUnchangedRegions` and `ShowAllUnchangedRegions`).

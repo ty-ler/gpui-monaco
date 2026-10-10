@@ -1,6 +1,6 @@
 //! The side-by-side diff editor (Monaco `DiffEditorWidget`).
 
-use gpui::{AppContext, Entity, TestAppContext, VisualTestContext, point, px};
+use gpui::{AppContext, Entity, Focusable, TestAppContext, VisualTestContext, point, px};
 use gpui_monaco::text::PointUtf16;
 use gpui_monaco::{DiffEditor, TextModel};
 
@@ -239,4 +239,81 @@ fn identical_models_hide_nothing(cx: &mut TestAppContext) {
     let (diff, cx) = setup(&text, &text, cx);
     hide_unchanged(&diff, cx);
     assert!(diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests().is_empty()));
+}
+
+fn modified_text(diff: &Entity<DiffEditor>, cx: &mut VisualTestContext) -> String {
+    diff.read_with(cx, |d, cx| {
+        d.modified_editor().read(cx).model().read(cx).text()
+    })
+}
+
+fn recompute(cx: &mut VisualTestContext) {
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(300));
+    paint(cx);
+}
+
+#[gpui::test]
+fn reverting_blocks(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb\nc\nd", "a\nx\ny\nb\nc", cx);
+    // Revert the insertion of x and y.
+    let first = diff.read_with(cx, |d, _| d.diff().unwrap().changes[0].line_range_mapping());
+    diff.update(cx, |d, cx| d.revert(&first, cx));
+    assert_eq!(modified_text(&diff, cx), "a\nb\nc");
+    // Reverting with a stale diff does nothing.
+    let deletion = diff.read_with(cx, |d, _| d.diff().unwrap().changes[1].line_range_mapping());
+    diff.update(cx, |d, cx| d.revert(&deletion, cx));
+    assert_eq!(modified_text(&diff, cx), "a\nb\nc");
+    recompute(cx);
+    // Then the deletion of `d` at the end.
+    let deletion = diff.read_with(cx, |d, _| d.diff().unwrap().changes[0].line_range_mapping());
+    diff.update(cx, |d, cx| d.revert(&deletion, cx));
+    assert_eq!(modified_text(&diff, cx), "a\nb\nc\nd");
+    // And an insertion at the end.
+    model_edit_end(&diff, "\nz", cx);
+    recompute(cx);
+    let insertion = diff.read_with(cx, |d, _| d.diff().unwrap().changes[0].line_range_mapping());
+    diff.update(cx, |d, cx| d.revert(&insertion, cx));
+    assert_eq!(modified_text(&diff, cx), "a\nb\nc\nd");
+    // One undo step each.
+    let model = diff.read_with(cx, |d, cx| d.modified_editor().read(cx).model().clone());
+    model.update(cx, |m, cx| m.undo(None, cx));
+    assert_eq!(modified_text(&diff, cx), "a\nb\nc\nd\nz");
+}
+
+fn model_edit_end(diff: &Entity<DiffEditor>, text: &str, cx: &mut VisualTestContext) {
+    let model = diff.read_with(cx, |d, cx| d.modified_editor().read(cx).model().clone());
+    model.update(cx, |m, cx| {
+        let len = m.text().len();
+        m.edit([(len..len, text)], cx).unwrap();
+    });
+}
+
+#[gpui::test]
+fn reverting_the_selection(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("one two three four\n", "one TWO three FOUR\n", cx);
+    let inner = diff.read_with(cx, |d, _| {
+        d.diff().unwrap().changes[0].inner_changes.clone()
+    });
+    assert_eq!(inner.len(), 2);
+    // Only the first character change.
+    diff.update(cx, |d, cx| d.revert_range_mappings(&inner[..1], cx));
+    assert_eq!(modified_text(&diff, cx), "one two three FOUR\n");
+}
+
+#[gpui::test]
+fn the_revert_action_reverts_changes_at_the_cursor(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb\nc\nd\ne", "a\nB\nc\nD\ne", cx);
+    let modified = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    cx.update(|window, cx| window.focus(&modified.read(cx).focus_handle(cx), cx));
+    modified.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                3, 0,
+            ))],
+            cx,
+        )
+    });
+    cx.dispatch_action(gpui_monaco::diff_editor::Revert);
+    assert_eq!(modified_text(&diff, cx), "a\nB\nc\nd\ne");
 }
