@@ -195,11 +195,11 @@ impl UnchangedRegion {
         self.set_state(top, bottom);
     }
 
-    fn max_visible_top(&self) -> usize {
+    pub fn max_visible_top(&self) -> usize {
         self.line_count - self.visible_bottom
     }
 
-    fn max_visible_bottom(&self) -> usize {
+    pub fn max_visible_bottom(&self) -> usize {
         self.line_count - self.visible_top
     }
 
