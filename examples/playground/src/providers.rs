@@ -438,6 +438,48 @@ impl OnTypeFormattingProvider for DemoFormatter {
     }
 }
 
+/// "N references" above each `fn`, counted when the lens scrolls into view.
+struct DemoCodeLens;
+impl CodeLensProvider for DemoCodeLens {
+    fn provide_code_lenses(
+        &self,
+        context: &ProviderContext,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<CodeLens>>> {
+        let rows = context.snapshot.rope().max_point().row + 1;
+        let lenses = (0..rows)
+            .filter_map(|row| {
+                let line = context.snapshot.line(row);
+                let column = line.find("fn ")? as u32;
+                Some(CodeLens {
+                    range: PointUtf16::new(row, column + 3)..PointUtf16::new(row, column + 3),
+                    command: None,
+                })
+            })
+            .collect();
+        Task::ready(Ok(lenses))
+    }
+
+    fn resolve_code_lens(
+        &self,
+        context: &ProviderContext,
+        lens: &CodeLens,
+        _: &mut App,
+    ) -> Option<Task<anyhow::Result<CodeLens>>> {
+        let name = word_at(context, lens.range.start);
+        let text = context.snapshot.rope().to_string();
+        let count = text.matches(name.as_str()).count().saturating_sub(1);
+        Some(Task::ready(Ok(CodeLens {
+            command: Some(Command {
+                id: "playground.references".into(),
+                title: format!("{count} reference{}", if count == 1 { "" } else { "s" }).into(),
+                arguments: vec![name.into()],
+            }),
+            ..lens.clone()
+        })))
+    }
+}
+
 /// Ghost text completing a few lines from what's typed.
 struct DemoInlineCompletions;
 impl InlineCompletionsProvider for DemoInlineCompletions {
@@ -478,6 +520,10 @@ impl InlineCompletionsProvider for DemoInlineCompletions {
 }
 
 pub fn register(cx: &mut App) {
+    register_code_lens_provider(cx, LanguageSelector::All, DemoCodeLens);
+    gpui_monaco::register_command(cx, "playground.references", |args, _| {
+        eprintln!("references to {args:?}");
+    });
     register_inline_completions_provider(cx, LanguageSelector::All, DemoInlineCompletions);
     register_document_formatting_provider(cx, LanguageSelector::All, DemoFormatter);
     register_document_range_formatting_provider(cx, LanguageSelector::All, DemoFormatter);

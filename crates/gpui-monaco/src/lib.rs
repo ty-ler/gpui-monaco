@@ -12,6 +12,7 @@ mod api;
 mod bracket_colors;
 mod bracket_matching;
 pub mod code_action;
+mod code_lens;
 mod commands;
 mod completion;
 pub mod cursor;

@@ -149,6 +149,11 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Code lens (#96):** ported from Monaco's `CodeLensContribution`.
+  - A `CodeLensProvider` (with `resolve_code_lens`) adds commands above lines, shown in view zones and grouped per line with ` | `.
+  - Lenses are requested after edits with Monaco's debounce (at least 250ms) and resolved when they scroll into view.
+  - Clicking runs the command through the command registry, or emits the new `CodeEditorEvent::ExecuteCommand` when nothing handles it.
+  - Options: `code_lens`, `code_lens_font_family` and `code_lens_font_size`. Theme color: `editorCodeLens.foreground`.
 - **Linked editing (#101):** ported from Monaco's `LinkedEditingContribution`.
   - With `linked_editing` on, typing in a linked range, such as an HTML start tag's name, is mirrored to the others in the same undo step.
   - A `LinkedEditingRangeProvider` supplies the ranges; without one, HTML tag pairs come from the syntax tree.
@@ -209,6 +214,7 @@ These are the small correctness follow-ups from #76:
 Also fixed:
 
 - **Undo:** `text::Buffer::set_last_transaction_metadata` sets the cursor state of the open transaction, if there is one, instead of the previous undo step.
+- **View zones:** many zones (for example thousands of code lenses) no longer slow down every frame. Zone positions are found by binary search, only zones on screen are rendered, and zone anchors are re-based as they're resolved.
 
 ## [0.1.0] - 2026-10-09
 

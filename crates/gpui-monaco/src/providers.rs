@@ -679,6 +679,41 @@ pub trait InlayHintsProvider: 'static {
     ) -> Task<anyhow::Result<Vec<InlayHint>>>;
 }
 
+// ----- code lens -----------------------------------------------------------------
+
+/// A command shown above a line (Monaco `CodeLens`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CodeLens {
+    /// The range it's about; it shows above its first line.
+    pub range: Range<PointUtf16>,
+    /// What it shows and runs; `None` until resolved.
+    pub command: Option<Command>,
+}
+
+/// Supplies code lenses (Monaco `CodeLensProvider`): clickable commands
+/// above lines, such as "3 references".
+///
+/// Register with [`register_code_lens_provider`].
+pub trait CodeLensProvider: 'static {
+    /// The document's lenses.
+    fn provide_code_lenses(
+        &self,
+        context: &ProviderContext,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<CodeLens>>>;
+
+    /// Fills in the command of a lens returned without one, when it
+    /// scrolls into view.
+    fn resolve_code_lens(
+        &self,
+        _context: &ProviderContext,
+        _lens: &CodeLens,
+        _cx: &mut App,
+    ) -> Option<Task<anyhow::Result<CodeLens>>> {
+        None
+    }
+}
+
 // ----- linked editing ------------------------------------------------------------
 
 /// Ranges edited together (Monaco `LinkedEditingRanges`).
@@ -1190,6 +1225,7 @@ struct LanguageFeatures {
     semantic_tokens: Vec<Entry<dyn DocumentSemanticTokensProvider>>,
     inline_completions: Vec<Entry<dyn InlineCompletionsProvider>>,
     linked_editing: Vec<Entry<dyn LinkedEditingRangeProvider>>,
+    code_lens: Vec<Entry<dyn CodeLensProvider>>,
     range_semantic_tokens: Vec<Entry<dyn DocumentRangeSemanticTokensProvider>>,
     folding: Vec<Entry<dyn FoldingRangeProvider>>,
     selection_range: Vec<Entry<dyn SelectionRangeProvider>>,
@@ -1281,6 +1317,13 @@ register_fn!(
     register_folding_range_provider,
     folding,
     FoldingRangeProvider
+);
+register_fn!(
+    /// Registers a code lens provider for the models `selector` matches
+    /// (Monaco `registerCodeLensProvider`). Lenses from all are shown.
+    register_code_lens_provider,
+    code_lens,
+    CodeLensProvider
 );
 register_fn!(
     /// Registers a linked editing range provider for the models `selector`
@@ -1410,6 +1453,7 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.semantic_tokens.retain(|e| e.id != registration);
     features.inline_completions.retain(|e| e.id != registration);
     features.linked_editing.retain(|e| e.id != registration);
+    features.code_lens.retain(|e| e.id != registration);
     features
         .range_semantic_tokens
         .retain(|e| e.id != registration);
@@ -1571,6 +1615,14 @@ pub fn code_action_providers(
 ) -> Vec<Arc<dyn CodeActionProvider>> {
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.code_action, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered code lens providers whose selector matches
+/// `language_id`, in registration order.
+pub fn code_lens_providers(cx: &App, language_id: Option<&str>) -> Vec<Arc<dyn CodeLensProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.code_lens, language_id))
         .unwrap_or_default()
 }
 
