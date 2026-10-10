@@ -149,6 +149,9 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Minimap section headers (#88, part 4):** labels in the minimap for `#region` markers (from the language's folding markers) and `MARK:` comments, as in Monaco.
+  - **Options:** `MinimapOptions::show_region_section_headers`, `show_mark_section_headers`, `mark_section_header_regex` (`label` and `separator` groups), `section_header_font_size` and `section_header_letter_spacing`.
+  - **Behavior:** a leading `-` draws a separator line, long labels are shortened in the middle, and mark headers only count inside comments. Headers are found in the background, 250ms after edits.
 - **Minimap options (#88, part 3):** `MinimapOptions::side` (left or right), `render_characters` (characters or blocks) and `size`.
   - **Sizes:** `Proportional`, `Fill` or `Fit`, following Monaco's layout computation. Documents longer than the editor's height are sampled.
   - **Rendering:** the minimap is now drawn into an image in the background, as Monaco draws into a canvas. Painting it is one image instead of thousands of quads, and typing got faster.

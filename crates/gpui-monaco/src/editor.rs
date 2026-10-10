@@ -172,6 +172,7 @@ pub struct CodeEditor {
     /// Actions from [`CodeEditor::add_action`].
     pub(crate) sticky: crate::sticky_model::StickyModelState,
     pub(crate) colors: crate::color_detector::ColorDetectorState,
+    pub(crate) section_headers: crate::section_headers::SectionHeaderState,
     pub(crate) color_picker: crate::color_picker::ColorPickerState,
     pub(crate) context_menu: crate::context_menu::ContextMenuState,
     pub(crate) added_actions: Vec<crate::editor_actions::EditorActionDescriptor>,
@@ -331,6 +332,7 @@ impl CodeEditor {
             added_actions: Vec::new(),
             sticky: Default::default(),
             colors: Default::default(),
+            section_headers: Default::default(),
             color_picker: Default::default(),
             context_menu: Default::default(),
             minimap_cache: Default::default(),
