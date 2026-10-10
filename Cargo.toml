@@ -24,7 +24,6 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ty-ler/gpui-monaco"
 publish = true
-homepage = "https://github.com/ty-ler/gpui-monaco"
 keywords = ["gpui", "editor", "monaco", "code-editor", "text-editor"]
 categories = ["gui", "text-editors"]
 
@@ -51,7 +50,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 streaming-iterator = "0.1"
 tree-sitter = "0.27"
-smallvec = { version = "1.13", features = ["union", "const_generics"] }
 unicode-segmentation = "1.12"
 
 [workspace.lints.rust]
