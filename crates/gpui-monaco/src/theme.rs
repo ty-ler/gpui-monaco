@@ -72,6 +72,13 @@ pub struct EditorColors {
     /// Unchanged lines that can be hidden
     /// (`diffEditor.unchangedCodeBackground`).
     pub diff_unchanged_code_background: Hsla,
+    /// Gutter toolbars, like the diff editor's revert buttons
+    /// (`editorGutter.itemBackground`).
+    pub gutter_item_background: Hsla,
+    /// Their icons (`editorGutter.itemGlyphForeground`).
+    pub gutter_item_glyph_foreground: Hsla,
+    /// Separators in menus and toolbars (`menu.separatorBackground`).
+    pub menu_separator_background: Hsla,
     /// Selections in an unfocused editor (`editor.inactiveSelectionBackground`).
     pub inactive_selection_background: Hsla,
     /// The cursor (`editorCursor.foreground`).
@@ -306,6 +313,9 @@ impl EditorColors {
             diff_unchanged_region_foreground: c(rgb(0xcccccc)),
             diff_unchanged_region_shadow: c(rgba(0x000000ff)),
             diff_unchanged_code_background: c(rgba(0x74747429)),
+            gutter_item_background: c(rgb(0x37373d)),
+            gutter_item_glyph_foreground: c(rgb(0xd4d4d4)),
+            menu_separator_background: c(rgb(0x606060)),
             inactive_selection_background: c(rgb(0x3a3d41)),
             cursor: c(rgb(0xaeafad)),
             gutter_background: c(rgb(0x1e1e1e)),
@@ -432,6 +442,9 @@ impl EditorColors {
             diff_unchanged_region_foreground: c(rgb(0x616161)),
             diff_unchanged_region_shadow: c(rgba(0x737373bf)),
             diff_unchanged_code_background: c(rgba(0xb8b8b829)),
+            gutter_item_background: c(rgb(0xd4d7e9)),
+            gutter_item_glyph_foreground: c(rgb(0x000000)),
+            menu_separator_background: c(rgb(0xd4d4d4)),
             inactive_selection_background: c(rgb(0xe5ebf1)),
             cursor: c(rgb(0x000000)),
             gutter_background: c(rgb(0xfffffe)),
@@ -567,6 +580,9 @@ impl EditorColors {
             diff_unchanged_region_foreground: c(rgb(0xffffff)),
             diff_unchanged_region_shadow: c(rgba(0x000000ff)),
             diff_unchanged_code_background: c(rgba(0x00000000)),
+            gutter_item_background: c(rgb(0xffffff)),
+            gutter_item_glyph_foreground: c(rgb(0x000000)),
+            menu_separator_background: c(rgb(0x6fc3df)),
             inactive_selection_background: c(rgba(0xf3f518b3)),
             cursor: c(rgb(0xffffff)),
             gutter_background: c(rgb(0x000000)),
@@ -709,6 +725,9 @@ impl EditorColors {
             diff_unchanged_region_foreground: c(rgb(0x292929)),
             diff_unchanged_region_shadow: c(rgba(0x737373bf)),
             diff_unchanged_code_background: c(rgba(0x00000000)),
+            gutter_item_background: c(rgb(0x000000)),
+            gutter_item_glyph_foreground: c(rgb(0xffffff)),
+            menu_separator_background: c(rgb(0x0f4a85)),
             inactive_selection_background: c(rgba(0x0f4a8580)),
             cursor: c(rgb(0x0f4a85)),
             gutter_background: c(rgb(0xffffff)),
@@ -876,6 +895,18 @@ impl EditorColors {
         set(
             &mut self.diff_unchanged_code_background,
             "diffEditor.unchangedCodeBackground",
+        );
+        set(
+            &mut self.gutter_item_background,
+            "editorGutter.itemBackground",
+        );
+        set(
+            &mut self.gutter_item_glyph_foreground,
+            "editorGutter.itemGlyphForeground",
+        );
+        set(
+            &mut self.menu_separator_background,
+            "menu.separatorBackground",
         );
         if let Some(color) = get("editor.selectionForeground") {
             self.selection_foreground = Some(color);
