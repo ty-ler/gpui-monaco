@@ -198,6 +198,8 @@ pub struct CodeEditor {
     pub(crate) minimap_hovered: bool,
     minimap_drag: Option<Pixels>,
     fold_task: Option<Task<()>>,
+    /// Rows hidden by [`CodeEditor::set_hidden_areas`], besides folds.
+    hidden_areas: Vec<Range<u32>>,
     /// The version `fold_task` was started for.
     fold_requested: Option<text::Version>,
     /// A background fold computation is running (dropping `fold_task`
@@ -378,6 +380,7 @@ impl CodeEditor {
             minimap_drag: None,
             fold_task: None,
             fold_requested: None,
+            hidden_areas: Vec::new(),
             fold_computing: false,
             fold_rerun: false,
             _blink_task: None,
@@ -442,6 +445,7 @@ impl CodeEditor {
         self.folds = FoldState::default();
         self.fold_task = None;
         self.fold_requested = None;
+        self.hidden_areas.clear();
         self.fold_computing = false;
         self.fold_rerun = false;
         self.model = model;
@@ -575,6 +579,20 @@ impl CodeEditor {
             .map_or(point(Pixels::MAX, Pixels::MAX), |layout| layout.max_scroll);
         self.scroll_top = self.scroll_top.clamp(px(0.), max.y);
         self.scroll_left = self.scroll_left.clamp(px(0.), max.x);
+    }
+
+    /// Hides whole rows besides folds (Monaco `setHiddenAreas`): each range
+    /// is 0-based rows, end exclusive. Replaces the previous areas.
+    pub fn set_hidden_areas(&mut self, areas: Vec<Range<u32>>, cx: &mut Context<Self>) {
+        if self.hidden_areas != areas {
+            self.hidden_areas = areas;
+            cx.notify();
+        }
+    }
+
+    /// The rows hidden by [`CodeEditor::set_hidden_areas`].
+    pub fn hidden_areas(&self) -> &[Range<u32>] {
+        &self.hidden_areas
     }
 
     /// Inserts a host view between lines (Monaco `changeViewZones` +
@@ -1821,11 +1839,18 @@ impl CodeEditor {
         if self.view_lines.wrap() != wrap.as_ref() {
             Arc::make_mut(&mut self.view_lines).set_wrap(wrap);
         }
-        let hidden = if self.options.folding {
-            normalize_hidden(self.folds.hidden_rows(self.model.read(cx).buffer()))
+        let mut hidden = if self.options.folding {
+            self.folds.hidden_rows(self.model.read(cx).buffer())
         } else {
             Vec::new()
         };
+        let row_count = self.snapshot.rope().line_count();
+        hidden.extend(
+            self.hidden_areas
+                .iter()
+                .map(|r| r.start.min(row_count)..r.end.min(row_count)),
+        );
+        let hidden = normalize_hidden(hidden);
         if self.view_lines.hidden() != hidden {
             Arc::make_mut(&mut self.view_lines).set_hidden(hidden);
         }

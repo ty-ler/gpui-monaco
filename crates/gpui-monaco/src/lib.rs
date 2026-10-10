@@ -28,7 +28,7 @@ pub mod decorations;
 mod definition;
 pub mod diff;
 pub mod diff_editor;
-pub use diff_editor::{DiffEditor, DiffEditorEvent, DiffEditorOptions};
+pub use diff_editor::{DiffEditor, DiffEditorEvent, DiffEditorOptions, HideUnchangedRegions};
 mod dnd;
 mod drop_paste;
 mod editor;

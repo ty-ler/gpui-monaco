@@ -662,6 +662,15 @@ fn main() {
                                 options.render_side_by_side = false;
                                 diff.update_options(options, cx);
                             }
+                            // `PLAYGROUND_DIFF_HIDE_UNCHANGED=1` collapses
+                            // unchanged regions.
+                            if std::env::var_os("PLAYGROUND_DIFF_HIDE_UNCHANGED")
+                                .is_some_and(|v| !v.is_empty())
+                            {
+                                let mut options = diff.options().clone();
+                                options.hide_unchanged_regions.enabled = true;
+                                diff.update_options(options, cx);
+                            }
                             diff
                         })
                     },
