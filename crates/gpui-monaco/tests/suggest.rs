@@ -562,3 +562,126 @@ fn additional_edits_after_a_change_are_dropped(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(text(&editor, cx), "item end");
 }
+
+fn functions(labels: &'static [&'static str]) -> impl Fn(PointUtf16) -> Vec<CompletionItem> {
+    move |_| {
+        labels
+            .iter()
+            .map(|label| CompletionItem::new(*label, CompletionItemKind::Function))
+            .collect()
+    }
+}
+
+#[gpui::test]
+fn tab_completion_inserts_the_best_and_cycles(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "",
+        |o| {
+            o.tab_completion = gpui_monaco::options::TabCompletion::On;
+            o.quick_suggestions = QuickSuggestions::OFF;
+        },
+        cx,
+    );
+    provide(cx, functions(&["print", "println", "private"]));
+    cx.simulate_input("pri");
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "print");
+    assert!(!visible(&editor, cx), "no widget");
+    // Tab and Shift+Tab cycle through the others.
+    cx.simulate_keystrokes("tab");
+    assert_eq!(text(&editor, cx), "println");
+    cx.simulate_keystrokes("tab");
+    assert_eq!(text(&editor, cx), "private");
+    cx.simulate_keystrokes("shift-tab shift-tab");
+    assert_eq!(text(&editor, cx), "print");
+    // Moving the cursor ends cycling: Tab completes again, and with the word
+    // already complete it types a tab.
+    cx.simulate_keystrokes("left right tab");
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "print   ");
+    // Undo restores what was typed.
+    cx.simulate_keystrokes("cmd-z cmd-z");
+    assert_eq!(text(&editor, cx), "pri");
+}
+
+#[gpui::test]
+fn tab_completion_off_by_default(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    provide(cx, functions(&["print"]));
+    cx.simulate_input("pri");
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "pri ");
+}
+
+#[gpui::test]
+fn locality_bonus_prefers_words_in_the_block(cx: &mut TestAppContext) {
+    let source = "fn a() {\n    alpha\n}\nfn b() {\n    beta;\n    \n}\n";
+    let (editor, cx) = setup(source, |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    provide(cx, |_| {
+        ["alpha", "beta"]
+            .into_iter()
+            .map(|label| CompletionItem::new(label, CompletionItemKind::Variable))
+            .collect()
+    });
+    move_to(&editor, cx, 5, 4);
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert_eq!(labels(&editor, cx).unwrap(), vec!["alpha", "beta"]);
+    cx.simulate_keystrokes("escape");
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.suggest.locality_bonus = true;
+        e.update_options(options, cx);
+    });
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert_eq!(labels(&editor, cx).unwrap(), vec!["beta", "alpha"]);
+}
+
+#[gpui::test]
+fn explicit_sessions_freeze_and_automatic_ones_close(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |_| {}, cx);
+    provide(cx, functions(&["print", "process"]));
+    // Typing something that matches nothing closes an automatic session...
+    cx.simulate_input("pr");
+    settle(cx);
+    assert!(visible(&editor, cx));
+    cx.simulate_input("z");
+    assert!(!visible(&editor, cx));
+    // ...but keeps the last matches of one requested with Ctrl+Space.
+    cx.simulate_input(" pr");
+    settle(cx);
+    cx.simulate_keystrokes("escape ctrl-space");
+    cx.run_until_parked();
+    cx.simulate_input("z");
+    assert_eq!(labels(&editor, cx).unwrap(), vec!["print", "process"]);
+    // Leaving the word closes it.
+    cx.simulate_input(" ");
+    assert!(!visible(&editor, cx));
+}
+
+#[gpui::test]
+fn deleting_before_the_request_asks_again(cx: &mut TestAppContext) {
+    let calls = Rc::new(Cell::new(0));
+    let (editor, cx) = setup("", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    let counter = calls.clone();
+    provide(cx, move |_| {
+        counter.set(counter.get() + 1);
+        vec![CompletionItem::new("print", CompletionItemKind::Function)]
+    });
+    cx.simulate_input("pri");
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert_eq!(calls.get(), 1);
+    // Still on a word: asks again.
+    cx.simulate_keystrokes("backspace");
+    cx.run_until_parked();
+    assert_eq!(calls.get(), 2);
+    assert!(visible(&editor, cx));
+    // Off the word: closes.
+    cx.simulate_keystrokes("backspace backspace");
+    cx.run_until_parked();
+    assert!(!visible(&editor, cx));
+}
