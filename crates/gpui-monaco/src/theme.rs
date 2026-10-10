@@ -225,6 +225,10 @@ pub struct EditorColors {
     pub minimap_slider_hover: Hsla,
     /// `editorStickyScroll.background` (defaults to the editor background).
     pub sticky_scroll_background: Option<Hsla>,
+    /// A hovered or focused sticky line (`editorStickyScrollHover.background`).
+    pub sticky_scroll_hover_background: Hsla,
+    /// Keyboard focus outlines (`focusBorder`).
+    pub focus_border: Hsla,
 }
 
 fn c(color: Rgba) -> Hsla {
@@ -335,6 +339,8 @@ impl EditorColors {
             minimap_slider: c(rgba(0x79797933)),
             minimap_slider_hover: c(rgba(0x64646459)),
             sticky_scroll_background: None,
+            sticky_scroll_hover_background: c(rgb(0x2a2d2e)),
+            focus_border: c(rgb(0x007fd4)),
         }
     }
 
@@ -441,6 +447,8 @@ impl EditorColors {
             minimap_slider: c(rgba(0x79797933)),
             minimap_slider_hover: c(rgba(0x64646459)),
             sticky_scroll_background: None,
+            sticky_scroll_hover_background: c(rgb(0xf0f0f0)),
+            focus_border: c(rgb(0x0090f1)),
         }
     }
 
@@ -489,6 +497,11 @@ impl EditorColors {
             "editor.findRangeHighlightBackground",
         );
         set(&mut self.error_foreground, "errorForeground");
+        set(
+            &mut self.sticky_scroll_hover_background,
+            "editorStickyScrollHover.background",
+        );
+        set(&mut self.focus_border, "focusBorder");
         set(
             &mut self.find_match_overview,
             "editorOverviewRuler.findMatchForeground",

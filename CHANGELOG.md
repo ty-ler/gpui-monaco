@@ -149,6 +149,12 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Sticky scroll polish (#106):**
+  - **Commands:** "Toggle Editor Sticky Scroll" (`ToggleStickyScroll`) and "Focus Editor Sticky Scroll" (`FocusStickyScroll`).
+  - **Keyboard focus:** Up/Down move between the sticky lines, Enter goes to the focused one, and Escape returns to the text (Monaco `selectNext/PreviousStickyScrollLine`, `goToFocusedStickyScrollLine`, `selectEditor`).
+  - **Folding controls:** shown in the sticky gutter. Clicking one folds the scope.
+  - **Mouse:** hovered lines use `editorStickyScrollHover.background`. Shift over a sticky line shows the end of its scope, and Shift+click reveals it.
+  - New option `StickyScrollOptions::scroll_with_editor` (default on), and theme colors `editorStickyScrollHover.background` and `focusBorder`.
 - **Find controller and widget (#104, part 2):**
   - **Commands:** `actions.find`, Replace, Find Next/Previous (`matchFindAction`), Find Next/Previous Selection (Cmd/Ctrl+F3, with Shift) and Find with Selection (Cmd+E on macOS) follow Monaco's `FindController`:
     - Find Next on a closed widget opens it without focusing it, seeded from the cursor when the query is empty.

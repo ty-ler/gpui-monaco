@@ -83,3 +83,43 @@ fn outline_without_symbols_falls_back_to_folding(cx: &mut TestAppContext) {
     let (editor, cx) = setup("plaintext", StickyScrollModel::Outline, cx);
     assert_eq!(sticky_rows_at(&editor, 1000., cx), vec![0, 1, 2]);
 }
+
+fn cursor_row(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> u32 {
+    editor.read_with(cx, |e, _| e.selections()[0].head.row)
+}
+
+#[gpui::test]
+fn keyboard_focus_moves_and_goes_to_lines(cx: &mut TestAppContext) {
+    use gpui::Focusable;
+    use gpui_monaco::actions::*;
+    let (editor, cx) = setup("rust", StickyScrollModel::Outline, cx);
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    assert_eq!(sticky_rows_at(&editor, 1000., cx), vec![0, 1]);
+    // Focus starts on the last sticky line.
+    cx.dispatch_action(FocusStickyScroll);
+    assert!(editor.read_with(cx, |e, _| e.is_sticky_scroll_focused()));
+    // Up, then Enter: goes to the first.
+    cx.simulate_keystrokes("up enter");
+    cx.run_until_parked();
+    assert!(!editor.read_with(cx, |e, _| e.is_sticky_scroll_focused()));
+    assert_eq!(cursor_row(&editor, cx), 0);
+
+    // Escape returns to the text without moving.
+    sticky_rows_at(&editor, 1000., cx);
+    cx.dispatch_action(FocusStickyScroll);
+    cx.simulate_keystrokes("escape");
+    assert!(!editor.read_with(cx, |e, _| e.is_sticky_scroll_focused()));
+    assert_eq!(cursor_row(&editor, cx), 0);
+}
+
+#[gpui::test]
+fn toggle_turns_sticky_scroll_off_and_on(cx: &mut TestAppContext) {
+    use gpui_monaco::actions::*;
+    let (editor, cx) = setup("rust", StickyScrollModel::Outline, cx);
+    assert_eq!(sticky_rows_at(&editor, 1000., cx), vec![0, 1]);
+    editor.update(cx, |e, cx| e.toggle_sticky_scroll(cx));
+    assert!(sticky_rows_at(&editor, 1000., cx).is_empty());
+    cx.update(|window, cx| window.focus(&gpui::Focusable::focus_handle(&editor, cx), cx));
+    cx.dispatch_action(ToggleStickyScroll);
+    assert_eq!(sticky_rows_at(&editor, 1000., cx), vec![0, 1]);
+}

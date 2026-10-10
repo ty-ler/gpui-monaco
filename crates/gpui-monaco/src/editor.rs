@@ -639,7 +639,7 @@ impl CodeEditor {
     pub fn sticky_rows_for_tests(&self) -> (Vec<u32>, bool) {
         self.layout.as_ref().map_or((Vec::new(), false), |layout| {
             (
-                layout.sticky_lines.iter().map(|(row, _)| *row).collect(),
+                layout.sticky_lines.iter().map(|line| line.row).collect(),
                 layout.minimap.is_some(),
             )
         })
@@ -915,6 +915,8 @@ impl CodeEditor {
         }
         self.color_picker_cursor_changed(cx);
         self.find_cursor_changed(change.reason, cx);
+        // The cursor moving means the keyboard is back in the text.
+        self.sticky.focused = None;
         cx.emit(CodeEditorEvent::SelectionsChanged(change));
         cx.notify();
     }
@@ -1921,24 +1923,12 @@ impl CodeEditor {
             cx.notify();
             return;
         }
-        if let Some((row, _)) = layout
+        if let Some(ix) = layout
             .sticky_lines
             .iter()
-            .find(|(_, bounds)| bounds.contains(&event.position))
+            .position(|line| line.bounds.contains(&event.position))
         {
-            // Monaco reveals the clicked scope header at the top.
-            let row = *row;
-            let ix = layout
-                .sticky_lines
-                .iter()
-                .position(|(r, _)| *r == row)
-                .unwrap_or(0);
-            let line = self.view_lines.first_view_line_of_row(row);
-            self.scroll_top = (layout.zones.line_y(line, layout.metrics.line_height)
-                - layout.metrics.line_height * ix as f32)
-                .max(px(0.));
-            self.set_selections(&[Selection::collapsed(PointUtf16::new(row, 0))], cx);
-            self.autoscroll_requested = false;
+            self.sticky_click(ix, event, cx);
             return;
         }
         if let Some(vbar) = layout.vertical_scrollbar
@@ -2141,6 +2131,7 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.sticky_mouse_move(Some(event.position), event.modifiers.shift, cx);
         if self
             .layout
             .as_ref()
@@ -2602,6 +2593,9 @@ impl Render for CodeEditor {
         }
         if self.is_suggest_visible() {
             key_context.add("suggest_widget_visible");
+        }
+        if self.sticky.focused.is_some() {
+            key_context.add("sticky_scroll_focused");
         }
         if self.inline_suggestion_visible(cx) {
             key_context.add("inline_suggestion_visible");
@@ -3154,9 +3148,28 @@ impl Render for CodeEditor {
             )
             .on_modifiers_changed(cx.listener(
                 |this, event: &gpui::ModifiersChangedEvent, _, cx| {
-                    this.inlay_hints_modifiers(&event.modifiers, cx)
+                    this.inlay_hints_modifiers(&event.modifiers, cx);
+                    this.sticky_mouse_move(None, event.modifiers.shift, cx);
                 },
             ))
+            .on_action(
+                cx.listener(|this, _: &ToggleStickyScroll, _, cx| this.toggle_sticky_scroll(cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &FocusStickyScroll, _, cx| this.focus_sticky_scroll(cx)),
+            )
+            .on_action(cx.listener(|this, _: &SelectNextStickyScrollLine, _, cx| {
+                this.sticky_focus_move(true, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &SelectPreviousStickyScrollLine, _, cx| {
+                    this.sticky_focus_move(false, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &GoToFocusedStickyScrollLine, _, cx| {
+                this.sticky_go_to_focused(cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectEditor, _, cx| this.sticky_select_editor(cx)))
             .on_action(cx.listener(|this, _: &Rename, _, cx| this.rename(cx)))
             .on_action(cx.listener(|this, _: &QuickFix, _, cx| this.quick_fix(cx)))
             .on_action(cx.listener(|this, _: &Refactor, _, cx| this.refactor(cx)))
@@ -3244,8 +3257,9 @@ impl Render for CodeEditor {
             )
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
-            .on_hover(cx.listener(|_, hovered: &bool, _, cx| {
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if !*hovered {
+                    this.sticky_mouse_leave(cx);
                     cx.emit(CodeEditorEvent::MouseLeave);
                 }
             }))

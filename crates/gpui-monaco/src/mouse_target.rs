@@ -123,10 +123,14 @@ impl CodeEditor {
         {
             return target(MouseTargetKind::Scrollbar, None);
         }
-        if let Some((row, _)) = layout.sticky_lines.iter().find(|(_, b)| b.contains(&point)) {
+        if let Some(line) = layout
+            .sticky_lines
+            .iter()
+            .find(|l| l.bounds.contains(&point))
+        {
             return target(
                 MouseTargetKind::StickyScroll,
-                Some(PointUtf16::new(*row, 0)),
+                Some(PointUtf16::new(line.row, 0)),
             );
         }
         let line = layout.lines.iter().find(|line| {

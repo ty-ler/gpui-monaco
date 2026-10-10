@@ -62,7 +62,7 @@ Issues are linked by number.
 | Minimap | `minimap` | ✅ | |
 | Minimap options (side, render characters, size), section headers | `minimap`, `sectionHeaders` | ❌ | #88 |
 | Sticky scroll (outline, folding and indentation models) | `stickyScroll` | ✅ | |
-| Sticky scroll keyboard focus, toggle | `stickyScroll` | ❌ | #106 |
+| Sticky scroll keyboard focus, toggle, folding controls, hover, scroll with editor | `stickyScroll` | ✅ | #106 |
 | Render whitespace, indent guides, rulers, control characters | view parts | ✅ | #84 |
 | Bracket pair guides | view parts | ✅ | #118 |
 | Bracket pair colorization | `bracketPairColorization` | ✅ | #85 |

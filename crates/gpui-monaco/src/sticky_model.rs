@@ -9,10 +9,14 @@ use std::time::Duration;
 
 use gpui::{Context, Task};
 
+use text::PointUtf16;
+
+use crate::cursor::Selection;
 use crate::editor::CodeEditor;
 use crate::options::StickyScrollModel;
 use crate::providers::{DocumentSymbol, document_symbol_providers};
 use crate::view::folding::{FoldRange, compute_indent_ranges};
+use crate::view::reveal::RevealType;
 
 /// Monaco's `Delayer` before recomputing after an edit.
 const UPDATE_DELAY: Duration = Duration::from_millis(300);
@@ -43,6 +47,12 @@ pub(crate) struct StickyModelState {
     task: Option<Task<()>>,
     /// The scopes, or `None` to use the folding ranges.
     elements: Option<Vec<StickyElement>>,
+    /// The keyboard-focused sticky line (Monaco `focusStickyScroll`).
+    pub focused: Option<usize>,
+    /// The sticky line under the mouse.
+    pub hovered: Option<usize>,
+    /// The line showing its scope's end while Shift is held over it.
+    pub show_end: Option<usize>,
 }
 
 /// Monaco's comparator: by start, longer first.
@@ -162,7 +172,9 @@ impl CodeEditor {
     pub(crate) fn refresh_sticky_model(&mut self, cx: &mut Context<Self>) {
         let options = &self.options.sticky_scroll;
         if !options.enabled || self.options.single_line {
-            self.sticky = StickyModelState::default();
+            if self.sticky.key.is_some() || self.sticky.focused.is_some() {
+                self.sticky = StickyModelState::default();
+            }
             return;
         }
         let model = self.model().read(cx);
@@ -232,6 +244,163 @@ impl CodeEditor {
             })
             .ok();
         }));
+    }
+}
+
+// ----- the widget (Monaco `StickyScrollController`) --------------------------------
+
+impl CodeEditor {
+    /// Scrolls so sticky line `ix`'s row sits where it's shown and moves
+    /// the cursor there (Monaco `_revealPosition` from a sticky line).
+    fn reveal_sticky_row(&mut self, row: u32, ix: usize, cx: &mut Context<Self>) {
+        let Some(layout) = self.layout.clone() else {
+            return;
+        };
+        let line = self.view_lines.first_view_line_of_row(row);
+        let line_height = layout.metrics.line_height;
+        self.scroll_top =
+            (layout.zones.line_y(line, line_height) - line_height * ix as f32).max(gpui::px(0.));
+        self.sticky.focused = None;
+        self.set_selections(&[Selection::collapsed(PointUtf16::new(row, 0))], cx);
+        self.autoscroll_requested = false;
+        cx.notify();
+    }
+
+    /// A click on sticky line `ix` (Monaco's sticky scroll click handler):
+    /// the folding control folds, Shift reveals the scope's end, otherwise
+    /// it goes to the line.
+    pub(crate) fn sticky_click(
+        &mut self,
+        ix: usize,
+        event: &gpui::MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(line) = self
+            .layout
+            .as_ref()
+            .and_then(|l| l.sticky_lines.get(ix).copied())
+        else {
+            return;
+        };
+        let modifiers = event.modifiers;
+        if modifiers.control || modifiers.alt || modifiers.platform {
+            return;
+        }
+        if event.button != gpui::MouseButton::Left {
+            return;
+        }
+        if modifiers.shift {
+            // The scope's last line, centered if outside the viewport.
+            let end = PointUtf16::new(
+                (line.end_row + 1).min(self.snapshot.max_point_utf16().row),
+                0,
+            );
+            self.sticky.focused = None;
+            self.reveal_range(end..end, RevealType::CenterIfOutsideViewport, cx);
+            self.set_selections(&[Selection::collapsed(end)], cx);
+            return;
+        }
+        if let Some(control) = line.fold
+            && control.bounds.contains(&event.position)
+        {
+            self.click_fold(control.row, true, false, false, cx);
+            // Keep the header where it was.
+            self.reveal_sticky_row(control.row, ix, cx);
+            return;
+        }
+        self.reveal_sticky_row(line.row, ix, cx);
+    }
+
+    /// Tracks the sticky line under the mouse; with Shift held it shows its
+    /// scope's end (Monaco `_onMouseMoveOrKeyDown`).
+    pub(crate) fn sticky_mouse_move(
+        &mut self,
+        position: Option<gpui::Point<gpui::Pixels>>,
+        shift: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let hovered = match position {
+            Some(position) => self.layout.as_ref().and_then(|layout| {
+                layout.sticky_lines.iter().position(|line| {
+                    line.bounds.contains(&position) && position.x >= layout.text_bounds.left()
+                })
+            }),
+            None => self.sticky.hovered,
+        };
+        let show_end = hovered.filter(|_| shift);
+        if hovered != self.sticky.hovered || show_end != self.sticky.show_end {
+            self.sticky.hovered = hovered;
+            self.sticky.show_end = show_end;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn sticky_mouse_leave(&mut self, cx: &mut Context<Self>) {
+        if self.sticky.hovered.is_some() || self.sticky.show_end.is_some() {
+            self.sticky.hovered = None;
+            self.sticky.show_end = None;
+            cx.notify();
+        }
+    }
+
+    fn sticky_line_count(&self) -> usize {
+        self.layout.as_ref().map_or(0, |l| l.sticky_lines.len())
+    }
+
+    /// Focuses the last sticky line for the keyboard (Monaco
+    /// `editor.action.focusStickyScroll`).
+    pub fn focus_sticky_scroll(&mut self, cx: &mut Context<Self>) {
+        let count = self.sticky_line_count();
+        if count > 0 {
+            self.sticky.focused = Some(count - 1);
+            cx.notify();
+        }
+    }
+
+    /// Whether a sticky line has keyboard focus.
+    pub fn is_sticky_scroll_focused(&self) -> bool {
+        self.sticky.focused.is_some()
+    }
+
+    /// Monaco `focusNext`/`focusPrevious` (Down and Up while focused).
+    pub(crate) fn sticky_focus_move(&mut self, next: bool, cx: &mut Context<Self>) {
+        let count = self.sticky_line_count();
+        if let Some(ix) = self.sticky.focused {
+            let ix = if next {
+                (ix + 1).min(count.saturating_sub(1))
+            } else {
+                ix.saturating_sub(1)
+            };
+            self.sticky.focused = Some(ix);
+            cx.notify();
+        }
+    }
+
+    /// Monaco `goToFocused` (Enter while focused).
+    pub(crate) fn sticky_go_to_focused(&mut self, cx: &mut Context<Self>) {
+        let Some(ix) = self.sticky.focused else {
+            return;
+        };
+        if let Some(line) = self
+            .layout
+            .as_ref()
+            .and_then(|l| l.sticky_lines.get(ix).copied())
+        {
+            self.reveal_sticky_row(line.row, ix, cx);
+        }
+    }
+
+    /// Monaco `selectEditor` (Escape while focused): back to the text.
+    pub(crate) fn sticky_select_editor(&mut self, cx: &mut Context<Self>) {
+        self.sticky.focused = None;
+        cx.notify();
+    }
+
+    /// Monaco `editor.action.toggleStickyScroll`.
+    pub fn toggle_sticky_scroll(&mut self, cx: &mut Context<Self>) {
+        let mut options = self.options.clone();
+        options.sticky_scroll.enabled = !options.sticky_scroll.enabled;
+        self.update_options(options, cx);
     }
 }
 
