@@ -47,7 +47,8 @@
 //!   ported (only the inline-edit code path uses it).
 //! - **The `cachingDiff` cache** is thread-local rather than module-global.
 
-// Used by the editor in a follow-up.
+// Some of Monaco's API (replacements, rendering helpers) is kept for
+// parity and partly exercised by the tests only.
 #![allow(dead_code)]
 
 use std::cell::RefCell;

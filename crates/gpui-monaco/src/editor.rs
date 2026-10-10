@@ -161,6 +161,7 @@ pub struct CodeEditor {
     pub(crate) snippet: crate::snippet_session::SnippetState,
     pub(crate) links: crate::links::LinksState,
     pub(crate) semantic: crate::semantic_tokens::SemanticTokensState,
+    pub(crate) inline: crate::inline_completions::controller::InlineCompletionsState,
     pub(crate) minimap_cache: crate::element::MinimapCache,
     pub(crate) minimap_hovered: bool,
     minimap_drag: Option<Pixels>,
@@ -170,7 +171,7 @@ pub struct CodeEditor {
     pub(crate) autoscroll_requested: bool,
     pub(crate) cursor_visible: bool,
     /// IME composition range, in byte offsets.
-    marked_range: Option<Range<usize>>,
+    pub(crate) marked_range: Option<Range<usize>>,
     pub(crate) prev_edit_kind: Option<EditOperationType>,
     /// The reason and source the next `SelectionsChanged` reports.
     pub(crate) next_selection_change: SelectionChange,
@@ -234,6 +235,7 @@ impl CodeEditor {
                 this.mouse_selection = None;
                 this.hide_hover(cx);
                 this.close_message(cx);
+                this.inline_blurred(cx);
                 cx.emit(CodeEditorEvent::Blurred);
                 cx.notify();
             }),
@@ -299,6 +301,7 @@ impl CodeEditor {
             snippet: Default::default(),
             links: Default::default(),
             semantic: Default::default(),
+            inline: Default::default(),
             minimap_cache: Default::default(),
             minimap_hovered: false,
             minimap_drag: None,
@@ -687,6 +690,7 @@ impl CodeEditor {
                 self.cancel_rename(false, cx);
                 self.inlay_hints_after_edit(cx);
                 self.semantic_tokens_after_edit(changes, cx);
+                self.inline_completions_after_edit(cx);
                 let latest = model.read(cx).snapshot();
                 if latest.version() == self.snapshot.version() {
                     return;
@@ -873,6 +877,7 @@ impl CodeEditor {
         self.update_occurrence_highlights(cx);
         self.restart_blink(cx);
         let change = std::mem::take(&mut self.next_selection_change);
+        self.inline_selections_changed(&change, cx);
         // Monaco `ParameterHintsModel.onCursorChange`: clicks close parameter
         // hints, other changes re-query them while they're shown.
         if change.source == CursorChangeSource::Mouse {
@@ -1047,6 +1052,10 @@ impl CodeEditor {
         }
         if self.is_suggest_visible() {
             self.hide_suggest(cx);
+            return;
+        }
+        if self.inline_suggestion_visible(cx) {
+            self.hide_inline_suggestion(cx);
             return;
         }
         if self.in_snippet_mode() {
@@ -1234,6 +1243,7 @@ impl CodeEditor {
             cursor::delete_left_with_language(config, rope, cursors, prev, lang)
         });
         self.apply(operation, cx);
+        self.trigger_inline_completions(cx);
         if self.suggest.session.is_some() {
             self.refilter_suggest(cx);
         }
@@ -1245,6 +1255,7 @@ impl CodeEditor {
     fn delete_right(&mut self, _: &DeleteRight, _: &mut Window, cx: &mut Context<Self>) {
         let prev = self.prev_edit_kind;
         self.run_edit(cx, |c, m, s| cursor::delete_right(c, m, s, prev));
+        self.trigger_inline_completions(cx);
     }
 
     fn delete_word_left(&mut self, _: &DeleteWordLeft, _: &mut Window, cx: &mut Context<Self>) {
@@ -1267,6 +1278,11 @@ impl CodeEditor {
         if self.is_suggest_visible() && self.accept_suggestion(cx) {
             return;
         }
+        // Monaco `inlineSuggest.commit` (it outranks snippets and tab
+        // completion).
+        if self.tab_accepts_inline_suggestion(cx) && self.accept_inline_suggestion(cx) {
+            return;
+        }
         if self.has_next_tabstop() {
             self.next_snippet_placeholder(cx);
             return;
@@ -1283,6 +1299,7 @@ impl CodeEditor {
             }
         }
         self.insert_tab(cx);
+        self.trigger_inline_completions(cx);
     }
 
     /// Monaco's `tab` command: indents or inserts a tab.
@@ -1450,6 +1467,11 @@ impl CodeEditor {
     }
 
     fn paste_item(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
+        self.paste_item_inner(item, cx);
+        self.trigger_inline_completions(cx);
+    }
+
+    fn paste_item_inner(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
         let version = self.snapshot.version();
         let start = self
             .cursors
@@ -2533,6 +2555,12 @@ impl Render for CodeEditor {
         if self.is_suggest_visible() {
             key_context.add("suggest_widget_visible");
         }
+        if self.inline_suggestion_visible(cx) {
+            key_context.add("inline_suggestion_visible");
+            if self.cursor_before_ghost_text(cx) {
+                key_context.add("cursor_before_ghost_text");
+            }
+        }
         let root = div()
             .id("code-editor")
             .key_context(key_context)
@@ -2983,6 +3011,33 @@ impl Render for CodeEditor {
             .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| this.go_to_definition(cx)))
             .on_action(cx.listener(|this, _: &ShowHover, _, cx| this.show_hover_at_cursor(cx)))
             .on_action(cx.listener(|this, _: &OpenLink, _, cx| this.open_link(cx)))
+            .on_action(
+                cx.listener(|this, _: &TriggerInlineSuggest, _, cx| {
+                    this.trigger_inline_suggest(cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &ShowNextInlineSuggestion, _, cx| {
+                this.show_next_inline_suggestion(true, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &ShowPreviousInlineSuggestion, _, cx| {
+                    this.show_next_inline_suggestion(false, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &AcceptInlineSuggestion, _, cx| {
+                this.accept_inline_suggestion(cx);
+            }))
+            .on_action(cx.listener(|this, _: &AcceptNextInlineWord, _, cx| {
+                this.accept_next_inline_word(cx);
+            }))
+            .on_action(cx.listener(|this, _: &AcceptNextInlineLine, _, cx| {
+                this.accept_next_inline_line(cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &HideInlineSuggestion, _, cx| {
+                    this.hide_inline_suggestion(cx)
+                }),
+            )
             .on_modifiers_changed(cx.listener(
                 |this, event: &gpui::ModifiersChangedEvent, _, cx| {
                     this.inlay_hints_modifiers(&event.modifiers, cx)

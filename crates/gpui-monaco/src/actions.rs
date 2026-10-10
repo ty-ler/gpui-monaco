@@ -15,6 +15,8 @@ const SINGLE_LINE: Option<&str> = Some("CodeEditor && single_line");
 /// The editor while the suggest widget is open (Monaco's
 /// `suggestWidgetVisible`).
 const SUGGEST: Option<&str> = Some("CodeEditor && suggest_widget_visible");
+/// The editor while ghost text shows (Monaco's `inlineSuggestionVisible`).
+const INLINE: Option<&str> = Some("CodeEditor && inline_suggestion_visible");
 
 actions!(
     code_editor,
@@ -498,6 +500,25 @@ actions!(
         ShowHover,
         /// Opens the link at the cursor (Monaco `editor.action.openLink`).
         OpenLink,
+        /// Asks for inline completions (Monaco
+        /// `editor.action.inlineSuggest.trigger`).
+        TriggerInlineSuggest,
+        /// Shows the next inline completion (Monaco
+        /// `editor.action.inlineSuggest.showNext`).
+        ShowNextInlineSuggestion,
+        /// Shows the previous inline completion (Monaco
+        /// `editor.action.inlineSuggest.showPrevious`).
+        ShowPreviousInlineSuggestion,
+        /// Accepts the ghost text (Monaco `editor.action.inlineSuggest.commit`).
+        AcceptInlineSuggestion,
+        /// Accepts the ghost text's next word (Monaco
+        /// `editor.action.inlineSuggest.acceptNextWord`).
+        AcceptNextInlineWord,
+        /// Accepts the ghost text's next line (Monaco
+        /// `editor.action.inlineSuggest.acceptNextLine`).
+        AcceptNextInlineLine,
+        /// Hides the ghost text (Monaco `editor.action.inlineSuggest.hide`).
+        HideInlineSuggestion,
         /// Formats the document (Monaco `editor.action.formatDocument`).
         FormatDocument,
         /// Goes to the declaration (Monaco `editor.action.revealDeclaration`).
@@ -652,6 +673,18 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-shift-space", TriggerParameterHints, ctx),
         KeyBinding::new("ctrl-space", TriggerSuggest, ctx),
         KeyBinding::new("ctrl-space", ToggleSuggestionDetails, SUGGEST),
+        KeyBinding::new("alt-\\", TriggerInlineSuggest, ctx),
+        KeyBinding::new("alt-]", ShowNextInlineSuggestion, INLINE),
+        KeyBinding::new("alt-[", ShowPreviousInlineSuggestion, INLINE),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-right"
+            } else {
+                "ctrl-right"
+            },
+            AcceptNextInlineWord,
+            Some("CodeEditor && inline_suggestion_visible && cursor_before_ghost_text"),
+        ),
         KeyBinding::new(
             if cfg!(target_os = "macos") {
                 "cmd-i"

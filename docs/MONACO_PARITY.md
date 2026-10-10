@@ -110,7 +110,7 @@ Issues are linked by number.
 | Colors and color picker | `colorPicker` | ❌ | #97 |
 | Links | `links` | ✅ | #93 |
 | Semantic tokens | `semanticTokens` | ✅ | #98 |
-| Inline completions (ghost text) | `inlineCompletions` | ❌ | #99 |
+| Inline completions (ghost text) | `inlineCompletions` | ✅ | #99 |
 | Document symbols | `documentSymbols` | ❌ | #100 |
 | Selection ranges | `smartSelect` | ✅ | #82 |
 | Folding ranges | `folding` | ✅ | #102 |
