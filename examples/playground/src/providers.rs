@@ -137,10 +137,43 @@ impl CompletionProvider for DemoCompletions {
                 "fn(&mut self)",
                 "Selects everything.",
             ),
+            CompletionItem {
+                tags: vec![CompletionItemTag::Deprecated],
+                ..item(
+                    "set_selection",
+                    CompletionItemKind::Method,
+                    "fn(&mut self, Selection)",
+                    "Deprecated: use `set_selections`.",
+                )
+            },
+            // Resolved when focused: its docs arrive later.
+            CompletionItem::new("selection_count", CompletionItemKind::Method),
         ];
         Task::ready(Ok(CompletionList {
             items,
             incomplete: false,
+        }))
+    }
+
+    fn resolve_completion_item(
+        &self,
+        item: &CompletionItem,
+        cx: &mut App,
+    ) -> Option<Task<anyhow::Result<CompletionItem>>> {
+        if item.documentation.is_some() {
+            return None;
+        }
+        let item = item.clone();
+        let timer = cx
+            .background_executor()
+            .timer(std::time::Duration::from_millis(300));
+        Some(cx.background_executor().spawn(async move {
+            timer.await;
+            Ok(CompletionItem {
+                detail: Some("fn(&self) -> usize".into()),
+                documentation: Some("How many selections there are (resolved).".into()),
+                ..item
+            })
         }))
     }
 }

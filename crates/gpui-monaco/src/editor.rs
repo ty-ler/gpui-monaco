@@ -1260,7 +1260,7 @@ impl CodeEditor {
             cx.propagate();
             return;
         }
-        if self.is_suggest_visible() && self.accept_suggestion(cx) {
+        if self.is_suggest_visible() && self.accept_suggestion_on_enter(cx) {
             return;
         }
         let operation = self.with_language(cx, |config, rope, cursors, lang| {
@@ -2471,6 +2471,9 @@ impl Render for CodeEditor {
         if self.options.single_line {
             key_context.add("single_line");
         }
+        if self.is_suggest_visible() {
+            key_context.add("suggest_widget_visible");
+        }
         let root = div()
             .id("code-editor")
             .key_context(key_context)
@@ -2977,6 +2980,15 @@ impl Render for CodeEditor {
             }))
             .on_action(cx.listener(|this, _: &FormatSelection, _, cx| {
                 this.format_selection(cx);
+            }))
+            .on_action(cx.listener(|this, _: &AcceptAlternativeSuggestion, _, cx| {
+                this.accept_alternative_suggestion(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectFirstSuggestion, _, cx| {
+                this.select_first_suggestion(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectLastSuggestion, _, cx| {
+                this.select_last_suggestion(cx);
             }))
             .on_action(cx.listener(|this, _: &TriggerSuggest, _, cx| {
                 this.trigger_suggest(crate::providers::CompletionTrigger::Invoke, cx)

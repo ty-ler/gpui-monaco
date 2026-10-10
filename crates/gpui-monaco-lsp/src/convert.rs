@@ -5,7 +5,9 @@
 use std::ops::Range;
 
 use gpui::SharedString;
-use gpui_monaco::providers::{CodeAction, CodeActionKind, Command, InlayHint, InlayHintKind};
+use gpui_monaco::providers::{
+    CodeAction, CodeActionKind, Command, CompletionItemTag, InlayHint, InlayHintKind,
+};
 use gpui_monaco::providers::{
     CompletionItem, CompletionItemKind, CompletionList, DocumentHighlight, DocumentHighlightKind,
     Hover, Location, MarkdownString, ParameterInformation, ParameterLabel, SignatureHelp,
@@ -135,6 +137,13 @@ pub fn completion_list(response: lsp::CompletionResponse) -> CompletionList {
 /// One completion item. Snippets are inserted as plain text until the
 /// editor supports them.
 pub fn completion_item(item: lsp::CompletionItem) -> CompletionItem {
+    // The original goes along for `completionItem/resolve`.
+    let data = serde_json::to_value(&item).ok();
+    let deprecated = item.deprecated == Some(true)
+        || item
+            .tags
+            .as_ref()
+            .is_some_and(|tags| tags.contains(&lsp::CompletionItemTag::DEPRECATED));
     let snippet = item.insert_text_format == Some(lsp::InsertTextFormat::SNIPPET);
     let as_text = |text: String| -> SharedString {
         if snippet {
@@ -143,13 +152,16 @@ pub fn completion_item(item: lsp::CompletionItem) -> CompletionItem {
             text.into()
         }
     };
-    let (edit_range, edit_text) = match item.text_edit {
-        Some(lsp::CompletionTextEdit::Edit(edit)) => (Some(range(edit.range)), Some(edit.new_text)),
-        // Monaco's default `insertMode` is `insert`.
-        Some(lsp::CompletionTextEdit::InsertAndReplace(edit)) => {
-            (Some(range(edit.insert)), Some(edit.new_text))
+    let (edit_range, replace_range, edit_text) = match item.text_edit {
+        Some(lsp::CompletionTextEdit::Edit(edit)) => {
+            (Some(range(edit.range)), None, Some(edit.new_text))
         }
-        None => (None, None),
+        Some(lsp::CompletionTextEdit::InsertAndReplace(edit)) => (
+            Some(range(edit.insert)),
+            Some(range(edit.replace)),
+            Some(edit.new_text),
+        ),
+        None => (None, None, None),
     };
     let insert_text = edit_text.or(item.insert_text).map(as_text);
     CompletionItem {
@@ -181,6 +193,14 @@ pub fn completion_item(item: lsp::CompletionItem) -> CompletionItem {
             .map(|edit| (range(edit.range), edit.new_text))
             .collect(),
         label: item.label.into(),
+        replace_range,
+        tags: if deprecated {
+            vec![CompletionItemTag::Deprecated]
+        } else {
+            Vec::new()
+        },
+        command: item.command.map(command),
+        data,
     }
 }
 

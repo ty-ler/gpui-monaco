@@ -101,7 +101,22 @@ All notable changes to this project are documented here. The format follows [Kee
   - A command registry: `register_command` and `execute_command`.
   - `TextModelEvent::MarkersChanged`.
   - The LSP bridge forwards code actions, resolve and `workspace/executeCommand`.
+- **Completion behavior (#103), ported from Monaco's `SuggestController` and `SuggestModel`:**
+  - `CompletionProvider::resolve_completion_item`: the focused item is resolved, and additional edits that arrive after accepting are applied unless the text changed before them.
+  - `CompletionItem` gains `replace_range`, `tags` (deprecated items are struck through), `command` (run after inserting) and `data`.
+  - Insert and replace modes (`suggest.insert_mode`); Shift+Enter or Shift+Tab accepts in the other mode.
+  - `accept_suggestion_on_enter` (on, smart or off) and `accept_suggestion_on_commit_character`.
+  - `suggest_selection` (first, recently used, or recently used by prefix), with Monaco's selection memories.
+  - Quick suggestions wait `quick_suggestions_delay`, need a word at the cursor, skip numbers, and can be enabled separately in comments, strings and other code.
+  - `suggest_on_trigger_characters`.
+  - Word-based suggestions (`word_based_suggestions`) from the current, matching or all registered documents when providers have nothing.
+  - `suggest.hidden_kinds`, `suggest.show_deprecated`, `suggest.filter_graceful`, `suggest.match_on_word_start_only` and `snippet_suggestions`.
+  - Select the first or last suggestion (Cmd+Up/Down, or Ctrl+Home/End elsewhere).
+  - The LSP bridge maps tags, insert-and-replace edits and commands, and forwards `completionItem/resolve`.
 - **Rename (#56):** `RenameProvider` (with optional `resolve_rename_location`), F2 with Monaco's rename box, `WorkspaceEdit` and `CodeEditor::apply_workspace_edit`. The LSP bridge forwards `prepareRename` and `rename`.
+
+### Changed
+- `EditorOptions::quick_suggestions` is now `QuickSuggestions { other, comments, strings }` instead of a `bool` (breaking).
 
 ### Fixed
 

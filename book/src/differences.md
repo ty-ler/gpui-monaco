@@ -21,7 +21,8 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
   - Replacement patterns support `$1`, `$&`, `$$`, `\n` and `\t`. Monaco's case-changing escapes (`\u`, `\U`, `\l`, `\L`) are not supported.
   - Language configuration patterns (`wordPattern`, `indentationRules`, …) use `fancy-regex`, so VS Code's configurations work unchanged.
 - **Completion:** snippet syntax in `insert_text` is inserted literally; snippets are post-MVP.
-- **Word-based suggestions:** there are none. Completions come only from providers.
+- **Word-based suggestions:** words are not ranked by distance from the cursor, and the documents are the models registered with `register_model`.
+- **Suggestion memories:** they are kept in memory for the app's lifetime, not persisted.
 - **Missing commands:** code actions, rename, formatting, inlay hints, color decorators and links are not built in.
 - **Folding:** clicking the `⋯` placeholder doesn't unfold the region, and there is no folding by tree-sitter fold queries yet. Ranges come from indentation and markers.
 - **Paste:** pasted text is not reindented (Monaco's `autoIndentOnPaste`).

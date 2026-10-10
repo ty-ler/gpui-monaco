@@ -748,6 +748,11 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
                     "preselectSupport": true,
                     "insertReplaceSupport": true,
                     "labelDetailsSupport": true,
+                    "deprecatedSupport": true,
+                    "tagSupport": { "valueSet": [1] },
+                    "resolveSupport": {
+                        "properties": ["documentation", "detail", "additionalTextEdits"],
+                    },
                 },
                 "contextSupport": true,
             },

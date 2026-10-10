@@ -294,6 +294,13 @@ impl CompletionProvider for Completions {
     }
 }
 
+/// Waits out the quick suggestions delay.
+fn settle(cx: &mut VisualTestContext) {
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(50));
+    cx.run_until_parked();
+}
+
 fn suggest_labels(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Option<Vec<String>> {
     editor.read_with(cx, |e, _| e.suggest_labels_for_tests())
 }
@@ -303,7 +310,7 @@ fn completion_filters_navigates_and_accepts(cx: &mut TestAppContext) {
     cx.update(|cx| register_completion_provider(cx, LanguageSelector::All, Completions));
     let (editor, cx) = setup("", cx);
     cx.simulate_input("pr");
-    cx.run_until_parked();
+    settle(cx);
     assert_eq!(
         suggest_labels(&editor, cx).unwrap(),
         vec!["print", "println", "private", "process"]
@@ -331,7 +338,7 @@ fn completion_filters_navigates_and_accepts(cx: &mut TestAppContext) {
     );
     // Escape closes; Ctrl+Space reopens.
     cx.simulate_input(" pri");
-    cx.run_until_parked();
+    settle(cx);
     assert!(editor.read_with(cx, |e, _| e.is_suggest_visible()));
     cx.simulate_keystrokes("escape");
     assert!(!editor.read_with(cx, |e, _| e.is_suggest_visible()));

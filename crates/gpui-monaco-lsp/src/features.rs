@@ -9,7 +9,7 @@ use gpui_monaco::providers::{
     register_code_action_provider,
 };
 use gpui_monaco::providers::{
-    CompletionList, CompletionProvider, CompletionTrigger, DefinitionProvider,
+    CompletionItem, CompletionList, CompletionProvider, CompletionTrigger, DefinitionProvider,
     DocumentFormattingProvider, DocumentHighlight, DocumentHighlightProvider,
     DocumentRangeFormattingProvider, FormattingOptions, Hover, HoverProvider, LanguageSelector,
     Location, OnTypeFormattingProvider, ProviderContext, ProviderRegistration, SignatureHelp,
@@ -50,6 +50,8 @@ pub(crate) struct LspFeatures {
     on_type_triggers: Vec<char>,
     /// The server answers `textDocument/prepareRename`.
     prepare_rename: bool,
+    /// The server answers `completionItem/resolve`.
+    resolve_completions: bool,
     /// The server answers `codeAction/resolve`.
     resolve_code_actions: bool,
     /// The code action kinds the server returns, if it says.
@@ -92,6 +94,11 @@ impl LspFeatures {
                 })
                 .filter_map(|s| s.chars().next())
                 .collect(),
+            resolve_completions: capabilities
+                .completion_provider
+                .as_ref()
+                .and_then(|c| c.resolve_provider)
+                .unwrap_or(false),
             resolve_code_actions: matches!(
                 &capabilities.code_action_provider,
                 Some(lsp::CodeActionProviderCapability::Options(
@@ -334,6 +341,24 @@ impl CompletionProvider for LspFeatures {
                 .map(convert::completion_list)
                 .unwrap_or_default())
         })
+    }
+
+    fn resolve_completion_item(
+        &self,
+        item: &CompletionItem,
+        cx: &mut App,
+    ) -> Option<Task<Result<CompletionItem>>> {
+        if !self.resolve_completions {
+            return None;
+        }
+        let original: lsp::CompletionItem = serde_json::from_value(item.data.clone()?).ok()?;
+        let client = self.client.upgrade()?;
+        let connection = client.read(cx).connection().clone();
+        let request = connection.request::<lsp::request::ResolveCompletionItem>(original);
+        Some(
+            cx.background_executor()
+                .spawn(async move { Ok(convert::completion_item(request.await?)) }),
+        )
     }
 }
 

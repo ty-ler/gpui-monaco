@@ -155,7 +155,24 @@ impl Render for SuggestWidget {
             let (item, highlights) = &self.state.rows[ix];
             let (icon, icon_color) = kind_icon(item.kind);
             let label: SharedString = item.label.clone();
-            let label_highlights: Vec<(Range<usize>, HighlightStyle)> =
+            // Monaco strikes deprecated items through, dimmed, without match
+            // highlights.
+            let deprecated = item
+                .tags
+                .contains(&crate::providers::CompletionItemTag::Deprecated);
+            let label_highlights: Vec<(Range<usize>, HighlightStyle)> = if deprecated {
+                vec![(
+                    0..label.len(),
+                    HighlightStyle {
+                        strikethrough: Some(gpui::StrikethroughStyle {
+                            thickness: px(1.),
+                            color: None,
+                        }),
+                        fade_out: Some(0.34),
+                        ..Default::default()
+                    },
+                )]
+            } else {
                 utf16_ranges_to_bytes(&label, highlights)
                     .into_iter()
                     .map(|range| {
@@ -168,7 +185,8 @@ impl Render for SuggestWidget {
                             },
                         )
                     })
-                    .collect();
+                    .collect()
+            };
             let is_selected = ix == self.state.selected;
             let editor = self.editor.clone();
             list = list.child(
