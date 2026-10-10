@@ -45,7 +45,11 @@ More `ITextModel` helpers:
 - **Words:** `word_at_position` and `word_until_position`, using the language's `wordPattern`.
 - **Search:** `find_matches`.
 
-A model emits `TextModelEvent::Edited` with a `Patch` describing each change. Subscribe to it with `cx.subscribe(&model, …)` to sync with something else, such as an LSP server.
+A model emits `TextModelEvent::Edited` for each change. Subscribe to it with `cx.subscribe(&model, …)` to sync with something else, such as an LSP server. The event carries:
+
+- **`changes`:** Monaco's `IModelContentChange`s. Each has the replaced `range` (UTF-16 positions), its byte `range_offset` and `range_length`, and the new `text`. They're in descending order in the old text's coordinates, so applying them one after another reproduces the new text.
+- **`patch`:** the same edits as byte ranges.
+- **`kind`:** an edit, undo, redo or `set_value`.
 
 ### Coordinates
 
@@ -100,7 +104,7 @@ editor.update(cx, |editor, cx| {
 
 `CodeEditor` emits `CodeEditorEvent`:
 
-- `SelectionsChanged`
+- `SelectionsChanged(SelectionChange)`: the `reason` is Monaco's `CursorChangeReason` (`Explicit`, `Paste`, `Undo`, `Redo`, `ContentFlush`, `RecoverFromMarkers` or `NotSet`). The `source` is `Keyboard`, `Mouse`, `Api`, `Model`, `ModelChange` or `RestoreState`.
 - `ScrollChanged`
 - `Focused`
 - `Blurred`
@@ -112,7 +116,7 @@ editor.update(cx, |editor, cx| {
 
 ```rust,ignore
 cx.subscribe(&editor, |this, editor, event: &CodeEditorEvent, cx| {
-    if let CodeEditorEvent::SelectionsChanged = event {
+    if let CodeEditorEvent::SelectionsChanged(_) = event {
         let head = editor.read(cx).selections()[0].head;
         this.status = format!("Ln {}, Col {}", head.row + 1, head.column + 1);
         cx.notify();

@@ -17,6 +17,7 @@ pub mod decorations;
 mod definition;
 mod editor;
 mod element;
+pub mod events;
 mod find;
 mod find_widget;
 mod hover;
@@ -37,12 +38,13 @@ pub mod theme;
 pub mod view;
 pub mod widgets;
 
-pub use api::WordAtPosition;
+pub use api::{DecorationsCollection, WordAtPosition};
 pub use decorations::{
     DecorationId, DecorationOptions, DecorationUnderline, InjectedText, OverviewRulerLane,
 };
 pub use editor::{CodeEditor, CodeEditorEvent, ViewState};
 pub use element::EditorElement;
+pub use events::{ContentChange, CursorChangeReason, CursorChangeSource, SelectionChange};
 pub use find::{FindOptions, MATCHES_LIMIT};
 pub use find_widget::FindWidget;
 pub use hover::{HOVER_DELAY, HoverWidget};

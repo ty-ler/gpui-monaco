@@ -199,7 +199,7 @@ fn mouse_targets_and_events(cx: &mut TestAppContext) {
         cx.subscribe(&editor, move |_, event: &CodeEditorEvent, _| {
             if !matches!(
                 event,
-                CodeEditorEvent::MouseMove(_) | CodeEditorEvent::SelectionsChanged
+                CodeEditorEvent::MouseMove(_) | CodeEditorEvent::SelectionsChanged(_)
             ) {
                 sink.borrow_mut().push(event.clone());
             }
@@ -232,4 +232,173 @@ fn mouse_targets_and_events(cx: &mut TestAppContext) {
         e,
         CodeEditorEvent::ContextMenu(m) if m.target.kind == MouseTargetKind::ContentText
     )));
+}
+
+#[gpui::test]
+fn content_change_events(cx: &mut TestAppContext) {
+    use gpui_monaco::{ContentChange, TextModelEvent};
+    let model = cx.new(|_| TextModel::new("abc\ndéf\nghi"));
+    let changes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = changes.clone();
+    cx.update(|cx| {
+        cx.subscribe(&model, move |_, event: &TextModelEvent, _| {
+            if let TextModelEvent::Edited { changes, .. } = event {
+                sink.borrow_mut().push(changes.to_vec());
+            }
+        })
+        .detach();
+    });
+    let old = model.read_with(cx, |m, _| m.text());
+    // Two edits in one step: "abc" -> "aXc", "déf" -> "dé" + "ef".
+    model.update(cx, |m, cx| {
+        m.edit([(1..2, "X"), (7..8, "ef")], cx).unwrap();
+    });
+    let last = changes.borrow().last().unwrap().clone();
+    assert_eq!(
+        last,
+        vec![
+            ContentChange {
+                range: p(1, 2)..p(1, 3),
+                range_offset: 7,
+                range_length: 1,
+                text: "ef".into(),
+            },
+            ContentChange {
+                range: p(0, 1)..p(0, 2),
+                range_offset: 1,
+                range_length: 1,
+                text: "X".into(),
+            },
+        ]
+    );
+    // Applied in order to the old text, they give the new text.
+    let mut replay = old.clone();
+    for change in &last {
+        replay.replace_range(
+            change.range_offset..change.range_offset + change.range_length,
+            &change.text,
+        );
+    }
+    assert_eq!(replay, model.read_with(cx, |m, _| m.text()));
+
+    // Undo reports the reverse change.
+    model.update(cx, |m, cx| m.undo(None, cx));
+    let undo = changes.borrow().last().unwrap().clone();
+    assert_eq!(undo.len(), 2);
+    assert_eq!(undo[1].text, "b");
+    // set_value replaces everything (Monaco's flush).
+    model.update(cx, |m, cx| m.set_value("new", cx));
+    let flush = changes.borrow().last().unwrap().clone();
+    assert_eq!(flush[0].range, p(0, 0)..p(2, 3));
+    assert_eq!(flush[0].text, "new");
+}
+
+#[gpui::test]
+fn selection_change_reasons(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, point};
+    use gpui_monaco::{CodeEditorEvent, CursorChangeReason as R, CursorChangeSource as S};
+    let (editor, cx) = setup("hello\nworld", cx);
+    let changes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = changes.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event: &CodeEditorEvent, _| {
+            if let CodeEditorEvent::SelectionsChanged(change) = event {
+                sink.borrow_mut().push((change.reason, change.source));
+            }
+        })
+        .detach();
+    });
+    let last = |cx: &mut VisualTestContext| {
+        cx.run_until_parked();
+        let last = changes.borrow_mut().drain(..).next_back();
+        last.expect("no SelectionsChanged")
+    };
+
+    cx.simulate_keystrokes("right");
+    assert_eq!(last(cx), (R::Explicit, S::Keyboard));
+    cx.simulate_input("x");
+    assert_eq!(last(cx), (R::NotSet, S::Keyboard));
+    editor.update_in(cx, |e, window, cx| {
+        e.trigger("code_editor::Undo", window, cx).unwrap()
+    });
+    assert_eq!(last(cx), (R::Undo, S::ModelChange));
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 2))], cx)
+    });
+    assert_eq!(last(cx), (R::NotSet, S::Api));
+    editor.update(cx, |e, cx| {
+        e.execute_edits(vec![(p(0, 0)..p(0, 0), "a".into())], None, cx);
+    });
+    assert_eq!(last(cx), (R::NotSet, S::Api));
+
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("pasted".into()));
+    editor.update_in(cx, |e, window, cx| {
+        e.trigger("code_editor::Paste", window, cx).unwrap()
+    });
+    assert_eq!(last(cx), (R::Paste, S::Keyboard));
+    // Not left over for the next change.
+    cx.simulate_keystrokes("left");
+    assert_eq!(last(cx), (R::Explicit, S::Keyboard));
+
+    // Edits made elsewhere move the cursors along.
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    model.update(cx, |m, cx| m.edit([(0..0, "zz")], cx).unwrap());
+    assert_eq!(last(cx), (R::RecoverFromMarkers, S::ModelChange));
+    model.update(cx, |m, cx| m.set_value("fresh", cx));
+    assert_eq!(last(cx), (R::ContentFlush, S::Model));
+
+    draw(cx);
+    let at = editor
+        .read_with(cx, |e, _| e.scrolled_visible_position(p(0, 2)))
+        .unwrap()
+        + point(px(1.), px(2.));
+    cx.simulate_click(at, Modifiers::default());
+    assert_eq!(last(cx), (R::Explicit, S::Mouse));
+}
+
+#[gpui::test]
+fn decorations_collection(cx: &mut TestAppContext) {
+    use gpui_monaco::DecorationOptions;
+    let (editor, cx) = setup("one\ntwo\nthree", cx);
+    let options = DecorationOptions {
+        is_whole_line: true,
+        ..Default::default()
+    };
+    let mut collection = editor.update(cx, |e, cx| {
+        e.create_decorations_collection(vec![(p(0, 1)..p(0, 3), options.clone())], cx)
+    });
+    assert_eq!(collection.len(), 1);
+    let first = collection.ids()[0];
+    assert!(collection.has(first));
+    cx.update(|_, cx| {
+        let ids = collection.append(vec![(p(2, 1)..p(2, 9), options.clone())], cx);
+        assert_eq!(ids.len(), 1);
+        // Clamped to the text.
+        assert_eq!(
+            collection.ranges(cx),
+            vec![p(0, 1)..p(0, 3), p(2, 1)..p(2, 5)]
+        );
+    });
+    // Ranges follow edits (inserting at a range's edge would grow it).
+    editor.update(cx, |e, cx| {
+        e.execute_edits(vec![(p(0, 0)..p(0, 0), "\n".into())], None, cx);
+    });
+    cx.update(|_, cx| {
+        assert_eq!(collection.range(0, cx), Some(p(1, 1)..p(1, 3)));
+        // Owned by the editor.
+        let model = collection_model(&editor, cx);
+        let owner = model.read(cx).decoration(first).unwrap().owner;
+        assert_eq!(owner, Some(editor.entity_id()));
+        collection.set(vec![(p(3, 0)..p(3, 2), options.clone())], cx);
+        assert!(!collection.has(first));
+        assert!(model.read(cx).decoration(first).is_none());
+        assert_eq!(collection.ranges(cx), vec![p(3, 0)..p(3, 2)]);
+        collection.clear(cx);
+        assert!(collection.is_empty());
+        assert!(model.update(cx, |m, _| m.all_decorations(None)).is_empty());
+    });
+}
+
+fn collection_model(editor: &Entity<CodeEditor>, cx: &gpui::App) -> Entity<TextModel> {
+    editor.read(cx).model().clone()
 }

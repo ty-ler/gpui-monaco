@@ -4,10 +4,11 @@
 
 use std::ops::Range;
 
-use gpui::{App, Context, Window};
+use gpui::{App, Context, Entity, EntityId, Window};
 use text::{Bias, PointUtf16};
 
 use crate::cursor::{self, EditOperation, Selection};
+use crate::decorations::{DecorationId, DecorationOptions};
 use crate::editor::CodeEditor;
 use crate::model::TextModel;
 use crate::search::{self, SearchParams};
@@ -244,7 +245,9 @@ impl CodeEditor {
         if let Some(end) = end_selections.filter(|s| !s.is_empty()) {
             operation.selections_after = end;
         }
+        self.next_selection_change.source = crate::events::CursorChangeSource::Api;
         self.apply(operation, cx);
+        self.next_selection_change = Default::default();
         true
     }
 
@@ -268,5 +271,134 @@ impl CodeEditor {
         window.focus(&self.focus_handle, cx);
         window.dispatch_action(action, cx);
         Ok(())
+    }
+}
+
+/// A set of decorations an editor owns, replaced as a whole (Monaco
+/// `IEditorDecorationsCollection`, from
+/// [`CodeEditor::create_decorations_collection`]).
+///
+/// It stays bound to the model the editor had when it was created. Dropping
+/// it leaves the decorations in place; call [`DecorationsCollection::clear`]
+/// first to remove them.
+#[derive(Clone, Debug)]
+pub struct DecorationsCollection {
+    model: Entity<TextModel>,
+    owner: EntityId,
+    ids: Vec<DecorationId>,
+}
+
+impl DecorationsCollection {
+    /// Replaces the decorations with `decorations` (positions in the
+    /// current text), returning their ids (Monaco `set`).
+    pub fn set(
+        &mut self,
+        decorations: Vec<(Range<PointUtf16>, DecorationOptions)>,
+        cx: &mut App,
+    ) -> &[DecorationId] {
+        let old = std::mem::take(&mut self.ids);
+        self.ids = self.delta(&old, decorations, cx);
+        &self.ids
+    }
+
+    /// Adds `decorations` to the collection, returning their ids (Monaco
+    /// `append`).
+    pub fn append(
+        &mut self,
+        decorations: Vec<(Range<PointUtf16>, DecorationOptions)>,
+        cx: &mut App,
+    ) -> Vec<DecorationId> {
+        let ids = self.delta(&[], decorations, cx);
+        self.ids.extend(&ids);
+        ids
+    }
+
+    /// Removes every decoration (Monaco `clear`).
+    pub fn clear(&mut self, cx: &mut App) {
+        if !self.ids.is_empty() {
+            let old = std::mem::take(&mut self.ids);
+            self.delta(&old, Vec::new(), cx);
+        }
+    }
+
+    /// The number of decorations (Monaco `length`).
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    /// Whether the collection is empty.
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    /// The decorations' ids, in the order they were added.
+    pub fn ids(&self) -> &[DecorationId] {
+        &self.ids
+    }
+
+    /// Whether `id` is in the collection (Monaco `has`).
+    pub fn has(&self, id: DecorationId) -> bool {
+        self.ids.contains(&id)
+    }
+
+    /// Where decoration `index` is now, after edits (Monaco `getRange`).
+    pub fn range(&self, index: usize, cx: &App) -> Option<Range<PointUtf16>> {
+        let model = self.model.read(cx);
+        let decoration = model.decoration(*self.ids.get(index)?)?;
+        let rope = model.buffer().rope();
+        Some(
+            rope.offset_to_point_utf16(decoration.range.start)
+                ..rope.offset_to_point_utf16(decoration.range.end),
+        )
+    }
+
+    /// Where every decoration is now (Monaco `getRanges`).
+    pub fn ranges(&self, cx: &App) -> Vec<Range<PointUtf16>> {
+        (0..self.ids.len())
+            .filter_map(|index| self.range(index, cx))
+            .collect()
+    }
+
+    fn delta(
+        &self,
+        old: &[DecorationId],
+        new: Vec<(Range<PointUtf16>, DecorationOptions)>,
+        cx: &mut App,
+    ) -> Vec<DecorationId> {
+        let owner = self.owner;
+        self.model.update(cx, |model, cx| {
+            let new = new
+                .into_iter()
+                .map(|(range, options)| {
+                    let range = model.validate_range(range);
+                    (
+                        model.offset_at(range.start)..model.offset_at(range.end),
+                        options,
+                    )
+                })
+                .collect();
+            model.delta_decorations(Some(owner), old, new, cx)
+        })
+    }
+}
+
+impl CodeEditor {
+    /// A [`DecorationsCollection`] on the current model, owned by this
+    /// editor, starting with `decorations` (Monaco
+    /// `createDecorationsCollection`).
+    pub fn create_decorations_collection(
+        &self,
+        decorations: Vec<(Range<PointUtf16>, DecorationOptions)>,
+        cx: &mut Context<Self>,
+    ) -> DecorationsCollection {
+        let mut collection = DecorationsCollection {
+            model: self.model().clone(),
+            owner: cx.entity_id(),
+            ids: Vec::new(),
+        };
+        if !decorations.is_empty() {
+            collection.set(decorations, cx);
+        }
+        collection
     }
 }

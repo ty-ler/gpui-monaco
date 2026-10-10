@@ -8,9 +8,11 @@ use std::sync::Arc;
 use gpui::{App, Context, EntityId, EventEmitter, Global, SharedString, Task};
 
 use crate::decorations::{Decoration, DecorationId, DecorationOptions, DecorationSet};
+use crate::events::{ContentChange, content_changes};
 use syntax::{HighlightState, Highlighter, Language, LanguageRegistry, TreeSitterHighlighter};
 use text::{
-    Buffer, BufferSnapshot, EditError, LineEnding, Patch, TransactionMetadata, UndoOutcome, Version,
+    Buffer, BufferSnapshot, EditError, LineEnding, Patch, Rope, TransactionMetadata, UndoOutcome,
+    Version,
 };
 
 /// The process-wide language registry used to resolve [`TextModel`] language
@@ -98,6 +100,9 @@ pub enum TextModelEvent {
     Edited {
         /// The changes, in byte offsets of the previous text.
         patch: Patch,
+        /// The changes with positions and inserted text (Monaco
+        /// `IModelContentChangedEvent.changes`).
+        changes: Arc<[ContentChange]>,
         /// The model's version after the change.
         version: Version,
         /// What caused the change.
@@ -452,6 +457,7 @@ impl TextModel {
     pub fn set_value(&mut self, text: &str, cx: &mut Context<Self>) {
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let len = self.buffer.len();
+        let old = self.buffer.rope().clone();
         let Ok(patch) = self.buffer.edit([(0..len, text)]) else {
             return;
         };
@@ -459,6 +465,7 @@ impl TextModel {
         self.decorations.apply_patch(&patch);
         self.reparse(cx);
         cx.emit(TextModelEvent::Edited {
+            changes: content_changes(&old, self.buffer.rope(), &patch).into(),
             patch,
             version: self.buffer.version(),
             kind: EditKind::SetValue,
@@ -487,6 +494,7 @@ impl TextModel {
         source: Option<EntityId>,
         cx: &mut Context<Self>,
     ) -> Result<Patch, EditError> {
+        let old = self.buffer.rope().clone();
         let patch = match group {
             Some(group) => self.buffer.edit_grouped(edits, group)?,
             None => self.buffer.edit(edits)?,
@@ -495,6 +503,7 @@ impl TextModel {
             self.decorations.apply_patch(&patch);
             self.reparse(cx);
             cx.emit(TextModelEvent::Edited {
+                changes: content_changes(&old, self.buffer.rope(), &patch).into(),
                 patch: patch.clone(),
                 version: self.buffer.version(),
                 kind: EditKind::Edit,
@@ -579,20 +588,23 @@ impl TextModel {
     /// [`TextModelEvent::Edited`] with [`EditKind::Undo`]. Returns whether anything
     /// was undone.
     pub fn undo(&mut self, source: Option<EntityId>, cx: &mut Context<Self>) -> bool {
+        let old = self.buffer.rope().clone();
         let outcome = self.buffer.undo();
-        self.emit_undo(outcome, EditKind::Undo, source, cx)
+        self.emit_undo(&old, outcome, EditKind::Undo, source, cx)
     }
 
     /// Redoes the last undone step on behalf of `source`, emitting
     /// [`TextModelEvent::Edited`] with [`EditKind::Redo`]. Returns whether anything
     /// was redone.
     pub fn redo(&mut self, source: Option<EntityId>, cx: &mut Context<Self>) -> bool {
+        let old = self.buffer.rope().clone();
         let outcome = self.buffer.redo();
-        self.emit_undo(outcome, EditKind::Redo, source, cx)
+        self.emit_undo(&old, outcome, EditKind::Redo, source, cx)
     }
 
     fn emit_undo(
         &mut self,
+        old: &Rope,
         outcome: Option<UndoOutcome>,
         kind: EditKind,
         source: Option<EntityId>,
@@ -604,6 +616,7 @@ impl TextModel {
         self.decorations.apply_patch(&outcome.patch);
         self.reparse(cx);
         cx.emit(TextModelEvent::Edited {
+            changes: content_changes(old, self.buffer.rope(), &outcome.patch).into(),
             patch: outcome.patch,
             version: self.buffer.version(),
             kind,

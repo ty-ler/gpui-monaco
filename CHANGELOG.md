@@ -44,6 +44,9 @@ All notable changes to this project are documented here. The format follows [Kee
   - `TextModel`: `line_count`, `line_content`, `validate_position` and `validate_range`, `offset_at` and `position_at`, `value_in_range`, `word_at_position`, `word_until_position` and `find_matches`.
   - `CodeEditor`: `reveal_*` (a port of Monaco's reveal math, with `RevealType`), `visible_ranges`, `execute_edits`, `push_undo_stop`, `trigger` by action name and `has_text_focus`.
 - Mouse events with hit-test targets (`MouseDown`, `MouseUp`, `MouseMove`, `MouseLeave`, `ContextMenu`, `CodeEditor::mouse_target`), a port of Monaco's `IMouseTarget` kinds (#105).
+- `TextModelEvent::Edited` now carries `changes`: Monaco-style `ContentChange`s with the range, offset, length and new text (#105).
+- `CodeEditorEvent::SelectionsChanged` now carries a `SelectionChange` with Monaco's `CursorChangeReason` (explicit, paste, undo, redo, content flush, recover from markers) and source (keyboard, mouse, API, model) (#105). This is a breaking change: match `SelectionsChanged(_)`.
+- `CodeEditor::create_decorations_collection` returns a `DecorationsCollection`, a port of Monaco's `IEditorDecorationsCollection` (#105).
 - `TextModel::language_at` (Monaco `getLanguageIdAtPosition`), and the `comments` editor option.
 - Language configurations accept `lineComment` as `{ "comment", "noIndent" }`.
 
