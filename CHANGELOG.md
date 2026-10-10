@@ -71,6 +71,13 @@ All notable changes to this project are documented here. The format follows [Kee
   - `register_model`, `model_for_uri` and `set_model_resolver`, so other documents can be previewed.
   - The LSP bridge forwards references, declaration, type definition and implementation requests.
 - Clicks in view zones and widgets no longer focus the editor.
+- **Code actions (#56):**
+  - `CodeActionProvider` with hierarchical `CodeActionKind`s and `resolve_code_action`.
+  - The lightbulb, and Monaco's grouped menu.
+  - Commands: Quick Fix (Cmd/Ctrl+.), Refactor, Source Action, Organize Imports, Fix All and Auto Fix, plus `trigger_code_actions`.
+  - A command registry: `register_command` and `execute_command`.
+  - `TextModelEvent::MarkersChanged`.
+  - The LSP bridge forwards code actions, resolve and `workspace/executeCommand`.
 - **Rename (#56):** `RenameProvider` (with optional `resolve_rename_location`), F2 with Monaco's rename box, `WorkspaceEdit` and `CodeEditor::apply_workspace_edit`. The LSP bridge forwards `prepareRename` and `rename`.
 
 ### Fixed

@@ -59,6 +59,7 @@ Positions need no conversion: both the editor and LSP use 0-based lines and UTF-
 | `signatureHelpProvider` | Parameter hints, with the server's trigger and retrigger characters. |
 | `documentFormattingProvider`, `documentRangeFormattingProvider` | Format Document, Format Selection and format on paste, with the model's tab size and spaces setting. |
 | `documentOnTypeFormattingProvider` | Format on type, with the server's trigger characters. |
+| `codeActionProvider`, `executeCommandProvider` | Code actions and the lightbulb, with `codeAction/resolve` for edits when the server supports it. The server's commands are registered with `register_command` and run with `workspace/executeCommand`. |
 | `renameProvider` | Rename (F2), with `prepareRename` when the server supports it. Edits to other documents need their models (`model_for_uri`). |
 | `textDocument/publishDiagnostics` | Markers owned by `lsp:<name>`, shown as squiggles and in the overview ruler. |
 

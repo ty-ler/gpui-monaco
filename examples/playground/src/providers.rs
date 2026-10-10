@@ -216,6 +216,61 @@ impl RenameProvider for DemoRename {
     }
 }
 
+/// A quick fix per marker and an uppercase rewrite of the word.
+struct DemoCodeActions;
+impl CodeActionProvider for DemoCodeActions {
+    fn provide_code_actions(
+        &self,
+        context: &ProviderContext,
+        range: std::ops::Range<PointUtf16>,
+        action_context: &CodeActionContext,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<CodeAction>>> {
+        let mut actions: Vec<CodeAction> = action_context
+            .markers
+            .iter()
+            .map(|marker| CodeAction {
+                title: format!("Silence '{}'", marker.message).into(),
+                kind: Some(CodeActionKind::QUICK_FIX.into()),
+                diagnostics: vec![marker.clone()],
+                is_preferred: true,
+                edit: Some(WorkspaceEdit {
+                    edits: vec![(
+                        None,
+                        vec![(marker.range.start..marker.range.start, "_".to_string())],
+                    )],
+                }),
+                ..Default::default()
+            })
+            .collect();
+        let word = word_at(context, range.start);
+        if !word.is_empty() && word != word.to_uppercase() {
+            let line = context.snapshot.line(range.start.row);
+            let column = range.start.column as usize;
+            let start = line[..column.min(line.len())]
+                .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .map_or(0, |i| i + 1) as u32;
+            let end = start + word.encode_utf16().count() as u32;
+            actions.push(CodeAction {
+                title: format!("Convert '{word}' to UPPERCASE").into(),
+                kind: Some(CodeActionKind::REFACTOR_REWRITE.into()),
+                edit: Some(WorkspaceEdit {
+                    edits: vec![(
+                        None,
+                        vec![(
+                            PointUtf16::new(range.start.row, start)
+                                ..PointUtf16::new(range.start.row, end),
+                            word.to_uppercase(),
+                        )],
+                    )],
+                }),
+                ..Default::default()
+            });
+        }
+        Task::ready(Ok(actions))
+    }
+}
+
 struct DemoDefinitions;
 impl DefinitionProvider for DemoDefinitions {
     fn provide_definition(
@@ -333,6 +388,7 @@ pub fn register(cx: &mut App) {
     register_definition_provider(cx, LanguageSelector::All, DemoDefinitions);
     register_reference_provider(cx, LanguageSelector::All, DemoReferences);
     register_rename_provider(cx, LanguageSelector::All, DemoRename);
+    register_code_action_provider(cx, LanguageSelector::All, DemoCodeActions);
     register_completion_provider(cx, LanguageSelector::All, DemoCompletions);
     register_hover_provider(cx, LanguageSelector::All, DemoHover);
     register_signature_help_provider(cx, LanguageSelector::All, DemoSignatures);

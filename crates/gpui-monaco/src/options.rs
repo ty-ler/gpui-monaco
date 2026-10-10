@@ -182,6 +182,19 @@ pub enum CursorStyle {
     LineThin,
 }
 
+/// When the lightbulb asks for code actions (Monaco
+/// `ShowLightbulbIconMode`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LightbulbMode {
+    /// Never.
+    Off,
+    /// When the cursor is on or next to code, or text is selected.
+    #[default]
+    OnCode,
+    /// Always.
+    On,
+}
+
 /// What symbol navigation does with several results (Monaco
 /// `GoToLocationValues`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -367,6 +380,8 @@ pub struct EditorOptions {
     pub quick_suggestions: bool,
     /// Monaco `gotoLocation`.
     pub goto_location: GotoLocationOptions,
+    /// Monaco `lightbulb.enabled`.
+    pub lightbulb: LightbulbMode,
     /// Monaco `formatOnType`: format with the on-type formatter when one of
     /// its trigger characters is typed.
     pub format_on_type: bool,
@@ -477,6 +492,7 @@ impl Default for EditorOptions {
             match_brackets: true,
             quick_suggestions: true,
             goto_location: GotoLocationOptions::default(),
+            lightbulb: LightbulbMode::OnCode,
             format_on_type: false,
             format_on_paste: false,
             minimap: MinimapOptions::default(),

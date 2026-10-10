@@ -32,6 +32,7 @@ editor.update(cx, |editor, cx| {
 | `auto_indent` | `autoIndent` | `None`, `Keep`, `Brackets`, `Advanced`, `Full` |
 | `match_brackets` | `matchBrackets` | |
 | `quick_suggestions` | `quickSuggestions` | completion while typing |
+| `lightbulb` | `lightbulb.enabled` | when the code action lightbulb asks for actions: `Off`, `OnCode` (default) or `On` |
 | `goto_location` | `gotoLocation` | what go to definition, references and the other navigation commands do with several results, and their alternative commands |
 | `format_on_type` | `formatOnType` | format with the on-type formatter after its trigger characters (off) |
 | `format_on_paste` | `formatOnPaste` | format pasted text with the range formatter (off) |

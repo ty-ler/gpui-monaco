@@ -527,6 +527,8 @@ pub(crate) struct EditorLayout {
     pub widget_bounds: Vec<Bounds<Pixels>>,
     /// What each of `widget_bounds` is.
     pub widget_kinds: Vec<crate::mouse_target::EmbeddedKind>,
+    /// The code action lightbulb, for clicks.
+    pub lightbulb: Option<Bounds<Pixels>>,
     pub minimap: Option<MinimapLayout>,
     /// Sticky scroll lines: (model row, bounds).
     pub sticky_lines: Vec<(u32, Bounds<Pixels>)>,
@@ -598,6 +600,7 @@ pub struct PrepaintState {
     decoration_underlines: Vec<(gpui::Point<Pixels>, Pixels, UnderlineStyle)>,
     gutter_bars: Vec<(Bounds<Pixels>, Hsla)>,
     glyphs: Vec<(gpui::Point<Pixels>, ShapedLine)>,
+    lightbulb: Option<(Bounds<Pixels>, Hsla)>,
     ruler_marks: Vec<(Bounds<Pixels>, Hsla)>,
     /// Indent guides and rulers.
     guides: Vec<(Bounds<Pixels>, Hsla)>,
@@ -1180,6 +1183,7 @@ fn prepaint_editor(
         zones: zones.clone(),
         widget_bounds: Vec::new(),
         widget_kinds: Vec::new(),
+        lightbulb: None,
         minimap: None,
         sticky_lines: Vec::new(),
         vertical_scrollbar,
@@ -1445,6 +1449,68 @@ fn prepaint_editor(
             }
         }
     }
+    // The code action lightbulb (Monaco `LightBulbWidget`).
+    let mut lightbulb = None;
+    if let Some(bulb) = editor.code_actions.lightbulb.clone() {
+        let model = editor.model().read(cx);
+        let line_count = snapshot.max_point().row + 1;
+        let lines = |row: u32| model.line_content(row);
+        let glyph_rows: Vec<u32> = decoration_points
+            .iter()
+            .filter(|(_, _, d)| d.options.glyph.is_some())
+            .map(|(start, _, _)| start.row)
+            .collect();
+        let placement = crate::code_action::place_lightbulb(
+            bulb.position,
+            line_count,
+            &lines,
+            &|row| view_lines.is_row_hidden(row),
+            tab_size,
+            f32::from(metrics.em_width),
+            glyph_rows.contains(&bulb.position.row),
+        );
+        let side = line_height.min(px(16.)).max(line_height * 0.8);
+        let at = |row: u32| {
+            layout
+                .lines
+                .iter()
+                .find(|line| line.row == row && line.columns.start == 0)
+        };
+        let bounds = match placement {
+            Some(crate::code_action::LightbulbPlacement::Gutter(row)) if glyph_width > px(0.) => {
+                at(row).map(|line| {
+                    let top = layout.line_top(line.view_line) + (line_height - side) / 2.;
+                    Bounds::new(
+                        point(bounds.left() + (glyph_width - side) / 2., top),
+                        size(side, side),
+                    )
+                })
+            }
+            Some(crate::code_action::LightbulbPlacement::Gutter(row))
+            | Some(crate::code_action::LightbulbPlacement::Content(row, _)) => {
+                let column = match placement {
+                    Some(crate::code_action::LightbulbPlacement::Content(_, column)) => column,
+                    _ => 0,
+                };
+                at(row).map(|line| {
+                    let top = layout.line_top(line.view_line) + (line_height - side) / 2.;
+                    Bounds::new(
+                        point(origin_x + line.x_for_column(column), top),
+                        size(side, side),
+                    )
+                })
+            }
+            None => None,
+        };
+        lightbulb = bounds.map(|bounds| {
+            (
+                bounds,
+                crate::code_action::lightbulb_color(&colors, bulb.auto_fix),
+            )
+        });
+    }
+    layout.lightbulb = lightbulb.map(|(bounds, _)| bounds);
+
     // Overview ruler marks in the vertical scrollbar track.
     let mut ruler_marks: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
     if let Some(track) = layout.vertical_scrollbar.map(|bar| bar.track).or_else(|| {
@@ -1733,6 +1799,7 @@ fn prepaint_editor(
         decoration_underlines,
         gutter_bars,
         glyphs,
+        lightbulb,
         ruler_marks,
         guides,
         whitespace,
@@ -1818,6 +1885,12 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
             shaped
                 .paint(*origin, line_height, TextAlign::Left, None, window, cx)
                 .ok();
+        }
+        // Monaco shows the lightbulb only while the editor has focus.
+        if state.focused
+            && let Some((bulb, color)) = state.lightbulb
+        {
+            paint_lightbulb(bulb, color, window);
         }
 
         // Fold controls: always for collapsed regions, otherwise per option.
@@ -2036,6 +2109,38 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
             window.paint_quad(fill(shadow, colors.scrollbar_shadow.opacity(0.6)));
         }
     });
+}
+
+/// A lightbulb: a round bulb over a small base.
+fn paint_lightbulb(bounds: Bounds<Pixels>, color: Hsla, window: &mut Window) {
+    let h = bounds.size.height;
+    let center = point(
+        bounds.left() + bounds.size.width / 2.,
+        bounds.top() + h * 0.4,
+    );
+    let radius = h * 0.3;
+    let mut path = PathBuilder::fill();
+    for i in 0..=16 {
+        let angle = std::f32::consts::TAU * i as f32 / 16.;
+        let p = point(
+            center.x + radius * angle.cos(),
+            center.y + radius * angle.sin(),
+        );
+        if i == 0 {
+            path.move_to(p);
+        } else {
+            path.line_to(p);
+        }
+    }
+    path.close();
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color);
+    }
+    let base = Bounds::new(
+        point(center.x - h * 0.13, bounds.top() + h * 0.7),
+        size(h * 0.26, h * 0.16),
+    );
+    window.paint_quad(fill(base, color));
 }
 
 fn paint_fold_placeholder(

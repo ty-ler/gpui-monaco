@@ -26,6 +26,7 @@ Demo providers are registered by default:
 - go to definition (`F12` / Cmd+click)
 - references in a peek view (`Shift+F12`): every whole-word occurrence
 - rename (`F2`) of every whole-word occurrence
+- code actions: a lightbulb and `Cmd+.` with a quick fix per diagnostic and an UPPERCASE rewrite
 - diagnostics (`F8`)
 - a formatter that trims trailing spaces and collapses repeated ones. Use format document (`Shift+Alt+F`) or format selection (`Cmd+K Cmd+F`). It also runs on paste and when you type `;` or `}`.
 
