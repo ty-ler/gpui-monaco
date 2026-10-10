@@ -679,6 +679,109 @@ pub trait InlayHintsProvider: 'static {
     ) -> Task<anyhow::Result<Vec<InlayHint>>>;
 }
 
+// ----- document symbols ----------------------------------------------------------
+
+/// Monaco `SymbolKind`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[allow(missing_docs)]
+pub enum SymbolKind {
+    File,
+    Module,
+    Namespace,
+    Package,
+    Class,
+    Method,
+    Property,
+    Field,
+    Constructor,
+    Enum,
+    Interface,
+    #[default]
+    Function,
+    Variable,
+    Constant,
+    String,
+    Number,
+    Boolean,
+    Array,
+    Object,
+    Key,
+    Null,
+    EnumMember,
+    Struct,
+    Event,
+    Operator,
+    TypeParameter,
+}
+
+impl SymbolKind {
+    /// Monaco's name for the kind, as shown when grouping symbols
+    /// (`symbolKindNames`).
+    pub fn name(self) -> &'static str {
+        match self {
+            SymbolKind::File => "files",
+            SymbolKind::Module => "modules",
+            SymbolKind::Namespace => "namespaces",
+            SymbolKind::Package => "packages",
+            SymbolKind::Class => "classes",
+            SymbolKind::Method => "methods",
+            SymbolKind::Property => "properties",
+            SymbolKind::Field => "fields",
+            SymbolKind::Constructor => "constructors",
+            SymbolKind::Enum => "enumerations",
+            SymbolKind::Interface => "interfaces",
+            SymbolKind::Function => "functions",
+            SymbolKind::Variable => "variables",
+            SymbolKind::Constant => "constants",
+            SymbolKind::String => "strings",
+            SymbolKind::Number => "numbers",
+            SymbolKind::Boolean => "booleans",
+            SymbolKind::Array => "arrays",
+            SymbolKind::Object => "objects",
+            SymbolKind::Key => "keys",
+            SymbolKind::Null => "null",
+            SymbolKind::EnumMember => "enumeration members",
+            SymbolKind::Struct => "structs",
+            SymbolKind::Event => "events",
+            SymbolKind::Operator => "operators",
+            SymbolKind::TypeParameter => "type parameters",
+        }
+    }
+}
+
+/// A symbol in a document's outline (Monaco `DocumentSymbol`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DocumentSymbol {
+    /// Its name.
+    pub name: SharedString,
+    /// E.g. a signature.
+    pub detail: Option<SharedString>,
+    /// Its kind.
+    pub kind: SymbolKind,
+    /// Deprecated, by Monaco's `SymbolTag.Deprecated`.
+    pub deprecated: bool,
+    /// The whole definition.
+    pub range: Range<PointUtf16>,
+    /// The part to select and reveal, usually the name.
+    pub selection_range: Range<PointUtf16>,
+    /// Nested symbols.
+    pub children: Vec<DocumentSymbol>,
+}
+
+/// Supplies a document's symbols (Monaco `DocumentSymbolProvider`), for go
+/// to symbol, the outline and sticky scroll. Without one, the language's
+/// `tags.scm` query is used.
+///
+/// Register with [`register_document_symbol_provider`].
+pub trait DocumentSymbolProvider: 'static {
+    /// The document's symbols, nested.
+    fn provide_document_symbols(
+        &self,
+        context: &ProviderContext,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<DocumentSymbol>>>;
+}
+
 // ----- code lens -----------------------------------------------------------------
 
 /// A command shown above a line (Monaco `CodeLens`).
@@ -1226,6 +1329,7 @@ struct LanguageFeatures {
     inline_completions: Vec<Entry<dyn InlineCompletionsProvider>>,
     linked_editing: Vec<Entry<dyn LinkedEditingRangeProvider>>,
     code_lens: Vec<Entry<dyn CodeLensProvider>>,
+    document_symbols: Vec<Entry<dyn DocumentSymbolProvider>>,
     range_semantic_tokens: Vec<Entry<dyn DocumentRangeSemanticTokensProvider>>,
     folding: Vec<Entry<dyn FoldingRangeProvider>>,
     selection_range: Vec<Entry<dyn SelectionRangeProvider>>,
@@ -1317,6 +1421,13 @@ register_fn!(
     register_folding_range_provider,
     folding,
     FoldingRangeProvider
+);
+register_fn!(
+    /// Registers a document symbol provider for the models `selector`
+    /// matches (Monaco `registerDocumentSymbolProvider`).
+    register_document_symbol_provider,
+    document_symbols,
+    DocumentSymbolProvider
 );
 register_fn!(
     /// Registers a code lens provider for the models `selector` matches
@@ -1454,6 +1565,7 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.inline_completions.retain(|e| e.id != registration);
     features.linked_editing.retain(|e| e.id != registration);
     features.code_lens.retain(|e| e.id != registration);
+    features.document_symbols.retain(|e| e.id != registration);
     features
         .range_semantic_tokens
         .retain(|e| e.id != registration);
@@ -1615,6 +1727,17 @@ pub fn code_action_providers(
 ) -> Vec<Arc<dyn CodeActionProvider>> {
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.code_action, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered document symbol providers whose selector matches
+/// `language_id`, in registration order.
+pub fn document_symbol_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn DocumentSymbolProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.document_symbols, language_id))
         .unwrap_or_default()
 }
 

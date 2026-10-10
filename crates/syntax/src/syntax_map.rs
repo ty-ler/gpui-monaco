@@ -68,6 +68,17 @@ pub struct HighlightSpan {
     pub highlight: HighlightId,
 }
 
+/// A definition found by a `tags.scm` query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tag {
+    /// The kind after `definition.`, e.g. `function` or `class`.
+    pub kind: String,
+    /// The definition's byte range.
+    pub range: Range<usize>,
+    /// Its name's byte range.
+    pub name_range: Range<usize>,
+}
+
 /// The syntax trees for one version of a buffer.
 #[derive(Clone)]
 pub struct SyntaxSnapshot {
@@ -447,6 +458,54 @@ impl SyntaxSnapshot {
             return Some(vec![name.byte_range(), other_name.byte_range()]);
         }
         None
+    }
+
+    /// Definitions from the layers' `tags.scm` queries, in document order:
+    /// each `@definition.<kind>` node with its `@name`. `None` if no layer
+    /// has a tags query.
+    pub fn tags(&self, text: &Rope) -> Option<Vec<Tag>> {
+        let mut any_query = false;
+        let mut tags = Vec::new();
+        for layer in &self.layers {
+            let Some(query) = layer
+                .language
+                .grammar
+                .as_ref()
+                .and_then(|grammar| grammar.tags.as_ref())
+            else {
+                continue;
+            };
+            any_query = true;
+            let names = query.capture_names();
+            let mut cursor = QueryCursor::new();
+            for range in &layer.ranges {
+                cursor.set_byte_range(range.clone());
+                let mut matches =
+                    cursor.matches(query, layer.tree.root_node(), RopeTextProvider(text));
+                while let Some(m) = matches.next() {
+                    let mut definition = None;
+                    let mut name = None;
+                    for capture in m.captures() {
+                        let capture_name = names[capture.index as usize];
+                        if let Some(kind) = capture_name.strip_prefix("definition.") {
+                            definition = Some((kind.to_string(), capture.node.byte_range()));
+                        } else if capture_name == "name" {
+                            name = Some(capture.node.byte_range());
+                        }
+                    }
+                    if let (Some((kind, range)), Some(name_range)) = (definition, name) {
+                        tags.push(Tag {
+                            kind,
+                            range,
+                            name_range,
+                        });
+                    }
+                }
+            }
+        }
+        tags.sort_by_key(|tag| (tag.range.start, std::cmp::Reverse(tag.range.end)));
+        tags.dedup_by(|a, b| a.range == b.range && a.name_range == b.name_range);
+        any_query.then_some(tags)
     }
 
     /// Foldable regions from the layers' `folds.scm` queries: each `@fold`

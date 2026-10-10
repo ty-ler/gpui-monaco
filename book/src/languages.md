@@ -104,3 +104,5 @@ A `Highlighter` has two methods:
 - **`highlights(state, text, range)`:** returns sorted, non-overlapping spans for a range. It runs every frame for the visible lines, so it must be fast.
 
 Spans carry `HighlightId`s, which are capture-style names such as `keyword` and `string`, and the theme maps them to colors. Bracket matching and auto-closing use names that start with `string` or `comment` to know what to skip.
+
+A grammar can also have a `tags.scm` query (`Grammar::with_tags_query`, tree-sitter's code navigation format: `@definition.<kind>` with `@name`). It gives the document symbols used by go to symbol when no provider is registered.

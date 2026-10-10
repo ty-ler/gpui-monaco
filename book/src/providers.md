@@ -212,6 +212,10 @@ The editor shows them as injected text that moves with edits. As in Monaco:
 
 Unlike Monaco, hints use the editor's font size, and their label parts, tooltips and edits aren't interactive yet.
 
+## Document symbols
+
+A `DocumentSymbolProvider` returns a document's outline as nested `DocumentSymbol`s (name, `SymbolKind`, range and selection range). `CodeEditor::document_symbols` returns them, merged across providers. Without a provider they come from the language's `tags.scm` query. The bundled languages have one for Rust, JavaScript, TypeScript, Markdown, JSON and CSS.
+
 ## Code lens
 
 A `CodeLensProvider` puts clickable commands above lines, such as "3 references" or "Run test". `provide_code_lenses` can return lenses without a `command`; `resolve_code_lens` then fills them in when they scroll into view. Lenses on the same line show together, separated by `|`.

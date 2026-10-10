@@ -52,6 +52,7 @@ pub struct Grammar {
     pub(crate) brackets: Option<Query>,
     pub(crate) folds: Option<Query>,
     pub(crate) indents: Option<Query>,
+    pub(crate) tags: Option<Query>,
 }
 
 pub(crate) struct InjectionQuery {
@@ -74,6 +75,7 @@ impl Grammar {
             brackets: None,
             folds: None,
             indents: None,
+            tags: None,
         }
     }
 
@@ -125,6 +127,14 @@ impl Grammar {
     /// `folds.scm`: foldable nodes captured as `@fold`.
     pub fn with_folds_query(mut self, source: &str) -> Result<Self, tree_sitter::QueryError> {
         self.folds = Some(Query::new(&self.ts_language, source)?);
+        Ok(self)
+    }
+
+    /// `tags.scm` (tree-sitter's code navigation query): definitions
+    /// captured as `@definition.<kind>` with their `@name`, used for
+    /// document symbols.
+    pub fn with_tags_query(mut self, source: &str) -> Result<Self, tree_sitter::QueryError> {
+        self.tags = Some(Query::new(&self.ts_language, source)?);
         Ok(self)
     }
 

@@ -796,6 +796,10 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
                 "augmentsSyntaxTokens": true,
             },
             "foldingRange": { "lineFoldingOnly": true },
+            "documentSymbol": {
+                "hierarchicalDocumentSymbolSupport": true,
+                "tagSupport": { "valueSet": [1] },
+            },
             "selectionRange": {},
             "codeAction": {
                 "codeActionLiteralSupport": {

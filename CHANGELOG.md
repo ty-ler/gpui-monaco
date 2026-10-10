@@ -149,6 +149,11 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Document symbols (#100, part 1):**
+  - `DocumentSymbolProvider` (`SymbolKind`, nested `DocumentSymbol`s) and `CodeEditor::document_symbols`.
+  - Without a provider, symbols come from the language's tags query, using `Grammar::with_tags_query` and `SyntaxSnapshot::tags`.
+  - Bundled queries cover Rust (plus `impl` blocks), JavaScript, TypeScript, Markdown headings, JSON keys and CSS selectors.
+  - The LSP bridge forwards `textDocument/documentSymbol`.
 - **Code lens (#96):** ported from Monaco's `CodeLensContribution`.
   - A `CodeLensProvider` (with `resolve_code_lens`) adds commands above lines, shown in view zones and grouped per line with ` | `.
   - Lenses are requested after edits with Monaco's debounce (at least 250ms) and resolved when they scroll into view.
