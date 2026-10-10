@@ -19,7 +19,7 @@ A Monaco-like code editor component for [GPUI](https://github.com/zed-industries
 
 ## Non-goals (for the MVP)
 
-Diff editor, CRDT collaboration and wasm. See the `post-mvp` issues.
+Diff editor, CRDT collaboration and a browser runner (the crates already compile for wasm32). See the `post-mvp` issues.
 
 ## Crates
 

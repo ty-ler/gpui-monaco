@@ -2,7 +2,9 @@
 //! zoom level shared by every editor, scaling the font size and line
 //! height by 10% per level.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use web_time::Instant;
 
 use gpui::{App, Context, Global, ScrollDelta, ScrollWheelEvent, px};
 

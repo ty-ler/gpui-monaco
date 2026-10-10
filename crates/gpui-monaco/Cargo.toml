@@ -11,6 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# `Instant` that works in browsers (std's on other targets).
+web-time = "1"
 anyhow.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 iana-time-zone = "0.1"

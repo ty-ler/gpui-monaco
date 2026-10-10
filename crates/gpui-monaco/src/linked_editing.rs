@@ -4,7 +4,9 @@
 //! there is mirrored to the others in the same undo step.
 
 use std::ops::Range;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use web_time::Instant;
 
 use gpui::{App, Context, Task};
 use text::PointUtf16;

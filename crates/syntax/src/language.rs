@@ -41,9 +41,26 @@ impl HighlightId {
     }
 }
 
+/// A tree-sitter language that can move between threads.
+///
+/// tree-sitter doesn't implement `Send`/`Sync` for `Language` on wasm,
+/// where it can also be a language loaded into a wasm store. Grammars here
+/// are compiled-in C tables, which are immutable and safe to share, as on
+/// every other target.
+pub(crate) struct SharedLanguage(pub(crate) tree_sitter::Language);
+
+#[cfg(target_family = "wasm")]
+#[allow(unsafe_code)]
+// SAFETY: compiled-in grammars are immutable static tables (see above).
+unsafe impl Send for SharedLanguage {}
+#[cfg(target_family = "wasm")]
+#[allow(unsafe_code)]
+// SAFETY: as above.
+unsafe impl Sync for SharedLanguage {}
+
 /// A tree-sitter grammar plus the queries gpui-monaco uses.
 pub struct Grammar {
-    pub(crate) ts_language: tree_sitter::Language,
+    pub(crate) ts_language: SharedLanguage,
     pub(crate) highlights: Option<Query>,
     /// Highlight id for each capture of `highlights`; `None` for captures that
     /// are not highlights (names starting with `_`).
@@ -68,7 +85,7 @@ impl Grammar {
     /// A grammar with no queries; add them with the `with_*_query` methods.
     pub fn new(ts_language: tree_sitter::Language) -> Self {
         Self {
-            ts_language,
+            ts_language: SharedLanguage(ts_language),
             highlights: None,
             highlight_ids: Vec::new(),
             injections: None,
@@ -81,13 +98,13 @@ impl Grammar {
 
     /// The tree-sitter language.
     pub fn ts_language(&self) -> &tree_sitter::Language {
-        &self.ts_language
+        &self.ts_language.0
     }
 
     /// `highlights.scm`: captures are interned as [`HighlightId`]s, except names
     /// starting with `_`, which are helpers and produce no highlight.
     pub fn with_highlights_query(mut self, source: &str) -> Result<Self, tree_sitter::QueryError> {
-        let query = Query::new(&self.ts_language, source)?;
+        let query = Query::new(&self.ts_language.0, source)?;
         self.highlight_ids = query
             .capture_names()
             .iter()
@@ -100,7 +117,7 @@ impl Grammar {
     /// `injections.scm`: `@injection.content` captures are parsed as the language
     /// named by `@injection.language` or the `injection.language` property.
     pub fn with_injections_query(mut self, source: &str) -> Result<Self, tree_sitter::QueryError> {
-        let query = Query::new(&self.ts_language, source)?;
+        let query = Query::new(&self.ts_language.0, source)?;
         let content_capture = query.capture_index_for_name("injection.content");
         let language_capture = query.capture_index_for_name("injection.language");
         let has_combined = (0..query.pattern_count()).any(|ix| {
@@ -120,13 +137,13 @@ impl Grammar {
 
     /// `brackets.scm`: pairs captured as `@open` and `@close`.
     pub fn with_brackets_query(mut self, source: &str) -> Result<Self, tree_sitter::QueryError> {
-        self.brackets = Some(Query::new(&self.ts_language, source)?);
+        self.brackets = Some(Query::new(&self.ts_language.0, source)?);
         Ok(self)
     }
 
     /// `folds.scm`: foldable nodes captured as `@fold`.
     pub fn with_folds_query(mut self, source: &str) -> Result<Self, tree_sitter::QueryError> {
-        self.folds = Some(Query::new(&self.ts_language, source)?);
+        self.folds = Some(Query::new(&self.ts_language.0, source)?);
         Ok(self)
     }
 
@@ -134,13 +151,13 @@ impl Grammar {
     /// captured as `@definition.<kind>` with their `@name`, used for
     /// document symbols.
     pub fn with_tags_query(mut self, source: &str) -> Result<Self, tree_sitter::QueryError> {
-        self.tags = Some(Query::new(&self.ts_language, source)?);
+        self.tags = Some(Query::new(&self.ts_language.0, source)?);
         Ok(self)
     }
 
     /// `indents.scm`: `@indent` / `@outdent` style captures.
     pub fn with_indents_query(mut self, source: &str) -> Result<Self, tree_sitter::QueryError> {
-        self.indents = Some(Query::new(&self.ts_language, source)?);
+        self.indents = Some(Query::new(&self.ts_language.0, source)?);
         Ok(self)
     }
 

@@ -3,7 +3,9 @@
 //! smooth caret moves (`cursorSmoothCaretAnimation`) and smooth scrolling
 //! (`smoothScrolling`, Monaco's `SmoothScrollingOperation`).
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use web_time::Instant;
 
 use gpui::{Bounds, Pixels, Point, point, px, size};
 

@@ -58,6 +58,18 @@ jobs:
           PERF_BUDGET_SCALE: "2"
       - run: cargo bench -p gpui-monaco --bench large_file -- --quick
 
+  # wasm32 (#58): the editor and its grammars compile for the web. Grammars use
+  # script/wasm/cc (see .cargo/config.toml). Best-effort, like Linux and Windows.
+  check-wasm:
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --target wasm32-unknown-unknown -p gpui-monaco -p gpui-monaco-languages
+
   # Linux and Windows are best-effort: they must build, but are not release blockers.
   build-linux:
     runs-on: ubuntu-latest

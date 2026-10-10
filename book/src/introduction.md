@@ -33,6 +33,6 @@ Like Monaco, the API separates the **model** from the **view**:
 
 Behavior follows Monaco closely. Large parts of Monaco's own unit tests are ported as a conformance suite. The API does not mirror Monaco's TypeScript one for one. Positions, for example, are 0-based `PointUtf16` values instead of 1-based `IPosition`. [Differences from Monaco](differences.md) lists where behavior or naming diverges.
 
-## Out of scope for 0.1
+## Not there yet
 
-The diff editor, code actions, rename, inlay hints, collaborative editing (CRDT), wasm and very long single lines. Each one has a `post-mvp` issue in the [issue tracker](https://github.com/ty-ler/gpui-monaco/issues?q=label%3Apost-mvp).
+The diff editor, collaborative editing (CRDT) and running in a browser: the crates compile for `wasm32-unknown-unknown`, but there's no web runner yet. Each one has a `post-mvp` issue in the [issue tracker](https://github.com/ty-ler/gpui-monaco/issues?q=label%3Apost-mvp).
