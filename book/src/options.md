@@ -15,6 +15,8 @@ editor.update(cx, |editor, cx| {
 | Field | Monaco option | Notes |
 |---|---|---|
 | `font_family`, `font_size`, `line_height` | `fontFamily`, `fontSize`, `lineHeight` | `line_height: None` derives it from the font size, as Monaco does |
+| `font_weight`, `font_ligatures` | `fontWeight`, `fontLigatures` | ligatures are `Off` (default), `On`, or CSS `font-feature-settings` |
+| `mouse_wheel_zoom` | `mouseWheelZoom` | Cmd+wheel (Ctrl elsewhere) zooms every editor's font; see `set_editor_zoom_level` |
 | `line_numbers` | `lineNumbers` | `On`, `Off`, `Relative`, `Interval` |
 | `line_numbers_min_chars`, `line_decorations_width`, `glyph_margin` | same names | gutter layout |
 | `render_line_highlight` | `renderLineHighlight` | `None`, `Gutter`, `Line`, `All` |

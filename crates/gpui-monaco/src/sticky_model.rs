@@ -398,7 +398,7 @@ impl CodeEditor {
 
     /// Monaco `editor.action.toggleStickyScroll`.
     pub fn toggle_sticky_scroll(&mut self, cx: &mut Context<Self>) {
-        let mut options = self.options.clone();
+        let mut options = self.options().clone();
         options.sticky_scroll.enabled = !options.sticky_scroll.enabled;
         self.update_options(options, cx);
     }

@@ -23,6 +23,8 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **Shift+Enter / Shift+Tab** in the suggest widget: accept in the other insert mode
 - **Tab / Shift+Tab** with `tab_completion: On`: insert the best completion, then cycle through the others
 
+Font zoom (`FontZoomIn`, `FontZoomOut`, `FontZoomReset`) has no default key, as in Monaco. Run it from the command palette, or bind it yourself. The zoom level is shared by every editor; `set_editor_zoom_level` sets it directly.
+
 All of these bindings live in the `CodeEditor` key context (`actions::KEY_CONTEXT`). Single-line editors also set `single_line`.
 
 ## Rebinding

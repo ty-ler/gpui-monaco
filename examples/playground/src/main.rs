@@ -205,6 +205,25 @@ impl Playground {
                 editor.update_options(options, cx);
             });
         }
+        // Cmd/Ctrl+wheel zooms; `PLAYGROUND_FONT`, `PLAYGROUND_LIGATURES`
+        // and `PLAYGROUND_ZOOM` pick the font, ligatures and zoom level.
+        editor.update(cx, |editor, cx| {
+            let mut options = editor.options().clone();
+            options.mouse_wheel_zoom = true;
+            if let Ok(family) = std::env::var("PLAYGROUND_FONT") {
+                options.font_family = family.into();
+            }
+            if std::env::var_os("PLAYGROUND_LIGATURES").is_some() {
+                options.font_ligatures = gpui_monaco::options::FontLigatures::On;
+            }
+            editor.update_options(options, cx);
+        });
+        if let Some(level) = std::env::var("PLAYGROUND_ZOOM")
+            .ok()
+            .and_then(|l| l.parse().ok())
+        {
+            gpui_monaco::set_editor_zoom_level(level, cx);
+        }
         // Demos are on unless disabled (`PLAYGROUND_PLAIN=1`).
         let plain = std::env::var_os("PLAYGROUND_PLAIN").is_some();
         if std::env::var_os("PLAYGROUND_DEMO").is_some() {

@@ -548,6 +548,14 @@ actions!(
         /// Turns sticky scroll on or off (Monaco
         /// `editor.action.toggleStickyScroll`).
         ToggleStickyScroll,
+        /// Zooms every editor's font in a level (Monaco
+        /// `editor.action.fontZoomIn`).
+        FontZoomIn,
+        /// Zooms every editor's font out a level (Monaco
+        /// `editor.action.fontZoomOut`).
+        FontZoomOut,
+        /// Resets the font zoom (Monaco `editor.action.fontZoomReset`).
+        FontZoomReset,
         /// Moves keyboard focus to the sticky lines (Monaco
         /// `editor.action.focusStickyScroll`).
         FocusStickyScroll,
