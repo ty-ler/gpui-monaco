@@ -475,6 +475,8 @@ actions!(
         PeekExpand,
         /// Closes the peek view (Monaco `closeReferenceSearch`).
         ClosePeek,
+        /// Renames the symbol at the cursor (Monaco `editor.action.rename`).
+        Rename,
         /// Formats the selections, or the cursor's line (Monaco
         /// `editor.action.formatSelection`).
         FormatSelection,
@@ -545,6 +547,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("f8", GoToNextMarker, ctx),
         KeyBinding::new("f12", GoToDefinition, ctx),
         KeyBinding::new("shift-f12", GoToReferences, ctx),
+        KeyBinding::new("f2", Rename, ctx),
         KeyBinding::new("f4", GoToNextReference, ctx),
         KeyBinding::new("shift-f4", GoToPreviousReference, ctx),
         KeyBinding::new("secondary-shift-space", TriggerParameterHints, ctx),

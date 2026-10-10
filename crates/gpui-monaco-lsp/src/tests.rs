@@ -65,6 +65,7 @@ fn capabilities() -> Value {
         "signatureHelpProvider": { "triggerCharacters": ["("], "retriggerCharacters": [","] },
         "documentFormattingProvider": true,
         "referencesProvider": true,
+        "renameProvider": { "prepareProvider": true },
         "declarationProvider": true,
         "typeDefinitionProvider": true,
         "implementationProvider": true,
@@ -235,6 +236,17 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
                 assert_eq!(params["context"]["triggerCharacter"], ".");
                 json!({ "isIncomplete": true, "items": [{ "label": "len", "kind": 2 }] })
             }
+            "textDocument/prepareRename" => json!({
+                "range": { "start": { "line": 0, "character": 3 }, "end": { "line": 0, "character": 7 } },
+                "placeholder": "main",
+            }),
+            "textDocument/rename" => {
+                assert_eq!(params["newName"], "start");
+                json!({ "documentChanges": [{
+                    "textDocument": { "uri": other, "version": 1 },
+                    "edits": [{ "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 4 } }, "newText": "start" }],
+                }] })
+            }
             "textDocument/references" => {
                 assert_eq!(params["context"]["includeDeclaration"], true);
                 json!([{ "uri": other, "range": { "start": { "line": 2, "character": 0 }, "end": { "line": 2, "character": 1 } } }])
@@ -351,6 +363,30 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
     assert_eq!(
         help.signatures[0].parameters[0].label,
         ParameterLabel::Range(2..3)
+    );
+
+    // Rename.
+    let location = cx
+        .update(|cx| features.resolve_rename_location(&context, p(1, 4), cx))
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (location.range, location.text.as_ref()),
+        (p(0, 3)..p(0, 7), "main")
+    );
+    let edit = cx
+        .update(|cx| features.provide_rename_edits(&context, p(1, 4), "start", cx))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        edit.edits,
+        vec![(
+            Some("file:///project/lib.rs".into()),
+            vec![(p(0, 0)..p(0, 4), "start".to_string())]
+        )]
     );
 
     // The other location requests.

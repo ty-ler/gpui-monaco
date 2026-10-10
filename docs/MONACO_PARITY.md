@@ -99,7 +99,8 @@ Issues are linked by number.
 | Diagnostic tags (unused, deprecated), related information | `gotoError` | ❌ | #90 |
 | Document highlights | `wordHighlighter` | ✅ | #83 |
 | Formatting: document, range, on type, on paste | `format` | ✅ | #94 |
-| Code actions and lightbulb, rename, inlay hints | `codeAction`, `rename`, `inlayHints` | ❌ | #56 |
+| Rename | `rename` | ✅ | #56 |
+| Code actions and lightbulb, inlay hints | `codeAction`, `inlayHints` | ❌ | #56 |
 | Code lens | `codelens` | ❌ | #96 |
 | Colors and color picker | `colorPicker` | ❌ | #97 |
 | Links | `links` | ❌ | #93 |

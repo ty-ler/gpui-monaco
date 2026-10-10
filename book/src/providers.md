@@ -11,6 +11,7 @@ gpui-monaco has no language server or other language intelligence built in. Your
 | `DeclarationProvider` | `DeclarationProvider` | go to and peek declaration |
 | `TypeDefinitionProvider` | `TypeDefinitionProvider` | go to and peek type definition |
 | `ImplementationProvider` | `ImplementationProvider` | Cmd/Ctrl+F12 and Cmd/Ctrl+Shift+F12 (peek) |
+| `RenameProvider` | `RenameProvider` | F2 (rename box) |
 | `SignatureHelpProvider` | `SignatureHelpProvider` | parameter hints while typing a call |
 | `DocumentHighlightProvider` | `DocumentHighlightProvider` | occurrence highlights of the symbol at the cursor (textual occurrences without one) |
 | `DocumentFormattingProvider` | `DocumentFormattingEditProvider` | Format Document (Shift+Alt+F; Ctrl+Shift+I on Linux) |
@@ -136,6 +137,15 @@ Formatters return `TextEdit`s, which are `(Range<PointUtf16>, String)` pairs in 
 - **Format on paste:** `options.format_on_paste` formats the pasted range with the range formatter.
 
 Both options are off by default, as in Monaco. You can also call `editor.format_document(cx)` and `editor.format_selection(cx)` directly.
+
+## Rename
+
+F2 (`editor.rename(cx)`) renames the symbol at the cursor, as in Monaco:
+
+1. **Resolve:** providers that implement `resolve_rename_location` say what to rename and its current name; an error's message explains why it can't be renamed. Without one, the word at the cursor is used.
+2. **Rename box:** a box under the symbol shows the name, selected. Enter accepts; Escape, clicking elsewhere, or a text change cancels.
+3. **Edits:** `provide_rename_edits` returns a `WorkspaceEdit`, which is text edits by document uri (`None` for this one). Providers are asked in order until one answers; if none does, their reasons are shown inline.
+4. **Apply:** `editor.apply_workspace_edit(edit, cx)` applies the edits. This document gets one undo step and the cursors follow the edits. Other documents are found with `model_for_uri`. If one can't be found, nothing is applied and "Rename failed to apply edits" is shown.
 
 ## Hover from decorations and markers
 

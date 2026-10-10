@@ -727,6 +727,7 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
             "typeDefinition": { "linkSupport": true },
             "implementation": { "linkSupport": true },
             "references": {},
+            "rename": { "prepareSupport": true },
             "documentHighlight": {},
             "formatting": {},
             "rangeFormatting": {},

@@ -59,6 +59,7 @@ Positions need no conversion: both the editor and LSP use 0-based lines and UTF-
 | `signatureHelpProvider` | Parameter hints, with the server's trigger and retrigger characters. |
 | `documentFormattingProvider`, `documentRangeFormattingProvider` | Format Document, Format Selection and format on paste, with the model's tab size and spaces setting. |
 | `documentOnTypeFormattingProvider` | Format on type, with the server's trigger characters. |
+| `renameProvider` | Rename (F2), with `prepareRename` when the server supports it. Edits to other documents need their models (`model_for_uri`). |
 | `textDocument/publishDiagnostics` | Markers owned by `lsp:<name>`, shown as squiggles and in the overview ruler. |
 
 Providers are registered for `options.languages`. An empty list registers them for every language. Either way they only answer for attached models. When the client is dropped, shuts down or its server exits, the providers are unregistered.
