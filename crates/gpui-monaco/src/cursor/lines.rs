@@ -224,6 +224,19 @@ impl Command for CopyLinesCommand {
     }
 }
 
+/// Monaco `new CopyLinesCommand(selection, down)`, for other commands that
+/// duplicate lines.
+pub(crate) fn copy_lines_command(selection: Selection, down: bool) -> Box<dyn Command> {
+    Box::new(CopyLinesCommand {
+        selection,
+        down,
+        noop: false,
+        tracked: None,
+        start_row_delta: 0,
+        end_row_delta: 0,
+    })
+}
+
 fn copy_lines(model: &dyn CursorModel, cursors: &CursorCollection, down: bool) -> EditOperation {
     let selections = cursors.selections();
     let mut sorted: Vec<(usize, Selection, bool)> = selections

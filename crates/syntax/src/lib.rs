@@ -13,6 +13,7 @@ pub use config::{
     IndentationRules, LanguageConfiguration, NotIn, OnEnterRule, Pattern, SurroundingPair,
     strip_jsonc,
 };
+pub use fancy_regex;
 pub use highlighter::{HighlightState, Highlighter, TreeSitterHighlighter};
 pub use language::{Grammar, HighlightId, HighlighterFactory, Language, LanguageRegistry};
 pub use syntax_map::{HighlightSpan, RopeTextProvider, SyntaxLayer, SyntaxSnapshot};

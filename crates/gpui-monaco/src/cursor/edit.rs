@@ -69,6 +69,17 @@ pub struct EditOperation {
 }
 
 impl EditOperation {
+    /// A batch of `edits` (in current coordinates) with undo stops around
+    /// it; the selections follow the edits (Monaco `executeEdits` without an
+    /// end cursor state).
+    pub fn from_edits(
+        model: &impl CursorModel,
+        selections: &[Selection],
+        edits: Vec<(Range<Position>, String)>,
+    ) -> Self {
+        execute_edits(model, selections, edits, None)
+    }
+
     /// An operation that changes nothing.
     pub(crate) fn none(selections: Vec<Selection>, kind: EditOperationType) -> Self {
         Self {
@@ -765,6 +776,62 @@ pub(crate) fn execute_commands(
     result.selections_after = selections_after;
     result.auto_closed = auto_closed;
     result
+}
+
+/// Applies `edits` (in pre-edit coordinates) as one batch with undo stops
+/// around it (Monaco `editor.executeEdits(source, edits, endCursorState)`).
+/// Without `end_state` the selections follow the edits like Monaco's cursor
+/// markers do (`readSelectionFromMarkers`): ranges that grow when typing at
+/// their edges, with empty selections collapsed to the end.
+pub(crate) fn execute_edits(
+    model: &dyn CursorModel,
+    selections_before: &[Selection],
+    mut edits: Vec<(Range<Position>, String)>,
+    end_state: Option<Vec<Selection>>,
+) -> EditOperation {
+    edits.retain(|(range, text)| range.start != range.end || !text.is_empty());
+    edits.sort_by(|a, b| cmp_using_ends(&a.0, &b.0));
+    let selections_after = match end_state {
+        Some(selections) if !selections.is_empty() => selections,
+        _ => {
+            let applied: Vec<AppliedOp> = edits
+                .iter()
+                .map(|(range, text)| AppliedOp {
+                    start: range.start,
+                    end: range.end,
+                    text,
+                    deleting: offset_between(model, range.start, range.end),
+                    inserting: text.encode_utf16().count() as u64,
+                    force_move_markers: false,
+                })
+                .collect();
+            selections_before
+                .iter()
+                .map(|s| {
+                    let range = adjust_range(
+                        model,
+                        s.range(),
+                        Stickiness::AlwaysGrowsWhenTypingAtEdges,
+                        &applied,
+                    );
+                    if s.is_empty() {
+                        Selection::collapsed(range.end)
+                    } else {
+                        Selection::from_range(range, s.is_reversed())
+                    }
+                })
+                .collect()
+        }
+    };
+    EditOperation {
+        edits,
+        selections_after,
+        kind: EditOperationType::Other,
+        push_stack_element_before: true,
+        push_stack_element_after: true,
+        auto_closed: Vec::new(),
+        follow_up: None,
+    }
 }
 
 /// Carries `ranges` (in pre-edit coordinates) through `edits` (a batch as in

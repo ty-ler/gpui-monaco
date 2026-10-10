@@ -14,6 +14,7 @@ mod lines_test;
 mod on_enter_test;
 mod overtype_test;
 mod tokenizer;
+mod transforms_test;
 mod word_operations_test;
 mod word_part_operations_test;
 mod word_test_utils;

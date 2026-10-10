@@ -25,7 +25,15 @@ Every feature here works out of the box. Each follows Monaco's behavior, which t
   - Enter applies the language's `onEnterRules` and `indentationRules`; for example, it continues `///` doc comments and indents after `{`.
   - Typing a closing bracket outdents the line.
 - **Comments:** Cmd+/ toggles line comments, Cmd+K Cmd+C adds them, Cmd+K Cmd+U removes them, and Shift+Alt+A toggles a block comment. The language at the cursor decides the tokens, so a Rust fence in Markdown gets `//` and Markdown text gets `<!-- -->`. Languages without a line comment fall back to block comments. `EditorOptions::comments` sets `insert_space` and `ignore_empty_lines`.
-- **Line operations:** move lines, copy lines, delete lines, insert a line above or below, indent and outdent.
+- **Line operations:**
+  - Move, copy and delete lines, insert a line above or below, indent and outdent.
+  - Join lines, sort, reverse and delete duplicate lines.
+  - Trim trailing whitespace and reindent.
+- **Text transforms:**
+  - Upper, lower, title, snake, camel, Pascal and kebab case.
+  - Transpose characters, duplicate the selection and move the selected text left or right.
+  - Step numbers and `true`/`false` with in-place replace (Cmd+Shift+. / ,).
+  - Remove the brackets around the cursor (Cmd+Alt+Backspace).
 
 ## Undo
 

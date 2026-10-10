@@ -32,10 +32,10 @@ Issues are linked by number.
 | Undo/redo with grouping, cursor restore | model | ✅ | |
 | Auto-closing, overtype, auto-surround | `cursor` | ✅ | |
 | Auto-indent (`onEnterRules`, `indentationRules`, electric characters) | `indentation` | ✅ | |
-| Reindent lines | `indentation` | ❌ | #80 |
+| Reindent lines | `indentation` | ✅ | #80 |
 | Line operations: move, copy, delete, insert, indent | `linesOperations` | ✅ | |
-| Sort, join, reverse, transpose, case transforms, delete duplicates, trim whitespace | `linesOperations`, `caretOperations` | ❌ | #80 |
-| In-place replace | `inPlaceReplace` | ❌ | #80 |
+| Sort, join, reverse, transpose, case transforms, delete duplicates, trim whitespace | `linesOperations`, `caretOperations` | ✅ | #80 |
+| In-place replace | `inPlaceReplace` | ✅ | #80 |
 | Toggle line and block comments | `comment` | ✅ | #79 |
 | Smart select (expand and shrink) | `smartSelect` | ❌ | #82 |
 | Linked editing (HTML tags) | `linkedEditing` | ❌ | #101 |

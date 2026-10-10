@@ -28,11 +28,14 @@ mod collection;
 mod column;
 mod comment;
 mod edit;
+mod in_place_replace;
 mod language;
 mod language_typing;
 mod lines;
 mod movement;
+mod reindent;
 pub(crate) mod strings;
+mod transforms;
 mod typing;
 mod word;
 
@@ -47,6 +50,7 @@ pub use collection::{CursorCollection, SelectionStartKind, SingleCursorState};
 pub use column::{ColumnSelectCommand, ColumnSelectData, column_select, column_select_to};
 pub use comment::{CommentOptions, CommentsAt, LineCommentType, block_comment, line_comment};
 pub use edit::{EditOperation, EditOperationType};
+pub use in_place_replace::in_place_replace;
 pub use language::{LanguageContext, StandardTokenType};
 pub use language_typing::{
     delete_left_with_language, line_break_insert, line_break_with_language, tab_with_language,
@@ -60,7 +64,13 @@ pub use movement::{
     MoveCommand, add_cursor_above, add_cursor_below, expand_line_selection, move_cursors, move_to,
     select_all, select_line, select_word,
 };
+pub use reindent::{reindent_lines, reindent_selected_lines};
 pub use text::PointUtf16 as Position;
+pub use transforms::{
+    CaseTransform, delete_all_right, delete_duplicate_lines, duplicate_selection, join_lines,
+    move_caret, reverse_lines, sort_lines, transform_case, transform_text_case, transpose,
+    transpose_letters, trim_trailing_whitespace,
+};
 pub use typing::{
     composition_type, copy_text, cut, delete_all_left, delete_inside_word, delete_left,
     delete_right, delete_word, delete_word_left, delete_word_part, delete_word_right, line_break,
