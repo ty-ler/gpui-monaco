@@ -89,7 +89,7 @@ Issues are linked by number.
 | Command palette, `addAction` | `quickAccess` | ✅ | #100 |
 | Reveal APIs, `executeEdits`, mouse hit-test events, word and position helpers, content-change details, cursor change reasons, decorations collections | editor API | ✅ | #105 |
 | Custom highlighter | tokenization support | ✅ (`Language::with_highlighter`) | |
-| Static colorize and tokenize | `colorizer` | ❌ | #108 |
+| Static colorize and tokenize | `colorizer` | ✅ | #108 |
 | Themes: `vs`, `vs-dark`, VS Code JSON, `defineTheme` | standalone theme service | ✅ | |
 | High-contrast themes (`hc-black`, `hc-light`) | standalone themes | ❌ | #53 |
 

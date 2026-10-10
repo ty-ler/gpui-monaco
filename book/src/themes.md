@@ -38,6 +38,19 @@ tree-sitter highlight captures (`keyword`, `string.special`, `function.method`, 
 
 Semantic tokens from a [provider](providers.md#semantic-tokens) are colored by the theme's `semanticTokenColors` (VS Code's selector scoring: `type.modifier:language`, `*.modifier`). If none matches, VS Code's default TextMate scope for the token type is matched against `tokenColors`. A theme's `semanticHighlighting` turns them on unless the editor's `semantic_highlighting` option says otherwise.
 
+## Highlighting code outside an editor
+
+`gpui_monaco::colorize` highlights text without an editor, as Monaco's `monaco.editor.colorize` and `tokenize` do. Use it for docs, tooltips or any other host UI:
+
+```rust
+use gpui_monaco::colorize::{ColorizeOptions, colorize_element, tokenize};
+
+let element = colorize_element(code, "rust", &theme, &registry, ColorizeOptions::default());
+let tokens = tokenize(code, "rust", &registry); // per line: offset, `keyword.rust`, ...
+```
+
+`colorize` returns the lines (tabs expanded) with their highlights, and `colorize_highlights` gives the highlights for a `StyledText`.
+
 ## Custom themes
 
 `Theme::define` is Monaco's `defineTheme`. It takes:
