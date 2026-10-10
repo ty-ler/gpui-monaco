@@ -8,7 +8,8 @@ use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, Context, CursorStyle as MouseCursor, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
-    Render, ScrollWheelEvent, Styled, Subscription, Task, UTF16Selection, Window, div, point, px,
+    Render, ScrollWheelEvent, StatefulInteractiveElement as _, Styled, Subscription, Task,
+    UTF16Selection, Window, div, point, px,
 };
 use serde::{Deserialize, Serialize};
 use text::{Bias, BufferSnapshot, OffsetUtf16, PointUtf16};
@@ -42,6 +43,17 @@ pub enum CodeEditorEvent {
     Blurred,
     /// Go to definition led to another model: the host should open it.
     OpenLocation(crate::providers::Location),
+    /// A mouse button went down over the editor (Monaco `onMouseDown`).
+    MouseDown(crate::mouse_target::EditorMouseEvent),
+    /// A mouse button went up (Monaco `onMouseUp`).
+    MouseUp(crate::mouse_target::EditorMouseEvent),
+    /// The mouse moved over the editor (Monaco `onMouseMove`).
+    MouseMove(crate::mouse_target::EditorMouseEvent),
+    /// The mouse left the editor (Monaco `onMouseLeave`).
+    MouseLeave,
+    /// The context menu was requested with a right click (Monaco
+    /// `onContextMenu`); the editor shows none itself.
+    ContextMenu(crate::mouse_target::EditorMouseEvent),
 }
 
 /// Saved per-model view state (Monaco `saveViewState`/`restoreViewState`).
@@ -1239,7 +1251,7 @@ impl CodeEditor {
     // ----- mouse ----------------------------------------------------------------
 
     /// The buffer position under a window point, clamped to the text.
-    fn position_for_point(
+    pub(crate) fn position_for_point(
         &self,
         position: Point<Pixels>,
         window: &mut Window,
@@ -1443,6 +1455,42 @@ impl CodeEditor {
         self.cursors_changed(true, cx);
     }
 
+    fn emit_mouse(
+        &self,
+        position: Point<Pixels>,
+        button: Option<MouseButton>,
+        modifiers: gpui::Modifiers,
+        click_count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> crate::mouse_target::EditorMouseEvent {
+        crate::mouse_target::EditorMouseEvent {
+            target: self.mouse_target(position, window, cx),
+            button,
+            modifiers,
+            click_count,
+        }
+    }
+
+    fn on_right_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+        let mouse = self.emit_mouse(
+            event.position,
+            Some(event.button),
+            event.modifiers,
+            event.click_count,
+            window,
+            cx,
+        );
+        cx.emit(CodeEditorEvent::MouseDown(mouse));
+        cx.emit(CodeEditorEvent::ContextMenu(mouse));
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -1450,6 +1498,15 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
+        let mouse = self.emit_mouse(
+            event.position,
+            Some(event.button),
+            event.modifiers,
+            event.click_count,
+            window,
+            cx,
+        );
+        cx.emit(CodeEditorEvent::MouseDown(mouse));
         let Some(layout) = self.layout.clone() else {
             return;
         };
@@ -1659,6 +1716,14 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .layout
+            .as_ref()
+            .is_some_and(|layout| layout.bounds.contains(&event.position))
+        {
+            let mouse = self.emit_mouse(event.position, None, event.modifiers, 0, window, cx);
+            cx.emit(CodeEditorEvent::MouseMove(mouse));
+        }
         let minimap_hovered = self
             .layout
             .as_ref()
@@ -1791,7 +1856,22 @@ impl CodeEditor {
         self.cursors_changed(false, cx);
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .layout
+            .as_ref()
+            .is_some_and(|layout| layout.bounds.contains(&event.position))
+        {
+            let mouse = self.emit_mouse(
+                event.position,
+                Some(event.button),
+                event.modifiers,
+                event.click_count,
+                window,
+                cx,
+            );
+            cx.emit(CodeEditorEvent::MouseUp(mouse));
+        }
         self.minimap_drag = None;
         self.mouse_selection = None;
         self.scrollbar_drag = None;
@@ -2510,6 +2590,12 @@ impl Render for CodeEditor {
                 }),
             )
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
+            .on_hover(cx.listener(|_, hovered: &bool, _, cx| {
+                if !*hovered {
+                    cx.emit(CodeEditorEvent::MouseLeave);
+                }
+            }))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))

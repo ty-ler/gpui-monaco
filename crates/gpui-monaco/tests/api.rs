@@ -145,3 +145,91 @@ fn execute_edits_and_trigger(cx: &mut TestAppContext) {
         assert!(!e.execute_edits(vec![(p(0, 0)..p(0, 1), "x".into())], None, cx));
     });
 }
+
+#[gpui::test]
+fn mouse_targets_and_events(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, point};
+    use gpui_monaco::{CodeEditorEvent, MouseTargetKind};
+    let (editor, cx) = setup("short\na much longer line", cx);
+    draw(cx);
+    let text_point = |cx: &mut VisualTestContext, row, column| {
+        editor
+            .read_with(cx, |e, _| e.scrolled_visible_position(p(row, column)))
+            .unwrap()
+            + point(px(1.), px(2.))
+    };
+    let target = |cx: &mut VisualTestContext, at| {
+        editor.update_in(cx, |e, window, cx| e.mouse_target(at, window, cx))
+    };
+
+    let in_text = text_point(cx, 1, 3);
+    let t = target(cx, in_text);
+    assert_eq!(
+        (t.kind, t.position),
+        (MouseTargetKind::ContentText, Some(p(1, 3)))
+    );
+    // Past the end of a short line.
+    let past = point(text_point(cx, 1, 10).x, text_point(cx, 0, 0).y);
+    assert_eq!(
+        target(cx, past).kind,
+        MouseTargetKind::ContentEmpty { after_lines: false }
+    );
+    // Below the last line.
+    let below = point(in_text.x, in_text.y + px(200.));
+    assert_eq!(
+        target(cx, below).kind,
+        MouseTargetKind::ContentEmpty { after_lines: true }
+    );
+    // The gutter: glyph margin, then line numbers.
+    let row_y = in_text.y;
+    let t = target(cx, point(px(2.), row_y));
+    assert_eq!(
+        (t.kind, t.position),
+        (MouseTargetKind::GutterGlyphMargin, Some(p(1, 0)))
+    );
+    assert_eq!(
+        target(cx, point(px(30.), row_y)).kind,
+        MouseTargetKind::GutterLineNumbers
+    );
+
+    // Events: a glyph margin click (breakpoints) and a right click.
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = events.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event: &CodeEditorEvent, _| {
+            if !matches!(
+                event,
+                CodeEditorEvent::MouseMove(_) | CodeEditorEvent::SelectionsChanged
+            ) {
+                sink.borrow_mut().push(event.clone());
+            }
+        })
+        .detach();
+    });
+    cx.simulate_click(point(px(2.), row_y), Modifiers::default());
+    let first = events.borrow()[0].clone();
+    let CodeEditorEvent::MouseDown(down) = first else {
+        panic!("expected MouseDown, got {first:?}");
+    };
+    assert_eq!(down.target.kind, MouseTargetKind::GutterGlyphMargin);
+    assert_eq!(down.target.position, Some(p(1, 0)));
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, CodeEditorEvent::MouseUp(_)))
+    );
+
+    events.borrow_mut().clear();
+    cx.simulate_event(gpui::MouseDownEvent {
+        position: in_text,
+        button: gpui::MouseButton::Right,
+        modifiers: Modifiers::default(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    assert!(events.borrow().iter().any(|e| matches!(
+        e,
+        CodeEditorEvent::ContextMenu(m) if m.target.kind == MouseTargetKind::ContentText
+    )));
+}

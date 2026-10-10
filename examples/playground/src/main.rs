@@ -10,7 +10,10 @@ use gpui::{
 };
 use gpui_monaco::options::{LineNumbers, RenderWhitespace, Ruler, WordWrap};
 use gpui_monaco::text::LineEnding;
-use gpui_monaco::{CodeEditor, CodeEditorEvent, EditorColors, EditorOptions, TextModel, Theme};
+use gpui_monaco::{
+    CodeEditor, CodeEditorEvent, DecorationId, DecorationOptions, EditorColors, EditorOptions,
+    MouseTargetKind, TextModel, Theme,
+};
 
 const SAMPLE: &str = include_str!("../samples/sample.rs");
 
@@ -57,6 +60,8 @@ struct Playground {
     theme: usize,
     languages: Vec<SharedString>,
     file_name: SharedString,
+    /// Breakpoint decorations by row.
+    breakpoints: Vec<(u32, DecorationId)>,
 }
 
 impl Playground {
@@ -132,8 +137,17 @@ impl Playground {
             })
             .detach();
         }
-        cx.subscribe(&editor, |_, _, _: &CodeEditorEvent, cx| cx.notify())
-            .detach();
+        cx.subscribe(&editor, |this, editor, event: &CodeEditorEvent, cx| {
+            // Breakpoints: clicking the glyph margin toggles a red dot.
+            if let CodeEditorEvent::MouseDown(mouse) = event
+                && mouse.target.kind == MouseTargetKind::GutterGlyphMargin
+                && let Some(position) = mouse.target.position
+            {
+                this.toggle_breakpoint(&editor, position.row, cx);
+            }
+            cx.notify();
+        })
+        .detach();
         let languages = gpui_monaco::language_registry(cx)
             .languages()
             .iter()
@@ -146,7 +160,38 @@ impl Playground {
             theme: theme.min(usize::MAX - 1),
             languages,
             file_name,
+            breakpoints: Vec::new(),
         }
+    }
+
+    fn toggle_breakpoint(&mut self, editor: &Entity<CodeEditor>, row: u32, cx: &mut Context<Self>) {
+        let model = editor.read(cx).model().clone();
+        if let Some(ix) = self.breakpoints.iter().position(|(r, _)| *r == row) {
+            let (_, id) = self.breakpoints.remove(ix);
+            model.update(cx, |model, cx| {
+                model.delta_decorations(None, &[id], Vec::new(), cx)
+            });
+            return;
+        }
+        let offset = model
+            .read(cx)
+            .offset_at(gpui_monaco::text::PointUtf16::new(row, 0));
+        let ids = model.update(cx, |model, cx| {
+            model.delta_decorations(
+                None,
+                &[],
+                vec![(
+                    offset..offset,
+                    DecorationOptions {
+                        is_whole_line: true,
+                        glyph: Some(("●".into(), gpui::rgb(0xe51400).into())),
+                        ..Default::default()
+                    },
+                )],
+                cx,
+            )
+        });
+        self.breakpoints.push((row, ids[0]));
     }
 
     fn open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
