@@ -53,7 +53,7 @@ Issues are linked by number.
 |---|---|---|---|
 | Gutter: line numbers (on, off, relative, interval), glyph margin, line decorations | view parts | ✅ | |
 | Current-line highlight, scrollbars, overview ruler | view parts | ✅ | |
-| Scrollbar and overview ruler options | `scrollbar`, `overviewRuler*` | ❌ | #88 |
+| Scrollbar and overview ruler options | `scrollbar`, `overviewRuler*` | ✅ | #88 |
 | Word wrap: off, on, column, bounded; wrapping indent | `wordWrap` | ✅ | |
 | Wrap for proportional fonts (`wrappingStrategy: advanced`), configurable break characters | `wordWrap*` | ❌ | #87 |
 | Folding: indentation and markers, gutter chevrons | `folding` | ✅ | |

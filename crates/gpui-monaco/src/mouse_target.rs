@@ -113,13 +113,13 @@ impl CodeEditor {
         }
         if layout
             .vertical_scrollbar
-            .is_some_and(|s| s.track.contains(&point))
+            .is_some_and(|s| s.bar.contains(&point))
         {
             return target(MouseTargetKind::OverviewRuler, None);
         }
         if layout
             .horizontal_scrollbar
-            .is_some_and(|s| s.track.contains(&point))
+            .is_some_and(|s| s.bar.contains(&point))
         {
             return target(MouseTargetKind::Scrollbar, None);
         }

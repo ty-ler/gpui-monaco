@@ -83,6 +83,70 @@ impl Default for MinimapOptions {
     }
 }
 
+/// When a scrollbar shows (Monaco `ScrollbarVisibility`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScrollbarVisibility {
+    /// While the mouse is over the editor or it just scrolled, fading out
+    /// after.
+    #[default]
+    Auto,
+    /// Always.
+    Visible,
+    /// Never.
+    Hidden,
+}
+
+/// Monaco `scrollbar` options (the sizes are
+/// [`EditorOptions::vertical_scrollbar_size`] and
+/// [`EditorOptions::horizontal_scrollbar_size`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollbarOptions {
+    /// Monaco `scrollbar.vertical`.
+    pub vertical: ScrollbarVisibility,
+    /// Monaco `scrollbar.horizontal`.
+    pub horizontal: ScrollbarVisibility,
+    /// Monaco `scrollbar.useShadows`: shadows along the top and left edges
+    /// once scrolled (default `true`).
+    pub use_shadows: bool,
+    /// Monaco `scrollbar.verticalHasArrows` (default `false`).
+    pub vertical_has_arrows: bool,
+    /// Monaco `scrollbar.horizontalHasArrows` (default `false`).
+    pub horizontal_has_arrows: bool,
+    /// Monaco `scrollbar.arrowSize` (default 11px).
+    pub arrow_size: Pixels,
+    /// Monaco `scrollbar.verticalSliderSize`: the slider's thickness;
+    /// `None` fills the scrollbar.
+    pub vertical_slider_size: Option<Pixels>,
+    /// Monaco `scrollbar.horizontalSliderSize`.
+    pub horizontal_slider_size: Option<Pixels>,
+    /// Monaco `scrollbar.handleMouseWheel` (default `true`).
+    pub handle_mouse_wheel: bool,
+    /// Monaco `scrollbar.alwaysConsumeMouseWheel`: keep wheel events that
+    /// can't scroll further from reaching the parent (default `true`).
+    pub always_consume_mouse_wheel: bool,
+    /// Monaco `scrollbar.scrollByPage`: clicking the track scrolls a page
+    /// instead of jumping there (default `false`).
+    pub scroll_by_page: bool,
+}
+
+impl Default for ScrollbarOptions {
+    fn default() -> Self {
+        Self {
+            vertical: ScrollbarVisibility::Auto,
+            horizontal: ScrollbarVisibility::Auto,
+            use_shadows: true,
+            vertical_has_arrows: false,
+            horizontal_has_arrows: false,
+            arrow_size: px(11.),
+            vertical_slider_size: None,
+            horizontal_slider_size: None,
+            handle_mouse_wheel: true,
+            always_consume_mouse_wheel: true,
+            scroll_by_page: false,
+        }
+    }
+}
+
 /// Monaco `cursorBlinking`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorBlinking {
@@ -825,6 +889,16 @@ pub struct EditorOptions {
     pub vertical_scrollbar_size: Pixels,
     /// Monaco `scrollbar.horizontalScrollbarSize` (default 12px; 0 hides it).
     pub horizontal_scrollbar_size: Pixels,
+    /// The rest of Monaco `scrollbar`.
+    pub scrollbar: ScrollbarOptions,
+    /// Monaco `overviewRulerLanes`: lanes in the overview ruler, 0 to hide
+    /// its marks (default 3).
+    pub overview_ruler_lanes: u32,
+    /// Monaco `overviewRulerBorder`: a border on its left (default
+    /// `true`).
+    pub overview_ruler_border: bool,
+    /// Monaco `hideCursorInOverviewRuler` (default `false`).
+    pub hide_cursor_in_overview_ruler: bool,
     /// Pixels scrolled per wheel "line" step is the line height; this scales it
     /// (Monaco `mouseWheelScrollSensitivity`).
     pub mouse_wheel_scroll_sensitivity: f32,
@@ -1046,6 +1120,10 @@ impl Default for EditorOptions {
             word_separators: "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?".into(),
             vertical_scrollbar_size: px(14.),
             horizontal_scrollbar_size: px(12.),
+            scrollbar: ScrollbarOptions::default(),
+            overview_ruler_lanes: 3,
+            overview_ruler_border: true,
+            hide_cursor_in_overview_ruler: false,
             mouse_wheel_scroll_sensitivity: 1.0,
             empty_selection_clipboard: true,
             sticky_tab_stops: false,
