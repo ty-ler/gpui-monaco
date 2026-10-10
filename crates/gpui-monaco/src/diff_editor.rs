@@ -1087,6 +1087,43 @@ impl DiffEditor {
                 && width < options.render_side_by_side_inline_breakpoint)
     }
 
+    /// The height to show everything without scrolling, as of the last
+    /// layout: the taller side's lines and view zones (Monaco
+    /// `onDidContentSizeChange`'s `contentHeight`).
+    pub fn content_height(&self, cx: &App) -> Option<Pixels> {
+        let modified = self.modified.read(cx).content_height();
+        if self.inline {
+            return modified;
+        }
+        match (self.original.read(cx).content_height(), modified) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// The widest horizontal scroll range of the sides, as of the last
+    /// layout.
+    pub(crate) fn max_scroll_left(&self, cx: &App) -> Pixels {
+        [&self.original, &self.modified]
+            .iter()
+            .filter_map(|e| e.read(cx).layout.as_ref().map(|l| l.max_scroll.x))
+            .fold(px(0.), |a, b| a.max(b))
+    }
+
+    /// Scrolls both sides to `position` without clamping, for a host that
+    /// sizes the diff editor as it scrolls (the multi-diff editor).
+    pub(crate) fn set_scroll_position_unclamped(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        for editor in [&self.original, &self.modified] {
+            editor.update(cx, |editor, cx| {
+                editor.set_scroll_position_unclamped(position, cx)
+            });
+        }
+    }
+
     /// The moved block under the last moved cursor, for tests.
     #[doc(hidden)]
     pub fn active_move_for_tests(&self) -> Option<usize> {

@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Multi-diff editor (#181):** `MultiDiffEditor` ports Monaco's `MultiDiffEditorWidget`: diffs of many files in one scrolling list.
+  - **Layout:** each file is a `DiffEditor` under a sticky, collapsible header, sized to its content with unchanged regions hidden. Only the visible part of each is laid out.
+  - **Files:** `MultiDiffDocument` covers created, deleted and renamed files.
+  - **API:** `set_documents`, `set_collapsed`/`set_all_collapsed`, `reveal`, `diff_editor(i)` and `MultiDiffEditorEvent::CollapsedChanged`.
+  - **Editor additions:** `CodeEditor::content_height` and `DiffEditor::content_height` (Monaco `getContentHeight`).
+  - **Theme colors:** `multiDiffEditor.headerBackground` and `multiDiffEditor.border`.
 - **Moved blocks (#52, part 7):** with `show_moves`, the diff editor shows moved code like Monaco's `MovedBlocksLinesFeature`.
   - **Display:** each moved block has a border and a "Code moved to/from line X-Y" caption on both sides, and a line with an arrow in a column between the sides joins the two places. The block at the cursor is highlighted (`diffEditor.moveActive.border`).
   - **Block decorations:** the new `DecorationOptions::block` (`BlockDecoration`, Monaco `blockClassName` + `blockPadding`) draws a bordered box around whole lines and the view zones above them.

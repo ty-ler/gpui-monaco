@@ -34,3 +34,24 @@ let diff = cx.new(|cx| DiffEditor::new(original, modified, window, cx));
 - **Computing diffs directly:** `gpui_monaco::diff::compute_diff` is Monaco's diff algorithm on its own, for hosts that only need the changes.
 
 Colors come from the theme: `diffEditor.insertedTextBackground`, `removedTextBackground`, `insertedLineBackground`, `removedLineBackground`, the `diffEditorGutter.*` backgrounds, `diffEditor.diagonalFill` and the `diffEditor.unchangedRegion*` and `unchangedCodeBackground` colors.
+
+## Many files
+
+`MultiDiffEditor` shows the diffs of many files in one scrolling list, like Monaco's multi-file diff editor. Each file is a `DiffEditor` under a header with its name, and each header sticks to the top while its file scrolls by. Unchanged regions are always hidden, and each diff is exactly as tall as what it shows.
+
+```rust
+use gpui_monaco::{MultiDiffDocument, MultiDiffEditor};
+
+let documents = vec![
+    MultiDiffDocument::new("src/main.rs", old_main, new_main),
+    // A created file has no original; a deleted one no modified.
+    MultiDiffDocument { label: "src/new.rs".into(), original_label: None, original: None, modified: Some(new_file) },
+];
+let multi = cx.new(|cx| MultiDiffEditor::new(documents, window, cx));
+```
+
+- **Headers:** the chevron collapses a file to its header (`set_collapsed`, `set_all_collapsed`). Headers show `A`, `D` or `R` for created, deleted and renamed (`original_label`) files.
+- **Scrolling:** `reveal(index)` scrolls a file's header to the top. Horizontal scrolling moves every file together.
+- **Options:** `update_options` applies `DiffEditorOptions` to every file. `diff_editor(index)` gives a file's `DiffEditor`.
+- **Colors:** `multiDiffEditor.headerBackground` and `multiDiffEditor.border`.
+

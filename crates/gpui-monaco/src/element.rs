@@ -882,6 +882,9 @@ pub(crate) struct EditorLayout {
     pub scroll_left: Pixels,
     /// The scroll range: `scroll_top` and `scroll_left` stay within it.
     pub max_scroll: gpui::Point<Pixels>,
+    /// The lines' and view zones' height, without scrolling beyond the
+    /// last line (Monaco `getContentHeight`).
+    pub content_height: Pixels,
     pub lines: Vec<LineLayout>,
     pub fold_controls: Vec<FoldControl>,
     /// The `⋯` after each collapsed line, with its row, for clicks.
@@ -1357,9 +1360,9 @@ fn prepaint_editor(
             Vec::new()
         });
 
-    let content_height = line_height * view_line_count as f32
-        + zones.total()
-        + options.padding.bottom
+    let lines_height =
+        line_height * view_line_count as f32 + zones.total() + options.padding.bottom;
+    let content_height = lines_height
         + if options.scroll_beyond_last_line {
             (viewport_height - line_height - options.padding.bottom).max(px(0.))
         } else {
@@ -1918,6 +1921,7 @@ fn prepaint_editor(
         scroll_top,
         scroll_left,
         max_scroll: point(max_scroll_left, max_scroll_top),
+        content_height: lines_height,
         lines,
         fold_controls,
         fold_placeholders: fold_placeholder_bounds,

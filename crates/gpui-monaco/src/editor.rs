@@ -570,6 +570,26 @@ impl CodeEditor {
         cx.notify();
     }
 
+    /// The height of the lines and view zones as of the last layout
+    /// (Monaco `getContentHeight`), not counting `scroll_beyond_last_line`.
+    pub fn content_height(&self) -> Option<Pixels> {
+        self.layout.as_ref().map(|layout| layout.content_height)
+    }
+
+    /// Scrolls without clamping to the last frame's range, for hosts that
+    /// resize the editor as they scroll it (the next frame clamps).
+    pub(crate) fn set_scroll_position_unclamped(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.scroll_position() != position {
+            self.scroll_left = position.x;
+            self.scroll_top = position.y;
+            cx.notify();
+        }
+    }
+
     /// Keeps the scroll position within the last frame's scroll range (the
     /// next frame clamps again for the current one).
     fn clamp_scroll(&mut self) {
