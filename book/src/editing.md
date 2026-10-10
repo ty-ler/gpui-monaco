@@ -171,4 +171,6 @@ Lines are indented like the cursor's line unless `adjust_whitespace` is off. `se
 - **Word wrap:** follows Monaco's line-break rules, including CJK and break-before/break-after characters, plus `wrapping_indent`.
 - **Minimap:** shows colored blocks and a draggable slider.
 - **Sticky scroll:** pins up to `max_line_count` enclosing scope headers to the top. Clicking a header jumps to it.
+  - The scopes come from `default_model`: the document symbols by default (Monaco's outline model), then the folding ranges or indentation.
+  - Without symbols, it uses the folding ranges.
 - **Scrollbars:** have an overview ruler showing the selection, find matches, diagnostics and decorations.

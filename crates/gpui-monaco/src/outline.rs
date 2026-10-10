@@ -109,13 +109,19 @@ impl CodeEditor {
         let language = model.language_id().map(|l| l.to_string());
         let providers = document_symbol_providers(cx, language.as_deref());
         if providers.is_empty() {
-            let rope = model.buffer().rope().clone();
-            let symbols = model
-                .syntax_snapshot()
-                .and_then(|syntax| syntax.highlighter.tags(&syntax.state, syntax.text.rope()))
-                .map(|tags| symbols_from_tags(tags, &rope))
-                .unwrap_or_default();
-            return Task::ready(symbols);
+            let Some(syntax) = model.syntax_snapshot() else {
+                return Task::ready(Vec::new());
+            };
+            // The query walks the whole tree. Its offsets are into the
+            // parsed text.
+            return cx.background_executor().spawn(async move {
+                let rope = syntax.text.rope();
+                syntax
+                    .highlighter
+                    .tags(&syntax.state, rope)
+                    .map(|tags| symbols_from_tags(tags, rope))
+                    .unwrap_or_default()
+            });
         }
         let context = model.provider_context();
         let requests: Vec<_> = providers

@@ -90,6 +90,9 @@ pub struct StickyScrollOptions {
     pub enabled: bool,
     /// Most header lines pinned at once (Monaco `stickyScroll.maxLineCount`, default 5).
     pub max_line_count: u32,
+    /// Where the scopes come from (Monaco `stickyScroll.defaultModel`,
+    /// default outline).
+    pub default_model: StickyScrollModel,
 }
 
 impl Default for StickyScrollOptions {
@@ -97,8 +100,23 @@ impl Default for StickyScrollOptions {
         Self {
             enabled: true,
             max_line_count: 5,
+            default_model: StickyScrollModel::Outline,
         }
     }
+}
+
+/// Monaco `stickyScroll.defaultModel`. Each falls back to the next when it
+/// has no scopes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum StickyScrollModel {
+    /// The document symbols (`outlineModel`), from providers or the
+    /// language's tags query.
+    #[default]
+    Outline,
+    /// The folding ranges (`foldingProviderModel`).
+    FoldingProvider,
+    /// Indentation (`indentationModel`).
+    Indentation,
 }
 
 /// Which whitespace is drawn as `·` and `→` (Monaco `renderWhitespace`).
