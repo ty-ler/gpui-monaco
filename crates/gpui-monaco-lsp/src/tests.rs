@@ -428,6 +428,7 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
                         range: p(0, 0)..p(0, 3),
                         source: None,
                         code: None,
+                        ..Default::default()
                     }],
                 },
                 cx,

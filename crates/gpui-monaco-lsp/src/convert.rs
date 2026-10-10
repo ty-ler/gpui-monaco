@@ -14,7 +14,7 @@ use gpui_monaco::providers::{
     SignatureInformation, WorkspaceEdit,
 };
 use gpui_monaco::text::PointUtf16;
-use gpui_monaco::{Marker, MarkerSeverity};
+use gpui_monaco::{Marker, MarkerSeverity, MarkerTag, RelatedInformation};
 use lsp_types as lsp;
 
 /// An LSP position as a gpui-monaco one.
@@ -396,6 +396,26 @@ pub fn marker(diagnostic: lsp::Diagnostic) -> Marker {
             lsp::NumberOrString::Number(n) => n.to_string().into(),
             lsp::NumberOrString::String(s) => s.into(),
         }),
+        tags: diagnostic
+            .tags
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|tag| match tag {
+                lsp::DiagnosticTag::UNNECESSARY => Some(MarkerTag::Unnecessary),
+                lsp::DiagnosticTag::DEPRECATED => Some(MarkerTag::Deprecated),
+                _ => None,
+            })
+            .collect(),
+        related_information: diagnostic
+            .related_information
+            .unwrap_or_default()
+            .into_iter()
+            .map(|related| RelatedInformation {
+                uri: Some(related.location.uri.to_string().into()),
+                range: range(related.location.range),
+                message: related.message.into(),
+            })
+            .collect(),
     }
 }
 
@@ -463,6 +483,16 @@ pub fn diagnostic(marker: &Marker) -> lsp::Diagnostic {
             .map(|code| lsp::NumberOrString::String(code.to_string())),
         source: marker.source.as_ref().map(|source| source.to_string()),
         message: marker.message.to_string(),
+        tags: (!marker.tags.is_empty()).then(|| {
+            marker
+                .tags
+                .iter()
+                .map(|tag| match tag {
+                    MarkerTag::Unnecessary => lsp::DiagnosticTag::UNNECESSARY,
+                    MarkerTag::Deprecated => lsp::DiagnosticTag::DEPRECATED,
+                })
+                .collect()
+        }),
         ..Default::default()
     }
 }
@@ -610,5 +640,43 @@ mod tests {
         assert_eq!(marker.severity, MarkerSeverity::Warning);
         assert_eq!(marker.code.as_deref(), Some("unused"));
         assert_eq!(marker.range, PointUtf16::new(1, 0)..PointUtf16::new(1, 3));
+    }
+
+    #[test]
+    fn diagnostic_tags_and_related_information() {
+        let diagnostic: lsp::Diagnostic = serde_json::from_value(serde_json::json!({
+            "range": { "start": { "line": 0, "character": 4 }, "end": { "line": 0, "character": 9 } },
+            "message": "unused",
+            "tags": [1, 2],
+            "relatedInformation": [{
+                "location": {
+                    "uri": "file:///src/lib.rs",
+                    "range": { "start": { "line": 2, "character": 1 }, "end": { "line": 2, "character": 5 } },
+                },
+                "message": "defined here",
+            }],
+        }))
+        .unwrap();
+        let marker = marker(diagnostic);
+        assert_eq!(
+            marker.tags,
+            vec![MarkerTag::Unnecessary, MarkerTag::Deprecated]
+        );
+        assert_eq!(
+            marker.related_information,
+            vec![RelatedInformation {
+                uri: Some("file:///src/lib.rs".into()),
+                range: PointUtf16::new(2, 1)..PointUtf16::new(2, 5),
+                message: "defined here".into(),
+            }]
+        );
+        // Back to the server with its tags.
+        assert_eq!(
+            super::diagnostic(&marker).tags,
+            Some(vec![
+                lsp::DiagnosticTag::UNNECESSARY,
+                lsp::DiagnosticTag::DEPRECATED
+            ])
+        );
     }
 }

@@ -100,7 +100,7 @@ Issues are linked by number.
 | Go to definition (link, F12) | `gotoSymbol` | ✅ | |
 | References, declaration, type definition, implementation, peek view | `gotoSymbol`, `peekView` | ✅ | #95 |
 | Diagnostics: squiggles, ruler, hover, F8 | `gotoError` | ✅ | |
-| Diagnostic tags (unused, deprecated), related information | `gotoError` | ❌ | #90 |
+| Diagnostic tags (unused, deprecated), related information | `gotoError` | ✅ | #90 |
 | Document highlights | `wordHighlighter` | ✅ | #83 |
 | Formatting: document, range, on type, on paste | `format` | ✅ | #94 |
 | Rename | `rename` | ✅ | #56 |

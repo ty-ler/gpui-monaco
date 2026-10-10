@@ -151,6 +151,7 @@ fn quick_fix_menu_applies_edits_and_commands(cx: &mut TestAppContext) {
                     range: p(0, 4)..p(0, 5),
                     source: None,
                     code: None,
+                    ..Default::default()
                 }],
                 edit: Some(replace(p(0, 4)..p(0, 4), "_")),
                 ..action("Prefix with underscore", "quickfix")

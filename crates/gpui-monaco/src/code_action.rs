@@ -980,6 +980,7 @@ mod tests {
                     range: PointUtf16::zero()..PointUtf16::zero(),
                     source: None,
                     code: None,
+                    ..Default::default()
                 }]
             } else {
                 Vec::new()

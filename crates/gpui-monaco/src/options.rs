@@ -261,6 +261,18 @@ pub enum WordBasedSuggestions {
     AllDocuments,
 }
 
+/// Monaco `renderValidationDecorations`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RenderValidationDecorations {
+    /// Only while the editor is editable (not read-only).
+    #[default]
+    Editable,
+    /// Always.
+    On,
+    /// Never.
+    Off,
+}
+
 /// Monaco `tabCompletion`: what Tab does without the suggest widget.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TabCompletion {
@@ -646,6 +658,13 @@ pub struct EditorOptions {
     /// Monaco `multiCursorPaste`: how pasting with several cursors splits
     /// the text.
     pub multi_cursor_paste: crate::cursor::MultiCursorPaste,
+    /// Monaco `showUnused`: fade code diagnostics tag unnecessary.
+    pub show_unused: bool,
+    /// Monaco `showDeprecated`: strike through code diagnostics tag
+    /// deprecated.
+    pub show_deprecated: bool,
+    /// Monaco `renderValidationDecorations`: when diagnostics are drawn.
+    pub render_validation_decorations: RenderValidationDecorations,
     /// Monaco `multiCursorLimit`: the most cursors at once (default 10000).
     pub multi_cursor_limit: usize,
     /// Monaco `multiCursorMergeOverlapping`: merge overlapping selections
@@ -749,6 +768,9 @@ impl Default for EditorOptions {
             selection_highlight_multiline: false,
             multi_cursor_modifier: MultiCursorModifier::Alt,
             multi_cursor_paste: Default::default(),
+            show_unused: true,
+            show_deprecated: true,
+            render_validation_decorations: RenderValidationDecorations::Editable,
             multi_cursor_limit: 10_000,
             multi_cursor_merge_overlapping: true,
             column_selection: false,

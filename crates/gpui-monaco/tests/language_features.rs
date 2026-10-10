@@ -72,6 +72,7 @@ fn hover_shows_provider_and_marker_contents(cx: &mut TestAppContext) {
                 range: PointUtf16::new(0, 6)..PointUtf16::new(0, 10),
                 source: Some("demo".into()),
                 code: None,
+                ..Default::default()
             }],
             cx,
         )
@@ -97,6 +98,7 @@ fn markers_follow_edits_and_f8_navigates(cx: &mut TestAppContext) {
         range: PointUtf16::new(row, 0)..PointUtf16::new(row, 3),
         source: None,
         code: None,
+        ..Default::default()
     };
     model.update(cx, |m, cx| {
         m.set_markers(

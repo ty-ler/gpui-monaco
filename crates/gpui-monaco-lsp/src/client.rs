@@ -794,7 +794,11 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
             "formatting": {},
             "rangeFormatting": {},
             "onTypeFormatting": {},
-            "publishDiagnostics": { "relatedInformation": false, "versionSupport": true },
+            "publishDiagnostics": {
+                "relatedInformation": true,
+                "versionSupport": true,
+                "tagSupport": { "valueSet": [1, 2] },
+            },
         },
     }))?;
     #[allow(deprecated)]

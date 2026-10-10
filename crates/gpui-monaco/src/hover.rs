@@ -28,8 +28,16 @@ pub(crate) struct HoverState {
     range: Option<Range<PointUtf16>>,
 }
 
+/// What a hover action link runs.
+type HoverAction = Box<dyn Fn(&mut CodeEditor, &mut Context<CodeEditor>)>;
+
 /// The hover card.
 pub struct HoverWidget {
+    /// Diagnostics at the position (Monaco's marker hover part).
+    markers: Vec<crate::Marker>,
+    /// Whether code actions can offer a quick fix.
+    quick_fix: bool,
+    editor: gpui::WeakEntity<CodeEditor>,
     contents: Vec<MarkdownString>,
     style: MarkdownStyle,
     theme: std::sync::Arc<crate::Theme>,
@@ -40,8 +48,14 @@ impl Render for HoverWidget {
         let colors = &self.theme.colors;
         let registry = crate::model::language_registry(cx);
         let mut sections = Vec::new();
-        for (ix, content) in self.contents.iter().enumerate() {
-            if ix > 0 {
+        for marker in &self.markers {
+            if !sections.is_empty() {
+                sections.push(div().h(px(1.)).bg(colors.widget_border).into_any_element());
+            }
+            sections.push(self.render_marker(marker));
+        }
+        for content in &self.contents {
+            if !sections.is_empty() {
                 sections.push(div().h(px(1.)).bg(colors.widget_border).into_any_element());
             }
             sections.push(render_markdown(
@@ -68,6 +82,92 @@ impl Render for HoverWidget {
     }
 }
 
+impl HoverWidget {
+    /// Monaco `MarkerHoverParticipant`: the message with its source and
+    /// code, related information links, and the problem's actions.
+    fn render_marker(&self, marker: &crate::Marker) -> gpui::AnyElement {
+        let colors = &self.theme.colors;
+        let link = self.style.link;
+        // The message, then its source and code, dimmed.
+        let mut column = div().flex().flex_col().gap(px(2.)).child(
+            div()
+                .flex()
+                .gap(px(4.))
+                .child(marker.message.clone())
+                .children(
+                    marker
+                        .source_label()
+                        .map(|label| div().opacity(0.6).child(label)),
+                ),
+        );
+        for (ix, related) in marker.related_information.iter().enumerate() {
+            let editor = self.editor.clone();
+            let location = related.location();
+            column = column.child(
+                div()
+                    .id(("related", ix))
+                    .cursor_pointer()
+                    .text_color(link)
+                    .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                        cx.stop_propagation();
+                        if let Some(editor) = editor.upgrade() {
+                            editor.update(cx, |editor, cx| {
+                                editor.hide_hover(cx);
+                                editor.open_location(&location, true, cx);
+                            });
+                        }
+                    })
+                    .child(related.label()),
+            );
+        }
+        let action = |id: &'static str, label: String, run: HoverAction| {
+            let editor = self.editor.clone();
+            div()
+                .id(id)
+                .cursor_pointer()
+                .text_color(link)
+                .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(editor) = editor.upgrade() {
+                        editor.update(cx, |editor, cx| {
+                            editor.hide_hover(cx);
+                            run(editor, cx);
+                        });
+                    }
+                })
+                .child(label)
+        };
+        let mac = cfg!(target_os = "macos");
+        let view_marker = marker.clone();
+        let fix_at = marker.range.start;
+        let actions = div()
+            .mt(px(4.))
+            .pt(px(4.))
+            .border_t_1()
+            .border_color(colors.widget_border)
+            .flex()
+            .gap(px(12.))
+            .child(action(
+                "view-problem",
+                "View Problem (F8)".into(),
+                Box::new(move |editor, cx| editor.show_marker(&view_marker, cx)),
+            ))
+            .when(self.quick_fix, |this| {
+                this.child(action(
+                    "quick-fix",
+                    format!("Quick Fix... ({})", if mac { "⌘." } else { "Ctrl+." }),
+                    Box::new(move |editor, cx| {
+                        editor.set_selections(&[cursor::Selection::collapsed(fix_at)], cx);
+                        editor.quick_fix(cx);
+                    }),
+                ))
+            });
+        column.child(actions).into_any_element()
+    }
+}
+
+use gpui::prelude::FluentBuilder as _;
+
 impl CodeEditor {
     pub(crate) fn markdown_style(&self) -> MarkdownStyle {
         let colors = &self.theme.colors;
@@ -78,6 +178,16 @@ impl CodeEditor {
             code_font: self.options.font_family.clone(),
             font_size: self.options.font_size,
         }
+    }
+
+    /// The diagnostics in the visible hover card.
+    #[doc(hidden)]
+    pub fn hover_markers_for_tests(&self, cx: &gpui::App) -> Vec<crate::Marker> {
+        self.hover
+            .widget
+            .as_ref()
+            .map(|(widget, _)| widget.read(cx).markers.clone())
+            .unwrap_or_default()
     }
 
     /// Whether a hover card is showing.
@@ -102,7 +212,7 @@ impl CodeEditor {
         let config = self.cursor_config(cx);
         let range =
             cursor::word_at(&config, self.snapshot.rope(), position).unwrap_or(position..position);
-        let (mut contents, tasks) = self.hover_requests(position, cx);
+        let (markers, mut contents, tasks) = self.hover_requests(position, cx);
         self.hover.range = Some(range.clone());
         self.hover.task = Some(cx.spawn(async move |this, cx| {
             let mut hover_range = None;
@@ -113,8 +223,8 @@ impl CodeEditor {
                 }
             }
             this.update(cx, |this, cx| {
-                if !contents.is_empty() {
-                    this.show_hover(hover_range.unwrap_or(range), contents, cx);
+                if !contents.is_empty() || !markers.is_empty() {
+                    this.show_hover(hover_range.unwrap_or(range), markers, contents, cx);
                 }
             })
             .ok();
@@ -150,7 +260,7 @@ impl CodeEditor {
             let Ok(requests) = this.update(cx, |this, cx| this.hover_requests(position, cx)) else {
                 return;
             };
-            let (mut contents, tasks) = requests;
+            let (markers, mut contents, tasks) = requests;
             let mut hover_range = None;
             for task in tasks {
                 if let Ok(Some(hover)) = task.await {
@@ -159,27 +269,35 @@ impl CodeEditor {
                 }
             }
             this.update(cx, |this, cx| {
-                if contents.is_empty() {
+                if contents.is_empty() && markers.is_empty() {
                     return;
                 }
                 let range = hover_range.unwrap_or(range);
-                this.show_hover(range, contents, cx);
+                this.show_hover(range, markers, contents, cx);
             })
             .ok();
         }));
     }
 
-    /// Decoration hover messages at `position` plus provider requests.
+    /// Markers and decoration hover messages at `position`, plus provider
+    /// requests.
     #[allow(clippy::type_complexity)]
     fn hover_requests(
         &mut self,
         position: PointUtf16,
         cx: &mut Context<Self>,
     ) -> (
+        Vec<crate::Marker>,
         Vec<MarkdownString>,
         Vec<Task<anyhow::Result<Option<crate::providers::Hover>>>>,
     ) {
         let offset = self.snapshot.point_utf16_to_offset(position);
+        // Monaco's marker hover part comes first.
+        let markers = if self.shows_validation_decorations() {
+            self.model().read(cx).markers_at(offset)
+        } else {
+            Vec::new()
+        };
         let editor_id = Some(cx.entity_id());
         let messages: Vec<MarkdownString> = self.model().update(cx, |model, _| {
             model
@@ -198,18 +316,26 @@ impl CodeEditor {
             .into_iter()
             .map(|provider| provider.provide_hover(&context, position, cx))
             .collect();
-        (messages, tasks)
+        (markers, messages, tasks)
     }
 
     fn show_hover(
         &mut self,
         range: Range<PointUtf16>,
+        markers: Vec<crate::Marker>,
         contents: Vec<MarkdownString>,
         cx: &mut Context<Self>,
     ) {
         let style = self.markdown_style();
         let theme = self.theme.clone();
+        let language = self.model().read(cx).language_id().map(|l| l.to_string());
+        let quick_fix =
+            !crate::providers::code_action_providers(cx, language.as_deref()).is_empty();
+        let editor = cx.entity().downgrade();
         let widget = cx.new(|_| HoverWidget {
+            markers,
+            quick_fix,
+            editor,
             contents,
             style,
             theme,

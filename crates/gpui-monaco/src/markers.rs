@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use gpui::{
-    AppContext as _, Context, Entity, Hsla, IntoElement, ParentElement, Render, SharedString,
-    Styled, Window, div, px, rgb,
+    AppContext as _, Context, Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement,
+    Render, SharedString, Styled, Window, div, px, rgb,
 };
 use text::PointUtf16;
 
@@ -17,7 +17,7 @@ use crate::model::TextModel;
 use crate::widgets::{ViewZone, WidgetId, ZoneHeight};
 
 /// Monaco `MarkerSeverity`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MarkerSeverity {
     /// A hint; no squiggle, only a hover message.
     Hint,
@@ -26,7 +26,53 @@ pub enum MarkerSeverity {
     /// A warning: yellow squiggle and overview ruler mark.
     Warning,
     /// An error: red squiggle and overview ruler mark.
+    #[default]
     Error,
+}
+
+/// Monaco `MarkerTag`: extra meaning a diagnostic gives its range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MarkerTag {
+    /// Unused or unnecessary code: faded (`show_unused`).
+    Unnecessary,
+    /// Deprecated code: struck through (`show_deprecated`).
+    Deprecated,
+}
+
+/// Monaco `IRelatedInformation`: another place a diagnostic refers to,
+/// listed in its hover and marker zone as a link.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RelatedInformation {
+    /// The other document's URI; `None` for this one.
+    pub uri: Option<SharedString>,
+    /// The range there.
+    pub range: Range<PointUtf16>,
+    /// What's there.
+    pub message: SharedString,
+}
+
+impl RelatedInformation {
+    /// `file.rs(3, 5): message`, as Monaco lists it (1-based).
+    pub(crate) fn label(&self) -> String {
+        let name = self
+            .uri
+            .as_deref()
+            .map(|uri| uri.rsplit('/').next().unwrap_or(uri).to_string())
+            .unwrap_or_default();
+        format!(
+            "{name}({}, {}): {}",
+            self.range.start.row + 1,
+            self.range.start.column + 1,
+            self.message
+        )
+    }
+
+    pub(crate) fn location(&self) -> crate::providers::Location {
+        crate::providers::Location {
+            uri: self.uri.clone(),
+            range: self.range.clone(),
+        }
+    }
 }
 
 impl MarkerSeverity {
@@ -42,7 +88,7 @@ impl MarkerSeverity {
 }
 
 /// Monaco `IMarkerData`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Marker {
     /// How serious it is; picks the color and whether it's marked in the overview ruler.
     pub severity: MarkerSeverity,
@@ -55,10 +101,28 @@ pub struct Marker {
     pub source: Option<SharedString>,
     /// E.g. a lint name; shown after the message with the source.
     pub code: Option<SharedString>,
+    /// Unnecessary or deprecated code.
+    pub tags: Vec<MarkerTag>,
+    /// Other places the diagnostic refers to.
+    pub related_information: Vec<RelatedInformation>,
 }
 
 impl Marker {
-    fn hover_text(&self) -> String {
+    fn has_tag(&self, tag: MarkerTag) -> bool {
+        self.tags.contains(&tag)
+    }
+
+    /// The source and code, e.g. `rustc(E0308)`.
+    pub(crate) fn source_label(&self) -> Option<String> {
+        match (&self.source, &self.code) {
+            (Some(source), Some(code)) => Some(format!("{source}({code})")),
+            (Some(source), None) => Some(source.to_string()),
+            (None, Some(code)) => Some(format!("({code})")),
+            (None, None) => None,
+        }
+    }
+
+    pub(crate) fn hover_text(&self) -> String {
         let mut text = self.message.to_string();
         match (&self.source, &self.code) {
             (Some(source), Some(code)) => text.push_str(&format!(" `{source}({code})`")),
@@ -98,9 +162,16 @@ impl TextModel {
                 let start = buffer.point_utf16_to_offset(
                     buffer.clip_point_utf16(marker.range.start, text::Bias::Left),
                 );
-                let mut end = buffer.point_utf16_to_offset(
-                    buffer.clip_point_utf16(marker.range.end, text::Bias::Right),
-                );
+                // Monaco never draws untagged hints on several lines, and
+                // gives them room for their three dots.
+                let tagged = !marker.tags.is_empty();
+                let end_point = if marker.severity == MarkerSeverity::Hint && !tagged {
+                    PointUtf16::new(marker.range.start.row, marker.range.start.column + 2)
+                } else {
+                    marker.range.end
+                };
+                let mut end = buffer
+                    .point_utf16_to_offset(buffer.clip_point_utf16(end_point, text::Bias::Right));
                 // Monaco widens empty markers to the word or character there.
                 if end <= start {
                     end = buffer
@@ -108,16 +179,24 @@ impl TextModel {
                         .min(buffer.len());
                 }
                 let color = marker.severity.color();
+                // Hints have no squiggle; an unnecessary one is underlined
+                // only by themes with an `editorUnnecessaryCode.border` (see
+                // the element).
+                let underline = (marker.severity != MarkerSeverity::Hint)
+                    .then_some(DecorationUnderline { color, wavy: true });
                 (
                     start..end,
                     DecorationOptions {
-                        underline: (marker.severity != MarkerSeverity::Hint)
-                            .then_some(DecorationUnderline { color, wavy: true }),
+                        underline,
                         overview_ruler: (marker.severity >= MarkerSeverity::Warning)
                             .then_some((color, OverviewRulerLane::Right)),
-                        hover_message: Some(marker.hover_text().into()),
                         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
                         z_index: 10 + marker.severity as i32,
+                        validation: true,
+                        // Monaco: deprecated wins over unnecessary.
+                        unnecessary: marker.has_tag(MarkerTag::Unnecessary)
+                            && !marker.has_tag(MarkerTag::Deprecated),
+                        deprecated: marker.has_tag(MarkerTag::Deprecated),
                         ..Default::default()
                     },
                 )
@@ -128,6 +207,29 @@ impl TextModel {
             self.markers.by_owner.insert(owner, (markers, ids));
         }
         cx.emit(crate::TextModelEvent::MarkersChanged);
+    }
+
+    /// The markers whose (current) range contains byte `offset`, most severe
+    /// first.
+    pub fn markers_at(&self, offset: usize) -> Vec<Marker> {
+        let buffer = self.buffer();
+        let mut found: Vec<Marker> = self
+            .markers
+            .by_owner
+            .values()
+            .flat_map(|(markers, ids)| markers.iter().zip(ids))
+            .filter_map(|(marker, id)| {
+                let range = &self.decoration(*id)?.range;
+                (range.start <= offset && offset <= range.end).then(|| {
+                    let mut marker = marker.clone();
+                    marker.range = buffer.offset_to_point_utf16(range.start)
+                        ..buffer.offset_to_point_utf16(range.end);
+                    marker
+                })
+            })
+            .collect();
+        found.sort_by_key(|m| (std::cmp::Reverse(m.severity), m.range.start));
+        found
     }
 
     /// All markers with their current ranges (they move with edits), sorted
@@ -161,6 +263,7 @@ pub struct MarkerZone {
     index: usize,
     total: usize,
     colors: crate::theme::EditorColors,
+    editor: gpui::WeakEntity<CodeEditor>,
 }
 
 impl Render for MarkerZone {
@@ -187,6 +290,29 @@ impl Render for MarkerZone {
             .gap(px(2.))
             .child(div().text_color(color).child(title))
             .child(self.marker.hover_text())
+            .children(
+                self.marker
+                    .related_information
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, related)| {
+                        let editor = self.editor.clone();
+                        let location = related.location();
+                        div()
+                            .id(("related", ix))
+                            .cursor_pointer()
+                            .text_color(self.colors.input_option_active_border)
+                            .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(editor) = editor.upgrade() {
+                                    editor.update(cx, |editor, cx| {
+                                        editor.open_location(&location, true, cx);
+                                    });
+                                }
+                            })
+                            .child(related.label())
+                    }),
+            )
     }
 }
 
@@ -197,6 +323,15 @@ pub(crate) struct MarkerNavigation {
 }
 
 impl CodeEditor {
+    /// Whether diagnostics are drawn (Monaco `renderValidationDecorations`).
+    pub fn shows_validation_decorations(&self) -> bool {
+        match self.options.render_validation_decorations {
+            crate::options::RenderValidationDecorations::Editable => !self.options.read_only,
+            crate::options::RenderValidationDecorations::On => true,
+            crate::options::RenderValidationDecorations::Off => false,
+        }
+    }
+
     /// Moves to the next (or previous) marker and shows it below its line
     /// (Monaco `editor.action.marker.next`, F8).
     pub fn go_to_marker(&mut self, next: bool, cx: &mut Context<Self>) {
@@ -217,18 +352,40 @@ impl CodeEditor {
                 .rposition(|m| m.range.start < head)
                 .unwrap_or(markers.len() - 1)
         };
+        self.show_marker_at(markers, index, cx);
+    }
+
+    /// Selects `marker` and shows it in the marker zone (Monaco's "View
+    /// Problem" hover action).
+    pub fn show_marker(&mut self, marker: &Marker, cx: &mut Context<Self>) {
+        let markers = self.model().read(cx).markers();
+        let index = markers.iter().position(|m| m == marker).or_else(|| {
+            markers
+                .iter()
+                .position(|m| m.range.start == marker.range.start && m.message == marker.message)
+        });
+        if let Some(index) = index {
+            self.show_marker_at(markers, index, cx);
+        }
+    }
+
+    fn show_marker_at(&mut self, markers: Vec<Marker>, index: usize, cx: &mut Context<Self>) {
         let marker = markers[index].clone();
         self.close_marker_zone(cx);
         self.set_selections(
             &[crate::cursor::Selection::collapsed(marker.range.start)],
             cx,
         );
-        let lines = 1. + (marker.hover_text().len() as f32 / 80.).ceil();
+        let lines = 1.
+            + (marker.hover_text().len() as f32 / 80.).ceil()
+            + marker.related_information.len() as f32;
+        let editor = cx.entity().downgrade();
         let zone = cx.new(|_| MarkerZone {
             marker: marker.clone(),
             index,
             total: markers.len(),
             colors: self.theme.colors.clone(),
+            editor,
         });
         let id = self.add_view_zone(
             ViewZone {
