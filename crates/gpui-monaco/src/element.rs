@@ -424,10 +424,17 @@ impl HighlightSource {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ScrollbarLayout {
+    /// The whole scrollbar, arrows included.
+    pub bar: Bounds<Pixels>,
+    /// Where the slider moves.
     pub track: Bounds<Pixels>,
     pub thumb: Bounds<Pixels>,
     /// Content pixels per track pixel.
     pub ratio: f32,
+    /// The arrow buttons (start, end), with `*_has_arrows`.
+    pub arrows: Option<[Bounds<Pixels>; 2]>,
+    /// Whether it takes clicks (`ScrollbarVisibility::Hidden` doesn't).
+    pub interactive: bool,
 }
 
 /// Where the minimap is and how it maps to content.
@@ -662,6 +669,10 @@ pub struct PrepaintState {
     cursor_scale: f32,
     /// Middle-click scrolling's anchor dot.
     middle_scroll_anchor: Option<gpui::Point<Pixels>>,
+    /// The scrollbars' sliders: (opacity, hovered, dragged) for vertical
+    /// and horizontal.
+    scrollbar_looks: [(f32, bool, bool); 2],
+    overview_ruler: Option<Bounds<Pixels>>,
 }
 
 impl Element for EditorElement {
@@ -1249,40 +1260,103 @@ fn prepaint_editor(
         size(text_width, text_height),
     );
 
+    let scrollbar_options = options.scrollbar;
     let vertical_scrollbar = (max_scroll_top > px(0.)).then(|| {
-        let track = Bounds::new(
+        let bar = Bounds::new(
             point(bounds.right() - vbar, bounds.top()),
             size(vbar, viewport_height),
         );
-        let thumb_height =
-            (viewport_height * (viewport_height / content_height)).max(px(MIN_SLIDER));
-        let travel = viewport_height - thumb_height;
+        // Monaco's arrows take `arrowSize` at each end.
+        let arrow = if scrollbar_options.vertical_has_arrows {
+            scrollbar_options.arrow_size.min(viewport_height / 4.)
+        } else {
+            px(0.)
+        };
+        let track = Bounds::new(
+            point(bar.left(), bar.top() + arrow),
+            size(vbar, viewport_height - arrow * 2.),
+        );
+        let thumb_height = (track.size.height * (viewport_height / content_height))
+            .max(px(MIN_SLIDER))
+            .min(track.size.height);
+        let travel = track.size.height - thumb_height;
         let thumb_top = track.top() + travel * (scroll_top / max_scroll_top);
+        // Monaco centers a `verticalSliderSize` slider in the bar.
+        let slider = scrollbar_options
+            .vertical_slider_size
+            .unwrap_or(vbar)
+            .min(vbar);
         ScrollbarLayout {
+            bar,
             track,
-            thumb: Bounds::new(point(track.left(), thumb_top), size(vbar, thumb_height)),
+            thumb: Bounds::new(
+                point(track.left() + (vbar - slider) / 2., thumb_top),
+                size(slider, thumb_height),
+            ),
             ratio: max_scroll_top / travel.max(px(1.)),
+            arrows: scrollbar_options.vertical_has_arrows.then(|| {
+                [
+                    Bounds::new(bar.origin, size(vbar, arrow)),
+                    Bounds::new(point(bar.left(), bar.bottom() - arrow), size(vbar, arrow)),
+                ]
+            }),
+            interactive: scrollbar_options.vertical != crate::options::ScrollbarVisibility::Hidden,
         }
     });
     let horizontal_scrollbar = show_hbar.then(|| {
-        let track = Bounds::new(
+        let bar = Bounds::new(
             point(text_bounds.left(), bounds.bottom() - hbar),
             size(text_width, hbar),
         );
-        let thumb_width = (text_width * (text_width / content_width)).max(px(MIN_SLIDER));
-        let travel = text_width - thumb_width;
+        let arrow = if scrollbar_options.horizontal_has_arrows {
+            scrollbar_options.arrow_size.min(text_width / 4.)
+        } else {
+            px(0.)
+        };
+        let track = Bounds::new(
+            point(bar.left() + arrow, bar.top()),
+            size(text_width - arrow * 2., hbar),
+        );
+        let thumb_width = (track.size.width * (text_width / content_width))
+            .max(px(MIN_SLIDER))
+            .min(track.size.width);
+        let travel = track.size.width - thumb_width;
         let thumb_left = track.left()
             + if max_scroll_left > px(0.) {
                 travel * (scroll_left / max_scroll_left)
             } else {
                 px(0.)
             };
+        let slider = scrollbar_options
+            .horizontal_slider_size
+            .unwrap_or(hbar)
+            .min(hbar);
         ScrollbarLayout {
+            bar,
             track,
-            thumb: Bounds::new(point(thumb_left, track.top()), size(thumb_width, hbar)),
+            thumb: Bounds::new(
+                point(thumb_left, track.top() + (hbar - slider) / 2.),
+                size(thumb_width, slider),
+            ),
             ratio: max_scroll_left / travel.max(px(1.)),
+            arrows: scrollbar_options.horizontal_has_arrows.then(|| {
+                [
+                    Bounds::new(bar.origin, size(arrow, hbar)),
+                    Bounds::new(point(bar.right() - arrow, bar.top()), size(arrow, hbar)),
+                ]
+            }),
+            interactive: scrollbar_options.horizontal
+                != crate::options::ScrollbarVisibility::Hidden,
         }
     });
+    // Monaco reveals `auto` scrollbars whenever the view scrolls.
+    if editor
+        .layout
+        .as_ref()
+        .is_some_and(|l| l.scroll_top != scroll_top || l.scroll_left != scroll_left)
+    {
+        editor.animation.scrollbars.revealed_at = Some(std::time::Instant::now());
+    }
 
     // Fold controls and placeholders.
     let mut fold_controls = Vec::new();
@@ -1728,12 +1802,12 @@ fn prepaint_editor(
 
     // Overview ruler marks in the vertical scrollbar track.
     let mut ruler_marks: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
-    if let Some(track) = layout.vertical_scrollbar.map(|bar| bar.track).or_else(|| {
-        Some(Bounds::new(
-            point(bounds.right() - vbar, bounds.top()),
-            size(vbar, viewport_height),
-        ))
-    }) {
+    let ruler = Bounds::new(
+        point(bounds.right() - vbar, bounds.top()),
+        size(vbar, viewport_height),
+    );
+    if options.overview_ruler_lanes > 0 && vbar > px(0.) {
+        let track = ruler;
         let all = editor
             .model()
             .update(cx, |model, _| model.all_decorations(Some(editor_id)))
@@ -1748,15 +1822,58 @@ fn prepaint_editor(
             let row = snapshot.offset_to_point(decoration.range.start).row;
             let (view_line, _) = view_lines.to_view(PointUtf16::new(row, 0), false);
             let y = track.top() + track.size.height * (view_line as f32 / total);
-            let third = track.size.width / 3.;
-            let (x, w) = match lane {
-                crate::decorations::OverviewRulerLane::Left => (track.left(), third),
-                crate::decorations::OverviewRulerLane::Center => (track.left() + third, third),
-                crate::decorations::OverviewRulerLane::Right => (track.left() + third * 2., third),
-                crate::decorations::OverviewRulerLane::Full => (track.left(), track.size.width),
-            };
+            let (x, w) = overview_lane(track, options.overview_ruler_lanes, lane);
             ruler_marks.push((Bounds::new(point(x, y), size(w, px(3.))), color));
         }
+        // Monaco draws the cursors across the ruler, 2px tall.
+        if !options.hide_cursor_in_overview_ruler {
+            for selection in &selections {
+                let (view_line, _) = view_lines.to_view(selection.head, false);
+                let y = track.top() + track.size.height * (view_line as f32 / total);
+                ruler_marks.push((
+                    Bounds::new(point(track.left(), y), size(track.size.width, px(2.))),
+                    colors.cursor,
+                ));
+            }
+        }
+    }
+
+    let show_ruler_border = options.overview_ruler_border
+        && options.overview_ruler_lanes > 0
+        && options.vertical_scrollbar_size > px(0.);
+    // Monaco's scrollbar visibility: `auto` shows while hovered, dragged or
+    // just scrolled, then fades.
+    let dragging = editor.scrollbar_drag;
+    let mouse = editor.animation.scrollbars.mouse_position;
+    let mut scrollbar_looks = [(0., false, false); 2];
+    for (ix, (bar, visibility)) in [
+        (layout.vertical_scrollbar, options.scrollbar.vertical),
+        (layout.horizontal_scrollbar, options.scrollbar.horizontal),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let Some(bar) = bar else {
+            continue;
+        };
+        let dragged = match dragging {
+            Some(crate::editor::ScrollbarDrag::Vertical { .. }) => ix == 0,
+            Some(crate::editor::ScrollbarDrag::Horizontal { .. }) => ix == 1,
+            None => false,
+        };
+        let opacity = match visibility {
+            crate::options::ScrollbarVisibility::Visible => 1.,
+            crate::options::ScrollbarVisibility::Hidden => 0.,
+            crate::options::ScrollbarVisibility::Auto => {
+                let (opacity, animating) = editor.animation.scrollbars.opacity(dragging.is_some());
+                if animating {
+                    window.request_animation_frame();
+                }
+                opacity
+            }
+        };
+        let hovered = mouse.is_some_and(|m| bar.thumb.contains(&m));
+        scrollbar_looks[ix] = (opacity, hovered, dragged);
     }
 
     // Cursors.
@@ -2168,6 +2285,8 @@ fn prepaint_editor(
         cursor_opacity,
         cursor_scale,
         middle_scroll_anchor: editor.animation.middle_scroll.map(|s| s.anchor),
+        scrollbar_looks,
+        overview_ruler: show_ruler_border.then_some(ruler),
     }
 }
 
@@ -2522,11 +2641,42 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
         for (bounds, color) in &state.ruler_marks {
             window.paint_quad(fill(*bounds, *color));
         }
-        for scrollbar in [layout.vertical_scrollbar, layout.horizontal_scrollbar]
+        if let Some(ruler) = state.overview_ruler {
+            window.paint_quad(fill(
+                Bounds::new(ruler.origin, size(px(1.), ruler.size.height)),
+                colors.overview_ruler_border,
+            ));
+        }
+        for (ix, scrollbar) in [layout.vertical_scrollbar, layout.horizontal_scrollbar]
             .into_iter()
-            .flatten()
+            .enumerate()
         {
-            window.paint_quad(fill(scrollbar.thumb, colors.scrollbar_slider));
+            let Some(scrollbar) = scrollbar else {
+                continue;
+            };
+            let (opacity, hovered, dragged) = state.scrollbar_looks[ix];
+            if opacity <= 0. {
+                continue;
+            }
+            let color = if dragged {
+                colors.scrollbar_slider_active
+            } else if hovered {
+                colors.scrollbar_slider_hover
+            } else {
+                colors.scrollbar_slider
+            };
+            window.paint_quad(fill(scrollbar.thumb, color.opacity(opacity)));
+            if let Some(arrows) = scrollbar.arrows {
+                for (end, arrow) in arrows.into_iter().enumerate() {
+                    paint_scrollbar_arrow(
+                        arrow,
+                        ix == 0,
+                        end == 0,
+                        colors.line_number.opacity(opacity),
+                        window,
+                    );
+                }
+            }
         }
         if let Some(minimap) = layout.minimap {
             if let Some(background) = colors.minimap_background {
@@ -2546,15 +2696,87 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                 },
             );
         }
-        // Monaco draws a thin shadow under the top edge once scrolled.
-        if layout.scroll_top > px(0.) {
-            let shadow = Bounds::new(
-                point(bounds.left(), bounds.top()),
-                Size::new(bounds.size.width, px(1.)),
-            );
-            window.paint_quad(fill(shadow, colors.scrollbar_shadow.opacity(0.6)));
+        // Monaco `scrollbar.useShadows`: thin shadows under the top edge
+        // and along the text's left edge once scrolled.
+        if state.options.scrollbar.use_shadows {
+            if layout.scroll_top > px(0.) {
+                let shadow = Bounds::new(
+                    point(bounds.left(), bounds.top()),
+                    Size::new(bounds.size.width, px(1.)),
+                );
+                window.paint_quad(fill(shadow, colors.scrollbar_shadow.opacity(0.6)));
+            }
+            if layout.scroll_left > px(0.) {
+                let shadow = Bounds::new(
+                    point(layout.text_bounds.left(), bounds.top()),
+                    Size::new(px(1.), layout.text_bounds.size.height),
+                );
+                window.paint_quad(fill(shadow, colors.scrollbar_shadow.opacity(0.6)));
+            }
         }
     });
+}
+
+/// The x and width of an overview ruler `lane` with `lanes` lanes (Monaco
+/// `DecorationsOverviewRuler` settings: one lane is the whole width, two
+/// split it in halves with the center on the left).
+fn overview_lane(
+    track: Bounds<Pixels>,
+    lanes: u32,
+    lane: crate::decorations::OverviewRulerLane,
+) -> (Pixels, Pixels) {
+    use crate::decorations::OverviewRulerLane as Lane;
+    let width = track.size.width;
+    match (lanes, lane) {
+        (_, Lane::Full) | (1, _) => (track.left(), width),
+        (2, Lane::Left | Lane::Center) => (track.left(), width / 2.),
+        (2, Lane::Right) => (track.left() + width / 2., width / 2.),
+        (_, Lane::Left) => (track.left(), width / 3.),
+        (_, Lane::Center) => (track.left() + width / 3., width / 3.),
+        (_, Lane::Right) => (track.left() + width * 2. / 3., width / 3.),
+    }
+}
+
+/// A scrollbar arrow: a small triangle pointing out of the bar.
+fn paint_scrollbar_arrow(
+    bounds: Bounds<Pixels>,
+    vertical: bool,
+    start: bool,
+    color: Hsla,
+    window: &mut Window,
+) {
+    let center = bounds.center();
+    let r = bounds.size.width.min(bounds.size.height) * 0.3;
+    let points = match (vertical, start) {
+        (true, true) => [
+            point(center.x, center.y - r),
+            point(center.x + r, center.y + r / 2.),
+            point(center.x - r, center.y + r / 2.),
+        ],
+        (true, false) => [
+            point(center.x, center.y + r),
+            point(center.x - r, center.y - r / 2.),
+            point(center.x + r, center.y - r / 2.),
+        ],
+        (false, true) => [
+            point(center.x - r, center.y),
+            point(center.x + r / 2., center.y - r),
+            point(center.x + r / 2., center.y + r),
+        ],
+        (false, false) => [
+            point(center.x + r, center.y),
+            point(center.x - r / 2., center.y + r),
+            point(center.x - r / 2., center.y - r),
+        ],
+    };
+    let mut path = PathBuilder::fill();
+    path.move_to(points[0]);
+    path.line_to(points[1]);
+    path.line_to(points[2]);
+    path.close();
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color);
+    }
 }
 
 /// A lightbulb: a round bulb over a small base.

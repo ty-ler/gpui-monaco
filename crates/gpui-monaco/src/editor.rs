@@ -110,7 +110,7 @@ struct MouseSelection {
 }
 
 #[derive(Clone, Copy)]
-enum ScrollbarDrag {
+pub(crate) enum ScrollbarDrag {
     Vertical { grab_offset: Pixels },
     Horizontal { grab_offset: Pixels },
 }
@@ -223,7 +223,9 @@ pub struct CodeEditor {
     /// frame (Monaco `StableEditorScrollState`).
     pub(crate) pending_cursor_offset: Option<Pixels>,
     mouse_selection: Option<MouseSelection>,
-    scrollbar_drag: Option<ScrollbarDrag>,
+    pub(crate) scrollbar_drag: Option<ScrollbarDrag>,
+    /// A held scrollbar arrow's repeat.
+    scrollbar_arrow_task: Option<Task<()>>,
     blink_epoch: usize,
     _blink_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -296,6 +298,7 @@ impl CodeEditor {
             pending_cursor_offset: None,
             mouse_selection: None,
             scrollbar_drag: None,
+            scrollbar_arrow_task: None,
             blink_epoch: 0,
             view_lines: Arc::new(ViewLines::new(snapshot.rope().clone(), snapshot.version())),
             folds: FoldState::default(),
@@ -661,6 +664,13 @@ impl CodeEditor {
             layout.zones.line_y(last, layout.metrics.line_height),
             layout.metrics.line_height,
         ))
+    }
+
+    /// The vertical scrollbar's (bar, thumb) bounds, for tests.
+    #[doc(hidden)]
+    pub fn vertical_scrollbar_for_tests(&self) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+        let bar = self.layout.as_ref()?.vertical_scrollbar?;
+        Some((bar.bar, bar.thumb))
     }
 
     /// Whether the blinking cursor is in its visible phase, for tests.
@@ -2039,27 +2049,56 @@ impl CodeEditor {
             self.sticky_click(ix, event, cx);
             return;
         }
-        if let Some(vbar) = layout.vertical_scrollbar
-            && vbar.track.contains(&event.position)
-        {
-            let grab_offset = if vbar.thumb.contains(&event.position) {
-                event.position.y - vbar.thumb.top()
-            } else {
-                vbar.thumb.size.height / 2.
+        for (vertical, bar) in [
+            (true, layout.vertical_scrollbar),
+            (false, layout.horizontal_scrollbar),
+        ] {
+            let Some(bar) = bar.filter(|b| b.interactive && b.bar.contains(&event.position)) else {
+                continue;
             };
-            self.scrollbar_drag = Some(ScrollbarDrag::Vertical { grab_offset });
-            self.drag_scrollbar(event.position, cx);
-            return;
-        }
-        if let Some(hbar) = layout.horizontal_scrollbar
-            && hbar.track.contains(&event.position)
-        {
-            let grab_offset = if hbar.thumb.contains(&event.position) {
-                event.position.x - hbar.thumb.left()
+            // Monaco's arrows scroll a wheel step, repeating while held.
+            if let Some(ix) = bar
+                .arrows
+                .and_then(|arrows| arrows.iter().position(|a| a.contains(&event.position)))
+            {
+                let sign = if ix == 0 { -1. } else { 1. };
+                self.start_scrollbar_arrow(vertical, sign, cx);
+                return;
+            }
+            let (along, thumb_start, thumb_len) = if vertical {
+                (event.position.y, bar.thumb.top(), bar.thumb.size.height)
             } else {
-                hbar.thumb.size.width / 2.
+                (event.position.x, bar.thumb.left(), bar.thumb.size.width)
             };
-            self.scrollbar_drag = Some(ScrollbarDrag::Horizontal { grab_offset });
+            let on_thumb = bar.thumb.contains(&event.position);
+            // Monaco `scrollByPage`: the track pages towards the click.
+            if !on_thumb && self.options.scrollbar.scroll_by_page {
+                let page = if vertical {
+                    layout.text_bounds.size.height
+                } else {
+                    layout.text_bounds.size.width
+                };
+                let delta = if along < thumb_start { -page } else { page };
+                if vertical {
+                    self.scroll_top += delta;
+                } else {
+                    self.scroll_left += delta;
+                }
+                self.clamp_scroll();
+                cx.emit(CodeEditorEvent::ScrollChanged);
+                cx.notify();
+                return;
+            }
+            let grab_offset = if on_thumb {
+                along - thumb_start
+            } else {
+                thumb_len / 2.
+            };
+            self.scrollbar_drag = Some(if vertical {
+                ScrollbarDrag::Vertical { grab_offset }
+            } else {
+                ScrollbarDrag::Horizontal { grab_offset }
+            });
             self.drag_scrollbar(event.position, cx);
             return;
         }
@@ -2243,6 +2282,22 @@ impl CodeEditor {
         if let Some(session) = self.animation.middle_scroll.as_mut() {
             session.mouse = event.position;
         }
+        let over_thumb = |position: Option<Point<Pixels>>, layout: Option<&EditorLayout>| {
+            layout.is_some_and(|l| {
+                [l.vertical_scrollbar, l.horizontal_scrollbar]
+                    .into_iter()
+                    .flatten()
+                    .any(|b| position.is_some_and(|p| b.thumb.contains(&p)))
+            })
+        };
+        let was_over = over_thumb(
+            self.animation.scrollbars.mouse_position,
+            self.layout.as_ref(),
+        );
+        self.animation.scrollbars.mouse_position = Some(event.position);
+        if was_over != over_thumb(Some(event.position), self.layout.as_ref()) {
+            cx.notify();
+        }
         if self
             .layout
             .as_ref()
@@ -2397,6 +2452,7 @@ impl CodeEditor {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.scrollbar_arrow_task = None;
         if self
             .layout
             .as_ref()
@@ -2415,6 +2471,36 @@ impl CodeEditor {
         self.minimap_drag = None;
         self.mouse_selection = None;
         self.scrollbar_drag = None;
+    }
+
+    /// Monaco `ScrollbarArrow`: one wheel step now, then repeating after
+    /// 200ms at 24 per second until the button is released.
+    fn start_scrollbar_arrow(&mut self, vertical: bool, sign: f32, cx: &mut Context<Self>) {
+        let step = px(50.) * self.options.mouse_wheel_scroll_sensitivity * sign;
+        let scroll = move |this: &mut Self, cx: &mut Context<Self>| {
+            if vertical {
+                this.scroll_top += step;
+            } else {
+                this.scroll_left += step;
+            }
+            this.clamp_scroll();
+            cx.emit(CodeEditorEvent::ScrollChanged);
+            cx.notify();
+        };
+        scroll(self, cx);
+        self.scrollbar_arrow_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(200))
+                .await;
+            loop {
+                if this.update(cx, |this, cx| scroll(this, cx)).is_err() {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(1000 / 24))
+                    .await;
+            }
+        }));
     }
 
     fn drag_scrollbar(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
@@ -2451,6 +2537,9 @@ impl CodeEditor {
             .map_or(self.options.resolved_line_height(), |l| {
                 l.metrics.line_height
             });
+        if !self.options.scrollbar.handle_mouse_wheel {
+            return;
+        }
         // Monaco `fastScrollSensitivity` with Alt held.
         let sensitivity = if event.modifiers.alt {
             self.options.mouse_wheel_scroll_sensitivity * self.options.fast_scroll_sensitivity
@@ -2477,12 +2566,18 @@ impl CodeEditor {
             self.animation.cancel_scroll();
         }
         self.hide_hover(cx);
+        let before = (self.scroll_top, self.scroll_left);
         self.scroll_top -= delta.y;
         self.scroll_left -= delta.x;
         self.clamp_scroll();
+        let moved = before != (self.scroll_top, self.scroll_left);
         cx.emit(CodeEditorEvent::ScrollChanged);
         cx.notify();
-        cx.stop_propagation();
+        // Monaco `alwaysConsumeMouseWheel: false` lets the parent scroll
+        // once the editor can't.
+        if moved || self.options.scrollbar.always_consume_mouse_wheel {
+            cx.stop_propagation();
+        }
     }
 
     // ----- UTF-16 helpers for the input handler ----------------------------------
@@ -3402,6 +3497,14 @@ impl Render for CodeEditor {
                 this.end_middle_scroll(cx);
             }))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                // Monaco reveals `auto` scrollbars while the mouse is over.
+                let scrollbars = &mut this.animation.scrollbars;
+                scrollbars.mouse_over = *hovered;
+                if !*hovered {
+                    scrollbars.left_at = Some(std::time::Instant::now());
+                    scrollbars.mouse_position = None;
+                }
+                cx.notify();
                 if !*hovered {
                     this.sticky_mouse_leave(cx);
                     cx.emit(CodeEditorEvent::MouseLeave);

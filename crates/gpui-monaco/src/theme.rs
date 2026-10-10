@@ -51,6 +51,8 @@ pub struct EditorColors {
     pub scrollbar_slider_active: Hsla,
     /// Shadow drawn when the content is scrolled (`scrollbar.shadow`).
     pub scrollbar_shadow: Hsla,
+    /// The overview ruler's left border (`editorOverviewRuler.border`).
+    pub overview_ruler_border: Hsla,
     /// Underline of IME composition text; follows the foreground when loading VS Code
     /// colors.
     pub ime_underline: Hsla,
@@ -253,6 +255,7 @@ impl EditorColors {
             scrollbar_slider_hover: c(rgba(0x646464b3)),
             scrollbar_slider_active: c(rgba(0xbfbfbf66)),
             scrollbar_shadow: c(rgb(0x000000)),
+            overview_ruler_border: c(rgba(0x7f7f7f4d)),
             ime_underline: c(rgb(0xd4d4d4)),
             find_match_background: c(rgb(0x515c6a)),
             find_match_highlight_background: c(rgba(0xea5c0055)),
@@ -361,6 +364,7 @@ impl EditorColors {
             scrollbar_slider_hover: c(rgba(0x646464b3)),
             scrollbar_slider_active: c(rgba(0x00000099)),
             scrollbar_shadow: c(rgb(0xdddddd)),
+            overview_ruler_border: c(rgba(0x7f7f7f4d)),
             ime_underline: c(rgb(0x000000)),
             find_match_background: c(rgb(0xa8ac94)),
             find_match_highlight_background: c(rgba(0xea5c0055)),
@@ -484,6 +488,10 @@ impl EditorColors {
             "scrollbarSlider.activeBackground",
         );
         set(&mut self.scrollbar_shadow, "scrollbar.shadow");
+        set(
+            &mut self.overview_ruler_border,
+            "editorOverviewRuler.border",
+        );
         set(
             &mut self.find_match_background,
             "editor.findMatchBackground",

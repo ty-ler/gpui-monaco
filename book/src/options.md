@@ -34,6 +34,8 @@ editor.update(cx, |editor, cx| {
 | `folding`, `show_folding_controls` | `folding`, `showFoldingControls` | |
 | `scroll_beyond_last_line`, `mouse_wheel_scroll_sensitivity` | same names | |
 | `vertical_scrollbar_size`, `horizontal_scrollbar_size` | `scrollbar.verticalScrollbarSize`, … | |
+| `scrollbar` | `scrollbar.*` | `vertical`/`horizontal` (`Auto` shows while hovered or just scrolled, `Visible`, `Hidden`), `use_shadows`, `*_has_arrows`, `arrow_size`, `*_slider_size`, `handle_mouse_wheel`, `always_consume_mouse_wheel`, `scroll_by_page` |
+| `overview_ruler_lanes`, `overview_ruler_border`, `hide_cursor_in_overview_ruler` | same names | lanes (3; 0 hides the marks), a left border, the cursor marks |
 | `minimap` | `minimap` | `enabled`, `max_column`, `scale`, `always_show_slider` |
 | `sticky_scroll` | `stickyScroll` | `enabled`, `max_line_count`, `default_model`, `scroll_with_editor` |
 | `auto_closing_brackets`, `auto_closing_quotes`, `auto_closing_comments` | `autoClosingBrackets`, … | `Always`, `LanguageDefined`, `BeforeWhitespace`, `Never` |

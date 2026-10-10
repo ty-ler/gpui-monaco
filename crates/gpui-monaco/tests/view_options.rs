@@ -156,3 +156,37 @@ fn solid_cursors_dont_blink(cx: &mut TestAppContext) {
     }
     assert!(hidden);
 }
+
+fn long_text() -> String {
+    (0..500)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[gpui::test]
+fn scroll_by_page_pages_the_track(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&long_text(), |o| o.scrollbar.scroll_by_page = true, cx);
+    let (bar, thumb) = editor.read_with(cx, |e, _| e.vertical_scrollbar_for_tests().unwrap());
+    let (_, _, height, _) = metrics(&editor, cx);
+    cx.simulate_click(
+        point(bar.center().x, thumb.bottom() + px(40.)),
+        Modifiers::default(),
+    );
+    let (top, _, _, _) = metrics(&editor, cx);
+    assert_eq!(top, height);
+}
+
+#[gpui::test]
+fn arrows_scroll_wheel_steps(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&long_text(), |o| o.scrollbar.vertical_has_arrows = true, cx);
+    let (bar, thumb) = editor.read_with(cx, |e, _| e.vertical_scrollbar_for_tests().unwrap());
+    // The track starts below the top arrow.
+    assert!(thumb.top() >= bar.top() + px(11.));
+    cx.simulate_click(
+        point(bar.center().x, bar.bottom() - px(4.)),
+        Modifiers::default(),
+    );
+    let (top, _, _, _) = metrics(&editor, cx);
+    assert_eq!(top, 50.);
+}

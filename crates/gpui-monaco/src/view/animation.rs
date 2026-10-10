@@ -112,6 +112,7 @@ pub(crate) struct ViewAnimation {
     pub cursor_count: usize,
     /// Middle-click scrolling (`scrollOnMiddleClick`).
     pub middle_scroll: Option<MiddleScroll>,
+    pub scrollbars: ScrollbarFade,
 }
 
 impl Default for ViewAnimation {
@@ -126,6 +127,7 @@ impl Default for ViewAnimation {
             caret_jump: false,
             cursor_count: 1,
             middle_scroll: None,
+            scrollbars: ScrollbarFade::default(),
         }
     }
 }
@@ -233,6 +235,47 @@ impl ViewAnimation {
     }
 }
 
+/// Monaco's `auto` scrollbar visibility: shown while the mouse is over the
+/// editor or a scrollbar is dragged, and for a moment after scrolling,
+/// then fading out.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ScrollbarFade {
+    pub mouse_over: bool,
+    /// The mouse, for the slider's hover color.
+    pub mouse_position: Option<Point<Pixels>>,
+    pub revealed_at: Option<Instant>,
+    pub left_at: Option<Instant>,
+}
+
+/// Monaco's `HIDE_TIMEOUT` before hiding, and its 800ms fade.
+const SCROLLBAR_HIDE_TIMEOUT: Duration = Duration::from_millis(500);
+const SCROLLBAR_FADE: Duration = Duration::from_millis(800);
+
+impl ScrollbarFade {
+    /// The sliders' opacity, and whether it's still changing.
+    pub fn opacity(&self, dragging: bool) -> (f32, bool) {
+        if self.mouse_over || dragging {
+            return (1., false);
+        }
+        let hide_from = [
+            self.revealed_at.map(|t| t + SCROLLBAR_HIDE_TIMEOUT),
+            self.left_at,
+        ]
+        .into_iter()
+        .flatten()
+        .max();
+        let Some(hide_from) = hide_from else {
+            return (0., false);
+        };
+        let now = Instant::now();
+        if now < hide_from {
+            return (1., true);
+        }
+        let t = (now - hide_from).as_secs_f32() / SCROLLBAR_FADE.as_secs_f32();
+        ((1. - t).max(0.), t < 1.)
+    }
+}
+
 /// A middle-click scrolling session (Monaco `MiddleScrollController`).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MiddleScroll {
@@ -324,6 +367,26 @@ mod tests {
         assert!((ease_in_out(0.5) - 0.5).abs() < 0.01);
         assert!(ease(0.5) > 0.7);
         assert_eq!(ease_out_cubic(1.), 1.);
+    }
+
+    #[test]
+    fn auto_scrollbars_fade() {
+        let mut fade = ScrollbarFade::default();
+        // Never revealed: hidden.
+        assert_eq!(fade.opacity(false), (0., false));
+        fade.mouse_over = true;
+        assert_eq!(fade.opacity(false), (1., false));
+        fade.mouse_over = false;
+        // Just scrolled: shown, then fading.
+        fade.revealed_at = Some(Instant::now());
+        assert_eq!(fade.opacity(false), (1., true));
+        fade.revealed_at = Some(Instant::now() - Duration::from_millis(900));
+        let (opacity, fading) = fade.opacity(false);
+        assert!(opacity > 0. && opacity < 1. && fading);
+        fade.revealed_at = Some(Instant::now() - Duration::from_millis(2000));
+        assert_eq!(fade.opacity(false), (0., false));
+        // Dragging keeps it.
+        assert_eq!(fade.opacity(true), (1., false));
     }
 
     #[test]

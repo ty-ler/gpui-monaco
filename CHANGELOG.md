@@ -149,6 +149,12 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Scrollbar and overview ruler options (#88, part 2):**
+  - **Scrollbar:** `EditorOptions::scrollbar` (Monaco `scrollbar.*`).
+    - Visibility: `auto` (the default, now as in Monaco) shows the sliders while the mouse is over the editor or for 500ms after scrolling, then fades them over 800ms. `visible` and `hidden` do what they say.
+    - Sliders take the hover and active colors. `use_shadows` adds a left shadow when scrolled sideways.
+    - Arrows (`*_has_arrows`, `arrow_size`) scroll a wheel step and repeat while held. Also `*_slider_size`, `handle_mouse_wheel`, `always_consume_mouse_wheel` and `scroll_by_page`.
+  - **Overview ruler:** `overview_ruler_lanes`, `overview_ruler_border` (`editorOverviewRuler.border`) and `hide_cursor_in_overview_ruler` (the cursors are now marked).
 - **Cursor and scrolling options (#88, part 1):**
   - **Cursor:** `cursor_blinking` is now Monaco's `CursorBlinking` (blink, smooth, phase, expand, solid, using Monaco's keyframes; read-only editors don't blink), plus `cursor_smooth_caret_animation` (the 80ms caret slide; off/explicit/on) and `cursor_height`.
   - **Scroll position:** `cursor_surrounding_lines` and its style. Cursor moves now reveal like Monaco's `_computeScrollTopToRevealRange`, so the sticky lines' context applies too, and mouse moves get one line of room. Also `smooth_scrolling` (125ms ease-out for reveals, cursor moves and wheel steps) and `padding` (top/bottom).
