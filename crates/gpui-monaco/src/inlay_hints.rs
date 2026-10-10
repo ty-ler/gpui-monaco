@@ -235,6 +235,7 @@ impl CodeEditor {
                                     ..Default::default()
                                 },
                                 background: Some(background),
+                                swatch: None,
                             }),
                             ..Default::default()
                         },

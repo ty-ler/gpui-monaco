@@ -179,7 +179,9 @@ impl CodeEditor {
         if self.sticky.key.as_ref() == Some(&key) || self.sticky.pending.as_ref() == Some(&key) {
             return;
         }
-        let delay = if self.sticky.key.is_some() {
+        // Only the first request is immediate, so typing doesn't recompute
+        // on every keystroke.
+        let delay = if self.sticky.key.is_some() || self.sticky.pending.is_some() {
             UPDATE_DELAY
         } else {
             Duration::ZERO

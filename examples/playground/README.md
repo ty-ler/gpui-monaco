@@ -16,6 +16,8 @@ The toolbar has these controls:
 
 Clicking the glyph margin, left of the line numbers, toggles a breakpoint dot. It uses the editor's mouse target events.
 
+Colors such as `#ff0000` or `rgb(…)` get a swatch in any language, from the built-in color finder.
+
 The status bar shows the cursor position, selection count, language, line endings and file.
 
 Demo providers are registered by default:

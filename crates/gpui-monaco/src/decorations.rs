@@ -40,7 +40,7 @@ pub enum OverviewRulerLane {
 
 /// Text injected before or after the decorated range (Monaco
 /// `before`/`after`). It's rendered inline but isn't part of the text.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct InjectedText {
     /// The text to show.
     pub content: SharedString,
@@ -48,6 +48,9 @@ pub struct InjectedText {
     pub style: TokenStyle,
     /// Background behind the injected text.
     pub background: Option<Hsla>,
+    /// A bordered square of this color centered in the text (Monaco's
+    /// `colorpicker-color-decoration`); the content just makes room.
+    pub swatch: Option<Hsla>,
 }
 
 /// Monaco `IModelDecorationOptions`, with styles instead of class names.

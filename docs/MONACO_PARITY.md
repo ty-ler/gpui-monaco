@@ -108,7 +108,8 @@ Issues are linked by number.
 | Code actions and lightbulb (no AI actions, "Show Disabled" toggle, refactor preview or nearby quick fixes) | `codeAction` | ✅ | #56 |
 | Inlay hints (no label part navigation, tooltips, double-click edits or smaller font) | `inlayHints` | ✅ | #56 |
 | Code lens | `codelens` | ✅ | #96 |
-| Colors and color picker | `colorPicker` | ❌ | #97 |
+| Color decorators (providers, default finder) | `colorDecorators` | ✅ | #97 |
+| Color picker | `colorPicker` | ❌ | #97 |
 | Links | `links` | ✅ | #93 |
 | Semantic tokens | `semanticTokens` | ✅ | #98 |
 | Inline completions (ghost text) | `inlineCompletions` | ✅ | #99 |

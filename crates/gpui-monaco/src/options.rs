@@ -416,6 +416,32 @@ impl Default for SuggestOptions {
     }
 }
 
+/// What opens the color picker from a swatch (Monaco
+/// `colorDecoratorsActivatedOn`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColorDecoratorsActivatedOn {
+    /// Hovering or clicking.
+    #[default]
+    ClickAndHover,
+    /// Hovering.
+    Hover,
+    /// Clicking.
+    Click,
+}
+
+/// When the built-in color finder (hex, `rgb()`, `hsl()` and the like)
+/// decorates colors (Monaco `defaultColorDecorators`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DefaultColorDecorators {
+    /// Only when no color provider found any.
+    #[default]
+    Auto,
+    /// Always, alongside providers.
+    Always,
+    /// Never.
+    Never,
+}
+
 /// Where folding ranges come from (Monaco `foldingStrategy`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FoldingStrategy {
@@ -755,6 +781,17 @@ pub struct EditorOptions {
     pub semantic_highlighting: SemanticHighlighting,
     /// Monaco `links`: detect links and follow them with Cmd/Ctrl+click.
     pub links: bool,
+    /// Monaco `colorDecorators`: a swatch before each color in the text,
+    /// which opens the color picker.
+    pub color_decorators: bool,
+    /// Monaco `colorDecoratorsLimit`: at most this many swatches (500).
+    pub color_decorators_limit: usize,
+    /// Monaco `colorDecoratorsActivatedOn`: what opens the picker from a
+    /// swatch.
+    pub color_decorators_activated_on: ColorDecoratorsActivatedOn,
+    /// Monaco `defaultColorDecorators`: when the built-in CSS color finder
+    /// runs.
+    pub default_color_decorators: DefaultColorDecorators,
     /// Monaco `showUnused`: fade code diagnostics tag unnecessary.
     pub show_unused: bool,
     /// Monaco `showDeprecated`: strike through code diagnostics tag
@@ -872,6 +909,10 @@ impl Default for EditorOptions {
             linked_editing: false,
             semantic_highlighting: SemanticHighlighting::ConfiguredByTheme,
             links: true,
+            color_decorators: true,
+            color_decorators_limit: 500,
+            color_decorators_activated_on: ColorDecoratorsActivatedOn::ClickAndHover,
+            default_color_decorators: DefaultColorDecorators::Auto,
             show_unused: true,
             show_deprecated: true,
             render_validation_decorations: RenderValidationDecorations::Editable,
@@ -905,6 +946,7 @@ impl EditorOptions {
                 enabled: false,
                 ..StickyScrollOptions::default()
             },
+            color_decorators: false,
             ..Self::default()
         }
     }

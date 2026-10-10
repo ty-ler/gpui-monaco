@@ -68,6 +68,9 @@ pub struct EditorColors {
     pub link_active_foreground: Hsla,
     /// Quick access previews (`editor.rangeHighlightBackground`).
     pub range_highlight_background: Hsla,
+    /// The border of color decorator swatches (Monaco's
+    /// `.colorpicker-color-decoration` CSS, not a theme color).
+    pub color_decoration_border: Hsla,
     /// Code lens text (`editorCodeLens.foreground`).
     pub code_lens_foreground: Hsla,
     /// Linked editing ranges (`editor.linkedEditingBackground`).
@@ -241,6 +244,7 @@ impl EditorColors {
             symbol_highlight_background: c(rgba(0xea5c0055)),
             link_active_foreground: c(rgb(0x4e94ce)),
             range_highlight_background: c(rgba(0xffffff0b)),
+            color_decoration_border: c(rgba(0xeeeeeeff)),
             code_lens_foreground: c(rgb(0x999999)),
             linked_editing_background: c(rgba(0xff00004d)),
             ghost_text_foreground: c(rgba(0xffffff56)),
@@ -340,6 +344,7 @@ impl EditorColors {
             symbol_highlight_background: c(rgba(0xea5c0055)),
             link_active_foreground: c(rgb(0x0000ff)),
             range_highlight_background: c(rgba(0xfdff0033)),
+            color_decoration_border: c(rgba(0x000000ff)),
             code_lens_foreground: c(rgb(0x999999)),
             linked_editing_background: c(rgba(0xff00004d)),
             ghost_text_foreground: c(rgba(0x00000077)),

@@ -149,6 +149,13 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Color decorators (#97, part 1):** a swatch before each color, as Monaco's `ColorDetector` draws them.
+  - Colors come from `DocumentColorProvider`s (`register_color_provider`, with color presentations). Without providers, Monaco's built-in finder handles hex, `rgb()`, `rgba()`, `hsl()` and `hsla()`.
+  - New options: `color_decorators`, `color_decorators_limit` (500), `color_decorators_activated_on` and `default_color_decorators` (auto/always/never).
+  - Colors update a second after edits.
+  - New `gpui_monaco::color` module: a port of Monaco's `Color` with RGBA, HSLA and HSVA conversions, CSS parsing and formatting.
+  - `InjectedText` gains `swatch`.
+  - Typing no longer restarts the sticky scroll model computation on every keystroke while the first one runs.
 - **Sticky scroll models (#100, part 4):** `StickyScrollOptions::default_model` (Monaco `stickyScroll.defaultModel`).
   - **Outline** is the default and follows Monaco's outline sticky model: headers are document symbols (from providers, or the tags query), from the name's line to the line before the symbol's end.
   - **FoldingProvider** uses the folding ranges, and **Indentation** uses indentation.

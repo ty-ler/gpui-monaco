@@ -40,7 +40,8 @@ pub(crate) struct LineLayout {
     pub display_index: Vec<usize>,
     /// Injected (decoration before/after) text: display byte range and
     /// background.
-    pub injected: Vec<(Range<usize>, Option<Hsla>)>,
+    /// Injected text: display range, background and swatch.
+    pub injected: Vec<(Range<usize>, Option<Hsla>, Option<Hsla>)>,
 }
 
 impl LineLayout {
@@ -137,6 +138,10 @@ pub(crate) struct RowSegment {
     pub is_last_segment: bool,
 }
 
+/// Injected text being laid out: display range, style, background and
+/// swatch.
+type Injected = (Range<usize>, TokenStyle, Option<Hsla>, Option<Hsla>);
+
 /// Shapes one view line. `highlights` are styled spans in row-relative byte
 /// offsets, sorted and non-overlapping. `marked` is an IME composition range
 /// in UTF-16 columns of the row, drawn underlined.
@@ -163,37 +168,40 @@ pub(crate) fn layout_segment(
     let mut char_starts = Vec::with_capacity(line.len());
     let mut visible_column = segment.start_visible_column as usize;
     // (display range, style, background) of injected text.
-    let mut injected: Vec<(Range<usize>, TokenStyle, Option<Hsla>)> = Vec::new();
+    let mut injected: Vec<Injected> = Vec::new();
     let mut injection_ix = 0;
     // Emits injections at `column` (`after` ones first) and returns where the
     // column itself displays: before `after` text (it ends a decorated range)
     // or after `before` text (it starts one).
-    let mut inject_at = |column: u32,
-                         display: &mut String,
-                         injected: &mut Vec<(Range<usize>, TokenStyle, Option<Hsla>)>|
-     -> usize {
-        let first = injection_ix;
-        while injection_ix < injections.len() && injections[injection_ix].0 <= column {
-            injection_ix += 1;
-        }
-        let position_before = display.len();
-        let mut has_after = false;
-        for is_after in [true, false] {
-            for (at, after, text) in &injections[first..injection_ix] {
-                if *at == column && *after == is_after {
-                    has_after |= *after;
-                    let start = display.len();
-                    display.push_str(&text.content);
-                    injected.push((start..display.len(), text.style, text.background));
+    let mut inject_at =
+        |column: u32, display: &mut String, injected: &mut Vec<Injected>| -> usize {
+            let first = injection_ix;
+            while injection_ix < injections.len() && injections[injection_ix].0 <= column {
+                injection_ix += 1;
+            }
+            let position_before = display.len();
+            let mut has_after = false;
+            for is_after in [true, false] {
+                for (at, after, text) in &injections[first..injection_ix] {
+                    if *at == column && *after == is_after {
+                        has_after |= *after;
+                        let start = display.len();
+                        display.push_str(&text.content);
+                        injected.push((
+                            start..display.len(),
+                            text.style,
+                            text.background,
+                            text.swatch,
+                        ));
+                    }
                 }
             }
-        }
-        if has_after {
-            position_before
-        } else {
-            display.len()
-        }
-    };
+            if has_after {
+                position_before
+            } else {
+                display.len()
+            }
+        };
     let mut column = segment.columns.start;
     for (byte, ch) in line.char_indices() {
         let position = inject_at(column, &mut display, &mut injected);
@@ -254,7 +262,7 @@ pub(crate) fn layout_segment(
     for (range, _) in &styled {
         bounds.extend([range.start, range.end]);
     }
-    for (range, _, _) in &injected {
+    for (range, _, _, _) in &injected {
         bounds.extend([range.start, range.end]);
     }
     if let Some((range, _)) = &marked_display {
@@ -275,8 +283,8 @@ pub(crate) fn layout_segment(
         }
         let style = injected
             .iter()
-            .find(|(range, _, _)| range.start <= start && end <= range.end)
-            .map(|(_, style, _)| *style)
+            .find(|(range, _, _, _)| range.start <= start && end <= range.end)
+            .map(|(_, style, _, _)| *style)
             .or_else(|| {
                 styled
                     .get(span_ix)
@@ -335,7 +343,7 @@ pub(crate) fn layout_segment(
         display_index,
         injected: injected
             .into_iter()
-            .map(|(range, _, background)| (range, background))
+            .map(|(range, _, background, swatch)| (range, background, swatch))
             .collect(),
     }
 }
@@ -1027,6 +1035,7 @@ fn prepaint_editor(
     editor.refresh_ghost_text(cx);
     editor.refresh_code_lenses(cx);
     editor.refresh_sticky_model(cx);
+    editor.refresh_colors(cx);
     editor.resolve_visible_code_lenses(cx);
     let bracket_colors = editor.bracket_colors_in(visible_start..visible_end, cx);
     let mut highlight_ix = 0;
@@ -2048,7 +2057,29 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                 }
                 // Injected text backgrounds.
                 for line in &layout.lines {
-                    for (range, background) in &line.injected {
+                    for (range, background, swatch) in &line.injected {
+                        if let Some(swatch) = swatch {
+                            // Monaco: a 0.8em square with a 0.1em border,
+                            // centered in its 1.2em of room.
+                            let from = line.shaped.x_for_index(range.start);
+                            let to = line.shaped.x_for_index(range.end);
+                            let side = (layout.metrics.font_size * 0.8).round();
+                            let top = layout.line_top(line.view_line);
+                            window.paint_quad(quad(
+                                Bounds::new(
+                                    point(
+                                        origin_x + line.indent_x + from + (to - from - side) / 2.,
+                                        top + (line_height - side) / 2.,
+                                    ),
+                                    size(side, side),
+                                ),
+                                Corners::default(),
+                                *swatch,
+                                Edges::all(px(1.)),
+                                colors.color_decoration_border,
+                                BorderStyle::Solid,
+                            ));
+                        }
                         if let Some(background) = background {
                             let from = line.shaped.x_for_index(range.start);
                             let to = line.shaped.x_for_index(range.end);

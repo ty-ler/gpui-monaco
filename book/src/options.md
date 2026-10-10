@@ -36,6 +36,10 @@ editor.update(cx, |editor, cx| {
 | `inline_suggest` | `inlineSuggest.*` | `enabled` (on), `mode` (`SubwordSmart`), `suppress_suggestions`, `keep_on_blur`, `min_show_delay`, `suppress_in_snippet_mode` (on) |
 | `semantic_highlighting` | `semanticHighlighting.enabled` | `On`, `Off` or `ConfiguredByTheme` (the theme's `semanticHighlighting`) |
 | `links` | `links` | detect links and follow them with Cmd/Ctrl+click (on) |
+| `color_decorators` | `colorDecorators` | swatches before colors (on) |
+| `color_decorators_limit` | `colorDecoratorsLimit` | at most this many swatches (500) |
+| `color_decorators_activated_on` | `colorDecoratorsActivatedOn` | what opens the color picker from a swatch |
+| `default_color_decorators` | `defaultColorDecorators` | when the built-in color finder runs (auto) |
 | `quick_suggestions` | `quickSuggestions` | completion while typing, per token type: `other` (on), `comments`, `strings` |
 | `quick_suggestions_delay` | `quickSuggestionsDelay` | wait before quick suggestions (10ms) |
 | `suggest_on_trigger_characters` | `suggestOnTriggerCharacters` | open on provider trigger characters (on) |

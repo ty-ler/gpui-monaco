@@ -546,6 +546,7 @@ impl CodeEditor {
                         content: part.lines[0].clone().into(),
                         style: style(part.preview),
                         background: visible_color(colors.ghost_text_background),
+                        swatch: None,
                     }),
                     border: visible_color(colors.ghost_text_border),
                     ..Default::default()
