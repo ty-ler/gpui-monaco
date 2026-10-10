@@ -12,6 +12,7 @@ mod language_support_test;
 mod lines_command_cases;
 mod lines_test;
 mod on_enter_test;
+mod overtype_test;
 mod tokenizer;
 mod word_operations_test;
 mod word_part_operations_test;

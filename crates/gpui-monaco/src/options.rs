@@ -100,6 +100,17 @@ impl Default for StickyScrollOptions {
     }
 }
 
+/// Which modifier adds a cursor on click (Monaco `multiCursorModifier`); the
+/// other one opens definitions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MultiCursorModifier {
+    /// Alt+click adds a cursor; Cmd/Ctrl+click goes to the definition.
+    #[default]
+    Alt,
+    /// Cmd/Ctrl+click adds a cursor; Alt+click goes to the definition.
+    CtrlCmd,
+}
+
 /// Monaco `cursorStyle`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorStyle {
@@ -205,6 +216,23 @@ pub struct EditorOptions {
     pub minimap: MinimapOptions,
     /// Monaco `stickyScroll`.
     pub sticky_scroll: StickyScrollOptions,
+    /// Monaco `multiCursorModifier`.
+    pub multi_cursor_modifier: MultiCursorModifier,
+    /// Monaco `multiCursorPaste`: how pasting with several cursors splits
+    /// the text.
+    pub multi_cursor_paste: crate::cursor::MultiCursorPaste,
+    /// Monaco `multiCursorLimit`: the most cursors at once (default 10000).
+    pub multi_cursor_limit: usize,
+    /// Monaco `multiCursorMergeOverlapping`: merge overlapping selections
+    /// (default `true`).
+    pub multi_cursor_merge_overlapping: bool,
+    /// Monaco `columnSelection`: mouse drags and Shift+arrows make column
+    /// (box) selections.
+    pub column_selection: bool,
+    /// Monaco `overtypeCursorStyle`: the cursor shape in overtype mode.
+    pub overtype_cursor_style: CursorStyle,
+    /// Monaco `overtypeOnPaste`: in overtype mode, pasting overtypes too.
+    pub overtype_on_paste: bool,
     /// Monaco `comments`: how comment toggling inserts and removes tokens.
     pub comments: crate::cursor::CommentOptions,
     /// A one-line input (like Monaco's find input): Enter, Tab and Escape
@@ -262,6 +290,13 @@ impl Default for EditorOptions {
             minimap: MinimapOptions::default(),
             sticky_scroll: StickyScrollOptions::default(),
             comments: Default::default(),
+            overtype_cursor_style: CursorStyle::Block,
+            multi_cursor_modifier: MultiCursorModifier::Alt,
+            multi_cursor_paste: Default::default(),
+            multi_cursor_limit: 10_000,
+            multi_cursor_merge_overlapping: true,
+            column_selection: false,
+            overtype_on_paste: true,
         }
     }
 }

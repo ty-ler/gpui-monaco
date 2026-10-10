@@ -312,3 +312,81 @@ fn focus_next_and_previous_cursor(cx: &mut TestAppContext) {
     editor.update(cx, |e, cx| e.focus_next_cursor(false, cx));
     assert_eq!(get(&editor, cx)[0], (3, 1, 3, 1));
 }
+
+fn update_options(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+    f: impl FnOnce(&mut gpui_monaco::EditorOptions),
+) {
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        f(&mut options);
+        e.update_options(options, cx);
+    });
+}
+
+fn mouse_at(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+    line: u32,
+    column: u32,
+) -> gpui::Point<gpui::Pixels> {
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+    });
+    editor
+        .read_with(cx, |e, _| {
+            e.scrolled_visible_position(PointUtf16::from_monaco(line, column))
+        })
+        .expect("visible")
+        + gpui::point(gpui::px(1.), gpui::px(2.))
+}
+
+#[gpui::test]
+fn multi_cursor_limit(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&["a", "b", "c", "d"], cx);
+    update_options(&editor, cx, |o| o.multi_cursor_limit = 2);
+    set(&editor, cx, &[(1, 1, 1, 1), (2, 1, 2, 1), (3, 1, 3, 1)]);
+    assert_eq!(get(&editor, cx), vec![(1, 1, 1, 1), (2, 1, 2, 1)]);
+}
+
+#[gpui::test]
+fn multi_cursor_merge_overlapping_off(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&["abcdef"], cx);
+    set(&editor, cx, &[(1, 1, 1, 4), (1, 3, 1, 6)]);
+    assert_eq!(get(&editor, cx), vec![(1, 1, 1, 6)]);
+    update_options(&editor, cx, |o| o.multi_cursor_merge_overlapping = false);
+    set(&editor, cx, &[(1, 1, 1, 4), (1, 3, 1, 6)]);
+    assert_eq!(get(&editor, cx), vec![(1, 1, 1, 4), (1, 3, 1, 6)]);
+}
+
+#[gpui::test]
+fn column_selection_mode_with_keys(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&["abcd", "abcd", "abcd"], cx);
+    update_options(&editor, cx, |o| o.column_selection = true);
+    cx.simulate_keystrokes("shift-right shift-right shift-down");
+    assert_eq!(get(&editor, cx), vec![(1, 1, 1, 3), (2, 1, 2, 3)]);
+}
+
+#[gpui::test]
+fn multi_cursor_modifier_ctrl_cmd(cx: &mut TestAppContext) {
+    use gpui::Modifiers;
+    let (editor, cx) = setup(&["abcd", "abcd"], cx);
+    // Default: Alt+click adds a cursor.
+    let at = mouse_at(&editor, cx, 2, 3);
+    cx.simulate_click(at, Modifiers::alt());
+    assert_eq!(get(&editor, cx).len(), 2);
+
+    update_options(&editor, cx, |o| {
+        o.multi_cursor_modifier = gpui_monaco::options::MultiCursorModifier::CtrlCmd
+    });
+    set(&editor, cx, &[(1, 1, 1, 1)]);
+    let at = mouse_at(&editor, cx, 2, 3);
+    cx.simulate_click(at, Modifiers::alt());
+    assert_eq!(get(&editor, cx), vec![(2, 3, 2, 3)]);
+    let at = mouse_at(&editor, cx, 1, 2);
+    cx.simulate_click(at, Modifiers::secondary_key());
+    assert_eq!(get(&editor, cx).len(), 2);
+}

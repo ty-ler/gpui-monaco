@@ -23,10 +23,10 @@ Issues are linked by number.
 | Feature | Monaco | Status | Issue |
 |---|---|---|---|
 | Typing, delete, tab, outdent, newline | `coreCommands` | ✅ | |
-| Cursor movement: char, word, word part, line, page, document | `coreCommands`, `wordOperations`, `wordPartOperations` | 🟡 `wordStart`/`wordEnd` variants and word-part delete actions missing | #81 |
-| Multi-cursor: add above/below, Cmd+D, select all occurrences, Alt+click, box select by mouse | `multicursor` | 🟡 previous-match commands, add at line ends, keyboard column select and option knobs missing | #81 |
-| Cursor undo, selection anchor, overtype mode | `cursorUndo`, `anchorSelect` | ❌ | #81 |
-| Scroll commands (Ctrl+Up/Down, …) | `coreCommands` | ❌ | #81 |
+| Cursor movement: char, word, word part, line, page, document | `coreCommands`, `wordOperations`, `wordPartOperations` | ✅ | #81 |
+| Multi-cursor: add above/below, Cmd+D and previous-match variants, select all occurrences, cursors at line ends/top/bottom, Alt+click, box select by mouse and keyboard, options | `multicursor` | ✅ | #81 |
+| Cursor undo, selection anchor, overtype mode | `cursorUndo`, `anchorSelect` | ✅ | #81 |
+| Scroll commands (Ctrl+Up/Down, …) | `coreCommands` | ✅ | #81 |
 | Clipboard with multi-cursor distribution | `clipboard` | ✅ | |
 | Copy with syntax highlighting, paste as, Linux primary selection, reindent on paste | `clipboard`, `dropOrPasteInto` | ❌ | #107 |
 | Undo/redo with grouping, cursor restore | model | ✅ | |

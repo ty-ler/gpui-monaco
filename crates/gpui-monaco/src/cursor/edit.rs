@@ -321,6 +321,42 @@ impl Command for ReplaceCommand {
     }
 }
 
+/// Monaco `ReplaceOvertypeCommand`: like [`ReplaceCommand`], but also
+/// replaces as many characters after the range as the text adds (never past
+/// the end of the line). Used in overtype mode.
+pub(crate) struct ReplaceOvertypeCommand {
+    pub range: Range<Position>,
+    pub text: String,
+}
+
+impl ReplaceOvertypeCommand {
+    pub(crate) fn boxed(
+        range: Range<Position>,
+        text: impl Into<String>,
+    ) -> Option<Box<dyn Command>> {
+        Some(Box::new(Self {
+            range,
+            text: text.into(),
+        }))
+    }
+}
+
+impl Command for ReplaceOvertypeCommand {
+    fn edit_operations(&mut self, model: &dyn CursorModel, builder: &mut EditBuilder) {
+        let start = self.range.start;
+        let end = self.range.end;
+        let delta = self.text.encode_utf16().count() as i64 - if start == end { 0 } else { 1 };
+        // Monaco `addPositiveOffsetToModelPosition`, clamped to the line.
+        let column = (end.column as i64 + delta)
+            .clamp(end.column as i64, model.line_max_column(end.row) as i64);
+        builder.add_edit(start..Position::new(end.row, column as u32), &self.text);
+    }
+
+    fn compute_cursor_state(&self, helper: &CursorStateHelper) -> Selection {
+        Selection::collapsed(helper.inverse_edit_ranges()[0].end)
+    }
+}
+
 /// Monaco `ReplaceCommandWithoutChangingPosition`: cursor before the new
 /// text.
 pub(crate) struct ReplaceCommandWithoutChangingPosition {

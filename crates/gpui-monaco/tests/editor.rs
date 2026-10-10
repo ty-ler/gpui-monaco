@@ -598,3 +598,29 @@ fn keyboard_column_select_and_scroll_commands(cx: &mut TestAppContext) {
         gpui::px(0.)
     );
 }
+
+/// Monaco "Overtype Mode": composition type. The composition is inserted,
+/// then overtypes as many characters when it's committed.
+#[gpui::test]
+fn overtype_mode_typing_and_composition(cx: &mut TestAppContext) {
+    let (editor, cx) = editor_with_text("123456789", cx);
+    cx.simulate_keystrokes("insert");
+    assert!(editor.read_with(cx, |e, _| e.is_overtype()));
+    cx.simulate_keystrokes("right right");
+    cx.simulate_input("a");
+    assert_eq!(text(&editor, cx), "12a456789");
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 5))], cx)
+    });
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_and_mark_text_in_range(None, "セ", None, window, cx)
+    });
+    assert_eq!(text(&editor, cx), "12a4セ56789");
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_text_in_range(None, "セ", window, cx)
+    });
+    assert_eq!(text(&editor, cx), "12a4セ6789");
+    cx.simulate_keystrokes("insert");
+    cx.simulate_input("b");
+    assert_eq!(text(&editor, cx), "12a4セb6789");
+}

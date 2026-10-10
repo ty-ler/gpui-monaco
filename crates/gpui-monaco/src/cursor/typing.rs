@@ -23,7 +23,7 @@ use std::ops::Range;
 
 use super::edit::{
     Command, CursorStateHelper, EditBuilder, EditOperation, EditOperationType, ReplaceCommand,
-    ReplaceCommandThatPreservesSelection, TrackedId, execute_commands,
+    ReplaceCommandThatPreservesSelection, ReplaceOvertypeCommand, TrackedId, execute_commands,
     should_push_stack_element_between, typing_operation,
 };
 use super::movement;
@@ -63,7 +63,13 @@ pub fn type_text(
     let selections = cursors.selections();
     let commands: Commands = selections
         .iter()
-        .map(|s| ReplaceCommand::boxed(s.range(), text))
+        .map(|s| {
+            if config.overtype {
+                ReplaceOvertypeCommand::boxed(s.range(), text)
+            } else {
+                ReplaceCommand::boxed(s.range(), text)
+            }
+        })
         .collect();
     let kind = typing_operation(text, prev);
     execute_commands(
@@ -1036,7 +1042,13 @@ pub fn paste(
         let commands: Commands = selections
             .iter()
             .zip(distributed)
-            .map(|(s, t)| ReplaceCommand::boxed(s.range(), t))
+            .map(|(s, t)| {
+                if config.overtype && config.overtype_on_paste {
+                    ReplaceOvertypeCommand::boxed(s.range(), t)
+                } else {
+                    ReplaceCommand::boxed(s.range(), t)
+                }
+            })
             .collect();
         return execute_commands(
             model,
@@ -1067,6 +1079,8 @@ pub fn paste(
                     force_move_markers: true,
                     tracked: None,
                 }) as Box<dyn Command>)
+            } else if config.overtype && config.overtype_on_paste {
+                ReplaceOvertypeCommand::boxed(selection.range(), text.clone())
             } else {
                 ReplaceCommand::boxed(selection.range(), text.clone())
             }

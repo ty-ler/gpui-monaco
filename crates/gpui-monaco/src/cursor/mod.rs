@@ -189,6 +189,11 @@ pub struct CursorConfig {
     /// Monaco `editor.autoIndent`. Only the `*_with_language` functions
     /// honor it, and only when given a [`LanguageContext`].
     pub auto_indent: AutoIndent,
+    /// Typing replaces the characters after the cursor (Monaco's `overtype`
+    /// input mode, toggled with Insert).
+    pub overtype: bool,
+    /// In overtype mode, pasting overtypes too (Monaco `overtypeOnPaste`).
+    pub overtype_on_paste: bool,
 }
 
 impl Default for CursorConfig {
@@ -210,6 +215,8 @@ impl Default for CursorConfig {
             auto_closing_delete: AutoClosingEditStrategy::Auto,
             auto_surround: AutoSurroundStrategy::LanguageDefined,
             auto_indent: AutoIndent::Full,
+            overtype: false,
+            overtype_on_paste: true,
         }
     }
 }
