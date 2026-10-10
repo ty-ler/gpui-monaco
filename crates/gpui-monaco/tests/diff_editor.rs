@@ -503,3 +503,32 @@ fn dragging_hidden_lines_bars(cx: &mut TestAppContext) {
         vec![1..28, 58..100]
     );
 }
+
+#[gpui::test]
+fn margin_revert_arrows(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb\nc\nd\ne", "a\nB\nc\nd\ne", cx);
+    diff.update(cx, |d, cx| {
+        let mut options = d.options().clone();
+        options.render_gutter_menu = false;
+        d.update_options(options, cx);
+    });
+    paint(cx);
+    // One arrow, beside the changed line, in the glyph margin.
+    let arrows = diff.read_with(cx, |d, cx| d.revert_arrow_bounds_for_tests(cx));
+    assert_eq!(arrows.len(), 1);
+    // Clicking it reverts the change.
+    cx.simulate_click(arrows[0].center(), gpui::Modifiers::none());
+    assert_eq!(modified_text(&diff, cx), "a\nb\nc\nd\ne");
+    // With the gutter menu, there are none.
+    recompute(cx);
+    diff.update(cx, |d, cx| {
+        let mut options = d.options().clone();
+        options.render_gutter_menu = true;
+        d.update_options(options, cx);
+    });
+    paint(cx);
+    assert!(
+        diff.read_with(cx, |d, cx| d.revert_arrow_bounds_for_tests(cx))
+            .is_empty()
+    );
+}

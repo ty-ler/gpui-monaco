@@ -5,6 +5,9 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Glyph margin widgets and margin revert arrows (#181):**
+  - **Widgets:** `CodeEditor::add_glyph_margin_widget` (`GlyphMarginWidget`, Monaco `addGlyphMarginWidget`) puts a host view in the glyph margin beside a line, following edits.
+  - **Arrows:** with `render_gutter_menu` off, the diff editor shows Monaco's older margin revert arrows (`render_margin_revert_icon`, on by default). There's one beside each change, one in a deletion's padding, or one for the selection.
 - **Dragging hidden-lines bars (#181):** like Monaco, dragging a hidden-lines bar's top or bottom edge shows or hides lines as the mouse moves. A click still shows 20 more lines.
 - **Comparing moved blocks (#181):** each moved block's caption has a "Compare" toggle (Monaco `movedTextToCompare`). While it's on, only that block's own changes show, and the two sides scroll with its two places lined up.
   - **Leaving:** Escape (`ExitCompareMove`, Monaco `diffEditor.exitCompareMove`) or the toggle turns it off.

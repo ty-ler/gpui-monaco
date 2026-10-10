@@ -150,6 +150,9 @@ pub struct DiffEditorOptions {
     /// each change (Monaco `renderGutterMenu`, default `true`). It only shows
     /// when the modified side is editable.
     pub render_gutter_menu: bool,
+    /// Revert arrows in the modified editor's glyph margin when there's no
+    /// gutter menu (Monaco `renderMarginRevertIcon`, default `true`).
+    pub render_margin_revert_icon: bool,
     /// Show only the accessible diff viewer, which can't be closed (Monaco
     /// `onlyShowAccessibleDiffViewer`, default `false`).
     pub only_show_accessible_diff_viewer: bool,
@@ -195,6 +198,7 @@ impl Default for DiffEditorOptions {
             render_side_by_side_inline_breakpoint: px(900.),
             hide_unchanged_regions: HideUnchangedRegions::default(),
             render_gutter_menu: true,
+            render_margin_revert_icon: true,
             only_show_accessible_diff_viewer: false,
         }
     }
@@ -533,6 +537,95 @@ fn diff_mappings(diff: &LinesDiff) -> Vec<LineRangeMapping> {
         .iter()
         .map(|c| c.line_range_mapping())
         .collect()
+}
+
+/// Monaco `RevertButton`: an arrow that reverts a change or the
+/// selection.
+#[derive(Clone)]
+struct RevertArrow {
+    diff: WeakEntity<DiffEditor>,
+    revert: GutterRevert,
+    color: Hsla,
+}
+
+impl RevertArrow {
+    fn element(&self, id: &'static str) -> gpui::Stateful<gpui::Div> {
+        let (diff, revert) = (self.diff.clone(), self.revert.clone());
+        let label = match self.revert {
+            GutterRevert::Block(_) => "Revert Change",
+            GutterRevert::Selection(_) => "Revert Selected Changes",
+        };
+        div()
+            .id(id)
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .text_color(self.color)
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(label))
+            .on_click(move |_, _, cx| {
+                let (diff, revert) = (diff.clone(), revert.clone());
+                // Deferred: the arrow is rendered by the editor it changes.
+                cx.defer(move |cx| {
+                    diff.update(cx, |diff, cx| match &revert {
+                        GutterRevert::Block(change) => diff.revert(change, cx),
+                        GutterRevert::Selection(changes) => diff.revert_range_mappings(changes, cx),
+                    })
+                    .ok();
+                });
+            })
+            .child("→")
+    }
+}
+
+impl Render for RevertArrow {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.element("revert-arrow")
+    }
+}
+
+/// A deletion's padding with a revert arrow in its margin (Monaco's
+/// alignment zone with `createViewZoneMarginArrow`).
+struct DeletionPadding {
+    fill: Entity<DiagonalFill>,
+    arrow: RevertArrow,
+    /// The modified editor, for its gutter.
+    editor: WeakEntity<CodeEditor>,
+}
+
+impl Render for DeletionPadding {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (gutter, glyph) = self
+            .editor
+            .upgrade()
+            .and_then(|e| {
+                let layout = e.read(cx).layout.as_ref()?;
+                Some((
+                    layout.text_bounds.left() - layout.bounds.left(),
+                    layout.glyph_margin_width,
+                ))
+            })
+            .unwrap_or((px(0.), px(0.)));
+        let line_height = self
+            .editor
+            .upgrade()
+            .map_or(px(18.), |e| e.read(cx).options().resolved_line_height());
+        div()
+            .size_full()
+            .flex()
+            .flex_row()
+            .child(
+                div().w(gutter).h_full().flex_none().child(
+                    div()
+                        .w(glyph.max(px(16.)))
+                        .h(line_height)
+                        .child(self.arrow.element("deletion-revert-arrow")),
+                ),
+            )
+            .child(div().flex_1().h_full().child(self.fill.clone()))
+    }
 }
 
 /// The gutter menu's width (Monaco's 35px `DiffEditorGutter`).
@@ -964,6 +1057,8 @@ pub struct DiffEditor {
     gutter_hovered: bool,
     /// A hidden-lines bar's edge being dragged.
     unchanged_drag: Option<UnchangedDrag>,
+    /// The margin revert arrows in the modified editor.
+    revert_arrows: Vec<WidgetId>,
     /// The accessible diff viewer, while it shows.
     accessible_viewer: Option<Entity<AccessibleDiffViewer>>,
     /// Moved blocks' borders on each side.
@@ -1022,6 +1117,7 @@ impl DiffEditor {
             unchanged_zones: Default::default(),
             gutter_hovered: false,
             unchanged_drag: None,
+            revert_arrows: Vec::new(),
             accessible_viewer: None,
             move_decorations: Default::default(),
             active_move: None,
@@ -1070,6 +1166,7 @@ impl DiffEditor {
                     CodeEditorEvent::SelectionsChanged(_) => {
                         this.ensure_selections_visible(false, cx);
                         this.update_active_move(false, cx);
+                        this.apply_revert_arrows(cx);
                         cx.notify();
                     }
                     _ => {}
@@ -1196,6 +1293,22 @@ impl DiffEditor {
         }
     }
 
+    /// The window bounds of the modified editor's glyph margin widgets (the
+    /// margin revert arrows), for tests.
+    #[doc(hidden)]
+    pub fn revert_arrow_bounds_for_tests(&self, cx: &App) -> Vec<Bounds<Pixels>> {
+        let Some(layout) = self.modified.read(cx).layout.as_ref() else {
+            return Vec::new();
+        };
+        layout
+            .widget_bounds
+            .iter()
+            .zip(&layout.widget_kinds)
+            .filter(|(_, kind)| **kind == crate::mouse_target::EmbeddedKind::GlyphMarginWidget)
+            .map(|(bounds, _)| *bounds)
+            .collect()
+    }
+
     /// The moved block under the last moved cursor, for tests.
     #[doc(hidden)]
     pub fn active_move_for_tests(&self) -> Option<usize> {
@@ -1302,6 +1415,7 @@ impl DiffEditor {
         self.decorations = (original_ids, modified_ids);
         self.apply_alignment(&diff, &colors, cx);
         self.apply_move_decorations(cx);
+        self.apply_revert_arrows(cx);
         self.update_unchanged_regions(&diff, cx);
         if let Some(viewer) = self.accessible_viewer.clone() {
             let mappings = diff_mappings(&diff);
@@ -1367,6 +1481,8 @@ impl DiffEditor {
             true,
         );
         let fill = colors.diff_diagonal_fill;
+        let arrows = self.shows_margin_revert_arrows(cx);
+        let this = cx.entity().downgrade();
         let mut zones = (Vec::new(), Vec::new());
         for a in alignments {
             let delta = a.modified_height - a.original_height;
@@ -1387,17 +1503,47 @@ impl DiffEditor {
             } else {
                 continue;
             };
-            let view = cx.new(|_| DiagonalFill { color: fill });
-            let id = editor.update(cx, |editor, cx| {
-                editor.add_view_zone(
-                    ViewZone {
-                        after_line: after as u32,
-                        height: ZoneHeight::Pixels(px(height)),
-                        view: view.into(),
+            // Monaco `createViewZoneMarginArrow`: a deletion's padding gets
+            // a revert arrow in its margin.
+            let deletion = (delta < 0. && arrows)
+                .then(|| {
+                    diff.changes.iter().find(|c| {
+                        c.modified.is_empty() && c.original == a.original_range && a.is_diff
+                    })
+                })
+                .flatten();
+            let id = if let Some(change) = deletion {
+                let view = cx.new(|cx| DeletionPadding {
+                    fill: cx.new(|_| DiagonalFill { color: fill }),
+                    arrow: RevertArrow {
+                        diff: this.clone(),
+                        revert: GutterRevert::Block(change.line_range_mapping()),
+                        color: colors.foreground,
                     },
-                    cx,
-                )
-            });
+                    editor: self.modified.downgrade(),
+                });
+                editor.update(cx, |editor, cx| {
+                    editor.add_zone(
+                        after as u32,
+                        ZoneHeight::Pixels(px(height)),
+                        view.into(),
+                        true,
+                        cx,
+                    )
+                })
+            } else {
+                let view = cx.new(|_| DiagonalFill { color: fill });
+                editor.update(cx, |editor, cx| {
+                    editor.add_view_zone(
+                        ViewZone {
+                            after_line: after as u32,
+                            height: ZoneHeight::Pixels(px(height)),
+                            view: view.into(),
+                        },
+                        cx,
+                    )
+                })
+            };
             ids.push(id);
         }
         // Monaco `MovedBlockOverlayWidget`: "Code moved to line …" above
@@ -2044,6 +2190,68 @@ impl DiffEditor {
             },
             cx,
         );
+    }
+
+    /// Monaco `shouldRenderOldRevertArrows`: margin arrows instead of the
+    /// gutter menu, side by side, when the modified side is editable.
+    fn shows_margin_revert_arrows(&self, cx: &App) -> bool {
+        self.options.render_margin_revert_icon
+            && !self.options.render_gutter_menu
+            && !self.inline
+            && !self.modified.read(cx).options().read_only
+    }
+
+    /// Monaco `RevertButtonsFeature`: an arrow in the modified editor's
+    /// glyph margin beside each change, or one reverting the selection.
+    fn apply_revert_arrows(&mut self, cx: &mut Context<Self>) {
+        let old = std::mem::take(&mut self.revert_arrows);
+        self.modified.update(cx, |editor, cx| {
+            for id in old {
+                editor.remove_widget(id, cx);
+            }
+        });
+        if !self.shows_margin_revert_arrows(cx) {
+            return;
+        }
+        let color = self.modified.read(cx).colors().foreground;
+        let this = cx.entity().downgrade();
+        let selection_line = self
+            .modified
+            .read(cx)
+            .selections()
+            .last()
+            .map(|s| s.head.row);
+        let arrows: Vec<(u32, GutterRevert)> = self
+            .gutter_items(cx)
+            .into_iter()
+            .filter_map(|item| match item.revert {
+                GutterRevert::Selection(_) => Some((selection_line?, item.revert)),
+                // Changes with modified lines (deletions get theirs in
+                // their padding's margin).
+                GutterRevert::Block(_) if !item.lines.is_empty() => {
+                    Some((item.lines.to_rows().start, item.revert))
+                }
+                GutterRevert::Block(_) => None,
+            })
+            .collect();
+        let mut ids = Vec::new();
+        for (row, revert) in arrows {
+            let view = cx.new(|_| RevertArrow {
+                diff: this.clone(),
+                revert,
+                color,
+            });
+            ids.push(self.modified.update(cx, |editor, cx| {
+                editor.add_glyph_margin_widget(
+                    crate::widgets::GlyphMarginWidget {
+                        row,
+                        view: view.into(),
+                    },
+                    cx,
+                )
+            }));
+        }
+        self.revert_arrows = ids;
     }
 
     /// Whether the diff is for the models' current text (Monaco

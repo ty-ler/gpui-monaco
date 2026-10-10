@@ -114,8 +114,8 @@ pub use text;
 pub use theme::{EditorColors, Theme, ThemeKind, TokenStyle};
 pub use view::reveal::RevealType;
 pub use widgets::{
-    ContentWidget, ContentWidgetPreference, OverlayPosition, OverlayWidget, ViewZone, WidgetId,
-    ZoneHeight,
+    ContentWidget, ContentWidgetPreference, GlyphMarginWidget, OverlayPosition, OverlayWidget,
+    ViewZone, WidgetId, ZoneHeight,
 };
 
 /// Binds Monaco's default keybindings in the editor's key context.
