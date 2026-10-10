@@ -122,6 +122,8 @@ Ctrl+G opens go to line, and Cmd/Ctrl+Shift+O opens go to symbol. Both use a qui
 
 Up, Down, Page Up and Page Down move through the list. Enter goes to the item, while Escape (or clicking elsewhere) closes the list and restores the view. `CodeEditor::open_quick_access(prefix, …)` opens it from code.
 
+Right-click or Shift+F10 opens the context menu. It holds the navigation, editing, clipboard and command palette items that can run. Host actions join it with `.context_menu(group, order)`; Monaco's groups are `navigation`, `1_modification`, `9_cutcopypaste` and `z_commands`.
+
 Hosts add their own actions to the palette with Monaco's `addAction`:
 
 ```rust,ignore
@@ -131,7 +133,8 @@ editor.add_action(
     })
     .alias("Prettify")
     .keybinding("cmd-k cmd-p")
-    .precondition(|editor, _| !editor.options().read_only),
+    .precondition(|editor, _| !editor.options().read_only)
+    .context_menu("1_modification", 1.5),
     cx,
 );
 editor.run_action("my.format", window, cx); // or dispatch RunAction { id }

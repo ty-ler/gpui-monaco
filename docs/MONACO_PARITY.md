@@ -79,7 +79,7 @@ Issues are linked by number.
 | Decorations: background, underline, glyph, gutter bar, before/after text, overview ruler, hover message, stickiness, owner | `deltaDecorations` | ✅ | |
 | View zones, content widgets, overlay widgets | widget API | ✅ | |
 | Custom commands and keybindings | `addAction`, `addCommand` | ✅ (GPUI actions) | |
-| Context menu, with host items | `contextmenu` | ❌ | #91 |
+| Context menu, with host items | `contextmenu` | ✅ | #91 |
 | Go to line, quick outline (quick input) | `quickAccess` | ✅ | #100 |
 | Command palette, `addAction` | `quickAccess` | ✅ | #100 |
 | Reveal APIs, `executeEdits`, mouse hit-test events, word and position helpers, content-change details, cursor change reasons, decorations collections | editor API | ✅ | #105 |
