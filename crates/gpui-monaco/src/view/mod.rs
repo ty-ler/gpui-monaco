@@ -1,6 +1,7 @@
 //! The view model: how model rows become rendered "view lines" once folding
 //! and soft wrapping are applied (Monaco's `viewModel`).
 
+pub mod animation;
 pub mod bracket_pairs;
 pub mod fold_model;
 #[cfg(test)]

@@ -155,6 +155,7 @@ impl CodeEditor {
     ) {
         self.pending_reveal = Some((range, reveal));
         self.autoscroll_requested = false;
+        self.animation.smooth_scroll_requested = true;
         cx.notify();
     }
 

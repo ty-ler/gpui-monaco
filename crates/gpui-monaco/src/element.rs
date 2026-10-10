@@ -658,6 +658,10 @@ pub struct PrepaintState {
     options: EditorOptions,
     focused: bool,
     cursor_visible: bool,
+    cursor_opacity: f32,
+    cursor_scale: f32,
+    /// Middle-click scrolling's anchor dot.
+    middle_scroll_anchor: Option<gpui::Point<Pixels>>,
 }
 
 impl Element for EditorElement {
@@ -934,12 +938,20 @@ fn prepaint_editor(
         }
         editor.widgets.zone_rows = Some((key, rows));
     }
-    let zones = ZoneLayout::new(zone_specs.iter().map(|(a, h, _, _)| (*a, *h)).collect());
+    // Monaco `padding.top` comes before everything, view zones above the
+    // first line included.
+    let mut zone_heights: Vec<(i64, Pixels)> =
+        zone_specs.iter().map(|(a, h, _, _)| (*a, *h)).collect();
+    if options.padding.top > px(0.) {
+        zone_heights.push((-1, options.padding.top));
+    }
+    let zones = ZoneLayout::new(zone_heights);
 
     let content_height = line_height * view_line_count as f32
         + zones.total()
+        + options.padding.bottom
         + if options.scroll_beyond_last_line {
-            (viewport_height - line_height).max(px(0.))
+            (viewport_height - line_height - options.padding.bottom).max(px(0.))
         } else {
             px(0.)
         };
@@ -949,7 +961,9 @@ fn prepaint_editor(
     let mut content_width = if wrap_column.is_some() {
         text_width
     } else {
-        metrics.em_width * (snapshot.summary().longest_row_chars as f32 + 2.)
+        metrics.em_width
+            * (snapshot.summary().longest_row_chars as f32
+                + options.scroll_beyond_last_column as f32)
     };
     let show_hbar = content_width > text_width;
     let text_height = if show_hbar {
@@ -957,6 +971,15 @@ fn prepaint_editor(
     } else {
         viewport_height
     };
+
+    // Middle-click scrolling moves every frame.
+    if let Some(session) = editor.animation.middle_scroll.as_mut() {
+        let delta = session.frame_delta();
+        editor.scroll_top += delta.y;
+        editor.scroll_left += delta.x;
+        editor.animation.cancel_scroll();
+        window.request_animation_frame();
+    }
 
     // Vertical autoscroll before choosing lines.
     let selections = editor.cursors.selections();
@@ -983,6 +1006,7 @@ fn prepaint_editor(
                 box_end: f32::from(zones.line_y(end, line_height) + line_height),
                 line_height: f32::from(line_height),
                 surrounding_lines: surrounding,
+                mouse: false,
             },
             reveal,
         );
@@ -990,16 +1014,40 @@ fn prepaint_editor(
         editor.pending_reveal_x = Some(range.start);
     }
     if editor.autoscroll_requested {
+        // Monaco's primary cursor reveal: `cursorSurroundingLines` (or the
+        // sticky lines) of context, unless a mouse gesture moved it.
+        let mouse = editor.autoscroll_from_mouse
+            && options.cursor_surrounding_lines_style
+                == crate::options::CursorSurroundingLinesStyle::Default;
+        let surrounding =
+            (options.cursor_surrounding_lines as f32).max(if options.sticky_scroll.enabled {
+                options.sticky_scroll.max_line_count as f32
+            } else {
+                0.
+            });
         let top = zones.line_y(primary_view_line, line_height);
-        let bottom = top + line_height;
-        if top < editor.scroll_top {
-            editor.scroll_top = top;
-        } else if bottom > editor.scroll_top + text_height {
-            editor.scroll_top = bottom - text_height;
-        }
+        editor.scroll_top = px(crate::view::reveal::scroll_top_to_reveal(
+            crate::view::reveal::RevealRequest {
+                viewport_top: f32::from(editor.scroll_top),
+                viewport_height: f32::from(text_height),
+                box_start: f32::from(top),
+                box_end: f32::from(top + line_height),
+                line_height: f32::from(line_height),
+                surrounding_lines: if mouse { 0. } else { surrounding },
+                mouse,
+            },
+            crate::view::reveal::RevealType::Simple,
+        ));
     }
     editor.scroll_top = editor.scroll_top.clamp(px(0.), max_scroll_top);
-    let scroll_top = editor.scroll_top;
+    // Monaco `smoothScrolling`: animate to the new position.
+    let (shown, scrolling) = editor
+        .animation
+        .scroll_position(point(px(0.), editor.scroll_top), options.smooth_scrolling);
+    if scrolling {
+        window.request_animation_frame();
+    }
+    let scroll_top = shown.y.clamp(px(0.), max_scroll_top);
     editor.last_cursor_offset = Some(zones.line_y(primary_view_line, line_height) - scroll_top);
 
     let first_line = zones.line_at(scroll_top, line_height, view_line_count);
@@ -1156,7 +1204,9 @@ fn prepaint_editor(
             marked_cols,
             window,
         );
-        content_width = content_width.max(line.width() + metrics.em_width * 2.);
+        // Monaco `scrollBeyondLastColumn`.
+        content_width = content_width
+            .max(line.width() + metrics.em_width * options.scroll_beyond_last_column as f32);
         lines.push(line);
     }
 
@@ -1168,11 +1218,13 @@ fn prepaint_editor(
             .find(|line| line.contains(primary))
             .map(|line| line.x_for_column(primary.column))
             .unwrap_or(px(0.));
-        let padding = metrics.em_width * 2.;
-        if primary_x < editor.scroll_left {
-            editor.scroll_left = (primary_x - padding).max(px(0.));
-        } else if primary_x + padding > editor.scroll_left + text_width {
-            editor.scroll_left = primary_x + padding - text_width;
+        // Monaco `_computeScrollLeftToReveal`: 30px of room on the left,
+        // `revealHorizontalRightPadding` on the right.
+        let (left_pad, right_pad) = (px(30.), options.reveal_horizontal_right_padding);
+        if primary_x - left_pad < editor.scroll_left {
+            editor.scroll_left = (primary_x - left_pad).max(px(0.));
+        } else if primary_x + right_pad > editor.scroll_left + text_width {
+            editor.scroll_left = primary_x + right_pad - text_width;
         }
         editor.autoscroll_requested = false;
     }
@@ -1182,11 +1234,11 @@ fn prepaint_editor(
             .find(|line| line.contains(position))
             .map(|line| line.x_for_column(position.column))
     {
-        let padding = metrics.em_width * 2.;
-        if x < editor.scroll_left {
-            editor.scroll_left = (x - padding).max(px(0.));
-        } else if x + padding > editor.scroll_left + text_width {
-            editor.scroll_left = x + padding - text_width;
+        let (left_pad, right_pad) = (px(30.), options.reveal_horizontal_right_padding);
+        if x - left_pad < editor.scroll_left {
+            editor.scroll_left = (x - left_pad).max(px(0.));
+        } else if x + right_pad > editor.scroll_left + text_width {
+            editor.scroll_left = x + right_pad - text_width;
         }
     }
     editor.scroll_left = editor.scroll_left.clamp(px(0.), max_scroll_left);
@@ -1731,11 +1783,21 @@ fn prepaint_editor(
             } else {
                 options.cursor_style
             };
+            // Monaco `cursorHeight` for the line styles, centered.
+            let line_cursor_height = if options.cursor_height > px(0.) {
+                options.cursor_height.min(line_height)
+            } else {
+                line_height
+            };
+            let line_y = y + (line_height - line_cursor_height) / 2.;
             let bounds = match style {
-                CursorStyle::Line => {
-                    Bounds::new(point(x, y), size(options.cursor_width, line_height))
+                CursorStyle::Line => Bounds::new(
+                    point(x, line_y),
+                    size(options.cursor_width, line_cursor_height),
+                ),
+                CursorStyle::LineThin => {
+                    Bounds::new(point(x, line_y), size(px(1.), line_cursor_height))
                 }
-                CursorStyle::LineThin => Bounds::new(point(x, y), size(px(1.), line_height)),
                 CursorStyle::Block => Bounds::new(point(x, y), size(char_width, line_height)),
                 CursorStyle::Underline => {
                     Bounds::new(point(x, y + line_height - px(2.)), size(char_width, px(2.)))
@@ -1744,6 +1806,27 @@ fn prepaint_editor(
             cursor_quads.push(bounds);
         }
     }
+    // Monaco `cursorSmoothCaretAnimation`: the primary cursor slides, in
+    // content coordinates so scrolling doesn't animate it.
+    if let Some(primary) = cursor_quads.first_mut() {
+        let offset = point(
+            layout.text_bounds.left() - scroll_left,
+            bounds.top() - scroll_top,
+        );
+        let content = Bounds::new(primary.origin - offset, primary.size);
+        let enabled = options.cursor_smooth_caret_animation
+            != crate::options::CursorSmoothCaretAnimation::Off;
+        let (shown, animating) = editor.animation.caret(content, enabled);
+        *primary = Bounds::new(shown.origin + offset, shown.size);
+        if animating {
+            window.request_animation_frame();
+        }
+    }
+    // Monaco's smooth, phase and expand blinking.
+    let (cursor_opacity, cursor_scale) = crate::view::animation::cursor_appearance(
+        editor.cursor_blinking(),
+        editor.animation.blink_started.elapsed(),
+    );
 
     // Indent and bracket pair guides (Monaco `IndentGuidesOverlay`) and
     // rulers.
@@ -2082,6 +2165,9 @@ fn prepaint_editor(
         options,
         focused,
         cursor_visible: editor.cursor_visible,
+        cursor_opacity,
+        cursor_scale,
+        middle_scroll_anchor: editor.animation.middle_scroll.map(|s| s.anchor),
     }
 }
 
@@ -2111,7 +2197,10 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
 
     window.with_content_mask(Some(ContentMask { bounds }), |window| {
         // Current line highlight (Monaco only draws it without a selection).
-        if !has_selection && (highlight_line || highlight_gutter) {
+        if !has_selection
+            && (highlight_line || highlight_gutter)
+            && (state.focused || !state.options.render_line_highlight_only_when_focus)
+        {
             let top = layout.line_top(state.cursor_view_lines[0]);
             let left = if highlight_gutter {
                 bounds.left()
@@ -2242,7 +2331,14 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                     if selection.is_empty() {
                         continue;
                     }
-                    paint_selection(layout, selection, origin_x, selection_color, window);
+                    paint_selection(
+                        layout,
+                        selection,
+                        origin_x,
+                        selection_color,
+                        state.options.rounded_selection,
+                        window,
+                    );
                 }
 
                 for line in &layout.lines {
@@ -2283,7 +2379,16 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
 
                 if state.focused && state.cursor_visible {
                     for cursor in &state.cursor_quads {
-                        window.paint_quad(fill(*cursor, colors.cursor));
+                        let height = cursor.size.height * state.cursor_scale;
+                        let bounds = Bounds::new(
+                            point(
+                                cursor.left(),
+                                cursor.top() + (cursor.size.height - height) / 2.,
+                            ),
+                            size(cursor.size.width, height),
+                        );
+                        window
+                            .paint_quad(fill(bounds, colors.cursor.opacity(state.cursor_opacity)));
                     }
                 }
             },
@@ -2399,6 +2504,19 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
 
         for element in &mut widget_elements {
             element.paint(window, cx);
+        }
+
+        // Monaco's `scroll-editor-on-middle-click-dot`: 5px, half opaque.
+        if let Some(anchor) = state.middle_scroll_anchor {
+            let dot = Bounds::new(anchor - point(px(3.5), px(3.5)), size(px(7.), px(7.)));
+            window.paint_quad(quad(
+                dot,
+                Corners::all(px(3.5)),
+                colors.foreground.opacity(0.5),
+                Edges::all(px(1.)),
+                colors.background.opacity(0.5),
+                BorderStyle::Solid,
+            ));
         }
 
         for (bounds, color) in &state.ruler_marks {
@@ -2531,8 +2649,10 @@ fn paint_selection(
     selection: &Selection,
     origin_x: Pixels,
     color: Hsla,
+    rounded: bool,
     window: &mut Window,
 ) {
+    let mut rows: Vec<Bounds<Pixels>> = Vec::new();
     let start: PointUtf16 = selection.start();
     let end: PointUtf16 = selection.end();
     let eol_width = layout.metrics.em_width / 2.;
@@ -2560,12 +2680,44 @@ fn paint_selection(
             line.x_for_column(sel_end)
         };
         if to > from {
-            let bounds = Bounds::new(
+            rows.push(Bounds::new(
                 point(origin_x + from, layout.line_top(line.view_line)),
                 size(to - from, layout.metrics.line_height),
-            );
-            window.paint_quad(fill(bounds, color));
+            ));
         }
+    }
+    // Monaco `roundedSelection`: 3px on the outer corners.
+    for (ix, bounds) in rows.iter().enumerate() {
+        let span = |b: &Bounds<Pixels>| (b.left(), b.right());
+        let adjacent = |other: Option<&Bounds<Pixels>>| {
+            other
+                .filter(|o| (o.top() - bounds.top()).abs() <= layout.metrics.line_height + px(0.5))
+                .map(span)
+        };
+        let corners = if rounded {
+            let [tl, tr, br, bl] = crate::view::animation::rounded_corners(
+                span(bounds),
+                adjacent(ix.checked_sub(1).and_then(|i| rows.get(i))),
+                adjacent(rows.get(ix + 1)),
+            );
+            let r = |round: bool| if round { px(3.) } else { px(0.) };
+            Corners {
+                top_left: r(tl),
+                top_right: r(tr),
+                bottom_right: r(br),
+                bottom_left: r(bl),
+            }
+        } else {
+            Corners::default()
+        };
+        window.paint_quad(quad(
+            *bounds,
+            corners,
+            color,
+            Edges::default(),
+            gpui::transparent_black(),
+            BorderStyle::Solid,
+        ));
     }
 }
 

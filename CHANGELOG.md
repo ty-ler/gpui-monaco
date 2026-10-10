@@ -149,6 +149,12 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Cursor and scrolling options (#88, part 1):**
+  - **Cursor:** `cursor_blinking` is now Monaco's `CursorBlinking` (blink, smooth, phase, expand, solid, using Monaco's keyframes; read-only editors don't blink), plus `cursor_smooth_caret_animation` (the 80ms caret slide; off/explicit/on) and `cursor_height`.
+  - **Scroll position:** `cursor_surrounding_lines` and its style. Cursor moves now reveal like Monaco's `_computeScrollTopToRevealRange`, so the sticky lines' context applies too, and mouse moves get one line of room. Also `smooth_scrolling` (125ms ease-out for reveals, cursor moves and wheel steps) and `padding` (top/bottom).
+  - **Scroll range:** `scroll_beyond_last_column` (4 columns instead of 2) and `reveal_horizontal_right_padding`, with Monaco's 30px on the left.
+  - **Mouse:** `fast_scroll_sensitivity` (Alt+wheel), `scroll_predominant_axis` and `scroll_on_middle_click` (Monaco's middle-click scrolling, with its anchor dot).
+  - **Look:** `rounded_selection` (3px outer corners) and `render_line_highlight_only_when_focus`.
 - **Sticky scroll polish (#106):**
   - **Commands:** "Toggle Editor Sticky Scroll" (`ToggleStickyScroll`) and "Focus Editor Sticky Scroll" (`FocusStickyScroll`).
   - **Keyboard focus:** Up/Down move between the sticky lines, Enter goes to the focused one, and Escape returns to the text (Monaco `selectNext/PreviousStickyScrollLine`, `goToFocusedStickyScrollLine`, `selectEditor`).

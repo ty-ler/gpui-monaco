@@ -18,7 +18,16 @@ editor.update(cx, |editor, cx| {
 | `line_numbers` | `lineNumbers` | `On`, `Off`, `Relative`, `Interval` |
 | `line_numbers_min_chars`, `line_decorations_width`, `glyph_margin` | same names | gutter layout |
 | `render_line_highlight` | `renderLineHighlight` | `None`, `Gutter`, `Line`, `All` |
-| `cursor_style`, `cursor_width`, `cursor_blinking` | `cursorStyle`, `cursorWidth`, `cursorBlinking` | |
+| `cursor_style`, `cursor_width`, `cursor_height` | `cursorStyle`, `cursorWidth`, `cursorHeight` | `cursor_height` 0 is the line height |
+| `cursor_blinking` | `cursorBlinking` | `Blink`, `Smooth`, `Phase`, `Expand`, `Solid` (read-only editors don't blink) |
+| `cursor_smooth_caret_animation` | `cursorSmoothCaretAnimation` | `Off`, `Explicit` (keys and clicks, not typing), `On` |
+| `cursor_surrounding_lines`, `cursor_surrounding_lines_style` | same names | lines kept around the cursor; `All` applies them to mouse moves too |
+| `smooth_scrolling` | `smoothScrolling` | animate reveals, cursor moves and mouse wheels (off) |
+| `scroll_beyond_last_column`, `reveal_horizontal_right_padding` | same names | room past the longest line (4 columns) and right of revealed positions (15px) |
+| `fast_scroll_sensitivity`, `scroll_predominant_axis` | same names | Alt+wheel speed (5); scroll along the main axis only (on) |
+| `scroll_on_middle_click` | `scrollOnMiddleClick` | a middle click scrolls toward the mouse until the next click (off) |
+| `padding` | `padding` | `top` and `bottom` space |
+| `rounded_selection`, `render_line_highlight_only_when_focus` | same names | (on, off) |
 | `read_only` | `readOnly` | |
 | `word_separators` | `wordSeparators` | used by word movement and whole-word find |
 | `word_wrap`, `word_wrap_column`, `wrapping_indent` | `wordWrap`, `wordWrapColumn`, `wrappingIndent` | `Off`, `On`, `WordWrapColumn`, `Bounded` |
