@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Accessibility (#53):** the editor is a text input for screen readers, through GPUI's AccessKit support.
+  - **Content:** the lines of the selection's page (`accessibility_page_size`, 500 lines) are exposed as text runs, with the selection (Monaco's screen reader content).
+  - **Interaction:** assistive technology can move the caret and selection.
+  - **Labels:** `aria_label` ("Editor content") and `aria_required`. Read-only editors report it.
+  - **High-contrast themes:** `Theme::hc_black()` and `Theme::hc_light()` port Monaco's `hc-black` and `hc-light`. With `EditorColors::selection_foreground` (`editor.selectionForeground`), selected text takes the theme's selection text color, as Monaco's `inline-selected-text` does.
+  - **Tab focus mode:** `editor.action.toggleTabFocusMode` (Ctrl+M; Ctrl+Shift+M on macOS) and the `tab_focus_mode` option. Tab and Shift+Tab move focus between elements instead of indenting, and the editor is a tab stop.
 - **Huge files and long lines (#59):**
   - **Options:** `EditorOptions::stop_rendering_line_after` (Monaco `stopRenderingLineAfter`, default 10 000) ends very long lines with a "Show more (1.9 MB)" chip. `ModelOptions::max_tokenization_line_length` (Monaco `maxTokenizationLineLength`, default 20 000) leaves longer lines unhighlighted.
   - **Chunked shaping:** long lines are shaped in content-defined chunks, so typing reshapes one chunk.

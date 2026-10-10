@@ -21,6 +21,8 @@ const QUICK_INPUT: Option<&str> = Some("QuickInput > CodeEditor");
 const STICKY_FOCUSED: Option<&str> = Some("CodeEditor && sticky_scroll_focused");
 /// While the drop or paste options button shows.
 const POST_EDIT_WIDGET: Option<&str> = Some("CodeEditor && post_edit_widget");
+/// With tab focus mode on.
+const TAB_MOVES_FOCUS: Option<&str> = Some("CodeEditor && tab_moves_focus");
 /// The context menu.
 const CONTEXT_MENU: Option<&str> = Some("EditorContextMenu");
 /// The find widget's inputs.
@@ -386,6 +388,13 @@ actions!(
         /// Pastes the clipboard; text copied from as many cursors as there are now is
         /// distributed one piece per cursor (Monaco `editor.action.clipboardPasteAction`).
         Paste,
+        /// Turns tab focus mode on or off for every editor (Monaco
+        /// `editor.action.toggleTabFocusMode`, Ctrl+M, Ctrl+Shift+M on macOS).
+        ToggleTabFocusMode,
+        /// Moves focus to the next element (Tab in tab focus mode).
+        FocusNextElement,
+        /// Moves focus to the previous element (Shift+Tab in tab focus mode).
+        FocusPreviousElement,
         /// Picks how to paste the clipboard (Monaco `editor.action.pasteAs`).
         PasteAs,
         /// Pastes the clipboard as plain text (Monaco
@@ -812,6 +821,18 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-shift-o", QuickOutline, ctx),
         KeyBinding::new("f1", QuickCommand, ctx),
         KeyBinding::new("shift-f10", ShowContextMenu, ctx),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "ctrl-shift-m"
+            } else {
+                "ctrl-m"
+            },
+            ToggleTabFocusMode,
+            ctx,
+        ),
+        // After Tab's bindings, so they win in tab focus mode.
+        KeyBinding::new("tab", FocusNextElement, TAB_MOVES_FOCUS),
+        KeyBinding::new("shift-tab", FocusPreviousElement, TAB_MOVES_FOCUS),
         // After QuickFix's binding, so they win while the button shows.
         KeyBinding::new("secondary-.", ChangePasteType, POST_EDIT_WIDGET),
         KeyBinding::new("escape", HidePostEditWidget, POST_EDIT_WIDGET),

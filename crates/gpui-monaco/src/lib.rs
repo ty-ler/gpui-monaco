@@ -7,6 +7,7 @@
 //! Call [`init`] once at startup to bind Monaco's default keybindings.
 #![warn(missing_docs)]
 
+mod accessibility;
 pub mod actions;
 mod api;
 mod bracket_colors;
@@ -61,6 +62,8 @@ mod rename;
 pub mod replace_pattern;
 pub mod search;
 mod section_headers;
+mod tab_focus;
+pub use tab_focus::{set_tab_focus_mode, tab_focus_mode};
 mod semantic_theme;
 mod semantic_tokens;
 mod signature_help;

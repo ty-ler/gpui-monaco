@@ -1358,6 +1358,17 @@ pub struct EditorOptions {
     /// line are drawn, then a "Show more" chip (default 10 000; `None`
     /// draws everything).
     pub stop_rendering_line_after: Option<u32>,
+    /// Monaco `ariaLabel`: the editor's name for screen readers (default
+    /// "Editor content").
+    pub aria_label: SharedString,
+    /// Monaco `ariaRequired`: report the editor as a required input.
+    pub aria_required: bool,
+    /// Monaco `accessibilityPageSize`: how many lines a screen reader can
+    /// read at once around the selection (default 500).
+    pub accessibility_page_size: u32,
+    /// Monaco `tabFocusMode`: Tab moves focus instead of inserting a tab
+    /// (also on for every editor with [`set_tab_focus_mode`](crate::set_tab_focus_mode)).
+    pub tab_focus_mode: bool,
 }
 
 impl Default for EditorOptions {
@@ -1437,6 +1448,10 @@ impl Default for EditorOptions {
             show_folding_controls: ShowFoldingControls::Mouseover,
             single_line: false,
             stop_rendering_line_after: Some(10_000),
+            aria_label: "Editor content".into(),
+            aria_required: false,
+            accessibility_page_size: 500,
+            tab_focus_mode: false,
             auto_closing_brackets: Default::default(),
             auto_closing_quotes: Default::default(),
             auto_closing_comments: Default::default(),

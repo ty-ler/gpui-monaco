@@ -91,7 +91,7 @@ Issues are linked by number.
 | Custom highlighter | tokenization support | ✅ (`Language::with_highlighter`) | |
 | Static colorize and tokenize | `colorizer` | ✅ | #108 |
 | Themes: `vs`, `vs-dark`, VS Code JSON, `defineTheme` | standalone theme service | ✅ | |
-| High-contrast themes (`hc-black`, `hc-light`) | standalone themes | ❌ | #53 |
+| High-contrast themes (`hc-black`, `hc-light`) | standalone themes | ✅ | #53 |
 
 ## Language features (providers)
 
@@ -129,7 +129,7 @@ Issues are linked by number.
 | Feature | Status | Issue |
 |---|---|---|
 | Diff editor, multi-diff editor | ❌ | #52 |
-| Screen readers, tab focus mode, ARIA options | ❌ | #53 |
+| Screen readers, tab focus mode, ARIA options | ✅ | #53 |
 | wasm / web | ❌ | #58 |
 | crates.io release | ❌ | #57 |
 | Monaco migration notes | ✅ (book: Migrating from Monaco) | #60 |

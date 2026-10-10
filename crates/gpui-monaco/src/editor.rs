@@ -1,5 +1,6 @@
 //! [`CodeEditor`]: the editor view entity.
 
+use gpui::prelude::FluentBuilder as _;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
@@ -146,6 +147,8 @@ pub struct CodeEditor {
     pub(crate) unicode_highlights: crate::unicode_highlighter::UnicodeHighlightState,
     pub(crate) dnd: crate::dnd::DragAndDrop,
     pub(crate) drop_paste: crate::drop_paste::DropPasteState,
+    /// Screen reader text run ids to rows.
+    a11y_rows: crate::accessibility::RunRows,
     pub(crate) theme: Arc<Theme>,
     pub(crate) scroll_top: Pixels,
     pub(crate) scroll_left: Pixels,
@@ -263,7 +266,8 @@ impl CodeEditor {
     /// Creates an editor showing `model`.
     pub fn new(model: Entity<TextModel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::model::register_model(cx, &model);
-        let focus_handle = cx.focus_handle();
+        // A tab stop, like Monaco's textarea, for tab focus mode and hosts.
+        let focus_handle = cx.focus_handle().tab_stop(true);
         let subscriptions = vec![
             cx.subscribe(&model, Self::on_model_event),
             cx.on_focus(&focus_handle, window, |this, _, cx| {
@@ -305,6 +309,7 @@ impl CodeEditor {
             unicode_highlights: Default::default(),
             dnd: Default::default(),
             drop_paste: Default::default(),
+            a11y_rows: Default::default(),
             theme: Arc::new(Theme::vs_dark()),
             scroll_top: px(0.),
             scroll_left: px(0.),
@@ -3054,6 +3059,9 @@ impl Render for CodeEditor {
         if self.is_post_edit_widget_visible() {
             key_context.add("post_edit_widget");
         }
+        if self.options.tab_focus_mode || crate::tab_focus_mode(cx) {
+            key_context.add("tab_moves_focus");
+        }
         if self.inline_suggestion_visible(cx) {
             key_context.add("inline_suggestion_visible");
             if self.cursor_before_ghost_text(cx) {
@@ -3064,6 +3072,46 @@ impl Render for CodeEditor {
             .id("code-editor")
             .key_context(key_context)
             .track_focus(&self.focus_handle)
+            // Screen readers: a text input whose text runs are the lines
+            // around the selection (Monaco's screen reader content).
+            .role(if self.options.single_line {
+                gpui::Role::TextInput
+            } else {
+                gpui::Role::MultilineTextInput
+            })
+            .aria_label(self.options.aria_label.clone())
+            .map(|root| {
+                if !window.is_a11y_active() {
+                    return root;
+                }
+                let content = self.screen_reader_content();
+                let rows = self.a11y_rows.clone();
+                let (read_only, required) = (self.options.read_only, self.options.aria_required);
+                let editor = cx.entity().downgrade();
+                let action_rows = self.a11y_rows.clone();
+                root.a11y_synthetic_children(move |builder| {
+                    content.build(builder, &rows);
+                    let node = builder.parent_node();
+                    if read_only {
+                        node.set_read_only();
+                    }
+                    if required {
+                        node.set_required();
+                    }
+                })
+                .on_a11y_action(
+                    gpui::AccessibleAction::SetTextSelection,
+                    move |data, _, cx| {
+                        if let Some(gpui::accesskit::ActionData::SetTextSelection(selection)) = data
+                            && let Some(editor) = editor.upgrade()
+                        {
+                            editor.update(cx, |editor, cx| {
+                                editor.a11y_set_selection(selection, &action_rows, cx)
+                            });
+                        }
+                    },
+                )
+            })
             .size_full()
             .cursor(if self.dnd.target.is_some() || self.dnd.copy {
                 // Monaco's `mouseStyle` while dragging the selection.
@@ -3621,6 +3669,11 @@ impl Render for CodeEditor {
                 cx.listener(|this, _: &ToggleStickyScroll, _, cx| this.toggle_sticky_scroll(cx)),
             )
             .on_action(cx.listener(|this, _: &PasteAs, window, cx| this.paste_as(None, window, cx)))
+            .on_action(|_: &ToggleTabFocusMode, _, cx| {
+                crate::set_tab_focus_mode(!crate::tab_focus_mode(cx), cx)
+            })
+            .on_action(|_: &FocusNextElement, window, cx| window.focus_next(cx))
+            .on_action(|_: &FocusPreviousElement, window, cx| window.focus_prev(cx))
             .on_action(cx.listener(|this, _: &PasteAsText, window, cx| {
                 this.paste_as(Some("text.plain".into()), window, cx)
             }))
