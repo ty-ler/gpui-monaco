@@ -133,7 +133,11 @@ pub struct CodeEditor {
     pub(crate) snapshot: BufferSnapshot,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) cursors: CursorCollection,
+    /// The options with the font zoom applied; what rendering reads.
     pub(crate) options: EditorOptions,
+    /// The options as the host set them.
+    user_options: EditorOptions,
+    pub(crate) zoom_gesture: Option<crate::font_zoom::ZoomGesture>,
     pub(crate) theme: Arc<Theme>,
     pub(crate) scroll_top: Pixels,
     pub(crate) scroll_left: Pixels,
@@ -265,6 +269,9 @@ impl CodeEditor {
         // Providers coming and going (e.g. a language server starting) and
         // refresh requests are noticed when painting.
         subscriptions.extend(crate::providers::observe_language_features(cx));
+        subscriptions.push(
+            cx.observe_global::<crate::font_zoom::EditorZoom>(|this, cx| this.on_zoom_changed(cx)),
+        );
         model.update(cx, |model, cx| model.ensure_syntax(cx));
         let snapshot = model.read(cx).snapshot();
         Self {
@@ -272,7 +279,12 @@ impl CodeEditor {
             snapshot: snapshot.clone(),
             focus_handle,
             cursors: CursorCollection::new(SingleCursorState::from_position(PointUtf16::zero())),
-            options: EditorOptions::default(),
+            options: crate::font_zoom::zoomed_options(
+                &EditorOptions::default(),
+                crate::font_zoom::editor_zoom_level(cx),
+            ),
+            user_options: EditorOptions::default(),
+            zoom_gesture: None,
             theme: Arc::new(Theme::vs_dark()),
             scroll_top: px(0.),
             scroll_left: px(0.),
@@ -445,13 +457,19 @@ impl CodeEditor {
     }
 
     /// The editor options.
+    #[expect(
+        clippy::misnamed_getters,
+        reason = "`options` holds the zoomed values; hosts get theirs back"
+    )]
     pub fn options(&self) -> &EditorOptions {
-        &self.options
+        &self.user_options
     }
 
     /// Replaces the editor options (Monaco `updateOptions`, but with a full set).
     pub fn update_options(&mut self, options: EditorOptions, cx: &mut Context<Self>) {
-        self.options = options;
+        self.options =
+            crate::font_zoom::zoomed_options(&options, crate::font_zoom::editor_zoom_level(cx));
+        self.user_options = options;
         self.cursors
             .set_merge_overlapping(self.options.multi_cursor_merge_overlapping);
         self.bracket_colors = Default::default();
@@ -2546,6 +2564,10 @@ impl CodeEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.mouse_wheel_zoom(event, cx) {
+            cx.stop_propagation();
+            return;
+        }
         let line_height = self
             .layout
             .as_ref()
@@ -3396,6 +3418,13 @@ impl Render for CodeEditor {
             .on_action(
                 cx.listener(|this, _: &ToggleStickyScroll, _, cx| this.toggle_sticky_scroll(cx)),
             )
+            .on_action(|_: &FontZoomIn, _, cx| {
+                crate::set_editor_zoom_level(crate::editor_zoom_level(cx) + 1., cx)
+            })
+            .on_action(|_: &FontZoomOut, _, cx| {
+                crate::set_editor_zoom_level(crate::editor_zoom_level(cx) - 1., cx)
+            })
+            .on_action(|_: &FontZoomReset, _, cx| crate::set_editor_zoom_level(0., cx))
             .on_action(
                 cx.listener(|this, _: &FocusStickyScroll, _, cx| this.focus_sticky_scroll(cx)),
             )

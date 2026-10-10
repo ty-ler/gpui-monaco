@@ -91,7 +91,11 @@ pub(crate) struct TextMetrics {
 
 impl TextMetrics {
     pub fn new(options: &EditorOptions, window: &mut Window) -> Self {
-        let font = font(options.font_family.clone());
+        let font = Font {
+            weight: options.font_weight,
+            features: options.font_ligatures.features(),
+            ..font(options.font_family.clone())
+        };
         let font_size = options.font_size;
         let em_width = window
             .text_system()

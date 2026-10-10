@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Font options and zoom (#87, part 1):**
+  - **Font options:** `EditorOptions::font_weight` and `font_ligatures` (`FontLigatures::Off`, `On`, or CSS `font-feature-settings` such as `"calt", "ss01" on`). Ligatures are off by default, as in Monaco.
+  - **Zoom:** a global zoom level (Monaco `EditorZoom`) scales every editor's font size and line height by 10% per level, clamped to −5…20. It's set with `editor.action.fontZoomIn`, `fontZoomOut` and `fontZoomReset` (`FontZoomIn`, `FontZoomOut`, `FontZoomReset`) and with `set_editor_zoom_level` / `editor_zoom_level`. `options()` keeps the unzoomed values.
+  - **`mouse_wheel_zoom`:** Cmd+wheel (Ctrl elsewhere) zooms. A physical wheel steps one level; trackpad gestures zoom smoothly.
 - Comment toggling: `editor.action.commentLine` (Cmd+/), `addCommentLine`, `removeCommentLine` and `blockComment` (Shift+Alt+A), using the language at the cursor (injections included). This is a port of Monaco's comment commands and their tests (#79).
 - Word commands: `cursorWordStart/End{Left,Right}{,Select}`, `deleteWordStart/End{Left,Right}`, `deleteWordPart{Left,Right}` (Ctrl+Alt+Backspace/Delete on macOS) and `deleteInsideWord`. Also `lineBreakInsert` (Ctrl+O on macOS) (#81).
 - Multi-cursor commands: `addSelectionToPreviousFindMatch`, `moveSelectionToPreviousFindMatch`, `insertCursorAtEndOfEachLineSelected` (Shift+Alt+I), `addCursorsToBottom`/`Top` and `focusNext`/`PreviousCursor` (#81).

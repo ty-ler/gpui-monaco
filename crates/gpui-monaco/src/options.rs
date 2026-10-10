@@ -2,7 +2,7 @@
 //! implemented so far.
 
 pub use crate::suggest::memory::SuggestSelection;
-use gpui::{Pixels, SharedString, px};
+use gpui::{FontFeatures, FontWeight, Pixels, SharedString, px};
 
 /// Monaco `lineNumbers`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -858,6 +858,78 @@ impl GotoLocationOptions {
     }
 }
 
+/// Monaco `fontLigatures`: the font's OpenType features.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum FontLigatures {
+    /// `"liga" off, "calt" off`.
+    #[default]
+    Off,
+    /// `"liga" on, "calt" on`.
+    On,
+    /// A CSS `font-feature-settings` value, such as `"calt", "ss01" on,
+    /// "zero" 1`.
+    Settings(SharedString),
+}
+
+impl FontLigatures {
+    /// The features to shape text with.
+    pub fn features(&self) -> FontFeatures {
+        let settings = match self {
+            Self::Off => vec![("liga".into(), 0), ("calt".into(), 0)],
+            Self::On => vec![("liga".into(), 1), ("calt".into(), 1)],
+            Self::Settings(settings) => parse_font_feature_settings(settings),
+        };
+        FontFeatures(std::sync::Arc::new(settings))
+    }
+}
+
+/// Parses CSS `font-feature-settings`: comma-separated quoted four-letter
+/// tags, each optionally followed by `on`, `off` or a number (1 if
+/// missing). Invalid entries are skipped.
+fn parse_font_feature_settings(settings: &str) -> Vec<(String, u32)> {
+    settings
+        .split(',')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            let quote = entry.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+            let rest = &entry[1..];
+            let end = rest.find(quote)?;
+            let tag = &rest[..end];
+            if tag.len() != 4 || !tag.is_ascii() {
+                return None;
+            }
+            let value = match rest[end + 1..].trim() {
+                "" | "on" => 1,
+                "off" => 0,
+                number => number.parse().ok()?,
+            };
+            Some((tag.to_string(), value))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod font_feature_tests {
+    use super::*;
+
+    #[test]
+    fn parses_font_feature_settings() {
+        assert_eq!(
+            parse_font_feature_settings(r#""calt", 'ss01' on, "zero" 2, "liga" off, "bad", "x" 1"#),
+            vec![
+                ("calt".to_string(), 1),
+                ("ss01".to_string(), 1),
+                ("zero".to_string(), 2),
+                ("liga".to_string(), 0),
+            ]
+        );
+        assert_eq!(
+            FontLigatures::Off.features().tag_value_list(),
+            &[("liga".to_string(), 0), ("calt".to_string(), 0)]
+        );
+    }
+}
+
 /// Options for one [`CodeEditor`](crate::CodeEditor) view (Monaco `IEditorOptions`).
 ///
 /// The model-level options (tab size, insert spaces, …) live in
@@ -872,6 +944,10 @@ pub struct EditorOptions {
     /// `None` computes it from the font size like Monaco
     /// (`GOLDEN_LINE_HEIGHT_RATIO`, 1.5 on macOS and 1.35 elsewhere).
     pub line_height: Option<Pixels>,
+    /// Monaco `fontWeight` (default normal). Bold tokens stay bold.
+    pub font_weight: FontWeight,
+    /// Monaco `fontLigatures` (default off).
+    pub font_ligatures: FontLigatures,
     /// Monaco `lineNumbers`.
     pub line_numbers: LineNumbers,
     /// Monaco `lineNumbersMinChars`: the number column is at least this many digits
@@ -953,6 +1029,10 @@ pub struct EditorOptions {
     /// Pixels scrolled per wheel "line" step is the line height; this scales it
     /// (Monaco `mouseWheelScrollSensitivity`).
     pub mouse_wheel_scroll_sensitivity: f32,
+    /// Monaco `mouseWheelZoom`: the wheel zooms the font while Cmd (macOS)
+    /// or Ctrl is held (default `false`). See
+    /// [`set_editor_zoom_level`](crate::set_editor_zoom_level).
+    pub mouse_wheel_zoom: bool,
     /// Monaco `emptySelectionClipboard`: copy and cut with an empty selection act on
     /// the whole line (default `true`).
     pub empty_selection_clipboard: bool,
@@ -1145,6 +1225,8 @@ impl Default for EditorOptions {
                 px(14.)
             },
             line_height: None,
+            font_weight: FontWeight::NORMAL,
+            font_ligatures: FontLigatures::Off,
             line_numbers: LineNumbers::On,
             line_numbers_min_chars: 5,
             line_decorations_width: px(10.),
@@ -1176,6 +1258,7 @@ impl Default for EditorOptions {
             overview_ruler_border: true,
             hide_cursor_in_overview_ruler: false,
             mouse_wheel_scroll_sensitivity: 1.0,
+            mouse_wheel_zoom: false,
             empty_selection_clipboard: true,
             sticky_tab_stops: false,
             word_wrap: WordWrap::Off,
