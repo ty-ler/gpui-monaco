@@ -36,7 +36,7 @@ Issues are linked by number.
 | Line operations: move, copy, delete, insert, indent | `linesOperations` | ✅ | |
 | Sort, join, reverse, transpose, case transforms, delete duplicates, trim whitespace | `linesOperations`, `caretOperations` | ❌ | #80 |
 | In-place replace | `inPlaceReplace` | ❌ | #80 |
-| Toggle line and block comments | `comment` | ❌ | #79 |
+| Toggle line and block comments | `comment` | ✅ | #79 |
 | Smart select (expand and shrink) | `smartSelect` | ❌ | #82 |
 | Linked editing (HTML tags) | `linkedEditing` | ❌ | #101 |
 | Snippets | `snippet` | ❌ | #55 |

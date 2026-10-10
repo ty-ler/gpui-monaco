@@ -50,12 +50,51 @@ impl LanguageConfiguration {
 
 /// The `comments` section of a language configuration.
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "RawComments")]
 pub struct Comments {
     /// `lineComment`, e.g. `//`.
     pub line_comment: Option<String>,
+    /// `lineComment.noIndent`: line comments go at column 1, not at the
+    /// line's indentation.
+    pub line_comment_no_indent: bool,
     /// `blockComment` as `(open, close)`, e.g. `("/*", "*/")`.
     pub block_comment: Option<(String, String)>,
+}
+
+/// `lineComment` is either the token or `{ "comment": …, "noIndent": … }`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawLineComment {
+    Token(String),
+    Object {
+        comment: Option<String>,
+        #[serde(default, rename = "noIndent")]
+        no_indent: bool,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawComments {
+    #[serde(default)]
+    line_comment: Option<RawLineComment>,
+    #[serde(default)]
+    block_comment: Option<(String, String)>,
+}
+
+impl From<RawComments> for Comments {
+    fn from(raw: RawComments) -> Self {
+        let (line_comment, line_comment_no_indent) = match raw.line_comment {
+            Some(RawLineComment::Token(token)) => (Some(token), false),
+            Some(RawLineComment::Object { comment, no_indent }) => (comment, no_indent),
+            None => (None, false),
+        };
+        Self {
+            line_comment,
+            line_comment_no_indent,
+            block_comment: raw.block_comment,
+        }
+    }
 }
 
 /// Where an auto-closing pair is not inserted.

@@ -583,7 +583,7 @@ fn adjust_range(
 pub(crate) fn execute_commands(
     model: &dyn CursorModel,
     selections_before: &[Selection],
-    mut commands: Vec<Option<Box<dyn Command>>>,
+    mut commands: Vec<Option<Box<dyn Command + '_>>>,
     kind: EditOperationType,
     push_stack_element_before: bool,
     push_stack_element_after: bool,

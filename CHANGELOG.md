@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/). Until 1.0, minor versions may break the API.
 
+## [Unreleased]
+
+### Added
+- Comment toggling: `editor.action.commentLine` (Cmd+/), `addCommentLine`, `removeCommentLine` and `blockComment` (Shift+Alt+A), using the language at the cursor (injections included). This is a port of Monaco's comment commands and their tests (#79).
+- `TextModel::language_at` (Monaco `getLanguageIdAtPosition`), and the `comments` editor option.
+- Language configurations accept `lineComment` as `{ "comment", "noIndent" }`.
+
 ## [0.1.0] - 2026-10-09
 
 This is the first release: a Monaco-like code editor component for GPUI. It is distributed through git and pinned to gpui at zed rev `f16f9652ec57bf806e65b2a0d51bb92a63644914`. See the [guide](book/src/getting-started.md) for setup.

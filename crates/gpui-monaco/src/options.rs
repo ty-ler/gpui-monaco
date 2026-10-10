@@ -205,6 +205,8 @@ pub struct EditorOptions {
     pub minimap: MinimapOptions,
     /// Monaco `stickyScroll`.
     pub sticky_scroll: StickyScrollOptions,
+    /// Monaco `comments`: how comment toggling inserts and removes tokens.
+    pub comments: crate::cursor::CommentOptions,
     /// A one-line input (like Monaco's find input): Enter, Tab and Escape
     /// propagate to the parent and pasted line breaks become spaces.
     pub single_line: bool,
@@ -259,6 +261,7 @@ impl Default for EditorOptions {
             quick_suggestions: true,
             minimap: MinimapOptions::default(),
             sticky_scroll: StickyScrollOptions::default(),
+            comments: Default::default(),
         }
     }
 }

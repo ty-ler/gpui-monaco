@@ -972,6 +972,27 @@ impl CodeEditor {
         self.run_edit(cx, cursor::copy_lines_down);
     }
 
+    /// Runs a comment command with the comment tokens of the language at
+    /// each position.
+    fn comment(&mut self, kind: Option<cursor::LineCommentType>, cx: &mut Context<Self>) {
+        let config = self.cursor_config(cx);
+        let options = self.options.comments;
+        let model = self.model.read(cx);
+        let rope = self.snapshot.rope();
+        let comments_at = |p: PointUtf16| {
+            model
+                .language_at(rope.point_utf16_to_offset(p))
+                .map(|language| language.config.comments.clone())
+        };
+        let operation = match kind {
+            Some(kind) => {
+                cursor::line_comment(&config, rope, &self.cursors, &comments_at, kind, options)
+            }
+            None => cursor::block_comment(&config, rope, &self.cursors, &comments_at, options),
+        };
+        self.apply(operation, cx);
+    }
+
     fn delete_lines(&mut self, _: &DeleteLines, _: &mut Window, cx: &mut Context<Self>) {
         self.run_edit(cx, cursor::delete_lines);
     }
@@ -1925,6 +1946,16 @@ impl Render for CodeEditor {
             .on_action(cx.listener(Self::copy_lines_up))
             .on_action(cx.listener(Self::copy_lines_down))
             .on_action(cx.listener(Self::delete_lines))
+            .on_action(cx.listener(|this, _: &CommentLine, _, cx| {
+                this.comment(Some(cursor::LineCommentType::Toggle), cx)
+            }))
+            .on_action(cx.listener(|this, _: &AddCommentLine, _, cx| {
+                this.comment(Some(cursor::LineCommentType::ForceAdd), cx)
+            }))
+            .on_action(cx.listener(|this, _: &RemoveCommentLine, _, cx| {
+                this.comment(Some(cursor::LineCommentType::ForceRemove), cx)
+            }))
+            .on_action(cx.listener(|this, _: &BlockComment, _, cx| this.comment(None, cx)))
             .on_action(cx.listener(Self::insert_line_after))
             .on_action(cx.listener(Self::insert_line_before))
             .on_action(cx.listener(|this, _: &Fold, _, cx| this.fold(cx)))
