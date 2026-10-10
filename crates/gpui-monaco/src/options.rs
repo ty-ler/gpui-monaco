@@ -724,6 +724,9 @@ pub struct EditorOptions {
     pub multi_cursor_paste: crate::cursor::MultiCursorPaste,
     /// Monaco `inlineSuggest`.
     pub inline_suggest: InlineSuggestOptions,
+    /// Monaco `linkedEditing`: edit linked ranges (like HTML tag pairs)
+    /// together (off).
+    pub linked_editing: bool,
     /// Monaco `semanticHighlighting.enabled`.
     pub semantic_highlighting: SemanticHighlighting,
     /// Monaco `links`: detect links and follow them with Cmd/Ctrl+click.
@@ -839,6 +842,7 @@ impl Default for EditorOptions {
             multi_cursor_modifier: MultiCursorModifier::Alt,
             multi_cursor_paste: Default::default(),
             inline_suggest: InlineSuggestOptions::default(),
+            linked_editing: false,
             semantic_highlighting: SemanticHighlighting::ConfiguredByTheme,
             links: true,
             show_unused: true,

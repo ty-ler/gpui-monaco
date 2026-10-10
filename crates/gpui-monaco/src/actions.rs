@@ -500,6 +500,9 @@ actions!(
         ShowHover,
         /// Opens the link at the cursor (Monaco `editor.action.openLink`).
         OpenLink,
+        /// Starts linked editing at the cursor, even with the option off
+        /// (Monaco `editor.action.linkedEditing`).
+        StartLinkedEditing,
         /// Asks for inline completions (Monaco
         /// `editor.action.inlineSuggest.trigger`).
         TriggerInlineSuggest,
@@ -674,6 +677,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-space", TriggerSuggest, ctx),
         KeyBinding::new("ctrl-space", ToggleSuggestionDetails, SUGGEST),
         KeyBinding::new("alt-\\", TriggerInlineSuggest, ctx),
+        KeyBinding::new("secondary-shift-f2", StartLinkedEditing, ctx),
         KeyBinding::new("alt-]", ShowNextInlineSuggestion, INLINE),
         KeyBinding::new("alt-[", ShowPreviousInlineSuggestion, INLINE),
         KeyBinding::new(

@@ -68,6 +68,16 @@ pub trait Highlighter: Send + Sync {
     ) -> Option<Vec<Range<usize>>> {
         None
     }
+
+    /// The tag name at `offset` and its matching start or end tag's name,
+    /// for linked editing, or `None`.
+    fn linked_tag_ranges(
+        &self,
+        _state: &HighlightState,
+        _offset: usize,
+    ) -> Option<Vec<Range<usize>>> {
+        None
+    }
 }
 
 /// The tree-sitter [`Highlighter`]; its state is a [`SyntaxSnapshot`].
@@ -118,5 +128,13 @@ impl Highlighter for TreeSitterHighlighter {
 
     fn selection_ranges(&self, state: &HighlightState, offset: usize) -> Option<Vec<Range<usize>>> {
         Some(state.syntax()?.selection_ranges(offset))
+    }
+
+    fn linked_tag_ranges(
+        &self,
+        state: &HighlightState,
+        offset: usize,
+    ) -> Option<Vec<Range<usize>>> {
+        state.syntax()?.linked_tag_ranges(offset)
     }
 }

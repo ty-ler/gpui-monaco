@@ -149,6 +149,12 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Linked editing (#101):** ported from Monaco's `LinkedEditingContribution`.
+  - With `linked_editing` on, typing in a linked range, such as an HTML start tag's name, is mirrored to the others in the same undo step.
+  - A `LinkedEditingRangeProvider` supplies the ranges; without one, HTML tag pairs come from the syntax tree.
+  - The ranges follow the cursor (with Monaco's debounce). Text outside the word pattern, Escape or several cursors end it.
+  - `StartLinkedEditing` (Cmd/Ctrl+Shift+F2) works with the option off.
+  - Theme color: `editor.linkedEditingBackground`.
 - **Inline completions, part 2 (#99):** ported from Monaco's `InlineCompletionsModel`, `InlineCompletionsSource` and controller.
   - Typing, pasting, Tab and deleting ask providers for completions after a 50ms debounce. Completions stay valid while what's typed matches them (`inlineCompletionIsVisible`).
   - The selected one shows as italic ghost text after the cursor, with extra lines in a view zone.

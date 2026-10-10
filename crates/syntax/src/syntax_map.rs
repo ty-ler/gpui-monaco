@@ -410,6 +410,45 @@ impl SyntaxSnapshot {
         ranges
     }
 
+    /// The name of the tag at `offset` and of its matching start or end tag
+    /// (tree-sitter-html's `tag_name` in `start_tag` / `end_tag`), for
+    /// linked editing; `None` elsewhere or for unclosed elements.
+    pub fn linked_tag_ranges(&self, offset: usize) -> Option<Vec<Range<usize>>> {
+        for layer in self.layers.iter().rev() {
+            let extent = layer.extent();
+            if layer.depth > 0 && !(extent.start <= offset && offset <= extent.end) {
+                continue;
+            }
+            // The cursor may be just after the name (`<div|>`).
+            let name = [offset, offset.saturating_sub(1)]
+                .into_iter()
+                .find_map(|at| {
+                    let node = layer.tree.root_node().descendant_for_byte_range(at, at)?;
+                    (node.kind() == "tag_name").then_some(node)
+                });
+            let Some(name) = name else {
+                continue;
+            };
+            let tag = name.parent()?;
+            let element = tag.parent()?;
+            let other_kind = match tag.kind() {
+                "start_tag" => "end_tag",
+                "end_tag" => "start_tag",
+                _ => return None,
+            };
+            let mut cursor = element.walk();
+            let other = element
+                .children(&mut cursor)
+                .find(|child| child.kind() == other_kind)?;
+            let mut cursor = other.walk();
+            let other_name = other
+                .children(&mut cursor)
+                .find(|child| child.kind() == "tag_name")?;
+            return Some(vec![name.byte_range(), other_name.byte_range()]);
+        }
+        None
+    }
+
     /// Foldable regions from the layers' `folds.scm` queries: each `@fold`
     /// node from its first row to the row before its closing line (a line
     /// starting with a closing bracket or tag, or a node ending at a line

@@ -212,6 +212,12 @@ The editor shows them as injected text that moves with edits. As in Monaco:
 
 Unlike Monaco, hints use the editor's font size, and their label parts, tooltips and edits aren't interactive yet.
 
+## Linked editing
+
+With `linked_editing` on, ranges that belong together are edited together. In HTML, renaming an element's start tag renames its end tag. Without a provider, tag pairs come from the syntax tree. A `LinkedEditingRangeProvider` supplies ranges for anything else, optionally with a `word_pattern` that ends linked editing when the text no longer matches it.
+
+The linked ranges are highlighted (`editor.linkedEditingBackground`). Escape ends it, and Cmd/Ctrl+Shift+F2 starts it even with the option off.
+
 ## Inline completions
 
 An `InlineCompletionsProvider` offers ghost text at the cursor, such as AI completions:

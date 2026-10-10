@@ -38,7 +38,7 @@ Issues are linked by number.
 | In-place replace | `inPlaceReplace` | ✅ | #80 |
 | Toggle line and block comments | `comment` | ✅ | #79 |
 | Smart select (expand and shrink) | `smartSelect` | ✅ | #82 |
-| Linked editing (HTML tags) | `linkedEditing` | ❌ | #101 |
+| Linked editing (HTML tags) | `linkedEditing` | ✅ | #101 |
 | Snippet syntax: parser, variables, transforms | `snippet` | ✅ | #55 |
 | Snippet sessions: tab stops, choices, nesting, completion integration | `snippet` | ✅ | #55 |
 | Drag and drop text | `dnd` | ❌ | #92 |
@@ -114,7 +114,7 @@ Issues are linked by number.
 | Document symbols | `documentSymbols` | ❌ | #100 |
 | Selection ranges | `smartSelect` | ✅ | #82 |
 | Folding ranges | `folding` | ✅ | #102 |
-| Linked editing ranges | `linkedEditing` | ❌ | #101 |
+| Linked editing ranges | `linkedEditing` | ✅ | #101 |
 | LSP bridge (`gpui-monaco-lsp`: sync, diagnostics, completion, hover, definition, highlights, signature help) | `monaco-languageclient` | ✅ | #54 |
 
 ## Other
