@@ -12,6 +12,7 @@
 - [Widgets](widgets.md)
 - [Language features (providers)](providers.md)
 - [Diagnostics](diagnostics.md)
+- [Diff editor](diff-editor.md)
 - [Language servers (LSP)](lsp.md)
 - [Editing features](editing.md)
 - [Performance](performance.md)

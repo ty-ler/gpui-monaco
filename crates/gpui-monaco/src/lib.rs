@@ -27,6 +27,8 @@ pub mod cursor;
 pub mod decorations;
 mod definition;
 pub mod diff;
+pub mod diff_editor;
+pub use diff_editor::{DiffEditor, DiffEditorEvent, DiffEditorOptions};
 mod dnd;
 mod drop_paste;
 mod editor;
@@ -116,4 +118,5 @@ pub use widgets::{
 /// Binds Monaco's default keybindings in the editor's key context.
 pub fn init(cx: &mut gpui::App) {
     actions::bind_default_keys(cx);
+    diff_editor::bind_keys(cx);
 }

@@ -44,6 +44,7 @@ Demo providers are registered by default:
 | `PLAYGROUND_DEMO=1` | Add the demo decorations and widgets at startup |
 | `PLAYGROUND_PLAIN=1` | Don't register the demo providers or markers |
 | `PLAYGROUND_LSP="rust-analyzer"` | Start a language server for `PLAYGROUND_FILE`, rooted at the nearest project directory, instead of the demo providers |
+| `PLAYGROUND_DIFF=old.rs` | Open a diff editor comparing `old.rs` with `PLAYGROUND_FILE` |
 | `PLAYGROUND_FONT="JetBrains Mono"` | Use another font family |
 | `PLAYGROUND_PLACEHOLDER="Type here"` | Show a placeholder while the file is empty |
 | `PLAYGROUND_READ_ONLY=1` | Start read-only (typing shows the read-only message) |

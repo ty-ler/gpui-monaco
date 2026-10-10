@@ -986,6 +986,8 @@ pub struct PrepaintState {
     decoration_quads: Vec<(Bounds<Pixels>, Option<Hsla>, Option<Hsla>)>,
     decoration_underlines: Vec<(gpui::Point<Pixels>, Pixels, UnderlineStyle)>,
     gutter_bars: Vec<(Bounds<Pixels>, Hsla)>,
+    /// Monaco `marginClassName` backgrounds.
+    margin_backgrounds: Vec<(Bounds<Pixels>, Hsla)>,
     glyphs: Vec<(gpui::Point<Pixels>, ShapedLine)>,
     lightbulb: Option<(Bounds<Pixels>, Hsla)>,
     ruler_marks: Vec<(Bounds<Pixels>, Hsla)>,
@@ -2275,6 +2277,8 @@ fn prepaint_editor(
     let mut decoration_quads: Vec<(Bounds<Pixels>, Option<Hsla>, Option<Hsla>)> = Vec::new();
     let mut decoration_underlines: Vec<(gpui::Point<Pixels>, Pixels, UnderlineStyle)> = Vec::new();
     let mut gutter_bars: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
+    let mut margin_backgrounds: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
+    let options_line_decorations_width = options.line_decorations_width;
     let mut glyphs: Vec<(gpui::Point<Pixels>, ShapedLine)> = Vec::new();
     let mut line_number_colors: Vec<(u32, Hsla)> = Vec::new();
     let origin_x = layout.text_origin_x();
@@ -2330,6 +2334,23 @@ fn prepaint_editor(
             if let Some(color) = options.gutter_bar {
                 let left = bounds.left() + glyph_width + numbers_width + px(2.);
                 gutter_bars.push((Bounds::new(point(left, top), size(px(3.), height)), color));
+            }
+            if let Some(color) = options.margin_background {
+                margin_backgrounds.push((
+                    Bounds::new(point(bounds.left(), top), size(gutter_width, height)),
+                    color,
+                ));
+            }
+            if let Some((text, color)) = &options.lines_decoration_text {
+                let shaped = window.text_system().shape_line(
+                    text.clone(),
+                    metrics.font_size,
+                    &[run(text.len(), &metrics.font, *color)],
+                    None,
+                );
+                let area = options_line_decorations_width;
+                let x = bounds.left() + glyph_width + numbers_width + (area - shaped.width) / 2.;
+                glyphs.push((point(x, text_top), shaped));
             }
             if line.columns.start == 0 {
                 if let Some(color) = options.line_number_color {
@@ -2925,6 +2946,7 @@ fn prepaint_editor(
         decoration_quads,
         decoration_underlines,
         gutter_bars,
+        margin_backgrounds,
         glyphs,
         lightbulb,
         ruler_marks,
@@ -3013,6 +3035,9 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                     BorderStyle::Solid,
                 ));
             }
+        }
+        for (bounds, color) in &state.margin_backgrounds {
+            window.paint_quad(fill(*bounds, *color));
         }
         // Monaco `foldingHighlight` (`editor.foldBackground`).
         for highlight in &state.fold_highlights {

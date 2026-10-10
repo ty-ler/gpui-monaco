@@ -42,6 +42,27 @@ pub struct EditorColors {
     /// Selected text's color (`editor.selectionForeground`; none keeps the
     /// token colors). High-contrast themes set it.
     pub selection_foreground: Option<Hsla>,
+    /// Inserted text in the diff editor (`diffEditor.insertedTextBackground`).
+    pub diff_inserted_text_background: Hsla,
+    /// Removed text (`diffEditor.removedTextBackground`).
+    pub diff_removed_text_background: Hsla,
+    /// Inserted text's outline (`diffEditor.insertedTextBorder`, high
+    /// contrast).
+    pub diff_inserted_text_border: Option<Hsla>,
+    /// Removed text's outline (`diffEditor.removedTextBorder`).
+    pub diff_removed_text_border: Option<Hsla>,
+    /// Inserted lines (`diffEditor.insertedLineBackground`).
+    pub diff_inserted_line_background: Hsla,
+    /// Removed lines (`diffEditor.removedLineBackground`).
+    pub diff_removed_line_background: Hsla,
+    /// The gutter beside inserted lines
+    /// (`diffEditorGutter.insertedLineBackground`).
+    pub diff_gutter_inserted_line_background: Hsla,
+    /// The gutter beside removed lines
+    /// (`diffEditorGutter.removedLineBackground`).
+    pub diff_gutter_removed_line_background: Hsla,
+    /// The stripes where the other side has lines (`diffEditor.diagonalFill`).
+    pub diff_diagonal_fill: Hsla,
     /// Selections in an unfocused editor (`editor.inactiveSelectionBackground`).
     pub inactive_selection_background: Hsla,
     /// The cursor (`editorCursor.foreground`).
@@ -263,6 +284,15 @@ impl EditorColors {
             line_highlight_border: Some(c(rgb(0x282828))),
             selection_background: c(rgb(0x264f78)),
             selection_foreground: None,
+            diff_inserted_text_background: c(rgba(0x9ccc2c33)),
+            diff_removed_text_background: c(rgba(0xff000033)),
+            diff_inserted_text_border: None,
+            diff_removed_text_border: None,
+            diff_inserted_line_background: c(rgba(0x9bb95533)),
+            diff_removed_line_background: c(rgba(0xff000033)),
+            diff_gutter_inserted_line_background: c(rgba(0x9bb95533)),
+            diff_gutter_removed_line_background: c(rgba(0xff000033)),
+            diff_diagonal_fill: c(rgba(0xcccccc33)),
             inactive_selection_background: c(rgb(0x3a3d41)),
             cursor: c(rgb(0xaeafad)),
             gutter_background: c(rgb(0x1e1e1e)),
@@ -376,6 +406,15 @@ impl EditorColors {
             line_highlight_border: Some(c(rgb(0xeeeeee))),
             selection_background: c(rgb(0xadd6ff)),
             selection_foreground: None,
+            diff_inserted_text_background: c(rgba(0x9ccc2c40)),
+            diff_removed_text_background: c(rgba(0xff000033)),
+            diff_inserted_text_border: None,
+            diff_removed_text_border: None,
+            diff_inserted_line_background: c(rgba(0x9bb95533)),
+            diff_removed_line_background: c(rgba(0xff000033)),
+            diff_gutter_inserted_line_background: c(rgba(0x9bb95533)),
+            diff_gutter_removed_line_background: c(rgba(0xff000033)),
+            diff_diagonal_fill: c(rgba(0x22222233)),
             inactive_selection_background: c(rgb(0xe5ebf1)),
             cursor: c(rgb(0x000000)),
             gutter_background: c(rgb(0xfffffe)),
@@ -498,6 +537,15 @@ impl EditorColors {
             line_highlight_border: Some(c(rgb(0xf38518))),
             selection_background: c(rgb(0xf3f518)),
             selection_foreground: Some(c(rgb(0x000000))),
+            diff_inserted_text_background: c(rgba(0x00000000)),
+            diff_removed_text_background: c(rgba(0x00000000)),
+            diff_inserted_text_border: Some(c(rgba(0x33ff2eff))),
+            diff_removed_text_border: Some(c(rgba(0xff008fff))),
+            diff_inserted_line_background: c(rgba(0x00000000)),
+            diff_removed_line_background: c(rgba(0x00000000)),
+            diff_gutter_inserted_line_background: c(rgba(0x00000000)),
+            diff_gutter_removed_line_background: c(rgba(0x00000000)),
+            diff_diagonal_fill: c(rgba(0xcccccc33)),
             inactive_selection_background: c(rgba(0xf3f518b3)),
             cursor: c(rgb(0xffffff)),
             gutter_background: c(rgb(0x000000)),
@@ -627,6 +675,15 @@ impl EditorColors {
             line_highlight_border: Some(c(rgb(0x0f4a85))),
             selection_background: c(rgb(0x0f4a85)),
             selection_foreground: Some(c(rgb(0xffffff))),
+            diff_inserted_text_background: c(rgba(0x00000000)),
+            diff_removed_text_background: c(rgba(0x00000000)),
+            diff_inserted_text_border: Some(c(rgba(0x374e06ff))),
+            diff_removed_text_border: Some(c(rgba(0xad0707ff))),
+            diff_inserted_line_background: c(rgba(0x00000000)),
+            diff_removed_line_background: c(rgba(0x00000000)),
+            diff_gutter_inserted_line_background: c(rgba(0x00000000)),
+            diff_gutter_removed_line_background: c(rgba(0x00000000)),
+            diff_diagonal_fill: c(rgba(0x22222233)),
             inactive_selection_background: c(rgba(0x0f4a8580)),
             cursor: c(rgb(0x0f4a85)),
             gutter_background: c(rgb(0xffffff)),
@@ -751,6 +808,34 @@ impl EditorColors {
             "editorLineNumber.activeForeground",
         );
         set(&mut self.selection_background, "editor.selectionBackground");
+        set(
+            &mut self.diff_inserted_text_background,
+            "diffEditor.insertedTextBackground",
+        );
+        set(
+            &mut self.diff_removed_text_background,
+            "diffEditor.removedTextBackground",
+        );
+        if let Some(color) = get("diffEditor.insertedTextBorder") {
+            self.diff_inserted_text_border = Some(color);
+        }
+        if let Some(color) = get("diffEditor.removedTextBorder") {
+            self.diff_removed_text_border = Some(color);
+        }
+        set(
+            &mut self.diff_inserted_line_background,
+            "diffEditor.insertedLineBackground",
+        );
+        set(
+            &mut self.diff_removed_line_background,
+            "diffEditor.removedLineBackground",
+        );
+        // The gutter defaults to the line backgrounds.
+        self.diff_gutter_inserted_line_background = get("diffEditorGutter.insertedLineBackground")
+            .unwrap_or(self.diff_inserted_line_background);
+        self.diff_gutter_removed_line_background = get("diffEditorGutter.removedLineBackground")
+            .unwrap_or(self.diff_removed_line_background);
+        set(&mut self.diff_diagonal_fill, "diffEditor.diagonalFill");
         if let Some(color) = get("editor.selectionForeground") {
             self.selection_foreground = Some(color);
         }

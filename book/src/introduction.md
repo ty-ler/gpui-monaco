@@ -35,4 +35,4 @@ Behavior follows Monaco closely. Large parts of Monaco's own unit tests are port
 
 ## Not there yet
 
-The diff editor, collaborative editing (CRDT) and running in a browser: the crates compile for `wasm32-unknown-unknown`, but there's no web runner yet. Each one has a `post-mvp` issue in the [issue tracker](https://github.com/ty-ler/gpui-monaco/issues?q=label%3Apost-mvp).
+The diff editor's inline view and extras, collaborative editing (CRDT) and running in a browser: the crates compile for `wasm32-unknown-unknown`, but there's no web runner yet. Each one has a `post-mvp` issue in the [issue tracker](https://github.com/ty-ler/gpui-monaco/issues?q=label%3Apost-mvp).
