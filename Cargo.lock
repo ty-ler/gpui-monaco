@@ -7712,6 +7712,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "web"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "gpui-monaco",
+ "gpui-monaco-languages",
+ "gpui-pre",
+ "gpui-pre-platform",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "web-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"

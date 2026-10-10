@@ -1,0 +1,23 @@
+#!/bin/sh
+# The archiver for wasm32-unknown-unknown builds (set in .cargo/config.toml).
+# macOS's `ar` silently drops WebAssembly objects, leaving tree-sitter's C code
+# out of the link, so use an LLVM `ar`: $WASM_AR, else the active toolchain's
+# (`rustup component add llvm-tools`), else `llvm-ar` on the PATH, else the
+# system `ar` (enough for `cargo check`).
+if [ -n "${WASM_AR:-}" ]; then
+    exec "$WASM_AR" "$@"
+fi
+rustc="${RUSTC:-rustc}"
+sysroot="$("$rustc" --print sysroot 2>/dev/null)"
+host="$("$rustc" -vV 2>/dev/null | sed -n 's/^host: //p')"
+tool="$sysroot/lib/rustlib/$host/bin/llvm-ar"
+if [ -x "$tool" ]; then
+    exec "$tool" "$@"
+fi
+if command -v llvm-ar >/dev/null 2>&1; then
+    exec llvm-ar "$@"
+fi
+# No LLVM ar: the system ar still works for `cargo check`, which doesn't link,
+# but a linked wasm would miss the C code.
+echo "script/wasm/ar: no llvm-ar (rustup component add llvm-tools); using ar, which can't link wasm" >&2
+exec ar "$@"

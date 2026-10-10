@@ -59,6 +59,12 @@ from the `tree-sitter-language` crate) and a few inline ctype functions. It need
 that targets wasm32; Apple's does, and you can choose another with `WASM_CLANG`. Use
 `web_time::Instant`, not `std::time::Instant`, which panics in browsers.
 
+Linking (a real build, not `cargo check`) also archives those objects through
+`script/wasm/ar`, because macOS's `ar` silently drops WebAssembly objects. It uses the
+toolchain's `llvm-ar` (`rustup component add llvm-tools`), `llvm-ar` on the PATH, or
+`WASM_AR`. [`examples/web`](examples/web/README.md) runs the editor in a browser through
+gpui's web platform, which needs a nightly toolchain.
+
 ## Releasing
 
 The five library crates publish to crates.io; the examples don't (`publish = false`).
