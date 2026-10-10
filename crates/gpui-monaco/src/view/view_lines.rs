@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use text::{Patch, PointUtf16, Rope, Version};
 
-use super::line_breaks::{LineBreakData, WrapClassifier, WrappingIndent, compute_line_breaks};
+use super::line_breaks::{
+    LineBreakData, MeasureChar, WrapClassifier, WrappingIndent, compute_measured_line_breaks,
+};
 use super::prefix_sum::PrefixSum;
 
 /// How [`ViewLines`] soft-wraps model rows.
@@ -26,6 +28,26 @@ pub struct WrapSettings {
     /// Don't break between CJK characters (Monaco `editor.wordBreak:
     /// keepAll`).
     pub keep_all: bool,
+    /// Measured character widths (Monaco `wrappingStrategy: advanced`);
+    /// `None` counts monospace columns.
+    pub measure: Option<MeasuredWidths>,
+}
+
+/// Shared character widths for [`WrapSettings::measure`]. Equal when they
+/// are the same widths.
+#[derive(Clone)]
+pub struct MeasuredWidths(pub Arc<dyn MeasureChar>);
+
+impl PartialEq for MeasuredWidths {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for MeasuredWidths {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MeasuredWidths")
+    }
 }
 
 /// Hidden row ranges sorted, with empty ones dropped and overlapping or
@@ -119,13 +141,14 @@ impl ViewLines {
 
     fn compute_row(&self, row: u32) -> Option<Arc<LineBreakData>> {
         let wrap = self.wrap.as_ref()?;
-        compute_line_breaks(
+        compute_measured_line_breaks(
             &self.classifier,
             &self.rope.line(row),
             wrap.tab_size,
             Some(wrap.column),
             wrap.indent,
             wrap.keep_all,
+            wrap.measure.as_ref().map(|m| &*m.0),
         )
         .map(Arc::new)
     }
@@ -158,13 +181,14 @@ impl ViewLines {
                 let mut breaks = Vec::with_capacity(self.rope.line_count() as usize);
                 self.rope.for_each_line(0..self.rope.len(), |_, line| {
                     breaks.push(
-                        compute_line_breaks(
+                        compute_measured_line_breaks(
                             &self.classifier,
                             line,
                             wrap.tab_size,
                             Some(wrap.column),
                             wrap.indent,
                             wrap.keep_all,
+                            wrap.measure.as_ref().map(|m| &*m.0),
                         )
                         .map(Arc::new),
                     );
@@ -403,6 +427,7 @@ mod tests {
             tab_size: 4,
             indent: WrappingIndent::Same,
             keep_all: false,
+            measure: None,
         })
     }
 

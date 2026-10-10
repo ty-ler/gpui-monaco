@@ -33,6 +33,7 @@ editor.update(cx, |editor, cx| {
 | `read_only` | `readOnly` | |
 | `word_separators` | `wordSeparators` | used by word movement and whole-word find |
 | `word_wrap`, `word_wrap_column`, `wrapping_indent` | `wordWrap`, `wordWrapColumn`, `wrappingIndent` | `Off`, `On`, `WordWrapColumn`, `Bounded` |
+| `wrapping_strategy` | `wrappingStrategy` | `Simple` counts monospace columns; `Advanced` measures characters, for proportional fonts |
 | `folding`, `show_folding_controls` | `folding`, `showFoldingControls` | |
 | `scroll_beyond_last_line`, `mouse_wheel_scroll_sensitivity` | same names | |
 | `vertical_scrollbar_size`, `horizontal_scrollbar_size` | `scrollbar.verticalScrollbarSize`, … | |

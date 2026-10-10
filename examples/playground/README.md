@@ -45,6 +45,7 @@ Demo providers are registered by default:
 | `PLAYGROUND_LSP="rust-analyzer"` | Start a language server for `PLAYGROUND_FILE`, rooted at the nearest project directory, instead of the demo providers |
 | `PLAYGROUND_FONT="JetBrains Mono"` | Use another font family |
 | `PLAYGROUND_LIGATURES=1` | Turn font ligatures on |
+| `PLAYGROUND_WRAPPING=advanced` | Wrap by measured widths (for proportional fonts) |
 | `PLAYGROUND_ZOOM=2` | Start at a font zoom level (Cmd+wheel zooms too) |
 | `PLAYGROUND_DEBUG=1` | Log selection changes |
 | `PLAYGROUND_SCREENSHOT=out.png` | Save a screenshot and exit (needs `--features screenshot`) |
