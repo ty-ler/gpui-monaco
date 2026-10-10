@@ -518,9 +518,16 @@ impl Buffer {
 
     /// Drops undo and redo history (Monaco `setValue` does this). Versions
     /// and patches are kept so anchors and consumers stay valid.
+    /// An open transaction keeps nesting, but forgets the edits it recorded
+    /// so far, so closing it adds no undo step for them.
     pub fn clear_history(&mut self) {
-        self.history.undo.clear();
-        self.history.redo.clear();
+        let history = &mut self.history;
+        history.undo.clear();
+        history.redo.clear();
+        if let Some(open) = history.open.as_mut() {
+            open.batches.clear();
+            open.before = None;
+        }
     }
 
     /// The id of the most recent undo step, if any.
@@ -781,6 +788,27 @@ mod tests {
         buffer.undo();
         buffer.edit([(0..0, "z")]).unwrap();
         assert!(!buffer.can_redo());
+    }
+
+    #[test]
+    fn clear_history_inside_a_transaction() {
+        let mut buffer = Buffer::new("x");
+        buffer.start_transaction(None);
+        buffer.edit([(0..0, "1")]).unwrap();
+        buffer.clear_history();
+        buffer.edit([(2..2, "2")]).unwrap();
+        assert!(buffer.end_transaction(None).is_some());
+        // Only the edit after clearing is undoable.
+        buffer.undo().unwrap();
+        assert_eq!(buffer.rope(), "1x");
+        assert!(!buffer.can_undo());
+
+        // Clearing with nothing after it leaves no undo step.
+        buffer.start_transaction(None);
+        buffer.edit([(0..0, "3")]).unwrap();
+        buffer.clear_history();
+        assert_eq!(buffer.end_transaction(None), None);
+        assert!(!buffer.can_undo());
     }
 
     proptest! {

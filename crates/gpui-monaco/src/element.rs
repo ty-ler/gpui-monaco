@@ -518,6 +518,8 @@ pub(crate) struct EditorLayout {
     pub metrics: TextMetrics,
     pub scroll_top: Pixels,
     pub scroll_left: Pixels,
+    /// The scroll range: `scroll_top` and `scroll_left` stay within it.
+    pub max_scroll: gpui::Point<Pixels>,
     pub lines: Vec<LineLayout>,
     pub fold_controls: Vec<FoldControl>,
     pub zones: ZoneLayout,
@@ -686,23 +688,13 @@ impl Element for EditorElement {
                         .x
                         .min(bounds.right() - measured.width)
                         .max(bounds.left());
-                    let above = anchor.y - measured.height;
-                    let below = anchor.y + line_height;
-                    let mut y = None;
-                    for preference in &preference {
-                        let candidate = match preference {
-                            ContentWidgetPreference::Above => above,
-                            ContentWidgetPreference::Below => below,
-                            ContentWidgetPreference::Exact => anchor.y,
-                        };
-                        if candidate >= bounds.top()
-                            && candidate + measured.height <= bounds.bottom()
-                        {
-                            y = Some(candidate);
-                            break;
-                        }
-                    }
-                    let Some(y) = y.or_else(|| preference.first().map(|_| below)) else {
+                    let Some(y) = crate::widgets::place_content_widget(
+                        &preference,
+                        anchor.y,
+                        line_height,
+                        measured.height,
+                        bounds.top()..bounds.bottom(),
+                    ) else {
                         continue;
                     };
                     element.prepaint_at(point(x, y), window, cx);
@@ -1168,6 +1160,7 @@ fn prepaint_editor(
         metrics: metrics.clone(),
         scroll_top,
         scroll_left,
+        max_scroll: point(max_scroll_left, max_scroll_top),
         lines,
         fold_controls,
         zones: zones.clone(),

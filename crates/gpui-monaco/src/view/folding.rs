@@ -385,6 +385,19 @@ mod tests {
     }
 
     #[test]
+    fn collapsed_regions_shrunk_to_one_row_are_pruned() {
+        let mut buffer = text::Buffer::new("a\n  b\n  c\nd");
+        let mut state = FoldState::default();
+        state.collapse(&buffer, 0, 2);
+        assert_eq!(state.collapsed_rows(&buffer), vec![(0, 2)]);
+        // Delete the folded lines: the region is a single row now.
+        buffer.edit([(1..9, "")]).unwrap();
+        assert!(state.collapsed_rows(&buffer).is_empty());
+        state.prune(&buffer);
+        assert!(!state.has_collapsed());
+    }
+
+    #[test]
     fn enclosing_lookups_match_brute_force() {
         // Deterministic pseudo-random indentation.
         let mut seed = 7u64;
@@ -542,6 +555,16 @@ impl FoldState {
         let start = buffer.anchor_before(buffer.point_to_offset(text::Point::new(start_row, 0)));
         let end = buffer.anchor_after(buffer.point_to_offset(text::Point::new(end_row, u32::MAX)));
         self.collapsed.push(start..end);
+    }
+
+    /// Forgets collapsed regions that edits shrank to a single row (Monaco
+    /// drops folding regions whose range became empty).
+    pub fn prune(&mut self, buffer: &text::Buffer) {
+        self.collapsed.retain(|range| {
+            let start = buffer.offset_to_point(buffer.resolve(&range.start)).row;
+            let end = buffer.offset_to_point(buffer.resolve(&range.end)).row;
+            end > start
+        });
     }
 
     /// Expands collapsed regions starting at `start_row`.

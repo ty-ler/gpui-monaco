@@ -50,6 +50,23 @@ All notable changes to this project are documented here. The format follows [Kee
 - `TextModel::language_at` (Monaco `getLanguageIdAtPosition`), and the `comments` editor option.
 - Language configurations accept `lineComment` as `{ "comment", "noIndent" }`.
 
+### Fixed
+
+These are the small correctness follow-ups from #76:
+
+- **Content widget placement:** when no preference fits, a content widget falls back to its first preference, as in Monaco, instead of always going below.
+- **Line endings:** `TextModel::set_line_ending` takes `cx` and emits the new `TextModelEvent::LineEndingChanged` (breaking).
+- **Scrolling:** `set_scroll_position` and wheel scrolling clamp at the maximum scroll right away.
+- **Folding:** collapsed folds that edits shrink to one line are dropped.
+- **Markdown:** inline code uses the code font, and web and mail links open on click.
+- **Undo history:** `text::Buffer::clear_history` also drops the edits of an open transaction.
+- **Parameter hints:** they re-query on cursor moves and close on clicks, as in Monaco's `ParameterHintsModel`.
+- **Language configuration regexes:**
+  - They translate more JavaScript syntax: `[^]`, `[]`, a literal `[` in a class, and Annex B hyphens such as `[\w-.]`.
+  - They ignore `g`, `y`, `d`, `u` and `v` flags.
+  - `Pattern::error` and `LanguageConfiguration::patterns` report regexes that don't compile.
+  - The bundled HTML `onEnterRules` and CSS `wordPattern` never compiled before and now work.
+
 ## [0.1.0] - 2026-10-09
 
 This is the first release: a Monaco-like code editor component for GPUI. It is distributed through git and pinned to gpui at zed rev `f16f9652ec57bf806e65b2a0d51bb92a63644914`. See the [guide](book/src/getting-started.md) for setup.

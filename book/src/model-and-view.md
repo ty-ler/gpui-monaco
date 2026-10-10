@@ -33,7 +33,7 @@ Other common calls:
 | `model.text()` | `getValue()` |
 | `model.set_value(text, cx)` (replaces the text and clears undo history) | `setValue` |
 | `model.set_language(Some("json".into()), cx)` | `setModelLanguage` |
-| `model.line_ending()` / `set_line_ending` | `getEOL` / `setEOL` |
+| `model.line_ending()` / `set_line_ending(eol, cx)` (emits `LineEndingChanged`) | `getEOL` / `setEOL` |
 | `model.undo(None, cx)` / `redo(None, cx)` / `push_stack_element()` | `undo` / `redo` / `pushStackElement` |
 | `model.snapshot()` | a cheap, immutable copy of the text for background work |
 

@@ -244,6 +244,23 @@ fn signature_help_opens_on_trigger_and_closes(cx: &mut TestAppContext) {
     assert!(!editor.read_with(cx, |e, _| e.is_signature_help_visible()));
 }
 
+#[gpui::test]
+fn signature_help_follows_cursor_moves(cx: &mut TestAppContext) {
+    cx.update(|cx| register_signature_help_provider(cx, LanguageSelector::All, Signatures));
+    let (editor, cx) = setup("", cx);
+    cx.simulate_input("add(1, 2");
+    cx.run_until_parked();
+    assert!(editor.read_with(cx, |e, _| e.is_signature_help_visible()));
+    // Moving within the call re-queries and keeps it open.
+    cx.simulate_keystrokes("left left");
+    cx.run_until_parked();
+    assert!(editor.read_with(cx, |e, _| e.is_signature_help_visible()));
+    // Moving out of the call re-queries, and the provider has nothing.
+    cx.simulate_keystrokes("home");
+    cx.run_until_parked();
+    assert!(!editor.read_with(cx, |e, _| e.is_signature_help_visible()));
+}
+
 struct Completions;
 impl CompletionProvider for Completions {
     fn trigger_characters(&self) -> Vec<char> {

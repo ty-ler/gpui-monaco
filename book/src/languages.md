@@ -55,6 +55,10 @@ The `language-configuration.json` keys behave as they do in VS Code:
 
 Patterns use the `fancy-regex` crate, so VS Code's lookaheads and backreferences work.
 
+- **JavaScript syntax:** syntax that Rust regexes read differently is translated: `[^]`, `[]`, a `[` inside a class, and hyphens next to `\w`-style escapes.
+- **Flags:** `i`, `m` and `s` are honored.
+- **Errors:** a pattern that still doesn't compile never matches. `Pattern::error()` says why, and `config.patterns()` lists every regex so you can check yours in a test.
+
 ## Adding a language
 
 ```rust,ignore
