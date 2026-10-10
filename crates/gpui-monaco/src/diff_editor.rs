@@ -1324,6 +1324,17 @@ impl DiffEditor {
             .collect()
     }
 
+    /// The gutter menu items' vertical spans in the modified editor, for
+    /// tests.
+    #[doc(hidden)]
+    pub fn gutter_spans_for_tests(&self, cx: &App) -> Vec<(Pixels, Pixels)> {
+        let editor = self.modified.read(cx);
+        self.gutter_items(cx)
+            .iter()
+            .filter_map(|item| editor.rows_y_span(item.lines.to_rows()))
+            .collect()
+    }
+
     /// The moved block under the last moved cursor, for tests.
     #[doc(hidden)]
     pub fn active_move_for_tests(&self) -> Option<usize> {
@@ -2658,10 +2669,9 @@ impl DiffEditor {
         let top = |editor: &Entity<CodeEditor>, lines: LineRange| {
             let editor = editor.read(cx);
             let start = lines.to_rows().start;
-            let layout_scroll = editor.layout.as_ref()?.scroll_top;
             editor
                 .rows_y_span(start..start + 1)
-                .map(|(top, _)| top + layout_scroll)
+                .map(|(top, _)| top + editor.scroll_position().y)
         };
         match (
             top(&self.original, m.line_range_mapping.original),
@@ -2744,18 +2754,21 @@ impl DiffEditor {
 }
 
 impl CodeEditor {
-    /// The vertical span of model `rows` from the editor's top, as of the
-    /// last layout (Monaco `getTopForLineNumber`/`getBottomForLineNumber`).
-    /// Empty `rows` span the gap before their row, with its view zones.
+    /// The vertical span of model `rows` from the editor's top (Monaco
+    /// `getTopForLineNumber`/`getBottomForLineNumber`). Lines are placed as
+    /// of the last layout, scrolled by the current position, so hosts drawn
+    /// before the editor's next frame line up with it. Empty `rows` span the
+    /// gap before their row, with its view zones.
     pub(crate) fn rows_y_span(&self, rows: Range<u32>) -> Option<(Pixels, Pixels)> {
         let layout = self.layout.as_ref()?;
         let line_height = layout.metrics.line_height;
         let zones = &layout.zones;
-        let y = |line: u32| zones.line_y(line, line_height) - layout.scroll_top;
+        let scroll_top = self.scroll_position().y;
+        let y = |line: u32| zones.line_y(line, line_height) - scroll_top;
         let first = self.view_lines.first_view_line_of_row(rows.start);
         if rows.is_empty() {
             let top = if first == 0 {
-                -layout.scroll_top
+                -scroll_top
             } else {
                 y(first - 1) + zones.height(first - 1, line_height)
             };
