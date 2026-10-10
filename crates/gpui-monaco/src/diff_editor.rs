@@ -486,6 +486,7 @@ struct MoveCaption {
     text: SharedString,
     color: Hsla,
     checked_background: Hsla,
+    colors: EditorColors,
     /// Its block is being compared (the toggle is checked).
     comparing: bool,
     diff: WeakEntity<DiffEditor>,
@@ -508,6 +509,7 @@ impl Render for MoveCaption {
             .child(
                 div()
                     .id("compare-move")
+                    .tooltip(crate::tooltip::tooltip("Compare", &self.colors))
                     .px_1()
                     .rounded(px(3.))
                     .cursor_pointer()
@@ -545,7 +547,7 @@ fn diff_mappings(diff: &LinesDiff) -> Vec<LineRangeMapping> {
 struct RevertArrow {
     diff: WeakEntity<DiffEditor>,
     revert: GutterRevert,
-    color: Hsla,
+    colors: EditorColors,
 }
 
 impl RevertArrow {
@@ -562,7 +564,8 @@ impl RevertArrow {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .text_color(self.color)
+            .text_color(self.colors.foreground)
+            .tooltip(crate::tooltip::tooltip(label, &self.colors))
             .role(gpui::Role::Button)
             .aria_label(SharedString::from(label))
             .on_click(move |_, _, cx| {
@@ -784,10 +787,15 @@ impl Render for UnchangedBar {
             .text_color(colors.diff_unchanged_region_foreground)
             .text_size(px(13.))
             .child(
-                edge("unchanged-top").on_mouse_down(MouseButton::Left, move |e, _, cx| {
-                    cx.stop_propagation();
-                    top(cx, e.position.y, true)
-                }),
+                edge("unchanged-top")
+                    .tooltip(crate::tooltip::tooltip(
+                        "Click or drag to show more above",
+                        &colors,
+                    ))
+                    .on_mouse_down(MouseButton::Left, move |e, _, cx| {
+                        cx.stop_propagation();
+                        top(cx, e.position.y, true)
+                    }),
             )
             .child(
                 div()
@@ -800,6 +808,7 @@ impl Render for UnchangedBar {
                         div().w(gutter).flex_none().flex().justify_center().child(
                             div()
                                 .id("unchanged-unfold")
+                                .tooltip(crate::tooltip::tooltip("Show Unchanged Region", &colors))
                                 .cursor_pointer()
                                 .px_1()
                                 .hover(|style| style.text_color(colors.focus_border))
@@ -810,6 +819,7 @@ impl Render for UnchangedBar {
                     .child(
                         div()
                             .id("unchanged-label")
+                            .tooltip(crate::tooltip::tooltip("Double click to unfold", &colors))
                             .font_family(font_family)
                             .whitespace_nowrap()
                             .on_click(move |event, _, cx| {
@@ -821,10 +831,15 @@ impl Render for UnchangedBar {
                     ),
             )
             .child(
-                edge("unchanged-bottom").on_mouse_down(MouseButton::Left, move |e, _, cx| {
-                    cx.stop_propagation();
-                    bottom(cx, e.position.y, false)
-                }),
+                edge("unchanged-bottom")
+                    .tooltip(crate::tooltip::tooltip(
+                        "Click or drag to show more below",
+                        &colors,
+                    ))
+                    .on_mouse_down(MouseButton::Left, move |e, _, cx| {
+                        cx.stop_propagation();
+                        bottom(cx, e.position.y, false)
+                    }),
             )
             // Monaco's inset shadows at the top and bottom.
             .border_t_1()
@@ -1518,7 +1533,7 @@ impl DiffEditor {
                     arrow: RevertArrow {
                         diff: this.clone(),
                         revert: GutterRevert::Block(change.line_range_mapping()),
-                        color: colors.foreground,
+                        colors: colors.clone(),
                     },
                     editor: self.modified.downgrade(),
                 });
@@ -1586,6 +1601,7 @@ impl DiffEditor {
                     text: text.into(),
                     color,
                     checked_background,
+                    colors: colors.clone(),
                     comparing,
                     diff: diff_editor,
                     index: move_index,
@@ -2213,7 +2229,7 @@ impl DiffEditor {
         if !self.shows_margin_revert_arrows(cx) {
             return;
         }
-        let color = self.modified.read(cx).colors().foreground;
+        let colors = self.modified.read(cx).colors().clone();
         let this = cx.entity().downgrade();
         let selection_line = self
             .modified
@@ -2239,7 +2255,7 @@ impl DiffEditor {
             let view = cx.new(|_| RevertArrow {
                 diff: this.clone(),
                 revert,
-                color,
+                colors: colors.clone(),
             });
             ids.push(self.modified.update(cx, |editor, cx| {
                 editor.add_glyph_margin_widget(
@@ -2460,6 +2476,11 @@ impl DiffEditor {
             }
             let button_top = gutter_button_top(top, bottom, viewport, px(GUTTER_BUTTON_HEIGHT));
             let visible = item.show_always || hovered;
+            // Monaco's hunk toolbar titles.
+            let title: SharedString = match item.revert {
+                GutterRevert::Block(_) => "Revert Block".into(),
+                GutterRevert::Selection(_) => "Revert Selection".into(),
+            };
             let revert = item.revert;
             items.push(
                 div()
@@ -2480,6 +2501,7 @@ impl DiffEditor {
                         .child(
                             div()
                                 .id(("diff-revert", ix))
+                                .tooltip(crate::tooltip::tooltip(title.clone(), &colors))
                                 .absolute()
                                 .top(button_top - top)
                                 .left(px((GUTTER_WIDTH - 22.) / 2.))

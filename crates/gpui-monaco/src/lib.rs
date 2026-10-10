@@ -41,6 +41,7 @@ mod find;
 mod find_widget;
 mod folding_commands;
 mod font_zoom;
+mod tooltip;
 pub use font_zoom::{editor_zoom_level, set_editor_zoom_level};
 mod format;
 mod goto;
