@@ -681,6 +681,24 @@ impl CodeEditor {
         id
     }
 
+    /// Adds a view in the glyph margin beside a line (Monaco
+    /// `addGlyphMarginWidget`). Remove it with [`CodeEditor::remove_widget`].
+    pub fn add_glyph_margin_widget(
+        &mut self,
+        widget: crate::widgets::GlyphMarginWidget,
+        cx: &mut Context<Self>,
+    ) -> WidgetId {
+        let id = self.widgets.next_id();
+        let anchor = self.anchor_for(PointUtf16::new(widget.row, 0), cx);
+        self.widgets.glyphs.push(crate::widgets::GlyphWidgetState {
+            id,
+            anchor,
+            view: widget.view,
+        });
+        cx.notify();
+        id
+    }
+
     /// Moves a content widget (Monaco `layoutContentWidget`).
     pub fn set_content_widget_position(
         &mut self,

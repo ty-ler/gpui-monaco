@@ -67,8 +67,20 @@ editor.update(cx, |editor, cx| {
 });
 ```
 
+## Glyph margin widgets
+
+A glyph margin widget (Monaco `IGlyphMarginWidget`) sits in the glyph margin beside a line, such as a breakpoint or a revert button. It follows its line through edits, gets the margin's width and the line's height, and receives its own clicks.
+
+```rust,ignore
+use gpui_monaco::GlyphMarginWidget;
+
+editor.update(cx, |editor, cx| {
+    editor.add_glyph_margin_widget(GlyphMarginWidget { row: 41, view: breakpoint.into() }, cx)
+});
+```
+
 ## Removing widgets and their state
 
-`editor.remove_widget(id, cx)` removes any of the three kinds.
+`editor.remove_widget(id, cx)` removes any of the four kinds.
 
 Widget views are ordinary entities. Update them as usual (`cx.notify()`), and the editor lays them out on its next frame. Views are laid out after the editor's own prepaint, so a widget can read editor state while it renders.

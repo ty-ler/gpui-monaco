@@ -715,6 +715,15 @@ fn main() {
                                 options.show_moves = true;
                                 diff.update_options(options, cx);
                             }
+                            // `PLAYGROUND_DIFF_MARGIN_ARROWS=1` shows margin
+                            // revert arrows instead of the gutter menu.
+                            if std::env::var_os("PLAYGROUND_DIFF_MARGIN_ARROWS")
+                                .is_some_and(|v| !v.is_empty())
+                            {
+                                let mut options = diff.options().clone();
+                                options.render_gutter_menu = false;
+                                diff.update_options(options, cx);
+                            }
                             diff
                         });
                         // Typing goes to the modified side.

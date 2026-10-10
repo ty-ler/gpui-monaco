@@ -17,6 +17,8 @@ pub enum EmbeddedKind {
     ContentWidget,
     /// An overlay widget.
     OverlayWidget,
+    /// A glyph margin widget.
+    GlyphMarginWidget,
 }
 
 /// The part of the editor under the mouse (Monaco `MouseTargetType`).
@@ -105,6 +107,7 @@ impl CodeEditor {
                 EmbeddedKind::ContentWidget => MouseTargetKind::ContentWidget,
                 EmbeddedKind::OverlayWidget => MouseTargetKind::OverlayWidget,
                 EmbeddedKind::ViewZone => MouseTargetKind::ContentViewZone,
+                EmbeddedKind::GlyphMarginWidget => MouseTargetKind::GutterGlyphMargin,
             };
             return target(kind, None);
         }

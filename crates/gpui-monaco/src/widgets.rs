@@ -106,6 +106,25 @@ pub struct OverlayWidget {
     pub view: AnyView,
 }
 
+/// A host view in the glyph margin beside a line (Monaco
+/// `IGlyphMarginWidget`), such as a breakpoint or a revert button.
+#[derive(Clone)]
+pub struct GlyphMarginWidget {
+    /// The 0-based line; it follows edits.
+    pub row: u32,
+    /// The view to render, laid out at the glyph margin's width and the
+    /// line's height.
+    pub view: AnyView,
+}
+
+#[derive(Clone)]
+pub(crate) struct GlyphWidgetState {
+    pub id: WidgetId,
+    /// The line's start.
+    pub anchor: Anchor,
+    pub view: AnyView,
+}
+
 /// Stored view zone: `after_line` tracked with an anchor.
 #[derive(Clone)]
 pub(crate) struct ZoneState {
@@ -143,6 +162,7 @@ pub(crate) struct Widgets {
     pub zones: Vec<ZoneState>,
     pub content: Vec<ContentWidgetState>,
     pub overlays: Vec<OverlayWidgetState>,
+    pub glyphs: Vec<GlyphWidgetState>,
     next_id: u64,
     /// Bumped when zones are added or removed.
     pub zones_generation: u64,
@@ -159,7 +179,8 @@ impl Widgets {
     }
 
     pub fn remove(&mut self, id: WidgetId) -> bool {
-        let before = self.zones.len() + self.content.len() + self.overlays.len();
+        let before =
+            self.zones.len() + self.content.len() + self.overlays.len() + self.glyphs.len();
         let zones = self.zones.len();
         self.zones.retain(|z| z.id != id);
         if self.zones.len() != zones {
@@ -167,7 +188,8 @@ impl Widgets {
         }
         self.content.retain(|w| w.id != id);
         self.overlays.retain(|w| w.id != id);
-        before != self.zones.len() + self.content.len() + self.overlays.len()
+        self.glyphs.retain(|w| w.id != id);
+        before != self.zones.len() + self.content.len() + self.overlays.len() + self.glyphs.len()
     }
 }
 

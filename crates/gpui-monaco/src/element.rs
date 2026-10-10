@@ -1127,6 +1127,24 @@ impl Element for EditorElement {
                     widget_kinds.push(crate::mouse_target::EmbeddedKind::ContentWidget);
                     state.widget_elements.push(element);
                 }
+                Embedded::Glyph {
+                    view,
+                    bounds: glyph,
+                } => {
+                    let mut element = view.into_any_element();
+                    element.layout_as_root(
+                        size(
+                            AvailableSpace::Definite(glyph.size.width),
+                            AvailableSpace::Definite(glyph.size.height),
+                        ),
+                        window,
+                        cx,
+                    );
+                    element.prepaint_at(glyph.origin, window, cx);
+                    widget_bounds.push(glyph);
+                    widget_kinds.push(crate::mouse_target::EmbeddedKind::GlyphMarginWidget);
+                    state.widget_elements.push(element);
+                }
                 Embedded::Overlay { view, position } => {
                     let mut element = view.into_any_element();
                     let measured = element.layout_as_root(
@@ -2912,6 +2930,28 @@ fn prepaint_editor(
     {
         let model = editor.model().clone();
         let buffer = model.read(cx).buffer();
+        // Monaco glyph margin widgets: on their line's first view line.
+        let glyph_width = layout.glyph_margin_width;
+        for widget in &editor.widgets.glyphs {
+            if glyph_width <= px(0.) {
+                break;
+            }
+            let row = buffer.offset_to_point(buffer.resolve(&widget.anchor)).row;
+            let Some(line) = layout
+                .lines
+                .iter()
+                .find(|line| line.row == row && line.columns.start == 0)
+            else {
+                continue;
+            };
+            embedded.push(Embedded::Glyph {
+                view: widget.view.clone(),
+                bounds: Bounds::new(
+                    point(layout.bounds.left(), layout.line_top(line.view_line)),
+                    size(glyph_width, layout.line_height_of(line.view_line)),
+                ),
+            });
+        }
         for widget in &editor.widgets.content {
             let position = buffer.offset_to_point_utf16(buffer.resolve(&widget.anchor));
             let Some(line) = layout.line_for_point(position) else {
@@ -3853,6 +3893,10 @@ pub(crate) enum Embedded {
     Overlay {
         view: gpui::AnyView,
         position: OverlayPosition,
+    },
+    Glyph {
+        view: gpui::AnyView,
+        bounds: Bounds<Pixels>,
     },
 }
 
