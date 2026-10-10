@@ -181,4 +181,6 @@ Lines are indented like the cursor's line unless `adjust_whitespace` is off. `se
 - **Sticky scroll:** pins up to `max_line_count` enclosing scope headers to the top. Clicking a header jumps to it.
   - The scopes come from `default_model`: the document symbols by default (Monaco's outline model), then the folding ranges or indentation.
   - Without symbols, it uses the folding ranges.
+  - "Focus Editor Sticky Scroll" (command palette) puts the keyboard on the sticky lines. Use Up and Down, Enter to go to one, and Escape to return.
+  - Shift over a sticky line shows the end of its scope; Shift+click goes there. The folding controls in the sticky gutter fold the scope.
 - **Scrollbars:** have an overview ruler showing the selection, find matches, diagnostics and decorations.

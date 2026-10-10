@@ -17,6 +17,8 @@ const SINGLE_LINE: Option<&str> = Some("CodeEditor && single_line");
 const SUGGEST: Option<&str> = Some("CodeEditor && suggest_widget_visible");
 /// The quick access input (inside the quick input widget).
 const QUICK_INPUT: Option<&str> = Some("QuickInput > CodeEditor");
+/// The editor while a sticky line has keyboard focus.
+const STICKY_FOCUSED: Option<&str> = Some("CodeEditor && sticky_scroll_focused");
 /// The context menu.
 const CONTEXT_MENU: Option<&str> = Some("EditorContextMenu");
 /// The find widget's inputs.
@@ -543,6 +545,24 @@ actions!(
         QuickOutline,
         /// Opens the command palette (Monaco `editor.action.quickCommand`).
         QuickCommand,
+        /// Turns sticky scroll on or off (Monaco
+        /// `editor.action.toggleStickyScroll`).
+        ToggleStickyScroll,
+        /// Moves keyboard focus to the sticky lines (Monaco
+        /// `editor.action.focusStickyScroll`).
+        FocusStickyScroll,
+        /// The next sticky line (Monaco
+        /// `editor.action.selectNextStickyScrollLine`, Down).
+        SelectNextStickyScrollLine,
+        /// The previous sticky line (Monaco
+        /// `editor.action.selectPreviousStickyScrollLine`, Up).
+        SelectPreviousStickyScrollLine,
+        /// Goes to the focused sticky line (Monaco
+        /// `editor.action.goToFocusedStickyScrollLine`, Enter).
+        GoToFocusedStickyScrollLine,
+        /// Returns focus from the sticky lines to the text (Monaco
+        /// `editor.action.selectEditor`, Escape).
+        SelectEditor,
         /// Shows the context menu at the cursor (Monaco
         /// `editor.action.showContextMenu`, Shift+F10).
         ShowContextMenu,
@@ -768,6 +788,10 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-shift-o", QuickOutline, ctx),
         KeyBinding::new("f1", QuickCommand, ctx),
         KeyBinding::new("shift-f10", ShowContextMenu, ctx),
+        KeyBinding::new("down", SelectNextStickyScrollLine, STICKY_FOCUSED),
+        KeyBinding::new("up", SelectPreviousStickyScrollLine, STICKY_FOCUSED),
+        KeyBinding::new("enter", GoToFocusedStickyScrollLine, STICKY_FOCUSED),
+        KeyBinding::new("escape", SelectEditor, STICKY_FOCUSED),
         KeyBinding::new("up", FindHistoryPrevious, FIND_INPUT),
         KeyBinding::new("down", FindHistoryNext, FIND_INPUT),
         KeyBinding::new("down", ContextMenuNext, CONTEXT_MENU),

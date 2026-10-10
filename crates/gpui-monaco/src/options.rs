@@ -161,6 +161,9 @@ pub struct StickyScrollOptions {
     /// Where the scopes come from (Monaco `stickyScroll.defaultModel`,
     /// default outline).
     pub default_model: StickyScrollModel,
+    /// Scroll the sticky lines with the editor's horizontal scroll (Monaco
+    /// `stickyScroll.scrollWithEditor`, default `true`).
+    pub scroll_with_editor: bool,
 }
 
 impl Default for StickyScrollOptions {
@@ -169,6 +172,7 @@ impl Default for StickyScrollOptions {
             enabled: true,
             max_line_count: 5,
             default_model: StickyScrollModel::Outline,
+            scroll_with_editor: true,
         }
     }
 }

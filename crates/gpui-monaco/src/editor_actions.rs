@@ -111,6 +111,14 @@ fn always(_: &CodeEditor, _: &App) -> bool {
     true
 }
 
+fn sticky_visible(editor: &CodeEditor, _: &App) -> bool {
+    editor.options.sticky_scroll.enabled
+        && editor
+            .layout
+            .as_ref()
+            .is_some_and(|l| !l.sticky_lines.is_empty())
+}
+
 fn writable(editor: &CodeEditor, _: &App) -> bool {
     !editor.options.read_only
 }
@@ -190,6 +198,8 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.wordHighlight.trigger", "code_editor::WordHighlightTrigger", "Trigger Symbol Highlight", always),
     Builtin("editor.action.showHover", "code_editor::ShowHover", "Show or Focus Hover", always),
     Builtin("editor.action.openLink", "code_editor::OpenLink", "Open Link", always),
+    Builtin("editor.action.toggleStickyScroll", "code_editor::ToggleStickyScroll", "Toggle Editor Sticky Scroll", always),
+    Builtin("editor.action.focusStickyScroll", "code_editor::FocusStickyScroll", "Focus Editor Sticky Scroll", sticky_visible),
     Builtin("editor.action.showContextMenu", "code_editor::ShowContextMenu", "Show Editor Context Menu", always),
     Builtin("editor.action.showOrFocusStandaloneColorPicker", "code_editor::ShowOrFocusStandaloneColorPicker", "Show or Focus Standalone Color Picker", always),
     // Editing.

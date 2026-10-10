@@ -466,6 +466,18 @@ pub(crate) struct FoldControl {
     pub collapsed: bool,
 }
 
+/// A sticky scroll line, for hit testing.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StickyLine {
+    /// The last row the scope keeps the header for.
+    pub end_row: u32,
+    /// The row shown (the scope's end with Shift held over it).
+    pub row: u32,
+    pub bounds: Bounds<Pixels>,
+    /// Its folding control.
+    pub fold: Option<FoldControl>,
+}
+
 /// Vertical positions with view zones: zone `i` sits after view line
 /// `after` (-1 for above the first line).
 #[derive(Clone, Debug, Default)]
@@ -553,8 +565,8 @@ pub(crate) struct EditorLayout {
     /// The code action lightbulb, for clicks.
     pub lightbulb: Option<Bounds<Pixels>>,
     pub minimap: Option<MinimapLayout>,
-    /// Sticky scroll lines: (model row, bounds).
-    pub sticky_lines: Vec<(u32, Bounds<Pixels>)>,
+    /// Sticky scroll lines.
+    pub sticky_lines: Vec<StickyLine>,
     pub vertical_scrollbar: Option<ScrollbarLayout>,
     pub horizontal_scrollbar: Option<ScrollbarLayout>,
 }
@@ -633,7 +645,11 @@ pub struct PrepaintState {
     embedded: Vec<Embedded>,
     minimap_blocks: Vec<(Bounds<Pixels>, Hsla)>,
     minimap_slider_visible: bool,
-    sticky: Vec<(u32, Pixels, LineLayout, Option<ShapedLine>)>,
+    sticky: Vec<(usize, Pixels, LineLayout, Option<ShapedLine>)>,
+    /// The keyboard-focused and hovered sticky lines.
+    sticky_focused: Option<usize>,
+    sticky_hovered: Option<usize>,
+    sticky_scroll_with_editor: bool,
     numbers_right: Pixels,
     zone_elements: Vec<gpui::AnyElement>,
     full_width_zone_elements: Vec<gpui::AnyElement>,
@@ -1405,7 +1421,7 @@ fn prepaint_editor(
 
     // Sticky scroll: headers of the fold ranges enclosing the top of the
     // viewport (Monaco `stickyScroll`; see `sticky_model`).
-    let mut sticky_shaped: Vec<(u32, Pixels, LineLayout, Option<ShapedLine>)> = Vec::new();
+    let mut sticky_shaped: Vec<(usize, Pixels, LineLayout, Option<ShapedLine>)> = Vec::new();
     if options.sticky_scroll.enabled && !options.single_line && scroll_top > px(0.) {
         let max = options.sticky_scroll.max_line_count as usize;
         let mut sticky_rows: Vec<(u32, u32)> = Vec::new();
@@ -1429,7 +1445,16 @@ fn prepaint_editor(
                 None => break,
             }
         }
-        for (ix, (row, end_row)) in sticky_rows.iter().enumerate() {
+        let collapsed_rows = editor
+            .folds
+            .collapsed_rows(editor.model().read(cx).buffer());
+        for (ix, (start_row, end_row)) in sticky_rows.iter().enumerate() {
+            // Monaco: Shift over a sticky line shows the scope's end.
+            let row = if editor.sticky.show_end == Some(ix) {
+                &(end_row + 1).min(snapshot.max_point_utf16().row)
+            } else {
+                start_row
+            };
             let mut top = line_height * ix as f32;
             // The last header slides up as its range scrolls out.
             let end_line = view_lines.first_view_line_of_row(end_row + 1).max(1) - 1;
@@ -1472,14 +1497,31 @@ fn prepaint_editor(
                     None,
                 )
             });
-            layout.sticky_lines.push((
-                *row,
-                Bounds::new(
+            let fold = (options.folding && editor.folds.range_starting_at(*start_row).is_some())
+                .then(|| FoldControl {
+                    row: *start_row,
+                    bounds: Bounds::new(
+                        point(
+                            bounds.left()
+                                + glyph_width
+                                + numbers_width
+                                + options.line_decorations_width,
+                            bounds.top() + top,
+                        ),
+                        size(folding_width, line_height),
+                    ),
+                    collapsed: collapsed_rows.iter().any(|(start, _)| start == start_row),
+                });
+            layout.sticky_lines.push(StickyLine {
+                end_row: *end_row,
+                row: *row,
+                bounds: Bounds::new(
                     point(bounds.left(), bounds.top() + top),
                     size(gutter_width + text_width, line_height),
                 ),
-            ));
-            sticky_shaped.push((*row, top, shaped, number));
+                fold,
+            });
+            sticky_shaped.push((ix, top, shaped, number));
         }
     }
     let numbers_right = bounds.left() + glyph_width + numbers_width;
@@ -2029,6 +2071,9 @@ fn prepaint_editor(
         minimap_blocks,
         minimap_slider_visible: options.minimap.always_show_slider || editor.minimap_hovered,
         sticky: sticky_shaped,
+        sticky_focused: editor.sticky.focused,
+        sticky_hovered: editor.sticky.hovered,
+        sticky_scroll_with_editor: options.sticky_scroll.scroll_with_editor,
         numbers_right,
         zone_elements: Vec::new(),
         full_width_zone_elements: Vec::new(),
@@ -2272,10 +2317,37 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                 bounds.origin,
                 size(layout.text_bounds.right() - bounds.left(), height),
             );
+            // Monaco `stickyScroll.scrollWithEditor`: the lines follow the
+            // horizontal scroll.
+            let origin_x = if state.sticky_scroll_with_editor {
+                layout.text_origin_x()
+            } else {
+                layout.text_bounds.left()
+            };
             window.with_content_mask(Some(ContentMask { bounds: area }), |window| {
                 window.paint_quad(fill(area, background));
-                for (_, top, line, number) in &state.sticky {
+                for (ix, top, line, number) in &state.sticky {
                     let y = bounds.top() + *top;
+                    let content = Bounds::new(
+                        point(layout.text_bounds.left(), y),
+                        size(layout.text_bounds.size.width, line_height),
+                    );
+                    // Hovered and keyboard-focused lines (Monaco
+                    // `editorStickyScrollHover.background`, focus outline).
+                    let focused = state.sticky_focused == Some(*ix);
+                    if focused || state.sticky_hovered == Some(*ix) {
+                        window.paint_quad(fill(content, colors.sticky_scroll_hover_background));
+                    }
+                    if focused {
+                        window.paint_quad(quad(
+                            content,
+                            Corners::default(),
+                            gpui::transparent_black(),
+                            Edges::all(px(1.)),
+                            colors.focus_border,
+                            BorderStyle::Solid,
+                        ));
+                    }
                     if let Some(number) = number {
                         number
                             .paint(
@@ -2298,7 +2370,7 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                         |window| {
                             line.shaped
                                 .paint(
-                                    point(layout.text_origin_x() + line.indent_x, y),
+                                    point(origin_x + line.indent_x, y),
                                     line_height,
                                     TextAlign::Left,
                                     None,
@@ -2308,6 +2380,14 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                                 .ok();
                         },
                     );
+                }
+                // Folding controls (Monaco shows them as in the gutter).
+                for sticky in &layout.sticky_lines {
+                    if let Some(control) = &sticky.fold
+                        && (control.collapsed || state.show_fold_controls)
+                    {
+                        paint_chevron(control, colors.line_number, window);
+                    }
                 }
                 let shadow = Bounds::new(
                     point(area.left(), area.bottom() - px(1.)),
