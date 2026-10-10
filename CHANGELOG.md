@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 - **gpui from crates.io snapshots (#188, breaking):** gpui, gpui_platform and sum_tree now come from the `gpui-pre` crates (`=0.3.8`, zed@279fe07), the same snapshot gpui-component pins, instead of zed's git. Apps depend on `gpui = { package = "gpui-pre", version = "=0.3.8" }`, and the `[patch.crates-io]` block is gone. No API changes were needed.
+- **Using gpui-component (#188):** `examples/with-gpui-component` shows gpui-component buttons above an editor in a gpui-component `Root`. A test checks typing, focus and the editor's keybindings there.
 
 ### Added
 - **Accessibility signals (#181):** `DiffEditorEvent::AccessibilitySignal` (`DiffLineInserted`, `DiffLineDeleted`) fires as the accessible diff viewer moves onto changed lines, like Monaco's `playSignal`. Standalone Monaco ignores these; a host can play VS Code's sounds.

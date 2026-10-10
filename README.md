@@ -39,6 +39,7 @@ Diff editor, CRDT collaboration and a browser runner (the crates already compile
 - **Monaco parity:** [`docs/MONACO_PARITY.md`](docs/MONACO_PARITY.md) lists what's implemented and links the issue for each gap.
 - **Performance:** [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) has the large-file budget and how to measure it.
 - **Playground:** [`examples/playground`](examples/playground/README.md) is a demo app with every feature.
+- **With gpui-component:** [`examples/with-gpui-component`](examples/with-gpui-component/src/main.rs) uses the editor in a [gpui-component](https://github.com/longbridge/gpui-component) window.
 
 ## Using it
 

@@ -1,0 +1,26 @@
+[package]
+name = "with-gpui-component"
+description = "gpui-monaco's editor inside a gpui-component layout, in one window."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+# `EXAMPLE_SCREENSHOT=out.png`: render offscreen, save a PNG and quit.
+screenshot = ["gpui/test-support", "gpui_platform/test-support", "dep:image"]
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+# Pins the same gpui-pre snapshot as gpui-monaco.
+gpui-component = "=0.7.1"
+gpui-monaco.workspace = true
+gpui-monaco-languages.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

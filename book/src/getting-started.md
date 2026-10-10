@@ -88,3 +88,20 @@ cargo run -p playground
 ```
 
 Its source is a practical reference for wiring things together.
+
+## With gpui-component
+
+gpui-monaco and [gpui-component](https://github.com/longbridge/gpui-component) build against the same `gpui-pre` snapshot, so an app can use both in one window. Depend on the gpui-component release that pins the same snapshot (0.7.1 for `gpui-pre =0.3.8`), and initialize both:
+
+```rust,ignore
+gpui_component::init(cx);
+gpui_monaco::init(cx);
+// A gpui-component window: its Root wraps your view, which can hold editors.
+cx.open_window(options, |window, cx| {
+    let view = cx.new(|cx| MyView::new(window, cx));
+    cx.new(|cx| gpui_component::Root::new(view, window, cx))
+});
+```
+
+The editor keeps its own keybindings, focus and input inside gpui-component's `Root`. It also keeps its own Monaco theme: set one with `CodeEditor::set_theme` to match gpui-component's light or dark mode. [`examples/with-gpui-component`](https://github.com/ty-ler/gpui-monaco/tree/main/examples/with-gpui-component) is a complete window with gpui-component buttons above an editor.
+
