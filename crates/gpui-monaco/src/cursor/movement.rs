@@ -48,6 +48,11 @@ pub enum MoveCommand {
     Home,
     /// Monaco `cursorEnd`: the end of the line.
     End,
+    /// Monaco `cursorLineStart` (Ctrl+A on macOS): column 0 of the line,
+    /// without [`MoveCommand::Home`]'s toggle.
+    LineStart,
+    /// Monaco `cursorLineEnd` (Ctrl+E on macOS): the end of the line.
+    LineEnd,
     /// Monaco `cursorTop`: the start of the text.
     Top,
     /// Monaco `cursorBottom`: the end of the text.
@@ -101,7 +106,12 @@ pub fn move_cursors(
             per_cursor(cursors, &|c| move_down(config, model, c, select, n))
         }
         MoveCommand::Home => per_cursor(cursors, &|c| move_to_beginning_of_line(model, c, select)),
-        MoveCommand::End => per_cursor(cursors, &|c| move_to_end_of_line(model, c, select, false)),
+        MoveCommand::End | MoveCommand::LineEnd => {
+            per_cursor(cursors, &|c| move_to_end_of_line(model, c, select, false))
+        }
+        MoveCommand::LineStart => per_cursor(cursors, &|c| {
+            c.move_to(select, Position::new(c.position.row, 0), 0)
+        }),
         MoveCommand::Top => per_cursor(cursors, &|c| c.move_to(select, Position::zero(), 0)),
         MoveCommand::Bottom => per_cursor(cursors, &|c| c.move_to(select, max_position(model), 0)),
         MoveCommand::PrevBlankLine => {

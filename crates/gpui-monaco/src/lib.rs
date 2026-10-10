@@ -22,6 +22,7 @@ pub mod markdown;
 mod markers;
 mod model;
 mod multi_cursor;
+mod navigation_history;
 pub mod options;
 pub mod providers;
 pub mod search;

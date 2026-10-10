@@ -145,6 +145,66 @@ actions!(
         /// Makes the previous cursor primary (Monaco
         /// `editor.action.focusPreviousCursor`).
         FocusPreviousCursor,
+        /// Moves to column 1 of the line (Monaco `cursorLineStart`, Ctrl+A on
+        /// macOS).
+        CursorLineStart,
+        /// Selects to column 1 of the line (Monaco `cursorLineStartSelect`).
+        CursorLineStartSelect,
+        /// Moves to the end of the line (Monaco `cursorLineEnd`, Ctrl+E on
+        /// macOS).
+        CursorLineEnd,
+        /// Selects to the end of the line (Monaco `cursorLineEndSelect`).
+        CursorLineEndSelect,
+        /// Extends the column selection one column left (Monaco
+        /// `cursorColumnSelectLeft`, Cmd/Ctrl+Shift+Alt+Left).
+        CursorColumnSelectLeft,
+        /// Extends the column selection one column right (Monaco
+        /// `cursorColumnSelectRight`).
+        CursorColumnSelectRight,
+        /// Extends the column selection one line up (Monaco
+        /// `cursorColumnSelectUp`).
+        CursorColumnSelectUp,
+        /// Extends the column selection one line down (Monaco
+        /// `cursorColumnSelectDown`).
+        CursorColumnSelectDown,
+        /// Extends the column selection one page up (Monaco
+        /// `cursorColumnSelectPageUp`).
+        CursorColumnSelectPageUp,
+        /// Extends the column selection one page down (Monaco
+        /// `cursorColumnSelectPageDown`).
+        CursorColumnSelectPageDown,
+        /// Restores the previous cursor state (Monaco `cursorUndo`, Cmd/Ctrl+U).
+        CursorUndo,
+        /// Reapplies an undone cursor state (Monaco `cursorRedo`).
+        CursorRedo,
+        /// Marks the cursor position as the selection anchor (Monaco
+        /// `editor.action.setSelectionAnchor`, Cmd/Ctrl+K Cmd/Ctrl+B).
+        SetSelectionAnchor,
+        /// Moves the cursor to the selection anchor (Monaco
+        /// `editor.action.goToSelectionAnchor`).
+        GoToSelectionAnchor,
+        /// Selects from the anchor to the cursor (Monaco
+        /// `editor.action.selectFromAnchorToCursor`, Cmd/Ctrl+K Cmd/Ctrl+K).
+        SelectFromAnchorToCursor,
+        /// Removes the selection anchor (Monaco
+        /// `editor.action.cancelSelectionAnchor`, Escape).
+        CancelSelectionAnchor,
+        /// Scrolls up one line without moving the cursor (Monaco
+        /// `scrollLineUp`, Ctrl+Up; Ctrl+PageUp on macOS).
+        ScrollLineUp,
+        /// Scrolls down one line (Monaco `scrollLineDown`).
+        ScrollLineDown,
+        /// Scrolls up one page without moving the cursor (Monaco
+        /// `scrollPageUp`, Cmd+PageUp; Alt+PageUp elsewhere).
+        ScrollPageUp,
+        /// Scrolls down one page (Monaco `scrollPageDown`).
+        ScrollPageDown,
+        /// Scrolls to the top (Monaco `scrollEditorTop`).
+        ScrollEditorTop,
+        /// Scrolls to the bottom (Monaco `scrollEditorBottom`).
+        ScrollEditorBottom,
+        /// Collapses the primary selection (Monaco `cancelSelection`).
+        CancelSelection,
         /// Toggles line comments on the selected lines (Monaco
         /// `editor.action.commentLine`, Cmd+/).
         CommentLine,
@@ -337,6 +397,9 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-f", StartFind, ctx),
         KeyBinding::new("secondary-d", AddSelectionToNextFindMatch, ctx),
         KeyBinding::new("secondary-/", CommentLine, ctx),
+        KeyBinding::new("secondary-u", CursorUndo, ctx),
+        KeyBinding::new("secondary-k secondary-b", SetSelectionAnchor, ctx),
+        KeyBinding::new("secondary-k secondary-k", SelectFromAnchorToCursor, ctx),
         KeyBinding::new("shift-alt-i", InsertCursorAtEndOfEachLineSelected, ctx),
         KeyBinding::new("secondary-k secondary-c", AddCommentLine, ctx),
         KeyBinding::new("secondary-k secondary-u", RemoveCommentLine, ctx),
@@ -376,6 +439,18 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-alt-backspace", DeleteWordPartLeft, ctx),
             KeyBinding::new("ctrl-alt-delete", DeleteWordPartRight, ctx),
             KeyBinding::new("ctrl-o", LineBreakInsert, ctx),
+            KeyBinding::new("ctrl-a", CursorLineStart, ctx),
+            KeyBinding::new("cmd-shift-alt-left", CursorColumnSelectLeft, ctx),
+            KeyBinding::new("cmd-shift-alt-right", CursorColumnSelectRight, ctx),
+            KeyBinding::new("cmd-shift-alt-up", CursorColumnSelectUp, ctx),
+            KeyBinding::new("cmd-shift-alt-down", CursorColumnSelectDown, ctx),
+            KeyBinding::new("cmd-shift-alt-pageup", CursorColumnSelectPageUp, ctx),
+            KeyBinding::new("cmd-shift-alt-pagedown", CursorColumnSelectPageDown, ctx),
+            KeyBinding::new("ctrl-e", CursorLineEnd, ctx),
+            KeyBinding::new("ctrl-pageup", ScrollLineUp, ctx),
+            KeyBinding::new("ctrl-pagedown", ScrollLineDown, ctx),
+            KeyBinding::new("cmd-pageup", ScrollPageUp, ctx),
+            KeyBinding::new("cmd-pagedown", ScrollPageDown, ctx),
             KeyBinding::new("ctrl-shift-alt-left", CursorWordPartLeftSelect, ctx),
             KeyBinding::new("ctrl-alt-right", CursorWordPartRight, ctx),
             KeyBinding::new("ctrl-shift-alt-right", CursorWordPartRightSelect, ctx),
@@ -451,6 +526,22 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("alt-w", ToggleWholeWord, ctx),
             KeyBinding::new("alt-l", ToggleFindInSelection, ctx),
         ]);
+        bindings.extend([
+            KeyBinding::new("ctrl-up", ScrollLineUp, ctx),
+            KeyBinding::new("ctrl-down", ScrollLineDown, ctx),
+            KeyBinding::new("alt-pageup", ScrollPageUp, ctx),
+            KeyBinding::new("alt-pagedown", ScrollPageDown, ctx),
+        ]);
+        if cfg!(target_os = "windows") {
+            bindings.extend([
+                KeyBinding::new("ctrl-shift-alt-left", CursorColumnSelectLeft, ctx),
+                KeyBinding::new("ctrl-shift-alt-right", CursorColumnSelectRight, ctx),
+                KeyBinding::new("ctrl-shift-alt-up", CursorColumnSelectUp, ctx),
+                KeyBinding::new("ctrl-shift-alt-down", CursorColumnSelectDown, ctx),
+                KeyBinding::new("ctrl-shift-alt-pageup", CursorColumnSelectPageUp, ctx),
+                KeyBinding::new("ctrl-shift-alt-pagedown", CursorColumnSelectPageDown, ctx),
+            ]);
+        }
         if cfg!(target_os = "windows") {
             bindings.extend([
                 KeyBinding::new("ctrl-alt-up", AddCursorAbove, ctx),
