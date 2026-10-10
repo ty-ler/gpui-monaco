@@ -20,6 +20,7 @@ use crate::cursor::{
     SingleCursorState,
 };
 use crate::element::{EditorElement, EditorLayout, layout_segment, row_segment};
+use crate::events::{CursorChangeReason, CursorChangeSource, SelectionChange};
 use crate::model::{EditKind, TextModel, TextModelEvent, metadata};
 use crate::options::EditorOptions;
 use crate::theme::{EditorColors, Theme};
@@ -33,8 +34,9 @@ use crate::widgets::{
 /// Events emitted by [`CodeEditor`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum CodeEditorEvent {
-    /// The cursors or selections changed (Monaco `onDidChangeCursorSelection`).
-    SelectionsChanged,
+    /// The cursors or selections changed, and why (Monaco
+    /// `onDidChangeCursorSelection`).
+    SelectionsChanged(SelectionChange),
     /// The scroll position changed (Monaco `onDidScrollChange`).
     ScrollChanged,
     /// The editor gained focus (Monaco `onDidFocusEditorText`).
@@ -155,6 +157,8 @@ pub struct CodeEditor {
     /// IME composition range, in byte offsets.
     marked_range: Option<Range<usize>>,
     pub(crate) prev_edit_kind: Option<EditOperationType>,
+    /// The reason and source the next `SelectionsChanged` reports.
+    pub(crate) next_selection_change: SelectionChange,
     mouse_selection: Option<MouseSelection>,
     scrollbar_drag: Option<ScrollbarDrag>,
     blink_epoch: usize,
@@ -204,6 +208,7 @@ impl CodeEditor {
             cursor_visible: true,
             marked_range: None,
             prev_edit_kind: None,
+            next_selection_change: SelectionChange::default(),
             mouse_selection: None,
             scrollbar_drag: None,
             blink_epoch: 0,
@@ -290,7 +295,10 @@ impl CodeEditor {
         self.prev_edit_kind = None;
         self.record_cursor_change();
         self.refresh_find_matches(cx);
-        cx.emit(CodeEditorEvent::SelectionsChanged);
+        cx.emit(CodeEditorEvent::SelectionsChanged(SelectionChange {
+            reason: CursorChangeReason::ContentFlush,
+            source: CursorChangeSource::Model,
+        }));
         cx.emit(CodeEditorEvent::ScrollChanged);
         cx.notify();
     }
@@ -312,7 +320,10 @@ impl CodeEditor {
         self.cursors.validate(self.snapshot.rope());
         self.scroll_top = state.scroll_top;
         self.scroll_left = state.scroll_left;
-        cx.emit(CodeEditorEvent::SelectionsChanged);
+        cx.emit(CodeEditorEvent::SelectionsChanged(SelectionChange {
+            reason: CursorChangeReason::NotSet,
+            source: CursorChangeSource::RestoreState,
+        }));
         cx.emit(CodeEditorEvent::ScrollChanged);
         cx.notify();
     }
@@ -367,6 +378,7 @@ impl CodeEditor {
         }
         self.cursors.set_selections(selections);
         self.cursors.validate(self.snapshot.rope());
+        self.next_selection_change.source = CursorChangeSource::Api;
         self.cursors_changed(true, cx);
     }
 
@@ -606,6 +618,18 @@ impl CodeEditor {
                     self.occurrences_after_edit(cx);
                 }
                 if !own || matches!(kind, EditKind::Undo | EditKind::Redo) {
+                    self.next_selection_change = SelectionChange {
+                        reason: match kind {
+                            EditKind::Undo => CursorChangeReason::Undo,
+                            EditKind::Redo => CursorChangeReason::Redo,
+                            EditKind::SetValue => CursorChangeReason::ContentFlush,
+                            EditKind::Edit => CursorChangeReason::RecoverFromMarkers,
+                        },
+                        source: match kind {
+                            EditKind::SetValue => CursorChangeSource::Model,
+                            _ => CursorChangeSource::ModelChange,
+                        },
+                    };
                     self.cursors_changed(own, cx);
                 }
                 cx.notify();
@@ -712,7 +736,8 @@ impl CodeEditor {
         self.update_bracket_highlights(cx);
         self.update_occurrence_highlights(cx);
         self.restart_blink(cx);
-        cx.emit(CodeEditorEvent::SelectionsChanged);
+        let change = std::mem::take(&mut self.next_selection_change);
+        cx.emit(CodeEditorEvent::SelectionsChanged(change));
         cx.notify();
     }
 
@@ -832,11 +857,13 @@ impl CodeEditor {
         if self.cursors.selections() != before {
             self.model.update(cx, |model, _| model.push_stack_element());
         }
+        self.next_selection_change.reason = CursorChangeReason::Explicit;
         self.cursors_changed(true, cx);
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         cursor::select_all(self.snapshot.rope(), &mut self.cursors);
+        self.next_selection_change.reason = CursorChangeReason::Explicit;
         self.cursors_changed(false, cx);
     }
 
@@ -847,18 +874,21 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         cursor::expand_line_selection(self.snapshot.rope(), &mut self.cursors);
+        self.next_selection_change.reason = CursorChangeReason::Explicit;
         self.cursors_changed(true, cx);
     }
 
     fn add_cursor_above(&mut self, _: &AddCursorAbove, _: &mut Window, cx: &mut Context<Self>) {
         let config = self.cursor_config(cx);
         cursor::add_cursor_above(&config, self.snapshot.rope(), &mut self.cursors);
+        self.next_selection_change.reason = CursorChangeReason::Explicit;
         self.cursors_changed(true, cx);
     }
 
     fn add_cursor_below(&mut self, _: &AddCursorBelow, _: &mut Window, cx: &mut Context<Self>) {
         let config = self.cursor_config(cx);
         cursor::add_cursor_below(&config, self.snapshot.rope(), &mut self.cursors);
+        self.next_selection_change.reason = CursorChangeReason::Explicit;
         self.cursors_changed(true, cx);
     }
 
@@ -906,6 +936,7 @@ impl CodeEditor {
             cx.propagate();
             return;
         }
+        self.next_selection_change.reason = CursorChangeReason::Explicit;
         self.cursors_changed(true, cx);
     }
 
@@ -1133,6 +1164,7 @@ impl CodeEditor {
         let page = self.page_lines();
         let rope = self.snapshot.rope().clone();
         cursor::column_select(&config, &rope, &mut self.cursors, command, page);
+        self.next_selection_change.reason = CursorChangeReason::Explicit;
         self.cursors_changed(true, cx);
     }
 
@@ -1227,6 +1259,13 @@ impl CodeEditor {
     }
 
     fn paste_item(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
+        self.next_selection_change.reason = CursorChangeReason::Paste;
+        self.paste_clipboard_item(item, cx);
+        // Nothing may have changed.
+        self.next_selection_change = SelectionChange::default();
+    }
+
+    fn paste_clipboard_item(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
         let Some(mut text) = item.text() else {
             return;
         };
@@ -1636,6 +1675,10 @@ impl CodeEditor {
                 origin: Selection::collapsed(position),
                 cursor_index: 0,
             });
+            self.next_selection_change = SelectionChange {
+                reason: CursorChangeReason::Explicit,
+                source: CursorChangeSource::Mouse,
+            };
             self.cursors_changed(false, cx);
             return;
         }
@@ -1666,6 +1709,10 @@ impl CodeEditor {
         self.cursors.set_states(states);
         self.prev_edit_kind = None;
         self.model.update(cx, |model, _| model.push_stack_element());
+        self.next_selection_change = SelectionChange {
+            reason: CursorChangeReason::Explicit,
+            source: CursorChangeSource::Mouse,
+        };
         self.cursors_changed(false, cx);
     }
 
@@ -1809,6 +1856,10 @@ impl CodeEditor {
                 visible_column,
                 true,
             );
+            self.next_selection_change = SelectionChange {
+                reason: CursorChangeReason::Explicit,
+                source: CursorChangeSource::Mouse,
+            };
             self.cursors_changed(false, cx);
             return;
         }
@@ -1853,6 +1904,10 @@ impl CodeEditor {
             *state = SingleCursorState::from_selection(selection);
         }
         self.cursors.set_states(states);
+        self.next_selection_change = SelectionChange {
+            reason: CursorChangeReason::Explicit,
+            source: CursorChangeSource::Mouse,
+        };
         self.cursors_changed(false, cx);
     }
 

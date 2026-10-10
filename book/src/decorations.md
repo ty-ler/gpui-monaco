@@ -64,6 +64,21 @@ Ranges are byte offsets. To convert from `PointUtf16`, use `model.buffer().point
 | `stickiness` | `stickiness` | whether typing at the edges grows the range |
 | `z_index` | `zIndex` | paint order for overlapping decorations |
 
+## Collections
+
+`editor.create_decorations_collection(decorations, cx)` returns a `DecorationsCollection` (Monaco `createDecorationsCollection`). It's a set of decorations that the editor owns, positioned with UTF-16 points:
+
+- `set` replaces all of them, `append` adds more and `clear` removes them.
+- `len`, `ids` and `has` describe the set.
+- `range(i)` and `ranges()` give their current positions after edits.
+
+It saves keeping the ids yourself:
+
+```rust,ignore
+let mut highlights = editor.update(cx, |editor, cx| editor.create_decorations_collection(vec![], cx));
+highlights.set(vec![(start..end, options)], cx);
+```
+
 ## Ownership
 
 Pass the editor's entity id as `owner` to show decorations only in that editor (Monaco's `ownerId`). The editor uses this internally for find matches and bracket highlights, so a split view doesn't show the other editor's search. Use `None` for decorations every editor should show.
