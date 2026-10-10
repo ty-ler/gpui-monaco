@@ -66,6 +66,8 @@ pub struct EditorColors {
     pub symbol_highlight_background: Hsla,
     /// A link while Cmd/Ctrl is held over it (`editorLink.activeForeground`).
     pub link_active_foreground: Hsla,
+    /// Linked editing ranges (`editor.linkedEditingBackground`).
+    pub linked_editing_background: Hsla,
     /// Ghost text (`editorGhostText.foreground`).
     pub ghost_text_foreground: Hsla,
     /// `editorGhostText.background` (transparent: none).
@@ -234,6 +236,7 @@ impl EditorColors {
             find_match_overview: c(rgba(0xd186167e)),
             symbol_highlight_background: c(rgba(0xea5c0055)),
             link_active_foreground: c(rgb(0x4e94ce)),
+            linked_editing_background: c(rgba(0xff00004d)),
             ghost_text_foreground: c(rgba(0xffffff56)),
             ghost_text_background: gpui::transparent_black(),
             ghost_text_border: gpui::transparent_black(),
@@ -330,6 +333,7 @@ impl EditorColors {
             find_match_overview: c(rgba(0xd186167e)),
             symbol_highlight_background: c(rgba(0xea5c0055)),
             link_active_foreground: c(rgb(0x0000ff)),
+            linked_editing_background: c(rgba(0xff00004d)),
             ghost_text_foreground: c(rgba(0x00000077)),
             ghost_text_background: gpui::transparent_black(),
             ghost_text_border: gpui::transparent_black(),

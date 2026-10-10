@@ -218,6 +218,8 @@ impl Playground {
             editor.update(cx, |editor, cx| {
                 let mut options = editor.options().clone();
                 options.format_on_type = true;
+                // Off by default in Monaco; on here to show it off in HTML.
+                options.linked_editing = true;
                 options.format_on_paste = true;
                 editor.update_options(options, cx);
             });

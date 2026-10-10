@@ -1410,11 +1410,21 @@ impl CodeEditor {
         });
     }
 
-    /// Applies `edits` elsewhere in the text, moving the cursors with them
-    /// (text inserted at a cursor goes before it).
     fn apply_additional_text_edits(
         &mut self,
         edits: &[(std::ops::Range<PointUtf16>, String)],
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_edits_moving_cursors(edits, EditOperationType::Other, cx);
+    }
+
+    /// Applies `edits` elsewhere in the text as one operation of `kind`,
+    /// moving the cursors with them (text inserted at a cursor goes before
+    /// it).
+    pub(crate) fn apply_edits_moving_cursors(
+        &mut self,
+        edits: &[(std::ops::Range<PointUtf16>, String)],
+        kind: EditOperationType,
         cx: &mut Context<Self>,
     ) {
         let mut offsets: Vec<(usize, usize, &str)> = edits
@@ -1457,7 +1467,7 @@ impl CodeEditor {
             EditOperation {
                 edits: sorted,
                 selections_after: self.cursors.selections(),
-                kind: EditOperationType::Other,
+                kind,
                 push_stack_element_before: false,
                 push_stack_element_after: false,
                 auto_closed: Vec::new(),

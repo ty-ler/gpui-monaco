@@ -29,6 +29,7 @@ mod hover;
 mod inlay_hints;
 mod inline_completions;
 pub mod link_computer;
+mod linked_editing;
 mod links;
 pub mod markdown;
 mod markers;

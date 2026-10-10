@@ -162,6 +162,7 @@ pub struct CodeEditor {
     pub(crate) links: crate::links::LinksState,
     pub(crate) semantic: crate::semantic_tokens::SemanticTokensState,
     pub(crate) inline: crate::inline_completions::controller::InlineCompletionsState,
+    pub(crate) linked: crate::linked_editing::LinkedEditingState,
     pub(crate) minimap_cache: crate::element::MinimapCache,
     pub(crate) minimap_hovered: bool,
     minimap_drag: Option<Pixels>,
@@ -302,6 +303,7 @@ impl CodeEditor {
             links: Default::default(),
             semantic: Default::default(),
             inline: Default::default(),
+            linked: Default::default(),
             minimap_cache: Default::default(),
             minimap_hovered: false,
             minimap_drag: None,
@@ -333,6 +335,7 @@ impl CodeEditor {
         self.hide_suggest(cx);
         self.cancel_snippet(false, cx);
         self.clear_links(cx);
+        self.clear_linked_editing(cx);
         self.reset_semantic_tokens(cx);
         self.semantic = Default::default();
         self.hide_signature_help(cx);
@@ -691,6 +694,7 @@ impl CodeEditor {
                 self.inlay_hints_after_edit(cx);
                 self.semantic_tokens_after_edit(changes, cx);
                 self.inline_completions_after_edit(cx);
+                self.linked_editing_after_edit(changes, own, cx);
                 let latest = model.read(cx).snapshot();
                 if latest.version() == self.snapshot.version() {
                     return;
@@ -878,6 +882,7 @@ impl CodeEditor {
         self.restart_blink(cx);
         let change = std::mem::take(&mut self.next_selection_change);
         self.inline_selections_changed(&change, cx);
+        self.linked_editing_cursor_changed(cx);
         // Monaco `ParameterHintsModel.onCursorChange`: clicks close parameter
         // hints, other changes re-query them while they're shown.
         if change.source == CursorChangeSource::Mouse {
@@ -1048,6 +1053,10 @@ impl CodeEditor {
     ) {
         if self.options.single_line {
             cx.propagate();
+            return;
+        }
+        if self.linked_editing_active() {
+            self.clear_linked_editing(cx);
             return;
         }
         if self.is_suggest_visible() {
@@ -3011,6 +3020,9 @@ impl Render for CodeEditor {
             .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| this.go_to_definition(cx)))
             .on_action(cx.listener(|this, _: &ShowHover, _, cx| this.show_hover_at_cursor(cx)))
             .on_action(cx.listener(|this, _: &OpenLink, _, cx| this.open_link(cx)))
+            .on_action(cx.listener(|this, _: &StartLinkedEditing, _, cx| {
+                this.update_linked_editing(true, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &TriggerInlineSuggest, _, cx| {
                     this.trigger_inline_suggest(cx)

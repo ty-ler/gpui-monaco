@@ -679,6 +679,33 @@ pub trait InlayHintsProvider: 'static {
     ) -> Task<anyhow::Result<Vec<InlayHint>>>;
 }
 
+// ----- linked editing ------------------------------------------------------------
+
+/// Ranges edited together (Monaco `LinkedEditingRanges`).
+#[derive(Clone, Debug, Default)]
+pub struct LinkedEditingRanges {
+    /// The ranges; the one containing the cursor is the reference.
+    pub ranges: Vec<Range<PointUtf16>>,
+    /// What the ranges may contain; typing anything else ends linked
+    /// editing. Defaults to the language's word pattern.
+    pub word_pattern: Option<syntax::Pattern>,
+}
+
+/// Supplies ranges that change together, such as an HTML element's start
+/// and end tag names (Monaco `LinkedEditingRangeProvider`).
+///
+/// Register with [`register_linked_editing_range_provider`]. Without one,
+/// the editor links HTML tag names from the syntax tree.
+pub trait LinkedEditingRangeProvider: 'static {
+    /// The ranges linked with the one at `position`, if any.
+    fn provide_linked_editing_ranges(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Option<LinkedEditingRanges>>>;
+}
+
 // ----- inline completions --------------------------------------------------------
 
 /// Why inline completions are requested (Monaco
@@ -1162,6 +1189,7 @@ struct LanguageFeatures {
     links: Vec<Entry<dyn LinkProvider>>,
     semantic_tokens: Vec<Entry<dyn DocumentSemanticTokensProvider>>,
     inline_completions: Vec<Entry<dyn InlineCompletionsProvider>>,
+    linked_editing: Vec<Entry<dyn LinkedEditingRangeProvider>>,
     range_semantic_tokens: Vec<Entry<dyn DocumentRangeSemanticTokensProvider>>,
     folding: Vec<Entry<dyn FoldingRangeProvider>>,
     selection_range: Vec<Entry<dyn SelectionRangeProvider>>,
@@ -1253,6 +1281,14 @@ register_fn!(
     register_folding_range_provider,
     folding,
     FoldingRangeProvider
+);
+register_fn!(
+    /// Registers a linked editing range provider for the models `selector`
+    /// matches (Monaco `registerLinkedEditingRangeProvider`). The first with
+    /// ranges wins.
+    register_linked_editing_range_provider,
+    linked_editing,
+    LinkedEditingRangeProvider
 );
 register_fn!(
     /// Registers an inline completions provider for the models `selector`
@@ -1373,6 +1409,7 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.links.retain(|e| e.id != registration);
     features.semantic_tokens.retain(|e| e.id != registration);
     features.inline_completions.retain(|e| e.id != registration);
+    features.linked_editing.retain(|e| e.id != registration);
     features
         .range_semantic_tokens
         .retain(|e| e.id != registration);
@@ -1534,6 +1571,17 @@ pub fn code_action_providers(
 ) -> Vec<Arc<dyn CodeActionProvider>> {
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.code_action, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered linked editing range providers whose selector matches
+/// `language_id`, in registration order.
+pub fn linked_editing_range_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn LinkedEditingRangeProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.linked_editing, language_id))
         .unwrap_or_default()
 }
 
