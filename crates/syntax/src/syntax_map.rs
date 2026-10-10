@@ -416,11 +416,36 @@ impl SyntaxSnapshot {
         {
             layers.insert(0, 0);
         }
+        // Merge one depth at a time: layers at the same depth mostly have
+        // disjoint extents, so their spans concatenate into one sorted list
+        // and each depth costs one linear merge (not one per layer, which
+        // is quadratic with Rust's thousands of macro layers).
+        let mut depth_spans: Vec<HighlightSpan> = Vec::new();
+        let mut depth = None;
         for ix in layers {
-            let spans = layer_highlights(&self.layers[ix], text, range.clone());
-            if !spans.is_empty() {
-                result = overlay(&result, &spans);
+            let layer = &self.layers[ix];
+            if depth != Some(layer.depth) {
+                if !depth_spans.is_empty() {
+                    result = overlay(&result, &std::mem::take(&mut depth_spans));
+                }
+                depth = Some(layer.depth);
             }
+            let spans = layer_highlights(layer, text, range.clone());
+            if spans.is_empty() {
+                continue;
+            }
+            let disjoint = depth_spans
+                .last()
+                .is_none_or(|last| last.range.end <= spans[0].range.start);
+            if disjoint {
+                depth_spans.extend(spans);
+            } else {
+                // Overlapping layers at one depth: the later one wins.
+                depth_spans = overlay(&depth_spans, &spans);
+            }
+        }
+        if !depth_spans.is_empty() {
+            result = overlay(&result, &depth_spans);
         }
         result
     }

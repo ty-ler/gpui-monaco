@@ -273,6 +273,9 @@ pub struct EditorOptions {
     pub minimap: MinimapOptions,
     /// Monaco `stickyScroll`.
     pub sticky_scroll: StickyScrollOptions,
+    /// Monaco `bracketPairColorization.enabled`: color brackets by nesting
+    /// level (default `true`).
+    pub bracket_pair_colorization: bool,
     /// Monaco `renderWhitespace`.
     pub render_whitespace: RenderWhitespace,
     /// Monaco `renderControlCharacters`: show control characters as visible
@@ -374,6 +377,7 @@ impl Default for EditorOptions {
             sticky_scroll: StickyScrollOptions::default(),
             comments: Default::default(),
             overtype_cursor_style: CursorStyle::Block,
+            bracket_pair_colorization: true,
             render_whitespace: RenderWhitespace::Selection,
             render_control_characters: true,
             render_final_newline: RenderFinalNewline::On,

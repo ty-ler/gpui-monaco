@@ -704,3 +704,40 @@ fn in_place_replace_and_remove_brackets(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(text(&editor, cx), "let x = foo0, false;");
 }
+
+#[gpui::test]
+fn bracket_pair_colorization(cx: &mut TestAppContext) {
+    let (editor, cx) = rust_editor("fn a() { b(\"(\", [1]); }", cx);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(200));
+    cx.run_until_parked();
+    let (colors, ranges) = editor.read_with(cx, |e, cx| {
+        (e.colors().clone(), e.bracket_colors_for_tests(cx))
+    });
+    let level = |l: u32| colors.bracket_color(l).unwrap();
+    // The `(` inside the string isn't a bracket.
+    assert_eq!(
+        ranges,
+        vec![
+            (4..5, level(0)),
+            (5..6, level(0)),
+            (7..8, level(0)),
+            (10..11, level(1)),
+            (16..17, level(2)),
+            (18..19, level(2)),
+            (19..20, level(1)),
+            (22..23, level(0)),
+        ]
+    );
+    // Turning it off removes the colors.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.bracket_pair_colorization = false;
+        e.update_options(options, cx);
+    });
+    assert!(
+        editor
+            .read_with(cx, |e, cx| e.bracket_colors_for_tests(cx))
+            .is_empty()
+    );
+}

@@ -8,6 +8,7 @@
 #![warn(missing_docs)]
 
 pub mod actions;
+mod bracket_colors;
 mod bracket_matching;
 mod completion;
 pub mod cursor;

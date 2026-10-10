@@ -928,6 +928,9 @@ fn prepaint_editor(
                 )
             })
             .collect();
+    // Monaco `bracketPairColorization`.
+    editor.refresh_bracket_colors(cx);
+    let bracket_colors = editor.bracket_colors_in(visible_start..visible_end, cx);
     let mut highlight_ix = 0;
     let mut lines = Vec::with_capacity(segments.len());
     for segment in &segments {
@@ -951,7 +954,19 @@ fn prepaint_editor(
         });
         // Decoration text styles override syntax colors; injected text goes
         // before/after decorated ranges.
-        let mut decoration_styles = Vec::new();
+        let mut decoration_styles: Vec<(Range<usize>, TokenStyle)> = bracket_colors
+            .iter()
+            .filter(|(range, _)| line_range.start <= range.start && range.end <= line_range.end)
+            .map(|(range, color)| {
+                (
+                    range.start - line_range.start..range.end - line_range.start,
+                    TokenStyle {
+                        foreground: Some(*color),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
         let mut injections = Vec::new();
         for (start, end, decoration) in &decoration_points {
             if start.row > segment.row || end.row < segment.row {
