@@ -112,3 +112,70 @@ fn paste_as_text(cx: &mut TestAppContext) {
     paint(cx);
     assert_eq!(text(&editor, cx), "hi");
 }
+
+#[gpui::test]
+fn pasting_copied_files_inserts_their_paths(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", cx);
+    let files = gpui::ExternalPaths(vec![PathBuf::from("/tmp/a.txt")].into());
+    cx.write_to_clipboard(ClipboardItem::from(gpui::ClipboardEntry::ExternalPaths(
+        files,
+    )));
+    cx.dispatch_action(Paste);
+    paint(cx);
+    assert_eq!(text(&editor, cx), "/tmp/a.txt");
+}
+
+#[gpui::test]
+fn middle_click(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, point, px};
+    let (editor, cx) = setup("abc\nabc", cx);
+    let at = editor.read_with(cx, |e, _| {
+        e.scrolled_visible_position(PointUtf16::new(1, 2)).unwrap()
+    });
+    cx.simulate_mouse_down(
+        point(at.x + px(1.), at.y + px(5.)),
+        MouseButton::Middle,
+        Modifiers::default(),
+    );
+    // A click with the selection clipboard (Linux), else the start of a
+    // column selection: either way the cursor goes there.
+    let selections = editor.read_with(cx, |e, _| e.selections());
+    assert_eq!(selections.len(), 1);
+    assert_eq!(selections[0].head, PointUtf16::new(1, 2));
+}
+
+#[gpui::test]
+fn auto_indent_on_paste(cx: &mut TestAppContext) {
+    use gpui::AppContext as _;
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
+    });
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| {
+            gpui_monaco::TextModel::new("function f() {\n\n}").with_language("typescript")
+        });
+        let mut editor = CodeEditor::new(model, window, cx);
+        let mut options = editor.options().clone();
+        options.auto_indent_on_paste = true;
+        editor.update_options(options, cx);
+        editor
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    paint(cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                1, 0,
+            ))],
+            cx,
+        )
+    });
+    cx.write_to_clipboard(ClipboardItem::new_string("let x = 1;\nlet y = 2;".into()));
+    cx.dispatch_action(Paste);
+    paint(cx);
+    assert_eq!(
+        text(&editor, cx),
+        "function f() {\n    let x = 1;\n    let y = 2;\n}"
+    );
+}

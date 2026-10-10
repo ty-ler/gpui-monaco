@@ -26,6 +26,7 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
 - **Advanced wrapping:** Monaco lets the browser break lines in a hidden DOM node. Here, characters are measured in the editor font and breaks follow the same break-before/after characters as `Simple` wrapping. `disableMonospaceOptimizations` isn't needed: cursor and selection positions always come from shaped text.
 - **Unicode highlighting:** there's no workspace trust, so Monaco's `inUntrustedWorkspace` defaults resolve as trusted, as in the standalone editor. When there are too many highlights, Monaco shows a banner offering to turn the kind off; here nothing is highlighted, without the banner. "Adjust settings" changes the editor's options, not user settings.
 - **Unusual line terminators:** Monaco asks in a modal dialog; here a quick pick asks, and dismissing it ignores them, like the dialog's Ignore.
+- **Copy with syntax highlighting:** not available, because GPUI's clipboard holds plain text, images and files but no HTML or RTF.
 - **Drop and paste:** GPUI delivers dropped files, not dragged text from other apps, and the clipboard's text only (no `text/html` or images), so the HTML provider only applies to data given to `drop_data`/providers directly. There's no relative path provider, because the editor has no workspace, and no copy-time metadata (`prepareDocumentPaste`). The options button is a small chip; its picker is the quick pick.
 - **Fonts:** `letterSpacing` and `fontVariations` aren't supported, because GPUI text has neither. Decorations can't change the font (`fontFamily`, `fontSize` and so on), because GPUI shapes a line in one font size. Taller lines from `line_height` stay uniform in the minimap and sticky scroll. A variable font's weight comes from `font_weight`.
 - **Minimap section headers:** `section_header_letter_spacing` is accepted but not applied, because GPUI text has no letter spacing.
@@ -50,7 +51,6 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
 - **Suggest widget:** the details panel goes beside the list or below it, never to the left or above. Its contents can't be focused or scrolled with the keyboard, and explain mode (`toggleExplainMode`) isn't ported. Icons are glyphs, not codicons.
 - **Missing commands:** code actions, rename, formatting, inlay hints, color decorators and links are not built in.
 - **Folding:** clicking the `⋯` placeholder doesn't unfold the region, and there is no folding by tree-sitter fold queries yet. Ranges come from indentation and markers.
-- **Paste:** pasted text is not reindented (Monaco's `autoIndentOnPaste`).
 - **Accessibility:** screen reader support is post-MVP. GPUI's accessibility support is still in progress upstream.
 - **Diff editor:** not available.
 - **Long lines:** very long lines, such as minified files, are not virtualized horizontally yet.

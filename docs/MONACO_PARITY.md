@@ -28,7 +28,8 @@ Issues are linked by number.
 | Cursor undo, selection anchor, overtype mode | `cursorUndo`, `anchorSelect` | ✅ | #81 |
 | Scroll commands (Ctrl+Up/Down, …) | `coreCommands` | ✅ | #81 |
 | Clipboard with multi-cursor distribution | `clipboard` | ✅ | |
-| Copy with syntax highlighting, paste as, Linux primary selection, reindent on paste | `clipboard`, `dropOrPasteInto` | ❌ | #107 |
+| Paste as, Linux primary selection, reindent on paste | `clipboard`, `dropOrPasteInto`, `autoIndentOnPaste` | ✅ | #107 |
+| Copy with syntax highlighting | `copyWithSyntaxHighlighting` | ❌ (GPUI's clipboard has no HTML) | #107 |
 | Undo/redo with grouping, cursor restore | model | ✅ | |
 | Auto-closing, overtype, auto-surround | `cursor` | ✅ | |
 | Auto-indent (`onEnterRules`, `indentationRules`, electric characters) | `indentation` | ✅ | |

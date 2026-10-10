@@ -987,6 +987,7 @@ impl CodeEditor {
 
     pub(crate) fn cursors_changed(&mut self, autoscroll: bool, cx: &mut Context<Self>) {
         self.suggest_cursor_changed();
+        self.write_selection_to_primary(cx);
         self.snippet_selections_changed(cx);
         // Monaco `multiCursorLimit`: extra cursors are dropped.
         let limit = self.options.multi_cursor_limit.max(1);
@@ -1676,6 +1677,7 @@ impl CodeEditor {
 
     fn paste_item_inner(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
         let version = self.snapshot.version();
+        let primary_start = self.cursors.primary().selection().start();
         let start = self
             .cursors
             .selections()
@@ -1698,6 +1700,18 @@ impl CodeEditor {
                 .max()
                 .unwrap_or(start);
             self.format_on_paste(start..end, cx);
+            // Monaco `AutoIndentOnPaste`: from the primary selection's
+            // start before the paste to its start after.
+            if self.options.auto_indent_on_paste {
+                let range = primary_start..self.cursors.primary().selection().start();
+                let within_string = self.options.auto_indent_on_paste_within_string;
+                let operation = self.with_language(cx, |config, rope, cursors, lang| {
+                    cursor::auto_indent_on_paste(config, rope, cursors, range, lang?, within_string)
+                });
+                if let Some(operation) = operation {
+                    self.apply(operation, cx);
+                }
+            }
         }
     }
 
@@ -2011,16 +2025,86 @@ impl CodeEditor {
     fn on_middle_mouse_down(
         &mut self,
         event: &MouseDownEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.end_middle_scroll(cx) || !self.options.scroll_on_middle_click {
+        if self.end_middle_scroll(cx) {
             return;
         }
         cx.stop_propagation();
-        self.animation.middle_scroll =
-            Some(crate::view::animation::MiddleScroll::new(event.position));
-        cx.notify();
+        if self.options.scroll_on_middle_click {
+            self.animation.middle_scroll =
+                Some(crate::view::animation::MiddleScroll::new(event.position));
+            cx.notify();
+            return;
+        }
+        window.focus(&self.focus_handle, cx);
+        let position = self.position_for_point(event.position, window, cx);
+        // Monaco `dispatchMouse`: with the selection clipboard (Linux) a
+        // middle click is a click, and the platform pastes the primary
+        // selection there; otherwise it column-selects.
+        if self.selection_clipboard_on() {
+            self.next_selection_change = SelectionChange {
+                reason: CursorChangeReason::Explicit,
+                source: CursorChangeSource::Mouse,
+            };
+            self.cursors
+                .set_selections(&[Selection::collapsed(position)]);
+            self.cursors_changed(false, cx);
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            if let Some(item) = cx.read_from_primary() {
+                self.paste_item(item, cx);
+            }
+            return;
+        }
+        let config = self.cursor_config(cx);
+        let visible_column = self.mouse_visible_column(event.position);
+        cursor::column_select_to(
+            &config,
+            self.snapshot.rope(),
+            &mut self.cursors,
+            position,
+            visible_column,
+            false,
+        );
+        // Dragging extends it.
+        self.mouse_selection = Some(MouseSelection {
+            mode: MouseSelectMode::Column,
+            origin: Selection::collapsed(position),
+            cursor_index: 0,
+        });
+        self.cursors_changed(false, cx);
+    }
+
+    /// Monaco `selectionClipboard` applies on Linux only.
+    fn selection_clipboard_on(&self) -> bool {
+        cfg!(any(target_os = "linux", target_os = "freebsd")) && self.options.selection_clipboard
+    }
+
+    /// The selection clipboard: selected text becomes the primary selection
+    /// (as Monaco's textarea does on Linux).
+    fn write_selection_to_primary(&mut self, cx: &mut Context<Self>) {
+        if !self.selection_clipboard_on() {
+            return;
+        }
+        let rope = self.snapshot.rope();
+        let text: Vec<String> = self
+            .cursors
+            .selections()
+            .iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                let range =
+                    rope.point_utf16_to_offset(s.start())..rope.point_utf16_to_offset(s.end());
+                rope.slice(range).to_string()
+            })
+            .collect();
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if !text.is_empty() {
+            cx.write_to_primary(ClipboardItem::new_string(text.join("\n")));
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        let _ = (text, cx);
     }
 
     /// Ends middle-click scrolling, if on.
@@ -2473,7 +2557,10 @@ impl CodeEditor {
         let Some(drag) = self.mouse_selection.as_ref() else {
             return;
         };
-        if event.pressed_button != Some(MouseButton::Left) {
+        // Middle drags column-select (Monaco).
+        let middle_column = drag.mode == MouseSelectMode::Column
+            && event.pressed_button == Some(MouseButton::Middle);
+        if event.pressed_button != Some(MouseButton::Left) && !middle_column {
             self.mouse_selection = None;
             return;
         }

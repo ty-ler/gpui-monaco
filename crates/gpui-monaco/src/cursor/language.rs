@@ -499,6 +499,25 @@ impl<'a> LanguageSupport<'a> {
             .is_some_and(|p| p.is_match(text))
     }
 
+    /// Monaco `IndentRulesSupport.getIndentMetadata`: which indentation
+    /// rules `text` matches, as a bitmask of the [`IndentConsts`] masks.
+    pub fn indent_metadata(&self, text: &str) -> u8 {
+        let mut ret = 0;
+        if self.should_increase(text) {
+            ret |= IndentConsts::INCREASE_MASK;
+        }
+        if self.should_decrease(text) {
+            ret |= IndentConsts::DECREASE_MASK;
+        }
+        if self.should_indent_next_line(text) {
+            ret |= IndentConsts::INDENT_NEXTLINE_MASK;
+        }
+        if self.should_ignore(text) {
+            ret |= IndentConsts::UNINDENT_MASK;
+        }
+        ret
+    }
+
     // --- onEnter (Monaco `OnEnterSupport.onEnter`)
 
     pub fn on_enter(
@@ -559,6 +578,20 @@ impl<'a> LanguageSupport<'a> {
         }
         None
     }
+}
+
+/// Monaco `IndentConsts`: the bits of [`LanguageSupport::indent_metadata`].
+pub(crate) struct IndentConsts;
+
+impl IndentConsts {
+    /// The line matches `increaseIndentPattern`.
+    pub const INCREASE_MASK: u8 = 0b0000_0001;
+    /// The line matches `decreaseIndentPattern`.
+    pub const DECREASE_MASK: u8 = 0b0000_0010;
+    /// The line matches `indentNextLinePattern`.
+    pub const INDENT_NEXTLINE_MASK: u8 = 0b0000_0100;
+    /// The line matches `unIndentedLinePattern`.
+    pub const UNINDENT_MASK: u8 = 0b0000_1000;
 }
 
 /// Monaco `EnterAction`.
@@ -628,15 +661,39 @@ fn remove_suffix_units(s: &str, remove: u32) -> String {
 // ---------------------------------------------------------------------------
 // enterAction.ts / autoIndent.ts
 
-/// Monaco `IVirtualModel`: the model, optionally with one line replaced by
-/// already processed text. Line numbers are 1-based, as in Monaco.
-struct VirtualModel<'a> {
+/// Monaco `IVirtualModel`: the model, optionally with one line replaced.
+/// Line numbers are 1-based, as in Monaco.
+pub(crate) struct VirtualModel<'a> {
     model: &'a dyn CursorModel,
     lang: &'a LanguageSupport<'a>,
     replaced: Option<(u32, String)>,
+    /// Whether `replaced` also stands for the line's processed text (Monaco
+    /// `createVirtualModelWithModifiedTokensAtLine`, already processed). When
+    /// `false` only the line's content is replaced and the processed text
+    /// still comes from the model's tokens, like the virtual model of
+    /// `AutoIndentOnPaste`.
+    replaced_processed: bool,
 }
 
-impl VirtualModel<'_> {
+impl<'a> VirtualModel<'a> {
+    /// The model itself.
+    pub(crate) fn new(model: &'a dyn CursorModel, lang: &'a LanguageSupport<'a>) -> Self {
+        Self {
+            model,
+            lang,
+            replaced: None,
+            replaced_processed: false,
+        }
+    }
+
+    /// The model with the content (not the tokens) of 1-based `line_number`
+    /// replaced by `text`.
+    pub(crate) fn with_line_content(mut self, line_number: u32, text: String) -> Self {
+        self.replaced = Some((line_number, text));
+        self.replaced_processed = false;
+        self
+    }
+
     fn line(&self, line_number: u32) -> String {
         match &self.replaced {
             Some((n, text)) if *n == line_number => text.clone(),
@@ -647,7 +704,7 @@ impl VirtualModel<'_> {
     /// Monaco `ProcessedIndentRulesSupport`'s processed line.
     fn processed(&self, line_number: u32) -> String {
         match &self.replaced {
-            Some((n, text)) if *n == line_number => text.clone(),
+            Some((n, text)) if *n == line_number && self.replaced_processed => text.clone(),
             _ => self.lang.processed_line(self.model, line_number - 1),
         }
     }
@@ -674,6 +731,8 @@ impl VirtualModel<'_> {
 pub(crate) struct InheritIndent {
     pub indentation: String,
     pub action: Option<IndentAction>,
+    /// The 1-based line the indentation was inherited from.
+    pub line: Option<u32>,
 }
 
 /// Monaco `getPrecedingValidLine`: the nearest line above that is neither
@@ -695,10 +754,11 @@ fn inherit_indent_for_line(
     if auto_indent < AutoIndent::Full || !vm.lang.has_indentation_rules() {
         return None;
     }
-    let none = |indentation: String, _line: Option<u32>| {
+    let none = |indentation: String, line: Option<u32>| {
         Some(InheritIndent {
             indentation,
             action: None,
+            line,
         })
     };
     if line_number <= 1 {
@@ -719,6 +779,7 @@ fn inherit_indent_for_line(
         return Some(InheritIndent {
             indentation: lw(preceding),
             action: Some(IndentAction::Indent),
+            line: Some(preceding),
         });
     }
     if vm.should_decrease(preceding) {
@@ -749,6 +810,7 @@ fn inherit_indent_for_line(
             return Some(InheritIndent {
                 indentation: lw(i),
                 action: Some(IndentAction::Indent),
+                line: Some(i),
             });
         } else if vm.should_indent_next_line(i) {
             // Monaco's inner loop tests line `i` rather than `j`, so it always
@@ -826,6 +888,7 @@ pub(crate) fn indent_for_enter(
         model,
         lang,
         replaced: Some((range.start.row + 1, before)),
+        replaced_processed: true,
     };
     let Some(after_enter_action) =
         inherit_indent_for_line(config.auto_indent, &vm, range.start.row + 2, true)
@@ -857,11 +920,7 @@ pub(crate) fn indent_action_for_type(
     let (before, after) = processed_around(lang, model, range);
     let text_around_range = format!("{before}{after}");
     let text_around_range_with_character = format!("{before}{ch}{after}");
-    let vm = VirtualModel {
-        model,
-        lang,
-        replaced: None,
-    };
+    let vm = VirtualModel::new(model, lang);
 
     // If the text already matched decreaseIndentPattern, the user may have
     // adjusted the indentation on purpose; leave it.
@@ -911,11 +970,7 @@ pub(crate) fn good_indent_for_line(
 ) -> Option<String> {
     let mut action = None;
     let mut indentation = String::new();
-    let vm = VirtualModel {
-        model,
-        lang,
-        replaced: None,
-    };
+    let vm = VirtualModel::new(model, lang);
     if let Some(expected) = inherit_indent_for_line(config.auto_indent, &vm, row + 1, false) {
         action = expected.action;
         indentation = expected.indentation;
@@ -1007,4 +1062,76 @@ pub(crate) fn on_electric_character(
         return None;
     }
     Some(String::from_utf16_lossy(&bracket))
+}
+
+/// Monaco `getIndentMetadata` (autoIndent.ts): the indentation rules the
+/// content of `row` matches (see [`LanguageSupport::indent_metadata`]), or
+/// `None` without indentation rules or for a row outside the model.
+pub(crate) fn indent_metadata(
+    lang: &LanguageSupport,
+    model: &dyn CursorModel,
+    row: u32,
+) -> Option<u8> {
+    if !lang.has_indentation_rules() || row >= model.line_count() {
+        return None;
+    }
+    Some(lang.indent_metadata(&model.line_content(row)))
+}
+
+/// Monaco `getGoodIndentForLine` (autoIndent.ts; not to be confused with
+/// `TabOperation._goodIndentForLine`, see [`good_indent_for_line`]): the
+/// indentation 1-based `line_number` of `vm` should have according to the
+/// indentation rules and the onEnter rules of the line it inherits its
+/// indentation from, or `None` when the rules don't say.
+pub(crate) fn rules_good_indent_for_line(
+    config: &CursorConfig,
+    vm: &VirtualModel,
+    line_number: u32,
+) -> Option<String> {
+    let lang = vm.lang;
+    if config.auto_indent < AutoIndent::Full || !lang.has_indentation_rules() {
+        return None;
+    }
+    let indent = inherit_indent_for_line(config.auto_indent, vm, line_number, true)?;
+    if let Some(inherit_line) = indent.line {
+        // Apply the enter action as long as there are only whitespace lines
+        // between the inherited line and this line.
+        let should_apply_enter_rules =
+            (inherit_line..line_number.saturating_sub(1)).all(|n| is_blank(&vm.line(n)));
+        if should_apply_enter_rules {
+            let inherit_text = vm.line(inherit_line);
+            if let Some(enter) = lang.on_enter(config.auto_indent, "", &inherit_text, "") {
+                let mut indentation = leading_whitespace(&inherit_text);
+                if let Some(remove) = enter.remove_text.filter(|&r| r > 0) {
+                    indentation = remove_suffix_units(&indentation, remove);
+                }
+                match enter.indent_action {
+                    IndentAction::Indent | IndentAction::IndentOutdent => {
+                        indentation = shift_indent(config, &indentation);
+                    }
+                    IndentAction::Outdent => indentation = unshift_indent(config, &indentation),
+                    IndentAction::None => {}
+                }
+                if vm.should_decrease(line_number) {
+                    indentation = unshift_indent(config, &indentation);
+                }
+                if let Some(append) = &enter.append_text {
+                    indentation.push_str(append);
+                }
+                return Some(leading_whitespace(&indentation));
+            }
+        }
+    }
+    let indents = indent.action == Some(IndentAction::Indent);
+    Some(if vm.should_decrease(line_number) {
+        if indents {
+            indent.indentation
+        } else {
+            unshift_indent(config, &indent.indentation)
+        }
+    } else if indents {
+        shift_indent(config, &indent.indentation)
+    } else {
+        indent.indentation
+    })
 }
