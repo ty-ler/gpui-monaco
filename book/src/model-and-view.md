@@ -104,6 +104,10 @@ editor.update(cx, |editor, cx| {
 - `ScrollChanged`
 - `Focused`
 - `Blurred`
+- `MouseDown`, `MouseUp`, `MouseMove`, `MouseLeave` and `ContextMenu` (on right click): each carries an `EditorMouseEvent` whose `target` says what's under the mouse.
+  - Targets include the glyph margin, line numbers, line decorations, text, empty area, view zones, widgets, scrollbars, minimap and sticky scroll.
+  - Each target also gives the text position. Use `editor.mouse_target(point, window, cx)` to hit-test any point.
+  - The playground toggles breakpoints from glyph margin clicks.
 - `OpenLocation(Location)`: go to definition found a location in another model. Open it and call `go_to_location` on the new editor.
 
 ```rust,ignore

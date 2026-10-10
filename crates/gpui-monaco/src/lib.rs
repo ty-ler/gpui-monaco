@@ -23,6 +23,7 @@ mod hover;
 pub mod markdown;
 mod markers;
 mod model;
+pub mod mouse_target;
 mod multi_cursor;
 mod navigation_history;
 mod occurrences;
@@ -50,6 +51,7 @@ pub use model::{
     EditKind, ModelOptions, SyntaxSnapshot, TextModel, TextModelEvent, language_registry,
     set_language_registry,
 };
+pub use mouse_target::{EditorMouseEvent, MouseTarget, MouseTargetKind};
 pub use options::EditorOptions;
 pub use signature_help::SignatureHelpWidget;
 pub use suggest_widget::SuggestWidget;

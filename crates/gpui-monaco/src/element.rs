@@ -509,6 +509,10 @@ impl ZoneLayout {
 pub(crate) struct EditorLayout {
     pub bounds: Bounds<Pixels>,
     pub gutter_width: Pixels,
+    /// Width of the glyph margin at the gutter's left.
+    pub glyph_margin_width: Pixels,
+    /// Width of the line numbers after the glyph margin.
+    pub line_numbers_width: Pixels,
     /// The text viewport: right of the gutter, excluding scrollbars.
     pub text_bounds: Bounds<Pixels>,
     pub metrics: TextMetrics,
@@ -519,6 +523,8 @@ pub(crate) struct EditorLayout {
     pub zones: ZoneLayout,
     /// Bounds of embedded views; the editor ignores clicks inside them.
     pub widget_bounds: Vec<Bounds<Pixels>>,
+    /// What each of `widget_bounds` is.
+    pub widget_kinds: Vec<crate::mouse_target::EmbeddedKind>,
     pub minimap: Option<MinimapLayout>,
     /// Sticky scroll lines: (model row, bounds).
     pub sticky_lines: Vec<(u32, Bounds<Pixels>)>,
@@ -647,6 +653,7 @@ impl Element for EditorElement {
             .update(cx, |editor, cx| prepaint_editor(editor, bounds, window, cx));
         let line_height = state.layout.metrics.line_height;
         let mut widget_bounds = Vec::new();
+        let mut widget_kinds = Vec::new();
         for embedded in std::mem::take(&mut state.embedded) {
             match embedded {
                 Embedded::Zone { view, bounds: zone } => {
@@ -661,6 +668,7 @@ impl Element for EditorElement {
                     );
                     element.prepaint_at(zone.origin, window, cx);
                     widget_bounds.push(zone);
+                    widget_kinds.push(crate::mouse_target::EmbeddedKind::ViewZone);
                     state.zone_elements.push(element);
                 }
                 Embedded::Content {
@@ -699,6 +707,7 @@ impl Element for EditorElement {
                     };
                     element.prepaint_at(point(x, y), window, cx);
                     widget_bounds.push(Bounds::new(point(x, y), measured));
+                    widget_kinds.push(crate::mouse_target::EmbeddedKind::ContentWidget);
                     state.widget_elements.push(element);
                 }
                 Embedded::Overlay { view, position } => {
@@ -725,6 +734,7 @@ impl Element for EditorElement {
                     };
                     element.prepaint_at(origin, window, cx);
                     widget_bounds.push(Bounds::new(origin, measured));
+                    widget_kinds.push(crate::mouse_target::EmbeddedKind::OverlayWidget);
                     state.widget_elements.push(element);
                 }
             }
@@ -733,6 +743,7 @@ impl Element for EditorElement {
             self.editor.update(cx, |editor, _| {
                 if let Some(layout) = editor.layout.as_mut() {
                     layout.widget_bounds = widget_bounds;
+                    layout.widget_kinds = widget_kinds;
                 }
             });
         }
@@ -1151,6 +1162,8 @@ fn prepaint_editor(
     let mut layout = EditorLayout {
         bounds,
         gutter_width,
+        glyph_margin_width: glyph_width,
+        line_numbers_width: numbers_width,
         text_bounds,
         metrics: metrics.clone(),
         scroll_top,
@@ -1159,6 +1172,7 @@ fn prepaint_editor(
         fold_controls,
         zones: zones.clone(),
         widget_bounds: Vec::new(),
+        widget_kinds: Vec::new(),
         minimap: None,
         sticky_lines: Vec::new(),
         vertical_scrollbar,

@@ -14,6 +14,8 @@ The toolbar has these controls:
 - **Wrap, Minimap, Sticky scroll, Line numbers, Folding** and **Read-only** toggle editor options.
 - **Add demo widgets** adds sample decorations, a view zone, a content widget and an overlay widget.
 
+Clicking the glyph margin, left of the line numbers, toggles a breakpoint dot. It uses the editor's mouse target events.
+
 The status bar shows the cursor position, selection count, language, line endings and file.
 
 Demo providers are registered by default:
