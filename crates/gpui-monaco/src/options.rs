@@ -216,6 +216,21 @@ pub struct EditorOptions {
     pub minimap: MinimapOptions,
     /// Monaco `stickyScroll`.
     pub sticky_scroll: StickyScrollOptions,
+    /// Monaco `occurrencesHighlight`: highlight the occurrences of the symbol
+    /// at the cursor (default `true`).
+    pub occurrences_highlight: bool,
+    /// Monaco `occurrencesHighlightDelay`: how long the cursor rests before
+    /// occurrences are highlighted (default 250ms).
+    pub occurrences_highlight_delay: std::time::Duration,
+    /// Monaco `selectionHighlight`: highlight other occurrences of the
+    /// selected text (default `true`).
+    pub selection_highlight: bool,
+    /// Monaco `selectionHighlightMaxLength`: longer selections aren't
+    /// highlighted (default 200 UTF-16 units; 0 for no limit).
+    pub selection_highlight_max_length: u32,
+    /// Monaco `selectionHighlightMultiline`: also highlight multi-line
+    /// selections (default `false`).
+    pub selection_highlight_multiline: bool,
     /// Monaco `multiCursorModifier`.
     pub multi_cursor_modifier: MultiCursorModifier,
     /// Monaco `multiCursorPaste`: how pasting with several cursors splits
@@ -291,6 +306,11 @@ impl Default for EditorOptions {
             sticky_scroll: StickyScrollOptions::default(),
             comments: Default::default(),
             overtype_cursor_style: CursorStyle::Block,
+            occurrences_highlight: true,
+            occurrences_highlight_delay: std::time::Duration::from_millis(250),
+            selection_highlight: true,
+            selection_highlight_max_length: 200,
+            selection_highlight_multiline: false,
             multi_cursor_modifier: MultiCursorModifier::Alt,
             multi_cursor_paste: Default::default(),
             multi_cursor_limit: 10_000,

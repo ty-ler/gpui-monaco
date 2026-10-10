@@ -73,6 +73,13 @@ Fold ranges come from indentation, plus `#region` / `#endregion` markers where t
 - **Placeholder:** a collapsed region shows `⋯` after its first line. Unfold it with its gutter chevron or Cmd+Alt+].
 - **Editing:** editing inside a collapsed region expands it, as in Monaco.
 
+## Occurrences
+
+- **Symbol at the cursor:** after the cursor rests on a word, its occurrences are highlighted.
+  - They come from a [`DocumentHighlightProvider`](providers.md), or the word's whole-word occurrences.
+  - F7 and Shift+F7 select the next and previous occurrence.
+- **Selected text:** other occurrences of the selected text are highlighted. The highlight skips whitespace-only and multi-line selections, and selections longer than 200 characters.
+
 ## Brackets
 
 - **Highlighting:** the bracket pair around the cursor is highlighted (`match_brackets`). Brackets inside strings and comments are skipped.

@@ -8,6 +8,7 @@ gpui-monaco has no language server or other language intelligence built in. Your
 | `HoverProvider` | `HoverProvider` | markdown hover on mouse rest |
 | `DefinitionProvider` | `DefinitionProvider` | Cmd/Ctrl+hover link, Cmd/Ctrl+click and F12 |
 | `SignatureHelpProvider` | `SignatureHelpProvider` | parameter hints while typing a call |
+| `DocumentHighlightProvider` | `DocumentHighlightProvider` | occurrence highlights of the symbol at the cursor (textual occurrences without one) |
 
 Providers are app-wide and registered per language. Each returns a GPUI `Task`, so it can answer right away (`Task::ready`) or asynchronously, for example by forwarding to an LSP server.
 

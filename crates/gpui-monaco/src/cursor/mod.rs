@@ -28,7 +28,7 @@ mod collection;
 mod column;
 mod comment;
 mod edit;
-mod in_place_replace;
+pub(crate) mod in_place_replace;
 mod language;
 mod language_typing;
 mod lines;

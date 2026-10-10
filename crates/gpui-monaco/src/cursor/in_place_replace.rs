@@ -14,6 +14,12 @@ use super::edit::{
 };
 use super::{CursorCollection, CursorConfig, CursorModel, Position, Selection, strings};
 
+/// Monaco's `DEFAULT_WORD_REGEXP` (a compiled copy).
+pub(crate) fn default_word_regex() -> &'static syntax::fancy_regex::Regex {
+    static REGEX: std::sync::OnceLock<syntax::fancy_regex::Regex> = std::sync::OnceLock::new();
+    REGEX.get_or_init(|| syntax::fancy_regex::Regex::new(DEFAULT_WORD_PATTERN).expect("valid"))
+}
+
 /// Monaco's `DEFAULT_WORD_REGEXP`: numbers like `-1.5` or runs of
 /// non-separator characters.
 const DEFAULT_WORD_PATTERN: &str = r#"(-?\d*\.\d\w*)|([^`~!@#$%^&*()\-=+\[{\]}\\|;:'",.<>/?\s]+)"#;
@@ -68,7 +74,11 @@ fn navigate(text: &str, up: bool) -> Option<String> {
 
 /// Monaco `model.getWordAtPosition(position, wordDefinition)`: the match of
 /// `pattern` containing (or touching) `column` on `line`.
-fn word_at(line: &str, column: u32, pattern: &syntax::fancy_regex::Regex) -> Option<Range<u32>> {
+pub(crate) fn word_at(
+    line: &str,
+    column: u32,
+    pattern: &syntax::fancy_regex::Regex,
+) -> Option<Range<u32>> {
     let mut start = 0;
     while let Ok(Some(m)) = pattern.find_from_pos(line, start) {
         let word = strings::utf16_len(&line[..m.start()])..strings::utf16_len(&line[..m.end()]);
@@ -143,8 +153,10 @@ pub fn in_place_replace(
         range.end += 1;
     }
     let selected = strings::utf16_slice(&line, range.start, range.end);
-    let default = syntax::fancy_regex::Regex::new(DEFAULT_WORD_PATTERN).ok()?;
-    let pattern = word_pattern.and_then(Pattern::regex).unwrap_or(&default);
+    let pattern = match word_pattern.and_then(Pattern::regex) {
+        Some(pattern) => pattern,
+        None => default_word_regex(),
+    };
     let word = word_at(&line, start.column, pattern);
 
     let (edit_range, value) = match (!selected.is_empty())
