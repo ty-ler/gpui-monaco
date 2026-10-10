@@ -3,8 +3,10 @@
 //! Two kinds of token rules are supported and can be mixed:
 //! - **Monaco rules** keyed by Monarch token names (`keyword`, `string.key.json`),
 //!   as in Monaco's built-in themes and `monaco.editor.defineTheme`. The
-//!   built-in [`Theme::vs`] and [`Theme::vs_dark`] are ported from Monaco's
-//!   `standalone/common/themes.ts` (MIT).
+//!   built-in [`Theme::vs`], [`Theme::vs_dark`], [`Theme::hc_black`] and
+//!   [`Theme::hc_light`] are ported from Monaco's
+//!   `standalone/common/themes.ts` (MIT). Most language-specific rules
+//!   (`*.pug`, `*.sql`, `*.php`, ...) are left out.
 //! - **TextMate rules** from VS Code theme JSON `tokenColors`, keyed by scope
 //!   selectors (`entity.name.function`, `keyword.control`).
 //!
@@ -37,6 +39,9 @@ pub struct EditorColors {
     pub line_highlight_border: Option<Hsla>,
     /// Selections in the focused editor (`editor.selectionBackground`).
     pub selection_background: Hsla,
+    /// Selected text's color (`editor.selectionForeground`; none keeps the
+    /// token colors). High-contrast themes set it.
+    pub selection_foreground: Option<Hsla>,
     /// Selections in an unfocused editor (`editor.inactiveSelectionBackground`).
     pub inactive_selection_background: Hsla,
     /// The cursor (`editorCursor.foreground`).
@@ -257,6 +262,7 @@ impl EditorColors {
             line_highlight_background: None,
             line_highlight_border: Some(c(rgb(0x282828))),
             selection_background: c(rgb(0x264f78)),
+            selection_foreground: None,
             inactive_selection_background: c(rgb(0x3a3d41)),
             cursor: c(rgb(0xaeafad)),
             gutter_background: c(rgb(0x1e1e1e)),
@@ -369,6 +375,7 @@ impl EditorColors {
             line_highlight_background: None,
             line_highlight_border: Some(c(rgb(0xeeeeee))),
             selection_background: c(rgb(0xadd6ff)),
+            selection_foreground: None,
             inactive_selection_background: c(rgb(0xe5ebf1)),
             cursor: c(rgb(0x000000)),
             gutter_background: c(rgb(0xfffffe)),
@@ -471,6 +478,262 @@ impl EditorColors {
         }
     }
 
+    /// Monaco `hc-black`: the theme's own colors plus the `hcDark` registry
+    /// defaults. `contrastBorder` is `#6FC3DF` and `contrastActiveBorder`
+    /// (`focusBorder`) `#F38518`.
+    ///
+    /// Monaco outlines find matches, word/selection/symbol highlights and
+    /// range highlights with `contrastActiveBorder` instead of filling them
+    /// (their `hcDark` backgrounds are `null`); with no border slots here,
+    /// those are approximated by translucent `#F38518` fills.
+    pub fn hc_black() -> Self {
+        // An approximated outline-only highlight (see above).
+        let outline_fill = c(rgba(0xf3851833));
+        Self {
+            background: c(rgb(0x000000)),
+            foreground: c(rgb(0xffffff)),
+            line_number: c(rgb(0xffffff)),
+            active_line_number: c(rgb(0xf38518)),
+            line_highlight_background: None,
+            line_highlight_border: Some(c(rgb(0xf38518))),
+            selection_background: c(rgb(0xf3f518)),
+            selection_foreground: Some(c(rgb(0x000000))),
+            inactive_selection_background: c(rgba(0xf3f518b3)),
+            cursor: c(rgb(0xffffff)),
+            gutter_background: c(rgb(0x000000)),
+            scrollbar_slider: c(rgba(0x6fc3df99)),
+            scrollbar_slider_hover: c(rgba(0x6fc3dfcc)),
+            scrollbar_slider_active: c(rgb(0x6fc3df)),
+            scrollbar_shadow: gpui::transparent_black(),
+            overview_ruler_border: c(rgba(0x7f7f7f4d)),
+            ime_underline: c(rgb(0xffffff)),
+            find_match_background: c(rgba(0xf3851866)),
+            find_match_highlight_background: outline_fill,
+            find_match_overview: c(rgb(0xab5a00)),
+            find_range_highlight_background: gpui::transparent_black(),
+            error_foreground: c(rgb(0xf48771)),
+            symbol_highlight_background: outline_fill,
+            link_active_foreground: c(rgb(0x00ffff)),
+            range_highlight_background: outline_fill,
+            color_decoration_border: c(rgba(0xeeeeeeff)),
+            // `menu.selectionBackground` is `null` (outlined); approximated.
+            menu_selection_background: outline_fill,
+            menu_selection_foreground: c(rgb(0xffffff)),
+            // `button.background` is `null` (a bordered button); hc-light's
+            // fill keeps it visible.
+            button_background: c(rgb(0x0f4a85)),
+            button_foreground: c(rgb(0xffffff)),
+            code_lens_foreground: c(rgb(0x999999)),
+            linked_editing_background: c(rgba(0xff00004d)),
+            // `editorGhostText.foreground` is `null`: ghost text keeps the
+            // text color and gets a border instead.
+            ghost_text_foreground: c(rgb(0xffffff)),
+            ghost_text_background: gpui::transparent_black(),
+            ghost_text_border: c(rgba(0xffffffcc)),
+            placeholder_foreground: c(rgb(0xffffff)),
+            unicode_highlight_border: c(rgb(0xffd370)),
+            unicode_highlight_background: gpui::transparent_black(),
+            message_background: c(rgb(0x000000)),
+            message_border: c(rgb(0x6fc3df)),
+            fold_background: gpui::transparent_black(),
+            inlay_hint_foreground: c(rgb(0xffffff)),
+            inlay_hint_background: c(rgba(0xffffff1a)),
+            inlay_hint_type_foreground: c(rgb(0xffffff)),
+            inlay_hint_type_background: c(rgba(0xffffff1a)),
+            inlay_hint_parameter_foreground: c(rgb(0xffffff)),
+            inlay_hint_parameter_background: c(rgba(0xffffff1a)),
+            lightbulb_foreground: c(rgb(0xffcc00)),
+            lightbulb_auto_fix_foreground: c(rgb(0x75beff)),
+            peek_view_border: c(rgb(0x6fc3df)),
+            peek_view_title_background: c(rgb(0x000000)),
+            peek_view_title_foreground: c(rgb(0xffffff)),
+            peek_view_title_description_foreground: c(rgba(0xffffff99)),
+            peek_view_result_background: c(rgb(0x000000)),
+            peek_view_result_line_foreground: c(rgb(0xffffff)),
+            peek_view_result_file_foreground: c(rgb(0xffffff)),
+            peek_view_result_selection_background: outline_fill,
+            peek_view_result_selection_foreground: c(rgb(0xffffff)),
+            peek_view_result_match_highlight_background: outline_fill,
+            peek_view_editor_background: c(rgb(0x000000)),
+            peek_view_editor_match_highlight_background: outline_fill,
+            word_highlight_background: outline_fill,
+            word_highlight_strong_background: c(rgba(0xf385184d)),
+            word_highlight_overview: c(rgba(0xa0a0a0cc)),
+            word_highlight_strong_overview: c(rgba(0xc0a0c0cc)),
+            selection_highlight_background: outline_fill,
+            bracket_highlights: [
+                Some(c(rgb(0xffd700))),
+                Some(c(rgb(0xda70d6))),
+                Some(c(rgb(0x87cefa))),
+                None,
+                None,
+                None,
+            ],
+            unexpected_bracket: c(rgb(0xff3232)),
+            whitespace: c(rgba(0xe3e4e229)),
+            indent_guide: c(rgb(0xffffff)),
+            indent_guide_active: c(rgb(0xffffff)),
+            ruler: c(rgb(0xffffff)),
+            // `editorUnnecessaryCode.opacity` is `null`: unused code is
+            // underlined instead of faded.
+            unnecessary_code_opacity: c(rgba(0x000000ff)),
+            unnecessary_code_border: c(rgba(0xffffffcc)),
+            selection_highlight_overview: c(rgba(0xa0a0a0cc)),
+            widget_background: c(rgb(0x0c141f)),
+            widget_foreground: c(rgb(0xffffff)),
+            widget_border: c(rgb(0x6fc3df)),
+            snippet_tabstop_background: c(rgba(0x7c7c7c4d)),
+            snippet_tabstop_border: gpui::transparent_black(),
+            snippet_final_tabstop_background: gpui::transparent_black(),
+            snippet_final_tabstop_border: c(rgb(0x525252)),
+            suggest_background: c(rgb(0x0c141f)),
+            suggest_border: c(rgb(0x6fc3df)),
+            suggest_foreground: c(rgb(0xffffff)),
+            // The focused row is inverted.
+            suggest_selected_foreground: c(rgb(0x0c141f)),
+            suggest_selected_background: c(rgb(0xffffff)),
+            suggest_highlight_foreground: c(rgb(0xf38518)),
+            suggest_focus_highlight_foreground: c(rgb(0x0c141f)),
+            input_background: c(rgb(0x000000)),
+            input_option_active_background: gpui::transparent_black(),
+            input_option_active_border: c(rgb(0x6fc3df)),
+            bracket_match_background: c(rgba(0x0064001a)),
+            bracket_match_border: c(rgb(0x6fc3df)),
+            minimap_background: None,
+            minimap_slider: c(rgba(0x6fc3df4d)),
+            minimap_slider_hover: c(rgba(0x6fc3df66)),
+            sticky_scroll_background: None,
+            // `editorStickyScrollHover.background` is `null`.
+            sticky_scroll_hover_background: gpui::transparent_black(),
+            focus_border: c(rgb(0xf38518)),
+        }
+    }
+
+    /// Monaco `hc-light`: the theme's own colors plus the `hcLight` registry
+    /// defaults. `contrastBorder` is `#0F4A85` and `contrastActiveBorder`
+    /// (`focusBorder`) `#006BBD`.
+    ///
+    /// As in [`EditorColors::hc_black`], highlights Monaco only outlines are
+    /// approximated by translucent `#006BBD` fills.
+    pub fn hc_light() -> Self {
+        // An approximated outline-only highlight (see `hc_black`).
+        let outline_fill = c(rgba(0x006bbd33));
+        Self {
+            background: c(rgb(0xffffff)),
+            foreground: c(rgb(0x292929)),
+            line_number: c(rgb(0x292929)),
+            active_line_number: c(rgb(0x006bbd)),
+            line_highlight_background: None,
+            line_highlight_border: Some(c(rgb(0x0f4a85))),
+            selection_background: c(rgb(0x0f4a85)),
+            selection_foreground: Some(c(rgb(0xffffff))),
+            inactive_selection_background: c(rgba(0x0f4a8580)),
+            cursor: c(rgb(0x0f4a85)),
+            gutter_background: c(rgb(0xffffff)),
+            scrollbar_slider: c(rgba(0x0f4a8566)),
+            scrollbar_slider_hover: c(rgba(0x0f4a85cc)),
+            scrollbar_slider_active: c(rgb(0x0f4a85)),
+            scrollbar_shadow: gpui::transparent_black(),
+            overview_ruler_border: c(rgb(0x666666)),
+            ime_underline: c(rgb(0x292929)),
+            find_match_background: c(rgba(0x006bbd66)),
+            find_match_highlight_background: outline_fill,
+            find_match_overview: c(rgb(0xab5a00)),
+            find_range_highlight_background: gpui::transparent_black(),
+            error_foreground: c(rgb(0xb5200d)),
+            symbol_highlight_background: outline_fill,
+            link_active_foreground: c(rgb(0x292929)),
+            range_highlight_background: outline_fill,
+            color_decoration_border: c(rgba(0x000000ff)),
+            menu_selection_background: c(rgba(0x0f4a851a)),
+            menu_selection_foreground: c(rgb(0x292929)),
+            button_background: c(rgb(0x0f4a85)),
+            button_foreground: c(rgb(0xffffff)),
+            code_lens_foreground: c(rgb(0x292929)),
+            linked_editing_background: c(rgb(0xffffff)),
+            // `editorGhostText.foreground` is `null`: ghost text keeps the
+            // text color and gets a border instead.
+            ghost_text_foreground: c(rgb(0x292929)),
+            ghost_text_background: gpui::transparent_black(),
+            ghost_text_border: c(rgba(0x292929cc)),
+            placeholder_foreground: c(rgb(0x292929)),
+            unicode_highlight_border: c(rgb(0x895503)),
+            unicode_highlight_background: gpui::transparent_black(),
+            message_background: c(rgb(0xffffff)),
+            message_border: c(rgb(0x0f4a85)),
+            fold_background: gpui::transparent_black(),
+            inlay_hint_foreground: c(rgb(0x000000)),
+            inlay_hint_background: c(rgba(0x0f4a851a)),
+            inlay_hint_type_foreground: c(rgb(0x000000)),
+            inlay_hint_type_background: c(rgba(0x0f4a851a)),
+            inlay_hint_parameter_foreground: c(rgb(0x000000)),
+            inlay_hint_parameter_background: c(rgba(0x0f4a851a)),
+            lightbulb_foreground: c(rgb(0x007acc)),
+            lightbulb_auto_fix_foreground: c(rgb(0x007acc)),
+            peek_view_border: c(rgb(0x0f4a85)),
+            peek_view_title_background: c(rgb(0xffffff)),
+            peek_view_title_foreground: c(rgb(0x292929)),
+            peek_view_title_description_foreground: c(rgb(0x292929)),
+            peek_view_result_background: c(rgb(0xffffff)),
+            peek_view_result_line_foreground: c(rgb(0x292929)),
+            peek_view_result_file_foreground: c(rgb(0x292929)),
+            peek_view_result_selection_background: outline_fill,
+            peek_view_result_selection_foreground: c(rgb(0x292929)),
+            peek_view_result_match_highlight_background: outline_fill,
+            peek_view_editor_background: c(rgb(0xffffff)),
+            peek_view_editor_match_highlight_background: outline_fill,
+            word_highlight_background: outline_fill,
+            word_highlight_strong_background: c(rgba(0x006bbd4d)),
+            word_highlight_overview: c(rgba(0xa0a0a0cc)),
+            word_highlight_strong_overview: c(rgba(0xc0a0c0cc)),
+            selection_highlight_background: outline_fill,
+            bracket_highlights: [
+                Some(c(rgb(0x0431fa))),
+                Some(c(rgb(0x319331))),
+                Some(c(rgb(0x7b3814))),
+                None,
+                None,
+                None,
+            ],
+            unexpected_bracket: c(rgb(0xb5200d)),
+            whitespace: c(rgb(0xcccccc)),
+            indent_guide: c(rgb(0x292929)),
+            indent_guide_active: c(rgb(0x292929)),
+            ruler: c(rgb(0x292929)),
+            // `editorUnnecessaryCode.opacity` is `null`: unused code is
+            // underlined instead of faded.
+            unnecessary_code_opacity: c(rgba(0x000000ff)),
+            unnecessary_code_border: c(rgb(0x0f4a85)),
+            selection_highlight_overview: c(rgba(0xa0a0a0cc)),
+            widget_background: c(rgb(0xffffff)),
+            widget_foreground: c(rgb(0x292929)),
+            widget_border: c(rgb(0x0f4a85)),
+            snippet_tabstop_background: c(rgba(0x0a326433)),
+            snippet_tabstop_border: gpui::transparent_black(),
+            snippet_final_tabstop_background: gpui::transparent_black(),
+            snippet_final_tabstop_border: c(rgb(0x292929)),
+            suggest_background: c(rgb(0xffffff)),
+            suggest_border: c(rgb(0x0f4a85)),
+            suggest_foreground: c(rgb(0x292929)),
+            // The focused row is inverted.
+            suggest_selected_foreground: c(rgb(0xffffff)),
+            suggest_selected_background: c(rgb(0x292929)),
+            suggest_highlight_foreground: c(rgb(0x006bbd)),
+            suggest_focus_highlight_foreground: c(rgb(0xffffff)),
+            input_background: c(rgb(0xffffff)),
+            input_option_active_background: gpui::transparent_black(),
+            input_option_active_border: c(rgb(0x0f4a85)),
+            bracket_match_background: gpui::transparent_black(),
+            bracket_match_border: c(rgb(0x0f4a85)),
+            minimap_background: None,
+            minimap_slider: c(rgba(0x0f4a8533)),
+            minimap_slider_hover: c(rgba(0x0f4a8566)),
+            sticky_scroll_background: None,
+            sticky_scroll_hover_background: c(rgba(0x0f4a851a)),
+            focus_border: c(rgb(0x006bbd)),
+        }
+    }
+
     /// Applies VS Code workbench color keys (`editor.background`, ...).
     fn apply_vscode_colors(&mut self, colors: &HashMap<String, String>) {
         let get = |key: &str| colors.get(key).and_then(|value| parse_hex_color(value));
@@ -488,6 +751,9 @@ impl EditorColors {
             "editorLineNumber.activeForeground",
         );
         set(&mut self.selection_background, "editor.selectionBackground");
+        if let Some(color) = get("editor.selectionForeground") {
+            self.selection_foreground = Some(color);
+        }
         set(
             &mut self.inactive_selection_background,
             "editor.inactiveSelectionBackground",
@@ -1049,6 +1315,76 @@ impl Theme {
         Self::new("vs", ThemeKind::Light, EditorColors::vs(), rules)
     }
 
+    /// Monaco's `hc-black` (high contrast dark). [`ThemeKind`] has no
+    /// high-contrast variant, so its kind is [`ThemeKind::Dark`].
+    pub fn hc_black() -> Self {
+        let rules = monaco_rules! {
+            "invalid" => "f44747";
+            "emphasis" => "", "italic";
+            "strong" => "", "bold";
+            "variable" => "1AEBFF";
+            "variable.parameter" => "9CDCFE";
+            "constant" => "569CD6";
+            "comment" => "608B4E";
+            "number" => "FFFFFF";
+            "regexp" => "C0C0C0";
+            "annotation" => "569CD6";
+            "type" => "3DC9B0";
+            "delimiter" => "FFFF00";
+            "delimiter.html" => "FFFF00";
+            "tag" => "569CD6";
+            "meta" => "D4D4D4";
+            "meta.tag" => "CE9178";
+            "metatag" => "569CD6";
+            "key" => "9CDCFE";
+            "string.key" => "9CDCFE";
+            "string.value" => "CE9178";
+            "attribute.name" => "569CD6";
+            "attribute.value" => "3FF23F";
+            "string" => "CE9178";
+            "keyword" => "569CD6";
+            "keyword.flow" => "C586C0";
+        };
+        Self::new("hc-black", ThemeKind::Dark, EditorColors::hc_black(), rules)
+    }
+
+    /// Monaco's `hc-light` (high contrast light). [`ThemeKind`] has no
+    /// high-contrast variant, so its kind is [`ThemeKind::Light`].
+    pub fn hc_light() -> Self {
+        let rules = monaco_rules! {
+            "invalid" => "B5200D";
+            "emphasis" => "", "italic";
+            "strong" => "", "bold";
+            "variable" => "264F70";
+            "variable.predefined" => "4864AA";
+            "constant" => "dd0000";
+            "comment" => "008000";
+            "number" => "098658";
+            "number.hex" => "3030c0";
+            "regexp" => "800000";
+            "annotation" => "808080";
+            "type" => "008080";
+            "delimiter" => "000000";
+            "delimiter.html" => "383838";
+            "tag" => "800000";
+            "metatag" => "e00000";
+            "key" => "863B00";
+            "string.key.json" => "A31515";
+            "string.value.json" => "0451A5";
+            "attribute.name" => "264F78";
+            "attribute.value" => "0451A5";
+            "string" => "A31515";
+            "keyword" => "0000FF";
+            "keyword.flow" => "AF00DB";
+        };
+        Self::new(
+            "hc-light",
+            ThemeKind::Light,
+            EditorColors::hc_light(),
+            rules,
+        )
+    }
+
     /// Monaco `defineTheme`: `base` plus extra Monaco rules and VS Code color
     /// keys. With `inherit: false` the base's token rules are dropped.
     pub fn define(
@@ -1407,6 +1743,47 @@ mod tests {
             function.foreground, None,
             "Monaco's vs-dark doesn't color functions"
         );
+    }
+
+    #[test]
+    fn hc_black_theme() {
+        let theme = Theme::hc_black();
+        assert_eq!(theme.name, "hc-black");
+        assert_eq!(theme.kind, ThemeKind::Dark);
+        let colors = &theme.colors;
+        assert_eq!(Some(colors.background), parse_hex_color("#000000"));
+        assert_eq!(Some(colors.foreground), parse_hex_color("#FFFFFF"));
+        assert_eq!(Some(colors.indent_guide), parse_hex_color("#FFFFFF"));
+        assert_eq!(Some(colors.widget_border), parse_hex_color("#6FC3DF"));
+        assert_eq!(Some(colors.peek_view_border), parse_hex_color("#6FC3DF"));
+        assert_eq!(Some(colors.focus_border), parse_hex_color("#F38518"));
+        assert_eq!(colors.line_highlight_border, parse_hex_color("#F38518"));
+        let keyword = theme.style_for(HighlightId::intern("keyword"));
+        assert_eq!(keyword.foreground, parse_hex_color("#569CD6"));
+        let delimiter = theme.style_for(HighlightId::intern("punctuation.bracket"));
+        assert_eq!(delimiter.foreground, parse_hex_color("#FFFF00"));
+        let variable = theme.style_for(HighlightId::intern("text.literal"));
+        assert_eq!(variable.foreground, parse_hex_color("#1AEBFF"));
+    }
+
+    #[test]
+    fn hc_light_theme() {
+        let theme = Theme::hc_light();
+        assert_eq!(theme.name, "hc-light");
+        assert_eq!(theme.kind, ThemeKind::Light);
+        let colors = &theme.colors;
+        assert_eq!(Some(colors.background), parse_hex_color("#FFFFFF"));
+        assert_eq!(Some(colors.foreground), parse_hex_color("#292929"));
+        assert_eq!(Some(colors.cursor), parse_hex_color("#0F4A85"));
+        assert_eq!(Some(colors.widget_border), parse_hex_color("#0F4A85"));
+        assert_eq!(Some(colors.focus_border), parse_hex_color("#006BBD"));
+        assert_eq!(Some(colors.active_line_number), parse_hex_color("#006BBD"));
+        let keyword = theme.style_for(HighlightId::intern("keyword"));
+        assert_eq!(keyword.foreground, parse_hex_color("#0000FF"));
+        let invalid = best_match(theme.rules(), RuleKind::Monaco, "invalid");
+        assert_eq!(invalid.unwrap().foreground, parse_hex_color("#B5200D"));
+        let string = theme.style_for(HighlightId::intern("string"));
+        assert_eq!(string.foreground, parse_hex_color("#A31515"));
     }
 
     #[test]

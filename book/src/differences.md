@@ -52,7 +52,7 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
 - **Suggest widget:** the details panel goes beside the list or below it, never to the left or above. Its contents can't be focused or scrolled with the keyboard, and explain mode (`toggleExplainMode`) isn't ported. Icons are glyphs, not codicons.
 - **Missing commands:** code actions, rename, formatting, inlay hints, color decorators and links are not built in.
 - **Folding:** clicking the `⋯` placeholder doesn't unfold the region, and there is no folding by tree-sitter fold queries yet. Ranges come from indentation and markers.
-- **Accessibility:** screen reader support is post-MVP. GPUI's accessibility support is still in progress upstream.
+- **Accessibility:** screen readers get the lines around the selection as AccessKit text runs, as Monaco's hidden textarea does. Tab focus mode is announced only in Monaco: GPUI has no live announcements. `accessibilitySupport` isn't an option: the text runs are built whenever assistive technology is connected.
 - **Diff editor:** not available.
 - **Long lines:** as in Monaco, very long lines stop rendering after `stop_rendering_line_after` with a "Show more (…)" chip. Clicking the chip doesn't expand the line; set the option to `None` to draw everything.
 

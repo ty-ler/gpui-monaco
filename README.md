@@ -19,8 +19,7 @@ A Monaco-like code editor component for [GPUI](https://github.com/zed-industries
 
 ## Non-goals (for the MVP)
 
-Diff editor, screen reader support, snippets, CRDT collaboration,
-wasm, and huge single lines (minified files). See the `post-mvp` issues.
+Diff editor, CRDT collaboration and wasm. See the `post-mvp` issues.
 
 ## Crates
 

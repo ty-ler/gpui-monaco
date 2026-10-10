@@ -1651,6 +1651,45 @@ fn prepaint_editor(
         } else {
             overlay_styles(&row_highlights, &decoration_styles)
         };
+        // Monaco's `inline-selected-text`: selected text in
+        // `editor.selectionForeground` (high-contrast themes).
+        let row_highlights = match colors.selection_foreground {
+            Some(foreground) => {
+                let rope = snapshot.rope();
+                let mut selected: Vec<(Range<usize>, TokenStyle)> = selections
+                    .iter()
+                    .filter(|s| {
+                        !s.is_empty() && s.start().row <= segment.row && segment.row <= s.end().row
+                    })
+                    .map(|s| {
+                        let start = if s.start().row == segment.row {
+                            rope.point_utf16_to_offset(s.start()) - line_range.start
+                        } else {
+                            0
+                        };
+                        let end = if s.end().row == segment.row {
+                            rope.point_utf16_to_offset(s.end()) - line_range.start
+                        } else {
+                            line_range.len()
+                        };
+                        (
+                            start..end,
+                            TokenStyle {
+                                foreground: Some(foreground),
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect();
+                if selected.is_empty() {
+                    row_highlights
+                } else {
+                    selected.sort_by_key(|(range, _)| range.start);
+                    overlay_styles(&row_highlights, &selected)
+                }
+            }
+            None => row_highlights,
+        };
         let line = layout_segment(
             &snapshot,
             segment,

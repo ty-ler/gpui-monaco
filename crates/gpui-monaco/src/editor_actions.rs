@@ -279,6 +279,7 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.formatDocument", "code_editor::FormatDocument", "Format Document", can_format),
     Builtin("editor.action.formatSelection", "code_editor::FormatSelection", "Format Selection", can_format_selection),
     Builtin("editor.action.rename", "code_editor::Rename", "Rename Symbol", can_rename),
+    Builtin("editor.action.toggleTabFocusMode", "code_editor::ToggleTabFocusMode", "Toggle Tab Key Moves Focus", always),
     Builtin("editor.action.pasteAs", "code_editor::PasteAs", "Paste As...", writable),
     Builtin("editor.action.pasteAsText", "code_editor::PasteAsText", "Paste as Text", writable),
     Builtin("editor.action.quickFix", "code_editor::QuickFix", "Quick Fix...", can_code_action),

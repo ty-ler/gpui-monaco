@@ -38,6 +38,8 @@ editor.update(cx, |editor, cx| {
 | `auto_indent_on_paste`, `auto_indent_on_paste_within_string` | `autoIndentOnPaste`, `autoIndentOnPasteWithinString` | re-indent pasted lines (off by default; needs `auto_indent: Full`) |
 | `selection_clipboard` | `selectionClipboard` | Linux primary selection: selected text is copied to it, and a middle click pastes it (default on) |
 | `stop_rendering_line_after` | `stopRenderingLineAfter` | draw at most this many characters of a line, then "Show more" (default 10 000) |
+| `aria_label`, `aria_required`, `accessibility_page_size` | `ariaLabel`, `ariaRequired`, `accessibilityPageSize` | the screen reader name and how many lines it can read around the selection (500) |
+| `tab_focus_mode` | `tabFocusMode` | Tab moves focus instead of indenting; `set_tab_focus_mode` (Ctrl+M) turns it on for every editor |
 | `drop_into_editor`, `paste_as` | `dropIntoEditor`, `pasteAs` | `enabled` and when to show the button that switches edits |
 | `unusual_line_terminators` | `unusualLineTerminators` | `Prompt` (default), `Auto` or `Off` for LS and PS characters |
 | `word_separators` | `wordSeparators` | used by word movement and whole-word find |

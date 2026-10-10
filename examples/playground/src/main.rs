@@ -49,6 +49,8 @@ fn themes() -> Vec<(&'static str, Arc<Theme>)> {
     vec![
         ("vs-dark", Arc::new(Theme::vs_dark())),
         ("vs", Arc::new(Theme::vs())),
+        ("hc-black", Arc::new(Theme::hc_black())),
+        ("hc-light", Arc::new(Theme::hc_light())),
         ("Dark Modern", Arc::new(vscode("dark_modern.json"))),
         ("Dark+", Arc::new(vscode("dark_plus.json"))),
         ("Light+", Arc::new(vscode("light_plus.json"))),

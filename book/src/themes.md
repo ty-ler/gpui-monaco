@@ -15,6 +15,7 @@ editor.update(cx, |editor, cx| editor.set_theme(Arc::new(Theme::vs()), cx));
 
 - `Theme::vs_dark()`: Monaco's `vs-dark` (the default)
 - `Theme::vs()`: Monaco's `vs`
+- `Theme::hc_black()` and `Theme::hc_light()`: Monaco's high-contrast `hc-black` and `hc-light`
 
 ## VS Code themes
 
