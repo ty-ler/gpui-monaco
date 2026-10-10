@@ -20,6 +20,7 @@ mod element;
 pub mod events;
 mod find;
 mod find_widget;
+mod format;
 mod hover;
 pub mod markdown;
 mod markers;

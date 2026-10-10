@@ -25,6 +25,7 @@ Demo providers are registered by default:
 - signature help inside `(`
 - go to definition (`F12` / Cmd+click)
 - diagnostics (`F8`)
+- a formatter that trims trailing spaces and collapses repeated ones. Use format document (`Shift+Alt+F`) or format selection (`Cmd+K Cmd+F`). It also runs on paste and when you type `;` or `}`.
 
 ## Environment variables
 

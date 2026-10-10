@@ -9,6 +9,9 @@ gpui-monaco has no language server or other language intelligence built in. Your
 | `DefinitionProvider` | `DefinitionProvider` | Cmd/Ctrl+hover link, Cmd/Ctrl+click and F12 |
 | `SignatureHelpProvider` | `SignatureHelpProvider` | parameter hints while typing a call |
 | `DocumentHighlightProvider` | `DocumentHighlightProvider` | occurrence highlights of the symbol at the cursor (textual occurrences without one) |
+| `DocumentFormattingProvider` | `DocumentFormattingEditProvider` | Format Document (Shift+Alt+F; Ctrl+Shift+I on Linux) |
+| `DocumentRangeFormattingProvider` | `DocumentRangeFormattingEditProvider` | Format Selection (Cmd/Ctrl+K Cmd/Ctrl+F), format on paste, and Format Document without a document formatter |
+| `OnTypeFormattingProvider` | `OnTypeFormattingEditProvider` | format on type, after its trigger characters |
 
 Providers are app-wide and registered per language. Each returns a GPUI `Task`, so it can answer right away (`Task::ready`) or asynchronously, for example by forwarding to an LSP server. The [`gpui-monaco-lsp`](lsp.md) crate does that for you.
 
@@ -85,6 +88,19 @@ Return a `SignatureHelp` with:
 - the parameter labels, either as substrings of the signature label or as UTF-16 ranges into it
 
 The widget highlights the active parameter and re-queries as the cursor moves. The defaults open it on `(` and `,`; override `trigger_characters` and `retrigger_characters` to change that.
+
+## Formatting
+
+Formatters return `TextEdit`s, which are `(Range<PointUtf16>, String)` pairs in the text's current coordinates. The editor applies them the way Monaco does:
+
+- **Minimal edits:** each edit is reduced to the characters that actually change (Monaco `computeMoreMinimalEdits`). A formatter can return a whole-document replacement and cursors, decorations and markers in unchanged text stay put.
+- **One undo step:** the edits are applied as a single undo step, and the primary cursor keeps its place on screen.
+- **Cancellation:** if the text or the cursors change before a Format Document or Format Selection result arrives, it's dropped.
+- **Format Selection:** formats each selection, and an empty selection formats its line. Ranges whose edits would collide are formatted again as one.
+- **Format on type:** with `options.format_on_type`, typing one of `auto_format_trigger_characters` formats at the cursor. It needs a single empty selection, and is dropped if the text at or above the cursor's line changes first.
+- **Format on paste:** `options.format_on_paste` formats the pasted range with the range formatter.
+
+Both options are off by default, as in Monaco. You can also call `editor.format_document(cx)` and `editor.format_selection(cx)` directly.
 
 ## Hover from decorations and markers
 

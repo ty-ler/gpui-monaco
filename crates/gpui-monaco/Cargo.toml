@@ -16,12 +16,15 @@ pulldown-cmark = { version = "0.13", default-features = false }
 gpui.workspace = true
 gpui-monaco-text.workspace = true
 gpui-monaco-syntax.workspace = true
+log = "0.4"
+similar = "2"
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 unicode-segmentation.workspace = true
 
 [dev-dependencies]
+async-channel = "2"
 criterion.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 gpui-monaco-languages.workspace = true

@@ -57,6 +57,11 @@ All notable changes to this project are documented here. The format follows [Kee
   - `$/cancelRequest` when a request is dropped
   - The playground runs it with `PLAYGROUND_LSP`.
 - `gpui_monaco::events::content_changes`, which turns a patch into `ContentChange`s.
+- **Formatting (#94):**
+  - New `DocumentFormattingProvider`, `DocumentRangeFormattingProvider` and `OnTypeFormattingProvider` traits.
+  - Format Document (`Shift+Alt+F`) and Format Selection (`Cmd/Ctrl+K Cmd/Ctrl+F`), plus the `format_on_type` and `format_on_paste` options.
+  - Edits are reduced to minimal character changes (Monaco `computeMoreMinimalEdits`) and applied as one undo step. The cursor keeps its place on screen, and stale results are dropped.
+  - The LSP bridge forwards `textDocument/formatting`, `rangeFormatting` and `onTypeFormatting`.
 
 ### Fixed
 

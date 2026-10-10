@@ -431,6 +431,11 @@ actions!(
         TriggerSuggest,
         /// Shows the hover for the cursor position (Monaco `editor.action.showHover`).
         ShowHover,
+        /// Formats the document (Monaco `editor.action.formatDocument`).
+        FormatDocument,
+        /// Formats the selections, or the cursor's line (Monaco
+        /// `editor.action.formatSelection`).
+        FormatSelection,
     ]
 );
 
@@ -575,6 +580,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("cmd-alt-f", StartFindReplace, ctx),
             KeyBinding::new("cmd-k cmd-d", MoveSelectionToNextFindMatch, ctx),
             KeyBinding::new("cmd-k cmd-i", ShowHover, ctx),
+            KeyBinding::new("shift-alt-f", FormatDocument, ctx),
+            KeyBinding::new("cmd-k cmd-f", FormatSelection, ctx),
             KeyBinding::new("cmd-g", NextMatch, ctx),
             KeyBinding::new("cmd-shift-g", PreviousMatch, ctx),
             KeyBinding::new("cmd-alt-enter", ReplaceAll, ctx),
@@ -611,6 +618,16 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-h", StartFindReplace, ctx),
             KeyBinding::new("ctrl-k ctrl-d", MoveSelectionToNextFindMatch, ctx),
             KeyBinding::new("ctrl-k ctrl-i", ShowHover, ctx),
+            KeyBinding::new("ctrl-k ctrl-f", FormatSelection, ctx),
+            KeyBinding::new(
+                if cfg!(target_os = "linux") {
+                    "ctrl-shift-i"
+                } else {
+                    "shift-alt-f"
+                },
+                FormatDocument,
+                ctx,
+            ),
             KeyBinding::new("ctrl-alt-enter", ReplaceAll, ctx),
             KeyBinding::new("ctrl-shift-1", ReplaceOne, ctx),
             KeyBinding::new("alt-c", ToggleCaseSensitive, ctx),

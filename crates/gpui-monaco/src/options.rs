@@ -269,6 +269,11 @@ pub struct EditorOptions {
     /// Monaco `quickSuggestions`: suggest while typing in code (not in
     /// strings or comments).
     pub quick_suggestions: bool,
+    /// Monaco `formatOnType`: format with the on-type formatter when one of
+    /// its trigger characters is typed.
+    pub format_on_type: bool,
+    /// Monaco `formatOnPaste`: format pasted text with the range formatter.
+    pub format_on_paste: bool,
     /// Monaco `minimap`.
     pub minimap: MinimapOptions,
     /// Monaco `stickyScroll`.
@@ -373,6 +378,8 @@ impl Default for EditorOptions {
             auto_indent: Default::default(),
             match_brackets: true,
             quick_suggestions: true,
+            format_on_type: false,
+            format_on_paste: false,
             minimap: MinimapOptions::default(),
             sticky_scroll: StickyScrollOptions::default(),
             comments: Default::default(),

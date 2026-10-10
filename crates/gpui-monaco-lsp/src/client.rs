@@ -724,6 +724,9 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
             },
             "definition": { "linkSupport": true },
             "documentHighlight": {},
+            "formatting": {},
+            "rangeFormatting": {},
+            "onTypeFormatting": {},
             "publishDiagnostics": { "relatedInformation": false, "versionSupport": true },
         },
     }))?;

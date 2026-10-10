@@ -182,7 +182,84 @@ impl DefinitionProvider for DemoDefinitions {
     }
 }
 
+/// The demo formatter's rule: trailing whitespace goes, and runs of spaces
+/// after the indentation become one.
+fn tidy_line(line: &str) -> String {
+    let indent = line.len() - line.trim_start().len();
+    let mut out = line[..indent].to_string();
+    let mut last_space = false;
+    for c in line[indent..].trim_end().chars() {
+        if !(c == ' ' && last_space) {
+            out.push(c);
+        }
+        last_space = c == ' ';
+    }
+    out
+}
+
+/// Tidies `rows`, one edit per changed line.
+fn tidy_rows(context: &ProviderContext, rows: std::ops::RangeInclusive<u32>) -> Vec<TextEdit> {
+    rows.filter(|row| *row <= context.snapshot.max_point().row)
+        .filter_map(|row| {
+            let line = context.snapshot.line(row);
+            let tidy = tidy_line(&line);
+            (tidy != line).then(|| {
+                let end = PointUtf16::new(row, line.encode_utf16().count() as u32);
+                (PointUtf16::new(row, 0)..end, tidy)
+            })
+        })
+        .collect()
+}
+
+/// Formats the document, selections, pasted text and the line where `;`
+/// or `}` is typed.
+struct DemoFormatter;
+
+impl DocumentFormattingProvider for DemoFormatter {
+    fn provide_document_formatting_edits(
+        &self,
+        context: &ProviderContext,
+        _: FormattingOptions,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<TextEdit>>> {
+        let last = context.snapshot.max_point().row;
+        Task::ready(Ok(tidy_rows(context, 0..=last)))
+    }
+}
+
+impl DocumentRangeFormattingProvider for DemoFormatter {
+    fn provide_document_range_formatting_edits(
+        &self,
+        context: &ProviderContext,
+        range: std::ops::Range<PointUtf16>,
+        _: FormattingOptions,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<TextEdit>>> {
+        Task::ready(Ok(tidy_rows(context, range.start.row..=range.end.row)))
+    }
+}
+
+impl OnTypeFormattingProvider for DemoFormatter {
+    fn auto_format_trigger_characters(&self) -> Vec<char> {
+        vec![';', '}']
+    }
+
+    fn provide_on_type_formatting_edits(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        _: char,
+        _: FormattingOptions,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<TextEdit>>> {
+        Task::ready(Ok(tidy_rows(context, position.row..=position.row)))
+    }
+}
+
 pub fn register(cx: &mut App) {
+    register_document_formatting_provider(cx, LanguageSelector::All, DemoFormatter);
+    register_document_range_formatting_provider(cx, LanguageSelector::All, DemoFormatter);
+    register_on_type_formatting_provider(cx, LanguageSelector::All, DemoFormatter);
     register_definition_provider(cx, LanguageSelector::All, DemoDefinitions);
     register_completion_provider(cx, LanguageSelector::All, DemoCompletions);
     register_hover_provider(cx, LanguageSelector::All, DemoHover);

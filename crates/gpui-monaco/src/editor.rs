@@ -159,6 +159,16 @@ pub struct CodeEditor {
     pub(crate) prev_edit_kind: Option<EditOperationType>,
     /// The reason and source the next `SelectionsChanged` reports.
     pub(crate) next_selection_change: SelectionChange,
+    /// A running format document, selection or paste request.
+    pub(crate) format_task: Option<Task<()>>,
+    /// A running format on type request.
+    pub(crate) format_on_type_task: Option<Task<()>>,
+    /// The primary cursor line's top relative to the viewport in the last
+    /// frame.
+    pub(crate) last_cursor_offset: Option<Pixels>,
+    /// Keep the primary cursor line at this height in the viewport next
+    /// frame (Monaco `StableEditorScrollState`).
+    pub(crate) pending_cursor_offset: Option<Pixels>,
     mouse_selection: Option<MouseSelection>,
     scrollbar_drag: Option<ScrollbarDrag>,
     blink_epoch: usize,
@@ -209,6 +219,10 @@ impl CodeEditor {
             marked_range: None,
             prev_edit_kind: None,
             next_selection_change: SelectionChange::default(),
+            format_task: None,
+            format_on_type_task: None,
+            last_cursor_offset: None,
+            pending_cursor_offset: None,
             mouse_selection: None,
             scrollbar_drag: None,
             blink_epoch: 0,
@@ -982,6 +996,9 @@ impl CodeEditor {
         self.apply(operation, cx);
         self.suggest_after_typing(text, cx);
         self.signature_help_after_typing(text, cx);
+        if let Some(ch) = text.chars().last() {
+            self.format_on_type(ch, cx);
+        }
     }
 
     /// Runs `f` with the model's language context (configuration plus token
@@ -1280,10 +1297,30 @@ impl CodeEditor {
     }
 
     fn paste_item(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
+        let version = self.snapshot.version();
+        let start = self
+            .cursors
+            .selections()
+            .iter()
+            .map(|s| s.start())
+            .min()
+            .unwrap_or_default();
         self.next_selection_change.reason = CursorChangeReason::Paste;
         self.paste_clipboard_item(item, cx);
         // Nothing may have changed.
         self.next_selection_change = SelectionChange::default();
+        if self.snapshot.version() != version {
+            // Monaco's `onDidPaste` range: from the first selection's start
+            // to the last cursor.
+            let end = self
+                .cursors
+                .selections()
+                .iter()
+                .map(|s| s.head)
+                .max()
+                .unwrap_or(start);
+            self.format_on_paste(start..end, cx);
+        }
     }
 
     fn paste_clipboard_item(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
@@ -2650,6 +2687,12 @@ impl Render for CodeEditor {
             )
             .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| this.go_to_definition(cx)))
             .on_action(cx.listener(|this, _: &ShowHover, _, cx| this.show_hover_at_cursor(cx)))
+            .on_action(cx.listener(|this, _: &FormatDocument, _, cx| {
+                this.format_document(cx);
+            }))
+            .on_action(cx.listener(|this, _: &FormatSelection, _, cx| {
+                this.format_selection(cx);
+            }))
             .on_action(cx.listener(|this, _: &TriggerSuggest, _, cx| {
                 this.trigger_suggest(crate::providers::CompletionTrigger::Invoke, cx)
             }))

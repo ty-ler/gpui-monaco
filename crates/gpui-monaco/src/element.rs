@@ -885,6 +885,10 @@ fn prepaint_editor(
     let selections = editor.cursors.selections();
     let primary = selections[0].head;
     let (primary_view_line, _) = view_lines.to_view(primary, false);
+    if let Some(offset) = editor.pending_cursor_offset.take() {
+        editor.scroll_top = zones.line_y(primary_view_line, line_height) - offset;
+        editor.autoscroll_requested = false;
+    }
     if let Some((range, reveal)) = editor.pending_reveal.take() {
         // Monaco `revealRange`: the box of the range's lines.
         let start = view_lines.to_view(range.start, false).0;
@@ -919,6 +923,7 @@ fn prepaint_editor(
     }
     editor.scroll_top = editor.scroll_top.clamp(px(0.), max_scroll_top);
     let scroll_top = editor.scroll_top;
+    editor.last_cursor_offset = Some(zones.line_y(primary_view_line, line_height) - scroll_top);
 
     let first_line = zones.line_at(scroll_top, line_height, view_line_count);
     let last_line = zones.line_at(scroll_top + viewport_height, line_height, view_line_count);
