@@ -49,6 +49,14 @@ All notable changes to this project are documented here. The format follows [Kee
 - `CodeEditor::create_decorations_collection` returns a `DecorationsCollection`, a port of Monaco's `IEditorDecorationsCollection` (#105).
 - `TextModel::language_at` (Monaco `getLanguageIdAtPosition`), and the `comments` editor option.
 - Language configurations accept `lineComment` as `{ "comment", "noIndent" }`.
+- **`gpui-monaco-lsp`**, a new crate that bridges language servers to the provider traits (#54):
+  - document sync: `didOpen`, incremental `didChange` (also flushed before each request), `didClose`, `didSave`
+  - diagnostics shown as markers
+  - completion, hover, definition, document highlights and signature help
+  - the requests a server sends: `workspace/configuration`, `applyEdit` and `workspaceFolders`
+  - `$/cancelRequest` when a request is dropped
+  - The playground runs it with `PLAYGROUND_LSP`.
+- `gpui_monaco::events::content_changes`, which turns a patch into `ContentChange`s.
 
 ### Fixed
 

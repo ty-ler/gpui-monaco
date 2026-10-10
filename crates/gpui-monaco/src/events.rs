@@ -25,8 +25,9 @@ pub struct ContentChange {
     pub text: String,
 }
 
-/// The [`ContentChange`]s of `patch`, which took `old` to `new`.
-pub(crate) fn content_changes(old: &Rope, new: &Rope, patch: &Patch) -> Vec<ContentChange> {
+/// The [`ContentChange`]s of `patch`, which took `old` to `new` (e.g. from
+/// [`Buffer::edits_since`](text::Buffer::edits_since)), in descending order.
+pub fn content_changes(old: &Rope, new: &Rope, patch: &Patch) -> Vec<ContentChange> {
     patch
         .edits()
         .iter()

@@ -38,7 +38,7 @@ jobs:
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: Rustdoc (missing_docs and broken links are errors)
-        run: cargo doc --no-deps -p gpui-monaco -p gpui-monaco-text -p gpui-monaco-syntax -p gpui-monaco-languages
+        run: cargo doc --no-deps -p gpui-monaco -p gpui-monaco-text -p gpui-monaco-syntax -p gpui-monaco-languages -p gpui-monaco-lsp
         env:
           RUSTDOCFLAGS: -D warnings
       - name: Guide

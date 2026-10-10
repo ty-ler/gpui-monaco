@@ -20,4 +20,5 @@ gpui.workspace = true
 gpui_platform.workspace = true
 gpui-monaco.workspace = true
 gpui-monaco-languages.workspace = true
+gpui-monaco-lsp.workspace = true
 anyhow.workspace = true
