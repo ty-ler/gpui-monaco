@@ -1909,6 +1909,14 @@ impl Render for CodeEditor {
             CursorWordLeftSelect => (MoveCommand::WordLeft, true),
             CursorWordRight => (MoveCommand::WordRight, false),
             CursorWordRightSelect => (MoveCommand::WordRight, true),
+            CursorWordStartLeft => (MoveCommand::WordStartLeft, false),
+            CursorWordStartLeftSelect => (MoveCommand::WordStartLeft, true),
+            CursorWordStartRight => (MoveCommand::WordStartRight, false),
+            CursorWordStartRightSelect => (MoveCommand::WordStartRight, true),
+            CursorWordEndLeft => (MoveCommand::WordEndLeft, false),
+            CursorWordEndLeftSelect => (MoveCommand::WordEndLeft, true),
+            CursorWordEndRight => (MoveCommand::WordEndRight, false),
+            CursorWordEndRightSelect => (MoveCommand::WordEndRight, true),
             CursorWordPartLeft => (MoveCommand::WordPartLeft, false),
             CursorWordPartLeftSelect => (MoveCommand::WordPartLeft, true),
             CursorWordPartRight => (MoveCommand::WordPartRight, false),
@@ -1934,6 +1942,79 @@ impl Render for CodeEditor {
             .on_action(cx.listener(Self::delete_left))
             .on_action(cx.listener(Self::delete_right))
             .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(|this, _: &DeleteWordStartLeft, _, cx| {
+                this.run_edit(cx, |c, m, s| {
+                    cursor::delete_word(c, m, s, true, cursor::WordNavigationType::WordStart, false)
+                })
+            }))
+            .on_action(cx.listener(|this, _: &DeleteWordEndLeft, _, cx| {
+                this.run_edit(cx, |c, m, s| {
+                    cursor::delete_word(c, m, s, true, cursor::WordNavigationType::WordEnd, false)
+                })
+            }))
+            .on_action(cx.listener(|this, _: &DeleteWordStartRight, _, cx| {
+                this.run_edit(cx, |c, m, s| {
+                    cursor::delete_word(
+                        c,
+                        m,
+                        s,
+                        false,
+                        cursor::WordNavigationType::WordStart,
+                        false,
+                    )
+                })
+            }))
+            .on_action(cx.listener(|this, _: &DeleteWordEndRight, _, cx| {
+                this.run_edit(cx, |c, m, s| {
+                    cursor::delete_word(c, m, s, false, cursor::WordNavigationType::WordEnd, false)
+                })
+            }))
+            .on_action(cx.listener(|this, _: &DeleteWordPartLeft, _, cx| {
+                this.run_edit(cx, |c, m, s| cursor::delete_word_part(c, m, s, true))
+            }))
+            .on_action(cx.listener(|this, _: &DeleteWordPartRight, _, cx| {
+                this.run_edit(cx, |c, m, s| cursor::delete_word_part(c, m, s, false))
+            }))
+            .on_action(cx.listener(|this, _: &DeleteInsideWord, _, cx| {
+                this.run_edit(cx, |c, m, s| cursor::delete_inside_word(c, m, s, false))
+            }))
+            .on_action(
+                cx.listener(|this, _: &AddSelectionToPreviousFindMatch, _, cx| {
+                    this.add_selection_to_previous_find_match(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &MoveSelectionToPreviousFindMatch, _, cx| {
+                    this.move_selection_to_previous_find_match(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &InsertCursorAtEndOfEachLineSelected, _, cx| {
+                    this.insert_cursor_at_end_of_each_line_selected(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &AddCursorsToBottom, _, cx| {
+                    this.add_cursors_to_edge(true, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &AddCursorsToTop, _, cx| this.add_cursors_to_edge(false, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &FocusNextCursor, _, cx| this.focus_next_cursor(true, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &FocusPreviousCursor, _, cx| {
+                    this.focus_next_cursor(false, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &LineBreakInsert, _, cx| {
+                let operation = this.with_language(cx, |config, rope, cursors, lang| {
+                    cursor::line_break_insert(config, rope, cursors, lang)
+                });
+                this.apply(operation, cx);
+            }))
             .on_action(cx.listener(Self::delete_word_right))
             .on_action(cx.listener(Self::delete_all_left))
             .on_action(cx.listener(Self::tab))

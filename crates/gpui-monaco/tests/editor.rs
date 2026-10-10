@@ -501,3 +501,34 @@ fn sticky_scroll_and_minimap_layout(cx: &mut TestAppContext) {
     assert_eq!(sticky_rows, vec![0, 1]);
     assert!(has_minimap);
 }
+
+#[gpui::test]
+fn word_start_end_and_delete_commands(cx: &mut TestAppContext) {
+    use gpui_monaco::actions::*;
+    let (editor, cx) = editor_with_text("fooBar baz qux", cx);
+    cx.dispatch_action(CursorWordEndRight);
+    assert_eq!(heads(&editor, cx), vec![(1, 7)]);
+    cx.dispatch_action(CursorWordStartRight);
+    assert_eq!(heads(&editor, cx), vec![(1, 8)]);
+    cx.dispatch_action(CursorWordEndLeftSelect);
+    assert_eq!(heads(&editor, cx), vec![(1, 7)]);
+    // With an empty selection it deletes the word and the space after it.
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 3))], cx)
+    });
+    cx.dispatch_action(DeleteInsideWord);
+    assert_eq!(text(&editor, cx), "baz qux");
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 4))], cx)
+    });
+    cx.dispatch_action(DeleteWordStartRight);
+    assert_eq!(text(&editor, cx), "bazqux");
+    cx.dispatch_action(LineBreakInsert);
+    assert_eq!(text(&editor, cx), "baz\nqux");
+    assert_eq!(heads(&editor, cx), vec![(1, 4)]);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(2, 4))], cx)
+    });
+    cx.dispatch_action(DeleteWordPartLeft);
+    assert_eq!(text(&editor, cx), "baz\n");
+}

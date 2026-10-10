@@ -49,7 +49,8 @@ pub use comment::{CommentOptions, CommentsAt, LineCommentType, block_comment, li
 pub use edit::{EditOperation, EditOperationType};
 pub use language::{LanguageContext, StandardTokenType};
 pub use language_typing::{
-    delete_left_with_language, line_break_with_language, tab_with_language, type_with_language,
+    delete_left_with_language, line_break_insert, line_break_with_language, tab_with_language,
+    type_with_language,
 };
 pub use lines::{
     copy_lines_down, copy_lines_up, delete_lines, indent_lines, insert_line_above,

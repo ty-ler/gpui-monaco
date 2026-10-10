@@ -89,6 +89,62 @@ actions!(
         AddCursorAbove,
         /// Adds a cursor on the line below (Monaco `editor.action.insertCursorBelow`).
         AddCursorBelow,
+        /// Moves to the previous word start (Monaco `cursorWordStartLeft`).
+        CursorWordStartLeft,
+        /// Selects to the previous word start (Monaco `cursorWordStartLeftSelect`).
+        CursorWordStartLeftSelect,
+        /// Moves to the next word start (Monaco `cursorWordStartRight`).
+        CursorWordStartRight,
+        /// Selects to the next word start (Monaco `cursorWordStartRightSelect`).
+        CursorWordStartRightSelect,
+        /// Moves to the previous word end (Monaco `cursorWordEndLeft`).
+        CursorWordEndLeft,
+        /// Selects to the previous word end (Monaco `cursorWordEndLeftSelect`).
+        CursorWordEndLeftSelect,
+        /// Moves to the next word end (Monaco `cursorWordEndRight`).
+        CursorWordEndRight,
+        /// Selects to the next word end (Monaco `cursorWordEndRightSelect`).
+        CursorWordEndRightSelect,
+        /// Deletes to the previous word start (Monaco `deleteWordStartLeft`).
+        DeleteWordStartLeft,
+        /// Deletes to the next word start (Monaco `deleteWordStartRight`).
+        DeleteWordStartRight,
+        /// Deletes to the previous word end (Monaco `deleteWordEndLeft`).
+        DeleteWordEndLeft,
+        /// Deletes to the next word end (Monaco `deleteWordEndRight`).
+        DeleteWordEndRight,
+        /// Deletes to the previous camelCase / `snake_case` part (Monaco
+        /// `deleteWordPartLeft`, Ctrl+Alt+Backspace on macOS).
+        DeleteWordPartLeft,
+        /// Deletes to the next camelCase / `snake_case` part (Monaco
+        /// `deleteWordPartRight`, Ctrl+Alt+Delete on macOS).
+        DeleteWordPartRight,
+        /// Deletes the word under each cursor and the whitespace next to it
+        /// (Monaco `deleteInsideWord`).
+        DeleteInsideWord,
+        /// Inserts a line break after each cursor without moving it (Monaco
+        /// `lineBreakInsert`, Ctrl+O on macOS).
+        LineBreakInsert,
+        /// Adds the previous occurrence of the selection as a new selection
+        /// (Monaco `editor.action.addSelectionToPreviousFindMatch`).
+        AddSelectionToPreviousFindMatch,
+        /// Moves the last selection to the previous occurrence (Monaco
+        /// `editor.action.moveSelectionToPreviousFindMatch`).
+        MoveSelectionToPreviousFindMatch,
+        /// Puts a cursor at the end of every selected line (Monaco
+        /// `editor.action.insertCursorAtEndOfEachLineSelected`, Shift+Alt+I).
+        InsertCursorAtEndOfEachLineSelected,
+        /// Repeats the primary selection on every line below it (Monaco
+        /// `editor.action.addCursorsToBottom`).
+        AddCursorsToBottom,
+        /// Repeats the primary selection on every line above it (Monaco
+        /// `editor.action.addCursorsToTop`).
+        AddCursorsToTop,
+        /// Makes the next cursor primary (Monaco `editor.action.focusNextCursor`).
+        FocusNextCursor,
+        /// Makes the previous cursor primary (Monaco
+        /// `editor.action.focusPreviousCursor`).
+        FocusPreviousCursor,
         /// Toggles line comments on the selected lines (Monaco
         /// `editor.action.commentLine`, Cmd+/).
         CommentLine,
@@ -281,6 +337,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-f", StartFind, ctx),
         KeyBinding::new("secondary-d", AddSelectionToNextFindMatch, ctx),
         KeyBinding::new("secondary-/", CommentLine, ctx),
+        KeyBinding::new("shift-alt-i", InsertCursorAtEndOfEachLineSelected, ctx),
         KeyBinding::new("secondary-k secondary-c", AddCommentLine, ctx),
         KeyBinding::new("secondary-k secondary-u", RemoveCommentLine, ctx),
         KeyBinding::new("secondary-shift-l", SelectAllOccurrences, ctx),
@@ -316,6 +373,9 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("alt-right", CursorWordRight, ctx),
             KeyBinding::new("shift-alt-right", CursorWordRightSelect, ctx),
             KeyBinding::new("ctrl-alt-left", CursorWordPartLeft, ctx),
+            KeyBinding::new("ctrl-alt-backspace", DeleteWordPartLeft, ctx),
+            KeyBinding::new("ctrl-alt-delete", DeleteWordPartRight, ctx),
+            KeyBinding::new("ctrl-o", LineBreakInsert, ctx),
             KeyBinding::new("ctrl-shift-alt-left", CursorWordPartLeftSelect, ctx),
             KeyBinding::new("ctrl-alt-right", CursorWordPartRight, ctx),
             KeyBinding::new("ctrl-shift-alt-right", CursorWordPartRightSelect, ctx),
