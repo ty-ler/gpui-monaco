@@ -26,6 +26,7 @@ mod auto_closed;
 mod brackets;
 mod collection;
 mod column;
+mod comment;
 mod edit;
 mod language;
 mod language_typing;
@@ -44,6 +45,7 @@ pub use auto_closed::{AutoClosedPair, AutoClosedRanges};
 pub use brackets::matching_bracket;
 pub use collection::{CursorCollection, SelectionStartKind, SingleCursorState};
 pub use column::{ColumnSelectCommand, ColumnSelectData, column_select, column_select_to};
+pub use comment::{CommentOptions, CommentsAt, LineCommentType, block_comment, line_comment};
 pub use edit::{EditOperation, EditOperationType};
 pub use language::{LanguageContext, StandardTokenType};
 pub use language_typing::{

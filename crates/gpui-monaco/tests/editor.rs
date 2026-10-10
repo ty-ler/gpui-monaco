@@ -381,18 +381,60 @@ fn rust_editor<'a>(
     text: &str,
     cx: &'a mut TestAppContext,
 ) -> (Entity<CodeEditor>, &'a mut VisualTestContext) {
+    language_editor(text, "rust", cx)
+}
+
+fn language_editor<'a>(
+    text: &str,
+    language: &'static str,
+    cx: &'a mut TestAppContext,
+) -> (Entity<CodeEditor>, &'a mut VisualTestContext) {
     cx.update(|cx| {
         gpui_monaco::init(cx);
         gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
     });
     let text = text.to_string();
     let (editor, cx) = cx.add_window_view(|window, cx| {
-        let model = cx.new(|_| TextModel::new(&text).with_language("rust"));
+        let model = cx.new(|_| TextModel::new(&text).with_language(language));
         CodeEditor::new(model, window, cx)
     });
     cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
     cx.run_until_parked();
     (editor, cx)
+}
+
+#[gpui::test]
+fn toggle_comments_by_language(cx: &mut TestAppContext) {
+    let (editor, cx) = rust_editor("fn a() {\n    b();\n}", cx);
+    cx.simulate_keystrokes("secondary-a secondary-/");
+    assert_eq!(text(&editor, cx), "// fn a() {\n//     b();\n// }");
+    cx.simulate_keystrokes("secondary-/");
+    assert_eq!(text(&editor, cx), "fn a() {\n    b();\n}");
+    cx.simulate_keystrokes("secondary-z");
+    assert_eq!(text(&editor, cx), "// fn a() {\n//     b();\n// }");
+}
+
+#[gpui::test]
+fn toggle_comments_use_the_injected_language(cx: &mut TestAppContext) {
+    let (editor, cx) = language_editor("# T\n\n```rust\nlet x = 1;\n```\n\ntext\n", "markdown", cx);
+    // Inside the Rust fence: Rust's line comment.
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(4, 1))], cx)
+    });
+    cx.simulate_keystrokes("secondary-/");
+    assert_eq!(
+        text(&editor, cx),
+        "# T\n\n```rust\n// let x = 1;\n```\n\ntext\n"
+    );
+    // In Markdown text: Markdown has only block comments.
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(7, 1))], cx)
+    });
+    cx.simulate_keystrokes("secondary-/");
+    assert_eq!(
+        text(&editor, cx),
+        "# T\n\n```rust\n// let x = 1;\n```\n\n<!-- text -->\n"
+    );
 }
 
 #[gpui::test]

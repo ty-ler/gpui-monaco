@@ -347,6 +347,40 @@ impl TextModel {
             .collect()
     }
 
+    /// The language at byte `offset` (Monaco `getLanguageIdAtPosition`): the
+    /// innermost injected language there (e.g. Rust in a Markdown code fence,
+    /// JavaScript in an HTML `<script>`), or the model's language. Hidden
+    /// helper languages such as `markdown_inline` are skipped.
+    pub fn language_at(&self, offset: usize) -> Option<Arc<Language>> {
+        let model_language = self.language().cloned();
+        let Some(syntax) = self.syntax_snapshot() else {
+            return model_language;
+        };
+        let Some(tree) = syntax.state.syntax() else {
+            return model_language;
+        };
+        let offset = if syntax.text.version() == self.buffer.version() {
+            offset
+        } else {
+            self.buffer
+                .edits_since(syntax.text.version())
+                .invert()
+                .transform_offset(offset, text::Bias::Left)
+        };
+        tree.layers()
+            .iter()
+            .filter(|layer| {
+                !layer.language.hidden
+                    && layer
+                        .ranges
+                        .iter()
+                        .any(|r| r.start <= offset && offset <= r.end)
+            })
+            .max_by_key(|layer| layer.depth)
+            .map(|layer| layer.language.clone())
+            .or(model_language)
+    }
+
     /// Monaco's standard token type of the character at byte `offset`.
     pub fn token_type_at(&self, offset: usize) -> crate::cursor::StandardTokenType {
         use crate::cursor::StandardTokenType;

@@ -1,6 +1,7 @@
 //! Tests ported from Monaco, plus the harness they run on.
 
 mod bundled_language_test;
+mod comment_test;
 mod cursor_editing_test;
 mod cursor_language_test;
 mod cursor_test;

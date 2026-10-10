@@ -22,7 +22,7 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
   - Language configuration patterns (`wordPattern`, `indentationRules`, …) use `fancy-regex`, so VS Code's configurations work unchanged.
 - **Completion:** snippet syntax in `insert_text` is inserted literally; snippets are post-MVP.
 - **Word-based suggestions:** there are none. Completions come only from providers.
-- **Missing commands:** commenting (toggle line or block comment), code actions, rename, formatting, inlay hints, color decorators and links are not built in.
+- **Missing commands:** code actions, rename, formatting, inlay hints, color decorators and links are not built in.
 - **Indent guides:** not drawn yet.
 - **Folding:** clicking the `⋯` placeholder doesn't unfold the region, and there is no folding by tree-sitter fold queries yet. Ranges come from indentation and markers.
 - **Paste:** pasted text is not reindented (Monaco's `autoIndentOnPaste`).

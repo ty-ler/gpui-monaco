@@ -89,6 +89,18 @@ actions!(
         AddCursorAbove,
         /// Adds a cursor on the line below (Monaco `editor.action.insertCursorBelow`).
         AddCursorBelow,
+        /// Toggles line comments on the selected lines (Monaco
+        /// `editor.action.commentLine`, Cmd+/).
+        CommentLine,
+        /// Adds line comments to the selected lines (Monaco
+        /// `editor.action.addCommentLine`, Cmd+K Cmd+C).
+        AddCommentLine,
+        /// Removes line comments from the selected lines (Monaco
+        /// `editor.action.removeCommentLine`, Cmd+K Cmd+U).
+        RemoveCommentLine,
+        /// Toggles a block comment around the selection (Monaco
+        /// `editor.action.blockComment`, Shift+Alt+A).
+        BlockComment,
         /// Escape: closes the suggest widget, marker zone, parameter hints, hover
         /// or find widget if one is open; otherwise keeps only the primary
         /// cursor, then clears its selection (Monaco `removeSecondaryCursors`).
@@ -268,6 +280,9 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-v", Paste, ctx),
         KeyBinding::new("secondary-f", StartFind, ctx),
         KeyBinding::new("secondary-d", AddSelectionToNextFindMatch, ctx),
+        KeyBinding::new("secondary-/", CommentLine, ctx),
+        KeyBinding::new("secondary-k secondary-c", AddCommentLine, ctx),
+        KeyBinding::new("secondary-k secondary-u", RemoveCommentLine, ctx),
         KeyBinding::new("secondary-shift-l", SelectAllOccurrences, ctx),
         KeyBinding::new("secondary-f2", SelectAllOccurrences, ctx),
         KeyBinding::new("secondary-shift-\\", JumpToBracket, ctx),
@@ -283,6 +298,16 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("alt-enter", SelectAllMatches, SINGLE_LINE),
         KeyBinding::new("secondary-enter", ReplaceAll, SINGLE_LINE),
     ];
+
+    bindings.push(KeyBinding::new(
+        if cfg!(target_os = "linux") {
+            "ctrl-shift-a"
+        } else {
+            "shift-alt-a"
+        },
+        BlockComment,
+        ctx,
+    ));
 
     if cfg!(target_os = "macos") {
         bindings.extend([

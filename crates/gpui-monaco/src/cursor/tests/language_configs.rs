@@ -189,6 +189,7 @@ pub fn auto_closing_language() -> LanguageConfiguration {
     LanguageConfiguration {
         comments: Comments {
             line_comment: None,
+            line_comment_no_indent: false,
             block_comment: Some(("/*".into(), "*/".into())),
         },
         auto_closing_pairs: auto_closing_pairs(true),
@@ -353,6 +354,7 @@ pub fn typescript_test_language() -> LanguageConfiguration {
         brackets: brackets(&[("${", "}"), ("{", "}"), ("[", "]"), ("(", ")")]),
         comments: Comments {
             line_comment: Some("//".into()),
+            line_comment_no_indent: false,
             block_comment: Some(("/*".into(), "*/".into())),
         },
         auto_closing_pairs: javascript_auto_closing_pairs(),
