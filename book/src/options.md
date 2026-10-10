@@ -34,6 +34,7 @@ editor.update(cx, |editor, cx| {
 | `read_only_message` | `readOnlyMessage` | markdown; defaults to "Cannot edit in read-only editor" |
 | `placeholder` | `placeholder` | shown while the model is empty |
 | `unicode_highlight` | `unicodeHighlight.*` | `non_basic_ascii`, `invisible_characters`, `ambiguous_characters`, `include_comments`, `include_strings`, `allowed_characters`, `allowed_locales` |
+| `drag_and_drop`, `double_click_selects_block` | `dragAndDrop`, `doubleClickSelectsBlock` | drag the selection to move it (Alt/Ctrl copies); double-click inside brackets or quotes selects their content |
 | `unusual_line_terminators` | `unusualLineTerminators` | `Prompt` (default), `Auto` or `Off` for LS and PS characters |
 | `word_separators` | `wordSeparators` | used by word movement and whole-word find |
 | `word_wrap`, `word_wrap_column`, `wrapping_indent` | `wordWrap`, `wordWrapColumn`, `wrappingIndent` | `Off`, `On`, `WordWrapColumn`, `Bounded` |

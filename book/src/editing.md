@@ -177,6 +177,7 @@ Lines are indented like the cursor's line unless `adjust_whitespace` is off. `se
 ## View
 
 - **Word wrap:** follows Monaco's line-break rules, including CJK and break-before/break-after characters, plus `wrapping_indent`.
+- **Drag and drop:** drag the selection to move it, or hold Alt (Ctrl on Windows and Linux) to copy it. Double-click just inside brackets or quotes to select their content.
 - **Unicode highlighting:** ambiguous and invisible characters get a warning border. Hover one to learn why, or to stop highlighting it.
 - **Minimap:** shows colored blocks and a draggable slider. `// #region Name` and `// MARK: - Name` comments become section headers in it.
 - **Sticky scroll:** pins up to `max_line_count` enclosing scope headers to the top. Clicking a header jumps to it.

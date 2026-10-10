@@ -144,6 +144,7 @@ pub struct CodeEditor {
     /// Check for unusual line terminators before the next frame.
     pub(crate) unusual_line_terminators_pending: bool,
     pub(crate) unicode_highlights: crate::unicode_highlighter::UnicodeHighlightState,
+    pub(crate) dnd: crate::dnd::DragAndDrop,
     pub(crate) theme: Arc<Theme>,
     pub(crate) scroll_top: Pixels,
     pub(crate) scroll_left: Pixels,
@@ -267,6 +268,7 @@ impl CodeEditor {
             }),
             cx.on_blur(&focus_handle, window, |this, _, cx| {
                 this.mouse_selection = None;
+                this.dnd_cancel(cx);
                 this.hide_hover(cx);
                 this.close_message(cx);
                 this.inline_blurred(cx);
@@ -296,6 +298,7 @@ impl CodeEditor {
             zoom_gesture: None,
             unusual_line_terminators_pending: true,
             unicode_highlights: Default::default(),
+            dnd: Default::default(),
             theme: Arc::new(Theme::vs_dark()),
             scroll_top: px(0.),
             scroll_left: px(0.),
@@ -1226,6 +1229,9 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.dnd_cancel(cx) {
+            return;
+        }
         if self.options.single_line {
             cx.propagate();
             return;
@@ -2213,6 +2219,17 @@ impl CodeEditor {
             return;
         }
         self.hide_suggest(cx);
+        // Monaco: a click on the selection may start dragging it.
+        if event.button == MouseButton::Left
+            && self.dnd_mouse_down(
+                mouse.target.kind,
+                position,
+                &event.modifiers,
+                event.click_count,
+            )
+        {
+            return;
+        }
         let in_gutter = event.position.x < layout.text_bounds.left();
         let config = self.cursor_config(cx);
         let mode = if in_gutter {
@@ -2226,10 +2243,15 @@ impl CodeEditor {
         };
         let clicked = match mode {
             MouseSelectMode::Character | MouseSelectMode::Column => Selection::collapsed(position),
-            MouseSelectMode::Word => cursor::word_at(&config, self.snapshot.rope(), position)
-                .map(|range| Selection {
-                    anchor: range.start,
-                    head: range.end,
+            MouseSelectMode::Word => self
+                .block_selection_at(position, cx)
+                .or_else(|| {
+                    cursor::word_at(&config, self.snapshot.rope(), position).map(|range| {
+                        Selection {
+                            anchor: range.start,
+                            head: range.end,
+                        }
+                    })
                 })
                 .unwrap_or_else(|| Selection::collapsed(position)),
             MouseSelectMode::Line => self.line_selection(position.row),
@@ -2426,6 +2448,15 @@ impl CodeEditor {
             }
             return;
         }
+        if self.dnd.active {
+            if event.pressed_button == Some(MouseButton::Left) {
+                let position = self.position_for_point(event.position, window, cx);
+                self.dnd_mouse_drag(Some(position), &event.modifiers, cx);
+            } else {
+                self.dnd_cancel(cx);
+            }
+            return;
+        }
         let Some(drag) = self.mouse_selection.as_ref() else {
             return;
         };
@@ -2515,6 +2546,7 @@ impl CodeEditor {
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.scrollbar_arrow_task = None;
+        let mut drop_target = None;
         if self
             .layout
             .as_ref()
@@ -2528,7 +2560,11 @@ impl CodeEditor {
                 window,
                 cx,
             );
+            drop_target = mouse.target.position.map(|p| (mouse.target.kind, p));
             cx.emit(CodeEditorEvent::MouseUp(mouse));
+        }
+        if self.dnd.active && event.button == MouseButton::Left {
+            self.dnd_mouse_drop(drop_target, &event.modifiers, cx);
         }
         self.minimap_drag = None;
         self.mouse_selection = None;
@@ -2902,7 +2938,14 @@ impl Render for CodeEditor {
             .key_context(key_context)
             .track_focus(&self.focus_handle)
             .size_full()
-            .cursor(if self.has_definition_link() || self.has_active_link() {
+            .cursor(if self.dnd.target.is_some() || self.dnd.copy {
+                // Monaco's `mouseStyle` while dragging the selection.
+                if self.dnd.copy {
+                    MouseCursor::DragCopy
+                } else {
+                    MouseCursor::Arrow
+                }
+            } else if self.has_definition_link() || self.has_active_link() {
                 MouseCursor::PointingHand
             } else {
                 MouseCursor::IBeam
@@ -3444,6 +3487,7 @@ impl Render for CodeEditor {
                 |this, event: &gpui::ModifiersChangedEvent, _, cx| {
                     this.inlay_hints_modifiers(&event.modifiers, cx);
                     this.sticky_mouse_move(None, event.modifiers.shift, cx);
+                    this.dnd_modifiers_changed(&event.modifiers, cx);
                 },
             ))
             .on_action(

@@ -1085,6 +1085,12 @@ pub struct EditorOptions {
     pub unusual_line_terminators: UnusualLineTerminators,
     /// Monaco `unicodeHighlight`.
     pub unicode_highlight: UnicodeHighlightOptions,
+    /// Monaco `dragAndDrop`: drag the selection to move it, or copy it with
+    /// Alt (Ctrl elsewhere) (default `true`).
+    pub drag_and_drop: bool,
+    /// Monaco `doubleClickSelectsBlock`: double-clicking just inside
+    /// brackets or quotes selects their content (default `true`).
+    pub double_click_selects_block: bool,
     /// Monaco `wordSeparators`: characters that end a word for word navigation,
     /// double-click selection and whole-word search.
     pub word_separators: SharedString,
@@ -1334,6 +1340,8 @@ impl Default for EditorOptions {
             placeholder: None,
             unusual_line_terminators: UnusualLineTerminators::Prompt,
             unicode_highlight: UnicodeHighlightOptions::default(),
+            drag_and_drop: true,
+            double_click_selects_block: true,
             word_separators: "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?".into(),
             vertical_scrollbar_size: px(14.),
             horizontal_scrollbar_size: px(12.),
