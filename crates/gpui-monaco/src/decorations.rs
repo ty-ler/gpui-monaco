@@ -150,6 +150,18 @@ impl DecorationSet {
         ids
     }
 
+    /// Replaces the options of decoration `id`, keeping its range and id
+    /// (Monaco `changeDecorationOptions`). Returns whether it exists.
+    pub fn change_options(&mut self, id: DecorationId, options: DecorationOptions) -> bool {
+        match self.decorations.iter_mut().find(|d| d.id == id) {
+            Some(decoration) => {
+                decoration.options = Arc::new(options);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Removes every decoration.
     pub fn clear(&mut self) {
         self.decorations.clear();

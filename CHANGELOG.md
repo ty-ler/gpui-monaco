@@ -126,6 +126,11 @@ All notable changes to this project are documented here. The format follows [Kee
     - Frozen sessions drop bold highlights.
     - Theme colors: `editorSuggestWidget.*`.
   - The session follows Monaco's rules as you type. It closes on another line or when the indentation changes. It asks again after deleting back past where it opened, or on starting a new word. An explicitly requested session keeps its last matches while nothing matches.
+- **Snippet syntax (#55, part 1):**
+  - `snippet::parser`: a port of Monaco's `SnippetParser` and its tests, with tab stops, placeholders, choices, variables, and transforms with format strings.
+  - `snippet::variables`: Monaco's variable resolvers (selection, file, clipboard, comments, time, random and UUID, plus workspace when the host provides one).
+  - `TextModel::change_decoration_options`.
+  - Theme colors: `editor.snippet*TabstopHighlight*`.
 - **Rename (#56):** `RenameProvider` (with optional `resolve_rename_location`), F2 with Monaco's rename box, `WorkspaceEdit` and `CodeEditor::apply_workspace_edit`. The LSP bridge forwards `prepareRename` and `rename`.
 
 ### Changed

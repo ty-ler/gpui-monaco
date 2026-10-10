@@ -39,7 +39,8 @@ Issues are linked by number.
 | Toggle line and block comments | `comment` | ✅ | #79 |
 | Smart select (expand and shrink) | `smartSelect` | ✅ | #82 |
 | Linked editing (HTML tags) | `linkedEditing` | ❌ | #101 |
-| Snippets | `snippet` | ❌ | #55 |
+| Snippet syntax: parser, variables, transforms | `snippet` | ✅ | #55 |
+| Snippet sessions: tab stops, choices, nesting, completion integration | `snippet` | ❌ | #55 |
 | Drag and drop text | `dnd` | ❌ | #92 |
 | Find/replace: case, word, regex, in selection, replace all | `find` | ✅ | |
 | Find history, preserve case, seed and loop options, case escapes in replace | `find` | ❌ | #104 |

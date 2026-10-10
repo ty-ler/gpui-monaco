@@ -1917,18 +1917,22 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "chrono",
  "criterion",
  "gpui",
  "gpui-monaco-languages",
  "gpui-monaco-syntax",
  "gpui-monaco-text",
+ "iana-time-zone",
  "log",
  "pulldown-cmark",
+ "rand 0.9.5",
  "regex",
  "serde",
  "serde_json",
  "similar",
  "unicode-segmentation",
+ "uuid",
 ]
 
 [[package]]

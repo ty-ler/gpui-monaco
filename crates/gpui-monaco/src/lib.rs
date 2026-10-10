@@ -42,6 +42,7 @@ mod rename;
 pub mod search;
 mod signature_help;
 mod smart_select;
+pub mod snippet;
 pub mod suggest;
 mod suggest_widget;
 pub mod theme;
