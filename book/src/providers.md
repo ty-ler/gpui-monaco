@@ -6,7 +6,11 @@ gpui-monaco has no language server or other language intelligence built in. Your
 |---|---|---|
 | `CompletionProvider` | `CompletionItemProvider` | suggest widget: fuzzy filtering, kind icons, details and docs |
 | `HoverProvider` | `HoverProvider` | markdown hover on mouse rest |
-| `DefinitionProvider` | `DefinitionProvider` | Cmd/Ctrl+hover link, Cmd/Ctrl+click and F12 |
+| `DefinitionProvider` | `DefinitionProvider` | Cmd/Ctrl+hover link, Cmd/Ctrl+click, F12 and Alt+F12 (peek) |
+| `ReferenceProvider` | `ReferenceProvider` | Shift+F12 (references in a peek view) |
+| `DeclarationProvider` | `DeclarationProvider` | go to and peek declaration |
+| `TypeDefinitionProvider` | `TypeDefinitionProvider` | go to and peek type definition |
+| `ImplementationProvider` | `ImplementationProvider` | Cmd/Ctrl+F12 and Cmd/Ctrl+Shift+F12 (peek) |
 | `SignatureHelpProvider` | `SignatureHelpProvider` | parameter hints while typing a call |
 | `DocumentHighlightProvider` | `DocumentHighlightProvider` | occurrence highlights of the symbol at the cursor (textual occurrences without one) |
 | `DocumentFormattingProvider` | `DocumentFormattingEditProvider` | Format Document (Shift+Alt+F; Ctrl+Shift+I on Linux) |
@@ -72,12 +76,43 @@ Filtering and ranking use Monaco's `fuzzyScore`, and the editor re-filters as yo
 
 On accept, the editor inserts `insert_text`, falling back to the label, over `range`, falling back to the word before the cursor. It then applies any `additional_text_edits`. Typing a character in `commit_characters` accepts the item and inserts the character.
 
-## Go to definition
+## Go to definition, references and the peek view
 
-Return `Location`s:
+Definition, declaration, type definition, implementation and reference providers all return `Location`s:
 
-- **Same model:** `uri: None`, or the model's own uri. The editor selects the location.
-- **Another model:** the editor emits `CodeEditorEvent::OpenLocation(location)`. Open the target model in an editor, then call `editor.go_to_location(location, cx)`.
+- **Same model:** `uri: None`, or the model's own uri.
+- **Another model:** its uri.
+
+The commands are Monaco's:
+
+| Command | Keys | Method |
+|---|---|---|
+| Go to Definition | F12, Cmd/Ctrl+click | `go_to_definition` |
+| Peek Definition | Alt+F12 (Ctrl+Shift+F10 on Linux) | `peek(LocationKind::Definition)` |
+| Go to References | Shift+F12 | `go_to(LocationKind::References)` |
+| Go to Implementations | Cmd/Ctrl+F12 | `go_to(LocationKind::Implementation)` |
+| Peek Implementations | Cmd/Ctrl+Shift+F12 | `peek(LocationKind::Implementation)` |
+| Go to / Peek Declaration, Type Definition, Peek References | (unbound) | `go_to` and `peek` |
+
+Results from every matching provider are merged, sorted by uri and position, and deduplicated. Then:
+
+- **One result:** it's selected, revealed near the top and briefly highlighted (`editor.symbolHighlightBackground`). In another model, the editor emits `CodeEditorEvent::OpenLocation(location)`; open that model in an editor and call `go_to_location(location, cx)` there.
+- **Several results:** `options.goto_location` decides, per command, as in Monaco's `gotoLocation.multiple*`:
+  - **`Peek`** (the default) opens the peek view.
+  - **`GotoAndPeek`** goes to the first result and opens the peek view.
+  - **`Goto`** goes to the first; F4 steps through the rest.
+- **No results:** an inline message such as "No definition found for 'foo'".
+- **Already there:** if the only result is where the cursor is, the command's alternative runs instead. Definition, declaration and type definition fall back to references, so F12 on a definition shows its references.
+- **Stale results:** they're dropped if the text or the cursor changed in the meantime.
+
+The peek view (Monaco's references widget) opens under the cursor's line:
+
+- **Preview:** an editable preview of the selected result, with every match in that file highlighted.
+- **Results list:** grouped by file, with the match in each line highlighted.
+- **List keys:** Up and Down (or F4 and Shift+F4) move through results, Left and Right collapse and expand files, Enter goes to the result and Escape closes the view.
+- **Going to a result:** a result in this model moves the peek view there; one elsewhere closes it and emits `OpenLocation`. Double-clicking in the preview always closes it.
+
+To preview other documents, the peek view looks models up by uri with `model_for_uri`. That covers models shown in an editor, models you `register_model`, and whatever your `set_model_resolver` callback returns, for example a model read from disk. Results it can't resolve show "no preview available".
 
 ## Signature help
 

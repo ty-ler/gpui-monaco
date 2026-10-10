@@ -21,15 +21,18 @@ pub mod events;
 mod find;
 mod find_widget;
 mod format;
+mod goto;
 mod hover;
 pub mod markdown;
 mod markers;
+mod message;
 mod model;
 pub mod mouse_target;
 mod multi_cursor;
 mod navigation_history;
 mod occurrences;
 pub mod options;
+mod peek;
 pub mod providers;
 pub mod search;
 mod signature_help;
@@ -48,11 +51,12 @@ pub use element::EditorElement;
 pub use events::{ContentChange, CursorChangeReason, CursorChangeSource, SelectionChange};
 pub use find::{FindOptions, MATCHES_LIMIT};
 pub use find_widget::FindWidget;
+pub use goto::has_symbol_navigation;
 pub use hover::{HOVER_DELAY, HoverWidget};
 pub use markers::{Marker, MarkerSeverity, MarkerZone};
 pub use model::{
     EditKind, ModelOptions, SyntaxSnapshot, TextModel, TextModelEvent, language_registry,
-    set_language_registry,
+    model_for_uri, register_model, set_language_registry, set_model_resolver,
 };
 pub use mouse_target::{EditorMouseEvent, MouseTarget, MouseTargetKind};
 pub use options::EditorOptions;

@@ -64,6 +64,10 @@ fn capabilities() -> Value {
         "documentHighlightProvider": true,
         "signatureHelpProvider": { "triggerCharacters": ["("], "retriggerCharacters": [","] },
         "documentFormattingProvider": true,
+        "referencesProvider": true,
+        "declarationProvider": true,
+        "typeDefinitionProvider": true,
+        "implementationProvider": true,
         "documentRangeFormattingProvider": true,
         "documentOnTypeFormattingProvider": { "firstTriggerCharacter": "}", "moreTriggerCharacter": [";"] },
     })
@@ -231,6 +235,14 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
                 assert_eq!(params["context"]["triggerCharacter"], ".");
                 json!({ "isIncomplete": true, "items": [{ "label": "len", "kind": 2 }] })
             }
+            "textDocument/references" => {
+                assert_eq!(params["context"]["includeDeclaration"], true);
+                json!([{ "uri": other, "range": { "start": { "line": 2, "character": 0 }, "end": { "line": 2, "character": 1 } } }])
+            }
+            "textDocument/declaration" | "textDocument/typeDefinition" | "textDocument/implementation" => json!({
+                "uri": "file:///project/main.rs",
+                "range": { "start": { "line": 0, "character": 1 }, "end": { "line": 0, "character": 2 } },
+            }),
             "textDocument/definition" => json!([
                 { "uri": "file:///project/main.rs", "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 2 } } },
                 { "uri": other, "range": { "start": { "line": 4, "character": 1 }, "end": { "line": 4, "character": 5 } } },
@@ -340,6 +352,32 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
         help.signatures[0].parameters[0].label,
         ParameterLabel::Range(2..3)
     );
+
+    // The other location requests.
+    let references = cx
+        .update(|cx| {
+            features.provide_references(
+                &context,
+                p(1, 4),
+                ReferenceContext {
+                    include_declaration: true,
+                },
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(references[0].uri.as_deref(), Some("file:///project/lib.rs"));
+    for kind in ["declaration", "type definition", "implementation"] {
+        let task = cx.update(|cx| match kind {
+            "declaration" => features.provide_declaration(&context, p(1, 4), cx),
+            "type definition" => features.provide_type_definition(&context, p(1, 4), cx),
+            _ => features.provide_implementation(&context, p(1, 4), cx),
+        });
+        let locations = task.await.unwrap();
+        assert_eq!(locations[0].uri, None, "{kind}");
+        assert_eq!(locations[0].range, p(0, 1)..p(0, 2), "{kind}");
+    }
 
     // Formatting, with the model's options.
     let options = FormattingOptions {

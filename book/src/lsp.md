@@ -54,6 +54,7 @@ Positions need no conversion: both the editor and LSP use 0-based lines and UTF-
 | `completionProvider` | The suggest widget, with the server's trigger characters. Snippet text is inserted as plain text until snippets land (#55). |
 | `hoverProvider` | Hovers. Markdown and code blocks render as markdown; plain text is escaped. |
 | `definitionProvider` | Go to definition. Locations in other documents come back with their uri, as `OpenLocation`. |
+| `referencesProvider`, `declarationProvider`, `typeDefinitionProvider`, `implementationProvider` | Go to and peek references, declarations, type definitions and implementations. |
 | `documentHighlightProvider` | Occurrence highlights, with read and write kinds. |
 | `signatureHelpProvider` | Parameter hints, with the server's trigger and retrigger characters. |
 | `documentFormattingProvider`, `documentRangeFormattingProvider` | Format Document, Format Selection and format on paste, with the model's tab size and spaces setting. |

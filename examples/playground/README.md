@@ -24,6 +24,7 @@ Demo providers are registered by default:
 - completions (`Ctrl+Space`) with docs
 - signature help inside `(`
 - go to definition (`F12` / Cmd+click)
+- references in a peek view (`Shift+F12`): every whole-word occurrence
 - diagnostics (`F8`)
 - a formatter that trims trailing spaces and collapses repeated ones. Use format document (`Shift+Alt+F`) or format selection (`Cmd+K Cmd+F`). It also runs on paste and when you type `;` or `}`.
 

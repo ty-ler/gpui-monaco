@@ -277,6 +277,71 @@ pub trait DefinitionProvider: 'static {
     ) -> Task<anyhow::Result<Vec<Location>>>;
 }
 
+/// Finds where the symbol at a position is declared (Monaco
+/// `DeclarationProvider`).
+///
+/// Register with [`register_declaration_provider`].
+pub trait DeclarationProvider: 'static {
+    /// The declarations of the symbol at `position`.
+    fn provide_declaration(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<Location>>>;
+}
+
+/// Finds the type of the symbol at a position (Monaco
+/// `TypeDefinitionProvider`).
+///
+/// Register with [`register_type_definition_provider`].
+pub trait TypeDefinitionProvider: 'static {
+    /// Where the type of the symbol at `position` is defined.
+    fn provide_type_definition(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<Location>>>;
+}
+
+/// Finds implementations of the symbol at a position (Monaco
+/// `ImplementationProvider`).
+///
+/// Register with [`register_implementation_provider`].
+pub trait ImplementationProvider: 'static {
+    /// The implementations of the interface or abstract member at
+    /// `position`.
+    fn provide_implementation(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<Location>>>;
+}
+
+/// Options for a references request (Monaco `ReferenceContext`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReferenceContext {
+    /// Include the declaration of the symbol.
+    pub include_declaration: bool,
+}
+
+/// Finds references to the symbol at a position (Monaco
+/// `ReferenceProvider`).
+///
+/// Register with [`register_reference_provider`].
+pub trait ReferenceProvider: 'static {
+    /// The references to the symbol at `position`.
+    fn provide_references(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        reference_context: ReferenceContext,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<Location>>>;
+}
+
 // ----- document highlights -------------------------------------------------------
 
 /// What an occurrence highlight marks (Monaco `DocumentHighlightKind`).
@@ -499,6 +564,10 @@ struct LanguageFeatures {
     definition: Vec<Entry<dyn DefinitionProvider>>,
     signature_help: Vec<Entry<dyn SignatureHelpProvider>>,
     document_highlight: Vec<Entry<dyn DocumentHighlightProvider>>,
+    declaration: Vec<Entry<dyn DeclarationProvider>>,
+    type_definition: Vec<Entry<dyn TypeDefinitionProvider>>,
+    implementation: Vec<Entry<dyn ImplementationProvider>>,
+    references: Vec<Entry<dyn ReferenceProvider>>,
     document_formatting: Vec<Entry<dyn DocumentFormattingProvider>>,
     range_formatting: Vec<Entry<dyn DocumentRangeFormattingProvider>>,
     on_type_formatting: Vec<Entry<dyn OnTypeFormattingProvider>>,
@@ -571,6 +640,34 @@ register_fn!(
 );
 
 register_fn!(
+    /// Registers a declaration provider for the models `selector` matches (Monaco
+    /// `registerDeclarationProvider`). Results from all matching providers are combined.
+    register_declaration_provider,
+    declaration,
+    DeclarationProvider
+);
+register_fn!(
+    /// Registers a type definition provider for the models `selector` matches (Monaco
+    /// `registerTypeDefinitionProvider`). Results from all matching providers are combined.
+    register_type_definition_provider,
+    type_definition,
+    TypeDefinitionProvider
+);
+register_fn!(
+    /// Registers an implementation provider for the models `selector` matches (Monaco
+    /// `registerImplementationProvider`). Results from all matching providers are combined.
+    register_implementation_provider,
+    implementation,
+    ImplementationProvider
+);
+register_fn!(
+    /// Registers a reference provider for the models `selector` matches (Monaco
+    /// `registerReferenceProvider`). Results from all matching providers are combined.
+    register_reference_provider,
+    references,
+    ReferenceProvider
+);
+register_fn!(
     /// Registers a document formatter for the models `selector` matches (Monaco
     /// `registerDocumentFormattingEditProvider`). The first one registered is used.
     register_document_formatting_provider,
@@ -604,6 +701,10 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
         .document_formatting
         .retain(|e| e.id != registration);
     features.range_formatting.retain(|e| e.id != registration);
+    features.declaration.retain(|e| e.id != registration);
+    features.type_definition.retain(|e| e.id != registration);
+    features.implementation.retain(|e| e.id != registration);
+    features.references.retain(|e| e.id != registration);
     features.on_type_formatting.retain(|e| e.id != registration);
 }
 
@@ -697,5 +798,46 @@ pub fn on_type_formatting_providers(
 ) -> Vec<Arc<dyn OnTypeFormattingProvider>> {
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.on_type_formatting, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered declaration providers whose selector matches `language_id`, in
+/// registration order.
+pub fn declaration_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn DeclarationProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.declaration, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered type definition providers whose selector matches `language_id`, in
+/// registration order.
+pub fn type_definition_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn TypeDefinitionProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.type_definition, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered implementation providers whose selector matches `language_id`, in
+/// registration order.
+pub fn implementation_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn ImplementationProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.implementation, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered reference providers whose selector matches `language_id`, in
+/// registration order.
+pub fn reference_providers(cx: &App, language_id: Option<&str>) -> Vec<Arc<dyn ReferenceProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.references, language_id))
         .unwrap_or_default()
 }

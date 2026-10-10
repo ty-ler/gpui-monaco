@@ -151,16 +151,23 @@ impl CodeEditor {
         position: PointUtf16,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some((range, locations)) = self.definition.link.clone() else {
+        let Some((range, _)) = self.definition.link.clone() else {
             return false;
         };
         if !(range.start <= position && position <= range.end) {
             return false;
         }
         self.clear_definition_link(cx);
-        if let Some(location) = locations.first() {
-            self.go_to_location(location.clone(), cx);
-        }
+        // Monaco moves the cursor there and runs go to definition, without
+        // a message when nothing is found.
+        self.set_selections(&[Selection::collapsed(position)], cx);
+        self.navigate(
+            crate::options::LocationKind::Definition,
+            false,
+            true,
+            true,
+            cx,
+        );
         true
     }
 
@@ -182,20 +189,9 @@ impl CodeEditor {
         }
     }
 
-    /// F12: go to the definition of the symbol at the cursor.
+    /// F12: go to the definition of the symbol at the cursor (Monaco
+    /// `editor.action.revealDefinition`).
     pub fn go_to_definition(&mut self, cx: &mut Context<Self>) {
-        let position = self.cursors.primary().position;
-        let tasks = self.request_definitions(position, cx);
-        self.definition.task = Some(cx.spawn(async move |this, cx| {
-            for task in tasks {
-                if let Ok(locations) = task.await
-                    && let Some(location) = locations.into_iter().next()
-                {
-                    this.update(cx, |this, cx| this.go_to_location(location, cx))
-                        .ok();
-                    return;
-                }
-            }
-        }));
+        self.go_to(crate::options::LocationKind::Definition, cx);
     }
 }

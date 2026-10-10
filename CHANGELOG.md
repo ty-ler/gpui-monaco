@@ -62,6 +62,15 @@ All notable changes to this project are documented here. The format follows [Kee
   - Format Document (`Shift+Alt+F`) and Format Selection (`Cmd/Ctrl+K Cmd/Ctrl+F`), plus the `format_on_type` and `format_on_paste` options.
   - Edits are reduced to minimal character changes (Monaco `computeMoreMinimalEdits`) and applied as one undo step. The cursor keeps its place on screen, and stale results are dropped.
   - The LSP bridge forwards `textDocument/formatting`, `rangeFormatting` and `onTypeFormatting`.
+- **Navigation and the peek view (#95):**
+  - `ReferenceProvider`, `DeclarationProvider`, `TypeDefinitionProvider` and `ImplementationProvider`.
+  - Go to and peek commands: Shift+F12 references, Alt+F12 peek definition, Cmd/Ctrl+F12 implementations and Cmd/Ctrl+Shift+F12 peek implementations.
+  - Monaco's `gotoLocation` options (peek, goto or goto-and-peek for several results, plus alternative commands), and F4 through results.
+  - The peek view: a zone with an editable preview editor and a results list grouped by file, using the `peekView.*` theme colors.
+  - Inline messages ("No definition found"), via `show_message`.
+  - `register_model`, `model_for_uri` and `set_model_resolver`, so other documents can be previewed.
+  - The LSP bridge forwards references, declaration, type definition and implementation requests.
+- Clicks in view zones and widgets no longer focus the editor.
 
 ### Fixed
 

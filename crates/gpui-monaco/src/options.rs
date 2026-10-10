@@ -182,6 +182,102 @@ pub enum CursorStyle {
     LineThin,
 }
 
+/// What symbol navigation does with several results (Monaco
+/// `GoToLocationValues`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GoToLocation {
+    /// Show them in a peek view.
+    #[default]
+    Peek,
+    /// Go to the first and show them all in a peek view.
+    GotoAndPeek,
+    /// Go to the first; F4 goes to the next.
+    Goto,
+}
+
+/// A symbol navigation command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LocationKind {
+    /// Go to definition (F12).
+    Definition,
+    /// Go to declaration.
+    Declaration,
+    /// Go to type definition.
+    TypeDefinition,
+    /// Go to implementations (Cmd/Ctrl+F12).
+    Implementation,
+    /// Go to references (Shift+F12).
+    References,
+}
+
+/// Monaco `gotoLocation`: what each navigation command does with several
+/// results, and what it runs instead when its only result is where the
+/// cursor already is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GotoLocationOptions {
+    /// `multipleDefinitions`.
+    pub multiple_definitions: GoToLocation,
+    /// `multipleTypeDefinitions`.
+    pub multiple_type_definitions: GoToLocation,
+    /// `multipleDeclarations`.
+    pub multiple_declarations: GoToLocation,
+    /// `multipleImplementations`.
+    pub multiple_implementations: GoToLocation,
+    /// `multipleReferences`.
+    pub multiple_references: GoToLocation,
+    /// `alternativeDefinitionCommand` (go to references by default).
+    pub alternative_definition_command: Option<LocationKind>,
+    /// `alternativeTypeDefinitionCommand` (go to references by default).
+    pub alternative_type_definition_command: Option<LocationKind>,
+    /// `alternativeDeclarationCommand` (go to references by default).
+    pub alternative_declaration_command: Option<LocationKind>,
+    /// `alternativeImplementationCommand` (none by default).
+    pub alternative_implementation_command: Option<LocationKind>,
+    /// `alternativeReferenceCommand` (none by default).
+    pub alternative_reference_command: Option<LocationKind>,
+}
+
+impl Default for GotoLocationOptions {
+    fn default() -> Self {
+        Self {
+            multiple_definitions: GoToLocation::Peek,
+            multiple_type_definitions: GoToLocation::Peek,
+            multiple_declarations: GoToLocation::Peek,
+            multiple_implementations: GoToLocation::Peek,
+            multiple_references: GoToLocation::Peek,
+            alternative_definition_command: Some(LocationKind::References),
+            alternative_type_definition_command: Some(LocationKind::References),
+            alternative_declaration_command: Some(LocationKind::References),
+            alternative_implementation_command: None,
+            alternative_reference_command: None,
+        }
+    }
+}
+
+impl GotoLocationOptions {
+    /// What `kind` does with several results.
+    pub fn multiple(&self, kind: LocationKind) -> GoToLocation {
+        match kind {
+            LocationKind::Definition => self.multiple_definitions,
+            LocationKind::Declaration => self.multiple_declarations,
+            LocationKind::TypeDefinition => self.multiple_type_definitions,
+            LocationKind::Implementation => self.multiple_implementations,
+            LocationKind::References => self.multiple_references,
+        }
+    }
+
+    /// What `kind` runs instead when its only result is at the cursor.
+    pub fn alternative(&self, kind: LocationKind) -> Option<LocationKind> {
+        match kind {
+            LocationKind::Definition => self.alternative_definition_command,
+            LocationKind::Declaration => self.alternative_declaration_command,
+            LocationKind::TypeDefinition => self.alternative_type_definition_command,
+            LocationKind::Implementation => self.alternative_implementation_command,
+            LocationKind::References => self.alternative_reference_command,
+        }
+    }
+}
+
 /// Options for one [`CodeEditor`](crate::CodeEditor) view (Monaco `IEditorOptions`).
 ///
 /// The model-level options (tab size, insert spaces, …) live in
@@ -269,6 +365,8 @@ pub struct EditorOptions {
     /// Monaco `quickSuggestions`: suggest while typing in code (not in
     /// strings or comments).
     pub quick_suggestions: bool,
+    /// Monaco `gotoLocation`.
+    pub goto_location: GotoLocationOptions,
     /// Monaco `formatOnType`: format with the on-type formatter when one of
     /// its trigger characters is typed.
     pub format_on_type: bool,
@@ -378,6 +476,7 @@ impl Default for EditorOptions {
             auto_indent: Default::default(),
             match_brackets: true,
             quick_suggestions: true,
+            goto_location: GotoLocationOptions::default(),
             format_on_type: false,
             format_on_paste: false,
             minimap: MinimapOptions::default(),

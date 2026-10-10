@@ -588,6 +588,13 @@ fn main() {
     gpui_platform::application().run(move |cx: &mut App| {
         gpui_monaco::init(cx);
         gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
+        // Peek views can show files that aren't open.
+        gpui_monaco::set_model_resolver(cx, |uri, cx| {
+            let path = uri.strip_prefix("file://")?.replace("%20", " ");
+            let text = std::fs::read_to_string(&path).ok()?;
+            let language = language_for_path(&path, cx);
+            Some(cx.new(|_| TextModel::new(&text).with_language(language).with_uri(uri)))
+        });
         let bounds = Bounds::centered(None, size(px(1100.), px(760.)), cx);
         let window = cx
             .open_window(

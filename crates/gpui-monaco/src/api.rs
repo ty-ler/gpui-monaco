@@ -289,6 +289,15 @@ pub struct DecorationsCollection {
 }
 
 impl DecorationsCollection {
+    /// An empty collection on `model` whose decorations only `owner` shows.
+    pub(crate) fn for_owner(model: Entity<TextModel>, owner: EntityId) -> Self {
+        Self {
+            model,
+            owner,
+            ids: Vec::new(),
+        }
+    }
+
     /// Replaces the decorations with `decorations` (positions in the
     /// current text), returning their ids (Monaco `set`).
     pub fn set(

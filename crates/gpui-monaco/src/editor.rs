@@ -23,6 +23,7 @@ use crate::element::{EditorElement, EditorLayout, layout_segment, row_segment};
 use crate::events::{CursorChangeReason, CursorChangeSource, SelectionChange};
 use crate::model::{EditKind, TextModel, TextModelEvent, metadata};
 use crate::options::EditorOptions;
+use crate::options::LocationKind;
 use crate::theme::{EditorColors, Theme};
 use crate::view::folding::{FoldState, compute_indent_ranges};
 use crate::view::view_lines::{ViewLines, WrapSettings, normalize_hidden};
@@ -159,6 +160,17 @@ pub struct CodeEditor {
     pub(crate) prev_edit_kind: Option<EditOperationType>,
     /// The reason and source the next `SelectionsChanged` reports.
     pub(crate) next_selection_change: SelectionChange,
+    /// The inline message, if one is showing.
+    pub(crate) message: crate::message::InlineMessage,
+    /// Navigation commands in flight and the jump highlight.
+    pub(crate) goto: crate::goto::GotoState,
+    /// The peek view, if open.
+    pub(crate) peek: crate::peek::PeekState,
+    /// This editor is a peek view's preview: F4 and unhandled Escape go to
+    /// the editor around it.
+    pub(crate) in_peek: bool,
+    /// Take focus on the next render (after closing a peek view).
+    pub(crate) refocus: bool,
     /// A running format document, selection or paste request.
     pub(crate) format_task: Option<Task<()>>,
     /// A running format on type request.
@@ -187,6 +199,7 @@ impl Focusable for CodeEditor {
 impl CodeEditor {
     /// Creates an editor showing `model`.
     pub fn new(model: Entity<TextModel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        crate::model::register_model(cx, &model);
         let focus_handle = cx.focus_handle();
         let subscriptions = vec![
             cx.subscribe(&model, Self::on_model_event),
@@ -198,6 +211,7 @@ impl CodeEditor {
             cx.on_blur(&focus_handle, window, |this, _, cx| {
                 this.mouse_selection = None;
                 this.hide_hover(cx);
+                this.close_message(cx);
                 cx.emit(CodeEditorEvent::Blurred);
                 cx.notify();
             }),
@@ -219,6 +233,11 @@ impl CodeEditor {
             marked_range: None,
             prev_edit_kind: None,
             next_selection_change: SelectionChange::default(),
+            message: Default::default(),
+            goto: Default::default(),
+            peek: Default::default(),
+            in_peek: false,
+            refocus: false,
             format_task: None,
             format_on_type_task: None,
             last_cursor_offset: None,
@@ -270,11 +289,14 @@ impl CodeEditor {
     /// Shows a different model, resetting cursors and scroll (Monaco
     /// `setModel`). Save and restore [`ViewState`] to keep them per model.
     pub fn set_model(&mut self, model: Entity<TextModel>, cx: &mut Context<Self>) {
+        crate::model::register_model(cx, &model);
         // Popups and decorations this editor owns refer to the old model: its
         // decoration ids would name unrelated decorations in the new one.
         self.hide_hover(cx);
         self.hide_suggest(cx);
         self.hide_signature_help(cx);
+        self.close_message(cx);
+        self.close_peek(cx);
         self.close_marker_zone(cx);
         self.clear_definition_link(cx);
         self.detach_find_from_model(cx);
@@ -425,17 +447,31 @@ impl CodeEditor {
     /// Inserts a host view between lines (Monaco `changeViewZones` +
     /// `addZone`).
     pub fn add_view_zone(&mut self, zone: ViewZone, cx: &mut Context<Self>) -> WidgetId {
+        self.add_zone(zone.after_line, zone.height, zone.view, false, cx)
+    }
+
+    /// Adds a zone; `full_width` ones also cover the gutter (Monaco's zone
+    /// widgets).
+    pub(crate) fn add_zone(
+        &mut self,
+        after_line: u32,
+        height: ZoneHeight,
+        view: gpui::AnyView,
+        full_width: bool,
+        cx: &mut Context<Self>,
+    ) -> WidgetId {
         let id = self.widgets.next_id();
         let buffer = self.model.read(cx).buffer();
-        let anchor = (zone.after_line > 0).then(|| {
-            let row = (zone.after_line - 1).min(buffer.max_point().row);
+        let anchor = (after_line > 0).then(|| {
+            let row = (after_line - 1).min(buffer.max_point().row);
             buffer.anchor_before(buffer.point_to_offset(text::Point::new(row, u32::MAX)))
         });
         self.widgets.zones.push(ZoneState {
             id,
             anchor,
-            height: zone.height,
-            view: zone.view,
+            height,
+            view,
+            full_width,
         });
         cx.notify();
         id
@@ -666,8 +702,12 @@ impl CodeEditor {
                 self.refresh_bracket_colors(cx);
                 cx.notify();
             }
+            TextModelEvent::LanguageChanged => {
+                // Monaco closes the peek view.
+                self.close_peek(cx);
+                cx.notify();
+            }
             TextModelEvent::OptionsChanged
-            | TextModelEvent::LanguageChanged
             | TextModelEvent::LineEndingChanged
             | TextModelEvent::DecorationsChanged => cx.notify(),
         }
@@ -761,6 +801,8 @@ impl CodeEditor {
             self.autoscroll_requested = true;
         }
         self.record_cursor_change();
+        self.close_message(cx);
+        self.check_symbol_navigation(cx);
         self.update_bracket_highlights(cx);
         self.update_occurrence_highlights(cx);
         self.restart_blink(cx);
@@ -950,6 +992,17 @@ impl CodeEditor {
         }
         if self.is_hover_visible() {
             self.hide_hover(cx);
+            return;
+        }
+        if self.is_message_visible() {
+            self.close_message(cx);
+            return;
+        }
+        // Monaco's `closeReferenceSearch` outranks closing find.
+        if self.close_peek(cx) {
+            return;
+        }
+        if self.cancel_symbol_navigation(cx) {
             return;
         }
         // Monaco's `closeFindWidget` and `cancelSelectionAnchor` outrank
@@ -1594,7 +1647,6 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.focus(&self.focus_handle, cx);
         let mouse = self.emit_mouse(
             event.position,
             Some(event.button),
@@ -1604,6 +1656,17 @@ impl CodeEditor {
             cx,
         );
         cx.emit(CodeEditorEvent::MouseDown(mouse));
+        // Embedded views (zones and widgets) handle their own clicks and
+        // focus.
+        if self.layout.as_ref().is_some_and(|layout| {
+            layout
+                .widget_bounds
+                .iter()
+                .any(|bounds| bounds.contains(&event.position))
+        }) {
+            return;
+        }
+        window.focus(&self.focus_handle, cx);
         let Some(layout) = self.layout.clone() else {
             return;
         };
@@ -1671,13 +1734,6 @@ impl CodeEditor {
             return;
         }
 
-        if layout
-            .widget_bounds
-            .iter()
-            .any(|bounds| bounds.contains(&event.position))
-        {
-            return;
-        }
         if let Some(control) = layout
             .fold_controls
             .iter()
@@ -1827,6 +1883,9 @@ impl CodeEditor {
             .is_some_and(|layout| layout.bounds.contains(&event.position))
         {
             let mouse = self.emit_mouse(event.position, None, event.modifiers, 0, window, cx);
+            if let Some(position) = mouse.target.position {
+                self.message_mouse_move(position.row, cx);
+            }
             cx.emit(CodeEditorEvent::MouseMove(mouse));
         }
         let minimap_hovered = self
@@ -2266,7 +2325,10 @@ macro_rules! move_action {
 }
 
 impl Render for CodeEditor {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.refocus) {
+            window.focus(&self.focus_handle, cx);
+        }
         let mut key_context = gpui::KeyContext::new_with_defaults();
         key_context.add(KEY_CONTEXT);
         if self.options.single_line {
@@ -2687,6 +2749,46 @@ impl Render for CodeEditor {
             )
             .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| this.go_to_definition(cx)))
             .on_action(cx.listener(|this, _: &ShowHover, _, cx| this.show_hover_at_cursor(cx)))
+            .on_action(cx.listener(|this, _: &GoToDeclaration, _, cx| {
+                this.go_to(LocationKind::Declaration, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoToTypeDefinition, _, cx| {
+                this.go_to(LocationKind::TypeDefinition, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoToImplementation, _, cx| {
+                this.go_to(LocationKind::Implementation, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoToReferences, _, cx| {
+                this.go_to(LocationKind::References, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PeekDefinition, _, cx| {
+                this.peek(LocationKind::Definition, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PeekDeclaration, _, cx| {
+                this.peek(LocationKind::Declaration, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PeekTypeDefinition, _, cx| {
+                this.peek(LocationKind::TypeDefinition, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PeekImplementation, _, cx| {
+                this.peek(LocationKind::Implementation, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PeekReferences, _, cx| {
+                this.peek(LocationKind::References, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoToNextReference, _, cx| {
+                // A preview editor leaves F4 to the editor around it.
+                let handled = !this.in_peek
+                    && (this.peek_select_relative(1, cx) || this.go_to_next_symbol_from_result(cx));
+                if !handled {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &GoToPreviousReference, _, cx| {
+                if this.in_peek || !this.peek_select_relative(-1, cx) {
+                    cx.propagate();
+                }
+            }))
             .on_action(cx.listener(|this, _: &FormatDocument, _, cx| {
                 this.format_document(cx);
             }))

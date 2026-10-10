@@ -112,7 +112,7 @@ editor.update(cx, |editor, cx| {
   - Targets include the glyph margin, line numbers, line decorations, text, empty area, view zones, widgets, scrollbars, minimap and sticky scroll.
   - Each target also gives the text position. Use `editor.mouse_target(point, window, cx)` to hit-test any point.
   - The playground toggles breakpoints from glyph margin clicks.
-- `OpenLocation(Location)`: go to definition found a location in another model. Open it and call `go_to_location` on the new editor.
+- `OpenLocation(Location)`: a navigation command or the peek view wants a location in another model. Open it and call `go_to_location` on the new editor.
 
 ```rust,ignore
 cx.subscribe(&editor, |this, editor, event: &CodeEditorEvent, cx| {
