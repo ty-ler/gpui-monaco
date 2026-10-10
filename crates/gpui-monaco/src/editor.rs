@@ -121,6 +121,8 @@ pub struct CodeEditor {
     pub(crate) multi_cursor: Option<crate::multi_cursor::MultiCursorSession>,
     pub(crate) bracket_decorations: Vec<crate::decorations::DecorationId>,
     pub(crate) navigation: crate::navigation_history::NavigationHistory,
+    /// Monaco's `overtype` input mode (Insert key).
+    pub(crate) overtype: bool,
     pub(crate) hover: crate::hover::HoverState,
     pub(crate) marker_navigation: crate::markers::MarkerNavigation,
     pub(crate) definition: crate::definition::DefinitionLink,
@@ -194,6 +196,7 @@ impl CodeEditor {
             find: Default::default(),
             multi_cursor: None,
             bracket_decorations: Vec::new(),
+            overtype: false,
             navigation: crate::navigation_history::NavigationHistory::starting_at(
                 vec![Selection::collapsed(PointUtf16::zero())],
                 snapshot.version(),
@@ -255,6 +258,8 @@ impl CodeEditor {
         self.fold_task = None;
         self.model = model;
         self.cursors = CursorCollection::new(SingleCursorState::from_position(PointUtf16::zero()));
+        self.cursors
+            .set_merge_overlapping(self.options.multi_cursor_merge_overlapping);
         self.scroll_top = px(0.);
         self.scroll_left = px(0.);
         self.marked_range = None;
@@ -296,6 +301,8 @@ impl CodeEditor {
     /// Replaces the editor options (Monaco `updateOptions`, but with a full set).
     pub fn update_options(&mut self, options: EditorOptions, cx: &mut Context<Self>) {
         self.options = options;
+        self.cursors
+            .set_merge_overlapping(self.options.multi_cursor_merge_overlapping);
         cx.notify();
     }
 
@@ -495,6 +502,9 @@ impl CodeEditor {
             auto_closing_delete: self.options.auto_closing_delete,
             auto_surround: self.options.auto_surround,
             auto_indent: self.options.auto_indent,
+            overtype: self.overtype,
+            overtype_on_paste: self.options.overtype_on_paste,
+            multi_cursor_paste: self.options.multi_cursor_paste,
             ..CursorConfig::default()
         }
     }
@@ -642,7 +652,31 @@ impl CodeEditor {
         }
     }
 
+    /// Whether `modifiers` add a cursor on click (Monaco
+    /// `multiCursorModifier`).
+    fn is_add_cursor_modifier(&self, modifiers: &gpui::Modifiers) -> bool {
+        match self.options.multi_cursor_modifier {
+            crate::options::MultiCursorModifier::Alt => modifiers.alt,
+            crate::options::MultiCursorModifier::CtrlCmd => modifiers.secondary(),
+        }
+    }
+
+    /// Whether `modifiers` show and follow definition links: the modifier
+    /// that doesn't add cursors.
+    fn is_definition_modifier(&self, modifiers: &gpui::Modifiers) -> bool {
+        match self.options.multi_cursor_modifier {
+            crate::options::MultiCursorModifier::Alt => modifiers.secondary(),
+            crate::options::MultiCursorModifier::CtrlCmd => modifiers.alt,
+        }
+    }
+
     fn cursors_changed(&mut self, autoscroll: bool, cx: &mut Context<Self>) {
+        // Monaco `multiCursorLimit`: extra cursors are dropped.
+        let limit = self.options.multi_cursor_limit.max(1);
+        if self.cursors.all().len() > limit {
+            let kept = self.cursors.all()[..limit].to_vec();
+            self.cursors.set_states(kept);
+        }
         if autoscroll {
             self.autoscroll_requested = true;
         }
@@ -686,6 +720,22 @@ impl CodeEditor {
     // ----- navigation ---------------------------------------------------------
 
     fn move_cursors(&mut self, command: MoveCommand, select: bool, cx: &mut Context<Self>) {
+        // Monaco `columnSelection`: Shift+arrows extend a column selection.
+        if select && self.options.column_selection {
+            let column = match command {
+                MoveCommand::Left => Some(cursor::ColumnSelectCommand::Left),
+                MoveCommand::Right => Some(cursor::ColumnSelectCommand::Right),
+                MoveCommand::Up => Some(cursor::ColumnSelectCommand::Up),
+                MoveCommand::Down => Some(cursor::ColumnSelectCommand::Down),
+                MoveCommand::PageUp => Some(cursor::ColumnSelectCommand::PageUp),
+                MoveCommand::PageDown => Some(cursor::ColumnSelectCommand::PageDown),
+                _ => None,
+            };
+            if let Some(column) = column {
+                self.column_select(column, cx);
+                return;
+            }
+        }
         if !select && self.is_suggest_visible() {
             let page = crate::suggest_widget::page_size() as isize;
             let delta = match command {
@@ -1404,7 +1454,9 @@ impl CodeEditor {
         }
 
         let position = self.position_for_point(event.position, window, cx);
-        if event.modifiers.secondary() && self.follow_definition_link(position, cx) {
+        if self.is_definition_modifier(&event.modifiers)
+            && self.follow_definition_link(position, cx)
+        {
             return;
         }
         self.hide_suggest(cx);
@@ -1430,7 +1482,9 @@ impl CodeEditor {
             MouseSelectMode::Line => self.line_selection(position.row),
         };
 
-        if event.modifiers.shift && event.modifiers.alt && !in_gutter {
+        if ((event.modifiers.shift && event.modifiers.alt) || self.options.column_selection)
+            && !in_gutter
+        {
             let visible_column = self.mouse_visible_column(event.position);
             cursor::column_select_to(
                 &config,
@@ -1448,7 +1502,7 @@ impl CodeEditor {
             self.cursors_changed(false, cx);
             return;
         }
-        let add_cursor = event.modifiers.alt;
+        let add_cursor = self.is_add_cursor_modifier(&event.modifiers);
         let mut states: Vec<SingleCursorState> = self.cursors.all().to_vec();
         let cursor_index;
         if event.modifiers.shift && mode == MouseSelectMode::Character {
@@ -1562,7 +1616,7 @@ impl CodeEditor {
             });
             if !over_widget {
                 let position = self.text_position_under_mouse(event.position, window, cx);
-                if event.modifiers.secondary() {
+                if self.is_definition_modifier(&event.modifiers) {
                     self.definition_mouse_move(position, cx);
                 } else if self.has_definition_link() {
                     self.clear_definition_link(cx);
@@ -1736,6 +1790,38 @@ impl CodeEditor {
     }
 
     /// Replaces `range` (bytes) with `text` and puts a single cursor after it.
+    /// Monaco `ReplaceOvertypeCommandOnCompositionEnd`: a committed
+    /// composition in overtype mode replaces as many characters after it as
+    /// it inserted, on the same line.
+    fn overtype_after_composition(&mut self, end: usize, text: &str, cx: &mut Context<Self>) {
+        let rope = self.snapshot.rope();
+        let line_end = rope.line_range(rope.offset_to_point(end).row).end;
+        let units = text.encode_utf16().count();
+        let mut overtyped = end;
+        for ch in rope.chars_at(end).take(units) {
+            if overtyped >= line_end {
+                break;
+            }
+            overtyped += ch.len_utf8();
+        }
+        let overtyped = overtyped.min(line_end);
+        if overtyped > end {
+            self.replace_range(end..overtyped, "", cx);
+        }
+    }
+
+    /// Switches between insert and overtype mode (Monaco
+    /// `editor.action.toggleOvertypeInsertMode`, Insert).
+    pub fn toggle_overtype(&mut self, cx: &mut Context<Self>) {
+        self.overtype = !self.overtype;
+        cx.notify();
+    }
+
+    /// Whether typing overtypes (Monaco's `overtype` input mode).
+    pub fn is_overtype(&self) -> bool {
+        self.overtype
+    }
+
     fn replace_range(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
         let start = self.snapshot.offset_to_point_utf16(range.start);
         let end = self.snapshot.offset_to_point_utf16(range.end);
@@ -1811,13 +1897,17 @@ impl EntityInputHandler for CodeEditor {
         if self.options.read_only {
             return;
         }
+        let from_composition = range_utf16.is_none() && self.marked_range.is_some();
         let explicit = range_utf16
             .map(|r| self.range_from_utf16(&r))
             .or(self.marked_range.take());
         match explicit {
             Some(range) => {
-                self.replace_range(range, text, cx);
+                self.replace_range(range.clone(), text, cx);
                 self.prev_edit_kind = None;
+                if from_composition && self.overtype {
+                    self.overtype_after_composition(range.start + text.len(), text, cx);
+                }
             }
             None => self.type_text(text, cx),
         }
@@ -2054,6 +2144,9 @@ impl Render for CodeEditor {
                 this.column_select(cursor::ColumnSelectCommand::PageDown, cx)
             }))
             .on_action(cx.listener(|this, _: &CursorUndo, _, cx| this.cursor_undo(cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleOvertypeInsertMode, _, cx| this.toggle_overtype(cx)),
+            )
             .on_action(cx.listener(|this, _: &CursorRedo, _, cx| this.cursor_redo(cx)))
             .on_action(
                 cx.listener(|this, _: &SetSelectionAnchor, _, cx| this.set_selection_anchor(cx)),

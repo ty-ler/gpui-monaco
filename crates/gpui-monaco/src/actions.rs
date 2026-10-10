@@ -173,6 +173,9 @@ actions!(
         /// Extends the column selection one page down (Monaco
         /// `cursorColumnSelectPageDown`).
         CursorColumnSelectPageDown,
+        /// Switches between insert and overtype mode (Monaco
+        /// `editor.action.toggleOvertypeInsertMode`, Insert).
+        ToggleOvertypeInsertMode,
         /// Restores the previous cursor state (Monaco `cursorUndo`, Cmd/Ctrl+U).
         CursorUndo,
         /// Reapplies an undone cursor state (Monaco `cursorRedo`).
@@ -398,6 +401,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-d", AddSelectionToNextFindMatch, ctx),
         KeyBinding::new("secondary-/", CommentLine, ctx),
         KeyBinding::new("secondary-u", CursorUndo, ctx),
+        KeyBinding::new("insert", ToggleOvertypeInsertMode, ctx),
         KeyBinding::new("secondary-k secondary-b", SetSelectionAnchor, ctx),
         KeyBinding::new("secondary-k secondary-k", SelectFromAnchorToCursor, ctx),
         KeyBinding::new("shift-alt-i", InsertCursorAtEndOfEachLineSelected, ctx),

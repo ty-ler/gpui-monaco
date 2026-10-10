@@ -11,6 +11,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - Keyboard column selection (`cursorColumnSelect*`, Cmd/Ctrl+Shift+Alt+arrows), `cursorLineStart`/`End` (Ctrl+A/E on macOS) and `cancelSelection` (#81).
 - Cursor undo and redo (`cursorUndo`, Cmd/Ctrl+U) and the selection anchor (`setSelectionAnchor` Cmd+K Cmd+B, `selectFromAnchorToCursor` Cmd+K Cmd+K, `goToSelectionAnchor`, `cancelSelectionAnchor`) (#81).
 - Scroll commands: `scrollLineUp`/`Down`, `scrollPageUp`/`Down` and `scrollEditorTop`/`Bottom`, plus `CodeEditor::scroll_by`, `scroll_lines` and `scroll_pages` (#81).
+- Overtype mode (`toggleOvertypeInsertMode`, Insert), with `overtype_cursor_style` and `overtype_on_paste`, including IME compositions (#81).
+- Options: `multi_cursor_modifier` (Alt or Cmd/Ctrl), `multi_cursor_paste`, `multi_cursor_limit`, `multi_cursor_merge_overlapping` and `column_selection` (#81).
 - `TextModel::language_at` (Monaco `getLanguageIdAtPosition`), and the `comments` editor option.
 - Language configurations accept `lineComment` as `{ "comment", "noIndent" }`.
 

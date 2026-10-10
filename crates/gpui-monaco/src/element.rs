@@ -1396,7 +1396,12 @@ fn prepaint_editor(
             } else {
                 metrics.em_width
             };
-            let bounds = match options.cursor_style {
+            let style = if editor.overtype {
+                options.overtype_cursor_style
+            } else {
+                options.cursor_style
+            };
+            let bounds = match style {
                 CursorStyle::Line => {
                     Bounds::new(point(x, y), size(options.cursor_width, line_height))
                 }

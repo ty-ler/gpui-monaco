@@ -152,6 +152,9 @@ pub struct CursorCollection {
     column_select_data: Option<ColumnSelectData>,
     /// Closing characters the editor auto-inserted.
     auto_closed: AutoClosedRanges,
+    /// Whether overlapping selections merge (Monaco
+    /// `multiCursorMergeOverlapping`, default `true`).
+    merge_overlapping: bool,
 }
 
 impl Default for CursorCollection {
@@ -168,6 +171,7 @@ impl CursorCollection {
             last_added_cursor_index: 0,
             column_select_data: None,
             auto_closed: AutoClosedRanges::default(),
+            merge_overlapping: true,
         }
     }
 
@@ -311,8 +315,17 @@ impl CursorCollection {
     /// Monaco `CursorCollection.normalize`: merges overlapping cursors (and
     /// touching ones if one of them is collapsed). The cursor added earlier
     /// wins, so the primary cursor survives.
+    /// Sets whether overlapping selections merge into one (Monaco
+    /// `multiCursorMergeOverlapping`).
+    pub fn set_merge_overlapping(&mut self, merge: bool) {
+        self.merge_overlapping = merge;
+        if merge {
+            self.normalize();
+        }
+    }
+
     fn normalize(&mut self) {
-        if self.states.len() == 1 {
+        if self.states.len() == 1 || !self.merge_overlapping {
             return;
         }
         struct Sorted {
