@@ -39,20 +39,21 @@ Diff editor, CRDT collaboration and a browser runner (the crates already compile
 - **Monaco parity:** [`docs/MONACO_PARITY.md`](docs/MONACO_PARITY.md) lists what's implemented and links the issue for each gap.
 - **Performance:** [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) has the large-file budget and how to measure it.
 - **Playground:** [`examples/playground`](examples/playground/README.md) is a demo app with every feature.
+- **With gpui-component:** [`examples/with-gpui-component`](examples/with-gpui-component/src/main.rs) uses the editor in a [gpui-component](https://github.com/longbridge/gpui-component) window.
 
 ## Using it
 
-gpui-monaco depends on gpui from git at a pinned revision (`f16f9652ec57bf806e65b2a0d51bb92a63644914`), because crates.io's gpui is out of date. It is therefore distributed through git:
+gpui-monaco depends on gpui through the `gpui-pre` crates.io snapshots of Zed's gpui, pinned to the same snapshot as [gpui-component](https://github.com/longbridge/gpui-component), so an app can use both. It's distributed through git for now:
 
 ```toml
 [dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", rev = "f16f9652ec57bf806e65b2a0d51bb92a63644914" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f16f9652ec57bf806e65b2a0d51bb92a63644914", features = ["font-kit"] }
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit"] }
 gpui-monaco = { git = "https://github.com/ty-ler/gpui-monaco", tag = "v0.1.0" }
 gpui-monaco-languages = { git = "https://github.com/ty-ler/gpui-monaco", tag = "v0.1.0" }
 ```
 
-Use the same gpui revision. Git dependencies don't inherit their workspace's `[patch]` section, so also copy the `[patch.crates-io]` block from this repo's `Cargo.toml` into your workspace. See [Getting started](book/src/getting-started.md) for a complete example. Rust 1.98 or newer is required.
+Use the same gpui snapshot; no `[patch]` entries are needed. See [Getting started](book/src/getting-started.md) for a complete example. Rust 1.98 or newer is required.
 
 While the repository is private, cargo's built-in git client can't authenticate. Tell cargo to use the `git` CLI, which uses your GitHub credentials, in `.cargo/config.toml`:
 

@@ -19,15 +19,17 @@ gpui-monaco is MIT OR Apache-2.0. Keep it that way:
 
 ## Bumping gpui
 
-`gpui`, `gpui_platform` and `sum_tree` are pinned to the same upstream zed rev in the
-workspace `Cargo.toml`. To bump:
+`gpui`, `gpui_platform` and `sum_tree` come from the `gpui-pre`, `gpui-pre-platform`
+and `gpui-pre-sum-tree` crates: weekly crates.io snapshots of zed's crates, which
+gpui-component also uses. They're pinned exactly (`=0.3.8`), because any snapshot may
+change gpui's API. To bump:
 
-1. Pick a new rev from `zed-industries/zed` `main`.
-2. Update all three `rev = ...` entries.
-3. Copy the `[patch.crates-io]` entries that gpui needs from zed's `Cargo.toml` at that
-   rev (tree-sitter-language, async-task, calloop, khronos-egl; check for new ones).
-4. Match `rust-toolchain.toml` to zed's `channel` at that rev.
-5. `cargo update -p gpui && cargo test --workspace && cargo run -p playground`.
+1. Prefer the snapshot gpui-component pins (its workspace `Cargo.toml`), so apps can
+   use both.
+2. Update all three `version = "=…"` entries together.
+3. Match `rust-toolchain.toml` to zed's `channel` at the snapshot's commit (in the
+   crate description, e.g. "gpui-pre snapshot of zed@279fe07").
+4. `cargo update -p gpui-pre && cargo test --workspace && cargo run -p playground`.
 
 ## Workflow
 

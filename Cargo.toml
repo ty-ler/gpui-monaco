@@ -7,6 +7,7 @@ members = [
     "crates/gpui-monaco-languages",
     "crates/gpui-monaco-lsp",
     "examples/playground",
+    "examples/with-gpui-component",
 ]
 default-members = [
     "crates/text",
@@ -30,10 +31,12 @@ gpui-monaco = { path = "crates/gpui-monaco" }
 gpui-monaco-languages = { path = "crates/gpui-monaco-languages" }
 gpui-monaco-lsp = { path = "crates/gpui-monaco-lsp" }
 
-# Upstream zed, pinned. Bump all three together; see CONTRIBUTING.md.
-gpui = { git = "https://github.com/zed-industries/zed", rev = "f16f9652ec57bf806e65b2a0d51bb92a63644914" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f16f9652ec57bf806e65b2a0d51bb92a63644914", features = ["font-kit"] }
-sum_tree = { git = "https://github.com/zed-industries/zed", rev = "f16f9652ec57bf806e65b2a0d51bb92a63644914" }
+# gpui from the `gpui-pre` crates.io snapshots of zed (0.3.8 is zed@279fe07),
+# pinned exactly like gpui-component does, so apps can use both. Bump all
+# three together; see CONTRIBUTING.md.
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit"] }
+sum_tree = { package = "gpui-pre-sum-tree", version = "=0.3.8" }
 
 anyhow = "1.0"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
@@ -47,14 +50,6 @@ tree-sitter = "0.27"
 smallvec = { version = "1.13", features = ["union", "const_generics"] }
 unicode-segmentation = "1.12"
 
-# Mirrors the [patch.crates-io] of upstream zed at the pinned rev that gpui
-# needs. Git dependencies do not inherit their workspace's patches.
-# (Zed's tree-sitter-language patch is omitted: we use crates.io tree-sitter.)
-[patch.crates-io]
-async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
-calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
-khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
-
 [workspace.lints.rust]
 unsafe_code = "deny"
 unused_qualifications = "warn"
@@ -63,13 +58,13 @@ unused_qualifications = "warn"
 dbg_macro = "deny"
 todo = "deny"
 
-[profile.dev.package.gpui]
+[profile.dev.package.gpui-pre]
 opt-level = 3
 [profile.dev.package.taffy]
 opt-level = 3
 [profile.dev.package.gpui-monaco-text]
 opt-level = 2
-[profile.dev.package.sum_tree]
+[profile.dev.package.gpui-pre-sum-tree]
 opt-level = 2
 [profile.dev.package.gpui-monaco-syntax]
 opt-level = 2
