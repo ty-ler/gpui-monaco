@@ -792,16 +792,26 @@ pub struct Theme {
     pub colors: EditorColors,
     rules: Vec<TokenRule>,
     cache: Mutex<HashMap<HighlightId, TokenStyle>>,
+    /// Whether semantic tokens color the text when
+    /// `semantic_highlighting` is `ConfiguredByTheme` (VS Code's theme
+    /// `semanticHighlighting`; Monaco's standalone themes say no).
+    pub semantic_highlighting: bool,
+    /// `semanticTokenColors` rules.
+    pub(crate) semantic_rules: Vec<crate::semantic_theme::SemanticTokenRule>,
+    pub(crate) semantic_cache: Mutex<HashMap<String, Option<crate::semantic_theme::SemanticStyle>>>,
 }
 
 impl Clone for Theme {
     fn clone(&self) -> Self {
-        Self::new(
+        let mut theme = Self::new(
             self.name.clone(),
             self.kind,
             self.colors.clone(),
             self.rules.clone(),
-        )
+        );
+        theme.semantic_highlighting = self.semantic_highlighting;
+        theme.semantic_rules = self.semantic_rules.clone();
+        theme
     }
 }
 
@@ -838,6 +848,9 @@ impl Theme {
             colors,
             rules,
             cache: Mutex::default(),
+            semantic_highlighting: false,
+            semantic_rules: Vec::new(),
+            semantic_cache: Mutex::default(),
         }
     }
 
@@ -1000,12 +1013,21 @@ impl Theme {
                 });
             }
         }
-        Ok(Self::new(
+        let mut theme = Self::new(
             merged.name.unwrap_or_else(|| "VS Code theme".into()),
             kind,
             colors,
             rules,
-        ))
+        );
+        theme.semantic_highlighting = merged.semantic_highlighting.unwrap_or(false);
+        theme.semantic_rules = merged
+            .semantic_token_colors
+            .iter()
+            .filter_map(|(selector, value)| {
+                crate::semantic_theme::SemanticTokenRule::parse(selector, value)
+            })
+            .collect();
+        Ok(theme)
     }
 
     /// Loads a VS Code theme file, following `include`s relative to it.
@@ -1060,6 +1082,10 @@ struct VsCodeTheme {
     colors: HashMap<String, String>,
     #[serde(default)]
     token_colors: Vec<TokenColor>,
+    #[serde(default)]
+    semantic_highlighting: Option<bool>,
+    #[serde(default)]
+    semantic_token_colors: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -1107,6 +1133,12 @@ fn load_vscode_theme(
     }
     merged.colors.extend(theme.colors);
     merged.token_colors.extend(theme.token_colors);
+    if theme.semantic_highlighting.is_some() {
+        merged.semantic_highlighting = theme.semantic_highlighting;
+    }
+    merged
+        .semantic_token_colors
+        .extend(theme.semantic_token_colors);
     Ok(())
 }
 
@@ -1116,7 +1148,7 @@ fn selector_matches(selector: &str, name: &str) -> bool {
         || (name.starts_with(selector) && name.as_bytes().get(selector.len()) == Some(&b'.'))
 }
 
-fn best_match(rules: &[TokenRule], kind: RuleKind, name: &str) -> Option<TokenStyle> {
+pub(crate) fn best_match(rules: &[TokenRule], kind: RuleKind, name: &str) -> Option<TokenStyle> {
     let mut best: Option<&TokenRule> = None;
     for rule in rules.iter().filter(|rule| rule.kind == kind) {
         if selector_matches(&rule.selector, name)

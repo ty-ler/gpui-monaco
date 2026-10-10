@@ -261,6 +261,20 @@ pub enum WordBasedSuggestions {
     AllDocuments,
 }
 
+/// Monaco `semanticHighlighting.enabled`: whether semantic tokens color
+/// the text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SemanticHighlighting {
+    /// Always.
+    On,
+    /// Never.
+    Off,
+    /// As the theme says (`Theme::semantic_highlighting`; off for Monaco's
+    /// built-in themes, as in standalone Monaco).
+    #[default]
+    ConfiguredByTheme,
+}
+
 /// Monaco `renderValidationDecorations`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RenderValidationDecorations {
@@ -658,6 +672,8 @@ pub struct EditorOptions {
     /// Monaco `multiCursorPaste`: how pasting with several cursors splits
     /// the text.
     pub multi_cursor_paste: crate::cursor::MultiCursorPaste,
+    /// Monaco `semanticHighlighting.enabled`.
+    pub semantic_highlighting: SemanticHighlighting,
     /// Monaco `links`: detect links and follow them with Cmd/Ctrl+click.
     pub links: bool,
     /// Monaco `showUnused`: fade code diagnostics tag unnecessary.
@@ -770,6 +786,7 @@ impl Default for EditorOptions {
             selection_highlight_multiline: false,
             multi_cursor_modifier: MultiCursorModifier::Alt,
             multi_cursor_paste: Default::default(),
+            semantic_highlighting: SemanticHighlighting::ConfiguredByTheme,
             links: true,
             show_unused: true,
             show_deprecated: true,

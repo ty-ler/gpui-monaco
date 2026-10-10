@@ -25,6 +25,11 @@ use gpui_monaco::providers::{
     register_reference_provider, register_type_definition_provider,
 };
 use gpui_monaco::providers::{
+    DocumentRangeSemanticTokensProvider, DocumentSemanticTokensProvider, SemanticTokens,
+    SemanticTokensEdit, SemanticTokensEdits, SemanticTokensLegend, SemanticTokensResult,
+    register_document_range_semantic_tokens_provider, register_document_semantic_tokens_provider,
+};
+use gpui_monaco::providers::{
     FoldingRange, FoldingRangeKind, FoldingRangeProvider, register_folding_range_provider,
 };
 use gpui_monaco::providers::{InlayHint, InlayHintsProvider, register_inlay_hints_provider};
@@ -56,6 +61,20 @@ pub(crate) struct LspFeatures {
     resolve_code_actions: bool,
     /// The code action kinds the server returns, if it says.
     code_action_kinds: Option<Vec<CodeActionKind>>,
+    /// The server's semantic token types and modifiers.
+    semantic_legend: SemanticTokensLegend,
+    /// The server answers `textDocument/semanticTokens/full/delta`.
+    semantic_delta: bool,
+}
+
+/// The semantic tokens options a server advertises.
+fn semantic_options(capabilities: &lsp::ServerCapabilities) -> Option<&lsp::SemanticTokensOptions> {
+    match capabilities.semantic_tokens_provider.as_ref()? {
+        lsp::SemanticTokensServerCapabilities::SemanticTokensOptions(options) => Some(options),
+        lsp::SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(options) => {
+            Some(&options.semantic_tokens_options)
+        }
+    }
 }
 
 fn chars(strings: Option<&Vec<String>>) -> Vec<char> {
@@ -119,6 +138,26 @@ impl LspFeatures {
                 }
                 _ => None,
             },
+            semantic_legend: semantic_options(capabilities)
+                .map(|options| SemanticTokensLegend {
+                    token_types: options
+                        .legend
+                        .token_types
+                        .iter()
+                        .map(|t| t.as_str().to_string().into())
+                        .collect(),
+                    token_modifiers: options
+                        .legend
+                        .token_modifiers
+                        .iter()
+                        .map(|m| m.as_str().to_string().into())
+                        .collect(),
+                })
+                .unwrap_or_default(),
+            semantic_delta: matches!(
+                semantic_options(capabilities).and_then(|o| o.full.as_ref()),
+                Some(lsp::SemanticTokensFullOptions::Delta { delta: Some(true) })
+            ),
             prepare_rename: matches!(
                 &capabilities.rename_provider,
                 Some(lsp::OneOf::Right(lsp::RenameOptions {
@@ -226,6 +265,28 @@ impl LspFeatures {
                 selector.clone(),
                 self.clone(),
             ));
+        }
+        if let Some(options) = semantic_options(capabilities) {
+            if matches!(
+                options.full,
+                Some(
+                    lsp::SemanticTokensFullOptions::Bool(true)
+                        | lsp::SemanticTokensFullOptions::Delta { .. }
+                )
+            ) {
+                registrations.push(register_document_semantic_tokens_provider(
+                    cx,
+                    selector.clone(),
+                    self.clone(),
+                ));
+            }
+            if options.range == Some(true) {
+                registrations.push(register_document_range_semantic_tokens_provider(
+                    cx,
+                    selector.clone(),
+                    self.clone(),
+                ));
+            }
         }
         if supported(capabilities.inlay_hint_provider.as_ref()) {
             registrations.push(register_inlay_hints_provider(
@@ -900,6 +961,150 @@ impl SelectionRangeProvider for LspFeatures {
                     ranges
                 })
                 .collect())
+        })
+    }
+}
+
+/// LSP tokens as Monaco's flat 5-number encoding.
+fn flatten_tokens(tokens: &[lsp::SemanticToken]) -> Vec<u32> {
+    tokens
+        .iter()
+        .flat_map(|t| {
+            [
+                t.delta_line,
+                t.delta_start,
+                t.length,
+                t.token_type,
+                t.token_modifiers_bitset,
+            ]
+        })
+        .collect()
+}
+
+fn semantic_tokens(tokens: lsp::SemanticTokens) -> SemanticTokens {
+    SemanticTokens {
+        result_id: tokens.result_id.map(Into::into),
+        data: flatten_tokens(&tokens.data),
+    }
+}
+
+impl DocumentSemanticTokensProvider for LspFeatures {
+    fn legend(&self) -> SemanticTokensLegend {
+        self.semantic_legend.clone()
+    }
+
+    fn provide_document_semantic_tokens(
+        &self,
+        context: &ProviderContext,
+        last_result_id: Option<gpui::SharedString>,
+        cx: &mut App,
+    ) -> Task<Result<Option<SemanticTokensResult>>> {
+        let Some((connection, position)) = self.prepare(context, PointUtf16::default(), cx) else {
+            return Task::ready(Ok(None));
+        };
+        let text_document = position.text_document;
+        match last_result_id.filter(|_| self.semantic_delta) {
+            Some(previous_result_id) => {
+                let request = connection.request::<lsp::request::SemanticTokensFullDeltaRequest>(
+                    lsp::SemanticTokensDeltaParams {
+                        text_document,
+                        previous_result_id: previous_result_id.to_string(),
+                        work_done_progress_params: Default::default(),
+                        partial_result_params: Default::default(),
+                    },
+                );
+                cx.background_executor().spawn(async move {
+                    Ok(request.await?.map(|result| match result {
+                        lsp::SemanticTokensFullDeltaResult::Tokens(tokens) => {
+                            SemanticTokensResult::Tokens(semantic_tokens(tokens))
+                        }
+                        lsp::SemanticTokensFullDeltaResult::TokensDelta(delta) => {
+                            SemanticTokensResult::Edits(SemanticTokensEdits {
+                                result_id: delta.result_id.map(Into::into),
+                                // LSP counts edits in numbers, like Monaco.
+                                edits: delta
+                                    .edits
+                                    .into_iter()
+                                    .map(|edit| SemanticTokensEdit {
+                                        start: edit.start as usize,
+                                        delete_count: edit.delete_count as usize,
+                                        data: flatten_tokens(&edit.data.unwrap_or_default()),
+                                    })
+                                    .collect(),
+                            })
+                        }
+                        lsp::SemanticTokensFullDeltaResult::PartialTokensDelta { edits } => {
+                            SemanticTokensResult::Edits(SemanticTokensEdits {
+                                result_id: None,
+                                edits: edits
+                                    .into_iter()
+                                    .map(|edit| SemanticTokensEdit {
+                                        start: edit.start as usize,
+                                        delete_count: edit.delete_count as usize,
+                                        data: flatten_tokens(&edit.data.unwrap_or_default()),
+                                    })
+                                    .collect(),
+                            })
+                        }
+                    }))
+                })
+            }
+            None => {
+                let request = connection.request::<lsp::request::SemanticTokensFullRequest>(
+                    lsp::SemanticTokensParams {
+                        text_document,
+                        work_done_progress_params: Default::default(),
+                        partial_result_params: Default::default(),
+                    },
+                );
+                cx.background_executor().spawn(async move {
+                    Ok(request.await?.map(|result| match result {
+                        lsp::SemanticTokensResult::Tokens(tokens) => {
+                            SemanticTokensResult::Tokens(semantic_tokens(tokens))
+                        }
+                        lsp::SemanticTokensResult::Partial(partial) => {
+                            SemanticTokensResult::Tokens(SemanticTokens {
+                                result_id: None,
+                                data: flatten_tokens(&partial.data),
+                            })
+                        }
+                    }))
+                })
+            }
+        }
+    }
+}
+
+impl DocumentRangeSemanticTokensProvider for LspFeatures {
+    fn legend(&self) -> SemanticTokensLegend {
+        self.semantic_legend.clone()
+    }
+
+    fn provide_document_range_semantic_tokens(
+        &self,
+        context: &ProviderContext,
+        range: Range<PointUtf16>,
+        cx: &mut App,
+    ) -> Task<Result<Option<SemanticTokens>>> {
+        let Some((connection, position)) = self.prepare(context, range.start, cx) else {
+            return Task::ready(Ok(None));
+        };
+        let request = connection.request::<lsp::request::SemanticTokensRangeRequest>(
+            lsp::SemanticTokensRangeParams {
+                text_document: position.text_document,
+                range: convert::lsp_range(&range),
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            },
+        );
+        cx.background_executor().spawn(async move {
+            Ok(request.await?.map(|result| match result {
+                lsp::SemanticTokensRangeResult::Tokens(tokens) => semantic_tokens(tokens),
+                lsp::SemanticTokensRangeResult::Partial(partial) => SemanticTokens {
+                    result_id: None,
+                    data: flatten_tokens(&partial.data),
+                },
+            }))
         })
     }
 }

@@ -594,6 +594,10 @@ impl LspClient {
                 gpui_monaco::providers::refresh_inlay_hints(cx);
                 Ok(Value::Null)
             }
+            lsp_types::request::SemanticTokensRefresh::METHOD => {
+                gpui_monaco::providers::refresh_semantic_tokens(cx);
+                Ok(Value::Null)
+            }
             RegisterCapability::METHOD
             | UnregisterCapability::METHOD
             | WorkDoneProgressCreate::METHOD => Ok(Value::Null),
@@ -734,6 +738,7 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
             "applyEdit": true,
             "executeCommand": {},
             "inlayHint": { "refreshSupport": true },
+            "semanticTokens": { "refreshSupport": true },
             "configuration": true,
             "workspaceFolders": true,
             "workspaceEdit": { "documentChanges": true },
@@ -773,6 +778,23 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
             "references": {},
             "rename": { "prepareSupport": true },
             "inlayHint": {},
+            "semanticTokens": {
+                "requests": { "range": true, "full": { "delta": true } },
+                "tokenTypes": [
+                    "namespace", "type", "class", "enum", "interface", "struct",
+                    "typeParameter", "parameter", "variable", "property", "enumMember",
+                    "event", "function", "method", "macro", "keyword", "modifier",
+                    "comment", "string", "number", "regexp", "operator", "decorator",
+                ],
+                "tokenModifiers": [
+                    "declaration", "definition", "readonly", "static", "deprecated",
+                    "abstract", "async", "modification", "documentation", "defaultLibrary",
+                ],
+                "formats": ["relative"],
+                "overlappingTokenSupport": false,
+                "multilineTokenSupport": false,
+                "augmentsSyntaxTokens": true,
+            },
             "foldingRange": { "lineFoldingOnly": true },
             "selectionRange": {},
             "codeAction": {

@@ -42,6 +42,8 @@ mod peek;
 pub mod providers;
 mod rename;
 pub mod search;
+mod semantic_theme;
+mod semantic_tokens;
 mod signature_help;
 mod smart_select;
 pub mod snippet;

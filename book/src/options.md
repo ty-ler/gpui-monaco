@@ -31,6 +31,7 @@ editor.update(cx, |editor, cx| {
 | `auto_closing_overtype`, `auto_closing_delete`, `auto_surround` | same names | |
 | `auto_indent` | `autoIndent` | `None`, `Keep`, `Brackets`, `Advanced`, `Full` |
 | `match_brackets` | `matchBrackets` | |
+| `semantic_highlighting` | `semanticHighlighting.enabled` | `On`, `Off` or `ConfiguredByTheme` (the theme's `semanticHighlighting`) |
 | `links` | `links` | detect links and follow them with Cmd/Ctrl+click (on) |
 | `quick_suggestions` | `quickSuggestions` | completion while typing, per token type: `other` (on), `comments`, `strings` |
 | `quick_suggestions_delay` | `quickSuggestionsDelay` | wait before quick suggestions (10ms) |
