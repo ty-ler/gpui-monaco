@@ -20,6 +20,10 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
   - `\n` in a pattern still enables multiline search, as in Monaco.
   - Replacement patterns support `$1`, `$&`, `$$`, `\n` and `\t`. Monaco's case-changing escapes (`\u`, `\U`, `\l`, `\L`) are not supported.
   - Language configuration patterns (`wordPattern`, `indentationRules`, …) use `fancy-regex`, so VS Code's configurations work unchanged.
+- **Quick access:**
+  - Symbols are matched with the suggest widget's fuzzy scorer, not VS Code's quick open scorer.
+  - The help list has no command palette entry yet.
+  - Icons are glyphs, not codicons.
 - **Inline completions:**
   - There is no toolbar (`showToolbar`).
   - Ghost text isn't syntax highlighted.

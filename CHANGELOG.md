@@ -149,6 +149,12 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Quick access (#100, part 2):** Monaco's standalone quick access in a quick input widget at the top of the editor.
+  - Go to line and column with Ctrl+G (`:line[:,#]col`, negative lines from the end, visible columns) and go to offset (`::`). Both preview by revealing and highlighting the line.
+  - Go to symbol with Cmd/Ctrl+Shift+O (`@`). It fuzzy-matches the name, with extra words matching the container. `@:` groups by kind. The symbol around the cursor starts active, and the active symbol is previewed.
+  - Without a known prefix, it lists the prefixes (help).
+  - Escape, or losing focus, restores the view; Enter goes there.
+  - New: `CodeEditor::open_quick_access`, the actions `GotoLine` and `QuickOutline`, and `editor.rangeHighlightBackground`.
 - **Document symbols (#100, part 1):**
   - `DocumentSymbolProvider` (`SymbolKind`, nested `DocumentSymbol`s) and `CodeEditor::document_symbols`.
   - Without a provider, symbols come from the language's tags query, using `Grammar::with_tags_query` and `SyntaxSnapshot::tags`.
