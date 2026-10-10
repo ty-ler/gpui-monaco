@@ -632,7 +632,8 @@ fn main() {
             Some(cx.new(|_| TextModel::new(&text).with_language(language).with_uri(uri)))
         });
         let bounds = Bounds::centered(None, size(px(1100.), px(760.)), cx);
-        // `PLAYGROUND_DIFF=original` compares it with `PLAYGROUND_FILE`.
+        // `PLAYGROUND_DIFF=original` compares it with `PLAYGROUND_FILE`
+        // (`PLAYGROUND_DIFF_INLINE=1` for the inline view).
         if let (Ok(original), Ok(modified)) = (
             std::env::var("PLAYGROUND_DIFF"),
             std::env::var("PLAYGROUND_FILE"),
@@ -650,7 +651,19 @@ fn main() {
                         ..Default::default()
                     },
                     |window, cx| {
-                        cx.new(|cx| gpui_monaco::DiffEditor::new(original, modified, window, cx))
+                        cx.new(|cx| {
+                            let mut diff =
+                                gpui_monaco::DiffEditor::new(original, modified, window, cx);
+                            // `PLAYGROUND_DIFF_INLINE=1` shows the inline view.
+                            if std::env::var_os("PLAYGROUND_DIFF_INLINE")
+                                .is_some_and(|v| !v.is_empty())
+                            {
+                                let mut options = diff.options().clone();
+                                options.render_side_by_side = false;
+                                diff.update_options(options, cx);
+                            }
+                            diff
+                        })
                     },
                 )
                 .expect("failed to open window");

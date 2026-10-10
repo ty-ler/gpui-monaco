@@ -2,6 +2,8 @@
 
 `DiffEditor` shows two models side by side, like Monaco's `createDiffEditor`. Changed lines are tinted, changed characters are highlighted, and striped padding keeps the two sides aligned. Both sides scroll together.
 
+With `render_side_by_side: false` the diff shows inline, like Monaco's inline diff. Only the modified editor is shown, and each change's deleted lines appear above it with syntax highlighting, the changed characters marked and `−` in the margin. Side-by-side diffs also switch to inline when the editor is narrower than `render_side_by_side_inline_breakpoint` (900px), unless `use_inline_view_when_space_is_limited` is turned off. `renders_side_by_side()` reports which mode is showing.
+
 ```rust
 use gpui_monaco::{DiffEditor, TextModel};
 
@@ -21,6 +23,7 @@ let diff = cx.new(|cx| DiffEditor::new(original, modified, window, cx));
   - `original_editable`
   - `enable_split_view_resizing` and `split_view_default_ratio` (drag the sash between the sides)
   - `show_moves`
+  - `render_side_by_side`, `use_inline_view_when_space_is_limited` and `render_side_by_side_inline_breakpoint`
 - **Computing diffs directly:** `gpui_monaco::diff::compute_diff` is Monaco's diff algorithm on its own, for hosts that only need the changes.
 
 Colors come from the theme: `diffEditor.insertedTextBackground`, `removedTextBackground`, `insertedLineBackground`, `removedLineBackground`, the `diffEditorGutter.*` backgrounds and `diffEditor.diagonalFill`.

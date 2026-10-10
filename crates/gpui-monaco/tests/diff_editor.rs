@@ -108,3 +108,54 @@ fn go_to_next_and_previous_diff(cx: &mut TestAppContext) {
     diff.update_in(cx, |d, window, cx| d.go_to_diff(false, window, cx));
     assert_eq!(row(cx), PointUtf16::new(4, 0));
 }
+
+#[gpui::test]
+fn inline_view_shows_deleted_lines_in_the_modified_editor(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb\nc\nd", "a\nx\ny\nb\nc", cx);
+    diff.update(cx, |d, cx| {
+        let mut options = d.options().clone();
+        options.render_side_by_side = false;
+        d.update_options(options, cx);
+    });
+    paint(cx);
+    assert!(!diff.read_with(cx, |d, _| d.renders_side_by_side()));
+    // One zone for the deleted `d`; the insertion has nothing deleted.
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.alignment_zones_for_tests()),
+        (0, 1)
+    );
+    // Back to side by side.
+    diff.update(cx, |d, cx| {
+        let mut options = d.options().clone();
+        options.render_side_by_side = true;
+        d.update_options(options, cx);
+    });
+    paint(cx);
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.alignment_zones_for_tests()),
+        (1, 1)
+    );
+}
+
+#[gpui::test]
+fn narrow_diff_editors_show_inline(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb", "a\nc", cx);
+    cx.simulate_resize(gpui::size(px(1200.), px(600.)));
+    paint(cx);
+    assert!(diff.read_with(cx, |d, _| d.renders_side_by_side()));
+    cx.simulate_resize(gpui::size(px(600.), px(600.)));
+    paint(cx);
+    assert!(!diff.read_with(cx, |d, _| d.renders_side_by_side()));
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.alignment_zones_for_tests()),
+        (0, 1)
+    );
+    // Unless that's turned off.
+    diff.update(cx, |d, cx| {
+        let mut options = d.options().clone();
+        options.use_inline_view_when_space_is_limited = false;
+        d.update_options(options, cx);
+    });
+    paint(cx);
+    assert!(diff.read_with(cx, |d, _| d.renders_side_by_side()));
+}

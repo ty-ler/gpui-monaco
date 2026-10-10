@@ -13,9 +13,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
-    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, PathBuilder, Pixels,
-    Render, SharedString, Styled as _, Subscription, Task, Window, canvas, div, point, px,
+    App, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, FontStyle,
+    FontWeight, HighlightStyle, Hsla, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement as _, PathBuilder, Pixels, Render, SharedString, Styled as _, StyledText,
+    Subscription, Task, WeakEntity, Window, canvas, div, point, px,
 };
 use text::{Point, PointUtf16};
 
@@ -74,6 +75,15 @@ pub struct DiffEditorOptions {
     /// Detect moved blocks (Monaco `experimental.showMoves`, default
     /// `false`).
     pub show_moves: bool,
+    /// Show the sides next to each other; `false` shows deleted lines inline
+    /// in the modified editor (default `true`).
+    pub render_side_by_side: bool,
+    /// Show inline when the diff editor is narrower than
+    /// `render_side_by_side_inline_breakpoint` (default `true`).
+    pub use_inline_view_when_space_is_limited: bool,
+    /// The width below which a side-by-side diff shows inline (default
+    /// 900px).
+    pub render_side_by_side_inline_breakpoint: Pixels,
 }
 
 impl Default for DiffEditorOptions {
@@ -87,6 +97,9 @@ impl Default for DiffEditorOptions {
             original_editable: false,
             render_overview_ruler: true,
             show_moves: false,
+            render_side_by_side: true,
+            use_inline_view_when_space_is_limited: true,
+            render_side_by_side_inline_breakpoint: px(900.),
         }
     }
 }
@@ -309,6 +322,201 @@ impl Render for DiagonalFill {
     }
 }
 
+/// Deleted lines in the inline view (Monaco `renderLines` into a
+/// `line-delete` view zone, with `inline-deleted-margin-view-zone`):
+/// highlighted original text on the removed background, the changed
+/// characters marked, and `−` in the margin.
+struct DeletedCode {
+    /// The modified editor, for its gutter, font and horizontal scroll.
+    editor: WeakEntity<CodeEditor>,
+    original: Entity<TextModel>,
+    /// 0-based original rows.
+    rows: Range<u32>,
+    /// The changed characters, in original coordinates.
+    inner_changes: Vec<Range<PointUtf16>>,
+    render_indicators: bool,
+    _subscription: Subscription,
+}
+
+impl DeletedCode {
+    fn new(
+        editor: WeakEntity<CodeEditor>,
+        original: Entity<TextModel>,
+        rows: Range<u32>,
+        inner_changes: Vec<Range<PointUtf16>>,
+        render_indicators: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // Monaco renders the zone again once tokenization completes.
+        let subscription = cx.subscribe(&original, |_, _, event: &TextModelEvent, cx| {
+            if matches!(event, TextModelEvent::SyntaxUpdated) {
+                cx.notify();
+            }
+        });
+        Self {
+            editor,
+            original,
+            rows,
+            inner_changes,
+            render_indicators,
+            _subscription: subscription,
+        }
+    }
+}
+
+impl Render for DeletedCode {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(editor) = self.editor.upgrade() else {
+            return div();
+        };
+        let editor = editor.read(cx);
+        let options = editor.options();
+        let colors = editor.colors().clone();
+        let theme = editor.theme().clone();
+        let line_height = options.resolved_line_height();
+        let (gutter_width, text_left, sign_left, scroll_left) = match &editor.layout {
+            Some(layout) => (
+                layout.gutter_width,
+                layout.text_bounds.left() - layout.bounds.left(),
+                layout.glyph_margin_width + layout.line_numbers_width,
+                layout.scroll_left,
+            ),
+            None => (px(0.), px(0.), px(0.), px(0.)),
+        };
+        let decorations_width = options.line_decorations_width;
+        let font_family = options.font_family.clone();
+        let font_size = options.font_size;
+        let font_weight = options.font_weight;
+        let model = self.original.read(cx);
+        let rope = model.buffer().rope();
+        let tab_size = model.options().tab_size.max(1) as usize;
+        let rows = self.rows.start..self.rows.end.min(rope.line_count());
+        let start = rope.point_to_offset(Point::new(rows.start, 0));
+        let end = rope.point_to_offset(Point::new(rows.end.saturating_sub(1), u32::MAX));
+        let tokens = crate::element::HighlightSource::new(model)
+            .map(|source| source.highlights(&theme, start..end))
+            .unwrap_or_default();
+        let lines = rows.clone().map(|row| {
+            let line = rope.line(row);
+            let line_start = rope.point_to_offset(Point::new(row, 0));
+            let line_end = line_start + line.len();
+            let (text, map) = crate::colorize::expand_tabs(&line, tab_size);
+            let syntax: Vec<_> = tokens
+                .iter()
+                .filter(|(range, _)| range.start < line_end && range.end > line_start)
+                .map(|(range, style)| {
+                    let range = map[range.start.max(line_start) - line_start]
+                        ..map[range.end.min(line_end) - line_start];
+                    (
+                        range,
+                        HighlightStyle {
+                            color: style.foreground,
+                            font_weight: style.bold.then_some(FontWeight::BOLD),
+                            font_style: style.italic.then_some(FontStyle::Italic),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .filter(|(range, _)| !range.is_empty())
+                .collect();
+            let byte = |column: u32| {
+                let mut units = 0;
+                for (ix, ch) in line.char_indices() {
+                    if units >= column {
+                        return ix;
+                    }
+                    units += ch.len_utf16() as u32;
+                }
+                line.len()
+            };
+            let changed: Vec<_> = self
+                .inner_changes
+                .iter()
+                .filter(|r| r.start.row <= row && r.end.row >= row)
+                .map(|r| {
+                    let from = if r.start.row == row {
+                        byte(r.start.column)
+                    } else {
+                        0
+                    };
+                    let to = if r.end.row == row {
+                        byte(r.end.column)
+                    } else {
+                        line.len()
+                    };
+                    (
+                        map[from]..map[to],
+                        HighlightStyle {
+                            background_color: Some(colors.diff_removed_text_background),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .filter(|(range, _)| !range.is_empty())
+                .collect();
+            let highlights: Vec<_> = gpui::combine_highlights(syntax, changed).collect();
+            let text = if text.is_empty() {
+                " ".to_string()
+            } else {
+                text
+            };
+            div()
+                .h(line_height)
+                .flex()
+                .flex_row()
+                .child(
+                    div()
+                        .relative()
+                        .h_full()
+                        .w(text_left)
+                        .flex_none()
+                        .child(
+                            div()
+                                .absolute()
+                                .h_full()
+                                .w(gutter_width)
+                                .bg(colors.diff_gutter_removed_line_background),
+                        )
+                        .when(self.render_indicators, |margin| {
+                            margin.child(
+                                div()
+                                    .absolute()
+                                    .left(sign_left)
+                                    .w(decorations_width)
+                                    .h_full()
+                                    .flex()
+                                    .justify_center()
+                                    .text_color(colors.foreground)
+                                    .child("−"),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .h_full()
+                        .flex_1()
+                        .overflow_hidden()
+                        .bg(colors.diff_removed_line_background)
+                        .child(
+                            div()
+                                .ml(-scroll_left)
+                                .whitespace_nowrap()
+                                .child(StyledText::new(text).with_highlights(highlights)),
+                        ),
+                )
+        });
+        div()
+            .size_full()
+            .overflow_hidden()
+            .font_family(font_family)
+            .text_size(font_size)
+            .font_weight(font_weight)
+            .line_height(line_height)
+            .text_color(colors.foreground)
+            .children(lines.collect::<Vec<_>>())
+    }
+}
+
 /// The side-by-side diff editor (Monaco `DiffEditorWidget`).
 pub struct DiffEditor {
     original: Entity<CodeEditor>,
@@ -326,6 +534,8 @@ pub struct DiffEditor {
     bounds: Rc<Cell<Bounds<Pixels>>>,
     dragging_sash: bool,
     syncing_scroll: bool,
+    /// Whether the last render showed the diff inline.
+    inline: bool,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -369,6 +579,7 @@ impl DiffEditor {
             bounds: Default::default(),
             dragging_sash: false,
             syncing_scroll: false,
+            inline: false,
             focus_handle: cx.focus_handle(),
             _subscriptions: Vec::new(),
         };
@@ -435,6 +646,7 @@ impl DiffEditor {
         if options.split_view_default_ratio != self.options.split_view_default_ratio {
             self.ratio = options.split_view_default_ratio;
         }
+        self.inline = !self.side_by_side_for(&options);
         self.options = options;
         if recompute {
             self.compute_diff(true, cx);
@@ -458,6 +670,22 @@ impl DiffEditor {
             .update(cx, |editor, cx| editor.set_model(modified, cx));
         self.subscribe(cx);
         self.compute_diff(true, cx);
+    }
+
+    /// Monaco `renderSideBySide` after `useInlineViewWhenSpaceIsLimited`:
+    /// whether the sides show next to each other (else deleted lines show
+    /// inline in the modified editor).
+    pub fn renders_side_by_side(&self) -> bool {
+        !self.inline
+    }
+
+    /// Whether `options` and the width call for side by side.
+    fn side_by_side_for(&self, options: &DiffEditorOptions) -> bool {
+        let width = self.bounds.get().size.width;
+        options.render_side_by_side
+            && !(options.use_inline_view_when_space_is_limited
+                && width > px(0.)
+                && width < options.render_side_by_side_inline_breakpoint)
     }
 
     /// The alignment view zones on each side, for tests.
@@ -556,6 +784,10 @@ impl DiffEditor {
             self.modified
                 .update(cx, |editor, cx| editor.remove_widget(id, cx));
         }
+        if self.inline {
+            self.apply_inline_zones(diff, cx);
+            return;
+        }
         let original_line_height =
             f32::from(self.original.read(cx).options().resolved_line_height());
         let modified_line_height =
@@ -620,10 +852,57 @@ impl DiffEditor {
         self.zones = zones;
     }
 
+    /// Monaco's inline view (`renderSideBySide: false`): each change's
+    /// deleted lines show in a view zone above its modified lines.
+    fn apply_inline_zones(&mut self, diff: &LinesDiff, cx: &mut Context<Self>) {
+        let line_height = self.modified.read(cx).options().resolved_line_height();
+        let original_model = self.original.read(cx).model().clone();
+        let line_count = original_model.read(cx).buffer().rope().line_count() as usize;
+        let mut ids = Vec::new();
+        for change in &diff.changes {
+            let range = change.original;
+            // A diff for older text can be out of bounds until recomputed.
+            if range.is_empty() || range.end_line_number_exclusive - 1 > line_count {
+                continue;
+            }
+            let rows =
+                range.start_line_number as u32 - 1..range.end_line_number_exclusive as u32 - 1;
+            let inner_changes = change
+                .inner_changes
+                .iter()
+                .map(|i| i.original_range.to_point_utf16_range())
+                .collect();
+            let editor = self.modified.downgrade();
+            let render_indicators = self.options.render_indicators;
+            let model = original_model.clone();
+            let view = cx.new(|cx| {
+                DeletedCode::new(
+                    editor,
+                    model,
+                    rows.clone(),
+                    inner_changes,
+                    render_indicators,
+                    cx,
+                )
+            });
+            let id = self.modified.update(cx, |editor, cx| {
+                editor.add_zone(
+                    change.modified.start_line_number as u32 - 1,
+                    ZoneHeight::Pixels(line_height * rows.len() as f32),
+                    view.into(),
+                    true,
+                    cx,
+                )
+            });
+            ids.push(id);
+        }
+        self.zones = (Vec::new(), ids);
+    }
+
     /// Keeps both sides scrolled together (aligned, their content heights
     /// match).
     fn sync_scroll(&mut self, from_original: bool, cx: &mut Context<Self>) {
-        if self.syncing_scroll {
+        if self.syncing_scroll || self.inline {
             return;
         }
         self.syncing_scroll = true;
@@ -868,6 +1147,12 @@ fn diff_decorations(
 
 impl Render for DiffEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Monaco `useInlineViewWhenSpaceIsLimited`: the width decides.
+        let inline = !self.side_by_side_for(&self.options);
+        if inline != self.inline {
+            self.inline = inline;
+            self.apply_diff(cx);
+        }
         let bounds = self.bounds.clone();
         let ratio = self.ratio.clamp(0.1, 0.9);
         let border = self.modified.read(cx).colors().widget_border;
@@ -912,29 +1197,31 @@ impl Render for DiffEditor {
                     .absolute()
                     .size_full(),
             )
-            .child(
-                div()
-                    .h_full()
-                    .w(gpui::relative(ratio))
-                    .child(self.original.clone()),
-            )
-            .child(
-                div()
-                    .id("diff-sash")
-                    .h_full()
-                    .w(px(1.))
-                    .flex_none()
-                    .bg(border)
-                    .when(resizable, |sash| {
-                        sash.cursor_col_resize().on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.dragging_sash = true;
-                                cx.stop_propagation();
-                            }),
-                        )
-                    }),
-            )
+            .when(!inline, |this| {
+                this.child(
+                    div()
+                        .h_full()
+                        .w(gpui::relative(ratio))
+                        .child(self.original.clone()),
+                )
+                .child(
+                    div()
+                        .id("diff-sash")
+                        .h_full()
+                        .w(px(1.))
+                        .flex_none()
+                        .bg(border)
+                        .when(resizable, |sash| {
+                            sash.cursor_col_resize().on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.dragging_sash = true;
+                                    cx.stop_propagation();
+                                }),
+                            )
+                        }),
+                )
+            })
             .child(div().h_full().flex_1().child(self.modified.clone()))
     }
 }

@@ -5,6 +5,9 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Inline diff view (#52, part 3):** `DiffEditorOptions::render_side_by_side = false` shows deleted lines inline in the modified editor, like Monaco's inline diff. They appear as syntax-highlighted view zones with the changed characters marked and `−` in the margin.
+  - **Narrow editors:** below `render_side_by_side_inline_breakpoint` (900px), diffs show inline unless `use_inline_view_when_space_is_limited` is off.
+  - **Mode:** `renders_side_by_side()` reports which mode is showing.
 - **Side-by-side diff editor (#52, part 2):** `DiffEditor` ports Monaco's `DiffEditorWidget`.
   - **Display:** the original and modified models side by side, with changed lines and characters highlighted and `+`/`−` gutter signs. Monaco's `computeRangeAlignment` view zones (striped) keep the sides aligned, wrapped lines included.
   - **Behavior:** synchronized scrolling, a resizable split, overview ruler marks, and `go_to_diff` (Alt+F5 / Shift+Alt+F5). The diff is recomputed in the background after edits.
