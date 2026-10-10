@@ -35,6 +35,12 @@ pub struct EditorActionDescriptor {
     pub keybindings: Vec<SharedString>,
     /// Whether it can run; without one it always can.
     pub precondition: Option<ActionPrecondition>,
+    /// The context menu group to show it in (Monaco `contextMenuGroupId`,
+    /// e.g. `"navigation"` or `"1_modification"`); without one it isn't
+    /// in the menu.
+    pub context_menu_group_id: Option<SharedString>,
+    /// Its order in the group (Monaco `contextMenuOrder`).
+    pub context_menu_order: f32,
     /// Runs it.
     pub run: ActionRun,
 }
@@ -52,6 +58,8 @@ impl EditorActionDescriptor {
             alias: None,
             keybindings: Vec::new(),
             precondition: None,
+            context_menu_group_id: None,
+            context_menu_order: 0.,
             run: Rc::new(run),
         }
     }
@@ -65,6 +73,13 @@ impl EditorActionDescriptor {
     /// Adds a keybinding.
     pub fn keybinding(mut self, keystrokes: impl Into<SharedString>) -> Self {
         self.keybindings.push(keystrokes.into());
+        self
+    }
+
+    /// Shows it in the context menu in `group` at `order`.
+    pub fn context_menu(mut self, group: impl Into<SharedString>, order: f32) -> Self {
+        self.context_menu_group_id = Some(group.into());
+        self.context_menu_order = order;
         self
     }
 
@@ -175,6 +190,7 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.wordHighlight.trigger", "code_editor::WordHighlightTrigger", "Trigger Symbol Highlight", always),
     Builtin("editor.action.showHover", "code_editor::ShowHover", "Show or Focus Hover", always),
     Builtin("editor.action.openLink", "code_editor::OpenLink", "Open Link", always),
+    Builtin("editor.action.showContextMenu", "code_editor::ShowContextMenu", "Show Editor Context Menu", always),
     Builtin("editor.action.showOrFocusStandaloneColorPicker", "code_editor::ShowOrFocusStandaloneColorPicker", "Show or Focus Standalone Color Picker", always),
     // Editing.
     Builtin("deleteAllLeft", "code_editor::DeleteAllLeft", "Delete All Left", writable),

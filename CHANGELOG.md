@@ -149,6 +149,13 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Context menu (#91):** right-click (over text) and Shift+F10 show Monaco's editor context menu.
+  - **Groups:** navigation (Go to Definition, Declaration, Type Definition, Implementations, References; Go to Symbol; a Peek submenu), modification (Rename Symbol, Change All Occurrences, Format Document/Selection, Refactor, Source Action), cut/copy/paste, and Command Palette.
+  - **Visibility:** each item shows only when it can run (providers, read-only, a selection), with its keybinding.
+  - **Host actions:** `EditorActionDescriptor::context_menu(group, order)` (Monaco `contextMenuGroupId`/`contextMenuOrder`) adds an action to the menu.
+  - **Keys:** Up/Down/Home/End, Enter, Right/Left for submenus, and Escape.
+  - **Cursor:** right-clicking moves the cursor unless a selection contains the click.
+  - New: the `context_menu` option (Monaco `contextmenu`), `ShowContextMenu`, and `menu.selectionBackground`/`menu.selectionForeground`.
 - **Bracket pair guides (#118):** `GuideOptions::bracket_pairs`, `bracket_pairs_horizontal` and `highlight_active_bracket_pair` (Monaco `guides.bracketPairs`, `guides.bracketPairsHorizontal` and `guides.highlightActiveBracketPair`).
   - Defaults: off, active and on.
   - **Vertical guides** sit at a pair's least indentation. **Horizontal guides** run to the brackets and turn along the bottom when text precedes the closing bracket. On wrapped lines they show after the opening bracket and up to the closing one.

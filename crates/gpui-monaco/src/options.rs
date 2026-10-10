@@ -807,6 +807,9 @@ pub struct EditorOptions {
     pub semantic_highlighting: SemanticHighlighting,
     /// Monaco `links`: detect links and follow them with Cmd/Ctrl+click.
     pub links: bool,
+    /// Monaco `contextmenu`: right-click and Shift+F10 show the editor's
+    /// context menu.
+    pub context_menu: bool,
     /// Monaco `colorDecorators`: a swatch before each color in the text,
     /// which opens the color picker.
     pub color_decorators: bool,
@@ -935,6 +938,7 @@ impl Default for EditorOptions {
             linked_editing: false,
             semantic_highlighting: SemanticHighlighting::ConfiguredByTheme,
             links: true,
+            context_menu: true,
             color_decorators: true,
             color_decorators_limit: 500,
             color_decorators_activated_on: ColorDecoratorsActivatedOn::ClickAndHover,
@@ -973,6 +977,7 @@ impl EditorOptions {
                 ..StickyScrollOptions::default()
             },
             color_decorators: false,
+            context_menu: false,
             ..Self::default()
         }
     }

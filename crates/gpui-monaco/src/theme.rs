@@ -71,6 +71,10 @@ pub struct EditorColors {
     /// The border of color decorator swatches (Monaco's
     /// `.colorpicker-color-decoration` CSS, not a theme color).
     pub color_decoration_border: Hsla,
+    /// The highlighted menu row (`menu.selectionBackground`).
+    pub menu_selection_background: Hsla,
+    /// The highlighted menu row's text (`menu.selectionForeground`).
+    pub menu_selection_foreground: Hsla,
     /// Button background (`button.background`).
     pub button_background: Hsla,
     /// Button text (`button.foreground`).
@@ -250,6 +254,8 @@ impl EditorColors {
             range_highlight_background: c(rgba(0xffffff0b)),
             color_decoration_border: c(rgba(0xeeeeeeff)),
             button_background: c(rgb(0x0e639c)),
+            menu_selection_background: c(rgb(0x04395e)),
+            menu_selection_foreground: c(rgb(0xffffff)),
             button_foreground: c(rgb(0xffffff)),
             code_lens_foreground: c(rgb(0x999999)),
             linked_editing_background: c(rgba(0xff00004d)),
@@ -352,6 +358,8 @@ impl EditorColors {
             range_highlight_background: c(rgba(0xfdff0033)),
             color_decoration_border: c(rgba(0x000000ff)),
             button_background: c(rgb(0x007acc)),
+            menu_selection_background: c(rgb(0x0060c0)),
+            menu_selection_foreground: c(rgb(0xffffff)),
             button_foreground: c(rgb(0xffffff)),
             code_lens_foreground: c(rgb(0x999999)),
             linked_editing_background: c(rgba(0xff00004d)),
@@ -684,6 +692,14 @@ impl EditorColors {
         );
         set(&mut self.input_background, "input.background");
         set(&mut self.button_background, "button.background");
+        set(
+            &mut self.menu_selection_background,
+            "menu.selectionBackground",
+        );
+        set(
+            &mut self.menu_selection_foreground,
+            "menu.selectionForeground",
+        );
         set(&mut self.button_foreground, "button.foreground");
         set(
             &mut self.input_option_active_background,

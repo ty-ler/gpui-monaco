@@ -17,6 +17,8 @@ const SINGLE_LINE: Option<&str> = Some("CodeEditor && single_line");
 const SUGGEST: Option<&str> = Some("CodeEditor && suggest_widget_visible");
 /// The quick access input (inside the quick input widget).
 const QUICK_INPUT: Option<&str> = Some("QuickInput > CodeEditor");
+/// The context menu.
+const CONTEXT_MENU: Option<&str> = Some("EditorContextMenu");
 /// The standalone color picker.
 const STANDALONE_COLOR_PICKER: Option<&str> = Some("StandaloneColorPicker");
 /// The editor while ghost text shows (Monaco's `inlineSuggestionVisible`).
@@ -521,6 +523,25 @@ actions!(
         QuickOutline,
         /// Opens the command palette (Monaco `editor.action.quickCommand`).
         QuickCommand,
+        /// Shows the context menu at the cursor (Monaco
+        /// `editor.action.showContextMenu`, Shift+F10).
+        ShowContextMenu,
+        /// The next context menu item.
+        ContextMenuNext,
+        /// The previous context menu item.
+        ContextMenuPrevious,
+        /// The first context menu item.
+        ContextMenuFirst,
+        /// The last context menu item.
+        ContextMenuLast,
+        /// Runs the context menu item (or opens its submenu).
+        ContextMenuSelect,
+        /// Opens the context menu item's submenu.
+        ContextMenuSubmenuOpen,
+        /// Closes the context menu's submenu.
+        ContextMenuSubmenuClose,
+        /// Hides the context menu.
+        ContextMenuHide,
         /// Shows the standalone color picker at the cursor, or focuses it
         /// (Monaco `editor.action.showOrFocusStandaloneColorPicker`).
         ShowOrFocusStandaloneColorPicker,
@@ -724,6 +745,18 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-g", GotoLine, ctx),
         KeyBinding::new("secondary-shift-o", QuickOutline, ctx),
         KeyBinding::new("f1", QuickCommand, ctx),
+        KeyBinding::new("shift-f10", ShowContextMenu, ctx),
+        KeyBinding::new("down", ContextMenuNext, CONTEXT_MENU),
+        KeyBinding::new("up", ContextMenuPrevious, CONTEXT_MENU),
+        KeyBinding::new("home", ContextMenuFirst, CONTEXT_MENU),
+        KeyBinding::new("end", ContextMenuLast, CONTEXT_MENU),
+        KeyBinding::new("pageup", ContextMenuFirst, CONTEXT_MENU),
+        KeyBinding::new("pagedown", ContextMenuLast, CONTEXT_MENU),
+        KeyBinding::new("enter", ContextMenuSelect, CONTEXT_MENU),
+        KeyBinding::new("space", ContextMenuSelect, CONTEXT_MENU),
+        KeyBinding::new("right", ContextMenuSubmenuOpen, CONTEXT_MENU),
+        KeyBinding::new("left", ContextMenuSubmenuClose, CONTEXT_MENU),
+        KeyBinding::new("escape", ContextMenuHide, CONTEXT_MENU),
         KeyBinding::new("escape", HideColorPicker, STANDALONE_COLOR_PICKER),
         KeyBinding::new(
             "enter",

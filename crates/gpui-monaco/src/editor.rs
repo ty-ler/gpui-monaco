@@ -64,7 +64,8 @@ pub enum CodeEditorEvent {
     /// The mouse left the editor (Monaco `onMouseLeave`).
     MouseLeave,
     /// The context menu was requested with a right click (Monaco
-    /// `onContextMenu`); the editor shows none itself.
+    /// `onContextMenu`). The editor shows its own unless the
+    /// `context_menu` option is off.
     ContextMenu(crate::mouse_target::EditorMouseEvent),
 }
 
@@ -172,6 +173,7 @@ pub struct CodeEditor {
     pub(crate) sticky: crate::sticky_model::StickyModelState,
     pub(crate) colors: crate::color_detector::ColorDetectorState,
     pub(crate) color_picker: crate::color_picker::ColorPickerState,
+    pub(crate) context_menu: crate::context_menu::ContextMenuState,
     pub(crate) added_actions: Vec<crate::editor_actions::EditorActionDescriptor>,
     pub(crate) minimap_cache: crate::element::MinimapCache,
     pub(crate) minimap_hovered: bool,
@@ -320,6 +322,7 @@ impl CodeEditor {
             sticky: Default::default(),
             colors: Default::default(),
             color_picker: Default::default(),
+            context_menu: Default::default(),
             minimap_cache: Default::default(),
             minimap_hovered: false,
             minimap_drag: None,
@@ -1850,6 +1853,14 @@ impl CodeEditor {
         );
         cx.emit(CodeEditorEvent::MouseDown(mouse));
         cx.emit(CodeEditorEvent::ContextMenu(mouse));
+        // Monaco: only over text, and not on widgets.
+        use crate::mouse_target::MouseTargetKind;
+        if matches!(
+            mouse.target.kind,
+            MouseTargetKind::ContentText | MouseTargetKind::ContentEmpty { .. }
+        ) {
+            self.context_menu_mouse_down(mouse.target.position, event.position, window, cx);
+        }
     }
 
     fn on_mouse_down(
@@ -3067,6 +3078,12 @@ impl Render for CodeEditor {
                     this.show_or_focus_standalone_color_picker(window, cx)
                 }),
             )
+            .on_action(cx.listener(|this, _: &ShowContextMenu, window, cx| {
+                if !this.options.context_menu {
+                    return cx.propagate();
+                }
+                this.show_context_menu(None, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &QuickCommand, window, cx| {
                 if this.options.single_line {
                     return cx.propagate();
