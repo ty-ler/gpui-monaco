@@ -532,3 +532,18 @@ fn margin_revert_arrows(cx: &mut TestAppContext) {
             .is_empty()
     );
 }
+
+#[gpui::test]
+fn the_gutter_menu_follows_scrolling_without_a_frame_of_lag(cx: &mut TestAppContext) {
+    let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    let (diff, cx) = setup(&text, &text.replace("line 150\n", "changed\n"), cx);
+    let before = diff.read_with(cx, |d, cx| d.gutter_spans_for_tests(cx));
+    let modified = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    modified.update(cx, |e, cx| {
+        e.set_scroll_position(point(px(0.), px(100.)), cx)
+    });
+    // Before the next frame, the gutter already places items for the new
+    // scroll position.
+    let after = diff.read_with(cx, |d, cx| d.gutter_spans_for_tests(cx));
+    assert_eq!(after[0].0, before[0].0 - px(100.));
+}
