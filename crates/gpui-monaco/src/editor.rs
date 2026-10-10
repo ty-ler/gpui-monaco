@@ -294,7 +294,7 @@ impl CodeEditor {
             folds: FoldState::default(),
             gutter_hovered: false,
             widgets: Widgets::default(),
-            find: Default::default(),
+            find: crate::find::FindState::new(),
             multi_cursor: None,
             bracket_decorations: Vec::new(),
             overtype: false,
@@ -398,7 +398,7 @@ impl CodeEditor {
         self.marked_range = None;
         self.prev_edit_kind = None;
         self.record_cursor_change();
-        self.refresh_find_matches(cx);
+        self.reattach_find_model(cx);
         cx.emit(CodeEditorEvent::SelectionsChanged(SelectionChange {
             reason: CursorChangeReason::ContentFlush,
             source: CursorChangeSource::Model,
@@ -753,7 +753,7 @@ impl CodeEditor {
                 if *kind == EditKind::SetValue {
                     self.marked_range = None;
                 }
-                self.refresh_find_matches(cx);
+                self.find_content_changed(*kind == EditKind::SetValue, cx);
                 if !own {
                     self.prev_edit_kind = None;
                     self.occurrences_after_edit(cx);
@@ -914,6 +914,7 @@ impl CodeEditor {
             self.trigger_signature_help(crate::providers::SignatureHelpTrigger::ContentChange, cx);
         }
         self.color_picker_cursor_changed(cx);
+        self.find_cursor_changed(change.reason, cx);
         cx.emit(CodeEditorEvent::SelectionsChanged(change));
         cx.notify();
     }
@@ -3026,6 +3027,14 @@ impl Render for CodeEditor {
                 }
                 let mut options = this.find_options().clone();
                 options.whole_word = !options.whole_word;
+                this.set_find_options(options, cx);
+            }))
+            .on_action(cx.listener(|this, _: &TogglePreserveCase, _, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                let mut options = this.find_options().clone();
+                options.preserve_case = !options.preserve_case;
                 this.set_find_options(options, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleFindInSelection, _, cx| {

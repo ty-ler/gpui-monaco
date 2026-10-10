@@ -149,6 +149,17 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Find model (#104, part 1):** find is now a port of Monaco's `FindModelBoundToEditorModel` and `FindDecorations`, checked against `findModel.test.ts`.
+  - **Incremental search:** starts where the cursor was, and restarts after explicit moves, undo and redo.
+  - **Matches:** the "N of M" position is kept on decorations. Next and previous step past empty matches and respect the scope. Scopes can be several selections, cover whole lines, and are shown with `editor.findRangeHighlightBackground`.
+  - **Over 1000 matches:** merged overview ruler marks.
+  - **After edits:** the matches update 100ms later.
+  - **Replace all:** keeps the selection.
+  - **Select all matches:** keeps the primary selection.
+  - **Replace patterns:** a port of Monaco's `replacePattern.ts` (`gpui_monaco::replace_pattern`): `$n`/`$nn`, `$&`/`$0`, `$$`, `\n`, `\t`, `\\`, and the case escapes `\u` `\U` `\l` `\L`.
+  - **Preserve case:** `FindOptions::preserve_case` and `TogglePreserveCase` (Cmd+Alt+P / Alt+P, and an `AB` toggle).
+  - New `EditorOptions::find` (`FindEditorOptions`), plus `change_find_options`, `set_find_search_scope` and `find_go_to_match`. Options: `cursor_move_on_type`, `loop_`, `seed_search_string_from_selection` (never/always/selection, escaped in regex mode) and `auto_find_in_selection` (never/always/multiline); `add_extra_space_on_top` arrives with part 2.
+  - `find_matches` now takes `cx`.
 - **Context menu (#91):** right-click (over text) and Shift+F10 show Monaco's editor context menu.
   - **Groups:** navigation (Go to Definition, Declaration, Type Definition, Implementations, References; Go to Symbol; a Peek submenu), modification (Rename Symbol, Change All Occurrences, Format Document/Selection, Refactor, Source Action), cut/copy/paste, and Command Palette.
   - **Visibility:** each item shows only when it can run (providers, read-only, a selection), with its keybinding.

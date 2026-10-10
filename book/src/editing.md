@@ -45,7 +45,7 @@ Undo is operation-based and per model.
 
 ## Find and replace
 
-Cmd+F opens the find widget, and Cmd+Alt+F (Ctrl+H elsewhere) opens it with replace.
+Cmd+F opens the find widget, and Cmd+Alt+F (Ctrl+H elsewhere) opens it with replace. The query starts as the selection or the word at the cursor (`options.find.seed_search_string_from_selection`). Selections can turn on find in selection (`auto_find_in_selection`).
 
 - **Search modes:**
   - case sensitive
@@ -57,7 +57,9 @@ Cmd+F opens the find widget, and Cmd+Alt+F (Ctrl+H elsewhere) opens it with repl
   - "N of M" counts up to 19,999 matches.
 - **Navigation and replace:**
   - Enter and Shift+Enter move between matches.
-  - Replace and Replace All support `$1` and `$&` substitution in regex mode.
+  - In regex mode, Replace and Replace All expand `$1`, `$&` and `$$`, and `\u`, `\U`, `\l` and `\L` change the case of the next group (Monaco's replace patterns).
+  - **Preserve case** (the `AB` toggle, Cmd+Alt+P / Alt+P) writes each replacement in the case of the text it replaces: `foo` → `bar`, `Foo` → `Bar`, `FOO` → `BAR`. Hyphenated and underscored words keep each part's case.
+  - Navigation wraps at the first and last match unless `options.find.loop_` is off. Typing the query jumps to matches unless `options.find.cursor_move_on_type` is off.
   - Alt+Enter in the find input selects all matches.
 
 Regexes use the Rust `regex` crate. It runs in linear time but has no lookaround or backreferences; see [Differences from Monaco](differences.md).
