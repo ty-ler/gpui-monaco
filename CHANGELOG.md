@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Accessible diff viewer (#52, part 6):** F7 and Shift+F7 in a diff editor open Monaco's accessible diff viewer, a keyboard-driven list of each change with three lines of context.
+  - **Keys:** F7 and Shift+F7 move between changes, Up and Down between lines, Enter or Space reveals the line in its editor, and Escape closes the viewer.
+  - **Screen readers:** rows carry Monaco's labels ("+ text modified line 12", "Difference 1 of 3: …"), and the modified cursor follows the current line, so `Revert` applies to it.
+  - **API:** `accessible_diff_viewer_next` and `accessible_diff_viewer_prev`, and `DiffEditorOptions::only_show_accessible_diff_viewer`.
 - **Revert buttons (#52, part 5):** the diff editor's gutter menu (Monaco `renderGutterMenu`, on by default when the modified side is editable) is a 35px column beside the modified editor.
   - **Buttons:** "Revert Block" (`→`, or `↺` inline) for the change at the cursor, and for every change while the gutter is hovered. With text selected, "Revert Selection" reverts only the selected character changes.
   - **API:** `revert`, `revert_range_mappings` and `revert_focused_range_mappings`, and the `Revert` action (Monaco `diffEditor.revert`). Each revert is one undo step.

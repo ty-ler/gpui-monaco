@@ -31,7 +31,10 @@ use crate::model::{TextModel, TextModelEvent};
 use crate::theme::EditorColors;
 use crate::widgets::{ViewZone, WidgetId, ZoneHeight};
 
+mod accessible;
 mod unchanged;
+
+use accessible::AccessibleDiffViewer;
 
 use unchanged::{RevealPreference, UnchangedRegion};
 
@@ -52,6 +55,12 @@ gpui::actions!(
         /// Reverts the changes at the cursor or in the selection (Monaco
         /// `diffEditor.revert`).
         Revert,
+        /// Opens the accessible diff viewer, or goes to its next change
+        /// (Monaco `editor.action.accessibleDiffViewer.next`, F7).
+        AccessibleDiffViewerNext,
+        /// Opens the accessible diff viewer at its previous change (Monaco
+        /// `editor.action.accessibleDiffViewer.prev`, Shift+F7).
+        AccessibleDiffViewerPrev,
     ]
 );
 
@@ -60,7 +69,29 @@ pub const DIFF_EDITOR_KEY_CONTEXT: &str = "DiffEditor";
 
 /// Binds the diff editor's keys (called by [`crate::init`]).
 pub(crate) fn bind_keys(cx: &mut App) {
+    // In a diff editor F7 opens the accessible diff viewer instead of the
+    // editor's next highlight.
+    let in_editor = format!(
+        "{DIFF_EDITOR_KEY_CONTEXT} > {}",
+        crate::actions::KEY_CONTEXT
+    );
     cx.bind_keys([
+        gpui::KeyBinding::new("f7", AccessibleDiffViewerNext, Some(in_editor.as_str())),
+        gpui::KeyBinding::new(
+            "shift-f7",
+            AccessibleDiffViewerPrev,
+            Some(in_editor.as_str()),
+        ),
+        gpui::KeyBinding::new(
+            "f7",
+            AccessibleDiffViewerNext,
+            Some(DIFF_EDITOR_KEY_CONTEXT),
+        ),
+        gpui::KeyBinding::new(
+            "shift-f7",
+            AccessibleDiffViewerPrev,
+            Some(DIFF_EDITOR_KEY_CONTEXT),
+        ),
         gpui::KeyBinding::new("alt-f5", GoToNextDiff, Some(DIFF_EDITOR_KEY_CONTEXT)),
         gpui::KeyBinding::new(
             "shift-alt-f5",
@@ -107,6 +138,9 @@ pub struct DiffEditorOptions {
     /// each change (Monaco `renderGutterMenu`, default `true`). It only shows
     /// when the modified side is editable.
     pub render_gutter_menu: bool,
+    /// Show only the accessible diff viewer, which can't be closed (Monaco
+    /// `onlyShowAccessibleDiffViewer`, default `false`).
+    pub only_show_accessible_diff_viewer: bool,
 }
 
 /// Monaco `hideUnchangedRegions`.
@@ -149,6 +183,7 @@ impl Default for DiffEditorOptions {
             render_side_by_side_inline_breakpoint: px(900.),
             hide_unchanged_regions: HideUnchangedRegions::default(),
             render_gutter_menu: true,
+            only_show_accessible_diff_viewer: false,
         }
     }
 }
@@ -369,6 +404,14 @@ impl Render for DiagonalFill {
         )
         .size_full()
     }
+}
+
+/// The changes' line mappings.
+fn diff_mappings(diff: &LinesDiff) -> Vec<LineRangeMapping> {
+    diff.changes
+        .iter()
+        .map(|c| c.line_range_mapping())
+        .collect()
 }
 
 /// The gutter menu's width (Monaco's 35px `DiffEditorGutter`).
@@ -775,6 +818,8 @@ pub struct DiffEditor {
     unchanged_zones: (Vec<WidgetId>, Vec<WidgetId>),
     /// The mouse is over the gutter menu, which shows every button.
     gutter_hovered: bool,
+    /// The accessible diff viewer, while it shows.
+    accessible_viewer: Option<Entity<AccessibleDiffViewer>>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -823,6 +868,7 @@ impl DiffEditor {
             unchanged_decorations: Default::default(),
             unchanged_zones: Default::default(),
             gutter_hovered: false,
+            accessible_viewer: None,
             focus_handle: cx.focus_handle(),
             _subscriptions: Vec::new(),
         };
@@ -906,7 +952,14 @@ impl DiffEditor {
             self.ratio = options.split_view_default_ratio;
         }
         self.inline = !self.side_by_side_for(&options);
+        let only_viewer = options.only_show_accessible_diff_viewer;
+        let was_only_viewer = self.options.only_show_accessible_diff_viewer;
         self.options = options;
+        if only_viewer {
+            self.set_accessible_viewer_visible(true, cx);
+        } else if was_only_viewer {
+            self.set_accessible_viewer_visible(false, cx);
+        }
         if recompute {
             self.compute_diff(true, cx);
         } else {
@@ -1032,6 +1085,10 @@ impl DiffEditor {
         self.decorations = (original_ids, modified_ids);
         self.apply_alignment(&diff, &colors, cx);
         self.update_unchanged_regions(&diff, cx);
+        if let Some(viewer) = self.accessible_viewer.clone() {
+            let mappings = diff_mappings(&diff);
+            viewer.update(cx, |viewer, cx| viewer.set_diffs(&mappings, cx));
+        }
     }
 
     /// Monaco `DiffEditorViewZones`: padding where one side has fewer
@@ -1703,6 +1760,83 @@ impl DiffEditor {
         )
     }
 
+    /// Shows or hides the accessible diff viewer.
+    pub(crate) fn set_accessible_viewer_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        let visible = visible || self.options.only_show_accessible_diff_viewer;
+        if visible == self.accessible_viewer.is_some() {
+            return;
+        }
+        if visible {
+            let this = cx.entity().downgrade();
+            let (original, modified) = (self.original.clone(), self.modified.clone());
+            let can_close = !self.options.only_show_accessible_diff_viewer;
+            let mappings = self.diff.as_deref().map(diff_mappings).unwrap_or_default();
+            self.accessible_viewer = Some(cx.new(|cx| {
+                let mut viewer = AccessibleDiffViewer::new(this, original, modified, can_close, cx);
+                viewer.set_diffs(&mappings, cx);
+                viewer
+            }));
+        } else {
+            self.accessible_viewer = None;
+        }
+        cx.notify();
+    }
+
+    /// Monaco `accessibleDiffViewerNext`: opens the accessible diff viewer,
+    /// or goes to its next change when it's open.
+    pub fn accessible_diff_viewer_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let was_visible = self.accessible_viewer.is_some();
+        self.set_accessible_viewer_visible(true, cx);
+        if let Some(viewer) = self.accessible_viewer.clone() {
+            if was_visible {
+                viewer.update(cx, |viewer, cx| viewer.go_to_group_delta(1, cx));
+            }
+            window.focus(&viewer.read(cx).focus_handle(cx), cx);
+        }
+    }
+
+    /// Monaco `accessibleDiffViewerPrev`: opens the accessible diff viewer
+    /// at the previous change.
+    pub fn accessible_diff_viewer_prev(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_accessible_viewer_visible(true, cx);
+        if let Some(viewer) = self.accessible_viewer.clone() {
+            viewer.update(cx, |viewer, cx| viewer.go_to_group_delta(-1, cx));
+            window.focus(&viewer.read(cx).focus_handle(cx), cx);
+        }
+    }
+
+    /// Whether the accessible diff viewer shows.
+    pub fn is_accessible_diff_viewer_visible(&self) -> bool {
+        self.accessible_viewer.is_some()
+    }
+
+    /// The accessible diff viewer's group count, current group and current
+    /// line, for tests.
+    #[doc(hidden)]
+    pub fn accessible_viewer_state_for_tests(&self, cx: &App) -> Option<(usize, usize, usize)> {
+        Some(self.accessible_viewer.as_ref()?.read(cx).state_for_tests())
+    }
+
+    /// The accessible diff viewer's current line, for tests: its kind
+    /// (`"header"`, `"unchanged"`, `"deleted"` or `"added"`).
+    #[doc(hidden)]
+    pub fn accessible_viewer_current_for_tests(&self, cx: &App) -> Option<&'static str> {
+        use accessible::ViewElement::*;
+        Some(
+            match self
+                .accessible_viewer
+                .as_ref()?
+                .read(cx)
+                .current_for_tests()?
+            {
+                Header => "header",
+                Unchanged { .. } => "unchanged",
+                Deleted { .. } => "deleted",
+                Added { .. } => "added",
+            },
+        )
+    }
+
     /// Keeps both sides scrolled together (aligned, their content heights
     /// match).
     fn sync_scroll(&mut self, from_original: bool, cx: &mut Context<Self>) {
@@ -2006,6 +2140,16 @@ impl Render for DiffEditor {
             .on_action(cx.listener(|this, _: &Revert, window, cx| {
                 this.revert_focused_range_mappings(window, cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &AccessibleDiffViewerNext, window, cx| {
+                    this.accessible_diff_viewer_next(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &AccessibleDiffViewerPrev, window, cx| {
+                    this.accessible_diff_viewer_prev(window, cx)
+                }),
+            )
             // Dragging the sash resizes the split.
             .on_mouse_move(
                 cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
@@ -2060,6 +2204,8 @@ impl Render for DiffEditor {
             })
             .children(gutter)
             .child(div().h_full().flex_1().child(self.modified.clone()))
+            // Monaco hides both editors behind the viewer.
+            .children(self.accessible_viewer.clone())
     }
 }
 
