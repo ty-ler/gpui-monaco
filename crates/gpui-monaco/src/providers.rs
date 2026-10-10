@@ -154,6 +154,12 @@ pub struct CompletionItem {
     pub command: Option<Command>,
     /// Data for [`CompletionProvider::resolve_completion_item`].
     pub data: Option<serde_json::Value>,
+    /// Shown right after the label, dimmed, e.g. a signature (Monaco
+    /// `CompletionItemLabel.detail`).
+    pub label_detail: Option<SharedString>,
+    /// Shown at the right of every row, e.g. a module path (Monaco
+    /// `CompletionItemLabel.description`); replaces the inline `detail`.
+    pub label_description: Option<SharedString>,
 }
 
 impl CompletionItem {

@@ -166,13 +166,16 @@ pub fn completion_item(item: lsp::CompletionItem) -> CompletionItem {
     let insert_text = edit_text.or(item.insert_text).map(as_text);
     CompletionItem {
         kind: item.kind.map(completion_kind).unwrap_or_default(),
-        detail: item
-            .detail
-            .or_else(|| {
-                item.label_details
-                    .as_ref()
-                    .and_then(|d| d.description.clone())
-            })
+        detail: item.detail.map(Into::into),
+        label_detail: item
+            .label_details
+            .as_ref()
+            .and_then(|d| d.detail.clone())
+            .map(Into::into),
+        label_description: item
+            .label_details
+            .as_ref()
+            .and_then(|d| d.description.clone())
             .map(Into::into),
         documentation: item.documentation.map(documentation),
         sort_text: item.sort_text.map(Into::into),

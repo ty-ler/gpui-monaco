@@ -487,6 +487,9 @@ actions!(
         /// Accepts the selected suggestion in the other insert mode (Monaco
         /// `acceptAlternativeSelectedSuggestion`).
         AcceptAlternativeSuggestion,
+        /// Shows or hides the suggestion's details (Monaco
+        /// `toggleSuggestionDetails`).
+        ToggleSuggestionDetails,
         /// Selects the first suggestion (Monaco `selectFirstSuggestion`).
         SelectFirstSuggestion,
         /// Selects the last suggestion (Monaco `selectLastSuggestion`).
@@ -646,6 +649,16 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-f4", GoToPreviousReference, ctx),
         KeyBinding::new("secondary-shift-space", TriggerParameterHints, ctx),
         KeyBinding::new("ctrl-space", TriggerSuggest, ctx),
+        KeyBinding::new("ctrl-space", ToggleSuggestionDetails, SUGGEST),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-i"
+            } else {
+                "ctrl-i"
+            },
+            ToggleSuggestionDetails,
+            SUGGEST,
+        ),
         KeyBinding::new("shift-enter", AcceptAlternativeSuggestion, SUGGEST),
         KeyBinding::new("shift-tab", AcceptAlternativeSuggestion, SUGGEST),
         KeyBinding::new(

@@ -119,12 +119,16 @@ impl CompletionProvider for DemoCompletions {
                 "fn(&mut self, &[Selection])",
                 "Replaces the selections.",
             ),
-            item(
-                "Selection",
-                CompletionItemKind::Struct,
-                "struct Selection",
-                "An anchor and a head.",
-            ),
+            CompletionItem {
+                label_detail: Some("<T>".into()),
+                label_description: Some("gpui_monaco::cursor".into()),
+                ..item(
+                    "Selection",
+                    CompletionItemKind::Struct,
+                    "struct Selection",
+                    "An anchor and a head.",
+                )
+            },
             item(
                 "snapshot",
                 CompletionItemKind::Field,

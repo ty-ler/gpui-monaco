@@ -18,7 +18,9 @@ use crate::providers::{
 };
 use crate::suggest::memory::{Candidate, MemoryContext, SuggestMemories};
 use crate::suggest::{CompletionModel, CompletionModelOptions, LineContext};
-use crate::suggest_widget::SuggestWidget;
+use crate::suggest_widget::{
+    LOADING_MESSAGE, SuggestUi, SuggestWidget, SuggestWidgetMetrics, SuggestWidgetState,
+};
 use crate::widgets::{ContentWidget, ContentWidgetPreference, WidgetId};
 
 /// Monaco stops collecting document words past this many.
@@ -80,6 +82,9 @@ pub(crate) struct Session {
     word_end: u32,
     /// The line's leading whitespace at the request.
     leading_whitespace: String,
+    /// Monaco's frozen state: an explicit session whose matches no longer
+    /// match what was typed.
+    pub(crate) frozen: bool,
     pub(crate) model: CompletionModel,
     pub(crate) selected: usize,
     incomplete: bool,
@@ -109,6 +114,8 @@ pub(crate) struct SuggestState {
     alternatives: Option<Alternatives>,
     /// Set while replacing an alternative, so its cursor change keeps them.
     keep_alternatives: bool,
+    /// Shows "Loading..." if an explicit request takes a while.
+    loading_task: Option<Task<()>>,
 }
 
 impl Session {
@@ -148,6 +155,22 @@ impl CodeEditor {
                 .map(|s| session.model.items()[s.index].label.to_string())
                 .collect(),
         )
+    }
+
+    /// The suggest widget's message ("Loading..." or "No suggestions."), if
+    /// it shows one instead of a list.
+    #[doc(hidden)]
+    pub fn suggest_message_for_tests(&self, cx: &gpui::App) -> Option<&'static str> {
+        let (widget, _) = self.suggest.widget.as_ref()?;
+        widget.read(cx).message()
+    }
+
+    /// Whether the suggest widget shows the selected item's details panel.
+    pub fn is_suggestion_details_visible(&self, cx: &gpui::App) -> bool {
+        self.suggest
+            .widget
+            .as_ref()
+            .is_some_and(|(widget, _)| widget.read(cx).details_shown(cx))
     }
 
     /// The selected suggestion's label and its index in the list.
@@ -215,6 +238,16 @@ impl CodeEditor {
     /// Closes the suggest widget (Escape, cursor moved away).
     pub fn hide_suggest(&mut self, cx: &mut Context<Self>) {
         self.suggest.accept_best = None;
+        self.suggest.loading_task = None;
+        // Monaco: a list resized below about four rows is restored to that.
+        if let Some(ui) = cx.try_global::<SuggestUi>()
+            && let Some(stored) = ui.size
+        {
+            let min = (self.suggest_item_height() * 4.3).ceil();
+            if stored.height < min {
+                cx.global_mut::<SuggestUi>().size = Some(gpui::size(stored.width, min));
+            }
+        }
         self.suggest.task = None;
         self.suggest.quick_task = None;
         self.suggest.session = None;
@@ -264,6 +297,25 @@ impl CodeEditor {
         });
         if tasks.is_empty() && words.is_none() {
             return;
+        }
+        // Monaco: explicit requests show "Loading..." after 50ms.
+        if !auto && self.suggest.accept_best.is_none() && self.suggest.session.is_none() {
+            self.suggest.loading_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.suggest.loading_task = None;
+                    if this.suggest.task.is_some() && this.suggest.session.is_none() {
+                        this.show_suggest_widget(
+                            SuggestWidgetState::message(LOADING_MESSAGE),
+                            PointUtf16::new(position.row, word_start),
+                            cx,
+                        );
+                    }
+                })
+                .ok();
+            }));
         }
         self.suggest.task = Some(cx.spawn(async move |this, cx| {
             let mut items = Vec::new();
@@ -390,7 +442,11 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         let head = self.cursors.primary().position;
-        if items.is_empty() || head.row != position.row || head.column < word_start {
+        self.suggest.loading_task = None;
+        // Monaco shows "No suggestions." for explicit requests.
+        let show_empty = !auto && self.suggest.accept_best.is_none();
+        if (items.is_empty() && !show_empty) || head.row != position.row || head.column < word_start
+        {
             self.finish_accept_best(cx);
             self.hide_suggest(cx);
             return;
@@ -423,6 +479,7 @@ impl CodeEditor {
             word_start,
             word_end,
             leading_whitespace,
+            frozen: false,
             model,
             selected: 0,
             incomplete,
@@ -689,25 +746,65 @@ impl CodeEditor {
         let Some(session) = &self.suggest.session else {
             return;
         };
-        if session.model.filtered().is_empty() {
+        if session.model.filtered().is_empty() && session.auto {
             self.hide_suggest(cx);
             return;
         }
         let anchor = PointUtf16::new(session.position.row, session.word_start);
-        let state = crate::suggest_widget::SuggestWidgetState::from_session(session);
+        let state = SuggestWidgetState::from_session(session);
+        self.show_suggest_widget(state, anchor, cx);
+    }
+
+    /// The suggest widget's row height (`suggest.line_height`, or the
+    /// editor's, clamped to 8–1000 as in Monaco).
+    pub(crate) fn suggest_item_height(&self) -> gpui::Pixels {
+        let line_height = self.options.suggest.line_height;
+        let height = if line_height > 0. {
+            gpui::px(line_height)
+        } else {
+            self.options.resolved_line_height()
+        };
+        height.clamp(gpui::px(8.), gpui::px(1000.))
+    }
+
+    fn suggest_metrics(&self, anchor: PointUtf16) -> SuggestWidgetMetrics {
+        let font_size = if self.options.suggest.font_size > 0. {
+            gpui::px(self.options.suggest.font_size)
+        } else {
+            self.options.font_size
+        };
+        let available_width = self.layout.as_ref().and_then(|layout| {
+            let origin = self.scrolled_visible_position(anchor)?;
+            Some(layout.bounds.right() - origin.x)
+        });
+        SuggestWidgetMetrics {
+            item_height: self.suggest_item_height(),
+            font_size,
+            available_width,
+        }
+    }
+
+    fn show_suggest_widget(
+        &mut self,
+        state: SuggestWidgetState,
+        anchor: PointUtf16,
+        cx: &mut Context<Self>,
+    ) {
+        let metrics = self.suggest_metrics(anchor);
         match &self.suggest.widget {
             Some((widget, id)) => {
                 let id = *id;
-                widget.update(cx, |widget, cx| widget.set_state(state, cx));
+                widget.update(cx, |widget, cx| widget.set_state(state, metrics, cx));
                 self.set_content_widget_position(id, anchor, cx);
             }
             None => {
                 let editor = cx.entity().downgrade();
                 let theme = self.theme.clone();
                 let style = self.markdown_style();
-                let line_height = self.options.resolved_line_height();
-                let widget =
-                    cx.new(|_| SuggestWidget::new(editor, state, theme, style, line_height));
+                let options = self.options.suggest.clone();
+                let widget = cx.new(|cx| {
+                    SuggestWidget::new(editor, state, theme, style, options, metrics, cx)
+                });
                 let id = self.add_content_widget(
                     ContentWidget {
                         position: anchor,
@@ -722,6 +819,24 @@ impl CodeEditor {
                 self.suggest.widget = Some((widget, id));
             }
         }
+    }
+
+    /// Shows or hides the details panel (Monaco `toggleSuggestionDetails`,
+    /// Ctrl+Space while suggestions show); remembered for later sessions.
+    pub fn toggle_suggestion_details(&mut self, cx: &mut Context<Self>) {
+        if self.suggest.session.is_none() {
+            return;
+        }
+        let ui = cx.default_global::<SuggestUi>();
+        ui.details_expanded = !ui.details_expanded;
+        self.refresh_suggest_widget(cx);
+    }
+
+    /// Rows the list pages by (Page Up / Page Down).
+    pub(crate) fn suggest_page_size(&self, cx: &gpui::App) -> usize {
+        self.suggest.widget.as_ref().map_or(11, |(widget, _)| {
+            widget.read(cx).visible_rows(cx).saturating_sub(1).max(1)
+        })
     }
 
     /// Resolves the selected item if its provider can (Monaco resolves on
@@ -934,10 +1049,14 @@ impl CodeEditor {
                 return;
             };
             session.model.set_line_context(old_context);
-            if session.model.filtered().is_empty() || !on_word {
+            let frozen = !session.model.filtered().is_empty();
+            if frozen && !on_word {
                 self.hide_suggest(cx);
                 return;
             }
+            session.frozen = frozen;
+        } else {
+            session.frozen = false;
         }
         self.select_by_memory(cx);
         self.refresh_suggest_widget(cx);

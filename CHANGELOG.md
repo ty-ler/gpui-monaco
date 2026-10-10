@@ -115,6 +115,16 @@ All notable changes to this project are documented here. The format follows [Kee
   - The LSP bridge maps tags, insert-and-replace edits and commands, and forwards `completionItem/resolve`.
   - Tab completion (`tab_completion`): at the end of a word, Tab inserts the best suggestion without showing the widget. Tab and Shift+Tab then cycle through the others, as do they after accepting with Tab or Enter.
   - `suggest.locality_bonus`: among equal matches, words used in the innermost bracket block sort first.
+  - The suggest widget (Monaco `suggestWidget`):
+    - "Loading..." for slow explicit requests, and "No suggestions." when one finds nothing.
+    - The details panel is collapsed by default, as in Monaco. Ctrl+Space (or Cmd/Ctrl+I) toggles it, and the choice is remembered. It goes beside the list when there's room, else below.
+    - Resizing by the right and bottom edges, remembered for later sessions.
+    - The status bar (`suggest.show_status_bar`).
+    - `CompletionItem::label_detail` and `label_description` (LSP `labelDetails`).
+    - Color swatches for `Color` items.
+    - Options: `suggest.font_size`, `line_height`, `show_icons` and `show_inline_details`.
+    - Frozen sessions drop bold highlights.
+    - Theme colors: `editorSuggestWidget.*`.
   - The session follows Monaco's rules as you type. It closes on another line or when the indentation changes. It asks again after deleting back past where it opened, or on starting a new word. An explicitly requested session keeps its last matches while nothing matches.
 - **Rename (#56):** `RenameProvider` (with optional `resolve_rename_location`), F2 with Monaco's rename box, `WorkspaceEdit` and `CodeEditor::apply_workspace_edit`. The LSP bridge forwards `prepareRename` and `rename`.
 

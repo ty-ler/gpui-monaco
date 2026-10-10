@@ -21,7 +21,7 @@ The status bar shows the cursor position, selection count, language, line ending
 Demo providers are registered by default:
 
 - hover on `Edit` / `Patch`
-- completions (`Ctrl+Space`) with docs, a deprecated item and one resolved lazily
+- completions (`Ctrl+Space`; press it again for details) with docs, label details, a deprecated item and one resolved lazily
 - signature help inside `(`
 - go to definition (`F12` / Cmd+click)
 - references in a peek view (`Shift+F12`): every whole-word occurrence

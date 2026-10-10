@@ -39,7 +39,7 @@ editor.update(cx, |editor, cx| {
 | `suggest_selection` | `suggestSelection` | `First`, `RecentlyUsed` or `RecentlyUsedByPrefix` |
 | `word_based_suggestions` | `wordBasedSuggestions` | words of the current, matching-language or all registered documents when providers have nothing |
 | `snippet_suggestions` | `snippetSuggestions` | where snippets sort; `None` hides them |
-| `suggest` | `suggest.*` | `insert_mode`, `filter_graceful`, `match_on_word_start_only`, `show_deprecated`, `hidden_kinds`, `locality_bonus` |
+| `suggest` | `suggest.*` | `insert_mode`, `filter_graceful`, `match_on_word_start_only`, `show_deprecated`, `hidden_kinds`, `locality_bonus`, `font_size`, `line_height`, `show_icons`, `show_status_bar`, `show_inline_details` |
 | `tab_completion` | `tabCompletion` | `Off`, `On` (Tab inserts the best suggestion and cycles through the others) or `OnlySnippets` (like `Off` until snippets land) |
 | `inlay_hints` | `inlayHints` | whether inlay hints show (`On`, `OnUnlessPressed`, `OffUnlessPressed`, `Off`), padding and the per-line maximum length |
 | `folding_strategy` | `foldingStrategy` | `Auto` (providers, then syntax, then indentation) or `Indentation` |

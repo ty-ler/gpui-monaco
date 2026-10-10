@@ -913,7 +913,7 @@ impl CodeEditor {
             }
         }
         if !select && self.is_suggest_visible() {
-            let page = crate::suggest_widget::page_size() as isize;
+            let page = self.suggest_page_size(cx) as isize;
             let delta = match command {
                 MoveCommand::Up => Some(-1),
                 MoveCommand::Down => Some(1),
@@ -3003,6 +3003,13 @@ impl Render for CodeEditor {
             }))
             .on_action(cx.listener(|this, _: &FormatSelection, _, cx| {
                 this.format_selection(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSuggestionDetails, _, cx| {
+                if this.selected_suggestion().is_some() {
+                    this.toggle_suggestion_details(cx);
+                } else {
+                    this.trigger_suggest(crate::providers::CompletionTrigger::Invoke, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &AcceptAlternativeSuggestion, _, cx| {
                 this.accept_alternative_suggestion(cx);
