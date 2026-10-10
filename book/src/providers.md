@@ -10,7 +10,7 @@ gpui-monaco has no language server or other language intelligence built in. Your
 | `SignatureHelpProvider` | `SignatureHelpProvider` | parameter hints while typing a call |
 | `DocumentHighlightProvider` | `DocumentHighlightProvider` | occurrence highlights of the symbol at the cursor (textual occurrences without one) |
 
-Providers are app-wide and registered per language. Each returns a GPUI `Task`, so it can answer right away (`Task::ready`) or asynchronously, for example by forwarding to an LSP server.
+Providers are app-wide and registered per language. Each returns a GPUI `Task`, so it can answer right away (`Task::ready`) or asynchronously, for example by forwarding to an LSP server. The [`gpui-monaco-lsp`](lsp.md) crate does that for you.
 
 ```rust,ignore
 use gpui_monaco::providers::*;

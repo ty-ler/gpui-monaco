@@ -14,6 +14,7 @@ use gpui_monaco::{
     CodeEditor, CodeEditorEvent, DecorationId, DecorationOptions, EditorColors, EditorOptions,
     MouseTargetKind, TextModel, Theme,
 };
+use gpui_monaco_lsp::{LanguageServerBinary, LspClient, LspClientEvent, LspClientOptions};
 
 const SAMPLE: &str = include_str!("../samples/sample.rs");
 
@@ -54,6 +55,97 @@ fn themes() -> Vec<(&'static str, Arc<Theme>)> {
     ]
 }
 
+/// A `file://` uri for `path` (made absolute).
+fn file_uri(path: &str) -> String {
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.into());
+    let path = path.to_string_lossy().replace('\\', "/");
+    let mut uri = String::from("file://");
+    if !path.starts_with('/') {
+        uri.push('/');
+    }
+    for c in path.chars() {
+        match c {
+            ' ' => uri.push_str("%20"),
+            '#' => uri.push_str("%23"),
+            '?' => uri.push_str("%3F"),
+            '%' => uri.push_str("%25"),
+            _ => uri.push(c),
+        }
+    }
+    uri
+}
+
+/// Starts the `PLAYGROUND_LSP` server (a command line, e.g. `rust-analyzer`
+/// or `typescript-language-server --stdio`) for the project around `path`
+/// and attaches `model` to it.
+fn start_language_server(
+    command: &str,
+    path: &str,
+    language: SharedString,
+    model: &Entity<TextModel>,
+    cx: &mut Context<Playground>,
+) {
+    let mut words = command.split_whitespace();
+    let Some(program) = words.next() else {
+        return;
+    };
+    let file = std::path::absolute(path).unwrap_or_else(|_| path.into());
+    // The nearest directory with a project marker, else the file's.
+    let root = file
+        .ancestors()
+        .skip(1)
+        .find(|dir| {
+            [
+                "Cargo.toml",
+                "package.json",
+                "pyproject.toml",
+                "go.mod",
+                ".git",
+            ]
+            .iter()
+            .any(|marker| dir.join(marker).exists())
+        })
+        .or_else(|| file.parent())
+        .map(|dir| dir.to_path_buf());
+    let binary = LanguageServerBinary {
+        path: program.into(),
+        args: words.map(str::to_string).collect(),
+        cwd: root.clone(),
+        ..Default::default()
+    };
+    let options = LspClientOptions {
+        name: program.to_string().into(),
+        languages: vec![language],
+        root_uri: root.map(|root| file_uri(&root.to_string_lossy())),
+        ..Default::default()
+    };
+    let start = LspClient::start(binary, options, cx);
+    let model = model.clone();
+    cx.spawn(async move |this, cx| {
+        let client = match start.await {
+            Ok(client) => client,
+            Err(err) => {
+                eprintln!("language server: {err:#}");
+                return;
+            }
+        };
+        this.update(cx, |this, cx| {
+            cx.subscribe(&client, |_, _, event: &LspClientEvent, _| {
+                if let LspClientEvent::ShowMessage { message, .. } = event {
+                    eprintln!("language server: {message}");
+                }
+            })
+            .detach();
+            if let Err(err) = client.update(cx, |client, cx| client.attach(&model, cx)) {
+                eprintln!("language server: {err:#}");
+            }
+            this.lsp = Some(client);
+        })
+        .ok();
+    })
+    .detach();
+}
+
 struct Playground {
     editor: Entity<CodeEditor>,
     themes: Vec<(&'static str, Arc<Theme>)>,
@@ -62,20 +154,32 @@ struct Playground {
     file_name: SharedString,
     /// Breakpoint decorations by row.
     breakpoints: Vec<(u32, DecorationId)>,
+    /// The language server from `PLAYGROUND_LSP`, once it's running.
+    lsp: Option<Entity<LspClient>>,
 }
 
 impl Playground {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (text, language, file_name) = match std::env::var("PLAYGROUND_FILE") {
-            Ok(path) => {
-                let text =
-                    std::fs::read_to_string(&path).unwrap_or_else(|e| format!("{path}: {e}"));
-                let language = language_for_path(&path, cx);
-                (text, language, path.into())
-            }
-            Err(_) => (SAMPLE.to_string(), "rust".into(), "sample.rs".into()),
-        };
-        let model = cx.new(|_| TextModel::new(&text).with_language(language));
+        let (text, language, file_name): (String, SharedString, SharedString) =
+            match std::env::var("PLAYGROUND_FILE") {
+                Ok(path) => {
+                    let text =
+                        std::fs::read_to_string(&path).unwrap_or_else(|e| format!("{path}: {e}"));
+                    let language = language_for_path(&path, cx);
+                    (text, language, path.into())
+                }
+                Err(_) => (SAMPLE.to_string(), "rust".into(), "sample.rs".into()),
+            };
+        let lsp_command = std::env::var("PLAYGROUND_LSP").ok();
+        let uri = file_uri(file_name.as_ref());
+        let model = cx.new(|_| {
+            TextModel::new(&text)
+                .with_language(language.clone())
+                .with_uri(uri)
+        });
+        if let Some(command) = &lsp_command {
+            start_language_server(command, file_name.as_ref(), language, &model, cx);
+        }
         let editor = cx.new(|cx| CodeEditor::new(model, window, cx));
         if let Ok(wrap) = std::env::var("PLAYGROUND_WRAP") {
             editor.update(cx, |editor, cx| {
@@ -107,7 +211,8 @@ impl Playground {
             add_demo_decorations(&editor, cx);
             add_demo_widgets(&editor, cx);
         }
-        if !plain || std::env::var_os("PLAYGROUND_PROVIDERS").is_some() {
+        // A real language server replaces the mock providers.
+        if lsp_command.is_none() && (!plain || std::env::var_os("PLAYGROUND_PROVIDERS").is_some()) {
             providers::register(cx);
             providers::add_markers(&editor, cx);
         }
@@ -161,6 +266,7 @@ impl Playground {
             languages,
             file_name,
             breakpoints: Vec::new(),
+            lsp: None,
         }
     }
 
@@ -214,7 +320,11 @@ impl Playground {
             this.update_in(cx, |this, window, cx| {
                 let path = path.to_string_lossy().to_string();
                 let language = language_for_path(&path, cx);
-                let model = cx.new(|_| TextModel::new(&text).with_language(language));
+                let uri = file_uri(&path);
+                let model = cx.new(|_| TextModel::new(&text).with_language(language).with_uri(uri));
+                if let Some(lsp) = &this.lsp {
+                    lsp.update(cx, |lsp, cx| lsp.attach(&model, cx)).ok();
+                }
                 this.editor
                     .update(cx, |editor, cx| editor.set_model(model, cx));
                 this.file_name = path.into();

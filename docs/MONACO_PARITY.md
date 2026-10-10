@@ -109,7 +109,7 @@ Issues are linked by number.
 | Selection ranges | `smartSelect` | ❌ | #82 |
 | Folding ranges | `folding` | ❌ | #102 |
 | Linked editing ranges | `linkedEditing` | ❌ | #101 |
-| LSP bridge | — | ❌ | #54 |
+| LSP bridge (`gpui-monaco-lsp`: sync, diagnostics, completion, hover, definition, highlights, signature help) | `monaco-languageclient` | ✅ | #54 |
 
 ## Other
 

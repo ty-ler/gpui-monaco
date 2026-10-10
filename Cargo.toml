@@ -5,9 +5,16 @@ members = [
     "crates/syntax",
     "crates/gpui-monaco",
     "crates/gpui-monaco-languages",
+    "crates/gpui-monaco-lsp",
     "examples/playground",
 ]
-default-members = ["crates/text", "crates/syntax", "crates/gpui-monaco", "crates/gpui-monaco-languages"]
+default-members = [
+    "crates/text",
+    "crates/syntax",
+    "crates/gpui-monaco",
+    "crates/gpui-monaco-languages",
+    "crates/gpui-monaco-lsp",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -21,6 +28,7 @@ gpui-monaco-text = { path = "crates/text" }
 gpui-monaco-syntax = { path = "crates/syntax" }
 gpui-monaco = { path = "crates/gpui-monaco" }
 gpui-monaco-languages = { path = "crates/gpui-monaco-languages" }
+gpui-monaco-lsp = { path = "crates/gpui-monaco-lsp" }
 
 # Upstream zed, pinned. Bump all three together; see CONTRIBUTING.md.
 gpui = { git = "https://github.com/zed-industries/zed", rev = "f16f9652ec57bf806e65b2a0d51bb92a63644914" }

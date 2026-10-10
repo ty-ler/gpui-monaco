@@ -19,7 +19,7 @@ A Monaco-like code editor component for [GPUI](https://github.com/zed-industries
 
 ## Non-goals (for the MVP)
 
-Diff editor, screen reader support, a built-in LSP client, snippets, CRDT collaboration,
+Diff editor, screen reader support, snippets, CRDT collaboration,
 wasm, and huge single lines (minified files). See the `post-mvp` issues.
 
 ## Crates
@@ -30,6 +30,7 @@ wasm, and huge single lines (minified files). See the `post-mvp` issues.
 | `gpui-monaco-syntax` | `crates/syntax` | `Highlighter` trait, tree-sitter backend, `LanguageRegistry`. |
 | `gpui-monaco` | `crates/gpui-monaco` | `TextModel`, `CodeEditor`, rendering, widgets, providers. |
 | `gpui-monaco-languages` | `crates/gpui-monaco-languages` | Feature-flagged grammars and queries. |
+| `gpui-monaco-lsp` | `crates/gpui-monaco-lsp` | Bridges language servers to the providers and markers. |
 | `playground` | `examples/playground` | Monaco-playground-like demo app. |
 
 ## Documentation

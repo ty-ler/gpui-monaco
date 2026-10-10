@@ -35,6 +35,7 @@ Demo providers are registered by default:
 | `PLAYGROUND_WRAP=on\|<column>` | Start with word wrap on, or wrapped at a column |
 | `PLAYGROUND_DEMO=1` | Add the demo decorations and widgets at startup |
 | `PLAYGROUND_PLAIN=1` | Don't register the demo providers or markers |
+| `PLAYGROUND_LSP="rust-analyzer"` | Start a language server for `PLAYGROUND_FILE`, rooted at the nearest project directory, instead of the demo providers |
 | `PLAYGROUND_DEBUG=1` | Log selection changes |
 | `PLAYGROUND_SCREENSHOT=out.png` | Save a screenshot and exit (needs `--features screenshot`) |
 | `PLAYGROUND_KEYS="cmd-down text:hi wait"` | Keystrokes to play before the screenshot (`text:` types, `_` is a space, `wait` pauses 150ms) |
