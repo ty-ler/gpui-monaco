@@ -160,6 +160,7 @@ pub struct CodeEditor {
     pub(crate) suggest: crate::completion::SuggestState,
     pub(crate) snippet: crate::snippet_session::SnippetState,
     pub(crate) links: crate::links::LinksState,
+    pub(crate) semantic: crate::semantic_tokens::SemanticTokensState,
     pub(crate) minimap_cache: crate::element::MinimapCache,
     pub(crate) minimap_hovered: bool,
     minimap_drag: Option<Pixels>,
@@ -237,6 +238,10 @@ impl CodeEditor {
                 cx.notify();
             }),
         ];
+        let mut subscriptions = subscriptions;
+        // Providers coming and going (e.g. a language server starting) and
+        // refresh requests are noticed when painting.
+        subscriptions.extend(crate::providers::observe_language_features(cx));
         model.update(cx, |model, cx| model.ensure_syntax(cx));
         let snapshot = model.read(cx).snapshot();
         Self {
@@ -293,6 +298,7 @@ impl CodeEditor {
             suggest: Default::default(),
             snippet: Default::default(),
             links: Default::default(),
+            semantic: Default::default(),
             minimap_cache: Default::default(),
             minimap_hovered: false,
             minimap_drag: None,
@@ -324,6 +330,8 @@ impl CodeEditor {
         self.hide_suggest(cx);
         self.cancel_snippet(false, cx);
         self.clear_links(cx);
+        self.reset_semantic_tokens(cx);
+        self.semantic = Default::default();
         self.hide_signature_help(cx);
         self.close_message(cx);
         self.close_peek(cx);
@@ -670,6 +678,7 @@ impl CodeEditor {
                 source,
                 kind,
                 restore,
+                changes,
                 ..
             } => {
                 let own = *source == Some(cx.entity_id());
@@ -677,6 +686,7 @@ impl CodeEditor {
                 // asks for inlay hints again.
                 self.cancel_rename(false, cx);
                 self.inlay_hints_after_edit(cx);
+                self.semantic_tokens_after_edit(changes, cx);
                 let latest = model.read(cx).snapshot();
                 if latest.version() == self.snapshot.version() {
                     return;

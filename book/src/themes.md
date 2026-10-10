@@ -36,6 +36,8 @@ VS Code's bundled themes keep `"type"` (light or dark) in the extension manifest
 
 tree-sitter highlight captures (`keyword`, `string.special`, `function.method`, …) are mapped to the names Monaco's themes use and to TextMate scopes. The most specific matching rule wins. This lets one theme color both Monaco-style rules (`keyword`, `string.key.json`) and VS Code `tokenColors` (`entity.name.function`, `storage.type`).
 
+Semantic tokens from a [provider](providers.md#semantic-tokens) are colored by the theme's `semanticTokenColors` (VS Code's selector scoring: `type.modifier:language`, `*.modifier`). If none matches, VS Code's default TextMate scope for the token type is matched against `tokenColors`. A theme's `semanticHighlighting` turns them on unless the editor's `semantic_highlighting` option says otherwise.
+
 ## Custom themes
 
 `Theme::define` is Monaco's `defineTheme`. It takes:

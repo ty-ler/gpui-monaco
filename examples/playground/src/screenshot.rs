@@ -3,7 +3,7 @@
 //! `PLAYGROUND_KEYS` optionally scripts input before the capture: whitespace
 //! separated keystrokes in GPUI syntax (`cmd-down shift-up`), where a token
 //! `text:abc` types `abc` character by character (`_` types a space) and
-//! `wait` pauses 150ms.
+//! `wait` pauses 150ms and draws a frame.
 
 use gpui::{AnyWindowHandle, App};
 
@@ -25,6 +25,14 @@ pub fn capture_if_requested(window: AnyWindowHandle, cx: &mut App) {
                 cx.background_executor()
                     .timer(Duration::from_millis(150))
                     .await;
+                // Draw a frame as a visible window would, so work started
+                // while painting (e.g. requests for providers that just
+                // registered) gets going.
+                cx.update_window(window, |_, window, cx| {
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                })
+                .ok();
                 continue;
             }
             let keystrokes: Vec<gpui::Keystroke> = match token.strip_prefix("text:") {

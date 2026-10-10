@@ -679,6 +679,124 @@ pub trait InlayHintsProvider: 'static {
     ) -> Task<anyhow::Result<Vec<InlayHint>>>;
 }
 
+// ----- semantic tokens -------------------------------------------------------------
+
+/// The token types and modifiers a semantic tokens provider's data
+/// indexes (Monaco `SemanticTokensLegend`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SemanticTokensLegend {
+    /// Token types, e.g. `variable`, by index.
+    pub token_types: Vec<SharedString>,
+    /// Modifiers, e.g. `readonly`, by bit.
+    pub token_modifiers: Vec<SharedString>,
+}
+
+/// Semantic tokens (Monaco `SemanticTokens`): five numbers per token,
+/// relative to the previous one: line delta, start (relative on the same
+/// line), length (UTF-16), type index and modifier bits.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SemanticTokens {
+    /// Identifies this result for a later delta request.
+    pub result_id: Option<SharedString>,
+    /// The encoded tokens.
+    pub data: Vec<u32>,
+}
+
+/// A change to a previous result's data (Monaco `SemanticTokensEdit`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SemanticTokensEdit {
+    /// Index in the data array.
+    pub start: usize,
+    /// How many numbers to remove.
+    pub delete_count: usize,
+    /// What to insert.
+    pub data: Vec<u32>,
+}
+
+/// A delta against the previous result (Monaco `SemanticTokensEdits`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SemanticTokensEdits {
+    /// Identifies this result for the next delta request.
+    pub result_id: Option<SharedString>,
+    /// The changes, in order.
+    pub edits: Vec<SemanticTokensEdit>,
+}
+
+/// What a document semantic tokens provider returns.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SemanticTokensResult {
+    /// All tokens.
+    Tokens(SemanticTokens),
+    /// Changes to the previous result.
+    Edits(SemanticTokensEdits),
+}
+
+/// Supplies semantic tokens for a whole document (Monaco
+/// `DocumentSemanticTokensProvider`). They color the text over the syntax
+/// highlighting when `semantic_highlighting` is on.
+///
+/// Register with [`register_document_semantic_tokens_provider`]; call
+/// [`refresh_semantic_tokens`] when they change without an edit.
+pub trait DocumentSemanticTokensProvider: 'static {
+    /// The types and modifiers the data refers to.
+    fn legend(&self) -> SemanticTokensLegend;
+
+    /// The document's tokens, or edits to the result `last_result_id`
+    /// names. `None` for no tokens.
+    fn provide_document_semantic_tokens(
+        &self,
+        context: &ProviderContext,
+        last_result_id: Option<SharedString>,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Option<SemanticTokensResult>>>;
+
+    /// The editor no longer needs result `result_id`.
+    fn release_document_semantic_tokens(&self, _result_id: Option<SharedString>) {}
+}
+
+/// Supplies semantic tokens for a range (Monaco
+/// `DocumentRangeSemanticTokensProvider`), used for the visible lines until
+/// a document provider answers.
+///
+/// Register with [`register_document_range_semantic_tokens_provider`].
+pub trait DocumentRangeSemanticTokensProvider: 'static {
+    /// The types and modifiers the data refers to.
+    fn legend(&self) -> SemanticTokensLegend;
+
+    /// The tokens in `range` (lines relative to the document start).
+    fn provide_document_range_semantic_tokens(
+        &self,
+        context: &ProviderContext,
+        range: Range<PointUtf16>,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Option<SemanticTokens>>>;
+}
+
+/// Bumped by [`refresh_semantic_tokens`]; editors re-request when it
+/// changes.
+#[derive(Default)]
+pub(crate) struct SemanticTokensEpoch(pub u64);
+
+impl Global for SemanticTokensEpoch {}
+
+/// Repaints the editor when providers are registered or removed, or a
+/// refresh is requested, so it notices.
+pub(crate) fn observe_language_features<V: 'static>(
+    cx: &mut gpui::Context<V>,
+) -> Vec<gpui::Subscription> {
+    vec![
+        cx.observe_global::<LanguageFeatures>(|_, cx| cx.notify()),
+        cx.observe_global::<SemanticTokensEpoch>(|_, cx| cx.notify()),
+        cx.observe_global::<InlayHintsEpoch>(|_, cx| cx.notify()),
+    ]
+}
+
+/// Asks every editor for semantic tokens again (Monaco's provider
+/// `onDidChange`), e.g. after `workspace/semanticTokens/refresh`.
+pub fn refresh_semantic_tokens(cx: &mut App) {
+    cx.default_global::<SemanticTokensEpoch>().0 += 1;
+}
+
 // ----- links ---------------------------------------------------------------------
 
 /// A link in the text (Monaco `ILink`).
@@ -954,6 +1072,8 @@ struct LanguageFeatures {
     code_action: Vec<Entry<dyn CodeActionProvider>>,
     inlay_hints: Vec<Entry<dyn InlayHintsProvider>>,
     links: Vec<Entry<dyn LinkProvider>>,
+    semantic_tokens: Vec<Entry<dyn DocumentSemanticTokensProvider>>,
+    range_semantic_tokens: Vec<Entry<dyn DocumentRangeSemanticTokensProvider>>,
     folding: Vec<Entry<dyn FoldingRangeProvider>>,
     selection_range: Vec<Entry<dyn SelectionRangeProvider>>,
     declaration: Vec<Entry<dyn DeclarationProvider>>,
@@ -1044,6 +1164,21 @@ register_fn!(
     register_folding_range_provider,
     folding,
     FoldingRangeProvider
+);
+register_fn!(
+    /// Registers a document semantic tokens provider for the models
+    /// `selector` matches (Monaco `registerDocumentSemanticTokensProvider`).
+    /// The most recently registered one with tokens is used.
+    register_document_semantic_tokens_provider,
+    semantic_tokens,
+    DocumentSemanticTokensProvider
+);
+register_fn!(
+    /// Registers a range semantic tokens provider for the models `selector`
+    /// matches (Monaco `registerDocumentRangeSemanticTokensProvider`).
+    register_document_range_semantic_tokens_provider,
+    range_semantic_tokens,
+    DocumentRangeSemanticTokensProvider
 );
 register_fn!(
     /// Registers a link provider for the models `selector` matches (Monaco
@@ -1140,6 +1275,10 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.code_action.retain(|e| e.id != registration);
     features.inlay_hints.retain(|e| e.id != registration);
     features.links.retain(|e| e.id != registration);
+    features.semantic_tokens.retain(|e| e.id != registration);
+    features
+        .range_semantic_tokens
+        .retain(|e| e.id != registration);
     features.folding.retain(|e| e.id != registration);
     features.selection_range.retain(|e| e.id != registration);
     features.type_definition.retain(|e| e.id != registration);
@@ -1298,6 +1437,28 @@ pub fn code_action_providers(
 ) -> Vec<Arc<dyn CodeActionProvider>> {
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.code_action, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered document semantic tokens providers whose selector
+/// matches `language_id`, in registration order.
+pub fn document_semantic_tokens_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn DocumentSemanticTokensProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.semantic_tokens, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered range semantic tokens providers whose selector matches
+/// `language_id`, in registration order.
+pub fn document_range_semantic_tokens_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn DocumentRangeSemanticTokensProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.range_semantic_tokens, language_id))
         .unwrap_or_default()
 }
 

@@ -149,6 +149,15 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Semantic tokens (#98):**
+  - `DocumentSemanticTokensProvider` (full results or edits against the last result) and `DocumentRangeSemanticTokensProvider` (for the viewport until a full result arrives).
+  - Ported from Monaco's `documentSemanticTokens` and `viewportSemanticTokens`, with its adaptive debounce. Edits made during a request are replayed onto the result.
+  - The tokens are stored in a port of Monaco's sparse multiline tokens, with its tests, and move with edits.
+  - Styles come from the theme's `semanticTokenColors`, scored as in VS Code, falling back to VS Code's default TextMate scopes and then to Monaco's standalone `type.modifier` rules. Only the properties a style sets override the syntax highlighting.
+  - The `semantic_highlighting` option (`On`, `Off` or `ConfiguredByTheme`). `Theme::semantic_highlighting` is read from VS Code themes; Monaco's built-in themes leave it off.
+  - `refresh_semantic_tokens`.
+  - Editors repaint when providers are registered or removed, so a language server that starts later is noticed.
+  - The LSP bridge forwards `textDocument/semanticTokens/full`, `full/delta` and `range`, and handles `workspace/semanticTokens/refresh`.
 - **Links (#93):**
   - Monaco's link computer (ported with its tests) underlines URLs.
   - `LinkProvider` (with `resolve_link`) adds or overrides links; later providers win where links overlap.

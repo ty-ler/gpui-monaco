@@ -958,10 +958,14 @@ fn prepaint_editor(
         ),
         _ => (0, 0),
     };
+    if let (Some(first), Some(last)) = (segments.first(), segments.last()) {
+        editor.refresh_semantic_tokens(first.row..last.row + 1, cx);
+    }
     let highlights = {
         let model = editor.model().read(cx);
         current_highlights(model, &theme, visible_start..visible_end)
     };
+    let highlights = editor.merge_semantic_tokens(highlights, visible_start..visible_end, cx);
     let editor_id = cx.entity_id();
     let decorations = editor.model().update(cx, |model, _| {
         model.decorations_in_range(visible_start..visible_end, Some(editor_id))

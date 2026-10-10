@@ -212,6 +212,18 @@ The editor shows them as injected text that moves with edits. As in Monaco:
 
 Unlike Monaco, hints use the editor's font size, and their label parts, tooltips and edits aren't interactive yet.
 
+## Semantic tokens
+
+A `DocumentSemanticTokensProvider` colors identifiers by meaning, such as parameters, read-only variables and macros. It works as in LSP: a legend of token types and modifiers, plus five numbers per token. It can return all tokens, or edits against the result it returned last (`last_result_id`). A `DocumentRangeSemanticTokensProvider` colors the visible lines until a full result arrives.
+
+The editor asks for the whole document right away, and again after a pause in typing. Meanwhile the tokens move with the text, as in Monaco. Call `refresh_semantic_tokens` when they change without an edit.
+
+Themes style the tokens:
+- VS Code themes through `semanticTokenColors`, else their TextMate rules, using VS Code's default scope for each token type.
+- Monaco-style themes match `type.modifier` against their rules.
+
+Only the properties a style sets override the syntax highlighting. Semantic coloring is on when `semantic_highlighting` says so: `ConfiguredByTheme` (the default) follows the theme's `semanticHighlighting`, which Monaco's built-in themes leave off.
+
 ## Links
 
 The editor finds URLs (`http`, `https` and `file`) itself, using Monaco's link computer, and underlines them. A `LinkProvider` adds other links, such as issue numbers. Where links overlap, the later provider's link wins over the built-in one.
