@@ -36,6 +36,10 @@ All notable changes to this project are documented here. The format follows [Kee
   - `render_control_characters`: shows ␇-style control pictures.
   - `render_final_newline`.
   - Theme colors: `editorWhitespace.foreground`, `editorIndentGuide.*` and `editorRuler.foreground`.
+- Bracket pair colorization (`bracket_pair_colorization`, on by default):
+  - Brackets are colored by nesting level, skipping strings and comments, and unmatched brackets use the unexpected-bracket color.
+  - It honors `colorizedBracketPairs` and the `editorBracketHighlight.*` theme colors (#85).
+- Faster whole-document highlighting: injection layers are merged per depth (5.5s → 0.24s on 100k lines of Rust).
 - `TextModel::language_at` (Monaco `getLanguageIdAtPosition`), and the `comments` editor option.
 - Language configurations accept `lineComment` as `{ "comment", "noIndent" }`.
 

@@ -71,6 +71,11 @@ pub struct EditorColors {
     /// Write occurrences in the overview ruler
     /// (`editorOverviewRuler.wordHighlightStrongForeground`).
     pub word_highlight_strong_overview: Hsla,
+    /// Bracket pair colors by nesting level, cycling
+    /// (`editorBracketHighlight.foreground1`–`6`; `None` for transparent).
+    pub bracket_highlights: [Option<Hsla>; 6],
+    /// Unmatched brackets (`editorBracketHighlight.unexpectedBracket.foreground`).
+    pub unexpected_bracket: Hsla,
     /// Rendered whitespace (`editorWhitespace.foreground`).
     pub whitespace: Hsla,
     /// Indent guides (`editorIndentGuide.background1`).
@@ -141,6 +146,15 @@ impl EditorColors {
             word_highlight_overview: c(rgba(0xa0a0a0cc)),
             word_highlight_strong_overview: c(rgba(0xc0a0c0cc)),
             selection_highlight_background: c(rgba(0xadd6ff26)),
+            bracket_highlights: [
+                Some(c(rgb(0xffd700))),
+                Some(c(rgb(0xda70d6))),
+                Some(c(rgb(0x179fff))),
+                None,
+                None,
+                None,
+            ],
+            unexpected_bracket: c(rgba(0xff1212cc)),
             whitespace: c(rgba(0xe3e4e229)),
             indent_guide: c(rgb(0x404040)),
             indent_guide_active: c(rgb(0x707070)),
@@ -187,6 +201,15 @@ impl EditorColors {
             word_highlight_overview: c(rgba(0xa0a0a0cc)),
             word_highlight_strong_overview: c(rgba(0xc0a0c0cc)),
             selection_highlight_background: c(rgba(0xadd6ff80)),
+            bracket_highlights: [
+                Some(c(rgb(0x0431fa))),
+                Some(c(rgb(0x319331))),
+                Some(c(rgb(0x7b3814))),
+                None,
+                None,
+                None,
+            ],
+            unexpected_bracket: c(rgba(0xff1212cc)),
             whitespace: c(rgba(0x33333333)),
             indent_guide: c(rgb(0xd3d3d3)),
             indent_guide_active: c(rgb(0x939393)),
@@ -275,6 +298,15 @@ impl EditorColors {
             &mut self.selection_highlight_overview,
             "editorOverviewRuler.selectionHighlightForeground",
         );
+        for (i, slot) in self.bracket_highlights.iter_mut().enumerate() {
+            if let Some(color) = get(&format!("editorBracketHighlight.foreground{}", i + 1)) {
+                *slot = (color.a > 0.).then_some(color);
+            }
+        }
+        set(
+            &mut self.unexpected_bracket,
+            "editorBracketHighlight.unexpectedBracket.foreground",
+        );
         set(&mut self.whitespace, "editorWhitespace.foreground");
         set(&mut self.indent_guide, "editorIndentGuide.background");
         set(&mut self.indent_guide, "editorIndentGuide.background1");
@@ -333,6 +365,15 @@ impl EditorColors {
             self.line_highlight_border = None;
         }
         self.ime_underline = self.foreground;
+    }
+}
+
+impl EditorColors {
+    /// The color for brackets at nesting `level` (Monaco cycles through the
+    /// non-transparent `editorBracketHighlight.foreground*` colors).
+    pub fn bracket_color(&self, level: u32) -> Option<Hsla> {
+        let colors: Vec<Hsla> = self.bracket_highlights.iter().flatten().copied().collect();
+        (!colors.is_empty()).then(|| colors[level as usize % colors.len()])
     }
 }
 

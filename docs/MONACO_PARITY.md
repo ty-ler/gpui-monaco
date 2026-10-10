@@ -61,8 +61,8 @@ Issues are linked by number.
 | Sticky scroll (indentation folding model) | `stickyScroll` | ✅ | |
 | Sticky scroll outline model, keyboard focus, toggle | `stickyScroll` | ❌ | #106 |
 | Render whitespace, indent guides, rulers, control characters | view parts | ✅ | #84 |
-| Bracket pair guides | view parts | ❌ | #85 |
-| Bracket pair colorization | `bracketPairColorization` | ❌ | #85 |
+| Bracket pair guides | view parts | ❌ | #118 |
+| Bracket pair colorization | `bracketPairColorization` | ✅ | #85 |
 | Occurrence and selection highlight | `wordHighlighter` | ✅ | #83 |
 | Unicode highlighting, unusual line terminators | `unicodeHighlighter`, `unusualLineTerminators` | ❌ | #86 |
 | Font weight, ligatures, letter spacing, zoom, variable line heights | `fontZoom`, options | ❌ | #87 |

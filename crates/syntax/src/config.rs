@@ -17,6 +17,10 @@ pub struct LanguageConfiguration {
     /// `brackets`: open/close pairs used for bracket matching and indentation.
     #[serde(default)]
     pub brackets: Vec<(String, String)>,
+    /// `colorizedBracketPairs`: the pairs bracket pair colorization uses;
+    /// `None` means [`LanguageConfiguration::brackets`].
+    #[serde(default)]
+    pub colorized_bracket_pairs: Option<Vec<(String, String)>>,
     /// `autoClosingPairs`: pairs closed automatically when the open text is typed.
     #[serde(default)]
     pub auto_closing_pairs: Vec<AutoClosingPair>,

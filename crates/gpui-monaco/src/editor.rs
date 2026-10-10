@@ -122,6 +122,7 @@ pub struct CodeEditor {
     pub(crate) bracket_decorations: Vec<crate::decorations::DecorationId>,
     pub(crate) navigation: crate::navigation_history::NavigationHistory,
     pub(crate) occurrences: crate::occurrences::OccurrenceHighlights,
+    pub(crate) bracket_colors: crate::bracket_colors::BracketColors,
     /// Monaco's `overtype` input mode (Insert key).
     pub(crate) overtype: bool,
     pub(crate) hover: crate::hover::HoverState,
@@ -199,6 +200,7 @@ impl CodeEditor {
             bracket_decorations: Vec::new(),
             overtype: false,
             occurrences: Default::default(),
+            bracket_colors: Default::default(),
             navigation: crate::navigation_history::NavigationHistory::starting_at(
                 vec![Selection::collapsed(PointUtf16::zero())],
                 snapshot.version(),
@@ -249,6 +251,7 @@ impl CodeEditor {
         self.cancel_selection_anchor(cx);
         self.reset_navigation_history();
         self.clear_occurrence_highlights(cx);
+        self.bracket_colors = Default::default();
 
         self._subscriptions[0] = cx.subscribe(&model, Self::on_model_event);
         model.update(cx, |model, cx| model.ensure_syntax(cx));
@@ -306,6 +309,8 @@ impl CodeEditor {
         self.options = options;
         self.cursors
             .set_merge_overlapping(self.options.multi_cursor_merge_overlapping);
+        self.bracket_colors = Default::default();
+        self.refresh_bracket_colors(cx);
         cx.notify();
     }
 
@@ -589,6 +594,7 @@ impl CodeEditor {
             }
             TextModelEvent::SyntaxUpdated => {
                 self.update_bracket_highlights(cx);
+                self.refresh_bracket_colors(cx);
                 cx.notify();
             }
             TextModelEvent::OptionsChanged

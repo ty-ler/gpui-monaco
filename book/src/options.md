@@ -40,6 +40,7 @@ editor.update(cx, |editor, cx| {
 | `comments` | `comments` | `insert_space`, `ignore_empty_lines` |
 | `render_whitespace`, `render_control_characters`, `render_final_newline` | same names | `·` and `→` for whitespace; `␇` for control characters |
 | `guides`, `rulers` | `guides`, `rulers` | indent guides (with the active one highlighted) and vertical rulers |
+| `bracket_pair_colorization` | `bracketPairColorization.enabled` | color brackets by nesting level |
 | `single_line` | — | a one-line input. Enter, Tab and Escape go to the parent, and pasted line breaks become spaces. |
 
 Model-level settings live in `ModelOptions` (Monaco `ITextModelUpdateOptions`), set with `model.update_options(…)`:
