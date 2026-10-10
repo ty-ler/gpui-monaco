@@ -261,6 +261,20 @@ pub enum WordBasedSuggestions {
     AllDocuments,
 }
 
+/// Monaco `tabCompletion`: what Tab does without the suggest widget.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TabCompletion {
+    /// Tab indents.
+    #[default]
+    Off,
+    /// At the end of a word, Tab inserts the best completion; Tab and
+    /// Shift+Tab then cycle through the other suggestions.
+    On,
+    /// Only snippet prefixes complete (Monaco's `onlySnippets`). Until
+    /// snippets land this behaves like `Off`.
+    OnlySnippets,
+}
+
 /// Monaco `editor.suggest`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SuggestOptions {
@@ -275,6 +289,9 @@ pub struct SuggestOptions {
     /// Kinds hidden from the list (Monaco's `show*` options set to false,
     /// e.g. `showWords: false` hides `Text`).
     pub hidden_kinds: Vec<crate::providers::CompletionItemKind>,
+    /// `localityBonus`: among equal matches, prefer words used in the
+    /// innermost bracket block around the cursor.
+    pub locality_bonus: bool,
 }
 
 impl Default for SuggestOptions {
@@ -285,6 +302,7 @@ impl Default for SuggestOptions {
             match_on_word_start_only: true,
             show_deprecated: true,
             hidden_kinds: Vec::new(),
+            locality_bonus: false,
         }
     }
 }
@@ -550,6 +568,8 @@ pub struct EditorOptions {
     pub suggest_on_trigger_characters: bool,
     /// Monaco `acceptSuggestionOnEnter`.
     pub accept_suggestion_on_enter: AcceptSuggestionOnEnter,
+    /// `tabCompletion`.
+    pub tab_completion: TabCompletion,
     /// Monaco `acceptSuggestionOnCommitCharacter`.
     pub accept_suggestion_on_commit_character: bool,
     /// Monaco `suggestSelection`.
@@ -685,6 +705,7 @@ impl Default for EditorOptions {
             quick_suggestions_delay: std::time::Duration::from_millis(10),
             suggest_on_trigger_characters: true,
             accept_suggestion_on_enter: AcceptSuggestionOnEnter::On,
+            tab_completion: TabCompletion::Off,
             accept_suggestion_on_commit_character: true,
             suggest_selection: Default::default(),
             word_based_suggestions: WordBasedSuggestions::OffWithInlineSuggestions,

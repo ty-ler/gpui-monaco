@@ -8,8 +8,9 @@
 //! of `Memory.select` (the `first` mode, `NoMemory`) from
 //! `src/vs/editor/contrib/suggest/browser/suggestMemory.ts`.
 //!
-//! Not ported: word distance (`editor.suggest.localityBonus`, treated as
-//! always 0), grouping by provider/incomplete providers (the session tracks
+//! Word distance (`editor.suggest.localityBonus`) is computed by the
+//! controller and passed in with [`CompletionModel::set_distances`]. Not
+//! ported: grouping by provider/incomplete providers (the session tracks
 //! that), and label stats.
 
 use std::cmp::Ordering;
@@ -106,6 +107,9 @@ pub struct CompletionModel {
     line_context: LineContext,
     options: CompletionModelOptions,
     filtered: Vec<ScoredCompletion>,
+    /// Monaco's word distance per item (`suggest.localityBonus`); smaller
+    /// sorts first among equal scores.
+    distances: Vec<u32>,
 }
 
 impl CompletionModel {
@@ -154,6 +158,7 @@ impl CompletionModel {
             line_context,
             options,
             filtered: Vec::new(),
+            distances: Vec::new(),
         };
         model.refilter(Refilter::All);
         model
@@ -177,6 +182,15 @@ impl CompletionModel {
     /// What the user has typed, as last set.
     pub fn line_context(&self) -> &LineContext {
         &self.line_context
+    }
+
+    /// Sets each item's word distance (an empty list means all 0) and
+    /// re-sorts.
+    pub fn set_distances(&mut self, distances: Vec<u32>) {
+        if self.distances != distances {
+            self.distances = distances;
+            self.refilter(Refilter::All);
+        }
     }
 
     /// Replaces item `index` with its resolved version (Monaco assigns the
@@ -317,10 +331,11 @@ impl CompletionModel {
 
         let snippet_order = self.options.snippet_sort_order;
         let items = &self.items;
+        let distance = |index: usize| self.distances.get(index).copied().unwrap_or(0);
         target.sort_by(|(a_idx, a), (b_idx, b)| {
             snippet_compare(items[a.index].kind, items[b.index].kind, snippet_order)
                 .then_with(|| b.score.score.cmp(&a.score.score))
-                // (word distance would be compared here)
+                .then_with(|| distance(a.index).cmp(&distance(b.index)))
                 .then_with(|| a_idx.cmp(b_idx))
         });
         self.filtered = target.into_iter().map(|(_, scored)| scored).collect();

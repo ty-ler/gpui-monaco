@@ -113,6 +113,9 @@ All notable changes to this project are documented here. The format follows [Kee
   - `suggest.hidden_kinds`, `suggest.show_deprecated`, `suggest.filter_graceful`, `suggest.match_on_word_start_only` and `snippet_suggestions`.
   - Select the first or last suggestion (Cmd+Up/Down, or Ctrl+Home/End elsewhere).
   - The LSP bridge maps tags, insert-and-replace edits and commands, and forwards `completionItem/resolve`.
+  - Tab completion (`tab_completion`): at the end of a word, Tab inserts the best suggestion without showing the widget. Tab and Shift+Tab then cycle through the others, as do they after accepting with Tab or Enter.
+  - `suggest.locality_bonus`: among equal matches, words used in the innermost bracket block sort first.
+  - The session follows Monaco's rules as you type. It closes on another line or when the indentation changes. It asks again after deleting back past where it opened, or on starting a new word. An explicitly requested session keeps its last matches while nothing matches.
 - **Rename (#56):** `RenameProvider` (with optional `resolve_rename_location`), F2 with Monaco's rename box, `WorkspaceEdit` and `CodeEditor::apply_workspace_edit`. The LSP bridge forwards `prepareRename` and `rename`.
 
 ### Changed

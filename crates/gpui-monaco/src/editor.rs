@@ -832,6 +832,7 @@ impl CodeEditor {
     }
 
     pub(crate) fn cursors_changed(&mut self, autoscroll: bool, cx: &mut Context<Self>) {
+        self.suggest_cursor_changed();
         // Monaco `multiCursorLimit`: extra cursors are dropped.
         let limit = self.options.multi_cursor_limit.max(1);
         if self.cursors.all().len() > limit {
@@ -1241,6 +1242,22 @@ impl CodeEditor {
         if self.is_suggest_visible() && self.accept_suggestion(cx) {
             return;
         }
+        // Monaco `tabCompletion`: `insertNextSuggestion`, then
+        // `insertBestCompletion`.
+        if self.options.tab_completion == crate::options::TabCompletion::On {
+            if self.has_other_suggestions() {
+                self.insert_other_suggestion(true, cx);
+                return;
+            }
+            if self.insert_best_completion(cx) {
+                return;
+            }
+        }
+        self.insert_tab(cx);
+    }
+
+    /// Monaco's `tab` command: indents or inserts a tab.
+    pub(crate) fn insert_tab(&mut self, cx: &mut Context<Self>) {
         let operation = self.with_language(cx, |config, rope, cursors, lang| {
             cursor::tab_with_language(config, rope, cursors, lang)
         });
@@ -1250,6 +1267,12 @@ impl CodeEditor {
     fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
         if self.options.single_line {
             cx.propagate();
+            return;
+        }
+        if self.options.tab_completion == crate::options::TabCompletion::On
+            && self.has_other_suggestions()
+        {
+            self.insert_other_suggestion(false, cx);
             return;
         }
         self.run_edit(cx, cursor::outdent);

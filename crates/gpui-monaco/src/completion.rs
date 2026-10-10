@@ -31,6 +31,46 @@ struct Memories(SuggestMemories);
 
 impl gpui::Global for Memories {}
 
+/// Where a session's items insert: what `getOverwriteInfo` needs.
+#[derive(Clone, Copy)]
+struct InsertContext {
+    /// Where the request was made.
+    position: PointUtf16,
+    /// Start column of the word being completed.
+    word_start: u32,
+    /// End column of the word at `position` (the default replace range).
+    word_end: u32,
+}
+
+/// Monaco `SuggestAlternatives`: after Tab or Enter accepted an item with
+/// `tab_completion` on, Tab and Shift+Tab replace it with the next or
+/// previous one.
+struct Alternatives {
+    items: Vec<CompletionItem>,
+    index: usize,
+    context: InsertContext,
+    replace: bool,
+}
+
+impl Alternatives {
+    /// Monaco `_moveIndex`: the next item without additional edits.
+    fn move_index(&self, forward: bool) -> usize {
+        let len = self.items.len();
+        let mut index = self.index;
+        for _ in 0..len {
+            index = if forward {
+                (index + 1) % len
+            } else {
+                (index + len - 1) % len
+            };
+            if index == self.index || self.items[index].additional_text_edits.is_empty() {
+                break;
+            }
+        }
+        index
+    }
+}
+
 pub(crate) struct Session {
     /// Where the request was made.
     position: PointUtf16,
@@ -38,6 +78,8 @@ pub(crate) struct Session {
     word_start: u32,
     /// End column of the word at `position` (the default replace range).
     word_end: u32,
+    /// The line's leading whitespace at the request.
+    leading_whitespace: String,
     pub(crate) model: CompletionModel,
     pub(crate) selected: usize,
     incomplete: bool,
@@ -61,6 +103,26 @@ pub(crate) struct SuggestState {
     /// Additional edits resolved after inserting.
     late_edits: Option<Task<()>>,
     widget: Option<(Entity<SuggestWidget>, WidgetId)>,
+    /// Tab completion's pending request: insert the best item instead of
+    /// showing the widget, or type a tab if the cursor is still here.
+    accept_best: Option<PointUtf16>,
+    alternatives: Option<Alternatives>,
+    /// Set while replacing an alternative, so its cursor change keeps them.
+    keep_alternatives: bool,
+}
+
+impl Session {
+    fn insert_context(&self) -> InsertContext {
+        InsertContext {
+            position: self.position,
+            word_start: self.word_start,
+            word_end: self.word_end,
+        }
+    }
+}
+
+fn leading_whitespace(line: &str) -> &str {
+    &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
 }
 
 fn is_word_char(ch: char) -> bool {
@@ -152,6 +214,7 @@ impl CodeEditor {
 
     /// Closes the suggest widget (Escape, cursor moved away).
     pub fn hide_suggest(&mut self, cx: &mut Context<Self>) {
+        self.suggest.accept_best = None;
         self.suggest.task = None;
         self.suggest.quick_task = None;
         self.suggest.session = None;
@@ -328,9 +391,15 @@ impl CodeEditor {
     ) {
         let head = self.cursors.primary().position;
         if items.is_empty() || head.row != position.row || head.column < word_start {
+            self.finish_accept_best(cx);
             self.hide_suggest(cx);
             return;
         }
+        let distances = if self.options.suggest.locality_bonus {
+            self.word_distances(position, &items, cx)
+        } else {
+            Vec::new()
+        };
         let line_context = self.line_context_at(head, position.column);
         let options = CompletionModelOptions {
             filter_graceful: self.options.suggest.filter_graceful,
@@ -341,12 +410,19 @@ impl CodeEditor {
             },
         };
         let resolved = vec![false; items.len()];
-        let model =
+        let mut model =
             CompletionModel::new_with_options(items, position, word_start, line_context, options);
+        // Monaco: distances only count while the cursor is where the request
+        // was made.
+        if head == position {
+            model.set_distances(distances);
+        }
+        let leading_whitespace = leading_whitespace(&self.snapshot.line(position.row)).to_string();
         self.suggest.session = Some(Session {
             position,
             word_start,
             word_end,
+            leading_whitespace,
             model,
             selected: 0,
             incomplete,
@@ -357,8 +433,204 @@ impl CodeEditor {
             resolve_task: None,
         });
         self.select_by_memory(cx);
+        if self.suggest.accept_best.is_some() {
+            self.finish_accept_best(cx);
+            return;
+        }
         self.refresh_suggest_widget(cx);
         self.resolve_selected_suggestion(cx);
+    }
+
+    /// Tab completion (Monaco `insertBestCompletion`): at the end of a word,
+    /// asks for completions without showing them and inserts the one
+    /// `suggest_selection` picks, or types a tab if none changes the text.
+    /// Returns false if it didn't apply (no word ends at the cursor).
+    pub(crate) fn insert_best_completion(&mut self, cx: &mut Context<Self>) -> bool {
+        let head = self.cursors.primary().position;
+        if self.options.read_only
+            || self.is_suggest_visible()
+            || self.word_start_at(head) == head.column
+            || self.word_end_at(head) != head.column
+        {
+            return false;
+        }
+        self.hide_suggest(cx);
+        self.suggest.accept_best = Some(head);
+        self.request_suggestions(CompletionTrigger::Invoke, false, cx);
+        if self.suggest.task.is_none() {
+            // Nothing to ask.
+            self.finish_accept_best(cx);
+        }
+        true
+    }
+
+    /// Completes a pending [`Self::insert_best_completion`] with the session
+    /// (if any): inserts its selected item, or falls back to a tab.
+    fn finish_accept_best(&mut self, cx: &mut Context<Self>) {
+        let Some(requested_at) = self.suggest.accept_best.take() else {
+            return;
+        };
+        let makes_edit = self.suggest.session.as_ref().is_some_and(|session| {
+            session
+                .model
+                .filtered()
+                .get(session.selected)
+                .is_some_and(|scored| {
+                    self.makes_text_edit(&session.model.items()[scored.index], session.word_start)
+                })
+        });
+        if makes_edit {
+            self.accept_suggestion(cx);
+            return;
+        }
+        self.hide_suggest(cx);
+        if self.cursors.primary().position == requested_at {
+            self.insert_tab(cx);
+        }
+    }
+
+    /// Monaco `triggerSuggestAndAcceptBest`'s `makesTextEdit`: snippets and
+    /// items with additional edits always do; others unless the text before
+    /// the cursor already is their insert text.
+    fn makes_text_edit(&self, item: &CompletionItem, word_start: u32) -> bool {
+        if item.kind == CompletionItemKind::Snippet || !item.additional_text_edits.is_empty() {
+            return true;
+        }
+        let head = self.cursors.primary().position;
+        let start = item.range.as_ref().map_or(word_start, |r| r.start.column);
+        let typed: String = self
+            .snapshot
+            .line(head.row)
+            .encode_utf16()
+            .skip(start as usize)
+            .take(head.column.saturating_sub(start) as usize)
+            .map(|u| char::from_u32(u as u32).unwrap_or('\u{fffd}'))
+            .collect();
+        typed != item.insert_text()
+    }
+
+    /// Whether Tab or Shift+Tab can replace the last inserted suggestion.
+    pub(crate) fn has_other_suggestions(&self) -> bool {
+        self.suggest.alternatives.is_some()
+    }
+
+    /// Replaces the last suggestion Tab or Enter inserted with the next
+    /// (`forward`) or previous one (Monaco `insertNextSuggestion`,
+    /// `insertPrevSuggestion`).
+    pub(crate) fn insert_other_suggestion(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(alternatives) = self.suggest.alternatives.as_mut() else {
+            return;
+        };
+        alternatives.index = alternatives.move_index(forward);
+        let item = alternatives.items[alternatives.index].clone();
+        let (context, replace) = (alternatives.context, alternatives.replace);
+        self.suggest.late_edits = None;
+        self.suggest.keep_alternatives = true;
+        // Monaco undoes the previous insertion and inserts the next item.
+        self.undo(cx);
+        self.insert_completion(&item, context, replace, cx);
+        self.suggest.keep_alternatives = false;
+    }
+
+    /// Drops the alternatives when the cursor moves (Monaco resets them on
+    /// any cursor change it didn't cause).
+    pub(crate) fn suggest_cursor_changed(&mut self) {
+        if !self.suggest.keep_alternatives {
+            self.suggest.alternatives = None;
+        }
+    }
+
+    /// Monaco `WordDistance`: with `suggest.locality_bonus`, words used in
+    /// the innermost bracket block around `position` sort before others.
+    fn word_distances(
+        &self,
+        position: PointUtf16,
+        items: &[CompletionItem],
+        cx: &gpui::App,
+    ) -> Vec<u32> {
+        use crate::cursor::smart_select::bracket_selection_ranges;
+        const FAR: u32 = 2 << 20;
+        let ranges = self
+            .with_bracket_context(cx, |rope, config, skip| {
+                bracket_selection_ranges(rope, config, position, skip)
+            })
+            .unwrap_or_else(|| {
+                bracket_selection_ranges(
+                    self.snapshot.rope(),
+                    &syntax::LanguageConfiguration::default(),
+                    position,
+                    &|_| false,
+                )
+            });
+        let Some(block) = ranges.first() else {
+            return Vec::new();
+        };
+        // Monaco `computeWordRanges`: the words of the block's lines (its
+        // last line excluded, as in Monaco), except numbers.
+        let (_, regex) = self.word_sources(cx);
+        let mut words: std::collections::HashMap<String, Vec<std::ops::Range<PointUtf16>>> =
+            Default::default();
+        for row in block.start.row..block.end.row {
+            let line = self.snapshot.line(row);
+            let mut start = 0;
+            while start < line.len() {
+                let Ok(Some(found)) = regex.find_from_pos(&line, start) else {
+                    break;
+                };
+                start = if found.end() > found.start() {
+                    found.end()
+                } else {
+                    found.end() + line[found.end()..].chars().next().map_or(1, char::len_utf8)
+                };
+                let word = found.as_str();
+                if word.is_empty() || word.parse::<f64>().is_ok() {
+                    continue;
+                }
+                let column = |byte: usize| line[..byte].encode_utf16().count() as u32;
+                words.entry(word.to_string()).or_default().push(
+                    PointUtf16::new(row, column(found.start()))
+                        ..PointUtf16::new(row, column(found.end())),
+                );
+            }
+        }
+        // The word being typed doesn't count.
+        let word_start = self.word_start_at(position);
+        let current: String = self
+            .snapshot
+            .line(position.row)
+            .encode_utf16()
+            .skip(word_start as usize)
+            .take((position.column - word_start) as usize)
+            .map(|u| char::from_u32(u as u32).unwrap_or('\u{fffd}'))
+            .collect();
+        words.remove(&current);
+        items
+            .iter()
+            .map(|item| {
+                if item.kind == CompletionItemKind::Keyword {
+                    return FAR;
+                }
+                let Some(lines) = words.get(item.label.as_ref()) else {
+                    return FAR;
+                };
+                // The occurrence at or last before the request position.
+                let anchor = position..position;
+                let best = match lines
+                    .binary_search_by(|r| r.start.cmp(&anchor.start).then(r.end.cmp(&anchor.end)))
+                {
+                    Ok(ix) => &lines[ix],
+                    Err(ix) => &lines[ix.saturating_sub(1)],
+                };
+                let mut distance = ranges.len() as u32;
+                for range in &ranges {
+                    if !(range.start <= best.start && best.end <= range.end) {
+                        break;
+                    }
+                    distance -= 1;
+                }
+                distance
+            })
+            .collect()
     }
 
     /// The memories' view of the cursor.
@@ -520,10 +792,14 @@ impl CodeEditor {
             self.request_suggestions(CompletionTrigger::TriggerCharacter(ch), true, cx);
             return;
         }
-        if self.suggest.session.is_some() || self.suggest.task.is_some() {
-            if is_word_char(ch) {
-                self.refilter_suggest(cx);
-            } else {
+        if self.suggest.session.is_some() {
+            self.refilter_suggest(cx);
+            return;
+        }
+        if self.suggest.task.is_some() {
+            // Still computing: the results are filtered by what's typed
+            // then, unless the word ended.
+            if !is_word_char(ch) {
                 self.hide_suggest(cx);
             }
             return;
@@ -549,22 +825,14 @@ impl CodeEditor {
         }
     }
 
-    /// Monaco `SuggestModel._doTriggerQuickSuggest`.
-    fn quick_suggest(&mut self, cx: &mut Context<Self>) {
-        if self.suggest.session.is_some() || self.suggest.task.is_some() {
-            return;
-        }
-        let quick = self.options.quick_suggestions;
-        if quick == crate::options::QuickSuggestions::OFF {
-            return;
-        }
-        // `shouldAutoTrigger`: a word ending at the cursor (or one character
-        // in), not a number.
+    /// Monaco `LineContext.shouldAutoTrigger`: a word ends at the cursor (or
+    /// the cursor is one character into it) and isn't a number.
+    fn should_auto_trigger(&self, _cx: &gpui::App) -> bool {
         let head = self.cursors.primary().position;
         let start = self.word_start_at(head);
         let end = self.word_end_at(head);
         if start == head.column || (end != head.column && start + 1 != head.column) {
-            return;
+            return false;
         }
         let word: String = self
             .snapshot
@@ -574,9 +842,22 @@ impl CodeEditor {
             .take((end - start) as usize)
             .map(|u| char::from_u32(u as u32).unwrap_or('\u{fffd}'))
             .collect();
-        if word.parse::<f64>().is_ok() {
+        word.parse::<f64>().is_err()
+    }
+
+    /// Monaco `SuggestModel._doTriggerQuickSuggest`.
+    fn quick_suggest(&mut self, cx: &mut Context<Self>) {
+        if self.suggest.session.is_some() || self.suggest.task.is_some() {
             return;
         }
+        let quick = self.options.quick_suggestions;
+        if quick == crate::options::QuickSuggestions::OFF {
+            return;
+        }
+        if !self.should_auto_trigger(cx) {
+            return;
+        }
+        let head = self.cursors.primary().position;
         let offset = self.snapshot.point_utf16_to_offset(head).saturating_sub(1);
         let allowed = match self.model().read(cx).token_type_at(offset) {
             StandardTokenType::Comment => quick.comments,
@@ -588,25 +869,75 @@ impl CodeEditor {
         }
     }
 
-    /// Re-filters after typing or deleting, or closes when the cursor left
-    /// the word.
+    /// Monaco `SuggestModel._onNewContext`, after typing or deleting:
+    /// closes, re-requests, or re-filters the open session.
     pub(crate) fn refilter_suggest(&mut self, cx: &mut Context<Self>) {
         let head = self.cursors.primary().position;
         let Some(session) = &self.suggest.session else {
             return;
         };
-        if head.row != session.position.row || head.column < session.word_start {
+        let line = self.snapshot.line(head.row);
+        if head.row != session.position.row
+            || leading_whitespace(&line) != session.leading_whitespace
+        {
+            // Another line (Enter), or the word was outdented.
             self.hide_suggest(cx);
             return;
         }
-        if session.incomplete {
-            let auto = session.auto;
+        let auto = session.auto;
+        let word_start = self.word_start_at(head);
+        let on_word = word_start < head.column;
+        if head.column < session.position.column {
+            // Moved left of the request: ask again while on a word.
+            if on_word {
+                self.request_suggestions(CompletionTrigger::Invoke, auto, cx);
+            } else {
+                self.hide_suggest(cx);
+            }
+            return;
+        }
+        if on_word && word_start > session.word_start {
+            // Started a new word: ask again if it would have opened by
+            // itself.
+            if self.should_auto_trigger(cx) {
+                self.request_suggestions(CompletionTrigger::Invoke, auto, cx);
+            }
+            return;
+        }
+        if head.column > session.position.column && session.incomplete && on_word {
             self.request_suggestions(CompletionTrigger::Incomplete, auto, cx);
             return;
         }
-        let line_context = self.line_context_at(head, session.position.column);
-        if let Some(session) = self.suggest.session.as_mut() {
-            session.model.set_line_context(line_context);
+        let request_column = session.position.column;
+        let line_context = self.line_context_at(head, request_column);
+        let Some(session) = self.suggest.session.as_mut() else {
+            return;
+        };
+        let old_context = session.model.line_context().clone();
+        session.model.set_line_context(line_context);
+        if head != session.position {
+            session.model.set_distances(Vec::new());
+        }
+        if session.model.filtered().is_empty() {
+            if self.should_auto_trigger(cx) && request_column < word_start {
+                // Heading into a new word.
+                self.request_suggestions(CompletionTrigger::Invoke, auto, cx);
+                return;
+            }
+            if auto {
+                self.hide_suggest(cx);
+                return;
+            }
+            // Requested explicitly: keep showing the last matches (frozen),
+            // unless the cursor left the word.
+            let Some(session) = self.suggest.session.as_mut() else {
+                return;
+            };
+            session.model.set_line_context(old_context);
+            if session.model.filtered().is_empty() || !on_word {
+                self.hide_suggest(cx);
+                return;
+            }
         }
         self.select_by_memory(cx);
         self.refresh_suggest_widget(cx);
@@ -740,6 +1071,7 @@ impl CodeEditor {
             return false;
         };
         let item: CompletionItem = session.model.items()[scored.index].clone();
+        let selected = session.selected;
         let provider = session.item_providers[scored.index].map(|p| session.providers[p].clone());
         let resolved = session.resolved[scored.index];
         // Monaco memorizes before inserting.
@@ -764,7 +1096,26 @@ impl CodeEditor {
         self.hide_suggest(cx);
         let replace = (self.options.suggest.insert_mode == SuggestInsertMode::Replace) ^ toggle;
         let version = self.model().read(cx).buffer().version();
-        self.insert_completion(&item, &session, replace, cx);
+        let context = session.insert_context();
+        self.insert_completion(&item, context, replace, cx);
+        // Monaco keeps the other items for Tab and Shift+Tab.
+        if self.options.tab_completion == crate::options::TabCompletion::On {
+            let items: Vec<CompletionItem> = session
+                .model
+                .filtered()
+                .iter()
+                .map(|scored| session.model.items()[scored.index].clone())
+                .collect();
+            let alternatives = Alternatives {
+                items,
+                index: selected,
+                context,
+                replace,
+            };
+            if alternatives.move_index(true) != selected {
+                self.suggest.alternatives = Some(alternatives);
+            }
+        }
         // Additional edits an unresolved item may still have arrive later.
         if item.additional_text_edits.is_empty()
             && !resolved
@@ -832,7 +1183,7 @@ impl CodeEditor {
     fn insert_completion(
         &mut self,
         item: &CompletionItem,
-        session: &Session,
+        session: InsertContext,
         replace: bool,
         cx: &mut Context<Self>,
     ) {

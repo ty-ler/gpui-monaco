@@ -77,6 +77,8 @@ impl CompletionProvider for MyCompletions {
 
 Completion is triggered by Ctrl+Space, by trigger characters (`suggest_on_trigger_characters`), or automatically after `quick_suggestions_delay` while typing a word. `quick_suggestions` turns that on separately for code, comments and strings. When no provider has items, the editor suggests words from open documents (`word_based_suggestions`).
 
+With `tab_completion: On`, Tab at the end of a word inserts the best suggestion without showing the list. Tab and Shift+Tab then swap in the next or previous one, until the cursor moves.
+
 Which item is selected first follows `suggest_selection`: the best match, or the item you picked last (for the same prefix).
 
 Filtering and ranking use Monaco's `fuzzyScore`, and the editor re-filters as you type without asking the provider again. If you return `incomplete: true`, the editor asks again as the word grows.

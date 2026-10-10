@@ -16,6 +16,7 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **F12:** go to definition
 - **Ctrl+Space:** trigger completion
 - **Shift+Enter / Shift+Tab** in the suggest widget: accept in the other insert mode
+- **Tab / Shift+Tab** with `tab_completion: On`: insert the best completion, then cycle through the others
 
 All of these bindings live in the `CodeEditor` key context (`actions::KEY_CONTEXT`). Single-line editors also set `single_line`.
 
