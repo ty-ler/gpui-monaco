@@ -32,9 +32,12 @@ pub(crate) struct LineLayout {
     /// UTF-16 columns of the model row on this view line.
     pub columns: Range<u32>,
     pub is_last_segment: bool,
+    /// Columns past `columns.end` that aren't drawn (Monaco
+    /// `stopRenderingLineAfter`); they map to its end.
+    pub overflow: u32,
     /// X of the first column (continuation indent).
     pub indent_x: Pixels,
-    pub shaped: ShapedLine,
+    pub shaped: ChunkedLine,
     /// Byte index into the shaped text for each column in `columns`,
     /// inclusive of the end.
     pub display_index: Vec<usize>,
@@ -74,7 +77,7 @@ impl LineLayout {
         point.row == self.row
             && self.columns.start <= point.column
             && (point.column < self.columns.end
-                || (point.column == self.columns.end && self.is_last_segment))
+                || (point.column <= self.columns.end + self.overflow && self.is_last_segment))
     }
 }
 
@@ -221,6 +224,134 @@ fn control_picture(ch: char) -> Option<char> {
     }
 }
 
+/// Long lines are shaped in chunks this big (bytes, ending at a
+/// delimiter): an edit reshapes its chunk, and GPUI's layout cache keeps
+/// the others.
+const SHAPE_CHUNK: usize = 512;
+
+/// A line's text shaped in chunks laid end to end (one chunk for most
+/// lines), with [`ShapedLine`]'s API in display byte offsets.
+#[derive(Clone)]
+pub(crate) struct ChunkedLine {
+    /// (display byte offset, x, shaped text) of each chunk.
+    chunks: Vec<(usize, Pixels, ShapedLine)>,
+    /// The total width.
+    pub width: Pixels,
+}
+
+impl ChunkedLine {
+    fn shape(display: String, font_size: Pixels, runs: &[TextRun], window: &mut Window) -> Self {
+        let mut bounds = vec![0];
+        if display.len() > SHAPE_CHUNK * 2 {
+            // Content-defined: the first delimiter after `SHAPE_CHUNK`
+            // bytes, so chunks after an edit come back unchanged.
+            let bytes = display.as_bytes();
+            let mut at = SHAPE_CHUNK;
+            while at < display.len() {
+                let end = bytes[at..]
+                    .iter()
+                    .position(|b| matches!(b, b' ' | b';' | b',' | b'}' | b')' | b'>'))
+                    .map_or(display.len(), |i| at + i + 1);
+                if end >= display.len() {
+                    break;
+                }
+                bounds.push(end);
+                at = end + SHAPE_CHUNK;
+            }
+        }
+        bounds.push(display.len());
+        let mut chunks = Vec::with_capacity(bounds.len() - 1);
+        let mut x = px(0.);
+        let mut run_ix = 0;
+        let mut run_offset = 0;
+        for pair in bounds.windows(2) {
+            let (start, end) = (pair[0], pair[1]);
+            // The runs covering `start..end`.
+            let mut chunk_runs = Vec::new();
+            let mut pos = start;
+            while pos < end && run_ix < runs.len() {
+                let run = &runs[run_ix];
+                let run_end = run_offset + run.len;
+                let take = run_end.min(end) - pos;
+                chunk_runs.push(TextRun {
+                    len: take,
+                    ..run.clone()
+                });
+                pos += take;
+                if run_end <= end {
+                    run_offset = run_end;
+                    run_ix += 1;
+                }
+            }
+            let shaped = window.text_system().shape_line(
+                SharedString::from(display[start..end].to_string()),
+                font_size,
+                &chunk_runs,
+                None,
+            );
+            let width = shaped.width;
+            chunks.push((start, x, shaped));
+            x += width;
+        }
+        Self { chunks, width: x }
+    }
+
+    /// The chunk holding display byte `index`.
+    fn chunk(&self, index: usize) -> usize {
+        self.chunks
+            .partition_point(|(start, _, _)| *start <= index)
+            .saturating_sub(1)
+    }
+
+    pub fn x_for_index(&self, index: usize) -> Pixels {
+        let (start, x, shaped) = &self.chunks[self.chunk(index)];
+        *x + shaped.x_for_index(index - start)
+    }
+
+    pub fn closest_index_for_x(&self, x: Pixels) -> usize {
+        let ix = self
+            .chunks
+            .partition_point(|(_, chunk_x, _)| *chunk_x <= x)
+            .saturating_sub(1);
+        let (start, chunk_x, shaped) = &self.chunks[ix];
+        start + shaped.closest_index_for_x(x - *chunk_x)
+    }
+
+    pub fn paint(
+        &self,
+        origin: gpui::Point<Pixels>,
+        line_height: Pixels,
+        align: TextAlign,
+        align_width: Option<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> anyhow::Result<()> {
+        for (_, x, shaped) in &self.chunks {
+            shaped.paint(
+                point(origin.x + *x, origin.y),
+                line_height,
+                align,
+                align_width,
+                window,
+                cx,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Monaco `renderOverflowingCharCount`.
+fn overflow_size(units: u32) -> String {
+    let n = units as f64;
+    if units < 1024 {
+        format!("{units} chars")
+    } else if units < 1024 * 1024 {
+        format!("{:.1} KB", n / 1024.)
+    } else {
+        format!("{:.1} MB", n / 1024. / 1024.)
+    }
+}
+
 /// What to shape for one view line.
 pub(crate) struct RowSegment {
     pub view_line: u32,
@@ -229,6 +360,8 @@ pub(crate) struct RowSegment {
     pub start_visible_column: u32,
     pub indent: u32,
     pub is_last_segment: bool,
+    /// UTF-16 units past Monaco's `stopRenderingLineAfter`, not shown.
+    pub overflow: u32,
 }
 
 /// Injected text being laid out: display range, style, background and
@@ -420,17 +553,13 @@ pub(crate) fn layout_segment(
         }
         runs.push(text_run);
     }
-    let shaped = window.text_system().shape_line(
-        SharedString::from(display),
-        metrics.font_size,
-        &runs,
-        None,
-    );
+    let shaped = ChunkedLine::shape(display, metrics.font_size, &runs, window);
     LineLayout {
         view_line: segment.view_line,
         row: segment.row,
         columns: segment.columns.clone(),
         is_last_segment: segment.is_last_segment,
+        overflow: segment.overflow,
         indent_x: metrics.space_width * segment.indent as f32,
         shaped,
         display_index,
@@ -452,6 +581,7 @@ pub(crate) fn row_segment(view_lines: &ViewLines, view_line: u32) -> RowSegment 
         start_visible_column: info.start_visible_column,
         indent: info.indent,
         is_last_segment: info.is_last,
+        overflow: 0,
     }
 }
 
@@ -471,6 +601,8 @@ pub(crate) struct HighlightSource {
     syntax: crate::model::SyntaxSnapshot,
     /// Edits since `syntax` was parsed, if any.
     patch: Option<text::Patch>,
+    /// Monaco `maxTokenizationLineLength`.
+    max_line_length: u32,
 }
 
 impl HighlightSource {
@@ -479,7 +611,11 @@ impl HighlightSource {
         let buffer = model.buffer();
         let patch = (syntax.text.version() != buffer.version())
             .then(|| buffer.edits_since(syntax.text.version()));
-        Some(Self { syntax, patch })
+        Some(Self {
+            syntax,
+            patch,
+            max_line_length: model.options().max_tokenization_line_length,
+        })
     }
 
     /// Styled spans in `range` of the current text, with the parsed
@@ -491,27 +627,37 @@ impl HighlightSource {
     ) -> Vec<(Range<usize>, TokenStyle)> {
         let syntax = &self.syntax;
         let style = |span: &syntax::HighlightSpan| theme.style_for(span.highlight);
-        let Some(patch) = &self.patch else {
-            return syntax
-                .highlighter
-                .highlights(&syntax.state, syntax.text.rope(), range)
-                .iter()
-                .map(|span| (span.range.clone(), style(span)))
-                .collect();
+        let old_range = match &self.patch {
+            None => range,
+            Some(patch) => {
+                let inverse = patch.invert();
+                inverse.transform_offset(range.start, text::Bias::Left)
+                    ..inverse.transform_offset(range.end, text::Bias::Right)
+            }
         };
-        let inverse = patch.invert();
-        let old_range = inverse.transform_offset(range.start, text::Bias::Left)
-            ..inverse.transform_offset(range.end, text::Bias::Right);
-        syntax
-            .highlighter
-            .highlights(&syntax.state, syntax.text.rope(), old_range)
-            .iter()
-            .filter_map(|span| {
-                let start = patch.transform_offset(span.range.start, text::Bias::Right);
-                let end = patch.transform_offset(span.range.end, text::Bias::Left);
-                (start < end).then(|| (start..end, style(span)))
-            })
-            .collect()
+        let mut result = Vec::new();
+        // Monaco `maxTokenizationLineLength`: long lines stay plain, and
+        // aren't even queried.
+        for old_range in
+            crate::model::tokenized_ranges(syntax.text.rope(), old_range, self.max_line_length)
+        {
+            for span in syntax
+                .highlighter
+                .highlights(&syntax.state, syntax.text.rope(), old_range)
+            {
+                let range = match &self.patch {
+                    None => span.range.clone(),
+                    Some(patch) => {
+                        patch.transform_offset(span.range.start, text::Bias::Right)
+                            ..patch.transform_offset(span.range.end, text::Bias::Left)
+                    }
+                };
+                if range.start < range.end {
+                    result.push((range, style(&span)));
+                }
+            }
+        }
+        result
     }
 }
 
@@ -1141,24 +1287,43 @@ fn prepaint_editor(
             .filter(|(k, _)| *k == key)
             .map(|(_, rows)| rows.clone());
         let rows = cached.unwrap_or_else(|| {
-            editor
+            // Re-based on this version, so resolving stays cheap as edits
+            // pile up.
+            let offsets: Vec<Option<usize>> = editor
                 .widgets
                 .zones
                 .iter_mut()
-                .map(|zone| match &mut zone.anchor {
-                    None => Some(-1),
-                    Some(anchor) => {
-                        // Re-based on this version, so resolving stays cheap
-                        // as edits pile up.
-                        *anchor = buffer.refresh(anchor);
-                        let row = buffer.offset_to_point(buffer.resolve(anchor)).row;
-                        if view_lines.is_row_hidden(row) {
-                            return None;
-                        }
-                        let first = view_lines.first_view_line_of_row(row);
-                        let next = view_lines.first_view_line_of_row(row + 1);
-                        Some(next.max(first + 1) as i64 - 1)
+                .map(|zone| {
+                    let anchor = zone.anchor.as_mut()?;
+                    *anchor = buffer.refresh(anchor);
+                    Some(buffer.resolve(anchor))
+                })
+                .collect();
+            // Rows in one forward pass over the text (there can be tens of
+            // thousands of zones, e.g. code lenses).
+            let mut order: Vec<usize> = (0..offsets.len())
+                .filter(|&i| offsets[i].is_some())
+                .collect();
+            order.sort_by_key(|&i| offsets[i]);
+            let sorted: Vec<usize> = order.iter().filter_map(|&i| offsets[i]).collect();
+            let mut zone_rows = vec![0u32; offsets.len()];
+            for (&i, point) in order.iter().zip(buffer.rope().offsets_to_points(&sorted)) {
+                zone_rows[i] = point.row;
+            }
+            offsets
+                .iter()
+                .zip(zone_rows)
+                .map(|(offset, row)| {
+                    // No anchor: above the first line.
+                    if offset.is_none() {
+                        return Some(-1);
                     }
+                    if view_lines.is_row_hidden(row) {
+                        return None;
+                    }
+                    let first = view_lines.first_view_line_of_row(row);
+                    let next = view_lines.first_view_line_of_row(row + 1);
+                    Some(next.max(first + 1) as i64 - 1)
                 })
                 .collect()
         });
@@ -1203,7 +1368,11 @@ fn prepaint_editor(
         text_width
     } else {
         metrics.em_width
-            * (snapshot.summary().longest_row_chars as f32
+            * (snapshot
+                .summary()
+                .longest_row_chars
+                // Lines stop rendering after the limit.
+                .min(options.stop_rendering_line_after.unwrap_or(u32::MAX)) as f32
                 + options.scroll_beyond_last_column as f32)
     };
     let show_hbar = content_width > text_width;
@@ -1294,7 +1463,19 @@ fn prepaint_editor(
     let first_line = zones.line_at(scroll_top, line_height, view_line_count);
     let last_line = zones.line_at(scroll_top + viewport_height, line_height, view_line_count);
     let segments: Vec<RowSegment> = (first_line..=last_line)
-        .map(|view_line| row_segment(&view_lines, view_line))
+        .map(|view_line| {
+            let mut segment = row_segment(&view_lines, view_line);
+            // Monaco `stopRenderingLineAfter`: very long lines are cut off.
+            if let Some(limit) = options.stop_rendering_line_after {
+                let len = segment.columns.end - segment.columns.start;
+                if len > limit {
+                    segment.overflow = len - limit;
+                    segment.columns.end = segment.columns.start + limit;
+                    segment.is_last_segment = true;
+                }
+            }
+            segment
+        })
         .collect();
 
     let marked = editor.marked_range_points();
@@ -1346,7 +1527,22 @@ fn prepaint_editor(
     editor.refresh_unicode_highlights(cx);
     editor.refresh_post_edit(cx);
     editor.resolve_visible_code_lenses(cx);
-    let bracket_colors = editor.bracket_colors_in(visible_start..visible_end, cx);
+    // Only the drawn parts of lines (long ones stop rendering early).
+    let mut rendered: Vec<Range<usize>> = Vec::new();
+    for segment in &segments {
+        let start =
+            snapshot.point_utf16_to_offset(PointUtf16::new(segment.row, segment.columns.start));
+        let end = snapshot.point_utf16_to_offset(PointUtf16::new(segment.row, segment.columns.end));
+        match rendered.last_mut() {
+            // Adjacent segments, or the next row after a line break.
+            Some(last) if start <= last.end + 2 => last.end = last.end.max(end),
+            _ => rendered.push(start..end),
+        }
+    }
+    let bracket_colors: Vec<_> = rendered
+        .iter()
+        .flat_map(|range| editor.bracket_colors_in(range.clone(), cx))
+        .collect();
     let mut highlight_ix = 0;
     let mut lines = Vec::with_capacity(segments.len());
     for segment in &segments {
@@ -1433,6 +1629,23 @@ fn prepaint_editor(
             }
         }
         injections.sort_by_key(|(column, _, _)| *column);
+        // Monaco's `mtkoverflow`: "Show more (1.9 MB)" where it stops.
+        if segment.overflow > 0 {
+            injections.retain(|(column, _, _)| *column <= segment.columns.end);
+            injections.push((
+                segment.columns.end,
+                true,
+                crate::decorations::InjectedText {
+                    content: format!("Show more ({})", overflow_size(segment.overflow)).into(),
+                    style: TokenStyle {
+                        foreground: Some(colors.button_foreground),
+                        ..Default::default()
+                    },
+                    background: Some(colors.button_background),
+                    swatch: None,
+                },
+            ));
+        }
         let row_highlights = if decoration_styles.is_empty() {
             row_highlights
         } else {
@@ -3462,17 +3675,25 @@ fn overlay_styles(
     bounds.sort_unstable();
     bounds.dedup();
     let mut result: Vec<(Range<usize>, TokenStyle)> = Vec::new();
+    // A sweep: each list's first span that hasn't ended yet, so long lines
+    // with many spans stay linear.
+    let (mut base_ix, mut top_ix) = (0, 0);
+    let covering = |spans: &[(Range<usize>, TokenStyle)], ix: &mut usize, start, end| {
+        while *ix < spans.len() && spans[*ix].0.end <= start {
+            *ix += 1;
+        }
+        // The last of the spans from here that cover it (later ones win).
+        spans[*ix..]
+            .iter()
+            .take_while(|(range, _)| range.start <= start)
+            .filter(|(range, _)| end <= range.end)
+            .last()
+            .map(|(_, style)| *style)
+    };
     for pair in bounds.windows(2) {
         let (start, end) = (pair[0], pair[1]);
-        let covering = |spans: &[(Range<usize>, TokenStyle)]| {
-            spans
-                .iter()
-                .rev()
-                .find(|(range, _)| range.start <= start && end <= range.end)
-                .map(|(_, style)| *style)
-        };
-        let base_style = covering(base);
-        let top_style = covering(top);
+        let base_style = covering(base, &mut base_ix, start, end);
+        let top_style = covering(top, &mut top_ix, start, end);
         let style = match (base_style, top_style) {
             (None, None) => continue,
             (Some(style), None) | (None, Some(style)) => style,

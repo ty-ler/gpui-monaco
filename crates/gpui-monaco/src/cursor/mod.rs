@@ -267,6 +267,18 @@ pub trait CursorModel {
     fn line_content(&self, row: u32) -> String;
     /// UTF-16 length of `row`, i.e. the largest valid column on it.
     fn line_max_column(&self, row: u32) -> u32;
+    /// Whether `column` falls between the halves of a surrogate pair.
+    fn splits_surrogate_pair(&self, row: u32, column: u32) -> bool {
+        strings::splits_surrogate_pair(&self.line_content(row), column)
+    }
+    /// The UTF-16 `columns` of `row` (clamped to it). Long lines are
+    /// sliced without copying the whole line.
+    fn line_slice(&self, row: u32, columns: Range<u32>) -> String {
+        let units = strings::utf16(&self.line_content(row));
+        let end = (columns.end as usize).min(units.len());
+        let start = (columns.start as usize).min(end);
+        String::from_utf16_lossy(&units[start..end])
+    }
 }
 
 impl CursorModel for text::Rope {
@@ -281,6 +293,19 @@ impl CursorModel for text::Rope {
     fn line_max_column(&self, row: u32) -> u32 {
         self.line_len_utf16(row)
     }
+    fn line_slice(&self, row: u32, columns: Range<u32>) -> String {
+        let rope = self;
+        let max = rope.line_len_utf16(row);
+        let (start, end) = (columns.start.min(max), columns.end.min(max));
+        let start = rope.point_utf16_to_offset(Position::new(row, start.min(end)));
+        let end = rope.point_utf16_to_offset(Position::new(row, end));
+        rope.slice(start..end).to_string()
+    }
+    fn splits_surrogate_pair(&self, row: u32, column: u32) -> bool {
+        // A column inside a pair doesn't survive clipping.
+        let point = Position::new(row, column);
+        self.clip_point_utf16(point, text::Bias::Left) != point
+    }
 }
 
 impl CursorModel for text::Buffer {
@@ -294,6 +319,19 @@ impl CursorModel for text::Buffer {
 
     fn line_max_column(&self, row: u32) -> u32 {
         self.rope().line_len_utf16(row)
+    }
+    fn line_slice(&self, row: u32, columns: Range<u32>) -> String {
+        let rope = self.rope();
+        let max = rope.line_len_utf16(row);
+        let (start, end) = (columns.start.min(max), columns.end.min(max));
+        let start = rope.point_utf16_to_offset(Position::new(row, start.min(end)));
+        let end = rope.point_utf16_to_offset(Position::new(row, end));
+        rope.slice(start..end).to_string()
+    }
+    fn splits_surrogate_pair(&self, row: u32, column: u32) -> bool {
+        // A column inside a pair doesn't survive clipping.
+        let point = Position::new(row, column);
+        self.rope().clip_point_utf16(point, text::Bias::Left) != point
     }
 }
 
@@ -387,7 +425,7 @@ pub(crate) fn validate_position(model: &dyn CursorModel, p: Position) -> Positio
     if p.column >= max {
         return Position::new(p.row, max);
     }
-    if p.column > 0 && strings::splits_surrogate_pair(&model.line_content(p.row), p.column) {
+    if p.column > 0 && model.splits_surrogate_pair(p.row, p.column) {
         return Position::new(p.row, p.column - 1);
     }
     p

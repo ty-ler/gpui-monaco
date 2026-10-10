@@ -118,6 +118,10 @@ pub struct ModelOptions {
     pub indent_size: u32,
     /// Monaco `insertSpaces`: indent with spaces instead of tabs (default `true`).
     pub insert_spaces: bool,
+    /// Monaco `maxTokenizationLineLength`: longer lines aren't highlighted,
+    /// and count as plain text for brackets and indentation (default
+    /// 20 000 UTF-16 units).
+    pub max_tokenization_line_length: u32,
 }
 
 impl Default for ModelOptions {
@@ -126,6 +130,7 @@ impl Default for ModelOptions {
             tab_size: 4,
             indent_size: 4,
             insert_spaces: true,
+            max_tokenization_line_length: 20_000,
         }
     }
 }
@@ -363,6 +368,15 @@ impl TextModel {
     /// state mapped through any pending edits.
     pub fn highlight_name_at(&self, offset: usize) -> Option<Arc<str>> {
         let syntax = self.syntax_snapshot()?;
+        // Monaco leaves long lines untokenized.
+        let row = self
+            .buffer
+            .rope()
+            .offset_to_point(offset.min(self.buffer.len()))
+            .row;
+        if self.buffer.rope().line_len_utf16(row) >= self.options.max_tokenization_line_length {
+            return None;
+        }
         let offset = if syntax.text.version() == self.buffer.version() {
             offset
         } else {
@@ -396,25 +410,33 @@ impl TextModel {
             }
             None => range,
         };
-        syntax
-            .highlighter
-            .highlights(&syntax.state, syntax.text.rope(), old_range)
-            .into_iter()
-            .filter(|span| {
-                let name = span.highlight.name();
-                name.starts_with("comment")
-                    || name.starts_with("string")
-                    || name.starts_with("character")
-            })
-            .filter_map(|span| match &patch {
-                Some(patch) => {
-                    let start = patch.transform_offset(span.range.start, text::Bias::Right);
-                    let end = patch.transform_offset(span.range.end, text::Bias::Left);
-                    (start < end).then_some(start..end)
-                }
-                None => Some(span.range),
-            })
-            .collect()
+        // Long lines are untokenized (Monaco `maxTokenizationLineLength`).
+        tokenized_ranges(
+            syntax.text.rope(),
+            old_range,
+            self.options.max_tokenization_line_length,
+        )
+        .into_iter()
+        .flat_map(|old_range| {
+            syntax
+                .highlighter
+                .highlights(&syntax.state, syntax.text.rope(), old_range)
+        })
+        .filter(|span| {
+            let name = span.highlight.name();
+            name.starts_with("comment")
+                || name.starts_with("string")
+                || name.starts_with("character")
+        })
+        .filter_map(|span| match &patch {
+            Some(patch) => {
+                let start = patch.transform_offset(span.range.start, text::Bias::Right);
+                let end = patch.transform_offset(span.range.end, text::Bias::Left);
+                (start < end).then_some(start..end)
+            }
+            None => Some(span.range),
+        })
+        .collect()
     }
 
     /// The language at byte `offset` (Monaco `getLanguageIdAtPosition`): the
@@ -733,4 +755,37 @@ impl TextModel {
 /// Wraps a value as undo metadata.
 pub(crate) fn metadata<T: std::any::Any + Send + Sync>(value: T) -> TransactionMetadata {
     Arc::new(value)
+}
+
+/// The parts of `range` on lines shorter than `max_line_length`.
+pub(crate) fn tokenized_ranges(
+    rope: &Rope,
+    range: Range<usize>,
+    max_line_length: u32,
+) -> Vec<Range<usize>> {
+    let range = range.start.min(rope.len())..range.end.min(rope.len());
+    let (first, last) = (
+        rope.offset_to_point(range.start).row,
+        rope.offset_to_point(range.end).row,
+    );
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for row in first..=last {
+        if rope.line_len_utf16(row) >= max_line_length {
+            continue;
+        }
+        let start = rope
+            .point_to_offset(text::Point::new(row, 0))
+            .max(range.start);
+        let end = if row + 1 < rope.line_count() {
+            rope.point_to_offset(text::Point::new(row + 1, 0))
+        } else {
+            rope.len()
+        }
+        .min(range.end);
+        match ranges.last_mut() {
+            Some(last) if last.end == start => last.end = end,
+            _ => ranges.push(start..end),
+        }
+    }
+    ranges
 }

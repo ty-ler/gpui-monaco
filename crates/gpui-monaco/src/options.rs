@@ -1354,6 +1354,10 @@ pub struct EditorOptions {
     /// A one-line input (like Monaco's find input): Enter, Tab and Escape
     /// propagate to the parent and pasted line breaks become spaces.
     pub single_line: bool,
+    /// Monaco `stopRenderingLineAfter`: only this many UTF-16 units of a
+    /// line are drawn, then a "Show more" chip (default 10 000; `None`
+    /// draws everything).
+    pub stop_rendering_line_after: Option<u32>,
 }
 
 impl Default for EditorOptions {
@@ -1432,6 +1436,7 @@ impl Default for EditorOptions {
             folding_imports_by_default: false,
             show_folding_controls: ShowFoldingControls::Mouseover,
             single_line: false,
+            stop_rendering_line_after: Some(10_000),
             auto_closing_brackets: Default::default(),
             auto_closing_quotes: Default::default(),
             auto_closing_comments: Default::default(),

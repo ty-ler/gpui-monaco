@@ -197,6 +197,10 @@ pub struct CodeEditor {
     fold_task: Option<Task<()>>,
     /// The version `fold_task` was started for.
     fold_requested: Option<text::Version>,
+    /// A background fold computation is running (dropping `fold_task`
+    /// wouldn't stop it), and whether a newer version waits for it.
+    fold_computing: bool,
+    fold_rerun: bool,
     pub(crate) autoscroll_requested: bool,
     /// The autoscroll comes from a mouse gesture (Monaco ignores
     /// `cursorSurroundingLines` for those by default).
@@ -369,6 +373,8 @@ impl CodeEditor {
             minimap_drag: None,
             fold_task: None,
             fold_requested: None,
+            fold_computing: false,
+            fold_rerun: false,
             _blink_task: None,
             _subscriptions: subscriptions,
         }
@@ -431,6 +437,8 @@ impl CodeEditor {
         self.folds = FoldState::default();
         self.fold_task = None;
         self.fold_requested = None;
+        self.fold_computing = false;
+        self.fold_rerun = false;
         self.model = model;
         self.cursors = CursorCollection::new(SingleCursorState::from_position(PointUtf16::zero()));
         self.cursors
@@ -1350,7 +1358,10 @@ impl CodeEditor {
                     let offset = rope.point_utf16_to_offset(PointUtf16::new(p.row, p.column - 1));
                     model.token_type_at(offset)
                 };
-                let context = cursor::LanguageContext::new(&language.config, &token_type);
+                let context = cursor::LanguageContext::new(&language.config, &token_type)
+                    .with_max_tokenization_line_length(
+                        model.options().max_tokenization_line_length,
+                    );
                 f(&config, rope, &self.cursors, Some(&context))
             }
             None => f(&config, rope, &self.cursors, None),
@@ -1830,6 +1841,11 @@ impl CodeEditor {
     /// Once there are ranges, recomputing waits for a pause in edits, like
     /// Monaco's update scheduler.
     fn compute_fold_ranges(&mut self, cx: &mut Context<Self>) {
+        // One computation at a time: huge documents take seconds each.
+        if self.fold_computing {
+            self.fold_rerun = true;
+            return;
+        }
         let delay = if self.folds.ranges_version().is_some() {
             FOLD_UPDATE_DELAY
         } else {
@@ -1839,7 +1855,10 @@ impl CodeEditor {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
             }
-            let Ok(inputs) = this.update(cx, |this, cx| this.fold_inputs(cx)) else {
+            let Ok(inputs) = this.update(cx, |this, cx| {
+                this.fold_computing = true;
+                this.fold_inputs(cx)
+            }) else {
                 return;
             };
             let (snapshot, version, providers, compute) = inputs;
@@ -1892,6 +1911,11 @@ impl CodeEditor {
                     this.folds.toggle(&buffer, imports);
                 }
                 this.fold_task = None;
+                this.fold_computing = false;
+                // A newer version is asked for again on the next frame.
+                if std::mem::take(&mut this.fold_rerun) {
+                    this.fold_requested = None;
+                }
                 cx.notify();
             })
             .ok();

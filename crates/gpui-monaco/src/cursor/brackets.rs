@@ -209,9 +209,15 @@ pub(crate) fn find_matching_bracket_up(
     let mut row = position.row as i64;
     while row >= 0 && scanned <= MAX_SCAN_UNITS * 50 {
         let r = row as u32;
-        let line = line_units(model, r);
-        scanned += line.len() + 1;
-        let found = brackets.in_line(&line, &|i| skip(Position::new(r, i)));
+        let window = if r == position.row {
+            position.column.saturating_sub(WINDOW)..position.column
+        } else {
+            tail(model, r)
+        };
+        let found = found_in(model, brackets, r, window.clone(), skip);
+        scanned += (window.end.min(model.line_max_column(r))
+            - window.start.min(model.line_max_column(r))) as usize
+            + 1;
         for f in found.iter().rev() {
             if r == position.row && f.start + f.len > position.column {
                 continue;
@@ -233,6 +239,36 @@ pub(crate) fn find_matching_bracket_up(
     None
 }
 
+/// The brackets of `row` in `columns` (clamped to it), with columns in the
+/// row: long lines are only scanned near where they matter.
+fn found_in(
+    model: &dyn CursorModel,
+    brackets: &Brackets,
+    row: u32,
+    columns: Range<u32>,
+    skip: &dyn Fn(Position) -> bool,
+) -> Vec<Found> {
+    let max = model.line_max_column(row);
+    let from = columns.start.min(max);
+    let units: Vec<u16> = model
+        .line_slice(row, from..columns.end.min(max))
+        .encode_utf16()
+        .collect();
+    let mut found = brackets.in_line(&units, &|i| skip(Position::new(row, from + i)));
+    for f in &mut found {
+        f.start += from;
+    }
+    found
+}
+
+/// The last `MAX_SCAN_UNITS` columns of `row`.
+fn tail(model: &dyn CursorModel, row: u32) -> Range<u32> {
+    model.line_max_column(row).saturating_sub(WINDOW)..u32::MAX
+}
+
+/// How far from a position long lines are scanned.
+const WINDOW: u32 = MAX_SCAN_UNITS as u32;
+
 /// Scans from (after) `from` for the bracket closing `pair`, counting
 /// nested brackets of the same pair.
 fn find_close_forward(
@@ -247,8 +283,14 @@ fn find_close_forward(
     let open = brackets.open_text(pair);
     let close = brackets.close_text(pair);
     for row in from.row..model.line_count() {
-        let line = line_units(model, row);
-        for f in brackets.in_line(&line, &|i| skip(Position::new(row, i))) {
+        let window = if row == from.row {
+            from.column..from.column.saturating_add(WINDOW)
+        } else {
+            0..WINDOW
+        };
+        let len = window.end.min(model.line_max_column(row))
+            - window.start.min(model.line_max_column(row));
+        for f in found_in(model, brackets, row, window, skip) {
             if row == from.row && f.start < from.column {
                 continue;
             }
@@ -266,7 +308,7 @@ fn find_close_forward(
                 depth -= 1;
             }
         }
-        scanned += line.len() + 1;
+        scanned += len as usize + 1;
         if scanned > MAX_SCAN_UNITS {
             break;
         }
@@ -287,12 +329,14 @@ fn find_open_backward(
     let open = brackets.open_text(pair);
     let close = brackets.close_text(pair);
     for row in (0..=to.row).rev() {
-        let line = line_units(model, row);
-        for f in brackets
-            .in_line(&line, &|i| skip(Position::new(row, i)))
-            .iter()
-            .rev()
-        {
+        let window = if row == to.row {
+            to.column.saturating_sub(WINDOW)..to.column
+        } else {
+            tail(model, row)
+        };
+        let len = window.end.min(model.line_max_column(row))
+            - window.start.min(model.line_max_column(row));
+        for f in found_in(model, brackets, row, window, skip).iter().rev() {
             if row == to.row && f.start + f.len > to.column {
                 continue;
             }
@@ -310,7 +354,7 @@ fn find_open_backward(
                 depth -= 1;
             }
         }
-        scanned += line.len() + 1;
+        scanned += len as usize + 1;
         if scanned > MAX_SCAN_UNITS {
             break;
         }
@@ -339,8 +383,13 @@ pub fn matching_bracket(
         return None;
     }
     let brackets = Brackets::configured_or_default(config);
-    let line = line_units(model, position.row);
-    let found = brackets.in_line(&line, &|i| is_skippable(Position::new(position.row, i)));
+    let found = found_in(
+        model,
+        &brackets,
+        position.row,
+        position.column.saturating_sub(WINDOW)..position.column.saturating_add(WINDOW),
+        is_skippable,
+    );
 
     let after = found.iter().find(|f| f.start == position.column);
     let before = found.iter().find(|f| f.start + f.len == position.column);
@@ -364,9 +413,14 @@ pub fn matching_bracket(
     let mut pending_closes: Vec<usize> = Vec::new();
     let mut scanned = 0usize;
     for row in (0..=position.row).rev() {
-        let line = line_units(model, row);
-        for f in brackets
-            .in_line(&line, &|i| is_skippable(Position::new(row, i)))
+        let window = if row == position.row {
+            position.column.saturating_sub(WINDOW)..position.column
+        } else {
+            tail(model, row)
+        };
+        let len = window.end.min(model.line_max_column(row))
+            - window.start.min(model.line_max_column(row));
+        for f in found_in(model, &brackets, row, window, is_skippable)
             .iter()
             .rev()
         {
@@ -386,7 +440,7 @@ pub fn matching_bracket(
                 return Some((open, close));
             }
         }
-        scanned += line.len() + 1;
+        scanned += len as usize + 1;
         if scanned > MAX_SCAN_UNITS {
             break;
         }

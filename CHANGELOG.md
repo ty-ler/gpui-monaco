@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Huge files and long lines (#59):**
+  - **Options:** `EditorOptions::stop_rendering_line_after` (Monaco `stopRenderingLineAfter`, default 10 000) ends very long lines with a "Show more (1.9 MB)" chip. `ModelOptions::max_tokenization_line_length` (Monaco `maxTokenizationLineLength`, default 20 000) leaves longer lines unhighlighted.
+  - **Chunked shaping:** long lines are shaped in content-defined chunks, so typing reshapes one chunk.
+  - **Background work:** fold ranges and bracket pairs compute one pass at a time instead of piling up a pass per keystroke.
+  - **Faster lookups:** view zone rows come from one forward pass. `Rope::offset_to_point` no longer walks characters, and `Rope::offsets_to_points` converts sorted offsets in one pass. Cursor validation and bracket matching no longer copy whole long lines; `CursorModel::line_slice` slices the rope.
+  - **Results:** a 2MB minified line no longer hangs (11ms per keystroke), and a 1M-line file types in about 2ms per keystroke.
 - **Migration notes (#60):** the book's new "Migrating from Monaco" page maps Monaco's editor, model, event, provider and option APIs to gpui-monaco's.
 - **Colorize and tokenize without an editor (#108):** `gpui_monaco::colorize` ports Monaco's `colorize`, `colorizeElement` and `tokenize`.
   - **`tokenize(text, language, registry)`:** each line's tokens, with UTF-16 offsets and Monaco token types such as `keyword.rust`.

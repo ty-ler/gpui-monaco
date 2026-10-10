@@ -1,6 +1,25 @@
 # Performance
 
-gpui-monaco targets large files: 100k+ lines and multi-megabyte files should stay smooth. Huge single lines, such as minified files, are post-MVP ([#59](https://github.com/ty-ler/gpui-monaco/issues/59)).
+gpui-monaco targets large files: 100k+ lines and multi-megabyte files should stay smooth, and so should huge files and minified ones ([#59](https://github.com/ty-ler/gpui-monaco/issues/59)).
+
+## Huge files and long lines
+
+Measured in the playground's perf mode with `PLAYGROUND_PLAIN=1` (release, Apple M5 Pro):
+
+| File | First frame | Keystroke, median / p95 | Page Down, median / p95 |
+|---|---|---|---|
+| 1M lines, 35MB of Rust | 340ms | 2.2 / 4.5ms | 2.0 / 4.3ms |
+| One 2MB line of minified JS | 270ms | 11 / 16ms | 8.3 / 9.3ms |
+
+What keeps them responsive:
+
+- **Monaco's long-line limits:**
+  - `stop_rendering_line_after` (10 000 by default) draws a "Show more" chip instead of the rest of the line.
+  - `max_tokenization_line_length` (20 000, a `ModelOptions` field) leaves longer lines unhighlighted, so they count as plain text for brackets and indentation.
+- **Chunked shaping:** long lines are shaped in chunks ending at delimiters, so an edit reshapes one chunk and GPUI's layout cache keeps the rest.
+- **Windowed scans:** bracket matching only scans 20 000 units each way on a line. Cursor validation and the line queries cursor commands use slice the rope instead of copying whole lines.
+- **One computation at a time:** fold ranges and bracket pairs run one whole-document pass at a time and catch up when it finishes, instead of piling up a pass per keystroke.
+- **Batched lookups:** view zones (e.g. thousands of code lenses) find their rows in one forward pass over the text, and `Rope::offset_to_point` counts line breaks per chunk instead of walking characters.
 
 ## Budget
 
