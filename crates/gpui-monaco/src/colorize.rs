@@ -194,6 +194,31 @@ pub fn colorize_highlights(
         .collect()
 }
 
+/// `line` with tabs as spaces up to the next multiple of `tab_size`, and
+/// each byte offset of `line` (and its end) mapped into the result.
+pub(crate) fn expand_tabs(line: &str, tab_size: usize) -> (String, Vec<usize>) {
+    let mut expanded = String::with_capacity(line.len());
+    let mut map = Vec::with_capacity(line.len() + 1);
+    let mut column = 0;
+    for (i, ch) in line.char_indices() {
+        while map.len() <= i {
+            map.push(expanded.len());
+        }
+        if ch == '\t' {
+            let spaces = tab_size - column % tab_size;
+            expanded.extend(std::iter::repeat_n(' ', spaces));
+            column += spaces;
+        } else {
+            expanded.push(ch);
+            column += 1;
+        }
+    }
+    while map.len() <= line.len() {
+        map.push(expanded.len());
+    }
+    (expanded, map)
+}
+
 /// Monaco `colorize`: `text` highlighted line by line, with tabs expanded
 /// (Monaco renders HTML; this returns the lines for any element).
 pub fn colorize(
@@ -210,26 +235,7 @@ pub fn colorize(
     let mut line_start = 0;
     for line in split_lines(text) {
         let line_end = line_start + line.len();
-        // Byte offsets in the line → in the expanded text.
-        let mut expanded = String::with_capacity(line.len());
-        let mut map = Vec::with_capacity(line.len() + 1);
-        let mut column = 0;
-        for (i, ch) in line.char_indices() {
-            while map.len() <= i {
-                map.push(expanded.len());
-            }
-            if ch == '\t' {
-                let spaces = tab_size - column % tab_size;
-                expanded.extend(std::iter::repeat_n(' ', spaces));
-                column += spaces;
-            } else {
-                expanded.push(ch);
-                column += 1;
-            }
-        }
-        while map.len() <= line.len() {
-            map.push(expanded.len());
-        }
+        let (expanded, map) = expand_tabs(line, tab_size);
         let line_highlights = highlights
             .iter()
             .filter(|(range, _)| range.start < line_end && range.end > line_start)

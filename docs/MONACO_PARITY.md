@@ -128,7 +128,7 @@ Issues are linked by number.
 
 | Feature | Status | Issue |
 |---|---|---|
-| Diff editor, multi-diff editor | 🟡 side-by-side `DiffEditor`; inline view, unchanged regions, revert and the accessible diff viewer to come | #52 |
+| Diff editor, multi-diff editor | 🟡 `DiffEditor`, side by side or inline; unchanged regions, revert and the accessible diff viewer to come | #52 |
 | Screen readers, tab focus mode, ARIA options | ✅ | #53 |
 | wasm / web | 🟡 compiles for `wasm32-unknown-unknown`; browser runner pending | #58 |
 | crates.io release | ❌ | #57 |
