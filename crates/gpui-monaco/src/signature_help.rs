@@ -165,15 +165,9 @@ impl CodeEditor {
         let is_retrigger = providers
             .iter()
             .any(|p| p.retrigger_characters().contains(&ch));
-        if is_trigger {
+        // Other typing re-queries as a content change via the cursor change.
+        if is_trigger || (is_retrigger && self.is_signature_help_visible()) {
             self.trigger_signature_help(SignatureHelpTrigger::TriggerCharacter(ch), cx);
-        } else if self.is_signature_help_visible() {
-            let trigger = if is_retrigger {
-                SignatureHelpTrigger::TriggerCharacter(ch)
-            } else {
-                SignatureHelpTrigger::ContentChange
-            };
-            self.trigger_signature_help(trigger, cx);
         }
     }
 

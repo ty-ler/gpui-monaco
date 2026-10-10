@@ -369,7 +369,8 @@ pub enum SignatureHelpTrigger {
     Invoke,
     /// Typing a trigger character, or a retrigger character while it's shown.
     TriggerCharacter(char),
-    /// Typing or moving while signature help is shown.
+    /// The text or cursor changed while signature help is shown (clicking
+    /// elsewhere closes it instead).
     ContentChange,
 }
 

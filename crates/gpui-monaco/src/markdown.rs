@@ -5,8 +5,8 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, FontStyle, FontWeight, HighlightStyle, Hsla, IntoElement, ParentElement, Pixels,
-    SharedString, Styled, StyledText, UnderlineStyle, div, px,
+    AnyElement, FontStyle, FontWeight, HighlightStyle, Hsla, InteractiveText, IntoElement,
+    ParentElement, Pixels, SharedString, Styled, StyledText, UnderlineStyle, div, px,
 };
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use syntax::{LanguageRegistry, SyntaxSnapshot};
@@ -23,7 +23,7 @@ pub struct MarkdownStyle {
     pub link: Hsla,
     /// Background of inline code spans and fenced code blocks.
     pub code_background: Hsla,
-    /// Font family of fenced code blocks.
+    /// Font family of code spans and fenced code blocks.
     pub code_font: SharedString,
     /// Base text size; headings are scaled up from it.
     pub font_size: Pixels,
@@ -33,6 +33,10 @@ pub struct MarkdownStyle {
 struct Inline {
     text: String,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
+    /// Code spans, which use the code font.
+    code: Vec<Range<usize>>,
+    /// Link text and its destination.
+    links: Vec<(Range<usize>, SharedString)>,
 }
 
 struct Renderer<'a> {
@@ -43,7 +47,8 @@ struct Renderer<'a> {
     inline: Inline,
     bold: usize,
     italic: usize,
-    link: usize,
+    /// Destinations of the links being rendered (innermost last).
+    links: Vec<SharedString>,
     heading: Option<u8>,
     list_stack: Vec<Option<u64>>,
     code_block: Option<(Option<String>, String)>,
@@ -61,7 +66,11 @@ impl Renderer<'_> {
         if self.italic > 0 {
             highlight.font_style = Some(FontStyle::Italic);
         }
-        if self.link > 0 {
+        if let Some(url) = self.links.last() {
+            match self.inline.links.last_mut() {
+                Some((range, last)) if range.end == start && last == url => range.end = end,
+                _ => self.inline.links.push((start..end, url.clone())),
+            }
             highlight.color = Some(self.style.link);
             highlight.underline = Some(UnderlineStyle {
                 thickness: px(1.),
@@ -71,6 +80,7 @@ impl Renderer<'_> {
         }
         if code {
             highlight.background_color = Some(self.style.code_background);
+            self.inline.code.push(start..end);
         }
         if highlight != HighlightStyle::default() {
             self.inline.highlights.push((start..end, highlight));
@@ -88,9 +98,29 @@ impl Renderer<'_> {
             Some(_) => self.style.font_size * 1.1,
             None => self.style.font_size,
         };
-        let text = StyledText::new(inline.text).with_highlights(inline.highlights);
+        let code_font = self.style.code_font.clone();
+        let text = StyledText::new(inline.text)
+            .with_highlights(inline.highlights)
+            .with_font_family_overrides(
+                inline
+                    .code
+                    .into_iter()
+                    .map(|range| (range, code_font.clone())),
+            );
+        let block = if inline.links.is_empty() {
+            text.into_any_element()
+        } else {
+            let (ranges, urls): (Vec<_>, Vec<_>) = inline.links.into_iter().unzip();
+            InteractiveText::new(("markdown-links", self.blocks.len()), text)
+                .on_click(ranges, move |ix, _, cx| {
+                    if is_openable(&urls[ix]) {
+                        cx.open_url(&urls[ix]);
+                    }
+                })
+                .into_any_element()
+        };
         self.blocks
-            .push(div().text_size(size).child(text).into_any_element());
+            .push(div().text_size(size).child(block).into_any_element());
     }
 
     fn code_block(&mut self, language: Option<String>, code: String) {
@@ -130,7 +160,18 @@ impl Renderer<'_> {
     }
 }
 
-/// Renders `source` as a column of blocks.
+/// Whether a link may be opened: Monaco's markdown renderer opens web and
+/// mail links by default (`command:` and other schemes need a trusted
+/// string and an opener, which hosts don't have here).
+fn is_openable(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    ["http://", "https://", "mailto:"]
+        .iter()
+        .any(|scheme| lower.starts_with(scheme))
+}
+
+/// Renders `source` as a column of blocks. Links to web and mail addresses
+/// open on click.
 pub fn render_markdown(
     source: &str,
     style: &MarkdownStyle,
@@ -145,7 +186,7 @@ pub fn render_markdown(
         inline: Inline::default(),
         bold: 0,
         italic: 0,
-        link: 0,
+        links: Vec::new(),
         heading: None,
         list_stack: Vec::new(),
         code_block: None,
@@ -185,8 +226,12 @@ pub fn render_markdown(
             Event::End(TagEnd::Strong) => renderer.bold = renderer.bold.saturating_sub(1),
             Event::Start(Tag::Emphasis) => renderer.italic += 1,
             Event::End(TagEnd::Emphasis) => renderer.italic = renderer.italic.saturating_sub(1),
-            Event::Start(Tag::Link { .. }) => renderer.link += 1,
-            Event::End(TagEnd::Link) => renderer.link = renderer.link.saturating_sub(1),
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                renderer.links.push(dest_url.to_string().into());
+            }
+            Event::End(TagEnd::Link) => {
+                renderer.links.pop();
+            }
             Event::Start(Tag::CodeBlock(kind)) => {
                 renderer.flush_inline();
                 let language = match kind {
@@ -245,4 +290,19 @@ pub fn render_markdown(
         .text_color(style.foreground)
         .children(renderer.blocks)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openable_links() {
+        assert!(is_openable("https://example.com"));
+        assert!(is_openable("HTTP://example.com"));
+        assert!(is_openable("mailto:someone@example.com"));
+        assert!(!is_openable("command:editor.action.format"));
+        assert!(!is_openable("javascript:alert(1)"));
+        assert!(!is_openable("file:///etc/passwd"));
+    }
 }

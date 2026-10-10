@@ -48,10 +48,39 @@ pub enum ContentWidgetPreference {
 pub struct ContentWidget {
     /// The anchor (0-based row, UTF-16 column); it follows edits.
     pub position: PointUtf16,
-    /// Tried in order; the first that fits in the editor is used.
+    /// Tried in order; the first that fits in the editor is used, else the
+    /// first. An empty list hides the widget, as in Monaco.
     pub preference: Vec<ContentWidgetPreference>,
     /// The view to render, laid out at its min-content size.
     pub view: AnyView,
+}
+
+/// The top of a content widget `height` tall anchored to the line at
+/// `line_top`, within the editor's `viewport` (Monaco
+/// `ContentWidget._prepareRenderWidget`): the first preference that fits,
+/// else the first preference. `Exact` always fits; an empty list hides the
+/// widget.
+pub(crate) fn place_content_widget(
+    preference: &[ContentWidgetPreference],
+    line_top: Pixels,
+    line_height: Pixels,
+    height: Pixels,
+    viewport: std::ops::Range<Pixels>,
+) -> Option<Pixels> {
+    let above = line_top - height;
+    let below = line_top + line_height;
+    let fits_above = above >= viewport.start;
+    let fits_below = below + height <= viewport.end;
+    let fitting = preference.iter().find(|p| match p {
+        ContentWidgetPreference::Above => fits_above,
+        ContentWidgetPreference::Below => fits_below,
+        ContentWidgetPreference::Exact => true,
+    });
+    Some(match fitting.or(preference.first())? {
+        ContentWidgetPreference::Above => above,
+        ContentWidgetPreference::Below => below,
+        ContentWidgetPreference::Exact => line_top,
+    })
 }
 
 /// Where an overlay widget is pinned (Monaco
@@ -123,5 +152,33 @@ impl Widgets {
         self.content.retain(|w| w.id != id);
         self.overlays.retain(|w| w.id != id);
         before != self.zones.len() + self.content.len() + self.overlays.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ContentWidgetPreference::{Above, Below, Exact};
+    use super::*;
+    use gpui::px;
+
+    fn place(preference: &[ContentWidgetPreference], line_top: f32) -> Option<Pixels> {
+        // 20px lines, a 50px widget, a 0..200 viewport.
+        place_content_widget(preference, px(line_top), px(20.), px(50.), px(0.)..px(200.))
+    }
+
+    #[test]
+    fn content_widget_placement() {
+        // The first preference that fits.
+        assert_eq!(place(&[Above, Below], 100.), Some(px(50.)));
+        assert_eq!(place(&[Above, Below], 10.), Some(px(30.)));
+        assert_eq!(place(&[Below, Above], 160.), Some(px(110.)));
+        // Nothing fits: the first preference, not always below.
+        let tight =
+            place_content_widget(&[Above, Below], px(30.), px(20.), px(50.), px(0.)..px(90.));
+        assert_eq!(tight, Some(px(-20.)));
+        // Exact always fits.
+        assert_eq!(place(&[Exact, Below], 0.), Some(px(0.)));
+        // No preference: hidden.
+        assert_eq!(place(&[], 100.), None);
     }
 }

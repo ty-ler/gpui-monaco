@@ -29,7 +29,7 @@ Zones follow edits: the line is tracked with an anchor. A zone is hidden while i
 
 ## Content widgets
 
-A content widget (Monaco `IContentWidget`) is anchored to a text position and scrolls with the text, like a tooltip or an inline action button. `preference` is tried in order until the widget fits:
+A content widget (Monaco `IContentWidget`) is anchored to a text position and scrolls with the text, like a tooltip or an inline action button. `preference` is tried in order until the widget fits. If none fits, the widget uses the first, and an empty list hides it:
 
 ```rust,ignore
 use gpui_monaco::{ContentWidget, ContentWidgetPreference};

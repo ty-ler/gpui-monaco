@@ -45,6 +45,39 @@ pub struct LanguageConfiguration {
 }
 
 impl LanguageConfiguration {
+    /// Every regex in the configuration, named by its JSON key (e.g. to
+    /// report ones that didn't compile, see [`Pattern::error`]).
+    pub fn patterns(&self) -> Vec<(&'static str, &Pattern)> {
+        let mut patterns = Vec::new();
+        if let Some(word) = &self.word_pattern {
+            patterns.push(("wordPattern", word));
+        }
+        if let Some(rules) = &self.indentation_rules {
+            patterns.push(("increaseIndentPattern", &rules.increase_indent_pattern));
+            patterns.push(("decreaseIndentPattern", &rules.decrease_indent_pattern));
+            if let Some(p) = &rules.indent_next_line_pattern {
+                patterns.push(("indentNextLinePattern", p));
+            }
+            if let Some(p) = &rules.un_indented_line_pattern {
+                patterns.push(("unIndentedLinePattern", p));
+            }
+        }
+        for rule in &self.on_enter_rules {
+            patterns.push(("onEnterRules.beforeText", &rule.before_text));
+            if let Some(p) = &rule.after_text {
+                patterns.push(("onEnterRules.afterText", p));
+            }
+            if let Some(p) = &rule.previous_line_text {
+                patterns.push(("onEnterRules.previousLineText", p));
+            }
+        }
+        if let Some(markers) = self.folding.as_ref().and_then(|f| f.markers.as_ref()) {
+            patterns.push(("folding.markers.start", &markers.start));
+            patterns.push(("folding.markers.end", &markers.end));
+        }
+        patterns
+    }
+
     /// Parses a `language-configuration.json` (JSON with comments and trailing
     /// commas tolerated).
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
@@ -189,32 +222,54 @@ impl<'de> Deserialize<'de> for SurroundingPair {
 pub struct Pattern {
     /// The pattern source, as written in JavaScript.
     pub source: String,
-    /// JavaScript regex flags. `i`, `m` and `s` are honored; others are ignored.
+    /// JavaScript regex flags. `i`, `m` and `s` are honored; `g`, `y`, `d`,
+    /// `u` and `v` change nothing here (matching is always Unicode-aware).
     pub flags: String,
     regex: Option<fancy_regex::Regex>,
+    error: Option<String>,
 }
 
 impl Pattern {
-    /// Compiles a JavaScript pattern with `flags`. A pattern that fails to compile
-    /// is kept, but [`Pattern::regex`] returns `None` and it never matches.
+    /// Compiles a JavaScript pattern with `flags`. A pattern that fails to
+    /// compile is kept, but [`Pattern::regex`] returns `None`, it never
+    /// matches, and [`Pattern::error`] says why.
     pub fn new(source: impl Into<String>, flags: impl Into<String>) -> Self {
         let source = source.into();
         let flags = flags.into();
         let mut prefix = String::new();
-        if flags.contains('i') {
-            prefix.push_str("(?i)");
+        let mut error = None;
+        for flag in flags.chars() {
+            match flag {
+                'i' | 'm' | 's' => {
+                    prefix.push_str("(?");
+                    prefix.push(flag);
+                    prefix.push(')');
+                }
+                'g' | 'y' | 'd' | 'u' | 'v' => {}
+                _ => error = Some(format!("unsupported regex flag `{flag}`")),
+            }
         }
-        if flags.contains('m') {
-            prefix.push_str("(?m)");
-        }
-        if flags.contains('s') {
-            prefix.push_str("(?s)");
-        }
-        let regex = fancy_regex::Regex::new(&format!("{prefix}{source}")).ok();
+        let regex = match error {
+            Some(_) => None,
+            None => match fancy_regex::Regex::new(&format!("{prefix}{}", translate_js(&source))) {
+                Ok(regex) => Some(regex),
+                Err(err) => {
+                    let mut message = err.to_string();
+                    let mut source = std::error::Error::source(&err);
+                    while let Some(inner) = source {
+                        message = format!("{message}: {inner}");
+                        source = inner.source();
+                    }
+                    error = Some(message);
+                    None
+                }
+            },
+        };
         Self {
             source,
             flags,
             regex,
+            error,
         }
     }
 
@@ -224,6 +279,11 @@ impl Pattern {
         self.regex.as_ref()
     }
 
+    /// Why the pattern didn't compile, if it didn't.
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
     /// Whether the pattern matches somewhere in `text`. Patterns that failed to
     /// compile never match.
     pub fn is_match(&self, text: &str) -> bool {
@@ -231,6 +291,73 @@ impl Pattern {
             .as_ref()
             .is_some_and(|regex| regex.is_match(text).unwrap_or(false))
     }
+}
+
+/// Whether `chars` continues with a class escape such as `\d`.
+fn is_class_escape_next(chars: &std::iter::Peekable<std::str::Chars>) -> bool {
+    let mut ahead = chars.clone();
+    ahead.next() == Some('\\') && matches!(ahead.next(), Some('w' | 'W' | 'd' | 'D' | 's' | 'S'))
+}
+
+/// Rewrites JavaScript regex syntax that means something else (or nothing)
+/// to `fancy-regex`: `[^]` (any character) and `[]` (nothing), and, inside
+/// character classes, a literal `[`, hyphens next to class escapes, and the
+/// `&&`, `--` and `~~` that Rust reads as set operations.
+fn translate_js(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    let mut in_class = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                out.push(c);
+                let Some(next) = chars.next() else {
+                    continue;
+                };
+                out.push(next);
+                // JavaScript (Annex B) reads `-` after a class escape, as in
+                // `[\w-.]`, as a literal hyphen; Rust rejects the range.
+                let class_escape = matches!(next, 'w' | 'W' | 'd' | 'D' | 's' | 'S');
+                if in_class && class_escape && chars.peek() == Some(&'-') {
+                    chars.next();
+                    out.push_str(r"\-");
+                }
+            }
+            '-' if in_class && is_class_escape_next(&chars) => out.push_str(r"\-"),
+            '[' if !in_class => {
+                let rest: String = chars.clone().take(2).collect();
+                if rest.starts_with("^]") {
+                    out.push_str(r"[\s\S]");
+                    chars.nth(1);
+                } else if rest.starts_with(']') {
+                    out.push_str(r"[^\s\S]");
+                    chars.next();
+                } else {
+                    in_class = true;
+                    out.push(c);
+                    // Keep a negation; `[^]` and `[]` were handled above.
+                    if chars.peek() == Some(&'^') {
+                        out.push('^');
+                        chars.next();
+                    }
+                }
+            }
+            '[' => out.push_str(r"\["),
+            ']' if in_class => {
+                in_class = false;
+                out.push(c);
+            }
+            '&' | '-' | '~' if in_class && chars.peek() == Some(&c) => {
+                chars.next();
+                out.push('\\');
+                out.push(c);
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 impl<'de> Deserialize<'de> for Pattern {
@@ -415,6 +542,32 @@ pub fn strip_jsonc(json: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn javascript_patterns() {
+        // Flags: `g` and `u` change nothing; unknown ones are reported.
+        let p = Pattern::new("ab", "giu");
+        assert!(p.is_match("xABy") && p.error().is_none());
+        assert!(Pattern::new("ab", "q").error().is_some());
+        // `[^]` is any character, `[]` none.
+        assert!(Pattern::new("a[^]b", "").is_match("a\nb"));
+        assert!(!Pattern::new("a[]", "").is_match("a"));
+        // A literal `[` and `&&` inside a class.
+        let class = Pattern::new("^[[&&]+$", "");
+        assert!(class.is_match("[&&[") && class.error().is_none());
+        assert!(!class.is_match("a"));
+        // A hyphen next to a class escape is literal (Annex B).
+        let word = Pattern::new(r"^[_:\w-.\d]+$", "");
+        assert!(word.error().is_none(), "{:?}", word.error());
+        assert!(word.is_match("a-b.c_1") && !word.is_match("a b"));
+        assert!(Pattern::new(r"^[\w-?]+$", "").is_match("a-?"));
+        assert!(Pattern::new(r"^[.-\d]+$", "").is_match("-.1"));
+        // Escapes are kept as written.
+        assert!(Pattern::new(r"\[\]", "").is_match("[]"));
+        // Unsupported syntax reports why.
+        let bad = Pattern::new("(?<=a+", "");
+        assert!(bad.regex().is_none() && bad.error().is_some());
+    }
 
     #[test]
     fn parses_vscode_style_configuration() {

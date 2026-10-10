@@ -112,3 +112,29 @@ fn configurations_load() {
             .all(|rule| rule.before_text.regex().is_some())
     );
 }
+
+#[test]
+fn configuration_patterns_compile() {
+    let registry = gpui_monaco_languages::registry();
+    let mut failures = Vec::new();
+    for language in registry.languages() {
+        for (key, pattern) in language.config.patterns() {
+            if let Some(error) = pattern.error() {
+                failures.push(format!("{} {key}: {error}", language.id));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn html_enter_between_tags_matches() {
+    // These patterns use `[\w-.]`, which only compiles with the JavaScript
+    // translation.
+    let registry = gpui_monaco_languages::registry();
+    let html = registry.language_for_id("html").unwrap();
+    let rule = &html.config.on_enter_rules[0];
+    assert!(rule.before_text.is_match("<my-tag class=\"a\">"));
+    assert!(!rule.before_text.is_match("<br>"));
+    assert!(rule.after_text.as_ref().unwrap().is_match("</my-tag>"));
+}

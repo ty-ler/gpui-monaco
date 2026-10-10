@@ -387,13 +387,25 @@ impl CodeEditor {
         point(self.scroll_left, self.scroll_top)
     }
 
-    /// Scrolls to `position` in pixels (negative values clamp to 0) and emits
+    /// Scrolls to `position` in pixels, clamped to the scroll range, and emits
     /// [`CodeEditorEvent::ScrollChanged`].
     pub fn set_scroll_position(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        self.scroll_left = position.x.max(px(0.));
-        self.scroll_top = position.y.max(px(0.));
+        self.scroll_left = position.x;
+        self.scroll_top = position.y;
+        self.clamp_scroll();
         cx.emit(CodeEditorEvent::ScrollChanged);
         cx.notify();
+    }
+
+    /// Keeps the scroll position within the last frame's scroll range (the
+    /// next frame clamps again for the current one).
+    fn clamp_scroll(&mut self) {
+        let max = self
+            .layout
+            .as_ref()
+            .map_or(point(Pixels::MAX, Pixels::MAX), |layout| layout.max_scroll);
+        self.scroll_top = self.scroll_top.clamp(px(0.), max.y);
+        self.scroll_left = self.scroll_left.clamp(px(0.), max.x);
     }
 
     /// Inserts a host view between lines (Monaco `changeViewZones` +
@@ -579,6 +591,7 @@ impl CodeEditor {
                 if latest.version() == self.snapshot.version() {
                     return;
                 }
+                self.folds.prune(model.read(cx).buffer());
                 let restored = own
                     && matches!(kind, EditKind::Undo | EditKind::Redo)
                     && restore
@@ -641,6 +654,7 @@ impl CodeEditor {
             }
             TextModelEvent::OptionsChanged
             | TextModelEvent::LanguageChanged
+            | TextModelEvent::LineEndingChanged
             | TextModelEvent::DecorationsChanged => cx.notify(),
         }
     }
@@ -737,6 +751,13 @@ impl CodeEditor {
         self.update_occurrence_highlights(cx);
         self.restart_blink(cx);
         let change = std::mem::take(&mut self.next_selection_change);
+        // Monaco `ParameterHintsModel.onCursorChange`: clicks close parameter
+        // hints, other changes re-query them while they're shown.
+        if change.source == CursorChangeSource::Mouse {
+            self.hide_signature_help(cx);
+        } else if self.is_signature_help_visible() {
+            self.trigger_signature_help(crate::providers::SignatureHelpTrigger::ContentChange, cx);
+        }
         cx.emit(CodeEditorEvent::SelectionsChanged(change));
         cx.notify();
     }
@@ -1972,8 +1993,9 @@ impl CodeEditor {
             delta = point(delta.y, px(0.));
         }
         self.hide_hover(cx);
-        self.scroll_top = (self.scroll_top - delta.y).max(px(0.));
-        self.scroll_left = (self.scroll_left - delta.x).max(px(0.));
+        self.scroll_top -= delta.y;
+        self.scroll_left -= delta.x;
+        self.clamp_scroll();
         cx.emit(CodeEditorEvent::ScrollChanged);
         cx.notify();
         cx.stop_propagation();

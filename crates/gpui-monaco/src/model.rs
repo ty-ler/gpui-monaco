@@ -118,6 +118,8 @@ pub enum TextModelEvent {
     OptionsChanged,
     /// [`TextModel::set_language`] changed the language id.
     LanguageChanged,
+    /// [`TextModel::set_line_ending`] changed the line ending.
+    LineEndingChanged,
     /// New highlights are available (background parse finished).
     SyntaxUpdated,
     /// Decorations were added, removed or changed.
@@ -209,10 +211,15 @@ impl TextModel {
         self.buffer.line_ending()
     }
 
-    /// Sets the line ending [`TextModel::text`] joins lines with. The stored text
-    /// is unchanged, so this isn't an undoable edit and no event is emitted.
-    pub fn set_line_ending(&mut self, line_ending: LineEnding) {
-        self.buffer.set_line_ending(line_ending);
+    /// Sets the line ending [`TextModel::text`] joins lines with (Monaco
+    /// `setEOL`), emitting [`TextModelEvent::LineEndingChanged`] if it
+    /// differs. The stored text is unchanged, so this isn't an undoable edit.
+    pub fn set_line_ending(&mut self, line_ending: LineEnding, cx: &mut Context<Self>) {
+        if self.buffer.line_ending() != line_ending {
+            self.buffer.set_line_ending(line_ending);
+            cx.emit(TextModelEvent::LineEndingChanged);
+            cx.notify();
+        }
     }
 
     /// The model options.
