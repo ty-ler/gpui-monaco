@@ -61,8 +61,15 @@ gpui::actions!(
         /// Opens the accessible diff viewer at its previous change (Monaco
         /// `editor.action.accessibleDiffViewer.prev`, Shift+F7).
         AccessibleDiffViewerPrev,
+        /// Stops comparing a moved block (Monaco
+        /// `diffEditor.exitCompareMove`, Escape).
+        ExitCompareMove,
     ]
 );
+
+/// Set on the diff editor's key context while comparing a moved block
+/// (Monaco `comparingMovedCode`).
+const COMPARING_MOVED_CODE: &str = "comparingMovedCode";
 
 /// The key context of the diff editor.
 pub const DIFF_EDITOR_KEY_CONTEXT: &str = "DiffEditor";
@@ -75,7 +82,12 @@ pub(crate) fn bind_keys(cx: &mut App) {
         "{DIFF_EDITOR_KEY_CONTEXT} > {}",
         crate::actions::KEY_CONTEXT
     );
+    let comparing = format!(
+        "{DIFF_EDITOR_KEY_CONTEXT} && {COMPARING_MOVED_CODE} > {}",
+        crate::actions::KEY_CONTEXT
+    );
     cx.bind_keys([
+        gpui::KeyBinding::new("escape", ExitCompareMove, Some(comparing.as_str())),
         gpui::KeyBinding::new("f7", AccessibleDiffViewerNext, Some(in_editor.as_str())),
         gpui::KeyBinding::new(
             "shift-f7",
@@ -469,19 +481,49 @@ fn move_line_tracks(lines: &[(Pixels, Pixels)]) -> Vec<usize> {
 struct MoveCaption {
     text: SharedString,
     color: Hsla,
+    checked_background: Hsla,
+    /// Its block is being compared (the toggle is checked).
+    comparing: bool,
+    diff: WeakEntity<DiffEditor>,
+    index: usize,
 }
 
 impl Render for MoveCaption {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let (diff, index, comparing) = (self.diff.clone(), self.index, self.comparing);
         div()
             .size_full()
             .flex()
             .justify_end()
             .items_center()
+            .gap(px(8.))
             .pr(px(20.))
             .text_size(px(12.))
             .text_color(self.color.opacity(0.8))
             .child(self.text.clone())
+            .child(
+                div()
+                    .id("compare-move")
+                    .px_1()
+                    .rounded(px(3.))
+                    .cursor_pointer()
+                    .when(comparing, |button| button.bg(self.checked_background))
+                    .hover(|style| style.bg(self.checked_background))
+                    .role(gpui::Role::Button)
+                    .aria_label(SharedString::from("Compare"))
+                    .on_click(move |_, _, cx| {
+                        if let Some(diff) = diff.upgrade() {
+                            // Deferred: the caption is rendered by an editor
+                            // the toggle changes.
+                            cx.defer(move |cx| {
+                                diff.update(cx, |diff, cx| {
+                                    diff.set_move_to_compare((!comparing).then_some(index), cx)
+                                })
+                            });
+                        }
+                    })
+                    .child("Compare"),
+            )
     }
 }
 
@@ -903,6 +945,9 @@ pub struct DiffEditor {
     move_decorations: (Vec<DecorationId>, Vec<DecorationId>),
     /// The moved block at the last moved cursor (Monaco `activeMovedText`).
     active_move: Option<usize>,
+    /// The moved block compared with its original (Monaco
+    /// `movedTextToCompare`).
+    move_to_compare: Option<usize>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -954,6 +999,7 @@ impl DiffEditor {
             accessible_viewer: None,
             move_decorations: Default::default(),
             active_move: None,
+            move_to_compare: None,
             focus_handle: cx.focus_handle(),
             _subscriptions: Vec::new(),
         };
@@ -1184,6 +1230,7 @@ impl DiffEditor {
         self.unchanged.clear();
         self.apply_unchanged(cx);
         self.active_move = None;
+        self.move_to_compare = None;
         self.apply_move_decorations(cx);
     }
 
@@ -1193,8 +1240,20 @@ impl DiffEditor {
             return;
         };
         let colors = self.modified.read(cx).colors().clone();
+        // A new diff may not have the compared move any more.
+        if self
+            .move_to_compare
+            .is_some_and(|ix| ix >= self.shown_moves(&diff).len())
+        {
+            self.move_to_compare = None;
+        }
+        // Comparing a moved block shows only its changes.
+        let compared = self
+            .move_to_compare
+            .and_then(|ix| self.shown_moves(&diff).get(ix));
+        let changes = compared.map_or(&diff.changes, |m| &m.changes);
         let (original_decorations, modified_decorations) =
-            diff_decorations(&diff.changes, &self.options, &colors);
+            diff_decorations(changes, &self.options, &colors);
         let original_id = self.original.entity_id();
         let modified_id = self.modified.entity_id();
         let (old_original, old_modified) = std::mem::take(&mut self.decorations);
@@ -1317,7 +1376,7 @@ impl DiffEditor {
         }
         // Monaco `MovedBlockOverlayWidget`: "Code moved to line …" above
         // each moved block, on both sides.
-        for m in self.shown_moves(diff) {
+        for (move_index, m) in self.shown_moves(diff).iter().enumerate() {
             let mapping = m.line_range_mapping;
             let with_changes = if m.changes.is_empty() {
                 ""
@@ -1346,11 +1405,18 @@ impl DiffEditor {
                     &mut zones.1,
                 ),
             ];
+            let comparing = self.move_to_compare == Some(move_index);
             for (editor, after, text, ids) in captions {
                 let color = colors.foreground;
+                let checked_background = colors.widget_border;
+                let diff_editor = cx.entity().downgrade();
                 let view = cx.new(|_| MoveCaption {
                     text: text.into(),
                     color,
+                    checked_background,
+                    comparing,
+                    diff: diff_editor,
+                    index: move_index,
                 });
                 let id = editor.update(cx, |editor, cx| {
                     editor.add_view_zone(
@@ -2225,11 +2291,62 @@ impl DiffEditor {
         } else {
             (&self.modified, &self.original)
         };
-        let position = source.read(cx).scroll_position();
+        let mut position = source.read(cx).scroll_position();
+        // Comparing a moved block: its two places line up (Monaco's scroll
+        // offsets).
+        let delta = self.compare_scroll_delta(cx);
+        position.y += if from_original { delta } else { -delta };
         if target.read(cx).scroll_position() != position {
             target.update(cx, |editor, cx| editor.set_scroll_position(position, cx));
         }
         self.syncing_scroll = false;
+    }
+
+    /// How much lower the compared moved block is in the modified editor
+    /// than in the original (Monaco's `deltaOrigToMod`).
+    fn compare_scroll_delta(&self, cx: &App) -> Pixels {
+        let Some(m) = self
+            .move_to_compare
+            .and_then(|ix| self.diff.as_deref()?.moves.get(ix))
+        else {
+            return px(0.);
+        };
+        // From the top of the content, so it doesn't change as either side
+        // scrolls.
+        let top = |editor: &Entity<CodeEditor>, lines: LineRange| {
+            let editor = editor.read(cx);
+            let start = lines.to_rows().start;
+            let layout_scroll = editor.layout.as_ref()?.scroll_top;
+            editor
+                .rows_y_span(start..start + 1)
+                .map(|(top, _)| top + layout_scroll)
+        };
+        match (
+            top(&self.original, m.line_range_mapping.original),
+            top(&self.modified, m.line_range_mapping.modified),
+        ) {
+            (Some(original), Some(modified)) => modified - original,
+            _ => px(0.),
+        }
+    }
+
+    /// Compares moved block `index` with its original, or stops (Monaco
+    /// `movedTextToCompare`): only its changes show, and the sides scroll
+    /// with its two places lined up.
+    pub fn set_move_to_compare(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+        if self.move_to_compare == index {
+            return;
+        }
+        self.move_to_compare = index;
+        self.apply_diff(cx);
+        // Line up from the modified side.
+        self.sync_scroll(false, cx);
+        cx.notify();
+    }
+
+    /// The moved block being compared.
+    pub fn move_to_compare(&self) -> Option<usize> {
+        self.move_to_compare
     }
 
     /// Monaco `goToDiff`: moves the modified editor's cursor to the next or
@@ -2496,7 +2613,17 @@ impl Render for DiffEditor {
         let border = self.modified.read(cx).colors().widget_border;
         let resizable = self.options.enable_split_view_resizing;
         div()
-            .key_context(DIFF_EDITOR_KEY_CONTEXT)
+            .key_context({
+                let mut context = gpui::KeyContext::new_with_defaults();
+                context.add(DIFF_EDITOR_KEY_CONTEXT);
+                if self.move_to_compare.is_some() {
+                    context.add(COMPARING_MOVED_CODE);
+                }
+                context
+            })
+            .on_action(
+                cx.listener(|this, _: &ExitCompareMove, _, cx| this.set_move_to_compare(None, cx)),
+            )
             .track_focus(&self.focus_handle)
             .size_full()
             .relative()

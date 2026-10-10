@@ -5,6 +5,9 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Comparing moved blocks (#181):** each moved block's caption has a "Compare" toggle (Monaco `movedTextToCompare`). While it's on, only that block's own changes show, and the two sides scroll with its two places lined up.
+  - **Leaving:** Escape (`ExitCompareMove`, Monaco `diffEditor.exitCompareMove`) or the toggle turns it off.
+  - **API:** `set_move_to_compare` and `move_to_compare`.
 - **Multi-diff editor (#181):** `MultiDiffEditor` ports Monaco's `MultiDiffEditorWidget`: diffs of many files in one scrolling list.
   - **Layout:** each file is a `DiffEditor` under a sticky, collapsible header, sized to its content with unchanged regions hidden. Only the visible part of each is laid out.
   - **Files:** `MultiDiffDocument` covers created, deleted and renamed files.
