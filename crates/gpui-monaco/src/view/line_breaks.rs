@@ -195,6 +195,16 @@ fn wrapped_text_indent_length(
     length
 }
 
+/// Character widths for wrapping by measured text instead of monospace
+/// columns (Monaco `wrappingStrategy: advanced`).
+pub trait MeasureChar: Send + Sync {
+    /// `ch`'s width in columns: its advance over the typical half-width
+    /// character's.
+    fn columns(&self, ch: char) -> f32;
+    /// The widest printable ASCII character, in columns.
+    fn max_ascii_columns(&self) -> f32;
+}
+
 /// Computes wrap points for `line` at `wrapping_column` visible columns, or
 /// `None` if it fits (or wrapping is off: `wrapping_column == None`).
 pub fn compute_line_breaks(
@@ -205,11 +215,39 @@ pub fn compute_line_breaks(
     wrapping_indent: WrappingIndent,
     keep_all: bool,
 ) -> Option<LineBreakData> {
+    compute_measured_line_breaks(
+        classifier,
+        line,
+        tab_size,
+        wrapping_column,
+        wrapping_indent,
+        keep_all,
+        None,
+    )
+}
+
+/// [`compute_line_breaks`], with widths from `measure` when given: Monaco's
+/// monospace computer with the DOM computer's measured widths. Breaks
+/// still follow the classifier, and visible columns stay monospace.
+pub fn compute_measured_line_breaks(
+    classifier: &WrapClassifier,
+    line: &str,
+    tab_size: u32,
+    wrapping_column: Option<u32>,
+    wrapping_indent: WrappingIndent,
+    keep_all: bool,
+    measure: Option<&dyn MeasureChar>,
+) -> Option<LineBreakData> {
     let first_break_column = wrapping_column?;
     // Fast path for the common short line: without tabs or other control
     // characters (2 columns wide) no character is wider than its UTF-8
-    // length, so it fits.
-    if line.len() <= first_break_column as usize && line.bytes().all(|b| b >= b' ') {
+    // length (or the widest ASCII character), so it fits.
+    let widest = measure.map_or(1., |m| m.max_ascii_columns().max(1.));
+    if line.len() as f32 * widest <= first_break_column as f32
+        && line
+            .bytes()
+            .all(|b| (b' '..0x80).contains(&b) || (measure.is_none() && b >= b' '))
+    {
         return None;
     }
     let units: Vec<u16> = line.encode_utf16().collect();
@@ -219,22 +257,37 @@ pub fn compute_line_breaks(
     }
     let tab_size = tab_size.max(1);
     let indent = wrapped_text_indent_length(&units, tab_size, first_break_column, wrapping_indent);
-    let wrapped_line_break_width = first_break_column as i64 - indent as i64;
+    // Monaco's DOM computer indents by space widths.
+    let space = measure.map_or(1., |m| m.columns(' '));
+    // A character's width: its columns, or its measured width (tabs and
+    // control characters are spaces).
+    let measured = |code: u32, columns: u32| -> f32 {
+        match (measure, char::from_u32(code)) {
+            (Some(m), Some(ch)) if code >= 32 => m.columns(ch),
+            (Some(_), _) => columns as f32 * space,
+            (None, _) => columns as f32,
+        }
+    };
+    let wrapped_line_break_width = first_break_column as f32 - indent as f32 * space;
 
     let mut offsets: Vec<u32> = Vec::new();
     let mut offsets_visible: Vec<u32> = Vec::new();
     let mut break_offset = 0usize;
     let mut break_offset_visible = 0u32;
-    let mut break_offset_width = 0i64;
-    let mut breaking_width = first_break_column as i64;
+    let mut break_offset_width = 0f32;
+    let mut breaking_width = first_break_column as f32;
 
     let mut prev_code = units[0] as u32;
     let mut visible = char_width(prev_code, 0, tab_size);
-    let mut width = visible as i64;
+    let mut width = measured(prev_code, visible);
     let mut start = 1;
     if is_high_surrogate(prev_code) {
+        let pair = char::decode_utf16([units[0], units[1]])
+            .next()
+            .and_then(Result::ok)
+            .map_or(0, u32::from);
         visible += 1;
-        width += 1;
+        width = measured(pair, 2);
         prev_code = units[1] as u32;
         start = 2;
     }
@@ -244,11 +297,16 @@ pub fn compute_line_breaks(
     while i < len {
         let char_start = i;
         let code = units[i] as u32;
-        let (class, char_w) = if is_high_surrogate(code) {
+        let (class, char_w, char_width_measured) = if is_high_surrogate(code) {
+            let pair = char::decode_utf16([units[i], units.get(i + 1).copied().unwrap_or(0)])
+                .next()
+                .and_then(Result::ok)
+                .map_or(0, u32::from);
             i += 1;
-            (CharClass::None, 2)
+            (CharClass::None, 2, measured(pair, 2))
         } else {
-            (classifier.get(code), char_width(code, visible, tab_size))
+            let char_w = char_width(code, visible, tab_size);
+            (classifier.get(code), char_w, measured(code, char_w))
         };
 
         if can_break(prev_code, prev_class, code, class, keep_all) {
@@ -258,13 +316,13 @@ pub fn compute_line_breaks(
         }
 
         visible += char_w;
-        width += char_w as i64;
+        width += char_width_measured;
 
         if width > breaking_width {
             if break_offset == 0 || width - break_offset_width > wrapped_line_break_width {
                 break_offset = char_start;
                 break_offset_visible = visible - char_w;
-                break_offset_width = width - char_w as i64;
+                break_offset_width = width - char_width_measured;
             }
             let line_start = offsets.last().copied().unwrap_or(0) as usize;
             if break_offset > line_start {
@@ -525,6 +583,59 @@ mod tests {
             "\t\t\t\t\t\t<tr dmx-class:table-danger=\"(alt <= 50)\" dmx-class:table-warning=\"(alt <= 200)\" dmx-class:table-primary=\"(alt <= 400)\" dmx-class:table-info=\"(alt <= 800)\" |dmx-class:table-success=\"(alt >= 400)\">",
             WrappingIndent::Same,
             false,
+        );
+    }
+
+    /// Narrow `i`, wide `W`, everything else a column.
+    struct Proportional;
+
+    impl MeasureChar for Proportional {
+        fn columns(&self, ch: char) -> f32 {
+            match ch {
+                'i' => 0.5,
+                'W' => 2.,
+                _ => 1.,
+            }
+        }
+
+        fn max_ascii_columns(&self) -> f32 {
+            2.
+        }
+    }
+
+    fn measured(line: &str, column: u32) -> Vec<u32> {
+        compute_measured_line_breaks(
+            &WrapClassifier::default(),
+            line,
+            4,
+            Some(column),
+            WrappingIndent::None,
+            false,
+            Some(&Proportional),
+        )
+        .map_or_else(Vec::new, |data| data.break_offsets)
+    }
+
+    #[test]
+    fn measured_widths_wrap_proportional_text() {
+        // Twelve narrow characters fit in six columns.
+        assert_eq!(measured("iiiiiiiiiiii", 6), Vec::<u32>::new());
+        assert_eq!(measured("iiii iiii iiii", 6), vec![10, 14]);
+        // Wide characters wrap sooner than their character count says.
+        assert_eq!(measured("WW WW WW", 6), vec![3, 6, 8]);
+        assert_eq!(measured("WWWW", 6), vec![3, 4]);
+        // Monospace columns are unchanged.
+        assert_eq!(
+            compute_line_breaks(
+                &WrapClassifier::default(),
+                "iiiiiiiiiiii",
+                4,
+                Some(6),
+                WrappingIndent::None,
+                false
+            )
+            .map(|d| d.break_offsets),
+            Some(vec![6, 12])
         );
     }
 }

@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Wrapping for proportional fonts (#87, part 2):** `EditorOptions::wrapping_strategy` (Monaco `wrappingStrategy`). `Advanced` wraps by the editor font's measured character widths, so proportional fonts wrap at the edge. `Simple`, the default, counts monospace columns.
+  - Wrapped lines are indented by space widths, as in Monaco, instead of `m` widths.
 - **Font options and zoom (#87, part 1):**
   - **Font options:** `EditorOptions::font_weight` and `font_ligatures` (`FontLigatures::Off`, `On`, or CSS `font-feature-settings` such as `"calt", "ss01" on`). Ligatures are off by default, as in Monaco.
   - **Zoom:** a global zoom level (Monaco `EditorZoom`) scales every editor's font size and line height by 10% per level, clamped to −5…20. It's set with `editor.action.fontZoomIn`, `fontZoomOut` and `fontZoomReset` (`FontZoomIn`, `FontZoomOut`, `FontZoomReset`) and with `set_editor_zoom_level` / `editor_zoom_level`. `options()` keeps the unzoomed values.

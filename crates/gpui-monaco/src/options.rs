@@ -858,6 +858,18 @@ impl GotoLocationOptions {
     }
 }
 
+/// Monaco `wrappingStrategy`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WrappingStrategy {
+    /// Every character is a column wide (two for full-width ones): fast,
+    /// and right for monospace fonts.
+    #[default]
+    Simple,
+    /// Characters are measured in the editor font, so proportional fonts
+    /// wrap at the edge.
+    Advanced,
+}
+
 /// Monaco `fontLigatures`: the font's OpenType features.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum FontLigatures {
@@ -1047,6 +1059,9 @@ pub struct EditorOptions {
     /// Monaco `wrappingIndent`: indentation of wrapped continuation lines (default
     /// same as the first line).
     pub wrapping_indent: crate::view::line_breaks::WrappingIndent,
+    /// Monaco `wrappingStrategy`: wrap by monospace columns (`Simple`, the
+    /// default) or by measured widths (`Advanced`, for proportional fonts).
+    pub wrapping_strategy: WrappingStrategy,
     /// Monaco `folding`: enable code folding and its gutter column (default `true`).
     pub folding: bool,
     /// Monaco `foldingStrategy`.
@@ -1264,6 +1279,7 @@ impl Default for EditorOptions {
             word_wrap: WordWrap::Off,
             word_wrap_column: 80,
             wrapping_indent: crate::view::line_breaks::WrappingIndent::Same,
+            wrapping_strategy: WrappingStrategy::Simple,
             folding: true,
             folding_strategy: FoldingStrategy::Auto,
             folding_maximum_regions: 5000,

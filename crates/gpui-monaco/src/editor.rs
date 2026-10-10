@@ -181,6 +181,9 @@ pub struct CodeEditor {
     pub(crate) context_menu: crate::context_menu::ContextMenuState,
     pub(crate) added_actions: Vec<crate::editor_actions::EditorActionDescriptor>,
     pub(crate) minimap_cache: crate::element::MinimapCache,
+    /// The editor font's measured character widths, for `Advanced`
+    /// wrapping.
+    pub(crate) char_widths: Option<Arc<crate::element::CharWidths>>,
     pub(crate) minimap_hovered: bool,
     minimap_drag: Option<Pixels>,
     fold_task: Option<Task<()>>,
@@ -348,6 +351,7 @@ impl CodeEditor {
             color_picker: Default::default(),
             context_menu: Default::default(),
             minimap_cache: Default::default(),
+            char_widths: None,
             minimap_hovered: false,
             minimap_drag: None,
             fold_task: None,

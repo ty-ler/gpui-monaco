@@ -85,6 +85,8 @@ pub(crate) struct TextMetrics {
     pub font_size: Pixels,
     pub line_height: Pixels,
     pub em_width: Pixels,
+    /// A space's width: wrapped lines' indentation.
+    pub space_width: Pixels,
     /// Show control characters as their Unicode control pictures.
     pub render_control_characters: bool,
 }
@@ -97,17 +99,104 @@ impl TextMetrics {
             ..font(options.font_family.clone())
         };
         let font_size = options.font_size;
-        let em_width = window
-            .text_system()
-            .shape_line("m".into(), font_size, &[run(1, &font, gpui::black())], None)
-            .width;
+        let width = |text: &'static str| {
+            window
+                .text_system()
+                .shape_line(
+                    text.into(),
+                    font_size,
+                    &[run(1, &font, gpui::black())],
+                    None,
+                )
+                .width
+        };
+        let em_width = width("m");
+        let space_width = width(" ");
         Self {
             font,
             font_size,
             line_height: options.resolved_line_height(),
             em_width,
+            space_width,
             render_control_characters: options.render_control_characters,
         }
+    }
+}
+
+/// The editor font's character advances in columns (Monaco measures them
+/// in the DOM for `wrappingStrategy: advanced`).
+pub(crate) struct CharWidths {
+    text_system: std::sync::Arc<gpui::TextSystem>,
+    font: Font,
+    font_id: gpui::FontId,
+    font_size: Pixels,
+    column_width: Pixels,
+    ascii: [f32; 128],
+    max_ascii: f32,
+    other: std::sync::Mutex<std::collections::HashMap<char, f32>>,
+}
+
+impl CharWidths {
+    fn new(metrics: &TextMetrics, cx: &App) -> Self {
+        let text_system = cx.text_system().clone();
+        let font_id = text_system.resolve_font(&metrics.font);
+        let mut this = Self {
+            text_system,
+            font: metrics.font.clone(),
+            font_id,
+            font_size: metrics.font_size,
+            column_width: metrics.em_width.max(px(1.)),
+            ascii: [0.; 128],
+            max_ascii: 0.,
+            other: Default::default(),
+        };
+        for code in 32..128u8 {
+            let columns = this.measure(code as char);
+            this.ascii[code as usize] = columns;
+            this.max_ascii = this.max_ascii.max(columns);
+        }
+        this
+    }
+
+    /// The widths for `metrics`, reusing `cached` when it's for the same
+    /// font.
+    pub(crate) fn for_metrics(
+        cached: &Option<std::sync::Arc<Self>>,
+        metrics: &TextMetrics,
+        cx: &App,
+    ) -> std::sync::Arc<Self> {
+        match cached {
+            Some(widths)
+                if widths.font == metrics.font
+                    && widths.font_size == metrics.font_size
+                    && widths.column_width == metrics.em_width.max(px(1.)) =>
+            {
+                widths.clone()
+            }
+            _ => std::sync::Arc::new(Self::new(metrics, cx)),
+        }
+    }
+
+    fn measure(&self, ch: char) -> f32 {
+        let advance = self
+            .text_system
+            .advance(self.font_id, self.font_size, ch)
+            .map_or(self.column_width, |size| size.width);
+        advance / self.column_width
+    }
+}
+
+impl crate::view::line_breaks::MeasureChar for CharWidths {
+    fn columns(&self, ch: char) -> f32 {
+        if (ch as u32) < 128 {
+            return self.ascii[ch as usize];
+        }
+        let mut other = self.other.lock().unwrap_or_else(|e| e.into_inner());
+        *other.entry(ch).or_insert_with(|| self.measure(ch))
+    }
+
+    fn max_ascii_columns(&self) -> f32 {
+        self.max_ascii
     }
 }
 
@@ -342,7 +431,7 @@ pub(crate) fn layout_segment(
         row: segment.row,
         columns: segment.columns.clone(),
         is_last_segment: segment.is_last_segment,
-        indent_x: metrics.em_width * segment.indent as f32,
+        indent_x: metrics.space_width * segment.indent as f32,
         shaped,
         display_index,
         injected: injected
@@ -928,12 +1017,20 @@ fn prepaint_editor(
             WordWrap::Bounded => Some(viewport_columns.min(options.word_wrap_column.max(1))),
         }
     };
+    let measure = (wrap_column.is_some()
+        && options.wrapping_strategy == crate::options::WrappingStrategy::Advanced)
+        .then(|| {
+            let widths = CharWidths::for_metrics(&editor.char_widths, &metrics, cx);
+            editor.char_widths = Some(widths.clone());
+            crate::view::view_lines::MeasuredWidths(widths)
+        });
     editor.sync_view_lines(
         wrap_column.map(|column| WrapSettings {
             column,
             tab_size,
             indent: options.wrapping_indent,
             keep_all: false,
+            measure,
         }),
         cx,
     );
