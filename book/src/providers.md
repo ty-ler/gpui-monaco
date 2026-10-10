@@ -289,6 +289,23 @@ impl LinkProvider for Issues {
 
 Holding Cmd/Ctrl over a link highlights it. Cmd/Ctrl+click, or the `OpenLink` action, emits `CodeEditorEvent::OpenLink(url)`; the editor never opens anything itself. Links are recomputed a second after edits. Turn them off with the `links` option.
 
+## Colors
+
+`register_color_provider` registers a `DocumentColorProvider` (Monaco `registerColorProvider`). It has two jobs:
+
+- `provide_document_colors` returns the colors and their ranges, with components in `0..=1`.
+- `provide_color_presentations` returns the ways to write a color, such as `rgb(…)` or `#rrggbb`.
+
+The editor draws a swatch before each color, up to `color_decorators_limit`.
+
+Without color providers, a built-in finder decorates hex, `rgb()`, `rgba()`, `hsl()` and `hsla()` colors in any language. `default_color_decorators` controls it:
+
+- **Auto:** only when no provider found colors.
+- **Always:** alongside providers.
+- **Never:** off.
+
+The `gpui_monaco::color` module has Monaco's `Color` for conversions and CSS formatting.
+
 ## Hover from decorations and markers
 
 The hover also shows `hover_message` text from [decorations](decorations.md) and messages from [diagnostics](diagnostics.md) under the mouse, with no provider needed.

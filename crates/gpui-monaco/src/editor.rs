@@ -170,6 +170,7 @@ pub struct CodeEditor {
     pub(crate) quick: Option<crate::quick_access::QuickAccessState>,
     /// Actions from [`CodeEditor::add_action`].
     pub(crate) sticky: crate::sticky_model::StickyModelState,
+    pub(crate) colors: crate::color_detector::ColorDetectorState,
     pub(crate) added_actions: Vec<crate::editor_actions::EditorActionDescriptor>,
     pub(crate) minimap_cache: crate::element::MinimapCache,
     pub(crate) minimap_hovered: bool,
@@ -316,6 +317,7 @@ impl CodeEditor {
             quick: None,
             added_actions: Vec::new(),
             sticky: Default::default(),
+            colors: Default::default(),
             minimap_cache: Default::default(),
             minimap_hovered: false,
             minimap_drag: None,

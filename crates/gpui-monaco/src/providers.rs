@@ -1050,6 +1050,52 @@ pub fn refresh_semantic_tokens(cx: &mut App) {
     cx.default_global::<SemanticTokensEpoch>().0 += 1;
 }
 
+// ----- colors --------------------------------------------------------------------
+
+/// A color in the text (Monaco `IColorInformation`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColorInformation {
+    /// Where it is.
+    pub range: Range<PointUtf16>,
+    /// The color, components in `0..=1`.
+    pub color: crate::color::ColorF,
+}
+
+/// A way to write a color (Monaco `IColorPresentation`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ColorPresentation {
+    /// Shown in the color picker's header, and inserted without a
+    /// `text_edit`.
+    pub label: SharedString,
+    /// The edit that writes it.
+    pub text_edit: Option<TextEdit>,
+    /// Other edits made with it.
+    pub additional_text_edits: Vec<TextEdit>,
+}
+
+/// Finds colors in a document and writes them (Monaco
+/// `DocumentColorProvider`).
+///
+/// Register with [`register_color_provider`]. Without providers, the
+/// editor finds hex, `rgb()`, `rgba()`, `hsl()` and `hsla()` colors itself
+/// (see `default_color_decorators`).
+pub trait DocumentColorProvider: 'static {
+    /// The document's colors.
+    fn provide_document_colors(
+        &self,
+        context: &ProviderContext,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<ColorInformation>>>;
+
+    /// The ways to write `color` at its range, the first being the default.
+    fn provide_color_presentations(
+        &self,
+        context: &ProviderContext,
+        color: &ColorInformation,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<ColorPresentation>>>;
+}
+
 // ----- links ---------------------------------------------------------------------
 
 /// A link in the text (Monaco `ILink`).
@@ -1325,6 +1371,7 @@ struct LanguageFeatures {
     code_action: Vec<Entry<dyn CodeActionProvider>>,
     inlay_hints: Vec<Entry<dyn InlayHintsProvider>>,
     links: Vec<Entry<dyn LinkProvider>>,
+    colors: Vec<Entry<dyn DocumentColorProvider>>,
     semantic_tokens: Vec<Entry<dyn DocumentSemanticTokensProvider>>,
     inline_completions: Vec<Entry<dyn InlineCompletionsProvider>>,
     linked_editing: Vec<Entry<dyn LinkedEditingRangeProvider>>,
@@ -1467,6 +1514,14 @@ register_fn!(
     DocumentRangeSemanticTokensProvider
 );
 register_fn!(
+    /// Registers a color provider for the models `selector` matches (Monaco
+    /// `registerColorProvider`). Results from all matching providers are
+    /// merged.
+    register_color_provider,
+    colors,
+    DocumentColorProvider
+);
+register_fn!(
     /// Registers a link provider for the models `selector` matches (Monaco
     /// `registerLinkProvider`). Later registrations win where links overlap.
     register_link_provider,
@@ -1550,6 +1605,7 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.document_highlight.retain(|e| e.id != registration);
     features.completion.retain(|e| e.id != registration);
     features.hover.retain(|e| e.id != registration);
+    features.colors.retain(|e| e.id != registration);
     features.definition.retain(|e| e.id != registration);
     features.signature_help.retain(|e| e.id != registration);
     features
@@ -1790,6 +1846,14 @@ pub fn document_range_semantic_tokens_providers(
 ) -> Vec<Arc<dyn DocumentRangeSemanticTokensProvider>> {
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.range_semantic_tokens, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered color providers whose selector matches `language_id`, in
+/// registration order.
+pub fn color_providers(cx: &App, language_id: Option<&str>) -> Vec<Arc<dyn DocumentColorProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.colors, language_id))
         .unwrap_or_default()
 }
 
