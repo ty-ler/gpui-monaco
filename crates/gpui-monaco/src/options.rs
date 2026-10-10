@@ -724,6 +724,12 @@ pub struct EditorOptions {
     pub multi_cursor_paste: crate::cursor::MultiCursorPaste,
     /// Monaco `inlineSuggest`.
     pub inline_suggest: InlineSuggestOptions,
+    /// Monaco `codeLens`: show code lenses (on).
+    pub code_lens: bool,
+    /// Monaco `codeLensFontFamily`; `None` uses the editor's.
+    pub code_lens_font_family: Option<SharedString>,
+    /// Monaco `codeLensFontSize`; 0 (or under 5) uses 90% of the editor's.
+    pub code_lens_font_size: f32,
     /// Monaco `linkedEditing`: edit linked ranges (like HTML tag pairs)
     /// together (off).
     pub linked_editing: bool,
@@ -842,6 +848,9 @@ impl Default for EditorOptions {
             multi_cursor_modifier: MultiCursorModifier::Alt,
             multi_cursor_paste: Default::default(),
             inline_suggest: InlineSuggestOptions::default(),
+            code_lens: true,
+            code_lens_font_family: None,
+            code_lens_font_size: 0.,
             linked_editing: false,
             semantic_highlighting: SemanticHighlighting::ConfiguredByTheme,
             links: true,

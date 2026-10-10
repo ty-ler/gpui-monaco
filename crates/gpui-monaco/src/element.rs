@@ -464,28 +464,37 @@ pub(crate) struct FoldControl {
 pub(crate) struct ZoneLayout {
     /// (after view line, height), sorted by `after`.
     zones: Vec<(i64, Pixels)>,
+    /// `heights_before[i]`: the total height of zones `..i`.
+    heights_before: Vec<Pixels>,
 }
 
 impl ZoneLayout {
     pub fn new(mut zones: Vec<(i64, Pixels)>) -> Self {
         zones.sort_by_key(|(after, _)| *after);
-        Self { zones }
+        let mut heights_before = Vec::with_capacity(zones.len() + 1);
+        let mut total = px(0.);
+        heights_before.push(total);
+        for (_, height) in &zones {
+            total += *height;
+            heights_before.push(total);
+        }
+        Self {
+            zones,
+            heights_before,
+        }
     }
 
     pub fn total(&self) -> Pixels {
-        self.zones
-            .iter()
-            .map(|(_, h)| *h)
-            .fold(px(0.), |a, b| a + b)
+        self.heights_before.last().copied().unwrap_or_default()
     }
 
-    /// Total height of zones above view line `line`.
+    /// Total height of zones above view line `line` (a binary search: there
+    /// may be thousands, e.g. code lenses).
     pub fn above(&self, line: u32) -> Pixels {
-        self.zones
-            .iter()
-            .take_while(|(after, _)| *after < line as i64)
-            .map(|(_, h)| *h)
-            .fold(px(0.), |a, b| a + b)
+        let count = self
+            .zones
+            .partition_point(|(after, _)| *after < line as i64);
+        self.heights_before.get(count).copied().unwrap_or_default()
     }
 
     /// Content y of the top of view line `line`.
@@ -856,18 +865,42 @@ fn prepaint_editor(
     {
         let model = editor.model().clone();
         let buffer = model.read(cx).buffer();
-        for zone in &editor.widgets.zones {
-            let after = match &zone.anchor {
-                None => -1,
-                Some(anchor) => {
-                    let row = buffer.offset_to_point(buffer.resolve(anchor)).row;
-                    if view_lines.is_row_hidden(row) {
-                        continue;
+        let key = (
+            std::sync::Arc::as_ptr(&view_lines) as usize,
+            buffer.version(),
+            editor.widgets.zones_generation,
+        );
+        let cached = editor
+            .widgets
+            .zone_rows
+            .as_ref()
+            .filter(|(k, _)| *k == key)
+            .map(|(_, rows)| rows.clone());
+        let rows = cached.unwrap_or_else(|| {
+            editor
+                .widgets
+                .zones
+                .iter_mut()
+                .map(|zone| match &mut zone.anchor {
+                    None => Some(-1),
+                    Some(anchor) => {
+                        // Re-based on this version, so resolving stays cheap
+                        // as edits pile up.
+                        *anchor = buffer.refresh(anchor);
+                        let row = buffer.offset_to_point(buffer.resolve(anchor)).row;
+                        if view_lines.is_row_hidden(row) {
+                            return None;
+                        }
+                        let first = view_lines.first_view_line_of_row(row);
+                        let next = view_lines.first_view_line_of_row(row + 1);
+                        Some(next.max(first + 1) as i64 - 1)
                     }
-                    let first = view_lines.first_view_line_of_row(row);
-                    let next = view_lines.first_view_line_of_row(row + 1);
-                    next.max(first + 1) as i64 - 1
-                }
+                })
+                .collect()
+        });
+        for (zone, after) in editor.widgets.zones.iter().zip(&rows) {
+            let Some(after) = *after else {
+                continue;
             };
             let height = match zone.height {
                 crate::widgets::ZoneHeight::Lines(lines) => line_height * lines,
@@ -875,6 +908,7 @@ fn prepaint_editor(
             };
             zone_specs.push((after, height, zone.view.clone(), zone.full_width));
         }
+        editor.widgets.zone_rows = Some((key, rows));
     }
     let zones = ZoneLayout::new(zone_specs.iter().map(|(a, h, _, _)| (*a, *h)).collect());
 
@@ -991,6 +1025,8 @@ fn prepaint_editor(
     editor.refresh_bracket_colors(cx);
     editor.refresh_links(cx);
     editor.refresh_ghost_text(cx);
+    editor.refresh_code_lenses(cx);
+    editor.resolve_visible_code_lenses(cx);
     let bracket_colors = editor.bracket_colors_in(visible_start..visible_end, cx);
     let mut highlight_ix = 0;
     let mut lines = Vec::with_capacity(segments.len());
@@ -1822,6 +1858,11 @@ fn prepaint_editor(
         let mut top = layout.bounds.top() + zones.line_y((after + 1) as u32, line_height)
             - group_height
             - scroll_top;
+        // Only zones on screen are rendered.
+        if top > layout.bounds.bottom() || top + group_height < layout.bounds.top() {
+            ix = group_end;
+            continue;
+        }
         for (_, height, view, full_width) in &zone_specs[ix..group_end] {
             let left = if *full_width {
                 layout.bounds.left()

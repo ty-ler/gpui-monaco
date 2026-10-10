@@ -52,6 +52,9 @@ pub enum CodeEditorEvent {
     /// the host opens it. Relative `file://./` links are resolved against
     /// the model's URI.
     OpenLink(gpui::SharedString),
+    /// A command no handler is registered for was run (e.g. by clicking a
+    /// code lens): the host runs it.
+    ExecuteCommand(crate::providers::Command),
     /// A mouse button went down over the editor (Monaco `onMouseDown`).
     MouseDown(crate::mouse_target::EditorMouseEvent),
     /// A mouse button went up (Monaco `onMouseUp`).
@@ -163,6 +166,7 @@ pub struct CodeEditor {
     pub(crate) semantic: crate::semantic_tokens::SemanticTokensState,
     pub(crate) inline: crate::inline_completions::controller::InlineCompletionsState,
     pub(crate) linked: crate::linked_editing::LinkedEditingState,
+    pub(crate) code_lens: crate::code_lens::CodeLensState,
     pub(crate) minimap_cache: crate::element::MinimapCache,
     pub(crate) minimap_hovered: bool,
     minimap_drag: Option<Pixels>,
@@ -304,6 +308,7 @@ impl CodeEditor {
             semantic: Default::default(),
             inline: Default::default(),
             linked: Default::default(),
+            code_lens: Default::default(),
             minimap_cache: Default::default(),
             minimap_hovered: false,
             minimap_drag: None,
@@ -523,6 +528,7 @@ impl CodeEditor {
             view,
             full_width,
         });
+        self.widgets.zones_generation += 1;
         cx.notify();
         id
     }

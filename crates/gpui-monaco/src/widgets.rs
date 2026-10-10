@@ -133,6 +133,10 @@ pub(crate) struct OverlayWidgetState {
     pub view: AnyView,
 }
 
+/// What cached zone rows were computed for: the view lines (pointer), the
+/// text version and the zones generation.
+pub(crate) type ZoneRowsKey = (usize, text::Version, u64);
+
 /// All embedded views of one editor.
 #[derive(Clone, Default)]
 pub(crate) struct Widgets {
@@ -140,6 +144,12 @@ pub(crate) struct Widgets {
     pub content: Vec<ContentWidgetState>,
     pub overlays: Vec<OverlayWidgetState>,
     next_id: u64,
+    /// Bumped when zones are added or removed.
+    pub zones_generation: u64,
+    /// Each zone's view line (`None` when folded away), cached for
+    /// (`view_lines`, text version, `zones_generation`): editors can have
+    /// thousands of zones (code lenses).
+    pub zone_rows: Option<(ZoneRowsKey, Vec<Option<i64>>)>,
 }
 
 impl Widgets {
@@ -150,7 +160,11 @@ impl Widgets {
 
     pub fn remove(&mut self, id: WidgetId) -> bool {
         let before = self.zones.len() + self.content.len() + self.overlays.len();
+        let zones = self.zones.len();
         self.zones.retain(|z| z.id != id);
+        if self.zones.len() != zones {
+            self.zones_generation += 1;
+        }
         self.content.retain(|w| w.id != id);
         self.overlays.retain(|w| w.id != id);
         before != self.zones.len() + self.content.len() + self.overlays.len()

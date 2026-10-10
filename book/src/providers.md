@@ -212,6 +212,12 @@ The editor shows them as injected text that moves with edits. As in Monaco:
 
 Unlike Monaco, hints use the editor's font size, and their label parts, tooltips and edits aren't interactive yet.
 
+## Code lens
+
+A `CodeLensProvider` puts clickable commands above lines, such as "3 references" or "Run test". `provide_code_lenses` can return lenses without a `command`; `resolve_code_lens` then fills them in when they scroll into view. Lenses on the same line show together, separated by `|`.
+
+Clicking a lens runs its command through [`register_command`](editing.md) handlers. If no handler is registered, the editor emits `CodeEditorEvent::ExecuteCommand` for the host. The `code_lens`, `code_lens_font_family` and `code_lens_font_size` options control them.
+
 ## Linked editing
 
 With `linked_editing` on, ranges that belong together are edited together. In HTML, renaming an element's start tag renames its end tag. Without a provider, tag pairs come from the syntax tree. A `LinkedEditingRangeProvider` supplies ranges for anything else, optionally with a `word_pattern` that ends linked editing when the text no longer matches it.
