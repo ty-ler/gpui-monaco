@@ -42,6 +42,10 @@ pub struct RevealRequest {
     /// line limit when sticky scroll is on (`cursorSurroundingLines`
     /// otherwise, default 0).
     pub surrounding_lines: f32,
+    /// A mouse gesture moved the cursor (Monaco's `source === 'mouse'`
+    /// with `cursorSurroundingLinesStyle: default`): no context lines, but
+    /// one line of room above.
+    pub mouse: bool,
 }
 
 /// Monaco `_computeMinimumScrolling`.
@@ -84,11 +88,15 @@ pub fn scroll_top_to_reveal(request: RevealRequest, reveal: RevealType) -> f32 {
         mut box_end,
         line_height,
         surrounding_lines,
+        mouse,
     } = request;
     let viewport_end = viewport_top + viewport_height;
-    let context = (viewport_height / line_height / 2.).min(surrounding_lines);
-    let padding_top = context * line_height;
-    let mut padding_bottom = (context - 1.).max(0.) * line_height;
+    let (padding_top, mut padding_bottom) = if mouse {
+        (line_height, 0.)
+    } else {
+        let context = (viewport_height / line_height / 2.).min(surrounding_lines);
+        (context * line_height, (context - 1.).max(0.) * line_height)
+    };
     if matches!(reveal, RevealType::Simple | RevealType::Bottom) {
         // One more line where the horizontal scrollbar may cover it.
         padding_bottom += line_height;
@@ -140,6 +148,7 @@ mod tests {
             box_end: line * 10. + 10.,
             line_height: 10.,
             surrounding_lines: 0.,
+            mouse: false,
         }
     }
 

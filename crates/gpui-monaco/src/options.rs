@@ -83,6 +83,53 @@ impl Default for MinimapOptions {
     }
 }
 
+/// Monaco `cursorBlinking`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorBlinking {
+    /// On and off every 500ms.
+    #[default]
+    Blink,
+    /// Fades in and out.
+    Smooth,
+    /// Fades, staying on longer.
+    Phase,
+    /// Shrinks and grows vertically.
+    Expand,
+    /// Doesn't blink.
+    Solid,
+}
+
+/// Monaco `cursorSmoothCaretAnimation`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorSmoothCaretAnimation {
+    /// Off.
+    #[default]
+    Off,
+    /// Only for explicit moves (keys, clicks), not typing.
+    Explicit,
+    /// Always.
+    On,
+}
+
+/// Monaco `cursorSurroundingLinesStyle`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorSurroundingLinesStyle {
+    /// Keyboard and API moves only.
+    #[default]
+    Default,
+    /// Mouse moves too.
+    All,
+}
+
+/// Monaco `padding`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EditorPadding {
+    /// Above the first line.
+    pub top: Pixels,
+    /// Below the last line.
+    pub bottom: Pixels,
+}
+
 /// Monaco `find` options.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FindEditorOptions {
@@ -726,9 +773,45 @@ pub struct EditorOptions {
     pub cursor_style: CursorStyle,
     /// Monaco `cursorWidth`: width of the [`CursorStyle::Line`] cursor (default 2px).
     pub cursor_width: Pixels,
-    /// Whether the cursor blinks (default `true`). Monaco's `cursorBlinking` has more
-    /// styles; `false` is `solid`.
-    pub cursor_blinking: bool,
+    /// Monaco `cursorBlinking`: how the cursor blinks (default blink).
+    pub cursor_blinking: CursorBlinking,
+    /// Monaco `cursorSmoothCaretAnimation`: animate cursor moves (default
+    /// off).
+    pub cursor_smooth_caret_animation: CursorSmoothCaretAnimation,
+    /// Monaco `cursorHeight`: the line cursor's height, at most the line
+    /// height; 0 for the line height (default 0).
+    pub cursor_height: Pixels,
+    /// Monaco `cursorSurroundingLines`: lines kept visible above and below
+    /// the cursor when it moves (default 0).
+    pub cursor_surrounding_lines: u32,
+    /// Monaco `cursorSurroundingLinesStyle`: whether mouse moves keep them
+    /// too (default no).
+    pub cursor_surrounding_lines_style: CursorSurroundingLinesStyle,
+    /// Monaco `smoothScrolling`: animate scrolling from reveals, cursor
+    /// moves and mouse wheels (default `false`).
+    pub smooth_scrolling: bool,
+    /// Monaco `scrollBeyondLastColumn`: columns of space past the longest
+    /// line (default 4).
+    pub scroll_beyond_last_column: u32,
+    /// Monaco `revealHorizontalRightPadding`: space kept right of a revealed
+    /// position (default 15px).
+    pub reveal_horizontal_right_padding: Pixels,
+    /// Monaco `fastScrollSensitivity`: wheel speed with Alt held (default
+    /// 5).
+    pub fast_scroll_sensitivity: f32,
+    /// Monaco `scrollPredominantAxis`: a diagonal wheel or trackpad scroll
+    /// moves along its main axis only (default `true`).
+    pub scroll_predominant_axis: bool,
+    /// Monaco `scrollOnMiddleClick`: a middle click starts scrolling toward
+    /// the mouse until the next click (default `false`).
+    pub scroll_on_middle_click: bool,
+    /// Monaco `padding`: space above the first line and below the last.
+    pub padding: EditorPadding,
+    /// Monaco `roundedSelection`: selections have rounded corners (default
+    /// `true`).
+    pub rounded_selection: bool,
+    /// Monaco `renderLineHighlightOnlyWhenFocus` (default `false`).
+    pub render_line_highlight_only_when_focus: bool,
     /// Monaco `scrollBeyondLastLine`: allow scrolling the last line to the top of the
     /// viewport (default `true`).
     pub scroll_beyond_last_line: bool,
@@ -944,7 +1027,20 @@ impl Default for EditorOptions {
             render_line_highlight: RenderLineHighlight::Line,
             cursor_style: CursorStyle::Line,
             cursor_width: px(2.),
-            cursor_blinking: true,
+            cursor_blinking: CursorBlinking::Blink,
+            cursor_smooth_caret_animation: CursorSmoothCaretAnimation::Off,
+            cursor_height: px(0.),
+            cursor_surrounding_lines: 0,
+            cursor_surrounding_lines_style: CursorSurroundingLinesStyle::Default,
+            smooth_scrolling: false,
+            scroll_beyond_last_column: 4,
+            reveal_horizontal_right_padding: px(15.),
+            fast_scroll_sensitivity: 5.,
+            scroll_predominant_axis: true,
+            scroll_on_middle_click: false,
+            padding: EditorPadding::default(),
+            rounded_selection: true,
+            render_line_highlight_only_when_focus: false,
             scroll_beyond_last_line: true,
             read_only: false,
             word_separators: "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?".into(),

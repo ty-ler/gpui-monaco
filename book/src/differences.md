@@ -20,6 +20,7 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
   - `\n` in a pattern still enables multiline search, as in Monaco.
   - Replacement patterns support `$1`, `$&`, `$$`, `\n` and `\t`. Monaco's case-changing escapes (`\u`, `\U`, `\l`, `\L`) are not supported.
   - Language configuration patterns (`wordPattern`, `indentationRules`, …) use `fancy-regex`, so VS Code's configurations work unchanged.
+- **Cursor and scrolling:** the smooth caret only animates the primary cursor. Horizontal smooth scrolling isn't animated. `inertialScroll` isn't there: the platforms GPUI supports give trackpad momentum themselves.
 - **Context menu:** it's drawn inside the editor, flipping up or left at its edges, rather than as an OS-level menu. The scrollbar menu and the "Copy As" and "Share" submenus aren't there.
 - **Bracket pair guides:** they use the bracket pair colors. The `editorBracketPairGuide.*` theme colors aren't read; Monaco's defaults for them fall back to the same colors. Pairs come from the colorized bracket pairs, and `highlight_active_indentation` has no `"always"`.
 - **Color picker:** the standalone picker isn't bound to a key (as in Monaco). It runs from the command palette or `ShowOrFocusStandaloneColorPicker`.

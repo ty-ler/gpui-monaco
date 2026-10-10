@@ -182,6 +182,11 @@ pub struct CodeEditor {
     /// The version `fold_task` was started for.
     fold_requested: Option<text::Version>,
     pub(crate) autoscroll_requested: bool,
+    /// The autoscroll comes from a mouse gesture (Monaco ignores
+    /// `cursorSurroundingLines` for those by default).
+    pub(crate) autoscroll_from_mouse: bool,
+    /// Animations of the view (smooth scrolling, the caret, blinking).
+    pub(crate) animation: crate::view::animation::ViewAnimation,
     pub(crate) cursor_visible: bool,
     /// IME composition range, in byte offsets.
     pub(crate) marked_range: Option<Range<usize>>,
@@ -270,6 +275,8 @@ impl CodeEditor {
             scroll_left: px(0.),
             layout: None,
             autoscroll_requested: false,
+            autoscroll_from_mouse: false,
+            animation: Default::default(),
             cursor_visible: true,
             marked_range: None,
             prev_edit_kind: None,
@@ -656,6 +663,25 @@ impl CodeEditor {
         ))
     }
 
+    /// Whether the blinking cursor is in its visible phase, for tests.
+    #[doc(hidden)]
+    pub fn cursor_visible_for_tests(&self) -> bool {
+        self.cursor_visible
+    }
+
+    /// (shown scroll top, max horizontal scroll, text area height, line
+    /// height) from the last layout, for tests.
+    #[doc(hidden)]
+    pub fn view_metrics_for_tests(&self) -> Option<(Pixels, Pixels, Pixels, Pixels)> {
+        let layout = self.layout.as_ref()?;
+        Some((
+            layout.scroll_top,
+            layout.max_scroll.x,
+            layout.text_bounds.size.height,
+            layout.metrics.line_height,
+        ))
+    }
+
     pub(crate) fn cursor_config(&self, cx: &App) -> CursorConfig {
         let model_options = self.model.read(cx).options();
         CursorConfig {
@@ -893,6 +919,9 @@ impl CodeEditor {
         }
         if autoscroll {
             self.autoscroll_requested = true;
+            self.autoscroll_from_mouse =
+                self.next_selection_change.source == CursorChangeSource::Mouse;
+            self.animation.smooth_scroll_requested = true;
         }
         self.record_cursor_change();
         self.close_message(cx);
@@ -915,20 +944,67 @@ impl CodeEditor {
         }
         self.color_picker_cursor_changed(cx);
         self.find_cursor_changed(change.reason, cx);
+        // Monaco pauses the caret transition when the cursor count changes,
+        // and for non-explicit moves with `explicit`.
+        let count = self.cursors.all().len();
+        self.animation.caret_jump = count
+            != std::mem::replace(&mut self.animation.cursor_count, count)
+            || (self.options.cursor_smooth_caret_animation
+                == crate::options::CursorSmoothCaretAnimation::Explicit
+                && change.reason != CursorChangeReason::Explicit);
         // The cursor moving means the keyboard is back in the text.
         self.sticky.focused = None;
         cx.emit(CodeEditorEvent::SelectionsChanged(change));
         cx.notify();
     }
 
+    /// Monaco `_getCursorBlinking`: read-only editors don't blink.
+    pub(crate) fn cursor_blinking(&self) -> crate::options::CursorBlinking {
+        if self.options.read_only {
+            crate::options::CursorBlinking::Solid
+        } else {
+            self.options.cursor_blinking
+        }
+    }
+
+    /// Monaco `_updateBlinking`: restarts the blink after the cursor moves
+    /// or the editor is focused.
     fn restart_blink(&mut self, cx: &mut Context<Self>) {
+        use crate::options::CursorBlinking;
         self.cursor_visible = true;
         self.blink_epoch += 1;
-        if !self.options.cursor_blinking {
-            self._blink_task = None;
-            return;
-        }
+        self.animation.blink_started = std::time::Instant::now();
         let epoch = self.blink_epoch;
+        match self.cursor_blinking() {
+            CursorBlinking::Solid => {
+                self._blink_task = None;
+                return;
+            }
+            CursorBlinking::Blink => {}
+            _ => {
+                // The CSS animations start after one blink interval and
+                // run 20 half-second iterations; repaint while they run.
+                self._blink_task = Some(cx.spawn(async move |this, cx| {
+                    let end = crate::view::animation::BLINK_ANIMATION_END;
+                    let start = std::time::Instant::now();
+                    while start.elapsed() < end {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(16))
+                            .await;
+                        let keep_going = this
+                            .update(cx, |this, cx| {
+                                cx.notify();
+                                this.blink_epoch == epoch
+                            })
+                            .unwrap_or(false);
+                        if !keep_going {
+                            break;
+                        }
+                    }
+                }));
+                return;
+            }
+        }
         self._blink_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -1839,12 +1915,41 @@ impl CodeEditor {
         }
     }
 
+    /// Monaco `scrollOnMiddleClick`: a middle click starts scrolling
+    /// toward the mouse; another click ends it.
+    fn on_middle_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.end_middle_scroll(cx) || !self.options.scroll_on_middle_click {
+            return;
+        }
+        cx.stop_propagation();
+        self.animation.middle_scroll =
+            Some(crate::view::animation::MiddleScroll::new(event.position));
+        cx.notify();
+    }
+
+    /// Ends middle-click scrolling, if on.
+    fn end_middle_scroll(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.animation.middle_scroll.take().is_some() {
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
     fn on_right_mouse_down(
         &mut self,
         event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.end_middle_scroll(cx) {
+            return;
+        }
         window.focus(&self.focus_handle, cx);
         let mouse = self.emit_mouse(
             event.position,
@@ -1872,6 +1977,9 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.end_middle_scroll(cx) {
+            return;
+        }
         let mouse = self.emit_mouse(
             event.position,
             Some(event.button),
@@ -2132,6 +2240,9 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         self.sticky_mouse_move(Some(event.position), event.modifiers.shift, cx);
+        if let Some(session) = self.animation.middle_scroll.as_mut() {
+            session.mouse = event.position;
+        }
         if self
             .layout
             .as_ref()
@@ -2340,10 +2451,30 @@ impl CodeEditor {
             .map_or(self.options.resolved_line_height(), |l| {
                 l.metrics.line_height
             });
-        let mut delta =
-            event.delta.pixel_delta(line_height) * self.options.mouse_wheel_scroll_sensitivity;
+        // Monaco `fastScrollSensitivity` with Alt held.
+        let sensitivity = if event.modifiers.alt {
+            self.options.mouse_wheel_scroll_sensitivity * self.options.fast_scroll_sensitivity
+        } else {
+            self.options.mouse_wheel_scroll_sensitivity
+        };
+        let mut delta = event.delta.pixel_delta(line_height) * sensitivity;
         if event.modifiers.shift && delta.x == px(0.) {
             delta = point(delta.y, px(0.));
+        }
+        // Monaco `scrollPredominantAxis`: only the main direction.
+        if self.options.scroll_predominant_axis {
+            if delta.x.abs() >= delta.y.abs() {
+                delta.y = px(0.);
+            } else {
+                delta.x = px(0.);
+            }
+        }
+        // Physical wheels scroll smoothly (Monaco `mouseWheelSmoothScroll`),
+        // trackpads don't.
+        if matches!(event.delta, gpui::ScrollDelta::Lines(_)) {
+            self.animation.smooth_scroll_requested = true;
+        } else {
+            self.animation.cancel_scroll();
         }
         self.hide_hover(cx);
         self.scroll_top -= delta.y;
@@ -3257,6 +3388,19 @@ impl Render for CodeEditor {
             )
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
+            .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_middle_mouse_down))
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    // Releasing ends it only after it scrolled (Monaco).
+                    if this.animation.middle_scroll.is_some_and(|s| s.did_scroll) {
+                        this.end_middle_scroll(cx);
+                    }
+                }),
+            )
+            .on_key_down(cx.listener(|this, _: &gpui::KeyDownEvent, _, cx| {
+                this.end_middle_scroll(cx);
+            }))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if !*hovered {
                     this.sticky_mouse_leave(cx);
