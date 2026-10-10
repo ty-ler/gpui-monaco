@@ -141,6 +141,9 @@ pub struct CodeEditor {
     /// The options as the host set them.
     user_options: EditorOptions,
     pub(crate) zoom_gesture: Option<crate::font_zoom::ZoomGesture>,
+    /// Check for unusual line terminators before the next frame.
+    pub(crate) unusual_line_terminators_pending: bool,
+    pub(crate) unicode_highlights: crate::unicode_highlighter::UnicodeHighlightState,
     pub(crate) theme: Arc<Theme>,
     pub(crate) scroll_top: Pixels,
     pub(crate) scroll_left: Pixels,
@@ -291,6 +294,8 @@ impl CodeEditor {
             ),
             user_options: EditorOptions::default(),
             zoom_gesture: None,
+            unusual_line_terminators_pending: true,
+            unicode_highlights: Default::default(),
             theme: Arc::new(Theme::vs_dark()),
             scroll_top: px(0.),
             scroll_left: px(0.),
@@ -379,6 +384,7 @@ impl CodeEditor {
     /// `setModel`). Save and restore [`ViewState`] to keep them per model.
     pub fn set_model(&mut self, model: Entity<TextModel>, cx: &mut Context<Self>) {
         crate::model::register_model(cx, &model);
+        self.request_unusual_line_terminators_check();
         // Popups and decorations this editor owns refer to the old model: its
         // decoration ids would name unrelated decorations in the new one.
         self.hide_hover(cx);
@@ -476,6 +482,9 @@ impl CodeEditor {
     pub fn update_options(&mut self, options: EditorOptions, cx: &mut Context<Self>) {
         self.options =
             crate::font_zoom::zoomed_options(&options, crate::font_zoom::editor_zoom_level(cx));
+        if options.unusual_line_terminators != self.user_options.unusual_line_terminators {
+            self.request_unusual_line_terminators_check();
+        }
         self.user_options = options;
         self.cursors
             .set_merge_overlapping(self.options.multi_cursor_merge_overlapping);
@@ -784,6 +793,16 @@ impl CodeEditor {
                 ..
             } => {
                 let own = *source == Some(cx.entity_id());
+                // Monaco skips undoing.
+                if *kind != EditKind::Undo
+                    && changes.iter().any(|change| {
+                        crate::unusual_line_terminators::contains_unusual_line_terminators(
+                            &change.text,
+                        )
+                    })
+                {
+                    self.request_unusual_line_terminators_check();
+                }
                 // Monaco cancels the rename box when the text changes, and
                 // asks for inlay hints again.
                 self.cancel_rename(false, cx);

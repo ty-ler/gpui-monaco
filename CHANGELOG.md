@@ -5,6 +5,15 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Unicode highlighting (#86):** `EditorOptions::unicode_highlight` (Monaco `unicodeHighlight`) borders ambiguous characters (such as Cyrillic `а`) and invisible ones (such as zero-width spaces). With `non_basic_ascii`, it borders every non-ASCII character.
+  - **Options:** `include_comments`, `include_strings`, `allowed_characters` and `allowed_locales` (`_os` and `_vscode` mean the system's locale). Defaults follow Monaco in a trusted workspace.
+  - **Hover:** says why a character is highlighted. Its "Adjust settings" link offers to allow the character or the locale, or to turn the kind off, by changing the editor's options.
+  - **Colors:** `editorUnicodeHighlight.border` and `.background`.
+  - **`gpui_monaco::unicode_highlight`:** ports `AmbiguousCharacters`, `InvisibleCharacters` and `UnicodeTextModelHighlighter`, with Monaco's data and tests.
+- **Unusual line terminators (#86):** `EditorOptions::unusual_line_terminators` (Monaco `unusualLineTerminators`) handles Line Separator and Paragraph Separator characters.
+  - **`Prompt` (the default):** asks whether to remove them; Ignore remembers the choice for the model. **`Auto`** removes them, and **`Off`** leaves them.
+  - **`CodeEditor::remove_unusual_line_terminators`** removes them as one undoable edit.
+- **Quick pick:** `CodeEditor::show_quick_pick` shows a filterable list in the quick input, with an optional title (Monaco `quickInputService.pick`).
 - **Placeholder and read-only message (#89):**
   - **`EditorOptions::placeholder`** (Monaco `placeholder`) shows while the model is empty, in the theme's `editor.placeholder.foreground`. Each line is cut off with an ellipsis.
   - **Read-only edits:** typing, IME input, editing commands and `execute_edits` in a read-only editor emit `CodeEditorEvent::ReadOnlyEditAttempt` (Monaco `onDidAttemptReadOnlyEdit`). They also show `read_only_message` (markdown) at the cursor, or Monaco's default "Cannot edit in read-only editor".

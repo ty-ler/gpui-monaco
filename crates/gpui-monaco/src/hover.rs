@@ -41,6 +41,8 @@ pub struct HoverWidget {
     contents: Vec<MarkdownString>,
     /// Monaco's color picker hover part.
     color_picker: Option<Entity<crate::ColorPickerWidget>>,
+    /// Monaco's unicode highlighter hover parts.
+    unicode: Vec<crate::unicode_highlighter::UnicodeHover>,
     style: MarkdownStyle,
     theme: std::sync::Arc<crate::Theme>,
 }
@@ -72,6 +74,45 @@ impl Render for HoverWidget {
                 sections.push(div().h(px(1.)).bg(colors.widget_border).into_any_element());
             }
             sections.push(picker.clone().into_any_element());
+        }
+        for (ix, hover) in self.unicode.iter().enumerate() {
+            if !sections.is_empty() {
+                sections.push(div().h(px(1.)).bg(colors.widget_border).into_any_element());
+            }
+            // The reason, then Monaco's "Adjust settings" link.
+            let editor = self.editor.clone();
+            let part = hover.clone();
+            sections.push(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(div().w(px(480.)).child(render_markdown(
+                        &hover.reason,
+                        &self.style,
+                        &self.theme,
+                        &registry,
+                    )))
+                    .child(
+                        div()
+                            .id(("unicode-adjust", ix))
+                            .cursor_pointer()
+                            .text_color(self.style.link)
+                            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                                cx.stop_propagation();
+                                if let Some(editor) = editor.upgrade() {
+                                    let part = part.clone();
+                                    editor.update(cx, |editor, cx| {
+                                        editor.hide_hover(cx);
+                                        editor.show_unicode_exclude_options(part, window, cx);
+                                    });
+                                }
+                            })
+                            .child("Adjust settings"),
+                    )
+                    .into_any_element(),
+            );
         }
         for content in &self.contents {
             if !sections.is_empty() {
@@ -199,6 +240,33 @@ impl CodeEditor {
         }
     }
 
+    /// The unicode highlighter's hover parts at `position`.
+    fn unicode_hovers_at(
+        &self,
+        position: PointUtf16,
+        cx: &gpui::App,
+    ) -> Vec<crate::unicode_highlighter::UnicodeHover> {
+        let offset = self.snapshot.point_utf16_to_offset(position);
+        self.unicode_hovers(offset, cx)
+    }
+
+    /// The unicode hover parts' reasons in the visible hover card.
+    #[doc(hidden)]
+    pub fn hover_unicode_reasons_for_tests(&self, cx: &gpui::App) -> Vec<gpui::SharedString> {
+        self.hover
+            .widget
+            .as_ref()
+            .map(|(widget, _)| {
+                widget
+                    .read(cx)
+                    .unicode
+                    .iter()
+                    .map(|u| u.reason.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The diagnostics in the visible hover card.
     #[doc(hidden)]
     pub fn hover_markers_for_tests(&self, cx: &gpui::App) -> Vec<crate::Marker> {
@@ -247,9 +315,14 @@ impl CodeEditor {
                 }
             }
             this.update(cx, |this, cx| {
-                if !contents.is_empty() || !markers.is_empty() || picker.is_some() {
+                let unicode = this.unicode_hovers_at(position, cx);
+                if !contents.is_empty()
+                    || !markers.is_empty()
+                    || picker.is_some()
+                    || !unicode.is_empty()
+                {
                     let range = hover_range.unwrap_or(range);
-                    this.show_hover(range, markers, contents, picker, cx);
+                    this.show_hover(range, markers, contents, picker, unicode, cx);
                 }
             })
             .ok();
@@ -302,11 +375,16 @@ impl CodeEditor {
                 }
             }
             this.update(cx, |this, cx| {
-                if contents.is_empty() && markers.is_empty() && picker.is_none() {
+                let unicode = this.unicode_hovers_at(position, cx);
+                if contents.is_empty()
+                    && markers.is_empty()
+                    && picker.is_none()
+                    && unicode.is_empty()
+                {
                     return;
                 }
                 let range = hover_range.unwrap_or(range);
-                this.show_hover(range, markers, contents, picker, cx);
+                this.show_hover(range, markers, contents, picker, unicode, cx);
             })
             .ok();
         }));
@@ -387,7 +465,14 @@ impl CodeEditor {
                 return;
             };
             this.update(cx, |this, cx| {
-                this.show_hover(position..position, Vec::new(), Vec::new(), Some(picker), cx);
+                this.show_hover(
+                    position..position,
+                    Vec::new(),
+                    Vec::new(),
+                    Some(picker),
+                    Vec::new(),
+                    cx,
+                );
             })
             .ok();
         }));
@@ -408,6 +493,7 @@ impl CodeEditor {
         markers: Vec<crate::Marker>,
         contents: Vec<MarkdownString>,
         color_picker: Option<Entity<crate::ColorPickerWidget>>,
+        unicode: Vec<crate::unicode_highlighter::UnicodeHover>,
         cx: &mut Context<Self>,
     ) {
         // Monaco shows the color picker at the color (`forceShowAtRange`).
@@ -427,6 +513,7 @@ impl CodeEditor {
             editor,
             contents,
             color_picker,
+            unicode,
             style,
             theme,
         });

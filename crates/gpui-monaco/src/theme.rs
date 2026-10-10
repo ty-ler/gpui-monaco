@@ -98,6 +98,12 @@ pub struct EditorColors {
     /// The `placeholder` text (`editor.placeholder.foreground`; Monaco
     /// defaults it to the ghost text color).
     pub placeholder_foreground: Hsla,
+    /// Highlighted Unicode characters' border (`editorUnicodeHighlight.border`,
+    /// defaulting to `editorWarning.foreground`).
+    pub unicode_highlight_border: Hsla,
+    /// Their background (`editorUnicodeHighlight.background`; none by
+    /// default).
+    pub unicode_highlight_background: Hsla,
     /// Inline messages such as "No definition found"
     /// (`inputValidation.infoBackground`).
     pub message_background: Hsla,
@@ -279,6 +285,8 @@ impl EditorColors {
             ghost_text_background: gpui::transparent_black(),
             ghost_text_border: gpui::transparent_black(),
             placeholder_foreground: c(rgba(0xffffff56)),
+            unicode_highlight_border: c(rgb(0xcca700)),
+            unicode_highlight_background: gpui::transparent_black(),
             message_background: c(rgb(0x063b49)),
             message_border: c(rgb(0x007acc)),
             fold_background: c(rgba(0x264f784d)),
@@ -389,6 +397,8 @@ impl EditorColors {
             ghost_text_background: gpui::transparent_black(),
             ghost_text_border: gpui::transparent_black(),
             placeholder_foreground: c(rgba(0x00000077)),
+            unicode_highlight_border: c(rgb(0xbf8803)),
+            unicode_highlight_background: gpui::transparent_black(),
             message_background: c(rgb(0xd6ecf2)),
             message_border: c(rgb(0x007acc)),
             fold_background: c(rgba(0xadd6ff4d)),
@@ -492,6 +502,12 @@ impl EditorColors {
             "editorGhostText.background",
         );
         set(&mut self.ghost_text_border, "editorGhostText.border");
+        self.unicode_highlight_border = get("editorUnicodeHighlight.border")
+            .or_else(|| get("editorWarning.foreground"))
+            .unwrap_or(self.unicode_highlight_border);
+        self.unicode_highlight_background = get("editorUnicodeHighlight.background")
+            .or_else(|| get("editorWarning.background"))
+            .unwrap_or(self.unicode_highlight_background);
         self.placeholder_foreground = get("editor.placeholder.foreground")
             .or_else(|| get("editorGhostText.foreground"))
             .unwrap_or(self.placeholder_foreground);
