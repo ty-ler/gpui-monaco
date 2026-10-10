@@ -782,11 +782,26 @@ async fn collect_edits(
     sort_edits_by_yield_to(edits)
 }
 
-/// The clipboard as paste data: its text as `text/plain`.
+/// The clipboard as paste data: its text as `text/plain`, and copied
+/// files.
 pub(crate) fn clipboard_data(item: &gpui::ClipboardItem) -> DataTransfer {
     let mut data = DataTransfer::default();
     if let Some(text) = item.text() {
         data.insert(TEXT_PLAIN, DataTransferItem::Text(text));
+    }
+    // Copied files, as Monaco's clipboard `files` and uri-list.
+    let paths: Vec<PathBuf> = item
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            gpui::ClipboardEntry::ExternalPaths(paths) => Some(paths.paths().to_vec()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    if !paths.is_empty() {
+        data.insert(URI_LIST, DataTransferItem::Text(uri_list(&paths)));
+        data.insert(FILES, DataTransferItem::Files(paths));
     }
     data
 }

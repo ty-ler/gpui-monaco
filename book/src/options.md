@@ -35,6 +35,8 @@ editor.update(cx, |editor, cx| {
 | `placeholder` | `placeholder` | shown while the model is empty |
 | `unicode_highlight` | `unicodeHighlight.*` | `non_basic_ascii`, `invisible_characters`, `ambiguous_characters`, `include_comments`, `include_strings`, `allowed_characters`, `allowed_locales` |
 | `drag_and_drop`, `double_click_selects_block` | `dragAndDrop`, `doubleClickSelectsBlock` | drag the selection to move it (Alt/Ctrl copies); double-click inside brackets or quotes selects their content |
+| `auto_indent_on_paste`, `auto_indent_on_paste_within_string` | `autoIndentOnPaste`, `autoIndentOnPasteWithinString` | re-indent pasted lines (off by default; needs `auto_indent: Full`) |
+| `selection_clipboard` | `selectionClipboard` | Linux primary selection: selected text is copied to it, and a middle click pastes it (default on) |
 | `drop_into_editor`, `paste_as` | `dropIntoEditor`, `pasteAs` | `enabled` and when to show the button that switches edits |
 | `unusual_line_terminators` | `unusualLineTerminators` | `Prompt` (default), `Auto` or `Off` for LS and PS characters |
 | `word_separators` | `wordSeparators` | used by word movement and whole-word find |

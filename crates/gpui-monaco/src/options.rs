@@ -1144,6 +1144,15 @@ pub struct EditorOptions {
     /// Monaco `pasteAs`: paste edit providers may decide how the clipboard
     /// is pasted.
     pub paste_as: PasteAsOptions,
+    /// Monaco `selectionClipboard` (Linux): selections go to the primary
+    /// selection, and a middle click pastes it (default `true`).
+    pub selection_clipboard: bool,
+    /// Monaco `autoIndentOnPaste`: re-indent pasted lines by the language's
+    /// indentation rules, with `auto_indent: Full` (default `false`).
+    pub auto_indent_on_paste: bool,
+    /// Monaco `autoIndentOnPasteWithinString`: also when the paste starts or
+    /// ends in a string (default `true`).
+    pub auto_indent_on_paste_within_string: bool,
     /// Monaco `wordSeparators`: characters that end a word for word navigation,
     /// double-click selection and whole-word search.
     pub word_separators: SharedString,
@@ -1397,6 +1406,9 @@ impl Default for EditorOptions {
             double_click_selects_block: true,
             drop_into_editor: DropIntoEditorOptions::default(),
             paste_as: PasteAsOptions::default(),
+            selection_clipboard: true,
+            auto_indent_on_paste: false,
+            auto_indent_on_paste_within_string: true,
             word_separators: "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?".into(),
             vertical_scrollbar_size: px(14.),
             horizontal_scrollbar_size: px(12.),

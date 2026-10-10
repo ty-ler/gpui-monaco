@@ -5,6 +5,11 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Clipboard extras (#107):**
+  - **`EditorOptions::selection_clipboard`** (Monaco `selectionClipboard`, Linux): selected text becomes the primary selection, and a middle click pastes it at the click.
+  - **Middle click:** without the selection clipboard (or off Linux), a middle click and drag column-select, as in Monaco, unless `scroll_on_middle_click` is on.
+  - **`auto_indent_on_paste`** and **`auto_indent_on_paste_within_string`** (Monaco `autoIndentOnPaste`): pasted lines are re-indented by the language's indentation rules, as a separate undo step. `cursor::auto_indent_on_paste` ports `AutoIndentOnPasteCommand` and `getIndentMetadata`, with Monaco's tests.
+  - **Copied files:** pasting copied files gives the paste providers a uri-list, so "Insert Path" pastes their paths.
 - **Drop and paste edit providers (#92, part 2):** ports `dropOrPasteInto`.
   - **Providers:** `DocumentDropEditProvider` and `DocumentPasteEditProvider` offer edits (`DocumentDropOrPasteEdit`) for dropped or pasted data (`DataTransfer`). Register them with `register_document_drop_edit_provider` and `register_document_paste_edit_provider`. Edits are ordered by `yield_to`, as in Monaco.
   - **Built-in providers:** plain text, paths from a `text/uri-list` ("Insert Path"), and HTML (for Paste As only).

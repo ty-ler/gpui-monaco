@@ -1,5 +1,6 @@
 //! Tests ported from Monaco, plus the harness they run on.
 
+mod auto_indent_paste_test;
 mod bundled_language_test;
 mod comment_test;
 mod cursor_editing_test;

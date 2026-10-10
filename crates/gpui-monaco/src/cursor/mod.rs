@@ -23,6 +23,7 @@
 //! [`AutoClosedRanges`] for how to keep it up to date).
 
 mod auto_closed;
+mod auto_indent_paste;
 mod brackets;
 mod collection;
 mod column;
@@ -46,6 +47,7 @@ mod tests;
 use std::ops::Range;
 
 pub use auto_closed::{AutoClosedPair, AutoClosedRanges};
+pub use auto_indent_paste::auto_indent_on_paste;
 pub use brackets::matching_bracket;
 pub use collection::{CursorCollection, SelectionStartKind, SingleCursorState};
 pub use column::{ColumnSelectCommand, ColumnSelectData, column_select, column_select_to};
