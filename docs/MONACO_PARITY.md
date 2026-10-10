@@ -132,7 +132,7 @@ Issues are linked by number.
 | Screen readers, tab focus mode, ARIA options | ❌ | #53 |
 | wasm / web | ❌ | #58 |
 | crates.io release | ❌ | #57 |
-| Monaco migration notes | ❌ | #60 |
+| Monaco migration notes | ✅ (book: Migrating from Monaco) | #60 |
 | Small correctness follow-ups | — | #76 |
 
 ## Not planned
