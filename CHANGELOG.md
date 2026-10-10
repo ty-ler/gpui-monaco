@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Colorize and tokenize without an editor (#108):** `gpui_monaco::colorize` ports Monaco's `colorize`, `colorizeElement` and `tokenize`.
+  - **`tokenize(text, language, registry)`:** each line's tokens, with UTF-16 offsets and Monaco token types such as `keyword.rust`.
+  - **`colorize(...)`:** each line's text, with tabs expanded, and its highlights.
+  - **`colorize_element(...)`:** an element ready for host UI.
+  - **`colorize_highlights(...)`:** the highlights for a `StyledText`.
+  - **Markdown:** code blocks now use `colorize_highlights`.
 - **Clipboard extras (#107):**
   - **`EditorOptions::selection_clipboard`** (Monaco `selectionClipboard`, Linux): selected text becomes the primary selection, and a middle click pastes it at the click.
   - **Middle click:** without the selection clipboard (or off Linux), a middle click and drag column-select, as in Monaco, unless `scroll_on_middle_click` is on.

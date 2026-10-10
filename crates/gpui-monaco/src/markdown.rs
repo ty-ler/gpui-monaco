@@ -9,8 +9,7 @@ use gpui::{
     ParentElement, Pixels, SharedString, Styled, StyledText, UnderlineStyle, div, px,
 };
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-use syntax::{LanguageRegistry, SyntaxSnapshot};
-use text::Buffer;
+use syntax::LanguageRegistry;
 
 use crate::theme::Theme;
 
@@ -125,27 +124,13 @@ impl Renderer<'_> {
 
     fn code_block(&mut self, language: Option<String>, code: String) {
         let code = code.trim_end_matches('\n').to_string();
-        let mut highlights = Vec::new();
-        if let Some(language) = language
+        let highlights = language
             .as_deref()
             .and_then(|name| self.registry.language_for_name(name))
-            .filter(|l| l.grammar.is_some())
-        {
-            let buffer = Buffer::new(&code);
-            let syntax = SyntaxSnapshot::parse(language, &buffer.snapshot(), self.registry);
-            for span in syntax.highlights(buffer.rope(), 0..buffer.len()) {
-                let token = self.theme.style_for(span.highlight);
-                highlights.push((
-                    span.range,
-                    HighlightStyle {
-                        color: token.foreground,
-                        font_weight: token.bold.then_some(FontWeight::BOLD),
-                        font_style: token.italic.then_some(FontStyle::Italic),
-                        ..Default::default()
-                    },
-                ));
-            }
-        }
+            .map(|language| {
+                crate::colorize::colorize_highlights(&code, &language.id, self.theme, self.registry)
+            })
+            .unwrap_or_default();
         let text = StyledText::new(code).with_highlights(highlights);
         self.blocks.push(
             div()

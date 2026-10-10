@@ -17,6 +17,7 @@ pub mod color;
 mod color_picker;
 pub use color_picker::{ColorPickerWidget, STANDALONE_COLOR_PICKER_KEY_CONTEXT};
 mod color_detector;
+pub mod colorize;
 mod commands;
 mod context_menu;
 pub use context_menu::CONTEXT_MENU_KEY_CONTEXT;
