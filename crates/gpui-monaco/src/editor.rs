@@ -294,7 +294,7 @@ impl CodeEditor {
             folds: FoldState::default(),
             gutter_hovered: false,
             widgets: Widgets::default(),
-            find: crate::find::FindState::new(),
+            find: crate::find::FindState::new(cx),
             multi_cursor: None,
             bracket_decorations: Vec::new(),
             overtype: false,
@@ -2974,17 +2974,35 @@ impl Render for CodeEditor {
                 }
                 this.open_find(true, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &NextMatch, _, cx| {
+            .on_action(cx.listener(|this, _: &NextMatch, window, cx| {
                 if this.options.single_line {
                     return cx.propagate();
                 }
-                this.find_next(cx)
+                this.find_match_action(true, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &PreviousMatch, _, cx| {
+            .on_action(cx.listener(|this, _: &PreviousMatch, window, cx| {
                 if this.options.single_line {
                     return cx.propagate();
                 }
-                this.find_previous(cx)
+                this.find_match_action(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NextSelectionMatch, window, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.find_selection_match_action(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PreviousSelectionMatch, window, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.find_selection_match_action(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &StartFindWithSelection, window, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.start_find_with_selection(window, cx)
             }))
             .on_action(cx.listener(|this, _: &ReplaceOne, _, cx| {
                 if this.options.single_line {

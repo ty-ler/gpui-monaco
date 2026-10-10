@@ -149,6 +149,18 @@ All notable changes to this project are documented here. The format follows [Kee
   - Theme colors: `editorUnnecessaryCode.opacity` and `.border`.
   - The LSP bridge maps diagnostic tags and related information.
   - `Marker` and `MarkerSeverity` now implement `Default`.
+- **Find controller and widget (#104, part 2):**
+  - **Commands:** `actions.find`, Replace, Find Next/Previous (`matchFindAction`), Find Next/Previous Selection (Cmd/Ctrl+F3, with Shift) and Find with Selection (Cmd+E on macOS) follow Monaco's `FindController`:
+    - Find Next on a closed widget opens it without focusing it, seeded from the cursor when the query is empty.
+    - Replace seeds only from a one-line selection while the find input isn't focused, then focuses replace.
+    - Find with Selection takes multi-line selections.
+    - Monaco's `find.closeOnResult` option (`close_on_result`).
+  - **Remembered toggles:** match case, whole word, regex and preserve case carry over to new editors and models (Monaco's stored query state).
+  - **History:** Up/Down in the find and replace inputs walk a shared history (`find.history`, `find.replaceHistory`). Typed strings join it after 500ms.
+  - **Extra space on top:** the widget no longer covers the first line (`find.addExtraSpaceOnTop`, a view zone above it).
+  - **Resizing:** drag the widget's left edge to resize it; double-click toggles widest.
+  - **States:** "No results" shows in `errorForeground`, and an invalid regex marks the input.
+  - New: `find_search_scope`, `is_find_query_invalid`, `set_find_replace_visible` and `start_find_with_selection`.
 - **Find model (#104, part 1):** find is now a port of Monaco's `FindModelBoundToEditorModel` and `FindDecorations`, checked against `findModel.test.ts`.
   - **Incremental search:** starts where the cursor was, and restarts after explicit moves, undo and redo.
   - **Matches:** the "N of M" position is kept on decorations. Next and previous step past empty matches and respect the scope. Scopes can be several selections, cover whole lines, and are shown with `editor.findRangeHighlightBackground`.

@@ -62,6 +62,8 @@ pub struct EditorColors {
     pub find_match_overview: Hsla,
     /// The find in selection scope (`editor.findRangeHighlightBackground`).
     pub find_range_highlight_background: Hsla,
+    /// Error text, e.g. the find widget's "No results" (`errorForeground`).
+    pub error_foreground: Hsla,
     /// The target of go to definition and similar jumps, briefly
     /// (`editor.symbolHighlightBackground`; defaults to the find match
     /// highlight).
@@ -252,6 +254,7 @@ impl EditorColors {
             find_match_highlight_background: c(rgba(0xea5c0055)),
             find_match_overview: c(rgba(0xd186167e)),
             find_range_highlight_background: c(rgba(0x3a3d4166)),
+            error_foreground: c(rgb(0xf48771)),
             symbol_highlight_background: c(rgba(0xea5c0055)),
             link_active_foreground: c(rgb(0x4e94ce)),
             range_highlight_background: c(rgba(0xffffff0b)),
@@ -357,6 +360,7 @@ impl EditorColors {
             find_match_highlight_background: c(rgba(0xea5c0055)),
             find_match_overview: c(rgba(0xd186167e)),
             find_range_highlight_background: c(rgba(0xb4b4b44c)),
+            error_foreground: c(rgb(0xa1260d)),
             symbol_highlight_background: c(rgba(0xea5c0055)),
             link_active_foreground: c(rgb(0x0000ff)),
             range_highlight_background: c(rgba(0xfdff0033)),
@@ -484,6 +488,7 @@ impl EditorColors {
             &mut self.find_range_highlight_background,
             "editor.findRangeHighlightBackground",
         );
+        set(&mut self.error_foreground, "errorForeground");
         set(
             &mut self.find_match_overview,
             "editorOverviewRuler.findMatchForeground",
