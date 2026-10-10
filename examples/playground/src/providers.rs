@@ -150,6 +150,26 @@ impl CompletionProvider for DemoCompletions {
                     "Deprecated: use `set_selections`.",
                 )
             },
+            CompletionItem {
+                insert_text: Some("for ${1:item} in ${2:iter} {\n\t$0\n}".into()),
+                insert_text_is_snippet: true,
+                ..item(
+                    "for",
+                    CompletionItemKind::Snippet,
+                    "for loop",
+                    "Tab moves through `item`, `iter` and the body.",
+                )
+            },
+            CompletionItem {
+                insert_text: Some("#[derive(${1|Debug,Clone,Default|})]$0".into()),
+                insert_text_is_snippet: true,
+                ..item(
+                    "derive",
+                    CompletionItemKind::Snippet,
+                    "derive attribute",
+                    "A choice of traits.",
+                )
+            },
             // Resolved when focused: its docs arrive later.
             CompletionItem::new("selection_count", CompletionItemKind::Method),
         ];

@@ -131,6 +131,15 @@ All notable changes to this project are documented here. The format follows [Kee
   - `snippet::variables`: Monaco's variable resolvers (selection, file, clipboard, comments, time, random and UUID, plus workspace when the host provides one).
   - `TextModel::change_decoration_options`.
   - Theme colors: `editor.snippet*TabstopHighlight*`.
+- **Snippet sessions (#55, part 2):** ported from Monaco's `SnippetSession` and `SnippetController2`.
+  - `CodeEditor::insert_snippet` with `SnippetInsertOptions`.
+  - Tab, Shift+Tab and Escape move between tab stops or leave, plus `finish_snippet`.
+  - Mirrors, transforms, nested snippets, and choices shown in the suggest widget.
+  - Per-cursor variables, and indentation following the cursor's line.
+  - Completion items with `insert_text_is_snippet` expand as snippets, and every item is inserted the way Monaco does it, re-indenting multi-line text unless `keep_whitespace` is set.
+  - `set_snippet_workspace`.
+  - The LSP bridge advertises `snippetSupport` and maps `insertTextMode`.
+  - `TextModel::start_transaction`, `end_transaction` and `last_transaction_id`.
 - **Rename (#56):** `RenameProvider` (with optional `resolve_rename_location`), F2 with Monaco's rename box, `WorkspaceEdit` and `CodeEditor::apply_workspace_edit`. The LSP bridge forwards `prepareRename` and `rename`.
 
 ### Changed
@@ -152,6 +161,10 @@ These are the small correctness follow-ups from #76:
   - They ignore `g`, `y`, `d`, `u` and `v` flags.
   - `Pattern::error` and `LanguageConfiguration::patterns` report regexes that don't compile.
   - The bundled HTML `onEnterRules` and CSS `wordPattern` never compiled before and now work.
+
+Also fixed:
+
+- **Undo:** `text::Buffer::set_last_transaction_metadata` sets the cursor state of the open transaction, if there is one, instead of the previous undo step.
 
 ## [0.1.0] - 2026-10-09
 

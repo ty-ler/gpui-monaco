@@ -134,8 +134,7 @@ pub fn completion_list(response: lsp::CompletionResponse) -> CompletionList {
     }
 }
 
-/// One completion item. Snippets are inserted as plain text until the
-/// editor supports them.
+/// One completion item; snippet text is kept for the editor to expand.
 pub fn completion_item(item: lsp::CompletionItem) -> CompletionItem {
     // The original goes along for `completionItem/resolve`.
     let data = serde_json::to_value(&item).ok();
@@ -145,13 +144,9 @@ pub fn completion_item(item: lsp::CompletionItem) -> CompletionItem {
             .as_ref()
             .is_some_and(|tags| tags.contains(&lsp::CompletionItemTag::DEPRECATED));
     let snippet = item.insert_text_format == Some(lsp::InsertTextFormat::SNIPPET);
-    let as_text = |text: String| -> SharedString {
-        if snippet {
-            snippet_to_text(&text).into()
-        } else {
-            text.into()
-        }
-    };
+    // `insertTextMode: asIs` keeps the text's own indentation.
+    let keep_whitespace = item.insert_text_mode == Some(lsp::InsertTextMode::AS_IS);
+    let as_text = |text: String| -> SharedString { text.into() };
     let (edit_range, replace_range, edit_text) = match item.text_edit {
         Some(lsp::CompletionTextEdit::Edit(edit)) => {
             (Some(range(edit.range)), None, Some(edit.new_text))
@@ -197,6 +192,8 @@ pub fn completion_item(item: lsp::CompletionItem) -> CompletionItem {
             .collect(),
         label: item.label.into(),
         replace_range,
+        insert_text_is_snippet: snippet,
+        keep_whitespace,
         tags: if deprecated {
             vec![CompletionItemTag::Deprecated]
         } else {
@@ -580,7 +577,8 @@ mod tests {
         .unwrap();
         let item = completion_item(item);
         assert_eq!(item.kind, CompletionItemKind::Method);
-        assert_eq!(item.insert_text(), "push(value)");
+        assert_eq!(item.insert_text(), "push(${1:value})$0");
+        assert!(item.insert_text_is_snippet);
         assert_eq!(
             item.range,
             Some(PointUtf16::new(0, 2)..PointUtf16::new(0, 4))

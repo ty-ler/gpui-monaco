@@ -498,6 +498,28 @@ impl CodeEditor {
         self.resolve_selected_suggestion(cx);
     }
 
+    /// Shows `items` replacing `range` (Monaco `showSimpleSuggestions`),
+    /// e.g. a snippet choice's options.
+    pub(crate) fn show_simple_suggestions(
+        &mut self,
+        items: Vec<CompletionItem>,
+        range: std::ops::Range<PointUtf16>,
+        cx: &mut Context<Self>,
+    ) {
+        self.hide_suggest(cx);
+        let head = self.cursors.primary().position;
+        let count = items.len();
+        self.start_session(
+            items,
+            vec![None; count],
+            Vec::new(),
+            false,
+            (head, range.start.column, range.end.column),
+            false,
+            cx,
+        );
+    }
+
     /// Tab completion (Monaco `insertBestCompletion`): at the end of a word,
     /// asks for completions without showing them and inserts the one
     /// `suggest_selection` picks, or types a tab if none changes the text.
@@ -550,7 +572,7 @@ impl CodeEditor {
     /// items with additional edits always do; others unless the text before
     /// the cursor already is their insert text.
     fn makes_text_edit(&self, item: &CompletionItem, word_start: u32) -> bool {
-        if item.kind == CompletionItemKind::Snippet || !item.additional_text_edits.is_empty() {
+        if item.insert_text_is_snippet || !item.additional_text_edits.is_empty() {
             return true;
         }
         let head = self.cursors.primary().position;
@@ -1162,7 +1184,7 @@ impl CodeEditor {
             return true;
         }
         let item = &session.model.items()[scored.index];
-        if !item.additional_text_edits.is_empty() || item.kind == CompletionItemKind::Snippet {
+        if !item.additional_text_edits.is_empty() || item.insert_text_is_snippet {
             return true;
         }
         let head = self.cursors.primary().position;
@@ -1250,7 +1272,9 @@ impl CodeEditor {
         }
         // Monaco runs the item's command after inserting.
         if let Some(command) = &item.command {
-            if command.id == "editor.action.triggerSuggest" {
+            if command.id == crate::snippet_session::NEXT_PLACEHOLDER_COMMAND {
+                self.next_snippet_placeholder(cx);
+            } else if command.id == "editor.action.triggerSuggest" {
                 self.request_suggestions(CompletionTrigger::Invoke, true, cx);
             } else if let Err(err) = crate::commands::execute_command(cx, command) {
                 log::warn!("{err:#}");
@@ -1325,126 +1349,105 @@ impl CodeEditor {
         };
         let overwrite_before = head.column.saturating_sub(start);
         let overwrite_after = end.saturating_sub(position.column);
-        let text = item.insert_text().to_string();
-        let inserted_utf16 = text.encode_utf16().count() as i64;
-        let mut edits = Vec::new();
-        let mut selections_after = Vec::new();
-        let mut shift: i64 = 0;
-        let mut last_row = None;
-        let mut selections = self.cursors.selections();
-        selections.sort_by_key(|s| s.head);
-        for selection in &selections {
-            let at = selection.head;
-            let start = PointUtf16::new(at.row, at.column.saturating_sub(overwrite_before));
-            let end = PointUtf16::new(
-                at.row,
-                (at.column + overwrite_after).min(self.snapshot.line_len_utf16(at.row)),
-            );
-            if last_row != Some(at.row) {
-                shift = 0;
-                last_row = Some(at.row);
-            }
-            edits.push((start..end, text.clone()));
-            let column = (start.column as i64 + shift + inserted_utf16) as u32;
-            selections_after.push(Selection::collapsed(PointUtf16::new(at.row, column)));
-            shift += inserted_utf16 - (end.column - start.column) as i64;
+        // Monaco inserts every item as a snippet (plain text escaped), after
+        // its additional edits, as one undo step.
+        self.model().update(cx, |model, _| {
+            model.push_stack_element();
+            model.start_transaction();
+        });
+        if !item.additional_text_edits.is_empty() {
+            self.apply_additional_text_edits(&item.additional_text_edits, cx);
         }
-        if text.contains('\n') {
-            // Multi-line insert text: place the cursor at the end of the
-            // last line of the inserted text.
-            selections_after = edits
-                .iter()
-                .map(|(range, text)| {
-                    let lines: Vec<&str> = text.split('\n').collect();
-                    let last = lines.last().copied().unwrap_or("");
-                    Selection::collapsed(PointUtf16::new(
-                        range.start.row + lines.len() as u32 - 1,
-                        last.encode_utf16().count() as u32,
-                    ))
-                })
-                .collect();
-        }
-        if item.additional_text_edits.is_empty() {
-            self.apply(
-                EditOperation {
-                    edits,
-                    selections_after,
-                    kind: EditOperationType::Other,
-                    push_stack_element_before: true,
-                    push_stack_element_after: true,
-                    auto_closed: Vec::new(),
-                    follow_up: None,
-                },
-                cx,
-            );
-            return;
-        }
-        // Monaco applies additional edits first: they go before the
-        // insertions at the same place, and the cursors (at the end of each
-        // insertion, relative to its start) shift with them.
-        let main_count = edits.len();
-        let heads: Vec<PointUtf16> = selections_after.iter().map(|s| s.head).collect();
-        let mut all: Vec<(bool, std::ops::Range<PointUtf16>, String)> = item
-            .additional_text_edits
+        let template = if item.insert_text_is_snippet {
+            item.insert_text().to_string()
+        } else {
+            crate::snippet::parser::SnippetParser::escape(item.insert_text())
+        };
+        self.insert_snippet(
+            &template,
+            crate::snippet_session::SnippetInsertOptions {
+                overwrite_before,
+                overwrite_after,
+                adjust_whitespace: !item.keep_whitespace,
+                undo_stop_before: false,
+                undo_stop_after: false,
+                clipboard_text: None,
+            },
+            cx,
+        );
+        self.model().update(cx, |model, _| {
+            model.end_transaction();
+            model.push_stack_element();
+        });
+    }
+
+    /// Applies `edits` elsewhere in the text, moving the cursors with them
+    /// (text inserted at a cursor goes before it).
+    fn apply_additional_text_edits(
+        &mut self,
+        edits: &[(std::ops::Range<PointUtf16>, String)],
+        cx: &mut Context<Self>,
+    ) {
+        let mut offsets: Vec<(usize, usize, &str)> = edits
             .iter()
-            .map(|(range, text)| (false, range.clone(), text.clone()))
-            .chain(edits.into_iter().map(|(range, text)| (true, range, text)))
+            .map(|(range, text)| {
+                (
+                    self.snapshot.point_utf16_to_offset(range.start),
+                    self.snapshot.point_utf16_to_offset(range.end),
+                    text.as_str(),
+                )
+            })
             .collect();
-        all.sort_by_key(|(_, range, _)| range.start);
-        // Each insertion's start in the new text, and the cursor's offset
-        // from that start.
-        let mut delta: isize = 0;
-        let mut cursor_offsets = Vec::with_capacity(main_count);
-        let mut main_ix = 0;
-        for (is_main, range, text) in &all {
-            let start = self.snapshot.point_utf16_to_offset(range.start);
-            let end = self.snapshot.point_utf16_to_offset(range.end);
-            if *is_main {
-                let head = heads[main_ix];
-                main_ix += 1;
-                // The cursor relative to the insertion start, in bytes of
-                // the inserted text.
-                let rel = if head.row == range.start.row {
-                    let columns = head.column.saturating_sub(range.start.column) as usize;
-                    let mut utf16 = 0;
-                    text.chars()
-                        .take_while(|ch| {
-                            utf16 += ch.len_utf16();
-                            utf16 <= columns
-                        })
-                        .map(char::len_utf8)
-                        .sum()
-                } else {
-                    text.len()
-                };
-                cursor_offsets.push((start as isize + delta) as usize + rel);
+        offsets.sort_by_key(|(start, _, _)| *start);
+        let transform = |offset: usize| -> usize {
+            let mut delta: isize = 0;
+            for &(start, end, text) in &offsets {
+                if end <= offset {
+                    delta += text.len() as isize - (end - start) as isize;
+                } else if start < offset {
+                    // Inside a replaced range: to the end of its new text.
+                    return (start as isize + delta) as usize + text.len();
+                }
             }
-            delta += text.len() as isize - (end - start) as isize;
-        }
-        let edits: Vec<_> = all
-            .into_iter()
-            .map(|(_, range, text)| (range, text))
+            (offset as isize + delta) as usize
+        };
+        let new_points: Vec<(usize, usize)> = self
+            .cursors
+            .selections()
+            .iter()
+            .map(|s| {
+                (
+                    transform(self.snapshot.point_utf16_to_offset(s.anchor)),
+                    transform(self.snapshot.point_utf16_to_offset(s.head)),
+                )
+            })
             .collect();
+        let mut sorted = edits.to_vec();
+        sorted.sort_by_key(|(range, _)| range.start);
         self.apply(
             EditOperation {
-                edits,
-                selections_after,
+                edits: sorted,
+                selections_after: self.cursors.selections(),
                 kind: EditOperationType::Other,
-                push_stack_element_before: true,
-                push_stack_element_after: true,
+                push_stack_element_before: false,
+                push_stack_element_after: false,
                 auto_closed: Vec::new(),
                 follow_up: None,
             },
             cx,
         );
-        let selections: Vec<Selection> = cursor_offsets
+        let selections: Vec<Selection> = new_points
             .into_iter()
-            .map(|offset| {
-                let offset = offset.min(self.snapshot.len());
-                Selection::collapsed(self.snapshot.offset_to_point_utf16(offset))
+            .map(|(anchor, head)| {
+                Selection::new(
+                    self.snapshot
+                        .offset_to_point_utf16(anchor.min(self.snapshot.len())),
+                    self.snapshot
+                        .offset_to_point_utf16(head.min(self.snapshot.len())),
+                )
             })
             .collect();
-        self.set_selections(&selections, cx);
+        self.cursors.set_selections(&selections);
     }
 
     /// If `ch` is a commit character of the selected suggestion, accepts it

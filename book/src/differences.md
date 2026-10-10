@@ -20,7 +20,10 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
   - `\n` in a pattern still enables multiline search, as in Monaco.
   - Replacement patterns support `$1`, `$&`, `$$`, `\n` and `\t`. Monaco's case-changing escapes (`\u`, `\U`, `\l`, `\L`) are not supported.
   - Language configuration patterns (`wordPattern`, `indentationRules`, …) use `fancy-regex`, so VS Code's configurations work unchanged.
-- **Completion:** snippet syntax in `insert_text` is inserted literally; snippets are post-MVP.
+- **Snippets:**
+  - Transform regexes run on Rust's regex engine (via JavaScript translation), so exotic JavaScript syntax may not compile.
+  - `$CURRENT_*` day and month names are English.
+  - There's no overtyping capture for `$SELECTION`.
 - **Word-based suggestions:** words are not ranked by distance from the cursor, and the documents are the models registered with `register_model`.
 - **Suggestion memories:** they are kept in memory for the app's lifetime, not persisted. The same goes for the suggest widget's size and whether details are expanded.
 - **Suggest widget:** the details panel goes beside the list or below it, never to the left or above. Its contents can't be focused or scrolled with the keyboard, and explain mode (`toggleExplainMode`) isn't ported. Icons are glyphs, not codicons.

@@ -111,6 +111,30 @@ Expand Selection grows each selection through the enclosing syntax nodes: word p
   - F7 and Shift+F7 select the next and previous occurrence.
 - **Selected text:** other occurrences of the selected text are highlighted. The highlight skips whitespace-only and multi-line selections, and selections longer than 200 characters.
 
+## Snippets
+
+`insert_snippet` inserts a TextMate snippet at every cursor and selects its first tab stop:
+
+```rust,ignore
+editor.update(cx, |editor, cx| {
+    editor.insert_snippet(
+        "for ${1:item} in ${2:iter} {\n\t$0\n}",
+        SnippetInsertOptions::default(),
+        cx,
+    )
+});
+```
+
+The supported syntax is Monaco's:
+- Tab stops (`$1`, `$0`), placeholders (`${1:default}`) and mirrors (the same index used twice).
+- Choices (`${1|one,two|}`), whose options show in the suggest widget.
+- Variables (`$TM_FILENAME`, `$CURRENT_YEAR`, `$CLIPBOARD`, …).
+- Transforms (`${1/(.*)/${1:/upcase}/}`).
+
+Tab and Shift+Tab move between tab stops and Escape leaves the snippet. Snippet mode also ends at the last tab stop, when the cursor leaves the placeholders, or when the insertion is undone. Inserting a snippet inside an active one nests it into the current placeholder.
+
+Lines are indented like the cursor's line unless `adjust_whitespace` is off. `set_snippet_workspace` sets what `$WORKSPACE_NAME` and `$WORKSPACE_FOLDER` refer to.
+
 ## Brackets
 
 - **Highlighting:** the bracket pair around the cursor is highlighted (`match_brackets`). Brackets inside strings and comments are skipped.

@@ -35,4 +35,4 @@ Behavior follows Monaco closely. Large parts of Monaco's own unit tests are port
 
 ## Out of scope for 0.1
 
-The diff editor, screen reader support, snippets, code actions, rename, inlay hints, collaborative editing (CRDT), wasm and very long single lines. Each one has a `post-mvp` issue in the [issue tracker](https://github.com/ty-ler/gpui-monaco/issues?q=label%3Apost-mvp).
+The diff editor, screen reader support, code actions, rename, inlay hints, collaborative editing (CRDT), wasm and very long single lines. Each one has a `post-mvp` issue in the [issue tracker](https://github.com/ty-ler/gpui-monaco/issues?q=label%3Apost-mvp).

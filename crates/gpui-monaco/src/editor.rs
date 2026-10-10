@@ -154,6 +154,7 @@ pub struct CodeEditor {
     pub(crate) definition: crate::definition::DefinitionLink,
     pub(crate) signature_help: crate::signature_help::SignatureHelpState,
     pub(crate) suggest: crate::completion::SuggestState,
+    pub(crate) snippet: crate::snippet_session::SnippetState,
     pub(crate) minimap_cache: crate::element::MinimapCache,
     pub(crate) minimap_hovered: bool,
     minimap_drag: Option<Pixels>,
@@ -285,6 +286,7 @@ impl CodeEditor {
             definition: Default::default(),
             signature_help: Default::default(),
             suggest: Default::default(),
+            snippet: Default::default(),
             minimap_cache: Default::default(),
             minimap_hovered: false,
             minimap_drag: None,
@@ -314,6 +316,7 @@ impl CodeEditor {
         // decoration ids would name unrelated decorations in the new one.
         self.hide_hover(cx);
         self.hide_suggest(cx);
+        self.cancel_snippet(false, cx);
         self.hide_signature_help(cx);
         self.close_message(cx);
         self.close_peek(cx);
@@ -833,6 +836,7 @@ impl CodeEditor {
 
     pub(crate) fn cursors_changed(&mut self, autoscroll: bool, cx: &mut Context<Self>) {
         self.suggest_cursor_changed();
+        self.snippet_selections_changed(cx);
         // Monaco `multiCursorLimit`: extra cursors are dropped.
         let limit = self.options.multi_cursor_limit.max(1);
         if self.cursors.all().len() > limit {
@@ -1026,6 +1030,10 @@ impl CodeEditor {
         }
         if self.is_suggest_visible() {
             self.hide_suggest(cx);
+            return;
+        }
+        if self.in_snippet_mode() {
+            self.cancel_snippet(true, cx);
             return;
         }
         if self.close_marker_zone(cx) {
@@ -1242,6 +1250,10 @@ impl CodeEditor {
         if self.is_suggest_visible() && self.accept_suggestion(cx) {
             return;
         }
+        if self.has_next_tabstop() {
+            self.next_snippet_placeholder(cx);
+            return;
+        }
         // Monaco `tabCompletion`: `insertNextSuggestion`, then
         // `insertBestCompletion`.
         if self.options.tab_completion == crate::options::TabCompletion::On {
@@ -1267,6 +1279,10 @@ impl CodeEditor {
     fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
         if self.options.single_line {
             cx.propagate();
+            return;
+        }
+        if self.has_prev_tabstop() {
+            self.prev_snippet_placeholder(cx);
             return;
         }
         if self.options.tab_completion == crate::options::TabCompletion::On

@@ -15,6 +15,7 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **F8:** next problem
 - **F12:** go to definition
 - **Ctrl+Space:** trigger completion
+- **Tab / Shift+Tab / Escape** in a snippet: next and previous tab stop, leave the snippet
 - **Ctrl+Space (or Cmd+I)** in the suggest widget: show or hide the details
 - **Shift+Enter / Shift+Tab** in the suggest widget: accept in the other insert mode
 - **Tab / Shift+Tab** with `tab_completion: On`: insert the best completion, then cycle through the others

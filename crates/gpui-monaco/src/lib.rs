@@ -43,6 +43,7 @@ pub mod search;
 mod signature_help;
 mod smart_select;
 pub mod snippet;
+mod snippet_session;
 pub mod suggest;
 mod suggest_widget;
 pub mod theme;
@@ -69,6 +70,7 @@ pub use model::{
 pub use mouse_target::{EditorMouseEvent, MouseTarget, MouseTargetKind};
 pub use options::EditorOptions;
 pub use signature_help::SignatureHelpWidget;
+pub use snippet_session::{SnippetInsertOptions, set_snippet_workspace};
 pub use suggest_widget::SuggestWidget;
 pub use syntax;
 pub use text;
