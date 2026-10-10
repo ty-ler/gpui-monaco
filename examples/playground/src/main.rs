@@ -215,6 +215,12 @@ impl Playground {
         if lsp_command.is_none() && (!plain || std::env::var_os("PLAYGROUND_PROVIDERS").is_some()) {
             providers::register(cx);
             providers::add_markers(&editor, cx);
+            editor.update(cx, |editor, cx| {
+                let mut options = editor.options().clone();
+                options.format_on_type = true;
+                options.format_on_paste = true;
+                editor.update_options(options, cx);
+            });
         }
         let themes = themes();
         let mut theme = 0;

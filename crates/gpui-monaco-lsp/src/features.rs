@@ -2,12 +2,17 @@
 
 use anyhow::Result;
 use gpui::{App, Task, WeakEntity};
+use std::ops::Range;
+
 use gpui_monaco::providers::{
-    CompletionList, CompletionProvider, CompletionTrigger, DefinitionProvider, DocumentHighlight,
-    DocumentHighlightProvider, Hover, HoverProvider, LanguageSelector, Location, ProviderContext,
-    ProviderRegistration, SignatureHelp, SignatureHelpProvider, SignatureHelpTrigger,
-    register_completion_provider, register_definition_provider,
-    register_document_highlight_provider, register_hover_provider,
+    CompletionList, CompletionProvider, CompletionTrigger, DefinitionProvider,
+    DocumentFormattingProvider, DocumentHighlight, DocumentHighlightProvider,
+    DocumentRangeFormattingProvider, FormattingOptions, Hover, HoverProvider, LanguageSelector,
+    Location, OnTypeFormattingProvider, ProviderContext, ProviderRegistration, SignatureHelp,
+    SignatureHelpProvider, SignatureHelpTrigger, TextEdit, register_completion_provider,
+    register_definition_provider, register_document_formatting_provider,
+    register_document_highlight_provider, register_document_range_formatting_provider,
+    register_hover_provider, register_on_type_formatting_provider,
     register_signature_help_provider,
 };
 use gpui_monaco::text::PointUtf16;
@@ -25,6 +30,7 @@ pub(crate) struct LspFeatures {
     completion_triggers: Vec<char>,
     signature_triggers: Vec<char>,
     signature_retriggers: Vec<char>,
+    on_type_triggers: Vec<char>,
 }
 
 fn chars(strings: Option<&Vec<String>>) -> Vec<char> {
@@ -54,6 +60,15 @@ impl LspFeatures {
             completion_triggers: chars(completion.and_then(|c| c.trigger_characters.as_ref())),
             signature_triggers: chars(signature.and_then(|s| s.trigger_characters.as_ref())),
             signature_retriggers: chars(signature.and_then(|s| s.retrigger_characters.as_ref())),
+            on_type_triggers: capabilities
+                .document_on_type_formatting_provider
+                .iter()
+                .flat_map(|options| {
+                    std::iter::once(&options.first_trigger_character)
+                        .chain(options.more_trigger_character.iter().flatten())
+                })
+                .filter_map(|s| s.chars().next())
+                .collect(),
         }
     }
 
@@ -90,6 +105,27 @@ impl LspFeatures {
         }
         if supported(capabilities.document_highlight_provider.as_ref()) {
             registrations.push(register_document_highlight_provider(
+                cx,
+                selector.clone(),
+                self.clone(),
+            ));
+        }
+        if supported(capabilities.document_formatting_provider.as_ref()) {
+            registrations.push(register_document_formatting_provider(
+                cx,
+                selector.clone(),
+                self.clone(),
+            ));
+        }
+        if supported(capabilities.document_range_formatting_provider.as_ref()) {
+            registrations.push(register_document_range_formatting_provider(
+                cx,
+                selector.clone(),
+                self.clone(),
+            ));
+        }
+        if capabilities.document_on_type_formatting_provider.is_some() {
+            registrations.push(register_on_type_formatting_provider(
                 cx,
                 selector.clone(),
                 self.clone(),
@@ -291,5 +327,94 @@ impl SignatureHelpProvider for LspFeatures {
                 .map(convert::signature_help)
                 .filter(|help| !help.signatures.is_empty()))
         })
+    }
+}
+
+fn formatting_options(options: FormattingOptions) -> lsp::FormattingOptions {
+    lsp::FormattingOptions {
+        tab_size: options.tab_size,
+        insert_spaces: options.insert_spaces,
+        ..Default::default()
+    }
+}
+
+fn text_edits(edits: Option<Vec<lsp::TextEdit>>) -> Vec<TextEdit> {
+    edits
+        .unwrap_or_default()
+        .into_iter()
+        .map(|edit| (convert::range(edit.range), edit.new_text))
+        .collect()
+}
+
+impl DocumentFormattingProvider for LspFeatures {
+    fn provide_document_formatting_edits(
+        &self,
+        context: &ProviderContext,
+        options: FormattingOptions,
+        cx: &mut App,
+    ) -> Task<Result<Vec<TextEdit>>> {
+        let Some((connection, position)) = self.prepare(context, PointUtf16::zero(), cx) else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let request =
+            connection.request::<lsp::request::Formatting>(lsp::DocumentFormattingParams {
+                text_document: position.text_document,
+                options: formatting_options(options),
+                work_done_progress_params: Default::default(),
+            });
+        cx.background_executor()
+            .spawn(async move { Ok(text_edits(request.await?)) })
+    }
+}
+
+impl DocumentRangeFormattingProvider for LspFeatures {
+    fn provide_document_range_formatting_edits(
+        &self,
+        context: &ProviderContext,
+        range: Range<PointUtf16>,
+        options: FormattingOptions,
+        cx: &mut App,
+    ) -> Task<Result<Vec<TextEdit>>> {
+        let Some((connection, position)) = self.prepare(context, range.start, cx) else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let request = connection.request::<lsp::request::RangeFormatting>(
+            lsp::DocumentRangeFormattingParams {
+                text_document: position.text_document,
+                range: convert::lsp_range(&range),
+                options: formatting_options(options),
+                work_done_progress_params: Default::default(),
+            },
+        );
+        cx.background_executor()
+            .spawn(async move { Ok(text_edits(request.await?)) })
+    }
+}
+
+impl OnTypeFormattingProvider for LspFeatures {
+    fn auto_format_trigger_characters(&self) -> Vec<char> {
+        self.on_type_triggers.clone()
+    }
+
+    fn provide_on_type_formatting_edits(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        ch: char,
+        options: FormattingOptions,
+        cx: &mut App,
+    ) -> Task<Result<Vec<TextEdit>>> {
+        let Some((connection, position)) = self.prepare(context, position, cx) else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let request = connection.request::<lsp::request::OnTypeFormatting>(
+            lsp::DocumentOnTypeFormattingParams {
+                text_document_position: position,
+                ch: ch.to_string(),
+                options: formatting_options(options),
+            },
+        );
+        cx.background_executor()
+            .spawn(async move { Ok(text_edits(request.await?)) })
     }
 }

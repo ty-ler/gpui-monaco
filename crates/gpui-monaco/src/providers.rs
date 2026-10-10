@@ -403,6 +403,72 @@ pub trait SignatureHelpProvider: 'static {
     ) -> Task<anyhow::Result<Option<SignatureHelp>>>;
 }
 
+// ----- formatting ---------------------------------------------------------------
+
+/// A replacement of `range` (0-based rows, UTF-16 columns) with the text
+/// (Monaco `TextEdit`). A list of edits refers to the text before any of
+/// them, and they must not overlap.
+pub type TextEdit = (Range<PointUtf16>, String);
+
+/// How the model is indented, for formatters (Monaco `FormattingOptions`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FormattingOptions {
+    /// Spaces per indentation level (and per tab).
+    pub tab_size: u32,
+    /// Indent with spaces rather than tabs.
+    pub insert_spaces: bool,
+}
+
+/// Formats a whole document (Monaco `DocumentFormattingEditProvider`).
+///
+/// Register with [`register_document_formatting_provider`].
+pub trait DocumentFormattingProvider: 'static {
+    /// The edits that format the document. Big replacements are fine: the
+    /// editor reduces them to the characters that actually change.
+    fn provide_document_formatting_edits(
+        &self,
+        context: &ProviderContext,
+        options: FormattingOptions,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<TextEdit>>>;
+}
+
+/// Formats part of a document (Monaco
+/// `DocumentRangeFormattingEditProvider`). Also formats whole documents
+/// when no [`DocumentFormattingProvider`] is registered, and pasted text
+/// with `format_on_paste`.
+///
+/// Register with [`register_document_range_formatting_provider`].
+pub trait DocumentRangeFormattingProvider: 'static {
+    /// The edits that format `range`.
+    fn provide_document_range_formatting_edits(
+        &self,
+        context: &ProviderContext,
+        range: Range<PointUtf16>,
+        options: FormattingOptions,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<TextEdit>>>;
+}
+
+/// Formats as you type (Monaco `OnTypeFormattingEditProvider`), with the
+/// `format_on_type` option.
+///
+/// Register with [`register_on_type_formatting_provider`].
+pub trait OnTypeFormattingProvider: 'static {
+    /// Characters that trigger formatting when typed (e.g. `;` or `}`).
+    fn auto_format_trigger_characters(&self) -> Vec<char>;
+
+    /// The edits after `ch` was typed, leaving the cursor at `position`.
+    fn provide_on_type_formatting_edits(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        ch: char,
+        options: FormattingOptions,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<TextEdit>>>;
+}
+
 // ----- registry ------------------------------------------------------------------
 
 /// Identifies a registration, for [`unregister_provider`].
@@ -433,6 +499,9 @@ struct LanguageFeatures {
     definition: Vec<Entry<dyn DefinitionProvider>>,
     signature_help: Vec<Entry<dyn SignatureHelpProvider>>,
     document_highlight: Vec<Entry<dyn DocumentHighlightProvider>>,
+    document_formatting: Vec<Entry<dyn DocumentFormattingProvider>>,
+    range_formatting: Vec<Entry<dyn DocumentRangeFormattingProvider>>,
+    on_type_formatting: Vec<Entry<dyn OnTypeFormattingProvider>>,
 }
 
 impl Global for LanguageFeatures {}
@@ -501,6 +570,28 @@ register_fn!(
     SignatureHelpProvider
 );
 
+register_fn!(
+    /// Registers a document formatter for the models `selector` matches (Monaco
+    /// `registerDocumentFormattingEditProvider`). The first one registered is used.
+    register_document_formatting_provider,
+    document_formatting,
+    DocumentFormattingProvider
+);
+register_fn!(
+    /// Registers a range formatter for the models `selector` matches (Monaco
+    /// `registerDocumentRangeFormattingEditProvider`). The first one registered is used.
+    register_document_range_formatting_provider,
+    range_formatting,
+    DocumentRangeFormattingProvider
+);
+register_fn!(
+    /// Registers an on-type formatter for the models `selector` matches (Monaco
+    /// `registerOnTypeFormattingEditProvider`). The first one registered is used.
+    register_on_type_formatting_provider,
+    on_type_formatting,
+    OnTypeFormattingProvider
+);
+
 /// Removes a provider registered with any `register_*_provider`.
 pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     let features = features(cx);
@@ -509,6 +600,11 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.hover.retain(|e| e.id != registration);
     features.definition.retain(|e| e.id != registration);
     features.signature_help.retain(|e| e.id != registration);
+    features
+        .document_formatting
+        .retain(|e| e.id != registration);
+    features.range_formatting.retain(|e| e.id != registration);
+    features.on_type_formatting.retain(|e| e.id != registration);
 }
 
 fn matching<T: ?Sized>(entries: &[Entry<T>], language_id: Option<&str>) -> Vec<Arc<T>> {
@@ -568,5 +664,38 @@ pub fn document_highlight_providers(
 ) -> Vec<Arc<dyn DocumentHighlightProvider>> {
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.document_highlight, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered document formatters whose selector matches `language_id`,
+/// in registration order.
+pub fn document_formatting_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn DocumentFormattingProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.document_formatting, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered range formatters whose selector matches `language_id`, in
+/// registration order.
+pub fn document_range_formatting_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn DocumentRangeFormattingProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.range_formatting, language_id))
+        .unwrap_or_default()
+}
+
+/// The registered on-type formatters whose selector matches `language_id`,
+/// in registration order.
+pub fn on_type_formatting_providers(
+    cx: &App,
+    language_id: Option<&str>,
+) -> Vec<Arc<dyn OnTypeFormattingProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.on_type_formatting, language_id))
         .unwrap_or_default()
 }

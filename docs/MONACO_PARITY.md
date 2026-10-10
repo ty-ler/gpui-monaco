@@ -98,7 +98,7 @@ Issues are linked by number.
 | Diagnostics: squiggles, ruler, hover, F8 | `gotoError` | ✅ | |
 | Diagnostic tags (unused, deprecated), related information | `gotoError` | ❌ | #90 |
 | Document highlights | `wordHighlighter` | ✅ | #83 |
-| Formatting: document, range, on type, on paste | `format` | ❌ | #94 |
+| Formatting: document, range, on type, on paste | `format` | ✅ | #94 |
 | Code actions and lightbulb, rename, inlay hints | `codeAction`, `rename`, `inlayHints` | ❌ | #56 |
 | Code lens | `codelens` | ❌ | #96 |
 | Colors and color picker | `colorPicker` | ❌ | #97 |

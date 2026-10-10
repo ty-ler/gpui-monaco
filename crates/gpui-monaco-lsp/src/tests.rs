@@ -63,6 +63,9 @@ fn capabilities() -> Value {
         "definitionProvider": true,
         "documentHighlightProvider": true,
         "signatureHelpProvider": { "triggerCharacters": ["("], "retriggerCharacters": [","] },
+        "documentFormattingProvider": true,
+        "documentRangeFormattingProvider": true,
+        "documentOnTypeFormattingProvider": { "firstTriggerCharacter": "}", "moreTriggerCharacter": [";"] },
     })
 }
 
@@ -235,6 +238,19 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
             "textDocument/documentHighlight" => json!([
                 { "range": { "start": { "line": 0, "character": 3 }, "end": { "line": 0, "character": 7 } }, "kind": 3 },
             ]),
+            "textDocument/formatting" | "textDocument/rangeFormatting" | "textDocument/onTypeFormatting" => {
+                assert_eq!(params["options"]["tabSize"], 4);
+                assert_eq!(params["options"]["insertSpaces"], true);
+                let column = match method {
+                    "textDocument/formatting" => 0,
+                    "textDocument/rangeFormatting" => params["range"]["start"]["character"].as_u64().unwrap(),
+                    _ => {
+                        assert_eq!(params["ch"], ";");
+                        params["position"]["character"].as_u64().unwrap()
+                    }
+                };
+                json!([{ "range": { "start": { "line": 0, "character": column }, "end": { "line": 0, "character": column } }, "newText": method }])
+            }
             "textDocument/signatureHelp" => {
                 assert_eq!(params["context"]["isRetrigger"], true);
                 json!({
@@ -324,6 +340,38 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
         help.signatures[0].parameters[0].label,
         ParameterLabel::Range(2..3)
     );
+
+    // Formatting, with the model's options.
+    let options = FormattingOptions {
+        tab_size: 4,
+        insert_spaces: true,
+    };
+    assert_eq!(features.auto_format_trigger_characters(), vec!['}', ';']);
+    let edits = cx
+        .update(|cx| features.provide_document_formatting_edits(&context, options, cx))
+        .await
+        .unwrap();
+    assert_eq!(
+        edits,
+        vec![(p(0, 0)..p(0, 0), "textDocument/formatting".to_string())]
+    );
+    let edits = cx
+        .update(|cx| {
+            features.provide_document_range_formatting_edits(
+                &context,
+                p(0, 2)..p(1, 0),
+                options,
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(edits[0].0, p(0, 2)..p(0, 2));
+    let edits = cx
+        .update(|cx| features.provide_on_type_formatting_edits(&context, p(1, 3), ';', options, cx))
+        .await
+        .unwrap();
+    assert_eq!(edits[0].1, "textDocument/onTypeFormatting");
 
     // Models that aren't attached get nothing, without asking the server.
     let other = cx.new(|_| TextModel::new("x").with_uri("file:///elsewhere.rs"));
