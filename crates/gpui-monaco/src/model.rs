@@ -641,6 +641,12 @@ impl TextModel {
         self.decorations.in_range(range, editor)
     }
 
+    /// The decorations' line heights (Monaco `lineHeight`), as seen by
+    /// `editor`.
+    pub fn decoration_line_heights(&self, editor: Option<EntityId>) -> Vec<(Range<usize>, f32)> {
+        self.decorations.line_heights(editor)
+    }
+
     /// All decorations visible to `editor`.
     pub fn all_decorations(&mut self, editor: Option<EntityId>) -> Vec<Decoration> {
         self.decorations.all(editor)

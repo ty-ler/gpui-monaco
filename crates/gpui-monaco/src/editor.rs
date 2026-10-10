@@ -2816,7 +2816,7 @@ impl EntityInputHandler for CodeEditor {
         let top = layout.line_top(line.view_line);
         Some(Bounds::new(
             point(x, top),
-            gpui::size(px(1.), layout.metrics.line_height),
+            gpui::size(px(1.), layout.line_height_of(line.view_line)),
         ))
     }
 

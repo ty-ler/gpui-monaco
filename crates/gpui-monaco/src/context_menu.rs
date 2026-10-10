@@ -561,7 +561,7 @@ impl CodeEditor {
             match layout.line_for_point(cursor) {
                 Some(line) => gpui::point(
                     layout.text_origin_x() + line.x_for_column(cursor.column),
-                    layout.line_top(line.view_line) + layout.metrics.line_height,
+                    layout.line_top(line.view_line) + layout.line_height_of(line.view_line),
                 ),
                 None => layout.text_bounds.origin,
             }

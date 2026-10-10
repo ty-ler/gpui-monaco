@@ -97,6 +97,10 @@ pub struct DecorationOptions {
     /// Deprecated code, struck through when the editor's `show_deprecated`
     /// is on (Monaco `squiggly-inline-deprecated`).
     pub deprecated: bool,
+    /// The decorated lines' height, as a multiple of the editor's line
+    /// height (Monaco `lineHeight`). The tallest decoration on a line wins;
+    /// the editor's `allow_variable_line_heights` turns it off.
+    pub line_height: Option<f32>,
 }
 
 /// A decoration as stored in the model.
@@ -227,6 +231,16 @@ impl DecorationSet {
             .collect();
         result.sort_by_key(|d| (d.options.z_index, d.range.start));
         result
+    }
+
+    /// The ranges and line height multipliers of the decorations with a
+    /// `line_height`, as seen by `editor`.
+    pub fn line_heights(&self, editor: Option<EntityId>) -> Vec<(Range<usize>, f32)> {
+        self.decorations
+            .iter()
+            .filter(|d| d.owner.is_none() || d.owner == editor)
+            .filter_map(|d| Some((d.range.clone(), d.options.line_height?)))
+            .collect()
     }
 
     /// All decorations visible to `editor` (for the overview ruler).

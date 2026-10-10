@@ -830,10 +830,9 @@ impl CodeEditor {
     /// position of its start.
     pub(crate) fn swatch_at(&self, point: Point<Pixels>) -> Option<PointUtf16> {
         let layout = self.layout.as_ref()?;
-        let line_height = layout.metrics.line_height;
         let line = layout.lines.iter().find(|line| {
             let top = layout.line_top(line.view_line);
-            top <= point.y && point.y < top + line_height
+            top <= point.y && point.y < top + layout.line_height_of(line.view_line)
         })?;
         let x = point.x - layout.text_origin_x() - line.indent_x;
         let (range, _, _) = line.injected.iter().find(|(range, _, swatch)| {

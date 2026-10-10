@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- **Variable line heights (#87, part 3):** `DecorationOptions::line_height` (Monaco `lineHeight`), a multiple of the editor's line height for the lines a decoration covers. The tallest decoration on a line wins.
+  - **Rendering:** text, line numbers and glyphs are centered in a taller line. Selections, the cursor, line highlights, backgrounds and guides fill it.
+  - **Hit testing, reveal and widgets** follow the new heights.
+  - **`EditorOptions::allow_variable_line_heights`** (default on) turns them off.
 - **Wrapping for proportional fonts (#87, part 2):** `EditorOptions::wrapping_strategy` (Monaco `wrappingStrategy`). `Advanced` wraps by the editor font's measured character widths, so proportional fonts wrap at the edge. `Simple`, the default, counts monospace columns.
   - Wrapped lines are indented by space widths, as in Monaco, instead of `m` widths.
 - **Font options and zoom (#87, part 1):**

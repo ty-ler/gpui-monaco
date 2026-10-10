@@ -24,7 +24,7 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
 - **Context menu:** it's drawn inside the editor, flipping up or left at its edges, rather than as an OS-level menu. The scrollbar menu and the "Copy As" and "Share" submenus aren't there.
 - **Bracket pair guides:** they use the bracket pair colors. The `editorBracketPairGuide.*` theme colors aren't read; Monaco's defaults for them fall back to the same colors. Pairs come from the colorized bracket pairs, and `highlight_active_indentation` has no `"always"`.
 - **Advanced wrapping:** Monaco lets the browser break lines in a hidden DOM node. Here, characters are measured in the editor font and breaks follow the same break-before/after characters as `Simple` wrapping. `disableMonospaceOptimizations` isn't needed: cursor and selection positions always come from shaped text.
-- **Fonts:** `letterSpacing` and `fontVariations` aren't supported, because GPUI text has neither. A variable font's weight comes from `font_weight`.
+- **Fonts:** `letterSpacing` and `fontVariations` aren't supported, because GPUI text has neither. Decorations can't change the font (`fontFamily`, `fontSize` and so on), because GPUI shapes a line in one font size. Taller lines from `line_height` stay uniform in the minimap and sticky scroll. A variable font's weight comes from `font_weight`.
 - **Minimap section headers:** `section_header_letter_spacing` is accepted but not applied, because GPUI text has no letter spacing.
 - **Color picker:** the standalone picker isn't bound to a key (as in Monaco). It runs from the command palette or `ShowOrFocusStandaloneColorPicker`.
 - **Quick access:**

@@ -135,13 +135,13 @@ impl CodeEditor {
         }
         let line = layout.lines.iter().find(|line| {
             let top = layout.line_top(line.view_line);
-            top <= point.y && point.y < top + layout.metrics.line_height
+            top <= point.y && point.y < top + layout.line_height_of(line.view_line)
         });
         let in_gutter = point.x < layout.text_bounds.left();
         let Some(line) = line else {
             // Not on a line: a view zone, or below the last line.
             let below = layout.lines.last().is_some_and(|last| {
-                point.y >= layout.line_top(last.view_line) + layout.metrics.line_height
+                point.y >= layout.line_top(last.view_line) + layout.line_height_of(last.view_line)
             });
             let kind = match (below, in_gutter) {
                 (true, _) => MouseTargetKind::ContentEmpty { after_lines: true },
