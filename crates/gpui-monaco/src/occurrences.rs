@@ -452,12 +452,18 @@ impl CodeEditor {
                 rope.point_utf16_to_offset(s.start())..rope.point_utf16_to_offset(s.end()),
             )
         };
-        let text = text_of(&primary);
-        // Same as Cmd+D: selected text matches per
-        // `selected_text_match_mode`; never whole-word here.
-        let (_, match_case) = self.selected_text_match_options();
+        // A running Cmd/Ctrl+D session's search (whole-word after starting
+        // from a word); otherwise the selected text, matched as Cmd+D
+        // would (Monaco `_createState` reuses the session or creates one).
+        let (text, whole_word, match_case) = match self.multi_cursor_session() {
+            Some((text, whole_word, match_case)) => (text.to_string(), whole_word, match_case),
+            None => {
+                let (whole_word, match_case) = self.selected_text_match_options();
+                (text_of(&primary), whole_word, match_case)
+            }
+        };
         let selections = self.cursors.selections();
-        if selections.len() > 1 {
+        if self.multi_cursor_session().is_none() && selections.len() > 1 {
             let same = selections.iter().all(|s| {
                 let other = text_of(s);
                 if match_case {
@@ -489,13 +495,19 @@ impl CodeEditor {
             let find = &self.find.options;
             if normalize(&find.query) == normalize(&text)
                 && find.match_case == match_case
-                && !find.whole_word
+                && find.whole_word == whole_word
                 && !find.is_regex
             {
                 return None;
             }
         }
-        Some(SearchParams::new(text, false, match_case, None))
+        let separators = whole_word.then(|| self.options.word_separators.to_string());
+        Some(SearchParams::new(
+            text,
+            false,
+            match_case,
+            separators.as_deref(),
+        ))
     }
 
     /// Recomputes the selection highlights, after `delay`.

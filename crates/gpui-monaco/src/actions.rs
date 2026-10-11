@@ -10,8 +10,6 @@ use gpui::{Action, App, KeyBinding, actions};
 /// The key context the editor element establishes.
 pub const KEY_CONTEXT: &str = "CodeEditor";
 
-/// Single-line editors (e.g. the find input) also set `single_line`.
-const SINGLE_LINE: Option<&str> = Some("CodeEditor && single_line");
 /// The editor while the suggest widget is open (Monaco's
 /// `suggestWidgetVisible`).
 const SUGGEST: Option<&str> = Some("CodeEditor && suggest_widget_visible");
@@ -30,6 +28,10 @@ const TAB_MOVES_FOCUS: Option<&str> = Some("CodeEditor && tab_moves_focus");
 const CONTEXT_MENU: Option<&str> = Some("EditorContextMenu");
 /// The find widget's inputs.
 const FIND_INPUT: Option<&str> = Some("FindWidget > CodeEditor");
+/// The find widget's find input (Monaco `findInputFocussed`).
+const FIND_INPUT_ONLY: Option<&str> = Some("FindInput > CodeEditor");
+/// The find widget's replace input (Monaco `replaceInputFocussed`).
+const REPLACE_INPUT_ONLY: Option<&str> = Some("ReplaceInput > CodeEditor");
 /// The standalone color picker.
 const STANDALONE_COLOR_PICKER: Option<&str> = Some("StandaloneColorPicker");
 /// The editor while ghost text shows (Monaco's `inlineSuggestionVisible`).
@@ -913,6 +915,10 @@ actions!(
         /// Inserts a line break in a find widget input (Monaco's find and
         /// replace inputs handle Ctrl+Enter themselves).
         FindInputNewline,
+        /// Moves the focus from a find widget input back to the editor,
+        /// keeping the widget (Monaco's find and replace inputs handle
+        /// Cmd/Ctrl+Down themselves).
+        FindInputFocusEditor,
         /// Asks for a match number and selects that match (Monaco
         /// `editor.action.goToMatchFindAction`).
         GoToMatch,
@@ -1811,10 +1817,16 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-alt-f8", GoToPreviousMarker, ctx),
         KeyBinding::new("shift-f8", GoToPreviousMarkerInFiles, ctx),
         KeyBinding::new("shift-f3", PreviousMatch, ctx),
-        // Inside the find widget's inputs.
-        KeyBinding::new("shift-enter", PreviousMatch, SINGLE_LINE),
-        KeyBinding::new("alt-enter", SelectAllMatches, SINGLE_LINE),
-        KeyBinding::new("secondary-enter", ReplaceAll, SINGLE_LINE),
+        // Monaco `editor.action.selectAllMatches` (`editorFocus`, so also
+        // from the find inputs; its precondition `findWidgetVisible` is
+        // folded in below).
+        KeyBinding::new("alt-enter", SelectAllMatches, ctx),
+        // Inside the find widget's inputs: Shift+Enter is Find Previous in
+        // the find input only; in the replace input no command takes it, so
+        // Monaco's textarea inserts a line break. Cmd+Enter (macOS) is
+        // bound in the replace input only, below.
+        KeyBinding::new("shift-enter", PreviousMatch, FIND_INPUT_ONLY),
+        KeyBinding::new("shift-enter", FindInputNewline, REPLACE_INPUT_ONLY),
         // After those, so they win: Monaco's find inputs take Ctrl+Enter
         // (on macOS too) for a line break.
         KeyBinding::new("ctrl-enter", FindInputNewline, FIND_INPUT),
@@ -2182,6 +2194,21 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
                 CursorWordAccessibilityRightSelect,
                 accessibility,
             ),
+        ]);
+    }
+    // The find widget's inputs' own keys (Monaco `_onFindInputKeyDown` and
+    // `_onReplaceInputKeyDown`), last so they beat the input editor's.
+    bindings.push(KeyBinding::new(
+        "secondary-down",
+        FindInputFocusEditor,
+        FIND_INPUT,
+    ));
+    if cfg!(target_os = "macos") {
+        // Monaco binds Cmd+Enter to Replace All in the replace input on
+        // macOS only; elsewhere Ctrl+Enter inserts a line break.
+        bindings.extend([
+            KeyBinding::new("cmd-enter", ReplaceAll, REPLACE_INPUT_ONLY),
+            KeyBinding::new("cmd-enter", gpui::NoAction, FIND_INPUT_ONLY),
         ]);
     }
     // Monaco folds an action's precondition into its keybindings' `when`.

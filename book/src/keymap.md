@@ -32,6 +32,9 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **Ctrl+Space (or Cmd+I)** in the suggest widget: show or hide the details, or focus the first suggestion if none is (Monaco's `focusSuggestion`, see `suggest.selection_mode`)
 - **Ctrl+Alt+Space** in the suggest widget: move the focus to the details panel and back (Monaco's `toggleSuggestionFocus`); there, Up / Down and PageUp / PageDown scroll it and Cmd/Ctrl+C copies it
 - **Ctrl+Enter** in the find or replace input: insert a line break
+- **Alt+Enter** while the find widget shows (from the editor or its inputs): select every match, keeping the widget open and focusing the editor
+- In the find widget: **Enter / Shift+Enter** in the find input go to the next and previous match; **Enter** in the replace input replaces, and on macOS **Cmd+Enter** there replaces all (Shift+Enter there inserts a line break, as Monaco's textarea does). **Cmd/Ctrl+Down** in either input returns the focus to the editor. **Tab / Shift+Tab** move through the inputs, toggles and buttons in Monaco's order, and **Space / Enter** press the focused one
+- **Cmd/Ctrl+D, Cmd/Ctrl+K Cmd/Ctrl+D, Cmd/Ctrl+Shift+L** in the find input: act on the editor, searching for the find widget's string (Monaco's `editorFocus`). From the editor they make their text the find widget's search string, so F3 finds it
 - **Cmd+/** in the suggest widget: explain mode, which shows how the focused suggestion was scored in the details (Monaco's `toggleExplainMode`)
 - **Shift+Enter / Shift+Tab** in the suggest widget: accept in the other insert mode
 - **Up / Down (or Cmd+Up / Cmd+Down, Ctrl+P / Ctrl+N), PageUp / PageDown** in the suggest widget: previous and next suggestion, by item or page

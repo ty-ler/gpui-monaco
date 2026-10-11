@@ -403,3 +403,22 @@ fn selection_highlights(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(selected_text_matches(&editor, cx).is_empty());
 }
+
+/// Monaco `SelectionHighlighter._createState` reuses the Cmd/Ctrl+D
+/// session: after Cmd+D on an empty selection it highlights only
+/// whole-word, case-sensitive occurrences.
+#[gpui::test]
+fn selection_highlights_follow_a_cmd_d_session(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("abc xabc abc Abc", cx);
+    set(&editor, cx, p(1, 2), p(1, 2));
+    cx.simulate_keystrokes("secondary-d");
+    cx.run_until_parked();
+    assert_eq!(selected_text_matches(&editor, cx), vec![(1, 10, 1, 13)]);
+    // Selecting the same text by hand matches substrings again.
+    set(&editor, cx, p(1, 4), p(1, 1));
+    cx.run_until_parked();
+    assert_eq!(
+        selected_text_matches(&editor, cx),
+        vec![(1, 6, 1, 9), (1, 10, 1, 13)]
+    );
+}

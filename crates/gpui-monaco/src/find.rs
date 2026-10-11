@@ -83,6 +83,19 @@ pub(crate) struct FindState {
     /// Monaco's `FindWidgetViewZone` (`find.addExtraSpaceOnTop`) and its
     /// height.
     zone: Option<(WidgetId, gpui::Pixels)>,
+    /// The toggles' own values while a Cmd/Ctrl+D session started from a
+    /// word overrides them (Monaco's `FindOptionOverride`s, whose
+    /// `actualIsRegex`, `actualWholeWord` and `actualMatchCase` these are):
+    /// `options` holds the overridden values until the next change.
+    overridden: Option<FindToggles>,
+    /// The last status read to screen readers (Monaco's find widget alerts
+    /// each new matches count).
+    last_alert: Option<String>,
+    /// The widget's find and replace inputs, whose heights make its own.
+    inputs: Option<(Entity<CodeEditor>, Entity<CodeEditor>)>,
+    /// The widget's height as last painted, with the height it was laid
+    /// out for.
+    measured: Option<(gpui::Pixels, gpui::Pixels)>,
 }
 
 /// How `find_start` seeds the search string (Monaco
@@ -238,12 +251,12 @@ impl FindState {
     }
 
     /// Monaco `canNavigateBack`.
-    fn can_navigate_back(&self, loop_: bool) -> bool {
+    pub(crate) fn can_navigate_back(&self, loop_: bool) -> bool {
         self.can_navigate_in_loop(loop_) || self.matches_position != 1
     }
 
     /// Monaco `canNavigateForward`.
-    fn can_navigate_forward(&self, loop_: bool) -> bool {
+    pub(crate) fn can_navigate_forward(&self, loop_: bool) -> bool {
         self.can_navigate_in_loop(loop_) || self.matches_position < self.matches_count
     }
 
@@ -320,6 +333,68 @@ impl CodeEditor {
         self.find.visible
     }
 
+    /// The find state the widget shows (matches, navigation).
+    pub(crate) fn find_state(&self) -> &FindState {
+        &self.find
+    }
+
+    fn find_widget(&self) -> Option<&Entity<FindWidget>> {
+        self.find.widget.as_ref().map(|(widget, _)| widget)
+    }
+
+    /// The find widget's layout in the last frame: (width, input width,
+    /// reduced, narrow, collapsed), for tests.
+    #[doc(hidden)]
+    pub fn find_widget_layout_for_tests(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<(gpui::Pixels, gpui::Pixels, bool, bool, bool)> {
+        Some(self.find_widget()?.read(cx).layout_for_tests())
+    }
+
+    /// The title of the find widget control `id` (`"match-case"`,
+    /// `"previous"`, `"close"`, …), for tests.
+    #[doc(hidden)]
+    pub fn find_widget_title_for_tests(
+        &self,
+        id: &str,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> Option<String> {
+        self.find_widget()?.read(cx).title_for_tests(id, window, cx)
+    }
+
+    /// Whether the find widget control `id` is shown and enabled, for
+    /// tests.
+    #[doc(hidden)]
+    pub fn find_widget_control_enabled_for_tests(&self, id: &str, cx: &gpui::App) -> bool {
+        self.find_widget()
+            .is_some_and(|w| w.read(cx).is_enabled_for_tests(id, cx))
+    }
+
+    /// Whether the find input, the replace input and the widget have the
+    /// focus, for tests.
+    #[doc(hidden)]
+    pub fn find_widget_focus_for_tests(
+        &self,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> (bool, bool, bool) {
+        self.find_widget_focus(window, cx)
+    }
+
+    /// The focused find widget control's id, for tests.
+    #[doc(hidden)]
+    pub fn find_widget_focused_control_for_tests(
+        &self,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> Option<&'static str> {
+        self.find_widget()?
+            .read(cx)
+            .focused_control_for_tests(window)
+    }
+
     /// Monaco `findInputFocussed`, `replaceInputFocussed` and
     /// `findWidgetFocused`.
     pub(crate) fn find_widget_focus(&self, window: &Window, cx: &gpui::App) -> (bool, bool, bool) {
@@ -377,6 +452,79 @@ impl CodeEditor {
         move_cursor: bool,
         cx: &mut Context<Self>,
     ) {
+        let mut options = options;
+        // Monaco resets the overrides on any change: the toggles the change
+        // leaves alone get their own values back.
+        if let Some(actual) = self.find.overridden.take() {
+            let current = &self.find.options;
+            if options.is_regex == current.is_regex {
+                options.is_regex = actual.is_regex;
+            }
+            if options.whole_word == current.whole_word {
+                options.whole_word = actual.whole_word;
+            }
+            if options.match_case == current.match_case {
+                options.match_case = actual.match_case;
+            }
+        }
+        self.apply_find_options(options, move_cursor, cx);
+    }
+
+    /// Monaco's multicursor `_beginSessionIfNeeded`: Cmd/Ctrl+D and
+    /// Cmd/Ctrl+Shift+L make `search` the search string, so the find
+    /// widget and F3 see it. A session started from a word also overrides
+    /// whole word and match case on and regex off until the next change
+    /// (Monaco `wholeWordOverride`, `matchCaseOverride`, `isRegexOverride`).
+    pub(crate) fn seed_find_from_multi_cursor(
+        &mut self,
+        search: String,
+        from_word: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let actual = self
+            .find
+            .overridden
+            .take()
+            .unwrap_or_else(|| FindToggles::of(&self.find.options));
+        let mut options = self.find.options.clone();
+        options.query = search;
+        options.is_regex = actual.is_regex;
+        options.whole_word = actual.whole_word;
+        options.match_case = actual.match_case;
+        if from_word {
+            options.is_regex = false;
+            options.whole_word = true;
+            options.match_case = true;
+            self.find.overridden = Some(actual);
+        }
+        self.apply_find_options(options.clone(), false, cx);
+        let replace = self.find.replace_visible;
+        // Deferred: the command may come from the widget itself.
+        if let Some((widget, _)) = &self.find.widget {
+            let widget = widget.downgrade();
+            cx.defer(move |cx| {
+                widget
+                    .update(cx, |widget, cx| widget.set_inputs(&options, replace, cx))
+                    .ok();
+            });
+        }
+    }
+
+    /// Monaco's multicursor `_endSession`: the toggles a session overrode
+    /// get their own values back.
+    pub(crate) fn clear_find_overrides(&mut self, cx: &mut Context<Self>) {
+        if self.find.overridden.is_some() {
+            let options = self.find.options.clone();
+            self.change_find_options(options, false, cx);
+        }
+    }
+
+    fn apply_find_options(
+        &mut self,
+        options: FindOptions,
+        move_cursor: bool,
+        cx: &mut Context<Self>,
+    ) {
         // Monaco's controller: turning on find in selection captures the
         // selections (whole lines when they span lines).
         let mut options = options;
@@ -392,9 +540,18 @@ impl CodeEditor {
                 }
             }
         }
-        // Monaco `saveQueryState`.
-        if FindToggles::of(&options) != FindToggles::of(&self.find.options) {
-            cx.set_global(FindToggles::of(&options));
+        // Monaco `saveQueryState`: the toggles' own values, not overrides.
+        let actual = |options: &FindOptions, overridden: Option<FindToggles>| {
+            let mut toggles = FindToggles::of(options);
+            if let Some(o) = overridden {
+                (toggles.is_regex, toggles.whole_word, toggles.match_case) =
+                    (o.is_regex, o.whole_word, o.match_case);
+            }
+            toggles
+        };
+        let saved = actual(&options, self.find.overridden);
+        if saved != actual(&self.find.options, self.find.overridden) {
+            cx.set_global(saved);
         }
         let old = std::mem::replace(&mut self.find.options, options);
         let new = &self.find.options;
@@ -680,7 +837,46 @@ impl CodeEditor {
                 .map_or(PointUtf16::zero(), |m| m.start_position);
             self.move_to_next_match_after(start, cx);
         }
+        self.alert_find_status(cx);
         cx.notify();
+    }
+
+    /// Monaco's find widget `_updateMatchesCount` and `_getAriaLabel`: reads
+    /// a changed matches count to screen readers, with the current match's
+    /// line and position.
+    fn alert_find_status(&mut self, cx: &mut Context<Self>) {
+        if !self.find.visible {
+            return;
+        }
+        let query = &self.find.options.query;
+        let label = match self.find.status() {
+            Some(status) => status,
+            None => "No results".to_string(),
+        };
+        let current = self
+            .find_model()
+            .and_then(|m| m.highlighted)
+            .and_then(|id| self.decoration_point_range(id, cx));
+        let message = if self.find.matches_count == 0 {
+            if query.is_empty() {
+                format!("{label} found")
+            } else {
+                format!("{label} found for '{query}'")
+            }
+        } else if let Some(current) = current {
+            let line = self.snapshot.rope().line(current.start.row);
+            format!(
+                "{line}, {label} found for '{query}', at {}:{}",
+                current.start.row + 1,
+                current.start.column + 1
+            )
+        } else {
+            format!("{label} found for '{query}'")
+        };
+        if self.find.last_alert.as_ref() != Some(&message) {
+            self.find.last_alert = Some(message.clone());
+            self.announce(message, cx);
+        }
     }
 
     /// Monaco `_findMatches`: the matches in each scope (or the whole
@@ -956,6 +1152,7 @@ impl CodeEditor {
         let position = self.set_current_find_match(Some(&range), cx);
         self.find.matches_position = position;
         self.find.matches_count = self.find_model().map_or(0, |m| m.matches.len());
+        self.alert_find_status(cx);
         self.set_selections(
             &[Selection {
                 anchor: range.start,
@@ -1515,6 +1712,7 @@ impl CodeEditor {
                 let editor = cx.entity().downgrade();
                 let theme = self.theme.clone();
                 let widget = cx.new(|cx| FindWidget::new(editor, theme, window, cx));
+                self.find.inputs = Some(widget.read(cx).inputs());
                 let id = self.add_overlay_widget(
                     OverlayWidget {
                         position: OverlayPosition::TopRight,
@@ -1527,7 +1725,6 @@ impl CodeEditor {
                 widget
             }
         };
-        self.update_find_view_zone(cx);
         widget.update(cx, |widget, cx| {
             widget.sync_from_editor(&options, replace, window, cx);
             match start.focus {
@@ -1536,6 +1733,9 @@ impl CodeEditor {
                 StartFocus::NoChange => {}
             }
         });
+        // After the inputs show the search string, which sizes them.
+        self.update_find_view_zone(cx);
+        self.alert_find_status(cx);
         cx.notify();
     }
 
@@ -1817,28 +2017,53 @@ impl CodeEditor {
         !self.find.options.query.is_empty() && self.search_data().is_none()
     }
 
-    /// The find widget's height: one row, or two with replace (Monaco
-    /// `_getHeight`).
-    fn find_widget_height(&self) -> gpui::Pixels {
-        // Each input grows with its lines (Monaco `flexibleHeight`).
-        let line_height = self.options.resolved_line_height();
-        let mut height = crate::find_widget::input_height(&self.find.options.query, line_height);
-        if self.find.replace_visible {
-            height += crate::find_widget::input_height(&self.find.options.replace, line_height);
-            // The gap between rows.
-            height += gpui::px(4.);
+    /// The find widget's height (Monaco `_getHeight`): its inputs' heights,
+    /// from their own text and line height, plus the margins. The widget
+    /// lays itself out at this height and reports what it measured (see
+    /// [`Self::find_widget_measured`]).
+    fn find_widget_height(&self, cx: &gpui::App) -> gpui::Pixels {
+        match &self.find.inputs {
+            Some((find, replace)) => crate::find_widget::widget_height(
+                find.read(cx),
+                self.find.replace_visible.then(|| replace.read(cx)),
+                cx,
+            ),
+            None => gpui::px(crate::find_widget::FIND_INPUT_AREA_HEIGHT),
         }
-        // Padding and borders.
-        height + gpui::px(10.)
+    }
+
+    /// The find widget's height as painted, measured while it was laid out
+    /// for `expected` (its [`Self::find_widget_height`] then): the view zone
+    /// follows the measurement (Monaco `_tryUpdateHeight` on the inputs'
+    /// `onDidHeightChange`).
+    pub(crate) fn find_widget_measured(
+        &mut self,
+        expected: gpui::Pixels,
+        measured: gpui::Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        if self.find.visible && self.find.measured != Some((expected, measured)) {
+            self.find.measured = Some((expected, measured));
+            self.update_find_view_zone(cx);
+        }
     }
 
     /// Monaco `_showViewZone`/`_removeViewZone`: while the widget shows,
     /// space above the first line keeps it from covering text when
     /// scrolled to the top; the scroll position moves with it so the text
-    /// doesn't jump.
+    /// doesn't jump. The editor's top padding counts towards the space.
     pub(crate) fn update_find_view_zone(&mut self, cx: &mut Context<Self>) {
         let wanted = (self.find.visible && self.options.find.add_extra_space_on_top)
-            .then(|| self.find_widget_height());
+            .then(|| {
+                let expected = self.find_widget_height(cx);
+                let height = match self.find.measured {
+                    // Measured with the inputs as they are now.
+                    Some((laid_out, measured)) if laid_out == expected => measured,
+                    _ => expected,
+                };
+                height - self.options.padding.top
+            })
+            .filter(|height| *height > gpui::px(0.));
         let current = self.find.zone.map(|(_, height)| height);
         if wanted == current {
             return;
@@ -1885,6 +2110,9 @@ impl CodeEditor {
         if let Some((_, id)) = self.find.widget.take() {
             self.remove_widget(id, cx);
         }
+        self.find.inputs = None;
+        self.find.measured = None;
+        self.find.last_alert = None;
         // Monaco disposes the model and clears the scope when hidden.
         self.stop_find_model(cx);
         self.update_find_view_zone(cx);

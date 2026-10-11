@@ -60,6 +60,8 @@ Issues are linked by number.
 | Find controller commands, history, extra space on top, widget width and states, remembered toggles | `find` | ✅ | #104 |
 | Find with arguments, go to match, `findOnType` | `find` | ✅ | #202 |
 | Multi-line search and replace inputs (Ctrl+Enter, growing inputs), global find clipboard | `findWidget`, `find.globalFindClipboard` | ✅ the find pasteboard on macOS, an app-wide find string elsewhere | #226 |
+| Find widget layout: toggles in the inputs, replace toggle column, reduced/narrow/collapsed widths, measured view zone, placeholders, titles with keybindings, disabled states, regex error message, theme colors, slide-in, sash, Tab order, screen-reader status | `findWidget` | ✅ no reduced-motion setting; titles use GPUI's keystroke text | #250 |
+| Find commands from the editor and the find inputs: Alt+Enter, Cmd/Ctrl+D and Cmd/Ctrl+Shift+L acting on the editor, Cmd/Ctrl+D seeding the search string (with Monaco's whole-word, match-case and regex overrides), session-aware selection highlights, per-input Shift+Enter, Cmd+Enter and Cmd/Ctrl+Down | `findController`, `multicursor` | ✅ | #250 |
 | Bracket matching and jump | `bracketMatching` | ✅ `always`/`near`/`never`, overview ruler mark | #195 |
 
 ## View
