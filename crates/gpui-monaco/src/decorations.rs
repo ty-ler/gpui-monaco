@@ -77,6 +77,11 @@ pub struct DecorationOptions {
     pub text: Option<TokenStyle>,
     /// Paint `background`/`border` across the whole line(s).
     pub is_whole_line: bool,
+    /// Where the range goes on past a line break, paint `background` and
+    /// `border` to the right edge of that line (Monaco
+    /// `shouldFillLineOnLineBreak`, as on the diff editor's changed
+    /// characters).
+    pub should_fill_line_on_line_break: bool,
     /// A glyph shown in the glyph margin on the start row (Monaco
     /// `glyphMarginClassName`).
     pub glyph: Option<(SharedString, Hsla)>,

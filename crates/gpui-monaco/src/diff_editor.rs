@@ -7,6 +7,7 @@
 //! `diffEditorOptions.ts`.
 
 use std::cell::Cell;
+use std::future::Future;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -21,14 +22,13 @@ use gpui::{
 use text::{Point, PointUtf16};
 
 use crate::cursor::Selection;
-use crate::decorations::{
-    BlockDecoration, DecorationId, DecorationOptions, InjectedText, OverviewRulerLane,
-};
+use crate::decorations::{BlockDecoration, DecorationId, DecorationOptions, InjectedText};
 use crate::diff::{
     DetailedLineRangeMapping, DiffOptions, LineRange, LineRangeMapping, LinesDiff, RangeMapping,
     compute_diff, compute_legacy_diff,
 };
 use crate::editor::{CodeEditor, CodeEditorEvent, ViewState};
+use crate::events::ContentChange;
 use crate::model::{TextModel, TextModelEvent};
 use crate::options::WordWrapOverride;
 use crate::theme::EditorColors;
@@ -88,6 +88,10 @@ const COMPARING_MOVED_CODE: &str = "comparingMovedCode";
 
 /// The key context of the diff editor.
 pub const DIFF_EDITOR_KEY_CONTEXT: &str = "DiffEditor";
+
+/// Set on the diff editor's key context with `is_in_embedded_editor`
+/// (Monaco `isEmbeddedDiffEditor`).
+const IS_EMBEDDED_DIFF_EDITOR: &str = "isEmbeddedDiffEditor";
 
 /// Binds the diff editor's keys (called by [`crate::init`]).
 pub(crate) fn bind_keys(cx: &mut App) {
@@ -200,6 +204,20 @@ pub struct DiffEditorOptions {
     /// above (Monaco `experimental.useTrueInlineView`, default `false`).
     /// Only changes whose parts each stay on one line.
     pub use_true_inline_view: bool,
+    /// In the inline view, don't show the original line numbers left of the
+    /// modified editor (Monaco `hideOriginalLineNumbers`, default `false`;
+    /// `compact_mode` implies it).
+    pub hide_original_line_numbers: bool,
+    /// The diff editor is embedded in another editor, e.g. a peek view
+    /// (Monaco `isInEmbeddedEditor`, default `false`): sets the
+    /// `isEmbeddedDiffEditor` key context.
+    pub is_in_embedded_editor: bool,
+    /// The original editor's screen reader label (Monaco
+    /// `originalAriaLabel`); `None` keeps the editor's own.
+    pub original_aria_label: Option<SharedString>,
+    /// The modified editor's screen reader label (Monaco
+    /// `modifiedAriaLabel`); `None` keeps the editor's own.
+    pub modified_aria_label: Option<SharedString>,
 }
 
 /// Monaco `diffAlgorithm`.
@@ -276,6 +294,10 @@ impl Default for DiffEditorOptions {
             accessibility_verbose: false,
             show_empty_decorations: true,
             use_true_inline_view: false,
+            hide_original_line_numbers: false,
+            is_in_embedded_editor: false,
+            original_aria_label: None,
+            modified_aria_label: None,
         }
     }
 }
@@ -297,12 +319,15 @@ pub enum DiffEditorEvent {
 /// Monaco `AccessibilitySignal`s a diff editor sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccessibilitySignal {
-    /// The accessible diff viewer moved to an inserted line
-    /// (`diffLineInserted`).
+    /// The accessible diff viewer, `go_to_diff` or a cursor move reached
+    /// inserted lines (`diffLineInserted`).
     DiffLineInserted,
-    /// The accessible diff viewer moved to a deleted line
-    /// (`diffLineDeleted`).
+    /// The accessible diff viewer, `go_to_diff` or a cursor move reached
+    /// deleted lines (`diffLineDeleted`).
     DiffLineDeleted,
+    /// `go_to_diff` or a cursor move reached changed lines
+    /// (`diffLineModified`).
+    DiffLineModified,
 }
 
 /// Monaco's delay after edits before the diff is computed again.
@@ -342,8 +367,8 @@ pub(crate) struct LineRangeAlignment {
     pub modified_range: LineRange,
     pub original_height: f32,
     pub modified_height: f32,
-    /// Whether it's part of a change.
-    pub is_diff: bool,
+    /// The index of the change it's part of (Monaco's `diff`), if any.
+    pub diff: Option<usize>,
 }
 
 /// Monaco `computeRangeAlignment`: the ranges to align, given each side's
@@ -402,11 +427,11 @@ pub(crate) fn compute_range_alignment(
             modified_range: LineRange::new(modified_line, modified_line + 1),
             original_height: original_line_height + original_px,
             modified_height: modified_line_height + modified_px,
-            is_diff: false,
+            diff: None,
         });
     };
 
-    for c in diffs {
+    for (diff_index, c) in diffs.iter().enumerate() {
         outside_diffs(
             c.original.start_line_number,
             c.modified.start_line_number,
@@ -454,7 +479,7 @@ pub(crate) fn compute_range_alignment(
                     + modified_additional,
                 original_range,
                 modified_range,
-                is_diff: true,
+                diff: Some(diff_index),
             });
             last_orig = orig_exclusive;
             last_mod = mod_exclusive;
@@ -600,41 +625,56 @@ fn move_line_tracks(lines: &[(Pixels, Pixels)]) -> Vec<usize> {
         .collect()
 }
 
-/// A moved block's caption (Monaco `MovedBlockOverlayWidget`), right
-/// aligned.
+/// A moved block's caption (Monaco `MovedBlockOverlayWidget`'s
+/// `.diff-moved-code-block`): right aligned, 4px up into the line above,
+/// clear of the vertical scrollbar, with the Compare toggle.
 struct MoveCaption {
     text: SharedString,
-    color: Hsla,
-    checked_background: Hsla,
     colors: EditorColors,
     /// Its block is being compared (the toggle is checked).
     comparing: bool,
     diff: WeakEntity<DiffEditor>,
+    /// The editor it's in, for its scrollbar width.
+    editor: WeakEntity<CodeEditor>,
     index: usize,
 }
 
 impl Render for MoveCaption {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (diff, index, comparing) = (self.diff.clone(), self.index, self.comparing);
+        let scrollbar = self
+            .editor
+            .upgrade()
+            .and_then(|e| {
+                e.read(cx)
+                    .layout
+                    .as_ref()
+                    .map(|l| l.layout_info.vertical_scrollbar_width)
+            })
+            .unwrap_or(px(0.));
+        let colors = &self.colors;
+        // Monaco's `actionBar.toggledBackground` (`inputOption.activeBackground`).
+        let checked = colors.input_option_active_background;
         div()
             .size_full()
             .flex()
             .justify_end()
             .items_center()
-            .gap(px(8.))
-            .pr(px(20.))
+            .mt(px(-4.))
+            .pr(px(4.) + scrollbar)
+            .gap(px(4.))
             .text_size(px(12.))
-            .text_color(self.color.opacity(0.8))
-            .child(self.text.clone())
+            .text_color(colors.foreground)
+            .child(div().opacity(0.8).child(self.text.clone()))
             .child(
                 div()
                     .id("compare-move")
-                    .tooltip(crate::tooltip::tooltip("Compare", &self.colors))
-                    .px_1()
+                    .tooltip(crate::tooltip::tooltip("Compare", colors))
+                    .px(px(2.))
                     .rounded(px(3.))
                     .cursor_pointer()
-                    .when(comparing, |button| button.bg(self.checked_background))
-                    .hover(|style| style.bg(self.checked_background))
+                    .when(comparing, |button| button.bg(checked))
+                    .hover(|style| colors.toolbar_hover(style))
                     .role(gpui::Role::Button)
                     .aria_label(SharedString::from("Compare"))
                     .on_click(move |_, _, cx| {
@@ -648,8 +688,73 @@ impl Render for MoveCaption {
                             });
                         }
                     })
-                    .child("Compare"),
+                    // TODO(#246): Monaco's `compare-changes` codicon.
+                    .child("⇄"),
             )
+    }
+}
+
+/// What an alignment zone shows (Monaco's zones in `DiffEditorViewZones`).
+#[derive(Clone, Debug, PartialEq)]
+enum AlignmentZoneKind {
+    /// Monaco's `diagonal-fill`.
+    Fill,
+    /// A deletion's padding with a revert arrow in its margin (change
+    /// index).
+    DeletionPadding(usize),
+    /// The inline view's deleted lines (Monaco's `line-delete` zone), with
+    /// each line's view line count.
+    DeletedCode {
+        change: usize,
+        line_counts: Vec<usize>,
+    },
+    /// The inline view's padding in the original column, with a
+    /// `gutter-delete` margin.
+    GutterDelete,
+}
+
+/// An alignment zone (Monaco `IObservableViewZone`).
+#[derive(Clone, Debug, PartialEq)]
+struct AlignmentZone {
+    /// In the original editor (else the modified).
+    original: bool,
+    /// Monaco `afterLineNumber`.
+    after: usize,
+    /// Monaco `heightInPx`.
+    height: f32,
+    kind: AlignmentZoneKind,
+}
+
+/// The inline view's padding in the original column (Monaco's fill zone
+/// with a `gutter-delete` margin): the margin in the removed gutter color.
+struct GutterDeleteFill {
+    fill: Entity<DiagonalFill>,
+    /// The original editor, for its gutter.
+    editor: WeakEntity<CodeEditor>,
+}
+
+impl Render for GutterDeleteFill {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(editor) = self.editor.upgrade() else {
+            return div();
+        };
+        let editor = editor.read(cx);
+        let (gutter, text_left) = editor.layout.as_ref().map_or((px(0.), px(0.)), |l| {
+            (l.gutter_width, l.text_bounds.left() - l.bounds.left())
+        });
+        let background = editor.colors().diff_gutter_removed_line_background;
+        div()
+            .size_full()
+            .flex()
+            .flex_row()
+            .child(
+                div()
+                    .w(text_left)
+                    .h_full()
+                    .flex_none()
+                    .child(div().w(gutter).h_full().bg(background)),
+            )
+            .child(div().flex_1().h_full().child(self.fill.clone()))
     }
 }
 
@@ -771,6 +876,8 @@ struct GutterItem {
     /// Shown without hovering the gutter (the cursor's change, or the
     /// selection).
     show_always: bool,
+    /// What its toolbar's actions run on (Monaco's `mapping`).
+    mapping: DetailedLineRangeMapping,
 }
 
 /// Monaco `DiffToolBar.layout`: the button's top for an item spanning
@@ -847,17 +954,29 @@ const COMPACT_UNCHANGED_BAR_HEIGHT: f32 = 12.;
 
 /// Monaco `CollapsedCodeOverlayWidget`: the bar where unchanged lines are
 /// hidden. Its top and bottom edges reveal more lines above and below; the
-/// unfold button or a double click on the label shows them all.
+/// unfold button or a double click on the label shows them all; the
+/// breadcrumbs (Monaco `diffEditorBreadcrumbs`) reveal their symbol.
 struct UnchangedBar {
     diff: WeakEntity<DiffEditor>,
     /// The editor it's in, for the gutter width.
     editor: WeakEntity<CodeEditor>,
     index: usize,
     hidden_lines: usize,
+    /// Monaco `canMoveTop` for the top edge: lines above can be hidden
+    /// again.
+    visible_top: bool,
+    /// Monaco `canMoveBottom` for the bottom edge.
+    visible_bottom: bool,
+    /// The symbols the hidden lines start, outermost first.
+    breadcrumbs: Vec<BreadcrumbSymbol>,
     /// Monaco `CompactCollapsedCodeOverlayWidget` (`compactMode`): a thin
     /// labelled separator without controls.
     compact: bool,
 }
+
+/// The top and bottom edges' height (Monaco's 4px band with transparent
+/// borders around it).
+const UNCHANGED_EDGE_HEIGHT: f32 = 6.;
 
 impl Render for UnchangedBar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -897,15 +1016,25 @@ impl Render for UnchangedBar {
             .layout
             .as_ref()
             .map_or(px(0.), |l| l.text_bounds.left() - l.bounds.left());
-        let font_family = editor.options().font_family.clone();
-        let edge = |id: &'static str| {
+        // Monaco's `n-resize`/`s-resize`/`ns-resize`: whether dragging up and
+        // down does anything.
+        let fully_revealed = self.hidden_lines == 0;
+        let cursor =
+            |can_move_top: bool, can_move_bottom: bool| match (can_move_top, can_move_bottom) {
+                (true, false) => gpui::CursorStyle::ResizeUp,
+                (false, true) => gpui::CursorStyle::ResizeDown,
+                _ => gpui::CursorStyle::ResizeUpDown,
+            };
+        let top_cursor = cursor(self.visible_top, !fully_revealed);
+        let bottom_cursor = cursor(!fully_revealed, self.visible_bottom);
+        let edge = |id: &'static str, cursor: gpui::CursorStyle| {
             div()
                 .id(id)
-                .h(px(5.))
+                .absolute()
+                .left_0()
                 .w_full()
-                .flex_none()
-                // Monaco's `n-resize`/`s-resize`/`ns-resize`: click or drag.
-                .cursor(gpui::CursorStyle::ResizeUpDown)
+                .h(px(UNCHANGED_EDGE_HEIGHT))
+                .cursor(cursor)
                 .hover(|style| style.bg(colors.focus_border))
         };
         let (diff, index) = (self.diff.clone(), self.index);
@@ -931,15 +1060,85 @@ impl Render for UnchangedBar {
         };
         let (top, bottom) = (start_drag.clone(), start_drag);
         let shadow = colors.diff_unchanged_region_shadow;
+        let link = colors.link_active_foreground;
+        let breadcrumb_count = self.breadcrumbs.len();
+        let breadcrumbs = self.breadcrumbs.iter().enumerate().map(|(ix, item)| {
+            let diff = self.diff.clone();
+            let line = item.start_line_number;
+            let (glyph, glyph_color) = crate::quick_access::symbol_icon(item.kind, &colors);
+            div()
+                .id(("unchanged-breadcrumb", ix))
+                .flex()
+                .flex_row()
+                .flex_none()
+                .items_center()
+                .cursor_pointer()
+                .hover(|style| style.text_color(link))
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(diff) = diff.upgrade() {
+                        cx.defer(move |cx| {
+                            diff.update(cx, |diff, cx| diff.reveal_modified_hidden_line(line, cx))
+                        });
+                    }
+                })
+                // TODO(#246): Monaco's symbol kind codicons.
+                .child(div().text_color(glyph_color).child(glyph))
+                .child("\u{a0}")
+                .child(item.name.clone())
+                .when(ix + 1 < breadcrumb_count, |item| {
+                    item.child("\u{a0}›\u{a0}")
+                })
+        });
         div()
             .size_full()
+            .relative()
             .flex()
-            .flex_col()
+            .flex_row()
+            .items_center()
+            .overflow_hidden()
             .bg(colors.diff_unchanged_region_background)
             .text_color(colors.diff_unchanged_region_foreground)
+            // Monaco's `.diff-hidden-lines`: 13px in the UI font.
             .text_size(px(13.))
             .child(
-                edge("unchanged-top")
+                div().w(gutter).flex_none().flex().justify_center().child(
+                    div()
+                        .id("unchanged-unfold")
+                        .tooltip(crate::tooltip::tooltip("Show Unchanged Region", &colors))
+                        .cursor_pointer()
+                        .px_1()
+                        .hover(|style| style.text_color(link))
+                        .on_click(move |_, _, cx| unfold(cx, |r, _| r.show_all()))
+                        // TODO(#246): Monaco's `unfold` codicon.
+                        .child("↕"),
+                ),
+            )
+            .child(
+                div()
+                    .id("unchanged-label")
+                    .tooltip(crate::tooltip::tooltip("Double click to unfold", &colors))
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .on_click(move |event, _, cx| {
+                        if event.click_count() == 2 {
+                            label(cx, |r, _| r.show_all())
+                        }
+                    })
+                    .child(format!("{} hidden lines", self.hidden_lines)),
+            )
+            .when(breadcrumb_count > 0, |bar| {
+                bar.child(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .child("\u{a0}\u{a0}|\u{a0}\u{a0}"),
+                )
+                .children(breadcrumbs)
+            })
+            .child(
+                edge("unchanged-top", top_cursor)
+                    .top_0()
                     .tooltip(crate::tooltip::tooltip(
                         "Click or drag to show more above",
                         &colors,
@@ -950,40 +1149,8 @@ impl Render for UnchangedBar {
                     }),
             )
             .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .overflow_hidden()
-                    .child(
-                        div().w(gutter).flex_none().flex().justify_center().child(
-                            div()
-                                .id("unchanged-unfold")
-                                .tooltip(crate::tooltip::tooltip("Show Unchanged Region", &colors))
-                                .cursor_pointer()
-                                .px_1()
-                                .hover(|style| style.text_color(colors.focus_border))
-                                .on_click(move |_, _, cx| unfold(cx, |r, _| r.show_all()))
-                                .child("↕"),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .id("unchanged-label")
-                            .tooltip(crate::tooltip::tooltip("Double click to unfold", &colors))
-                            .font_family(font_family)
-                            .whitespace_nowrap()
-                            .on_click(move |event, _, cx| {
-                                if event.click_count() == 2 {
-                                    label(cx, |r, _| r.show_all())
-                                }
-                            })
-                            .child(format!("{} hidden lines", self.hidden_lines)),
-                    ),
-            )
-            .child(
-                edge("unchanged-bottom")
+                edge("unchanged-bottom", bottom_cursor)
+                    .bottom_0()
                     .tooltip(crate::tooltip::tooltip(
                         "Click or drag to show more below",
                         &colors,
@@ -1000,145 +1167,483 @@ impl Render for UnchangedBar {
     }
 }
 
-/// Deleted lines in the inline view (Monaco `renderLines` into a
-/// `line-delete` view zone, with `inline-deleted-margin-view-zone`):
-/// highlighted original text on the removed background, the changed
-/// characters marked, and `−` in the margin.
-struct DeletedCode {
-    /// The modified editor, for its gutter, font and horizontal scroll.
+/// Monaco's "Fold Unchanged Region" glyph (`fold-unchanged`): hides a
+/// fully shown unchanged region again.
+struct FoldUnchangedGlyph {
+    diff: WeakEntity<DiffEditor>,
+    index: usize,
+    colors: EditorColors,
+}
+
+impl Render for FoldUnchangedGlyph {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let (diff, index) = (self.diff.clone(), self.index);
+        div()
+            .id("fold-unchanged")
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .text_color(self.colors.foreground)
+            .tooltip(crate::tooltip::tooltip(
+                "Fold Unchanged Region",
+                &self.colors,
+            ))
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from("Fold Unchanged Region"))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(move |_, _, cx| {
+                if let Some(diff) = diff.upgrade() {
+                    // Deferred: the glyph is rendered by the editor it
+                    // changes.
+                    cx.defer(move |cx| {
+                        diff.update(cx, |diff, cx| {
+                            diff.update_unchanged_region(index, UnchangedRegion::collapse_all, cx)
+                        })
+                    });
+                }
+            })
+            // TODO(#246): Monaco's `fold` codicon.
+            .child("⊟")
+    }
+}
+
+/// What a [`DeletedCode`] zone shows.
+struct DeletedCodeSource {
+    /// The modified editor, for its gutter, font, wrapping and horizontal
+    /// scroll.
     editor: WeakEntity<CodeEditor>,
+    diff: WeakEntity<DiffEditor>,
     original: Entity<TextModel>,
+    /// The change whose deleted lines these are.
+    change: LineRangeMapping,
     /// 0-based original rows.
     rows: Range<u32>,
     /// The changed characters, in original coordinates.
     inner_changes: Vec<Range<PointUtf16>>,
     render_indicators: bool,
+}
+
+/// One view line of the deleted lines (Monaco `renderLines`' output line).
+#[derive(Clone, Debug, PartialEq)]
+struct DeletedViewLine {
+    /// The 0-based original row.
+    row: u32,
+    /// Its UTF-16 range in the row.
+    range: Range<u32>,
+    /// Visible columns of continuation indentation.
+    indent: u32,
+}
+
+/// The visible column before each UTF-16 unit of `line`, and after the
+/// last (tabs expand to `tab_size`).
+fn utf16_visible_columns(line: &str, tab_size: u32) -> Vec<u32> {
+    let mut columns = Vec::with_capacity(line.len() + 1);
+    let mut column = 0;
+    for ch in line.chars() {
+        for _ in 0..ch.len_utf16() {
+            columns.push(column);
+        }
+        column = if ch == '\t' {
+            column + tab_size - column % tab_size
+        } else {
+            column + 1
+        };
+    }
+    columns.push(column);
+    columns
+}
+
+/// The byte offset of UTF-16 column `column` in `line`.
+fn utf16_to_byte(line: &str, column: u32) -> usize {
+    let mut units = 0;
+    for (ix, ch) in line.char_indices() {
+        if units >= column {
+            return ix;
+        }
+        units += ch.len_utf16() as u32;
+    }
+    line.len()
+}
+
+/// Deleted lines in the inline view (Monaco `renderLines` into a
+/// `line-delete line-delete-selectable` view zone, with
+/// `inline-deleted-margin-view-zone` and `InlineDiffDeletedCodeMargin`):
+/// highlighted original text on the removed background, wrapped like the
+/// modified editor's lines, the changed characters marked, `−` in the
+/// margin, and a light bulb with a copy and revert menu. The text can be
+/// selected with the mouse and copied (Monaco `copySelection.ts`).
+struct DeletedCode {
+    source: DeletedCodeSource,
+    /// The selection's anchor and head, in original rows and UTF-16
+    /// columns.
+    selection: Option<(PointUtf16, PointUtf16)>,
+    selecting: bool,
+    /// The view line under the mouse, where the light bulb shows.
+    hovered: Option<usize>,
+    /// The margin menu: where it opens (window coordinates) and the
+    /// original row it's for.
+    menu: Option<(gpui::Point<Pixels>, u32)>,
+    /// The zone's bounds as of the last paint.
+    bounds: Rc<Cell<Bounds<Pixels>>>,
+    focus_handle: FocusHandle,
     _subscription: Subscription,
 }
 
+/// The light bulb's width in the margin.
+const DELETED_LIGHT_BULB_WIDTH: f32 = 16.;
+
 impl DeletedCode {
-    fn new(
-        editor: WeakEntity<CodeEditor>,
-        original: Entity<TextModel>,
-        rows: Range<u32>,
-        inner_changes: Vec<Range<PointUtf16>>,
-        render_indicators: bool,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn new(source: DeletedCodeSource, cx: &mut Context<Self>) -> Self {
         // Monaco renders the zone again once tokenization completes.
-        let subscription = cx.subscribe(&original, |_, _, event: &TextModelEvent, cx| {
+        let subscription = cx.subscribe(&source.original, |_, _, event: &TextModelEvent, cx| {
             if matches!(event, TextModelEvent::SyntaxUpdated) {
                 cx.notify();
             }
         });
         Self {
-            editor,
-            original,
-            rows,
-            inner_changes,
-            render_indicators,
+            source,
+            selection: None,
+            selecting: false,
+            hovered: None,
+            menu: None,
+            bounds: Default::default(),
+            focus_handle: cx.focus_handle(),
             _subscription: subscription,
         }
     }
+
+    /// The deleted lines' view lines, with the modified editor's wrapping.
+    fn view_lines(&self, cx: &App) -> Vec<DeletedViewLine> {
+        let Some(editor) = self.source.editor.upgrade() else {
+            return Vec::new();
+        };
+        let editor = editor.read(cx);
+        let rope = self.source.original.read(cx).buffer().rope();
+        let rows = self.source.rows.start..self.source.rows.end.min(rope.line_count());
+        rows.flat_map(|row| {
+            let (ranges, indent) = editor.line_breaks_for(&rope.line(row));
+            ranges
+                .into_iter()
+                .enumerate()
+                .map(move |(ix, range)| DeletedViewLine {
+                    row,
+                    range,
+                    indent: if ix == 0 { 0 } else { indent },
+                })
+        })
+        .collect()
+    }
+
+    /// Monaco `RenderLinesResult.minWidthInPx`: the widest view line's
+    /// columns plus `scroll_beyond_last_column`, in the modified editor's
+    /// character width.
+    fn min_width(&self, cx: &App) -> Pixels {
+        let Some(editor) = self.source.editor.upgrade() else {
+            return px(0.);
+        };
+        let editor = editor.read(cx);
+        let em_width = editor
+            .layout
+            .as_ref()
+            .map_or(px(0.), |l| l.metrics.em_width);
+        let model = self.source.original.read(cx);
+        let tab_size = model.options().tab_size.max(1);
+        let rope = model.buffer().rope();
+        let max_columns = self
+            .view_lines(cx)
+            .iter()
+            .map(|line| {
+                let columns = utf16_visible_columns(&rope.line(line.row), tab_size);
+                let at = |c: u32| columns[(c as usize).min(columns.len() - 1)];
+                at(line.range.end) - at(line.range.start) + line.indent
+            })
+            .max()
+            .unwrap_or(0);
+        em_width * (max_columns + editor.options().scroll_beyond_last_column) as f32
+    }
+
+    /// The view line and text position at window position `position`.
+    fn position_at(
+        &self,
+        position: gpui::Point<Pixels>,
+        cx: &App,
+    ) -> Option<(usize, PointUtf16, bool)> {
+        let editor = self.source.editor.upgrade()?;
+        let editor = editor.read(cx);
+        let layout = editor.layout.as_ref()?;
+        let line_height = editor.options().resolved_line_height();
+        let bounds = self.bounds.get();
+        let lines = self.view_lines(cx);
+        if lines.is_empty() {
+            return None;
+        }
+        let ix = (((position.y - bounds.top()) / line_height).floor().max(0.) as usize)
+            .min(lines.len() - 1);
+        let line = &lines[ix];
+        let text_left = bounds.left() + (layout.text_bounds.left() - layout.bounds.left());
+        let in_text = position.x >= text_left;
+        let model = self.source.original.read(cx);
+        let text = model.buffer().rope().line(line.row);
+        let columns = utf16_visible_columns(&text, model.options().tab_size.max(1));
+        let em_width = layout.metrics.em_width.max(px(1.));
+        let x = position.x - text_left + layout.scroll_left - em_width * line.indent as f32;
+        let target = columns[line.range.start as usize] as f32 + (x / em_width).max(0.);
+        // The nearest character boundary in the view line.
+        let column = (line.range.start..=line.range.end)
+            .min_by(|a, b| {
+                let distance = |c: &u32| (columns[*c as usize] as f32 - target).abs();
+                distance(a)
+                    .partial_cmp(&distance(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(line.range.start);
+        Some((ix, PointUtf16::new(line.row, column), in_text))
+    }
+
+    /// The selected text (Monaco `copySelection`'s `getValueInRange`).
+    fn selected_text(&self, cx: &App) -> Option<String> {
+        let (anchor, head) = self.selection?;
+        let (start, end) = (anchor.min(head), anchor.max(head));
+        if start == end {
+            return None;
+        }
+        let rope = self.source.original.read(cx).buffer().rope();
+        let range = rope.point_utf16_to_offset(start)..rope.point_utf16_to_offset(end);
+        Some(rope.text_for_range(range))
+    }
+
+    /// Copies the selection to the clipboard.
+    fn copy_selection(&self, cx: &mut App) -> bool {
+        let Some(text) = self.selected_text(cx) else {
+            return false;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        true
+    }
+
+    /// Monaco's "Copy deleted lines": the change's original lines, through
+    /// the start of the line after them (`toExclusiveRange`).
+    fn deleted_text(&self, cx: &App) -> String {
+        let rope = self.source.original.read(cx).buffer().rope();
+        let rows = &self.source.rows;
+        let start = rope.point_to_offset(Point::new(rows.start.min(rope.max_point().row), 0));
+        let end = if rows.end < rope.line_count() {
+            rope.point_to_offset(Point::new(rows.end, 0))
+        } else {
+            rope.len()
+        };
+        rope.text_for_range(start..end)
+    }
+
+    /// Monaco's "Copy deleted line (N)": one line, or a line break for an
+    /// empty one.
+    fn deleted_line_text(&self, row: u32, cx: &App) -> String {
+        let line = self.source.original.read(cx).buffer().rope().line(row);
+        if line.is_empty() {
+            "\n".to_string()
+        } else {
+            line
+        }
+    }
+
+    /// Runs margin menu item `item` (see [`DeletedCode::menu_items`]).
+    fn run_menu_item(&mut self, item: DeletedMenuItem, row: u32, cx: &mut Context<Self>) {
+        self.menu = None;
+        match item {
+            DeletedMenuItem::CopyAll => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(self.deleted_text(cx)))
+            }
+            DeletedMenuItem::CopyLine => cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                self.deleted_line_text(row, cx),
+            )),
+            DeletedMenuItem::Revert => {
+                if let Some(diff) = self.source.diff.upgrade() {
+                    let change = self.source.change;
+                    // Deferred: the zone is rendered by the editor it changes.
+                    cx.defer(move |cx| diff.update(cx, |diff, cx| diff.revert(&change, cx)));
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Monaco `InlineDiffDeletedCodeMargin`'s menu items, with their labels,
+    /// for original row `row`.
+    fn menu_items(&self, row: u32, cx: &App) -> Vec<(DeletedMenuItem, String)> {
+        let change = &self.source.change;
+        let deletion = change.modified.is_empty();
+        let many = change.original.len() > 1;
+        let what = if deletion { "deleted" } else { "changed" };
+        let mut items = vec![(
+            DeletedMenuItem::CopyAll,
+            if many {
+                format!("Copy {what} lines")
+            } else {
+                format!("Copy {what} line")
+            },
+        )];
+        if many {
+            items.push((
+                DeletedMenuItem::CopyLine,
+                format!("Copy {what} line ({})", row + 1),
+            ));
+        }
+        let read_only = self
+            .source
+            .editor
+            .upgrade()
+            .is_none_or(|e| e.read(cx).options().read_only);
+        if !read_only {
+            items.push((DeletedMenuItem::Revert, "Revert this change".to_string()));
+        }
+        items
+    }
+}
+
+/// An item of the deleted lines' margin menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeletedMenuItem {
+    /// `diff.clipboard.copyDeletedContent`.
+    CopyAll,
+    /// `diff.clipboard.copyDeletedLineContent`.
+    CopyLine,
+    /// `diff.inline.revertChange`.
+    Revert,
 }
 
 impl Render for DeletedCode {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(editor) = self.editor.upgrade() else {
-            return div();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(editor) = self.source.editor.upgrade() else {
+            return div().id("deleted-code");
         };
         let editor = editor.read(cx);
         let options = editor.options();
         let colors = editor.colors().clone();
         let theme = editor.theme().clone();
         let line_height = options.resolved_line_height();
-        let (gutter_width, text_left, sign_left, scroll_left, char_width) = match &editor.layout {
-            Some(layout) => (
-                layout.gutter_width,
-                layout.text_bounds.left() - layout.bounds.left(),
-                layout.glyph_margin_width + layout.line_numbers_width,
-                layout.scroll_left,
-                layout.metrics.em_width,
-            ),
-            None => (px(0.), px(0.), px(0.), px(0.), px(0.)),
-        };
-        let decorations_width = options.line_decorations_width.resolve(char_width);
+        let (gutter_width, text_left, decorations_width, scroll_left, em_width) =
+            match &editor.layout {
+                Some(layout) => (
+                    layout.gutter_width,
+                    layout.text_bounds.left() - layout.bounds.left(),
+                    layout.layout_info.decorations_width,
+                    layout.scroll_left,
+                    layout.metrics.em_width,
+                ),
+                None => (px(0.), px(0.), px(0.), px(0.), px(0.)),
+            };
         let font_family = options.font_family.clone();
         let font_size = options.font_size;
         let font_weight = options.font_weight;
-        let model = self.original.read(cx);
+        let view_lines = self.view_lines(cx);
+        let model = self.source.original.read(cx);
         let rope = model.buffer().rope();
         let tab_size = model.options().tab_size.max(1) as usize;
-        let rows = self.rows.start..self.rows.end.min(rope.line_count());
+        let rows = self.source.rows.start..self.source.rows.end.min(rope.line_count());
         let start = rope.point_to_offset(Point::new(rows.start, 0));
         let end = rope.point_to_offset(Point::new(rows.end.saturating_sub(1), u32::MAX));
         let tokens = crate::element::HighlightSource::new(model)
             .map(|source| source.highlights(&theme, start..end))
             .unwrap_or_default();
-        let lines = rows.clone().map(|row| {
+        let selection = self
+            .selection
+            .map(|(a, b)| (a.min(b), a.max(b)))
+            .filter(|(a, b)| a != b);
+        let focused = self.focus_handle.is_focused(window);
+        let selection_color = if focused {
+            colors.selection_background
+        } else {
+            colors.inactive_selection_background
+        };
+        let lines = view_lines.iter().enumerate().map(|(ix, view_line)| {
+            let row = view_line.row;
             let line = rope.line(row);
             let line_start = rope.point_to_offset(Point::new(row, 0));
             let line_end = line_start + line.len();
             let (text, map) = crate::colorize::expand_tabs(&line, tab_size);
+            let from = map[utf16_to_byte(&line, view_line.range.start)];
+            let to = map[utf16_to_byte(&line, view_line.range.end)];
+            // Highlights in expanded line offsets, clipped to this view line
+            // and made relative to it.
+            let clip = |range: Range<usize>| {
+                let range = range.start.max(from)..range.end.min(to);
+                (range.start < range.end).then(|| range.start - from..range.end - from)
+            };
             let syntax: Vec<_> = tokens
                 .iter()
                 .filter(|(range, _)| range.start < line_end && range.end > line_start)
-                .map(|(range, style)| {
+                .filter_map(|(range, style)| {
                     let range = map[range.start.max(line_start) - line_start]
                         ..map[range.end.min(line_end) - line_start];
-                    (
-                        range,
+                    Some((
+                        clip(range)?,
                         HighlightStyle {
                             color: style.foreground,
                             font_weight: style.bold.then_some(FontWeight::BOLD),
                             font_style: style.italic.then_some(FontStyle::Italic),
                             ..Default::default()
                         },
-                    )
+                    ))
                 })
-                .filter(|(range, _)| !range.is_empty())
                 .collect();
-            let byte = |column: u32| {
-                let mut units = 0;
-                for (ix, ch) in line.char_indices() {
-                    if units >= column {
-                        return ix;
-                    }
-                    units += ch.len_utf16() as u32;
+            let columns = |r: &Range<PointUtf16>| {
+                if r.start.row > row || r.end.row < row {
+                    return None;
                 }
-                line.len()
+                let start = if r.start.row == row {
+                    r.start.column
+                } else {
+                    0
+                };
+                let end = if r.end.row == row {
+                    r.end.column
+                } else {
+                    u32::MAX
+                };
+                Some(map[utf16_to_byte(&line, start)]..map[utf16_to_byte(&line, end)])
             };
             let changed: Vec<_> = self
+                .source
                 .inner_changes
                 .iter()
-                .filter(|r| r.start.row <= row && r.end.row >= row)
-                .map(|r| {
-                    let from = if r.start.row == row {
-                        byte(r.start.column)
-                    } else {
-                        0
-                    };
-                    let to = if r.end.row == row {
-                        byte(r.end.column)
-                    } else {
-                        line.len()
-                    };
-                    (
-                        map[from]..map[to],
+                .filter_map(|r| {
+                    Some((
+                        clip(columns(r)?)?,
                         HighlightStyle {
                             background_color: Some(colors.diff_removed_text_background),
                             ..Default::default()
                         },
+                    ))
+                })
+                .collect();
+            let selected: Vec<_> = selection
+                .and_then(|(a, b)| clip(columns(&(a..b))?))
+                .map(|range| {
+                    (
+                        range,
+                        HighlightStyle {
+                            background_color: Some(selection_color),
+                            ..Default::default()
+                        },
                     )
                 })
-                .filter(|(range, _)| !range.is_empty())
+                .into_iter()
                 .collect();
-            let highlights: Vec<_> = gpui::combine_highlights(syntax, changed).collect();
+            let highlights: Vec<_> = gpui::combine_highlights(
+                gpui::combine_highlights(syntax, changed).collect::<Vec<_>>(),
+                selected,
+            )
+            .collect();
+            let text = text[from..to].to_string();
             let text = if text.is_empty() {
                 " ".to_string()
             } else {
                 text
             };
+            let bulb = self.hovered == Some(ix);
+            let first_of_row = view_line.range.start == 0;
             div()
                 .h(line_height)
                 .flex()
@@ -1156,17 +1661,37 @@ impl Render for DeletedCode {
                                 .w(gutter_width)
                                 .bg(colors.diff_gutter_removed_line_background),
                         )
-                        .when(self.render_indicators, |margin| {
+                        .when(self.source.render_indicators && !bulb, |margin| {
+                            // Monaco's `delete-sign` at the margin's right.
                             margin.child(
                                 div()
                                     .absolute()
-                                    .left(sign_left)
+                                    .right(px(0.))
                                     .w(decorations_width)
                                     .h_full()
                                     .flex()
+                                    .items_center()
                                     .justify_center()
+                                    .text_size(px(11.))
+                                    .opacity(0.7)
                                     .text_color(colors.foreground)
+                                    // TODO(#246): Monaco's `remove` codicon.
                                     .child("−"),
+                            )
+                        })
+                        .when(bulb, |margin| {
+                            let color = colors.lightbulb_foreground;
+                            margin.child(
+                                canvas(
+                                    |_, _, _| {},
+                                    move |bounds, _, window, _| {
+                                        crate::element::paint_lightbulb(bounds, color, window)
+                                    },
+                                )
+                                .absolute()
+                                .right(px(0.))
+                                .w(px(DELETED_LIGHT_BULB_WIDTH))
+                                .h_full(),
                             )
                         }),
                 )
@@ -1179,21 +1704,402 @@ impl Render for DeletedCode {
                         .child(
                             div()
                                 .ml(-scroll_left)
+                                .when(!first_of_row, |text| {
+                                    text.pl(em_width * view_line.indent as f32)
+                                })
                                 .whitespace_nowrap()
                                 .child(StyledText::new(text).with_highlights(highlights)),
                         ),
                 )
         });
+        let lines: Vec<_> = lines.collect();
+        let bounds = self.bounds.clone();
+        let menu = self.menu.map(|(position, row)| {
+            let items = self.menu_items(row, cx);
+            deferred(
+                anchored().position(position).child(
+                    div()
+                        .id("deleted-code-menu")
+                        .occlude()
+                        .min_w(px(160.))
+                        .py(px(4.))
+                        .rounded(px(5.))
+                        .bg(colors.menu_background)
+                        .text_color(colors.menu_foreground)
+                        .text_size(px(13.))
+                        .when_some(colors.menu_border, |menu, border| {
+                            menu.border_1().border_color(border)
+                        })
+                        .shadow_md()
+                        .role(gpui::Role::Menu)
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.menu = None;
+                            cx.notify();
+                        }))
+                        .children(items.into_iter().enumerate().map(|(ix, (item, label))| {
+                            div()
+                                .id(("deleted-code-menu-item", ix))
+                                .px(px(12.))
+                                .h(px(24.))
+                                .flex()
+                                .items_center()
+                                .whitespace_nowrap()
+                                .cursor_pointer()
+                                .role(gpui::Role::MenuItem)
+                                .hover(|style| {
+                                    style
+                                        .bg(colors.menu_selection_background)
+                                        .text_color(colors.menu_selection_foreground)
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.run_menu_item(item, row, cx)
+                                }))
+                                .child(label)
+                        })),
+                ),
+            )
+            .with_priority(1)
+        });
         div()
+            .id("deleted-code")
+            .track_focus(&self.focus_handle)
             .size_full()
             .overflow_hidden()
+            .cursor(gpui::CursorStyle::IBeam)
             .font_family(font_family)
             .text_size(font_size)
             .font_weight(font_weight)
             .line_height(line_height)
             .text_color(colors.foreground)
-            .children(lines.collect::<Vec<_>>())
+            .child(
+                canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    let Some((ix, position, in_text)) = this.position_at(event.position, cx) else {
+                        return;
+                    };
+                    cx.stop_propagation();
+                    if !in_text {
+                        // Monaco's light bulb opens the menu below itself.
+                        let bounds = this.bounds.get();
+                        let top = bounds.top() + line_height * (ix + 1) as f32;
+                        let pad = (line_height / 3.).floor();
+                        this.menu = Some((point(event.position.x, top + pad), position.row));
+                        this.hovered = Some(ix);
+                        cx.notify();
+                        return;
+                    }
+                    window.focus(&this.focus_handle, cx);
+                    this.selection = Some((position, position));
+                    this.selecting = true;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                let Some((ix, position, _)) = this.position_at(event.position, cx) else {
+                    return;
+                };
+                let mut changed = this.hovered != Some(ix);
+                this.hovered = Some(ix);
+                if this.selecting && event.pressed_button == Some(MouseButton::Left) {
+                    if let Some((_, head)) = this.selection.as_mut() {
+                        changed |= *head != position;
+                        *head = position;
+                    }
+                } else {
+                    this.selecting = false;
+                }
+                if changed {
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.selecting = false),
+            )
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !hovered && this.menu.is_none() {
+                    this.hovered = None;
+                    cx.notify();
+                }
+            }))
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                let keystroke = &event.keystroke;
+                let secondary = if cfg!(target_os = "macos") {
+                    keystroke.modifiers.platform
+                } else {
+                    keystroke.modifiers.control
+                };
+                if secondary && keystroke.key == "c" && this.copy_selection(cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .children(lines)
+            .children(menu)
     }
+}
+
+/// The models a diff editor compares (Monaco `IDiffEditorModel`).
+#[derive(Clone)]
+pub struct DiffEditorModel {
+    /// The original model (Monaco `original`).
+    pub original: Entity<TextModel>,
+    /// The modified model (Monaco `modified`).
+    pub modified: Entity<TextModel>,
+}
+
+/// Monaco `ILineChange` (from the deprecated `getLineChanges`): a change's
+/// 1-based inclusive line numbers. An insertion has
+/// `original_end_line_number == 0` and `original_start_line_number` the
+/// line before it; a deletion likewise on the modified side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineChange {
+    /// Monaco `originalStartLineNumber`.
+    pub original_start_line_number: usize,
+    /// Monaco `originalEndLineNumber`.
+    pub original_end_line_number: usize,
+    /// Monaco `modifiedStartLineNumber`.
+    pub modified_start_line_number: usize,
+    /// Monaco `modifiedEndLineNumber`.
+    pub modified_end_line_number: usize,
+    /// Monaco `charChanges`: the changed characters, for changes with lines
+    /// on both sides.
+    pub char_changes: Option<Vec<CharChange>>,
+}
+
+/// Monaco `ICharChange`: 1-based lines and columns, end exclusive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CharChange {
+    /// Monaco `originalStartLineNumber`.
+    pub original_start_line_number: usize,
+    /// Monaco `originalStartColumn`.
+    pub original_start_column: usize,
+    /// Monaco `originalEndLineNumber`.
+    pub original_end_line_number: usize,
+    /// Monaco `originalEndColumn`.
+    pub original_end_column: usize,
+    /// Monaco `modifiedStartLineNumber`.
+    pub modified_start_line_number: usize,
+    /// Monaco `modifiedStartColumn`.
+    pub modified_start_column: usize,
+    /// Monaco `modifiedEndLineNumber`.
+    pub modified_end_line_number: usize,
+    /// Monaco `modifiedEndColumn`.
+    pub modified_end_column: usize,
+}
+
+/// Monaco `toLineChanges`.
+pub(crate) fn to_line_changes(diff: &LinesDiff) -> Vec<LineChange> {
+    diff.changes
+        .iter()
+        .map(|m| {
+            let mut inner = Some(&m.inner_changes);
+            let (original_start_line_number, original_end_line_number) = if m.original.is_empty() {
+                inner = None;
+                (m.original.start_line_number - 1, 0)
+            } else {
+                (
+                    m.original.start_line_number,
+                    m.original.end_line_number_exclusive - 1,
+                )
+            };
+            let (modified_start_line_number, modified_end_line_number) = if m.modified.is_empty() {
+                inner = None;
+                (m.modified.start_line_number - 1, 0)
+            } else {
+                (
+                    m.modified.start_line_number,
+                    m.modified.end_line_number_exclusive - 1,
+                )
+            };
+            LineChange {
+                original_start_line_number,
+                original_end_line_number,
+                modified_start_line_number,
+                modified_end_line_number,
+                char_changes: inner.map(|inner| {
+                    inner
+                        .iter()
+                        .map(|c| CharChange {
+                            original_start_line_number: c.original_range.start_line_number,
+                            original_start_column: c.original_range.start_column,
+                            original_end_line_number: c.original_range.end_line_number,
+                            original_end_column: c.original_range.end_column,
+                            modified_start_line_number: c.modified_range.start_line_number,
+                            modified_start_column: c.modified_range.start_column,
+                            modified_end_line_number: c.modified_range.end_line_number,
+                            modified_end_column: c.modified_range.end_column,
+                        })
+                        .collect()
+                }),
+            }
+        })
+        .collect()
+}
+
+/// Which gutter toolbar a [`DiffHunkAction`] is in (Monaco's menus).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffHunkToolbar {
+    /// Beside each change (Monaco `MenuId.DiffEditorHunkToolbar`).
+    Hunk,
+    /// Beside the selected changes (Monaco
+    /// `MenuId.DiffEditorSelectionToolbar`).
+    Selection,
+}
+
+/// What a [`DiffHunkAction`] runs on (Monaco
+/// `DiffEditorSelectionHunkToolbarContext`).
+#[derive(Clone, Debug)]
+pub struct DiffHunkContext {
+    /// The change, or the selected parts of changes (Monaco `mapping`).
+    pub mapping: DetailedLineRangeMapping,
+    /// The original text with the change applied (Monaco
+    /// `originalWithModifiedChanges`), e.g. to stage it.
+    pub original_with_modified_changes: String,
+}
+
+/// What a [`DiffHunkAction`] runs.
+pub type DiffHunkHandler = Rc<dyn Fn(&DiffHunkContext, &mut Window, &mut App)>;
+
+/// A button in the diff editor's gutter menu (a Monaco
+/// `DiffEditorHunkToolbar` or `DiffEditorSelectionToolbar` menu item), from
+/// [`DiffEditor::add_hunk_action`].
+#[derive(Clone)]
+pub struct DiffHunkAction {
+    /// Its id, for [`DiffEditor::remove_hunk_action`].
+    pub id: SharedString,
+    /// Its tooltip and screen reader label.
+    pub label: SharedString,
+    /// The button's text (Monaco shows a codicon).
+    pub icon: SharedString,
+    /// The toolbar it's in.
+    pub toolbar: DiffHunkToolbar,
+    /// Runs it.
+    pub run: DiffHunkHandler,
+}
+
+impl std::fmt::Debug for DiffHunkAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiffHunkAction")
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .field("toolbar", &self.toolbar)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Monaco `DiffEditorGutter.computeStagedValue`: `original` with
+/// `mapping`'s inner changes applied.
+fn staged_value(
+    original: &text::Rope,
+    modified: &text::Rope,
+    mapping: &DetailedLineRangeMapping,
+) -> String {
+    let mut result = String::new();
+    let mut last = 0;
+    let offset = |rope: &text::Rope, range: &crate::diff::Range| {
+        let range = range.to_point_utf16_range();
+        rope.point_utf16_to_offset(rope.clip_point_utf16(range.start, text::Bias::Left))
+            ..rope.point_utf16_to_offset(rope.clip_point_utf16(range.end, text::Bias::Left))
+    };
+    for change in &mapping.inner_changes {
+        let original_range = offset(original, &change.original_range);
+        let modified_range = offset(modified, &change.modified_range);
+        if original_range.start < last {
+            continue;
+        }
+        result.push_str(&original.text_for_range(last..original_range.start));
+        result.push_str(&modified.text_for_range(modified_range));
+        last = original_range.end;
+    }
+    result.push_str(&original.text_for_range(last..original.len()));
+    result
+}
+
+/// A symbol for the hidden-lines bars' breadcrumbs (Monaco
+/// `IDiffEditorBreadcrumbsSource`'s items).
+#[derive(Clone, Debug, PartialEq)]
+struct BreadcrumbSymbol {
+    name: SharedString,
+    kind: crate::providers::SymbolKind,
+    /// 1-based lines.
+    start_line_number: usize,
+    end_line_number: usize,
+}
+
+/// Monaco `DiffEditorBreadcrumbsSource.getBreadcrumbItems`: the symbols
+/// starting in `range` and ending after it, outermost first.
+fn breadcrumb_items(symbols: &[BreadcrumbSymbol], range: LineRange) -> Vec<BreadcrumbSymbol> {
+    let mut items: Vec<_> = symbols
+        .iter()
+        .filter(|s| range.contains(s.start_line_number) && !range.contains(s.end_line_number))
+        .cloned()
+        .collect();
+    items.sort_by_key(|s| std::cmp::Reverse(s.end_line_number - s.start_line_number));
+    items
+}
+
+/// Monaco `DiffEditorSash`'s `MINIMUM_EDITOR_WIDTH`.
+const MINIMUM_EDITOR_WIDTH: f32 = 100.;
+/// Monaco's sash size (`Sash` with the default `size` of 4px).
+const SASH_SIZE: f32 = 4.;
+/// Monaco `OverviewRulerFeature.ENTIRE_DIFF_OVERVIEW_WIDTH`.
+const DIFF_OVERVIEW_WIDTH: f32 = 30.;
+/// Monaco `ScrollbarState`'s minimum slider size.
+const MINIMUM_SLIDER_SIZE: f32 = 20.;
+
+/// Monaco `SashLayout._computeSashLeft`: the sash's x in a `width` wide
+/// diff editor (less the overview ruler).
+fn compute_sash_left(ratio: f32, default_ratio: f32, resizable: bool, width: Pixels) -> Pixels {
+    let width = f32::from(width);
+    let mid_point = (default_ratio * width).floor();
+    let sash_left = if resizable {
+        (ratio * width).floor()
+    } else {
+        mid_point
+    };
+    px(if width <= MINIMUM_EDITOR_WIDTH * 2. {
+        mid_point
+    } else {
+        sash_left.clamp(MINIMUM_EDITOR_WIDTH, width - MINIMUM_EDITOR_WIDTH)
+    })
+}
+
+/// Monaco `ScrollbarState`'s slider for a `visible` tall viewport over
+/// `scroll_height` scrolled to `scroll_top` (no arrows): its top and size.
+fn slider_geometry(visible: Pixels, scroll_height: Pixels, scroll_top: Pixels) -> (Pixels, Pixels) {
+    let visible = f32::from(visible);
+    let scroll_height = f32::from(scroll_height).max(visible);
+    if visible <= 0. || scroll_height <= 0. {
+        return (px(0.), px(0.));
+    }
+    let size = (visible * visible / scroll_height)
+        .floor()
+        .max(MINIMUM_SLIDER_SIZE)
+        .min(visible)
+        .round();
+    let ratio = if scroll_height > visible {
+        (visible - size) / (scroll_height - visible)
+    } else {
+        0.
+    };
+    (px(f32::from(scroll_top) * ratio), px(size))
+}
+
+/// What [`DiffEditor`] forces on its editors, and the host's values it
+/// replaced, to restore them (Monaco `_adjustOptionsForSubEditor` reads
+/// them from the diff editor's own options).
+#[derive(Default)]
+struct HostOptions {
+    /// Each editor's sticky scroll before it was turned off.
+    sticky_scroll: [Option<bool>; 2],
+    /// The original editor's unicode highlighting before the inline view
+    /// turned it off.
+    unicode_highlight: Option<crate::options::UnicodeHighlightOptions>,
 }
 
 /// The side-by-side diff editor (Monaco `DiffEditorWidget`).
@@ -1202,30 +2108,64 @@ pub struct DiffEditor {
     modified: Entity<CodeEditor>,
     options: DiffEditorOptions,
     diff: Option<Arc<LinesDiff>>,
+    /// Monaco `IDocumentDiff.identical`: no changes and the same text.
+    identical: bool,
     /// The model versions `diff` is for, and the computation running.
     diff_versions: Option<(text::Version, text::Version)>,
     diff_task: Option<Task<()>>,
+    /// [`DiffEditor::wait_for_diff`]'s callers.
+    diff_waiters: Vec<futures::channel::oneshot::Sender<()>>,
+    /// Monaco `setModel(null)`: the editors show empty placeholder models.
+    has_model: bool,
     decorations: (Vec<DecorationId>, Vec<DecorationId>),
+    /// The alignment zones on each side.
     zones: (Vec<WidgetId>, Vec<WidgetId>),
+    /// What the alignment zones show, to skip realigning when nothing
+    /// changed.
+    alignment: Vec<AlignmentZone>,
+    /// The scheduled realignment (Monaco's `RunOnceScheduler(0)`).
+    alignment_task: Option<Task<()>>,
+    /// The moved blocks' caption zones on each side.
+    move_caption_zones: (Vec<WidgetId>, Vec<WidgetId>),
+    /// The inline view's deleted lines zones.
+    deleted_code: Vec<WeakEntity<DeletedCode>>,
     /// The original side's share of the width.
     ratio: f32,
     /// The diff editor's bounds, for dragging the sash.
     bounds: Rc<Cell<Bounds<Pixels>>>,
-    dragging_sash: bool,
+    /// Monaco `DiffEditorSash`: a drag's start x and sash left.
+    sash_drag: Option<(Pixels, Pixels)>,
+    /// The mouse is over the sash (Monaco's `sash.hoverBorder`).
+    sash_hovered: bool,
+    /// Monaco's `diffViewport` being dragged: where in the slider it was
+    /// grabbed.
+    overview_drag: Option<Pixels>,
     syncing_scroll: bool,
     /// Whether the last render showed the diff inline.
     inline: bool,
     /// The modified editor runs optimized for screen readers (Monaco's
     /// `_screenReaderMode`), as of the last render.
     screen_reader_mode: bool,
+    /// Editor options the diff editor replaced.
+    host_options: HostOptions,
     /// Hideable unchanged regions, when `hide_unchanged_regions` is on.
     unchanged: Vec<UnchangedRegion>,
     /// Decorations on each region's lines, tracking them through edits.
     unchanged_decorations: (Vec<DecorationId>, Vec<DecorationId>),
     /// The "hidden lines" bars.
     unchanged_zones: (Vec<WidgetId>, Vec<WidgetId>),
+    /// The "Fold Unchanged Region" glyphs on fully shown regions.
+    fold_glyphs: (Vec<WidgetId>, Vec<WidgetId>),
+    /// The modified model's symbols, for the bars' breadcrumbs (Monaco
+    /// `diffEditorBreadcrumbs`).
+    breadcrumb_symbols: Vec<BreadcrumbSymbol>,
+    breadcrumb_task: Option<Task<()>>,
     /// The mouse is over the gutter menu, which shows every button.
     gutter_hovered: bool,
+    /// Counts the mouse leaving the gutter, keying the buttons' fade out.
+    gutter_fade: usize,
+    /// Host buttons in the gutter menu.
+    hunk_actions: Vec<DiffHunkAction>,
     /// A hidden-lines bar's edge being dragged.
     unchanged_drag: Option<UnchangedDrag>,
     /// The margin revert arrows in the modified editor.
@@ -1284,19 +2224,34 @@ impl DiffEditor {
             ratio: options.split_view_default_ratio,
             options,
             diff: None,
+            identical: false,
             diff_versions: None,
             diff_task: None,
+            diff_waiters: Vec::new(),
+            has_model: true,
             decorations: Default::default(),
             zones: Default::default(),
+            alignment: Vec::new(),
+            alignment_task: None,
+            move_caption_zones: Default::default(),
+            deleted_code: Vec::new(),
             bounds: Default::default(),
-            dragging_sash: false,
+            sash_drag: None,
+            sash_hovered: false,
+            overview_drag: None,
             syncing_scroll: false,
             inline: false,
             screen_reader_mode: false,
+            host_options: HostOptions::default(),
             unchanged: Vec::new(),
             unchanged_decorations: Default::default(),
             unchanged_zones: Default::default(),
+            fold_glyphs: Default::default(),
+            breadcrumb_symbols: Vec::new(),
+            breadcrumb_task: None,
             gutter_hovered: false,
+            gutter_fade: 0,
+            hunk_actions: Vec::new(),
             unchanged_drag: None,
             revert_arrows: Vec::new(),
             accessible_viewer: None,
@@ -1321,45 +2276,61 @@ impl DiffEditor {
     fn subscribe(&mut self, cx: &mut Context<Self>) {
         let original_model = self.original.read(cx).model().clone();
         let modified_model = self.modified.read(cx).model().clone();
+        let editor_events = |original: bool| {
+            move |this: &mut Self,
+                  _: Entity<CodeEditor>,
+                  event: &CodeEditorEvent,
+                  cx: &mut Context<Self>| {
+                match event {
+                    CodeEditorEvent::ScrollChanged(_) => {
+                        this.sync_scroll(original, cx);
+                        // The gutter menu, the overview ruler and the moved
+                        // block lines follow the editors.
+                        cx.notify();
+                    }
+                    CodeEditorEvent::SelectionsChanged(change) => {
+                        this.ensure_selections_visible(original, cx);
+                        this.update_active_move(original, cx);
+                        if change.reason == crate::events::CursorChangeReason::Explicit {
+                            this.signal_change_at_cursor(original, cx);
+                        }
+                        if !original {
+                            this.apply_revert_arrows(cx);
+                            cx.notify();
+                        }
+                    }
+                    // Monaco realigns on `onDidChangeViewZones` and on
+                    // `wrappingInfo`/`lineHeight` changes; a layout change
+                    // can change the wrapping.
+                    CodeEditorEvent::ViewZonesChanged | CodeEditorEvent::LayoutChanged(_) => {
+                        this.schedule_alignment(cx);
+                        cx.notify();
+                    }
+                    CodeEditorEvent::ConfigurationChanged(_) => {
+                        // The host may have changed what the diff editor
+                        // forces (Monaco re-applies its overrides).
+                        this.apply_editor_options(cx);
+                        this.schedule_alignment(cx);
+                    }
+                    _ => {}
+                }
+            }
+        };
         self._subscriptions = vec![
             cx.subscribe(&original_model, |this, _, event: &TextModelEvent, cx| {
-                if matches!(event, TextModelEvent::Edited { .. }) {
+                if let TextModelEvent::Edited { changes, .. } = event {
+                    this.model_edited(true, changes, cx);
                     this.compute_diff(false, cx);
                 }
             }),
             cx.subscribe(&modified_model, |this, _, event: &TextModelEvent, cx| {
-                if matches!(event, TextModelEvent::Edited { .. }) {
+                if let TextModelEvent::Edited { changes, .. } = event {
+                    this.model_edited(false, changes, cx);
                     this.compute_diff(false, cx);
                 }
             }),
-            cx.subscribe(
-                &self.original,
-                |this, _, event: &CodeEditorEvent, cx| match event {
-                    CodeEditorEvent::ScrollChanged(_) => this.sync_scroll(true, cx),
-                    CodeEditorEvent::SelectionsChanged(_) => {
-                        this.ensure_selections_visible(true, cx);
-                        this.update_active_move(true, cx);
-                    }
-                    _ => {}
-                },
-            ),
-            cx.subscribe(
-                &self.modified,
-                |this, _, event: &CodeEditorEvent, cx| match event {
-                    CodeEditorEvent::ScrollChanged(_) => {
-                        this.sync_scroll(false, cx);
-                        // The gutter menu follows the modified editor.
-                        cx.notify();
-                    }
-                    CodeEditorEvent::SelectionsChanged(_) => {
-                        this.ensure_selections_visible(false, cx);
-                        this.update_active_move(false, cx);
-                        this.apply_revert_arrows(cx);
-                        cx.notify();
-                    }
-                    _ => {}
-                },
-            ),
+            cx.subscribe(&self.original, editor_events(true)),
+            cx.subscribe(&self.modified, editor_events(false)),
         ];
     }
 
@@ -1431,15 +2402,40 @@ impl DiffEditor {
         modified: Entity<TextModel>,
         cx: &mut Context<Self>,
     ) {
+        self.set_model(Some(DiffEditorModel { original, modified }), cx);
+    }
+
+    /// Shows other models, or none (Monaco `setModel`, with `null`): without
+    /// a model the editors show empty text and there's no diff.
+    pub fn set_model(&mut self, model: Option<DiffEditorModel>, cx: &mut Context<Self>) {
         self.clear_diff(cx);
         self.simple_diff = None;
+        self.has_model = model.is_some();
+        let DiffEditorModel { original, modified } = model.unwrap_or_else(|| DiffEditorModel {
+            original: cx.new(|_| TextModel::new("")),
+            modified: cx.new(|_| TextModel::new("")),
+        });
         self.original
             .update(cx, |editor, cx| editor.set_model(original, cx));
         self.modified
             .update(cx, |editor, cx| editor.set_model(modified, cx));
         self.subscribe(cx);
-        self.compute_diff(true, cx);
+        if self.has_model {
+            self.compute_diff(true, cx);
+        } else {
+            self.resolve_diff_waiters();
+        }
         cx.emit(DiffEditorEvent::ModelChanged);
+        cx.notify();
+    }
+
+    /// The models shown (Monaco `getModel`), `None` after
+    /// `set_model(None)`.
+    pub fn model(&self, cx: &App) -> Option<DiffEditorModel> {
+        self.has_model.then(|| DiffEditorModel {
+            original: self.original.read(cx).model().clone(),
+            modified: self.modified.read(cx).model().clone(),
+        })
     }
 
     /// The editors' word wrap overrides (Monaco `_adjustOptionsForLeftHandSide`
@@ -1474,23 +2470,64 @@ impl DiffEditor {
         set(&self.modified, self.options.diff_word_wrap, None, cx);
     }
 
-    /// What Monaco's `_adjustOptionsForSubEditor` sets on both editors
-    /// besides word wrap: `code_lens` from `diff_code_lens`, and the
-    /// `accessibility_verbose` tip in `aria_label`.
+    /// What Monaco's `_adjustOptionsForSubEditor`, `...LeftHandSide` and
+    /// `...RightHandSide` set on the editors besides word wrap: no minimap
+    /// or folding; no sticky scroll with hidden unchanged regions (nor in
+    /// the hidden original editor inline); no unicode highlighting in the
+    /// hidden original editor; the original's glyph margin only side by
+    /// side; `code_lens` from `diff_code_lens`; the aria labels, with the
+    /// `accessibility_verbose` tip.
     fn apply_editor_options(&mut self, cx: &mut Context<Self>) {
         let code_lens = self.options.diff_code_lens;
         let verbose = self.options.accessibility_verbose;
-        for editor in [&self.original, &self.modified] {
+        let inline = self.inline;
+        let hide_sticky = self.options.hide_unchanged_regions.enabled;
+        for (ix, editor) in [&self.original, &self.modified].into_iter().enumerate() {
+            let original = ix == 0;
+            let label = if original {
+                self.options.original_aria_label.clone()
+            } else {
+                self.options.modified_aria_label.clone()
+            };
+            let sticky_off = hide_sticky || (original && inline);
+            let saved_sticky = &mut self.host_options.sticky_scroll[ix];
+            let saved_unicode = &mut self.host_options.unicode_highlight;
             editor.update(cx, |editor, cx| {
                 let current = editor.options();
-                let aria_label = aria_label_with_tip(&current.aria_label, verbose);
-                if current.code_lens == code_lens && current.aria_label == aria_label {
-                    return;
-                }
                 let mut options = current.clone();
+                let aria_label = label.as_deref().unwrap_or(&current.aria_label);
+                options.aria_label = aria_label_with_tip(aria_label, verbose);
                 options.code_lens = code_lens;
-                options.aria_label = aria_label;
-                editor.update_options(options, cx);
+                options.minimap.enabled = false;
+                options.folding = false;
+                if sticky_off {
+                    if options.sticky_scroll.enabled {
+                        *saved_sticky = Some(true);
+                        options.sticky_scroll.enabled = false;
+                    }
+                } else if let Some(enabled) = saved_sticky.take() {
+                    options.sticky_scroll.enabled = enabled;
+                }
+                if original {
+                    options.glyph_margin = !inline;
+                    let highlights = &mut options.unicode_highlight;
+                    let shows_any = highlights.non_basic_ascii
+                        || highlights.ambiguous_characters
+                        || highlights.invisible_characters;
+                    if inline {
+                        if shows_any {
+                            *saved_unicode = Some(highlights.clone());
+                            highlights.non_basic_ascii = false;
+                            highlights.ambiguous_characters = false;
+                            highlights.invisible_characters = false;
+                        }
+                    } else if let Some(saved) = saved_unicode.take() {
+                        *highlights = saved;
+                    }
+                }
+                if options != *current {
+                    editor.update_options(options, cx);
+                }
             });
         }
     }
@@ -1510,12 +2547,310 @@ impl DiffEditor {
         }
         let width = self.bounds.get().size.width;
         // Screen reader users keep the sides apart (Monaco
-        // `_screenReaderMode`).
+        // `_screenReaderMode`). Monaco `couldShowInlineViewBecauseOfSize`
+        // is `width <= breakpoint`.
         options.render_side_by_side
             && !(options.use_inline_view_when_space_is_limited
                 && width > px(0.)
-                && width < options.render_side_by_side_inline_breakpoint
+                && width <= options.render_side_by_side_inline_breakpoint
                 && !self.screen_reader_mode)
+    }
+
+    /// Monaco `inlineViewHideOriginalLineNumbers`: the inline view hides the
+    /// original line numbers.
+    fn hides_original_line_numbers(&self) -> bool {
+        self.options.hide_original_line_numbers || self.options.compact_mode
+    }
+
+    /// Monaco's inline layout: the original editor shows as a column of its
+    /// line numbers, `max(5, layoutInfoDecorationsLeft)` wide, or not at
+    /// all with `hide_original_line_numbers`.
+    fn inline_original_width(&self, cx: &App) -> Pixels {
+        if self.hides_original_line_numbers() {
+            return px(0.);
+        }
+        self.original
+            .read(cx)
+            .layout
+            .as_ref()
+            .map_or(px(5.), |l| l.layout_info.decorations_left.max(px(5.)))
+    }
+
+    /// Monaco `getLineChanges` (deprecated there for
+    /// `getDiffComputationResult().changes2`, here [`DiffEditor::diff`]):
+    /// the changes as `ILineChange`s, once computed.
+    pub fn line_changes(&self) -> Option<Vec<LineChange>> {
+        self.diff.as_deref().map(to_line_changes)
+    }
+
+    /// Monaco `getDiffComputationResult().identical`: no changes and the
+    /// same text (whitespace changes ignored by `ignore_trim_whitespace`
+    /// leave no changes, but the text differs), once computed.
+    pub fn identical(&self) -> Option<bool> {
+        self.diff.is_some().then_some(self.identical)
+    }
+
+    /// Monaco `waitForDiff`: resolves once the diff for the current text is
+    /// computed (right away when there's nothing to compute).
+    pub fn wait_for_diff(&mut self) -> impl Future<Output = ()> + use<> {
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        if self.has_model && self.diff_task.is_some() {
+            self.diff_waiters.push(sender);
+        } else {
+            sender.send(()).ok();
+        }
+        async move {
+            receiver.await.ok();
+        }
+    }
+
+    fn resolve_diff_waiters(&mut self) {
+        for waiter in self.diff_waiters.drain(..) {
+            waiter.send(()).ok();
+        }
+    }
+
+    /// Adds an action to the modified editor (Monaco
+    /// `IStandaloneDiffEditor.addAction`, which delegates the same way).
+    pub fn add_action(
+        &mut self,
+        descriptor: crate::editor_actions::EditorActionDescriptor,
+        cx: &mut Context<Self>,
+    ) {
+        self.modified
+            .update(cx, |editor, cx| editor.add_action(descriptor, cx));
+    }
+
+    /// Adds a command handler (Monaco `IStandaloneDiffEditor.addCommand`,
+    /// which delegates to the modified editor's `addCommand`): see
+    /// [`crate::add_command`].
+    pub fn add_command(
+        &mut self,
+        id: impl Into<SharedString>,
+        handler: impl Fn(&[serde_json::Value], &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) -> crate::registry::Disposable {
+        crate::commands::add_command(cx, id, handler)
+    }
+
+    /// Adds a button to the gutter menu (a Monaco `DiffEditorHunkToolbar` or
+    /// `DiffEditorSelectionToolbar` menu item), replacing one with the same
+    /// id. The gutter shows while it has buttons, even for a read-only
+    /// modified side.
+    pub fn add_hunk_action(&mut self, action: DiffHunkAction, cx: &mut Context<Self>) {
+        self.hunk_actions.retain(|a| a.id != action.id);
+        self.hunk_actions.push(action);
+        cx.notify();
+    }
+
+    /// Removes a button added with [`DiffEditor::add_hunk_action`].
+    pub fn remove_hunk_action(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let len = self.hunk_actions.len();
+        self.hunk_actions.retain(|a| a.id.as_ref() != id);
+        cx.notify();
+        self.hunk_actions.len() != len
+    }
+
+    /// Monaco `applyOriginalEdits`/`applyModifiedEdits`: moves the shown
+    /// diff's line ranges through an edit, so the sides stay aligned until
+    /// the diff is computed again. Monaco has these disabled (a TODO) and
+    /// keeps the stale diff; this ports their line range part
+    /// (`applyEditToLineRange`). Changes the edit touches lose their inner
+    /// changes until then.
+    fn model_edited(&mut self, original: bool, changes: &[ContentChange], cx: &mut Context<Self>) {
+        let Some(diff) = self.diff.as_deref() else {
+            return;
+        };
+        // (start line, end line, line delta), in descending order.
+        let edits: Vec<(usize, usize, isize)> = changes
+            .iter()
+            .map(|c| {
+                let start = c.range.start.row as usize + 1;
+                let end = c.range.end.row as usize + 1;
+                let new_lines = c.text.matches('\n').count() as isize;
+                (start, end, new_lines - (end - start) as isize)
+            })
+            .collect();
+        if edits.iter().all(|(_, _, delta)| *delta == 0) {
+            return;
+        }
+        let shift_inner = |inner: &mut Vec<RangeMapping>, delta: isize| {
+            for c in inner {
+                let range = if original {
+                    &mut c.original_range
+                } else {
+                    &mut c.modified_range
+                };
+                range.start_line_number = (range.start_line_number as isize + delta) as usize;
+                range.end_line_number = (range.end_line_number as isize + delta) as usize;
+            }
+        };
+        let apply = |m: &mut DetailedLineRangeMapping| -> Option<()> {
+            let range = if original { m.original } else { m.modified };
+            let moved = apply_edits_to_line_range(range, &edits)?;
+            if moved.len() == range.len() {
+                shift_inner(
+                    &mut m.inner_changes,
+                    moved.start_line_number as isize - range.start_line_number as isize,
+                );
+            } else {
+                m.inner_changes.clear();
+            }
+            if original {
+                m.original = moved;
+            } else {
+                m.modified = moved;
+            }
+            Some(())
+        };
+        let mut new = diff.clone();
+        for change in &mut new.changes {
+            if apply(change).is_none() {
+                return;
+            }
+        }
+        let move_count = new.moves.len();
+        new.moves.retain_mut(|m| {
+            let lines = &mut m.line_range_mapping;
+            let range = if original {
+                &mut lines.original
+            } else {
+                &mut lines.modified
+            };
+            let Some(moved) = apply_edits_to_line_range(*range, &edits) else {
+                return false;
+            };
+            *range = moved;
+            m.changes.iter_mut().all(|c| apply(c).is_some())
+        });
+        if new.moves.len() != move_count {
+            self.move_to_compare = None;
+            self.active_move = None;
+        }
+        self.diff = Some(Arc::new(new));
+        self.schedule_alignment(cx);
+        cx.notify();
+    }
+
+    /// Monaco `_handleCursorPositionChange`: a cursor moved onto a change
+    /// plays its signal.
+    fn signal_change_at_cursor(&mut self, original: bool, cx: &mut Context<Self>) {
+        let Some(diff) = self.diff.clone() else {
+            return;
+        };
+        let editor = if original {
+            &self.original
+        } else {
+            &self.modified
+        };
+        let line = editor.read(cx).selections()[0].head.row as usize + 1;
+        let change = diff.changes.iter().find(|m| {
+            if original {
+                m.original.contains(line)
+            } else {
+                m.modified.contains(line)
+            }
+        });
+        if let Some(change) = change {
+            self.play_signal(change_signal(change), cx);
+        }
+    }
+
+    /// Monaco `DiffEditorBreadcrumbsSource`: the modified model's symbols
+    /// (from its document symbol providers, or the language's tags), for the
+    /// hidden-lines bars.
+    fn update_breadcrumb_symbols(&mut self, cx: &mut Context<Self>) {
+        if !self.options.hide_unchanged_regions.enabled || self.unchanged.is_empty() {
+            return;
+        }
+        let task = self
+            .modified
+            .update(cx, |editor, cx| editor.document_symbols(cx));
+        self.breadcrumb_task = Some(cx.spawn(async move |this, cx| {
+            let symbols = task.await;
+            this.update(cx, |this, cx| {
+                let symbols: Vec<BreadcrumbSymbol> = crate::outline::flatten_symbols(&symbols)
+                    .into_iter()
+                    .map(|(_, _, s)| BreadcrumbSymbol {
+                        name: s.name.clone(),
+                        kind: s.kind,
+                        start_line_number: s.range.start.row as usize + 1,
+                        end_line_number: s.range.end.row as usize + 1,
+                    })
+                    .collect();
+                if symbols != this.breadcrumb_symbols {
+                    this.breadcrumb_symbols = symbols;
+                    this.apply_unchanged(cx);
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Monaco `_revealModifiedHiddenLine`: shows a hidden modified line from
+    /// the bottom of its region and reveals it.
+    fn reveal_modified_hidden_line(&mut self, line: usize, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .unchanged
+            .iter()
+            .position(|r| r.hidden_modified_range().contains(line))
+        else {
+            return;
+        };
+        self.unchanged[index].show_modified_line(line, RevealPreference::FromBottom);
+        self.apply_unchanged(cx);
+        let point = PointUtf16::new(line as u32 - 1, 0);
+        self.modified.update(cx, |editor, cx| {
+            editor.reveal_range(point..point, crate::view::reveal::RevealType::Center, cx)
+        });
+    }
+
+    /// Monaco's "Fold Unchanged Region" glyph (`fold-unchanged`) on the
+    /// first line of each fully shown region, on both sides.
+    fn apply_fold_glyphs(&mut self, cx: &mut Context<Self>) {
+        let (old_original, old_modified) = std::mem::take(&mut self.fold_glyphs);
+        for (editor, old) in [
+            (&self.original, old_original),
+            (&self.modified, old_modified),
+        ] {
+            editor.update(cx, |editor, cx| {
+                for id in old {
+                    editor.remove_widget(id, cx);
+                }
+            });
+        }
+        if self.options.compact_mode {
+            return;
+        }
+        let colors = self.modified.read(cx).colors().clone();
+        let this = cx.entity().downgrade();
+        let mut glyphs = (Vec::new(), Vec::new());
+        for (index, region) in self.unchanged.iter().enumerate() {
+            if !region.should_hide_controls() {
+                continue;
+            }
+            let sides = [
+                (&self.original, region.original_line_number, &mut glyphs.0),
+                (&self.modified, region.modified_line_number, &mut glyphs.1),
+            ];
+            for (editor, line, ids) in sides {
+                let view = cx.new(|_| FoldUnchangedGlyph {
+                    diff: this.clone(),
+                    index,
+                    colors: colors.clone(),
+                });
+                ids.push(editor.update(cx, |editor, cx| {
+                    editor.add_glyph_margin_widget(
+                        crate::widgets::GlyphMarginWidget {
+                            row: line as u32 - 1,
+                            view: view.into(),
+                        },
+                        cx,
+                    )
+                }));
+            }
+        }
+        self.fold_glyphs = glyphs;
     }
 
     /// The height to show everything without scrolling, as of the last
@@ -1594,6 +2929,171 @@ impl DiffEditor {
         (self.zones.0.len(), self.zones.1.len())
     }
 
+    /// The alignment zones: (in the original editor, after line, height),
+    /// for tests.
+    #[doc(hidden)]
+    pub fn alignment_heights_for_tests(&self) -> Vec<(bool, usize, f32)> {
+        self.alignment
+            .iter()
+            .map(|z| (z.original, z.after, z.height))
+            .collect()
+    }
+
+    /// The inline view's original column width, for tests.
+    #[doc(hidden)]
+    pub fn inline_original_width_for_tests(&self, cx: &App) -> Pixels {
+        self.inline_original_width(cx)
+    }
+
+    /// The diff overview's marks, for tests.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    pub fn overview_zones_for_tests(&self, cx: &App) -> (Vec<(f32, f32)>, Vec<(f32, f32)>) {
+        self.overview_zones(cx)
+    }
+
+    /// The "Fold Unchanged Region" glyphs on each side, for tests.
+    #[doc(hidden)]
+    pub fn fold_glyphs_for_tests(&self) -> (usize, usize) {
+        (self.fold_glyphs.0.len(), self.fold_glyphs.1.len())
+    }
+
+    /// Region `index`'s breadcrumbs, for tests.
+    #[doc(hidden)]
+    pub fn breadcrumbs_for_tests(&self, index: usize) -> Vec<String> {
+        self.unchanged.get(index).map_or(Vec::new(), |region| {
+            breadcrumb_items(&self.breadcrumb_symbols, region.hidden_modified_range())
+                .into_iter()
+                .map(|s| s.name.to_string())
+                .collect()
+        })
+    }
+
+    /// Clicks breadcrumb `item` of region `index`, for tests.
+    #[doc(hidden)]
+    pub fn click_breadcrumb_for_tests(
+        &mut self,
+        index: usize,
+        item: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(region) = self.unchanged.get(index) else {
+            return;
+        };
+        let items = breadcrumb_items(&self.breadcrumb_symbols, region.hidden_modified_range());
+        if let Some(symbol) = items.get(item) {
+            self.reveal_modified_hidden_line(symbol.start_line_number, cx);
+        }
+    }
+
+    /// Clicks region `index`'s "Fold Unchanged Region" glyph, for tests.
+    #[doc(hidden)]
+    pub fn fold_unchanged_for_tests(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.update_unchanged_region(index, UnchangedRegion::collapse_all, cx);
+    }
+
+    /// The deleted lines zone `zone`'s margin menu for original row `row`,
+    /// for tests.
+    #[doc(hidden)]
+    pub fn deleted_menu_for_tests(&self, zone: usize, row: u32, cx: &App) -> Vec<String> {
+        self.deleted_code
+            .get(zone)
+            .and_then(|z| z.upgrade())
+            .map_or(Vec::new(), |z| {
+                z.read(cx)
+                    .menu_items(row, cx)
+                    .into_iter()
+                    .map(|(_, label)| label)
+                    .collect()
+            })
+    }
+
+    /// Runs item `item` of the deleted lines zone `zone`'s margin menu for
+    /// original row `row`, for tests.
+    #[doc(hidden)]
+    pub fn run_deleted_menu_item_for_tests(
+        &mut self,
+        zone: usize,
+        row: u32,
+        item: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.deleted_code.get(zone).and_then(|z| z.upgrade()) else {
+            return;
+        };
+        view.update(cx, |view, cx| {
+            if let Some((item, _)) = view.menu_items(row, cx).get(item).cloned() {
+                view.run_menu_item(item, row, cx);
+            }
+        });
+    }
+
+    /// Selects `range` (original rows and UTF-16 columns) in the deleted
+    /// lines zone `zone` and copies it, for tests.
+    #[doc(hidden)]
+    pub fn copy_deleted_text_for_tests(
+        &mut self,
+        zone: usize,
+        range: Range<PointUtf16>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(view) = self.deleted_code.get(zone).and_then(|z| z.upgrade()) else {
+            return false;
+        };
+        view.update(cx, |view, cx| {
+            view.selection = Some((range.start, range.end));
+            cx.notify();
+            view.copy_selection(cx)
+        })
+    }
+
+    /// The deleted lines zones' view line counts and min widths, for
+    /// tests.
+    #[doc(hidden)]
+    pub fn deleted_code_layout_for_tests(&self, cx: &App) -> Vec<(usize, Pixels)> {
+        self.deleted_code
+            .iter()
+            .filter_map(|z| z.upgrade())
+            .map(|z| {
+                let z = z.read(cx);
+                (z.view_lines(cx).len(), z.min_width(cx))
+            })
+            .collect()
+    }
+
+    /// Runs gutter action `id` for gutter item `item`, for tests.
+    #[doc(hidden)]
+    pub fn run_hunk_action_for_tests(
+        &mut self,
+        item: usize,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(item) = self.gutter_items(cx).into_iter().nth(item) else {
+            return false;
+        };
+        let toolbar = match item.revert {
+            GutterRevert::Block(_) => DiffHunkToolbar::Hunk,
+            GutterRevert::Selection(_) => DiffHunkToolbar::Selection,
+        };
+        let Some(action) = self
+            .toolbar_actions(toolbar, cx)
+            .into_iter()
+            .find(|a| a.id.as_ref() == id)
+        else {
+            return false;
+        };
+        self.run_hunk_action(&action, &item.revert, &item.mapping, window, cx);
+        true
+    }
+
+    /// Whether the gutter menu shows, for tests.
+    #[doc(hidden)]
+    pub fn shows_gutter_for_tests(&self, cx: &App) -> bool {
+        self.shows_gutter(cx)
+    }
+
     /// The latest diff (Monaco `getDiffComputationResult`), once computed.
     pub fn diff(&self) -> Option<&LinesDiff> {
         self.diff.as_deref()
@@ -1629,17 +3129,21 @@ impl DiffEditor {
             if !now {
                 cx.background_executor().timer(RECOMPUTE_DELAY).await;
             }
-            let diff = cx
+            let (diff, identical) = cx
                 .background_executor()
                 .spawn(async move {
-                    match algorithm {
+                    let diff = match algorithm {
                         DiffAlgorithm::Advanced => {
                             compute_diff(&original_lines, &modified_lines, &options)
                         }
                         DiffAlgorithm::Legacy => {
                             compute_legacy_diff(&original_lines, &modified_lines, &options)
                         }
-                    }
+                    };
+                    // Monaco's worker: `identical` when there are no
+                    // changes and the texts are equal.
+                    let identical = diff.changes.is_empty() && original_lines == modified_lines;
+                    (diff, identical)
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -1655,6 +3159,7 @@ impl DiffEditor {
                     }));
                 }
                 this.diff = Some(Arc::new(diff));
+                this.identical = identical;
                 this.diff_versions = Some(versions);
                 this.diff_task = None;
                 this.inline = !this.side_by_side_for(&this.options);
@@ -1663,10 +3168,12 @@ impl DiffEditor {
                 if let Some(ranges) = this.pending_collapsed_regions.take() {
                     this.restore_collapsed_regions(&ranges, cx);
                 }
+                this.update_breadcrumb_symbols(cx);
                 cx.emit(DiffEditorEvent::DiffUpdated);
                 if std::mem::take(&mut this.reveal_first_diff_pending) {
                     this.reveal_first_change(cx);
                 }
+                this.resolve_diff_waiters();
                 cx.notify();
             })
             .ok();
@@ -1675,11 +3182,16 @@ impl DiffEditor {
 
     fn clear_diff(&mut self, cx: &mut Context<Self>) {
         self.diff = None;
+        self.identical = false;
         self.diff_task = None;
+        self.alignment.clear();
         let (original, modified) = std::mem::take(&mut self.decorations);
         let (original_zones, modified_zones) = std::mem::take(&mut self.zones);
         clear_side(&self.original, original, original_zones, cx);
         clear_side(&self.modified, modified, modified_zones, cx);
+        let (original_zones, modified_zones) = std::mem::take(&mut self.move_caption_zones);
+        clear_side(&self.original, Vec::new(), original_zones, cx);
+        clear_side(&self.modified, Vec::new(), modified_zones, cx);
         self.unchanged.clear();
         self.apply_unchanged(cx);
         self.active_move = None;
@@ -1740,7 +3252,7 @@ impl DiffEditor {
             model.delta_decorations(Some(modified_id), &old_modified, new_modified, cx)
         });
         self.decorations = (original_ids, modified_ids);
-        self.apply_alignment(&diff, &colors, cx);
+        self.apply_alignment(&diff, cx);
         self.apply_move_decorations(cx);
         self.apply_revert_arrows(cx);
         self.update_unchanged_regions(&diff, cx);
@@ -1750,54 +3262,43 @@ impl DiffEditor {
         }
     }
 
-    /// Monaco `DiffEditorViewZones`: padding where one side has fewer
-    /// lines, so changes line up.
-    fn apply_alignment(&mut self, diff: &LinesDiff, colors: &EditorColors, cx: &mut Context<Self>) {
-        let (old_original, old_modified) = std::mem::take(&mut self.zones);
-        for id in old_original {
-            self.original
-                .update(cx, |editor, cx| editor.remove_widget(id, cx));
-        }
-        for id in old_modified {
-            self.modified
-                .update(cx, |editor, cx| editor.remove_widget(id, cx));
-        }
-        if self.inline {
-            self.apply_inline_zones(diff, cx);
-            return;
-        }
-        let original_line_height =
-            f32::from(self.original.read(cx).options().resolved_line_height());
-        let modified_line_height =
-            f32::from(self.modified.read(cx).options().resolved_line_height());
-        let mut original_extra = self.original.read(cx).wrap_extra_heights();
-        let mut modified_extra = self.modified.read(cx).wrap_extra_heights();
-        // The moved blocks' captions count like any other view zone.
-        let moves = self.shown_moves(diff);
-        for m in moves {
-            original_extra.push((
-                m.line_range_mapping.original.start_line_number - 1,
-                MOVE_CAPTION_HEIGHT,
-            ));
-            modified_extra.push((
-                m.line_range_mapping.modified.start_line_number - 1,
-                MOVE_CAPTION_HEIGHT,
-            ));
-        }
-        merge_extra_heights(&mut original_extra);
-        merge_extra_heights(&mut modified_extra);
-        let original_rope = self
-            .original
-            .read(cx)
-            .model()
-            .read(cx)
-            .buffer()
-            .rope()
-            .clone();
+    /// The view zones the diff editor aligns with, which alignment ignores
+    /// (Monaco `_origViewZonesToIgnore`/`_modViewZonesToIgnore`): its
+    /// alignment zones and hidden-lines bars. Moved-block captions and
+    /// every other zone (code lenses, peek views, the find and problem
+    /// zones, host zones) count.
+    fn ignored_zones(&self, original: bool) -> Vec<WidgetId> {
+        let (alignment, bars) = if original {
+            (&self.zones.0, &self.unchanged_zones.0)
+        } else {
+            (&self.zones.1, &self.unchanged_zones.1)
+        };
+        alignment.iter().chain(bars).copied().collect()
+    }
+
+    /// Monaco `DiffEditorViewZones.viewZones`: the zones that align the
+    /// sides for `diff`, from `computeRangeAlignment` over each side's
+    /// extra line heights (wrapping and other view zones).
+    fn alignment_zones(&self, diff: &LinesDiff, cx: &App) -> Vec<AlignmentZone> {
+        let original_editor = self.original.read(cx);
+        let modified_editor = self.modified.read(cx);
+        let original_line_height = f32::from(original_editor.options().resolved_line_height());
+        let modified_line_height = f32::from(modified_editor.options().resolved_line_height());
+        let extra = |editor: &CodeEditor, original: bool| {
+            let mut extra = editor.wrap_extra_heights();
+            extra.extend(editor.zone_heights(&self.ignored_zones(original), cx));
+            merge_extra_heights(&mut extra);
+            extra
+        };
+        let original_extra = extra(original_editor, true);
+        let modified_extra = extra(modified_editor, false);
+        let original_rope = original_editor.model().read(cx).buffer().rope().clone();
+        let original_line_count = original_rope.line_count() as usize;
         let max_column = |line: usize| {
-            (line >= 1 && line <= original_rope.line_count() as usize)
+            (line >= 1 && line <= original_line_count)
                 .then(|| original_rope.line_len_utf16(line as u32 - 1) as usize + 1)
         };
+        let side_by_side = !self.inline;
         let alignments = compute_range_alignment(
             &diff.changes,
             &original_extra,
@@ -1805,76 +3306,290 @@ impl DiffEditor {
             original_line_height,
             modified_line_height,
             &max_column,
-            true,
+            side_by_side,
         );
-        let fill = colors.diff_diagonal_fill;
+        let compared = self
+            .move_to_compare
+            .and_then(|ix| self.shown_moves(diff).get(ix));
+        // Monaco `syncedMovedText...delta(-1).deltaLength(2).contains(line)`.
+        let near = |range: LineRange, line: usize| {
+            line + 1 >= range.start_line_number && line <= range.end_line_number_exclusive
+        };
+        let true_inline = self.uses_true_inline_view();
         let arrows = self.shows_margin_revert_arrows(cx);
-        let this = cx.entity().downgrade();
-        let mut zones = (Vec::new(), Vec::new());
-        for a in alignments {
-            let delta = a.modified_height - a.original_height;
-            let (editor, after, height, ids) = if delta > 0. {
-                (
-                    &self.original,
-                    a.original_range.end_line_number_exclusive - 1,
-                    delta,
-                    &mut zones.0,
-                )
-            } else if delta < 0. {
-                (
-                    &self.modified,
-                    a.modified_range.end_line_number_exclusive - 1,
-                    -delta,
-                    &mut zones.1,
-                )
-            } else {
-                continue;
-            };
-            // Monaco `createViewZoneMarginArrow`: a deletion's padding gets
-            // a revert arrow in its margin.
-            let deletion = (delta < 0. && arrows)
-                .then(|| {
-                    diff.changes.iter().find(|c| {
-                        c.modified.is_empty() && c.original == a.original_range && a.is_diff
-                    })
-                })
-                .flatten();
-            let id = if let Some(change) = deletion {
-                let view = cx.new(|cx| DeletionPadding {
-                    fill: cx.new(|_| DiagonalFill { color: fill }),
-                    arrow: RevertArrow {
-                        diff: this.clone(),
-                        revert: GutterRevert::Block(change.line_range_mapping()),
-                        colors: colors.clone(),
-                    },
-                    editor: self.modified.downgrade(),
-                });
-                editor.update(cx, |editor, cx| {
-                    editor.add_zone(
-                        after as u32,
-                        ZoneHeight::Pixels(px(height)),
-                        view.into(),
-                        true,
-                        cx,
-                    )
-                })
-            } else {
-                let view = cx.new(|_| DiagonalFill { color: fill });
-                editor.update(cx, |editor, cx| {
-                    editor.add_view_zone(
-                        ViewZone {
-                            after_line: after as u32,
-                            height: ZoneHeight::Pixels(px(height)),
-                            view: view.into(),
-                        },
-                        cx,
-                    )
-                })
-            };
-            ids.push(id);
+        let mut zones = Vec::new();
+        for a in &alignments {
+            let change = a.diff.map(|ix| (ix, &diff.changes[ix]));
+            match change {
+                Some((ix, change))
+                    if !side_by_side
+                        && !(true_inline && allows_true_inline_diff_rendering(change)) =>
+                {
+                    if !a.original_range.is_empty() {
+                        // `a.original_range` can be out of bounds until the
+                        // diff is computed again (Monaco returns early).
+                        if a.original_range.end_line_number_exclusive - 1 > original_line_count {
+                            return zones;
+                        }
+                        let line_counts: Vec<usize> = (a.original_range.start_line_number
+                            ..a.original_range.end_line_number_exclusive)
+                            .map(|line| {
+                                modified_editor
+                                    .line_breaks_for(&original_rope.line(line as u32 - 1))
+                                    .0
+                                    .len()
+                            })
+                            .collect();
+                        // The (collapsed) original editor doesn't wrap:
+                        // fill for the deleted lines' wrapped rows.
+                        for (i, count) in line_counts.iter().enumerate() {
+                            if *count > 1 {
+                                zones.push(AlignmentZone {
+                                    original: true,
+                                    after: a.original_range.start_line_number + i,
+                                    height: (*count - 1) as f32 * modified_line_height,
+                                    kind: AlignmentZoneKind::Fill,
+                                });
+                            }
+                        }
+                        let view_lines: usize = line_counts.iter().sum();
+                        zones.push(AlignmentZone {
+                            original: false,
+                            after: a.modified_range.start_line_number - 1,
+                            height: view_lines as f32 * modified_line_height,
+                            kind: AlignmentZoneKind::DeletedCode {
+                                change: ix,
+                                line_counts,
+                            },
+                        });
+                    }
+                    zones.push(AlignmentZone {
+                        original: true,
+                        after: a.original_range.end_line_number_exclusive - 1,
+                        height: a.modified_height,
+                        kind: AlignmentZoneKind::GutterDelete,
+                    });
+                }
+                _ => {
+                    let delta = a.modified_height - a.original_height;
+                    if delta > 0. {
+                        let after = a.original_range.end_line_number_exclusive - 1;
+                        if compared.is_some_and(|m| near(m.line_range_mapping.original, after)) {
+                            continue;
+                        }
+                        zones.push(AlignmentZone {
+                            original: true,
+                            after,
+                            height: delta,
+                            kind: AlignmentZoneKind::Fill,
+                        });
+                    } else if delta < 0. {
+                        let after = a.modified_range.end_line_number_exclusive - 1;
+                        if compared.is_some_and(|m| near(m.line_range_mapping.modified, after)) {
+                            continue;
+                        }
+                        // Monaco `createViewZoneMarginArrow`: a deletion's
+                        // padding gets a revert arrow in its margin.
+                        let kind = match change {
+                            Some((ix, change)) if arrows && change.modified.is_empty() => {
+                                AlignmentZoneKind::DeletionPadding(ix)
+                            }
+                            _ => AlignmentZoneKind::Fill,
+                        };
+                        zones.push(AlignmentZone {
+                            original: false,
+                            after,
+                            height: -delta,
+                            kind,
+                        });
+                    }
+                }
+            }
         }
-        // Monaco `MovedBlockOverlayWidget`: "Code moved to line …" above
-        // each moved block, on both sides.
+        // Monaco `alignmentsSyncedMovedText`: the compared moved block's
+        // own changes line up too.
+        if let Some(m) = compared {
+            let synced = compute_range_alignment(
+                &m.changes,
+                &original_extra,
+                &modified_extra,
+                original_line_height,
+                modified_line_height,
+                &max_column,
+                true,
+            );
+            for a in synced {
+                if m.line_range_mapping
+                    .original
+                    .intersect(&a.original_range)
+                    .is_none()
+                    || m.line_range_mapping
+                        .modified
+                        .intersect(&a.modified_range)
+                        .is_none()
+                {
+                    continue;
+                }
+                let delta = a.modified_height - a.original_height;
+                if delta > 0. {
+                    zones.push(AlignmentZone {
+                        original: true,
+                        after: a.original_range.end_line_number_exclusive - 1,
+                        height: delta,
+                        kind: AlignmentZoneKind::Fill,
+                    });
+                } else if delta < 0. {
+                    zones.push(AlignmentZone {
+                        original: false,
+                        after: a.modified_range.end_line_number_exclusive - 1,
+                        height: -delta,
+                        kind: AlignmentZoneKind::Fill,
+                    });
+                }
+            }
+        }
+        zones
+    }
+
+    /// Aligns the sides again (Monaco's `RunOnceScheduler(0)` on view zone,
+    /// wrapping and line height changes), unless nothing would change.
+    fn schedule_alignment(&mut self, cx: &mut Context<Self>) {
+        if self.alignment_task.is_some() || self.diff.is_none() {
+            return;
+        }
+        self.alignment_task = Some(cx.spawn(async move |this, cx| {
+            this.update(cx, |this, cx| {
+                this.alignment_task = None;
+                let Some(diff) = this.diff.clone() else {
+                    return;
+                };
+                let zones = this.alignment_zones(&diff, cx);
+                if zones != this.alignment {
+                    this.apply_alignment_zones(&diff, zones, cx);
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Monaco `DiffEditorViewZones`: zones where one side has fewer lines
+    /// (or less height), so the sides line up.
+    fn apply_alignment(&mut self, diff: &LinesDiff, cx: &mut Context<Self>) {
+        self.apply_move_captions(diff, cx);
+        let zones = self.alignment_zones(diff, cx);
+        self.apply_alignment_zones(diff, zones, cx);
+    }
+
+    /// Replaces the alignment zones with `zones`.
+    fn apply_alignment_zones(
+        &mut self,
+        diff: &LinesDiff,
+        zones: Vec<AlignmentZone>,
+        cx: &mut Context<Self>,
+    ) {
+        let (old_original, old_modified) = std::mem::take(&mut self.zones);
+        clear_side(&self.original, Vec::new(), old_original, cx);
+        clear_side(&self.modified, Vec::new(), old_modified, cx);
+        let colors = self.modified.read(cx).colors().clone();
+        let fill = colors.diff_diagonal_fill;
+        let this = cx.entity().downgrade();
+        let original_model = self.original.read(cx).model().clone();
+        let mut ids = (Vec::new(), Vec::new());
+        self.deleted_code.clear();
+        for zone in &zones {
+            let editor = if zone.original {
+                &self.original
+            } else {
+                &self.modified
+            };
+            let height = ZoneHeight::Pixels(px(zone.height));
+            let after = zone.after as u32;
+            let (view, full_width, min_width): (gpui::AnyView, bool, Option<Pixels>) =
+                match &zone.kind {
+                    AlignmentZoneKind::Fill => {
+                        (cx.new(|_| DiagonalFill { color: fill }).into(), false, None)
+                    }
+                    AlignmentZoneKind::DeletionPadding(ix) => {
+                        let change = diff.changes[*ix].line_range_mapping();
+                        let view = cx.new(|cx| DeletionPadding {
+                            fill: cx.new(|_| DiagonalFill { color: fill }),
+                            arrow: RevertArrow {
+                                diff: this.clone(),
+                                revert: GutterRevert::Block(change),
+                                colors: colors.clone(),
+                            },
+                            editor: self.modified.downgrade(),
+                        });
+                        (view.into(), true, None)
+                    }
+                    AlignmentZoneKind::GutterDelete => {
+                        let view = cx.new(|cx| GutterDeleteFill {
+                            fill: cx.new(|_| DiagonalFill { color: fill }),
+                            editor: self.original.downgrade(),
+                        });
+                        (view.into(), true, None)
+                    }
+                    AlignmentZoneKind::DeletedCode { change, .. } => {
+                        let change = &diff.changes[*change];
+                        let range = change.original;
+                        let rows = range.start_line_number as u32 - 1
+                            ..range.end_line_number_exclusive as u32 - 1;
+                        let inner_changes = change
+                            .inner_changes
+                            .iter()
+                            .map(|i| i.original_range.to_point_utf16_range())
+                            .collect();
+                        let render_indicators = self.options.render_indicators;
+                        let editor = self.modified.downgrade();
+                        let model = original_model.clone();
+                        let mapping = change.line_range_mapping();
+                        let diff_editor = this.clone();
+                        let view = cx.new(|cx| {
+                            DeletedCode::new(
+                                DeletedCodeSource {
+                                    editor,
+                                    diff: diff_editor,
+                                    original: model,
+                                    change: mapping,
+                                    rows,
+                                    inner_changes,
+                                    render_indicators,
+                                },
+                                cx,
+                            )
+                        });
+                        let min_width = view.read(cx).min_width(cx);
+                        self.deleted_code.push(view.downgrade());
+                        (view.into(), true, Some(min_width))
+                    }
+                };
+            let id = editor.update(cx, |editor, cx| {
+                let id = editor.add_zone(after, height, view, full_width, cx);
+                if let Some(min_width) = min_width {
+                    editor.set_zone_min_width(id, min_width, cx);
+                }
+                id
+            });
+            if zone.original {
+                ids.0.push(id);
+            } else {
+                ids.1.push(id);
+            }
+        }
+        self.zones = ids;
+        self.alignment = zones;
+    }
+
+    /// Monaco `MovedBlockOverlayWidget` on an 18px placeholder zone: "Code
+    /// moved to line …" above each moved block, on both sides. Alignment
+    /// counts these zones like any host zone.
+    fn apply_move_captions(&mut self, diff: &LinesDiff, cx: &mut Context<Self>) {
+        let (old_original, old_modified) = std::mem::take(&mut self.move_caption_zones);
+        clear_side(&self.original, Vec::new(), old_original, cx);
+        clear_side(&self.modified, Vec::new(), old_modified, cx);
+        let colors = self.modified.read(cx).colors().clone();
+        let mut zones = (Vec::new(), Vec::new());
         for (move_index, m) in self.shown_moves(diff).iter().enumerate() {
             let mapping = m.line_range_mapping;
             let with_changes = if m.changes.is_empty() {
@@ -1906,16 +3621,13 @@ impl DiffEditor {
             ];
             let comparing = self.move_to_compare == Some(move_index);
             for (editor, after, text, ids) in captions {
-                let color = colors.foreground;
-                let checked_background = colors.widget_border;
                 let diff_editor = cx.entity().downgrade();
                 let view = cx.new(|_| MoveCaption {
                     text: text.into(),
-                    color,
-                    checked_background,
                     colors: colors.clone(),
                     comparing,
                     diff: diff_editor,
+                    editor: editor.downgrade(),
                     index: move_index,
                 });
                 let id = editor.update(cx, |editor, cx| {
@@ -1931,7 +3643,7 @@ impl DiffEditor {
                 ids.push(id);
             }
         }
-        self.zones = zones;
+        self.move_caption_zones = zones;
     }
 
     /// The moved blocks to show (Monaco shows them side by side).
@@ -2023,21 +3735,71 @@ impl DiffEditor {
         }
     }
 
-    /// Dragging the sash resizes the split.
+    /// The width the sides share (Monaco's `SashLayout.dimensions.width`):
+    /// the diff editor's, less the overview ruler.
+    fn content_width(&self) -> Pixels {
+        let overview = if self.options.render_overview_ruler {
+            px(DIFF_OVERVIEW_WIDTH)
+        } else {
+            px(0.)
+        };
+        (self.bounds.get().size.width - overview).max(px(0.))
+    }
+
+    /// Monaco `SashLayout.sashLeft`: the sash's x from the diff editor's
+    /// left, at least 100px from either side.
+    fn sash_left(&self) -> Pixels {
+        compute_sash_left(
+            self.ratio,
+            self.options.split_view_default_ratio,
+            self.options.enable_split_view_resizing,
+            self.content_width(),
+        )
+    }
+
+    /// Monaco `DiffEditorSash.onDidChange`: the sash moves by how far the
+    /// mouse moved since the drag started.
     fn drag_sash(&mut self, event: &gpui::MouseMoveEvent, cx: &mut Context<Self>) {
-        if !self.dragging_sash {
+        let Some((start_x, start_left)) = self.sash_drag else {
             return;
-        }
+        };
         if event.pressed_button != Some(MouseButton::Left) {
-            self.dragging_sash = false;
+            self.sash_drag = None;
             cx.notify();
             return;
         }
-        let bounds = self.bounds.get();
-        if bounds.size.width > px(0.) {
-            self.ratio = ((event.position.x - bounds.left()) / bounds.size.width).clamp(0.1, 0.9);
+        let width = self.content_width();
+        if width > px(0.) {
+            let left = start_left + (event.position.x - start_x);
+            self.ratio = left / width;
             cx.notify();
         }
+    }
+
+    /// Monaco `DiffEditorSash.onDidReset` (a double click): back to
+    /// `split_view_default_ratio`.
+    pub fn reset_sash(&mut self, cx: &mut Context<Self>) {
+        self.ratio = self.options.split_view_default_ratio;
+        cx.notify();
+    }
+
+    /// The sash's x from the diff editor's left, for tests.
+    #[doc(hidden)]
+    pub fn sash_left_for_tests(&self) -> Pixels {
+        self.sash_left()
+    }
+
+    /// Drags the sash from window x `from` to `to`, for tests.
+    #[doc(hidden)]
+    pub fn drag_sash_for_tests(&mut self, from: Pixels, to: Pixels, cx: &mut Context<Self>) {
+        self.sash_drag = Some((from, self.sash_left()));
+        let event = gpui::MouseMoveEvent {
+            position: point(to, px(0.)),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Default::default(),
+        };
+        self.drag_sash(&event, cx);
+        self.sash_drag = None;
     }
 
     /// Monaco `gutterFeature.ts`'s `delegateScrollFromMouseWheelEvent`: the
@@ -2049,9 +3811,12 @@ impl DiffEditor {
             .update(cx, |editor, cx| editor.scroll_by_wheel(event, cx));
     }
 
-    /// Monaco `MovedBlocksLinesFeature`: a column between the sides with a
-    /// line from each moved block to where it went.
-    fn render_move_lines(&self, cx: &App) -> Option<gpui::AnyElement> {
+    /// Monaco `MovedBlocksLinesFeature`: a column between the sides (its
+    /// width, Monaco's `lineAreaWidth`) and, over it and the editors, a line
+    /// from each moved block to where it went: from the original editor's
+    /// vertical scrollbar into the modified editor's gutter, ending in an
+    /// arrow on a background rectangle at the moved code.
+    fn render_move_lines(&self, cx: &App) -> Option<(Pixels, gpui::AnyElement)> {
         let diff = self.diff.as_deref()?;
         let moves = self.shown_moves(diff);
         if moves.is_empty() {
@@ -2092,109 +3857,256 @@ impl DiffEditor {
         );
         let track_count = tracks.iter().copied().max().map_or(1, |t| t + 1);
         let padding = 10.;
-        let width = (track_count - 1) as f32 * 10. + padding * 2. + MOVE_ARROW_WIDTH;
+        let line_area_width = px((track_count - 1) as f32 * 10. + padding * 2.);
+        let (Some(original_layout), Some(modified_layout)) =
+            (original.layout.as_ref(), modified.layout.as_ref())
+        else {
+            return Some((line_area_width, div().into_any_element()));
+        };
+        let root = self.bounds.get();
+        let scrollbar = original_layout.layout_info.vertical_scrollbar_width;
+        // Monaco: from `width - verticalScrollbarWidth` of the original
+        // editor, `verticalScrollbarWidth + contentLeft - movedCodeBlockPadding
+        // + lineAreaWidth` wide.
+        let left = original_layout.bounds.right() - scrollbar - root.left();
+        let width = scrollbar + line_area_width + modified_layout.layout_info.content_left - px(4.);
+        let rect_width = modified_layout.layout_info.glyph_margin_width
+            + modified_layout.layout_info.line_numbers_width;
         let colors = modified.colors().clone();
-        let background = colors.background;
-        Some(
-            canvas(
-                |_, _, _| {},
-                move |bounds, _, window, _| {
-                    window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-                        for ((from, to, active), track) in lines.iter().zip(&tracks) {
-                            let color = if *active {
-                                colors.diff_move_active_border
-                            } else {
-                                colors.diff_move_border
-                            };
-                            let x = |x: f32| bounds.left() + px(x);
-                            let y = |y: Pixels| bounds.top() + y;
-                            let vertical = padding + *track as f32 * 10.;
-                            let right = f32::from(bounds.size.width);
-                            let mut path = PathBuilder::stroke(px(2.));
-                            path.move_to(point(x(0.), y(*from)));
-                            path.line_to(point(x(vertical), y(*from)));
-                            path.line_to(point(x(vertical), y(*to)));
-                            path.line_to(point(x(right - MOVE_ARROW_WIDTH), y(*to)));
-                            if let Ok(path) = path.build() {
-                                window.paint_path(path, color);
-                            }
-                            let half = px(MOVE_ARROW_WIDTH / 2.);
-                            let mut arrow = PathBuilder::fill();
-                            arrow.move_to(point(x(right - MOVE_ARROW_WIDTH), y(*to) - half));
-                            arrow.line_to(point(x(right), y(*to)));
-                            arrow.line_to(point(x(right - MOVE_ARROW_WIDTH), y(*to) + half));
-                            arrow.close();
-                            if let Ok(arrow) = arrow.build() {
-                                window.paint_path(arrow, color);
-                            }
+        let overlay = canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+                    for ((from, to, active), track) in lines.iter().zip(&tracks) {
+                        let color = if *active {
+                            colors.diff_move_active_border
+                        } else {
+                            colors.diff_move_border
+                        };
+                        let x = |x: Pixels| bounds.left() + x;
+                        let y = |y: Pixels| bounds.top() + y;
+                        let vertical = scrollbar + px(padding + *track as f32 * 10.);
+                        let right = bounds.size.width;
+                        // Monaco's `arrow-rectangle` hides the line numbers
+                        // behind the arrow.
+                        window.paint_quad(gpui::fill(
+                            Bounds::new(
+                                point(x(right - rect_width), y(*to) - px(9.)),
+                                gpui::size(rect_width, px(18.)),
+                            ),
+                            colors.background,
+                        ));
+                        let mut path = PathBuilder::stroke(px(2.));
+                        path.move_to(point(x(px(0.)), y(*from)));
+                        path.line_to(point(x(vertical), y(*from)));
+                        path.line_to(point(x(vertical), y(*to)));
+                        path.line_to(point(x(right - px(MOVE_ARROW_WIDTH)), y(*to)));
+                        if let Ok(path) = path.build() {
+                            window.paint_path(path, color);
                         }
-                    });
-                },
-            )
+                        let half = px(MOVE_ARROW_WIDTH / 2.);
+                        let mut arrow = PathBuilder::fill();
+                        arrow.move_to(point(x(right - px(MOVE_ARROW_WIDTH)), y(*to) - half));
+                        arrow.line_to(point(x(right), y(*to)));
+                        arrow.line_to(point(x(right - px(MOVE_ARROW_WIDTH)), y(*to) + half));
+                        arrow.close();
+                        if let Ok(arrow) = arrow.build() {
+                            window.paint_path(arrow, color);
+                        }
+                    }
+                });
+            },
+        )
+        .absolute()
+        .top_0()
+        .left(left)
+        .w(width)
+        .h_full()
+        .into_any_element();
+        Some((line_area_width, overlay))
+    }
+
+    /// The diff overview's marks (Monaco `createZones`): each side's
+    /// changes as fractions of its scroll height, top and bottom.
+    #[allow(clippy::type_complexity)]
+    fn overview_zones(&self, cx: &App) -> (Vec<(f32, f32)>, Vec<(f32, f32)>) {
+        let zones = |editor: &CodeEditor, original: bool| -> Vec<(f32, f32)> {
+            let Some(diff) = self.diff.as_deref() else {
+                return Vec::new();
+            };
+            let Some(scroll_height) = editor.scroll_height() else {
+                return Vec::new();
+            };
+            let scroll_top = editor.scroll_position().y;
+            diff.changes
+                .iter()
+                .map(|c| if original { c.original } else { c.modified })
+                .filter(|r| !r.is_empty())
+                .filter_map(|r| {
+                    let (top, bottom) = editor.rows_y_span(r.to_rows())?;
+                    Some((
+                        f32::from(top + scroll_top) / f32::from(scroll_height),
+                        f32::from(bottom + scroll_top) / f32::from(scroll_height),
+                    ))
+                })
+                .collect()
+        };
+        (
+            zones(self.original.read(cx), true),
+            zones(self.modified.read(cx), false),
+        )
+    }
+
+    /// Monaco `OverviewRulerFeature`: a 30px column at the right with the
+    /// original's changes in its left half and the modified's in its right
+    /// half, and the modified editor's viewport (`diffViewport`) as a
+    /// slider. Pointer down and the wheel go to the modified editor.
+    fn render_overview_ruler(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let modified = self.modified.read(cx);
+        let colors = modified.colors().clone();
+        let light = modified.theme().kind == crate::theme::ThemeKind::Light;
+        // `diffEditorOverview.*Foreground`, else Monaco's
+        // `diffInserted`/`diffRemoved` at twice their alpha.
+        let insert_color = colors.diff_overview_inserted.unwrap_or_else(|| {
+            let c = colors.diff_inserted_text_background;
+            c.opacity((c.a * 2.).min(1.))
+        });
+        let remove_color = colors.diff_overview_removed.unwrap_or_else(|| {
+            let c = colors.diff_removed_text_background;
+            c.opacity((c.a * 2.).min(1.))
+        });
+        let (original_zones, modified_zones) = self.overview_zones(cx);
+        let slider = modified.layout.as_ref().and_then(|layout| {
+            let scroll_height = modified.scroll_height()?;
+            Some(slider_geometry(
+                layout.bounds.size.height,
+                scroll_height,
+                modified.scroll_position().y,
+            ))
+        });
+        let dragging = self.overview_drag.is_some();
+        let slider_color = if dragging {
+            colors.scrollbar_slider_active
+        } else {
+            colors.scrollbar_slider
+        };
+        let background = if light {
+            gpui::black().opacity(0.03)
+        } else {
+            gpui::white().opacity(0.01)
+        };
+        let half = DIFF_OVERVIEW_WIDTH / 2.;
+        let paint = move |bounds: Bounds<Pixels>, window: &mut Window| {
+            let height = f32::from(bounds.size.height);
+            for (zones, left, color) in [
+                (&original_zones, 0., remove_color),
+                (&modified_zones, half, insert_color),
+            ] {
+                for (top, bottom) in zones.iter() {
+                    let top = (top * height).floor();
+                    let bottom = (bottom * height).ceil().max(top + 2.);
+                    window.paint_quad(gpui::fill(
+                        Bounds::new(
+                            point(bounds.left() + px(left), bounds.top() + px(top)),
+                            gpui::size(px(half), px(bottom - top)),
+                        ),
+                        color,
+                    ));
+                }
+            }
+            if let Some((top, size)) = slider {
+                window.paint_quad(gpui::fill(
+                    Bounds::new(
+                        point(bounds.left(), bounds.top() + top),
+                        gpui::size(bounds.size.width, size),
+                    ),
+                    slider_color,
+                ));
+            }
+        };
+        div()
+            .id("diff-overview")
             .h_full()
-            .w(px(width))
+            .w(px(DIFF_OVERVIEW_WIDTH))
             .flex_none()
             .bg(background)
-            .into_any_element(),
-        )
+            .hover(|style| style)
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| paint(bounds, window),
+                )
+                .size_full(),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.start_overview_drag(event.position.y, cx);
+                }),
+            )
+            .on_scroll_wheel(cx.listener(|this, event, _, cx| this.delegate_wheel(event, cx)))
+            .into_any_element()
+    }
+
+    /// Monaco `delegateVerticalScrollbarPointerDown` from the diff
+    /// overview: a press on the slider grabs it; elsewhere the slider jumps
+    /// to center on the press first.
+    fn start_overview_drag(&mut self, y: Pixels, cx: &mut Context<Self>) {
+        let modified = self.modified.read(cx);
+        let (Some(layout), Some(scroll_height)) =
+            (modified.layout.as_ref(), modified.scroll_height())
+        else {
+            return;
+        };
+        let top = self.bounds.get().top();
+        let (slider_top, size) = slider_geometry(
+            layout.bounds.size.height,
+            scroll_height,
+            modified.scroll_position().y,
+        );
+        let offset = y - top - slider_top;
+        let grab = if offset >= px(0.) && offset <= size {
+            offset
+        } else {
+            size / 2.
+        };
+        self.overview_drag = Some(grab);
+        self.drag_overview(y, cx);
+        cx.notify();
+    }
+
+    /// Scrolls the modified editor so the slider's grabbed point is at
+    /// window y `y`.
+    fn drag_overview(&mut self, y: Pixels, cx: &mut Context<Self>) {
+        let Some(grab) = self.overview_drag else {
+            return;
+        };
+        let modified = self.modified.read(cx);
+        let (Some(layout), Some(scroll_height)) =
+            (modified.layout.as_ref(), modified.scroll_height())
+        else {
+            return;
+        };
+        let visible = layout.bounds.size.height;
+        let (_, size) = slider_geometry(visible, scroll_height, px(0.));
+        let track = visible - size;
+        if track <= px(0.) {
+            return;
+        }
+        let slider_top = (y - self.bounds.get().top() - grab).clamp(px(0.), track);
+        let scroll_top = (scroll_height - visible) * (slider_top / track);
+        self.modified.update(cx, |editor, cx| {
+            let mut position = editor.scroll_position();
+            position.y = scroll_top;
+            editor.set_scroll_position(position, cx);
+        });
     }
 
     /// Monaco `useTrueInlineDiffRendering`: the inline view with
     /// `use_true_inline_view`.
     fn uses_true_inline_view(&self) -> bool {
         self.inline && self.options.use_true_inline_view
-    }
-
-    /// Monaco's inline view (`renderSideBySide: false`): each change's
-    /// deleted lines show in a view zone above its modified lines, except
-    /// changes the true inline view shows within the lines.
-    fn apply_inline_zones(&mut self, diff: &LinesDiff, cx: &mut Context<Self>) {
-        let true_inline = self.uses_true_inline_view();
-        let line_height = self.modified.read(cx).options().resolved_line_height();
-        let original_model = self.original.read(cx).model().clone();
-        let line_count = original_model.read(cx).buffer().rope().line_count() as usize;
-        let mut ids = Vec::new();
-        for change in &diff.changes {
-            let range = change.original;
-            // A diff for older text can be out of bounds until recomputed.
-            if range.is_empty() || range.end_line_number_exclusive - 1 > line_count {
-                continue;
-            }
-            if true_inline && allows_true_inline_diff_rendering(change) {
-                continue;
-            }
-            let rows =
-                range.start_line_number as u32 - 1..range.end_line_number_exclusive as u32 - 1;
-            let inner_changes = change
-                .inner_changes
-                .iter()
-                .map(|i| i.original_range.to_point_utf16_range())
-                .collect();
-            let editor = self.modified.downgrade();
-            let render_indicators = self.options.render_indicators;
-            let model = original_model.clone();
-            let view = cx.new(|cx| {
-                DeletedCode::new(
-                    editor,
-                    model,
-                    rows.clone(),
-                    inner_changes,
-                    render_indicators,
-                    cx,
-                )
-            });
-            let id = self.modified.update(cx, |editor, cx| {
-                editor.add_zone(
-                    change.modified.start_line_number as u32 - 1,
-                    ZoneHeight::Pixels(line_height * rows.len() as f32),
-                    view.into(),
-                    true,
-                    cx,
-                )
-            });
-            ids.push(id);
-        }
-        self.zones = (Vec::new(), ids);
     }
 
     /// Monaco `updateUnchangedRegions`: the hideable regions of a new diff,
@@ -2344,16 +4256,17 @@ impl DiffEditor {
                 (&self.original, region.hidden_original_range(), &mut zones.0),
                 (&self.modified, region.hidden_modified_range(), &mut zones.1),
             ];
-            for (side, (editor, hidden, ids)) in sides.into_iter().enumerate() {
-                // Inline, the original editor isn't shown.
-                if side == 0 && self.inline {
-                    continue;
-                }
+            let breadcrumbs =
+                breadcrumb_items(&self.breadcrumb_symbols, region.hidden_modified_range());
+            for (editor, hidden, ids) in sides {
                 let bar = cx.new(|_| UnchangedBar {
                     diff: this.clone(),
                     editor: editor.downgrade(),
                     index,
                     hidden_lines: hidden.len(),
+                    visible_top: region.visible_top > 0,
+                    visible_bottom: region.visible_bottom > 0,
+                    breadcrumbs: breadcrumbs.clone(),
                     compact,
                 });
                 let height = if compact {
@@ -2374,6 +4287,7 @@ impl DiffEditor {
             }
         }
         self.unchanged_zones = zones;
+        self.apply_fold_glyphs(cx);
         cx.notify();
     }
 
@@ -2425,16 +4339,46 @@ impl DiffEditor {
         let Some(region) = self.unchanged.get_mut(index) else {
             return;
         };
-        let changed = if top {
+        if top {
             let value = (start + lines).clamp(0, region.max_visible_top() as isize) as usize;
-            std::mem::replace(&mut region.visible_top, value) != value
+            if std::mem::replace(&mut region.visible_top, value) != value {
+                self.apply_unchanged(cx);
+            }
         } else {
             let value = (start - lines).clamp(0, region.max_visible_bottom() as isize) as usize;
-            std::mem::replace(&mut region.visible_bottom, value) != value
-        };
-        if changed {
-            self.apply_unchanged(cx);
+            if region.visible_bottom != value {
+                self.with_lower_scroll_anchor(index, |r| r.visible_bottom = value, cx);
+            }
         }
+    }
+
+    /// Monaco `_runWithLowerScrollAnchor`: changes region `index` keeping
+    /// the line after it in place on screen, so a dragged bottom edge
+    /// follows the mouse.
+    fn with_lower_scroll_anchor(
+        &mut self,
+        index: usize,
+        change: impl FnOnce(&mut UnchangedRegion),
+        cx: &mut Context<Self>,
+    ) {
+        let Some(region) = self.unchanged.get_mut(index) else {
+            return;
+        };
+        let before = region.hidden_modified_range().len();
+        change(region);
+        let after = region.hidden_modified_range().len();
+        // The lines shown (or hidden) are above the anchor. Hidden lines
+        // apply on the next frame, so count them rather than measure.
+        let line_height = self.modified.read(cx).options().resolved_line_height();
+        let delta = line_height * (before as f32 - after as f32);
+        for editor in [&self.original, &self.modified] {
+            editor.update(cx, |editor, cx| {
+                let mut position = editor.scroll_position();
+                position.y = (position.y + delta).max(px(0.));
+                editor.set_scroll_position_unclamped(position, cx);
+            });
+        }
+        self.apply_unchanged(cx);
     }
 
     /// Monaco's mouse up: a click without dragging shows
@@ -2445,17 +4389,11 @@ impl DiffEditor {
         };
         if !drag.moved {
             let count = self.options.hide_unchanged_regions.reveal_line_count;
-            self.update_unchanged_region(
-                drag.index,
-                |r| {
-                    if drag.top {
-                        r.show_more_above(count)
-                    } else {
-                        r.show_more_below(count)
-                    }
-                },
-                cx,
-            );
+            if drag.top {
+                self.update_unchanged_region(drag.index, |r| r.show_more_above(count), cx);
+            } else {
+                self.with_lower_scroll_anchor(drag.index, |r| r.show_more_below(count), cx);
+            }
         }
         cx.notify();
     }
@@ -2576,6 +4514,8 @@ impl DiffEditor {
             && !self.options.render_gutter_menu
             && !self.inline
             && !self.modified.read(cx).options().read_only
+            // Monaco hides them while comparing a moved block.
+            && self.move_to_compare.is_none()
     }
 
     /// Monaco `RevertButtonsFeature`: an arrow in the modified editor's
@@ -2598,19 +4538,28 @@ impl DiffEditor {
             .selections()
             .last()
             .map(|s| s.head.row);
-        let arrows: Vec<(u32, GutterRevert)> = self
-            .gutter_items(cx)
-            .into_iter()
-            .filter_map(|item| match item.revert {
-                GutterRevert::Selection(_) => Some((selection_line?, item.revert)),
-                // Changes with modified lines (deletions get theirs in
-                // their padding's margin).
-                GutterRevert::Block(_) if !item.lines.is_empty() => {
-                    Some((item.lines.to_rows().start, item.revert))
-                }
-                GutterRevert::Block(_) => None,
-            })
-            .collect();
+        let Some(diff) = self.diff.clone() else {
+            return;
+        };
+        // Monaco `RevertButtonsFeature`: one for the selected changes, and
+        // one for each other change with modified lines (deletions get
+        // theirs in their padding's margin).
+        let (selected, selected_changes) = self.selected_changes(cx);
+        let mut arrows: Vec<(u32, GutterRevert)> = Vec::new();
+        if !selected.is_empty()
+            && let Some(line) = selection_line
+        {
+            arrows.push((line, GutterRevert::Selection(selected)));
+        }
+        for (ix, change) in diff.changes.iter().enumerate() {
+            if selected_changes.contains(&ix) || change.modified.is_empty() {
+                continue;
+            }
+            arrows.push((
+                change.modified.to_rows().start,
+                GutterRevert::Block(change.line_range_mapping()),
+            ));
+        }
         let mut ids = Vec::new();
         for (row, revert) in arrows {
             let view = cx.new(|_| RevertArrow {
@@ -2756,30 +4705,34 @@ impl DiffEditor {
         self.revert_edits(edits, cx);
     }
 
-    /// Monaco `DiffEditorGutter`'s items: a "Revert Selection" item when
-    /// the selection touches changed characters, else one per change.
-    fn gutter_items(&self, cx: &App) -> Vec<GutterItem> {
+    /// Monaco `_selectedDiffs`: the inner changes the modified editor's
+    /// selections touch, and the indices of their changes.
+    fn selected_changes(&self, cx: &App) -> (Vec<RangeMapping>, Vec<usize>) {
         let Some(diff) = self.diff.as_ref() else {
-            return Vec::new();
+            return Default::default();
         };
-        let editor = self.modified.read(cx);
-        let selections = editor.selections();
-        if selections.iter().any(|s| !s.is_empty()) {
-            let selected_lines: Vec<LineRange> = selections
+        let selections = self.modified.read(cx).selections();
+        if selections.iter().all(|s| s.is_empty()) {
+            return Default::default();
+        }
+        let selected_lines: Vec<LineRange> = selections
+            .iter()
+            .map(|s| LineRange::new(s.start().row as usize + 1, s.end().row as usize + 2))
+            .collect();
+        let intersects =
+            |a: &Range<PointUtf16>, b: &Range<PointUtf16>| a.start <= b.end && b.start <= a.end;
+        let mut selected = Vec::new();
+        let mut changes = Vec::new();
+        for (ix, change) in diff.changes.iter().enumerate() {
+            if !selected_lines
                 .iter()
-                .map(|s| LineRange::new(s.start().row as usize + 1, s.end().row as usize + 2))
-                .collect();
-            let intersects =
-                |a: &Range<PointUtf16>, b: &Range<PointUtf16>| a.start <= b.end && b.start <= a.end;
-            let selected: Vec<RangeMapping> = diff
-                .changes
+                .any(|l| change.modified.intersect(l).is_some_and(|r| !r.is_empty()))
+            {
+                continue;
+            }
+            let inner: Vec<RangeMapping> = change
+                .inner_changes
                 .iter()
-                .filter(|c| {
-                    selected_lines
-                        .iter()
-                        .any(|l| c.modified.intersect(l).is_some_and(|r| !r.is_empty()))
-                })
-                .flat_map(|c| &c.inner_changes)
                 .filter(|i| {
                     let range = i.modified_range.to_point_utf16_range();
                     selections
@@ -2788,44 +4741,168 @@ impl DiffEditor {
                 })
                 .cloned()
                 .collect();
-            if !selected.is_empty() {
-                let lines = |r: &RangeMapping| {
-                    let range = r.modified_range.to_point_utf16_range();
-                    range.start.row as usize + 1..range.end.row as usize + 2
-                };
-                let start = selected.iter().map(|c| lines(c).start).min().unwrap_or(1);
-                let end = selected.iter().map(|c| lines(c).end).max().unwrap_or(1);
-                return vec![GutterItem {
-                    lines: LineRange::new(start, end),
-                    revert: GutterRevert::Selection(selected),
-                    show_always: true,
-                }];
+            if !inner.is_empty() {
+                changes.push(ix);
+                selected.extend(inner);
             }
         }
-        let cursor_line = selections[0].head.row as usize + 1;
+        (selected, changes)
+    }
+
+    /// Monaco `DiffEditorGutter`'s items: a "Revert Selection" item when
+    /// the selection touches changed characters, else one per change.
+    fn gutter_items(&self, cx: &App) -> Vec<GutterItem> {
+        let Some(diff) = self.diff.as_ref() else {
+            return Vec::new();
+        };
+        let (selected, _) = self.selected_changes(cx);
+        if !selected.is_empty() {
+            // Monaco `DetailedLineRangeMapping.fromRangeMappings`.
+            let lines = |r: &crate::diff::Range| LineRange::from_range_inclusive(r);
+            let join = |f: &dyn Fn(&RangeMapping) -> LineRange| {
+                selected
+                    .iter()
+                    .map(f)
+                    .reduce(|a, b| a.join(&b))
+                    .unwrap_or(LineRange::new(1, 1))
+            };
+            let original = join(&|r| lines(&r.original_range));
+            let modified = join(&|r| lines(&r.modified_range));
+            return vec![GutterItem {
+                lines: modified,
+                mapping: DetailedLineRangeMapping::new(original, modified, selected.clone()),
+                revert: GutterRevert::Selection(selected),
+                show_always: true,
+            }];
+        }
+        let original = self
+            .original
+            .read(cx)
+            .model()
+            .read(cx)
+            .buffer()
+            .rope()
+            .clone();
+        let modified = self
+            .modified
+            .read(cx)
+            .model()
+            .read(cx)
+            .buffer()
+            .rope()
+            .clone();
+        let cursor_line = self.modified.read(cx).selections()[0].head.row as usize + 1;
         diff.changes
             .iter()
-            .map(|c| GutterItem {
-                lines: c.modified,
-                revert: GutterRevert::Block(c.line_range_mapping()),
-                show_always: c.modified.contains(cursor_line),
+            .map(|c| {
+                let mapping = c.line_range_mapping();
+                // Monaco `withInnerChangesFromLineRanges`.
+                let (original_range, modified_range) =
+                    revert_points(&original, &modified, &mapping);
+                let whole = RangeMapping::new(
+                    crate::diff::Range::from_point_utf16_range(original_range),
+                    crate::diff::Range::from_point_utf16_range(modified_range),
+                );
+                GutterItem {
+                    lines: c.modified,
+                    revert: GutterRevert::Block(mapping),
+                    show_always: c.modified.contains(cursor_line),
+                    mapping: DetailedLineRangeMapping::new(c.original, c.modified, vec![whole]),
+                }
             })
             .collect()
     }
 
-    /// Monaco `DiffEditorGutter`: a 35px column left of the modified editor.
+    /// The gutter menu's actions for `toolbar`: the built-in revert (Monaco
+    /// `diffEditor.revert`, while the modified side is editable), then the
+    /// host's.
+    fn toolbar_actions(&self, toolbar: DiffHunkToolbar, cx: &App) -> Vec<DiffHunkAction> {
+        let mut actions = Vec::new();
+        if !self.modified.read(cx).options().read_only {
+            let (id, label) = match toolbar {
+                DiffHunkToolbar::Hunk => ("diffEditor.revert", "Revert Block"),
+                DiffHunkToolbar::Selection => ("diffEditor.revert", "Revert Selection"),
+            };
+            actions.push(DiffHunkAction {
+                id: id.into(),
+                label: label.into(),
+                // TODO(#246): Monaco's `arrow-right`/`discard` codicons.
+                icon: if self.inline { "↺" } else { "→" }.into(),
+                toolbar,
+                // Run by `run_hunk_action`, which knows the revert.
+                run: Rc::new(|_, _, _| {}),
+            });
+        }
+        actions.extend(
+            self.hunk_actions
+                .iter()
+                .filter(|a| a.toolbar == toolbar)
+                .cloned(),
+        );
+        actions
+    }
+
+    /// Monaco `DiffEditorGutter._hasActions`: the gutter shows while its
+    /// menus have actions.
+    fn shows_gutter(&self, cx: &App) -> bool {
+        self.options.render_gutter_menu
+            && (!self.modified.read(cx).options().read_only || !self.hunk_actions.is_empty())
+    }
+
+    /// Runs gutter action `action` for `item`.
+    fn run_hunk_action(
+        &mut self,
+        action: &DiffHunkAction,
+        revert: &GutterRevert,
+        mapping: &DetailedLineRangeMapping,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let builtin = !self.hunk_actions.iter().any(|a| a.id == action.id);
+        if builtin {
+            match revert {
+                GutterRevert::Block(change) => self.revert(change, cx),
+                GutterRevert::Selection(changes) => self.revert_range_mappings(changes, cx),
+            }
+            return;
+        }
+        let original = self
+            .original
+            .read(cx)
+            .model()
+            .read(cx)
+            .buffer()
+            .rope()
+            .clone();
+        let modified = self
+            .modified
+            .read(cx)
+            .model()
+            .read(cx)
+            .buffer()
+            .rope()
+            .clone();
+        let context = DiffHunkContext {
+            mapping: mapping.clone(),
+            original_with_modified_changes: staged_value(&original, &modified, mapping),
+        };
+        (action.run)(&context, window, cx);
+    }
+
+    /// Monaco `DiffEditorGutter`: a 35px column left of the modified editor
+    /// with a vertical toolbar beside each change.
     fn render_gutter(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let editor = self.modified.read(cx);
-        if !self.options.render_gutter_menu || editor.options().read_only {
+        if !self.shows_gutter(cx) {
             return None;
         }
+        let editor = self.modified.read(cx);
         let colors = editor.colors().clone();
         let viewport = editor
             .layout
             .as_ref()
             .map_or(px(0.), |l| l.bounds.size.height);
-        let icon = if self.inline { "↺" } else { "→" };
         let hovered = self.gutter_hovered;
+        let fade = self.gutter_fade;
         let mut items = Vec::new();
         for (ix, item) in self.gutter_items(cx).into_iter().enumerate() {
             let editor = self.modified.read(cx);
@@ -2835,57 +4912,93 @@ impl DiffEditor {
             if bottom < px(0.) || top > viewport {
                 continue;
             }
-            let button_top = gutter_button_top(top, bottom, viewport, px(GUTTER_BUTTON_HEIGHT));
-            let visible = item.show_always || hovered;
-            // Monaco's hunk toolbar titles.
-            let title: SharedString = match item.revert {
-                GutterRevert::Block(_) => "Revert Block".into(),
-                GutterRevert::Selection(_) => "Revert Selection".into(),
+            let toolbar = match item.revert {
+                GutterRevert::Block(_) => DiffHunkToolbar::Hunk,
+                GutterRevert::Selection(_) => DiffHunkToolbar::Selection,
             };
-            let revert = item.revert;
-            items.push(
+            let mut actions = self.toolbar_actions(toolbar, cx);
+            // Monaco's `overflowBehavior`: 3 buttons, or 1 when small.
+            let small = item.mapping.original.start_line_number == 1 && bottom - top < px(30.);
+            actions.truncate(if small { 1 } else { 3 });
+            if actions.is_empty() {
+                continue;
+            }
+            let toolbar_height = px(GUTTER_BUTTON_HEIGHT) * actions.len() as f32;
+            let button_top = gutter_button_top(top, bottom, viewport, toolbar_height);
+            // Monaco's `.gutterItem`: shown always, while the gutter is
+            // hovered, or fading out (0.7s) after.
+            if !item.show_always && !hovered && fade == 0 {
+                continue;
+            }
+            let buttons = actions.into_iter().enumerate().map(|(button_ix, action)| {
+                let (revert, mapping) = (item.revert.clone(), item.mapping.clone());
+                let label = action.label.clone();
+                let icon = action.icon.clone();
                 div()
-                    .absolute()
-                    .top(top)
-                    .h(bottom - top)
-                    .w_full()
-                    .when(visible, |item| {
-                        item.child(
-                            // Monaco's `.background`: a line along the change.
-                            div()
-                                .absolute()
-                                .left(px(GUTTER_WIDTH / 2. - 1.))
-                                .h_full()
-                                .w(px(2.))
-                                .bg(colors.menu_separator_background),
-                        )
+                    .id(("diff-hunk-action", ix * 8 + button_ix))
+                    .tooltip(crate::tooltip::tooltip(label.clone(), &colors))
+                    .h(px(GUTTER_BUTTON_HEIGHT))
+                    .px(px(2.))
+                    .py(px(1.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .rounded(px(4.))
+                    .hover(|style| colors.toolbar_hover(style))
+                    .role(gpui::Role::Button)
+                    .aria_label(label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.run_hunk_action(&action, &revert, &mapping, window, cx)
+                    }))
+                    .child(icon)
+            });
+            let element = div()
+                .absolute()
+                .top(top)
+                .h(bottom - top)
+                .w_full()
+                .child(
+                    // Monaco's `.background`: a 1px line with a 2px left
+                    // border at the middle.
+                    div()
+                        .absolute()
+                        .left(px(GUTTER_WIDTH / 2.))
+                        .h_full()
+                        .w(px(1.))
+                        .border_l_2()
+                        .border_color(colors.menu_separator_background),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(button_top - top)
+                        .w_full()
+                        .flex()
+                        .justify_center()
                         .child(
                             div()
-                                .id(("diff-revert", ix))
-                                .tooltip(crate::tooltip::tooltip(title.clone(), &colors))
-                                .absolute()
-                                .top(button_top - top)
-                                .left(px((GUTTER_WIDTH - 22.) / 2.))
-                                .w(px(22.))
-                                .h(px(GUTTER_BUTTON_HEIGHT))
+                                .flex()
+                                .flex_col()
                                 .rounded(px(4.))
                                 .bg(colors.gutter_item_background)
                                 .text_color(colors.gutter_item_glyph_foreground)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .hover(|style| style.opacity(0.8))
-                                .on_click(cx.listener(move |this, _, _, cx| match &revert {
-                                    GutterRevert::Block(change) => this.revert(change, cx),
-                                    GutterRevert::Selection(changes) => {
-                                        this.revert_range_mappings(changes, cx)
-                                    }
-                                }))
-                                .child(icon),
+                                .children(buttons),
+                        ),
+                );
+            if item.show_always || hovered {
+                items.push(element.into_any_element());
+            } else {
+                items.push(
+                    element
+                        .with_animation(
+                            ("diff-gutter-fade", fade * 4096 + ix),
+                            gpui::Animation::new(Duration::from_millis(700)),
+                            |element, delta| element.opacity(1. - delta),
                         )
-                    }),
-            );
+                        .into_any_element(),
+                );
+            }
         }
         Some(
             div()
@@ -2897,8 +5010,15 @@ impl DiffEditor {
                 .overflow_hidden()
                 .bg(colors.background)
                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    if this.gutter_hovered && !hovered {
+                        this.gutter_fade += 1;
+                    }
                     this.gutter_hovered = *hovered;
                     cx.notify();
+                }))
+                // Monaco: a click on the gutter focuses the modified editor.
+                .on_click(cx.listener(|this, _, window, cx| {
+                    window.focus(&this.modified.focus_handle(cx), cx);
                 }))
                 .on_scroll_wheel(cx.listener(|this, event, _, cx| this.delegate_wheel(event, cx)))
                 .children(items)
@@ -2991,7 +5111,7 @@ impl DiffEditor {
     /// Keeps both sides scrolled together (aligned, their content heights
     /// match).
     fn sync_scroll(&mut self, from_original: bool, cx: &mut Context<Self>) {
-        if self.syncing_scroll || self.inline {
+        if self.syncing_scroll {
             return;
         }
         self.syncing_scroll = true;
@@ -3005,6 +5125,11 @@ impl DiffEditor {
         // offsets).
         let delta = self.compare_scroll_delta(cx);
         position.y += if from_original { delta } else { -delta };
+        // Inline, the original column doesn't scroll sideways with the
+        // modified editor.
+        if self.inline {
+            position.x = target.read(cx).scroll_position().x;
+        }
         if target.read(cx).scroll_position() != position {
             target.update(cx, |editor, cx| editor.set_scroll_position(position, cx));
         }
@@ -3288,6 +5413,7 @@ impl DiffEditor {
                 cx,
             );
         });
+        self.play_signal(change_signal(change), cx);
         window.focus(&self.modified.focus_handle(cx), cx);
     }
 }
@@ -3340,6 +5466,115 @@ impl CodeEditor {
                     .then(|| (row as usize + 1, (next - first - 1) as f32 * line_height))
             })
             .collect()
+    }
+
+    /// Monaco `getAdditionalLineHeights` for view zones: (1-based line the
+    /// zone is after, pixels) for each zone not in `ignore`.
+    pub(crate) fn zone_heights(&self, ignore: &[WidgetId], cx: &App) -> Vec<(usize, f32)> {
+        let line_height = f32::from(self.options.resolved_line_height());
+        let buffer = self.model().read(cx).buffer();
+        self.widgets
+            .zones
+            .iter()
+            .filter(|zone| !ignore.contains(&zone.id))
+            .map(|zone| {
+                let line = zone.anchor.as_ref().map_or(0, |anchor| {
+                    buffer.offset_to_point(buffer.resolve(anchor)).row as usize + 1
+                });
+                let height = match zone.height {
+                    ZoneHeight::Lines(lines) => lines * line_height,
+                    ZoneHeight::Pixels(height) => f32::from(height),
+                };
+                (line, height)
+            })
+            .collect()
+    }
+
+    /// Sets a zone's Monaco `minWidthInPx`.
+    pub(crate) fn set_zone_min_width(
+        &mut self,
+        id: WidgetId,
+        width: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(zone) = self.widgets.zones.iter_mut().find(|z| z.id == id)
+            && zone.min_width != width
+        {
+            zone.min_width = width;
+            cx.notify();
+        }
+    }
+
+    /// Monaco's line breaks computer (`createLineBreaksComputer`) for text
+    /// that isn't in the model, such as the inline view's deleted lines:
+    /// the UTF-16 ranges of `line`'s view lines with this editor's
+    /// wrapping, and the continuation indent in visible columns.
+    pub(crate) fn line_breaks_for(&self, line: &str) -> (Vec<Range<u32>>, u32) {
+        let len = line.encode_utf16().count() as u32;
+        let breaks = self.view_lines.wrap().and_then(|wrap| {
+            crate::view::line_breaks::compute_measured_line_breaks(
+                &wrap.classifier,
+                line,
+                wrap.tab_size,
+                Some(wrap.column),
+                wrap.indent,
+                wrap.keep_all,
+                wrap.wrap_on_escaped_line_feeds,
+                wrap.measure.as_ref().map(|m| &*m.0),
+            )
+        });
+        match breaks {
+            Some(data) => (
+                (0..data.output_line_count())
+                    .map(|ix| data.input_range(ix))
+                    .collect(),
+                data.wrapped_text_indent_length,
+            ),
+            None => (std::iter::once(0..len).collect(), 0),
+        }
+    }
+}
+
+/// Monaco `applyEditToLineRange`: `range` after `edits` (start line, end
+/// line, line delta), given in descending order; `None` when an edit
+/// swallows it.
+fn apply_edits_to_line_range(
+    range: LineRange,
+    edits: &[(usize, usize, isize)],
+) -> Option<LineRange> {
+    let mut start = range.start_line_number as isize;
+    let mut end = range.end_line_number_exclusive as isize;
+    for &(edit_start, edit_end, delta) in edits {
+        let (edit_start, edit_end) = (edit_start as isize, edit_end as isize);
+        if edit_end < start {
+            // The edit is before the range.
+            start += delta;
+            end += delta;
+        } else if edit_start > end {
+            // The edit is after the range.
+        } else if edit_start < start && end < edit_end {
+            // The range is inside the edit.
+            return None;
+        } else if edit_start < start && edit_end <= end {
+            // The edit ends inside the range.
+            start = edit_end + 1 + delta;
+            end += delta;
+        } else {
+            end += delta;
+        }
+    }
+    (start >= 1 && end >= start).then(|| LineRange::new(start as usize, end as usize))
+}
+
+/// Monaco's signal for a change: `diffLineDeleted`, `diffLineInserted` or
+/// `diffLineModified`.
+fn change_signal(change: &DetailedLineRangeMapping) -> AccessibilitySignal {
+    if change.modified.is_empty() {
+        AccessibilitySignal::DiffLineDeleted
+    } else if change.original.is_empty() {
+        AccessibilitySignal::DiffLineInserted
+    } else {
+        AccessibilitySignal::DiffLineModified
     }
 }
 
@@ -3474,27 +5709,10 @@ fn diff_decorations(
             background: Some(background),
             is_whole_line: true,
             margin_background: Some(gutter),
+            // Monaco's `insert-sign`/`delete-sign`: 0.7 opacity.
             lines_decoration_text: options
                 .render_indicators
-                .then(|| (SharedString::from(sign), colors.foreground)),
-            overview_ruler: options.render_overview_ruler.then(|| {
-                // `diffEditorOverview.*Foreground` if the theme sets them.
-                let (overview, color) = if inserted {
-                    (
-                        colors.diff_overview_inserted,
-                        colors.diff_inserted_text_background,
-                    )
-                } else {
-                    (
-                        colors.diff_overview_removed,
-                        colors.diff_removed_text_background,
-                    )
-                };
-                (
-                    overview.unwrap_or(color.opacity(1.0f32.min(color.a * 3.))),
-                    OverviewRulerLane::Full,
-                )
-            }),
+                .then(|| (SharedString::from(sign), colors.foreground.opacity(0.7))),
             ..Default::default()
         }
     };
@@ -3514,6 +5732,8 @@ fn diff_decorations(
             background: (background.a > 0.).then_some(background),
             border,
             is_whole_line: whole_line,
+            // Monaco `diffAddDecoration`/`diffDeleteDecoration`.
+            should_fill_line_on_line_break: !whole_line,
             ..Default::default()
         }
     };
@@ -3604,6 +5824,34 @@ fn diff_decorations(
     (original, modified)
 }
 
+/// A canvas that listens to the window's mouse moves and ups while a drag
+/// goes on, wherever the mouse is (Monaco's global pointer monitors).
+fn window_drag_listener(
+    this: WeakEntity<DiffEditor>,
+    on_move: fn(&mut DiffEditor, &gpui::MouseMoveEvent, &mut Context<DiffEditor>),
+    on_up: fn(&mut DiffEditor, &mut Context<DiffEditor>),
+) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            let moves = this.clone();
+            window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Capture {
+                    moves.update(cx, |this, cx| on_move(this, event, cx)).ok();
+                }
+            });
+            let ups = this.clone();
+            window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Capture {
+                    ups.update(cx, on_up).ok();
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_0()
+}
+
 impl Render for DiffEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.screen_reader_mode = self.modified.read(cx).screen_reader_optimized(window);
@@ -3612,95 +5860,209 @@ impl Render for DiffEditor {
         if inline != self.inline {
             self.inline = inline;
             self.apply_word_wrap(cx);
+            self.apply_editor_options(cx);
             self.apply_diff(cx);
         }
         let gutter = self.render_gutter(cx);
+        let gutter_width = if gutter.is_some() {
+            px(GUTTER_WIDTH)
+        } else {
+            px(0.)
+        };
+        let this = cx.entity().downgrade();
         // A bar edge drag follows the mouse anywhere in the window.
         let drag_listener = self.unchanged_drag.is_some().then(|| {
-            let this = cx.entity().downgrade();
-            canvas(
-                |_, _, _| {},
-                move |_, _, window, _| {
-                    let moves = this.clone();
-                    window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
-                        if phase != gpui::DispatchPhase::Capture {
-                            return;
-                        }
-                        let y = event.position.y;
-                        let pressed = event.pressed_button == Some(MouseButton::Left);
-                        moves
-                            .update(cx, |this, cx| {
-                                if pressed {
-                                    this.drag_unchanged(y, cx)
-                                } else {
-                                    this.end_unchanged_drag(cx)
-                                }
-                            })
-                            .ok();
-                    });
-                    let ups = this.clone();
-                    window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
-                        if phase == gpui::DispatchPhase::Capture {
-                            ups.update(cx, |this, cx| this.end_unchanged_drag(cx)).ok();
-                        }
-                    });
+            window_drag_listener(
+                this.clone(),
+                |this, event, cx| {
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        this.drag_unchanged(event.position.y, cx)
+                    } else {
+                        this.end_unchanged_drag(cx)
+                    }
                 },
+                |this, cx| this.end_unchanged_drag(cx),
             )
-            .absolute()
-            .size_0()
         });
-        // Dragging the sash follows the mouse anywhere in the window, not
-        // just over the diff editor.
-        let sash_listener = self.dragging_sash.then(|| {
-            let this = cx.entity().downgrade();
-            canvas(
-                |_, _, _| {},
-                move |_, _, window, _| {
-                    let moves = this.clone();
-                    window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
-                        if phase != gpui::DispatchPhase::Capture {
-                            return;
-                        }
-                        moves.update(cx, |this, cx| this.drag_sash(event, cx)).ok();
-                    });
-                    let ups = this.clone();
-                    window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
-                        if phase == gpui::DispatchPhase::Capture {
-                            ups.update(cx, |this, cx| {
-                                this.dragging_sash = false;
-                                cx.notify();
-                            })
-                            .ok();
-                        }
-                    });
-                },
-            )
-            .absolute()
-            .size_0()
-        });
-        let move_lines = (!self.inline)
-            .then(|| self.render_move_lines(cx))
-            .flatten()
-            .map(|lines| {
+        // Monaco's cursor on the whole editor while dragging a bar's edge.
+        let drag_cursor = self.unchanged_drag.and_then(|drag| {
+            let region = self.unchanged.get(drag.index)?;
+            let fully_revealed = region.hidden_modified_range().is_empty();
+            let (up, down) = if drag.top {
+                (region.visible_top > 0, !fully_revealed)
+            } else {
+                (!fully_revealed, region.visible_bottom > 0)
+            };
+            let cursor = match (up, down) {
+                (true, false) => gpui::CursorStyle::ResizeUp,
+                (false, true) => gpui::CursorStyle::ResizeDown,
+                _ => gpui::CursorStyle::ResizeUpDown,
+            };
+            Some(
                 div()
-                    .id("diff-move-lines")
-                    .h_full()
-                    .flex_none()
-                    .on_scroll_wheel(
-                        cx.listener(|this, event, _, cx| this.delegate_wheel(event, cx)),
-                    )
-                    .child(lines)
-            });
+                    .id("diff-drag-cursor")
+                    .absolute()
+                    .size_full()
+                    .occlude()
+                    .cursor(cursor),
+            )
+        });
+        let sash_listener = self.sash_drag.is_some().then(|| {
+            window_drag_listener(
+                this.clone(),
+                |this, event, cx| this.drag_sash(event, cx),
+                |this, cx| {
+                    this.sash_drag = None;
+                    cx.notify();
+                },
+            )
+        });
+        let overview_listener = self.overview_drag.is_some().then(|| {
+            window_drag_listener(
+                this.clone(),
+                |this, event, cx| {
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        this.drag_overview(event.position.y, cx)
+                    } else {
+                        this.overview_drag = None;
+                        cx.notify();
+                    }
+                },
+                |this, cx| {
+                    this.overview_drag = None;
+                    cx.notify();
+                },
+            )
+        });
+        let move_lines = (!inline).then(|| self.render_move_lines(cx)).flatten();
+        let (move_lines_width, move_lines_overlay) = match move_lines {
+            Some((width, overlay)) => (width, Some(overlay)),
+            None => (px(0.), None),
+        };
+        let move_column = (move_lines_width > px(0.)).then(|| {
+            div()
+                .id("diff-move-lines")
+                .h_full()
+                .w(move_lines_width)
+                .flex_none()
+                .on_scroll_wheel(cx.listener(|this, event, _, cx| this.delegate_wheel(event, cx)))
+        });
+        let overview = self
+            .options
+            .render_overview_ruler
+            .then(|| self.render_overview_ruler(cx));
         let bounds = self.bounds.clone();
-        let ratio = self.ratio.clamp(0.1, 0.9);
-        let border = self.modified.read(cx).colors().widget_border;
+        let colors = self.modified.read(cx).colors().clone();
         let resizable = self.options.enable_split_view_resizing;
-        div()
+        let measured = self.content_width() > px(0.);
+        let sash_left = self.sash_left();
+        // Monaco's layout: side by side, the original ends at the sash less
+        // the gutter and moved-lines column; inline, the original is a
+        // column of its line numbers after the gutter.
+        let original_width = if inline {
+            self.inline_original_width(cx)
+        } else {
+            (sash_left - gutter_width - move_lines_width).max(px(0.))
+        };
+        let original = if inline {
+            // The editor lays out wider than its column, which shows only
+            // its line numbers.
+            div()
+                .relative()
+                .h_full()
+                .w(original_width)
+                .flex_none()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .h_full()
+                        .w(original_width + px(200.))
+                        .child(self.original.clone()),
+                )
+        } else if measured {
+            div()
+                .h_full()
+                .w(original_width)
+                .flex_none()
+                .child(self.original.clone())
+        } else {
+            div()
+                .h_full()
+                .w(gpui::relative(self.ratio.clamp(0.1, 0.9)))
+                .child(self.original.clone())
+        };
+        // Monaco `Sash`: a 4px hit area on the boundary, `sash.hoverBorder`
+        // on hover or while dragging; a double click resets the ratio. A
+        // second one left of the gutter moves the same boundary.
+        let sash = |id: &'static str, x: Pixels, cx: &mut Context<Self>| {
+            let active = self.sash_drag.is_some() || self.sash_hovered;
+            div()
+                .id(id)
+                .absolute()
+                .top_0()
+                .h_full()
+                .left(x - px(SASH_SIZE / 2.))
+                .w(px(SASH_SIZE))
+                .cursor_col_resize()
+                .when(active, |sash| sash.bg(colors.focus_border))
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    this.sash_hovered = *hovered;
+                    cx.notify();
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        if event.click_count == 2 {
+                            this.reset_sash(cx);
+                            return;
+                        }
+                        this.sash_drag = Some((event.position.x, this.sash_left()));
+                        cx.notify();
+                    }),
+                )
+        };
+        let sashes = (!inline && resizable && measured).then(|| {
+            let mut sashes = vec![sash("diff-sash", sash_left, cx)];
+            if gutter.is_some() {
+                sashes.push(sash("diff-gutter-sash", sash_left - gutter_width, cx));
+            }
+            sashes
+        });
+        // Monaco's boundary: `diffEditor.border` and a `scrollbar.shadow`
+        // box shadow on the modified editor's left.
+        let shadow = colors.scrollbar_shadow;
+        let modified = div()
+            .h_full()
+            .flex_1()
+            .min_w_0()
+            .when(!inline, |modified| {
+                modified
+                    .when_some(colors.diff_border, |modified, border| {
+                        modified.border_l_1().border_color(border)
+                    })
+                    .shadow(vec![gpui::BoxShadow {
+                        color: shadow,
+                        offset: point(px(-6.), px(0.)),
+                        blur_radius: px(5.),
+                        spread_radius: px(-5.),
+                        inset: false,
+                    }])
+            })
+            .child(self.modified.clone());
+        let viewer_shown = self.accessible_viewer.is_some();
+        let root = div()
             .key_context({
                 let mut context = gpui::KeyContext::new_with_defaults();
                 context.add(DIFF_EDITOR_KEY_CONTEXT);
                 if self.move_to_compare.is_some() {
                     context.add(COMPARING_MOVED_CODE);
+                }
+                if self.options.is_in_embedded_editor {
+                    context.add(IS_EMBEDDED_DIFF_EDITOR);
                 }
                 context
             })
@@ -3712,6 +6074,7 @@ impl Render for DiffEditor {
             .relative()
             .flex()
             .flex_row()
+            .bg(colors.background)
             .on_action(
                 cx.listener(|this, _: &GoToNextDiff, window, cx| this.go_to_diff(true, window, cx)),
             )
@@ -3761,47 +6124,33 @@ impl Render for DiffEditor {
                 }),
             )
             .children(sash_listener)
+            .children(overview_listener)
             .child(
                 canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
                     .absolute()
                     .size_full(),
-            )
-            .when(!inline, |this| {
-                this.child(
-                    div()
-                        .h_full()
-                        .w(gpui::relative(ratio))
-                        .child(self.original.clone()),
-                )
-                .child(
-                    div()
-                        .id("diff-sash")
-                        .h_full()
-                        .w(px(1.))
-                        .flex_none()
-                        .bg(border)
-                        .when(resizable, |sash| {
-                            sash.cursor_col_resize().on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    this.dragging_sash = true;
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }),
-                            )
-                        }),
-                )
-            })
-            .children(move_lines)
-            .children(gutter)
-            .child(div().h_full().flex_1().child(self.modified.clone()))
+            );
+        let root = if inline {
+            root.children(gutter)
+                .when(original_width > px(0.), |this| this.child(original))
+        } else {
+            root.child(original).children(move_column).children(gutter)
+        };
+        root.child(modified)
+            .children(overview)
+            .children(move_lines_overlay)
+            .children(sashes.into_iter().flatten())
             .children(drag_listener)
+            .children(drag_cursor)
             // Monaco hides both editors behind the viewer.
-            .children(self.accessible_viewer.clone())
+            .when(viewer_shown, |this| {
+                this.children(self.accessible_viewer.clone())
+            })
     }
 }
 
 use gpui::prelude::FluentBuilder as _;
+use gpui::{AnimationExt as _, anchored, deferred};
 
 #[cfg(test)]
 mod tests {
@@ -3845,5 +6194,91 @@ mod tests {
         let a = compute_range_alignment(&diff.changes, &[(2, 10.)], &[], 10., 10., &max, true);
         assert_eq!(a.len(), 1);
         assert_eq!((a[0].original_height, a[0].modified_height), (20., 10.));
+    }
+
+    #[test]
+    fn sash_left_keeps_100px_per_side() {
+        // Monaco `SashLayout._computeSashLeft`.
+        assert_eq!(compute_sash_left(0.5, 0.5, true, px(1000.)), px(500.));
+        assert_eq!(compute_sash_left(0.01, 0.5, true, px(1000.)), px(100.));
+        assert_eq!(compute_sash_left(0.99, 0.5, true, px(1000.)), px(900.));
+        // Not resizable: the default ratio.
+        assert_eq!(compute_sash_left(0.2, 0.5, false, px(1000.)), px(500.));
+        // Too narrow for the minimum: the midpoint.
+        assert_eq!(compute_sash_left(0.1, 0.5, true, px(150.)), px(75.));
+    }
+
+    #[test]
+    fn slider_like_monaco_scrollbar_state() {
+        // A tenth visible: 60px slider, moving 540px over 5400px of scroll.
+        assert_eq!(
+            slider_geometry(px(600.), px(6000.), px(2700.)),
+            (px(270.), px(60.))
+        );
+        // At least 20px.
+        assert_eq!(slider_geometry(px(100.), px(100_000.), px(0.)).1, px(20.));
+        // Nothing to scroll: the whole height.
+        assert_eq!(
+            slider_geometry(px(600.), px(300.), px(0.)),
+            (px(0.), px(600.))
+        );
+    }
+
+    #[test]
+    fn edits_move_line_ranges() {
+        let range = LineRange::new(5, 8);
+        // A line inserted above.
+        assert_eq!(
+            apply_edits_to_line_range(range, &[(2, 2, 1)]),
+            Some(LineRange::new(6, 9))
+        );
+        // A line inserted inside.
+        assert_eq!(
+            apply_edits_to_line_range(range, &[(6, 6, 1)]),
+            Some(LineRange::new(5, 9))
+        );
+        // Below: no change.
+        assert_eq!(
+            apply_edits_to_line_range(range, &[(10, 10, 3)]),
+            Some(range)
+        );
+        // Swallowed.
+        assert_eq!(apply_edits_to_line_range(range, &[(3, 10, -7)]), None);
+    }
+
+    #[test]
+    fn breadcrumbs_start_in_the_hidden_lines_and_end_after_them() {
+        let symbol = |name: &str, start, end| BreadcrumbSymbol {
+            name: SharedString::from(name.to_string()),
+            kind: crate::providers::SymbolKind::Function,
+            start_line_number: start,
+            end_line_number: end,
+        };
+        let symbols = [
+            symbol("inside", 3, 5),
+            symbol("small", 8, 30),
+            symbol("big", 2, 50),
+            symbol("before", 1, 40),
+        ];
+        let names: Vec<_> = breadcrumb_items(&symbols, LineRange::new(2, 20))
+            .into_iter()
+            .map(|s| s.name.to_string())
+            .collect();
+        assert_eq!(names, ["big", "small"]);
+    }
+
+    #[test]
+    fn staged_value_applies_the_inner_changes() {
+        let original = text::Rope::from("a\nfoo\nb");
+        let modified = text::Rope::from("a\nfoo bar\nb");
+        let diff = compute_diff(
+            &["a", "foo", "b"],
+            &["a", "foo bar", "b"],
+            &DiffOptions::default(),
+        );
+        assert_eq!(
+            staged_value(&original, &modified, &diff.changes[0]),
+            "a\nfoo bar\nb"
+        );
     }
 }

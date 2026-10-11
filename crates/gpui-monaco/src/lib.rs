@@ -45,8 +45,9 @@ pub mod diff;
 pub mod diff_editor;
 pub mod multi_diff_editor;
 pub use diff_editor::{
-    AccessibilitySignal, DiffAlgorithm, DiffEditor, DiffEditorEvent, DiffEditorOptions,
-    DiffEditorViewState, HideUnchangedRegions,
+    AccessibilitySignal, CharChange, DiffAlgorithm, DiffEditor, DiffEditorEvent, DiffEditorModel,
+    DiffEditorOptions, DiffEditorViewState, DiffHunkAction, DiffHunkContext, DiffHunkHandler,
+    DiffHunkToolbar, HideUnchangedRegions, LineChange,
 };
 pub use multi_diff_editor::{MultiDiffDocument, MultiDiffEditor, MultiDiffEditorEvent};
 mod dnd;
