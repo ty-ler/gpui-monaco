@@ -1303,6 +1303,12 @@ impl CodeEditor {
             indent_size: model_options.indent_size,
             insert_spaces: model_options.insert_spaces,
             word_separators: self.options.word_separators.to_string(),
+            word_segmenter_locales: self
+                .options
+                .word_segmenter_locales
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
             sticky_tab_stops: self.options.sticky_tab_stops,
             use_tab_stops: self.options.use_tab_stops,
             trim_whitespace_on_delete: self.options.trim_whitespace_on_delete,

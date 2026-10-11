@@ -32,6 +32,14 @@ gpui-monaco-languages = { git = "…", tag = "v0.1.0", default-features = false,
 
 The language features are `lang-rust`, `lang-js`, `lang-ts` (TypeScript and TSX), `lang-json`, `lang-yaml`, `lang-toml`, `lang-markdown`, `lang-html` and `lang-css`.
 
+`gpui-monaco` has one feature, `word-segmenter` (on by default). It adds ICU4X's word segmenter and its compiled data (about 2.5 MB) for the `word_segmenter_locales` [option](options.md), which finds words in Japanese, Chinese, Thai and other languages written without spaces. To leave it out:
+
+```toml
+gpui-monaco = { git = "…", tag = "v0.1.0", default-features = false }
+```
+
+Without it, `word_segmenter_locales` is accepted but has no effect.
+
 ## A minimal editor
 
 ```rust,ignore

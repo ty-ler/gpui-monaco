@@ -13,6 +13,13 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["word-segmenter"]
+# Monaco's `wordSegmenterLocales`: ICU4X word segmentation (with its compiled
+# data) for word navigation, deletion and selection in languages like
+# Japanese, Chinese and Thai. Without it the option has no effect.
+word-segmenter = ["dep:icu_segmenter", "dep:icu_locale_core"]
+
 [dependencies]
 # `Instant` that works in browsers (std's on other targets).
 web-time = "1"
@@ -35,6 +42,8 @@ serde.workspace = true
 serde_json.workspace = true
 unicode-segmentation.workspace = true
 uuid = { version = "1", features = ["v4"] }
+icu_segmenter = { version = "2.3", optional = true }
+icu_locale_core = { version = "2.3", optional = true, default-features = false }
 
 [dev-dependencies]
 async-channel = "2"

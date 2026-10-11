@@ -1644,6 +1644,14 @@ pub struct EditorOptions {
     /// Monaco `wordSeparators`: characters that end a word for word navigation,
     /// double-click selection and whole-word search.
     pub word_separators: SharedString,
+    /// Monaco `wordSegmenterLocales`: BCP 47 tags (e.g. `ja`, `zh-CN`,
+    /// `zh-Hant-TW`, `th`) of the languages whose words word navigation,
+    /// deletion and double-click selection find with a word segmenter, for
+    /// languages written without spaces. The first valid tag is used and
+    /// invalid ones are ignored (default empty: words are found by
+    /// `word_separators` alone). Needs the `word-segmenter` cargo feature (on
+    /// by default); without it this has no effect.
+    pub word_segmenter_locales: Vec<SharedString>,
     /// Monaco `scrollbar.verticalScrollbarSize` (default 14px; 0 hides it).
     pub vertical_scrollbar_size: Pixels,
     /// Monaco `scrollbar.horizontalScrollbarSize` (default 12px; 0 hides it).
@@ -1983,6 +1991,7 @@ impl Default for EditorOptions {
             auto_indent_on_paste: false,
             auto_indent_on_paste_within_string: true,
             word_separators: "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?".into(),
+            word_segmenter_locales: Vec::new(),
             vertical_scrollbar_size: px(14.),
             horizontal_scrollbar_size: px(12.),
             scrollbar: ScrollbarOptions::default(),

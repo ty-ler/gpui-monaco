@@ -55,6 +55,8 @@ gpui-monaco-languages = { git = "https://github.com/ty-ler/gpui-monaco", tag = "
 
 Use the same gpui snapshot; no `[patch]` entries are needed. See [Getting started](book/src/getting-started.md) for a complete example. Rust 1.98 or newer is required.
 
+`gpui-monaco`'s default `word-segmenter` feature adds ICU4X's word segmenter and its data (about 2.5 MB) for Monaco's `wordSegmenterLocales` (word navigation in Japanese, Chinese, Thai and other languages written without spaces). Use `default-features = false` to leave it out; the option then has no effect.
+
 While the repository is private, cargo's built-in git client can't authenticate. Tell cargo to use the `git` CLI, which uses your GitHub credentials, in `.cargo/config.toml`:
 
 ```toml

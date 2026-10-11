@@ -10,6 +10,13 @@
 //! functions taking the app: [`editors`], [`models`], [`on_did_create_model`],
 //! [`model_markers`], [`set_theme`], [`add_editor_action`],
 //! [`add_keybinding_rules`] and so on.
+//!
+//! # Cargo features
+//!
+//! - `word-segmenter` (default): ICU4X's word segmenter and its compiled
+//!   data, for Monaco's `wordSegmenterLocales`
+//!   ([`EditorOptions::word_segmenter_locales`]). Without it the option has
+//!   no effect.
 #![warn(missing_docs)]
 
 mod accessibility;

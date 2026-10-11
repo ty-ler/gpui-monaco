@@ -2,10 +2,10 @@
 //! `src/vs/editor/contrib/wordOperations/test/browser/wordOperations.test.ts`
 //! (MIT).
 //!
+//! `cursorWordLeft - Recognize words` and `cursorWordRight - Recognize words`
+//! need the `word-segmenter` cargo feature (`wordSegmenterLocales`).
+//!
 //! Skipped:
-//! - `cursorWordLeft - Recognize words`, `cursorWordRight - Recognize words`:
-//!   need `Intl.Segmenter` word segmentation (`wordSegmenterLocales`), which
-//!   is not ported.
 //! - `deleteWordLeft - issue #91855`: needs language auto-closing pairs.
 
 use super::harness::{TestEditor, pos, sel};
@@ -139,6 +139,14 @@ fn assert_delete_right_stops(
     assert_eq!(serialize_pipe_positions(&text, actual_stops), expected);
 }
 
+/// The default config with `word_segmenter_locales: [locale]`.
+fn segmenter_config(locale: &str) -> CursorConfig {
+    CursorConfig {
+        word_segmenter_locales: vec![locale.to_string()],
+        ..CursorConfig::default()
+    }
+}
+
 const LINES: [&str; 5] = [
     "    \tMy First Line\t ",
     "\tMy Second Line",
@@ -187,11 +195,28 @@ fn cursor_word_left_issue_48046_word_selection_doesnt_work_as_usual() {
 }
 
 #[test]
+#[cfg(feature = "word-segmenter")]
+fn cursor_word_left_recognize_words() {
+    let expected = "|/* |これ|は|テスト|です |/*";
+    assert_stops_with(
+        expected,
+        pos(1000, 1000),
+        segmenter_config("ja"),
+        |ed| cursor_word_left(ed, true),
+        |ed| ed.position() == pos(1, 1),
+    );
+}
+
+#[test]
 fn cursor_word_left_does_not_recognize_words() {
     let expected = "|/* |これはテストです |/*";
-    assert_stops(expected, pos(1000, 1000), pos(1, 1), |ed| {
-        cursor_word_left(ed, true)
-    });
+    assert_stops_with(
+        expected,
+        pos(1000, 1000),
+        segmenter_config(""),
+        |ed| cursor_word_left(ed, true),
+        |ed| ed.position() == pos(1, 1),
+    );
 }
 
 #[test]
@@ -317,11 +342,28 @@ fn cursor_word_right_issue_41199() {
 }
 
 #[test]
+#[cfg(feature = "word-segmenter")]
+fn cursor_word_right_recognize_words() {
+    let expected = "/*| これ|は|テスト|です|/*|";
+    assert_stops_with(
+        expected,
+        pos(1, 1),
+        segmenter_config("ja"),
+        |ed| cursor_word_right(ed, false),
+        |ed| ed.position() == pos(1, 14),
+    );
+}
+
+#[test]
 fn cursor_word_right_does_not_recognize_words() {
     let expected = "/*| これはテストです|/*|";
-    assert_stops(expected, pos(1, 1), pos(1, 14), |ed| {
-        cursor_word_right(ed, false)
-    });
+    assert_stops_with(
+        expected,
+        pos(1, 1),
+        segmenter_config(""),
+        |ed| cursor_word_right(ed, false),
+        |ed| ed.position() == pos(1, 14),
+    );
 }
 
 #[test]
@@ -653,4 +695,99 @@ fn delete_inside_word_only_word_deletes_just_the_word() {
     editor.set_position(1, 7);
     delete_inside_word_(&mut editor, true);
     assert_eq!(editor.value(), "This  interesting");
+}
+
+// Not in Monaco: `wordSegmenterLocales` with the other word operations.
+
+#[test]
+#[cfg(feature = "word-segmenter")]
+fn delete_word_left_recognize_words() {
+    let expected = "|これ|は|テスト|です";
+    assert_delete_left_stops(
+        expected,
+        pos(1000, 1000),
+        segmenter_config("ja"),
+        delete_word_left,
+    );
+}
+
+#[test]
+#[cfg(feature = "word-segmenter")]
+fn delete_word_right_recognize_words() {
+    let expected = "これ|は|テスト|です|";
+    assert_delete_right_stops(expected, segmenter_config("ja"), delete_word_right);
+}
+
+#[test]
+#[cfg(feature = "word-segmenter")]
+fn delete_inside_word_recognize_words() {
+    let mut editor = TestEditor::with_config("これはテストです", segmenter_config("ja"));
+    editor.set_position(1, 5);
+    delete_inside_word_(&mut editor, false);
+    assert_eq!(editor.value(), "これはです");
+}
+
+#[test]
+#[cfg(feature = "word-segmenter")]
+fn cursor_word_accessibility_right_recognize_words() {
+    // Accessibility navigation uses the default separators but keeps the
+    // locales.
+    let config = CursorConfig {
+        word_separators: String::new(),
+        ..segmenter_config("ja")
+    };
+    let expected = "/* |これ|は|テスト|です /*|";
+    assert_stops_with(
+        expected,
+        pos(1, 1),
+        config,
+        |ed| cursor_word_accessibility_right(ed, false),
+        |ed| ed.position() == pos(1, 15),
+    );
+}
+
+#[test]
+#[cfg(feature = "word-segmenter")]
+fn cursor_word_left_recognize_chinese_and_thai_words() {
+    assert_stops_with(
+        "|我们|是|学生",
+        pos(1000, 1000),
+        segmenter_config("zh-CN"),
+        |ed| cursor_word_left(ed, false),
+        |ed| ed.position() == pos(1, 1),
+    );
+    assert_stops_with(
+        "|ทุก|สอง|สัปดาห์",
+        pos(1000, 1000),
+        segmenter_config("th"),
+        |ed| cursor_word_left(ed, false),
+        |ed| ed.position() == pos(1, 1),
+    );
+}
+
+#[test]
+#[cfg(feature = "word-segmenter")]
+fn word_at_recognize_words() {
+    let editor = TestEditor::with_config("/* これはテストです */", segmenter_config("ja"));
+    let word_at = |column| {
+        crate::cursor::word_at(&editor.config, &editor.buffer, pos(1, column))
+            .map(|r| (r.start.column + 1, r.end.column + 1))
+    };
+    assert_eq!(word_at(4), Some((4, 6)));
+    assert_eq!(word_at(7), Some((6, 7)));
+    assert_eq!(word_at(9), Some((7, 10)));
+    assert_eq!(word_at(2), Some((1, 3)));
+}
+
+#[test]
+#[cfg(not(feature = "word-segmenter"))]
+fn word_segmenter_locales_have_no_effect_without_the_feature() {
+    let expected = "|/* |これはテストです |/*";
+    assert_stops_with(
+        expected,
+        pos(1000, 1000),
+        segmenter_config("ja"),
+        |ed| cursor_word_left(ed, true),
+        |ed| ed.position() == pos(1, 1),
+    );
 }
