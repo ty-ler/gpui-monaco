@@ -36,9 +36,16 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `getValueInRange(range)` | `value_in_range(range)` |
 | `validatePosition`, `validateRange` | `validate_position`, `validate_range` |
 | `getWordAtPosition`, `getWordUntilPosition` | `word_at_position`, `word_until_position` |
-| `findMatches(...)` | `find_matches(query, is_regex, match_case, whole_word, …)` |
-| `applyEdits(edits)` / `pushEditOperations(...)` | `edit(edits, cx)`, grouped with `start_transaction`/`end_transaction` |
-| `pushStackElement()` | `push_stack_element()` |
+| `findMatches(...)` | `find_matches(query, is_regex, match_case, whole_word, …)`, or `find_matches_in(query, scope, …, capture_matches, limit)` |
+| `findNextMatch(...)` / `findPreviousMatch(...)` | `find_next_match(...)` / `find_previous_match(...)`, returning a `FindMatch` |
+| `getLinesContent()`, `getValueLength()`, `getFullModelRange()` | `lines_content()`, `value_length()`, `full_model_range()` |
+| `modifyPosition(pos, offset)` | `modify_position(point, offset)` |
+| `applyEdits(edits, true)` | `apply_edits(edits, cx)`, returning the undo edits (also recorded for undo) |
+| `pushEditOperations(before, edits, computer)` | `push_edit_operations(before, edits, computer, cx)`, or `edit(edits, cx)` grouped with `start_transaction`/`end_transaction` |
+| `pushStackElement()` / `popStackElement()` | `push_stack_element()` / `pop_stack_element()` |
+| `getAlternativeVersionId()` | `alternative_version_id()` |
+| `bracketPairs.getBracketPairsInRange`, `matchBracket`, `findEnclosingBrackets` | `bracket_pairs_in_range`, `match_bracket`, `find_enclosing_brackets` |
+| `guides.getLinesIndentGuides`, `getActiveIndentGuide` | `lines_indent_guides`, `active_indent_guide` |
 | `undo()` / `redo()`, `canUndo()` / `canRedo()` | `undo(source, cx)` / `redo(source, cx)`, `can_undo()` / `can_redo()` |
 | `getEOL()` / `setEOL(...)` | `line_ending()` / `set_line_ending(...)` |
 | `getOptions()` / `updateOptions(...)` | `options()` / `update_options(...)` (tab size, insert spaces, …) |

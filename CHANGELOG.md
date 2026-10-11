@@ -5,6 +5,15 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Model helpers (#206, part 1):**
+  - **Lines and positions:** `TextModel::lines_content`, `value_length` (UTF-16, line breaks as the model's line ending), `modify_position` and `full_model_range`. Monaco's `modifyPosition` test is ported.
+  - **Search:** `find_next_match` and `find_previous_match` return a `FindMatch` with regex captures when asked. `find_matches_in` searches within scopes, which are merged first. Monaco's capturing-matches search tests are ported.
+  - **Edits:**
+    - `apply_edits` returns the undo edits. Unlike Monaco, it also records the edit for undo, which keeps history consistent.
+    - The public `push_edit_operations` joins the open undo step until `push_stack_element`, restores the before cursor state on undo, and takes a cursor state computer whose selections redo restores.
+    - `pop_stack_element` reopens the last undo step, in the text crate too (`Buffer::pop_stack_element`).
+    - `alternative_version_id` / `Buffer::alternative_version` return to the earlier value on undo and redo. Monaco's issue #90973 test is ported.
+  - **Brackets and guides:** `bracket_pairs_in_range`, `match_bracket`, `find_enclosing_brackets`, `lines_indent_guides` and `active_indent_guide` (Monaco's `model.bracketPairs` and `model.guides`). Brackets in strings and comments are ignored.
 - **Inline completions toolbar, options and provider hooks (#201):**
   - **Toolbar:** Monaco's inline suggestion toolbar. It has previous and next buttons with the "1/3" count, Accept (Tab) and Accept Word (Cmd/Ctrl+Right), and a "⋯" menu with Accept Line, Always Show Toolbar and the list's commands. `inline_suggest.show_toolbar` chooses whether it shows in the hover over ghost text (`OnHover`, the default), above the ghost text (`Always`) or not at all (`Never`). Showing it asks explicitly so the count is known. The new `editor.action.inlineSuggest.toggleAlwaysShowToolbar` toggles `Always`.
   - **Options:** `inline_suggest.syntax_highlighting_enabled` (on) colors ghost text like code, at 70% opacity. Monaco tokenizes from the line's state; here the line with the ghost text, plus the extra lines, is parsed on its own. `inline_suggest.font_family` sets the ghost text's font.

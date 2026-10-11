@@ -172,8 +172,15 @@ struct Transaction {
     batches: Vec<Vec<RecordedEdit>>,
     group: Option<u64>,
     sealed: bool,
+    /// Reopened by [`Buffer::pop_stack_element`]: any edit joins it until
+    /// it's sealed again.
+    reopened: bool,
     before: Option<TransactionMetadata>,
     after: Option<TransactionMetadata>,
+    /// The alternative version before and after it (Monaco
+    /// `beforeVersionId`/`afterVersionId`).
+    before_version: Version,
+    after_version: Version,
 }
 
 #[derive(Default, Clone)]
@@ -191,6 +198,7 @@ impl History {
         &mut self,
         group: Option<u64>,
         before: Option<TransactionMetadata>,
+        before_version: Version,
     ) -> Transaction {
         self.next_id += 1;
         Transaction {
@@ -198,8 +206,11 @@ impl History {
             batches: Vec::new(),
             group,
             sealed: false,
+            reopened: false,
             before,
             after: None,
+            before_version,
+            after_version: before_version,
         }
     }
 }
@@ -218,6 +229,9 @@ pub struct Buffer {
     history: History,
     line_ending: LineEnding,
     has_bom: bool,
+    /// Monaco's alternative version id: the version, except that undo and
+    /// redo go back to the one the text had then.
+    alternative_version: Version,
 }
 
 impl Default for Buffer {
@@ -246,6 +260,7 @@ impl Buffer {
             patches: Vec::new(),
             history: History::default(),
             has_bom,
+            alternative_version: 0,
         }
     }
 
@@ -253,6 +268,14 @@ impl Buffer {
     /// redo bump it once per batch in the transaction.
     pub fn version(&self) -> Version {
         self.patches.len()
+    }
+
+    /// The version, except that undoing or redoing returns to the version
+    /// the text had then (Monaco `getAlternativeVersionId`): equal values
+    /// mean equal text, e.g. to tell whether undo got back to the saved
+    /// state.
+    pub fn alternative_version(&self) -> Version {
+        self.alternative_version
     }
 
     /// The text, with `\n` line breaks.
@@ -354,8 +377,10 @@ impl Buffer {
         if edits.is_empty() {
             return Ok(Patch::default());
         }
+        let before_version = self.alternative_version;
         let (patch, recorded) = self.apply(edits);
-        self.record(recorded, group);
+        self.alternative_version = self.version();
+        self.record(recorded, group, before_version);
         Ok(patch)
     }
 
@@ -432,26 +457,29 @@ impl Buffer {
         (patch, recorded)
     }
 
-    fn record(&mut self, batch: Vec<RecordedEdit>, group: Option<u64>) {
+    fn record(&mut self, batch: Vec<RecordedEdit>, group: Option<u64>, before_version: Version) {
+        let after_version = self.version();
         let history = &mut self.history;
         history.redo.clear();
         if let Some(open) = history.open.as_mut() {
             open.batches.push(batch);
+            open.after_version = after_version;
             return;
         }
-        if let Some(group) = group
-            && let Some(last) = history.undo.last_mut()
+        if let Some(last) = history.undo.last_mut()
             && !last.sealed
-            && last.group == Some(group)
+            && (last.reopened || group.is_some_and(|group| last.group == Some(group)))
         {
             last.batches.push(batch);
+            last.after_version = after_version;
             return;
         }
         if let Some(last) = history.undo.last_mut() {
             last.sealed = true;
         }
-        let mut transaction = history.new_transaction(group, None);
+        let mut transaction = history.new_transaction(group, None, before_version);
         transaction.batches.push(batch);
+        transaction.after_version = after_version;
         transaction.sealed = group.is_none();
         history.undo.push(transaction);
     }
@@ -461,7 +489,7 @@ impl Buffer {
     pub fn start_transaction(&mut self, before: Option<TransactionMetadata>) {
         let history = &mut self.history;
         if history.open_depth == 0 {
-            let transaction = history.new_transaction(None, before);
+            let transaction = history.new_transaction(None, before, self.alternative_version);
             history.open = Some(transaction);
         }
         history.open_depth += 1;
@@ -481,6 +509,18 @@ impl Buffer {
             return None;
         }
         transaction.after = after;
+        // A reopened step takes it in (Monaco appends to the open element).
+        if let Some(last) = history.undo.last_mut()
+            && last.reopened
+            && !last.sealed
+        {
+            last.batches.append(&mut transaction.batches);
+            last.after_version = transaction.after_version;
+            if transaction.after.is_some() {
+                last.after = transaction.after;
+            }
+            return Some(last.id);
+        }
         transaction.sealed = true;
         if let Some(last) = history.undo.last_mut() {
             last.sealed = true;
@@ -495,6 +535,16 @@ impl Buffer {
     pub fn push_stack_element(&mut self) {
         if let Some(last) = self.history.undo.last_mut() {
             last.sealed = true;
+            last.reopened = false;
+        }
+    }
+
+    /// Reopens the most recent undo step so the next edits join it, until
+    /// [`Buffer::push_stack_element`] (Monaco's `popStackElement`).
+    pub fn pop_stack_element(&mut self) {
+        if let Some(last) = self.history.undo.last_mut() {
+            last.sealed = false;
+            last.reopened = true;
         }
     }
 
@@ -574,6 +624,8 @@ impl Buffer {
             patch = patch.compose(&step);
         }
         transaction.sealed = true;
+        transaction.reopened = false;
+        self.alternative_version = transaction.before_version;
         let outcome = UndoOutcome {
             transaction_id: transaction.id,
             patch,
@@ -595,6 +647,7 @@ impl Buffer {
             let (step, _) = self.apply(forward);
             patch = patch.compose(&step);
         }
+        self.alternative_version = transaction.after_version;
         let outcome = UndoOutcome {
             transaction_id: transaction.id,
             patch,
@@ -872,5 +925,43 @@ mod tests {
             while buffer.redo().is_some() {}
             prop_assert_eq!(buffer.rope().to_string(), final_text);
         }
+    }
+
+    /// Monaco `cursor.test.ts` "issue #90973: Undo brings back model
+    /// alternative version", plus redo.
+    #[test]
+    fn undo_brings_back_the_alternative_version() {
+        let mut buffer = Buffer::new("");
+        let (before, before_alt) = (buffer.version(), buffer.alternative_version());
+        for (i, ch) in "Hello".chars().enumerate() {
+            buffer.edit_grouped([(i..i, ch.to_string())], 1).unwrap();
+        }
+        let typed_alt = buffer.alternative_version();
+        assert_eq!(typed_alt, buffer.version());
+        buffer.undo().unwrap();
+        assert_ne!(buffer.version(), before);
+        assert_eq!(buffer.alternative_version(), before_alt);
+        buffer.redo().unwrap();
+        assert_eq!(buffer.alternative_version(), typed_alt);
+    }
+
+    /// Monaco `popStackElement`: the next edits join the last undo step.
+    #[test]
+    fn pop_stack_element_reopens_the_last_step() {
+        let mut buffer = Buffer::new("");
+        buffer.edit([(0..0, "a")]).unwrap();
+        buffer.edit([(1..1, "b")]).unwrap();
+        buffer.pop_stack_element();
+        buffer.edit([(2..2, "c")]).unwrap();
+        buffer.start_transaction(None);
+        buffer.edit([(3..3, "d")]).unwrap();
+        buffer.end_transaction(None);
+        buffer.push_stack_element();
+        buffer.edit([(4..4, "e")]).unwrap();
+        buffer.undo().unwrap();
+        assert_eq!(buffer.text(), "abcd");
+        // "b", "c" and "d" were one step.
+        buffer.undo().unwrap();
+        assert_eq!(buffer.text(), "a");
     }
 }

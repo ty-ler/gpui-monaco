@@ -89,7 +89,9 @@ mod unusual_line_terminators;
 pub mod view;
 pub mod widgets;
 
-pub use api::{DecorationsCollection, WordAtPosition};
+pub use api::{
+    BracketPairInfo, CursorStateComputer, DecorationsCollection, FindMatch, WordAtPosition,
+};
 pub use commands::{execute_command, register_command, unregister_command};
 pub use decorations::{
     BlockDecoration, DecorationId, DecorationOptions, DecorationUnderline, InjectedText,

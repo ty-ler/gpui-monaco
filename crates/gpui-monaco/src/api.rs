@@ -142,6 +142,395 @@ impl TextModel {
             .map(|m| rope.offset_to_point_utf16(m.start)..rope.offset_to_point_utf16(m.end))
             .collect()
     }
+
+    /// Each line's text, without line breaks (Monaco `getLinesContent`).
+    pub fn lines_content(&self) -> Vec<String> {
+        let rope = self.buffer().rope();
+        (0..rope.line_count()).map(|row| rope.line(row)).collect()
+    }
+
+    /// The text's length in UTF-16 units, line breaks counted as the
+    /// model's line ending (Monaco `getValueLength`).
+    pub fn value_length(&self) -> usize {
+        let rope = self.buffer().rope();
+        let breaks = rope.line_count() as usize - 1;
+        rope.len_utf16().0 + breaks * (self.line_ending().as_str().len() - 1)
+    }
+
+    /// Monaco's offset of `position`: UTF-16 units, line breaks counted as
+    /// the model's line ending.
+    fn utf16_offset_at(&self, position: PointUtf16) -> usize {
+        let rope = self.buffer().rope();
+        let position = rope.clip_point_utf16(position, Bias::Left);
+        let offset = rope.point_utf16_to_offset(position);
+        rope.offset_to_offset_utf16(offset).0
+            + position.row as usize * (self.line_ending().as_str().len() - 1)
+    }
+
+    /// The position at Monaco offset `offset` (see `utf16_offset_at`).
+    fn position_at_utf16_offset(&self, offset: usize) -> PointUtf16 {
+        let rope = self.buffer().rope();
+        let extra = self.line_ending().as_str().len() - 1;
+        let offset = offset.min(self.value_length());
+        // At most this row; step back while the row starts after `offset`.
+        let mut row = rope
+            .offset_to_point(
+                rope.offset_utf16_to_offset(text::OffsetUtf16(offset.min(rope.len_utf16().0))),
+            )
+            .row;
+        while row > 0 && self.utf16_offset_at(PointUtf16::new(row, 0)) > offset {
+            row -= 1;
+        }
+        let start = rope
+            .offset_to_offset_utf16(rope.point_to_offset(text::Point::new(row, 0)))
+            .0
+            + row as usize * extra;
+        let column = ((offset - start) as u32).min(rope.line_len_utf16(row));
+        PointUtf16::new(row, column)
+    }
+
+    /// The position `offset` UTF-16 units from `position`, clamped to the
+    /// text (Monaco `modifyPosition`; line breaks count as the model's line
+    /// ending).
+    pub fn modify_position(&self, position: PointUtf16, offset: isize) -> PointUtf16 {
+        let start = self.utf16_offset_at(position) as isize;
+        let target = (start + offset).clamp(0, self.value_length() as isize);
+        self.position_at_utf16_offset(target as usize)
+    }
+
+    /// The whole text's range (Monaco `getFullModelRange`).
+    pub fn full_model_range(&self) -> Range<PointUtf16> {
+        PointUtf16::new(0, 0)..self.buffer().rope().max_point_utf16()
+    }
+
+    fn search_data(
+        query: &str,
+        is_regex: bool,
+        match_case: bool,
+        word_separators: Option<&str>,
+    ) -> Option<search::SearchData> {
+        SearchParams::new(query, is_regex, match_case, word_separators).parse()
+    }
+
+    fn find_match(
+        &self,
+        data: &search::SearchData,
+        range: Range<usize>,
+        capture_matches: bool,
+    ) -> FindMatch {
+        let rope = self.buffer().rope();
+        let matches = capture_matches
+            .then(|| {
+                let (haystack, start) = search::match_context(rope, data, &range);
+                search::captures(data, &haystack, range.start - start..range.end - start)
+            })
+            .flatten();
+        FindMatch {
+            range: rope.offset_to_point_utf16(range.start)..rope.offset_to_point_utf16(range.end),
+            matches,
+        }
+    }
+
+    /// Searches only within `scope` (Monaco `findMatches` with a search
+    /// scope): overlapping or touching ranges are merged first. With
+    /// `capture_matches`, each result has the regex's captures, whole match
+    /// first. `word_separators` makes it whole-word. At most `limit`
+    /// results; an invalid regex finds nothing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_matches_in(
+        &self,
+        query: &str,
+        scope: &[Range<PointUtf16>],
+        is_regex: bool,
+        match_case: bool,
+        word_separators: Option<&str>,
+        capture_matches: bool,
+        limit: usize,
+    ) -> Vec<FindMatch> {
+        let Some(data) = Self::search_data(query, is_regex, match_case, word_separators) else {
+            return Vec::new();
+        };
+        let rope = self.buffer().rope();
+        let mut ranges: Vec<Range<usize>> = scope
+            .iter()
+            .map(|range| {
+                let range = self.validate_range(range.clone());
+                rope.point_utf16_to_offset(range.start)..rope.point_utf16_to_offset(range.end)
+            })
+            .collect();
+        ranges.sort_by_key(|range| (range.start, range.end));
+        let mut merged: Vec<Range<usize>> = Vec::new();
+        for range in ranges {
+            match merged.last_mut() {
+                Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+                _ => merged.push(range),
+            }
+        }
+        let mut result = Vec::new();
+        for range in merged {
+            if result.len() >= limit {
+                break;
+            }
+            for m in search::find_matches(rope, &data, range, limit - result.len()) {
+                result.push(self.find_match(&data, m, capture_matches));
+            }
+        }
+        result
+    }
+
+    /// The first match at or after `search_start`, wrapping around (Monaco
+    /// `findNextMatch`).
+    pub fn find_next_match(
+        &self,
+        query: &str,
+        search_start: PointUtf16,
+        is_regex: bool,
+        match_case: bool,
+        word_separators: Option<&str>,
+        capture_matches: bool,
+    ) -> Option<FindMatch> {
+        let data = Self::search_data(query, is_regex, match_case, word_separators)?;
+        let rope = self.buffer().rope();
+        let from = self.offset_at(search_start);
+        let found = search::find_next(rope, &data, from)?;
+        Some(self.find_match(&data, found, capture_matches))
+    }
+
+    /// The last match ending at or before `search_start`, wrapping around
+    /// (Monaco `findPreviousMatch`).
+    pub fn find_previous_match(
+        &self,
+        query: &str,
+        search_start: PointUtf16,
+        is_regex: bool,
+        match_case: bool,
+        word_separators: Option<&str>,
+        capture_matches: bool,
+    ) -> Option<FindMatch> {
+        let data = Self::search_data(query, is_regex, match_case, word_separators)?;
+        let rope = self.buffer().rope();
+        let before = self.offset_at(search_start);
+        let found = search::find_previous(rope, &data, before)?;
+        Some(self.find_match(&data, found, capture_matches))
+    }
+}
+
+/// A closed bracket pair (Monaco `BracketPairInfo`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BracketPairInfo {
+    /// The opening bracket.
+    pub open: Range<PointUtf16>,
+    /// The closing bracket.
+    pub close: Range<PointUtf16>,
+    /// Nesting level, 0 for top-level pairs.
+    pub level: u32,
+}
+
+/// Monaco's `model.bracketPairs` and `model.guides`. Brackets in strings
+/// and comments are ignored. Unlike Monaco's incremental bracket tree, the
+/// pairs are found on each call, so these suit occasional queries.
+impl TextModel {
+    fn guide_context(&self) -> crate::view::guides::GuideContext {
+        crate::view::guides::GuideContext {
+            tab_size: self.options().tab_size,
+            indent_size: self.options().indent_size,
+            off_side: self
+                .language()
+                .and_then(|l| l.config.folding.as_ref())
+                .is_some_and(|f| f.off_side),
+        }
+    }
+
+    /// Every closed bracket pair, sorted by opening bracket.
+    fn all_bracket_pairs(&self) -> Vec<BracketPairInfo> {
+        let Some(language) = self.language() else {
+            return Vec::new();
+        };
+        let config = &language.config;
+        let pairs = config
+            .colorized_bracket_pairs
+            .clone()
+            .unwrap_or_else(|| config.brackets.clone());
+        let rope = self.buffer().rope();
+        let skip = self.string_and_comment_ranges(0..rope.len());
+        let (_, pairs) =
+            crate::view::bracket_pairs::bracket_pairs(rope, &pairs, &skip, self.options().tab_size);
+        pairs
+            .into_iter()
+            .map(|pair| BracketPairInfo {
+                open: rope.offset_to_point_utf16(pair.open.start)
+                    ..rope.offset_to_point_utf16(pair.open.end),
+                close: rope.offset_to_point_utf16(pair.close.start)
+                    ..rope.offset_to_point_utf16(pair.close.end),
+                level: pair.level,
+            })
+            .collect()
+    }
+
+    /// The bracket pairs intersecting `range` (Monaco
+    /// `bracketPairs.getBracketPairsInRange`).
+    pub fn bracket_pairs_in_range(&self, range: Range<PointUtf16>) -> Vec<BracketPairInfo> {
+        let range = self.validate_range(range);
+        self.all_bracket_pairs()
+            .into_iter()
+            .filter(|pair| pair.open.start <= range.end && range.start <= pair.close.end)
+            .collect()
+    }
+
+    /// The bracket touching `position` and its partner, as (open, close)
+    /// (Monaco `bracketPairs.matchBracket`).
+    pub fn match_bracket(
+        &self,
+        position: PointUtf16,
+    ) -> Option<(Range<PointUtf16>, Range<PointUtf16>)> {
+        let position = self.validate_position(position);
+        let touches = |r: &Range<PointUtf16>| r.start <= position && position <= r.end;
+        // The bracket after the position wins, as in Monaco.
+        let pairs = self.all_bracket_pairs();
+        pairs
+            .iter()
+            .find(|pair| pair.open.start == position || pair.close.start == position)
+            .or_else(|| {
+                pairs
+                    .iter()
+                    .find(|pair| touches(&pair.open) || touches(&pair.close))
+            })
+            .map(|pair| (pair.open.clone(), pair.close.clone()))
+    }
+
+    /// The innermost pair around `position` (Monaco
+    /// `bracketPairs.findEnclosingBrackets`).
+    pub fn find_enclosing_brackets(
+        &self,
+        position: PointUtf16,
+    ) -> Option<(Range<PointUtf16>, Range<PointUtf16>)> {
+        let position = self.validate_position(position);
+        self.all_bracket_pairs()
+            .into_iter()
+            .filter(|pair| pair.open.end <= position && position <= pair.close.start)
+            .max_by_key(|pair| pair.level)
+            .map(|pair| (pair.open, pair.close))
+    }
+
+    /// The number of indent guides on each of `rows` (Monaco
+    /// `guides.getLinesIndentGuides`).
+    pub fn lines_indent_guides(&self, rows: Range<u32>) -> Vec<u32> {
+        let rope = self.buffer().rope();
+        let rows = rows.start.min(rope.line_count())..rows.end.min(rope.line_count());
+        crate::view::guides::lines_indent_guides(rope, rows, self.guide_context())
+    }
+
+    /// The indentation block to highlight for a cursor on `row`, searched
+    /// within `min_row..=max_row` (Monaco `guides.getActiveIndentGuide`).
+    pub fn active_indent_guide(
+        &self,
+        row: u32,
+        min_row: u32,
+        max_row: u32,
+    ) -> crate::view::guides::ActiveIndentGuide {
+        let rope = self.buffer().rope();
+        let last = rope.line_count().saturating_sub(1);
+        crate::view::guides::active_indent_guide(
+            rope,
+            row.min(last),
+            min_row.min(last),
+            max_row.min(last),
+            self.guide_context(),
+        )
+    }
+}
+
+/// A search result (Monaco `FindMatch`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FindMatch {
+    /// Where it is.
+    pub range: Range<PointUtf16>,
+    /// With `capture_matches`, the whole match and then each group
+    /// (`None` for a group that didn't participate).
+    pub matches: Option<Vec<Option<String>>>,
+}
+
+/// Monaco `ICursorStateComputer`: the selections after an edit, from the
+/// edits that undo it.
+pub type CursorStateComputer = dyn Fn(&[(Range<PointUtf16>, String)]) -> Option<Vec<Selection>>;
+
+/// The undo group consecutive [`TextModel::push_edit_operations`] calls
+/// share until [`TextModel::push_stack_element`], as Monaco appends them to
+/// the open undo element.
+const PUSH_EDIT_OPERATIONS_GROUP: u64 = u64::MAX - 1;
+
+impl TextModel {
+    /// Applies `edits` and returns the edits that undo them, in the new
+    /// text's coordinates (Monaco `applyEdits` with `computeUndoEdits`).
+    /// Unlike Monaco, the edit is also recorded for undo, which keeps undo
+    /// history consistent with the text.
+    pub fn apply_edits(
+        &mut self,
+        edits: Vec<(Range<PointUtf16>, String)>,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(Range<PointUtf16>, String)>, text::EditError> {
+        self.apply_edits_in(edits, None, cx)
+    }
+
+    fn apply_edits_in(
+        &mut self,
+        edits: Vec<(Range<PointUtf16>, String)>,
+        group: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(Range<PointUtf16>, String)>, text::EditError> {
+        let old = self.buffer().rope().clone();
+        let edits: Vec<(Range<usize>, String)> = edits
+            .into_iter()
+            .map(|(range, text)| {
+                let range = self.validate_range(range);
+                (
+                    old.point_utf16_to_offset(range.start)..old.point_utf16_to_offset(range.end),
+                    text,
+                )
+            })
+            .collect();
+        let patch = self.edit_from(edits, group, None, cx)?;
+        let new = self.buffer().rope();
+        Ok(patch
+            .edits()
+            .iter()
+            .map(|edit| {
+                (
+                    new.offset_to_point_utf16(edit.new.start)
+                        ..new.offset_to_point_utf16(edit.new.end),
+                    old.text_for_range(edit.old.clone()),
+                )
+            })
+            .collect())
+    }
+
+    /// Applies `edits` as part of the current undo step (Monaco
+    /// `pushEditOperations`): consecutive calls join one step until
+    /// [`TextModel::push_stack_element`]. `before_cursor_state` is restored
+    /// by undo. `cursor_state_computer` gets the undo edits and returns the
+    /// selections after, which redo restores; they're returned.
+    pub fn push_edit_operations(
+        &mut self,
+        before_cursor_state: Option<Vec<Selection>>,
+        edits: Vec<(Range<PointUtf16>, String)>,
+        cursor_state_computer: Option<&CursorStateComputer>,
+        cx: &mut Context<Self>,
+    ) -> Result<Option<Vec<Selection>>, text::EditError> {
+        let undo_edits = self.apply_edits_in(edits, Some(PUSH_EDIT_OPERATIONS_GROUP), cx)?;
+        let after = cursor_state_computer.and_then(|compute| compute(&undo_edits));
+        let metadata = |selections: Option<Vec<Selection>>| {
+            selections.map(|s| std::sync::Arc::new(s) as text::TransactionMetadata)
+        };
+        self.set_undo_metadata(metadata(before_cursor_state), metadata(after.clone()));
+        Ok(after)
+    }
+
+    /// The version, except that undo and redo return to the version the
+    /// text had then (Monaco `getAlternativeVersionId`): equal values mean
+    /// equal text.
+    pub fn alternative_version_id(&self) -> usize {
+        self.buffer().alternative_version()
+    }
 }
 
 impl CodeEditor {
