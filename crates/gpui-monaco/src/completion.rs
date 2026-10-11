@@ -14,7 +14,7 @@ use crate::editor::CodeEditor;
 use crate::options::{AcceptSuggestionOnEnter, SuggestInsertMode, WordBasedSuggestions};
 use crate::providers::{
     CompletionItem, CompletionItemKind, CompletionItemTag, CompletionProvider, CompletionTrigger,
-    completion_providers,
+    completion_provider_groups, completion_providers,
 };
 use crate::suggest::memory::{Candidate, MemoryContext, SuggestMemories};
 use crate::suggest::{CompletionModel, CompletionModelOptions, LineContext};
@@ -44,6 +44,98 @@ pub(crate) fn memory_select(
     cx.default_global::<Memories>()
         .0
         .select(mode, context, candidates)
+}
+
+/// One provider's items in a request or session (an entry of Monaco's
+/// `CompletionModel.getItemsByProvider`).
+#[derive(Clone)]
+pub(crate) struct ProviderItems {
+    /// `None` for word-based suggestions.
+    pub(crate) provider: Option<Arc<dyn CompletionProvider>>,
+    pub(crate) items: Vec<CompletionItem>,
+    /// The provider's list was incomplete.
+    pub(crate) incomplete: bool,
+}
+
+/// Monaco `CompletionOptions.providerFilter` and `providerItemsToReuse`.
+#[derive(Default)]
+pub(crate) struct SuggestRequestOptions {
+    /// Only these providers are asked; all when `None`.
+    pub(crate) filter: Option<Vec<Arc<dyn CompletionProvider>>>,
+    /// Items kept from the open session instead of asking their providers
+    /// again.
+    pub(crate) reuse: Vec<ProviderItems>,
+}
+
+fn same_provider(a: &Arc<dyn CompletionProvider>, b: &Arc<dyn CompletionProvider>) -> bool {
+    std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b))
+}
+
+/// Monaco `provideSuggestionItems`: asks the provider `groups` (equal
+/// scores, best first; see
+/// [`completion_provider_groups`](crate::providers::completion_provider_groups))
+/// one group at a time, and stops after the first group that yields items
+/// `keep` accepts. Providers in `options.reuse` contribute their kept items
+/// instead of being asked, and with `options.filter` only those providers
+/// are asked.
+pub(crate) fn provide_suggestion_items(
+    groups: Vec<Vec<Arc<dyn CompletionProvider>>>,
+    options: SuggestRequestOptions,
+    context: crate::providers::ProviderContext,
+    position: PointUtf16,
+    trigger: CompletionTrigger,
+    keep: impl Fn(&CompletionItem) -> bool + 'static,
+    cx: &mut gpui::App,
+) -> Task<Vec<ProviderItems>> {
+    cx.spawn(async move |cx| {
+        let mut result = Vec::new();
+        for group in groups {
+            let mut did_add_result = false;
+            let mut tasks = Vec::new();
+            for provider in group {
+                let reused = options.reuse.iter().find(|reused| {
+                    reused
+                        .provider
+                        .as_ref()
+                        .is_some_and(|p| same_provider(p, &provider))
+                });
+                if let Some(reused) = reused {
+                    did_add_result |= !reused.items.is_empty();
+                    result.push(reused.clone());
+                    continue;
+                }
+                if options
+                    .filter
+                    .as_ref()
+                    .is_some_and(|filter| !filter.iter().any(|p| same_provider(p, &provider)))
+                {
+                    continue;
+                }
+                let task = cx.update(|cx| {
+                    provider.provide_completions(&context, position, trigger.clone(), cx)
+                });
+                tasks.push((provider, task));
+            }
+            for (provider, task) in tasks {
+                match task.await {
+                    Ok(list) => {
+                        let items: Vec<_> = list.items.into_iter().filter(|i| keep(i)).collect();
+                        did_add_result |= !items.is_empty();
+                        result.push(ProviderItems {
+                            provider: Some(provider),
+                            items,
+                            incomplete: list.incomplete,
+                        });
+                    }
+                    Err(err) => log::warn!("completions failed: {err:#}"),
+                }
+            }
+            if did_add_result {
+                break;
+            }
+        }
+        result
+    })
 }
 
 /// Where a session's items insert: what `getOverwriteInfo` needs.
@@ -104,7 +196,9 @@ pub(crate) struct Session {
     /// `suggest.selection_mode` opened the widget without a focused item,
     /// until one is focused.
     pub(crate) focused: bool,
-    incomplete: bool,
+    /// Whether each of `providers` gave an incomplete list with items
+    /// (Monaco `getIncompleteProvider`): typing more asks those again.
+    provider_incomplete: Vec<bool>,
     /// Opened by itself (typing, a trigger character), not Ctrl+Space
     /// (Monaco's `State.Auto`).
     auto: bool,
@@ -174,6 +268,37 @@ impl Session {
             word_start: self.word_start,
             word_end: self.word_end,
         }
+    }
+
+    /// Monaco `CompletionModel.getItemsByProvider`: the session's items by
+    /// provider (word-based ones under `None`). Items without a range get
+    /// the session's default ranges, as Monaco fills them in when
+    /// collecting, so they still insert there when reused by a later
+    /// request.
+    fn items_by_provider(&self) -> Vec<ProviderItems> {
+        let row = self.position.row;
+        let insert = PointUtf16::new(row, self.word_start)..self.position;
+        let replace = PointUtf16::new(row, self.word_start)..PointUtf16::new(row, self.word_end);
+        let mut groups: Vec<(Option<usize>, ProviderItems)> = Vec::new();
+        for (item, provider) in self.model.items().iter().zip(&self.item_providers) {
+            let mut item = item.clone();
+            if item.range.is_none() {
+                item.range = Some(insert.clone());
+                item.replace_range = item.replace_range.or_else(|| Some(replace.clone()));
+            }
+            match groups.iter_mut().find(|(p, _)| p == provider) {
+                Some((_, group)) => group.items.push(item),
+                None => groups.push((
+                    *provider,
+                    ProviderItems {
+                        provider: provider.map(|ix| self.providers[ix].clone()),
+                        items: vec![item],
+                        incomplete: provider.is_some_and(|ix| self.provider_incomplete[ix]),
+                    },
+                )),
+            }
+        }
+        groups.into_iter().map(|(_, group)| group).collect()
     }
 }
 
@@ -381,18 +506,35 @@ impl CodeEditor {
         auto: bool,
         cx: &mut Context<Self>,
     ) {
+        self.request_suggestions_with(trigger, auto, SuggestRequestOptions::default(), cx);
+    }
+
+    /// Monaco `SuggestModel.trigger` with `completionOptions`: asks the
+    /// providers (see [`provide_suggestion_items`]), keeping the items
+    /// `options` reuses.
+    fn request_suggestions_with(
+        &mut self,
+        trigger: CompletionTrigger,
+        auto: bool,
+        mut options: SuggestRequestOptions,
+        cx: &mut Context<Self>,
+    ) {
         // Widget inputs are plain inputs in Monaco.
         if self.options.read_only || self.widget_input {
             return;
         }
         let position = self.cursors.primary().position;
-        let model = self.model().read(cx);
-        let context = model.provider_context();
-        let providers = completion_providers(cx, self.provider_target(cx));
-        let tasks: Vec<_> = providers
+        let context = self.model().read(cx).provider_context();
+        let groups = completion_provider_groups(cx, self.provider_target(cx));
+        // Word-based suggestions are the lowest group here (Monaco
+        // registers them as a `*` provider): reused ones only show when
+        // no provider has items.
+        let reused_words = options
+            .reuse
             .iter()
-            .map(|provider| provider.provide_completions(&context, position, trigger.clone(), cx))
-            .collect();
+            .position(|reused| reused.provider.is_none())
+            .map(|ix| options.reuse.remove(ix).items);
+        let has_providers = !groups.is_empty();
         let word_start = self.word_start_at(position);
         let word_end = self.word_end_at(position);
         // Monaco `offWithInlineSuggestions`: off while an inline
@@ -418,9 +560,18 @@ impl CodeEditor {
                 .collect();
             (documents, regex, current)
         });
-        if tasks.is_empty() && words.is_none() {
+        if !has_providers && words.is_none() && reused_words.is_none() {
             return;
         }
+        let request = provide_suggestion_items(
+            groups,
+            options,
+            context,
+            position,
+            trigger.clone(),
+            self.suggestion_filter(),
+            cx,
+        );
         let trigger_character = matches!(trigger, CompletionTrigger::TriggerCharacter(_));
         // Monaco: explicit requests show "Loading..." after 50ms.
         if !auto && self.suggest.accept_best.is_none() && self.suggest.session.is_none() {
@@ -444,26 +595,29 @@ impl CodeEditor {
         self.suggest.task = Some(cx.spawn(async move |this, cx| {
             let mut items = Vec::new();
             let mut item_providers = Vec::new();
-            let mut incomplete = false;
-            for (ix, task) in tasks.into_iter().enumerate() {
-                match task.await {
-                    Ok(result) => {
-                        incomplete |= result.incomplete;
-                        item_providers.extend(std::iter::repeat_n(Some(ix), result.items.len()));
-                        items.extend(result.items);
-                    }
-                    Err(err) => log::warn!("completions failed: {err:#}"),
-                }
+            let mut providers = Vec::new();
+            let mut provider_incomplete = Vec::new();
+            for list in request.await {
+                let Some(provider) = list.provider else {
+                    continue;
+                };
+                let ix = providers.len();
+                providers.push(provider);
+                // Monaco `getIncompleteProvider` counts providers with items.
+                provider_incomplete.push(list.incomplete && !list.items.is_empty());
+                item_providers.extend(std::iter::repeat_n(Some(ix), list.items.len()));
+                items.extend(list.items);
             }
-            let Ok((mut items, mut item_providers)) = this.update(cx, |this, _| {
-                this.filter_suggestion_kinds(items, item_providers)
-            }) else {
-                return;
-            };
+            if items.is_empty()
+                && let Some(reused) = reused_words
+            {
+                item_providers = vec![None; reused.len()];
+                items = reused;
+            }
             // Monaco: word-based suggestions are a lower-ranked provider
             // group, used only when the others have nothing; collected off
             // the main thread.
-            if items.is_empty()
+            else if items.is_empty()
                 && let Some((documents, regex, current)) = words
             {
                 let words = cx
@@ -490,8 +644,7 @@ impl CodeEditor {
                 this.start_session(
                     items,
                     item_providers,
-                    providers,
-                    incomplete,
+                    (providers, provider_incomplete),
                     (position, word_start, word_end),
                     (auto, trigger_character),
                     cx,
@@ -501,25 +654,31 @@ impl CodeEditor {
         }));
     }
 
-    /// Drops hidden kinds, deprecated items (`suggest.show_deprecated`) and
-    /// snippets (`snippet_suggestions: None`), as Monaco does when
-    /// collecting.
+    /// Whether an item is kept: not of a hidden kind, deprecated
+    /// (`suggest.show_deprecated`) or a snippet (`snippet_suggestions:
+    /// None`), as Monaco filters when collecting.
+    fn suggestion_filter(&self) -> impl Fn(&CompletionItem) -> bool + 'static {
+        let hidden_kinds = self.options.suggest.hidden_kinds.clone();
+        let show_deprecated = self.options.suggest.show_deprecated;
+        let snippets = self.options.snippet_suggestions.is_some();
+        move |item| {
+            !hidden_kinds.contains(&item.kind)
+                && (show_deprecated || !item.tags.contains(&CompletionItemTag::Deprecated))
+                && (snippets || item.kind != CompletionItemKind::Snippet)
+        }
+    }
+
+    /// Drops the items [`Self::suggestion_filter`] doesn't keep.
     fn filter_suggestion_kinds(
         &self,
         items: Vec<CompletionItem>,
         item_providers: Vec<Option<usize>>,
     ) -> (Vec<CompletionItem>, Vec<Option<usize>>) {
-        let suggest = &self.options.suggest;
+        let keep = self.suggestion_filter();
         items
             .into_iter()
             .zip(item_providers)
-            .filter(|(item, _)| {
-                !suggest.hidden_kinds.contains(&item.kind)
-                    && (suggest.show_deprecated
-                        || !item.tags.contains(&CompletionItemTag::Deprecated))
-                    && (self.options.snippet_suggestions.is_some()
-                        || item.kind != CompletionItemKind::Snippet)
-            })
+            .filter(|(item, _)| keep(item))
             .unzip()
     }
 
@@ -559,8 +718,7 @@ impl CodeEditor {
         &mut self,
         items: Vec<CompletionItem>,
         item_providers: Vec<Option<usize>>,
-        providers: Vec<Arc<dyn CompletionProvider>>,
-        incomplete: bool,
+        (providers, provider_incomplete): (Vec<Arc<dyn CompletionProvider>>, Vec<bool>),
         (position, word_start, word_end): (PointUtf16, u32, u32),
         (auto, trigger_character): (bool, bool),
         cx: &mut Context<Self>,
@@ -607,7 +765,7 @@ impl CodeEditor {
             model,
             selected: 0,
             focused: !self.suggest_no_focus(auto, trigger_character, false),
-            incomplete,
+            provider_incomplete,
             auto,
             trigger_character,
             item_providers,
@@ -638,8 +796,7 @@ impl CodeEditor {
         self.start_session(
             items,
             vec![None; count],
-            Vec::new(),
-            false,
+            (Vec::new(), Vec::new()),
             (head, range.start.column, range.end.column),
             (false, false),
             cx,
@@ -1156,12 +1313,45 @@ impl CodeEditor {
         if self.inline_suppresses_suggestions(cx) && self.suggest.session.is_none() {
             return;
         }
+        // Monaco `_updateTriggerCharacters`: only the providers declaring
+        // the character are asked; the open session's items from the others
+        // are kept (`providerFilter`, `providerItemsToReuse`).
+        let supports: Vec<_> = providers
+            .into_iter()
+            .filter(|p| p.trigger_characters().contains(&ch))
+            .collect();
+        // Monaco `checkTriggerCharacter`: not when it's a case for quick
+        // suggestions (a word character that's also a trigger).
         if self.options.suggest_on_trigger_characters
-            && providers
-                .iter()
-                .any(|p| p.trigger_characters().contains(&ch))
+            && !supports.is_empty()
+            && !self.should_auto_trigger(cx)
         {
-            self.request_suggestions(CompletionTrigger::TriggerCharacter(ch), true, cx);
+            let reuse = self
+                .suggest
+                .session
+                .as_ref()
+                .map(|session| {
+                    session
+                        .items_by_provider()
+                        .into_iter()
+                        .filter(|reused| {
+                            !reused
+                                .provider
+                                .as_ref()
+                                .is_some_and(|p| supports.iter().any(|s| same_provider(s, p)))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.request_suggestions_with(
+                CompletionTrigger::TriggerCharacter(ch),
+                true,
+                SuggestRequestOptions {
+                    filter: Some(supports),
+                    reuse,
+                },
+                cx,
+            );
             return;
         }
         if self.suggest.session.is_some() {
@@ -1349,14 +1539,49 @@ impl CodeEditor {
         }
         if on_word && word_start > session.word_start {
             // Started a new word: ask again if it would have opened by
-            // itself.
+            // itself, keeping the items the providers gave (Monaco reuses
+            // `getItemsByProvider`, so only providers without items are
+            // asked again).
             if self.should_auto_trigger(cx) {
-                self.request_suggestions(CompletionTrigger::Invoke, auto, cx);
+                let reuse = session.items_by_provider();
+                self.request_suggestions_with(
+                    CompletionTrigger::Invoke,
+                    auto,
+                    SuggestRequestOptions {
+                        filter: None,
+                        reuse,
+                    },
+                    cx,
+                );
             }
             return;
         }
-        if head.column > session.position.column && session.incomplete && on_word {
-            self.request_suggestions(CompletionTrigger::Incomplete, auto, cx);
+        if head.column > session.position.column
+            && session
+                .provider_incomplete
+                .iter()
+                .any(|incomplete| *incomplete)
+            && on_word
+        {
+            // Monaco: only the providers with incomplete lists are asked
+            // again; the others' items are kept.
+            let (incomplete, complete): (Vec<_>, Vec<_>) = session
+                .items_by_provider()
+                .into_iter()
+                .partition(|items| items.incomplete);
+            let filter = incomplete
+                .into_iter()
+                .filter_map(|items| items.provider)
+                .collect();
+            self.request_suggestions_with(
+                CompletionTrigger::Incomplete,
+                auto,
+                SuggestRequestOptions {
+                    filter: Some(filter),
+                    reuse: complete,
+                },
+                cx,
+            );
             return;
         }
         let request_column = session.position.column;

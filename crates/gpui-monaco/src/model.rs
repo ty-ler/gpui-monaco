@@ -873,6 +873,9 @@ impl TextModel {
                 let dirty = std::mem::take(&mut syntax.dirty);
                 cx.emit(TextModelEvent::SyntaxUpdated);
                 cx.notify();
+                // Embedded languages the tokenizer met (Monaco's lexer
+                // requests their basic features).
+                crate::languages::embedded_languages_encountered(cx);
                 if dirty {
                     this.reparse(cx);
                 }

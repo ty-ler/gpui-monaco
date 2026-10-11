@@ -373,19 +373,21 @@ fn record_selector(
 #[gpui::test]
 fn choosing_between_document_formatters(cx: &mut TestAppContext) {
     let (editor, cx) = setup("text", cx);
+    // Registered in reverse: equal scores are tried newest first, as in
+    // Monaco's `LanguageFeatureRegistry.ordered`.
     cx.update(|_, cx| {
-        register_document_formatting_provider(cx, LanguageSelector::All, Named("one", Some("a")));
         register_document_formatting_provider(cx, LanguageSelector::All, Named("two", None));
+        register_document_formatting_provider(cx, LanguageSelector::All, Named("one", Some("a")));
+        register_document_range_formatting_provider(
+            cx,
+            LanguageSelector::All,
+            NamedRange("three", Some("b")),
+        );
         // Extension `a` already formats documents: not offered again.
         register_document_range_formatting_provider(
             cx,
             LanguageSelector::All,
             NamedRange("one range", Some("a")),
-        );
-        register_document_range_formatting_provider(
-            cx,
-            LanguageSelector::All,
-            NamedRange("three", Some("b")),
         );
     });
     assert!(editor.update(cx, |e, cx| e.format_document(cx)));
@@ -430,14 +432,44 @@ fn choosing_between_document_formatters(cx: &mut TestAppContext) {
     cx.update(|_, cx| disposable.dispose(cx));
 }
 
+/// Monaco `LanguageFeatureRegistry.ordered`: a formatter for the model's
+/// language beats a `*` one whenever they were registered, and among
+/// equals the newest runs.
+#[gpui::test]
+fn the_best_ranked_formatter_runs(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("text", cx);
+    cx.update(|_, cx| {
+        register_document_formatting_provider(
+            cx,
+            LanguageSelector::language("rust"),
+            Named("rust", None),
+        );
+        register_document_formatting_provider(cx, LanguageSelector::All, Named("any", None));
+    });
+    editor.update(cx, |e, cx| e.format_document(cx));
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "rust");
+    cx.update(|_, cx| {
+        register_document_formatting_provider(
+            cx,
+            LanguageSelector::language("rust"),
+            Named("newer", None),
+        );
+    });
+    editor.update(cx, |e, cx| e.format_document(cx));
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "newer");
+}
+
 /// A selector answering later, e.g. after asking the user: the choice runs
 /// then, unless the text changed meanwhile.
 #[gpui::test]
 fn choosing_a_formatter_asynchronously(cx: &mut TestAppContext) {
     let (editor, cx) = setup("text", cx);
+    // Newest first.
     cx.update(|_, cx| {
-        register_document_formatting_provider(cx, LanguageSelector::All, Named("one", None));
         register_document_formatting_provider(cx, LanguageSelector::All, Named("two", None));
+        register_document_formatting_provider(cx, LanguageSelector::All, Named("one", None));
     });
     let (send, receive) = async_channel::unbounded::<Option<usize>>();
     let disposable = cx.update(|_, cx| {
@@ -461,16 +493,17 @@ fn choosing_a_formatter_asynchronously(cx: &mut TestAppContext) {
 #[gpui::test]
 fn choosing_between_range_formatters(cx: &mut TestAppContext) {
     let (editor, cx) = setup("a\nb\n", cx);
+    // Newest first.
     cx.update(|_, cx| {
         register_document_range_formatting_provider(
             cx,
             LanguageSelector::All,
-            NamedRange("x", None),
+            NamedRange("y", None),
         );
         register_document_range_formatting_provider(
             cx,
             LanguageSelector::All,
-            NamedRange("y", None),
+            NamedRange("x", None),
         );
     });
     let (asked, disposable) = record_selector(Some(1), cx);

@@ -69,8 +69,8 @@ pub(crate) fn sorted_locations(
     let mut locations: Vec<Location> = locations
         .into_iter()
         .map(|location| Location {
-            uri: location.uri.or_else(|| queried.cloned()),
-            range: location.range,
+            uri: location.uri.clone().or_else(|| queried.cloned()),
+            ..location
         })
         .collect();
     locations.sort_by(|a, b| {
@@ -79,7 +79,7 @@ pub(crate) fn sorted_locations(
             .then(a.range.start.cmp(&b.range.start))
             .then(a.range.end.cmp(&b.range.end))
     });
-    locations.dedup();
+    locations.dedup_by(|a, b| a.uri == b.uri && a.range == b.range);
     locations
 }
 
@@ -121,10 +121,8 @@ impl CodeEditor {
         position: PointUtf16,
         cx: &mut Context<Self>,
     ) -> Vec<Task<anyhow::Result<Vec<Location>>>> {
-        let model = self.model().read(cx);
-        let context = model.provider_context();
-        let language = model.language_id().map(|l| l.to_string());
-        let language = language.as_deref();
+        let context = self.model().read(cx).provider_context();
+        let language = self.provider_target(cx);
         match kind {
             LocationKind::Definition => definition_providers(cx, language)
                 .into_iter()
@@ -393,11 +391,14 @@ impl CodeEditor {
             cx.emit(CodeEditorEvent::OpenLocation(location.clone()));
             return false;
         }
-        let start = location.range.start;
+        // Monaco `_openReference`: a link's `targetSelectionRange`, else its
+        // range.
+        let range = location.selection_range();
+        let start = range.start;
         self.set_selections(&[Selection::collapsed(start)], cx);
         self.reveal_range(start..start, RevealType::NearTopIfOutsideViewport, cx);
         if highlight {
-            self.highlight_symbol(location.range.clone(), cx);
+            self.highlight_symbol(range, cx);
         }
         true
     }
@@ -625,6 +626,7 @@ mod tests {
         Location {
             uri: uri.map(SharedString::from),
             range: PointUtf16::new(row, 0)..PointUtf16::new(row, 3),
+            ..Default::default()
         }
     }
 

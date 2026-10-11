@@ -260,6 +260,7 @@ impl ReferenceProvider for DemoReferences {
                 found.push(Location {
                     uri: None,
                     range: PointUtf16::new(row, column)..PointUtf16::new(row, column + len),
+                    ..Default::default()
                 });
             }
         }
@@ -294,6 +295,7 @@ impl RenameProvider for DemoRename {
                 .collect();
             Ok(Some(WorkspaceEdit {
                 edits: vec![(None, edits)],
+                ..Default::default()
             }))
         })
     }
@@ -322,6 +324,7 @@ impl CodeActionProvider for DemoCodeActions {
                         None,
                         vec![(marker.range.start..marker.range.start, "_".to_string())],
                     )],
+                    ..Default::default()
                 }),
                 ..Default::default()
             })
@@ -346,6 +349,7 @@ impl CodeActionProvider for DemoCodeActions {
                             word.to_uppercase(),
                         )],
                     )],
+                    ..Default::default()
                 }),
                 ..Default::default()
             });
@@ -379,10 +383,16 @@ impl DefinitionProvider for DemoDefinitions {
                         return None;
                     }
                     let column = line[..column].encode_utf16().count() as u32;
+                    let name = PointUtf16::new(row, column)
+                        ..PointUtf16::new(row, column + word.encode_utf16().count() as u32);
+                    // A `LocationLink`: the definition hover shows the whole
+                    // line; navigating and peek select the name.
                     Some(Location {
                         uri: None,
-                        range: PointUtf16::new(row, column)
-                            ..PointUtf16::new(row, column + word.encode_utf16().count() as u32),
+                        range: PointUtf16::new(row, 0)
+                            ..PointUtf16::new(row, line.encode_utf16().count() as u32),
+                        target_selection_range: Some(name),
+                        ..Default::default()
                     })
                 })
         });
@@ -480,6 +490,7 @@ impl CodeLensProvider for DemoCodeLens {
                 Some(CodeLens {
                     range: PointUtf16::new(row, column + 3)..PointUtf16::new(row, column + 3),
                     command: None,
+                    ..Default::default()
                 })
             })
             .collect();
@@ -507,6 +518,7 @@ impl CodeLensProvider for DemoCodeLens {
                 command: Some(Command {
                     id: "playground.references".into(),
                     title: format!("{count} reference{}", if count == 1 { "" } else { "s" }).into(),
+                    tooltip: Some("Show where it's used".into()),
                     arguments: vec![name.into()],
                 }),
                 ..lens

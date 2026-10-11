@@ -120,7 +120,10 @@ pub mod widgets;
 pub use api::{
     BracketPairInfo, CursorStateComputer, DecorationsCollection, FindMatch, WordAtPosition,
 };
-pub use bulk_edit::{has_workspace_edit_preview_handler, set_workspace_edit_preview_handler};
+pub use bulk_edit::{
+    has_workspace_edit_preview_handler, set_workspace_edit_preview_handler,
+    set_workspace_file_edit_handler,
+};
 pub use commands::{add_command, execute_command, register_command, unregister_command};
 pub use decorations::{
     BlockDecoration, DecorationId, DecorationOptions, DecorationUnderline, InjectedText,
@@ -142,7 +145,10 @@ pub use find_widget::FindWidget;
 pub use goto::has_symbol_navigation;
 pub use hover::{HOVER_DELAY, HoverWidget};
 pub use inline_completions::inline_edits::InlineEditViewKind;
-pub use languages::{on_language, set_language_configuration, set_monarch_tokens_provider};
+pub use languages::{
+    LanguageTokenizer, on_language, on_language_encountered, register_tokens_provider_factory,
+    set_language_configuration, set_monarch_tokens_provider, set_tokens_provider,
+};
 pub use layout_info::{LayoutInfo, MinimapLayoutInfo, OverviewRulerPosition, RenderMinimap};
 pub use markers::{
     Marker, MarkerFilter, MarkerSeverity, MarkerTag, MarkerZone, ModelMarker, RelatedInformation,

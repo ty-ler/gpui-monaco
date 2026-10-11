@@ -24,10 +24,10 @@ use crate::actions::{
 };
 use crate::cursor::Selection;
 use crate::editor::{CodeEditor, CodeEditorEvent};
-use crate::model::{TextModelEvent, model_for_uri};
+use crate::model::TextModelEvent;
 use crate::providers::{
-    NewSymbolName, NewSymbolNameTag, NewSymbolNameTriggerKind, RenameLocation, TextEdit,
-    WorkspaceEdit, new_symbol_names_providers, rename_providers,
+    NewSymbolName, NewSymbolNameTag, NewSymbolNameTriggerKind, RenameLocation,
+    new_symbol_names_providers, rename_providers,
 };
 use crate::theme::{EditorColors, Theme};
 use crate::widgets::{ContentWidget, ContentWidgetPreference, WidgetId};
@@ -444,20 +444,19 @@ impl CodeEditor {
         let context = model.provider_context();
         let position = self.cursors.primary().position;
         let state = self.rename_state(cx);
-        // Monaco `RenameSkeleton.resolveRenameLocation`: providers in order
-        // until one without `resolveRenameLocation`.
-        let mut resolves = Vec::new();
-        for (ix, provider) in providers.iter().enumerate() {
-            match provider.resolve_rename_location(&context, position, cx) {
-                Some(task) => resolves.push((ix, task)),
-                None => break,
-            }
-        }
         self.start_cancellable(crate::editor_state::CancellableOperation::Rename);
         self.rename.task = Some(cx.spawn(async move |this, cx| {
+            // Monaco `RenameSkeleton.resolveRenameLocation`: one provider
+            // at a time, best first, until one answers or one doesn't
+            // resolve locations.
             let mut rejects: Vec<String> = Vec::new();
             let mut resolved = None;
-            for (ix, task) in resolves {
+            for (ix, provider) in providers.iter().enumerate() {
+                let Ok(Some(task)) = this.update(cx, |_, cx| {
+                    provider.resolve_rename_location(&context, position, cx)
+                }) else {
+                    break;
+                };
                 match task.await {
                     Ok(Some(location)) => {
                         resolved = Some((ix, location));
@@ -762,21 +761,22 @@ impl CodeEditor {
         let context = model.provider_context();
         let providers = rename_providers(cx, self.provider_target(cx));
         let state = self.rename_state(cx);
-        let tasks: Vec<_> = providers
-            .iter()
-            .skip(session.provider)
-            .map(|provider| {
-                provider.provide_rename_edits(&context, session.position, &new_name, cx)
-            })
-            .collect();
         let position = session.position;
+        let first = session.provider;
         let label: SharedString =
             format!("Renaming '{}' to '{new_name}'", session.location.text).into();
         self.start_cancellable(crate::editor_state::CancellableOperation::Rename);
         self.rename.task = Some(cx.spawn(async move |this, cx| {
+            // Monaco `RenameSkeleton._provideRenameEdits`: one provider at a
+            // time, from the one that resolved the location.
             let mut rejects: Vec<String> = Vec::new();
             let mut edit = None;
-            for task in tasks {
+            for provider in providers.iter().skip(first) {
+                let Ok(task) = this.update(cx, |_, cx| {
+                    provider.provide_rename_edits(&context, position, &new_name, cx)
+                }) else {
+                    return;
+                };
                 match task.await {
                     Ok(Some(result)) => {
                         edit = Some(result);
@@ -810,55 +810,6 @@ impl CodeEditor {
                 .ok();
             }
         }));
-    }
-
-    /// Applies `edit`: to this editor's model as one undo step with the
-    /// cursors following, and to other documents found with
-    /// [`model_for_uri`](crate::model_for_uri) (Monaco's bulk edit
-    /// service). Nothing is applied if a document can't be found.
-    pub fn apply_workspace_edit(
-        &mut self,
-        edit: WorkspaceEdit,
-        cx: &mut Context<Self>,
-    ) -> anyhow::Result<()> {
-        let uri = self.model().read(cx).uri().cloned();
-        let mut here: Vec<TextEdit> = Vec::new();
-        let mut elsewhere = Vec::new();
-        for (target, edits) in edit.edits {
-            match target {
-                None => here.extend(edits),
-                Some(target) if Some(&target) == uri.as_ref() => here.extend(edits),
-                Some(target) => {
-                    let model = model_for_uri(cx, &target)
-                        .ok_or_else(|| anyhow::anyhow!("{target} isn't open"))?;
-                    elsewhere.push((model, edits));
-                }
-            }
-        }
-        for (model, edits) in elsewhere {
-            model
-                .update(cx, |model, cx| {
-                    let mut edits: Vec<_> = edits
-                        .into_iter()
-                        .map(|(range, text)| {
-                            (
-                                model.offset_at(range.start)..model.offset_at(range.end),
-                                text,
-                            )
-                        })
-                        .collect();
-                    edits.sort_by_key(|(range, _)| range.start);
-                    model.edit(edits, cx).map(|_| ())
-                })
-                .map_err(|err| anyhow::anyhow!("{err:?}"))?;
-        }
-        if !here.is_empty() {
-            here.sort_by_key(|(range, _)| range.start);
-            self.push_undo_stop(cx);
-            self.execute_edits(here, None, cx);
-            self.push_undo_stop(cx);
-        }
-        Ok(())
     }
 }
 

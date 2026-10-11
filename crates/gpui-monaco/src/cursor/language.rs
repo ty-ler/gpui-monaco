@@ -212,43 +212,53 @@ fn is_word_char(c: char) -> bool {
 impl<'a> LanguageSupport<'a> {
     pub fn new(ctx: &'a LanguageContext<'a>) -> Self {
         let config = ctx.config;
-        let auto_closing_pairs: Vec<AutoClosingPair> = if !config.auto_closing_pairs.is_empty() {
-            config
-                .auto_closing_pairs
+        // Monaco `CharacterPairSupport`: `autoClosingPairs` when set (even
+        // empty), else the brackets.
+        let mut auto_closing_pairs: Vec<AutoClosingPair> = match &config.auto_closing_pairs {
+            Some(pairs) => pairs
                 .iter()
                 .map(|p| AutoClosingPair::new(&p.open, &p.close, &p.not_in))
-                .collect()
-        } else {
-            config
-                .brackets
+                .collect(),
+            None => config
+                .brackets()
                 .iter()
                 .map(|(open, close)| AutoClosingPair::new(open, close, &[]))
-                .collect()
+                .collect(),
         };
-        let surrounding_pairs = if !config.surrounding_pairs.is_empty() {
-            config
-                .surrounding_pairs
+        // The deprecated `__electricCharacterSupport.docComment` closes too.
+        if let Some(doc) = config
+            .electric_character_support
+            .as_ref()
+            .and_then(|support| support.doc_comment.as_ref())
+        {
+            auto_closing_pairs.push(AutoClosingPair::new(
+                &doc.open,
+                doc.close.as_deref().unwrap_or_default(),
+                &[],
+            ));
+        }
+        let surrounding_pairs = match &config.surrounding_pairs {
+            Some(pairs) => pairs
                 .iter()
                 .map(|p| (p.open.clone(), p.close.clone()))
-                .collect()
-        } else {
-            auto_closing_pairs
+                .collect(),
+            None => auto_closing_pairs
                 .iter()
                 .map(|p| (p.open.clone(), p.close.clone()))
-                .collect()
+                .collect(),
         };
-        let has_on_enter = !config.brackets.is_empty()
+        let has_on_enter = !config.brackets().is_empty()
             || config.indentation_rules.is_some()
-            || !config.on_enter_rules.is_empty();
+            || !config.on_enter_rules().is_empty();
         let on_enter_brackets = has_on_enter.then(|| {
-            let brackets: Vec<(String, String)> = if config.brackets.is_empty() {
+            let brackets: Vec<(String, String)> = if config.brackets().is_empty() {
                 vec![
                     ("(".into(), ")".into()),
                     ("{".into(), "}".into()),
                     ("[".into(), "]".into()),
                 ]
             } else {
-                config.brackets.clone()
+                config.brackets().to_vec()
             };
             brackets
                 .iter()
@@ -272,7 +282,7 @@ impl<'a> LanguageSupport<'a> {
                 .collect()
         });
         let bracket_pieces: Vec<String> = config
-            .brackets
+            .brackets()
             .iter()
             .filter(|(open, close)| !open.is_empty() && !close.is_empty())
             .flat_map(|(open, close)| [open, close])
@@ -304,7 +314,7 @@ impl<'a> LanguageSupport<'a> {
             on_enter_brackets,
             bracket_regex,
             block_comment_start: config
-                .comments
+                .comments()
                 .block_comment
                 .as_ref()
                 .map(|(start, _)| start.clone()),
@@ -544,7 +554,7 @@ impl<'a> LanguageSupport<'a> {
         let brackets = self.on_enter_brackets.as_ref()?;
         // (1): regExpRules
         if auto_indent >= AutoIndent::Advanced {
-            for rule in &self.config().on_enter_rules {
+            for rule in self.config().on_enter_rules() {
                 let matches = rule.before_text.is_match(before_enter_text)
                     && rule
                         .after_text
@@ -1014,7 +1024,7 @@ pub(crate) fn good_indent_for_line(
 /// characters of the closing brackets.
 pub(crate) fn is_electric_character(lang: &LanguageSupport, ch: &str) -> bool {
     lang.config()
-        .brackets
+        .brackets()
         .iter()
         .filter(|(open, close)| !open.is_empty() && !close.is_empty())
         .any(|(_, close)| last_char(close).is_some_and(|c| c.to_string() == ch))
@@ -1031,7 +1041,7 @@ pub(crate) fn on_electric_character(
 ) -> Option<String> {
     let brackets: Vec<(String, String)> = lang
         .config()
-        .brackets
+        .brackets()
         .iter()
         .filter(|(open, close)| !open.is_empty() && !close.is_empty())
         .map(|(open, close)| (open.to_lowercase(), close.to_lowercase()))

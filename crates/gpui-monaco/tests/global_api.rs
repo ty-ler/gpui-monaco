@@ -489,6 +489,7 @@ fn run(id: &str, cx: &mut gpui::App) -> anyhow::Result<()> {
             id: id.to_string().into(),
             title: SharedString::default(),
             arguments: vec![serde_json::json!(1)],
+            ..Default::default()
         },
     )
 }

@@ -429,6 +429,7 @@ impl CompletionProvider for Resolving {
                         id: "test.after".into(),
                         title: "After".into(),
                         arguments: vec![serde_json::json!(7)],
+                        ..Default::default()
                     }),
                     ..CompletionItem::new("second", CompletionItemKind::Function)
                 },
@@ -1356,4 +1357,268 @@ fn off_when_inline_completions_stops_waiting_after_750ms(cx: &mut TestAppContext
     cx.executor().advance_clock(Duration::from_secs(5));
     cx.run_until_parked();
     assert_eq!(ghost(&editor, cx), None);
+}
+
+/// Counts its requests and answers `items` (default ranges), declaring
+/// `triggers`.
+struct Counted {
+    count: Rc<Cell<usize>>,
+    items: &'static [&'static str],
+    triggers: Vec<char>,
+    incomplete: bool,
+}
+
+impl CompletionProvider for Counted {
+    fn trigger_characters(&self) -> Vec<char> {
+        self.triggers.clone()
+    }
+
+    fn provide_completions(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        _: CompletionTrigger,
+        _: &mut App,
+    ) -> Task<anyhow::Result<CompletionList>> {
+        self.count.set(self.count.get() + 1);
+        Task::ready(Ok(CompletionList {
+            items: self
+                .items
+                .iter()
+                .map(|label| CompletionItem::new(*label, CompletionItemKind::Property))
+                .collect(),
+            incomplete: self.incomplete,
+        }))
+    }
+}
+
+/// Registers a [`Counted`] provider, returning its request count.
+fn counted(
+    cx: &mut VisualTestContext,
+    selector: LanguageSelector,
+    items: &'static [&'static str],
+    triggers: &[char],
+    incomplete: bool,
+) -> Rc<Cell<usize>> {
+    let count = Rc::new(Cell::new(0));
+    let provider = Counted {
+        count: count.clone(),
+        items,
+        triggers: triggers.to_vec(),
+        incomplete,
+    };
+    cx.update(|_, cx| register_completion_provider(cx, selector, provider));
+    count
+}
+
+fn sorted_labels(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<String> {
+    let mut labels = labels(editor, cx).unwrap_or_default();
+    labels.sort();
+    labels
+}
+
+/// Monaco `provideSuggestionItems`: providers are asked in groups of equal
+/// score, and a group with items stops the lower ones (a language's own
+/// providers over a `*` one).
+#[gpui::test]
+fn provider_groups_stop_at_the_first_with_items(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "",
+        |o| o.word_based_suggestions = WordBasedSuggestions::Off,
+        cx,
+    );
+    let star = counted(cx, LanguageSelector::All, &["star"], &[], false);
+    let own = counted(cx, LanguageSelector::language("demo"), &["own"], &[], false);
+    let other = counted(
+        cx,
+        LanguageSelector::language("demo"),
+        &["other"],
+        &[],
+        false,
+    );
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert_eq!(sorted_labels(&editor, cx), ["other", "own"]);
+    assert_eq!((own.get(), other.get(), star.get()), (1, 1, 0));
+}
+
+/// The `*` group answers when the language's providers have no items.
+#[gpui::test]
+fn lower_provider_groups_answer_when_higher_ones_are_empty(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "",
+        |o| o.word_based_suggestions = WordBasedSuggestions::Off,
+        cx,
+    );
+    let star = counted(cx, LanguageSelector::All, &["star"], &[], false);
+    let own = counted(cx, LanguageSelector::language("demo"), &[], &[], false);
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert_eq!(sorted_labels(&editor, cx), ["star"]);
+    assert_eq!((own.get(), star.get()), (1, 1));
+}
+
+/// Monaco `suggestModel.test.ts` "registerCompletionItemProvider with
+/// letters as trigger characters block other completion items to show up
+/// #127815": a trigger character asks only the providers declaring it,
+/// unless it's a word character starting quick suggestions.
+#[gpui::test]
+fn trigger_characters_ask_only_their_providers(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "",
+        |o| o.word_based_suggestions = WordBasedSuggestions::Off,
+        cx,
+    );
+    let word = counted(cx, LanguageSelector::All, &["AAAA"], &[], false);
+    let triggered = counted(cx, LanguageSelector::All, &["AAAA"], &['a', '.'], false);
+    cx.simulate_input(".");
+    settle(cx);
+    assert_eq!(labels(&editor, cx).map(|l| l.len()), Some(1));
+    assert_eq!((word.get(), triggered.get()), (0, 1));
+    cx.simulate_keystrokes("escape");
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| m.set_value("", cx))
+    });
+    cx.simulate_input("a");
+    settle(cx);
+    assert_eq!(labels(&editor, cx).map(|l| l.len()), Some(2));
+}
+
+/// Monaco `suggestModel.test.ts` "#21484: Trigger character always force a
+/// new completion session": the open session's items of providers that
+/// don't declare the typed trigger character are kept
+/// (`providerItemsToReuse`, filtered by their own ranges), and only the
+/// providers that do are asked.
+#[gpui::test]
+fn trigger_characters_keep_the_other_providers_items(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "",
+        |o| o.word_based_suggestions = WordBasedSuggestions::Off,
+        cx,
+    );
+    let count = Rc::new(Cell::new(0));
+    let counter = count.clone();
+    provide(cx, move |p| {
+        counter.set(counter.get() + 1);
+        vec![CompletionItem {
+            range: Some(PointUtf16::new(p.row, 0)..p),
+            ..CompletionItem::new("foo.bar", CompletionItemKind::Property)
+        }]
+    });
+    cx.update(|_, cx| register_completion_provider(cx, LanguageSelector::All, Boom));
+    cx.simulate_input("foo");
+    settle(cx);
+    assert_eq!(labels(&editor, cx), Some(vec!["foo.bar".to_string()]));
+    cx.simulate_input(".");
+    settle(cx);
+    assert_eq!(sorted_labels(&editor, cx), ["boom", "foo.bar"]);
+    assert_eq!(count.get(), 1);
+}
+
+/// The `.`-triggered provider of Monaco's #21484 test: `boom` replacing
+/// the character before the cursor, or nothing after a `.`.
+struct Boom;
+impl CompletionProvider for Boom {
+    fn trigger_characters(&self) -> Vec<char> {
+        vec!['.']
+    }
+
+    fn provide_completions(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        _: CompletionTrigger,
+        _: &mut App,
+    ) -> Task<anyhow::Result<CompletionList>> {
+        let line = context.snapshot.line(position.row);
+        let after_dot = line[..position.column as usize].ends_with('.');
+        let start = if after_dot {
+            position
+        } else {
+            PointUtf16::new(position.row, position.column.saturating_sub(1))
+        };
+        Task::ready(Ok(CompletionList {
+            items: vec![CompletionItem {
+                range: Some(start..position),
+                ..CompletionItem::new("boom", CompletionItemKind::Property)
+            }],
+            incomplete: false,
+        }))
+    }
+}
+
+/// Monaco `suggestModel.test.ts` "Snippets gone from IntelliSense #173244"
+/// and `_onNewContext`: typing on after an incomplete list asks only the
+/// providers whose lists were incomplete, keeping the others' items.
+#[gpui::test]
+fn incomplete_lists_ask_only_their_providers_again(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "",
+        |o| o.word_based_suggestions = WordBasedSuggestions::Off,
+        cx,
+    );
+    let complete = counted(cx, LanguageSelector::All, &["log"], &[], false);
+    let incomplete = counted(cx, LanguageSelector::All, &["locals"], &[], true);
+    cx.simulate_input("l");
+    settle(cx);
+    assert_eq!(sorted_labels(&editor, cx), ["locals", "log"]);
+    cx.simulate_input("o");
+    settle(cx);
+    assert_eq!(sorted_labels(&editor, cx), ["locals", "log"]);
+    assert_eq!((complete.get(), incomplete.get()), (1, 2));
+    // Accepting a kept item still replaces the typed word.
+    cx.simulate_keystrokes("down");
+    let selected = editor.read_with(cx, |e, _| e.selected_suggestion().unwrap().1.label);
+    cx.simulate_keystrokes("enter");
+    assert_eq!(text(&editor, cx), selected.to_string());
+}
+
+/// Monaco `suggestModel.test.ts` "Trigger (full) completions when
+/// (incomplete) completions are already active #99504": starting a new
+/// word keeps the items providers gave and asks the others again.
+#[gpui::test]
+fn a_new_word_keeps_the_items_providers_gave(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "",
+        |o| o.word_based_suggestions = WordBasedSuggestions::Off,
+        cx,
+    );
+    let count_a = Rc::new(Cell::new(0));
+    let count_b = Rc::new(Cell::new(0));
+    let a = count_a.clone();
+    cx.update(|_, cx| {
+        register_completion_provider(
+            cx,
+            LanguageSelector::All,
+            Items(move |p: PointUtf16| {
+                a.set(a.get() + 1);
+                vec![CompletionItem {
+                    range: Some(PointUtf16::new(0, 0)..p),
+                    ..CompletionItem::new("Z aaa", CompletionItemKind::Class)
+                }]
+            }),
+        )
+    });
+    let b = count_b.clone();
+    cx.update(|_, cx| {
+        register_completion_provider(
+            cx,
+            LanguageSelector::All,
+            Items(move |p: PointUtf16| {
+                b.set(b.get() + 1);
+                // Only after `Z `: the word at the cursor starts with `a`.
+                if p.column < 3 {
+                    return Vec::new();
+                }
+                vec![CompletionItem::new("aaa", CompletionItemKind::Folder)]
+            }),
+        )
+    });
+    cx.simulate_input("Z");
+    settle(cx);
+    assert_eq!(labels(&editor, cx), Some(vec!["Z aaa".to_string()]));
+    cx.simulate_input(" a");
+    settle(cx);
+    assert_eq!(sorted_labels(&editor, cx), ["Z aaa", "aaa"]);
+    assert_eq!((count_a.get(), count_b.get()), (1, 2));
 }

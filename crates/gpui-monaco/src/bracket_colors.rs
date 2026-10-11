@@ -47,7 +47,7 @@ impl CodeEditor {
             config
                 .colorized_bracket_pairs
                 .clone()
-                .unwrap_or_else(|| config.brackets.clone())
+                .unwrap_or_else(|| config.brackets().to_vec())
         });
         let guides = self.options.guides.bracket_pairs != crate::options::BracketPairGuides::Off;
         let Some(pairs) = pairs.filter(|p| {

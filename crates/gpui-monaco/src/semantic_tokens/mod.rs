@@ -230,9 +230,8 @@ impl CodeEditor {
         }
         let model = self.model().read(cx);
         let context = model.provider_context();
-        // The most recently registered first, as Monaco orders them.
-        let mut providers = document_semantic_tokens_providers(cx, self.provider_target(cx));
-        providers.reverse();
+        // Best first: by selector score, then newest (Monaco `ordered`).
+        let providers = document_semantic_tokens_providers(cx, self.provider_target(cx));
         if providers.is_empty() {
             if !self.semantic.store.is_empty() {
                 self.semantic.store.set(None, false);
@@ -430,7 +429,9 @@ impl CodeEditor {
                     ..PointUtf16::new(end_row, model.buffer().line_len_utf16(end_row));
                 let version = model.buffer().version();
                 let provider =
-                    document_range_semantic_tokens_providers(cx, this.provider_target(cx)).pop()?;
+                    document_range_semantic_tokens_providers(cx, this.provider_target(cx))
+                        .into_iter()
+                        .next()?;
                 let task =
                     provider.provide_document_range_semantic_tokens(&context, range.clone(), cx);
                 Some((provider, task, range, version))

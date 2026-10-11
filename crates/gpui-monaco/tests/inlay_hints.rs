@@ -227,6 +227,7 @@ impl InlayHintsProvider for Parts {
                     location: Some(Location {
                         uri: None,
                         range: p(1, 7)..p(1, 10),
+                        ..Default::default()
                     }),
                     ..label_part("Foo")
                 },
@@ -235,6 +236,7 @@ impl InlayHintsProvider for Parts {
                         id: "test.showT".into(),
                         title: "Show T".into(),
                         arguments: vec![serde_json::json!(1)],
+                        ..Default::default()
                     }),
                     ..label_part("<T>")
                 },

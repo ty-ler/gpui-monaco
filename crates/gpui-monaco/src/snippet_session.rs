@@ -419,8 +419,8 @@ impl CodeEditor {
                 uri.filter(|_| path.is_none()),
                 config
                     .as_ref()
-                    .and_then(|c| c.comments.line_comment.clone()),
-                config.and_then(|c| c.comments.block_comment.clone()),
+                    .and_then(|c| c.comments().line_comment.clone()),
+                config.and_then(|c| c.comments().block_comment.clone()),
             )
         };
         let config = self.cursor_config(cx);
@@ -1136,6 +1136,7 @@ impl CodeEditor {
                     id: NEXT_PLACEHOLDER_COMMAND.into(),
                     title: "Go to next placeholder...".into(),
                     arguments: Vec::new(),
+                    ..Default::default()
                 }),
                 ..CompletionItem::new(option.clone(), CompletionItemKind::Value)
             })

@@ -20,6 +20,7 @@ fn here(row: u32, start: u32, end: u32) -> Location {
     Location {
         uri: None,
         range: p(row, start)..p(row, end),
+        ..Default::default()
     }
 }
 
@@ -27,6 +28,7 @@ fn elsewhere(uri: &str, row: u32) -> Location {
     Location {
         uri: Some(uri.to_string().into()),
         range: p(row, 0)..p(row, 3),
+        ..Default::default()
     }
 }
 
@@ -620,6 +622,7 @@ fn definitions_in_other_models_are_previewed(cx: &mut TestAppContext) {
         definitions: vec![Location {
             uri: Some(uri.into()),
             range: p(1, 0)..p(4, 1),
+            ..Default::default()
         }],
         ..Default::default()
     };
@@ -703,4 +706,51 @@ fn stable_peek_keeps_the_peek_view_open_on_escape(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("escape");
     draw(cx);
     assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
+}
+
+/// Monaco `LocationLink`: navigation selects the `targetSelectionRange`
+/// (the definition's name) while the hover shows the whole `range`, and
+/// Cmd/Ctrl+hover underlines the `originSelectionRange`.
+#[gpui::test]
+fn location_links_select_and_underline_their_ranges(cx: &mut TestAppContext) {
+    let fixed = Fixed {
+        definitions: vec![Location {
+            range: p(0, 0)..p(0, 17),
+            target_selection_range: Some(p(0, 3)..p(0, 6)),
+            origin_selection_range: Some(p(2, 4)..p(2, 10)),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(fixed, cx);
+    set_cursor(&editor, cx, p(2, 5));
+    cx.simulate_keystrokes("f12");
+    cx.run_until_parked();
+    assert_eq!(head(&editor, cx), p(0, 3));
+    let id = editor.entity_id();
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    let color = editor.read_with(cx, |e, _| e.colors().symbol_highlight_background);
+    let highlighted: Vec<_> = model.update(cx, |m, _| {
+        m.all_decorations(Some(id))
+            .into_iter()
+            .filter(|d| d.options.background == Some(color))
+            .map(|d| d.range)
+            .collect()
+    });
+    assert_eq!(highlighted, vec![3..6usize]);
+
+    // The whole range in the hover, the origin range underlined: `add(1)`
+    // on line 2 (bytes 34..40).
+    assert_eq!(
+        definition_hover(&editor, cx, p(2, 5)),
+        ["\n```\nfn add(a: i32) {}\n```\n"]
+    );
+    let underlined: Vec<_> = model.update(cx, |m, _| {
+        m.all_decorations(Some(id))
+            .into_iter()
+            .filter(|d| d.options.underline.is_some())
+            .map(|d| d.range)
+            .collect()
+    });
+    assert_eq!(underlined, vec![34..40usize]);
 }

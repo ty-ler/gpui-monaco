@@ -51,6 +51,7 @@ impl CodeActionProvider for Actions {
 fn replace(range: Range<PointUtf16>, text: &str) -> WorkspaceEdit {
     WorkspaceEdit {
         edits: vec![(None, vec![(range, text.to_string())])],
+        ..Default::default()
     }
 }
 
@@ -141,6 +142,7 @@ fn quick_fix_menu_applies_edits_and_commands(cx: &mut TestAppContext) {
                     id: "test.after".into(),
                     title: "After".into(),
                     arguments: vec![serde_json::json!(7)],
+                    ..Default::default()
                 }),
                 ..action("Extract to function", "refactor.extract")
             },
@@ -405,6 +407,7 @@ impl CodeActionProvider for Documented {
             id: id.to_string().into(),
             title: title.to_string().into(),
             arguments: Vec::new(),
+            ..Default::default()
         };
         vec![
             (
@@ -562,6 +565,7 @@ fn previewing_an_action_goes_through_the_preview_handler(cx: &mut TestAppContext
                 id: "test.after".into(),
                 title: "After".into(),
                 arguments: Vec::new(),
+                ..Default::default()
             }),
             ..action("Extract to function", "refactor.extract")
         }],

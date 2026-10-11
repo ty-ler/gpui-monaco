@@ -240,6 +240,7 @@ fn go_to_locations_runs_as_a_command(cx: &mut TestAppContext) {
                     json!({ "lineNumber": 4, "column": 5 }),
                     json!([location(URI, 1, 4, 7)]),
                 ],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -259,6 +260,7 @@ fn go_to_locations_runs_as_a_command(cx: &mut TestAppContext) {
                     json!([location(URI, 1, 4, 7), location(URI, 3, 5, 8)]),
                     json!("goto"),
                 ],
+                ..Default::default()
             },
         )
         .unwrap();
@@ -287,6 +289,7 @@ fn go_to_locations_in_other_models_asks_the_host(cx: &mut TestAppContext) {
             vec![Location {
                 uri: Some("file:///src/lib.rs".into()),
                 range: p(4, 0)..p(4, 3),
+                ..Default::default()
             }],
             Some(GoToLocation::Goto),
             None,
@@ -492,6 +495,7 @@ impl DefinitionProvider for Pending {
             Ok(vec![Location {
                 uri: None,
                 range: PointUtf16::new(0, 3)..PointUtf16::new(0, 6),
+                ..Default::default()
             }])
         })
     }

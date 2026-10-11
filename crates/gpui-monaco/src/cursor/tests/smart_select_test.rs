@@ -30,7 +30,7 @@ fn word_regex() -> Regex {
 
 fn config() -> LanguageConfiguration {
     LanguageConfiguration {
-        brackets: brackets(&[("(", ")"), ("{", "}"), ("[", "]")]),
+        brackets: Some(brackets(&[("(", ")"), ("{", "}"), ("[", "]")])),
         ..Default::default()
     }
 }

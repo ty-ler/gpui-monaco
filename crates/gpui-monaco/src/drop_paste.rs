@@ -17,8 +17,8 @@ use crate::cursor::Selection;
 use crate::editor::CodeEditor;
 use crate::providers::{
     DataTransfer, DataTransferItem, DocumentDropEditProvider, DocumentDropOrPasteEdit,
-    DocumentPasteEditProvider, DocumentPasteTriggerKind, EditInsertText, EditYieldTo,
-    ProviderContext, edit_kind_contains, matches_mime_type,
+    DocumentPasteContext, DocumentPasteEditProvider, DocumentPasteTriggerKind, EditInsertText,
+    EditYieldTo, ProviderContext, edit_kind_contains, matches_mime_type,
 };
 use crate::snippet::parser::SnippetParser;
 use crate::snippet_session::SnippetInsertOptions;
@@ -268,11 +268,50 @@ pub(crate) fn default_paste_providers() -> Vec<Arc<dyn DocumentPasteEditProvider
     ]
 }
 
+/// Resolves an edit before it's applied: its provider's
+/// `resolve_document_drop_edit` or `resolve_document_paste_edit`.
+type EditResolver = std::rc::Rc<
+    dyn Fn(
+        &DocumentDropOrPasteEdit,
+        &mut App,
+    ) -> Option<Task<anyhow::Result<DocumentDropOrPasteEdit>>>,
+>;
+
+/// An edit and how to resolve it (Monaco keeps the provider with each
+/// edit).
+#[derive(Clone)]
+pub(crate) struct ProvidedEdit {
+    edit: DocumentDropOrPasteEdit,
+    resolve: Option<EditResolver>,
+}
+
+fn drop_resolver(provider: &Arc<dyn DocumentDropEditProvider>) -> EditResolver {
+    let provider = provider.clone();
+    std::rc::Rc::new(move |edit, cx| provider.resolve_document_drop_edit(edit, cx))
+}
+
+fn paste_resolver(provider: &Arc<dyn DocumentPasteEditProvider>) -> EditResolver {
+    let provider = provider.clone();
+    std::rc::Rc::new(move |edit, cx| provider.resolve_document_paste_edit(edit, cx))
+}
+
+/// The edit tasks of a request, each with its provider's resolver.
+type EditTasks = Vec<(
+    EditResolver,
+    Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>>,
+)>;
+
 /// Monaco `sortEditsByYieldTo`: a topological sort putting edits after the
 /// ones they yield to, otherwise keeping their order.
+#[cfg(test)]
 pub(crate) fn sort_edits_by_yield_to(
     edits: Vec<DocumentDropOrPasteEdit>,
 ) -> Vec<DocumentDropOrPasteEdit> {
+    sort_by_yield_to(edits, |edit| edit)
+}
+
+/// [`sort_edits_by_yield_to`] for items holding edits.
+fn sort_by_yield_to<T>(edits: Vec<T>, edit_of: impl Fn(&T) -> &DocumentDropOrPasteEdit) -> Vec<T> {
     let yields_to = |y: &EditYieldTo, other: &DocumentDropOrPasteEdit| match y {
         EditYieldTo::MimeType(mime) => other.handled_mime_type.as_ref() == Some(mime),
         EditYieldTo::Kind(kind) => other
@@ -285,9 +324,9 @@ pub(crate) fn sort_edits_by_yield_to(
         .enumerate()
         .map(|(ix, edit)| {
             let mut targets = Vec::new();
-            for y in &edit.yield_to {
+            for y in &edit_of(edit).yield_to {
                 for (other_ix, other) in edits.iter().enumerate() {
-                    if other_ix != ix && yields_to(y, other) {
+                    if other_ix != ix && yields_to(y, edit_of(other)) {
                         targets.push(other_ix);
                     }
                 }
@@ -332,7 +371,7 @@ pub(crate) fn sort_edits_by_yield_to(
     let mut order = Vec::new();
     let all: Vec<usize> = (0..edits.len()).collect();
     visit(&all, &after, &mut visited, &mut Vec::new(), &mut order);
-    let mut edits: Vec<Option<DocumentDropOrPasteEdit>> = edits.into_iter().map(Some).collect();
+    let mut edits: Vec<Option<T>> = edits.into_iter().map(Some).collect();
     order
         .into_iter()
         .filter_map(|ix| edits[ix].take())
@@ -350,7 +389,7 @@ enum PostEditKind {
 /// button that switches between them.
 pub(crate) struct PostEdit {
     kind: PostEditKind,
-    edits: Vec<DocumentDropOrPasteEdit>,
+    edits: Vec<ProvidedEdit>,
     active: usize,
     ranges: Vec<Range<PointUtf16>>,
     /// The text version right after applying it.
@@ -362,6 +401,8 @@ pub(crate) struct PostEdit {
 pub(crate) struct DropPasteState {
     pub(crate) task: Option<Task<()>>,
     pub(crate) post_edit: Option<PostEdit>,
+    /// Resolving the edit about to be applied.
+    resolve_task: Option<Task<()>>,
 }
 
 /// The post-edit button.
@@ -426,20 +467,19 @@ impl CodeEditor {
                     .is_none_or(|mimes| mimes.iter().any(|mime| data.matches(mime)))
             })
             .collect();
-        let tasks: Vec<_> = providers
+        let tasks: EditTasks = providers
             .iter()
-            .map(|provider| provider.provide_document_drop_edits(&context, position, &data, cx))
+            .map(|provider| {
+                (
+                    drop_resolver(provider),
+                    provider.provide_document_drop_edits(&context, position, &data, cx),
+                )
+            })
             .collect();
         let version = self.snapshot.version();
         self.start_cancellable(crate::editor_state::CancellableOperation::DropOrPaste);
         self.drop_paste.task = Some(cx.spawn(async move |this, cx| {
-            let mut edits = Vec::new();
-            for task in tasks {
-                if let Ok(result) = task.await {
-                    edits.extend(result);
-                }
-            }
-            let edits = sort_edits_by_yield_to(edits);
+            let edits = collect_edits(tasks).await;
             this.update(cx, |this, cx| {
                 // Monaco cancels when the text changed meanwhile.
                 if this.snapshot.version() != version || edits.is_empty() {
@@ -485,7 +525,10 @@ impl CodeEditor {
             &ranges,
             data,
             &fallback,
-            DocumentPasteTriggerKind::Automatic,
+            DocumentPasteContext {
+                trigger_kind: DocumentPasteTriggerKind::Automatic,
+                only: None,
+            },
             cx,
         );
         let version = self.snapshot.version();
@@ -500,7 +543,10 @@ impl CodeEditor {
                             &providers,
                             &ranges,
                             &data,
-                            DocumentPasteTriggerKind::Automatic,
+                            &DocumentPasteContext {
+                                trigger_kind: DocumentPasteTriggerKind::Automatic,
+                                only: None,
+                            },
                             cx,
                         )
                     }) else {
@@ -516,7 +562,7 @@ impl CodeEditor {
                 }
                 // Only the plain text edit: the normal paste.
                 if edits.is_empty()
-                    || (edits.len() == 1 && edits[0].kind.as_deref() == Some("text.plain"))
+                    || (edits.len() == 1 && edits[0].edit.kind.as_deref() == Some("text.plain"))
                 {
                     this.paste_item_for_providers(fallback, cx);
                     return;
@@ -563,13 +609,24 @@ impl CodeEditor {
         providers: &[Arc<dyn DocumentPasteEditProvider>],
         ranges: &[Range<PointUtf16>],
         data: &DataTransfer,
-        trigger: DocumentPasteTriggerKind,
+        paste_context: &DocumentPasteContext,
         cx: &mut App,
-    ) -> Vec<Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>>> {
+    ) -> EditTasks {
         let context = self.provider_context_now(cx);
         providers
             .iter()
-            .map(|p| p.provide_document_paste_edits(&context, ranges, data, trigger, cx))
+            .map(|p| {
+                (
+                    paste_resolver(p),
+                    p.provide_document_paste_edits_with_context(
+                        &context,
+                        ranges,
+                        data,
+                        paste_context,
+                        cx,
+                    ),
+                )
+            })
             .collect()
     }
 
@@ -597,7 +654,10 @@ impl CodeEditor {
             &ranges,
             data,
             &item,
-            DocumentPasteTriggerKind::PasteAs,
+            DocumentPasteContext {
+                trigger_kind: DocumentPasteTriggerKind::PasteAs,
+                only: only.clone(),
+            },
             cx,
         );
         let version = self.snapshot.version();
@@ -612,7 +672,10 @@ impl CodeEditor {
                             &providers,
                             &ranges,
                             &data,
-                            DocumentPasteTriggerKind::PasteAs,
+                            &DocumentPasteContext {
+                                trigger_kind: DocumentPasteTriggerKind::PasteAs,
+                                only: only.clone(),
+                            },
                             cx,
                         )
                     }) else {
@@ -623,7 +686,12 @@ impl CodeEditor {
             };
             let mut edits = collect_edits(tasks).await;
             if let Some(only) = &only {
-                edits.retain(|e| e.kind.as_ref().is_some_and(|k| edit_kind_contains(only, k)));
+                edits.retain(|e| {
+                    e.edit
+                        .kind
+                        .as_ref()
+                        .is_some_and(|k| edit_kind_contains(only, k))
+                });
             }
             this.update_in(cx, |this, window, cx| {
                 if this.snapshot.version() != version {
@@ -638,14 +706,16 @@ impl CodeEditor {
                     return;
                 }
                 if only.is_some() && edits.len() == 1 {
-                    this.apply_post_edit_once(&ranges, &edits[0], cx);
+                    this.apply_post_edit_resolved(ranges, edits[0].clone(), cx);
                     return;
                 }
-                let labels = edits.iter().map(|e| e.title.clone()).collect();
+                let labels = edits.iter().map(|e| e.edit.title.clone()).collect();
                 this.show_quick_pick(
                     Some("Paste As...".into()),
                     labels,
-                    move |this, ix, _, cx| this.apply_post_edit_once(&ranges, &edits[ix], cx),
+                    move |this, ix, _, cx| {
+                        this.apply_post_edit_resolved(ranges.clone(), edits[ix].clone(), cx)
+                    },
                     window,
                     cx,
                 );
@@ -688,6 +758,61 @@ impl CodeEditor {
         }
         self.model()
             .update(cx, |model, _| model.push_stack_element());
+        if let Some(additional) = edit.additional_edit.clone().filter(|e| !e.is_empty()) {
+            let apply = self.apply_workspace_edit(additional, cx);
+            cx.spawn(async move |_, _| {
+                if let Err(err) = apply.await {
+                    log::warn!("drop or paste edit's additional edit failed: {err:#}");
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// Resolves `edit` with its provider, if needed, then runs `apply` with
+    /// it, unless the text changed meanwhile (Monaco resolves the edit it's
+    /// about to apply).
+    fn resolve_post_edit(
+        &mut self,
+        mut edit: ProvidedEdit,
+        apply: impl FnOnce(&mut Self, ProvidedEdit, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let task = edit
+            .resolve
+            .take()
+            .and_then(|resolve| resolve(&edit.edit, cx));
+        let Some(task) = task else {
+            apply(self, edit, cx);
+            return;
+        };
+        let version = self.snapshot.version();
+        self.drop_paste.resolve_task = Some(cx.spawn(async move |this, cx| {
+            match task.await {
+                Ok(resolved) => edit.edit = resolved,
+                Err(err) => log::warn!("resolving a drop or paste edit failed: {err:#}"),
+            }
+            this.update(cx, |this, cx| {
+                if this.snapshot.version() == version {
+                    apply(this, edit, cx);
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// [`Self::apply_post_edit_once`] after resolving the edit.
+    fn apply_post_edit_resolved(
+        &mut self,
+        ranges: Vec<Range<PointUtf16>>,
+        edit: ProvidedEdit,
+        cx: &mut Context<Self>,
+    ) {
+        self.resolve_post_edit(
+            edit,
+            move |this, edit, cx| this.apply_post_edit_once(&ranges, &edit.edit, cx),
+            cx,
+        );
     }
 
     /// Monaco `PostEditWidgetManager.applyEditAndShowIfNeeded`.
@@ -695,12 +820,24 @@ impl CodeEditor {
         &mut self,
         kind: PostEditKind,
         ranges: Vec<Range<PointUtf16>>,
-        edits: Vec<DocumentDropOrPasteEdit>,
+        mut edits: Vec<ProvidedEdit>,
         active: usize,
         show: crate::options::ShowEditSelector,
         cx: &mut Context<Self>,
     ) {
-        self.apply_post_edit_once(&ranges, &edits[active], cx);
+        if edits[active].resolve.is_some() {
+            let edit = edits[active].clone();
+            self.resolve_post_edit(
+                edit,
+                move |this, resolved, cx| {
+                    edits[active] = resolved;
+                    this.apply_post_edit(kind, ranges, edits, active, show, cx);
+                },
+                cx,
+            );
+            return;
+        }
+        self.apply_post_edit_once(&ranges, &edits[active].edit, cx);
         if show == crate::options::ShowEditSelector::Never || edits.len() < 2 {
             return;
         }
@@ -780,9 +917,9 @@ impl CodeEditor {
             .enumerate()
             .map(|(ix, edit)| {
                 if ix == post_edit.active {
-                    format!("{} ✓", edit.title).into()
+                    format!("{} ✓", edit.edit.title).into()
                 } else {
-                    edit.title.clone()
+                    edit.edit.title.clone()
                 }
             })
             .collect();
@@ -879,7 +1016,7 @@ fn copy_mime_types(item: &gpui::ClipboardItem) -> Vec<String> {
 /// The paste providers' requests: started right away, or once the data
 /// prepared at copy time is in.
 enum PasteRequests {
-    Started(Vec<Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>>>),
+    Started(EditTasks),
     AfterCopyData(PendingPaste),
 }
 
@@ -983,7 +1120,7 @@ impl CodeEditor {
         ranges: &[Range<PointUtf16>],
         data: DataTransfer,
         item: &gpui::ClipboardItem,
-        trigger: DocumentPasteTriggerKind,
+        paste_context: DocumentPasteContext,
         cx: &mut App,
     ) -> PasteRequests {
         let id = CodeEditor::clipboard_metadata(item).and_then(|metadata| metadata.id);
@@ -1016,9 +1153,13 @@ impl CodeEditor {
                         .any(|mime| data.matches(mime))
                 })
                 .collect();
-            return PasteRequests::Started(
-                self.paste_tasks(&providers, ranges, &data, trigger, cx),
-            );
+            return PasteRequests::Started(self.paste_tasks(
+                &providers,
+                ranges,
+                &data,
+                &paste_context,
+                cx,
+            ));
         }
         PasteRequests::AfterCopyData(PendingPaste {
             providers,
@@ -1029,16 +1170,17 @@ impl CodeEditor {
     }
 }
 
-async fn collect_edits(
-    tasks: Vec<Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>>>,
-) -> Vec<DocumentDropOrPasteEdit> {
+async fn collect_edits(tasks: EditTasks) -> Vec<ProvidedEdit> {
     let mut edits = Vec::new();
-    for task in tasks {
+    for (resolve, task) in tasks {
         if let Ok(result) = task.await {
-            edits.extend(result);
+            edits.extend(result.into_iter().map(|edit| ProvidedEdit {
+                edit,
+                resolve: Some(resolve.clone()),
+            }));
         }
     }
-    sort_edits_by_yield_to(edits)
+    sort_by_yield_to(edits, |provided| &provided.edit)
 }
 
 /// The clipboard as paste data: its text as `text/plain`, and copied

@@ -1,48 +1,80 @@
-//! Monaco's `monaco.languages` extras: `setLanguageConfiguration` and
-//! `setMonarchTokensProvider` at runtime, `onLanguage`, and guessing a
-//! model's language from its uri and first line.
+//! Monaco's `monaco.languages` extras: `setLanguageConfiguration`,
+//! `setMonarchTokensProvider`, `setTokensProvider` and
+//! `registerTokensProviderFactory` at runtime, `onLanguage` and
+//! `onLanguageEncountered`, and guessing a model's language from its uri
+//! and first line.
 //!
-//! Monaco's `setColorMap` and `getEncodedLanguageId` have no equivalent:
-//! they serve encoded token metadata (language and color indices packed
-//! into numbers, from `EncodedTokensProvider`s), while highlighters here
-//! give named tokens that the theme resolves by name.
+//! Monaco's `setColorMap`, `getEncodedLanguageId` and
+//! `EncodedTokensProvider` have no equivalent: they serve encoded token
+//! metadata (language and color indices packed into numbers), while
+//! highlighters here give named tokens that the theme resolves by name.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{App, Global, SharedString};
-use syntax::{LanguageConfiguration, MonarchHighlighter, MonarchTokenizer};
+use gpui::{App, Global, SharedString, Task};
+use syntax::{
+    HighlighterFactory, LanguageConfiguration, MonarchHighlighter, MonarchTokenizer,
+    TokensProvider, TokensProviderHighlighter,
+};
 
 use crate::model::language_registry;
 use crate::registry::Disposable;
 
-/// An `on_language` callback.
+/// An `on_language` or `on_language_encountered` callback.
 type LanguageCallback = Box<dyn FnOnce(&mut App)>;
 
-/// Languages already requested by a model, and `on_language` callbacks
-/// waiting for theirs.
+/// Callbacks waiting for a language, by id, with their registration ids.
+type Waiting = HashMap<SharedString, Vec<(u64, LanguageCallback)>>;
+
+/// Languages already requested, and the callbacks waiting for theirs:
+/// Monaco's `requestRichLanguageFeatures` (a model uses the language) and
+/// `requestBasicLanguageFeatures` (a model uses it, or it's met while
+/// tokenizing another).
 #[derive(Default)]
 struct RequestedLanguages {
-    seen: HashSet<SharedString>,
-    waiting: HashMap<SharedString, Vec<LanguageCallback>>,
+    rich: HashSet<SharedString>,
+    basic: HashSet<SharedString>,
+    next_id: u64,
+    waiting_rich: Waiting,
+    waiting_basic: Waiting,
 }
 
 impl Global for RequestedLanguages {}
 
-/// Replaces the editing configuration (brackets, comments, auto-closing
-/// pairs, indentation rules, …) of the registered language `language_id`
-/// at runtime (Monaco `languages.setLanguageConfiguration`). Every model of
-/// that language picks it up and emits
+/// Layers `config` over the configuration of the registered language
+/// `language_id` at runtime (Monaco `languages.setLanguageConfiguration`).
+/// Each field `config` sets replaces the language's, and fields it leaves
+/// `None` keep theirs, so `{ comments }` alone keeps the brackets and
+/// auto-closing pairs; with several, the latest wins per field. Every model
+/// of the language picks it up and emits
 /// [`TextModelEvent::LanguageConfigurationChanged`](crate::TextModelEvent::LanguageConfigurationChanged).
-/// Returns whether the language is registered.
+///
+/// Fails, as Monaco throws, for an unknown language. Disposing the result
+/// removes this configuration, restoring what it replaced.
 pub fn set_language_configuration(
     cx: &mut App,
     language_id: &str,
     config: LanguageConfiguration,
-) -> bool {
-    if !language_registry(cx).set_configuration(language_id, config) {
-        return false;
-    }
+) -> anyhow::Result<Disposable> {
+    let Some(registration) = language_registry(cx).register_configuration(language_id, config)
+    else {
+        anyhow::bail!("Cannot set configuration for unknown language {language_id}");
+    };
+    refresh_configuration(cx, language_id);
+    let language_id = language_id.to_string();
+    Ok(Disposable::new(move |cx| {
+        if language_registry(cx).unregister_configuration(&language_id, registration) {
+            refresh_configuration(cx, &language_id);
+        }
+    }))
+}
+
+/// Re-resolves the language of models in `language_id` after its
+/// configuration changed.
+fn refresh_configuration(cx: &mut App, language_id: &str) {
     for model in crate::registry::models(cx) {
         model.update(cx, |model, cx| {
             if model.language_id().is_some_and(|id| id == language_id) {
@@ -50,20 +82,20 @@ pub fn set_language_configuration(
             }
         });
     }
-    true
 }
 
-/// Highlights the registered language `language_id` with a Monarch grammar
-/// (Monaco `languages.setMonarchTokensProvider`): the JSON form of
-/// Monaco's `IMonarchLanguage`, regexes as strings (see
-/// [`syntax::monarch`] for the regex dialect). It replaces the language's
-/// tree-sitter or custom highlighting; models of the language, and of
-/// Monarch languages embedding others, re-tokenize. [`colorize`] and
-/// [`tokenize`] use it too.
+/// Highlights the language `language_id` with a Monarch grammar (Monaco
+/// `languages.setMonarchTokensProvider`): the JSON form of Monaco's
+/// `IMonarchLanguage`, regexes as strings (see [`syntax::monarch`] for the
+/// regex dialect). It replaces the language's tree-sitter or custom
+/// highlighting; models of the language, and of Monarch languages
+/// embedding others, re-tokenize. [`colorize`] and [`tokenize`] use it
+/// too.
 ///
-/// Fails, as Monaco throws, for an unknown language or an invalid grammar.
+/// As in Monaco, the language needn't be registered yet: the grammar
+/// applies once it is. Fails, as Monaco throws, for an invalid grammar.
 /// Disposing the result restores the previous highlighting, unless another
-/// provider replaced this one since.
+/// tokenizer replaced this one since.
 ///
 /// [`colorize`]: crate::colorize::colorize
 /// [`tokenize`]: crate::colorize::tokenize
@@ -72,27 +104,144 @@ pub fn set_monarch_tokens_provider(
     language_id: &str,
     grammar: &serde_json::Value,
 ) -> anyhow::Result<Disposable> {
-    let registry = language_registry(cx);
-    let Some(language) = registry.language_for_id(language_id) else {
-        anyhow::bail!("Cannot set tokens provider for unknown language {language_id}");
-    };
     let tokenizer = Arc::new(MonarchTokenizer::new(language_id, grammar)?);
-    let factory = MonarchHighlighter::factory(tokenizer);
-    let previous = language.highlighter.clone();
+    Ok(install_highlighter(
+        cx,
+        language_id,
+        MonarchHighlighter::factory(tokenizer),
+    ))
+}
+
+/// Highlights the registered language `language_id` with a line-state
+/// tokenizer (Monaco `languages.setTokensProvider`), run by a
+/// [`TokensProviderHighlighter`]: each line is tokenized from the state the
+/// previous one ended in, and edits re-tokenize until a line ends as it did
+/// before. It replaces the language's other highlighting, like
+/// [`set_monarch_tokens_provider`].
+///
+/// Fails, as Monaco throws, for an unknown language. For a provider
+/// that's only available later (Monaco's `Thenable` providers), use
+/// [`register_tokens_provider_factory`]. Disposing the result restores the
+/// previous highlighting, unless another tokenizer replaced this one
+/// since.
+pub fn set_tokens_provider<P: TokensProvider>(
+    cx: &mut App,
+    language_id: &str,
+    provider: P,
+) -> anyhow::Result<Disposable> {
+    if language_registry(cx).language_for_id(language_id).is_none() {
+        anyhow::bail!("Cannot set tokens provider for unknown language {language_id}");
+    }
+    Ok(install_highlighter(
+        cx,
+        language_id,
+        TokensProviderHighlighter::factory(Arc::new(provider)),
+    ))
+}
+
+/// What a [`register_tokens_provider_factory`] factory creates (Monaco's
+/// `TokensProvider | EncodedTokensProvider | IMonarchLanguage`).
+pub enum LanguageTokenizer {
+    /// A highlighter, such as a [`TokensProviderHighlighter`] (see
+    /// [`LanguageTokenizer::tokens_provider`]).
+    Highlighter(HighlighterFactory),
+    /// A Monarch grammar, as for [`set_monarch_tokens_provider`].
+    Monarch(serde_json::Value),
+}
+
+impl LanguageTokenizer {
+    /// A [`TokensProvider`], run by a [`TokensProviderHighlighter`].
+    pub fn tokens_provider(provider: impl TokensProvider) -> Self {
+        Self::Highlighter(TokensProviderHighlighter::factory(Arc::new(provider)))
+    }
+
+    fn into_factory(self, language_id: &str) -> anyhow::Result<HighlighterFactory> {
+        Ok(match self {
+            Self::Highlighter(factory) => factory,
+            Self::Monarch(grammar) => {
+                MonarchHighlighter::factory(Arc::new(MonarchTokenizer::new(language_id, &grammar)?))
+            }
+        })
+    }
+}
+
+/// Registers a factory for the tokenizer of `language_id` (Monaco
+/// `languages.registerTokensProviderFactory`), called once, when the
+/// language is first needed: when a model uses it or it's embedded in
+/// another (see [`on_language_encountered`]), or right away if that
+/// already happened. Its task's tokenizer then replaces the language's
+/// highlighting, like [`set_tokens_provider`]; `None` leaves it as is.
+///
+/// Disposing the result drops the factory if it wasn't called yet, and
+/// otherwise restores the previous highlighting, unless another tokenizer
+/// replaced this one since.
+pub fn register_tokens_provider_factory(
+    cx: &mut App,
+    language_id: impl Into<SharedString>,
+    factory: impl FnOnce(&mut App) -> Task<anyhow::Result<Option<LanguageTokenizer>>> + 'static,
+) -> Disposable {
+    let language_id = language_id.into();
+    let installed: Rc<RefCell<Option<Disposable>>> = Rc::default();
+    let disposed = Rc::new(Cell::new(false));
+    let create = {
+        let language_id = language_id.clone();
+        let installed = installed.clone();
+        let disposed = disposed.clone();
+        move |cx: &mut App| {
+            let task = factory(cx);
+            cx.spawn(async move |cx| {
+                let result = task.await.and_then(|tokenizer| {
+                    tokenizer
+                        .map(|tokenizer| tokenizer.into_factory(&language_id))
+                        .transpose()
+                });
+                cx.update(|cx| match result {
+                    _ if disposed.get() => {}
+                    Ok(Some(factory)) => {
+                        *installed.borrow_mut() =
+                            Some(install_highlighter(cx, &language_id, factory));
+                    }
+                    Ok(None) => {}
+                    Err(err) => log::warn!("tokens provider for {language_id} failed: {err:#}"),
+                });
+            })
+            .detach();
+        }
+    };
+    let registration = when_requested(cx, language_id, false, true, Box::new(create));
+    Disposable::new(move |cx| {
+        disposed.set(true);
+        registration.dispose(cx);
+        if let Some(installed) = installed.borrow_mut().take() {
+            installed.dispose(cx);
+        }
+    })
+}
+
+/// Sets the highlighter of `language_id` (registered or not yet), re-tokenizing
+/// affected models; disposing restores the previous one if this one is still
+/// set (Monaco's tokenization registry).
+fn install_highlighter(cx: &mut App, language_id: &str, factory: HighlighterFactory) -> Disposable {
+    let registry = language_registry(cx);
+    let current = |registry: &syntax::LanguageRegistry, id: &str| {
+        registry
+            .language_for_id(id)
+            .map(|language| language.highlighter.clone())
+            .unwrap_or_else(|| registry.pending_highlighter(id))
+    };
+    let previous = current(&registry, language_id);
     registry.set_highlighter(language_id, Some(factory.clone()));
     refresh_highlighting(cx, language_id);
     let language_id = language_id.to_string();
-    Ok(Disposable::new(move |cx| {
+    Disposable::new(move |cx| {
         let registry = language_registry(cx);
-        let ours = registry
-            .language_for_id(&language_id)
-            .and_then(|language| language.highlighter.clone())
-            .is_some_and(|current| Arc::ptr_eq(&current, &factory));
+        let ours =
+            current(&registry, &language_id).is_some_and(|current| Arc::ptr_eq(&current, &factory));
         if ours {
             registry.set_highlighter(&language_id, previous);
             refresh_highlighting(cx, &language_id);
         }
-    }))
+    })
 }
 
 /// Re-resolves the highlighter of models in `language_id`, and of models in
@@ -117,40 +266,120 @@ fn refresh_highlighting(cx: &mut App, language_id: &str) {
 /// Runs `callback` once, the first time a model uses `language_id` (Monaco
 /// `languages.onLanguage`), e.g. to register its providers lazily. Models
 /// resolve their language when first shown. As in Monaco, a language that
-/// was already used doesn't call back.
+/// was already used doesn't call back. Disposing the result before then
+/// cancels it.
 pub fn on_language(
     cx: &mut App,
     language_id: impl Into<SharedString>,
     callback: impl FnOnce(&mut App) + 'static,
-) {
-    let language_id = language_id.into();
-    let requested = cx.default_global::<RequestedLanguages>();
-    if requested.seen.contains(&language_id) {
-        return;
-    }
-    requested
-        .waiting
-        .entry(language_id)
-        .or_default()
-        .push(Box::new(callback));
+) -> Disposable {
+    when_requested(cx, language_id.into(), true, false, Box::new(callback))
 }
 
-/// A model now uses `language_id` (Monaco
-/// `requestRichLanguageFeatures`): the first time, runs its `on_language`
-/// callbacks after the current update.
-pub(crate) fn language_requested(language_id: &SharedString, cx: &mut App) {
+/// Runs `callback` once, the first time `language_id` is needed for basic
+/// features such as highlighting (Monaco `languages.onLanguageEncountered`):
+/// when a model uses it, or when it's met while tokenizing another
+/// language, like a Monarch grammar's `nextEmbedded`. That's where to set
+/// an embedded language's tokenizer lazily. As in Monaco, a language that
+/// was already encountered doesn't call back. Disposing the result before
+/// then cancels it.
+pub fn on_language_encountered(
+    cx: &mut App,
+    language_id: impl Into<SharedString>,
+    callback: impl FnOnce(&mut App) + 'static,
+) -> Disposable {
+    when_requested(cx, language_id.into(), false, false, Box::new(callback))
+}
+
+/// Queues `callback` for the first rich (`rich`) or basic request of
+/// `language_id`; with `if_seen`, runs it now if that already happened.
+fn when_requested(
+    cx: &mut App,
+    language_id: SharedString,
+    rich: bool,
+    if_seen: bool,
+    callback: LanguageCallback,
+) -> Disposable {
     let requested = cx.default_global::<RequestedLanguages>();
-    if !requested.seen.insert(language_id.clone()) {
+    let seen = if rich {
+        requested.rich.contains(&language_id)
+    } else {
+        requested.basic.contains(&language_id)
+    };
+    if seen {
+        if if_seen {
+            callback(cx);
+        }
+        return Disposable::none();
+    }
+    requested.next_id += 1;
+    let id = requested.next_id;
+    let waiting = if rich {
+        &mut requested.waiting_rich
+    } else {
+        &mut requested.waiting_basic
+    };
+    waiting
+        .entry(language_id.clone())
+        .or_default()
+        .push((id, callback));
+    Disposable::new(move |cx| {
+        let requested = cx.default_global::<RequestedLanguages>();
+        let waiting = if rich {
+            &mut requested.waiting_rich
+        } else {
+            &mut requested.waiting_basic
+        };
+        if let Some(callbacks) = waiting.get_mut(&language_id) {
+            callbacks.retain(|(other, _)| *other != id);
+        }
+    })
+}
+
+/// A model now uses `language_id` (Monaco `requestRichLanguageFeatures`,
+/// which also requests basic features): the first time, runs its
+/// `on_language_encountered` and `on_language` callbacks after the current
+/// update.
+pub(crate) fn language_requested(language_id: &SharedString, cx: &mut App) {
+    language_encountered(language_id, cx);
+    let requested = cx.default_global::<RequestedLanguages>();
+    if !requested.rich.insert(language_id.clone()) {
         return;
     }
-    let Some(callbacks) = requested.waiting.remove(language_id) else {
+    let Some(callbacks) = requested.waiting_rich.remove(language_id) else {
         return;
     };
     cx.defer(move |cx| {
-        for callback in callbacks {
+        for (_, callback) in callbacks {
             callback(cx);
         }
     });
+}
+
+/// `language_id` is needed for basic features (Monaco
+/// `requestBasicLanguageFeatures`): the first time, runs its
+/// `on_language_encountered` callbacks after the current update.
+pub(crate) fn language_encountered(language_id: &SharedString, cx: &mut App) {
+    let requested = cx.default_global::<RequestedLanguages>();
+    if !requested.basic.insert(language_id.clone()) {
+        return;
+    }
+    let Some(callbacks) = requested.waiting_basic.remove(language_id) else {
+        return;
+    };
+    cx.defer(move |cx| {
+        for (_, callback) in callbacks {
+            callback(cx);
+        }
+    });
+}
+
+/// Requests basic features for the languages tokenizers met since the last
+/// call (Monarch `nextEmbedded`), after a model's highlighting updated.
+pub(crate) fn embedded_languages_encountered(cx: &mut App) {
+    for language_id in language_registry(cx).take_encountered_languages() {
+        language_encountered(&SharedString::from(language_id.to_string()), cx);
+    }
 }
 
 /// The path of `uri` for language guessing (Monaco uses `fsPath` for

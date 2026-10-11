@@ -146,8 +146,11 @@ impl CodeEditor {
                 .await;
             let Ok(requests) = this.update(cx, |this, cx| {
                 let context = this.model().read(cx).provider_context();
+                // Monaco `getLinks`: `ordered(model).reverse()`, so the
+                // best-ranked provider's links win.
                 link_providers(cx, this.provider_target(cx))
                     .into_iter()
+                    .rev()
                     .map(|provider| {
                         let task = provider.provide_links(&context, cx);
                         (provider, task)

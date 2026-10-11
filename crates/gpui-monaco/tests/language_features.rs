@@ -159,11 +159,13 @@ impl DefinitionProvider for Definitions {
             Location {
                 uri: None,
                 range: PointUtf16::new(0, 3)..PointUtf16::new(0, 7),
+                ..Default::default()
             }
         } else {
             Location {
                 uri: Some("file:///other.demo".into()),
                 range: PointUtf16::new(9, 0)..PointUtf16::new(9, 1),
+                ..Default::default()
             }
         };
         Task::ready(Ok(vec![location]))

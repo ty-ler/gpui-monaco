@@ -1119,6 +1119,7 @@ impl CommandLocation {
         crate::providers::Location {
             uri: self.uri.clone().map(Into::into),
             range: self.range.to_range(),
+            ..Default::default()
         }
     }
 }

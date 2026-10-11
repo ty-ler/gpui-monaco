@@ -199,7 +199,9 @@ fn register(
     answers: Vec<(&'static str, Option<Ranges>)>,
 ) -> Rc<RefCell<Vec<&'static str>>> {
     let calls = Rc::new(RefCell::new(Vec::new()));
-    for (name, answer) in answers {
+    // Registered last to first: equal scores are tried newest first (Monaco
+    // `LanguageFeatureRegistry.ordered`), so `answers` is in priority order.
+    for (name, answer) in answers.into_iter().rev() {
         let provider = Fixed {
             name,
             answer,

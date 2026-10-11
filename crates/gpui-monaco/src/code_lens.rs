@@ -12,7 +12,8 @@ use crate::providers::{CodeLens, CodeLensProvider, Command, code_lens_providers}
 use crate::widgets::{ViewZone, WidgetId, ZoneHeight};
 use gpui::{
     AppContext as _, Context, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels,
-    Render, SharedString, Styled, Task, WeakEntity, Window, div, px,
+    Render, SharedString, StatefulInteractiveElement as _, Styled, Task, WeakEntity, Window, div,
+    px,
 };
 
 /// Monaco's debounce floor for requesting and resolving lenses.
@@ -61,6 +62,8 @@ pub struct CodeLensLine {
     line_height: Pixels,
     color: gpui::Hsla,
     hover: gpui::Hsla,
+    /// Colors for the commands' tooltips (Monaco `Command.tooltip`).
+    colors: Arc<crate::theme::EditorColors>,
 }
 
 impl Render for CodeLensLine {
@@ -81,15 +84,26 @@ impl Render for CodeLensLine {
                 continue;
             };
             let title = SharedString::from(command.title.trim().to_string());
+            // Monaco shows `Command.tooltip` as the lens's title attribute.
+            let tooltip = command
+                .tooltip
+                .clone()
+                .map(|text| crate::tooltip::tooltip(text, &self.colors));
             if command.id.is_empty() {
-                row = row.child(div().child(title));
+                let label = div().id(("code-lens", ix)).child(title);
+                row = row.child(match tooltip {
+                    Some(tooltip) => label.tooltip(tooltip),
+                    None => label,
+                });
             } else {
                 let editor = self.editor.clone();
                 let command = command.clone();
+                let mut lens = div().id(("code-lens", ix));
+                if let Some(tooltip) = tooltip {
+                    lens = lens.tooltip(tooltip);
+                }
                 row = row.child(
-                    div()
-                        .id(("code-lens", ix))
-                        .cursor_pointer()
+                    lens.cursor_pointer()
                         .hover(|style| style.text_color(self.hover))
                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                             cx.stop_propagation();
@@ -256,6 +270,7 @@ impl CodeEditor {
                 line_height: height,
                 color: self.theme.colors.code_lens_foreground,
                 hover: self.theme.colors.link_active_foreground,
+                colors: Arc::new(self.theme.colors.clone()),
             });
             let zone = self.add_view_zone(
                 ViewZone {
@@ -426,5 +441,41 @@ impl CodeEditor {
         if let Some(command) = command {
             self.run_code_lens(&command, cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, point};
+
+    /// Monaco shows `Command.tooltip` as the lens's title.
+    #[gpui::test]
+    fn lenses_show_their_tooltips(cx: &mut TestAppContext) {
+        let colors = crate::theme::Theme::vs_dark().colors;
+        let (_, cx) = cx.add_window_view(|_, _| CodeLensLine {
+            editor: WeakEntity::new_invalid(),
+            lenses: vec![Some(Command {
+                tooltip: Some("Show the references".into()),
+                ..Command::new("", "2 references")
+            })],
+            indent: px(0.),
+            font_family: "Helvetica".into(),
+            font_size: px(12.),
+            line_height: px(16.),
+            color: colors.code_lens_foreground,
+            hover: colors.link_active_foreground,
+            colors: Arc::new(colors.clone()),
+        });
+        cx.run_until_parked();
+        cx.simulate_mouse_move(point(px(5.), px(8.)), None, gpui::Modifiers::none());
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(
+            crate::tooltip::RENDERED
+                .with(|r| { r.borrow().iter().any(|text| text == "Show the references") })
+        );
     }
 }

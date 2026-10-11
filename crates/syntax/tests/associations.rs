@@ -183,17 +183,151 @@ fn mime_types_and_runtime_configuration() {
     );
     assert!(registry.language_for_mime_type("text/html").is_none());
     let config = syntax::LanguageConfiguration {
-        brackets: vec![("<".into(), ">".into())],
+        brackets: Some(vec![("<".into(), ">".into())]),
         ..Default::default()
     };
-    assert!(registry.set_configuration("css", config));
-    assert!(!registry.set_configuration("html", Default::default()));
-    let css = registry.language_for_id("css").unwrap();
-    assert_eq!(
-        css.config.brackets,
-        vec![("<".to_string(), ">".to_string())]
+    assert!(registry.register_configuration("css", config).is_some());
+    assert!(
+        registry
+            .register_configuration("html", Default::default())
+            .is_none()
     );
+    let css = registry.language_for_id("css").unwrap();
+    assert_eq!(css.config.brackets(), [("<".to_string(), ">".to_string())]);
     assert_eq!(&*css.mimetypes, ["text/css"]);
+}
+
+/// Monaco `LanguagesRegistry._mergeLanguage`: registering an id again adds
+/// to the language instead of replacing it.
+#[test]
+fn registering_again_merges() {
+    let registry = LanguageRegistry::new();
+    let config = syntax::LanguageConfiguration {
+        comments: Some(syntax::Comments {
+            line_comment: Some("//".into()),
+            ..Default::default()
+        }),
+        brackets: Some(vec![("(".into(), ")".into())]),
+        ..Default::default()
+    };
+    registry.register(
+        Language::new("mylang", "My Language")
+            .with_extensions(&["my"])
+            .with_aliases(&["My Language"])
+            .with_config(config)
+            .with_monarch_grammar(&serde_json::json!({ "tokenizer": { "root": [] } }))
+            .unwrap(),
+    );
+    // A bare registration of the same id, as `monaco.languages.register({ id })`.
+    registry.register(
+        Language::new("mylang", "mylang")
+            .with_extensions(&["mine"])
+            .with_file_names(&["MyFile"])
+            .with_config(syntax::LanguageConfiguration {
+                brackets: Some(vec![("[".into(), "]".into())]),
+                ..Default::default()
+            }),
+    );
+    let language = registry.language_for_id("mylang").unwrap();
+    assert_eq!(&*language.name, "My Language");
+    assert_eq!(language.extensions, ["my", "mine"]);
+    assert_eq!(language.file_names, ["MyFile"]);
+    assert_eq!(language.aliases, ["My Language"]);
+    // The highlighter is kept, and only the fields set are replaced.
+    assert!(language.highlighter.is_some());
+    assert_eq!(
+        language.config.comments().line_comment.as_deref(),
+        Some("//")
+    );
+    assert_eq!(
+        language.config.brackets(),
+        [("[".to_string(), "]".to_string())]
+    );
+    assert_eq!(registry.languages().len(), 1);
+    for path in ["a.my", "b.mine", "MyFile"] {
+        assert_eq!(
+            registry
+                .language_for_path(Path::new(path))
+                .map(|l| l.id.to_string())
+                .as_deref(),
+            Some("mylang"),
+            "{path}"
+        );
+    }
+}
+
+/// Monaco `combineLanguageConfigurations`: runtime configurations stack,
+/// each field from the newest that sets it, and removing one restores what
+/// it covered.
+#[test]
+fn configurations_stack() {
+    let registry = LanguageRegistry::new();
+    registry.register(Language::new("js", "JavaScript").with_config(
+        syntax::LanguageConfiguration {
+            brackets: Some(vec![("{".into(), "}".into())]),
+            auto_close_before: Some(";".into()),
+            ..Default::default()
+        },
+    ));
+    let comments = registry
+        .register_configuration(
+            "js",
+            syntax::LanguageConfiguration {
+                comments: Some(syntax::Comments {
+                    line_comment: Some("//".into()),
+                    ..Default::default()
+                }),
+                // Monaco treats an empty `autoCloseBefore` as unset.
+                auto_close_before: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let brackets = registry
+        .register_configuration(
+            "js",
+            syntax::LanguageConfiguration {
+                brackets: Some(vec![("(".into(), ")".into())]),
+                auto_closing_pairs: Some(Vec::new()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let config = registry.language_for_id("js").unwrap().config.clone();
+    assert_eq!(config.comments().line_comment.as_deref(), Some("//"));
+    assert_eq!(config.brackets(), [("(".to_string(), ")".to_string())]);
+    assert_eq!(config.auto_close_before.as_deref(), Some(";"));
+    assert_eq!(config.auto_closing_pairs.as_deref(), Some(&[][..]));
+
+    assert!(registry.unregister_configuration("js", brackets));
+    assert!(!registry.unregister_configuration("js", brackets));
+    let config = registry.language_for_id("js").unwrap().config.clone();
+    assert_eq!(config.brackets(), [("{".to_string(), "}".to_string())]);
+    assert_eq!(config.comments().line_comment.as_deref(), Some("//"));
+    assert!(config.auto_closing_pairs.is_none());
+
+    assert!(registry.unregister_configuration("js", comments));
+    let config = registry.language_for_id("js").unwrap().config.clone();
+    assert!(config.comments.is_none());
+}
+
+/// Monaco's `setMonarchTokensProvider` doesn't need the language
+/// registered: the highlighter applies once it is.
+#[test]
+fn highlighters_wait_for_their_language() {
+    let registry = LanguageRegistry::new();
+    let tokenizer = std::sync::Arc::new(
+        syntax::MonarchTokenizer::new("later", &serde_json::json!({ "tokenizer": { "root": [] } }))
+            .unwrap(),
+    );
+    assert!(!registry.set_highlighter(
+        "later",
+        Some(syntax::MonarchHighlighter::factory(tokenizer))
+    ));
+    assert!(registry.pending_highlighter("later").is_some());
+    let language = registry.register(Language::new("later", "Later"));
+    assert!(language.highlighter.is_some());
+    assert!(registry.pending_highlighter("later").is_none());
 }
 
 #[test]

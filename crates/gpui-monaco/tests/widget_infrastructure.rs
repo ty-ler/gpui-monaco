@@ -323,6 +323,7 @@ fn the_wheel_over_menus_and_peek_leaves_the_editor_alone(cx: &mut TestAppContext
         .map(|row| Location {
             uri: None,
             range: PointUtf16::new(row, 0)..PointUtf16::new(row, 4),
+            ..Default::default()
         })
         .collect();
     editor.update(cx, |e, cx| {
@@ -615,6 +616,7 @@ fn registries_leave_out_internal_editors_and_models(cx: &mut TestAppContext) {
             .map(|row| Location {
                 uri: None,
                 range: PointUtf16::new(row, 0)..PointUtf16::new(row, 2),
+                ..Default::default()
             })
             .collect();
         e.peek_locations(PointUtf16::new(5, 0), locations, None, cx)

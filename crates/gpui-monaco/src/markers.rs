@@ -78,6 +78,7 @@ impl RelatedInformation {
         crate::providers::Location {
             uri: self.uri.clone(),
             range: self.range.clone(),
+            ..Default::default()
         }
     }
 }

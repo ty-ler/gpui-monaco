@@ -147,7 +147,7 @@ fn issue_47733_undo_mangles_unicode_characters() {
     let mut ed = using_cursor(
         &["'👁'"],
         LanguageConfiguration {
-            surrounding_pairs: vec![surround("%", "%")],
+            surrounding_pairs: Some(vec![surround("%", "%")]),
             ..Default::default()
         },
     );
@@ -220,14 +220,14 @@ fn issue_115033_indent_and_append_text() {
     let mut ed = using_cursor(
         &["text"],
         LanguageConfiguration {
-            on_enter_rules: vec![on_enter(
+            on_enter_rules: Some(vec![on_enter(
                 re(".*"),
                 None,
                 None,
                 IndentAction::Indent,
                 Some("x"),
                 None,
-            )],
+            )]),
             ..Default::default()
         },
     );
@@ -860,7 +860,7 @@ fn issue_38261_tab_key_results_in_bizarre_indentation_in_cpp_mode() {
             ")",
         ],
         LanguageConfiguration {
-            brackets: standard_brackets(),
+            brackets: Some(standard_brackets()),
             indentation_rules: Some(rules(re(r"(^.*\{[^}]*$)"), re(r"^\s*\}"))),
             ..Default::default()
         },
@@ -929,7 +929,7 @@ fn typing_in_json() {
             "\"}\"",
         ],
         LanguageConfiguration {
-            brackets: standard_brackets(),
+            brackets: Some(standard_brackets()),
             indentation_rules: Some(rules(
                 re(r#"(\{+(?=([^"]*"[^"]*")*[^"}]*$))|(\[+(?=([^"]*"[^"]*")*[^"\]]*$))"#),
                 re(r"^\s*[}\]],?\s*$"),
@@ -1425,7 +1425,7 @@ fn issue_338693_undo_after_multi_character_autoclose_first_removes_only_the_auto
 fn issue_338693_undo_after_multi_character_autoclose_with_auto_indentation_first_removes_only_the_auto_closed_characters()
  {
     let language = LanguageConfiguration {
-        auto_closing_pairs: vec![pair("begin", "end")],
+        auto_closing_pairs: Some(vec![pair("begin", "end")]),
         indentation_rules: Some(rules(re(r"^\s*procedure\b"), re(r"^\s*begin\b"))),
         ..Default::default()
     };
@@ -1470,12 +1470,12 @@ fn auto_closing_pairs_doc_comments_can_be_turned_off() {
 #[test]
 fn issue_72177_multi_character_autoclose_with_conflicting_patterns() {
     let language = LanguageConfiguration {
-        auto_closing_pairs: vec![
+        auto_closing_pairs: Some(vec![
             pair("(", ")"),
             pair("(*", "*)"),
             pair("<@", "@>"),
             pair("<@@", "@@>"),
-        ],
+        ]),
         ..Default::default()
     };
     let mut ed = using_cursor(&[""], language);
@@ -1517,7 +1517,7 @@ fn issue_72177_multi_character_autoclose_with_conflicting_patterns() {
 #[test]
 fn issue_55314_do_not_auto_close_when_ending_with_open() {
     let language = LanguageConfiguration {
-        auto_closing_pairs: vec![
+        auto_closing_pairs: Some(vec![
             pair("{", "}"),
             pair("[", "]"),
             pair("(", ")"),
@@ -1526,7 +1526,7 @@ fn issue_55314_do_not_auto_close_when_ending_with_open() {
             pair_not_in("B\"", "\"", &[NotIn::String, NotIn::Comment]),
             pair_not_in("`", "`", &[NotIn::String, NotIn::Comment]),
             pair_not_in("/**", " */", &[NotIn::String]),
-        ],
+        ]),
         ..Default::default()
     };
     let mut ed = using_cursor(
@@ -1557,8 +1557,8 @@ fn issue_27937_trying_to_add_an_item_to_the_front_of_a_list_is_cumbersome() {
 #[test]
 fn issue_6841_auto_closing_brackets_should_balance_brackets() {
     let language = LanguageConfiguration {
-        brackets: standard_brackets(),
-        auto_closing_pairs: vec![pair("{", "}"), pair("[", "]"), pair("(", ")")],
+        brackets: Some(standard_brackets()),
+        auto_closing_pairs: Some(vec![pair("{", "}"), pair("[", "]"), pair("(", ")")]),
         ..Default::default()
     };
     let cases: [(&str, (u32, u32), &str, &str); 10] = [
@@ -1608,7 +1608,7 @@ fn issue_6841_auto_closing_brackets_should_balance_brackets() {
     assert_eq!(ed.value(), "()\n)");
 
     let language = LanguageConfiguration {
-        brackets: brackets(&[("{", "}")]),
+        brackets: Some(brackets(&[("{", "}")])),
         ..auto_closing_language()
     };
     let mut ed =
@@ -1812,7 +1812,7 @@ fn issue_85983_editor_auto_closing_brackets_before_whitespace_is_incorrect_for_p
     }
     pairs.push(pair_not_in("`", "`", &[NotIn::String]));
     let language = LanguageConfiguration {
-        auto_closing_pairs: pairs,
+        auto_closing_pairs: Some(pairs),
         ..Default::default()
     };
     let mut ed = using_cursor_with(&["foo'hello'"], language, |c| {
@@ -1893,7 +1893,7 @@ fn issue_20891_all_cursors_should_do_the_same_thing() {
 #[test]
 fn issue_41825_special_handling_of_quotes_in_surrounding_pairs() {
     let language = LanguageConfiguration {
-        surrounding_pairs: vec![surround("\"", "\""), surround("'", "'")],
+        surrounding_pairs: Some(vec![surround("\"", "\""), surround("'", "'")]),
         ..Default::default()
     };
     let mut ed = using_cursor(&["var x = 'hi';"], language);

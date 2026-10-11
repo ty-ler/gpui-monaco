@@ -1714,6 +1714,7 @@ impl CodeEditor {
             &Location {
                 uri: Some(uri),
                 range: range.start..range.start,
+                ..Default::default()
             },
             false,
             cx,

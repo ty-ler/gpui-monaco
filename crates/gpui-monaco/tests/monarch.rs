@@ -7,7 +7,9 @@ use std::sync::Arc;
 use gpui::{AppContext as _, Entity, TestAppContext};
 use gpui_monaco::colorize::{ColorizeOptions, colorize, tokenize};
 use gpui_monaco::cursor::StandardTokenType;
-use gpui_monaco::syntax::{HighlightId, Language, LanguageRegistry};
+use gpui_monaco::syntax::{
+    HighlightId, Language, LanguageRegistry, LineTokens, Token, TokensProvider,
+};
 use gpui_monaco::theme::{TokenRule, parse_hex_color};
 use gpui_monaco::{TextModel, Theme, TokenStyle};
 use serde_json::json;
@@ -123,11 +125,6 @@ fn set_monarch_tokens_provider_highlights_models(cx: &mut TestAppContext) {
 fn set_monarch_tokens_provider_fails_like_monaco(cx: &mut TestAppContext) {
     init(cx);
     cx.update(|cx| {
-        let unknown = gpui_monaco::set_monarch_tokens_provider(cx, "nope", &grammar());
-        assert_eq!(
-            unknown.unwrap_err().to_string(),
-            "Cannot set tokens provider for unknown language nope"
-        );
         let invalid = gpui_monaco::set_monarch_tokens_provider(
             cx,
             "mini",
@@ -142,6 +139,163 @@ fn set_monarch_tokens_provider_fails_like_monaco(cx: &mut TestAppContext) {
         // Monaco `remeasureFonts` is a no-op.
         gpui_monaco::remeasure_fonts(cx);
     });
+}
+
+/// Monaco's `setMonarchTokensProvider` doesn't check the language: the
+/// grammar applies once it's registered.
+#[gpui::test]
+fn set_monarch_tokens_provider_before_the_language_is_registered(cx: &mut TestAppContext) {
+    let registry = init(cx);
+    let disposable = cx
+        .update(|cx| gpui_monaco::set_monarch_tokens_provider(cx, "later", &grammar()))
+        .unwrap();
+    registry.register(Language::new("later", "Later"));
+    let model = cx.new(|_| TextModel::new("let x").with_language("later"));
+    model.update(cx, |model, cx| model.ensure_syntax(cx));
+    cx.run_until_parked();
+    assert_eq!(name_at(&model, 0, cx).as_deref(), Some("keyword.later"));
+    // Disposing restores the language's own (no) highlighting.
+    cx.update(|cx| disposable.dispose(cx));
+    cx.run_until_parked();
+    assert_eq!(name_at(&model, 0, cx), None);
+}
+
+/// A line-state tokenizer: words starting with `k` are keywords, and a
+/// `(` opens a comment that runs until `)`, across lines.
+struct Parens;
+
+impl TokensProvider for Parens {
+    type State = bool;
+
+    fn initial_state(&self) -> bool {
+        false
+    }
+
+    fn tokenize(&self, line: &str, in_comment: &bool) -> LineTokens<bool> {
+        let mut tokens = Vec::new();
+        let mut in_comment = *in_comment;
+        for (ix, ch) in line.char_indices() {
+            let scopes = match ch {
+                '(' => {
+                    in_comment = true;
+                    "comment"
+                }
+                ')' => {
+                    in_comment = false;
+                    "comment"
+                }
+                _ if in_comment => "comment",
+                'k' => "keyword",
+                _ => "",
+            };
+            tokens.push(Token::new(ix, scopes));
+        }
+        LineTokens {
+            tokens,
+            end_state: in_comment,
+        }
+    }
+}
+
+/// Monaco `languages.setTokensProvider`.
+#[gpui::test]
+fn set_tokens_provider_highlights_models(cx: &mut TestAppContext) {
+    init(cx);
+    let model = shown("k (a\nb) k", cx);
+    assert_eq!(name_at(&model, 0, cx), None);
+    let disposable = cx
+        .update(|cx| gpui_monaco::set_tokens_provider(cx, "mini", Parens))
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(name_at(&model, 0, cx).as_deref(), Some("keyword"));
+    assert_eq!(name_at(&model, 3, cx).as_deref(), Some("comment"));
+    // The state carries the comment to the next line.
+    assert_eq!(name_at(&model, 5, cx).as_deref(), Some("comment"));
+    assert_eq!(name_at(&model, 8, cx).as_deref(), Some("keyword"));
+    // Edits re-tokenize from the state: closing the comment early.
+    model.update(cx, |model, cx| model.edit([(4..4, ")")], cx).unwrap());
+    cx.run_until_parked();
+    assert_eq!(name_at(&model, 6, cx), None);
+    cx.update(|cx| disposable.dispose(cx));
+    cx.run_until_parked();
+    assert_eq!(name_at(&model, 0, cx), None);
+    // Monaco throws for unknown languages.
+    let unknown = cx.update(|cx| gpui_monaco::set_tokens_provider(cx, "nope", Parens));
+    assert_eq!(
+        unknown.unwrap_err().to_string(),
+        "Cannot set tokens provider for unknown language nope"
+    );
+}
+
+/// Monaco `languages.registerTokensProviderFactory`: created once, when
+/// the language is first needed.
+#[gpui::test]
+fn tokens_provider_factories_are_lazy(cx: &mut TestAppContext) {
+    init(cx);
+    let created = std::rc::Rc::new(std::cell::Cell::new(0));
+    let count = created.clone();
+    let _factory = cx.update(|cx| {
+        gpui_monaco::register_tokens_provider_factory(cx, "mini", move |_| {
+            count.set(count.get() + 1);
+            gpui::Task::ready(Ok(Some(gpui_monaco::LanguageTokenizer::Monarch(grammar()))))
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(created.get(), 0);
+    let model = shown("let x", cx);
+    cx.run_until_parked();
+    assert_eq!(created.get(), 1);
+    assert_eq!(name_at(&model, 0, cx).as_deref(), Some("keyword.mini"));
+    let _second = shown("fn", cx);
+    assert_eq!(created.get(), 1);
+}
+
+/// Monaco `languages.onLanguageEncountered`: an embedded language's
+/// tokenizer can be set when it's first met.
+#[gpui::test]
+fn embedded_languages_are_encountered(cx: &mut TestAppContext) {
+    let registry = init(cx);
+    registry.register(Language::new("lazy", "Lazy"));
+    let _provider = cx
+        .update(|cx| {
+            gpui_monaco::set_monarch_tokens_provider(
+                cx,
+                "mini",
+                &json!({
+                    "tokenizer": {
+                        "root": [
+                            ["<", { "token": "tag", "next": "@embedded", "nextEmbedded": "lazy" }],
+                            ["[a-z]+", "identifier"],
+                        ],
+                        "embedded": [[">", { "token": "tag", "next": "@pop", "nextEmbedded": "@pop" }]],
+                    },
+                }),
+            )
+        })
+        .unwrap();
+    let encountered = std::rc::Rc::new(std::cell::Cell::new(0));
+    let count = encountered.clone();
+    let _callback = cx.update(|cx| {
+        gpui_monaco::on_language_encountered(cx, "lazy", move |cx| {
+            count.set(count.get() + 1);
+            // Dropping the `Disposable` keeps the provider.
+            let _provider = gpui_monaco::set_monarch_tokens_provider(
+                cx,
+                "lazy",
+                &json!({ "tokenizer": { "root": [["\\d+", "number"]] } }),
+            )
+            .unwrap();
+        })
+    });
+    // A rich request isn't made for embedded languages.
+    let rich = std::rc::Rc::new(std::cell::Cell::new(false));
+    let flag = rich.clone();
+    let _rich = cx.update(|cx| gpui_monaco::on_language(cx, "lazy", move |_| flag.set(true)));
+    let model = shown("a <12> b", cx);
+    cx.run_until_parked();
+    assert_eq!(encountered.get(), 1);
+    assert!(!rich.get());
+    assert_eq!(name_at(&model, 3, cx).as_deref(), Some("number.lazy"));
 }
 
 #[gpui::test]
