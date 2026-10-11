@@ -258,6 +258,7 @@ impl FoldingRangeProvider for CountedFolds {
     fn provide_folding_ranges(
         &self,
         _: &ProviderContext,
+        _: &FoldingContext,
         _: &mut App,
     ) -> Task<anyhow::Result<Option<Vec<FoldingRange>>>> {
         self.0.set(self.0.get() + 1);

@@ -79,6 +79,7 @@ impl FoldingRangeProvider for Provided {
     fn provide_folding_ranges(
         &self,
         _: &ProviderContext,
+        _: &FoldingContext,
         _: &mut App,
     ) -> Task<anyhow::Result<Option<Vec<FoldingRange>>>> {
         Task::ready(Ok(Some(vec![
@@ -114,6 +115,7 @@ impl FoldingRangeProvider for NoOpinion {
     fn provide_folding_ranges(
         &self,
         _: &ProviderContext,
+        _: &FoldingContext,
         _: &mut App,
     ) -> Task<anyhow::Result<Option<Vec<FoldingRange>>>> {
         Task::ready(Ok(None))
@@ -273,6 +275,7 @@ impl FoldingRangeProvider for Imports {
     fn provide_folding_ranges(
         &self,
         _: &ProviderContext,
+        _: &FoldingContext,
         _: &mut App,
     ) -> Task<anyhow::Result<Option<Vec<FoldingRange>>>> {
         Task::ready(Ok(Some(vec![
@@ -313,4 +316,39 @@ fn imports_by_default_and_typed_commands(cx: &mut TestAppContext) {
     // With kinds, block comments are found by kind.
     editor.update(cx, |e, cx| e.fold_all_block_comments(cx));
     assert_eq!(collapsed(&editor, cx), [(5, 6)]);
+}
+
+/// Records the folding contexts it's given.
+struct ContextRecorder(std::rc::Rc<std::cell::RefCell<Vec<FoldingContext>>>);
+impl FoldingRangeProvider for ContextRecorder {
+    fn provide_folding_ranges(
+        &self,
+        _: &ProviderContext,
+        folding_context: &FoldingContext,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Option<Vec<FoldingRange>>>> {
+        self.0.borrow_mut().push(folding_context.clone());
+        Task::ready(Ok(None))
+    }
+}
+
+/// Monaco's `syntaxRangeProvider.ts` passes providers a `FoldingContext`
+/// (empty in Monaco too).
+#[gpui::test]
+fn providers_get_a_folding_context(cx: &mut TestAppContext) {
+    let contexts = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let recorder = ContextRecorder(contexts.clone());
+    cx.update(|cx| {
+        register_folding_range_provider(cx, LanguageSelector::All, recorder);
+    });
+    let (editor, cx) = setup(RUST, cx);
+    assert!(!contexts.borrow().is_empty());
+    assert!(
+        contexts
+            .borrow()
+            .iter()
+            .all(|context| *context == FoldingContext::default())
+    );
+    // The provider had no opinion: the syntax ranges.
+    assert_eq!(ranges(&editor, cx), [(0, 3), (1, 2), (5, 7)]);
 }

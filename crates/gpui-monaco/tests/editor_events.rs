@@ -5,8 +5,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{
-    AppContext as _, Entity, Focusable, Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent,
-    TestAppContext, VisualTestContext, point, px, size,
+    AppContext as _, Entity, EntityInputHandler as _, Focusable, Modifiers, MouseButton,
+    ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point, px, size,
 };
 use gpui_monaco::cursor::Selection;
 use gpui_monaco::text::PointUtf16;
@@ -78,7 +78,8 @@ fn model_language_and_configuration_events(cx: &mut TestAppContext) {
     let (editor, cx) = setup("hello", cx);
     let events = record(&editor, cx);
 
-    // Monaco `onWillChangeModel`, then `onDidChangeModel`, with the uris.
+    // Monaco `onWillChangeModel`, then `onDidChangeModel`, with the uris,
+    // in an update (`onBeginUpdate`/`onEndUpdate`).
     let other = cx.update(|_, cx| cx.new(|_| TextModel::new("other").with_uri("file:///b.txt")));
     editor.update(cx, |e, cx| e.set_model(other.clone(), cx));
     let change = ModelChange {
@@ -88,14 +89,19 @@ fn model_language_and_configuration_events(cx: &mut TestAppContext) {
     assert_eq!(
         events.borrow().as_slice(),
         [
+            CodeEditorEvent::BeginUpdate,
             CodeEditorEvent::WillChangeModel(change.clone()),
             CodeEditorEvent::ModelChanged(change),
+            CodeEditorEvent::EndUpdate,
         ]
     );
-    // The same model again: nothing, as in Monaco.
+    // The same model again: nothing but the update, as in Monaco.
     events.borrow_mut().clear();
     editor.update(cx, |e, cx| e.set_model(other.clone(), cx));
-    assert!(events.borrow().is_empty());
+    assert_eq!(
+        events.borrow().as_slice(),
+        [CodeEditorEvent::BeginUpdate, CodeEditorEvent::EndUpdate]
+    );
 
     // The model's language change reaches the editor.
     other.update(cx, |m, cx| m.set_language(Some("rust".into()), cx));
@@ -788,4 +794,192 @@ fn view_state_keeps_manual_ranges(cx: &mut TestAppContext) {
     });
     fresh.update(cx, |e, cx| e.restore_view_state(&state, cx));
     assert_eq!(fresh.read_with(cx, |e, cx| e.collapsed_folds(cx)), [(2, 5)]);
+}
+
+/// Counts `event` in the recorded events and forgets them.
+fn take_count(events: &Rc<RefCell<Vec<CodeEditorEvent>>>, event: &CodeEditorEvent) -> usize {
+    let count = events.borrow().iter().filter(|e| *e == event).count();
+    events.borrow_mut().clear();
+    count
+}
+
+/// Monaco `onDidCompositionStart`/`onDidCompositionEnd` and
+/// `inComposition`, from the IME's marked text.
+#[gpui::test]
+fn composition_events(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("ab", cx);
+    let events = record(&editor, cx);
+    let composition = |events: &Rc<RefCell<Vec<CodeEditorEvent>>>| -> Vec<&'static str> {
+        let names = events
+            .borrow()
+            .iter()
+            .filter_map(|e| match e {
+                CodeEditorEvent::CompositionStarted => Some("start"),
+                CodeEditorEvent::CompositionEnded => Some("end"),
+                _ => None,
+            })
+            .collect();
+        events.borrow_mut().clear();
+        names
+    };
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 1))], cx)
+    });
+    events.borrow_mut().clear();
+    // Marking text starts a composition; updating it doesn't again.
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_and_mark_text_in_range(None, "n", None, window, cx);
+        assert!(e.in_composition());
+        e.replace_and_mark_text_in_range(None, "ni", None, window, cx);
+    });
+    assert_eq!(composition(&events), ["start"]);
+    // Committing ends it.
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_text_in_range(None, "你", window, cx);
+        assert!(!e.in_composition());
+    });
+    assert_eq!(composition(&events), ["end"]);
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    assert_eq!(model.read_with(cx, |m, _| m.text()), "a你b");
+    // Marking nothing cancels it, and so does unmarking.
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_and_mark_text_in_range(None, "x", None, window, cx);
+        e.replace_and_mark_text_in_range(None, "", None, window, cx);
+        e.replace_and_mark_text_in_range(None, "y", None, window, cx);
+        e.unmark_text(window, cx);
+    });
+    assert_eq!(composition(&events), ["start", "end", "start", "end"]);
+    // Typing without an IME doesn't compose.
+    cx.simulate_input("z");
+    assert!(composition(&events).is_empty());
+}
+
+/// Monaco `onDidChangeHiddenAreas`, from hidden areas and folding.
+#[gpui::test]
+fn hidden_area_events(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("fn a() {\n    one\n}\nfn b() {\n    two\n}", cx);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(500));
+    cx.run_until_parked();
+    draw(cx);
+    let events = record(&editor, cx);
+    let hidden = CodeEditorEvent::HiddenAreasChanged;
+    editor.update(cx, |e, cx| {
+        e.set_hidden_areas(std::iter::once(1..2).collect(), cx)
+    });
+    draw(cx);
+    assert_eq!(take_count(&events, &hidden), 1);
+    // The same areas again: no change.
+    editor.update(cx, |e, cx| {
+        e.set_hidden_areas(std::iter::once(1..2).collect(), cx)
+    });
+    draw(cx);
+    assert_eq!(take_count(&events, &hidden), 0);
+    // Folding hides lines too.
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(3, 0))], cx);
+        e.fold(cx);
+    });
+    draw(cx);
+    assert_eq!(take_count(&events, &hidden), 1);
+    editor.update(cx, |e, cx| {
+        e.unfold(cx);
+        e.set_hidden_areas(Vec::new(), cx);
+    });
+    draw(cx);
+    assert_eq!(take_count(&events, &hidden), 1);
+    assert!(editor.read_with(cx, |e, _| e.hidden_areas().is_empty()));
+}
+
+/// Monaco `onDidChangeViewZones`.
+#[gpui::test]
+fn view_zone_events(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&lines(5), cx);
+    let events = record(&editor, cx);
+    let zones = CodeEditorEvent::ViewZonesChanged;
+    let view = cx.update(|_, cx| cx.new(|_| gpui::Empty).into());
+    let id = editor.update(cx, |e, cx| {
+        e.add_view_zone(
+            ViewZone {
+                after_line: 1,
+                height: ZoneHeight::Lines(2.),
+                view,
+            },
+            cx,
+        )
+    });
+    assert_eq!(take_count(&events, &zones), 1);
+    editor.update(cx, |e, cx| {
+        e.set_view_zone_height(id, ZoneHeight::Lines(3.), cx);
+        // The same height: no change.
+        e.set_view_zone_height(id, ZoneHeight::Lines(3.), cx);
+    });
+    assert_eq!(take_count(&events, &zones), 1);
+    editor.update(cx, |e, cx| {
+        e.remove_widget(id, cx);
+        e.remove_widget(id, cx);
+    });
+    assert_eq!(take_count(&events, &zones), 1);
+}
+
+/// Monaco `onBeginUpdate`/`onEndUpdate` bracket edits, typing, undo and
+/// setting selections, once however nested.
+#[gpui::test]
+fn begin_and_end_update_events(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("hello", cx);
+    let events = record(&editor, cx);
+    let updates = |events: &Rc<RefCell<Vec<CodeEditorEvent>>>| -> Vec<String> {
+        let names = events
+            .borrow()
+            .iter()
+            .filter_map(|e| match e {
+                CodeEditorEvent::BeginUpdate => Some("begin".to_string()),
+                CodeEditorEvent::EndUpdate => Some("end".to_string()),
+                CodeEditorEvent::WillType(text) => Some(format!("will type {text}")),
+                CodeEditorEvent::DidType(text) => Some(format!("did type {text}")),
+                _ => None,
+            })
+            .collect();
+        events.borrow_mut().clear();
+        names
+    };
+    // Typing runs edits inside its own update: one pair.
+    editor.update(cx, |e, cx| e.type_text("x", cx));
+    assert_eq!(
+        updates(&events),
+        ["begin", "will type x", "did type x", "end"]
+    );
+    editor.update(cx, |e, cx| {
+        e.execute_edits(vec![(p(0, 0)..p(0, 0), "y".into())], None, cx);
+    });
+    assert_eq!(updates(&events), ["begin", "end"]);
+    editor.update(cx, |e, cx| e.undo(cx));
+    assert_eq!(updates(&events), ["begin", "end"]);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 1))], cx)
+    });
+    assert_eq!(updates(&events), ["begin", "end"]);
+    // Scrolling isn't bracketed.
+    editor.update(cx, |e, cx| {
+        e.set_scroll_top(px(0.), ScrollType::Immediate, cx)
+    });
+    assert!(updates(&events).is_empty());
+}
+
+/// Monaco `getStatusbarColumn`: tabs to the next tab stop, 1-based.
+#[gpui::test]
+fn statusbar_column(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("\tab\n𐌀x", cx);
+    editor.read_with(cx, |e, cx| {
+        assert_eq!(e.statusbar_column(p(0, 0), cx), 1);
+        assert_eq!(e.statusbar_column(p(0, 1), cx), 5);
+        assert_eq!(e.statusbar_column(p(0, 3), cx), 7);
+        // Past the end, as the position is validated.
+        assert_eq!(e.statusbar_column(p(0, 99), cx), 7);
+        // A surrogate pair counts as one.
+        assert_eq!(e.statusbar_column(p(1, 2), cx), 2);
+        assert_eq!(e.statusbar_column(p(1, 3), cx), 3);
+        // The visible column is 0-based and counts wide characters twice.
+        assert_eq!(e.visible_column_from_position(p(0, 1), cx), 4);
+    });
 }

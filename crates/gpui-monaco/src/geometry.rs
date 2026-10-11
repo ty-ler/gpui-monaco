@@ -129,6 +129,21 @@ impl CodeEditor {
         )
     }
 
+    /// The column a status bar shows for `position` (Monaco
+    /// `getStatusbarColumn`): 1-based like Monaco's, with tabs expanded to
+    /// the next tab stop but every other character, wide or not, counting
+    /// as one.
+    pub fn statusbar_column(&self, position: PointUtf16, cx: &App) -> u32 {
+        let model = self.model().read(cx);
+        let position = model.validate_position(position);
+        let line = model.line_content(position.row);
+        crate::cursor::strings::to_statusbar_column(
+            &line,
+            position.column,
+            model.options().tab_size,
+        )
+    }
+
     /// The width of the content: the longest line laid out, plus
     /// `scroll_beyond_last_column` and the vertical scrollbar, or the text
     /// area's width when wrapping (Monaco `getContentWidth`).

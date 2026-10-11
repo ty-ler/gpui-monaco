@@ -87,55 +87,9 @@ pub fn tokenize(text: &str, language_id: &str, registry: &LanguageRegistry) -> V
     let mut spans = spans.into_iter().peekable();
     for line in split_lines(text) {
         let line_end = line_start + line.len();
-        let utf16 = |byte: usize| line[..byte - line_start].encode_utf16().count() as u32;
-        let mut tokens: Vec<Token> = Vec::new();
-        // A token at the same offset replaces the last one, and equal
-        // neighbours merge.
-        let push = |tokens: &mut Vec<Token>, offset: u32, token_type: SharedString| {
-            if tokens.last().is_some_and(|t| t.offset == offset) {
-                tokens.pop();
-            }
-            if tokens.last().is_none_or(|t| t.token_type != token_type) {
-                tokens.push(Token {
-                    offset,
-                    token_type,
-                    language: language.clone(),
-                });
-            }
-        };
-        let mut position = line_start;
-        while let Some((range, capture)) = spans.peek() {
-            if range.start >= line_end {
-                break;
-            }
-            let (range, capture) = (range.clone(), capture.name());
-            if range.end <= position {
-                spans.next();
-                continue;
-            }
-            let start = range.start.max(position);
-            if start > position {
-                push(&mut tokens, utf16(position), "".into());
-            }
-            let token = monaco_token_for_capture(&capture)
-                .map(str::to_string)
-                .unwrap_or_else(|| capture.to_string());
-            push(
-                &mut tokens,
-                utf16(start),
-                format!("{token}.{language_id}").into(),
-            );
-            position = range.end.min(line_end);
-            if range.end > line_end {
-                // Continues on the next line.
-                break;
-            }
-            spans.next();
-        }
-        if position < line_end || tokens.is_empty() {
-            push(&mut tokens, utf16(position), "".into());
-        }
-        result.push(tokens);
+        result.push(line_tokens(line, line_start, &mut spans, &|_| {
+            language.clone()
+        }));
         // Past the line break.
         line_start = line_end
             + match text.as_bytes().get(line_end) {
@@ -145,6 +99,71 @@ pub fn tokenize(text: &str, language_id: &str, registry: &LanguageRegistry) -> V
             };
     }
     result
+}
+
+/// The tokens of `line`, which starts at byte `line_start` of the text
+/// `spans` (sorted highlight captures) are in, covering it from the start.
+/// Spans ending in the line are consumed; one continuing past it is left
+/// for the next line. `language_at` names the language at a byte offset.
+fn line_tokens<I: Iterator<Item = (Range<usize>, syntax::HighlightId)>>(
+    line: &str,
+    line_start: usize,
+    spans: &mut std::iter::Peekable<I>,
+    language_at: &dyn Fn(usize) -> SharedString,
+) -> Vec<Token> {
+    let line_end = line_start + line.len();
+    let utf16 = |byte: usize| line[..byte - line_start].encode_utf16().count() as u32;
+    let mut tokens: Vec<Token> = Vec::new();
+    // A token at the same offset replaces the last one, and equal
+    // neighbours merge.
+    let push = |tokens: &mut Vec<Token>, at: usize, token_type: SharedString, language| {
+        let offset = utf16(at);
+        if tokens.last().is_some_and(|t| t.offset == offset) {
+            tokens.pop();
+        }
+        if tokens.last().is_none_or(|t| t.token_type != token_type) {
+            tokens.push(Token {
+                offset,
+                token_type,
+                language,
+            });
+        }
+    };
+    let mut position = line_start;
+    while let Some((range, capture)) = spans.peek() {
+        if range.start >= line_end {
+            break;
+        }
+        let (range, capture) = (range.clone(), capture.name());
+        if range.end <= position {
+            spans.next();
+            continue;
+        }
+        let start = range.start.max(position);
+        if start > position {
+            push(&mut tokens, position, "".into(), language_at(position));
+        }
+        let token = monaco_token_for_capture(&capture)
+            .map(str::to_string)
+            .unwrap_or_else(|| capture.to_string());
+        let language = language_at(start);
+        push(
+            &mut tokens,
+            start,
+            format!("{token}.{language}").into(),
+            language,
+        );
+        position = range.end.min(line_end);
+        if range.end > line_end {
+            // Continues on the next line.
+            break;
+        }
+        spans.next();
+    }
+    if position < line_end || tokens.is_empty() {
+        push(&mut tokens, position, "".into(), language_at(position));
+    }
+    tokens
 }
 
 /// Monaco `IColorizerOptions`.
@@ -278,11 +297,43 @@ pub fn colorize_model_line(
         return None;
     }
     let line = model.line_content(row);
+    let line_start = model
+        .buffer()
+        .rope()
+        .point_to_offset(text::Point::new(row, 0));
+    let line_end = line_start + line.len();
+    let captures = model_line_captures(model, row, cx);
+    let (expanded, map) = expand_tabs(&line, tab_size.max(1) as usize);
+    let highlights = captures
+        .into_iter()
+        .filter(|(range, _)| range.start < line_end && range.end > line_start)
+        .map(|(range, capture)| {
+            let start = range.start.max(line_start) - line_start;
+            let end = range.end.min(line_end) - line_start;
+            (map[start]..map[end], token_style(theme, capture))
+        })
+        .filter(|(range, _)| !range.is_empty())
+        .collect();
+    Some(ColorizedLine {
+        text: expanded.into(),
+        highlights,
+    })
+}
+
+/// The highlight captures over row `row` of `model`, as Monaco's
+/// `forceTokenization` would have them: a model that has parsed before is
+/// brought up to date right away, and one that never has is parsed by its
+/// language id. None past `max_tokenization_line_length`.
+fn model_line_captures(
+    model: &crate::TextModel,
+    row: u32,
+    cx: &gpui::App,
+) -> Vec<(Range<usize>, syntax::HighlightId)> {
     let rope = model.buffer().rope();
     let line_start = rope.point_to_offset(text::Point::new(row, 0));
-    let line_end = line_start + line.len();
+    let line_end = line_start + rope.line_len(row) as usize;
     let tokenized = model.line_len_utf16(row) < model.options().max_tokenization_line_length;
-    let captures: Vec<(Range<usize>, syntax::HighlightId)> = if !tokenized {
+    if !tokenized {
         Vec::new()
     } else if let Some(syntax) = model.syntax_snapshot() {
         let state = if syntax.text.version() == model.version() {
@@ -306,22 +357,50 @@ pub fn colorize_model_line(
             .unwrap_or_default()
     } else {
         Vec::new()
-    };
-    let (expanded, map) = expand_tabs(&line, tab_size.max(1) as usize);
-    let highlights = captures
-        .into_iter()
-        .filter(|(range, _)| range.start < line_end && range.end > line_start)
-        .map(|(range, capture)| {
-            let start = range.start.max(line_start) - line_start;
-            let end = range.end.min(line_end) - line_start;
-            (map[start]..map[end], token_style(theme, capture))
-        })
-        .filter(|(range, _)| !range.is_empty())
-        .collect();
-    Some(ColorizedLine {
-        text: expanded.into(),
-        highlights,
-    })
+    }
+}
+
+impl crate::TextModel {
+    /// The tokens of row `row` (Monaco `tokenization.getLineTokens`), like
+    /// [`tokenize`]'s: each token's start in UTF-16 units, its Monaco token
+    /// type with the language as a suffix (`keyword.rust`, or `""` between
+    /// highlighted tokens), and its language, the injected one inside
+    /// e.g. a Markdown code fence. A token ends where the next starts.
+    ///
+    /// Like Monaco's `getLineTokens` after `forceTokenization`, a model
+    /// that parsed before is brought up to date right away, and one that
+    /// never has (not shown yet) is parsed by its language id. Lines past
+    /// `max_tokenization_line_length` and models without a grammar give one
+    /// `""` token. `None` for rows past the end.
+    pub fn line_tokens(&self, row: u32, cx: &gpui::App) -> Option<Vec<Token>> {
+        if row >= self.line_count() {
+            return None;
+        }
+        let line = self.line_content(row);
+        let line_start = self
+            .buffer()
+            .rope()
+            .point_to_offset(text::Point::new(row, 0));
+        let mut captures = model_line_captures(self, row, cx);
+        captures.sort_by_key(|(range, _)| range.start);
+        let model_language: SharedString = self
+            .language()
+            .map(|language| language.id.to_string().into())
+            .or_else(|| self.language_id().cloned())
+            .unwrap_or_default();
+        let language_at = |offset: usize| -> SharedString {
+            match self.language_at(offset) {
+                Some(language) => language.id.to_string().into(),
+                None => model_language.clone(),
+            }
+        };
+        Some(line_tokens(
+            &line,
+            line_start,
+            &mut captures.into_iter().peekable(),
+            &language_at,
+        ))
+    }
 }
 
 /// Monaco `colorizeElement`: `text` highlighted, one line per row, in the

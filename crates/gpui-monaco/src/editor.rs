@@ -139,6 +139,29 @@ pub enum CodeEditorEvent {
     /// Dragging text was cancelled with Escape (Monaco
     /// `onMouseDropCanceled`).
     MouseDropCanceled,
+    /// An IME composition started (Monaco `onDidCompositionStart`): the
+    /// input method marked text. See [`CodeEditor::in_composition`].
+    CompositionStarted,
+    /// The IME composition ended (Monaco `onDidCompositionEnd`): it was
+    /// committed, cancelled or unmarked.
+    CompositionEnded,
+    /// The hidden lines changed (Monaco `onDidChangeHiddenAreas`): folding
+    /// or [`CodeEditor::set_hidden_areas`], reported when the next frame
+    /// applies them.
+    HiddenAreasChanged,
+    /// View zones were added, removed or resized (Monaco
+    /// `onDidChangeViewZones`), the editor's own (code lenses, peek views)
+    /// included.
+    ViewZonesChanged,
+    /// The editor started an operation that may change the model or the
+    /// view several times (Monaco `onBeginUpdate`): an edit, typing,
+    /// pasting, undo or redo, setting selections or the model. Nested
+    /// operations report once; [`CodeEditorEvent::EndUpdate`] follows. Not
+    /// every operation is bracketed, as in Monaco.
+    BeginUpdate,
+    /// The operation [`CodeEditorEvent::BeginUpdate`] reported finished
+    /// (Monaco `onEndUpdate`).
+    EndUpdate,
 }
 
 /// Monaco's folding update scheduler waits at least this long.
@@ -384,6 +407,8 @@ pub struct CodeEditor {
     pub(crate) cursor_visible: bool,
     /// IME composition range, in byte offsets.
     pub(crate) marked_range: Option<Range<usize>>,
+    /// Nesting of [`CodeEditor::begin_update`] (Monaco `_updateCounter`).
+    update_depth: usize,
     pub(crate) prev_edit_kind: Option<EditOperationType>,
     /// The reason and source the next `SelectionsChanged` reports.
     pub(crate) next_selection_change: SelectionChange,
@@ -506,7 +531,14 @@ impl CodeEditor {
         subscriptions.push(
             cx.observe_global::<crate::font_zoom::EditorZoom>(|this, cx| this.on_zoom_changed(cx)),
         );
-        model.update(cx, |model, cx| model.ensure_syntax(cx));
+        // Monaco `onBeforeDetached` when the editor goes away.
+        subscriptions.push(cx.on_release(|this: &mut Self, cx| {
+            this.model.update(cx, |model, cx| model.detach_editor(cx));
+        }));
+        model.update(cx, |model, cx| {
+            model.attach_editor(cx);
+            model.ensure_syntax(cx);
+        });
         let snapshot = model.read(cx).snapshot();
         Self {
             model,
@@ -538,6 +570,7 @@ impl CodeEditor {
             animation: Default::default(),
             cursor_visible: true,
             marked_range: None,
+            update_depth: 0,
             prev_edit_kind: None,
             next_selection_change: SelectionChange::default(),
             message: Default::default(),
@@ -629,9 +662,14 @@ impl CodeEditor {
     /// `setModel`). Save and restore [`ViewState`] to keep them per model.
     pub fn set_model(&mut self, model: Entity<TextModel>, cx: &mut Context<Self>) {
         // Monaco does nothing for the same model.
-        if model == self.model {
-            return;
+        self.begin_update(cx);
+        if model != self.model {
+            self.set_model_inner(model, cx);
         }
+        self.end_update(cx);
+    }
+
+    fn set_model_inner(&mut self, model: Entity<TextModel>, cx: &mut Context<Self>) {
         let change = ModelChange {
             old_uri: self.model.read(cx).uri().cloned(),
             new_uri: model.read(cx).uri().cloned(),
@@ -672,7 +710,12 @@ impl CodeEditor {
         self.bracket_colors = Default::default();
 
         self._subscriptions[0] = cx.subscribe(&model, Self::on_model_event);
-        model.update(cx, |model, cx| model.ensure_syntax(cx));
+        // Monaco `_detachModel` and `_attachModel`.
+        self.model.update(cx, |model, cx| model.detach_editor(cx));
+        model.update(cx, |model, cx| {
+            model.attach_editor(cx);
+            model.ensure_syntax(cx);
+        });
         // Monaco `setIsDominatedByLongLines` when a model is attached.
         self.screen_reader.dominated_by_long_lines = model.read(cx).is_dominated_by_long_lines();
         self.snapshot = model.read(cx).snapshot();
@@ -695,7 +738,7 @@ impl CodeEditor {
         self.pending_reveal = None;
         self.pending_reveal_x = None;
         self.pending_scroll_anchor = None;
-        self.marked_range = None;
+        self.set_marked_range(None, cx);
         self.prev_edit_kind = None;
         self.record_cursor_change();
         self.reattach_find_model(cx);
@@ -843,6 +886,7 @@ impl CodeEditor {
         if selections.is_empty() {
             return;
         }
+        self.begin_update(cx);
         // The model may have changed since our last event (e.g. `set_value`
         // just now); the new selections refer to its current text.
         let latest = self.model.read(cx).snapshot();
@@ -853,6 +897,45 @@ impl CodeEditor {
         self.cursors.validate(self.snapshot.rope());
         self.next_selection_change.source = CursorChangeSource::Api;
         self.cursors_changed(true, cx);
+        self.end_update(cx);
+    }
+
+    /// Monaco `_beginUpdate`: the outermost call emits
+    /// [`CodeEditorEvent::BeginUpdate`].
+    pub(crate) fn begin_update(&mut self, cx: &mut Context<Self>) {
+        self.update_depth += 1;
+        if self.update_depth == 1 {
+            cx.emit(CodeEditorEvent::BeginUpdate);
+        }
+    }
+
+    /// Monaco `_endUpdate`: the outermost call emits
+    /// [`CodeEditorEvent::EndUpdate`].
+    pub(crate) fn end_update(&mut self, cx: &mut Context<Self>) {
+        self.update_depth = self.update_depth.saturating_sub(1);
+        if self.update_depth == 0 {
+            cx.emit(CodeEditorEvent::EndUpdate);
+        }
+    }
+
+    /// Whether an IME composition is in progress (Monaco `inComposition`).
+    pub fn in_composition(&self) -> bool {
+        self.marked_range.is_some()
+    }
+
+    /// Sets the IME composition range, emitting
+    /// [`CodeEditorEvent::CompositionStarted`] or
+    /// [`CodeEditorEvent::CompositionEnded`] when one starts or ends
+    /// (Monaco `_startComposition`/`_endComposition`).
+    pub(crate) fn set_marked_range(&mut self, range: Option<Range<usize>>, cx: &mut Context<Self>) {
+        let was = self.marked_range.is_some();
+        let is = range.is_some();
+        self.marked_range = range;
+        if !was && is {
+            cx.emit(CodeEditorEvent::CompositionStarted);
+        } else if was && !is {
+            cx.emit(CodeEditorEvent::CompositionEnded);
+        }
     }
 
     /// The scroll offset in pixels (`x` is the left, `y` the top).
@@ -978,6 +1061,7 @@ impl CodeEditor {
             full_width,
         });
         self.widgets.zones_generation += 1;
+        cx.emit(CodeEditorEvent::ViewZonesChanged);
         cx.notify();
         id
     }
@@ -989,8 +1073,11 @@ impl CodeEditor {
         height: ZoneHeight,
         cx: &mut Context<Self>,
     ) {
-        if let Some(zone) = self.widgets.zones.iter_mut().find(|z| z.id == id) {
+        if let Some(zone) = self.widgets.zones.iter_mut().find(|z| z.id == id)
+            && zone.height != height
+        {
             zone.height = height;
+            cx.emit(CodeEditorEvent::ViewZonesChanged);
             cx.notify();
         }
     }
@@ -1064,7 +1151,11 @@ impl CodeEditor {
 
     /// Removes a view zone, content widget or overlay widget.
     pub fn remove_widget(&mut self, id: WidgetId, cx: &mut Context<Self>) {
+        let zones = self.widgets.zones_generation;
         if self.widgets.remove(id) {
+            if self.widgets.zones_generation != zones {
+                cx.emit(CodeEditorEvent::ViewZonesChanged);
+            }
             cx.notify();
         }
     }
@@ -1311,7 +1402,7 @@ impl CodeEditor {
                 self.snapshot = latest;
                 self.cursors.validate(self.snapshot.rope());
                 if *kind == EditKind::SetValue {
-                    self.marked_range = None;
+                    self.set_marked_range(None, cx);
                 }
                 self.find_content_changed(*kind == EditKind::SetValue, cx);
                 if !own {
@@ -1373,6 +1464,7 @@ impl CodeEditor {
             TextModelEvent::OptionsChanged
             | TextModelEvent::LineEndingChanged
             | TextModelEvent::DecorationsChanged => cx.notify(),
+            TextModelEvent::AttachedChanged => {}
         }
     }
 
@@ -1382,6 +1474,18 @@ impl CodeEditor {
     /// Returns where the text of each of the operation's edits ended up, in
     /// byte offsets of the new text (empty if nothing was applied).
     pub(crate) fn apply(
+        &mut self,
+        operation: EditOperation,
+        cx: &mut Context<Self>,
+    ) -> Vec<Range<usize>> {
+        // Monaco's view model batches its changes (`batchChanges`).
+        self.begin_update(cx);
+        let ranges = self.apply_inner(operation, cx);
+        self.end_update(cx);
+        ranges
+    }
+
+    fn apply_inner(
         &mut self,
         mut operation: EditOperation,
         cx: &mut Context<Self>,
@@ -1837,9 +1941,11 @@ impl CodeEditor {
             return;
         }
         let typed = gpui::SharedString::from(text.to_string());
+        self.begin_update(cx);
         cx.emit(CodeEditorEvent::WillType(typed.clone()));
         self.type_text_inner(text, cx);
         cx.emit(CodeEditorEvent::DidType(typed));
+        self.end_update(cx);
     }
 
     fn type_text_inner(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -2197,7 +2303,9 @@ impl CodeEditor {
         }
         let source = Some(cx.entity_id());
         self.prev_edit_kind = None;
+        self.begin_update(cx);
         self.model.update(cx, |model, cx| model.undo(source, cx));
+        self.end_update(cx);
     }
 
     /// Redoes the model's last undone step (Monaco `redo`), restoring the cursors
@@ -2208,7 +2316,9 @@ impl CodeEditor {
         }
         let source = Some(cx.entity_id());
         self.prev_edit_kind = None;
+        self.begin_update(cx);
         self.model.update(cx, |model, cx| model.redo(source, cx));
+        self.end_update(cx);
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -2281,6 +2391,12 @@ impl CodeEditor {
     }
 
     fn paste_item(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
+        self.begin_update(cx);
+        self.paste_item_outer(item, cx);
+        self.end_update(cx);
+    }
+
+    fn paste_item_outer(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
         // Monaco `onWillPaste`, before anything handles it.
         let metadata = Self::clipboard_metadata(&item);
         cx.emit(CodeEditorEvent::WillPaste(ClipboardPasteEvent {
@@ -2478,6 +2594,9 @@ impl CodeEditor {
         let hidden = normalize_hidden(hidden);
         if self.view_lines.hidden() != hidden {
             Arc::make_mut(&mut self.view_lines).set_hidden(hidden);
+            // Monaco `HiddenAreasChangedEvent`, when the line mapping
+            // changed.
+            cx.emit(CodeEditorEvent::HiddenAreasChanged);
         }
         // Each new version restarts the wait (Monaco's `Delayer`).
         let version = self.snapshot.version();
@@ -2613,10 +2732,12 @@ impl CodeEditor {
         let limit = self.options.folding_maximum_regions;
         let context = model.provider_context();
         let syntax = if auto { model.syntax_snapshot() } else { None };
+        // Monaco's `syntaxRangeProvider.ts` passes the same empty context.
+        let folding_context = crate::providers::FoldingContext::default();
         let providers: Vec<_> = if auto {
             crate::providers::folding_range_providers(cx, self.provider_target(cx))
                 .into_iter()
-                .map(|provider| provider.provide_folding_ranges(&context, cx))
+                .map(|provider| provider.provide_folding_ranges(&context, &folding_context, cx))
                 .collect()
         } else {
             Vec::new()
@@ -3764,7 +3885,7 @@ impl EntityInputHandler for CodeEditor {
     }
 
     fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.marked_range = None;
+        self.set_marked_range(None, cx);
         cx.notify();
     }
 
@@ -3784,9 +3905,10 @@ impl EntityInputHandler for CodeEditor {
             return;
         }
         let from_composition = range_utf16.is_none() && self.marked_range.is_some();
+        let marked = self.marked_range.take();
         let explicit = range_utf16
             .map(|r| self.range_from_utf16(&r))
-            .or(self.marked_range.take());
+            .or(marked.clone());
         match explicit {
             Some(range) => {
                 self.replace_range(range.clone(), text, cx);
@@ -3796,6 +3918,11 @@ impl EntityInputHandler for CodeEditor {
                 }
             }
             None => self.type_text(text, cx),
+        }
+        // Committing the text ends the composition (Monaco
+        // `compositionend`).
+        if marked.is_some() {
+            cx.emit(CodeEditorEvent::CompositionEnded);
         }
     }
 
@@ -3815,9 +3942,19 @@ impl EntityInputHandler for CodeEditor {
             .map(|r| self.range_from_utf16(&r))
             .or(self.marked_range.clone())
             .unwrap_or_else(|| self.primary_selection_offsets().0);
+        // Monaco `compositionstart` comes before the composed text.
+        let starting = self.marked_range.is_none() && !new_text.is_empty();
+        if starting {
+            cx.emit(CodeEditorEvent::CompositionStarted);
+        }
         self.replace_range(range.clone(), new_text, cx);
+        let was_marked = self.marked_range.is_some();
         self.marked_range =
             (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
+        // Marking nothing cancels the composition.
+        if was_marked && self.marked_range.is_none() {
+            cx.emit(CodeEditorEvent::CompositionEnded);
+        }
         if let Some(selected) = new_selected_range_utf16 {
             let base = self.offset_to_utf16(range.start);
             let start = self.offset_from_utf16(base + selected.start);
