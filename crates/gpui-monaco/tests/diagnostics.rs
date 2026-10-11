@@ -209,3 +209,73 @@ fn related_information_and_view_problem(cx: &mut TestAppContext) {
     );
     assert!(editor.update(cx, |e, cx| e.close_marker_zone(cx)));
 }
+
+fn draw(cx: &mut VisualTestContext) {
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+/// Monaco `MarkerNavigationWidget`: 3 lines plus the body (at most 17), and
+/// the body scrolls on its own, without scrolling the editor.
+#[gpui::test]
+fn the_marker_zone_fits_its_content_and_scrolls(cx: &mut TestAppContext) {
+    let text: String = (0..80).map(|i| format!("line {i}\n")).collect();
+    let (editor, cx) = setup(&text, |_| {}, cx);
+    let related = |row: u32| RelatedInformation {
+        uri: None,
+        range: PointUtf16::new(row, 0)..PointUtf16::new(row, 4),
+        message: "expected because of this".into(),
+    };
+    let short = Marker {
+        message: "mismatched types".into(),
+        source: Some("demo".into()),
+        code: Some("E0308".into()),
+        related_information: vec![related(0)],
+        ..marker(
+            MarkerSeverity::Error,
+            PointUtf16::new(2, 0)..PointUtf16::new(2, 4),
+        )
+    };
+    let long_message: Vec<String> = (0..30).map(|i| format!("note {i}")).collect();
+    let long = Marker {
+        message: long_message.join("\n").into(),
+        ..marker(
+            MarkerSeverity::Warning,
+            PointUtf16::new(40, 0)..PointUtf16::new(40, 4),
+        )
+    };
+    set_markers(&editor, cx, vec![short.clone(), long.clone()]);
+    draw(cx);
+    let zone = |cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, cx| e.marker_zone_for_tests(cx))
+            .expect("marker zone")
+    };
+    // One message line, a spacer and one related line: 3 + 3.
+    editor.update(cx, |e, cx| e.show_marker(&short, cx));
+    draw(cx);
+    let (_, lines, _) = zone(cx);
+    assert!((lines - 6.).abs() < 0.01, "{lines}");
+    // Thirty message lines: 3 + 17, and the rest scrolls.
+    editor.update(cx, |e, cx| e.show_marker(&long, cx));
+    draw(cx);
+    let (bounds, lines, offset) = zone(cx);
+    assert!((lines - 20.).abs() < 0.01, "{lines}");
+    assert_eq!(offset.y, gpui::px(0.));
+    let scroll_top = editor.read_with(cx, |e, _| e.scroll_top());
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: bounds.center(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-60.))),
+        ..Default::default()
+    });
+    draw(cx);
+    let (_, _, offset) = zone(cx);
+    assert!(offset.y < gpui::px(0.), "the body scrolled: {offset:?}");
+    assert_eq!(editor.read_with(cx, |e, _| e.scroll_top()), scroll_top);
+    // Clicks inside the zone don't move the cursor.
+    let head = editor.read_with(cx, |e, _| e.selections()[0].head);
+    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    draw(cx);
+    assert_eq!(editor.read_with(cx, |e, _| e.selections()[0].head), head);
+    assert!(editor.update(cx, |e, cx| e.close_marker_zone(cx)));
+}

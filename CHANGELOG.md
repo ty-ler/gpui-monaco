@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Marker navigation zone (F8 / Alt+F8, "View Problem"):** it's now a port of Monaco's `MarkerNavigationWidget`.
+  - **Before:** the zone guessed its height from the message length, so related information was cut off by the bottom border. Its content couldn't scroll; the wheel scrolled the editor instead. The source and code were shown in literal backticks.
+  - **Now:**
+    - A header with the severity icon, the file name, "N of M problems" and next/previous/close buttons.
+    - Monaco's arrow under the marker and a 1px frame.
+    - A body in the editor font, with the source and code dimmed after the message and related information as `file(line, col):` links. It scrolls on its own, in both directions, without scrolling the editor.
+    - Monaco's height: 3 lines plus up to 17 lines of content, at most 80% of the editor.
+    - Clicks in the zone no longer reach the text behind it.
 - **wordSegmenterLocales (#234):**
   - **Option:** `word_segmenter_locales` (Monaco `wordSegmenterLocales`, empty by default) takes BCP 47 tags such as `ja`, `zh-CN`, `zh-Hant-TW` or `th`. Word movement (including word part and accessibility movement), word deletion, Delete Inside Word, double-click and drag selection (and `cursor::word_at`, which Cmd+D and find seeding use too) and the word the case transforms act on (`getConfiguredWordAtPosition`, now ported as Monaco's `getWordAtPosition`) then find words with ICU4X's word segmenter, so Japanese, Chinese and Thai text, written without spaces, splits into words (`これ|は|テスト|です`). As in Monaco's `WordCharacterClassifier`, the segmenter's word-like segments take precedence over `word_separators`, a line's segments are cached, and auto-closing and whole-word search don't use it. `CursorConfig::word_segmenter_locales` carries it to the cursor functions.
   - **Locales:** the first tag that parses as a BCP 47 locale is the segmenter's content locale, and invalid tags (like `""`) are ignored. Monaco hands every supported locale to `Intl.Segmenter`, which also picks one; it checks support with `Intl.Segmenter.supportedLocalesOf`, which can reject well-formed tags.
