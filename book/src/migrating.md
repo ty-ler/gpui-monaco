@@ -65,7 +65,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `saveViewState()` / `restoreViewState(s)` | `save_view_state()` / `restore_view_state(&s, cx)` |
 | `executeEdits(source, edits, endCursorState)` | `execute_edits(edits, end_selections, cx)` |
 | `pushUndoStop()` | `push_undo_stop(cx)` |
-| `trigger(source, handlerId, payload)` | `trigger(id, window, cx)`, taking a Monaco action id or a GPUI action name |
+| `trigger(source, handlerId, payload)` | `trigger(id, window, cx)`, taking a Monaco action or command id (`cursorDown`, `undo`, …) or a GPUI action name; `DiffEditor::trigger` for `diffEditor.*` ids |
 | `getAction(id).run()` | `run_action(id, window, cx)` |
 | `addAction(descriptor)` | `add_action(EditorActionDescriptor::new(id, label, run).keybinding(…), cx)` |
 | `addCommand(keybinding, handler)` | define a GPUI action and bind it in `actions::KEY_CONTEXT` |

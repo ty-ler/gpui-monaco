@@ -123,6 +123,25 @@ fn writable(editor: &CodeEditor, _: &App) -> bool {
     !editor.options.read_only
 }
 
+/// Monaco `inlineSuggestionVisible`.
+fn inline_visible(editor: &CodeEditor, cx: &App) -> bool {
+    editor.inline_suggestion_visible(cx)
+}
+
+fn inline_visible_writable(editor: &CodeEditor, cx: &App) -> bool {
+    writable(editor, cx) && inline_visible(editor, cx)
+}
+
+/// Monaco `standaloneColorPickerVisible`.
+fn color_picker_visible(editor: &CodeEditor, _: &App) -> bool {
+    editor.is_standalone_color_picker_visible()
+}
+
+/// Monaco `stickyScrollFocused`.
+fn sticky_focused(editor: &CodeEditor, _: &App) -> bool {
+    editor.sticky.focused.is_some()
+}
+
 /// Whether some `providers::$lookup` serves the editor's language.
 macro_rules! has_provider {
     ($name:ident, $lookup:ident) => {
@@ -300,7 +319,136 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.peekImplementation", "code_editor::PeekImplementation", "Peek Implementations", has_implementation),
     Builtin("editor.action.goToReferences", "code_editor::GoToReferences", "Go to References", has_references),
     Builtin("editor.action.referenceSearch.trigger", "code_editor::PeekReferences", "Peek References", has_references),
+    // Find, inline suggestions, the color picker, sticky scroll.
+    Builtin("deleteInsideWord", "code_editor::DeleteInsideWord", "Delete Word", writable),
+    Builtin("actions.findWithSelection", "code_editor::StartFindWithSelection", "Find with Selection", always),
+    Builtin("editor.action.nextSelectionMatchFindAction", "code_editor::NextSelectionMatch", "Find Next Selection", always),
+    Builtin("editor.action.previousSelectionMatchFindAction", "code_editor::PreviousSelectionMatch", "Find Previous Selection", always),
+    Builtin("editor.action.selectNextStickyScrollLine", "code_editor::SelectNextStickyScrollLine", "Select the next editor sticky scroll line", sticky_focused),
+    Builtin("editor.action.selectPreviousStickyScrollLine", "code_editor::SelectPreviousStickyScrollLine", "Select the previous sticky scroll line", sticky_focused),
+    Builtin("editor.action.goToFocusedStickyScrollLine", "code_editor::GoToFocusedStickyScrollLine", "Go to the focused sticky scroll line", sticky_focused),
+    Builtin("editor.action.selectEditor", "code_editor::SelectEditor", "Select Editor", sticky_focused),
+    Builtin("editor.action.hideColorPicker", "code_editor::HideColorPicker", "Hide the Color Picker", color_picker_visible),
+    Builtin("editor.action.insertColorWithStandaloneColorPicker", "code_editor::InsertColorWithStandaloneColorPicker", "Insert Color with Standalone Color Picker", color_picker_visible),
+    Builtin("editor.action.inlineSuggest.showNext", "code_editor::ShowNextInlineSuggestion", "Show Next Inline Suggestion", inline_visible_writable),
+    Builtin("editor.action.inlineSuggest.showPrevious", "code_editor::ShowPreviousInlineSuggestion", "Show Previous Inline Suggestion", inline_visible_writable),
+    Builtin("editor.action.inlineSuggest.commit", "code_editor::AcceptInlineSuggestion", "Accept Inline Suggestion", inline_visible),
+    Builtin("editor.action.inlineSuggest.acceptNextWord", "code_editor::AcceptNextInlineWord", "Accept Next Word Of Inline Suggestion", inline_visible_writable),
+    Builtin("editor.action.inlineSuggest.acceptNextLine", "code_editor::AcceptNextInlineLine", "Accept Next Line Of Inline Suggestion", inline_visible_writable),
+    Builtin("editor.action.inlineSuggest.hide", "code_editor::HideInlineSuggestion", "Hide Inline Suggestion", inline_visible),
+    Builtin("editor.action.changeAll", "code_editor::SelectAllOccurrences", "Change All Occurrences", writable),
 ];
+
+/// An editor command without a label (Monaco `registerEditorCommand` and
+/// core commands such as `cursorDown`): [`CodeEditor::trigger`] runs it by
+/// its Monaco id, but the command palette doesn't list it.
+struct Command(&'static str, &'static str);
+
+#[rustfmt::skip]
+static COMMANDS: &[Command] = &[
+    Command("cursorLeft", "code_editor::CursorLeft"),
+    Command("cursorLeftSelect", "code_editor::CursorLeftSelect"),
+    Command("cursorRight", "code_editor::CursorRight"),
+    Command("cursorRightSelect", "code_editor::CursorRightSelect"),
+    Command("cursorUp", "code_editor::CursorUp"),
+    Command("cursorUpSelect", "code_editor::CursorUpSelect"),
+    Command("cursorDown", "code_editor::CursorDown"),
+    Command("cursorDownSelect", "code_editor::CursorDownSelect"),
+    Command("cursorWordLeft", "code_editor::CursorWordLeft"),
+    Command("cursorWordLeftSelect", "code_editor::CursorWordLeftSelect"),
+    Command("cursorWordRight", "code_editor::CursorWordRight"),
+    Command("cursorWordRightSelect", "code_editor::CursorWordRightSelect"),
+    Command("cursorWordPartLeft", "code_editor::CursorWordPartLeft"),
+    Command("cursorWordPartLeftSelect", "code_editor::CursorWordPartLeftSelect"),
+    Command("cursorWordPartRight", "code_editor::CursorWordPartRight"),
+    Command("cursorWordPartRightSelect", "code_editor::CursorWordPartRightSelect"),
+    Command("cursorHome", "code_editor::CursorHome"),
+    Command("cursorHomeSelect", "code_editor::CursorHomeSelect"),
+    Command("cursorEnd", "code_editor::CursorEnd"),
+    Command("cursorEndSelect", "code_editor::CursorEndSelect"),
+    Command("cursorTop", "code_editor::CursorTop"),
+    Command("cursorTopSelect", "code_editor::CursorTopSelect"),
+    Command("cursorBottom", "code_editor::CursorBottom"),
+    Command("cursorBottomSelect", "code_editor::CursorBottomSelect"),
+    Command("cursorPageUp", "code_editor::CursorPageUp"),
+    Command("cursorPageUpSelect", "code_editor::CursorPageUpSelect"),
+    Command("cursorPageDown", "code_editor::CursorPageDown"),
+    Command("cursorPageDownSelect", "code_editor::CursorPageDownSelect"),
+    Command("editor.action.selectAll", "code_editor::SelectAll"),
+    Command("cursorWordStartLeft", "code_editor::CursorWordStartLeft"),
+    Command("cursorWordStartLeftSelect", "code_editor::CursorWordStartLeftSelect"),
+    Command("cursorWordStartRight", "code_editor::CursorWordStartRight"),
+    Command("cursorWordStartRightSelect", "code_editor::CursorWordStartRightSelect"),
+    Command("cursorWordEndLeft", "code_editor::CursorWordEndLeft"),
+    Command("cursorWordEndLeftSelect", "code_editor::CursorWordEndLeftSelect"),
+    Command("cursorWordEndRight", "code_editor::CursorWordEndRight"),
+    Command("cursorWordEndRightSelect", "code_editor::CursorWordEndRightSelect"),
+    Command("deleteWordStartLeft", "code_editor::DeleteWordStartLeft"),
+    Command("deleteWordStartRight", "code_editor::DeleteWordStartRight"),
+    Command("deleteWordEndLeft", "code_editor::DeleteWordEndLeft"),
+    Command("deleteWordEndRight", "code_editor::DeleteWordEndRight"),
+    Command("deleteWordPartLeft", "code_editor::DeleteWordPartLeft"),
+    Command("deleteWordPartRight", "code_editor::DeleteWordPartRight"),
+    Command("lineBreakInsert", "code_editor::LineBreakInsert"),
+    Command("cursorLineStart", "code_editor::CursorLineStart"),
+    Command("cursorLineStartSelect", "code_editor::CursorLineStartSelect"),
+    Command("cursorLineEnd", "code_editor::CursorLineEnd"),
+    Command("cursorLineEndSelect", "code_editor::CursorLineEndSelect"),
+    Command("cursorColumnSelectLeft", "code_editor::CursorColumnSelectLeft"),
+    Command("cursorColumnSelectRight", "code_editor::CursorColumnSelectRight"),
+    Command("cursorColumnSelectUp", "code_editor::CursorColumnSelectUp"),
+    Command("cursorColumnSelectDown", "code_editor::CursorColumnSelectDown"),
+    Command("cursorColumnSelectPageUp", "code_editor::CursorColumnSelectPageUp"),
+    Command("cursorColumnSelectPageDown", "code_editor::CursorColumnSelectPageDown"),
+    Command("scrollLineUp", "code_editor::ScrollLineUp"),
+    Command("scrollLineDown", "code_editor::ScrollLineDown"),
+    Command("scrollPageUp", "code_editor::ScrollPageUp"),
+    Command("scrollPageDown", "code_editor::ScrollPageDown"),
+    Command("scrollEditorTop", "code_editor::ScrollEditorTop"),
+    Command("scrollEditorBottom", "code_editor::ScrollEditorBottom"),
+    Command("cancelSelection", "code_editor::CancelSelection"),
+    Command("removeSecondaryCursors", "code_editor::RemoveSecondaryCursors"),
+    Command("deleteLeft", "code_editor::DeleteLeft"),
+    Command("deleteRight", "code_editor::DeleteRight"),
+    Command("deleteWordLeft", "code_editor::DeleteWordLeft"),
+    Command("deleteWordRight", "code_editor::DeleteWordRight"),
+    Command("tab", "code_editor::Tab"),
+    Command("outdent", "code_editor::Outdent"),
+    Command("undo", "code_editor::Undo"),
+    Command("redo", "code_editor::Redo"),
+    Command("editor.action.clipboardPasteAction", "code_editor::Paste"),
+    Command("editor.changePasteType", "code_editor::ChangePasteType"),
+    Command("editor.changeDropType", "code_editor::ChangeDropType"),
+    Command("editor.hidePasteWidget", "code_editor::HidePostEditWidget"),
+    Command("editor.action.replaceOne", "code_editor::ReplaceOne"),
+    Command("editor.action.replaceAll", "code_editor::ReplaceAll"),
+    Command("editor.action.selectAllMatches", "code_editor::SelectAllMatches"),
+    Command("toggleFindCaseSensitive", "code_editor::ToggleCaseSensitive"),
+    Command("toggleFindRegex", "code_editor::ToggleRegex"),
+    Command("toggleFindWholeWord", "code_editor::ToggleWholeWord"),
+    Command("toggleFindInSelection", "code_editor::ToggleFindInSelection"),
+    Command("togglePreserveCase", "code_editor::TogglePreserveCase"),
+    Command("history.showPrevious", "code_editor::FindHistoryPrevious"),
+    Command("history.showNext", "code_editor::FindHistoryNext"),
+    Command("acceptAlternativeSelectedSuggestion", "code_editor::AcceptAlternativeSuggestion"),
+    Command("toggleSuggestionDetails", "code_editor::ToggleSuggestionDetails"),
+    Command("selectNextSuggestion", "code_editor::SelectNextSuggestion"),
+    Command("selectPrevSuggestion", "code_editor::SelectPreviousSuggestion"),
+    Command("selectNextPageSuggestion", "code_editor::SelectNextPageSuggestion"),
+    Command("selectPrevPageSuggestion", "code_editor::SelectPreviousPageSuggestion"),
+    Command("selectFirstSuggestion", "code_editor::SelectFirstSuggestion"),
+    Command("selectLastSuggestion", "code_editor::SelectLastSuggestion"),
+    Command("goToNextReference", "code_editor::GoToNextReference"),
+    Command("goToPreviousReference", "code_editor::GoToPreviousReference"),
+    Command("closeReferenceSearch", "code_editor::ClosePeek"),
+    Command("editor.action.clipboardCutAction", "code_editor::Cut"),
+    Command("editor.action.clipboardCopyAction", "code_editor::Copy"),
+];
+
+/// The GPUI action name for the unlabelled Monaco command `id`.
+pub(crate) fn command_action_name(id: &str) -> Option<&'static str> {
+    COMMANDS.iter().find(|c| c.0 == id).map(|c| c.1)
+}
 
 fn builtin(id: &str) -> Option<&'static Builtin> {
     BUILTINS.iter().find(|b| b.0 == id)
@@ -484,6 +632,25 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), BUILTINS.len());
+    }
+
+    #[gpui::test]
+    fn commands_name_real_actions(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            for c in COMMANDS {
+                assert!(
+                    cx.build_action(c.1, None).is_ok(),
+                    "{} is not an action",
+                    c.1
+                );
+            }
+        });
+        // Each id once, and never also a labelled action.
+        let mut ids: Vec<_> = COMMANDS.iter().map(|c| c.0).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), COMMANDS.len());
+        assert!(COMMANDS.iter().all(|c| builtin(c.0).is_none()));
     }
 
     #[gpui::test]

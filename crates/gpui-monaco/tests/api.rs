@@ -136,6 +136,34 @@ fn execute_edits_and_trigger(cx: &mut TestAppContext) {
         editor.read_with(cx, |e, cx| e.model().read(cx).text()),
         "HELLO world"
     );
+    // Monaco's unlabelled commands by id, like Monaco's `trigger`.
+    editor.update_in(cx, |e, window, cx| {
+        e.trigger("undo", window, cx).unwrap();
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.model().read(cx).text()),
+        "hello world"
+    );
+    editor.update_in(cx, |e, window, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 0))], cx);
+        e.trigger("cursorWordEndRight", window, cx).unwrap();
+        e.trigger("cursorRightSelect", window, cx).unwrap();
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.selections()[0]),
+        Selection::new(p(0, 5), p(0, 6))
+    );
+    // Labelled ones are also listed for the command palette.
+    let ids = editor.update_in(cx, |e, _, cx| {
+        e.supported_actions(cx)
+            .into_iter()
+            .map(|a| a.id.to_string())
+            .collect::<Vec<_>>()
+    });
+    assert!(ids.iter().any(|id| id == "actions.findWithSelection"));
+    assert!(!ids.iter().any(|id| id == "cursorDown"));
 
     // Read-only editors refuse edits.
     editor.update(cx, |e, cx| {
