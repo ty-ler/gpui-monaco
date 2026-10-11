@@ -549,6 +549,7 @@ static REGISTRY: &[(&str, [V; 4])] = &[
     ("editorOverviewRuler.wordHighlightTextForeground", [R("editorOverviewRuler.selectionHighlightForeground"), R("editorOverviewRuler.selectionHighlightForeground"), R("editorOverviewRuler.selectionHighlightForeground"), R("editorOverviewRuler.selectionHighlightForeground")]),
     ("multiDiffEditor.headerBackground", [H(0x262626ff), R("tab.inactiveBackground"), R("tab.inactiveBackground"), R("tab.inactiveBackground")]),
     ("multiDiffEditor.border", [R("sideBarSectionHeader.border"), H(0xccccccff), R("sideBarSectionHeader.border"), H(0xccccccff)]),
+    ("multiDiffEditor.background", [R("editor.background"), R("editor.background"), R("editor.background"), R("editor.background")]),
     ("diffEditor.move.border", [H(0x8b8b8b9c), H(0x8b8b8b9c), H(0x8b8b8b9c), H(0x8b8b8b9c)]),
     ("diffEditor.moveActive.border", [H(0xffa500ff), H(0xffa500ff), H(0xffa500ff), H(0xffa500ff)]),
     ("diffEditor.unchangedRegionShadow", [H(0x000000ff), H(0x737373bf), H(0x000000ff), H(0x737373bf)]),

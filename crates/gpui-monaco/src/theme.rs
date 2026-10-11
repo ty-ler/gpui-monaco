@@ -181,8 +181,18 @@ editor_colors! { r;
     /// (`multiDiffEditor.headerBackground`, else the editor background).
     multi_diff_header_background: Hsla =
         r.color_first(&["multiDiffEditor.headerBackground", "editor.background"]);
-    /// The border above them (`multiDiffEditor.border`).
+    /// The border above them and below each file's diff
+    /// (`multiDiffEditor.border`).
     multi_diff_border: Hsla = r.color("multiDiffEditor.border");
+    /// A multi-diff editor's background, around the files
+    /// (`multiDiffEditor.background`, defaulting to the editor background).
+    multi_diff_background: Hsla = r.color("multiDiffEditor.background");
+    /// The file headers' text (the workbench `foreground`).
+    multi_diff_header_foreground: Hsla = r.color("foreground");
+    /// The border under an expanded file's header
+    /// (`sideBarSectionHeader.border`, high contrast themes only by
+    /// default).
+    multi_diff_header_border: Option<Hsla> = r.visible("sideBarSectionHeader.border");
     /// Selections in an unfocused editor (`editor.inactiveSelectionBackground`).
     inactive_selection_background: Hsla = r.color("editor.inactiveSelectionBackground");
     /// The cursor (`editorCursor.foreground`).
@@ -2965,6 +2975,8 @@ mod tests {
         assert_eq!(hex(c.diff_move_active_border), "#050505ff");
         assert_eq!(hex(c.multi_diff_header_background), "#060606ff");
         assert_eq!(hex(c.multi_diff_border), "#070707ff");
+        // Monaco's default: the editor background.
+        assert_eq!(c.multi_diff_background, c.background);
         // The deprecated id is `editorLineNumber.activeForeground`'s default.
         assert_eq!(hex(c.active_line_number), "#080808ff");
         assert_eq!(hex(c.menu_background), "#090909ff");
