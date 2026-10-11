@@ -60,7 +60,7 @@ Issues are linked by number.
 | Find controller commands, history, extra space on top, widget width and states, remembered toggles | `find` | ✅ | #104 |
 | Find with arguments, go to match, `findOnType` | `find` | ✅ | #202 |
 | Multi-line search and replace inputs (Ctrl+Enter, growing inputs), global find clipboard | `findWidget`, `find.globalFindClipboard` | ✅ the find pasteboard on macOS, an app-wide find string elsewhere | #226 |
-| Find widget layout: toggles in the inputs, replace toggle column, reduced/narrow/collapsed widths, measured view zone, placeholders, titles with keybindings, disabled states, regex error message, theme colors, slide-in, sash, Tab order, screen-reader status | `findWidget` | ✅ no reduced-motion setting; titles use GPUI's keystroke text | #250 |
+| Find widget layout: toggles in the inputs, replace toggle column, reduced/narrow/collapsed widths, measured view zone, placeholders, titles with keybindings, disabled states, regex error message, theme colors, slide-in, sash, Tab order, screen-reader status | `findWidget` | ✅ no reduced-motion setting; titles use Monaco's keybinding labels | #250, #251 |
 | Find commands from the editor and the find inputs: Alt+Enter, Cmd/Ctrl+D and Cmd/Ctrl+Shift+L acting on the editor, Cmd/Ctrl+D seeding the search string (with Monaco's whole-word, match-case and regex overrides), session-aware selection highlights, per-input Shift+Enter, Cmd+Enter and Cmd/Ctrl+Down | `findController`, `multicursor` | ✅ | #250 |
 | Bracket matching and jump | `bracketMatching` | ✅ `always`/`near`/`never`, overview ruler mark | #195 |
 
@@ -91,7 +91,7 @@ Issues are linked by number.
 | Minimap options (side, render characters, size, autohide), section headers | `minimap`, `sectionHeaders` | ✅ | #88, #203 |
 | Sticky scroll (outline, folding and indentation models) | `stickyScroll` | ✅ | |
 | Sticky scroll keyboard focus, toggle, folding controls, hover, scroll with editor | `stickyScroll` | ✅ | #106 |
-| Sticky scroll widget state (`findScrollWidgetState`, the pushed last line, the 25% cap), models without `folding`, `offSide`, column and chevron clicks, Cmd/Ctrl+click definition, decorations and inlay hints, shadow, border and gutter colors | `stickyScroll` | ✅ no sticky scroll context menu; the `mouseover` chevrons don't fade | #254 |
+| Sticky scroll widget state (`findScrollWidgetState`, the pushed last line, the 25% cap), models without `folding`, `offSide`, column and chevron clicks, Cmd/Ctrl+click definition, decorations and inlay hints, shadow, border and gutter colors, its context menu | `stickyScroll` | ✅ the `mouseover` chevrons don't fade | #254, #251 |
 | Render whitespace, indent guides, rulers, control characters | view parts | ✅ whitespace always as Monaco's default SVG marks (no `experimentalWhitespaceRendering`) | #84, #259 |
 | Cursor and selection rendering: block cursor text, view positions at wrap points, multi-cursor colors, selection corners and insets, view part paint order | `viewCursors`, `selections`, `CursorState.viewState` | ✅ the "Show more" chip has no 4px padding | #259 |
 | Bracket pair guides, `guides.highlightActiveIndentation: 'always'` | view parts | ✅ | #118, #203 |
@@ -103,7 +103,7 @@ Issues are linked by number.
 | Variable line heights (`lineHeight` decorations, `allowVariableLineHeights`) | decorations | ✅ | #87 |
 | Letter spacing, font variations, per-decoration fonts | options | ❌ | #87 |
 | Smooth scrolling, caret animation, blinking styles, cursor surrounding lines, padding, wheel and middle-click options | options | ✅ | #88 |
-| Placeholder text, read-only message | `placeholderText`, `readOnlyMessage`, `message` | ✅ | #89 |
+| Placeholder text, read-only message | `placeholderText`, `readOnlyMessage`, `message` | ✅ the message's arrow, 8px gap, fade in and out, reveal, `editorHoverWidget.*` colors with the `inputValidation.infoBorder` border, and staying open on blur under the mouse | #89, #251 |
 | Very long lines | `stopRenderingLineAfter`, `maxTokenizationLineLength` | ✅ | #59 |
 | Clicking past the rendering limit turns it off | `longLinesHelper` | ✅ | #227 |
 
@@ -123,8 +123,9 @@ Issues are linked by number.
 | Global commands, actions and removable keybinding rules | `editor.addCommand`, `addEditorAction`, `addKeybindingRule(s)` | ✅ (`Disposable`; GPUI keystrokes and key contexts) | #204 |
 | Editor, diff editor and model registries and events | `getEditors`, `getDiffEditors`, `onDidCreateEditor`, `onDidCreateDiffEditor`, `getModels`, `onDidCreateModel`, `onWillDisposeModel`, `onDidChangeModelLanguage` | ✅ widget inputs and placeholder models are left out (Monaco `isSimpleWidget`) | #204, #245 |
 | Markers across models | `getModelMarkers`, `removeAllMarkers`, `onDidChangeMarkers` | ✅ markers live in their model, so none for uris without one | #204 |
-| Context menu, with host items | `contextmenu` | ✅ | #91 |
-| Go to line, quick outline (quick input) | `quickAccess` | ✅ | #100 |
+| Context menu, with host items | `contextmenu` | ✅ measured width, scrolling, submenus flipping at the window edge after a 250ms delay, the sticky scroll menu, none on injected text, Shift+F10 revealing the cursor | #91, #251 |
+| Go to line, quick outline (quick input) | `quickAccess` | ✅ a virtualized list with wheel scrolling and Monaco's scrollbar, separators on their group's first item, row hover, theme highlight colors and keycap keybindings | #100, #251 |
+| Keybinding labels | `keybindingLabels`, `USLayoutResolvedKeybinding`, `KeybindingLabel` | ✅ UI, ARIA, Electron and settings labels (`keybinding_label`) | #251 |
 | Go to offset (`::`, `editor.action.gotoOffset`), with the zero-based toggle | `quickAccess` | ✅ the toggle is app-wide state, not storage | #100, #227, #261 |
 | Command palette, `addAction` | `quickAccess` | ✅ | #100 |
 | Reveal APIs, `executeEdits`, mouse hit-test events, word and position helpers, content-change details, cursor change reasons, decorations collections | editor API | ✅ | #105 |
@@ -184,16 +185,16 @@ Issues are linked by number.
 | Document highlights | `wordHighlighter` | ✅ 50ms after the cursor rests, then `occurrencesHighlightDelay` (0) from the move | #83, #262 |
 | Formatting: document, range, on type, on paste | `format` | ✅ | #94 |
 | Choosing between formatters (`FormattingConflicts.setFormatterSelector`, `displayName`) | `format` | ✅ the first by default, as standalone Monaco; no built-in picker (`formatDocument.multiple` is VS Code workbench) | #229 |
-| Rename | `rename` | ✅ | #56 |
+| Rename | `rename` | ✅ measured input width, line-height input and candidates, scrolling suggestions, `widget.shadow`, cancelled when scrolled out of view | #56, #251 |
 | Rename preview (`acceptRenameInputWithPreview`, through a host preview handler) | `rename` | ✅ | #225 |
-| Code actions and lightbulb (no AI actions or nearby quick fixes) | `codeAction` | ✅ | #56 |
+| Code actions and lightbulb (no AI actions or nearby quick fixes) | `codeAction` | ✅ the lightbulb's title with its keybinding and AI colors; the menu measured, scrolling to the focused row with a sticky action bar, keycaps and `widget.shadow` | #56, #251 |
 | Code action menu: "Show Disabled", documentation links, preview (Cmd/Ctrl+Enter, through a host preview handler; no Refactor Preview panel) | `codeAction` | ✅ | #225 |
 | The `editor.action.codeAction` command with `kind`, `apply` and `preferred` | `codeAction` | ✅ | #202 |
 | Rename suggestions (`NewSymbolNamesProvider`) | `rename` | ✅ | #225 |
 | Inlay hints: label parts, tooltips, Cmd/Ctrl+click, double-click edits, resolve, font options, spacers, padding and rounded boxes, the part location menu and location hovers, fixed lengths while typing, the per-model cache | `inlayHints` | ✅ | #56, #200, #253 |
 | Code lens: placeholder while resolving, theme/font/zoom-following style and height, first non-whitespace column, horizontal scrolling, `$(icon)` titles, tooltips, fade-in | `codelens` | ✅ (and "Show CodeLens Commands for Current Line", #202) | #96, #253 |
 | Color decorators (providers, default finder) | `colorDecorators` | ✅ | #97 |
-| Color picker (hover and standalone) | `colorPicker` | ✅ | #97 |
+| Color picker (hover and standalone) | `colorPicker` | ✅ `editorHoverWidget.*` chrome, `color-mode` header icon and title, hover states, grab cursors | #97, #251 |
 | Links | `links` | ✅ | #93 |
 | Semantic tokens | `semanticTokens` | ✅ | #98 |
 | Inline completions (ghost text, inline edits) | `inlineCompletions` | 🟡 ghost text, toolbar (hover or always), commands, options, lifetime hooks and provider groups; inline edits with Monaco's word, line, insertion, deletion, side-by-side, collapsed, custom (`hint`) and jump-to views, the gutter indicator (line number, pulse) and menu, the long-distance hint, cross-file edits (through `OpenLocation`), `jumpToPosition` items, alternative actions (Shift+Tab; supplied by the provider), `showInlineEditMenu`, undo/redo special cases and the fade-out; no snooze, model picker or onboarding | #99, #201, #216, #230 |

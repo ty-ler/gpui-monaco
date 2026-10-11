@@ -15,9 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AppContext as _, Context, Entity, FocusHandle, Hsla, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
-    WeakEntity, Window, div, prelude::FluentBuilder as _, px,
+    AppContext as _, Context, Entity, FocusHandle, FontWeight, Hsla, InteractiveElement,
+    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, Task, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
 use text::PointUtf16;
 
@@ -26,6 +26,7 @@ use crate::api::DecorationsCollection;
 use crate::codicons::{Codicon, icon as codicon};
 use crate::decorations::DecorationOptions;
 use crate::editor::CodeEditor;
+use crate::keybinding_label::{KeyLabel, keycaps_width, ui_text_width};
 use crate::options::LightbulbMode;
 use crate::providers::{
     CodeAction, CodeActionContext, CodeActionKind, CodeActionProvider, CodeActionTrigger, Command,
@@ -280,21 +281,6 @@ impl BarAction {
     }
 }
 
-/// The keybinding labels in the menu's tooltips (Monaco's
-/// `acceptSelectedCodeAction` and `previewSelectedCodeAction`).
-fn apply_tooltip(preview: bool) -> SharedString {
-    let preview_keys = if cfg!(target_os = "macos") {
-        "⌘Enter"
-    } else {
-        "Ctrl+Enter"
-    };
-    if preview {
-        format!("Enter to Apply, {preview_keys} to Preview").into()
-    } else {
-        "Enter to Apply".into()
-    }
-}
-
 /// Where the lightbulb is drawn (Monaco `LightBulbWidget`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LightbulbPlacement {
@@ -437,24 +423,6 @@ fn menu_rows(items: &[Item]) -> Vec<Row> {
     rows
 }
 
-/// The keybinding shown next to an action (Monaco
-/// `CodeActionKeybindingResolver`; of the default bindings only organize
-/// imports has a kind).
-fn keybinding_label(action: &CodeAction) -> Option<&'static str> {
-    let organize = CodeActionKind::from(CodeActionKind::SOURCE_ORGANIZE_IMPORTS);
-    action
-        .kind
-        .as_ref()
-        .filter(|kind| organize.contains(kind))
-        .map(|_| {
-            if cfg!(target_os = "macos") {
-                "⇧⌥O"
-            } else {
-                "Shift+Alt+O"
-            }
-        })
-}
-
 /// Monaco's action list widget for code actions.
 pub(crate) struct CodeActionMenu {
     editor: WeakEntity<CodeEditor>,
@@ -468,8 +436,17 @@ pub(crate) struct CodeActionMenu {
     bar: Vec<BarAction>,
     focused: Option<usize>,
     colors: EditorColors,
-    font_size: gpui::Pixels,
     focus: FocusHandle,
+    /// The editor's focus, where the code action commands' keys are
+    /// looked up.
+    editor_focus: Option<FocusHandle>,
+    /// The list's scrolling (Monaco's `List` reveals the focused row).
+    scroll: gpui::ScrollHandle,
+    /// The list's size as last rendered.
+    list_height: gpui::Pixels,
+    list_width: gpui::Pixels,
+    /// Each row's keybinding as last rendered.
+    row_keys: Vec<Option<KeyLabel>>,
     focus_pending: bool,
     /// The room it has in the window (it overflows the editor, as Monaco's
     /// action list is in the context view).
@@ -507,6 +484,9 @@ impl CodeActionMenu {
             return;
         }
         self.focused = row;
+        if let Some(row) = row {
+            self.scroll.scroll_to_item(row);
+        }
         let diagnostics: Vec<Range<PointUtf16>> = row
             .and_then(|row| match self.rows[row] {
                 Row::Action(ix) => Some(
@@ -578,6 +558,83 @@ impl CodeActionMenu {
     }
 }
 
+/// Monaco `ActionList`'s row heights (`_actionLineHeight`,
+/// `_headerLineHeight`).
+const ACTION_ROW_HEIGHT: f32 = 24.;
+const HEADER_ROW_HEIGHT: f32 = 26.;
+/// `.action-widget { font-size: 13px }`; group headers are 12px.
+const MENU_FONT_SIZE: f32 = 13.;
+const HEADER_FONT_SIZE: f32 = 12.;
+/// The row's icon box (a 16px codicon).
+const ICON_WIDTH: f32 = 16.;
+/// `.monaco-list-row { padding: 0 4px }` and the 4px gap between its parts.
+const ROW_PADDING: f32 = 4.;
+const ROW_GAP: f32 = 4.;
+/// The action bar under the list: `margin-top: 2px`, a 1px border, `3px`
+/// top padding and 22px labels.
+const BAR_HEIGHT: f32 = 2. + 1. + 3. + 22.;
+
+impl CodeActionMenu {
+    fn row_height(&self, row: usize) -> gpui::Pixels {
+        match self.rows[row] {
+            Row::Header(_) => px(HEADER_ROW_HEIGHT),
+            Row::Action(_) => px(ACTION_ROW_HEIGHT),
+        }
+    }
+
+    /// The keybinding of the row's action (Monaco
+    /// `CodeActionKeybindingResolver`), looked up in the editor.
+    fn row_keybinding(&self, ix: usize, window: &Window) -> Option<KeyLabel> {
+        let kind = self.items[ix].action.kind.as_ref()?;
+        let editor_focus = self.editor_focus.as_ref()?;
+        let organize = CodeActionKind::from(CodeActionKind::SOURCE_ORGANIZE_IMPORTS);
+        let fix_all = CodeActionKind::from(CodeActionKind::SOURCE_FIX_ALL);
+        let binding = if organize.contains(kind) {
+            window.highest_precedence_binding_for_action_in(&OrganizeImports, editor_focus)
+        } else if fix_all.contains(kind) {
+            window.highest_precedence_binding_for_action_in(&FixAll, editor_focus)
+        } else {
+            None
+        }?;
+        Some(KeyLabel::for_binding(&binding))
+    }
+
+    /// Monaco `ActionList.layout`: the list is as wide as its widest row
+    /// (at least the action bar), measured.
+    fn measure_width(&self, keys: &[Option<KeyLabel>], window: &mut Window) -> gpui::Pixels {
+        let mut width = px(0.);
+        for (row, kind) in self.rows.iter().enumerate() {
+            let row_width = match kind {
+                Row::Header(title) => {
+                    ui_text_width(title, px(HEADER_FONT_SIZE), FontWeight::SEMIBOLD, window)
+                }
+                Row::Action(ix) => {
+                    let title = self.items[*ix].action.title.replace(['\r', '\n'], " ");
+                    let mut w = px(ICON_WIDTH + ROW_GAP)
+                        + ui_text_width(&title, px(MENU_FONT_SIZE), FontWeight::NORMAL, window);
+                    if let Some(keys) = &keys[row] {
+                        w += px(ROW_GAP * 2.) + keycaps_width(keys, window);
+                    }
+                    w
+                }
+            };
+            width = width.max(row_width + px(ROW_PADDING * 2.));
+        }
+        if !self.bar.is_empty() {
+            // `.actions-container { padding: 3px 8px 0 }`, 16px after each.
+            let labels = self
+                .bar
+                .iter()
+                .map(|action| {
+                    ui_text_width(&action.label(), px(12.), FontWeight::NORMAL, window) + px(16.)
+                })
+                .fold(px(16.), |a, b| a + b);
+            width = width.max(labels);
+        }
+        width.ceil()
+    }
+}
+
 impl Render for CodeActionMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if std::mem::take(&mut self.focus_pending) {
@@ -587,17 +644,66 @@ impl Render for CodeActionMenu {
             self._subscriptions.push(subscription);
         }
         let colors = self.colors.clone();
+        // Monaco's row titles name the accept and preview keys.
+        let label = |action: &dyn gpui::Action, window: &Window| {
+            window
+                .highest_precedence_binding_for_action_in(action, &self.focus)
+                .map(|binding| KeyLabel::for_binding(&binding).text)
+        };
+        let accept_keys = label(&CodeActionMenuAccept, window).unwrap_or("Enter".into());
+        let preview_keys = label(&CodeActionMenuPreview, window).unwrap_or_default();
+        let keys: Vec<Option<KeyLabel>> = self
+            .rows
+            .iter()
+            .map(|row| match row {
+                Row::Action(ix) => self.row_keybinding(*ix, window),
+                Row::Header(_) => None,
+            })
+            .collect();
+        // Sizes: as wide as the widest row, at most 80% of the window, and
+        // as tall as the rows, at most 70% of the window (Monaco
+        // `ActionList.layout`), and the room on the side it shows on.
+        let viewport = window.viewport_size();
+        let chrome = px(4. * 2. + 2.);
+        let width = self
+            .measure_width(&keys, window)
+            .min(viewport.width * 0.8 - chrome)
+            .min(self.room.cap_width(px(f32::MAX), px(100.)) - chrome)
+            .max(px(100.));
+        let content: gpui::Pixels = (0..self.rows.len())
+            .map(|row| self.row_height(row))
+            .fold(px(0.), |a, b| a + b);
+        let bar_height = if self.bar.is_empty() {
+            px(0.)
+        } else {
+            px(BAR_HEIGHT)
+        };
+        let room = self.room.cap_height(px(f32::MAX), px(ACTION_ROW_HEIGHT)) - chrome - bar_height;
+        let height = content
+            .min(viewport.height * 0.7)
+            .min(room)
+            .max(px(ACTION_ROW_HEIGHT).min(content));
+        self.list_height = height;
+        self.list_width = width;
+        self.row_keys = keys.clone();
         let rows: Vec<_> = self
             .rows
             .iter()
             .enumerate()
             .map(|(row, kind)| match kind {
+                // `.group-header`: 12px, semibold, `descriptionForeground`.
                 Row::Header(title) => div()
                     .id(("code-action-header", row))
-                    .px(px(8.))
-                    .pt(px(4.))
-                    .text_size(self.font_size * 0.85)
-                    .text_color(colors.widget_foreground.opacity(0.6))
+                    .h(px(HEADER_ROW_HEIGHT))
+                    .flex_none()
+                    .px(px(ROW_PADDING))
+                    .flex()
+                    .items_center()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_size(px(HEADER_FONT_SIZE))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(colors.description_foreground)
                     .child(*title)
                     .into_any_element(),
                 Row::Action(ix) => {
@@ -606,41 +712,64 @@ impl Render for CodeActionMenu {
                     let focused = self.focused == Some(row);
                     let label: String = action.title.replace(['\r', '\n'], " ");
                     // Monaco's row titles: why it's disabled, or the keys.
-                    let tooltip = match &action.disabled {
+                    let tooltip: SharedString = match &action.disabled {
                         Some(reason) => reason.clone(),
-                        None => apply_tooltip(can_preview(action)),
+                        None if can_preview(action) && !preview_keys.is_empty() => {
+                            format!("{accept_keys} to Apply, {preview_keys} to Preview").into()
+                        }
+                        None => format!("{accept_keys} to Apply").into(),
                     };
                     div()
                         .id(("code-action", row))
+                        .h(px(ACTION_ROW_HEIGHT))
+                        .flex_none()
                         .flex()
                         .items_center()
-                        .gap(px(6.))
-                        .px(px(8.))
-                        .py(px(2.))
+                        .gap(px(ROW_GAP))
+                        .px(px(ROW_PADDING))
                         .rounded(px(3.))
+                        .whitespace_nowrap()
+                        .cursor_pointer()
                         // Monaco `editorActionList.focus*`; high contrast
                         // outlines the row instead.
-                        .when(focused, |row| {
+                        .when(focused && !disabled, |row| {
                             colors.focused_list_row(
                                 row,
                                 colors.action_list_focus_background,
                                 colors.action_list_focus_foreground,
                             )
                         })
-                        .when(disabled, |row| row.opacity(0.5))
+                        // `.option-disabled`: `disabledForeground`.
+                        .when(disabled, |row| row.text_color(colors.disabled_foreground))
                         // Monaco's action list: the group's icon, or
                         // `light-bulb` in `editorLightBulb.foreground`.
-                        .child(match group_icon(action) {
-                            Some(icon) => codicon(icon).size(px(12.)),
-                            None => codicon(Codicon::LightBulb)
-                                .size(px(12.))
-                                .color(colors.lightbulb_foreground),
-                        })
-                        .child(div().flex_1().child(label))
-                        .children(keybinding_label(action).map(|label| {
+                        .child(
                             div()
-                                .text_color(colors.widget_foreground.opacity(0.7))
-                                .child(label)
+                                .w(px(ICON_WIDTH))
+                                .flex_none()
+                                .flex()
+                                .justify_center()
+                                .child(match group_icon(action) {
+                                    Some(icon) => codicon(icon),
+                                    None if disabled => codicon(Codicon::LightBulb),
+                                    None => codicon(Codicon::LightBulb)
+                                        .color(colors.lightbulb_foreground),
+                                }),
+                        )
+                        // `.title`: one line, cut with an ellipsis.
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(label),
+                        )
+                        .children(keys[row].as_ref().map(|keys| {
+                            div()
+                                .flex_none()
+                                .ml(px(ROW_GAP))
+                                .child(crate::keybinding_label::keycaps(keys, &colors))
                         }))
                         .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                             if *hovered && this.focusable(row) {
@@ -672,41 +801,54 @@ impl Render for CodeActionMenu {
                 }
             }))
             .on_action(cx.listener(|this, _: &CodeActionMenuHide, _, cx| this.hide(cx)))
-            .min_w(px(200.))
-            .max_w(self.room.cap_width(px(500.), px(200.)))
-            // Capped to the room in the window, so the list scrolls.
-            .max_h(self.room.cap_height(px(400.), px(32.)))
-            .overflow_y_scroll()
+            // `.action-widget`: 4px padding, 5px corners and
+            // `0 2px 8px widget.shadow`.
             .p(px(4.))
             .flex()
             .flex_col()
             .bg(colors.action_list_background)
             .border_1()
             .border_color(colors.widget_border)
-            .rounded(px(4.))
-            .text_size(self.font_size)
+            .rounded(px(5.))
+            .shadow(crate::widgets::card::widget_shadow(colors.widget_shadow))
+            .text_size(px(MENU_FONT_SIZE))
             .text_color(colors.action_list_foreground)
-            .children(rows)
+            .child(
+                div()
+                    .id("code-action-list")
+                    .w(width)
+                    .h(height)
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .children(rows),
+            )
             .when(!self.bar.is_empty(), |menu| {
-                // Monaco's action bar: links under the list.
+                // Monaco's action bar: links under the list, outside its
+                // scrolling.
                 let buttons = self.bar.iter().enumerate().map(|(ix, action)| {
                     div()
                         .id(("code-action-bar", ix))
+                        .mr(px(16.))
                         .cursor_pointer()
-                        .text_color(colors.link_active_foreground)
+                        .text_color(colors.text_link_active_foreground)
                         .text_size(px(12.))
+                        .line_height(px(22.))
+                        .whitespace_nowrap()
                         .child(action.label())
                         .on_click(cx.listener(move |this, _, _, cx| this.run_bar_action(ix, cx)))
                 });
                 menu.child(
                     div()
-                        .mt(px(4.))
-                        .pt(px(4.))
+                        .id("code-action-bar")
+                        .w(width)
+                        .mt(px(2.))
+                        .pt(px(3.))
                         .px(px(8.))
                         .border_t_1()
-                        .border_color(colors.widget_border)
+                        .border_color(colors.hover_border)
                         .flex()
-                        .gap(px(12.))
                         .children(buttons),
                 )
             })
@@ -1101,6 +1243,11 @@ impl CodeEditor {
         let Some(lightbulb) = self.code_actions.lightbulb.clone() else {
             return;
         };
+        // Monaco `autoRun`: a lone AI fix runs on the click.
+        if let Some(item) = lightbulb_auto_run(&lightbulb).cloned() {
+            self.apply_code_action(item, true, false, cx);
+            return;
+        }
         let set = CodeActionSet {
             items: lightbulb.items.to_vec(),
             documentation: Vec::new(),
@@ -1160,7 +1307,7 @@ impl CodeEditor {
         self.refocus = false;
         let editor = cx.entity().downgrade();
         let colors = self.theme.colors.clone();
-        let font_size = self.options.font_size;
+        let editor_focus = self.focus_handle.clone();
         let menu = cx.new(|cx| {
             let mut menu = CodeActionMenu {
                 editor,
@@ -1172,7 +1319,11 @@ impl CodeEditor {
                 bar,
                 focused: None,
                 colors,
-                font_size,
+                editor_focus: Some(editor_focus),
+                scroll: gpui::ScrollHandle::new(),
+                list_height: px(0.),
+                list_width: px(0.),
+                row_keys: Vec::new(),
                 focus: cx.focus_handle(),
                 focus_pending: true,
                 room: Default::default(),
@@ -1215,6 +1366,50 @@ impl CodeEditor {
                 Row::Action(ix) => menu.items[*ix].action.title.to_string(),
             })
             .collect()
+    }
+
+    /// The open menu's list size, whether its focused row is inside the
+    /// list's visible part, and each row's keybinding label, as last
+    /// rendered, for tests.
+    #[doc(hidden)]
+    pub fn code_action_menu_layout_for_tests(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<(gpui::Size<gpui::Pixels>, bool, Vec<Option<String>>)> {
+        let menu = self.code_actions.menu.as_ref()?.1.read(cx);
+        let list = menu.scroll.bounds();
+        let offset = menu.scroll.offset().y;
+        let visible = menu.focused.is_some_and(|row| {
+            menu.scroll.bounds_for_item(row).is_some_and(|item| {
+                // Item bounds are unscrolled.
+                let top = item.top() + offset;
+                top >= list.top() - px(0.5) && top + item.size.height <= list.bottom() + px(0.5)
+            })
+        });
+        Some((
+            gpui::size(menu.list_width, menu.list_height),
+            visible,
+            menu.row_keys
+                .iter()
+                .map(|keys| keys.as_ref().map(|k| k.text.to_string()))
+                .collect(),
+        ))
+    }
+
+    /// The lightbulb's title (Monaco `LightBulbWidget`'s), for tests.
+    #[doc(hidden)]
+    pub fn lightbulb_title_for_tests(&self, window: &Window) -> Option<String> {
+        let bulb = self.code_actions.lightbulb.as_ref()?;
+        let keys = |action: &dyn gpui::Action| {
+            window
+                .highest_precedence_binding_for_action_in(action, &self.focus_handle)
+                .map(|binding| crate::keybinding_label::binding_label(&binding))
+        };
+        Some(lightbulb_title(
+            bulb,
+            keys(&AutoFix).as_deref(),
+            keys(&QuickFix).as_deref(),
+        ))
     }
 
     /// The labels of the open code action menu's action bar (Monaco's
@@ -1363,12 +1558,47 @@ pub(crate) fn lightbulb_icon(bulb: &Lightbulb) -> Codicon {
     }
 }
 
-/// Monaco's lightbulb colors.
-pub(crate) fn lightbulb_color(colors: &EditorColors, auto_fix: bool) -> Hsla {
-    if auto_fix {
-        colors.lightbulb_auto_fix_foreground
-    } else {
-        colors.lightbulb_foreground
+/// Monaco's lightbulb colors (`lightBulbWidget.css`): the AI color for
+/// `sparkle-filled`, the autofix color for the autofix variants, else
+/// `editorLightBulb.foreground`.
+pub(crate) fn lightbulb_color(colors: &EditorColors, icon: Codicon) -> Hsla {
+    match icon {
+        Codicon::SparkleFilled => colors.lightbulb_ai_foreground,
+        Codicon::LightbulbAutofix | Codicon::LightbulbSparkleAutofix => {
+            colors.lightbulb_auto_fix_foreground
+        }
+        _ => colors.lightbulb_foreground,
+    }
+}
+
+/// Monaco `computeLightBulbInfo`'s `autoRun`: every valid action is an AI
+/// fix and there's one, so a click runs it.
+fn lightbulb_auto_run(bulb: &Lightbulb) -> Option<&Item> {
+    let valid = valid(&bulb.items);
+    match valid.as_slice() {
+        [only] if only.action.is_ai => Some(only),
+        _ => None,
+    }
+}
+
+/// Monaco `computeLightBulbInfo`'s title, with the Auto Fix
+/// (`preferred_keys`) and Quick Fix (`quick_fix_keys`) keybindings:
+/// "Run: {title}", "Show Code Actions. Preferred Quick Fix Available
+/// ({keys})", "Show Code Actions ({keys})" or "Show Code Actions".
+pub(crate) fn lightbulb_title(
+    bulb: &Lightbulb,
+    preferred_keys: Option<&str>,
+    quick_fix_keys: Option<&str>,
+) -> String {
+    if let Some(item) = lightbulb_auto_run(bulb) {
+        return format!("Run: {}", item.action.title);
+    }
+    match (bulb.auto_fix, preferred_keys, quick_fix_keys) {
+        (true, Some(keys), _) => {
+            format!("Show Code Actions. Preferred Quick Fix Available ({keys})")
+        }
+        (false, _, Some(keys)) => format!("Show Code Actions ({keys})"),
+        _ => "Show Code Actions".to_string(),
     }
 }
 
@@ -1536,6 +1766,59 @@ mod tests {
         ) -> Task<anyhow::Result<Vec<CodeAction>>> {
             Task::ready(Ok(Vec::new()))
         }
+    }
+
+    /// Monaco `computeLightBulbInfo` and `lightBulbWidget.css`: the title
+    /// and color for each kind of bulb.
+    #[test]
+    fn lightbulb_titles_and_colors() {
+        let bulb = |actions: Vec<CodeAction>, auto_fix: bool| Lightbulb {
+            position: PointUtf16::zero(),
+            items: std::rc::Rc::new(
+                actions
+                    .into_iter()
+                    .map(|action| Item {
+                        action,
+                        provider: Arc::new(Nothing),
+                    })
+                    .collect(),
+            ),
+            auto_fix,
+        };
+        let plain = bulb(
+            vec![action("Inline", Some("refactor"), false, false)],
+            false,
+        );
+        assert_eq!(
+            lightbulb_title(&plain, Some("⌥⌘."), Some("⌘.")),
+            "Show Code Actions (⌘.)"
+        );
+        assert_eq!(lightbulb_title(&plain, None, None), "Show Code Actions");
+        let fix = bulb(vec![action("Fix", Some("quickfix"), true, false)], true);
+        assert_eq!(
+            lightbulb_title(&fix, Some("⌥⌘."), Some("⌘.")),
+            "Show Code Actions. Preferred Quick Fix Available (⌥⌘.)"
+        );
+        // A lone AI fix runs on the click.
+        let mut ai = action("Ask AI", Some("quickfix"), false, false);
+        ai.is_ai = true;
+        let ai = bulb(vec![ai], false);
+        assert_eq!(lightbulb_title(&ai, None, Some("⌘.")), "Run: Ask AI");
+        assert!(lightbulb_auto_run(&ai).is_some());
+        assert!(lightbulb_auto_run(&plain).is_none());
+        let colors = crate::theme::Theme::vs_dark().colors;
+        assert_eq!(
+            lightbulb_color(&colors, lightbulb_icon(&ai)),
+            colors.lightbulb_ai_foreground
+        );
+        assert_eq!(
+            lightbulb_color(&colors, lightbulb_icon(&fix)),
+            colors.lightbulb_auto_fix_foreground
+        );
+        assert_eq!(
+            lightbulb_color(&colors, lightbulb_icon(&plain)),
+            colors.lightbulb_foreground
+        );
     }
 
     #[test]

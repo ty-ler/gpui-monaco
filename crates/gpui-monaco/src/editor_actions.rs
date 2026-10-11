@@ -1089,22 +1089,14 @@ impl CodeEditor {
         }
     }
 
-    /// The keystrokes bound to each supported action in this editor, for
-    /// display.
+    /// The keystrokes bound to each supported action in this editor, as
+    /// Monaco labels them (`ResolvedKeybinding.getLabel()`).
     pub(crate) fn action_keybindings(
         &self,
         window: &Window,
         cx: &App,
-    ) -> HashMap<SharedString, SharedString> {
-        let text = |binding: KeyBinding| -> SharedString {
-            binding
-                .keystrokes()
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(" ")
-                .into()
-        };
+    ) -> HashMap<SharedString, crate::keybinding_label::KeyLabel> {
+        let text = |binding: KeyBinding| crate::keybinding_label::KeyLabel::for_binding(&binding);
         let mut keys = HashMap::new();
         for b in BUILTINS {
             let Ok(action) = cx.build_action(b.1, None) else {

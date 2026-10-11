@@ -576,14 +576,14 @@ fn right_click_on_a_part_shows_its_location_menu(cx: &mut TestAppContext) {
     assert_eq!(*asked.borrow(), [p(1, 7)]);
     assert_eq!(editor.read_with(cx, |e, _| e.selections()[0].head), p(1, 0));
 
-    // A part without a location keeps the editor's menu.
+    // A part without a location shows no menu: Monaco's editor menu skips
+    // injected text (`contextmenu.ts` `_onContextMenu`).
     draw(cx);
     let position = part_point(&editor, "<T>", cx);
     cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
     cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
     cx.run_until_parked();
-    let rows = editor.read_with(cx, |e, cx| e.context_menu_rows_for_tests(cx));
-    assert!(rows.iter().any(|row| row.ends_with("Cut")));
+    assert!(!editor.read_with(cx, |e, _| e.is_context_menu_visible()));
 }
 
 /// Monaco `_resolveInlayHintLabelPartHover`: the hovers at a part's

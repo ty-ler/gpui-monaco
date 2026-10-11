@@ -67,6 +67,19 @@ struct RenameInput {
     theme: Arc<Theme>,
     colors: EditorColors,
     font_size: gpui::Pixels,
+    /// The editor's line height and typical character width (Monaco's
+    /// `fontInfo`).
+    line_height: gpui::Pixels,
+    char_width: gpui::Pixels,
+    /// The renamed range's length in UTF-16 columns.
+    location_length: u32,
+    /// Where the editor publishes the room around the line.
+    room: crate::widgets::OverflowRoomCell,
+    /// The preference has been set from the room.
+    placed: bool,
+    /// The candidate list's scrolling (Monaco's list reveals the focused
+    /// candidate).
+    scroll: gpui::ScrollHandle,
     /// Previews are possible: the label shows (Monaco `supportPreview`).
     support_preview: bool,
     /// Suggestion providers exist: the button shows.
@@ -221,6 +234,9 @@ impl RenameInput {
             (Some(ix), false) if ix > 0 => Some(ix - 1),
             (Some(_), _) => None,
         };
+        // Monaco `focusNext`/`focusPrevious` reveal the focused candidate,
+        // or the first when focus leaves the list.
+        self.scroll.scroll_to_item(self.focused.unwrap_or(0));
         let text = match self.focused {
             Some(ix) => self.candidates[ix].new_symbol_name.to_string(),
             None => self.name.clone(),
@@ -263,31 +279,97 @@ impl RenameInput {
         cx.notify();
     }
 
-    fn render_candidates(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// Monaco `RenameCandidateView.getLayoutInfo`: a line plus 2px padding
+    /// above and below.
+    fn candidate_height(&self) -> gpui::Pixels {
+        self.line_height + px(CANDIDATE_PADDING * 2.)
+    }
+
+    /// Monaco `getPosition`: below the line when there's room there for
+    /// about six candidates, else above.
+    fn below_first(&self) -> bool {
+        self.room
+            .get()
+            .is_none_or(|room| room.below > self.candidate_height() * 6.)
+    }
+
+    /// Monaco `_pickListHeight`: every candidate, at most seven and the
+    /// space left on the side the box shows on (less the input and label).
+    fn list_height(&self, label_height: gpui::Pixels) -> gpui::Pixels {
+        let row = self.candidate_height();
+        let all = row * self.candidates.len() as f32;
+        let available = match self.room.get() {
+            Some(room) if self.below_first() => room.below,
+            Some(room) => room.above,
+            None => all,
+        } - label_height
+            - (self.line_height + px(INPUT_PADDING * 2. + 2.));
+        all.min(row * MAX_VISIBLE_CANDIDATES as f32)
+            .min(available.max(row))
+    }
+
+    /// Monaco `input.size = max(nameLength * 1.1, 20)` characters, at the
+    /// editor's typical character width.
+    fn input_width(&self) -> gpui::Pixels {
+        let length = self.location_length as f32;
+        self.char_width * (length * 1.1).max(20.).ceil()
+    }
+
+    /// Monaco `_pickListWidth`: room for the longest candidate after the
+    /// icon, at least the input's width.
+    fn list_width(&self, input: gpui::Pixels) -> gpui::Pixels {
+        let longest = self
+            .candidates
+            .iter()
+            .map(|c| c.new_symbol_name.chars().count())
+            .max()
+            .unwrap_or(0);
+        input.max(px(4. + 16. + 5. + 10.) + (self.char_width * longest as f32).ceil())
+    }
+
+    fn render_candidates(&self, height: gpui::Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = &self.colors;
-        let row_height = self.font_size * 1.4 + px(4.);
+        let row_height = self.candidate_height();
         let rows = self.candidates.iter().enumerate().map(|(ix, candidate)| {
             let ai = candidate.tags.contains(&NewSymbolNameTag::AIGenerated);
+            let focused = self.focused == Some(ix);
             div()
                 .id(("rename-candidate", ix))
                 .h(row_height)
-                .p(px(2.))
+                .flex_none()
+                .p(px(CANDIDATE_PADDING))
                 .flex()
                 .items_center()
                 .gap(px(5.))
                 .rounded(px(2.))
                 .cursor_pointer()
-                // Monaco's list colors.
-                .when(self.focused == Some(ix), |row| {
+                .whitespace_nowrap()
+                // The list's focus colors (`quickInputList.focus*`, its
+                // inactive focus) and `list.hoverBackground`.
+                .when(focused, |row| {
                     colors.focused_list_row(
                         row,
-                        colors.list_active_selection_background,
-                        colors.list_active_selection_foreground,
+                        colors.quick_input_list_focus_background,
+                        colors.quick_input_list_focus_foreground,
                     )
                 })
-                .child(div().w(self.font_size).flex_none().when(ai, |icon| {
-                    icon.child(codicon(Codicon::Sparkle).size(self.font_size))
-                }))
+                .when(!focused, |row| {
+                    let hover = colors.list_hover_background;
+                    row.hover(move |style| match hover {
+                        Some(hover) => style.bg(hover),
+                        None => style,
+                    })
+                })
+                .child(
+                    div()
+                        .size(self.line_height * 0.8)
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .when(ai, |icon| {
+                            icon.child(codicon(Codicon::Sparkle).size(self.line_height * 0.8))
+                        }),
+                )
                 .child(candidate.new_symbol_name.clone())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     // Monaco's list selection: pick it and rename, without
@@ -299,8 +381,9 @@ impl RenameInput {
         });
         div()
             .id("rename-candidates")
-            .max_h(row_height * MAX_VISIBLE_CANDIDATES as f32)
+            .h(height)
             .overflow_y_scroll()
+            .track_scroll(&self.scroll)
             .flex()
             .flex_col()
             .children(rows)
@@ -308,20 +391,44 @@ impl RenameInput {
     }
 }
 
-/// The label under the box (Monaco's `rename-label`, shown with previews).
-fn rename_label() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "Enter to Rename, ⌘Enter to Preview"
-    } else {
-        "Enter to Rename, Ctrl+Enter to Preview"
-    }
+/// The label under the box (Monaco's `rename-label`, shown with previews):
+/// "{accept} to Rename, {preview} to Preview" with their keys.
+fn rename_label(accept: &str, preview: &str) -> String {
+    format!("{accept} to Rename, {preview} to Preview")
 }
+
+/// Monaco `RenameCandidateView._PADDING`.
+const CANDIDATE_PADDING: f32 = 2.;
+/// `.rename-input-with-button { padding: 3px }`.
+const INPUT_PADDING: f32 = 3.;
 
 impl Render for RenameInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_input(window, cx);
+        // Monaco `getPosition`'s preference, once the room is known.
+        if !self.placed && self.room.get().is_some() {
+            self.placed = true;
+            if !self.below_first() {
+                self.with_editor(cx, |editor, cx| editor.prefer_rename_above(cx));
+            }
+        }
         let colors = self.colors.clone();
-        let candidates = (!self.candidates.is_empty()).then(|| self.render_candidates(cx));
+        let label_size = self.font_size * 0.8;
+        let label_height = if self.support_preview {
+            label_size * 1.4
+        } else {
+            px(0.)
+        };
+        let button_width = if self.has_suggestions {
+            px(16. + 6.)
+        } else {
+            px(0.)
+        };
+        let input_width = self.input_width();
+        let box_width = (input_width + button_width + px(INPUT_PADDING * 2. + 2.)).max(px(200.));
+        let list_width = self.list_width(box_width);
+        let candidates = (!self.candidates.is_empty())
+            .then(|| self.render_candidates(self.list_height(label_height), cx));
         // Monaco's `InputWithButton`: sparkle to ask, stop to cancel.
         let button = self.has_suggestions.then(|| {
             let (icon, title) = if self.requesting {
@@ -332,14 +439,42 @@ impl Render for RenameInput {
             div()
                 .id("rename-suggestions-button")
                 .flex_none()
-                .px(px(3.))
+                .p(px(3.))
                 .rounded(px(5.))
                 .cursor_pointer()
+                .hover(|style| colors.toolbar_hover(style))
                 .child(codicon(icon))
                 .tooltip(crate::tooltip::tooltip(title, &colors))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.with_editor(cx, |editor, cx| editor.request_rename_suggestions(cx));
                 }))
+        });
+        let focused = self
+            .input
+            .as_ref()
+            .is_some_and(|input| input.read(cx).focus_handle.is_focused(window));
+        // The label names the accept and preview keys.
+        let label = self.support_preview.then(|| {
+            let keys = |action: &dyn gpui::Action| {
+                self.input.as_ref().and_then(|input| {
+                    window
+                        .highest_precedence_binding_for_action_in(
+                            action,
+                            &input.read(cx).focus_handle,
+                        )
+                        .map(|binding| crate::keybinding_label::binding_label(&binding))
+                })
+            };
+            let accept = keys(&AcceptRenameInput).unwrap_or_else(|| "Enter".into());
+            let preview = keys(&AcceptRenameInputWithPreview).unwrap_or_default();
+            rename_label(&accept, &preview)
+        });
+        let shadow = colors.widget_shadow.map(|color| gpui::BoxShadow {
+            color,
+            offset: gpui::point(px(0.), px(0.)),
+            blur_radius: px(8.),
+            spread_radius: px(2.),
+            inset: false,
         });
         div()
             .key_context("RenameInput")
@@ -364,43 +499,57 @@ impl Render for RenameInput {
                     this.move_focus(false, cx)
                 }),
             )
-            .min_w(px(200.))
-            .w(px(220.))
-            .p(px(4.))
+            // Monaco `.rename-box`: 4px corners, `editorWidget.background`,
+            // `widget.border`, `0 0 8px 2px widget.shadow` and
+            // `input.foreground`; `4px 4px 0` padding with the label.
+            .w(list_width.max(box_width) + if self.support_preview { px(8.) } else { px(0.) })
+            .when(self.support_preview, |this| this.pt(px(4.)).px(px(4.)))
             .flex()
             .flex_col()
-            .gap(px(2.))
             .bg(colors.widget_background)
-            .border_1()
-            .border_color(colors.widget_border)
+            .when_some(colors.widget_outline, |this, border| {
+                this.border_1().border_color(border)
+            })
+            .when_some(shadow, |this, shadow| this.shadow(vec![shadow]))
             .rounded(px(4.))
             .text_size(self.font_size)
-            .text_color(colors.widget_foreground)
+            .text_color(colors.input_foreground)
             .child(
                 div()
+                    .w(box_width)
                     .flex()
                     .items_center()
-                    .px(px(2.))
+                    .p(px(INPUT_PADDING))
+                    .rounded(px(4.))
                     .bg(colors.input_background)
                     .border_1()
-                    .border_color(colors.input_option_active_border)
+                    // `input.border`, and the `focusBorder` outline while
+                    // the input has focus.
+                    .border_color(if focused {
+                        colors.focus_border
+                    } else {
+                        colors.input_border.unwrap_or_else(gpui::transparent_black)
+                    })
                     .child(
                         div()
                             .flex_1()
-                            .h(self.font_size * 1.6)
+                            .min_w_0()
+                            .h(self.line_height)
                             .children(self.input.clone()),
                     )
                     .children(button),
             )
-            .children(candidates)
-            .when(self.support_preview, |this| {
-                this.child(
-                    div()
-                        .text_size(self.font_size * 0.8)
-                        .text_color(colors.widget_foreground.opacity(0.8))
-                        .child(rename_label()),
-                )
-            })
+            .children(candidates.map(|list| div().w(list_width).child(list)))
+            .children(label.map(|label| {
+                div()
+                    .h(label_height)
+                    .flex()
+                    .items_center()
+                    .whitespace_nowrap()
+                    .text_size(label_size)
+                    .opacity(0.8)
+                    .child(label)
+            }))
     }
 }
 
@@ -518,6 +667,20 @@ impl CodeEditor {
         let editor = cx.entity().downgrade();
         let has_suggestions = !new_symbol_names_providers(cx, self.provider_target(cx)).is_empty();
         let support_preview = crate::has_workspace_edit_preview_handler(cx);
+        let (line_height, char_width) = self.layout.as_ref().map_or_else(
+            || {
+                (
+                    self.options.resolved_line_height(),
+                    self.options.font_size * 0.6,
+                )
+            },
+            |layout| (layout.metrics.line_height, layout.metrics.em_width),
+        );
+        let location_length = location
+            .range
+            .end
+            .column
+            .saturating_sub(location.range.start.column);
         let view = cx.new(|_| RenameInput {
             editor,
             name: location.text.to_string(),
@@ -526,6 +689,12 @@ impl CodeEditor {
             theme: Arc::new(theme),
             colors: self.theme.colors.clone(),
             font_size: self.options.font_size,
+            line_height,
+            char_width,
+            location_length,
+            room: Default::default(),
+            placed: false,
+            scroll: gpui::ScrollHandle::new(),
             support_preview,
             has_suggestions,
             requesting: false,
@@ -551,6 +720,8 @@ impl CodeEditor {
         );
         self.widgets
             .set_layer(widget, crate::widgets::layer::WIDGET);
+        let room = self.widgets.room(widget);
+        view.update(cx, |view, _| view.room = room);
         self.rename.session = Some(Session {
             widget,
             view,
@@ -682,6 +853,24 @@ impl CodeEditor {
         Some((view.support_preview, view.has_suggestions))
     }
 
+    /// The input's width (Monaco's `size` in characters) and whether the
+    /// focused suggestion is inside the list's visible part, as last laid
+    /// out, for tests.
+    #[doc(hidden)]
+    pub fn rename_layout_for_tests(&self, cx: &gpui::App) -> Option<(gpui::Pixels, bool)> {
+        let view = self.rename.session.as_ref()?.view.read(cx);
+        let list = view.scroll.bounds();
+        let offset = view.scroll.offset().y;
+        let visible = view.focused.is_some_and(|ix| {
+            view.scroll.bounds_for_item(ix).is_some_and(|item| {
+                // Item bounds are unscrolled.
+                let top = item.top() + offset;
+                top >= list.top() - px(0.5) && top + item.size.height <= list.bottom() + px(0.5)
+            })
+        });
+        Some((view.input_width(), visible))
+    }
+
     /// Focuses the next rename suggestion, showing it in the box (Monaco
     /// `focusNextRenameSuggestion`, Down). Past the last one, or with none,
     /// the box shows the current name again.
@@ -717,6 +906,42 @@ impl CodeEditor {
             self.refocus = true;
         }
         true
+    }
+
+    /// Monaco `getPosition` with little room below: the box goes above the
+    /// line first.
+    pub(crate) fn prefer_rename_above(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &self.rename.session else {
+            return;
+        };
+        let id = session.widget;
+        if let Some(widget) = self.widgets.content.iter_mut().find(|w| w.id == id) {
+            widget.preference = vec![
+                ContentWidgetPreference::Above,
+                ContentWidgetPreference::Below,
+            ];
+            cx.notify();
+        }
+    }
+
+    /// Whether the rename box's line was scrolled out of the laid out
+    /// lines, so it isn't rendered (Monaco `afterRender(null)`).
+    pub(crate) fn rename_out_of_view(&self, cx: &gpui::App) -> bool {
+        let (Some(session), Some(layout)) = (&self.rename.session, &self.layout) else {
+            return false;
+        };
+        // The widget's anchor follows edits.
+        let anchor = self
+            .widgets
+            .content
+            .iter()
+            .find(|w| w.id == session.widget)
+            .and_then(|w| {
+                let buffer = self.model().read(cx).buffer();
+                Some(buffer.offset_to_point_utf16(buffer.resolve(w.anchor.as_ref()?)))
+            })
+            .unwrap_or(session.location.range.start);
+        layout.line_for_point(anchor).is_none()
     }
 
     /// The text or the cursor left the symbol: Monaco cancels the box.

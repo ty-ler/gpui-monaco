@@ -624,3 +624,126 @@ fn previewing_an_action_goes_through_the_preview_handler(cx: &mut TestAppContext
     cx.update(|_, cx| handler.dispose(cx));
     assert!(cx.update(|_, cx| !gpui_monaco::has_workspace_edit_preview_handler(cx)));
 }
+
+fn menu_layout(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+) -> (gpui::Size<gpui::Pixels>, bool, Vec<Option<String>>) {
+    editor
+        .read_with(cx, |e, cx| e.code_action_menu_layout_for_tests(cx))
+        .unwrap()
+}
+
+/// Monaco's `ActionList` reveals the focused row: Down past the rows that
+/// fit keeps it in view, and the list is capped and scrolls.
+#[gpui::test]
+fn up_and_down_keep_the_focused_action_in_view(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: (0..60)
+            .map(|i| action(&format!("Fix number {i}"), "quickfix"))
+            .collect(),
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    editor.update(cx, |e, cx| e.quick_fix(cx));
+    draw(cx);
+    let (size, visible, _) = menu_layout(&editor, cx);
+    assert!(visible);
+    // 60 rows of 24px don't fit in 70% of the window.
+    assert!(size.height < gpui::px(24. * 60.), "{size:?}");
+    for _ in 0..45 {
+        cx.simulate_keystrokes("down");
+    }
+    draw(cx);
+    draw(cx);
+    let (_, visible, _) = menu_layout(&editor, cx);
+    assert!(visible, "the focused row scrolled out of view");
+    // Up wraps to the last row, also revealed.
+    for _ in 0..46 {
+        cx.simulate_keystrokes("up");
+    }
+    draw(cx);
+    draw(cx);
+    assert!(menu_layout(&editor, cx).1);
+}
+
+/// The list is as wide as its widest row (measured, one line each), and
+/// rows show their keybinding as Monaco labels it.
+#[gpui::test]
+fn the_menu_is_measured_and_shows_keybindings(cx: &mut TestAppContext) {
+    let long = "Replace this expression with a considerably longer and more descriptive name";
+    let provider = Actions {
+        actions: vec![
+            action("Short", "source"),
+            action(long, "source"),
+            action("Organize imports", "source.organizeImports"),
+        ],
+        kinds: Some(vec!["source".into(), "source.organizeImports".into()]),
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    editor.update(cx, |e, cx| e.source_action(cx));
+    draw(cx);
+    let (size, _, keys) = menu_layout(&editor, cx);
+    // Wider than the old fixed 200-500px guess would allow for one line.
+    assert!(size.width > gpui::px(400.), "{size:?}");
+    // One 24px row per action and a 26px header.
+    assert_eq!(size.height, gpui::px(26. + 3. * 24.));
+    let organize = if cfg!(target_os = "macos") {
+        "⇧⌥O"
+    } else {
+        "Shift+Alt+O"
+    };
+    assert_eq!(keys, [None, None, None, Some(organize.to_string())]);
+}
+
+/// Monaco `computeLightBulbInfo`'s titles, with the Quick Fix and Auto Fix
+/// keys.
+#[gpui::test]
+fn the_lightbulb_title_names_its_keybinding(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: vec![action("Inline variable", "refactor.inline")],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    wait(cx);
+    let title = cx.update(|window, cx| editor.read(cx).lightbulb_title_for_tests(window));
+    let quick_fix = if cfg!(target_os = "macos") {
+        "⌘."
+    } else {
+        "Ctrl+."
+    };
+    assert_eq!(title, Some(format!("Show Code Actions ({quick_fix})")));
+}
+
+#[gpui::test]
+fn a_preferred_fix_names_the_auto_fix_keys(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: vec![CodeAction {
+            is_preferred: true,
+            ..action("Add semicolon", "quickfix")
+        }],
+        kinds: Some(vec!["quickfix".into()]),
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    wait(cx);
+    let title = cx.update(|window, cx| editor.read(cx).lightbulb_title_for_tests(window));
+    let auto_fix = if cfg!(target_os = "macos") {
+        "⌥⌘."
+    } else {
+        "Shift+Alt+."
+    };
+    assert_eq!(
+        title,
+        Some(format!(
+            "Show Code Actions. Preferred Quick Fix Available ({auto_fix})"
+        ))
+    );
+}

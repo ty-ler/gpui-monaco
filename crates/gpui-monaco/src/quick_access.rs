@@ -38,8 +38,10 @@ use crate::widgets::{OverlayPosition, OverlayWidget, WidgetId};
 /// The key context of the quick input.
 pub const QUICK_INPUT_KEY_CONTEXT: &str = "QuickInput";
 
-/// Row height (VS Code's quick input list).
+/// Row height (Monaco's quick input list, `QuickInputListDelegate`).
 const ROW_HEIGHT: f32 = 22.;
+/// The list's vertical scrollbar (Monaco's list `verticalScrollbarSize`).
+const SCROLLBAR_WIDTH: f32 = 10.;
 
 /// What choosing an item does.
 #[derive(Clone, Debug, PartialEq)]
@@ -82,8 +84,11 @@ pub(crate) struct QuickItem {
     pub description: Option<SharedString>,
     pub icon: Option<(Codicon, Hsla)>,
     pub strikethrough: bool,
-    /// The keys that run it, shown on the right.
-    pub keybinding: Option<SharedString>,
+    /// The keys that run it, shown as keycaps on the right.
+    pub keybinding: Option<crate::keybinding_label::KeyLabel>,
+    /// The label of the separator this item starts (Monaco
+    /// `IQuickPickItem.separator`), set by the widget.
+    pub separator: Option<SharedString>,
     pub action: QuickAction,
 }
 
@@ -96,6 +101,7 @@ impl QuickItem {
             icon: None,
             strikethrough: false,
             keybinding: None,
+            separator: None,
             action,
         }
     }
@@ -111,7 +117,7 @@ pub(crate) struct QuickAccessState {
     symbols: Option<Vec<DocumentSymbol>>,
     _symbols_task: Option<Task<()>>,
     /// The keys bound to each action, looked up when it opened.
-    action_keys: HashMap<SharedString, SharedString>,
+    action_keys: HashMap<SharedString, crate::keybinding_label::KeyLabel>,
     /// A [`CodeEditor::show_quick_pick`] list instead of the providers.
     pick: Option<(Vec<SharedString>, Option<PickHandler>)>,
     /// Monaco's "Go to Match..." input box instead of the providers; the
@@ -124,17 +130,49 @@ pub(crate) struct QuickAccessState {
 pub struct QuickInput {
     editor: WeakEntity<CodeEditor>,
     input: Entity<CodeEditor>,
-    rows: Vec<QuickRow>,
+    /// The list's items; a separator is drawn on the item it starts.
+    items: Vec<QuickItem>,
     active: Option<usize>,
-    scroll: usize,
-    visible_rows: usize,
-    /// Wheel movement not yet a whole row.
-    wheel_remainder: Pixels,
-    width: Pixels,
+    /// The list's scroll offset (Monaco's list `scrollTop`).
+    scroll_top: Pixels,
+    /// The list's height as last rendered.
+    list_height: Pixels,
+    /// Its maximum height as last rendered.
+    max_list_height: Pixels,
+    /// The mouse is over the list, so its scrollbar shows (Monaco's
+    /// `ScrollbarVisibility.Auto`).
+    list_hovered: bool,
+    /// A scrollbar slider drag: the mouse's y and the scroll offset when it
+    /// started.
+    slider_drag: Option<(Pixels, Pixels)>,
+    /// The list's top in the window as last painted.
+    list_top: std::rc::Rc<std::cell::Cell<Option<Pixels>>>,
     /// Monaco's title bar above the input (quick picks).
     title: Option<SharedString>,
     colors: crate::theme::EditorColors,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Monaco's quick input list rows from the providers' rows: a separator
+/// becomes the label and top border of the item after it (Monaco
+/// `QuickPickItem.separator`), and `active` an item index.
+fn items_from_rows(rows: Vec<QuickRow>, active: Option<usize>) -> (Vec<QuickItem>, Option<usize>) {
+    let mut items = Vec::with_capacity(rows.len());
+    let mut separator = None;
+    let mut active_item = None;
+    for (ix, row) in rows.into_iter().enumerate() {
+        match row {
+            QuickRow::Separator(label) => separator = Some(label),
+            QuickRow::Item(mut item) => {
+                item.separator = separator.take();
+                if active == Some(ix) {
+                    active_item = Some(items.len());
+                }
+                items.push(item);
+            }
+        }
+    }
+    (items, active_item)
 }
 
 /// The symbol kind's codicon (Monaco `SymbolKinds.toIcon`), in the theme's
@@ -194,13 +232,11 @@ fn column_from_visible(line: &str, visible: u32, tab_size: u32) -> u32 {
 }
 
 impl QuickInput {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         editor: WeakEntity<CodeEditor>,
         value: &str,
         (rows, active): (Vec<QuickRow>, Option<usize>),
-        width: Pixels,
-        visible_rows: usize,
+        max_list_height: Pixels,
         theme: std::sync::Arc<crate::Theme>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -227,21 +263,25 @@ impl QuickInput {
             }),
         ];
         window.focus(&input.read(cx).focus_handle.clone(), cx);
+        let (items, active) = items_from_rows(rows, active);
         let mut this = Self {
             editor,
             input,
-            rows,
-            active: None,
-            scroll: 0,
-            wheel_remainder: px(0.),
-            visible_rows,
-            width,
+            items,
+            active,
+            scroll_top: px(0.),
+            list_height: px(0.),
+            max_list_height,
+            list_hovered: false,
+            slider_drag: None,
+            list_top: Default::default(),
             title: None,
             colors,
             _subscriptions: subscriptions,
         };
-        this.active = active.or_else(|| this.item_indices().first().copied());
-        this.keep_active_visible();
+        this.list_height = this.list_height_for(max_list_height);
+        this.active = this.active.or((!this.items.is_empty()).then_some(0));
+        this.reveal_active();
         this
     }
 
@@ -260,60 +300,88 @@ impl QuickInput {
         let Some(editor) = self.editor.upgrade() else {
             return;
         };
-        let (rows, active) = editor.update(cx, |editor, cx| editor.quick_access_rows(&value, cx));
-        self.rows = rows;
-        self.active = active.or_else(|| self.item_indices().first().copied());
-        self.scroll = 0;
-        self.keep_active_visible();
+        let rows = editor.update(cx, |editor, cx| editor.quick_access_rows(&value, cx));
+        let (items, active) = items_from_rows(rows.0, rows.1);
+        self.items = items;
+        self.active = active.or((!self.items.is_empty()).then_some(0));
+        self.list_height = self.list_height_for(self.max_list_height);
+        self.scroll_top = px(0.);
+        self.reveal_active();
         self.preview(cx);
         cx.notify();
     }
 
-    fn item_indices(&self) -> Vec<usize> {
-        self.rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| matches!(row, QuickRow::Item(_)))
-            .map(|(ix, _)| ix)
-            .collect()
+    fn active_item(&self) -> Option<&QuickItem> {
+        self.items.get(self.active?)
     }
 
-    fn active_item(&self) -> Option<&QuickItem> {
-        match self.rows.get(self.active?) {
-            Some(QuickRow::Item(item)) => Some(item),
-            _ => None,
+    /// The width and the list's maximum height, from the editor's size as
+    /// last laid out.
+    fn size(&self, cx: &gpui::App) -> (Pixels, Pixels) {
+        quick_input_size(
+            self.editor
+                .upgrade()
+                .and_then(|editor| editor.read(cx).layout.as_ref().map(|l| l.bounds.size)),
+        )
+    }
+
+    /// The list's height for `max`: its rows, up to `max`.
+    fn list_height_for(&self, max: Pixels) -> Pixels {
+        self.content_height().min(max)
+    }
+
+    /// The height of every row.
+    fn content_height(&self) -> Pixels {
+        px(ROW_HEIGHT) * self.items.len() as f32
+    }
+
+    fn max_scroll_top(&self) -> Pixels {
+        (self.content_height() - self.list_height).max(px(0.))
+    }
+
+    fn set_scroll_top(&mut self, scroll_top: Pixels, cx: &mut Context<Self>) {
+        let scroll_top = scroll_top.clamp(px(0.), self.max_scroll_top());
+        if scroll_top != self.scroll_top {
+            self.scroll_top = scroll_top;
+            cx.notify();
         }
     }
 
-    fn keep_active_visible(&mut self) {
+    /// Monaco's list `reveal(index)`: scrolls just enough to show the
+    /// active row.
+    fn reveal_active(&mut self) {
         let Some(active) = self.active else {
             return;
         };
-        if active < self.scroll {
-            self.scroll = active;
-        } else if active >= self.scroll + self.visible_rows {
-            self.scroll = active + 1 - self.visible_rows;
+        let top = px(ROW_HEIGHT) * active as f32;
+        let bottom = top + px(ROW_HEIGHT);
+        if top < self.scroll_top {
+            self.scroll_top = top;
+        } else if bottom > self.scroll_top + self.list_height {
+            self.scroll_top = bottom - self.list_height;
         }
+        self.scroll_top = self.scroll_top.clamp(px(0.), self.max_scroll_top());
+    }
+
+    /// Rows that fit in the list, for Page Up/Down.
+    fn page_rows(&self) -> isize {
+        ((self.list_height / px(ROW_HEIGHT)).floor() as isize).max(1)
     }
 
     /// Moves the active item by `delta` items (wrapping for single steps).
     fn move_active(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let items = self.item_indices();
-        if items.is_empty() {
+        if self.items.is_empty() {
             return;
         }
-        let current = self
-            .active
-            .and_then(|a| items.iter().position(|ix| *ix == a))
-            .unwrap_or(0) as isize;
-        let count = items.len() as isize;
+        let current = self.active.unwrap_or(0) as isize;
+        let count = self.items.len() as isize;
         let next = if delta.abs() == 1 {
             (current + delta).rem_euclid(count)
         } else {
             (current + delta).clamp(0, count - 1)
         };
-        self.active = Some(items[next as usize]);
-        self.keep_active_visible();
+        self.active = Some(next as usize);
+        self.reveal_active();
         self.preview(cx);
         cx.notify();
     }
@@ -397,7 +465,12 @@ impl QuickInput {
         }
     }
 
-    fn render_item(&self, ix: usize, item: &QuickItem, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// Monaco's `QuickInputList` row (`quick-input-list-entry`): the icon,
+    /// the highlighted label and the description, then the keybinding's
+    /// keycaps and the separator's label on the right; an item that starts
+    /// a group has the `pickerGroup.border` line on top.
+    fn render_item(&self, ix: usize, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let item = &self.items[ix];
         let colors = &self.colors;
         let is_active = self.active == Some(ix);
         // Monaco `list.highlightForeground`, and
@@ -433,6 +506,8 @@ impl QuickInput {
                 })
                 .collect()
         };
+        // `.quick-input-list-separator-border`, except on the first row.
+        let border = item.separator.is_some() && ix > 0;
         div()
             .id(("quick-item", ix))
             .h(px(ROW_HEIGHT))
@@ -443,12 +518,30 @@ impl QuickInput {
             .overflow_hidden()
             .whitespace_nowrap()
             .cursor_pointer()
-            .when(is_active, |this| {
+            .when(border, |row| {
+                row.border_t_1().border_color(colors.picker_group_border)
+            })
+            .when(is_active, |row| {
                 colors.focused_list_row(
-                    this,
+                    row,
                     colors.quick_input_list_focus_background,
                     colors.quick_input_list_focus_foreground,
                 )
+            })
+            // Monaco `list.hoverBackground` / `list.hoverForeground`.
+            .when(!is_active, |row| {
+                let (background, foreground) =
+                    (colors.list_hover_background, colors.list_hover_foreground);
+                row.hover(move |style| {
+                    let style = match background {
+                        Some(background) => style.bg(background),
+                        None => style,
+                    };
+                    match foreground {
+                        Some(foreground) => style.text_color(foreground),
+                        None => style,
+                    }
+                })
             })
             .on_mouse_down(
                 MouseButton::Left,
@@ -459,61 +552,213 @@ impl QuickInput {
                 }),
             )
             .children(item.icon.map(|(glyph, color)| codicon(glyph).color(color)))
-            .child(StyledText::new(item.label.clone()).with_highlights(label_highlights))
-            .children(
-                item.description
-                    .clone()
-                    .map(|description| div().opacity(0.7).text_size(px(12.)).child(description)),
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .overflow_hidden()
+                    .child(StyledText::new(item.label.clone()).with_highlights(label_highlights))
+                    .children(item.description.clone().map(|description| {
+                        div().opacity(0.7).text_size(px(12.)).child(description)
+                    })),
             )
-            .children(item.keybinding.clone().map(|keys| {
-                // Monaco's `KeybindingLabel` (`keybindingLabel.*`), whose
-                // bottom edge is a second, darker border.
-                div().ml_auto().pl(px(8.)).flex_none().child(
+            // `.quick-input-list-entry-keybinding`, 8px from the separator
+            // label or the edge.
+            .children(item.keybinding.as_ref().map(|keys| {
+                div()
+                    .flex_none()
+                    .mr(px(if item.separator.is_some() { 8. } else { 0. }))
+                    .child(crate::keybinding_label::keycaps(keys, colors))
+            }))
+            // `.quick-input-list-separator` in `pickerGroup.foreground`.
+            .children(item.separator.clone().map(|label| {
+                div()
+                    .flex_none()
+                    .mr(px(4.))
+                    .text_color(colors.picker_group_foreground)
+                    .child(label)
+            }))
+    }
+
+    /// Monaco's list scrollbar: a 10px track at the right with a slider
+    /// sized `max(20, visible² / content)`, shown while the mouse is over
+    /// the list; the slider drags and a click on the track jumps there.
+    fn render_scrollbar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let content = self.content_height();
+        let visible = self.list_height;
+        if content <= visible || !(self.list_hovered || self.slider_drag.is_some()) {
+            return None;
+        }
+        let colors = &self.colors;
+        let (slider_top, slider_height) = slider_geometry(visible, content, self.scroll_top);
+        let slider_color = if self.slider_drag.is_some() {
+            colors.scrollbar_slider_active
+        } else {
+            colors.scrollbar_slider
+        };
+        let hover = colors.scrollbar_slider_hover;
+        Some(
+            div()
+                .id("quick-scrollbar")
+                .absolute()
+                .top_0()
+                .right_0()
+                .w(px(SCROLLBAR_WIDTH))
+                .h(visible)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        // Monaco's track click: center the slider on the
+                        // mouse.
+                        let Some(top) = this.list_top.get() else {
+                            return;
+                        };
+                        let content = this.content_height();
+                        let visible = this.list_height;
+                        let (_, slider) = slider_geometry(visible, content, this.scroll_top);
+                        let desired = event.position.y - top - slider / 2.;
+                        let ratio = (content - visible) / (visible - slider).max(px(1.));
+                        this.set_scroll_top(desired * ratio, cx);
+                    }),
+                )
+                .child(
                     div()
-                        .rounded(px(3.))
-                        .border_b_1()
-                        .border_color(colors.keybinding_label_bottom_border)
-                        .child(
-                            div()
-                                .px(px(3.))
-                                .rounded(px(3.))
-                                .text_size(px(11.))
-                                .bg(colors.keybinding_label_background)
-                                .text_color(colors.keybinding_label_foreground)
-                                .border_1()
-                                .border_color(colors.keybinding_label_border)
-                                .child(keys),
+                        .id("quick-scrollbar-slider")
+                        .absolute()
+                        .top(slider_top)
+                        .left_0()
+                        .w_full()
+                        .h(slider_height)
+                        .bg(slider_color)
+                        .when(self.slider_drag.is_none(), |slider| {
+                            slider.hover(move |style| style.bg(hover))
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.slider_drag = Some((event.position.y, this.scroll_top));
+                                cx.notify();
+                            }),
                         ),
                 )
-            }))
-            .into_any_element()
+                .into_any_element(),
+        )
     }
+
+    /// Follows the mouse while the slider is dragged, anywhere in the
+    /// window, until the button is released.
+    fn slider_drag_listener(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        self.slider_drag?;
+        let entity = cx.entity().downgrade();
+        Some(
+            gpui::canvas(
+                |_, _, _| (),
+                move |_, _, window, _| {
+                    let moved = entity.clone();
+                    window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                        if phase == gpui::DispatchPhase::Capture
+                            && let Some(entity) = moved.upgrade()
+                        {
+                            entity.update(cx, |this, cx| this.drag_slider(event.position.y, cx));
+                        }
+                    });
+                    let released = entity.clone();
+                    window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
+                        if phase == gpui::DispatchPhase::Capture
+                            && let Some(entity) = released.upgrade()
+                        {
+                            entity.update(cx, |this, cx| {
+                                this.slider_drag = None;
+                                cx.notify();
+                            });
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .size_0()
+            .into_any_element(),
+        )
+    }
+
+    fn drag_slider(&mut self, y: Pixels, cx: &mut Context<Self>) {
+        let Some((start_y, start_scroll)) = self.slider_drag else {
+            return;
+        };
+        let content = self.content_height();
+        let visible = self.list_height;
+        let (_, slider) = slider_geometry(visible, content, self.scroll_top);
+        let ratio = (content - visible) / (visible - slider).max(px(1.));
+        self.set_scroll_top(start_scroll + (y - start_y) * ratio, cx);
+    }
+}
+
+/// The quick input's width and its list's maximum height in an editor of
+/// `size` (VS Code: 62% of the width, at most 600px, and a list at most
+/// 40% of the height).
+fn quick_input_size(size: Option<gpui::Size<Pixels>>) -> (Pixels, Pixels) {
+    let size = size.unwrap_or_else(|| gpui::size(px(600.), px(400.)));
+    (
+        (size.width * 0.62).min(px(600.)),
+        (size.height * 0.4).floor().max(px(ROW_HEIGHT * 3.)),
+    )
+}
+
+/// The slider's top and height in a list `visible` tall showing `content`
+/// scrolled by `scroll_top` (Monaco `ScrollbarState`: the slider is
+/// `round(max(20, floor(visible² / content)))` tall).
+fn slider_geometry(visible: Pixels, content: Pixels, scroll_top: Pixels) -> (Pixels, Pixels) {
+    if content <= px(0.) || visible <= px(0.) {
+        return (px(0.), visible);
+    }
+    let height = px(
+        f32::from(visible * (f32::from(visible) / f32::from(content)))
+            .floor()
+            .max(20.)
+            .round(),
+    )
+    .min(visible);
+    let max_scroll = (content - visible).max(px(1.));
+    let top = (visible - height) * (f32::from(scroll_top) / f32::from(max_scroll)).clamp(0., 1.);
+    (top, height)
 }
 
 impl Render for QuickInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors.clone();
-        let end = (self.scroll + self.visible_rows).min(self.rows.len());
-        let rows: Vec<gpui::AnyElement> = (self.scroll..end)
-            .map(|ix| match self.rows[ix].clone() {
-                QuickRow::Separator(label) => div()
-                    .h(px(ROW_HEIGHT))
-                    .px(px(8.))
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .border_t_1()
-                    .border_color(colors.picker_group_border)
-                    .text_size(px(11.))
-                    .text_color(colors.picker_group_foreground)
-                    .child(label)
-                    .into_any_element(),
-                QuickRow::Item(item) => self.render_item(ix, &item, cx),
+        // The editor's size as last laid out, so the list follows resizes.
+        let (width, max_list_height) = self.size(cx);
+        self.max_list_height = max_list_height;
+        let list_height = self.list_height_for(max_list_height);
+        if list_height != self.list_height {
+            self.list_height = list_height;
+            self.scroll_top = self.scroll_top.clamp(px(0.), self.max_scroll_top());
+        }
+        let row = px(ROW_HEIGHT);
+        // Only the rows in view (Monaco's virtualized list).
+        let first = (self.scroll_top / row).floor().max(0.) as usize;
+        let end = (((self.scroll_top + list_height) / row).ceil() as usize).min(self.items.len());
+        let rows: Vec<gpui::AnyElement> = (first..end)
+            .map(|ix| {
+                self.render_item(ix, cx)
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(row * ix as f32 - self.scroll_top)
+                    .into_any_element()
             })
             .collect();
+        let scrollbar = self.render_scrollbar(cx);
+        let drag = self.slider_drag_listener(cx);
+        let list_top = self.list_top.clone();
         div()
             .key_context(QUICK_INPUT_KEY_CONTEXT)
-            .w(self.width)
+            .w(width)
             .flex()
             .flex_col()
             .bg(colors.quick_input_background)
@@ -525,18 +770,18 @@ impl Render for QuickInput {
             .on_action(cx.listener(|this, _: &QuickInputNext, _, cx| this.move_active(1, cx)))
             .on_action(cx.listener(|this, _: &QuickInputPrevious, _, cx| this.move_active(-1, cx)))
             .on_action(cx.listener(|this, _: &QuickInputPageNext, _, cx| {
-                let page = this.visible_rows as isize;
+                let page = this.page_rows();
                 this.move_active(page, cx)
             }))
             .on_action(cx.listener(|this, _: &QuickInputPagePrevious, _, cx| {
-                let page = this.visible_rows as isize;
+                let page = this.page_rows();
                 this.move_active(-page, cx)
             }))
             .on_action(cx.listener(|this, _: &QuickInputFirst, _, cx| {
-                this.move_active(-(this.rows.len() as isize), cx)
+                this.move_active(-(this.items.len() as isize), cx)
             }))
             .on_action(cx.listener(|this, _: &QuickInputLast, _, cx| {
-                this.move_active(this.rows.len() as isize, cx)
+                this.move_active(this.items.len() as isize, cx)
             }))
             .on_action(cx.listener(|this, _: &Newline, window, cx| this.accept(window, cx)))
             .on_action(cx.listener(|this, _: &RemoveSecondaryCursors, _, cx| this.close(false, cx)))
@@ -601,12 +846,36 @@ impl Render for QuickInput {
                 ),
             )
             .child(
-                div()
-                    .id("quick-rows")
-                    .pb(px(4.))
-                    .on_scroll_wheel(cx.listener(|this, event, _, cx| this.scroll_wheel(event, cx)))
-                    .children(rows),
+                div().pb(px(4.)).child(
+                    div()
+                        .id("quick-rows")
+                        .relative()
+                        .h(list_height)
+                        .overflow_hidden()
+                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                            if this.list_hovered != *hovered {
+                                this.list_hovered = *hovered;
+                                cx.notify();
+                            }
+                        }))
+                        .on_scroll_wheel(
+                            cx.listener(|this, event, _, cx| this.scroll_wheel(event, cx)),
+                        )
+                        .children(rows)
+                        .children(scrollbar)
+                        .child(
+                            // Where the list is in the window, for track
+                            // clicks.
+                            gpui::canvas(
+                                move |bounds, _, _| list_top.set(Some(bounds.top())),
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .size_full(),
+                        ),
+                ),
             )
+            .children(drag)
     }
 }
 
@@ -614,16 +883,8 @@ impl QuickInput {
     /// Monaco's list scrolls with the wheel, which it consumes.
     fn scroll_wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
         cx.stop_propagation();
-        let row = px(ROW_HEIGHT);
-        let delta = event.delta.pixel_delta(row).y + self.wheel_remainder;
-        let rows = (delta / row).trunc();
-        self.wheel_remainder = delta - row * rows;
-        let max = self.rows.len().saturating_sub(self.visible_rows);
-        let scroll = (self.scroll as f32 - rows).clamp(0., max as f32) as usize;
-        if scroll != self.scroll {
-            self.scroll = scroll;
-            cx.notify();
-        }
+        let delta = event.delta.pixel_delta(px(ROW_HEIGHT)).y;
+        self.set_scroll_top(self.scroll_top - delta, cx);
     }
 }
 
@@ -691,13 +952,6 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         self.close_quick_access(false, cx);
-        let (width, height) = self.layout.as_ref().map_or((px(600.), px(400.)), |layout| {
-            (layout.bounds.size.width, layout.bounds.size.height)
-        });
-        // VS Code: 62% of the editor's width (at most 600), a list at most
-        // 40% of its height.
-        let width = (width * 0.62).min(px(600.));
-        let visible_rows = ((height * 0.4 / px(ROW_HEIGHT)).floor() as usize).max(3);
         self.quick = Some(QuickAccessState {
             widget: None,
             view_state: self.save_view_state(cx),
@@ -711,10 +965,12 @@ impl CodeEditor {
         // The first rows come from here: the widget can't update this
         // editor while it's being updated.
         let rows = self.quick_access_rows(value, cx);
+        let (_, max_list_height) =
+            quick_input_size(self.layout.as_ref().map(|layout| layout.bounds.size));
         let editor = cx.entity().downgrade();
         let theme = self.theme.clone();
-        let widget = cx
-            .new(|cx| QuickInput::new(editor, value, rows, width, visible_rows, theme, window, cx));
+        let widget =
+            cx.new(|cx| QuickInput::new(editor, value, rows, max_list_height, theme, window, cx));
         widget.update(cx, |widget, _| widget.title = title);
         if let Some(action) = widget.read(cx).active_action() {
             self.quick_access_preview(&action, cx);
@@ -1041,6 +1297,7 @@ impl CodeEditor {
                     icon: Some(symbol_icon(symbol.kind, &self.theme.colors)),
                     strikethrough: symbol.deprecated,
                     keybinding: None,
+                    separator: None,
                     action: QuickAction::GoTo {
                         selection: symbol.selection_range.start,
                         highlight: symbol.range.clone(),
@@ -1137,25 +1394,37 @@ impl CodeEditor {
             return Vec::new();
         };
         let widget = widget.read(cx);
-        widget
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(ix, row)| match row {
-                QuickRow::Separator(label) => format!("[{label}]"),
-                QuickRow::Item(item) => {
-                    let active = if widget.active == Some(ix) { "> " } else { "" };
-                    let mut row = format!("{active}{}", item.label);
-                    if let Some(description) = &item.description {
-                        row.push_str(&format!(" ({description})"));
-                    }
-                    if let Some(keys) = &item.keybinding {
-                        row.push_str(&format!(" [{keys}]"));
-                    }
-                    row
-                }
-            })
-            .collect()
+        let mut rows = Vec::new();
+        for (ix, item) in widget.items.iter().enumerate() {
+            if let Some(label) = &item.separator {
+                rows.push(format!("[{label}]"));
+            }
+            let active = if widget.active == Some(ix) { "> " } else { "" };
+            let mut row = format!("{active}{}", item.label);
+            if let Some(description) = &item.description {
+                row.push_str(&format!(" ({description})"));
+            }
+            if let Some(keys) = &item.keybinding {
+                row.push_str(&format!(" [{}]", keys.text));
+            }
+            rows.push(row);
+        }
+        rows
+    }
+
+    /// The list's scroll offset, height and content height, for tests.
+    #[doc(hidden)]
+    pub fn quick_access_scroll_for_tests(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<(Pixels, Pixels, Pixels)> {
+        let (widget, _) = self.quick.as_ref()?.widget.as_ref()?;
+        let widget = widget.read(cx);
+        Some((
+            widget.scroll_top,
+            widget.list_height,
+            widget.content_height(),
+        ))
     }
 
     /// Types `text` into the quick access input (for tests).
@@ -1227,6 +1496,7 @@ impl CodeEditor {
                 icon: None,
                 strikethrough: false,
                 keybinding: keys.and_then(|keys| keys.get(&action.id).cloned()),
+                separator: None,
                 action: QuickAction::Run(action.id),
             }));
         }
@@ -1252,6 +1522,7 @@ fn help_rows() -> Vec<QuickRow> {
             icon: None,
             strikethrough: false,
             keybinding: None,
+            separator: None,
             action: QuickAction::SetValue(prefix.to_string()),
         })
     })
@@ -1467,6 +1738,44 @@ mod tests {
             char_ranges_to_bytes("äb c", &[1..2, 3..4]),
             vec![2..3, 4..5]
         );
+    }
+
+    /// Monaco's quick pick separators are the label and top border of the
+    /// item they start, not rows of their own.
+    #[test]
+    fn separators_go_on_the_next_item() {
+        let item =
+            |label: &str| QuickRow::Item(QuickItem::message(label.to_string(), QuickAction::None));
+        let (items, active) = items_from_rows(
+            vec![
+                QuickRow::Separator("classes (1)".into()),
+                item("Point"),
+                QuickRow::Separator("methods (2)".into()),
+                item("len"),
+                item("scale"),
+            ],
+            Some(4),
+        );
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].separator.as_deref(), Some("classes (1)"));
+        assert_eq!(items[1].separator.as_deref(), Some("methods (2)"));
+        assert_eq!(items[2].separator, None);
+        assert_eq!(active, Some(2));
+    }
+
+    /// Monaco `ScrollbarState`: the slider is the visible share of the
+    /// track, at least 20px, and moves with the scroll offset.
+    #[test]
+    fn scrollbar_slider_geometry() {
+        assert_eq!(
+            slider_geometry(px(100.), px(400.), px(0.)),
+            (px(0.), px(25.))
+        );
+        assert_eq!(
+            slider_geometry(px(100.), px(400.), px(300.)),
+            (px(75.), px(25.))
+        );
+        assert_eq!(slider_geometry(px(100.), px(4000.), px(0.)).1, px(20.));
     }
 
     #[test]

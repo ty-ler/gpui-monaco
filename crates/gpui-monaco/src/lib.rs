@@ -86,6 +86,7 @@ pub use high_contrast::{
 mod hover;
 mod inlay_hints;
 mod inline_completions;
+pub mod keybinding_label;
 mod languages;
 pub mod layout_info;
 pub mod link_computer;

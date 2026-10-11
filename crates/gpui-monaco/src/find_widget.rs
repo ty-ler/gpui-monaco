@@ -1093,14 +1093,7 @@ impl FindWidget {
         let keys = control.action().and_then(|action| {
             window
                 .highest_precedence_binding_for_action_in(action.as_ref(), focus)
-                .map(|binding| {
-                    binding
-                        .keystrokes()
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
+                .map(|binding| crate::keybinding_label::binding_label(&binding))
         });
         match keys {
             Some(keys) => format!("{label} ({keys})"),

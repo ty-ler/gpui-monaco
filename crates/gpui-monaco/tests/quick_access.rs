@@ -242,3 +242,77 @@ fn host_actions_and_preconditions(cx: &mut TestAppContext) {
     assert!(ids.contains(&"editor.action.quickCommand".to_string()));
     assert!(!ids.contains(&"editor.action.formatDocument".to_string()));
 }
+
+fn scroll(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+) -> (gpui::Pixels, gpui::Pixels, gpui::Pixels) {
+    editor
+        .read_with(cx, |e, cx| e.quick_access_scroll_for_tests(cx))
+        .unwrap()
+}
+
+fn draw(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+    });
+    cx.run_until_parked();
+}
+
+/// Monaco's quick input list is a scrolling `List`: the wheel scrolls it
+/// (never the editor behind it), and the keyboard keeps the active row in
+/// view, so every command can be reached.
+#[gpui::test]
+fn the_list_scrolls_with_the_wheel_and_follows_the_active_row(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&"fn main() {}\n".repeat(200), cx);
+    cx.simulate_keystrokes("f1");
+    draw(cx);
+    let (top, height, content) = scroll(&editor, cx);
+    assert_eq!(top, gpui::px(0.));
+    assert!(content > height, "{content:?} {height:?}");
+    // The wheel over the list.
+    let (_, widgets) = editor.read_with(cx, |e, _| e.widget_bounds_for_tests());
+    let quick_input = widgets.last().unwrap().0;
+    let over_list = gpui::point(quick_input.center().x, quick_input.bottom() - gpui::px(30.));
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: over_list,
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-100.))),
+        ..Default::default()
+    });
+    draw(cx);
+    assert_eq!(scroll(&editor, cx).0, gpui::px(100.));
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.scroll_position().y),
+        gpui::px(0.)
+    );
+    // Up wraps to the last command, revealed at the bottom.
+    cx.simulate_keystrokes("up");
+    draw(cx);
+    let (top, height, content) = scroll(&editor, cx);
+    assert_eq!(top, content - height);
+    // Down wraps back to the first, at the top.
+    cx.simulate_keystrokes("down");
+    draw(cx);
+    assert_eq!(scroll(&editor, cx).0, gpui::px(0.));
+}
+
+/// Keybindings are labeled as Monaco does ("F1", capitalized keys and
+/// macOS modifiers in ⌃⇧⌥⌘ order).
+#[gpui::test]
+fn keybindings_use_monaco_labels(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(RUST, cx);
+    cx.simulate_keystrokes("f1");
+    let rows = rows(&editor, cx);
+    assert!(
+        rows.iter().any(|row| row == "Command Palette [F1]"),
+        "{rows:?}"
+    );
+    let rename = if cfg!(target_os = "macos") {
+        "Change All Occurrences [⌘F2]"
+    } else {
+        "Change All Occurrences [Ctrl+F2]"
+    };
+    assert!(rows.iter().any(|row| row == rename), "{rows:?}");
+}

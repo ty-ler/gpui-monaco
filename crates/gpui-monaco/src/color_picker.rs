@@ -399,7 +399,7 @@ impl Render for ColorPickerWidget {
         // Monaco: dark text on light colors (or on a light hover through a
         // mostly transparent color).
         let light = if self.model.color.rgba().a < 0.5 {
-            hsla_to_color(colors.widget_background).is_lighter()
+            hsla_to_color(colors.hover_background).is_lighter()
         } else {
             self.model.color.is_lighter()
         };
@@ -435,7 +435,14 @@ impl Render for ColorPickerWidget {
                     .cursor_pointer()
                     .bg(color)
                     .text_color(if light { gpui::black() } else { gpui::white() })
+                    // `colorPickerHeader.ts`: the `color-mode` codicon, and
+                    // a title.
+                    .child(codicon(Codicon::ColorMode).size(px(14.)))
                     .child(div().mx(px(5.)).child(label))
+                    .tooltip(crate::tooltip::tooltip(
+                        "Click to toggle color options (rgb/hsl/hex)",
+                        &colors,
+                    ))
                     .on_click(cx.listener(|this, _, _, cx| this.next_presentation(cx))),
             )
             .child(
@@ -458,11 +465,21 @@ impl Render for ColorPickerWidget {
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .bg(colors.widget_background)
+                    // `.close-button`: `editorHoverWidget.background` and
+                    // `-border`, `toolbar.hoverBackground` on hover.
+                    .bg(colors.hover_background)
                     .border_l_1()
-                    .border_color(colors.widget_border)
-                    // The close button's `close` codicon.
-                    .child(codicon(Codicon::Close))
+                    .border_color(colors.hover_border)
+                    .child(
+                        div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .hover(|style| colors.toolbar_hover(style))
+                            // The close button's `close` codicon, 3px in.
+                            .child(div().p(px(3.)).child(codicon(Codicon::Close))),
+                    )
                     .on_click(cx.listener(|this, _, _, cx| this.close(cx)))
             }));
 
@@ -505,6 +522,12 @@ impl Render for ColorPickerWidget {
                     .shadow_sm(),
             )
             .child(self.part_tracker(Part::Saturation, cx));
+        // `.strip { cursor: grab }`, `grabbing` while dragged.
+        let strip_cursor = if self.drag.is_some() {
+            gpui::CursorStyle::ClosedHand
+        } else {
+            gpui::CursorStyle::OpenHand
+        };
         let opaque = to_hsla(&self.model.color).opacity(1.);
         let opaque = Hsla { a: 1., ..opaque };
         let opacity = div()
@@ -512,6 +535,7 @@ impl Render for ColorPickerWidget {
             .ml(px(8.))
             .w(px(25.))
             .h(strip_height)
+            .cursor(strip_cursor)
             .child(checker())
             .child(div().absolute().size_full().bg(linear_gradient(
                 180.,
@@ -540,6 +564,7 @@ impl Render for ColorPickerWidget {
             .ml(px(8.))
             .w(px(25.))
             .h(strip_height)
+            .cursor(strip_cursor)
             .flex()
             .flex_col()
             .children(segments)
@@ -567,6 +592,7 @@ impl Render for ColorPickerWidget {
                     .rounded(px(2.))
                     .cursor_pointer()
                     .bg(colors.button_background)
+                    .hover(|style| style.bg(colors.button_hover_background))
                     .text_color(colors.button_foreground)
                     .child(if s.found_in_editor {
                         "Replace"
@@ -623,9 +649,11 @@ impl Render for ColorPickerWidget {
             root =
                 root.track_focus(&standalone.focus)
                     .key_context(STANDALONE_COLOR_PICKER_KEY_CONTEXT)
-                    .bg(colors.widget_background)
+                    // `.standalone-colorpicker`: `editorHoverWidget.*`.
+                    .bg(colors.hover_background)
+                    .text_color(colors.hover_foreground)
                     .border_1()
-                    .border_color(colors.widget_border)
+                    .border_color(colors.hover_border)
                     .on_action(cx.listener(|this, _: &HideColorPicker, _, cx| this.close(cx)))
                     .on_action(cx.listener(
                         |this, _: &InsertColorWithStandaloneColorPicker, _, cx| this.insert(cx),

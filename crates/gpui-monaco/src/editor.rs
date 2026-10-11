@@ -732,7 +732,7 @@ impl CodeEditor {
                 this.mouse_selection = None;
                 this.drag_scroll = None;
                 this.dnd_cancel(cx);
-                this.close_message(cx);
+                this.message_blurred(cx);
                 cx.emit(CodeEditorEvent::Blurred);
                 cx.notify();
             }),
@@ -4128,6 +4128,9 @@ impl CodeEditor {
         let over_widget = self.over_widget(event.position);
         if !over_widget {
             window.focus(&self.focus_handle, cx);
+            // Keeps GPUI from focusing the editor's root after the menu
+            // shown below took the focus.
+            window.prevent_default();
         }
         let mouse = self.emit_mouse(
             event.position,
@@ -4146,6 +4149,19 @@ impl CodeEditor {
         cx.emit(CodeEditorEvent::ContextMenu(mouse.clone()));
         // Monaco: only over text, and not on widgets.
         use crate::mouse_target::MouseTargetKind;
+        // Monaco `StickyScrollController._onContextMenu`: its own menu.
+        if mouse.target.kind == MouseTargetKind::StickyScroll {
+            self.show_sticky_scroll_context_menu(event.position, window, cx);
+            return;
+        }
+        // Monaco leaves injected text to its own menus: an inlay hint part
+        // with a location shows the go-to menu, other injected text none.
+        if mouse.target.kind == MouseTargetKind::ContentText
+            && self.injected_text_at(event.position)
+        {
+            self.inlay_hint_context_menu(event.position, window, cx);
+            return;
+        }
         if matches!(
             mouse.target.kind,
             MouseTargetKind::ContentText | MouseTargetKind::ContentEmpty { .. }
