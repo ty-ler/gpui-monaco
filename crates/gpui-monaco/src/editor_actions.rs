@@ -136,6 +136,16 @@ fn inline_visible_writable(editor: &CodeEditor, cx: &App) -> bool {
     writable(editor, cx) && inline_visible(editor, cx)
 }
 
+/// Monaco `inlineEditIsVisible`.
+fn inline_edit_visible(editor: &CodeEditor, cx: &App) -> bool {
+    editor.inline_edit_visible(cx)
+}
+
+/// Monaco `inlineSuggestionVisible || inlineEditIsVisible`.
+fn inline_or_edit_visible(editor: &CodeEditor, cx: &App) -> bool {
+    inline_visible(editor, cx) || inline_edit_visible(editor, cx)
+}
+
 /// Monaco `standaloneColorPickerVisible`.
 fn color_picker_visible(editor: &CodeEditor, _: &App) -> bool {
     editor.is_standalone_color_picker_visible()
@@ -378,10 +388,12 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.insertColorWithStandaloneColorPicker", "code_editor::InsertColorWithStandaloneColorPicker", "Insert Color with Standalone Color Picker", color_picker_visible),
     Builtin("editor.action.inlineSuggest.showNext", "code_editor::ShowNextInlineSuggestion", "Show Next Inline Suggestion", inline_visible_writable),
     Builtin("editor.action.inlineSuggest.showPrevious", "code_editor::ShowPreviousInlineSuggestion", "Show Previous Inline Suggestion", inline_visible_writable),
-    Builtin("editor.action.inlineSuggest.commit", "code_editor::AcceptInlineSuggestion", "Accept Inline Suggestion", inline_visible),
+    Builtin("editor.action.inlineSuggest.commit", "code_editor::AcceptInlineSuggestion", "Accept Inline Suggestion", inline_or_edit_visible),
+    Builtin("editor.action.inlineSuggest.jump", "code_editor::JumpToNextInlineEdit", "Jump to next inline edit", inline_edit_visible),
+    Builtin("editor.action.inlineSuggest.toggleShowCollapsed", "code_editor::ToggleInlineSuggestionShowCollapsed", "Toggle Inline Suggestions Show Collapsed", always),
     Builtin("editor.action.inlineSuggest.acceptNextWord", "code_editor::AcceptNextInlineWord", "Accept Next Word Of Inline Suggestion", inline_visible_writable),
     Builtin("editor.action.inlineSuggest.acceptNextLine", "code_editor::AcceptNextInlineLine", "Accept Next Line Of Inline Suggestion", inline_visible_writable),
-    Builtin("editor.action.inlineSuggest.hide", "code_editor::HideInlineSuggestion", "Hide Inline Suggestion", inline_visible),
+    Builtin("editor.action.inlineSuggest.hide", "code_editor::HideInlineSuggestion", "Hide Inline Suggestion", inline_or_edit_visible),
     Builtin("editor.action.changeAll", "code_editor::SelectAllOccurrences", "Change All Occurrences", writable),
 ];
 

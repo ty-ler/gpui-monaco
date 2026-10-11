@@ -36,6 +36,7 @@ mod sequences;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use mapping::line_range_mapping_from_range_mappings;
 pub use mapping::{DetailedLineRangeMapping, LineRangeMapping, RangeMapping};
 pub use range::{LineRange, Position, Range};
 

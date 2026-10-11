@@ -32,6 +32,7 @@ Demo providers are registered by default:
 - rename (`F2`) of every whole-word occurrence
 - code actions: a lightbulb and `Cmd+.` with a quick fix per diagnostic and an UPPERCASE rewrite
 - diagnostics (`F8`)
+- inline completions: ghost text finishing a few lines (type `pri` or `let t`), and an inline edit (a next edit suggestion) adding a doc comment above the first undocumented `pub fn`. Tab jumps to it, Tab again accepts it, Escape rejects it, and hovering its gutter pill shows a menu.
 - a formatter that trims trailing spaces and collapses repeated ones. Use format document (`Shift+Alt+F`) or format selection (`Cmd+K Cmd+F`). It also runs on paste and when you type `;` or `}`.
 
 ## Environment variables

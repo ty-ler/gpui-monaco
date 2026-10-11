@@ -22,6 +22,7 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **F1 / Ctrl+G / Cmd+Shift+O:** command palette, go to line, go to symbol
 - **Shift+F10:** context menu
 - **Tab / Cmd+Right / Alt+] / Alt+[ / Alt+\\** with ghost text: accept, accept a word, next, previous, ask explicitly
+- **Tab / Escape** with an inline edit: jump to it while the cursor is away from it, then accept it; reject it
 - **Tab / Shift+Tab / Escape** in a snippet: next and previous tab stop, leave the snippet
 - **Ctrl+Space (or Cmd+I)** in the suggest widget: show or hide the details, or focus the first suggestion if none is (Monaco's `focusSuggestion`, see `suggest.selection_mode`)
 - **Cmd+/** in the suggest widget: explain mode, which shows how the focused suggestion was scored in the details (Monaco's `toggleExplainMode`)

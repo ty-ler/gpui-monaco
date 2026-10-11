@@ -1,9 +1,14 @@
 //! The inline completions controller (Monaco's `InlineCompletionsModel`,
-//! `InlineCompletionsSource` and `InlineCompletionsController`, classic
-//! ghost text only): requests completions while typing, keeps them through
-//! edits that match them, shows the selected one as ghost text after the
-//! cursor (extra lines in a view zone), and accepts all of it, a word or a
-//! line.
+//! `InlineCompletionsSource` and `InlineCompletionsController`): requests
+//! completions while typing, keeps them through edits that match them,
+//! shows the selected one as ghost text after the cursor (extra lines in a
+//! view zone), and accepts all of it, a word or a line.
+//!
+//! Inline edits (items with `is_inline_edit`) are diffed into replacements
+//! that follow the user's typing (Monaco `InlineEditItem`); the last one
+//! shows when no completion is visible at the cursor, through
+//! [`super::inline_edits_view`]. Tab jumps to it or accepts it, as Monaco's
+//! `tabShouldJumpToInlineEdit` and `tabShouldAcceptInlineEdit` say.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -21,6 +26,7 @@ use text::PointUtf16;
 use super::ghost_text::{
     GhostText, GhostTextMode, TextReplacement, compute_ghost_text, single_text_remove_common_prefix,
 };
+use super::inline_edits::{Changes, Replacements, UpdatedEdit, diffed_edits, new_ranges};
 use crate::cursor::Selection;
 use crate::decorations::{DecorationId, DecorationOptions, InjectedText};
 use crate::editor::CodeEditor;
@@ -44,9 +50,9 @@ type InlineView = (Vec<(usize, TextReplacement)>, usize, GhostText);
 
 /// A completion and where it applies, followed through edits.
 #[derive(Clone)]
-struct Item {
-    provider: Arc<dyn InlineCompletionsProvider>,
-    completion: InlineCompletion,
+pub(crate) struct Item {
+    pub(crate) provider: Arc<dyn InlineCompletionsProvider>,
+    pub(crate) completion: InlineCompletion,
     /// Its range as byte offsets in the text of `version`.
     range: Range<usize>,
     version: text::Version,
@@ -54,7 +60,30 @@ struct Item {
     original_start: PointUtf16,
     /// It showed as ghost text (Monaco `_didShow`).
     shown: bool,
+    /// Its identity, kept by an equal item from a newer request (Monaco
+    /// `InlineSuggestionIdentity`).
+    pub(crate) id: u64,
+    /// Its list's commands (Monaco `source.inlineSuggestions.commands`).
+    pub(crate) commands: Vec<Command>,
+    /// Where it may show, in the text of `version` (Monaco `showRange`).
+    show_range: Option<Range<usize>>,
+    /// An inline edit's replacements (Monaco `InlineEditItem`).
+    edit: Option<InlineEditItem>,
 }
+
+/// An inline edit's replacements, followed through every change.
+#[derive(Clone)]
+struct InlineEditItem {
+    edits: Vec<UpdatedEdit>,
+    /// The text version `edits` are in.
+    version: text::Version,
+    /// The change count when it was created or typing last matched it
+    /// (Monaco `updatedEditModelVersion`).
+    updated_at: u64,
+}
+
+/// Monaco drops an inline edit ignored for this many changes.
+const INLINE_EDIT_MAX_IGNORED_CHANGES: u64 = 20;
 
 /// Why inline completions stop (Monaco `stop`'s reason, or accepting).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -78,7 +107,7 @@ struct Rendered {
 pub(crate) struct InlineCompletionsState {
     /// Monaco's `_isActive`: typing (or a trigger) turned it on.
     active: bool,
-    items: Vec<Item>,
+    pub(crate) items: Vec<Item>,
     /// The selected item's identity (its edit), kept through updates.
     selected: Option<(String, Range<PointUtf16>)>,
     /// The last request was explicit (cycling shows a count).
@@ -101,6 +130,18 @@ pub(crate) struct InlineCompletionsState {
     /// The toolbar's position this session, so it doesn't move right as
     /// the ghost text shrinks (Monaco `sessionPosition`).
     toolbar_session: Option<PointUtf16>,
+    /// Text changes seen (Monaco's model version id, for inline edits).
+    change_count: u64,
+    /// The next item identity.
+    next_id: u64,
+    /// Monaco `_inAcceptFlow`: an edit was just accepted (or requested
+    /// explicitly), and no other change came since.
+    in_accept_flow: bool,
+    /// The inline edit jumped to, until the cursor leaves it (Monaco
+    /// `_jumpedToId`).
+    jumped_to: Option<u64>,
+    /// The inline edit's view.
+    pub(crate) edit_view: super::inline_edits_view::InlineEditViewState,
 }
 
 /// Monaco `provideInlineCompletions`' yield graph: for each provider, the
@@ -344,13 +385,93 @@ impl CodeEditor {
             return;
         }
         self.inline.active = true;
+        // Monaco `trigger({ explicit: true })` starts an accept flow.
+        self.inline.in_accept_flow = true;
         self.fetch_inline_completions(InlineCompletionTriggerKind::Explicit, cx);
     }
 
-    /// The text changed: requests again while active.
+    /// The text changed: inline edits follow it, and while active it
+    /// requests again.
     pub(crate) fn inline_completions_after_edit(&mut self, cx: &mut Context<Self>) {
+        self.inline.change_count += 1;
+        // Monaco resets `_inAcceptFlow` on every change; accepting sets it
+        // again after its edit.
+        self.inline.in_accept_flow = false;
+        self.update_inline_edit_items(cx);
         if self.inline.active && !self.inline.updating {
             self.fetch_inline_completions(InlineCompletionTriggerKind::Automatic, cx);
+        }
+    }
+
+    /// Monaco `InlineEditItem.withEdit`: moves each inline edit through the
+    /// changes since it was last updated, dropping it when a change
+    /// conflicts, when it was ignored for 20 changes, or when nothing is
+    /// left to change.
+    fn update_inline_edit_items(&mut self, cx: &mut Context<Self>) {
+        let buffer = self.model().read(cx).buffer();
+        let version = buffer.version();
+        let rope = buffer.rope().clone();
+        let changes: Vec<Option<Changes>> = self
+            .inline
+            .items
+            .iter()
+            .map(|item| {
+                let edit = item.edit.as_ref()?;
+                (edit.version != version).then(|| {
+                    buffer
+                        .edits_since(edit.version)
+                        .edits()
+                        .iter()
+                        .map(|e| (e.old.clone(), rope.text_for_range(e.new.clone())))
+                        .collect()
+                })
+            })
+            .collect();
+        let count = self.inline.change_count;
+        let mut dropped = Vec::new();
+        for (ix, (item, changes)) in self.inline.items.iter_mut().zip(changes).enumerate() {
+            let (Some(edit), Some(changes)) = (item.edit.as_mut(), changes) else {
+                continue;
+            };
+            edit.version = version;
+            for updated in &mut edit.edits {
+                updated.apply_changes(&changes);
+            }
+            if edit.edits.iter().any(|updated| updated.edit.is_none()) {
+                dropped.push(ix);
+                continue;
+            }
+            if edit
+                .edits
+                .iter()
+                .any(|updated| updated.last_change_updated_edit)
+            {
+                edit.updated_at = count;
+            }
+            if edit.updated_at + INLINE_EDIT_MAX_IGNORED_CHANGES < count {
+                dropped.push(ix);
+                continue;
+            }
+            edit.edits.retain(|updated| {
+                updated
+                    .edit
+                    .as_ref()
+                    .is_some_and(|(range, text)| !range.is_empty() || !text.is_empty())
+            });
+            if edit.edits.is_empty() {
+                // The user typed it.
+                dropped.push(ix);
+            }
+        }
+        for ix in dropped.into_iter().rev() {
+            let item = self.inline.items.remove(ix);
+            item.provider.handle_end_of_lifetime(
+                &item.completion,
+                &InlineCompletionEndOfLifeReason::Ignored {
+                    superseded_by: None,
+                    user_typing_disagreed: false,
+                },
+            );
         }
     }
 
@@ -395,6 +516,7 @@ impl CodeEditor {
             self.options.inline_suggest.min_show_delay
         };
         let started = Instant::now();
+        let include_inline_edits = self.options.inline_suggest.edits.enabled;
         self.inline.task = Some(cx.spawn(async move |this, cx| {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
@@ -414,6 +536,8 @@ impl CodeEditor {
                     InlineCompletionContext {
                         trigger_kind: kind,
                         selected_suggestion_info: None,
+                        include_inline_edits,
+                        include_inline_completions: true,
                     },
                     cx,
                 )
@@ -500,41 +624,104 @@ impl CodeEditor {
         let word_start = self.word_start_at(position);
         self.inline.suppress_suggestions = false;
         self.inline.commands.clear();
+        let include_inline_edits = self.options.inline_suggest.edits.enabled;
+        let offset = |point: PointUtf16| {
+            rope.point_utf16_to_offset(rope.clip_point_utf16(point, text::Bias::Left))
+        };
         let mut items = Vec::new();
+        let mut not_shown = Vec::new();
         for (provider, list) in lists {
             if let Some(suppress) = list.suppress_suggestions {
                 self.inline.suppress_suggestions |= suppress;
             }
-            self.inline.commands.extend(list.commands);
+            self.inline.commands.extend(list.commands.iter().cloned());
             for completion in list.items {
+                // Monaco `notInlineEditRequested`.
+                if completion.is_inline_edit && !include_inline_edits {
+                    not_shown.push((provider.clone(), completion));
+                    continue;
+                }
                 // Monaco's default range: the word at the cursor to the end
                 // of the line.
                 let range = completion.range.clone().unwrap_or_else(|| {
                     PointUtf16::new(position.row, word_start)..PointUtf16::new(position.row, line)
                 });
-                let start = rope
-                    .point_utf16_to_offset(rope.clip_point_utf16(range.start, text::Bias::Left));
-                let end =
-                    rope.point_utf16_to_offset(rope.clip_point_utf16(range.end, text::Bias::Left));
+                let start = offset(range.start);
+                let end = offset(range.end).max(start);
+                let completion = InlineCompletion {
+                    insert_text: completion
+                        .insert_text
+                        .replace("\r\n", "\n")
+                        .replace('\r', "\n"),
+                    ..completion
+                };
+                // Monaco `InlineEditItem.create`: the replacements a diff
+                // finds.
+                let edit = completion.is_inline_edit.then(|| InlineEditItem {
+                    edits: diffed_edits(&rope, start..end, &completion.insert_text)
+                        .into_iter()
+                        .map(|(range, text)| {
+                            let replaced = rope.text_for_range(range.clone());
+                            UpdatedEdit::new(range, text, &replaced)
+                        })
+                        .collect(),
+                    version,
+                    updated_at: self.inline.change_count,
+                });
+                if edit.as_ref().is_some_and(|edit| edit.edits.is_empty()) {
+                    // It changes nothing.
+                    not_shown.push((provider.clone(), completion));
+                    continue;
+                }
+                let show_range = completion
+                    .show_range
+                    .as_ref()
+                    .map(|range| offset(range.start)..offset(range.end).max(offset(range.start)));
+                self.inline.next_id += 1;
                 items.push(Item {
                     provider: provider.clone(),
-                    completion: InlineCompletion {
-                        insert_text: completion
-                            .insert_text
-                            .replace("\r\n", "\n")
-                            .replace('\r', "\n"),
-                        ..completion
-                    },
-                    range: start..end.max(start),
+                    completion,
+                    range: start..end,
                     version,
                     original_start: range.start,
                     shown: false,
+                    id: self.inline.next_id,
+                    commands: list.commands.clone(),
+                    show_range,
+                    edit,
                 });
             }
         }
+        // Monaco `createStateWithAppliedResults`: completions win when one
+        // is visible at the cursor, else only inline edits are kept.
+        let line_text = |row: u32| rope.line(row);
+        let prefer_completions = items.iter().any(|item| {
+            item.edit.is_none()
+                && self.item_shows_at(item, position, cx)
+                && self.current_edit(item, cx).is_some_and(|edit| {
+                    is_visible(&edit, item.original_start, position, &line_text)
+                })
+        });
+        let (kept, dropped): (Vec<Item>, Vec<Item>) = items
+            .into_iter()
+            .partition(|item| prefer_completions != item.edit.is_some());
+        not_shown.extend(
+            dropped
+                .into_iter()
+                .map(|item| (item.provider, item.completion)),
+        );
+        for (provider, completion) in not_shown {
+            provider.handle_end_of_lifetime(
+                &completion,
+                &InlineCompletionEndOfLifeReason::Ignored {
+                    superseded_by: None,
+                    user_typing_disagreed: false,
+                },
+            );
+        }
         // Monaco: replaced items end, superseded by an equal new one, which
         // keeps their identity (and so whether they showed).
-        for old in std::mem::replace(&mut self.inline.items, items) {
+        for old in std::mem::replace(&mut self.inline.items, kept) {
             let superseded_by = self
                 .inline
                 .items
@@ -542,9 +729,11 @@ impl CodeEditor {
                 .find(|new| {
                     new.completion.insert_text == old.completion.insert_text
                         && new.original_start == old.original_start
+                        && new.completion.is_inline_edit == old.completion.is_inline_edit
                 })
                 .map(|new| {
                     new.shown |= old.shown;
+                    new.id = old.id;
                     new.completion.clone()
                 });
             old.provider.handle_end_of_lifetime(
@@ -571,7 +760,7 @@ impl CodeEditor {
         let word_start = self.word_start_at(position);
         let line_text = |row: u32| self.snapshot.line(row);
         lists.iter().flat_map(|list| &list.items).any(|item| {
-            if item.is_snippet {
+            if item.is_snippet || item.is_inline_edit {
                 return true;
             }
             let range = item.range.clone().unwrap_or_else(|| {
@@ -604,6 +793,312 @@ impl CodeEditor {
         })
     }
 
+    /// Whether `position` is in the item's `show_range` (Monaco
+    /// `showRange`), which follows edits.
+    fn item_shows_at(&self, item: &Item, position: PointUtf16, cx: &gpui::App) -> bool {
+        let Some(range) = &item.show_range else {
+            return true;
+        };
+        let buffer = self.model().read(cx).buffer();
+        let range = if buffer.version() == item.version {
+            range.clone()
+        } else {
+            let patch = buffer.edits_since(item.version);
+            patch.transform_offset(range.start, text::Bias::Left)
+                ..patch.transform_offset(range.end, text::Bias::Right)
+        };
+        let rope = buffer.rope();
+        let start = rope.offset_to_point_utf16(range.start.min(rope.len()));
+        let end = rope.offset_to_point_utf16(range.end.min(rope.len()));
+        start <= position && position <= end
+    }
+
+    /// Whether a classic completion is visible at the cursor (Monaco
+    /// `isVisible`, which keeps inline edits hidden).
+    fn completion_visible(&self, cx: &gpui::App) -> bool {
+        let cursor = self.cursors.primary().position;
+        let rope = self.model().read(cx).buffer().rope().clone();
+        let line_text = |row: u32| rope.line(row);
+        self.inline.items.iter().any(|item| {
+            item.edit.is_none()
+                && self.item_shows_at(item, cursor, cx)
+                && self
+                    .current_edit(item, cx)
+                    .is_some_and(|edit| is_visible(&edit, item.original_start, cursor, &line_text))
+        })
+    }
+
+    /// The shown inline edit: its item and its replacements (Monaco
+    /// `inlineEditState`). It's the last inline edit, shown unless a
+    /// completion is visible at the cursor, a peek view is open, or a
+    /// snippet is active (with `suppress_in_snippet_mode`).
+    pub(crate) fn inline_edit_state(&self, cx: &gpui::App) -> Option<(usize, Replacements)> {
+        if !self.options.inline_suggest.enabled || self.is_peek_visible() {
+            return None;
+        }
+        if self.options.inline_suggest.suppress_in_snippet_mode && self.in_snippet_mode() {
+            return None;
+        }
+        let cursor = self.cursors.primary().position;
+        let (ix, item) = self
+            .inline
+            .items
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, item)| item.edit.is_some())?;
+        if !self.item_shows_at(item, cursor, cx) || self.completion_visible(cx) {
+            return None;
+        }
+        let edit = item.edit.as_ref()?;
+        let buffer = self.model().read(cx).buffer();
+        if edit.version != buffer.version() {
+            return None;
+        }
+        let rope = buffer.rope();
+        let edits = edit
+            .edits
+            .iter()
+            .filter_map(|updated| updated.edit.as_ref())
+            .map(|(range, text)| {
+                (
+                    rope.offset_to_point_utf16(range.start.min(rope.len()))
+                        ..rope.offset_to_point_utf16(range.end.min(rope.len())),
+                    text.clone(),
+                )
+            })
+            .collect();
+        Some((ix, edits))
+    }
+
+    /// The range from the inline edit's first change to its last (Monaco
+    /// `targetRange`).
+    fn inline_edit_target(edits: &[(Range<PointUtf16>, String)]) -> Option<Range<PointUtf16>> {
+        Some(edits.first()?.0.start..edits.last()?.0.end)
+    }
+
+    /// The shown inline edit's replacements as (replaced text, new text),
+    /// for tests.
+    #[doc(hidden)]
+    pub fn inline_edit_for_tests(&self, cx: &gpui::App) -> Option<Vec<(String, String)>> {
+        let (_, edits) = self.inline_edit_state(cx)?;
+        let rope = self.model().read(cx).buffer().rope().clone();
+        Some(
+            edits
+                .into_iter()
+                .map(|(range, text)| {
+                    let start = rope.point_utf16_to_offset(range.start);
+                    let end = rope.point_utf16_to_offset(range.end);
+                    (rope.text_for_range(start..end), text)
+                })
+                .collect(),
+        )
+    }
+
+    /// Whether an inline edit shows (Monaco `inlineEditIsVisible`).
+    pub fn inline_edit_visible(&self, cx: &gpui::App) -> bool {
+        self.inline_edit_state(cx).is_some()
+    }
+
+    /// Whether the cursor is on the inline edit's lines or a line next to
+    /// them (Monaco `cursorAtInlineEdit`).
+    pub fn cursor_at_inline_edit(&self, cx: &gpui::App) -> bool {
+        let Some(target) = self
+            .inline_edit_state(cx)
+            .and_then(|(_, edits)| Self::inline_edit_target(&edits))
+        else {
+            return false;
+        };
+        let row = self.cursors.primary().position.row;
+        target.start.row.saturating_sub(1) <= row && row <= target.end.row + 1
+    }
+
+    /// Monaco `_tabShouldIndent`: Tab indents an empty line or a selection
+    /// covering a line's text.
+    fn tab_should_indent(&self, cx: &gpui::App) -> bool {
+        if self.inline.in_accept_flow {
+            return false;
+        }
+        let rope = self.model().read(cx).buffer().rope().clone();
+        self.cursors.selections().iter().any(|selection| {
+            let (start, end) = if selection.anchor <= selection.head {
+                (selection.anchor, selection.head)
+            } else {
+                (selection.head, selection.anchor)
+            };
+            if start == end {
+                return rope.line_len_utf16(start.row) == 0;
+            }
+            if start.row != end.row {
+                return true;
+            }
+            // Covers the line's text, without its indentation.
+            let line = rope.line(start.row);
+            let indentation = line.len() - line.trim_start().len();
+            let text_start = line[..indentation].encode_utf16().count() as u32;
+            let text_end = line.trim_end().encode_utf16().count() as u32;
+            start.column <= text_start && end.column >= text_end.max(text_start)
+        })
+    }
+
+    /// Monaco `showCollapsed`: the inline edit shows as a marker only, with
+    /// `inline_suggest.edits.show_collapsed` or once other changes moved
+    /// it, until it's jumped to or while accepting.
+    pub(crate) fn inline_edit_show_collapsed(&self, cx: &gpui::App) -> bool {
+        let Some((ix, _)) = self.inline_edit_state(cx) else {
+            return false;
+        };
+        let item = &self.inline.items[ix];
+        let current = item
+            .edit
+            .as_ref()
+            .is_some_and(|edit| edit.updated_at == self.inline.change_count);
+        (self.options.inline_suggest.edits.show_collapsed || !current)
+            && self.inline.jumped_to != Some(item.id)
+            && !self.inline.in_accept_flow
+    }
+
+    /// Whether the inline edit's lines are all on screen (Monaco
+    /// `isSuggestionInViewport`).
+    fn inline_edit_in_viewport(&self, target: &Range<PointUtf16>, cx: &gpui::App) -> bool {
+        let visible = self.visible_ranges(cx);
+        match (visible.first(), visible.last()) {
+            (Some(first), Some(last)) => first.start <= target.start && target.end <= last.end,
+            _ => false,
+        }
+    }
+
+    /// Whether Tab jumps to the inline edit (Monaco
+    /// `tabShouldJumpToInlineEdit`): the cursor isn't at it, or it shows
+    /// collapsed.
+    pub fn tab_should_jump_to_inline_edit(&self, cx: &gpui::App) -> bool {
+        if self.tab_should_indent(cx) {
+            return false;
+        }
+        let Some(target) = self
+            .inline_edit_state(cx)
+            .and_then(|(_, edits)| Self::inline_edit_target(&edits))
+        else {
+            return false;
+        };
+        if self.inline_edit_show_collapsed(cx) {
+            return true;
+        }
+        if self.inline.in_accept_flow && self.inline_edit_in_viewport(&target, cx) {
+            return false;
+        }
+        !self.cursor_at_inline_edit(cx)
+    }
+
+    /// Whether Tab accepts the inline edit (Monaco
+    /// `tabShouldAcceptInlineEdit`): the cursor is at it, it was jumped to,
+    /// or it follows an accepted one on screen.
+    pub fn tab_should_accept_inline_edit(&self, cx: &gpui::App) -> bool {
+        let Some((ix, edits)) = self.inline_edit_state(cx) else {
+            return false;
+        };
+        let Some(target) = Self::inline_edit_target(&edits) else {
+            return false;
+        };
+        if self.inline_edit_show_collapsed(cx) || self.tab_should_indent(cx) {
+            return false;
+        }
+        if self.inline.in_accept_flow && self.inline_edit_in_viewport(&target, cx) {
+            return true;
+        }
+        if target.start.row == self.cursors.primary().position.row
+            || self.inline.jumped_to == Some(self.inline.items[ix].id)
+        {
+            return true;
+        }
+        self.cursor_at_inline_edit(cx)
+    }
+
+    /// Jumps to the inline edit (Monaco `editor.action.inlineSuggest.jump`,
+    /// Tab while the cursor is away from it): moves the cursor to its start
+    /// and reveals it. Tab then accepts it.
+    pub fn jump_to_next_inline_edit(&mut self, cx: &mut Context<Self>) {
+        let Some((ix, edits)) = self.inline_edit_state(cx) else {
+            return;
+        };
+        let Some(target) = Self::inline_edit_target(&edits) else {
+            return;
+        };
+        self.inline.jumped_to = Some(self.inline.items[ix].id);
+        self.inline.updating = true;
+        self.set_selections(&[Selection::collapsed(target.start)], cx);
+        self.inline.updating = false;
+        let single_line = target.start.row == target.end.row
+            && !edits.iter().any(|(_, text)| text.contains('\n'));
+        if single_line {
+            self.reveal_position(target.start, cx);
+        } else {
+            let max_row = self.model().read(cx).buffer().rope().max_point().row;
+            self.reveal_range(
+                PointUtf16::new(target.start.row.saturating_sub(1), 0)
+                    ..PointUtf16::new((target.end.row + 1).min(max_row), 0),
+                crate::RevealType::Simple,
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// Switches `inline_suggest.edits.show_collapsed` (Monaco
+    /// `editor.action.inlineSuggest.toggleShowCollapsed`).
+    pub fn toggle_inline_edits_show_collapsed(&mut self, cx: &mut Context<Self>) {
+        let mut options = self.options.clone();
+        options.inline_suggest.edits.show_collapsed = !options.inline_suggest.edits.show_collapsed;
+        self.update_options(options, cx);
+    }
+
+    /// Monaco `handleInlineEditShownNextFrame`: reports the inline edit as
+    /// shown, once.
+    pub(crate) fn inline_edit_did_show(&mut self, ix: usize) {
+        let item = &mut self.inline.items[ix];
+        item.shown = true;
+        if self.inline.shown.insert(format!("edit:{}", item.id)) {
+            item.provider.handle_item_did_show(&item.completion);
+        }
+    }
+
+    /// Accepts the inline edit (Monaco `accept` for an `inlineEdit` state):
+    /// applies its replacements and the item's other edits, and puts the
+    /// cursor after the last replacement.
+    fn accept_inline_edit(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((ix, edits)) = self.inline_edit_state(cx) else {
+            return false;
+        };
+        let Some(((first_range, first_text), rest)) = edits.split_first() else {
+            return false;
+        };
+        let item = self.inline.items[ix].clone();
+        self.inline.updating = true;
+        self.stop_inline_completions(StopReason::Accepted(ix), cx);
+        self.model()
+            .update(cx, |model, _| model.push_stack_element());
+        let cursor = new_ranges(&edits).last().map(|range| range.end);
+        let mut others = rest.to_vec();
+        others.extend(item.completion.additional_text_edits.iter().cloned());
+        self.replace_text(first_range.clone(), first_text, &others, cx);
+        if let Some(cursor) = cursor {
+            self.set_selections(&[Selection::collapsed(cursor)], cx);
+        }
+        self.model()
+            .update(cx, |model, _| model.push_stack_element());
+        self.inline.updating = false;
+        // Set after the edit, which resets it.
+        self.inline.in_accept_flow = true;
+        if let Some(command) = &item.completion.command
+            && let Err(err) = crate::commands::execute_command(cx, command)
+        {
+            log::warn!("{err:#}");
+        }
+        // Accepting is a trigger.
+        self.trigger_inline_completions(cx);
+        true
+    }
+
     /// The visible items (deduplicated by their edit), the selected index,
     /// and its ghost text.
     fn inline_state(&self, cx: &gpui::App) -> Option<InlineView> {
@@ -627,6 +1122,7 @@ impl CodeEditor {
             .items
             .iter()
             .enumerate()
+            .filter(|(_, item)| item.edit.is_none() && self.item_shows_at(item, cursor, cx))
             .filter_map(|(ix, item)| {
                 let edit = self.current_edit(item, cx)?;
                 is_visible(&edit, item.original_start, cursor, &line_text).then_some((ix, edit))
@@ -817,6 +1313,12 @@ impl CodeEditor {
 
     /// Renders the ghost text before painting.
     pub(crate) fn refresh_ghost_text(&mut self, cx: &mut Context<Self>) {
+        // The jump resets once the cursor leaves the edit (Monaco
+        // `jumpToReset`).
+        if self.inline.jumped_to.is_some() && !self.cursor_at_inline_edit(cx) {
+            self.inline.jumped_to = None;
+        }
+        self.refresh_inline_edit(cx);
         let state = self.inline_state(cx);
         self.refresh_inline_toolbar(state.as_ref().map(|(_, _, ghost)| ghost), cx);
         let preview = if state.is_none() {
@@ -1018,20 +1520,23 @@ impl CodeEditor {
         }
     }
 
-    /// Hides the ghost text until typing triggers it again, rejecting the
-    /// shown completion (Monaco `stop('explicitCancel')`, Escape).
+    /// Hides the ghost text or inline edit until typing triggers it again,
+    /// rejecting the shown one (Monaco `stop('explicitCancel')`, Escape).
     pub fn hide_inline_suggestion(&mut self, cx: &mut Context<Self>) {
         self.stop_inline_completions(StopReason::Explicit, cx);
     }
 
-    /// Monaco `stop`: ends every item's lifetime and hides the ghost text.
+    /// Monaco `stop`: ends every item's lifetime and hides the ghost text
+    /// and inline edit.
     fn stop_inline_completions(&mut self, reason: StopReason, cx: &mut Context<Self>) {
         let shown = match reason {
             StopReason::Explicit => self
                 .inline_state(cx)
-                .map(|(visible, selected, _)| visible[selected].0),
+                .map(|(visible, selected, _)| visible[selected].0)
+                .or_else(|| self.inline_edit_state(cx).map(|(ix, _)| ix)),
             _ => None,
         };
+        self.inline.jumped_to = None;
         for (ix, item) in std::mem::take(&mut self.inline.items)
             .into_iter()
             .enumerate()
@@ -1056,17 +1561,26 @@ impl CodeEditor {
         self.inline.task = None;
         self.inline.requested = None;
         self.clear_ghost_text(cx);
+        self.clear_inline_edit_view(cx);
         cx.notify();
     }
 
     /// Selections moved: an explicit move (keys, mouse) or an API change
-    /// hides the ghost text (Monaco's controller).
+    /// hides the ghost text, but not an inline edit (Monaco's controller).
     pub(crate) fn inline_selections_changed(
         &mut self,
         change: &SelectionChange,
         cx: &mut Context<Self>,
     ) {
-        if self.inline.updating || !self.inline.active {
+        if self.inline.updating {
+            return;
+        }
+        if self.inline.jumped_to.is_some() && !self.cursor_at_inline_edit(cx) {
+            self.inline.jumped_to = None;
+        }
+        // Monaco stops only ghost text: inline edits stay, even while the
+        // cursor is outside their `show_range`.
+        if !self.inline.active || self.inline.items.iter().any(|item| item.edit.is_some()) {
             return;
         }
         if change.reason == CursorChangeReason::Explicit || change.source == CursorChangeSource::Api
@@ -1075,8 +1589,12 @@ impl CodeEditor {
         }
     }
 
-    /// The editor lost focus: hides unless `keep_on_blur`.
+    /// The editor lost focus: hides unless `keep_on_blur`, or an inline
+    /// edit asked for explicitly shows (Monaco).
     pub(crate) fn inline_blurred(&mut self, cx: &mut Context<Self>) {
+        if self.inline.explicit && self.inline_edit_visible(cx) {
+            return;
+        }
         if !self.options.inline_suggest.keep_on_blur && self.inline.active {
             self.stop_inline_completions(StopReason::Automatic, cx);
         }
@@ -1148,9 +1666,12 @@ impl CodeEditor {
         })
     }
 
-    /// Accepts the shown completion (Monaco
+    /// Accepts the shown completion or inline edit (Monaco
     /// `editor.action.inlineSuggest.commit`, Tab).
     pub fn accept_inline_suggestion(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.inline_edit_visible(cx) {
+            return self.accept_inline_edit(cx);
+        }
         let Some((visible, selected, _)) = self.inline_state(cx) else {
             return false;
         };

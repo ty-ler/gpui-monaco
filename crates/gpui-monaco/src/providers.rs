@@ -1109,22 +1109,43 @@ pub struct InlineCompletionContext {
     pub trigger_kind: InlineCompletionTriggerKind,
     /// The suggest widget's selection, while it's open.
     pub selected_suggestion_info: Option<SelectedSuggestionInfo>,
+    /// Whether inline edits are wanted (Monaco `includeInlineEdits`, from
+    /// `inline_suggest.edits.enabled`); the editor drops them otherwise.
+    pub include_inline_edits: bool,
+    /// Whether classic inline completions are wanted (Monaco
+    /// `includeInlineCompletions`).
+    pub include_inline_completions: bool,
 }
 
 /// One inline completion (Monaco `InlineCompletion`).
+///
+/// A classic completion shows as ghost text while what's typed matches it.
+/// An inline edit (`is_inline_edit`, a "next edit suggestion") can change
+/// text anywhere: the editor diffs `range` against `insert_text`, shows the
+/// changes where they are, and offers to jump there with Tab.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InlineCompletion {
     /// The text to insert.
     pub insert_text: String,
     /// `insert_text` is a snippet.
     pub is_snippet: bool,
-    /// The single-line range it replaces; by default from the start of the
-    /// word at the cursor to the end of the line.
+    /// The range it replaces; by default from the start of the word at the
+    /// cursor to the end of the line. A completion's range is on one line;
+    /// an inline edit's can span lines.
     pub range: Option<Range<PointUtf16>>,
     /// Run after accepting.
     pub command: Option<Command>,
     /// Edits elsewhere applied on accept.
     pub additional_text_edits: Vec<(Range<PointUtf16>, String)>,
+    /// Show it as an inline edit, wherever it is, rather than as ghost text
+    /// at the cursor (Monaco `isInlineEdit`).
+    pub is_inline_edit: bool,
+    /// Only show it while the cursor is in this range (Monaco `showRange`).
+    /// It follows edits.
+    pub show_range: Option<Range<PointUtf16>>,
+    /// A link at the bottom of the inline edit's gutter menu, shown as
+    /// "title..." (Monaco `gutterMenuLinkAction`).
+    pub gutter_menu_link_action: Option<Command>,
 }
 
 /// What an inline completions provider returns (Monaco
@@ -1143,6 +1164,7 @@ pub struct InlineCompletionList {
 /// Why an inline completion stopped showing for good (Monaco
 /// `InlineCompletionEndOfLifeReason`).
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)] // Matches Monaco's shape; rarely built.
 pub enum InlineCompletionEndOfLifeReason {
     /// The user accepted it.
     Accepted,
@@ -1208,6 +1230,12 @@ pub trait InlineCompletionsProvider: 'static {
     /// `yieldsToGroupIds`).
     fn yields_to_group_ids(&self) -> Vec<SharedString> {
         Vec::new()
+    }
+
+    /// The name heading the inline edit gutter menu; `None` shows "Inline
+    /// Suggestion" (Monaco `displayName`).
+    fn display_name(&self) -> Option<SharedString> {
+        None
     }
 }
 
