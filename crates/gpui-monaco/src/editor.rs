@@ -1137,6 +1137,7 @@ impl CodeEditor {
             let mut theme = (*theme).clone();
             theme.colors.background = theme.colors.input_background;
             theme.colors.gutter_background = theme.colors.input_background;
+            theme.colors.placeholder_foreground = theme.colors.input_placeholder_foreground;
             Arc::new(theme)
         } else {
             theme
@@ -2199,6 +2200,7 @@ impl CodeEditor {
         self.smart_select_cursor_changed();
         self.schedule_auto_code_actions(cx);
         self.update_bracket_highlights(cx);
+        self.multi_cursor_selections_changed(cx);
         self.update_occurrence_highlights(cx);
         self.restart_blink(cx);
         let change = std::mem::take(&mut self.next_selection_change);
@@ -3134,10 +3136,17 @@ impl CodeEditor {
     }
 
     fn insert_line_after(&mut self, _: &InsertLineAfter, _: &mut Window, cx: &mut Context<Self>) {
+        // Single-line inputs (Monaco's `<input>`s) have no lines to add.
+        if self.options.single_line {
+            return;
+        }
         self.run_edit(cx, cursor::insert_line_below);
     }
 
     fn insert_line_before(&mut self, _: &InsertLineBefore, _: &mut Window, cx: &mut Context<Self>) {
+        if self.options.single_line {
+            return;
+        }
         self.run_edit(cx, cursor::insert_line_above);
     }
 
@@ -5757,8 +5766,10 @@ impl Render for CodeEditor {
                 if this.options.single_line {
                     return cx.propagate();
                 }
+                // Monaco `FindController.selectAllMatches`: the widget
+                // stays; the editor takes the focus.
                 this.select_all_matches(cx);
-                this.close_find(window, cx);
+                window.focus(&this.focus_handle, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleCaseSensitive, _, cx| {
                 if this.options.single_line {

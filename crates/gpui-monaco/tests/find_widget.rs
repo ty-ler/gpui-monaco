@@ -397,3 +397,334 @@ fn global_find_clipboard(cx: &mut TestAppContext) {
     refocus(&editor, cx);
     assert_eq!(query(&editor, cx), "alpha");
 }
+
+fn draw(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+    });
+    cx.run_until_parked();
+}
+
+fn selections(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+) -> Vec<(u32, u32, u32, u32)> {
+    editor.read_with(cx, |e, _| {
+        e.selections()
+            .iter()
+            .map(|s| (s.start().row, s.start().column, s.end().row, s.end().column))
+            .collect()
+    })
+}
+
+fn editor_focused(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, cx| editor.focus_handle(cx).is_focused(window))
+}
+
+/// Monaco `editor.action.selectAllMatches`: Alt+Enter works from the
+/// editor while find shows, keeps the widget and focuses the editor.
+#[gpui::test]
+fn alt_enter_selects_all_matches_from_the_editor(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("foo bar foo\nfoo", cx);
+    // Without the widget (its precondition), nothing happens.
+    cx.simulate_keystrokes("alt-enter");
+    assert_eq!(selections(&editor, cx), vec![(0, 0, 0, 0)]);
+
+    cx.simulate_keystrokes("secondary-f");
+    type_query("foo", cx);
+    // From the find input.
+    cx.simulate_keystrokes("alt-enter");
+    cx.run_until_parked();
+    assert_eq!(selections(&editor, cx).len(), 3);
+    assert!(editor.read_with(cx, |e, _| e.is_find_visible()));
+    assert!(editor_focused(&editor, cx));
+    // And from the editor.
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(
+                text::PointUtf16::new(0, 5),
+            )],
+            cx,
+        )
+    });
+    cx.simulate_keystrokes("alt-enter");
+    assert_eq!(selections(&editor, cx).len(), 3);
+    assert!(editor.read_with(cx, |e, _| e.is_find_visible()));
+}
+
+/// Monaco's multicursor commands have `editorFocus`: from the find input,
+/// Cmd/Ctrl+D adds the next match of the widget's string in the editor.
+#[gpui::test]
+fn cmd_d_in_the_find_input_acts_on_the_editor(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("a.c abc a.c\nxyz", cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(
+                text::PointUtf16::new(1, 0),
+            )],
+            cx,
+        )
+    });
+    cx.simulate_keystrokes("secondary-f");
+    type_query("a.c", cx);
+    let before = selections(&editor, cx);
+    cx.simulate_keystrokes("secondary-d");
+    cx.run_until_parked();
+    let after = selections(&editor, cx);
+    assert_eq!(after.len(), before.len() + 1, "{after:?}");
+    // The input keeps its text and the focus.
+    assert_eq!(query(&editor, cx), "a.c");
+    assert!(!editor_focused(&editor, cx));
+
+    // Cmd/Ctrl+Shift+L: a non-regex search string is matched literally,
+    // not as a regex (`abc` isn't selected).
+    cx.simulate_keystrokes("secondary-shift-l");
+    cx.run_until_parked();
+    assert_eq!(selections(&editor, cx), vec![(0, 0, 0, 3), (0, 8, 0, 11)]);
+}
+
+/// Monaco `selectAll`: the find widget's string is used only as a regex;
+/// otherwise the selection is what's searched for.
+#[gpui::test]
+fn select_all_occurrences_uses_the_selection_unless_find_is_a_regex(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("foo bar foo bar", cx);
+    cx.simulate_keystrokes("secondary-f");
+    type_query("foo", cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection {
+                anchor: text::PointUtf16::new(0, 4),
+                head: text::PointUtf16::new(0, 7),
+            }],
+            cx,
+        );
+        e.select_all_occurrences(cx);
+    });
+    assert_eq!(selections(&editor, cx), vec![(0, 4, 0, 7), (0, 12, 0, 15)]);
+}
+
+/// Monaco `_beginSessionIfNeeded`: Cmd/Ctrl+D makes the word the search
+/// string (whole word and match case while the session lasts), so F3
+/// finds it; another selection ends the overrides.
+#[gpui::test]
+fn cmd_d_seeds_the_find_widget(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("foo foobar Foo foo", cx);
+    cx.simulate_keystrokes("secondary-d");
+    let options = editor.read_with(cx, |e, _| e.find_options().clone());
+    assert_eq!(options.query, "foo");
+    assert!(options.whole_word && options.match_case && !options.is_regex);
+    // Another selection ends the session: the toggles are their own again.
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(
+                text::PointUtf16::new(0, 1),
+            )],
+            cx,
+        )
+    });
+    let options = editor.read_with(cx, |e, _| e.find_options().clone());
+    assert_eq!(options.query, "foo");
+    assert!(!options.whole_word && !options.match_case);
+    // F3 finds the new search string (opening find resets the overrides,
+    // as in Monaco).
+    cx.simulate_keystrokes("secondary-d f3");
+    cx.run_until_parked();
+    assert_eq!(selections(&editor, cx), vec![(0, 4, 0, 7)]);
+    assert_eq!(query(&editor, cx), "foo");
+}
+
+/// Monaco `_getHeight`: the view zone is the widget's height as laid out
+/// and measured (33px, 62px with replace).
+#[gpui::test]
+fn the_view_zone_is_the_measured_widget_height(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("a\nb", cx);
+    cx.simulate_keystrokes("secondary-f");
+    draw(cx);
+    let zone =
+        |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.find_zone_height_for_tests());
+    assert_eq!(zone(cx), Some(gpui::px(33.)));
+    editor.update(cx, |e, cx| e.set_find_replace_visible(true, cx));
+    draw(cx);
+    assert_eq!(zone(cx), Some(gpui::px(62.)));
+    // A line break in the find input grows it by a 19px line.
+    cx.simulate_keystrokes("secondary-f ctrl-enter");
+    draw(cx);
+    assert_eq!(zone(cx), Some(gpui::px(81.)));
+}
+
+/// Monaco `_tryUpdateWidgetWidth`: 419px, then reduced, narrow (257px) and
+/// collapsed (170px) as the editor narrows; never past its left edge.
+#[gpui::test]
+fn narrow_reduced_and_collapsed_layouts(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("a", cx);
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.minimap.enabled = false;
+        e.update_options(options, cx);
+    });
+    cx.simulate_keystrokes("secondary-f");
+    let layout = |width: f32, cx: &mut VisualTestContext| {
+        cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(400.)));
+        draw(cx);
+        editor
+            .read_with(cx, |e, cx| e.find_widget_layout_for_tests(cx))
+            .unwrap()
+    };
+    let (width, _, reduced, narrow, collapsed) = layout(1000., cx);
+    assert_eq!(
+        (width, reduced, narrow, collapsed),
+        (gpui::px(419.), false, false, false)
+    );
+    let (_, _, reduced, narrow, collapsed) = layout(440., cx);
+    assert!(reduced && !narrow && !collapsed);
+    let (width, _, reduced, narrow, collapsed) = layout(370., cx);
+    assert!(reduced && narrow && !collapsed);
+    assert_eq!(width, gpui::px(257.));
+    let (width, input, _, _, collapsed) = layout(300., cx);
+    assert!(collapsed);
+    assert_eq!(width, gpui::px(170.));
+    assert!(input > gpui::px(0.));
+    // Narrower than the widget: it shrinks to fit.
+    let (width, _, _, _, _) = layout(150., cx);
+    assert!(width <= gpui::px(150. - 28.), "{width:?}");
+}
+
+/// Monaco's titles with keybindings, and `_updateButtons`' disabled
+/// states.
+#[gpui::test]
+fn titles_and_disabled_states(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("foo foo", cx);
+    cx.simulate_keystrokes("secondary-f");
+    draw(cx);
+    let title = |id: &str, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| editor.read(cx).find_widget_title_for_tests(id, window, cx))
+            .unwrap()
+    };
+    assert!(
+        title("match-case", cx).starts_with("Match Case ("),
+        "{}",
+        title("match-case", cx)
+    );
+    assert!(title("next", cx).starts_with("Next Match ("));
+    assert_eq!(title("toggle-replace", cx), "Toggle Replace");
+    let enabled = |id: &str, cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, cx| e.find_widget_control_enabled_for_tests(id, cx))
+    };
+    cx.simulate_keystrokes("secondary-a backspace");
+    cx.run_until_parked();
+    // No search string: no navigation, no find in selection without a
+    // selection.
+    assert!(!enabled("previous", cx) && !enabled("next", cx));
+    assert!(!enabled("in-selection", cx));
+    type_query("foo", cx);
+    assert!(enabled("previous", cx) && enabled("next", cx));
+    // Replace buttons need the replace input and a search string.
+    assert!(!enabled("replace", cx));
+    editor.update(cx, |e, cx| e.set_find_replace_visible(true, cx));
+    cx.simulate_keystrokes("secondary-f");
+    draw(cx);
+    assert!(enabled("replace", cx) && enabled("replace-all", cx));
+}
+
+#[gpui::test]
+fn read_only_hides_the_replace_toggle(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("foo", cx);
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.read_only = true;
+        e.update_options(options, cx);
+    });
+    cx.simulate_keystrokes("secondary-f");
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, cx| {
+        e.find_widget_control_enabled_for_tests("toggle-replace", cx)
+    }));
+}
+
+/// Monaco's Tab order: find input → match case (or the replace input),
+/// through the toggles and buttons; Shift+Tab back.
+#[gpui::test]
+fn tab_order(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("foo foo", cx);
+    cx.simulate_keystrokes("secondary-f");
+    type_query("foo", cx);
+    draw(cx);
+    let focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            editor
+                .read(cx)
+                .find_widget_focused_control_for_tests(window, cx)
+        })
+    };
+    cx.simulate_keystrokes("tab");
+    assert_eq!(focused(cx), Some("match-case"));
+    cx.simulate_keystrokes("tab tab tab");
+    assert_eq!(focused(cx), Some("previous"));
+    // Space presses the focused button (from the first match, previous
+    // wraps to the last).
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert_eq!(selections(&editor, cx), vec![(0, 4, 0, 7)]);
+    // Shift+Tab walks back to the find input.
+    cx.simulate_keystrokes("shift-tab shift-tab shift-tab shift-tab");
+    assert_eq!(focused(cx), None);
+    assert!(cx.update(|window, cx| editor.read(cx).find_widget_focus_for_tests(window, cx).0));
+
+    // With replace: find input → replace input → match case.
+    cx.update(|window, cx| editor.update(cx, |e, cx| e.open_find(true, window, cx)));
+    cx.update(|window, cx| editor.update(cx, |e, cx| e.open_find(false, window, cx)));
+    draw(cx);
+    cx.simulate_keystrokes("tab");
+    assert!(cx.update(|window, cx| editor.read(cx).find_widget_focus_for_tests(window, cx).1));
+    cx.simulate_keystrokes("tab");
+    assert_eq!(focused(cx), Some("match-case"));
+}
+
+/// Monaco's inputs: Cmd/Ctrl+Down focuses the editor; Shift+Enter is
+/// Find Previous in the find input only.
+#[gpui::test]
+fn input_keys(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("foo foo foo", cx);
+    cx.simulate_keystrokes("secondary-f");
+    type_query("foo", cx);
+    cx.simulate_keystrokes("enter enter");
+    assert_eq!(selections(&editor, cx), vec![(0, 8, 0, 11)]);
+    cx.simulate_keystrokes("shift-enter");
+    assert_eq!(selections(&editor, cx), vec![(0, 4, 0, 7)]);
+    cx.update(|window, cx| editor.update(cx, |e, cx| e.open_find(true, window, cx)));
+    cx.run_until_parked();
+    // In the replace input it's no command: the textarea's line break.
+    cx.simulate_keystrokes("shift-enter");
+    cx.run_until_parked();
+    assert_eq!(selections(&editor, cx), vec![(0, 4, 0, 7)]);
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.find_options().replace.clone()),
+        "\n"
+    );
+    cx.simulate_keystrokes("secondary-down");
+    assert!(editor_focused(&editor, cx));
+    assert!(editor.read_with(cx, |e, _| e.is_find_visible()));
+}
+
+/// Monaco's find widget reads each new count to screen readers.
+#[gpui::test]
+fn screen_reader_status(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("foo\nbar foo", cx);
+    cx.simulate_keystrokes("secondary-f");
+    type_query("foo", cx);
+    let last = |cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, _| e.last_announcement_for_tests())
+            .map(|s| s.to_string())
+    };
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        last(cx).as_deref(),
+        Some("bar foo, 2 of 2 found for 'foo', at 2:5")
+    );
+    type_query("zzz", cx);
+    assert_eq!(last(cx).as_deref(), Some("No results found for 'zzz'"));
+}

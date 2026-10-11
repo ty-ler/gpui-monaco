@@ -232,6 +232,87 @@ fn keybindings(cx: &mut TestAppContext) {
     assert_eq!(get(&editor, cx).len(), 3);
 }
 
+/// Opens find with `query` and match case `match_case`, leaving the focus
+/// in its find input (Monaco's tests' `hasTextFocus: false`).
+fn find_focused(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+    query: &str,
+    match_case: bool,
+) {
+    cx.simulate_keystrokes("secondary-f");
+    editor.update(cx, |e, cx| {
+        e.set_find_options(
+            FindOptions {
+                query: query.into(),
+                match_case,
+                ..Default::default()
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+}
+
+/// Monaco: "the default Find session survives returning focus to the
+/// editor".
+#[gpui::test]
+fn find_session_survives_returning_focus_to_the_editor(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&["foo", "bar", "bar"], cx);
+    find_focused(&editor, cx, "bar", false);
+    set(&editor, cx, &[(1, 1, 1, 4)]);
+    cx.simulate_keystrokes("secondary-d");
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    cx.simulate_keystrokes("secondary-d");
+    assert_eq!(
+        get(&editor, cx),
+        vec![(1, 1, 1, 4), (2, 1, 2, 4), (3, 1, 3, 4)]
+    );
+}
+
+/// Monaco: "Find-focused mixed-case initial selections respect Find match
+/// case false" and "… true".
+#[gpui::test]
+fn find_focused_mixed_case_selections_use_find_match_case(cx: &mut TestAppContext) {
+    for (match_case, expected) in [
+        (false, vec![(1, 1, 1, 4), (2, 1, 2, 4), (3, 1, 3, 4)]),
+        (true, vec![(1, 1, 1, 4), (2, 1, 2, 4)]),
+    ] {
+        let (editor, vcx) = setup(&["foo", "FOO", "fooBar"], cx);
+        find_focused(&editor, vcx, "foo", match_case);
+        set(&editor, vcx, &[(1, 1, 1, 4), (2, 1, 2, 4)]);
+        vcx.simulate_keystrokes("secondary-d");
+        assert_eq!(get(&editor, vcx), expected, "match case {match_case}");
+    }
+}
+
+/// Monaco: "switching focus transfers matching rules between selection and
+/// Find sessions" (the Find session's part: from the find input, the move
+/// searches for the widget's string).
+#[gpui::test]
+fn move_from_the_find_input_searches_the_find_string(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        &["foo", "FOO", "fooqux", "foobar", "bar", "BAR", "barista"],
+        cx,
+    );
+    set(&editor, cx, &[(1, 1, 1, 4)]);
+    editor.update(cx, |e, cx| e.move_selection_to_next_find_match(cx));
+    assert_eq!(get(&editor, cx), vec![(3, 1, 3, 4)]);
+    find_focused(&editor, cx, "bar", false);
+    editor.update(cx, |e, cx| {
+        let mut options = e.find_options().clone();
+        options.whole_word = true;
+        e.set_find_options(options, cx);
+    });
+    set(&editor, cx, &[(3, 1, 3, 4)]);
+    cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-k cmd-d"
+    } else {
+        "ctrl-k ctrl-d"
+    });
+    assert_eq!(get(&editor, cx), vec![(5, 1, 5, 4)]);
+}
+
 const OCCURRENCES: [&str; 5] = ["foo", "FOObar", "foobar", "FOO", "foo"];
 
 /// Monaco: addSelectionToPreviousFindMatch: selected text, match case true,

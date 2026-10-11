@@ -635,7 +635,12 @@ fn main() {
             let language = language_for_path(&path, cx);
             Some(cx.new(|_| TextModel::new(&text).with_language(language).with_uri(uri)))
         });
-        let bounds = Bounds::centered(None, size(px(1100.), px(760.)), cx);
+        // `PLAYGROUND_WIDTH=400` makes a narrow window.
+        let width = std::env::var("PLAYGROUND_WIDTH")
+            .ok()
+            .and_then(|w| w.parse::<f32>().ok())
+            .unwrap_or(1100.);
+        let bounds = Bounds::centered(None, size(px(width), px(760.)), cx);
         // `PLAYGROUND_MULTI_DIFF=old1:new1,old2:new2` opens a multi-diff editor.
         if let Ok(pairs) = std::env::var("PLAYGROUND_MULTI_DIFF") {
             let load = |path: &str, cx: &mut App| {

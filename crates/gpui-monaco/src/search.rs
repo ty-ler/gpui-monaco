@@ -102,6 +102,23 @@ impl SearchParams {
     }
 }
 
+/// Why the regular expression `source` doesn't parse, for the find
+/// widget's validation message (Monaco shows the `RegExp` constructor's
+/// error), or `None` when it does.
+pub(crate) fn regex_error(source: &str) -> Option<String> {
+    let error = Regex::new(source).err()?;
+    let text = error.to_string();
+    // The `regex` crate's message has the pattern and a caret diagram; keep
+    // its `error: …` line.
+    let reason = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("error: "))
+        .unwrap_or(text.lines().next().unwrap_or_default())
+        .trim()
+        .to_string();
+    Some(format!("Invalid regular expression: /{source}/: {reason}"))
+}
+
 impl SearchData {
     /// True if matches can span lines (the regex can match a line break, or
     /// the literal query contains one), so the search runs over the whole
@@ -306,6 +323,16 @@ mod tests {
     //! line-by-line search matches Monaco only for multiline sources, which
     //! we treat the same).
     use super::*;
+
+    /// The find widget's validation message (Monaco's `RegExp` error).
+    #[test]
+    fn regex_error_message() {
+        assert_eq!(
+            regex_error("a(b"),
+            Some("Invalid regular expression: /a(b/: unclosed group".into())
+        );
+        assert_eq!(regex_error("a(b)"), None);
+    }
     use text::PointUtf16;
 
     const USUAL_WORD_SEPARATORS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
