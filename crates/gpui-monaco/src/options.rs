@@ -326,6 +326,11 @@ pub struct ScrollbarOptions {
     /// Monaco `scrollbar.scrollByPage`: clicking the track scrolls a page
     /// instead of jumping there (default `false`).
     pub scroll_by_page: bool,
+    /// Monaco `scrollbar.ignoreHorizontalScrollbarInContentHeight`: without
+    /// `scroll_beyond_last_line`, a shown horizontal scrollbar adds its
+    /// height to the content height, so the last line can scroll above it;
+    /// this leaves it out (default `false`).
+    pub ignore_horizontal_scrollbar_in_content_height: bool,
 }
 
 impl Default for ScrollbarOptions {
@@ -342,6 +347,7 @@ impl Default for ScrollbarOptions {
             handle_mouse_wheel: true,
             always_consume_mouse_wheel: true,
             scroll_by_page: false,
+            ignore_horizontal_scrollbar_in_content_height: false,
         }
     }
 }
@@ -1347,6 +1353,32 @@ pub enum WrappingStrategy {
     Advanced,
 }
 
+/// Monaco `fullwidthCharacterWidth`: how wide full-width (CJK) characters
+/// are drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FullwidthCharacterWidth {
+    /// The font's own width (the default).
+    #[default]
+    Font,
+    /// Centered in exactly two character cells, so columns line up. Only
+    /// with a monospace font (Monaco `effectiveFullwidthCharacterWidth`).
+    TwoCells,
+}
+
+/// Monaco `accessibilitySupport`: whether the editor runs optimized for
+/// screen readers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AccessibilitySupport {
+    /// Optimized while assistive technology is connected to the window (the
+    /// default; Monaco asks the platform).
+    #[default]
+    Auto,
+    /// Always optimized for screen readers.
+    On,
+    /// Assume no screen reader is attached.
+    Off,
+}
+
 /// Monaco `fontLigatures`: the font's OpenType features.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum FontLigatures {
@@ -1482,6 +1514,10 @@ pub struct EditorOptions {
     /// Monaco `scrollPredominantAxis`: a diagonal wheel or trackpad scroll
     /// moves along its main axis only (default `true`).
     pub scroll_predominant_axis: bool,
+    /// Monaco `inertialScroll`: trackpad scrolling keeps going and slows
+    /// down after the fingers lift, for platforms that don't do it
+    /// themselves (default `false`).
+    pub inertial_scroll: bool,
     /// Monaco `scrollOnMiddleClick`: a middle click starts scrolling toward
     /// the mouse until the next click (default `false`).
     pub scroll_on_middle_click: bool,
@@ -1578,6 +1614,10 @@ pub struct EditorOptions {
     /// Monaco `wordWrapOverride2`: overrides `word_wrap_override1` (default
     /// inherit).
     pub word_wrap_override2: WordWrapOverride,
+    /// Monaco `wordWrapIndicator`: a `↩` at the wrapping column of each
+    /// soft-wrapped line, which then wraps a column earlier to leave room
+    /// for it (default `false`). Only while wrapping.
+    pub word_wrap_indicator: bool,
     /// Monaco `wordWrapColumn`, in characters (default 80); used by
     /// [`WordWrap::WordWrapColumn`] and [`WordWrap::Bounded`].
     pub word_wrap_column: u32,
@@ -1599,6 +1639,10 @@ pub struct EditorOptions {
     /// Monaco `wrappingStrategy`: wrap by monospace columns (`Simple`, the
     /// default) or by measured widths (`Advanced`, for proportional fonts).
     pub wrapping_strategy: WrappingStrategy,
+    /// Monaco `fullwidthCharacterWidth`: draw full-width characters with the
+    /// font's width or centered in two cells (default font). Two cells only
+    /// apply with a monospace font.
+    pub fullwidth_character_width: FullwidthCharacterWidth,
     /// Monaco `folding`: enable code folding and its gutter column (default `true`).
     pub folding: bool,
     /// Monaco `foldingStrategy`.
@@ -1697,6 +1741,11 @@ pub struct EditorOptions {
     /// Monaco `occurrencesHighlight`: highlight the occurrences of the symbol
     /// at the cursor (default single file).
     pub occurrences_highlight: OccurrencesHighlight,
+    /// Monaco `occurrencesHighlightFromAllProviders`: ask every matching
+    /// document highlight provider at once and merge their answers instead
+    /// of taking the first one; the textual highlights are only used when
+    /// no other provider matches (default `false`).
+    pub occurrences_highlight_from_all_providers: bool,
     /// Monaco `occurrencesHighlightDelay`: how long the cursor rests before
     /// occurrences are highlighted (default 250ms).
     pub occurrences_highlight_delay: std::time::Duration,
@@ -1792,6 +1841,16 @@ pub struct EditorOptions {
     /// Monaco `accessibilityPageSize`: how many lines a screen reader can
     /// read at once around the selection (default 500).
     pub accessibility_page_size: u32,
+    /// Monaco `accessibilitySupport`: run optimized for screen readers
+    /// (default auto: while assistive technology is connected). Optimized,
+    /// wrapping is measured (`wrapping_strategy: Advanced`) without
+    /// continuation indent, and a model dominated by long lines wraps at the
+    /// viewport unless `word_wrap_override1` says otherwise. Off, the screen
+    /// reader gets no text, only a label saying the editor isn't accessible.
+    pub accessibility_support: AccessibilitySupport,
+    /// Monaco `screenReaderAnnounceInlineSuggestion`: screen readers announce
+    /// ghost text when it shows (default `true`).
+    pub screen_reader_announce_inline_suggestion: bool,
     /// Monaco `tabFocusMode`: Tab moves focus instead of inserting a tab
     /// (also on for every editor with [`set_tab_focus_mode`](crate::set_tab_focus_mode)).
     pub tab_focus_mode: bool,
@@ -1832,6 +1891,7 @@ impl Default for EditorOptions {
             reveal_horizontal_right_padding: px(15.),
             fast_scroll_sensitivity: 5.,
             scroll_predominant_axis: true,
+            inertial_scroll: false,
             scroll_on_middle_click: false,
             padding: EditorPadding::default(),
             rounded_selection: true,
@@ -1866,6 +1926,7 @@ impl Default for EditorOptions {
             word_wrap: WordWrap::Off,
             word_wrap_override1: WordWrapOverride::Inherit,
             word_wrap_override2: WordWrapOverride::Inherit,
+            word_wrap_indicator: false,
             word_wrap_column: 80,
             word_wrap_break_before_characters: crate::view::line_breaks::DEFAULT_BREAK_BEFORE
                 .into(),
@@ -1874,6 +1935,7 @@ impl Default for EditorOptions {
             wrap_on_escaped_line_feeds: false,
             wrapping_indent: crate::view::line_breaks::WrappingIndent::Same,
             wrapping_strategy: WrappingStrategy::Simple,
+            fullwidth_character_width: FullwidthCharacterWidth::Font,
             folding: true,
             folding_strategy: FoldingStrategy::Auto,
             folding_maximum_regions: 5000,
@@ -1887,6 +1949,8 @@ impl Default for EditorOptions {
             aria_required: false,
             accessibility_page_size: 500,
             tab_focus_mode: false,
+            accessibility_support: AccessibilitySupport::Auto,
+            screen_reader_announce_inline_suggestion: true,
             auto_closing_brackets: Default::default(),
             auto_closing_quotes: Default::default(),
             auto_closing_comments: Default::default(),
@@ -1926,6 +1990,7 @@ impl Default for EditorOptions {
             guides: GuideOptions::default(),
             rulers: Vec::new(),
             occurrences_highlight: OccurrencesHighlight::SingleFile,
+            occurrences_highlight_from_all_providers: false,
             occurrences_highlight_delay: std::time::Duration::from_millis(250),
             selection_highlight: true,
             selection_highlight_max_length: 200,
@@ -2003,6 +2068,27 @@ impl EditorOptions {
             WordWrapOverride::On => WordWrap::On,
             WordWrapOverride::Off => WordWrap::Off,
         }
+    }
+
+    /// Monaco `EditorLayoutInfoComputer`'s wrapping with
+    /// `accessibilitySupport`: [`effective_word_wrap`](Self::effective_word_wrap),
+    /// except that optimized for a `screen_reader`, a model
+    /// `dominated_by_long_lines` wraps at the viewport unless
+    /// `word_wrap_override1` (or `word_wrap_override2`) is set. The second
+    /// value says it was forced (Monaco `isWordWrapMinified`).
+    pub(crate) fn wrap_mode(
+        &self,
+        screen_reader: bool,
+        dominated_by_long_lines: bool,
+    ) -> (WordWrap, bool) {
+        let override1 = match self.word_wrap_override2 {
+            WordWrapOverride::Inherit => self.word_wrap_override1,
+            forced => forced,
+        };
+        if screen_reader && dominated_by_long_lines && override1 == WordWrapOverride::Inherit {
+            return (WordWrap::On, true);
+        }
+        (self.effective_word_wrap(), false)
     }
 
     /// The line height in pixels: [`line_height`](Self::line_height), or the font size

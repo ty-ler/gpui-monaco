@@ -1581,8 +1581,12 @@ pub struct DocumentHighlight {
 /// Register with [`register_document_highlight_provider`].
 pub trait DocumentHighlightProvider: 'static {
     /// The occurrences to highlight for the symbol at `position` (0-based row,
-    /// UTF-16 column), or `None` for none. Called after the cursor rests on a
-    /// word for [`EditorOptions::occurrences_highlight_delay`](crate::EditorOptions::occurrences_highlight_delay).
+    /// UTF-16 column). `None` leaves it to the next provider, and finally to
+    /// the textual occurrences; an empty list highlights nothing. Called
+    /// after the cursor rests on a word for
+    /// [`EditorOptions::occurrences_highlight_delay`](crate::EditorOptions::occurrences_highlight_delay).
+    /// With [`EditorOptions::occurrences_highlight_from_all_providers`](crate::EditorOptions::occurrences_highlight_from_all_providers)
+    /// every matching provider is asked and the answers are merged.
     fn provide_document_highlights(
         &self,
         context: &ProviderContext,

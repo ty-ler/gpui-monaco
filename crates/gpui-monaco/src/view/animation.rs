@@ -1,7 +1,8 @@
 //! The view's animations: the cursor's blinking styles (Monaco's
 //! `cursor-smooth`, `cursor-phase` and `cursor-expand` CSS animations),
 //! smooth caret moves (`cursorSmoothCaretAnimation`) and smooth scrolling
-//! (`smoothScrolling`, Monaco's `SmoothScrollingOperation`).
+//! (`smoothScrolling`, Monaco's `SmoothScrollingOperation`) and inertial
+//! scrolling (`inertialScroll`, from `scrollableElement.ts`).
 
 use std::time::Duration;
 
@@ -20,6 +21,10 @@ pub const BLINK_ANIMATION_END: Duration = Duration::from_millis(500 + 20 * 500);
 pub const SMOOTH_SCROLL_DURATION: Duration = Duration::from_millis(125);
 /// Monaco's `.cursor-smooth-caret-animation` transition.
 pub const CARET_DURATION: Duration = Duration::from_millis(80);
+/// How often an inertial scroll moves (Monaco's `1000 / 60` ms timeout).
+pub const INERTIAL_SCROLL_INTERVAL: Duration = Duration::from_micros(16_667);
+/// Monaco `SCROLL_WHEEL_SENSITIVITY`: pixels per wheel delta unit.
+const SCROLL_WHEEL_SENSITIVITY: f32 = 50.;
 
 /// A cubic Bézier timing function (CSS `cubic-bezier(x1, y1, x2, y2)`).
 fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
@@ -116,6 +121,8 @@ pub(crate) struct ViewAnimation {
     pub middle_scroll: Option<MiddleScroll>,
     pub scrollbars: ScrollbarFade,
     pub minimap: MinimapFade,
+    /// Inertial scrolling (`inertialScroll`).
+    pub inertial: InertialScroll,
 }
 
 impl Default for ViewAnimation {
@@ -132,6 +139,7 @@ impl Default for ViewAnimation {
             middle_scroll: None,
             scrollbars: ScrollbarFade::default(),
             minimap: MinimapFade::default(),
+            inertial: InertialScroll::default(),
         }
     }
 }
@@ -395,6 +403,56 @@ impl MiddleScroll {
     }
 }
 
+/// Monaco's inertial scrolling (`inertialScroll`, the `_inertialSpeed` of
+/// `AbstractScrollableElement` in `scrollableElement.ts`): each wheel event
+/// sets a speed from its delta, and every 1/60s the view scrolls by it
+/// while it decays by a tenth, so a flick keeps going after the wheel
+/// events stop.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct InertialScroll {
+    /// In Monaco's wheel delta units (positive scrolls up and left).
+    speed: Point<f32>,
+}
+
+impl InertialScroll {
+    /// A wheel event scrolled by `delta` pixels (after sensitivity and the
+    /// predominant axis; positive scrolls up and left). Returns whether
+    /// the periodic scroll should start (it isn't running yet).
+    pub fn on_wheel(&mut self, delta: Point<Pixels>) -> bool {
+        if delta.x == px(0.) && delta.y == px(0.) {
+            return false;
+        }
+        let start = !self.is_moving();
+        // Monaco: `(delta < 0 ? -1 : 1) * Math.abs(delta) ** 1.02`.
+        let speed = |delta: Pixels| {
+            let units = f32::from(delta) / SCROLL_WHEEL_SENSITIVITY;
+            units.signum() * units.abs().powf(1.02)
+        };
+        self.speed = point(speed(delta.x), speed(delta.y));
+        start
+    }
+
+    /// Monaco `_periodicSync`: the pixels to scroll by now (subtracted from
+    /// the scroll position), then the speed decays, stopping under 0.01.
+    pub fn tick(&mut self) -> Option<Point<Pixels>> {
+        if !self.is_moving() {
+            return None;
+        }
+        let delta = point(px(self.speed.x * 100.), px(self.speed.y * 100.));
+        let decay = |speed: f32| {
+            let speed = speed * 0.9;
+            if speed.abs() < 0.01 { 0. } else { speed }
+        };
+        self.speed = point(decay(self.speed.x), decay(self.speed.y));
+        Some(delta)
+    }
+
+    /// Whether there's speed left.
+    pub fn is_moving(&self) -> bool {
+        self.speed.x != 0. || self.speed.y != 0.
+    }
+}
+
 /// Monaco's selection corner rounding (`roundedSelection`): which corners
 /// of a line's selection rectangle are outer corners, given the rows
 /// above and below as `(left, right)`.
@@ -417,6 +475,28 @@ pub fn rounded_corners(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inertial_scroll_decays() {
+        let mut inertial = InertialScroll::default();
+        assert_eq!(inertial.tick(), None);
+        assert!(!inertial.on_wheel(point(px(0.), px(0.))));
+        // A 50px wheel delta is one Monaco unit: 100px on the first tick.
+        assert!(inertial.on_wheel(point(px(0.), px(-50.))));
+        assert_eq!(inertial.tick(), Some(point(px(0.), px(-100.))));
+        assert_eq!(inertial.tick(), Some(point(px(0.), px(-90.))));
+        // Another wheel event resets the speed without restarting.
+        assert!(!inertial.on_wheel(point(px(0.), px(-50.))));
+        assert_eq!(inertial.tick(), Some(point(px(0.), px(-100.))));
+        // It stops once the speed is under 0.01 units.
+        let ticks = std::iter::from_fn(|| inertial.tick()).count();
+        assert_eq!(ticks, 43);
+        assert!(!inertial.is_moving());
+        // Larger deltas grow slightly faster than linearly.
+        inertial.on_wheel(point(px(500.), px(0.)));
+        let delta = inertial.tick().unwrap();
+        assert!(delta.x > px(1000.) && delta.x < px(1060.));
+    }
 
     #[test]
     fn blink_keyframes() {

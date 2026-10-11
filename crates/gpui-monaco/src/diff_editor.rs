@@ -21,7 +21,9 @@ use gpui::{
 use text::{Point, PointUtf16};
 
 use crate::cursor::Selection;
-use crate::decorations::{BlockDecoration, DecorationId, DecorationOptions, OverviewRulerLane};
+use crate::decorations::{
+    BlockDecoration, DecorationId, DecorationOptions, InjectedText, OverviewRulerLane,
+};
 use crate::diff::{
     DetailedLineRangeMapping, DiffOptions, LineRange, LineRangeMapping, LinesDiff, RangeMapping,
     compute_diff, compute_legacy_diff,
@@ -183,6 +185,21 @@ pub struct DiffEditorOptions {
     pub diff_word_wrap: WordWrapOverride,
     /// The diff algorithm (Monaco `diffAlgorithm`, default advanced).
     pub diff_algorithm: DiffAlgorithm,
+    /// Show code lenses in both editors (Monaco `diffCodeLens`, default
+    /// `false`): sets their [`code_lens`](crate::EditorOptions::code_lens).
+    pub diff_code_lens: bool,
+    /// Add a navigation tip to both editors' screen reader labels (Monaco
+    /// `accessibilityVerbose`, default `false`).
+    pub accessibility_verbose: bool,
+    /// Mark where characters were inserted or deleted, when the other side
+    /// has none, with a thin bar (Monaco `experimental.showEmptyDecorations`,
+    /// default `true`).
+    pub show_empty_decorations: bool,
+    /// In the inline view, show changes within lines as struck-through
+    /// deleted text before the inserted text instead of the deleted lines
+    /// above (Monaco `experimental.useTrueInlineView`, default `false`).
+    /// Only changes whose parts each stay on one line.
+    pub use_true_inline_view: bool,
 }
 
 /// Monaco `diffAlgorithm`.
@@ -255,6 +272,10 @@ impl Default for DiffEditorOptions {
             compact_mode: false,
             diff_word_wrap: WordWrapOverride::Inherit,
             diff_algorithm: DiffAlgorithm::Advanced,
+            diff_code_lens: false,
+            accessibility_verbose: false,
+            show_empty_decorations: true,
+            use_true_inline_view: false,
         }
     }
 }
@@ -286,6 +307,32 @@ pub enum AccessibilitySignal {
 
 /// Monaco's delay after edits before the diff is computed again.
 const RECOMPUTE_DELAY: Duration = Duration::from_millis(200);
+
+/// Monaco's `diff-aria-navigation-tip`, added to the editors' labels with
+/// `accessibility_verbose`. Monaco names the accessibility help's key; this
+/// port has no accessibility help, so it names the accessible diff viewer.
+const ARIA_NAVIGATION_TIP: &str = " use F7 to open the accessible diff viewer.";
+
+/// Monaco `DiffEditorEditors._updateAriaLabel`.
+fn aria_label_with_tip(label: &str, verbose: bool) -> SharedString {
+    let label = label.replace(ARIA_NAVIGATION_TIP, "");
+    if verbose {
+        format!("{label}{ARIA_NAVIGATION_TIP}").into()
+    } else {
+        label.into()
+    }
+}
+
+/// Monaco `allowsTrueInlineDiffRendering`: every inner change stays on one
+/// line on both sides (or inserts at the very start).
+fn allows_true_inline_diff_rendering(mapping: &DetailedLineRangeMapping) -> bool {
+    let single_line = |range: &crate::diff::Range| range.start_line_number == range.end_line_number;
+    !mapping.inner_changes.is_empty()
+        && mapping.inner_changes.iter().all(|c| {
+            (single_line(&c.modified_range) && single_line(&c.original_range))
+                || c.original_range == crate::diff::Range::new(1, 1, 1, 1)
+        })
+}
 
 /// Monaco `ILineRangeAlignment`: line ranges of the two sides shown with
 /// the same height.
@@ -1167,6 +1214,9 @@ pub struct DiffEditor {
     syncing_scroll: bool,
     /// Whether the last render showed the diff inline.
     inline: bool,
+    /// The modified editor runs optimized for screen readers (Monaco's
+    /// `_screenReaderMode`), as of the last render.
+    screen_reader_mode: bool,
     /// Hideable unchanged regions, when `hide_unchanged_regions` is on.
     unchanged: Vec<UnchangedRegion>,
     /// Decorations on each region's lines, tracking them through edits.
@@ -1241,6 +1291,7 @@ impl DiffEditor {
             dragging_sash: false,
             syncing_scroll: false,
             inline: false,
+            screen_reader_mode: false,
             unchanged: Vec::new(),
             unchanged_decorations: Default::default(),
             unchanged_zones: Default::default(),
@@ -1258,6 +1309,7 @@ impl DiffEditor {
             _subscriptions: Vec::new(),
         };
         this.apply_word_wrap(cx);
+        this.apply_editor_options(cx);
         // After its editors, as Monaco's `addDiffEditor`.
         crate::registry::track_diff_editor(cx);
         this.subscribe(cx);
@@ -1333,7 +1385,14 @@ impl DiffEditor {
             || options.hide_unchanged_regions != self.options.hide_unchanged_regions
             || options.max_file_size != self.options.max_file_size
             || options.diff_algorithm != self.options.diff_algorithm
-            || options.compact_mode != self.options.compact_mode;
+            || options.compact_mode != self.options.compact_mode
+            // `compact_mode` decides on the first diff with it.
+            || (options.compact_mode
+                && options.use_true_inline_view != self.options.use_true_inline_view);
+        if options.compact_mode && options.use_true_inline_view != self.options.use_true_inline_view
+        {
+            self.simple_diff = None;
+        }
         if options.original_editable != self.options.original_editable {
             let read_only = !options.original_editable;
             self.original.update(cx, |editor, cx| {
@@ -1350,6 +1409,7 @@ impl DiffEditor {
         let was_only_viewer = self.options.only_show_accessible_diff_viewer;
         self.options = options;
         self.apply_word_wrap(cx);
+        self.apply_editor_options(cx);
         if only_viewer {
             self.set_accessible_viewer_visible(true, cx);
         } else if was_only_viewer {
@@ -1413,6 +1473,27 @@ impl DiffEditor {
         set(&self.modified, self.options.diff_word_wrap, None, cx);
     }
 
+    /// What Monaco's `_adjustOptionsForSubEditor` sets on both editors
+    /// besides word wrap: `code_lens` from `diff_code_lens`, and the
+    /// `accessibility_verbose` tip in `aria_label`.
+    fn apply_editor_options(&mut self, cx: &mut Context<Self>) {
+        let code_lens = self.options.diff_code_lens;
+        let verbose = self.options.accessibility_verbose;
+        for editor in [&self.original, &self.modified] {
+            editor.update(cx, |editor, cx| {
+                let current = editor.options();
+                let aria_label = aria_label_with_tip(&current.aria_label, verbose);
+                if current.code_lens == code_lens && current.aria_label == aria_label {
+                    return;
+                }
+                let mut options = current.clone();
+                options.code_lens = code_lens;
+                options.aria_label = aria_label;
+                editor.update_options(options, cx);
+            });
+        }
+    }
+
     /// Monaco `renderSideBySide` after `useInlineViewWhenSpaceIsLimited`:
     /// whether the sides show next to each other (else deleted lines show
     /// inline in the modified editor).
@@ -1427,10 +1508,13 @@ impl DiffEditor {
             return false;
         }
         let width = self.bounds.get().size.width;
+        // Screen reader users keep the sides apart (Monaco
+        // `_screenReaderMode`).
         options.render_side_by_side
             && !(options.use_inline_view_when_space_is_limited
                 && width > px(0.)
-                && width < options.render_side_by_side_inline_breakpoint)
+                && width < options.render_side_by_side_inline_breakpoint
+                && !self.screen_reader_mode)
     }
 
     /// The height to show everything without scrolling, as of the last
@@ -1558,13 +1642,16 @@ impl DiffEditor {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                // Monaco `isSimpleDiff`, decided by the first diff.
+                // Monaco `isSimpleDiff`, decided by the first diff: only
+                // insertions and deletions, or changes the true inline view
+                // shows.
                 if this.simple_diff.is_none() {
-                    this.simple_diff = Some(
-                        diff.changes
-                            .iter()
-                            .all(|c| c.original.is_empty() || c.modified.is_empty()),
-                    );
+                    let true_inline = this.options.use_true_inline_view;
+                    this.simple_diff = Some(diff.changes.iter().all(|c| {
+                        c.original.is_empty()
+                            || c.modified.is_empty()
+                            || (true_inline && allows_true_inline_diff_rendering(c))
+                    }));
                 }
                 this.diff = Some(Arc::new(diff));
                 this.diff_versions = Some(versions);
@@ -1617,8 +1704,21 @@ impl DiffEditor {
             .move_to_compare
             .and_then(|ix| self.shown_moves(&diff).get(ix));
         let changes = compared.map_or(&diff.changes, |m| &m.changes);
-        let (original_decorations, modified_decorations) =
-            diff_decorations(changes, &self.options, &colors);
+        let original_rope = self
+            .original
+            .read(cx)
+            .model()
+            .read(cx)
+            .buffer()
+            .rope()
+            .clone();
+        let (original_decorations, modified_decorations) = diff_decorations(
+            changes,
+            &self.options,
+            self.uses_true_inline_view(),
+            &original_rope,
+            &colors,
+        );
         let original_id = self.original.entity_id();
         let modified_id = self.modified.entity_id();
         let (old_original, old_modified) = std::mem::take(&mut self.decorations);
@@ -2012,9 +2112,17 @@ impl DiffEditor {
         )
     }
 
+    /// Monaco `useTrueInlineDiffRendering`: the inline view with
+    /// `use_true_inline_view`.
+    fn uses_true_inline_view(&self) -> bool {
+        self.inline && self.options.use_true_inline_view
+    }
+
     /// Monaco's inline view (`renderSideBySide: false`): each change's
-    /// deleted lines show in a view zone above its modified lines.
+    /// deleted lines show in a view zone above its modified lines, except
+    /// changes the true inline view shows within the lines.
     fn apply_inline_zones(&mut self, diff: &LinesDiff, cx: &mut Context<Self>) {
+        let true_inline = self.uses_true_inline_view();
         let line_height = self.modified.read(cx).options().resolved_line_height();
         let original_model = self.original.read(cx).model().clone();
         let line_count = original_model.read(cx).buffer().rope().line_count() as usize;
@@ -2023,6 +2131,9 @@ impl DiffEditor {
             let range = change.original;
             // A diff for older text can be out of bounds until recomputed.
             if range.is_empty() || range.end_line_number_exclusive - 1 > line_count {
+                continue;
+            }
+            if true_inline && allows_true_inline_diff_rendering(change) {
                 continue;
             }
             let rows =
@@ -3313,6 +3424,8 @@ type SideDecoration = (Side, DecorationOptions);
 fn diff_decorations(
     changes: &[DetailedLineRangeMapping],
     options: &DiffEditorOptions,
+    true_inline: bool,
+    original_text: &text::Rope,
     colors: &EditorColors,
 ) -> (Vec<SideDecoration>, Vec<SideDecoration>) {
     let line = |inserted: bool| {
@@ -3369,6 +3482,25 @@ fn diff_decorations(
             ..Default::default()
         }
     };
+    // Monaco `diffDeleteDecorationEmpty`/`diffAddDecorationEmpty`: a 3px
+    // bar in the text background color (`diff-range-empty`), a pixel left
+    // of the position on the original side.
+    let empty = |inserted: bool| {
+        let (color, offset) = if inserted {
+            (colors.diff_inserted_text_background, px(0.))
+        } else {
+            (colors.diff_removed_text_background, px(-1.))
+        };
+        DecorationOptions {
+            left_border: Some(crate::decorations::LeftBorder {
+                color,
+                width: px(3.),
+                offset,
+            }),
+            ..Default::default()
+        }
+    };
+    let show_empty = options.show_empty_decorations;
     let mut original = Vec::new();
     let mut modified = Vec::new();
     for m in changes {
@@ -3386,23 +3518,50 @@ fn diff_decorations(
                 modified.push((Side::Lines(m.modified), text(true, true)));
             }
         } else {
+            let inline_diff = true_inline && allows_true_inline_diff_rendering(m);
             for i in &m.inner_changes {
                 // Monaco skips empty markers outside the line range.
-                if m.original.contains(i.original_range.start_line_number)
-                    && !i.original_range.is_empty()
-                {
-                    original.push((
-                        Side::Text(i.original_range.to_point_utf16_range()),
-                        text(false, false),
-                    ));
+                if m.original.contains(i.original_range.start_line_number) {
+                    let range = Side::Text(i.original_range.to_point_utf16_range());
+                    if !i.original_range.is_empty() {
+                        original.push((range, text(false, false)));
+                    } else if show_empty {
+                        original.push((range, empty(false)));
+                    }
                 }
-                if m.modified.contains(i.modified_range.start_line_number)
-                    && !i.modified_range.is_empty()
-                {
-                    modified.push((
-                        Side::Text(i.modified_range.to_point_utf16_range()),
-                        text(true, false),
-                    ));
+                if m.modified.contains(i.modified_range.start_line_number) {
+                    let range = Side::Text(i.modified_range.to_point_utf16_range());
+                    if !i.modified_range.is_empty() {
+                        modified.push((range, text(true, false)));
+                    } else if show_empty && !inline_diff {
+                        modified.push((range, empty(true)));
+                    }
+                }
+                // Monaco's true inline view: the deleted text, struck
+                // through, before the inserted text (`inline-deleted-text`).
+                if inline_diff {
+                    let deleted = Side::Text(i.original_range.to_point_utf16_range())
+                        .to_offsets(original_text);
+                    let deleted = original_text.text_for_range(deleted);
+                    if !deleted.is_empty() {
+                        let start = i.modified_range.to_point_utf16_range().start;
+                        modified.push((
+                            Side::Text(start..start),
+                            DecorationOptions {
+                                before: Some(InjectedText {
+                                    content: deleted.into(),
+                                    style: crate::theme::TokenStyle {
+                                        strikethrough: true,
+                                        ..Default::default()
+                                    },
+                                    background: Some(colors.diff_removed_text_background),
+                                    ..Default::default()
+                                }),
+                                z_index: 100_000,
+                                ..Default::default()
+                            },
+                        ));
+                    }
                 }
             }
         }
@@ -3411,7 +3570,8 @@ fn diff_decorations(
 }
 
 impl Render for DiffEditor {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.screen_reader_mode = self.modified.read(cx).screen_reader_optimized(window);
         // Monaco `useInlineViewWhenSpaceIsLimited`: the width decides.
         let inline = !self.side_by_side_for(&self.options);
         if inline != self.inline {

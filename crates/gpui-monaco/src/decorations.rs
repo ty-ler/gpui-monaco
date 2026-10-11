@@ -119,6 +119,22 @@ pub struct DecorationOptions {
     /// A bordered box around the decorated lines and the view zones above
     /// them (Monaco `blockClassName` with `blockPadding`).
     pub block: Option<BlockDecoration>,
+    /// A bar at the range's start, drawn for an empty range too (Monaco's
+    /// CSS `border-left`, as on the diff editor's `diff-range-empty`
+    /// markers).
+    pub left_border: Option<LeftBorder>,
+}
+
+/// A bar at a decoration's start ([`DecorationOptions::left_border`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LeftBorder {
+    /// Its color.
+    pub color: Hsla,
+    /// Its width.
+    pub width: Pixels,
+    /// How far it's moved right of the range's start (CSS `margin-left`;
+    /// negative moves left).
+    pub offset: Pixels,
 }
 
 /// Monaco's block decoration: a box spanning the content width around

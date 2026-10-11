@@ -1,8 +1,10 @@
 //! Editor and model options from Monaco's `editorOptions.ts` and
 //! `ITextModelCreationOptions`: custom and interval line numbers, cursor
 //! styles, selecting from line numbers, the mouse, minimap autohide, word
-//! wrap overrides and break rules, selected text matching, large files and
-//! the default line ending.
+//! wrap overrides and break rules, selected text matching, large files, the
+//! default line ending, the word wrap indicator, the horizontal scrollbar in
+//! the content height, inertial scrolling, two-cell full-width characters
+//! and accessibility support.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -13,8 +15,9 @@ use gpui::{
 };
 use gpui_monaco::cursor::Selection;
 use gpui_monaco::options::{
-    CursorStyle, LineNumbers, MinimapAutohide, MouseMiddleClickAction, MouseStyle,
-    SelectedTextMatchMode, WordBreak, WordWrap, WordWrapOverride,
+    AccessibilitySupport, CursorStyle, FullwidthCharacterWidth, LineNumbers, MinimapAutohide,
+    MouseMiddleClickAction, MouseStyle, SelectedTextMatchMode, WordBreak, WordWrap,
+    WordWrapOverride, WrappingStrategy,
 };
 use gpui_monaco::text::{LineEnding, PointUtf16};
 use gpui_monaco::{CodeEditor, CodeEditorEvent, EditorOptions, ModelOptions, TextModel};
@@ -498,4 +501,265 @@ fn default_eol(cx: &mut TestAppContext) {
     let lf = cx.new(|_| TextModel::new("abc"));
     lf.update(cx, |m, cx| m.set_value("a\r\nb", cx));
     assert_eq!(lf.read_with(cx, |m, _| m.text()), "a\r\nb");
+}
+
+/// Monaco `wordWrapIndicator.test.ts`: the rows (and columns, in ems) of
+/// the `↩` glyphs.
+fn indicators(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<(u32, f32)> {
+    paint(cx);
+    let em = editor.read_with(cx, |e, _| {
+        e.offset_for_column(0, 1).unwrap() - e.offset_for_column(0, 0).unwrap()
+    });
+    editor.read_with(cx, |e, _| {
+        e.wrap_indicators_for_tests()
+            .into_iter()
+            .map(|(row, left)| (row, (left / em * 100.).round() / 100.))
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn word_wrap_indicator(cx: &mut TestAppContext) {
+    // Monaco's `WRAPPED_TEXT` with `wordWrapColumn: 6`: view lines
+    // 'aaaaa ', 'bbbbb ', 'ccccc' / 'short' / 'ddddd ', 'eeeee'.
+    let text = "aaaaa bbbbb ccccc\nshort\nddddd eeeee";
+    let (editor, cx) = setup(
+        text,
+        |o| {
+            o.word_wrap = WordWrap::WordWrapColumn;
+            o.word_wrap_column = 6;
+        },
+        cx,
+    );
+    // Off by default.
+    assert!(indicators(&editor, cx).is_empty());
+    set_options(&editor, |o| o.word_wrap_indicator = true, cx);
+    // One per soft-wrapped view line, at the wrapping column.
+    assert_eq!(indicators(&editor, cx), vec![(0, 6.), (0, 6.), (2, 6.)]);
+    // A fixed wrapping column keeps its width.
+    assert_eq!(segments(&editor, 0, cx), vec!["aaaaa ", "bbbbb ", "ccccc"]);
+    // Words broken mid token get one too (Monaco's 'aaaaaaaaaa' at 5).
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    model.update(cx, |m, cx| m.set_value("aaaaaaaaaa", cx));
+    set_options(&editor, |o| o.word_wrap_column = 5, cx);
+    assert_eq!(indicators(&editor, cx), vec![(0, 5.)]);
+    // Nothing without wrapping.
+    set_options(&editor, |o| o.word_wrap = WordWrap::Off, cx);
+    assert!(indicators(&editor, cx).is_empty());
+}
+
+#[gpui::test]
+fn word_wrap_indicator_leaves_the_last_column_free(cx: &mut TestAppContext) {
+    // Monaco `editorLayoutProvider.test.ts` "leaves the rightmost column for
+    // the word wrap indicator when wrapping to the viewport".
+    let (editor, cx) = setup("a", |o| o.word_wrap = WordWrap::On, cx);
+    let wrapping = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        paint(cx);
+        let info = editor.read_with(cx, |e, _| e.layout_info()).unwrap();
+        (info.viewport_column, info.wrapping_column.unwrap())
+    };
+    let (viewport, on) = wrapping(&editor, cx);
+    set_options(&editor, |o| o.word_wrap_indicator = true, cx);
+    // The viewport keeps its columns; wrapping stops one earlier.
+    assert_eq!(wrapping(&editor, cx), (viewport, on - 1));
+    // `bounded` and `wordWrapColumn` already leave room.
+    set_options(
+        &editor,
+        |o| {
+            o.word_wrap = WordWrap::Bounded;
+            o.word_wrap_column = 20;
+        },
+        cx,
+    );
+    assert_eq!(wrapping(&editor, cx).1, 20);
+    set_options(&editor, |o| o.word_wrap = WordWrap::WordWrapColumn, cx);
+    assert_eq!(wrapping(&editor, cx).1, 20);
+}
+
+#[gpui::test]
+fn horizontal_scrollbar_in_content_height(cx: &mut TestAppContext) {
+    let long = "x".repeat(2000);
+    let (editor, cx) = setup(
+        &format!("a\n{long}\nb"),
+        |o| o.scroll_beyond_last_line = false,
+        cx,
+    );
+    let (line_height, hbar) = editor.read_with(cx, |e, _| {
+        (
+            e.options().resolved_line_height(),
+            e.options().horizontal_scrollbar_size,
+        )
+    });
+    let height = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        paint(cx);
+        editor.read_with(cx, |e, _| e.content_height()).unwrap()
+    };
+    // Monaco `_getContentHeight`: the shown horizontal scrollbar's height
+    // keeps the last line above it.
+    assert_eq!(height(&editor, cx), line_height * 3. + hbar);
+    set_options(
+        &editor,
+        |o| o.scrollbar.ignore_horizontal_scrollbar_in_content_height = true,
+        cx,
+    );
+    assert_eq!(height(&editor, cx), line_height * 3.);
+    // Nothing to add without a horizontal scrollbar.
+    set_options(
+        &editor,
+        |o| {
+            o.scrollbar.ignore_horizontal_scrollbar_in_content_height = false;
+            o.scrollbar.horizontal = gpui_monaco::options::ScrollbarVisibility::Hidden;
+        },
+        cx,
+    );
+    assert_eq!(height(&editor, cx), line_height * 3.);
+}
+
+#[gpui::test]
+fn inertial_scroll(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&lines(2000), |_| {}, cx);
+    let origin = editor
+        .read_with(cx, |e, _| e.scrolled_visible_position(p(0, 0)))
+        .unwrap();
+    let wheel = |cx: &mut VisualTestContext| {
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(origin.x + px(10.), origin.y + px(5.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-25.))),
+            ..Default::default()
+        });
+    };
+    let top = |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.scroll_top());
+    // Off: the wheel's own delta.
+    wheel(cx);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    paint(cx);
+    assert_eq!(top(cx), px(25.));
+
+    // On: Monaco's `_periodicSync` keeps going after the event, slowing
+    // down (half a unit: 0.5^1.02 * 100px, then 90% each 1/60s).
+    set_options(&editor, |o| o.inertial_scroll = true, cx);
+    wheel(cx);
+    let first = 0.5f32.powf(1.02) * 100.;
+    assert!((f32::from(top(cx)) - (50. + first)).abs() < 0.01);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(17));
+    paint(cx);
+    assert!(top(cx) > px(50. + first));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    paint(cx);
+    let resting = top(cx);
+    // In all about ten times the first step.
+    assert!(resting > px(50. + first * 9.) && resting < px(50. + first * 11.));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    paint(cx);
+    assert_eq!(top(cx), resting);
+}
+
+#[gpui::test]
+fn full_width_characters_in_two_cells(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("a中b", |_| {}, cx);
+    let x = |editor: &Entity<CodeEditor>, column: u32, cx: &mut VisualTestContext| {
+        paint(cx);
+        editor.read_with(cx, |e, _| e.offset_for_column(0, column).unwrap())
+    };
+    let em = x(&editor, 1, cx) - x(&editor, 0, cx);
+    // The test font draws `中` one em wide.
+    assert_eq!(x(&editor, 2, cx) - x(&editor, 1, cx), em);
+    // Monaco `fullwidthCharacterWidth: 'twoCells'`: two spaces wide, and
+    // what follows moves along.
+    set_options(
+        &editor,
+        |o| o.fullwidth_character_width = FullwidthCharacterWidth::TwoCells,
+        cx,
+    );
+    assert_eq!(x(&editor, 1, cx), em);
+    assert_eq!(x(&editor, 2, cx), em * 3.);
+    assert_eq!(x(&editor, 3, cx), em * 4.);
+    // Clicks land on the nearer edge of the cell.
+    let origin = editor
+        .read_with(cx, |e, _| e.scrolled_visible_position(p(0, 0)))
+        .unwrap();
+    let column_at = |x: Pixels, cx: &mut VisualTestContext| {
+        editor.update_in(cx, |e, window, cx| {
+            e.mouse_target(point(origin.x + x, origin.y + px(2.)), window, cx)
+                .position
+                .unwrap()
+                .column
+        })
+    };
+    assert_eq!(column_at(em * 1.4, cx), 1);
+    assert_eq!(column_at(em * 2.6, cx), 2);
+    // Measured wrapping counts the two cells too.
+    set_options(
+        &editor,
+        |o| {
+            o.word_wrap = WordWrap::WordWrapColumn;
+            o.word_wrap_column = 2;
+            o.wrapping_strategy = WrappingStrategy::Advanced;
+        },
+        cx,
+    );
+    assert_eq!(segments(&editor, 0, cx), vec!["a", "中", "b"]);
+}
+
+#[gpui::test]
+fn accessibility_support(cx: &mut TestAppContext) {
+    // Mostly one long line: Monaco `isDominatedByLongLines`.
+    let long = "word ".repeat(2_500);
+    let (editor, cx) = setup(&format!("{long}\nshort"), |_| {}, cx);
+    // Auto without assistive technology (as in tests): not optimized.
+    assert!(!editor.read_with(cx, |e, _| e.is_screen_reader_optimized()));
+    assert_eq!(segments(&editor, 0, cx).len(), 1);
+    // On: a model dominated by long lines wraps at the viewport.
+    set_options(
+        &editor,
+        |o| o.accessibility_support = AccessibilitySupport::On,
+        cx,
+    );
+    assert!(editor.read_with(cx, |e, _| e.is_screen_reader_optimized()));
+    assert!(segments(&editor, 0, cx).len() > 1);
+    let info = editor.read_with(cx, |e, _| e.layout_info()).unwrap();
+    assert!(info.is_word_wrap_minified && info.is_viewport_wrapping);
+    // Unless `wordWrapOverride1` says otherwise.
+    set_options(
+        &editor,
+        |o| o.word_wrap_override1 = WordWrapOverride::Off,
+        cx,
+    );
+    assert_eq!(segments(&editor, 0, cx).len(), 1);
+}
+
+#[gpui::test]
+fn screen_readers_get_wrapped_lines_without_indent(cx: &mut TestAppContext) {
+    // Monaco's computed `wrappingIndent` is `none` with a screen reader, so
+    // the wrapping matches the screen reader's.
+    let (editor, cx) = setup(
+        "    aaaa bbbb cccc",
+        |o| {
+            o.word_wrap = WordWrap::WordWrapColumn;
+            o.word_wrap_column = 10;
+            o.accessibility_support = AccessibilitySupport::On;
+        },
+        cx,
+    );
+    let continuation_x = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        paint(cx);
+        let column = segments(editor, 0, cx)[0].encode_utf16().count() as u32;
+        editor.read_with(cx, |e, _| {
+            e.scrolled_visible_position(p(0, column + 1)).unwrap().x
+                - e.scrolled_visible_position(p(0, 0)).unwrap().x
+        })
+    };
+    let optimized = continuation_x(&editor, cx);
+    set_options(
+        &editor,
+        |o| o.accessibility_support = AccessibilitySupport::Off,
+        cx,
+    );
+    // Not optimized, continuation lines keep the indentation.
+    assert!(continuation_x(&editor, cx) > optimized);
+    assert!(!editor.read_with(cx, |e, _| e.is_screen_reader_optimized()));
 }

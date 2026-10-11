@@ -1193,6 +1193,14 @@ impl CodeEditor {
         ))
     }
 
+    /// The ghost text's row and its text for screen readers (Monaco
+    /// `renderForScreenReader`).
+    pub(crate) fn ghost_text_for_screen_reader(&self, cx: &gpui::App) -> Option<(u32, String)> {
+        let (_, _, ghost) = self.inline_state(cx)?;
+        let line = self.snapshot.line(ghost.line);
+        Some((ghost.line, ghost.render_for_screen_reader(&line)))
+    }
+
     /// Whether ghost text is inserted at `position` (Monaco
     /// `shouldShowHoverAt`).
     pub(crate) fn inline_ghost_text_at(&self, position: PointUtf16, cx: &gpui::App) -> bool {

@@ -2,7 +2,7 @@
 
 `DiffEditor` shows two models side by side, like Monaco's `createDiffEditor`. Changed lines are tinted, changed characters are highlighted, and striped padding keeps the two sides aligned. Both sides scroll together.
 
-With `render_side_by_side: false` the diff shows inline, like Monaco's inline diff. Only the modified editor is shown, and each change's deleted lines appear above it with syntax highlighting, the changed characters marked and `−` in the margin. Side-by-side diffs also switch to inline when the editor is narrower than `render_side_by_side_inline_breakpoint` (900px), unless `use_inline_view_when_space_is_limited` is turned off. `renders_side_by_side()` reports which mode is showing.
+With `render_side_by_side: false` the diff shows inline, like Monaco's inline diff. Only the modified editor is shown, and each change's deleted lines appear above it with syntax highlighting, the changed characters marked and `−` in the margin. Side-by-side diffs also switch to inline when the editor is narrower than `render_side_by_side_inline_breakpoint` (900px), unless `use_inline_view_when_space_is_limited` is turned off or the modified editor runs optimized for screen readers (`accessibility_support`). `renders_side_by_side()` reports which mode is showing.
 
 ```rust
 use gpui_monaco::{DiffEditor, TextModel};
@@ -37,6 +37,10 @@ let diff = cx.new(|cx| DiffEditor::new(original, modified, window, cx));
   - `diff_word_wrap` (`On`, `Off` or `Inherit`: both editors' `word_wrap_override1`; the hidden original editor never wraps inline)
   - `diff_algorithm` (`Advanced`, the default, or `Legacy`, Monaco's older algorithm without moves)
   - `max_file_size` (MB, default 50, 0 for no limit): larger models show without a diff
+  - `diff_code_lens` (off): code lenses in both editors (sets their `code_lens`)
+  - `accessibility_verbose` (off): adds " use F7 to open the accessible diff viewer." to both editors' `aria_label` (Monaco names its accessibility help, which this port doesn't have)
+  - `show_empty_decorations` (on, Monaco `experimental.showEmptyDecorations`): a 3px bar where characters were inserted or deleted when the other side has none
+  - `use_true_inline_view` (off, Monaco `experimental.useTrueInlineView`): in the inline view, changes whose parts each stay on one line show the deleted text struck through before the inserted text, without the deleted lines above; `compact_mode` then also treats them as simple
 - **Computing diffs directly:** `gpui_monaco::diff::compute_diff` is Monaco's diff algorithm on its own, for hosts that only need the changes; `compute_legacy_diff` is the legacy one.
 
 Colors come from the theme: `diffEditor.insertedTextBackground`, `removedTextBackground`, `insertedLineBackground`, `removedLineBackground`, the `diffEditorGutter.*` backgrounds, `diffEditor.diagonalFill` and the `diffEditor.unchangedRegion*` and `unchangedCodeBackground` colors.

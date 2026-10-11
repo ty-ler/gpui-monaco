@@ -65,8 +65,10 @@ Issues are linked by number.
 | Word wrap: off, on, column, bounded; wrapping indent | `wordWrap` | ✅ | |
 | Wrap for proportional fonts (`wrappingStrategy: advanced`), configurable break characters | `wordWrap*` | ✅ | #87 |
 | Wrap overrides, `wordBreak: keepAll`, `wrapOnEscapedLineFeeds` | `wordWrapOverride1/2`, `wordBreak`, `wrapOnEscapedLineFeeds` | ✅ | #203 |
+| Word wrap indicator | `wordWrapIndicator` | ✅ | #228 |
+| Horizontal scrollbar left out of the content height | `scrollbar.ignoreHorizontalScrollbarInContentHeight` | ✅ | #228 |
 | Large file optimizations, default line ending | `largeFileOptimizations`, `defaultEOL` | ✅ | #203 |
-| Inertial scrolling, two-cell full-width characters | `inertialScroll`, `fullwidthCharacterWidth` | ❌ | #203 |
+| Inertial scrolling, two-cell full-width characters | `inertialScroll`, `fullwidthCharacterWidth` | ✅ ghost text and the inline diff's deleted lines keep the font's width | #203, #228 |
 | Folding: indentation and markers, gutter chevrons | `folding` | ✅ | |
 | Syntax and provider folding (`foldingStrategy`, `foldingMaximumRegions`) | `folding` | ✅ | #102 |
 | Fold level and recursive commands, fold navigation, manual ranges, unfold on `⋯` click, `foldingHighlight`, `foldingImportsByDefault` | `folding` | ✅ | #102 |
@@ -77,7 +79,7 @@ Issues are linked by number.
 | Render whitespace, indent guides, rulers, control characters | view parts | ✅ | #84 |
 | Bracket pair guides, `guides.highlightActiveIndentation: 'always'` | view parts | ✅ | #118, #203 |
 | Bracket pair colorization, independent color pool per bracket type | `bracketPairColorization` | ✅ | #85, #203 |
-| Occurrence and selection highlight, `selectedTextMatchMode` | `wordHighlighter` | ✅ `multiFile` highlights in the current editor only | #83, #203 |
+| Occurrence and selection highlight, `selectedTextMatchMode`, `occurrencesHighlightFromAllProviders` | `wordHighlighter` | ✅ `multiFile` highlights in the current editor only | #83, #203, #228 |
 | Unicode highlighting, unusual line terminators | `unicodeHighlighter`, `unusualLineTerminators` | ✅ | #86 |
 | Font weight, ligatures, zoom, mouse wheel zoom | `fontZoom`, options | ✅ | #87 |
 | Variable line heights (`lineHeight` decorations, `allowVariableLineHeights`) | decorations | ✅ | #87 |
@@ -153,8 +155,8 @@ Issues are linked by number.
 
 | Feature | Status | Issue |
 |---|---|---|
-| Diff editor, multi-diff editor | ✅ `DiffEditor` (side by side or inline, hidden unchanged regions, revert buttons, moved blocks, the accessible diff viewer, legacy and advanced algorithms, `compactMode`, `diffWordWrap`, `maxFileSize`, switch side, view state, `revealFirstDiff`) and `MultiDiffEditor`; smaller gaps in #181 | #52, #181, #203 |
-| Screen readers, tab focus mode, ARIA options | ✅ | #53 |
+| Diff editor, multi-diff editor | ✅ `DiffEditor` (side by side or inline, hidden unchanged regions, revert buttons, moved blocks, the accessible diff viewer, legacy and advanced algorithms, `compactMode`, `diffWordWrap`, `maxFileSize`, `diffCodeLens`, `accessibilityVerbose`, `experimental.showEmptyDecorations` and `useTrueInlineView`, switch side, view state, `revealFirstDiff`) and `MultiDiffEditor`; smaller gaps in #181 | #52, #181, #203, #228 |
+| Screen readers, tab focus mode, ARIA options, `accessibilitySupport`, `screenReaderAnnounceInlineSuggestion` | ✅ announcements are AccessKit live regions; no accessibility signals (sounds) for inline suggestions | #53, #228 |
 | wasm / web | 🟡 compiles for `wasm32-unknown-unknown`; browser runner pending | #58 |
 | crates.io release | ❌ | #57 |
 | Monaco migration notes | ✅ (book: Migrating from Monaco) | #60 |
