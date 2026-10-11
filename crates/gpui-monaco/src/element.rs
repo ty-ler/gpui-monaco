@@ -1054,53 +1054,30 @@ pub(crate) struct ScrollbarLayout {
     pub interactive: bool,
 }
 
-/// Where the minimap is and how it maps to content.
+/// Where the minimap is and how it maps to content, for the mouse.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MinimapLayout {
     pub bounds: Bounds<Pixels>,
     pub slider: Bounds<Pixels>,
-    /// Content scroll pixels per slider pixel when dragging.
-    pub drag_ratio: f32,
+    /// Monaco `sliderNeeded`: the slider shows and takes the mouse.
+    pub slider_needed: bool,
+    /// Monaco `MinimapLayout`.
+    pub layout: crate::view::minimap::MinimapLayout,
+    /// Logical pixels per view line.
     pub line_height: Pixels,
-    /// Minimap pixels scrolled off the top.
-    pub scroll: Pixels,
+    /// Canvas pixels per minimap line (Monaco `minimapLineHeight`).
+    pub minimap_line_height: f32,
+    /// Logical pixels per canvas pixel, vertically.
+    pub canvas_scale_y: f32,
+    /// `minimap.size: Proportional`.
+    pub proportional: bool,
+    /// Minimap lines (sampled lines when sampling).
+    pub line_count: u32,
     /// Monaco `minimap.autohide`: its opacity, and whether it takes the
     /// mouse (not while hidden with `scroll`).
     pub opacity: f32,
     pub interactive: bool,
 }
-
-/// Cached minimap blocks for one view of the minimap.
-#[derive(Clone, Default)]
-pub(crate) struct MinimapCache {
-    key: Option<MinimapKey>,
-    /// The view line `blocks` start at.
-    first: u32,
-    /// The rendered lines from `first` on (Monaco draws the minimap into a
-    /// canvas too), with its size in device pixels.
-    image: Option<(std::sync::Arc<gpui::RenderImage>, (u32, u32))>,
-    /// Replaced images, to free from the atlas at the next paint.
-    stale: Vec<std::sync::Arc<gpui::RenderImage>>,
-    /// A rebuild running in the background; until it lands the old blocks
-    /// are drawn (a frame-stale minimap is invisible, ~3ms per keystroke on
-    /// the main thread is not).
-    pending: Option<(MinimapKey, std::sync::Arc<gpui::Task<()>>)>,
-    /// What the layout remembers between frames (Monaco
-    /// `ComputeOptionsMemory`).
-    pub layout_memory: crate::layout_info::LayoutMemory,
-}
-
-/// (text, parsed text, first line, last line, theme, wrap column, render
-/// settings): it's redrawn once the syntax tree catches up, for colors.
-type MinimapKey = (
-    text::Version,
-    Option<text::Version>,
-    u32,
-    u32,
-    usize,
-    u32,
-    [u32; 4],
-);
 
 /// A fold control in the gutter.
 #[derive(Clone, Copy, Debug)]
@@ -1301,6 +1278,8 @@ pub(crate) struct EditorLayout {
     /// The code action lightbulb, for clicks.
     pub lightbulb: Option<Bounds<Pixels>>,
     pub minimap: Option<MinimapLayout>,
+    /// What the minimap draws.
+    pub minimap_paint: Option<std::sync::Arc<crate::minimap::MinimapPaint>>,
     /// Sticky scroll lines.
     pub sticky_lines: Vec<StickyLine>,
     pub vertical_scrollbar: Option<ScrollbarLayout>,
@@ -1392,16 +1371,6 @@ impl IntoElement for EditorElement {
     }
 }
 
-/// A minimap section header (Monaco `_renderSectionHeaders`).
-struct MinimapSectionHeader {
-    /// The translucent band behind the label.
-    band: Bounds<Pixels>,
-    /// The label and where it goes.
-    label: Option<(ShapedLine, gpui::Point<Pixels>)>,
-    /// The separator line above it.
-    separator: Option<Bounds<Pixels>>,
-}
-
 /// Where each rendered whitespace mark's character starts (on its line's
 /// text top), and whether it's a tab.
 type WhitespaceMarks = Vec<(gpui::Point<Pixels>, bool)>;
@@ -1467,17 +1436,12 @@ pub struct PrepaintState {
     /// The `wordWrapIndicator` glyph and where it goes.
     wrap_indicators: Option<(ShapedLine, Vec<gpui::Point<Pixels>>)>,
     embedded: Vec<Embedded>,
-    section_headers: Vec<MinimapSectionHeader>,
     /// The placeholder's lines and where they go.
     placeholder: Vec<(ShapedLine, gpui::Point<Pixels>)>,
     /// Where a dragged selection would drop.
     dnd_target: Option<Bounds<Pixels>>,
-    /// The minimap's image and where it goes; replaced images to free.
-    minimap_image: Option<(std::sync::Arc<gpui::RenderImage>, Bounds<Pixels>)>,
+    /// Replaced minimap images to free.
     minimap_stale: Vec<std::sync::Arc<gpui::RenderImage>>,
-    /// The minimap slider's color, if it shows: `minimapSlider.background`,
-    /// or its hover or active color.
-    minimap_slider: Option<Hsla>,
     sticky: Vec<(usize, Pixels, LineLayout, Option<ShapedLine>)>,
     /// The keyboard-focused and hovered sticky lines.
     sticky_focused: Option<usize>,
@@ -2841,6 +2805,7 @@ fn prepaint_editor(
         widget_captures_wheel: Vec::new(),
         lightbulb: None,
         minimap: None,
+        minimap_paint: None,
         sticky_lines: Vec::new(),
         vertical_scrollbar,
         horizontal_scrollbar,
@@ -2849,51 +2814,9 @@ fn prepaint_editor(
         wrap_indicators: Vec::new(),
     };
 
-    // Minimap: token-colored characters or blocks (Monaco `minimap`), sized
-    // per `minimap.size` (`EditorLayoutInfoComputer`).
-    let mut minimap_image = None;
-    let mut section_headers = Vec::new();
+    // Minimap (Monaco `Minimap`), sized per `minimap.size`
+    // (`EditorLayoutInfoComputer`).
     if minimap_width > px(0.) {
-        let pixel_ratio = window.scale_factor();
-        let minimap_options = &options.minimap;
-        // Monaco `EditorMinimapLayoutInfo`, from `compute_layout`.
-        let minimap_layout = layout.layout_info.minimap;
-        let scale = minimap_layout.minimap_scale;
-        // Device pixels per minimap line.
-        let line_px = minimap_layout.minimap_line_height;
-        let fills = minimap_layout.minimap_height_is_editor_height;
-        // More lines than pixels: one pixel per sampled line (Monaco
-        // `MinimapLayout`'s sampling ratio).
-        let sample_ratio = if minimap_layout.minimap_is_sampling {
-            let contained = crate::layout_info::contained_minimap_line_count(
-                view_line_count,
-                options.scroll_beyond_last_line,
-                f64::from(f32::from(options.padding.top)),
-                f64::from(f32::from(options.padding.bottom)),
-                f64::from(f32::from(viewport_height)),
-                f64::from(f32::from(line_height)),
-                f64::from(pixel_ratio),
-            );
-            (f64::from(view_line_count) / contained.minimap_line_count.max(1.)).max(1.) as f32
-        } else {
-            1.
-        };
-        let mline = px(line_px / pixel_ratio);
-        // Monaco draws `minimap.size: Fill` scaled up past the configured
-        // scale into a wider canvas, squeezed into the minimap's width.
-        let inner_width = minimap_layout.minimap_canvas_inner_width;
-        let width_multiplier = if minimap_width > px(0.) {
-            (inner_width as f32 / (f32::from(minimap_width) * pixel_ratio).floor().max(1.)).max(1.)
-        } else {
-            1.
-        };
-        let render = MinimapRender {
-            char_width: scale,
-            line_height: line_px,
-            characters: minimap_options.render_characters,
-            max_column: (inner_width as f32 / scale.max(0.1)) as usize,
-            width: inner_width,
-        };
         let minimap_bounds = Bounds::new(
             if minimap_left {
                 full_bounds.origin
@@ -2902,186 +2825,40 @@ fn prepaint_editor(
             },
             size(minimap_width, viewport_height),
         );
-        // Minimap lines, and the view line each shows.
-        let minimap_line_count = (view_line_count as f32 / sample_ratio).ceil().max(1.) as u32;
-        let total = mline * minimap_line_count as f32;
-        let minimap_scroll = if !fills && total > viewport_height && max_scroll_top > px(0.) {
-            (total - viewport_height) * (scroll_top / max_scroll_top)
-        } else {
-            px(0.)
-        };
-        let first = (minimap_scroll / mline).floor() as u32;
-        let last = (((minimap_scroll + viewport_height) / mline).ceil() as u32)
-            .min(minimap_line_count.saturating_sub(1));
-        let lines: Vec<u32> = (first..=last)
-            .map(|i| ((i as f32 * sample_ratio) as u32).min(view_line_count.saturating_sub(1)))
-            .collect();
-        let theme_key = std::sync::Arc::as_ptr(&theme) as usize;
-        let parsed = editor
-            .model()
-            .read(cx)
-            .syntax_snapshot()
-            .map(|syntax| syntax.text.version());
-        let key = (
-            snapshot.version(),
-            parsed,
-            first,
-            last,
-            theme_key,
-            wrap_column.unwrap_or(0),
-            [
-                render.char_width.to_bits(),
-                render.line_height.to_bits(),
-                render.characters as u32,
-                sample_ratio.to_bits(),
-            ],
-        );
-        let cache = &editor.minimap_cache;
-        if cache.key != Some(key) && cache.pending.as_ref().is_none_or(|(k, _)| *k != key) {
-            let source = HighlightSource::new(editor.model().read(cx));
-            let build = {
-                let (view_lines, snapshot, theme) =
-                    (view_lines.clone(), snapshot.clone(), theme.clone());
-                move || {
-                    minimap_image_for(
-                        source.as_ref(),
-                        &view_lines,
-                        &snapshot,
-                        &theme,
-                        &lines,
-                        tab_size,
-                        render,
-                    )
-                }
-            };
-            if cache.key.is_none() {
-                // Nothing to show yet: build the first one now.
-                let stale = std::mem::take(&mut editor.minimap_cache.stale);
-                let layout_memory = std::mem::take(&mut editor.minimap_cache.layout_memory);
-                editor.minimap_cache = MinimapCache {
-                    key: Some(key),
-                    first,
-                    image: build(),
-                    stale,
-                    pending: None,
-                    layout_memory,
-                };
-            } else {
-                let task = cx.spawn(async move |this, cx| {
-                    let blocks = cx.background_executor().spawn(async move { build() }).await;
-                    this.update(cx, |editor, cx| {
-                        let cache = &mut editor.minimap_cache;
-                        if cache.pending.as_ref().is_some_and(|(k, _)| *k == key) {
-                            cache.key = Some(key);
-                            cache.first = first;
-                            if let Some((old, _)) = std::mem::replace(&mut cache.image, blocks) {
-                                cache.stale.push(old);
-                            }
-                            cache.pending = None;
-                            cx.notify();
-                        }
-                    })
-                    .ok();
-                });
-                editor.minimap_cache.pending = Some((key, std::sync::Arc::new(task)));
-            }
-        }
-        let origin_y =
-            minimap_bounds.top() + mline * editor.minimap_cache.first as f32 - minimap_scroll;
-        minimap_image = editor.minimap_cache.image.clone().map(|(image, (w, h))| {
-            (
-                image,
-                Bounds::new(
-                    point(minimap_bounds.left(), origin_y),
-                    size(
-                        px(w as f32 / pixel_ratio / width_multiplier),
-                        px(h as f32 / pixel_ratio),
-                    ),
-                ),
-            )
+        // View zones in the viewport, besides the top padding (Monaco
+        // `whitespaceViewportData`).
+        let whitespace_gaps = zone_specs.iter().any(|(after, height, _, _)| {
+            *height > px(0.) && *after + 1 >= first_line as i64 && *after <= last_line as i64
         });
-        // The slider covers the visible lines, in minimap lines.
-        let first_visible = zones.line_at(scroll_top, line_height, view_line_count);
-        let visible_lines = (viewport_height / line_height).max(1.);
-        let per_view_line = mline / sample_ratio;
-        let slider = Bounds::new(
-            point(
-                minimap_bounds.left(),
-                minimap_bounds.top() + per_view_line * first_visible as f32 - minimap_scroll,
-            ),
-            size(minimap_width, (per_view_line * visible_lines).max(px(2.))),
+        let (minimap, paint) = crate::minimap::prepaint(
+            editor,
+            crate::minimap::MinimapInput {
+                options: &options,
+                info: layout.layout_info.minimap,
+                bounds: minimap_bounds,
+                editor_bounds: full_bounds,
+                view_lines: &view_lines,
+                snapshot: &snapshot,
+                theme: &theme,
+                zones: &zones,
+                line_height,
+                viewport_height,
+                scroll_top,
+                max_scroll_top,
+                scroll_left,
+                max_scroll_left,
+                first_line,
+                last_line,
+                whitespace_gaps,
+                tab_size,
+                wrap_column,
+                selections: &selections,
+            },
+            window,
+            cx,
         );
-        // Monaco `_renderSectionHeaders`: a label over a translucent band
-        // and/or a separator line, at each header's minimap line.
-        let font_size = px(minimap_options.section_header_font_size);
-        let band = font_size * 1.5;
-        let label_font = Font {
-            weight: FontWeight::MEDIUM,
-            ..font(".SystemUIFont")
-        };
-        for header in &editor.section_headers.headers {
-            let (view_line, _) = view_lines.to_view(header.range.start, false);
-            let top = minimap_bounds.top() + per_view_line * view_line as f32 - minimap_scroll;
-            if top + band < minimap_bounds.top() || top > minimap_bounds.bottom() {
-                continue;
-            }
-            let label = (!header.text.is_empty()).then(|| {
-                let shape = |text: String| {
-                    window.text_system().shape_line(
-                        text.clone().into(),
-                        font_size,
-                        &[run(text.len(), &label_font, colors.foreground)],
-                        None,
-                    )
-                };
-                // Monaco's `MINIMAP_GUTTER_WIDTH` left of the label.
-                let max_width = minimap_width - px(8.);
-                let mut shaped = shape(header.text.clone());
-                if shaped.width > max_width {
-                    let chars = header.text.chars().count().max(1);
-                    let average = shaped.width / chars as f32;
-                    let count = ((max_width - average) / average).floor() as usize;
-                    shaped = shape(crate::section_headers::fit_section_header(
-                        &header.text,
-                        count.saturating_sub(1),
-                    ));
-                }
-                (
-                    shaped,
-                    point(
-                        minimap_bounds.left() + px(8.),
-                        top + (band - font_size) / 2.,
-                    ),
-                )
-            });
-            section_headers.push(MinimapSectionHeader {
-                band: Bounds::new(point(minimap_bounds.left(), top), size(minimap_width, band)),
-                label,
-                separator: header.has_separator_line.then(|| {
-                    Bounds::new(
-                        point(minimap_bounds.left(), top + px(2.)),
-                        size(minimap_width, px(1.)),
-                    )
-                }),
-            });
-        }
-        let travel = (total.min(viewport_height) - slider.size.height).max(px(1.));
-        let (opacity, fading, interactive) = editor
-            .animation
-            .minimap
-            .update(minimap_options.autohide, editor.minimap_hovered);
-        if fading {
-            window.request_animation_frame();
-        }
-        layout.minimap = Some(MinimapLayout {
-            bounds: minimap_bounds,
-            slider,
-            drag_ratio: max_scroll_top / travel,
-            line_height: per_view_line,
-            scroll: minimap_scroll,
-            opacity,
-            interactive,
-        });
+        layout.minimap = Some(minimap);
+        layout.minimap_paint = Some(std::sync::Arc::new(paint));
     }
 
     // Sticky scroll: headers of the fold ranges enclosing the top of the
@@ -4180,20 +3957,9 @@ fn prepaint_editor(
         whitespace,
         wrap_indicators,
         embedded,
-        minimap_image,
-        section_headers,
         placeholder,
         dnd_target,
         minimap_stale: std::mem::take(&mut editor.minimap_cache.stale),
-        minimap_slider: (options.minimap.always_show_slider || editor.minimap_hovered).then(|| {
-            if editor.minimap_drag.is_some() {
-                colors.minimap_slider_active
-            } else if editor.minimap_slider_hovered {
-                colors.minimap_slider_hover
-            } else {
-                colors.minimap_slider
-            }
-        }),
         sticky: sticky_shaped,
         sticky_focused: editor.sticky.focused,
         sticky_hovered: editor.sticky.hovered,
@@ -4758,18 +4524,36 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
         for image in &state.minimap_stale {
             window.drop_image(image.clone()).ok();
         }
-        if let Some(minimap) = layout.minimap {
-            // Its own background, also where it sits left of the gutter.
-            window.paint_quad(fill(
-                minimap.bounds,
-                colors.minimap_background.unwrap_or(colors.background),
-            ));
+        if let (Some(minimap), Some(paint)) = (layout.minimap, layout.minimap_paint.as_ref()) {
+            // The editor's background, also where it sits left of the gutter;
+            // the canvas (with `minimap.background`) goes over it.
+            window.paint_quad(fill(minimap.bounds, colors.background));
+            // Monaco `minimap-shadow-visible`: a 6px shadow left of it while
+            // the text scrolls right.
+            if let Some(band) = paint.shadow {
+                window.with_content_mask(Some(ContentMask { bounds: band }), |window| {
+                    window.paint_drop_shadows(
+                        minimap.bounds,
+                        Corners::default(),
+                        &[gpui::BoxShadow {
+                            color: colors.scrollbar_shadow.opacity(minimap.opacity),
+                            offset: point(px(0.), px(0.)),
+                            blur_radius: px(6.),
+                            spread_radius: px(0.),
+                            inset: false,
+                        }],
+                    );
+                });
+            }
             window.with_content_mask(
                 Some(ContentMask {
                     bounds: minimap.bounds,
                 }),
                 |window| {
-                    if let Some((image, image_bounds)) = &state.minimap_image {
+                    if let Some(background) = paint.background {
+                        window.paint_quad(fill(minimap.bounds, background));
+                    }
+                    for (image, image_bounds) in &paint.images {
                         window
                             .paint_image(
                                 minimap.bounds,
@@ -4781,24 +4565,24 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                             )
                             .ok();
                     }
-                    for MinimapSectionHeader {
-                        band,
-                        label,
-                        separator,
-                    } in &state.section_headers
-                    {
-                        if let Some((label, origin)) = label {
-                            window.paint_quad(fill(*band, colors.background.opacity(0.7)));
+                    for (bounds, color) in &paint.marks {
+                        window.paint_quad(fill(*bounds, *color));
+                    }
+                    for header in &paint.section_headers {
+                        if let Some((band, color)) = header.band {
+                            window.paint_quad(fill(band, color));
+                        }
+                        if let Some((label, origin, line_height)) = &header.label {
                             label
-                                .paint(*origin, band.size.height, TextAlign::Left, None, window, cx)
+                                .paint(*origin, *line_height, TextAlign::Left, None, window, cx)
                                 .ok();
                         }
-                        if let Some(separator) = separator {
-                            window.paint_quad(fill(*separator, colors.foreground.opacity(0.4)));
+                        if let Some((separator, color)) = header.separator {
+                            window.paint_quad(fill(separator, color));
                         }
                     }
-                    if let Some(color) = state.minimap_slider {
-                        window.paint_quad(fill(minimap.slider, color));
+                    if let Some((slider, color)) = paint.slider {
+                        window.paint_quad(fill(slider, color));
                     }
                     // `minimap.autohide`: fade it into the editor's
                     // background (GPUI images have no opacity).
@@ -5569,163 +5353,4 @@ impl WidgetHits {
             .map(|(bounds, _, _, _)| *bounds)
             .collect()
     }
-}
-
-/// Minimap blocks for view lines `lines`, relative to the first one.
-#[allow(clippy::too_many_arguments)]
-/// How the minimap draws (Monaco's minimap layout: char width and line
-/// height in device pixels, and `renderCharacters`).
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct MinimapRender {
-    char_width: f32,
-    line_height: f32,
-    /// Monaco `renderCharacters`: a two-pixel-row impression of each
-    /// character rather than solid blocks.
-    characters: bool,
-    max_column: usize,
-    /// The image's width in device pixels.
-    width: u32,
-}
-
-/// How dark a character is in the top and bottom halves of its minimap
-/// cell, standing in for Monaco's prerendered minimap glyphs.
-fn minimap_glyph(ch: char) -> (f32, f32) {
-    match ch {
-        'g' | 'j' | 'p' | 'q' | 'y' => (0.45, 0.9),
-        'b' | 'd' | 'f' | 'h' | 'k' | 'l' | 't' | 'i' => (0.75, 0.7),
-        c if c.is_lowercase() => (0.35, 0.8),
-        c if c.is_uppercase() || c.is_ascii_digit() => (0.8, 0.75),
-        '.' | ',' | '_' => (0., 0.6),
-        ':' | ';' => (0.35, 0.5),
-        '-' | '=' | '+' | '~' | '*' => (0.4, 0.3),
-        '\'' | '"' | '`' | '^' => (0.6, 0.),
-        _ => (0.6, 0.6),
-    }
-}
-
-fn minimap_image_for(
-    highlights: Option<&HighlightSource>,
-    view_lines: &ViewLines,
-    snapshot: &text::BufferSnapshot,
-    theme: &Theme,
-    lines: &[u32],
-    tab_size: u32,
-    render: MinimapRender,
-) -> Option<(std::sync::Arc<gpui::RenderImage>, (u32, u32))> {
-    let width = render.width;
-    // Device pixels per character and per line.
-    let char_px = render.char_width.max(1.).round() as u32;
-    let line_px = render.line_height.max(1.).round() as u32;
-    let height = line_px * lines.len() as u32;
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let mut pixels = vec![0u8; (width * height * 4) as usize];
-    let mut fill = |x: u32, y: u32, w: u32, h: u32, color: Hsla| {
-        let rgba = gpui::Rgba::from(color);
-        let bgra = [
-            (rgba.b * 255.) as u8,
-            (rgba.g * 255.) as u8,
-            (rgba.r * 255.) as u8,
-            (rgba.a * 255.) as u8,
-        ];
-        for row in y..(y + h).min(height) {
-            let start = ((row * width + x.min(width)) * 4) as usize;
-            let end = ((row * width + (x + w).min(width)) * 4) as usize;
-            for pixel in pixels[start..end].as_chunks_mut::<4>().0 {
-                pixel.copy_from_slice(&bgra);
-            }
-        }
-    };
-    let max_column = render.max_column;
-    let foreground = theme.colors.foreground.opacity(0.6);
-    let (Some(first), Some(last)) = (lines.first(), lines.last()) else {
-        return None;
-    };
-    let first_row = view_lines.view_line(*first).row;
-    let last_row = view_lines.view_line(*last).row;
-    // Contiguous lines share one highlight query; sampled ones get their own.
-    let contiguous = (*last - *first) as usize + 1 == lines.len();
-    let row_range = |first_row: u32, last_row: u32| {
-        snapshot.point_to_offset(text::Point::new(first_row, 0))
-            ..snapshot.point_to_offset(text::Point::new(last_row, u32::MAX))
-    };
-    let shared = if contiguous {
-        highlights.map_or_else(Vec::new, |source| {
-            source.highlights(theme, row_range(first_row, last_row))
-        })
-    } else {
-        Vec::new()
-    };
-    let tab_size = tab_size.max(1) as usize;
-    for (ix, view_line) in lines.iter().copied().enumerate() {
-        let segment = row_segment(view_lines, view_line);
-        let line_highlights;
-        let highlights: &[(Range<usize>, TokenStyle)] = if contiguous {
-            &shared
-        } else {
-            line_highlights = highlights.map_or_else(Vec::new, |source| {
-                source.highlights(theme, row_range(segment.row, segment.row))
-            });
-            &line_highlights
-        };
-        let mut next_highlight = 0;
-        let full = snapshot.line(segment.row);
-        let line_start = snapshot.point_to_offset(text::Point::new(segment.row, 0));
-        let byte_start = utf16_to_byte(&full, segment.columns.start);
-        let byte_end = utf16_to_byte(&full, segment.columns.end);
-        let y = line_px * ix as u32;
-        let mut column = segment.indent as usize + segment.start_visible_column as usize
-            - if segment.columns.start > 0 {
-                segment.start_visible_column as usize
-            } else {
-                0
-            };
-        for (byte, ch) in full[byte_start..byte_end].char_indices() {
-            if column >= max_column {
-                break;
-            }
-            let span = if ch == '\t' {
-                tab_size - column % tab_size
-            } else {
-                1
-            };
-            if !ch.is_whitespace() {
-                let offset = line_start + byte_start + byte;
-                while highlights
-                    .get(next_highlight)
-                    .is_some_and(|(r, _)| r.end <= offset)
-                {
-                    next_highlight += 1;
-                }
-                let color = highlights
-                    .get(next_highlight)
-                    .filter(|(r, _)| r.start <= offset)
-                    .and_then(|(_, style)| style.foreground)
-                    .map_or(foreground, |c| c.opacity(0.75));
-                let x = column as u32 * char_px;
-                let w = span as u32 * char_px;
-                if render.characters && line_px >= 2 {
-                    // Monaco's glyphs, as two bands of darkness.
-                    let (top, bottom) = minimap_glyph(ch);
-                    let half = line_px / 2;
-                    fill(x, y, w, half, color.opacity(top));
-                    fill(x, y + half, w, line_px - half, color.opacity(bottom));
-                } else if render.characters {
-                    let (top, bottom) = minimap_glyph(ch);
-                    fill(x, y, w, 1, color.opacity((top + bottom) / 2.));
-                } else {
-                    // Blocks leave a gap between lines.
-                    let h = (line_px - (line_px / 3).max(1)).max(1);
-                    fill(x, y, w, h, color);
-                }
-            }
-            column += span;
-        }
-    }
-    let buffer = image::RgbaImage::from_raw(width, height, pixels)?;
-    Some((
-        std::sync::Arc::new(gpui::RenderImage::new(vec![image::Frame::new(buffer)])),
-        (width, height),
-    ))
 }

@@ -191,7 +191,7 @@ Lines are indented like the cursor's line unless `adjust_whitespace` is off. `se
 - **Word wrap:** follows Monaco's line-break rules, including CJK and break-before/break-after characters, plus `wrapping_indent`.
 - **Drag and drop:** drag the selection to move it, or hold Alt (Ctrl on Windows and Linux) to copy it. Double-click just inside brackets or quotes to select their content.
 - **Unicode highlighting:** ambiguous and invisible characters get a warning border. Hover one to learn why, or to stop highlighting it.
-- **Minimap:** shows colored blocks and a draggable slider. `// #region Name` and `// MARK: - Name` comments become section headers in it.
+- **Minimap:** draws each character from Monaco's own minimap glyphs (or blocks with `render_characters` off), in its token color. The slider follows Monaco's `MinimapLayout`, so the end of a long file shows at the bottom and the slider follows the pointer when dragged. Clicking elsewhere centers the clicked line (`minimap.size: Proportional`) or moves the slider there (`Fill` and `Fit`). It shows the selections (`minimap.selectionHighlight`), find matches, occurrences, errors, warnings and infos, and decorations with `minimap` options. `// #region Name` and `// MARK: - Name` comments, and decorations with a section header, become section headers in it.
 - **Sticky scroll:** pins up to `max_line_count` enclosing scope headers to the top. Clicking a header jumps to it.
   - The scopes come from `default_model`: the document symbols by default (Monaco's outline model), then the folding ranges or indentation.
   - Without symbols, it uses the folding ranges.

@@ -222,6 +222,10 @@ impl TextModel {
                         // Monaco marks infos too.
                         overview_ruler: (marker.severity >= MarkerSeverity::Info)
                             .then_some((color, OverviewRulerLane::Right)),
+                        // Monaco marks infos, warnings and errors in the
+                        // minimap, in the theme's colors for the severity.
+                        minimap: (marker.severity >= MarkerSeverity::Info)
+                            .then(crate::MinimapDecoration::default),
                         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
                         z_index: 10 + marker.severity as i32,
                         validation: true,

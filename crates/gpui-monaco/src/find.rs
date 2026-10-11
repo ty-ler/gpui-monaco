@@ -265,6 +265,8 @@ fn match_options(colors: &crate::theme::EditorColors, overview: bool) -> Decorat
                 ..Default::default()
             }),
         overview_ruler: overview.then_some((colors.find_match_overview, OverviewRulerLane::Center)),
+        // Monaco's `_FIND_MATCH_NO_OVERVIEW_DECORATION` has no minimap mark.
+        minimap: overview.then(|| find_match_minimap(colors)),
         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
         z_index: 10,
         ..Default::default()
@@ -282,8 +284,18 @@ fn current_match_options(colors: &crate::theme::EditorColors) -> DecorationOptio
                 ..Default::default()
             }),
         overview_ruler: Some((colors.find_match_overview, OverviewRulerLane::Center)),
+        minimap: Some(find_match_minimap(colors)),
         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
         z_index: 13,
+        ..Default::default()
+    }
+}
+
+/// Monaco's find match minimap mark: `minimap.findMatchHighlight`, inline.
+fn find_match_minimap(colors: &crate::theme::EditorColors) -> crate::MinimapDecoration {
+    crate::MinimapDecoration {
+        color: colors.minimap_find_match_highlight,
+        position: crate::MinimapPosition::Inline,
         ..Default::default()
     }
 }

@@ -103,6 +103,11 @@ impl CodeEditor {
                         background: Some(background),
                         border,
                         overview_ruler: Some((overview, OverviewRulerLane::Center)),
+                        // Monaco `minimap.selectionOccurrenceHighlight`.
+                        minimap: Some(crate::MinimapDecoration {
+                            color: colors.minimap_selection_occurrence_highlight,
+                            ..Default::default()
+                        }),
                         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
                         ..Default::default()
                     },
@@ -406,6 +411,10 @@ impl CodeEditor {
                             colors.selection_highlight_overview,
                             OverviewRulerLane::Center,
                         )),
+                        minimap: Some(crate::MinimapDecoration {
+                            color: colors.minimap_selection_occurrence_highlight,
+                            ..Default::default()
+                        }),
                         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
                         ..Default::default()
                     },
