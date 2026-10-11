@@ -591,3 +591,217 @@ fn diff_editor_commands_by_monaco_id(cx: &mut TestAppContext) {
     assert!(!diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests().is_empty()));
     assert!(diff.update_in(cx, |d, window, cx| d.trigger("nope", window, cx).is_err()));
 }
+
+#[gpui::test]
+fn switch_side_maps_the_selection(cx: &mut TestAppContext) {
+    use gpui_monaco::cursor::Selection;
+    let (diff, cx) = setup("a\nb\nc\nd", "a\nx\ny\nb\nc\nd", cx);
+    let (original, modified) = diff.read_with(cx, |d, _| {
+        (d.original_editor().clone(), d.modified_editor().clone())
+    });
+    // From the modified side's `c` (after two inserted lines)...
+    cx.update(|window, cx| window.focus(&modified.focus_handle(cx), cx));
+    modified.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(PointUtf16::new(4, 1))], cx)
+    });
+    diff.update_in(cx, |d, window, cx| {
+        d.trigger("diffEditor.switchSide", window, cx).unwrap()
+    });
+    paint(cx);
+    // ...to the original's `c`, now focused.
+    assert_eq!(
+        original.read_with(cx, |e, _| e.selections()[0]),
+        Selection::collapsed(PointUtf16::new(2, 1))
+    );
+    assert!(cx.update(|window, cx| original.focus_handle(cx).contains_focused(window, cx)));
+    // And back with the action.
+    cx.dispatch_action(gpui_monaco::diff_editor::SwitchSide);
+    paint(cx);
+    assert_eq!(
+        modified.read_with(cx, |e, _| e.selections()[0]),
+        Selection::collapsed(PointUtf16::new(4, 1))
+    );
+}
+
+#[gpui::test]
+fn reveal_first_diff_waits_for_the_diff(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let modified = original.replace("line 60\n", "changed\n");
+    let (diff, cx) = cx.add_window_view(|window, cx| {
+        let original = cx.new(|_| TextModel::new(&original));
+        let modified = cx.new(|_| TextModel::new(&modified));
+        let mut diff = DiffEditor::new(original, modified, window, cx);
+        // Before the diff is computed.
+        diff.reveal_first_diff(cx);
+        diff
+    });
+    paint(cx);
+    let modified = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    assert_eq!(
+        modified.read_with(cx, |e, _| e.selections()[0].head),
+        PointUtf16::new(60, 0)
+    );
+}
+
+#[gpui::test]
+fn view_state_round_trips(cx: &mut TestAppContext) {
+    use gpui_monaco::cursor::Selection;
+    let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let modified = original.replace("line 50\n", "changed\n");
+    let (diff, cx) = setup(&original, &modified, cx);
+    hide_unchanged(&diff, cx);
+    let modified_editor = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    modified_editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(PointUtf16::new(50, 2))], cx)
+    });
+    let state = diff.read_with(cx, |d, cx| d.save_view_state(cx));
+    let hidden = diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests());
+    assert!(!hidden.is_empty());
+
+    diff.update(cx, |d, cx| d.show_all_unchanged_regions(cx));
+    modified_editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(PointUtf16::new(0, 0))], cx)
+    });
+    diff.update(cx, |d, cx| d.restore_view_state(&state, cx));
+    paint(cx);
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests()),
+        hidden
+    );
+    assert_eq!(
+        modified_editor.read_with(cx, |e, _| e.selections()[0].head),
+        PointUtf16::new(50, 2)
+    );
+}
+
+#[gpui::test]
+fn set_models_emits_model_changed(cx: &mut TestAppContext) {
+    use gpui_monaco::DiffEditorEvent;
+    let (diff, cx) = setup("a", "b", cx);
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = events.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&diff, move |_, event: &DiffEditorEvent, _| {
+            sink.borrow_mut().push(event.clone())
+        })
+        .detach()
+    });
+    let (original, modified) = cx.update(|_, cx| {
+        (
+            cx.new(|_| TextModel::new("x")),
+            cx.new(|_| TextModel::new("y")),
+        )
+    });
+    diff.update(cx, |d, cx| d.set_models(original, modified, cx));
+    paint(cx);
+    assert_eq!(
+        *events.borrow(),
+        vec![DiffEditorEvent::ModelChanged, DiffEditorEvent::DiffUpdated]
+    );
+}
+
+#[gpui::test]
+fn max_file_size_skips_the_diff(cx: &mut TestAppContext) {
+    // Over 1MB.
+    let big = "x".repeat(1024 * 1024 + 1);
+    let (diff, cx) = setup(&big, "small", cx);
+    assert!(diff.read_with(cx, |d, _| d.diff().is_some()));
+    diff.update(cx, |d, cx| {
+        let mut options = d.options().clone();
+        options.max_file_size = 1;
+        d.update_options(options, cx);
+    });
+    paint(cx);
+    assert!(diff.read_with(cx, |d, _| d.diff().is_none()));
+    // 0 is no limit.
+    diff.update(cx, |d, cx| {
+        let mut options = d.options().clone();
+        options.max_file_size = 0;
+        d.update_options(options, cx);
+    });
+    paint(cx);
+    assert!(diff.read_with(cx, |d, _| d.diff().is_some()));
+}
+
+#[gpui::test]
+fn diff_word_wrap_overrides_both_editors(cx: &mut TestAppContext) {
+    use gpui_monaco::options::WordWrapOverride;
+    let (diff, cx) = setup("a", "b", cx);
+    diff.update(cx, |d, cx| {
+        let mut options = d.options().clone();
+        options.diff_word_wrap = WordWrapOverride::On;
+        d.update_options(options, cx);
+    });
+    paint(cx);
+    let overrides = |cx: &mut VisualTestContext| {
+        diff.read_with(cx, |d, cx| {
+            (
+                d.original_editor().read(cx).options().word_wrap_override1,
+                d.modified_editor().read(cx).options().word_wrap_override1,
+            )
+        })
+    };
+    assert_eq!(overrides(cx), (WordWrapOverride::On, WordWrapOverride::On));
+    // Inline, the hidden original editor never wraps.
+    diff.update(cx, |d, cx| {
+        let mut options = d.options().clone();
+        options.render_side_by_side = false;
+        d.update_options(options, cx);
+    });
+    paint(cx);
+    assert_eq!(overrides(cx), (WordWrapOverride::Off, WordWrapOverride::On));
+}
+
+#[gpui::test]
+fn legacy_diff_algorithm(cx: &mut TestAppContext) {
+    use gpui_monaco::DiffAlgorithm;
+    use gpui_monaco::diff::{DiffOptions, compute_legacy_diff};
+    let (original, modified) = ("a\nb\nc\nd", "a\nx\nc\nd\ne");
+    let (diff, cx) = setup(original, modified, cx);
+    diff.update(cx, |d, cx| {
+        let mut options = d.options().clone();
+        options.diff_algorithm = DiffAlgorithm::Legacy;
+        d.update_options(options, cx);
+    });
+    paint(cx);
+    let expected = compute_legacy_diff(
+        &original.split('\n').collect::<Vec<_>>(),
+        &modified.split('\n').collect::<Vec<_>>(),
+        &DiffOptions::default(),
+    );
+    assert_eq!(diff.read_with(cx, |d, _| d.diff().cloned()), Some(expected));
+}
+
+#[gpui::test]
+fn compact_mode(cx: &mut TestAppContext) {
+    // Only insertions: inline in compact mode.
+    let (diff, cx) = setup("a\nb", "a\nnew\nb", cx);
+    assert!(diff.read_with(cx, |d, _| d.renders_side_by_side()));
+    diff.update(cx, |d, cx| {
+        let mut options = d.options().clone();
+        options.compact_mode = true;
+        d.update_options(options, cx);
+    });
+    paint(cx);
+    assert!(!diff.read_with(cx, |d, _| d.renders_side_by_side()));
+}
+
+#[gpui::test]
+fn diff_toggle_actions(cx: &mut TestAppContext) {
+    use gpui_monaco::diff_editor::{
+        ToggleCollapseUnchangedRegions, ToggleShowMovedCodeBlocks,
+        ToggleUseInlineViewWhenSpaceIsLimited,
+    };
+    let (diff, cx) = setup("a", "b", cx);
+    let modified = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    cx.update(|window, cx| window.focus(&modified.focus_handle(cx), cx));
+    cx.dispatch_action(ToggleCollapseUnchangedRegions);
+    cx.dispatch_action(ToggleShowMovedCodeBlocks);
+    cx.dispatch_action(ToggleUseInlineViewWhenSpaceIsLimited);
+    paint(cx);
+    let options = diff.read_with(cx, |d, _| d.options().clone());
+    assert!(options.hide_unchanged_regions.enabled);
+    assert!(options.show_moves);
+    assert!(!options.use_inline_view_when_space_is_limited);
+}

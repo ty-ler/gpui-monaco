@@ -4,7 +4,8 @@
 //! [`compute_diff`] diffs two texts given as lines and returns the changed
 //! line ranges, the character-level changes inside them and, optionally,
 //! blocks of moved code. The results match Monaco's exactly (verified
-//! against Monaco's diffing fixtures).
+//! against Monaco's diffing fixtures). [`compute_legacy_diff`] is Monaco's
+//! legacy computer (`diffAlgorithm: 'legacy'`).
 //!
 //! # Coordinates
 //!
@@ -24,6 +25,10 @@
 mod algorithms;
 mod computer;
 mod heuristics;
+mod lcs;
+mod legacy;
+#[cfg(test)]
+mod legacy_tests;
 mod mapping;
 mod moves;
 pub(crate) mod range;
@@ -134,6 +139,38 @@ pub fn compute_diff<S: AsRef<str>>(
     options: &DiffOptions,
 ) -> LinesDiff {
     computer::compute_diff(
+        &to_utf16_lines(original),
+        &to_utf16_lines(modified),
+        options,
+    )
+}
+
+/// Computes the diff from `original` to `modified` with Monaco's legacy
+/// algorithm (Monaco's `LegacyLinesDiffComputer.computeDiff`, used for
+/// `diffAlgorithm: 'legacy'`): a Myers line diff on trimmed lines, then a
+/// character diff within each changed block of fewer than 20 lines.
+///
+/// Honors [`DiffOptions::ignore_trim_whitespace`] and
+/// [`DiffOptions::max_computation_time_ms`]; never computes moves, so
+/// [`LinesDiff::moves`] is always empty. A change's
+/// [`inner_changes`](DetailedLineRangeMapping::inner_changes) is empty when
+/// Monaco computes none (large blocks, pure insertions/deletions, an empty
+/// side).
+///
+/// ```
+/// use gpui_monaco::diff::{DiffOptions, compute_legacy_diff};
+///
+/// let diff = compute_legacy_diff(&["let a = 1;"], &["let b = 1;"], &DiffOptions::default());
+/// assert_eq!(diff.changes.len(), 1);
+/// let inner = diff.changes[0].inner_changes[0];
+/// assert_eq!(inner.original_range.to_string(), "[1,5 -> 1,6]");
+/// ```
+pub fn compute_legacy_diff<S: AsRef<str>>(
+    original: &[S],
+    modified: &[S],
+    options: &DiffOptions,
+) -> LinesDiff {
+    legacy::compute_legacy_diff(
         &to_utf16_lines(original),
         &to_utf16_lines(modified),
         options,

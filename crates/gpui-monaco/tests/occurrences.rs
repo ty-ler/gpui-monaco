@@ -118,7 +118,7 @@ fn textual_word_highlights(cx: &mut TestAppContext) {
     // Off: nothing.
     editor.update(cx, |e, cx| {
         let mut options = e.options().clone();
-        options.occurrences_highlight = false;
+        options.occurrences_highlight = gpui_monaco::options::OccurrencesHighlight::Off;
         e.update_options(options, cx);
     });
     set(&editor, cx, p(1, 2), p(1, 2));

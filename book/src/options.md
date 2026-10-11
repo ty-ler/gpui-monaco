@@ -17,10 +17,13 @@ editor.update(cx, |editor, cx| {
 | `font_family`, `font_size`, `line_height` | `fontFamily`, `fontSize`, `lineHeight` | `line_height: None` derives it from the font size, as Monaco does |
 | `font_weight`, `font_ligatures` | `fontWeight`, `fontLigatures` | ligatures are `Off` (default), `On`, or CSS `font-feature-settings` |
 | `mouse_wheel_zoom` | `mouseWheelZoom` | Cmd+wheel (Ctrl elsewhere) zooms every editor's font; see `set_editor_zoom_level` |
-| `line_numbers` | `lineNumbers` | `On`, `Off`, `Relative`, `Interval` |
+| `line_numbers` | `lineNumbers` | `On`, `Off`, `Relative`, `Interval` (every 10th, the current and the last line), or `LineNumbers::custom(\|n\| …)` for Monaco's function: a label per 1-based line, empty for none |
+| `select_on_line_numbers` | `selectOnLineNumbers` | clicking a line number selects the line (on); other gutter clicks never select |
 | `line_numbers_min_chars`, `line_decorations_width`, `glyph_margin` | same names | gutter layout |
 | `render_line_highlight` | `renderLineHighlight` | `None`, `Gutter`, `Line`, `All` |
-| `cursor_style`, `cursor_width`, `cursor_height` | `cursorStyle`, `cursorWidth`, `cursorHeight` | `cursor_height` 0 is the line height |
+| `cursor_style`, `cursor_width`, `cursor_height` | `cursorStyle`, `cursorWidth`, `cursorHeight` | `Line`, `Block`, `Underline`, `LineThin`, `BlockOutline`, `UnderlineThin`; `cursor_height` 0 is the line height |
+| `mouse_style` | `mouseStyle` | the mouse cursor over the text: `Text` (I-beam), `Default` (arrow) or `Copy` |
+| `mouse_middle_click_action` | `mouseMiddleClickAction` | `Default`, `OpenLink` (a middle click opens a link) or `CtrlLeftClick` (it acts like Cmd/Ctrl+click) |
 | `cursor_blinking` | `cursorBlinking` | `Blink`, `Smooth`, `Phase`, `Expand`, `Solid` (read-only editors don't blink) |
 | `cursor_smooth_caret_animation` | `cursorSmoothCaretAnimation` | `Off`, `Explicit` (keys and clicks, not typing), `On` |
 | `cursor_surrounding_lines`, `cursor_surrounding_lines_style` | same names | lines kept around the cursor; `All` applies them to mouse moves too |
@@ -44,6 +47,10 @@ editor.update(cx, |editor, cx| {
 | `unusual_line_terminators` | `unusualLineTerminators` | `Prompt` (default), `Auto` or `Off` for LS and PS characters |
 | `word_separators` | `wordSeparators` | used by word movement and whole-word find |
 | `word_wrap`, `word_wrap_column`, `wrapping_indent` | `wordWrap`, `wordWrapColumn`, `wrappingIndent` | `Off`, `On`, `WordWrapColumn`, `Bounded` |
+| `word_wrap_override1`, `word_wrap_override2` | `wordWrapOverride1`, `wordWrapOverride2` | `On`, `Off` or `Inherit` (default); the second overrides the first, which overrides `word_wrap`. `EditorOptions::effective_word_wrap` resolves them. The diff editor sets the first from `diff_word_wrap` |
+| `word_wrap_break_before_characters`, `word_wrap_break_after_characters` | `wordWrapBreakBeforeCharacters`, `wordWrapBreakAfterCharacters` | where wrapping may break (Monaco's defaults) |
+| `word_break` | `wordBreak` | `Normal`, or `KeepAll` to not break between CJK characters |
+| `wrap_on_escaped_line_feeds` | `wrapOnEscapedLineFeeds` | while wrapping, a line with a quote also breaks after each literal `\n` (off) |
 | `wrapping_strategy` | `wrappingStrategy` | `Simple` counts monospace columns; `Advanced` measures characters, for proportional fonts |
 | `folding`, `show_folding_controls` | `folding`, `showFoldingControls` | |
 | `scroll_beyond_last_line`, `mouse_wheel_scroll_sensitivity` | same names | |
@@ -51,7 +58,7 @@ editor.update(cx, |editor, cx| {
 | `vertical_scrollbar_size`, `horizontal_scrollbar_size` | `scrollbar.verticalScrollbarSize`, … | |
 | `scrollbar` | `scrollbar.*` | `vertical`/`horizontal` (`Auto` shows while hovered or just scrolled, `Visible`, `Hidden`), `use_shadows`, `*_has_arrows`, `arrow_size`, `*_slider_size`, `handle_mouse_wheel`, `always_consume_mouse_wheel`, `scroll_by_page` |
 | `overview_ruler_lanes`, `overview_ruler_border`, `hide_cursor_in_overview_ruler` | same names | lanes (3; 0 hides the marks), a left border, the cursor marks |
-| `minimap` | `minimap` | `enabled`, `max_column`, `scale`, `always_show_slider`, `side` (right or left), `render_characters`, `size` (`Proportional`, `Fill`, `Fit`), section headers (`show_region_section_headers`, `show_mark_section_headers`, `mark_section_header_regex`, `section_header_font_size`, `section_header_letter_spacing`) |
+| `minimap` | `minimap` | `enabled`, `max_column`, `scale`, `always_show_slider`, `side` (right or left), `render_characters`, `size` (`Proportional`, `Fill`, `Fit`), section headers (`show_region_section_headers`, `show_mark_section_headers`, `mark_section_header_regex`, `section_header_font_size`, `section_header_letter_spacing`), `autohide` (`None`; `Mouseover` shows it while hovered; `Scroll` shows it while scrolling and lets clicks through while hidden) |
 | `sticky_scroll` | `stickyScroll` | `enabled`, `max_line_count`, `default_model`, `scroll_with_editor` |
 | `auto_closing_brackets`, `auto_closing_quotes`, `auto_closing_comments` | `autoClosingBrackets`, … | `Always`, `LanguageDefined`, `BeforeWhitespace`, `Never` |
 | `auto_closing_overtype`, `auto_closing_delete`, `auto_surround` | same names | |
@@ -101,8 +108,11 @@ editor.update(cx, |editor, cx| {
 | `overtype_cursor_style`, `overtype_on_paste` | `overtypeCursorStyle`, `overtypeOnPaste` | overtype mode (Insert) |
 | `comments` | `comments` | `insert_space`, `ignore_empty_lines` |
 | `render_whitespace`, `render_control_characters`, `render_final_newline` | same names | `·` and `→` for whitespace; `␇` for control characters |
-| `guides`, `rulers` | `guides`, `rulers` | indent guides (with the active one highlighted), bracket pair guides (`bracket_pairs`: off, active or on, plus horizontal ones) and vertical rulers |
-| `bracket_pair_colorization` | `bracketPairColorization.enabled` | color brackets by nesting level |
+| `guides`, `rulers` | `guides`, `rulers` | indent guides (with the active one highlighted: `highlight_active_indentation` is `On`, `Off` or `Always`, which also highlights it on lines with bracket pair guides), bracket pair guides (`bracket_pairs`: off, active or on, plus horizontal ones) and vertical rulers |
+| `bracket_pair_colorization` | `bracketPairColorization` | `enabled`: color brackets by nesting level (on); `independent_color_pool_per_bracket_type`: each bracket kind counts its own nesting (off) |
+| `occurrences_highlight`, `occurrences_highlight_delay` | `occurrencesHighlight`, `occurrencesHighlightDelay` | `Off`, `SingleFile` (default) or `MultiFile`, which like `SingleFile` highlights in this editor only (editors don't share highlights) |
+| `selection_highlight`, `selection_highlight_max_length`, `selection_highlight_multiline` | same names | highlight other occurrences of the selection |
+| `selected_text_match_mode` | `selectedTextMatchMode` | how Cmd/Ctrl+D, select all occurrences and selection highlights match selected text: `FindOptions` (the find widget's options while it's open), `CaseSensitive` or `CaseInsensitive` |
 | `single_line` | — | a one-line input. Enter, Tab and Escape go to the parent, and pasted line breaks become spaces. |
 
 Model-level settings live in `ModelOptions` (Monaco `ITextModelUpdateOptions`), set with `model.update_options(…)`:
@@ -113,5 +123,7 @@ Model-level settings live in `ModelOptions` (Monaco `ITextModelUpdateOptions`), 
 - `max_tokenization_line_length` (Monaco `maxTokenizationLineLength`, default 20 000): longer lines aren't highlighted
 - `detect_indentation` (Monaco `detectIndentation`, default on): when the model is created, `tab_size`, `indent_size` and `insert_spaces` are guessed from its text, with the given values as the fallback. Pass creation options with `TextModel::new(text).with_options(…)`. `model.detect_indentation(…)` and the "Detect Indentation from Content" command guess again later.
 - `trim_auto_whitespace` (Monaco `trimAutoWhitespace`, default on): indentation that Enter or Tab inserted is removed by the next edit if the line is still blank
+- `large_file_optimizations` (Monaco `largeFileOptimizations`, default on): a model created with more than 20M characters or 300K lines is never tokenized, and has no folding, sticky scroll, code lenses, occurrence or selection highlights, or wrapping (`TextModel::is_too_large_for_tokenization`). Only the creation options count.
+- `default_eol` (Monaco `defaultEOL`, default LF): the line ending of text without line breaks, when the model is created (`with_options`) or its value set
 
 Changing options takes effect on the next frame. Wrapping, folding and the minimap update incrementally.

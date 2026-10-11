@@ -14,7 +14,9 @@ let diff = cx.new(|cx| DiffEditor::new(original, modified, window, cx));
 
 - **Editors:** `original_editor()` and `modified_editor()` are ordinary `CodeEditor`s, so options, themes, decorations and providers work on each. The original side is read-only unless `DiffEditorOptions::original_editable` is set.
 - **The diff:** `diff()` returns the latest `LinesDiff` (Monaco `getLineChanges`). It's recomputed in the background 200ms after an edit, and `DiffEditorEvent::DiffUpdated` fires when it changes.
-- **Navigation:** `go_to_diff(next, window, cx)` moves to the next or previous change (Alt+F5 / Shift+Alt+F5).
+- **Navigation:** `go_to_diff(next, window, cx)` moves to the next or previous change (Alt+F5 / Shift+Alt+F5). `reveal_first_diff(cx)` (Monaco `revealFirstDiff`) moves to the first change once the diff is computed. `switch_side(window, cx)` (`diffEditor.switchSide`, the `SwitchSide` action) focuses the other side with the selection mapped through the diff, and `map_to_other_side` returns that mapping.
+- **Models and view state:** `set_models` emits `DiffEditorEvent::ModelChanged` (Monaco `onDidChangeModel`). `save_view_state(cx)` returns a `DiffEditorViewState` with both editors' view states and the collapsed unchanged regions, and `restore_view_state` applies it (the regions once the diff is computed).
+- **Commands:** `trigger` runs the `diffEditor.*` ids: `revert`, `switchSide`, `collapseAllUnchangedRegions`, `showAllUnchangedRegions`, `exitCompareMove`, `toggleCollapseUnchangedRegions`, `toggleShowMovedCodeBlocks` and `toggleUseInlineViewWhenSpaceIsLimited` (the last three are also GPUI actions, unbound like Monaco's).
 - **Unchanged regions:** with `hide_unchanged_regions.enabled`, long runs of unchanged lines collapse into "N hidden lines" bars, leaving `context_line_count` lines (default 3) around each change. Click a bar's top or bottom edge to show `reveal_line_count` (default 20) more lines, or drag the edge to show as many as you like, or its `↕` button (or double-click the label) to show them all. Moving the cursor into hidden lines reveals them. `collapse_all_unchanged_regions` and `show_all_unchanged_regions` reset them.
 - **Reverting:** a gutter between the sides (or left of the inline view) shows a "Revert Block" button beside the change at the cursor, and beside every change while the mouse is over it. With text selected, the button reverts only the selected changes. `revert(change, cx)`, `revert_range_mappings(changes, cx)` and the `Revert` action (the changes at the modified editor's cursor) do the same from code. The gutter is hidden when `render_gutter_menu` is off or the modified editor is read-only. Without it, `render_margin_revert_icon` shows Monaco's older `→` arrows in the modified editor's glyph margin instead.
 - **Accessible diff viewer:** F7 (or `accessible_diff_viewer_next`) opens a list of the changes for screen reader and keyboard users, like Monaco's. Each change shows with three lines of context and both line numbers. F7 and Shift+F7 move between changes, Up and Down between lines, Enter or Space jumps to the line in its editor, and Escape closes the list. `only_show_accessible_diff_viewer` shows only the list. Moving onto an inserted or deleted line emits `DiffEditorEvent::AccessibilitySignal`, so a host can play a sound as VS Code does.
@@ -31,7 +33,11 @@ let diff = cx.new(|cx| DiffEditor::new(original, modified, window, cx));
   - `render_gutter_menu` and `render_margin_revert_icon`
   - `only_show_accessible_diff_viewer`
   - `render_side_by_side`, `use_inline_view_when_space_is_limited` and `render_side_by_side_inline_breakpoint`
-- **Computing diffs directly:** `gpui_monaco::diff::compute_diff` is Monaco's diff algorithm on its own, for hosts that only need the changes.
+  - `compact_mode` (a diff of only insertions and deletions shows inline, and hidden regions get thin "N hidden lines" separators, none at the start or end)
+  - `diff_word_wrap` (`On`, `Off` or `Inherit`: both editors' `word_wrap_override1`; the hidden original editor never wraps inline)
+  - `diff_algorithm` (`Advanced`, the default, or `Legacy`, Monaco's older algorithm without moves)
+  - `max_file_size` (MB, default 50, 0 for no limit): larger models show without a diff
+- **Computing diffs directly:** `gpui_monaco::diff::compute_diff` is Monaco's diff algorithm on its own, for hosts that only need the changes; `compute_legacy_diff` is the legacy one.
 
 Colors come from the theme: `diffEditor.insertedTextBackground`, `removedTextBackground`, `insertedLineBackground`, `removedLineBackground`, the `diffEditorGutter.*` backgrounds, `diffEditor.diagonalFill` and the `diffEditor.unchangedRegion*` and `unchangedCodeBackground` colors.
 

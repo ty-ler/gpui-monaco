@@ -17,7 +17,7 @@ pub enum MatchBrackets {
 }
 
 /// Monaco `lineNumbers`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum LineNumbers {
     /// Absolute line numbers (the default).
     #[default]
@@ -26,8 +26,47 @@ pub enum LineNumbers {
     Off,
     /// Distance from the primary cursor's line; that line shows its absolute number.
     Relative,
-    /// Every 10th line, plus the current line.
+    /// Every 10th line, plus the current and the last line.
     Interval,
+    /// Each line's label from a host function of its 1-based line number
+    /// (Monaco's `lineNumbers: (lineNumber) => string`); see
+    /// [`LineNumbers::custom`].
+    Custom(LineNumbersFn),
+}
+
+impl LineNumbers {
+    /// Labels each line with `render(line_number)` (1-based), like Monaco's
+    /// function-valued `lineNumbers`. An empty label leaves the line
+    /// unnumbered.
+    pub fn custom(render: impl Fn(u32) -> SharedString + Send + Sync + 'static) -> Self {
+        Self::Custom(LineNumbersFn(std::sync::Arc::new(render)))
+    }
+}
+
+/// A host function labelling line numbers ([`LineNumbers::Custom`]). Two
+/// are equal when they're the same function.
+#[derive(Clone)]
+pub struct LineNumbersFn(pub std::sync::Arc<dyn Fn(u32) -> SharedString + Send + Sync>);
+
+impl LineNumbersFn {
+    /// The label of 1-based `line_number`.
+    pub fn render(&self, line_number: u32) -> SharedString {
+        (self.0)(line_number)
+    }
+}
+
+impl PartialEq for LineNumbersFn {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for LineNumbersFn {}
+
+impl std::fmt::Debug for LineNumbersFn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LineNumbersFn")
+    }
 }
 
 /// Monaco `renderLineHighlight`.
@@ -56,6 +95,86 @@ pub enum WordWrap {
     WordWrapColumn,
     /// Wrap at the smaller of the viewport width and `word_wrap_column`.
     Bounded,
+}
+
+/// Monaco `wordWrapOverride1`/`wordWrapOverride2`: forces wrapping on or
+/// off, or leaves it to the setting below.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WordWrapOverride {
+    /// Wrap at the viewport width.
+    On,
+    /// Don't wrap.
+    Off,
+    /// Use the setting below (the default).
+    #[default]
+    Inherit,
+}
+
+/// Monaco `wordBreak`: the line break rules for CJK text when wrapping.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WordBreak {
+    /// Break between CJK characters (the default).
+    #[default]
+    Normal,
+    /// Don't break between CJK characters (CSS `keep-all`); other text
+    /// wraps as with `Normal`.
+    KeepAll,
+}
+
+/// Monaco `mouseStyle`: the mouse cursor over the text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MouseStyle {
+    /// An I-beam (the default).
+    #[default]
+    Text,
+    /// The arrow.
+    Default,
+    /// The copy cursor.
+    Copy,
+}
+
+/// Monaco `mouseMiddleClickAction`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MouseMiddleClickAction {
+    /// What a middle click usually does: column select, or paste the
+    /// primary selection with `selection_clipboard` (the default).
+    #[default]
+    Default,
+    /// A middle click on a link opens it.
+    OpenLink,
+    /// A middle click acts like a Cmd/Ctrl+click: it opens links and goes
+    /// to definitions.
+    CtrlLeftClick,
+}
+
+/// Monaco `occurrencesHighlight`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OccurrencesHighlight {
+    /// No occurrence highlighting.
+    Off,
+    /// Highlight the symbol at the cursor in this editor (the default).
+    #[default]
+    SingleFile,
+    /// Monaco also highlights across the other open editors (VS Code's
+    /// experimental multi-document highlights). Here it highlights in this
+    /// editor, like `SingleFile`: there are no multi-document highlight
+    /// providers and editors don't share highlights.
+    MultiFile,
+}
+
+/// Monaco `selectedTextMatchMode`: how Cmd/Ctrl+D, select all occurrences
+/// and selection highlights match the selected text. An empty selection
+/// always starts a whole-word, case-sensitive search.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SelectedTextMatchMode {
+    /// The find widget's match case and whole word settings while it's
+    /// open; case-sensitive otherwise (the default).
+    #[default]
+    FindOptions,
+    /// Case-sensitive substrings, whatever the find widget says.
+    CaseSensitive,
+    /// Case-insensitive substrings, whatever the find widget says.
+    CaseInsensitive,
 }
 
 /// Monaco `showFoldingControls`.
@@ -103,6 +222,22 @@ pub struct MinimapOptions {
     /// Monaco `minimap.sectionHeaderLetterSpacing` (default 1). Not applied:
     /// GPUI text has no letter spacing.
     pub section_header_letter_spacing: f32,
+    /// Monaco `minimap.autohide`: hide the minimap until the mouse is over
+    /// it or the editor scrolls (default never).
+    pub autohide: MinimapAutohide,
+}
+
+/// Monaco `minimap.autohide`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MinimapAutohide {
+    /// Always shown (the default).
+    #[default]
+    None,
+    /// Shown while the mouse is over it, fading in and out.
+    Mouseover,
+    /// Shown while the editor scrolls and for half a second after (longer
+    /// while the mouse is over it); clicks go through it while it's hidden.
+    Scroll,
 }
 
 /// Monaco `minimap.side`.
@@ -142,6 +277,7 @@ impl Default for MinimapOptions {
             mark_section_header_regex: r"\bMARK:\s*(?<separator>-?)\s*(?<label>.*)$".into(),
             section_header_font_size: 9.,
             section_header_letter_spacing: 1.,
+            autohide: MinimapAutohide::None,
         }
     }
 }
@@ -413,9 +549,8 @@ pub struct GuideOptions {
     /// Draw indent guides (Monaco `guides.indentation`, default `true`).
     pub indentation: bool,
     /// Highlight the guide of the block with the cursor (Monaco
-    /// `guides.highlightActiveIndentation`, default `true`). Lines with
-    /// bracket pair guides don't highlight indent guides.
-    pub highlight_active_indentation: bool,
+    /// `guides.highlightActiveIndentation`, default on).
+    pub highlight_active_indentation: HighlightActiveIndentation,
     /// Vertical bracket pair guides (Monaco `guides.bracketPairs`, default
     /// off).
     pub bracket_pairs: BracketPairGuides,
@@ -431,10 +566,44 @@ impl Default for GuideOptions {
     fn default() -> Self {
         Self {
             indentation: true,
-            highlight_active_indentation: true,
+            highlight_active_indentation: HighlightActiveIndentation::On,
             bracket_pairs: BracketPairGuides::Off,
             bracket_pairs_horizontal: BracketPairGuides::Active,
             highlight_active_bracket_pair: true,
+        }
+    }
+}
+
+/// Whether the active indent guide is highlighted (Monaco
+/// `guides.highlightActiveIndentation`: `true`, `"always"` or `false`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HighlightActiveIndentation {
+    /// Not highlighted.
+    Off,
+    /// Highlighted, except on lines with bracket pair guides (the
+    /// default).
+    #[default]
+    On,
+    /// Highlighted even on lines with bracket pair guides.
+    Always,
+}
+
+/// Monaco `bracketPairColorization`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BracketPairColorizationOptions {
+    /// Color brackets by nesting level (Monaco `enabled`, default `true`).
+    pub enabled: bool,
+    /// Each kind of bracket counts its own nesting level, so `(` inside `[`
+    /// gets the first color (Monaco `independentColorPoolPerBracketType`,
+    /// default `false`). Bracket pair guides are colored the same way.
+    pub independent_color_pool_per_bracket_type: bool,
+}
+
+impl Default for BracketPairColorizationOptions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            independent_color_pool_per_bracket_type: false,
         }
     }
 }
@@ -521,6 +690,10 @@ pub enum CursorStyle {
     Underline,
     /// A 1px vertical bar.
     LineThin,
+    /// A 1px outline of the box [`Block`](Self::Block) fills.
+    BlockOutline,
+    /// A 1px bar under the character after the cursor.
+    UnderlineThin,
 }
 
 /// Monaco `acceptSuggestionOnEnter`.
@@ -1344,9 +1517,27 @@ pub struct EditorOptions {
     pub trim_whitespace_on_delete: bool,
     /// Monaco `wordWrap`.
     pub word_wrap: WordWrap,
+    /// Monaco `wordWrapOverride1`: overrides `word_wrap` (default inherit).
+    /// The diff editor sets it from its `diff_word_wrap`.
+    pub word_wrap_override1: WordWrapOverride,
+    /// Monaco `wordWrapOverride2`: overrides `word_wrap_override1` (default
+    /// inherit).
+    pub word_wrap_override2: WordWrapOverride,
     /// Monaco `wordWrapColumn`, in characters (default 80); used by
     /// [`WordWrap::WordWrapColumn`] and [`WordWrap::Bounded`].
     pub word_wrap_column: u32,
+    /// Monaco `wordWrapBreakBeforeCharacters`: wrapping may break before
+    /// these characters.
+    pub word_wrap_break_before_characters: SharedString,
+    /// Monaco `wordWrapBreakAfterCharacters`: wrapping may break after these
+    /// characters.
+    pub word_wrap_break_after_characters: SharedString,
+    /// Monaco `wordBreak`: whether wrapping breaks between CJK characters
+    /// (default normal).
+    pub word_break: WordBreak,
+    /// Monaco `wrapOnEscapedLineFeeds`: while wrapping, a line with a quote
+    /// also wraps after each literal `\n` (default `false`).
+    pub wrap_on_escaped_line_feeds: bool,
     /// Monaco `wrappingIndent`: indentation of wrapped continuation lines (default
     /// same as the first line).
     pub wrapping_indent: crate::view::line_breaks::WrappingIndent,
@@ -1435,9 +1626,8 @@ pub struct EditorOptions {
     pub sticky_scroll: StickyScrollOptions,
     /// Monaco `find`.
     pub find: FindEditorOptions,
-    /// Monaco `bracketPairColorization.enabled`: color brackets by nesting
-    /// level (default `true`).
-    pub bracket_pair_colorization: bool,
+    /// Monaco `bracketPairColorization`: color brackets by nesting level.
+    pub bracket_pair_colorization: BracketPairColorizationOptions,
     /// Monaco `renderWhitespace`.
     pub render_whitespace: RenderWhitespace,
     /// Monaco `renderControlCharacters`: show control characters as visible
@@ -1450,8 +1640,8 @@ pub struct EditorOptions {
     /// Monaco `rulers`: vertical lines at visible columns.
     pub rulers: Vec<Ruler>,
     /// Monaco `occurrencesHighlight`: highlight the occurrences of the symbol
-    /// at the cursor (default `true`).
-    pub occurrences_highlight: bool,
+    /// at the cursor (default single file).
+    pub occurrences_highlight: OccurrencesHighlight,
     /// Monaco `occurrencesHighlightDelay`: how long the cursor rests before
     /// occurrences are highlighted (default 250ms).
     pub occurrences_highlight_delay: std::time::Duration,
@@ -1464,8 +1654,19 @@ pub struct EditorOptions {
     /// Monaco `selectionHighlightMultiline`: also highlight multi-line
     /// selections (default `false`).
     pub selection_highlight_multiline: bool,
+    /// Monaco `selectedTextMatchMode`: how occurrences of the selected text
+    /// match (default the find widget's options).
+    pub selected_text_match_mode: SelectedTextMatchMode,
     /// Monaco `multiCursorModifier`.
     pub multi_cursor_modifier: MultiCursorModifier,
+    /// Monaco `selectOnLineNumbers`: clicking a line number selects its
+    /// line, and dragging selects lines (default `true`). Clicks elsewhere
+    /// in the gutter never select.
+    pub select_on_line_numbers: bool,
+    /// Monaco `mouseStyle`: the mouse cursor over the text (default text).
+    pub mouse_style: MouseStyle,
+    /// Monaco `mouseMiddleClickAction` (default the usual middle click).
+    pub mouse_middle_click_action: MouseMiddleClickAction,
     /// Monaco `hover`.
     pub hover: HoverOptions,
     /// Monaco `multiCursorPaste`: how pasting with several cursors splits
@@ -1608,7 +1809,14 @@ impl Default for EditorOptions {
             use_tab_stops: true,
             trim_whitespace_on_delete: false,
             word_wrap: WordWrap::Off,
+            word_wrap_override1: WordWrapOverride::Inherit,
+            word_wrap_override2: WordWrapOverride::Inherit,
             word_wrap_column: 80,
+            word_wrap_break_before_characters: crate::view::line_breaks::DEFAULT_BREAK_BEFORE
+                .into(),
+            word_wrap_break_after_characters: crate::view::line_breaks::DEFAULT_BREAK_AFTER.into(),
+            word_break: WordBreak::Normal,
+            wrap_on_escaped_line_feeds: false,
             wrapping_indent: crate::view::line_breaks::WrappingIndent::Same,
             wrapping_strategy: WrappingStrategy::Simple,
             folding: true,
@@ -1656,18 +1864,22 @@ impl Default for EditorOptions {
             find: FindEditorOptions::default(),
             comments: Default::default(),
             overtype_cursor_style: CursorStyle::Block,
-            bracket_pair_colorization: true,
+            bracket_pair_colorization: BracketPairColorizationOptions::default(),
             render_whitespace: RenderWhitespace::Selection,
             render_control_characters: true,
             render_final_newline: RenderFinalNewline::On,
             guides: GuideOptions::default(),
             rulers: Vec::new(),
-            occurrences_highlight: true,
+            occurrences_highlight: OccurrencesHighlight::SingleFile,
             occurrences_highlight_delay: std::time::Duration::from_millis(250),
             selection_highlight: true,
             selection_highlight_max_length: 200,
             selection_highlight_multiline: false,
+            selected_text_match_mode: SelectedTextMatchMode::FindOptions,
             multi_cursor_modifier: MultiCursorModifier::Alt,
+            select_on_line_numbers: true,
+            mouse_style: MouseStyle::Text,
+            mouse_middle_click_action: MouseMiddleClickAction::Default,
             hover: HoverOptions::default(),
             multi_cursor_paste: Default::default(),
             inline_suggest: InlineSuggestOptions::default(),
@@ -1723,6 +1935,21 @@ impl EditorOptions {
 }
 
 impl EditorOptions {
+    /// `word_wrap` after `word_wrap_override2` and `word_wrap_override1`
+    /// (Monaco `EditorLayoutInfoComputer.computeLayout`); an `On` override
+    /// wraps at the viewport width.
+    pub fn effective_word_wrap(&self) -> WordWrap {
+        let override1 = match self.word_wrap_override2 {
+            WordWrapOverride::Inherit => self.word_wrap_override1,
+            forced => forced,
+        };
+        match override1 {
+            WordWrapOverride::Inherit => self.word_wrap,
+            WordWrapOverride::On => WordWrap::On,
+            WordWrapOverride::Off => WordWrap::Off,
+        }
+    }
+
     /// The line height in pixels: [`line_height`](Self::line_height), or the font size
     /// times 1.5 on macOS and 1.35 elsewhere, rounded.
     pub fn resolved_line_height(&self) -> Pixels {

@@ -199,6 +199,13 @@ pub struct CodeEditor {
     /// The editor font's measured character widths, for `Advanced`
     /// wrapping.
     pub(crate) char_widths: Option<Arc<crate::element::CharWidths>>,
+    /// The wrap classifier for the break character options it was built
+    /// from (Monaco recreates its line breaks computer when they change).
+    wrap_classifier: Option<(
+        gpui::SharedString,
+        gpui::SharedString,
+        Arc<crate::view::line_breaks::WrapClassifier>,
+    )>,
     pub(crate) minimap_hovered: bool,
     minimap_drag: Option<Pixels>,
     fold_task: Option<Task<()>>,
@@ -386,6 +393,7 @@ impl CodeEditor {
             context_menu: Default::default(),
             minimap_cache: Default::default(),
             char_widths: None,
+            wrap_classifier: None,
             minimap_hovered: false,
             minimap_drag: None,
             fold_task: None,
@@ -810,6 +818,49 @@ impl CodeEditor {
             minimap.line_height,
             layout.text_bounds.left(),
         ))
+    }
+
+    /// The line number labels of the last frame, by row, for tests.
+    #[doc(hidden)]
+    pub fn line_number_labels_for_tests(&self) -> Vec<(u32, String)> {
+        self.layout
+            .as_ref()
+            .map_or_else(Vec::new, |l| l.line_number_labels.clone())
+    }
+
+    /// The cursors of the last frame and whether they're outlined, for
+    /// tests.
+    #[doc(hidden)]
+    pub fn cursor_shapes_for_tests(&self) -> (Vec<Bounds<Pixels>>, bool) {
+        self.layout
+            .as_ref()
+            .map_or_else(|| (Vec::new(), false), |l| l.cursors.clone())
+    }
+
+    /// The (row, UTF-16 columns) of each view line laid out in the last
+    /// frame, for tests.
+    #[doc(hidden)]
+    pub fn view_line_segments_for_tests(&self) -> Vec<(u32, Range<u32>)> {
+        self.layout.as_ref().map_or_else(Vec::new, |l| {
+            l.lines
+                .iter()
+                .map(|line| (line.row, line.columns.clone()))
+                .collect()
+        })
+    }
+
+    /// The mouse cursor over the text without links, for tests.
+    #[doc(hidden)]
+    pub fn text_mouse_cursor_for_tests(&self) -> MouseCursor {
+        self.text_mouse_cursor()
+    }
+
+    /// The minimap's (opacity, takes the mouse) in the last frame, for
+    /// tests.
+    #[doc(hidden)]
+    pub fn minimap_visibility_for_tests(&self) -> Option<(f32, bool)> {
+        let minimap = self.layout.as_ref()?.minimap?;
+        Some((minimap.opacity, minimap.interactive))
     }
 
     /// The vertical scrollbar's (bar, thumb) bounds, for tests.
@@ -1956,6 +2007,32 @@ impl CodeEditor {
 
     /// Brings the view lines up to date with the text, wrap settings and
     /// folds, and (re)computes fold ranges in the background when stale.
+    /// The mouse cursor over the text for `mouse_style` (Monaco's
+    /// `mouse-default` and `mouse-copy` editor classes).
+    pub(crate) fn text_mouse_cursor(&self) -> MouseCursor {
+        match self.options.mouse_style {
+            crate::options::MouseStyle::Text => MouseCursor::IBeam,
+            crate::options::MouseStyle::Default => MouseCursor::Arrow,
+            crate::options::MouseStyle::Copy => MouseCursor::DragCopy,
+        }
+    }
+
+    /// The classifier for `word_wrap_break_before_characters` and
+    /// `word_wrap_break_after_characters`, built when they change.
+    pub(crate) fn wrap_classifier(&mut self) -> Arc<crate::view::line_breaks::WrapClassifier> {
+        let before = &self.options.word_wrap_break_before_characters;
+        let after = &self.options.word_wrap_break_after_characters;
+        if let Some((b, a, classifier)) = &self.wrap_classifier
+            && b == before
+            && a == after
+        {
+            return classifier.clone();
+        }
+        let classifier = Arc::new(crate::view::line_breaks::WrapClassifier::new(before, after));
+        self.wrap_classifier = Some((before.clone(), after.clone(), classifier.clone()));
+        classifier
+    }
+
     pub(crate) fn sync_view_lines(&mut self, wrap: Option<WrapSettings>, cx: &mut Context<Self>) {
         if self.view_lines.version() != self.snapshot.version() {
             let model = self.model.clone();
@@ -1995,7 +2072,9 @@ impl CodeEditor {
         }
         // Each new version restarts the wait (Monaco's `Delayer`).
         let version = self.snapshot.version();
+        // Monaco doesn't fold models too large to tokenize.
         if self.options.folding
+            && !self.model.read(cx).is_too_large_for_tokenization()
             && self.folds.ranges_version() != Some(version)
             && self.fold_requested.as_ref() != Some(&version)
         {
@@ -2232,6 +2311,38 @@ impl CodeEditor {
             return;
         }
         window.focus(&self.focus_handle, cx);
+        // Monaco `mouseMiddleClickAction`: a middle click on text opens a
+        // link, or with `ctrlLeftClick` acts like a Cmd/Ctrl+click.
+        if let Some(position) = self.text_position_under_mouse(event.position, window, cx) {
+            use crate::options::MouseMiddleClickAction;
+            let handled = match self.options.mouse_middle_click_action {
+                MouseMiddleClickAction::Default => false,
+                MouseMiddleClickAction::OpenLink => self.follow_link_at(position, cx),
+                MouseMiddleClickAction::CtrlLeftClick => {
+                    if !self.follow_link_at(position, cx) {
+                        // Monaco's gesture runs go to definition there,
+                        // quietly, like a Cmd/Ctrl+click.
+                        self.clear_definition_link(cx);
+                        self.set_selections(&[Selection::collapsed(position)], cx);
+                        let open_in_peek =
+                            self.options.definition_link_opens_in_peek && !self.in_peek;
+                        self.navigate(
+                            LocationKind::Definition,
+                            crate::goto::Navigation {
+                                open_in_peek,
+                                mute_message: true,
+                                ..Default::default()
+                            },
+                            cx,
+                        );
+                    }
+                    true
+                }
+            };
+            if handled {
+                return;
+            }
+        }
         let position = self.position_for_point(event.position, window, cx);
         // Monaco `dispatchMouse`: with the selection clipboard (Linux) a
         // middle click is a click, and the platform pastes the primary
@@ -2381,6 +2492,7 @@ impl CodeEditor {
             return;
         }
         if let Some(minimap) = layout.minimap
+            && minimap.interactive
             && minimap.bounds.contains(&event.position)
         {
             // Clicking outside the slider centers the clicked line; then drag.
@@ -2535,6 +2647,14 @@ impl CodeEditor {
             return;
         }
         let in_gutter = event.position.x < layout.text_bounds.left();
+        // Monaco `_onMouseDown`: in the gutter, only the line numbers select
+        // (with `selectOnLineNumbers`).
+        if in_gutter
+            && !(self.options.select_on_line_numbers
+                && mouse.target.kind == crate::mouse_target::MouseTargetKind::GutterLineNumbers)
+        {
+            return;
+        }
         let config = self.cursor_config(cx);
         let mode = if in_gutter {
             MouseSelectMode::Line
@@ -2701,7 +2821,7 @@ impl CodeEditor {
             .layout
             .as_ref()
             .and_then(|layout| layout.minimap)
-            .is_some_and(|minimap| minimap.bounds.contains(&event.position));
+            .is_some_and(|minimap| minimap.interactive && minimap.bounds.contains(&event.position));
         if minimap_hovered != self.minimap_hovered {
             self.minimap_hovered = minimap_hovered;
             cx.notify();
@@ -3362,7 +3482,7 @@ impl Render for CodeEditor {
             {
                 MouseCursor::PointingHand
             } else {
-                MouseCursor::IBeam
+                self.text_mouse_cursor()
             });
         let root = move_action!(root, cx,
             CursorLeft => (MoveCommand::Left, false),
@@ -4188,6 +4308,7 @@ impl Render for CodeEditor {
                 if !*hovered {
                     scrollbars.left_at = Some(web_time::Instant::now());
                     scrollbars.mouse_position = None;
+                    this.minimap_hovered = false;
                 }
                 cx.notify();
                 if !*hovered {

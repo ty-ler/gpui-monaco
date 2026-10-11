@@ -111,7 +111,10 @@ impl CodeEditor {
             };
             return target(kind, None);
         }
-        if layout.minimap.is_some_and(|m| m.bounds.contains(&point)) {
+        if layout
+            .minimap
+            .is_some_and(|m| m.interactive && m.bounds.contains(&point))
+        {
             return target(MouseTargetKind::Minimap, None);
         }
         if layout

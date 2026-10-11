@@ -70,6 +70,8 @@ fn bench(c: &mut Criterion) {
                     tab_size: 4,
                     indent: WrappingIndent::Same,
                     keep_all: false,
+                    classifier: Default::default(),
+                    wrap_on_escaped_line_feeds: false,
                     measure: None,
                 }));
                 lines

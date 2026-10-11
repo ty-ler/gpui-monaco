@@ -9,7 +9,7 @@ use web_time::Instant;
 
 use gpui::{Bounds, Pixels, Point, point, px, size};
 
-use crate::options::CursorBlinking;
+use crate::options::{CursorBlinking, MinimapAutohide};
 
 /// Monaco `ViewCursors.BLINK_INTERVAL`.
 pub const BLINK_INTERVAL: Duration = Duration::from_millis(500);
@@ -115,6 +115,7 @@ pub(crate) struct ViewAnimation {
     /// Middle-click scrolling (`scrollOnMiddleClick`).
     pub middle_scroll: Option<MiddleScroll>,
     pub scrollbars: ScrollbarFade,
+    pub minimap: MinimapFade,
 }
 
 impl Default for ViewAnimation {
@@ -130,6 +131,7 @@ impl Default for ViewAnimation {
             cursor_count: 1,
             middle_scroll: None,
             scrollbars: ScrollbarFade::default(),
+            minimap: MinimapFade::default(),
         }
     }
 }
@@ -278,6 +280,65 @@ impl ScrollbarFade {
     }
 }
 
+/// Monaco `minimap.autohide`: the minimap fades in and out over 0.5s
+/// (`.minimap-autohide-*` in `minimap.css`).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct MinimapFade {
+    /// When the view last scrolled, for `scroll`.
+    pub scrolled_at: Option<Instant>,
+    /// Whether it's shown (or fading in), and since when.
+    shown: bool,
+    changed_at: Option<Instant>,
+    /// The opacity the current transition started from.
+    from: f32,
+}
+
+/// Monaco's `_hideDelayedScheduler` delay.
+const MINIMAP_HIDE_DELAY: Duration = Duration::from_millis(500);
+/// The CSS `transition: opacity 0.5s`.
+const MINIMAP_FADE: Duration = Duration::from_millis(500);
+
+impl MinimapFade {
+    /// (opacity, whether it's still changing, whether it takes the mouse)
+    /// for `autohide`, with the mouse over the minimap or not.
+    pub fn update(&mut self, autohide: MinimapAutohide, mouse_over: bool) -> (f32, bool, bool) {
+        let now = Instant::now();
+        let (target, waiting, interactive) = match autohide {
+            MinimapAutohide::None => return (1., false, true),
+            MinimapAutohide::Mouseover => (mouse_over, false, true),
+            MinimapAutohide::Scroll => {
+                // Monaco checks again after the delay while the mouse is
+                // over it; while hidden it doesn't take the mouse.
+                if self.shown && mouse_over {
+                    self.scrolled_at = Some(now);
+                }
+                let active = self
+                    .scrolled_at
+                    .is_some_and(|at| now < at + MINIMAP_HIDE_DELAY);
+                (active, active, active)
+            }
+        };
+        let current = self.opacity(now);
+        if target != self.shown {
+            self.from = current;
+            self.shown = target;
+            self.changed_at = Some(now);
+        }
+        let opacity = self.opacity(now);
+        let target_opacity = if self.shown { 1. } else { 0. };
+        (opacity, waiting || opacity != target_opacity, interactive)
+    }
+
+    fn opacity(&self, now: Instant) -> f32 {
+        let target = if self.shown { 1. } else { 0. };
+        let Some(changed_at) = self.changed_at else {
+            return target;
+        };
+        let t = ((now - changed_at).as_secs_f32() / MINIMAP_FADE.as_secs_f32()).min(1.);
+        self.from + (target - self.from) * ease(t)
+    }
+}
+
 /// A middle-click scrolling session (Monaco `MiddleScrollController`).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MiddleScroll {
@@ -389,6 +450,42 @@ mod tests {
         assert_eq!(fade.opacity(false), (0., false));
         // Dragging keeps it.
         assert_eq!(fade.opacity(true), (1., false));
+    }
+
+    #[test]
+    fn minimap_autohide() {
+        let mut fade = MinimapFade::default();
+        assert_eq!(fade.update(MinimapAutohide::None, false), (1., false, true));
+        // `mouseover`: hidden, then fading in while hovered.
+        assert_eq!(
+            fade.update(MinimapAutohide::Mouseover, false),
+            (0., false, true)
+        );
+        let (opacity, fading, interactive) = fade.update(MinimapAutohide::Mouseover, true);
+        assert!(opacity < 1. && fading && interactive);
+        fade.changed_at = Some(Instant::now() - Duration::from_millis(600));
+        assert_eq!(
+            fade.update(MinimapAutohide::Mouseover, true),
+            (1., false, true)
+        );
+
+        // `scroll`: hidden and click-through until the view scrolls.
+        let mut fade = MinimapFade::default();
+        assert_eq!(
+            fade.update(MinimapAutohide::Scroll, true),
+            (0., false, false)
+        );
+        fade.scrolled_at = Some(Instant::now());
+        let (_, waiting, interactive) = fade.update(MinimapAutohide::Scroll, false);
+        assert!(waiting && interactive);
+        // Half a second later it fades out, unless the mouse is over it.
+        fade.scrolled_at = Some(Instant::now() - Duration::from_millis(600));
+        fade.changed_at = Some(Instant::now() - Duration::from_millis(600));
+        let (opacity, _, interactive) = fade.update(MinimapAutohide::Scroll, true);
+        assert!(opacity == 1. && interactive);
+        fade.scrolled_at = Some(Instant::now() - Duration::from_millis(600));
+        let (opacity, fading, interactive) = fade.update(MinimapAutohide::Scroll, false);
+        assert!(opacity > 0. && fading && !interactive);
     }
 
     #[test]
