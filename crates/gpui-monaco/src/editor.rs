@@ -419,7 +419,9 @@ pub struct CodeEditor {
         Arc<crate::view::line_breaks::WrapClassifier>,
     )>,
     pub(crate) minimap_hovered: bool,
-    minimap_drag: Option<Pixels>,
+    /// The pointer is over the minimap's slider (`minimapSlider.hoverBackground`).
+    pub(crate) minimap_slider_hovered: bool,
+    pub(crate) minimap_drag: Option<Pixels>,
     fold_task: Option<Task<()>>,
     /// The editor has focus (Monaco `hasWidgetFocus`, for bracket matching).
     pub(crate) has_focus: bool,
@@ -726,6 +728,7 @@ impl CodeEditor {
             char_widths: None,
             wrap_classifier: None,
             minimap_hovered: false,
+            minimap_slider_hovered: false,
             minimap_drag: None,
             fold_task: None,
             has_focus: false,
@@ -3598,8 +3601,17 @@ impl CodeEditor {
             .as_ref()
             .and_then(|layout| layout.minimap)
             .is_some_and(|minimap| minimap.interactive && minimap.bounds.contains(&event.position));
-        if minimap_hovered != self.minimap_hovered {
+        let minimap_slider_hovered = minimap_hovered
+            && self
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.minimap)
+                .is_some_and(|minimap| minimap.slider.contains(&event.position));
+        if minimap_hovered != self.minimap_hovered
+            || minimap_slider_hovered != self.minimap_slider_hovered
+        {
             self.minimap_hovered = minimap_hovered;
+            self.minimap_slider_hovered = minimap_slider_hovered;
             cx.notify();
         }
         if let Some(grab) = self.minimap_drag {

@@ -286,7 +286,7 @@ impl CodeEditor {
             .or_else(|| model.language_id().cloned())
             .unwrap_or_else(|| "plaintext".into());
         let style = capture
-            .map(|capture| self.theme.style_for(capture))
+            .map(|capture| self.theme.style_for_language(capture, Some(&language)))
             .unwrap_or_default();
         let capture_name = capture.map(|capture| capture.name());
         let token = capture

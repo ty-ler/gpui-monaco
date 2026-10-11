@@ -289,13 +289,15 @@ impl ContextMenu {
             .py(px(4.))
             .flex()
             .flex_col()
-            .bg(colors.widget_background)
+            // Monaco's menu colors (`menu.*`); the border only shows in
+            // high contrast.
+            .bg(colors.menu_background)
             .border_1()
-            .border_color(colors.widget_border)
+            .border_color(colors.menu_border.unwrap_or_else(gpui::transparent_black))
             .rounded(px(5.))
             .shadow_md()
             .text_size(px(13.))
-            .text_color(colors.widget_foreground)
+            .text_color(colors.menu_foreground)
             .children(entries.iter().enumerate().map(|(ix, entry)| {
                 let is_active = active == Some(ix);
                 match entry {
@@ -304,7 +306,12 @@ impl ContextMenu {
                         .flex()
                         .items_center()
                         .px(px(8.))
-                        .child(div().w_full().h(px(1.)).bg(colors.widget_border))
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(1.))
+                                .bg(colors.menu_separator_background),
+                        )
                         .into_any_element(),
                     Entry::Item { label, .. } | Entry::Submenu { label, .. } => {
                         let keybinding = match entry {
@@ -381,8 +388,14 @@ trait ActiveRow {
 impl<E: Styled> ActiveRow for E {
     fn when_active(self, active: bool, colors: &crate::theme::EditorColors) -> Self {
         if active {
-            self.bg(colors.menu_selection_background)
-                .text_color(colors.menu_selection_foreground)
+            let row = self
+                .bg(colors.menu_selection_background)
+                .text_color(colors.menu_selection_foreground);
+            // High contrast outlines the row (`menu.selectionBorder`).
+            match colors.menu_selection_border {
+                Some(border) => row.border_1().border_color(border),
+                None => row,
+            }
         } else {
             self
         }

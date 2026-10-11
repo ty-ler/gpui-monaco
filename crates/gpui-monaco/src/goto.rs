@@ -409,6 +409,7 @@ impl CodeEditor {
                 range,
                 DecorationOptions {
                     background: Some(self.theme.colors.symbol_highlight_background),
+                    border: self.theme.colors.symbol_highlight_border,
                     ..Default::default()
                 },
             )],

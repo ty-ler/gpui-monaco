@@ -9,7 +9,7 @@
 use gpui::{
     AppContext as _, Context, Entity, FontWeight, HighlightStyle, InteractiveElement as _,
     IntoElement, MouseButton, ParentElement, Render, StatefulInteractiveElement as _, Styled,
-    StyledText, Task, UnderlineStyle, WeakEntity, Window, div, px,
+    StyledText, Task, WeakEntity, Window, div, px,
 };
 use text::PointUtf16;
 
@@ -134,15 +134,13 @@ impl Render for SignatureHelpWidget {
             .get(active)
             .and_then(|p| parameter_range(&signature.label, &p.label))
         {
+            // Monaco's `.parameter.active`: bold, in
+            // `editorHoverWidget.highlightForeground`.
             highlights.push((
                 range,
                 HighlightStyle {
+                    color: Some(colors.hover_highlight_foreground),
                     font_weight: Some(FontWeight::BOLD),
-                    underline: Some(UnderlineStyle {
-                        thickness: px(1.),
-                        color: Some(colors.widget_foreground),
-                        wavy: false,
-                    }),
                     ..Default::default()
                 },
             ));
@@ -179,10 +177,10 @@ impl Render for SignatureHelpWidget {
             .max_w(self.room.cap_width(px(440.), px(100.)))
             .max_h(self.room.cap_height(self.max_height, px(24.)))
             .flex()
-            .bg(colors.widget_background)
+            .bg(colors.hover_background)
             .border_1()
-            .border_color(colors.widget_border)
-            .text_color(colors.widget_foreground)
+            .border_color(colors.hover_border)
+            .text_color(colors.hover_foreground)
             .text_size(self.style.font_size)
             // Monaco's `.controls` column, shown with several signatures.
             .when(multiple, |this| {
@@ -196,7 +194,7 @@ impl Render for SignatureHelpWidget {
                         .items_center()
                         .justify_between()
                         .border_r_1()
-                        .border_color(colors.widget_border)
+                        .border_color(colors.hover_border)
                         .child(self.button(false))
                         .child(
                             div()

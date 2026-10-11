@@ -124,7 +124,9 @@ Issues are linked by number.
 | Token-level APIs | `remeasureFonts`, `setColorMap`, `getEncodedLanguageId` | ✅ `remeasure_fonts` is a no-op (GPUI measures every frame); no `setColorMap` or `getEncodedLanguageId`, which serve encoded token metadata | #235 |
 | Static colorize and tokenize | `colorizer` | ✅ | #108 |
 | Colorize a model line | `colorizeModelLine` | ✅ | #204 |
-| Themes: `vs`, `vs-dark`, VS Code JSON, `defineTheme` | standalone theme service | ✅ | |
+| Themes: `vs`, `vs-dark`, VS Code JSON, `defineTheme` | standalone theme service | ✅ | #263 |
+| Theme colors and their defaults | color registry (`registerColor`), `StandaloneTheme.getColor` | ✅ the editor's and platform registry colors with Monaco's per-kind defaults, derived lazily from the theme's own colors; widgets use their own keys (`menu.*`, `editorHoverWidget.*`, `list.*`, `quickInput*`, `keybindingLabel.*`, `toolbar.*`, markers); high contrast outlines; workbench-only colors left out | #263 |
+| Token rules | `TokenTheme`, `ThemeTrieElement` | ✅ rule inheritance, `''` default rules and the built-in themes' language rules; tree-sitter captures get their language suffix; the default color is the editor foreground rather than `#000000`, and token backgrounds are ignored | #263 |
 | Themes by name for every editor | `editor.defineTheme`, `editor.setTheme` | ✅ | #204 |
 | High-contrast themes (`hc-black`, `hc-light`) | standalone themes | ✅ | #53 |
 | Toggle high contrast, force retokenize, inspect tokens | `toggleHighContrast`, `tokenization`, `inspectTokens` | ✅ inspect tokens shows tree-sitter captures and their TextMate scopes | #227 |

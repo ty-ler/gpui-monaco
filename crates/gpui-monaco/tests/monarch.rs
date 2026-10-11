@@ -8,7 +8,7 @@ use gpui::{AppContext as _, Entity, TestAppContext};
 use gpui_monaco::colorize::{ColorizeOptions, colorize, tokenize};
 use gpui_monaco::cursor::StandardTokenType;
 use gpui_monaco::syntax::{HighlightId, Language, LanguageRegistry};
-use gpui_monaco::theme::{RuleKind, TokenRule, parse_hex_color};
+use gpui_monaco::theme::{TokenRule, parse_hex_color};
 use gpui_monaco::{TextModel, Theme, TokenStyle};
 use serde_json::json;
 
@@ -242,11 +242,7 @@ fn themes_match_monarch_tokens_like_monaco() {
     let type_mini = HighlightId::intern_monaco_token("type.identifier.mini");
 
     // Monaco rules: the longest matching prefix wins.
-    let rule = |selector: &str, hex: &str| TokenRule {
-        kind: RuleKind::Monaco,
-        selector: selector.into(),
-        style: color(hex),
-    };
+    let rule = |selector: &str, hex: &str| TokenRule::monaco(selector, Some(hex), None).unwrap();
     let theme = Theme::define(
         "monarch-test",
         &Theme::vs(),

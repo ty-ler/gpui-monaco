@@ -16,7 +16,7 @@ use std::ops::Range;
 use gpui::{
     AppContext as _, Context, Entity, FontWeight, HighlightStyle, Hsla, InteractiveElement,
     IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString, Styled, StyledText,
-    Subscription, Task, WeakEntity, Window, div, px, rgb,
+    Subscription, Task, WeakEntity, Window, div, px,
 };
 use text::PointUtf16;
 
@@ -404,7 +404,13 @@ impl QuickInput {
     fn render_item(&self, ix: usize, item: &QuickItem, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = &self.colors;
         let is_active = self.active == Some(ix);
-        let highlight: Hsla = rgb(0x0097fb).into();
+        // Monaco `list.highlightForeground`, and
+        // `quickInputList.focusHighlightForeground` on the focused row.
+        let highlight: Hsla = if is_active {
+            colors.quick_input_list_focus_highlight_foreground
+        } else {
+            colors.list_highlight_foreground
+        };
         let label_highlights: Vec<(Range<usize>, HighlightStyle)> = if item.strikethrough {
             vec![(
                 0..item.label.len(),
@@ -442,7 +448,11 @@ impl QuickInput {
             .whitespace_nowrap()
             .cursor_pointer()
             .when(is_active, |this| {
-                this.bg(colors.suggest_selected_background)
+                colors.focused_list_row(
+                    this,
+                    colors.quick_input_list_focus_background,
+                    colors.quick_input_list_focus_foreground,
+                )
             })
             .on_mouse_down(
                 MouseButton::Left,
@@ -463,13 +473,25 @@ impl QuickInput {
                     .map(|description| div().opacity(0.7).text_size(px(12.)).child(description)),
             )
             .children(item.keybinding.clone().map(|keys| {
-                div()
-                    .ml_auto()
-                    .pl(px(8.))
-                    .flex_none()
-                    .opacity(0.8)
-                    .text_size(px(11.))
-                    .child(keys)
+                // Monaco's `KeybindingLabel` (`keybindingLabel.*`), whose
+                // bottom edge is a second, darker border.
+                div().ml_auto().pl(px(8.)).flex_none().child(
+                    div()
+                        .rounded(px(3.))
+                        .border_b_1()
+                        .border_color(colors.keybinding_label_bottom_border)
+                        .child(
+                            div()
+                                .px(px(3.))
+                                .rounded(px(3.))
+                                .text_size(px(11.))
+                                .bg(colors.keybinding_label_background)
+                                .text_color(colors.keybinding_label_foreground)
+                                .border_1()
+                                .border_color(colors.keybinding_label_border)
+                                .child(keys),
+                        ),
+                )
             }))
             .into_any_element()
     }
@@ -488,9 +510,9 @@ impl Render for QuickInput {
                     .items_center()
                     .justify_end()
                     .border_t_1()
-                    .border_color(colors.widget_border)
+                    .border_color(colors.picker_group_border)
                     .text_size(px(11.))
-                    .opacity(0.7)
+                    .text_color(colors.picker_group_foreground)
                     .child(label)
                     .into_any_element(),
                 QuickRow::Item(item) => self.render_item(ix, &item, cx),
@@ -501,12 +523,12 @@ impl Render for QuickInput {
             .w(self.width)
             .flex()
             .flex_col()
-            .bg(colors.widget_background)
+            .bg(colors.quick_input_background)
             .border_1()
             .border_color(colors.widget_border)
             .shadow_md()
             .text_size(px(13.))
-            .text_color(colors.widget_foreground)
+            .text_color(colors.quick_input_foreground)
             .on_action(cx.listener(|this, _: &QuickInputNext, _, cx| this.move_active(1, cx)))
             .on_action(cx.listener(|this, _: &QuickInputPrevious, _, cx| this.move_active(-1, cx)))
             .on_action(cx.listener(|this, _: &QuickInputPageNext, _, cx| {
@@ -532,6 +554,7 @@ impl Render for QuickInput {
                         .flex()
                         .justify_center()
                         .text_size(px(11.))
+                        .bg(colors.quick_input_title_background)
                         .child(title),
                 )
             })
@@ -725,9 +748,11 @@ impl CodeEditor {
             start..end.max(start),
             DecorationOptions {
                 background: Some(self.theme.colors.range_highlight_background),
+                border: self.theme.colors.range_highlight_border,
                 is_whole_line: true,
+                // Monaco `editorOverviewRuler.rangeHighlightForeground`.
                 overview_ruler: Some((
-                    self.theme.colors.range_highlight_background.opacity(1.),
+                    self.theme.colors.range_highlight_overview,
                     OverviewRulerLane::Right,
                 )),
                 ..Default::default()

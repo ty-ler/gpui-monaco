@@ -1,319 +1,753 @@
 //! Themes: editor chrome colors plus token colors.
 //!
+//! Chrome colors are VS Code color ids (`editor.background`), resolved as
+//! Monaco's `StandaloneTheme.getColor` does: a theme's own colors first,
+//! then the color registry's defaults for its kind (dark, light, high
+//! contrast dark or light), which may derive from other colors.
+//! [`EditorColors`] holds the resolved values the editor draws with.
+//!
 //! Two kinds of token rules are supported and can be mixed:
 //! - **Monaco rules** keyed by Monarch token names (`keyword`, `string.key.json`),
 //!   as in Monaco's built-in themes and `monaco.editor.defineTheme`. The
 //!   built-in [`Theme::vs`], [`Theme::vs_dark`], [`Theme::hc_black`] and
 //!   [`Theme::hc_light`] are ported from Monaco's
-//!   `standalone/common/themes.ts` (MIT). Most language-specific rules
-//!   (`*.pug`, `*.sql`, `*.php`, ...) are left out.
+//!   `standalone/common/themes.ts` (MIT), language-specific rules included.
 //! - **TextMate rules** from VS Code theme JSON `tokenColors`, keyed by scope
 //!   selectors (`entity.name.function`, `keyword.control`).
 //!
+//! Each vocabulary resolves like Monaco's `TokenTheme`: a rule inherits the
+//! fields it leaves unset from its parent (`comment.doc` with only a font
+//! style keeps `comment`'s color), and `''` rules set the default.
+//!
 //! Tree-sitter capture names (e.g. `function.method`) are mapped onto both
 //! vocabularies by [`monaco_token_for_capture`] and [`textmate_scopes_for_capture`].
+//! As in Monaco, a capture's Monaco token carries its language as a suffix
+//! (`keyword.json`), so language-specific rules apply.
 //! Monarch tokens (`keyword.rust`, from
 //! [`set_monarch_tokens_provider`](crate::set_monarch_tokens_provider)) are
 //! Monaco token names already: Monaco rules match them as Monaco's
 //! `TokenTheme` does, then TextMate rules as if they were scopes, then the
 //! TextMate scopes of the capture they'd be.
 
+mod color_registry;
+mod token_theme;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use gpui::{Hsla, Rgba, rgb, rgba};
+use gpui::{Hsla, rgb, rgba};
 use serde::Deserialize;
 use syntax::HighlightId;
 
-/// Editor chrome colors, named after the VS Code color keys they come from.
-///
-/// Defaults to [`EditorColors::vs_dark`].
-#[derive(Clone, Debug, PartialEq)]
-pub struct EditorColors {
+pub(crate) use color_registry::ColorScheme;
+use color_registry::Resolver;
+use token_theme::TokenTrie;
+
+/// Declares [`EditorColors`]: each field with its doc comment and how it
+/// resolves from a theme's colors (`$r` being the [`Resolver`]).
+macro_rules! editor_colors {
+    ($r:ident; $( $(#[$doc:meta])* $field:ident: $ty:ty = $value:expr; )*) => {
+        /// Editor chrome colors, resolved from VS Code color ids (named in
+        /// each field's docs) and their Monaco defaults.
+        ///
+        /// Defaults to [`EditorColors::vs_dark`].
+        #[derive(Clone, Debug, PartialEq)]
+        pub struct EditorColors {
+            $( $(#[$doc])* pub $field: $ty, )*
+        }
+
+        impl EditorColors {
+            fn from_resolver($r: &mut Resolver) -> Self {
+                Self { $( $field: $value, )* }
+            }
+
+            /// Takes the fields that differ between `before` and `after`.
+            fn merge_changed(&mut self, before: &Self, after: &Self) {
+                $( if before.$field != after.$field {
+                    self.$field = after.$field.clone();
+                } )*
+            }
+        }
+    };
+}
+
+/// Monaco's `currentLineHighlight` theming: the border shows when the
+/// background is unset or transparent, or when the theme sets it.
+fn line_highlight_border(r: &mut Resolver) -> Option<Hsla> {
+    let background = r.get("editor.lineHighlightBackground");
+    if background.is_none_or(|color| color.a == 0.) || r.defines("editor.lineHighlightBorder") {
+        r.visible("editor.lineHighlightBorder")
+    } else {
+        None
+    }
+}
+
+/// The six numbered `{prefix}1` … `{prefix}6` colors, `None` when
+/// transparent.
+fn levels(r: &mut Resolver, prefix: &str) -> [Option<Hsla>; 6] {
+    std::array::from_fn(|i| r.visible(&format!("{prefix}{}", i + 1)))
+}
+
+editor_colors! { r;
     /// Text area background (`editor.background`).
-    pub background: Hsla,
+    background: Hsla = r.color("editor.background");
     /// Default text color (`editor.foreground`).
-    pub foreground: Hsla,
+    foreground: Hsla = r.color("editor.foreground");
     /// Line numbers (`editorLineNumber.foreground`).
-    pub line_number: Hsla,
-    /// The cursor's line number (`editorLineNumber.activeForeground`).
-    pub active_line_number: Hsla,
+    line_number: Hsla = r.color("editorLineNumber.foreground");
+    /// The cursor's line number (`editorLineNumber.activeForeground`,
+    /// defaulting to the deprecated `editorActiveLineNumber.foreground`).
+    active_line_number: Hsla = r.color("editorLineNumber.activeForeground");
+    /// The final line's number when `renderFinalNewline` is `dimmed`
+    /// (`editorLineNumber.dimmedForeground`; `None` uses the line number
+    /// color).
+    line_number_dimmed: Option<Hsla> = r.get("editorLineNumber.dimmedForeground");
     /// Current line fill (`editor.lineHighlightBackground`); `None` draws no fill.
-    pub line_highlight_background: Option<Hsla>,
-    /// Current line outline (`editor.lineHighlightBorder`); `None` draws no outline.
-    pub line_highlight_border: Option<Hsla>,
+    line_highlight_background: Option<Hsla> = r.get("editor.lineHighlightBackground");
+    /// Current line fill when the editor isn't focused
+    /// (`editor.inactiveLineHighlightBackground`, defaulting to the focused
+    /// one).
+    inactive_line_highlight_background: Option<Hsla> =
+        r.get("editor.inactiveLineHighlightBackground");
+    /// Current line outline (`editor.lineHighlightBorder`); `None` draws no
+    /// outline. As in Monaco, it's dropped when the theme sets a visible
+    /// `editor.lineHighlightBackground` but not the border.
+    line_highlight_border: Option<Hsla> = line_highlight_border(r);
     /// Selections in the focused editor (`editor.selectionBackground`).
-    pub selection_background: Hsla,
+    selection_background: Hsla = r.color("editor.selectionBackground");
     /// Selected text's color (`editor.selectionForeground`; none keeps the
     /// token colors). High-contrast themes set it.
-    pub selection_foreground: Option<Hsla>,
+    selection_foreground: Option<Hsla> = r.get("editor.selectionForeground");
     /// Inserted text in the diff editor (`diffEditor.insertedTextBackground`).
-    pub diff_inserted_text_background: Hsla,
+    diff_inserted_text_background: Hsla = r.color("diffEditor.insertedTextBackground");
     /// Removed text (`diffEditor.removedTextBackground`).
-    pub diff_removed_text_background: Hsla,
+    diff_removed_text_background: Hsla = r.color("diffEditor.removedTextBackground");
     /// Inserted text's outline (`diffEditor.insertedTextBorder`, high
     /// contrast).
-    pub diff_inserted_text_border: Option<Hsla>,
+    diff_inserted_text_border: Option<Hsla> = r.get("diffEditor.insertedTextBorder");
     /// Removed text's outline (`diffEditor.removedTextBorder`).
-    pub diff_removed_text_border: Option<Hsla>,
+    diff_removed_text_border: Option<Hsla> = r.get("diffEditor.removedTextBorder");
     /// Inserted lines (`diffEditor.insertedLineBackground`).
-    pub diff_inserted_line_background: Hsla,
+    diff_inserted_line_background: Hsla = r.color("diffEditor.insertedLineBackground");
     /// Removed lines (`diffEditor.removedLineBackground`).
-    pub diff_removed_line_background: Hsla,
+    diff_removed_line_background: Hsla = r.color("diffEditor.removedLineBackground");
     /// The gutter beside inserted lines
-    /// (`diffEditorGutter.insertedLineBackground`).
-    pub diff_gutter_inserted_line_background: Hsla,
+    /// (`diffEditorGutter.insertedLineBackground`, defaulting to the lines').
+    diff_gutter_inserted_line_background: Hsla = r.color_first(&[
+        "diffEditorGutter.insertedLineBackground",
+        "diffEditor.insertedLineBackground",
+    ]);
     /// The gutter beside removed lines
-    /// (`diffEditorGutter.removedLineBackground`).
-    pub diff_gutter_removed_line_background: Hsla,
+    /// (`diffEditorGutter.removedLineBackground`, defaulting to the lines').
+    diff_gutter_removed_line_background: Hsla = r.color_first(&[
+        "diffEditorGutter.removedLineBackground",
+        "diffEditor.removedLineBackground",
+    ]);
+    /// Inserted lines in the diff overview ruler
+    /// (`diffEditorOverview.insertedForeground`; `None` uses the line
+    /// background).
+    diff_overview_inserted: Option<Hsla> = r.get("diffEditorOverview.insertedForeground");
+    /// Removed lines in the diff overview ruler
+    /// (`diffEditorOverview.removedForeground`).
+    diff_overview_removed: Option<Hsla> = r.get("diffEditorOverview.removedForeground");
+    /// The border between the two sides (`diffEditor.border`, high contrast).
+    diff_border: Option<Hsla> = r.visible("diffEditor.border");
     /// The stripes where the other side has lines (`diffEditor.diagonalFill`).
-    pub diff_diagonal_fill: Hsla,
-    /// The "hidden lines" bars (`diffEditor.unchangedRegionBackground`).
-    pub diff_unchanged_region_background: Hsla,
+    diff_diagonal_fill: Hsla = r.color("diffEditor.diagonalFill");
+    /// The "hidden lines" bars (`diffEditor.unchangedRegionBackground`, else
+    /// `sideBySideEditor.background`, else the editor background).
+    diff_unchanged_region_background: Hsla = r.color_first(&[
+        "diffEditor.unchangedRegionBackground",
+        "sideBySideEditor.background",
+        "editor.background",
+    ]);
     /// Their text (`diffEditor.unchangedRegionForeground`).
-    pub diff_unchanged_region_foreground: Hsla,
+    diff_unchanged_region_foreground: Hsla = r.color("diffEditor.unchangedRegionForeground");
     /// Their shadow (`diffEditor.unchangedRegionShadow`).
-    pub diff_unchanged_region_shadow: Hsla,
+    diff_unchanged_region_shadow: Hsla = r.color("diffEditor.unchangedRegionShadow");
     /// Unchanged lines that can be hidden
     /// (`diffEditor.unchangedCodeBackground`).
-    pub diff_unchanged_code_background: Hsla,
+    diff_unchanged_code_background: Hsla = r.color("diffEditor.unchangedCodeBackground");
     /// Gutter toolbars, like the diff editor's revert buttons
     /// (`editorGutter.itemBackground`).
-    pub gutter_item_background: Hsla,
+    gutter_item_background: Hsla = r.color("editorGutter.itemBackground");
     /// Their icons (`editorGutter.itemGlyphForeground`).
-    pub gutter_item_glyph_foreground: Hsla,
-    /// Separators in menus and toolbars (`menu.separatorBackground`).
-    pub menu_separator_background: Hsla,
+    gutter_item_glyph_foreground: Hsla = r.color("editorGutter.itemGlyphForeground");
     /// Moved blocks' borders and arrows (`diffEditor.move.border`).
-    pub diff_move_border: Hsla,
+    diff_move_border: Hsla = r.color("diffEditor.move.border");
     /// The active moved block's (`diffEditor.moveActive.border`).
-    pub diff_move_active_border: Hsla,
+    diff_move_active_border: Hsla = r.color("diffEditor.moveActive.border");
     /// A multi-diff editor's file headers
-    /// (`multiDiffEditor.headerBackground`).
-    pub multi_diff_header_background: Hsla,
+    /// (`multiDiffEditor.headerBackground`, else the editor background).
+    multi_diff_header_background: Hsla =
+        r.color_first(&["multiDiffEditor.headerBackground", "editor.background"]);
     /// The border above them (`multiDiffEditor.border`).
-    pub multi_diff_border: Hsla,
+    multi_diff_border: Hsla = r.color("multiDiffEditor.border");
     /// Selections in an unfocused editor (`editor.inactiveSelectionBackground`).
-    pub inactive_selection_background: Hsla,
+    inactive_selection_background: Hsla = r.color("editor.inactiveSelectionBackground");
     /// The cursor (`editorCursor.foreground`).
-    pub cursor: Hsla,
-    /// Gutter background (`editorGutter.background`, else the editor background).
-    pub gutter_background: Hsla,
+    cursor: Hsla = r.color("editorCursor.foreground");
+    /// The character under a block cursor (`editorCursor.background`; `None`
+    /// keeps its color).
+    cursor_background: Option<Hsla> = r.get("editorCursor.background");
+    /// The primary cursor when there are several
+    /// (`editorMultiCursor.primary.foreground`).
+    multi_cursor_primary_foreground: Hsla = r.color("editorMultiCursor.primary.foreground");
+    /// `editorMultiCursor.primary.background`.
+    multi_cursor_primary_background: Option<Hsla> = r.get("editorMultiCursor.primary.background");
+    /// The other cursors (`editorMultiCursor.secondary.foreground`).
+    multi_cursor_secondary_foreground: Hsla = r.color("editorMultiCursor.secondary.foreground");
+    /// `editorMultiCursor.secondary.background`.
+    multi_cursor_secondary_background: Option<Hsla> =
+        r.get("editorMultiCursor.secondary.background");
+    /// Gutter background (`editorGutter.background`, defaulting to the
+    /// editor background).
+    gutter_background: Hsla = r.color("editorGutter.background");
+    /// The folding chevrons (`editorGutter.foldingControlForeground`).
+    folding_control_foreground: Hsla = r.color("editorGutter.foldingControlForeground");
     /// Scrollbar thumb (`scrollbarSlider.background`).
-    pub scrollbar_slider: Hsla,
+    scrollbar_slider: Hsla = r.color("scrollbarSlider.background");
     /// Hovered scrollbar thumb (`scrollbarSlider.hoverBackground`).
-    pub scrollbar_slider_hover: Hsla,
+    scrollbar_slider_hover: Hsla = r.color("scrollbarSlider.hoverBackground");
     /// Dragged scrollbar thumb (`scrollbarSlider.activeBackground`).
-    pub scrollbar_slider_active: Hsla,
+    scrollbar_slider_active: Hsla = r.color("scrollbarSlider.activeBackground");
     /// Shadow drawn when the content is scrolled (`scrollbar.shadow`).
-    pub scrollbar_shadow: Hsla,
+    scrollbar_shadow: Hsla = r.color("scrollbar.shadow");
     /// The overview ruler's left border (`editorOverviewRuler.border`).
-    pub overview_ruler_border: Hsla,
-    /// Underline of IME composition text; follows the foreground when loading VS Code
-    /// colors.
-    pub ime_underline: Hsla,
+    overview_ruler_border: Hsla = r.color("editorOverviewRuler.border");
+    /// The overview ruler's background (`editorOverviewRuler.background`;
+    /// `None` draws none).
+    overview_ruler_background: Option<Hsla> = r.visible("editorOverviewRuler.background");
+    /// Underline of IME composition text (`editor.compositionBorder`).
+    ime_underline: Hsla = r.color("editor.compositionBorder");
     /// Current find match (`editor.findMatchBackground`).
-    pub find_match_background: Hsla,
+    find_match_background: Hsla = r.color("editor.findMatchBackground");
+    /// Its text (`editor.findMatchForeground`; `None` keeps the token colors).
+    find_match_foreground: Option<Hsla> = r.get("editor.findMatchForeground");
+    /// Its outline (`editor.findMatchBorder`, high contrast).
+    find_match_border: Option<Hsla> = r.visible("editor.findMatchBorder");
     /// Other find matches (`editor.findMatchHighlightBackground`).
-    pub find_match_highlight_background: Hsla,
+    find_match_highlight_background: Hsla = r.color("editor.findMatchHighlightBackground");
+    /// Their text (`editor.findMatchHighlightForeground`).
+    find_match_highlight_foreground: Option<Hsla> = r.get("editor.findMatchHighlightForeground");
+    /// Their outline (`editor.findMatchHighlightBorder`).
+    find_match_highlight_border: Option<Hsla> = r.visible("editor.findMatchHighlightBorder");
     /// Find matches in the overview ruler (`editorOverviewRuler.findMatchForeground`).
-    pub find_match_overview: Hsla,
+    find_match_overview: Hsla = r.color("editorOverviewRuler.findMatchForeground");
     /// The find in selection scope (`editor.findRangeHighlightBackground`).
-    pub find_range_highlight_background: Hsla,
+    find_range_highlight_background: Hsla = r.color("editor.findRangeHighlightBackground");
+    /// Its outline (`editor.findRangeHighlightBorder`).
+    find_range_highlight_border: Option<Hsla> = r.visible("editor.findRangeHighlightBorder");
     /// Error text, e.g. the find widget's "No results" (`errorForeground`).
-    pub error_foreground: Hsla,
+    error_foreground: Hsla = r.color("errorForeground");
     /// The target of go to definition and similar jumps, briefly
     /// (`editor.symbolHighlightBackground`; defaults to the find match
     /// highlight).
-    pub symbol_highlight_background: Hsla,
+    symbol_highlight_background: Hsla = r.color("editor.symbolHighlightBackground");
+    /// Its outline (`editor.symbolHighlightBorder`).
+    symbol_highlight_border: Option<Hsla> = r.visible("editor.symbolHighlightBorder");
     /// A link while Cmd/Ctrl is held over it (`editorLink.activeForeground`).
-    pub link_active_foreground: Hsla,
+    link_active_foreground: Hsla = r.color("editorLink.activeForeground");
     /// Quick access previews (`editor.rangeHighlightBackground`).
-    pub range_highlight_background: Hsla,
+    range_highlight_background: Hsla = r.color("editor.rangeHighlightBackground");
+    /// Their outline (`editor.rangeHighlightBorder`).
+    range_highlight_border: Option<Hsla> = r.visible("editor.rangeHighlightBorder");
+    /// Range highlights in the overview ruler
+    /// (`editorOverviewRuler.rangeHighlightForeground`).
+    range_highlight_overview: Hsla = r.color("editorOverviewRuler.rangeHighlightForeground");
     /// The border of color decorator swatches (Monaco's
     /// `.colorpicker-color-decoration` CSS, not a theme color).
-    pub color_decoration_border: Hsla,
+    color_decoration_border: Hsla = if r.scheme().is_light() {
+        c(rgb(0x000000))
+    } else {
+        c(rgb(0xeeeeee))
+    };
+    /// Menus, like the context menu (`menu.background`).
+    menu_background: Hsla = r.color("menu.background");
+    /// Menu items (`menu.foreground`).
+    menu_foreground: Hsla = r.color("menu.foreground");
+    /// The menu's border (`menu.border`, high contrast).
+    menu_border: Option<Hsla> = r.visible("menu.border");
     /// The highlighted menu row (`menu.selectionBackground`).
-    pub menu_selection_background: Hsla,
-    /// The highlighted menu row's text (`menu.selectionForeground`).
-    pub menu_selection_foreground: Hsla,
+    menu_selection_background: Hsla = r.color("menu.selectionBackground");
+    /// The highlighted menu row's text (`menu.selectionForeground`, else the
+    /// menu's).
+    menu_selection_foreground: Hsla =
+        r.color_first(&["menu.selectionForeground", "menu.foreground"]);
+    /// The highlighted menu row's outline (`menu.selectionBorder`, high
+    /// contrast).
+    menu_selection_border: Option<Hsla> = r.visible("menu.selectionBorder");
+    /// Separators in menus and toolbars (`menu.separatorBackground`).
+    menu_separator_background: Hsla = r.color("menu.separatorBackground");
     /// Button background (`button.background`).
-    pub button_background: Hsla,
+    button_background: Hsla = r.color("button.background");
     /// Button text (`button.foreground`).
-    pub button_foreground: Hsla,
+    button_foreground: Hsla = r.color("button.foreground");
+    /// A hovered button (`button.hoverBackground`).
+    button_hover_background: Hsla = r.color("button.hoverBackground");
+    /// Button outline (`button.border`, high contrast).
+    button_border: Option<Hsla> = r.visible("button.border");
+    /// The separator in split buttons (`button.separator`).
+    button_separator: Hsla = r.color("button.separator");
+    /// Secondary buttons (`button.secondaryBackground`).
+    button_secondary_background: Option<Hsla> = r.get("button.secondaryBackground");
+    /// Their text (`button.secondaryForeground`).
+    button_secondary_foreground: Hsla = r.color("button.secondaryForeground");
+    /// A hovered secondary button (`button.secondaryHoverBackground`).
+    button_secondary_hover_background: Option<Hsla> = r.get("button.secondaryHoverBackground");
+    /// Secondary button outline (`button.secondaryBorder`).
+    button_secondary_border: Option<Hsla> = r.visible("button.secondaryBorder");
     /// Code lens text (`editorCodeLens.foreground`).
-    pub code_lens_foreground: Hsla,
+    code_lens_foreground: Hsla = r.color("editorCodeLens.foreground");
     /// Linked editing ranges (`editor.linkedEditingBackground`).
-    pub linked_editing_background: Hsla,
-    /// Ghost text (`editorGhostText.foreground`).
-    pub ghost_text_foreground: Hsla,
+    linked_editing_background: Hsla = r.color("editor.linkedEditingBackground");
+    /// Ghost text (`editorGhostText.foreground`; high contrast themes keep
+    /// the text color and add a border).
+    ghost_text_foreground: Hsla = r.color_first(&["editorGhostText.foreground", "editor.foreground"]);
     /// `editorGhostText.background` (transparent: none).
-    pub ghost_text_background: Hsla,
+    ghost_text_background: Hsla = r.color("editorGhostText.background");
     /// `editorGhostText.border` (transparent: none).
-    pub ghost_text_border: Hsla,
+    ghost_text_border: Hsla = r.color("editorGhostText.border");
     /// The `placeholder` text (`editor.placeholder.foreground`; Monaco
     /// defaults it to the ghost text color).
-    pub placeholder_foreground: Hsla,
+    placeholder_foreground: Hsla =
+        r.color_first(&["editor.placeholder.foreground", "editor.foreground"]);
     /// Highlighted Unicode characters' border (`editorUnicodeHighlight.border`,
     /// defaulting to `editorWarning.foreground`).
-    pub unicode_highlight_border: Hsla,
+    unicode_highlight_border: Hsla = r.color("editorUnicodeHighlight.border");
     /// Their background (`editorUnicodeHighlight.background`; none by
     /// default).
-    pub unicode_highlight_background: Hsla,
+    unicode_highlight_background: Hsla = r.color("editorUnicodeHighlight.background");
     /// Inline messages such as "No definition found"
     /// (`inputValidation.infoBackground`).
-    pub message_background: Hsla,
+    message_background: Hsla = r.color("inputValidation.infoBackground");
+    /// Their text (`inputValidation.infoForeground`; `None` keeps the
+    /// widget's).
+    message_foreground: Option<Hsla> = r.get("inputValidation.infoForeground");
     /// Their border (`inputValidation.infoBorder`).
-    pub message_border: Hsla,
+    message_border: Hsla = r.color("inputValidation.infoBorder");
+    /// Input warnings (`inputValidation.warningBackground`).
+    input_validation_warning_background: Hsla = r.color("inputValidation.warningBackground");
+    /// `inputValidation.warningForeground`.
+    input_validation_warning_foreground: Option<Hsla> = r.get("inputValidation.warningForeground");
+    /// `inputValidation.warningBorder`.
+    input_validation_warning_border: Hsla = r.color("inputValidation.warningBorder");
+    /// Input errors, like an invalid find regex
+    /// (`inputValidation.errorBackground`).
+    input_validation_error_background: Hsla = r.color("inputValidation.errorBackground");
+    /// `inputValidation.errorForeground`.
+    input_validation_error_foreground: Option<Hsla> = r.get("inputValidation.errorForeground");
+    /// `inputValidation.errorBorder`.
+    input_validation_error_border: Hsla = r.color("inputValidation.errorBorder");
     /// Collapsed regions' first lines (`editor.foldBackground`).
-    pub fold_background: Hsla,
+    fold_background: Hsla = r.color("editor.foldBackground");
+    /// The `…` after a collapsed region (`editor.foldPlaceholderForeground`;
+    /// `None` keeps the text color).
+    fold_placeholder_foreground: Option<Hsla> = r.get("editor.foldPlaceholderForeground");
     /// Inlay hint text (`editorInlayHint.foreground`).
-    pub inlay_hint_foreground: Hsla,
+    inlay_hint_foreground: Hsla = r.color("editorInlayHint.foreground");
     /// Inlay hint background (`editorInlayHint.background`).
-    pub inlay_hint_background: Hsla,
+    inlay_hint_background: Hsla = r.color("editorInlayHint.background");
     /// Type hints (`editorInlayHint.typeForeground`).
-    pub inlay_hint_type_foreground: Hsla,
+    inlay_hint_type_foreground: Hsla = r.color("editorInlayHint.typeForeground");
     /// `editorInlayHint.typeBackground`.
-    pub inlay_hint_type_background: Hsla,
+    inlay_hint_type_background: Hsla = r.color("editorInlayHint.typeBackground");
     /// Parameter hints (`editorInlayHint.parameterForeground`).
-    pub inlay_hint_parameter_foreground: Hsla,
+    inlay_hint_parameter_foreground: Hsla = r.color("editorInlayHint.parameterForeground");
     /// `editorInlayHint.parameterBackground`.
-    pub inlay_hint_parameter_background: Hsla,
+    inlay_hint_parameter_background: Hsla = r.color("editorInlayHint.parameterBackground");
     /// The code action lightbulb (`editorLightBulb.foreground`).
-    pub lightbulb_foreground: Hsla,
+    lightbulb_foreground: Hsla = r.color("editorLightBulb.foreground");
     /// The lightbulb when a preferred quick fix exists
     /// (`editorLightBulbAutoFix.foreground`).
-    pub lightbulb_auto_fix_foreground: Hsla,
-    /// The peek view's frame and arrow (`peekView.border`).
-    pub peek_view_border: Hsla,
+    lightbulb_auto_fix_foreground: Hsla = r.color("editorLightBulbAutoFix.foreground");
+    /// The lightbulb for AI fixes (`editorLightBulbAi.foreground`).
+    lightbulb_ai_foreground: Hsla = r.color("editorLightBulbAi.foreground");
+    /// The peek view's frame and arrow (`peekView.border`, defaulting to
+    /// `editorInfo.foreground`).
+    peek_view_border: Hsla = r.color("peekView.border");
     /// Its title bar (`peekViewTitle.background`).
-    pub peek_view_title_background: Hsla,
+    peek_view_title_background: Hsla = r.color("peekViewTitle.background");
     /// The title (`peekViewTitleLabel.foreground`).
-    pub peek_view_title_foreground: Hsla,
+    peek_view_title_foreground: Hsla = r.color("peekViewTitleLabel.foreground");
     /// The title's description (the folder) (`peekViewTitleDescription.foreground`).
-    pub peek_view_title_description_foreground: Hsla,
+    peek_view_title_description_foreground: Hsla = r.color("peekViewTitleDescription.foreground");
     /// The results list (`peekViewResult.background`).
-    pub peek_view_result_background: Hsla,
+    peek_view_result_background: Hsla = r.color("peekViewResult.background");
     /// Result lines (`peekViewResult.lineForeground`).
-    pub peek_view_result_line_foreground: Hsla,
+    peek_view_result_line_foreground: Hsla = r.color("peekViewResult.lineForeground");
     /// Result files (`peekViewResult.fileForeground`).
-    pub peek_view_result_file_foreground: Hsla,
+    peek_view_result_file_foreground: Hsla = r.color("peekViewResult.fileForeground");
     /// The selected result (`peekViewResult.selectionBackground`).
-    pub peek_view_result_selection_background: Hsla,
+    peek_view_result_selection_background: Hsla = r.color("peekViewResult.selectionBackground");
     /// The selected result's text (`peekViewResult.selectionForeground`).
-    pub peek_view_result_selection_foreground: Hsla,
+    peek_view_result_selection_foreground: Hsla = r.color("peekViewResult.selectionForeground");
     /// The match in result lines (`peekViewResult.matchHighlightBackground`).
-    pub peek_view_result_match_highlight_background: Hsla,
+    peek_view_result_match_highlight_background: Hsla =
+        r.color("peekViewResult.matchHighlightBackground");
     /// The preview editor (`peekViewEditor.background`).
-    pub peek_view_editor_background: Hsla,
+    peek_view_editor_background: Hsla = r.color("peekViewEditor.background");
+    /// The preview editor's gutter (`peekViewEditorGutter.background`).
+    peek_view_editor_gutter_background: Hsla = r.color("peekViewEditorGutter.background");
+    /// The preview editor's sticky scroll
+    /// (`peekViewEditorStickyScroll.background`).
+    peek_view_editor_sticky_scroll_background: Hsla =
+        r.color("peekViewEditorStickyScroll.background");
+    /// Its gutter (`peekViewEditorStickyScrollGutter.background`).
+    peek_view_editor_sticky_scroll_gutter_background: Hsla =
+        r.color("peekViewEditorStickyScrollGutter.background");
     /// Matches in the preview editor (`peekViewEditor.matchHighlightBackground`).
-    pub peek_view_editor_match_highlight_background: Hsla,
+    peek_view_editor_match_highlight_background: Hsla =
+        r.color("peekViewEditor.matchHighlightBackground");
+    /// Their outline (`peekViewEditor.matchHighlightBorder`).
+    peek_view_editor_match_highlight_border: Option<Hsla> =
+        r.visible("peekViewEditor.matchHighlightBorder");
     /// Occurrences of the symbol at the cursor (`editor.wordHighlightBackground`).
-    pub word_highlight_background: Hsla,
+    word_highlight_background: Hsla = r.color("editor.wordHighlightBackground");
     /// Write occurrences of the symbol at the cursor
     /// (`editor.wordHighlightStrongBackground`).
-    pub word_highlight_strong_background: Hsla,
+    word_highlight_strong_background: Hsla = r.color("editor.wordHighlightStrongBackground");
+    /// Textual occurrences (`editor.wordHighlightTextBackground`).
+    word_highlight_text_background: Hsla = r.color("editor.wordHighlightTextBackground");
+    /// Occurrences' outline (`editor.wordHighlightBorder`).
+    word_highlight_border: Option<Hsla> = r.visible("editor.wordHighlightBorder");
+    /// Write occurrences' outline (`editor.wordHighlightStrongBorder`).
+    word_highlight_strong_border: Option<Hsla> = r.visible("editor.wordHighlightStrongBorder");
+    /// Textual occurrences' outline (`editor.wordHighlightTextBorder`).
+    word_highlight_text_border: Option<Hsla> = r.visible("editor.wordHighlightTextBorder");
     /// Occurrences in the overview ruler
     /// (`editorOverviewRuler.wordHighlightForeground`).
-    pub word_highlight_overview: Hsla,
+    word_highlight_overview: Hsla = r.color("editorOverviewRuler.wordHighlightForeground");
     /// Write occurrences in the overview ruler
     /// (`editorOverviewRuler.wordHighlightStrongForeground`).
-    pub word_highlight_strong_overview: Hsla,
+    word_highlight_strong_overview: Hsla =
+        r.color("editorOverviewRuler.wordHighlightStrongForeground");
+    /// Textual occurrences in the overview ruler
+    /// (`editorOverviewRuler.wordHighlightTextForeground`).
+    word_highlight_text_overview: Hsla = r.color("editorOverviewRuler.wordHighlightTextForeground");
     /// Bracket pair colors by nesting level, cycling
     /// (`editorBracketHighlight.foreground1`–`6`; `None` for transparent).
-    pub bracket_highlights: [Option<Hsla>; 6],
+    bracket_highlights: [Option<Hsla>; 6] = levels(r, "editorBracketHighlight.foreground");
     /// Unmatched brackets (`editorBracketHighlight.unexpectedBracket.foreground`).
-    pub unexpected_bracket: Hsla,
+    unexpected_bracket: Hsla = r.color("editorBracketHighlight.unexpectedBracket.foreground");
+    /// Bracket pair guides by nesting level
+    /// (`editorBracketPairGuide.background1`–`6`; `None` for transparent,
+    /// which uses the bracket color at 30%).
+    bracket_pair_guides: [Option<Hsla>; 6] = levels(r, "editorBracketPairGuide.background");
+    /// Active bracket pair guides (`editorBracketPairGuide.activeBackground1`–`6`;
+    /// `None` uses the bracket color).
+    bracket_pair_guides_active: [Option<Hsla>; 6] =
+        levels(r, "editorBracketPairGuide.activeBackground");
     /// Rendered whitespace (`editorWhitespace.foreground`).
-    pub whitespace: Hsla,
+    whitespace: Hsla = r.color("editorWhitespace.foreground");
     /// The `wordWrapIndicator` glyph (`editorWordWrapIndicator.foreground`,
     /// defaulting to the whitespace color).
-    pub word_wrap_indicator: Hsla,
-    /// Indent guides (`editorIndentGuide.background1`).
-    pub indent_guide: Hsla,
-    /// The active indent guide (`editorIndentGuide.activeBackground1`).
-    pub indent_guide_active: Hsla,
+    word_wrap_indicator: Hsla = r.color("editorWordWrapIndicator.foreground");
+    /// Indent guides by indentation level, cycling over the visible ones
+    /// (`editorIndentGuide.background1`–`6`, the first defaulting to the
+    /// deprecated `editorIndentGuide.background`; `None` for transparent).
+    indent_guides: [Option<Hsla>; 6] = levels(r, "editorIndentGuide.background");
+    /// The active indent guide (`editorIndentGuide.activeBackground1`–`6`).
+    indent_guides_active: [Option<Hsla>; 6] = levels(r, "editorIndentGuide.activeBackground");
     /// Rulers (`editorRuler.foreground`).
-    pub ruler: Hsla,
+    ruler: Hsla = r.color("editorRuler.foreground");
     /// `editorUnnecessaryCode.opacity`: its alpha is how opaque unused code
-    /// is drawn.
-    pub unnecessary_code_opacity: Hsla,
+    /// is drawn (opaque in high contrast, which underlines instead).
+    unnecessary_code_opacity: Hsla = r.get("editorUnnecessaryCode.opacity").unwrap_or(c(rgb(0x000000)));
     /// `editorUnnecessaryCode.border` (transparent: none): an underline for
     /// unused code instead of fading.
-    pub unnecessary_code_border: Hsla,
+    unnecessary_code_border: Hsla = r.color("editorUnnecessaryCode.border");
     /// Other occurrences of the selected text (`editor.selectionHighlightBackground`).
-    pub selection_highlight_background: Hsla,
+    selection_highlight_background: Hsla = r.color("editor.selectionHighlightBackground");
+    /// Their outline (`editor.selectionHighlightBorder`).
+    selection_highlight_border: Option<Hsla> = r.visible("editor.selectionHighlightBorder");
     /// Selection occurrences in the overview ruler
     /// (`editorOverviewRuler.selectionHighlightForeground`).
-    pub selection_highlight_overview: Hsla,
-    /// Widget chrome (`editorWidget.background` / `.foreground` / `.border`).
-    pub widget_background: Hsla,
+    selection_highlight_overview: Hsla = r.color("editorOverviewRuler.selectionHighlightForeground");
+    /// Widget chrome, like the find widget (`editorWidget.background`).
+    widget_background: Hsla = r.color("editorWidget.background");
     /// `editorWidget.foreground`.
-    pub widget_foreground: Hsla,
+    widget_foreground: Hsla = r.color("editorWidget.foreground");
     /// `editorWidget.border`.
-    pub widget_border: Hsla,
+    widget_border: Hsla = r.color("editorWidget.border");
+    /// Widgets' resize sash (`editorWidget.resizeBorder`).
+    widget_resize_border: Option<Hsla> = r.visible("editorWidget.resizeBorder");
+    /// Widgets' drop shadow (`widget.shadow`; none in high contrast).
+    widget_shadow: Option<Hsla> = r.visible("widget.shadow");
+    /// Widgets' outline (`widget.border`, high contrast).
+    widget_outline: Option<Hsla> = r.visible("widget.border");
     /// Snippet tab stops (`editor.snippetTabstopHighlightBackground`).
-    pub snippet_tabstop_background: Hsla,
+    snippet_tabstop_background: Hsla = r.color("editor.snippetTabstopHighlightBackground");
     /// `editor.snippetTabstopHighlightBorder` (transparent: none).
-    pub snippet_tabstop_border: Hsla,
+    snippet_tabstop_border: Hsla = r.color("editor.snippetTabstopHighlightBorder");
     /// The final tab stop (`editor.snippetFinalTabstopHighlightBackground`;
     /// transparent: none).
-    pub snippet_final_tabstop_background: Hsla,
+    snippet_final_tabstop_background: Hsla = r.color("editor.snippetFinalTabstopHighlightBackground");
     /// `editor.snippetFinalTabstopHighlightBorder`.
-    pub snippet_final_tabstop_border: Hsla,
+    snippet_final_tabstop_border: Hsla = r.color("editor.snippetFinalTabstopHighlightBorder");
     /// The suggest widget (`editorSuggestWidget.background`, defaulting to
     /// the widget background).
-    pub suggest_background: Hsla,
+    suggest_background: Hsla = r.color("editorSuggestWidget.background");
     /// `editorSuggestWidget.border` (defaults to the widget border).
-    pub suggest_border: Hsla,
+    suggest_border: Hsla = r.color("editorSuggestWidget.border");
     /// `editorSuggestWidget.foreground` (defaults to the editor foreground).
-    pub suggest_foreground: Hsla,
+    suggest_foreground: Hsla = r.color("editorSuggestWidget.foreground");
     /// `editorSuggestWidget.selectedForeground`: the focused row's text.
-    pub suggest_selected_foreground: Hsla,
+    suggest_selected_foreground: Hsla = r.color("editorSuggestWidget.selectedForeground");
+    /// `editorSuggestWidget.selectedIconForeground`: the focused row's icon
+    /// (`None` keeps the icon colors).
+    suggest_selected_icon_foreground: Option<Hsla> = r.get("editorSuggestWidget.selectedIconForeground");
     /// `editorSuggestWidget.selectedBackground`: the focused row.
-    pub suggest_selected_background: Hsla,
+    suggest_selected_background: Hsla = r.color("editorSuggestWidget.selectedBackground");
+    /// `editorSuggestWidget.focusOutline`: the focused row's outline (high
+    /// contrast).
+    suggest_focus_outline: Option<Hsla> = r.visible("editorSuggestWidget.focusOutline");
     /// `editorSuggestWidget.highlightForeground`: matched characters.
-    pub suggest_highlight_foreground: Hsla,
+    suggest_highlight_foreground: Hsla = r.color("editorSuggestWidget.highlightForeground");
     /// `editorSuggestWidget.focusHighlightForeground`: matched characters on
     /// the focused row.
-    pub suggest_focus_highlight_foreground: Hsla,
-    /// Input boxes in widgets (`input.background` / `inputOption.activeBackground`).
-    pub input_background: Hsla,
+    suggest_focus_highlight_foreground: Hsla = r.color("editorSuggestWidget.focusHighlightForeground");
+    /// The suggest widget's status bar (`editorSuggestWidgetStatus.foreground`).
+    suggest_status_foreground: Hsla = r.color("editorSuggestWidgetStatus.foreground");
+    /// Hovers and parameter hints (`editorHoverWidget.background`, defaulting
+    /// to the widget background).
+    hover_background: Hsla = r.color("editorHoverWidget.background");
+    /// `editorHoverWidget.foreground`.
+    hover_foreground: Hsla = r.color("editorHoverWidget.foreground");
+    /// `editorHoverWidget.border`.
+    hover_border: Hsla = r.color("editorHoverWidget.border");
+    /// The hover's status bar, with its actions
+    /// (`editorHoverWidget.statusBarBackground`).
+    hover_status_bar_background: Hsla = r.color("editorHoverWidget.statusBarBackground");
+    /// The active parameter in parameter hints
+    /// (`editorHoverWidget.highlightForeground`).
+    hover_highlight_foreground: Hsla = r.color("editorHoverWidget.highlightForeground");
+    /// The hovered word's range (`editor.hoverHighlightBackground`).
+    hover_highlight_background: Hsla = r.color("editor.hoverHighlightBackground");
+    /// Input boxes in widgets (`input.background`).
+    input_background: Hsla = r.color("input.background");
+    /// Their text (`input.foreground`).
+    input_foreground: Hsla = r.color("input.foreground");
+    /// Their outline (`input.border`, high contrast).
+    input_border: Option<Hsla> = r.visible("input.border");
+    /// Their placeholder (`input.placeholderForeground`).
+    input_placeholder_foreground: Hsla = r.color("input.placeholderForeground");
     /// `inputOption.activeBackground`: an enabled toggle (e.g. match case).
-    pub input_option_active_background: Hsla,
+    input_option_active_background: Hsla = r.color("inputOption.activeBackground");
     /// `inputOption.activeBorder`; also used for links in widgets.
-    pub input_option_active_border: Hsla,
-    /// `editorBracketMatch.background` / `.border`.
-    pub bracket_match_background: Hsla,
+    input_option_active_border: Hsla = r.color("inputOption.activeBorder");
+    /// An enabled toggle's icon (`inputOption.activeForeground`).
+    input_option_active_foreground: Hsla = r.color("inputOption.activeForeground");
+    /// A hovered toggle (`inputOption.hoverBackground`).
+    input_option_hover_background: Hsla = r.color("inputOption.hoverBackground");
+    /// Checkboxes (`checkbox.background`).
+    checkbox_background: Hsla = r.color("checkbox.background");
+    /// `checkbox.foreground`.
+    checkbox_foreground: Hsla = r.color("checkbox.foreground");
+    /// `checkbox.border`.
+    checkbox_border: Hsla = r.color("checkbox.border");
+    /// A checked checkbox (`checkbox.selectBackground`).
+    checkbox_select_background: Hsla = r.color("checkbox.selectBackground");
+    /// `checkbox.selectBorder`.
+    checkbox_select_border: Hsla = r.color("checkbox.selectBorder");
+    /// `editorBracketMatch.background`.
+    bracket_match_background: Hsla = r.color("editorBracketMatch.background");
     /// `editorBracketMatch.border`.
-    pub bracket_match_border: Hsla,
+    bracket_match_border: Hsla = r.color("editorBracketMatch.border");
+    /// Matching brackets' text (`editorBracketMatch.foreground`; `None` keeps
+    /// their color).
+    bracket_match_foreground: Option<Hsla> = r.get("editorBracketMatch.foreground");
     /// The overview ruler mark for matching brackets
     /// (`editorOverviewRuler.bracketMatchForeground`).
-    pub overview_ruler_bracket_match: Hsla,
+    overview_ruler_bracket_match: Hsla = r.color("editorOverviewRuler.bracketMatchForeground");
     /// `minimap.background` (defaults to the editor background).
-    pub minimap_background: Option<Hsla>,
-    /// `minimapSlider.background` / `.hoverBackground`.
-    pub minimap_slider: Hsla,
+    minimap_background: Option<Hsla> = r.get("minimap.background");
+    /// `minimapSlider.background`.
+    minimap_slider: Hsla = r.color("minimapSlider.background");
     /// `minimapSlider.hoverBackground`.
-    pub minimap_slider_hover: Hsla,
+    minimap_slider_hover: Hsla = r.color("minimapSlider.hoverBackground");
+    /// `minimapSlider.activeBackground`: while dragging.
+    minimap_slider_active: Hsla = r.color("minimapSlider.activeBackground");
+    /// Find matches in the minimap (`minimap.findMatchHighlight`).
+    minimap_find_match_highlight: Option<Hsla> = r.visible("minimap.findMatchHighlight");
+    /// The selection in the minimap (`minimap.selectionHighlight`).
+    minimap_selection_highlight: Option<Hsla> = r.visible("minimap.selectionHighlight");
+    /// Selection occurrences in the minimap
+    /// (`minimap.selectionOccurrenceHighlight`).
+    minimap_selection_occurrence_highlight: Option<Hsla> =
+        r.visible("minimap.selectionOccurrenceHighlight");
+    /// Errors in the minimap (`minimap.errorHighlight`).
+    minimap_error_highlight: Option<Hsla> = r.visible("minimap.errorHighlight");
+    /// Warnings in the minimap (`minimap.warningHighlight`).
+    minimap_warning_highlight: Option<Hsla> = r.visible("minimap.warningHighlight");
+    /// Infos in the minimap (`minimap.infoHighlight`).
+    minimap_info_highlight: Option<Hsla> = r.visible("minimap.infoHighlight");
+    /// `minimap.foregroundOpacity`: its alpha is how opaque minimap text is.
+    minimap_foreground_opacity: Hsla = r.color("minimap.foregroundOpacity");
     /// `editorStickyScroll.background` (defaults to the editor background).
-    pub sticky_scroll_background: Option<Hsla>,
+    sticky_scroll_background: Option<Hsla> = r.get("editorStickyScroll.background");
+    /// Sticky lines' gutter (`editorStickyScrollGutter.background`).
+    sticky_scroll_gutter_background: Option<Hsla> = r.get("editorStickyScrollGutter.background");
     /// A hovered or focused sticky line (`editorStickyScrollHover.background`).
-    pub sticky_scroll_hover_background: Hsla,
+    sticky_scroll_hover_background: Hsla = r.color("editorStickyScrollHover.background");
+    /// The line under the sticky lines (`editorStickyScroll.border`, high
+    /// contrast).
+    sticky_scroll_border: Option<Hsla> = r.visible("editorStickyScroll.border");
+    /// The shadow under the sticky lines (`editorStickyScroll.shadow`,
+    /// defaulting to `scrollbar.shadow`).
+    sticky_scroll_shadow: Hsla = r.color("editorStickyScroll.shadow");
     /// Keyboard focus outlines (`focusBorder`).
-    pub focus_border: Hsla,
+    focus_border: Hsla = r.color("focusBorder");
+    /// High contrast themes' outline around elements (`contrastBorder`).
+    contrast_border: Option<Hsla> = r.visible("contrastBorder");
+    /// High contrast themes' outline around active elements
+    /// (`contrastActiveBorder`).
+    contrast_active_border: Option<Hsla> = r.visible("contrastActiveBorder");
+    /// Icons (`icon.foreground`).
+    icon_foreground: Hsla = r.color("icon.foreground");
+    /// Secondary text, like a list item's description
+    /// (`descriptionForeground`).
+    description_foreground: Hsla = r.color("descriptionForeground");
+    /// Disabled text (`disabledForeground`).
+    disabled_foreground: Hsla = r.color("disabledForeground");
     /// Inline edit colors (`inlineEdit.*`).
-    pub inline_edit: InlineEditColors,
+    inline_edit: InlineEditColors = InlineEditColors::from_resolver(r);
     /// Symbol icon colors (`symbolIcon.*Foreground`), in the suggest
     /// widget and the quick outline.
-    pub symbol_icons: SymbolIconColors,
+    symbol_icons: SymbolIconColors = SymbolIconColors::from_resolver(r);
     /// An editor banner, such as the unicode highlighter's "too many
-    /// characters" one (`banner.background`).
-    pub banner_background: Hsla,
-    /// `banner.foreground`: a banner's text and links.
-    pub banner_foreground: Hsla,
-    /// `banner.iconForeground`: a banner's icon.
-    pub banner_icon_foreground: Hsla,
+    /// characters" one (`banner.background`, defaulting to
+    /// `list.activeSelectionBackground`).
+    banner_background: Hsla = r.color("banner.background");
+    /// `banner.foreground`: a banner's text and links (defaulting to
+    /// `list.activeSelectionForeground`, else the editor foreground).
+    banner_foreground: Hsla = r.color_first(&["banner.foreground", "editor.foreground"]);
+    /// `banner.iconForeground`: a banner's icon (defaulting to
+    /// `editorInfo.foreground`).
+    banner_icon_foreground: Hsla = r.color("banner.iconForeground");
+    /// Error squiggles (`editorError.foreground`).
+    editor_error_foreground: Hsla = r.color("editorError.foreground");
+    /// The background of error ranges (`editorError.background`).
+    editor_error_background: Option<Hsla> = r.visible("editorError.background");
+    /// A double underline under errors (`editorError.border`, high
+    /// contrast).
+    editor_error_border: Option<Hsla> = r.visible("editorError.border");
+    /// Warning squiggles (`editorWarning.foreground`).
+    editor_warning_foreground: Hsla = r.color("editorWarning.foreground");
+    /// `editorWarning.background`.
+    editor_warning_background: Option<Hsla> = r.visible("editorWarning.background");
+    /// `editorWarning.border`.
+    editor_warning_border: Option<Hsla> = r.visible("editorWarning.border");
+    /// Info squiggles (`editorInfo.foreground`).
+    editor_info_foreground: Hsla = r.color("editorInfo.foreground");
+    /// `editorInfo.background`.
+    editor_info_background: Option<Hsla> = r.visible("editorInfo.background");
+    /// `editorInfo.border`.
+    editor_info_border: Option<Hsla> = r.visible("editorInfo.border");
+    /// Hint dots (`editorHint.foreground`; `None` in high contrast, which
+    /// uses the border).
+    editor_hint_foreground: Option<Hsla> = r.visible("editorHint.foreground");
+    /// `editorHint.border`.
+    editor_hint_border: Option<Hsla> = r.visible("editorHint.border");
+    /// Errors in the overview ruler (`editorOverviewRuler.errorForeground`).
+    overview_ruler_error: Hsla = r.color("editorOverviewRuler.errorForeground");
+    /// Warnings in the overview ruler (`editorOverviewRuler.warningForeground`).
+    overview_ruler_warning: Hsla = r.color("editorOverviewRuler.warningForeground");
+    /// Infos in the overview ruler (`editorOverviewRuler.infoForeground`).
+    overview_ruler_info: Hsla = r.color("editorOverviewRuler.infoForeground");
+    /// The marker navigation zone's frame for errors
+    /// (`editorMarkerNavigationError.background`).
+    marker_navigation_error_background: Hsla = r.color("editorMarkerNavigationError.background");
+    /// Its header (`editorMarkerNavigationError.headerBackground`).
+    marker_navigation_error_header_background: Hsla =
+        r.color("editorMarkerNavigationError.headerBackground");
+    /// The zone's frame for warnings (`editorMarkerNavigationWarning.background`).
+    marker_navigation_warning_background: Hsla = r.color("editorMarkerNavigationWarning.background");
+    /// Its header (`editorMarkerNavigationWarning.headerBackground`).
+    marker_navigation_warning_header_background: Hsla =
+        r.color("editorMarkerNavigationWarning.headerBackground");
+    /// The zone's frame for infos (`editorMarkerNavigationInfo.background`).
+    marker_navigation_info_background: Hsla = r.color("editorMarkerNavigationInfo.background");
+    /// Its header (`editorMarkerNavigationInfo.headerBackground`).
+    marker_navigation_info_header_background: Hsla =
+        r.color("editorMarkerNavigationInfo.headerBackground");
+    /// The zone's body (`editorMarkerNavigation.background`).
+    marker_navigation_background: Hsla = r.color("editorMarkerNavigation.background");
+    /// The selected list row (`list.activeSelectionBackground`; `None` in
+    /// high contrast, which outlines it).
+    list_active_selection_background: Option<Hsla> = r.visible("list.activeSelectionBackground");
+    /// Its text (`list.activeSelectionForeground`).
+    list_active_selection_foreground: Option<Hsla> = r.get("list.activeSelectionForeground");
+    /// Its icon (`list.activeSelectionIconForeground`).
+    list_active_selection_icon_foreground: Option<Hsla> =
+        r.get("list.activeSelectionIconForeground");
+    /// The selected row of an unfocused list
+    /// (`list.inactiveSelectionBackground`).
+    list_inactive_selection_background: Option<Hsla> = r.visible("list.inactiveSelectionBackground");
+    /// A hovered list row (`list.hoverBackground`).
+    list_hover_background: Option<Hsla> = r.visible("list.hoverBackground");
+    /// Its text (`list.hoverForeground`).
+    list_hover_foreground: Option<Hsla> = r.get("list.hoverForeground");
+    /// The focused list row (`list.focusBackground`).
+    list_focus_background: Option<Hsla> = r.visible("list.focusBackground");
+    /// Its text (`list.focusForeground`).
+    list_focus_foreground: Option<Hsla> = r.get("list.focusForeground");
+    /// Its outline (`list.focusOutline`).
+    list_focus_outline: Option<Hsla> = r.visible("list.focusOutline");
+    /// Matched characters in lists (`list.highlightForeground`).
+    list_highlight_foreground: Hsla = r.color("list.highlightForeground");
+    /// Matched characters on the focused row (`list.focusHighlightForeground`).
+    list_focus_highlight_foreground: Hsla = r.color("list.focusHighlightForeground");
+    /// Invalid list items, like a rename candidate that can't apply
+    /// (`list.invalidItemForeground`).
+    list_invalid_item_foreground: Hsla = r.color("list.invalidItemForeground");
+    /// De-emphasized list items (`list.deemphasizedForeground`).
+    list_deemphasized_foreground: Hsla = r.color("list.deemphasizedForeground");
+    /// The code action list (`editorActionList.background`).
+    action_list_background: Hsla = r.color("editorActionList.background");
+    /// Its items (`editorActionList.foreground`).
+    action_list_foreground: Hsla = r.color("editorActionList.foreground");
+    /// Its focused item (`editorActionList.focusBackground`; `None` in high
+    /// contrast).
+    action_list_focus_background: Option<Hsla> = r.visible("editorActionList.focusBackground");
+    /// Its focused item's text (`editorActionList.focusForeground`).
+    action_list_focus_foreground: Option<Hsla> = r.get("editorActionList.focusForeground");
+    /// Quick access (`quickInput.background`).
+    quick_input_background: Hsla = r.color("quickInput.background");
+    /// Its text (`quickInput.foreground`).
+    quick_input_foreground: Hsla = r.color("quickInput.foreground");
+    /// Its title bar (`quickInputTitle.background`).
+    quick_input_title_background: Hsla = r.color("quickInputTitle.background");
+    /// Its focused row (`quickInputList.focusBackground`; `None` in high
+    /// contrast, which outlines it with `list.focusOutline`).
+    quick_input_list_focus_background: Option<Hsla> = r.visible("quickInputList.focusBackground");
+    /// Its focused row's text (`quickInputList.focusForeground`).
+    quick_input_list_focus_foreground: Option<Hsla> = r.get("quickInputList.focusForeground");
+    /// Its focused row's icon (`quickInputList.focusIconForeground`).
+    quick_input_list_focus_icon_foreground: Option<Hsla> = r.get("quickInputList.focusIconForeground");
+    /// Matched characters on its focused row
+    /// (`quickInputList.focusHighlightForeground`).
+    quick_input_list_focus_highlight_foreground: Hsla =
+        r.color("quickInputList.focusHighlightForeground");
+    /// Quick access group labels (`pickerGroup.foreground`).
+    picker_group_foreground: Hsla = r.color("pickerGroup.foreground");
+    /// The line above a group (`pickerGroup.border`).
+    picker_group_border: Hsla = r.color("pickerGroup.border");
+    /// Keybinding labels (`keybindingLabel.background`).
+    keybinding_label_background: Hsla = r.color("keybindingLabel.background");
+    /// `keybindingLabel.foreground`.
+    keybinding_label_foreground: Hsla = r.color("keybindingLabel.foreground");
+    /// `keybindingLabel.border`.
+    keybinding_label_border: Hsla = r.color("keybindingLabel.border");
+    /// `keybindingLabel.bottomBorder`.
+    keybinding_label_bottom_border: Hsla = r.color("keybindingLabel.bottomBorder");
+    /// A hovered toolbar button (`toolbar.hoverBackground`; `None` in high
+    /// contrast, which outlines it).
+    toolbar_hover_background: Option<Hsla> = r.visible("toolbar.hoverBackground");
+    /// A hovered toolbar button's outline (`toolbar.hoverOutline`).
+    toolbar_hover_outline: Option<Hsla> = r.visible("toolbar.hoverOutline");
+    /// A pressed toolbar button (`toolbar.activeBackground`).
+    toolbar_active_background: Option<Hsla> = r.visible("toolbar.activeBackground");
 }
 
 /// The colors of symbol icons, `symbolIcon.*Foreground` (Monaco
@@ -555,84 +989,384 @@ impl SymbolIconColors {
         }
     }
 
-    /// Applies the `symbolIcon.*Foreground` keys, after `foreground` for
-    /// the colors that default to it.
-    fn apply_vscode_colors(&mut self, get: &dyn Fn(&str) -> Option<Hsla>) {
-        if let Some(foreground) = get("foreground") {
-            self.set_foreground(foreground);
-        }
-        for (slot, key) in [
-            (&mut self.array, "arrayForeground"),
-            (&mut self.boolean, "booleanForeground"),
-            (&mut self.class, "classForeground"),
-            (&mut self.color, "colorForeground"),
-            (&mut self.constant, "constantForeground"),
-            (&mut self.constructor, "constructorForeground"),
-            (&mut self.enumerator, "enumeratorForeground"),
-            (&mut self.enumerator_member, "enumeratorMemberForeground"),
-            (&mut self.event, "eventForeground"),
-            (&mut self.field, "fieldForeground"),
-            (&mut self.file, "fileForeground"),
-            (&mut self.folder, "folderForeground"),
-            (&mut self.function, "functionForeground"),
-            (&mut self.interface, "interfaceForeground"),
-            (&mut self.key, "keyForeground"),
-            (&mut self.keyword, "keywordForeground"),
-            (&mut self.method, "methodForeground"),
-            (&mut self.module, "moduleForeground"),
-            (&mut self.namespace, "namespaceForeground"),
-            (&mut self.null, "nullForeground"),
-            (&mut self.number, "numberForeground"),
-            (&mut self.object, "objectForeground"),
-            (&mut self.operator, "operatorForeground"),
-            (&mut self.package, "packageForeground"),
-            (&mut self.property, "propertyForeground"),
-            (&mut self.reference, "referenceForeground"),
-            (&mut self.snippet, "snippetForeground"),
-            (&mut self.string, "stringForeground"),
-            (&mut self.structure, "structForeground"),
-            (&mut self.text, "textForeground"),
-            (&mut self.type_parameter, "typeParameterForeground"),
-            (&mut self.unit, "unitForeground"),
-            (&mut self.variable, "variableForeground"),
-        ] {
-            if let Some(color) = get(&format!("symbolIcon.{key}")) {
-                *slot = color;
-            }
+    /// The `symbolIcon.*Foreground` colors.
+    fn from_resolver(r: &mut Resolver) -> Self {
+        let mut get = |key: &str| r.color(&format!("symbolIcon.{key}Foreground"));
+        Self {
+            array: get("array"),
+            boolean: get("boolean"),
+            class: get("class"),
+            color: get("color"),
+            constant: get("constant"),
+            constructor: get("constructor"),
+            enumerator: get("enumerator"),
+            enumerator_member: get("enumeratorMember"),
+            event: get("event"),
+            field: get("field"),
+            file: get("file"),
+            folder: get("folder"),
+            function: get("function"),
+            interface: get("interface"),
+            key: get("key"),
+            keyword: get("keyword"),
+            method: get("method"),
+            module: get("module"),
+            namespace: get("namespace"),
+            null: get("null"),
+            number: get("number"),
+            object: get("object"),
+            operator: get("operator"),
+            package: get("package"),
+            property: get("property"),
+            reference: get("reference"),
+            snippet: get("snippet"),
+            string: get("string"),
+            structure: get("struct"),
+            text: get("text"),
+            type_parameter: get("typeParameter"),
+            unit: get("unit"),
+            variable: get("variable"),
         }
     }
 }
 
-/// Inline edit (next edit suggestion) colors, `inlineEdit.*`. Each is
-/// `None` until a theme sets it, and then derives from other colors as in
-/// Monaco; the [`EditorColors`] methods of the same names resolve them.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// Inline edit (next edit suggestion) colors, `inlineEdit.*` (Monaco
+/// `inlineEdits/theme.ts`), defaulting to diff editor, button and hover
+/// colors.
+#[derive(Clone, Debug, PartialEq)]
 pub struct InlineEditColors {
-    /// `inlineEdit.originalBackground`.
-    pub original_background: Option<Hsla>,
-    /// `inlineEdit.modifiedBackground`.
-    pub modified_background: Option<Hsla>,
-    /// `inlineEdit.originalChangedLineBackground`.
-    pub original_changed_line_background: Option<Hsla>,
-    /// `inlineEdit.originalChangedTextBackground`.
-    pub original_changed_text_background: Option<Hsla>,
-    /// `inlineEdit.modifiedChangedLineBackground`.
-    pub modified_changed_line_background: Option<Hsla>,
-    /// `inlineEdit.modifiedChangedTextBackground`.
-    pub modified_changed_text_background: Option<Hsla>,
-    /// `inlineEdit.originalBorder`.
-    pub original_border: Option<Hsla>,
-    /// `inlineEdit.modifiedBorder`.
-    pub modified_border: Option<Hsla>,
+    /// `inlineEdit.originalBackground` (20% of
+    /// `diffEditor.removedTextBackground`).
+    pub original_background: Hsla,
+    /// `inlineEdit.modifiedBackground` (30% of
+    /// `diffEditor.insertedTextBackground`).
+    pub modified_background: Hsla,
+    /// `inlineEdit.originalChangedLineBackground` (80% of
+    /// `diffEditor.removedTextBackground`).
+    pub original_changed_line_background: Hsla,
+    /// `inlineEdit.originalChangedTextBackground` (80% of
+    /// `diffEditor.removedTextBackground`).
+    pub original_changed_text_background: Hsla,
+    /// `inlineEdit.modifiedChangedLineBackground` (70% of
+    /// `diffEditor.insertedLineBackground`, all of it in high contrast).
+    pub modified_changed_line_background: Hsla,
+    /// `inlineEdit.modifiedChangedTextBackground` (70% of
+    /// `diffEditor.insertedTextBackground`).
+    pub modified_changed_text_background: Hsla,
+    /// `inlineEdit.originalBorder` (`diffEditor.removedTextBackground`).
+    pub original_border: Hsla,
+    /// `inlineEdit.modifiedBorder` (`diffEditor.insertedTextBackground`,
+    /// darkened in light themes).
+    pub modified_border: Hsla,
+    /// `inlineEdit.tabWillAcceptOriginalBorder`.
+    pub tab_will_accept_original_border: Hsla,
+    /// `inlineEdit.tabWillAcceptModifiedBorder`.
+    pub tab_will_accept_modified_border: Hsla,
+    /// `inlineEdit.gutterIndicator.background`: the gutter behind the
+    /// indicator.
+    pub gutter_indicator_background: Hsla,
     /// `inlineEdit.gutterIndicator.primaryForeground`, `primaryBorder` and
-    /// `primaryBackground`: the indicator when Tab jumps.
-    pub gutter_indicator_primary: [Option<Hsla>; 3],
+    /// `primaryBackground`: the indicator when Tab jumps (button colors, the
+    /// background at 40%, 50% in light themes).
+    pub gutter_indicator_primary: [Hsla; 3],
     /// `inlineEdit.gutterIndicator.secondaryForeground`, `secondaryBorder`
-    /// and `secondaryBackground`: when Tab does neither.
-    pub gutter_indicator_secondary: [Option<Hsla>; 3],
+    /// and `secondaryBackground`: when Tab does neither (the hover widget's
+    /// colors).
+    pub gutter_indicator_secondary: [Hsla; 3],
     /// `inlineEdit.gutterIndicator.successfulForeground`,
-    /// `successfulBorder` and `successfulBackground`: when Tab accepts.
-    pub gutter_indicator_successful: [Option<Hsla>; 3],
+    /// `successfulBorder` and `successfulBackground`: when Tab accepts
+    /// (button colors).
+    pub gutter_indicator_successful: [Hsla; 3],
+}
+
+impl InlineEditColors {
+    fn from_resolver(r: &mut Resolver) -> Self {
+        let mut indicator = |kind: &str| {
+            ["Foreground", "Border", "Background"]
+                .map(|part| r.color(&format!("inlineEdit.gutterIndicator.{kind}{part}")))
+        };
+        let gutter_indicator_primary = indicator("primary");
+        let gutter_indicator_secondary = indicator("secondary");
+        let gutter_indicator_successful = indicator("successful");
+        Self {
+            original_background: r.color("inlineEdit.originalBackground"),
+            modified_background: r.color("inlineEdit.modifiedBackground"),
+            original_changed_line_background: r.color("inlineEdit.originalChangedLineBackground"),
+            original_changed_text_background: r.color("inlineEdit.originalChangedTextBackground"),
+            modified_changed_line_background: r.color("inlineEdit.modifiedChangedLineBackground"),
+            modified_changed_text_background: r.color("inlineEdit.modifiedChangedTextBackground"),
+            original_border: r.color("inlineEdit.originalBorder"),
+            modified_border: r.color("inlineEdit.modifiedBorder"),
+            tab_will_accept_original_border: r.color("inlineEdit.tabWillAcceptOriginalBorder"),
+            tab_will_accept_modified_border: r.color("inlineEdit.tabWillAcceptModifiedBorder"),
+            gutter_indicator_background: r.color("inlineEdit.gutterIndicator.background"),
+            gutter_indicator_primary,
+            gutter_indicator_secondary,
+            gutter_indicator_successful,
+        }
+    }
+}
+
+impl EditorColors {
+    /// `inlineEdit.modifiedBackground`.
+    pub fn inline_edit_modified_background(&self) -> Hsla {
+        self.inline_edit.modified_background
+    }
+
+    /// `inlineEdit.originalChangedTextBackground`.
+    pub fn inline_edit_original_changed_text_background(&self) -> Hsla {
+        self.inline_edit.original_changed_text_background
+    }
+
+    /// `inlineEdit.modifiedChangedTextBackground`.
+    pub fn inline_edit_modified_changed_text_background(&self) -> Hsla {
+        self.inline_edit.modified_changed_text_background
+    }
+
+    /// `inlineEdit.originalBorder`.
+    pub fn inline_edit_original_border(&self) -> Hsla {
+        self.inline_edit.original_border
+    }
+
+    /// `inlineEdit.modifiedBorder`.
+    pub fn inline_edit_modified_border(&self) -> Hsla {
+        self.inline_edit.modified_border
+    }
+
+    /// The gutter indicator's foreground, border and background when Tab
+    /// jumps.
+    pub fn inline_edit_gutter_indicator_primary(&self) -> [Hsla; 3] {
+        self.inline_edit.gutter_indicator_primary
+    }
+
+    /// The gutter indicator's foreground, border and background when Tab
+    /// does neither.
+    pub fn inline_edit_gutter_indicator_secondary(&self) -> [Hsla; 3] {
+        self.inline_edit.gutter_indicator_secondary
+    }
+
+    /// The gutter indicator's foreground, border and background when Tab
+    /// accepts.
+    pub fn inline_edit_gutter_indicator_successful(&self) -> [Hsla; 3] {
+        self.inline_edit.gutter_indicator_successful
+    }
+}
+
+fn c(color: gpui::Rgba) -> Hsla {
+    color.into()
+}
+
+/// The colors Monaco's built-in themes set (`standalone/common/themes.ts`);
+/// the rest are registry defaults.
+const VS_COLORS: &[(&str, u32)] = &[
+    ("editor.background", 0xfffffeff),
+    ("editor.foreground", 0x000000ff),
+    ("editor.inactiveSelectionBackground", 0xe5ebf1ff),
+    ("editorIndentGuide.background1", 0xd3d3d3ff),
+    ("editorIndentGuide.activeBackground1", 0x939393ff),
+    ("editor.selectionHighlightBackground", 0xadd6ff4d),
+];
+const VS_DARK_COLORS: &[(&str, u32)] = &[
+    ("editor.background", 0x1e1e1eff),
+    ("editor.foreground", 0xd4d4d4ff),
+    ("editor.inactiveSelectionBackground", 0x3a3d41ff),
+    ("editorIndentGuide.background1", 0x404040ff),
+    ("editorIndentGuide.activeBackground1", 0x707070ff),
+    ("editor.selectionHighlightBackground", 0xadd6ff26),
+];
+const HC_BLACK_COLORS: &[(&str, u32)] = &[
+    ("editor.background", 0x000000ff),
+    ("editor.foreground", 0xffffffff),
+    ("editorIndentGuide.background1", 0xffffffff),
+    ("editorIndentGuide.activeBackground1", 0xffffffff),
+];
+const HC_LIGHT_COLORS: &[(&str, u32)] = &[
+    ("editor.background", 0xffffffff),
+    ("editor.foreground", 0x292929ff),
+    ("editorIndentGuide.background1", 0x292929ff),
+    ("editorIndentGuide.activeBackground1", 0x292929ff),
+];
+
+fn color_map(colors: &[(&str, u32)]) -> HashMap<String, Hsla> {
+    colors
+        .iter()
+        .map(|(id, color)| (id.to_string(), c(rgba(*color))))
+        .collect()
+}
+
+/// VS Code color ids and values, the valid ones parsed.
+fn parse_colors(colors: &HashMap<String, String>) -> HashMap<String, Hsla> {
+    colors
+        .iter()
+        .filter_map(|(id, value)| Some((id.clone(), parse_hex_color(value)?)))
+        .collect()
+}
+
+impl EditorColors {
+    /// The colors of a theme of `scheme` that sets `colors` itself, the
+    /// others from their Monaco defaults (Monaco `StandaloneTheme.getColor`).
+    pub(crate) fn resolve(scheme: ColorScheme, colors: &HashMap<String, Hsla>) -> Self {
+        Self::from_resolver(&mut Resolver::new(scheme, colors))
+    }
+
+    /// Monaco `vs-dark`.
+    pub fn vs_dark() -> Self {
+        Self::resolve(ColorScheme::Dark, &color_map(VS_DARK_COLORS))
+    }
+
+    /// Monaco `vs`.
+    pub fn vs() -> Self {
+        Self::resolve(ColorScheme::Light, &color_map(VS_COLORS))
+    }
+
+    /// Monaco `hc-black`: the theme's own colors plus the `hcDark` registry
+    /// defaults. `contrastBorder` is `#6FC3DF` and `contrastActiveBorder`
+    /// (`focusBorder`) `#F38518`; highlights are outlined with it rather
+    /// than filled.
+    pub fn hc_black() -> Self {
+        Self::resolve(ColorScheme::HcDark, &color_map(HC_BLACK_COLORS))
+    }
+
+    /// Monaco `hc-light`: the theme's own colors plus the `hcLight` registry
+    /// defaults. `contrastBorder` is `#0F4A85` and `contrastActiveBorder`
+    /// (`focusBorder`) `#006BBD`.
+    pub fn hc_light() -> Self {
+        Self::resolve(ColorScheme::HcLight, &color_map(HC_LIGHT_COLORS))
+    }
+
+    /// The color for brackets at nesting `level` (Monaco cycles through the
+    /// non-transparent `editorBracketHighlight.foreground*` colors).
+    pub fn bracket_color(&self, level: u32) -> Option<Hsla> {
+        let colors: Vec<Hsla> = self.bracket_highlights.iter().flatten().copied().collect();
+        (!colors.is_empty()).then(|| colors[level as usize % colors.len()])
+    }
+
+    /// The bracket pair guide color at nesting `level`, and the active
+    /// one (Monaco's `indentGuides.ts` theming): each level's
+    /// `editorBracketPairGuide.background*` (else its bracket color at 30%)
+    /// and `activeBackground*` (else its bracket color), cycling through the
+    /// levels that have both.
+    pub fn bracket_pair_guide_colors(&self, level: u32) -> Option<(Hsla, Hsla)> {
+        let colors: Vec<(Hsla, Hsla)> = (0..6)
+            .filter_map(|i| {
+                let bracket = self.bracket_highlights[i];
+                let guide = self.bracket_pair_guides[i]
+                    .or_else(|| bracket.map(|color| transparent(color, 0.3)))
+                    .filter(|color| color.a > 0.)?;
+                let active = self.bracket_pair_guides_active[i]
+                    .or(bracket)
+                    .filter(|color| color.a > 0.)?;
+                Some((guide, active))
+            })
+            .collect();
+        (!colors.is_empty()).then(|| colors[level as usize % colors.len()])
+    }
+
+    /// A marker's squiggle and icon color: `editorError.foreground` and the
+    /// like, the border for hints in high contrast (which have no
+    /// foreground).
+    pub fn marker_color(&self, severity: crate::MarkerSeverity) -> Hsla {
+        use crate::MarkerSeverity as S;
+        match severity {
+            S::Error => self.editor_error_foreground,
+            S::Warning => self.editor_warning_foreground,
+            S::Info => self.editor_info_foreground,
+            S::Hint => self
+                .editor_hint_foreground
+                .or(self.editor_hint_border)
+                .unwrap_or_else(gpui::transparent_black),
+        }
+    }
+
+    /// The background of a marker's range (`editorError.background` and
+    /// the like; none by default).
+    pub fn marker_background(&self, severity: crate::MarkerSeverity) -> Option<Hsla> {
+        use crate::MarkerSeverity as S;
+        match severity {
+            S::Error => self.editor_error_background,
+            S::Warning => self.editor_warning_background,
+            S::Info => self.editor_info_background,
+            S::Hint => None,
+        }
+    }
+
+    /// A marker's overview ruler mark (`editorOverviewRuler.errorForeground`
+    /// and the like; none for hints).
+    pub fn marker_overview_color(&self, severity: crate::MarkerSeverity) -> Option<Hsla> {
+        use crate::MarkerSeverity as S;
+        match severity {
+            S::Error => Some(self.overview_ruler_error),
+            S::Warning => Some(self.overview_ruler_warning),
+            S::Info => Some(self.overview_ruler_info),
+            S::Hint => None,
+        }
+    }
+
+    /// The marker navigation zone's frame and header colors for a marker
+    /// (`editorMarkerNavigation{Error,Warning,Info}.background` and
+    /// `.headerBackground`; hints use the info ones, as in Monaco).
+    pub fn marker_navigation_colors(&self, severity: crate::MarkerSeverity) -> (Hsla, Hsla) {
+        use crate::MarkerSeverity as S;
+        match severity {
+            S::Error => (
+                self.marker_navigation_error_background,
+                self.marker_navigation_error_header_background,
+            ),
+            S::Warning => (
+                self.marker_navigation_warning_background,
+                self.marker_navigation_warning_header_background,
+            ),
+            S::Info | S::Hint => (
+                self.marker_navigation_info_background,
+                self.marker_navigation_info_header_background,
+            ),
+        }
+    }
+
+    /// Styles a list's focused row with `background` and `foreground` (a
+    /// list's `*.focusBackground` / `*.focusForeground` pair), outlined with
+    /// `list.focusOutline` when there's no background (high contrast).
+    pub(crate) fn focused_list_row<E: gpui::Styled>(
+        &self,
+        row: E,
+        background: Option<Hsla>,
+        foreground: Option<Hsla>,
+    ) -> E {
+        let row = match foreground {
+            Some(foreground) => row.text_color(foreground),
+            None => row,
+        };
+        match (background, self.list_focus_outline) {
+            (Some(background), _) => row.bg(background),
+            (None, Some(outline)) => row.border_1().border_color(outline),
+            (None, None) => row,
+        }
+    }
+
+    /// A hovered toolbar button's style (`toolbar.hoverBackground`, or the
+    /// `toolbar.hoverOutline` in high contrast).
+    pub fn toolbar_hover(&self, style: gpui::StyleRefinement) -> gpui::StyleRefinement {
+        use gpui::Styled as _;
+        let style = match self.toolbar_hover_background {
+            Some(background) => style.bg(background),
+            None => style,
+        };
+        match self.toolbar_hover_outline {
+            Some(outline) => style.border_1().border_color(outline),
+            None => style,
+        }
+    }
+
+    /// The indent guide color at indentation `level` (0-based), and the
+    /// active one, cycling through the levels whose
+    /// `editorIndentGuide.background*` and `activeBackground*` are both
+    /// visible (Monaco's `indentGuides.ts` theming).
+    pub fn indent_guide_colors(&self, level: u32) -> Option<(Hsla, Hsla)> {
+        let colors: Vec<(Hsla, Hsla)> = (0..6)
+            .filter_map(|i| Some((self.indent_guides[i]?, self.indent_guides_active[i]?)))
+            .collect();
+        (!colors.is_empty()).then(|| colors[level as usize % colors.len()])
+    }
 }
 
 /// Monaco's `transparent(color, factor)`.
@@ -643,1180 +1377,19 @@ fn transparent(color: Hsla, factor: f32) -> Hsla {
     }
 }
 
-impl EditorColors {
-    /// `inlineEdit.originalBackground` (20% of
-    /// `diffEditor.removedTextBackground`).
-    pub fn inline_edit_original_background(&self) -> Hsla {
-        (self.inline_edit.original_background)
-            .unwrap_or_else(|| transparent(self.diff_removed_text_background, 0.2))
-    }
-
-    /// `inlineEdit.modifiedBackground` (30% of
-    /// `diffEditor.insertedTextBackground`).
-    pub fn inline_edit_modified_background(&self) -> Hsla {
-        (self.inline_edit.modified_background)
-            .unwrap_or_else(|| transparent(self.diff_inserted_text_background, 0.3))
-    }
-
-    /// `inlineEdit.originalChangedLineBackground` (80% of
-    /// `diffEditor.removedTextBackground`).
-    pub fn inline_edit_original_changed_line_background(&self) -> Hsla {
-        (self.inline_edit.original_changed_line_background)
-            .unwrap_or_else(|| transparent(self.diff_removed_text_background, 0.8))
-    }
-
-    /// `inlineEdit.originalChangedTextBackground` (80% of
-    /// `diffEditor.removedTextBackground`).
-    pub fn inline_edit_original_changed_text_background(&self) -> Hsla {
-        (self.inline_edit.original_changed_text_background)
-            .unwrap_or_else(|| transparent(self.diff_removed_text_background, 0.8))
-    }
-
-    /// `inlineEdit.modifiedChangedLineBackground` (70% of
-    /// `diffEditor.insertedLineBackground`).
-    pub fn inline_edit_modified_changed_line_background(&self) -> Hsla {
-        (self.inline_edit.modified_changed_line_background)
-            .unwrap_or_else(|| transparent(self.diff_inserted_line_background, 0.7))
-    }
-
-    /// `inlineEdit.modifiedChangedTextBackground` (70% of
-    /// `diffEditor.insertedTextBackground`).
-    pub fn inline_edit_modified_changed_text_background(&self) -> Hsla {
-        (self.inline_edit.modified_changed_text_background)
-            .unwrap_or_else(|| transparent(self.diff_inserted_text_background, 0.7))
-    }
-
-    /// `inlineEdit.originalBorder` (`diffEditor.removedTextBackground`).
-    pub fn inline_edit_original_border(&self) -> Hsla {
-        (self.inline_edit.original_border).unwrap_or(self.diff_removed_text_background)
-    }
-
-    /// `inlineEdit.modifiedBorder` (`diffEditor.insertedTextBackground`).
-    pub fn inline_edit_modified_border(&self) -> Hsla {
-        (self.inline_edit.modified_border).unwrap_or(self.diff_inserted_text_background)
-    }
-
-    /// The gutter indicator's foreground, border and background when Tab
-    /// jumps (button colors, the background at 40%).
-    pub fn inline_edit_gutter_indicator_primary(&self) -> [Hsla; 3] {
-        let [fg, border, bg] = self.inline_edit.gutter_indicator_primary;
-        let border = border.unwrap_or(self.button_background);
-        [
-            fg.unwrap_or(self.button_foreground),
-            border,
-            bg.unwrap_or_else(|| transparent(border, 0.4)),
-        ]
-    }
-
-    /// The gutter indicator's foreground, border and background when Tab
-    /// does neither (the hover widget's colors).
-    pub fn inline_edit_gutter_indicator_secondary(&self) -> [Hsla; 3] {
-        let [fg, border, bg] = self.inline_edit.gutter_indicator_secondary;
-        [
-            fg.unwrap_or(self.widget_foreground),
-            border.unwrap_or(self.widget_border),
-            bg.unwrap_or(self.widget_background),
-        ]
-    }
-
-    /// The gutter indicator's foreground, border and background when Tab
-    /// accepts (button colors).
-    pub fn inline_edit_gutter_indicator_successful(&self) -> [Hsla; 3] {
-        let [fg, border, bg] = self.inline_edit.gutter_indicator_successful;
-        let border = border.unwrap_or(self.button_background);
-        [
-            fg.unwrap_or(self.button_foreground),
-            border,
-            bg.unwrap_or(border),
-        ]
-    }
-}
-
-fn c(color: Rgba) -> Hsla {
-    color.into()
-}
-
-impl EditorColors {
-    /// Monaco `vs-dark`.
-    pub fn vs_dark() -> Self {
-        Self {
-            background: c(rgb(0x1e1e1e)),
-            foreground: c(rgb(0xd4d4d4)),
-            line_number: c(rgb(0x858585)),
-            active_line_number: c(rgb(0xc6c6c6)),
-            line_highlight_background: None,
-            line_highlight_border: Some(c(rgb(0x282828))),
-            selection_background: c(rgb(0x264f78)),
-            selection_foreground: None,
-            diff_inserted_text_background: c(rgba(0x9ccc2c33)),
-            diff_removed_text_background: c(rgba(0xff000033)),
-            diff_inserted_text_border: None,
-            diff_removed_text_border: None,
-            diff_inserted_line_background: c(rgba(0x9bb95533)),
-            diff_removed_line_background: c(rgba(0xff000033)),
-            diff_gutter_inserted_line_background: c(rgba(0x9bb95533)),
-            diff_gutter_removed_line_background: c(rgba(0xff000033)),
-            diff_diagonal_fill: c(rgba(0xcccccc33)),
-            diff_unchanged_region_background: c(rgb(0x1e1e1e)),
-            diff_unchanged_region_foreground: c(rgb(0xcccccc)),
-            diff_unchanged_region_shadow: c(rgba(0x000000ff)),
-            diff_unchanged_code_background: c(rgba(0x74747429)),
-            gutter_item_background: c(rgb(0x37373d)),
-            gutter_item_glyph_foreground: c(rgb(0xd4d4d4)),
-            menu_separator_background: c(rgb(0x606060)),
-            diff_move_border: c(rgba(0x8b8b8b9c)),
-            diff_move_active_border: c(rgb(0xffa500)),
-            multi_diff_header_background: c(rgb(0x262626)),
-            multi_diff_border: c(rgba(0x00000000)),
-            inactive_selection_background: c(rgb(0x3a3d41)),
-            cursor: c(rgb(0xaeafad)),
-            gutter_background: c(rgb(0x1e1e1e)),
-            scrollbar_slider: c(rgba(0x79797966)),
-            scrollbar_slider_hover: c(rgba(0x646464b3)),
-            scrollbar_slider_active: c(rgba(0xbfbfbf66)),
-            scrollbar_shadow: c(rgb(0x000000)),
-            overview_ruler_border: c(rgba(0x7f7f7f4d)),
-            ime_underline: c(rgb(0xd4d4d4)),
-            find_match_background: c(rgb(0x515c6a)),
-            find_match_highlight_background: c(rgba(0xea5c0055)),
-            find_match_overview: c(rgba(0xd186167e)),
-            find_range_highlight_background: c(rgba(0x3a3d4166)),
-            error_foreground: c(rgb(0xf48771)),
-            symbol_highlight_background: c(rgba(0xea5c0055)),
-            link_active_foreground: c(rgb(0x4e94ce)),
-            range_highlight_background: c(rgba(0xffffff0b)),
-            color_decoration_border: c(rgba(0xeeeeeeff)),
-            button_background: c(rgb(0x0e639c)),
-            menu_selection_background: c(rgb(0x04395e)),
-            menu_selection_foreground: c(rgb(0xffffff)),
-            button_foreground: c(rgb(0xffffff)),
-            code_lens_foreground: c(rgb(0x999999)),
-            linked_editing_background: c(rgba(0xff00004d)),
-            ghost_text_foreground: c(rgba(0xffffff56)),
-            ghost_text_background: gpui::transparent_black(),
-            ghost_text_border: gpui::transparent_black(),
-            placeholder_foreground: c(rgba(0xffffff56)),
-            unicode_highlight_border: c(rgb(0xcca700)),
-            unicode_highlight_background: gpui::transparent_black(),
-            message_background: c(rgb(0x063b49)),
-            message_border: c(rgb(0x007acc)),
-            fold_background: c(rgba(0x264f784d)),
-            inlay_hint_foreground: c(rgb(0x969696)),
-            inlay_hint_background: c(rgba(0x4d4d4d1a)),
-            inlay_hint_type_foreground: c(rgb(0x969696)),
-            inlay_hint_type_background: c(rgba(0x4d4d4d1a)),
-            inlay_hint_parameter_foreground: c(rgb(0x969696)),
-            inlay_hint_parameter_background: c(rgba(0x4d4d4d1a)),
-            lightbulb_foreground: c(rgb(0xffcc00)),
-            lightbulb_auto_fix_foreground: c(rgb(0x75beff)),
-            peek_view_border: c(rgb(0x3794ff)),
-            peek_view_title_background: c(rgb(0x252526)),
-            peek_view_title_foreground: c(rgb(0xffffff)),
-            peek_view_title_description_foreground: c(rgba(0xccccccb3)),
-            peek_view_result_background: c(rgb(0x252526)),
-            peek_view_result_line_foreground: c(rgb(0xbbbbbb)),
-            peek_view_result_file_foreground: c(rgb(0xffffff)),
-            peek_view_result_selection_background: c(rgba(0x3399ff33)),
-            peek_view_result_selection_foreground: c(rgb(0xffffff)),
-            peek_view_result_match_highlight_background: c(rgba(0xea5c004d)),
-            peek_view_editor_background: c(rgb(0x001f33)),
-            peek_view_editor_match_highlight_background: c(rgba(0xff8f0099)),
-            word_highlight_background: c(rgba(0x575757b8)),
-            word_highlight_strong_background: c(rgba(0x004972b8)),
-            word_highlight_overview: c(rgba(0xa0a0a0cc)),
-            word_highlight_strong_overview: c(rgba(0xc0a0c0cc)),
-            selection_highlight_background: c(rgba(0xadd6ff26)),
-            bracket_highlights: [
-                Some(c(rgb(0xffd700))),
-                Some(c(rgb(0xda70d6))),
-                Some(c(rgb(0x179fff))),
-                None,
-                None,
-                None,
-            ],
-            unexpected_bracket: c(rgba(0xff1212cc)),
-            whitespace: c(rgba(0xe3e4e229)),
-            word_wrap_indicator: c(rgba(0xe3e4e229)),
-            indent_guide: c(rgb(0x404040)),
-            indent_guide_active: c(rgb(0x707070)),
-            ruler: c(rgb(0x5a5a5a)),
-            unnecessary_code_opacity: c(rgba(0x000000aa)),
-            unnecessary_code_border: gpui::transparent_black(),
-            selection_highlight_overview: c(rgba(0xa0a0a0cc)),
-            widget_background: c(rgb(0x252526)),
-            widget_foreground: c(rgb(0xcccccc)),
-            widget_border: c(rgb(0x454545)),
-            snippet_tabstop_background: c(rgba(0x7c7c7c4d)),
-            snippet_tabstop_border: gpui::transparent_black(),
-            snippet_final_tabstop_background: gpui::transparent_black(),
-            snippet_final_tabstop_border: c(rgb(0x525252)),
-            suggest_background: c(rgb(0x252526)),
-            suggest_border: c(rgb(0x454545)),
-            suggest_foreground: c(rgb(0xd4d4d4)),
-            suggest_selected_foreground: c(rgb(0xffffff)),
-            suggest_selected_background: c(rgb(0x04395e)),
-            suggest_highlight_foreground: c(rgb(0x2aaaff)),
-            suggest_focus_highlight_foreground: c(rgb(0x2aaaff)),
-            input_background: c(rgb(0x3c3c3c)),
-            input_option_active_background: c(rgba(0x007fd466)),
-            input_option_active_border: c(rgb(0x007acc)),
-            bracket_match_background: c(rgba(0x0064001a)),
-            bracket_match_border: c(rgb(0x888888)),
-            overview_ruler_bracket_match: c(rgb(0xa0a0a0)),
-            minimap_background: None,
-            minimap_slider: c(rgba(0x79797933)),
-            minimap_slider_hover: c(rgba(0x64646459)),
-            sticky_scroll_background: None,
-            sticky_scroll_hover_background: c(rgb(0x2a2d2e)),
-            focus_border: c(rgb(0x007fd4)),
-            inline_edit: InlineEditColors::default(),
-            // Monaco's `foreground` is #CCCCCC.
-            symbol_icons: SymbolIconColors::new(c(rgb(0xcccccc)), false),
-            // `listActiveSelectionBackground`, `listActiveSelectionForeground`
-            // and `editorInfo.foreground`.
-            banner_background: c(rgb(0x04395e)),
-            banner_foreground: c(rgb(0xffffff)),
-            banner_icon_foreground: c(rgb(0x3794ff)),
-        }
-    }
-
-    /// Monaco `vs`.
-    pub fn vs() -> Self {
-        Self {
-            background: c(rgb(0xfffffe)),
-            foreground: c(rgb(0x000000)),
-            line_number: c(rgb(0x237893)),
-            active_line_number: c(rgb(0x0b216f)),
-            line_highlight_background: None,
-            line_highlight_border: Some(c(rgb(0xeeeeee))),
-            selection_background: c(rgb(0xadd6ff)),
-            selection_foreground: None,
-            diff_inserted_text_background: c(rgba(0x9ccc2c40)),
-            diff_removed_text_background: c(rgba(0xff000033)),
-            diff_inserted_text_border: None,
-            diff_removed_text_border: None,
-            diff_inserted_line_background: c(rgba(0x9bb95533)),
-            diff_removed_line_background: c(rgba(0xff000033)),
-            diff_gutter_inserted_line_background: c(rgba(0x9bb95533)),
-            diff_gutter_removed_line_background: c(rgba(0xff000033)),
-            diff_diagonal_fill: c(rgba(0x22222233)),
-            diff_unchanged_region_background: c(rgb(0xfffffe)),
-            diff_unchanged_region_foreground: c(rgb(0x616161)),
-            diff_unchanged_region_shadow: c(rgba(0x737373bf)),
-            diff_unchanged_code_background: c(rgba(0xb8b8b829)),
-            gutter_item_background: c(rgb(0xd4d7e9)),
-            gutter_item_glyph_foreground: c(rgb(0x000000)),
-            menu_separator_background: c(rgb(0xd4d4d4)),
-            diff_move_border: c(rgba(0x8b8b8b9c)),
-            diff_move_active_border: c(rgb(0xffa500)),
-            multi_diff_header_background: c(rgb(0xececec)),
-            multi_diff_border: c(rgba(0xccccccff)),
-            inactive_selection_background: c(rgb(0xe5ebf1)),
-            cursor: c(rgb(0x000000)),
-            gutter_background: c(rgb(0xfffffe)),
-            scrollbar_slider: c(rgba(0x64646466)),
-            scrollbar_slider_hover: c(rgba(0x646464b3)),
-            scrollbar_slider_active: c(rgba(0x00000099)),
-            scrollbar_shadow: c(rgb(0xdddddd)),
-            overview_ruler_border: c(rgba(0x7f7f7f4d)),
-            ime_underline: c(rgb(0x000000)),
-            find_match_background: c(rgb(0xa8ac94)),
-            find_match_highlight_background: c(rgba(0xea5c0055)),
-            find_match_overview: c(rgba(0xd186167e)),
-            find_range_highlight_background: c(rgba(0xb4b4b44c)),
-            error_foreground: c(rgb(0xa1260d)),
-            symbol_highlight_background: c(rgba(0xea5c0055)),
-            link_active_foreground: c(rgb(0x0000ff)),
-            range_highlight_background: c(rgba(0xfdff0033)),
-            color_decoration_border: c(rgba(0x000000ff)),
-            button_background: c(rgb(0x007acc)),
-            menu_selection_background: c(rgb(0x0060c0)),
-            menu_selection_foreground: c(rgb(0xffffff)),
-            button_foreground: c(rgb(0xffffff)),
-            code_lens_foreground: c(rgb(0x999999)),
-            linked_editing_background: c(rgba(0xff00004d)),
-            ghost_text_foreground: c(rgba(0x00000077)),
-            ghost_text_background: gpui::transparent_black(),
-            ghost_text_border: gpui::transparent_black(),
-            placeholder_foreground: c(rgba(0x00000077)),
-            unicode_highlight_border: c(rgb(0xbf8803)),
-            unicode_highlight_background: gpui::transparent_black(),
-            message_background: c(rgb(0xd6ecf2)),
-            message_border: c(rgb(0x007acc)),
-            fold_background: c(rgba(0xadd6ff4d)),
-            inlay_hint_foreground: c(rgb(0x969696)),
-            inlay_hint_background: c(rgba(0xc4c4c41a)),
-            inlay_hint_type_foreground: c(rgb(0x969696)),
-            inlay_hint_type_background: c(rgba(0xc4c4c41a)),
-            inlay_hint_parameter_foreground: c(rgb(0x969696)),
-            inlay_hint_parameter_background: c(rgba(0xc4c4c41a)),
-            lightbulb_foreground: c(rgb(0xddb100)),
-            lightbulb_auto_fix_foreground: c(rgb(0x007acc)),
-            peek_view_border: c(rgb(0x1a85ff)),
-            peek_view_title_background: c(rgb(0xf3f3f3)),
-            peek_view_title_foreground: c(rgb(0x000000)),
-            peek_view_title_description_foreground: c(rgba(0x00616161)),
-            peek_view_result_background: c(rgb(0xf3f3f3)),
-            peek_view_result_line_foreground: c(rgb(0x646465)),
-            peek_view_result_file_foreground: c(rgb(0x1e1e1e)),
-            peek_view_result_selection_background: c(rgba(0x3399ff33)),
-            peek_view_result_selection_foreground: c(rgb(0x6c6c6c)),
-            peek_view_result_match_highlight_background: c(rgba(0xea5c004d)),
-            peek_view_editor_background: c(rgb(0xf2f8fc)),
-            peek_view_editor_match_highlight_background: c(rgba(0xf5d802de)),
-            word_highlight_background: c(rgba(0x57575740)),
-            word_highlight_strong_background: c(rgba(0x0e639c40)),
-            word_highlight_overview: c(rgba(0xa0a0a0cc)),
-            word_highlight_strong_overview: c(rgba(0xc0a0c0cc)),
-            selection_highlight_background: c(rgba(0xadd6ff80)),
-            bracket_highlights: [
-                Some(c(rgb(0x0431fa))),
-                Some(c(rgb(0x319331))),
-                Some(c(rgb(0x7b3814))),
-                None,
-                None,
-                None,
-            ],
-            unexpected_bracket: c(rgba(0xff1212cc)),
-            whitespace: c(rgba(0x33333333)),
-            word_wrap_indicator: c(rgba(0x33333333)),
-            indent_guide: c(rgb(0xd3d3d3)),
-            indent_guide_active: c(rgb(0x939393)),
-            ruler: c(rgb(0xd3d3d3)),
-            unnecessary_code_opacity: c(rgba(0x00000077)),
-            unnecessary_code_border: gpui::transparent_black(),
-            selection_highlight_overview: c(rgba(0xa0a0a0cc)),
-            widget_background: c(rgb(0xf3f3f3)),
-            widget_foreground: c(rgb(0x616161)),
-            widget_border: c(rgb(0xc8c8c8)),
-            snippet_tabstop_background: c(rgba(0x0a32641a)),
-            snippet_tabstop_border: gpui::transparent_black(),
-            snippet_final_tabstop_background: gpui::transparent_black(),
-            snippet_final_tabstop_border: c(rgba(0x0a326480)),
-            suggest_background: c(rgb(0xf3f3f3)),
-            suggest_border: c(rgb(0xc8c8c8)),
-            suggest_foreground: c(rgb(0x000000)),
-            suggest_selected_foreground: c(rgb(0xffffff)),
-            suggest_selected_background: c(rgb(0x0060c0)),
-            suggest_highlight_foreground: c(rgb(0x0066bf)),
-            suggest_focus_highlight_foreground: c(rgb(0xbbe7ff)),
-            input_background: c(rgb(0xffffff)),
-            input_option_active_background: c(rgba(0x007fd433)),
-            input_option_active_border: c(rgb(0x007acc)),
-            bracket_match_background: c(rgba(0x0064001a)),
-            bracket_match_border: c(rgb(0xb9b9b9)),
-            overview_ruler_bracket_match: c(rgb(0xa0a0a0)),
-            minimap_background: None,
-            minimap_slider: c(rgba(0x79797933)),
-            minimap_slider_hover: c(rgba(0x64646459)),
-            sticky_scroll_background: None,
-            sticky_scroll_hover_background: c(rgb(0xf0f0f0)),
-            focus_border: c(rgb(0x0090f1)),
-            inline_edit: InlineEditColors::default(),
-            // Monaco's `foreground` is #616161.
-            symbol_icons: SymbolIconColors::new(c(rgb(0x616161)), true),
-            // `listActiveSelectionBackground`, `listActiveSelectionForeground`
-            // and `editorInfo.foreground`.
-            banner_background: c(rgb(0x0060c0)),
-            banner_foreground: c(rgb(0xffffff)),
-            banner_icon_foreground: c(rgb(0x1a85ff)),
-        }
-    }
-
-    /// Monaco `hc-black`: the theme's own colors plus the `hcDark` registry
-    /// defaults. `contrastBorder` is `#6FC3DF` and `contrastActiveBorder`
-    /// (`focusBorder`) `#F38518`.
-    ///
-    /// Monaco outlines find matches, word/selection/symbol highlights and
-    /// range highlights with `contrastActiveBorder` instead of filling them
-    /// (their `hcDark` backgrounds are `null`); with no border slots here,
-    /// those are approximated by translucent `#F38518` fills.
-    pub fn hc_black() -> Self {
-        // An approximated outline-only highlight (see above).
-        let outline_fill = c(rgba(0xf3851833));
-        Self {
-            background: c(rgb(0x000000)),
-            foreground: c(rgb(0xffffff)),
-            line_number: c(rgb(0xffffff)),
-            active_line_number: c(rgb(0xf38518)),
-            line_highlight_background: None,
-            line_highlight_border: Some(c(rgb(0xf38518))),
-            selection_background: c(rgb(0xf3f518)),
-            selection_foreground: Some(c(rgb(0x000000))),
-            diff_inserted_text_background: c(rgba(0x00000000)),
-            diff_removed_text_background: c(rgba(0x00000000)),
-            diff_inserted_text_border: Some(c(rgba(0x33ff2eff))),
-            diff_removed_text_border: Some(c(rgba(0xff008fff))),
-            diff_inserted_line_background: c(rgba(0x00000000)),
-            diff_removed_line_background: c(rgba(0x00000000)),
-            diff_gutter_inserted_line_background: c(rgba(0x00000000)),
-            diff_gutter_removed_line_background: c(rgba(0x00000000)),
-            diff_diagonal_fill: c(rgba(0xcccccc33)),
-            diff_unchanged_region_background: c(rgb(0x000000)),
-            diff_unchanged_region_foreground: c(rgb(0xffffff)),
-            diff_unchanged_region_shadow: c(rgba(0x000000ff)),
-            diff_unchanged_code_background: c(rgba(0x00000000)),
-            gutter_item_background: c(rgb(0xffffff)),
-            gutter_item_glyph_foreground: c(rgb(0x000000)),
-            menu_separator_background: c(rgb(0x6fc3df)),
-            diff_move_border: c(rgba(0x8b8b8b9c)),
-            diff_move_active_border: c(rgb(0xffa500)),
-            multi_diff_header_background: c(rgb(0x000000)),
-            multi_diff_border: c(rgba(0x6fc3dfff)),
-            inactive_selection_background: c(rgba(0xf3f518b3)),
-            cursor: c(rgb(0xffffff)),
-            gutter_background: c(rgb(0x000000)),
-            scrollbar_slider: c(rgba(0x6fc3df99)),
-            scrollbar_slider_hover: c(rgba(0x6fc3dfcc)),
-            scrollbar_slider_active: c(rgb(0x6fc3df)),
-            scrollbar_shadow: gpui::transparent_black(),
-            overview_ruler_border: c(rgba(0x7f7f7f4d)),
-            ime_underline: c(rgb(0xffffff)),
-            find_match_background: c(rgba(0xf3851866)),
-            find_match_highlight_background: outline_fill,
-            find_match_overview: c(rgb(0xab5a00)),
-            find_range_highlight_background: gpui::transparent_black(),
-            error_foreground: c(rgb(0xf48771)),
-            symbol_highlight_background: outline_fill,
-            link_active_foreground: c(rgb(0x00ffff)),
-            range_highlight_background: outline_fill,
-            color_decoration_border: c(rgba(0xeeeeeeff)),
-            // `menu.selectionBackground` is `null` (outlined); approximated.
-            menu_selection_background: outline_fill,
-            menu_selection_foreground: c(rgb(0xffffff)),
-            // `button.background` is `null` (a bordered button); hc-light's
-            // fill keeps it visible.
-            button_background: c(rgb(0x0f4a85)),
-            button_foreground: c(rgb(0xffffff)),
-            code_lens_foreground: c(rgb(0x999999)),
-            linked_editing_background: c(rgba(0xff00004d)),
-            // `editorGhostText.foreground` is `null`: ghost text keeps the
-            // text color and gets a border instead.
-            ghost_text_foreground: c(rgb(0xffffff)),
-            ghost_text_background: gpui::transparent_black(),
-            ghost_text_border: c(rgba(0xffffffcc)),
-            placeholder_foreground: c(rgb(0xffffff)),
-            unicode_highlight_border: c(rgb(0xffd370)),
-            unicode_highlight_background: gpui::transparent_black(),
-            message_background: c(rgb(0x000000)),
-            message_border: c(rgb(0x6fc3df)),
-            fold_background: gpui::transparent_black(),
-            inlay_hint_foreground: c(rgb(0xffffff)),
-            inlay_hint_background: c(rgba(0xffffff1a)),
-            inlay_hint_type_foreground: c(rgb(0xffffff)),
-            inlay_hint_type_background: c(rgba(0xffffff1a)),
-            inlay_hint_parameter_foreground: c(rgb(0xffffff)),
-            inlay_hint_parameter_background: c(rgba(0xffffff1a)),
-            lightbulb_foreground: c(rgb(0xffcc00)),
-            lightbulb_auto_fix_foreground: c(rgb(0x75beff)),
-            peek_view_border: c(rgb(0x6fc3df)),
-            peek_view_title_background: c(rgb(0x000000)),
-            peek_view_title_foreground: c(rgb(0xffffff)),
-            peek_view_title_description_foreground: c(rgba(0xffffff99)),
-            peek_view_result_background: c(rgb(0x000000)),
-            peek_view_result_line_foreground: c(rgb(0xffffff)),
-            peek_view_result_file_foreground: c(rgb(0xffffff)),
-            peek_view_result_selection_background: outline_fill,
-            peek_view_result_selection_foreground: c(rgb(0xffffff)),
-            peek_view_result_match_highlight_background: outline_fill,
-            peek_view_editor_background: c(rgb(0x000000)),
-            peek_view_editor_match_highlight_background: outline_fill,
-            word_highlight_background: outline_fill,
-            word_highlight_strong_background: c(rgba(0xf385184d)),
-            word_highlight_overview: c(rgba(0xa0a0a0cc)),
-            word_highlight_strong_overview: c(rgba(0xc0a0c0cc)),
-            selection_highlight_background: outline_fill,
-            bracket_highlights: [
-                Some(c(rgb(0xffd700))),
-                Some(c(rgb(0xda70d6))),
-                Some(c(rgb(0x87cefa))),
-                None,
-                None,
-                None,
-            ],
-            unexpected_bracket: c(rgb(0xff3232)),
-            whitespace: c(rgba(0xe3e4e229)),
-            word_wrap_indicator: c(rgba(0xe3e4e229)),
-            indent_guide: c(rgb(0xffffff)),
-            indent_guide_active: c(rgb(0xffffff)),
-            ruler: c(rgb(0xffffff)),
-            // `editorUnnecessaryCode.opacity` is `null`: unused code is
-            // underlined instead of faded.
-            unnecessary_code_opacity: c(rgba(0x000000ff)),
-            unnecessary_code_border: c(rgba(0xffffffcc)),
-            selection_highlight_overview: c(rgba(0xa0a0a0cc)),
-            widget_background: c(rgb(0x0c141f)),
-            widget_foreground: c(rgb(0xffffff)),
-            widget_border: c(rgb(0x6fc3df)),
-            snippet_tabstop_background: c(rgba(0x7c7c7c4d)),
-            snippet_tabstop_border: gpui::transparent_black(),
-            snippet_final_tabstop_background: gpui::transparent_black(),
-            snippet_final_tabstop_border: c(rgb(0x525252)),
-            suggest_background: c(rgb(0x0c141f)),
-            suggest_border: c(rgb(0x6fc3df)),
-            suggest_foreground: c(rgb(0xffffff)),
-            // The focused row is inverted.
-            suggest_selected_foreground: c(rgb(0x0c141f)),
-            suggest_selected_background: c(rgb(0xffffff)),
-            suggest_highlight_foreground: c(rgb(0xf38518)),
-            suggest_focus_highlight_foreground: c(rgb(0x0c141f)),
-            input_background: c(rgb(0x000000)),
-            input_option_active_background: gpui::transparent_black(),
-            input_option_active_border: c(rgb(0x6fc3df)),
-            bracket_match_background: c(rgba(0x0064001a)),
-            bracket_match_border: c(rgb(0x6fc3df)),
-            overview_ruler_bracket_match: c(rgb(0xa0a0a0)),
-            minimap_background: None,
-            minimap_slider: c(rgba(0x6fc3df4d)),
-            minimap_slider_hover: c(rgba(0x6fc3df66)),
-            sticky_scroll_background: None,
-            // `editorStickyScrollHover.background` is `null`.
-            sticky_scroll_hover_background: gpui::transparent_black(),
-            focus_border: c(rgb(0xf38518)),
-            inline_edit: InlineEditColors::default(),
-            // Monaco's `foreground` is #FFFFFF.
-            symbol_icons: SymbolIconColors::new(c(rgb(0xffffff)), false),
-            // The list selection colors are `null` in high contrast.
-            banner_background: gpui::transparent_black(),
-            banner_foreground: c(rgb(0xffffff)),
-            banner_icon_foreground: c(rgb(0x3794ff)),
-        }
-    }
-
-    /// Monaco `hc-light`: the theme's own colors plus the `hcLight` registry
-    /// defaults. `contrastBorder` is `#0F4A85` and `contrastActiveBorder`
-    /// (`focusBorder`) `#006BBD`.
-    ///
-    /// As in [`EditorColors::hc_black`], highlights Monaco only outlines are
-    /// approximated by translucent `#006BBD` fills.
-    pub fn hc_light() -> Self {
-        // An approximated outline-only highlight (see `hc_black`).
-        let outline_fill = c(rgba(0x006bbd33));
-        Self {
-            background: c(rgb(0xffffff)),
-            foreground: c(rgb(0x292929)),
-            line_number: c(rgb(0x292929)),
-            active_line_number: c(rgb(0x006bbd)),
-            line_highlight_background: None,
-            line_highlight_border: Some(c(rgb(0x0f4a85))),
-            selection_background: c(rgb(0x0f4a85)),
-            selection_foreground: Some(c(rgb(0xffffff))),
-            diff_inserted_text_background: c(rgba(0x00000000)),
-            diff_removed_text_background: c(rgba(0x00000000)),
-            diff_inserted_text_border: Some(c(rgba(0x374e06ff))),
-            diff_removed_text_border: Some(c(rgba(0xad0707ff))),
-            diff_inserted_line_background: c(rgba(0x00000000)),
-            diff_removed_line_background: c(rgba(0x00000000)),
-            diff_gutter_inserted_line_background: c(rgba(0x00000000)),
-            diff_gutter_removed_line_background: c(rgba(0x00000000)),
-            diff_diagonal_fill: c(rgba(0x22222233)),
-            diff_unchanged_region_background: c(rgb(0xffffff)),
-            diff_unchanged_region_foreground: c(rgb(0x292929)),
-            diff_unchanged_region_shadow: c(rgba(0x737373bf)),
-            diff_unchanged_code_background: c(rgba(0x00000000)),
-            gutter_item_background: c(rgb(0x000000)),
-            gutter_item_glyph_foreground: c(rgb(0xffffff)),
-            menu_separator_background: c(rgb(0x0f4a85)),
-            diff_move_border: c(rgba(0x8b8b8b9c)),
-            diff_move_active_border: c(rgb(0xffa500)),
-            multi_diff_header_background: c(rgb(0xffffff)),
-            multi_diff_border: c(rgba(0x0f4a85ff)),
-            inactive_selection_background: c(rgba(0x0f4a8580)),
-            cursor: c(rgb(0x0f4a85)),
-            gutter_background: c(rgb(0xffffff)),
-            scrollbar_slider: c(rgba(0x0f4a8566)),
-            scrollbar_slider_hover: c(rgba(0x0f4a85cc)),
-            scrollbar_slider_active: c(rgb(0x0f4a85)),
-            scrollbar_shadow: gpui::transparent_black(),
-            overview_ruler_border: c(rgb(0x666666)),
-            ime_underline: c(rgb(0x292929)),
-            find_match_background: c(rgba(0x006bbd66)),
-            find_match_highlight_background: outline_fill,
-            find_match_overview: c(rgb(0xab5a00)),
-            find_range_highlight_background: gpui::transparent_black(),
-            error_foreground: c(rgb(0xb5200d)),
-            symbol_highlight_background: outline_fill,
-            link_active_foreground: c(rgb(0x292929)),
-            range_highlight_background: outline_fill,
-            color_decoration_border: c(rgba(0x000000ff)),
-            menu_selection_background: c(rgba(0x0f4a851a)),
-            menu_selection_foreground: c(rgb(0x292929)),
-            button_background: c(rgb(0x0f4a85)),
-            button_foreground: c(rgb(0xffffff)),
-            code_lens_foreground: c(rgb(0x292929)),
-            linked_editing_background: c(rgb(0xffffff)),
-            // `editorGhostText.foreground` is `null`: ghost text keeps the
-            // text color and gets a border instead.
-            ghost_text_foreground: c(rgb(0x292929)),
-            ghost_text_background: gpui::transparent_black(),
-            ghost_text_border: c(rgba(0x292929cc)),
-            placeholder_foreground: c(rgb(0x292929)),
-            unicode_highlight_border: c(rgb(0x895503)),
-            unicode_highlight_background: gpui::transparent_black(),
-            message_background: c(rgb(0xffffff)),
-            message_border: c(rgb(0x0f4a85)),
-            fold_background: gpui::transparent_black(),
-            inlay_hint_foreground: c(rgb(0x000000)),
-            inlay_hint_background: c(rgba(0x0f4a851a)),
-            inlay_hint_type_foreground: c(rgb(0x000000)),
-            inlay_hint_type_background: c(rgba(0x0f4a851a)),
-            inlay_hint_parameter_foreground: c(rgb(0x000000)),
-            inlay_hint_parameter_background: c(rgba(0x0f4a851a)),
-            lightbulb_foreground: c(rgb(0x007acc)),
-            lightbulb_auto_fix_foreground: c(rgb(0x007acc)),
-            peek_view_border: c(rgb(0x0f4a85)),
-            peek_view_title_background: c(rgb(0xffffff)),
-            peek_view_title_foreground: c(rgb(0x292929)),
-            peek_view_title_description_foreground: c(rgb(0x292929)),
-            peek_view_result_background: c(rgb(0xffffff)),
-            peek_view_result_line_foreground: c(rgb(0x292929)),
-            peek_view_result_file_foreground: c(rgb(0x292929)),
-            peek_view_result_selection_background: outline_fill,
-            peek_view_result_selection_foreground: c(rgb(0x292929)),
-            peek_view_result_match_highlight_background: outline_fill,
-            peek_view_editor_background: c(rgb(0xffffff)),
-            peek_view_editor_match_highlight_background: outline_fill,
-            word_highlight_background: outline_fill,
-            word_highlight_strong_background: c(rgba(0x006bbd4d)),
-            word_highlight_overview: c(rgba(0xa0a0a0cc)),
-            word_highlight_strong_overview: c(rgba(0xc0a0c0cc)),
-            selection_highlight_background: outline_fill,
-            bracket_highlights: [
-                Some(c(rgb(0x0431fa))),
-                Some(c(rgb(0x319331))),
-                Some(c(rgb(0x7b3814))),
-                None,
-                None,
-                None,
-            ],
-            unexpected_bracket: c(rgb(0xb5200d)),
-            whitespace: c(rgb(0xcccccc)),
-            word_wrap_indicator: c(rgb(0xcccccc)),
-            indent_guide: c(rgb(0x292929)),
-            indent_guide_active: c(rgb(0x292929)),
-            ruler: c(rgb(0x292929)),
-            // `editorUnnecessaryCode.opacity` is `null`: unused code is
-            // underlined instead of faded.
-            unnecessary_code_opacity: c(rgba(0x000000ff)),
-            unnecessary_code_border: c(rgb(0x0f4a85)),
-            selection_highlight_overview: c(rgba(0xa0a0a0cc)),
-            widget_background: c(rgb(0xffffff)),
-            widget_foreground: c(rgb(0x292929)),
-            widget_border: c(rgb(0x0f4a85)),
-            snippet_tabstop_background: c(rgba(0x0a326433)),
-            snippet_tabstop_border: gpui::transparent_black(),
-            snippet_final_tabstop_background: gpui::transparent_black(),
-            snippet_final_tabstop_border: c(rgb(0x292929)),
-            suggest_background: c(rgb(0xffffff)),
-            suggest_border: c(rgb(0x0f4a85)),
-            suggest_foreground: c(rgb(0x292929)),
-            // The focused row is inverted.
-            suggest_selected_foreground: c(rgb(0xffffff)),
-            suggest_selected_background: c(rgb(0x292929)),
-            suggest_highlight_foreground: c(rgb(0x006bbd)),
-            suggest_focus_highlight_foreground: c(rgb(0xffffff)),
-            input_background: c(rgb(0xffffff)),
-            input_option_active_background: gpui::transparent_black(),
-            input_option_active_border: c(rgb(0x0f4a85)),
-            bracket_match_background: gpui::transparent_black(),
-            bracket_match_border: c(rgb(0x0f4a85)),
-            overview_ruler_bracket_match: c(rgb(0xa0a0a0)),
-            minimap_background: None,
-            minimap_slider: c(rgba(0x0f4a8533)),
-            minimap_slider_hover: c(rgba(0x0f4a8566)),
-            sticky_scroll_background: None,
-            sticky_scroll_hover_background: c(rgba(0x0f4a851a)),
-            focus_border: c(rgb(0x006bbd)),
-            inline_edit: InlineEditColors::default(),
-            // Monaco's `foreground` is #292929.
-            symbol_icons: SymbolIconColors::new(c(rgb(0x292929)), true),
-            // The list selection colors are `null` in high contrast.
-            banner_background: gpui::transparent_black(),
-            banner_foreground: c(rgb(0x292929)),
-            banner_icon_foreground: c(rgb(0x1a85ff)),
-        }
-    }
-
-    /// Applies VS Code workbench color keys (`editor.background`, ...).
-    fn apply_vscode_colors(&mut self, colors: &HashMap<String, String>) {
-        let get = |key: &str| colors.get(key).and_then(|value| parse_hex_color(value));
-        let set = |slot: &mut Hsla, key: &str| {
-            if let Some(color) = get(key) {
-                *slot = color;
-            }
-        };
-        let previous_background = self.background;
-        set(&mut self.background, "editor.background");
-        set(&mut self.foreground, "editor.foreground");
-        set(&mut self.line_number, "editorLineNumber.foreground");
-        set(
-            &mut self.active_line_number,
-            "editorLineNumber.activeForeground",
-        );
-        set(&mut self.selection_background, "editor.selectionBackground");
-        set(
-            &mut self.diff_inserted_text_background,
-            "diffEditor.insertedTextBackground",
-        );
-        set(
-            &mut self.diff_removed_text_background,
-            "diffEditor.removedTextBackground",
-        );
-        if let Some(color) = get("diffEditor.insertedTextBorder") {
-            self.diff_inserted_text_border = Some(color);
-        }
-        if let Some(color) = get("diffEditor.removedTextBorder") {
-            self.diff_removed_text_border = Some(color);
-        }
-        set(
-            &mut self.diff_inserted_line_background,
-            "diffEditor.insertedLineBackground",
-        );
-        set(
-            &mut self.diff_removed_line_background,
-            "diffEditor.removedLineBackground",
-        );
-        // The gutter defaults to the line backgrounds.
-        self.diff_gutter_inserted_line_background = get("diffEditorGutter.insertedLineBackground")
-            .unwrap_or(self.diff_inserted_line_background);
-        self.diff_gutter_removed_line_background = get("diffEditorGutter.removedLineBackground")
-            .unwrap_or(self.diff_removed_line_background);
-        set(&mut self.diff_diagonal_fill, "diffEditor.diagonalFill");
-        // The bars default to the editor's background and foreground.
-        self.diff_unchanged_region_background = get("diffEditor.unchangedRegionBackground")
-            .or_else(|| get("sideBySideEditor.background"))
-            .or_else(|| get("editor.background"))
-            .unwrap_or(self.diff_unchanged_region_background);
-        self.diff_unchanged_region_foreground = get("diffEditor.unchangedRegionForeground")
-            .or_else(|| get("foreground"))
-            .unwrap_or(self.diff_unchanged_region_foreground);
-        set(
-            &mut self.diff_unchanged_region_shadow,
-            "diffEditor.unchangedRegionShadow",
-        );
-        set(
-            &mut self.diff_unchanged_code_background,
-            "diffEditor.unchangedCodeBackground",
-        );
-        set(
-            &mut self.gutter_item_background,
-            "editorGutter.itemBackground",
-        );
-        set(
-            &mut self.gutter_item_glyph_foreground,
-            "editorGutter.itemGlyphForeground",
-        );
-        set(
-            &mut self.menu_separator_background,
-            "menu.separatorBackground",
-        );
-        if let Some(color) = get("editor.selectionForeground") {
-            self.selection_foreground = Some(color);
-        }
-        set(
-            &mut self.inactive_selection_background,
-            "editor.inactiveSelectionBackground",
-        );
-        set(&mut self.cursor, "editorCursor.foreground");
-        set(
-            &mut self.ghost_text_foreground,
-            "editorGhostText.foreground",
-        );
-        set(
-            &mut self.ghost_text_background,
-            "editorGhostText.background",
-        );
-        set(&mut self.ghost_text_border, "editorGhostText.border");
-        let inline_edit = &mut self.inline_edit;
-        for (slot, key) in [
-            (
-                &mut inline_edit.original_background,
-                "inlineEdit.originalBackground",
-            ),
-            (
-                &mut inline_edit.modified_background,
-                "inlineEdit.modifiedBackground",
-            ),
-            (
-                &mut inline_edit.original_changed_line_background,
-                "inlineEdit.originalChangedLineBackground",
-            ),
-            (
-                &mut inline_edit.original_changed_text_background,
-                "inlineEdit.originalChangedTextBackground",
-            ),
-            (
-                &mut inline_edit.modified_changed_line_background,
-                "inlineEdit.modifiedChangedLineBackground",
-            ),
-            (
-                &mut inline_edit.modified_changed_text_background,
-                "inlineEdit.modifiedChangedTextBackground",
-            ),
-            (
-                &mut inline_edit.original_border,
-                "inlineEdit.originalBorder",
-            ),
-            (
-                &mut inline_edit.modified_border,
-                "inlineEdit.modifiedBorder",
-            ),
-        ] {
-            if let Some(color) = get(key) {
-                *slot = Some(color);
-            }
-        }
-        for (slots, kind) in [
-            (&mut inline_edit.gutter_indicator_primary, "primary"),
-            (&mut inline_edit.gutter_indicator_secondary, "secondary"),
-            (&mut inline_edit.gutter_indicator_successful, "successful"),
-        ] {
-            for (slot, part) in slots.iter_mut().zip(["Foreground", "Border", "Background"]) {
-                if let Some(color) = get(&format!("inlineEdit.gutterIndicator.{kind}{part}")) {
-                    *slot = Some(color);
-                }
-            }
-        }
-        self.symbol_icons.apply_vscode_colors(&get);
-        set(&mut self.banner_background, "banner.background");
-        set(&mut self.banner_foreground, "banner.foreground");
-        set(&mut self.banner_icon_foreground, "banner.iconForeground");
-        self.unicode_highlight_border = get("editorUnicodeHighlight.border")
-            .or_else(|| get("editorWarning.foreground"))
-            .unwrap_or(self.unicode_highlight_border);
-        self.unicode_highlight_background = get("editorUnicodeHighlight.background")
-            .or_else(|| get("editorWarning.background"))
-            .unwrap_or(self.unicode_highlight_background);
-        self.placeholder_foreground = get("editor.placeholder.foreground")
-            .or_else(|| get("editorGhostText.foreground"))
-            .unwrap_or(self.placeholder_foreground);
-        set(&mut self.scrollbar_slider, "scrollbarSlider.background");
-        set(
-            &mut self.scrollbar_slider_hover,
-            "scrollbarSlider.hoverBackground",
-        );
-        set(
-            &mut self.scrollbar_slider_active,
-            "scrollbarSlider.activeBackground",
-        );
-        set(&mut self.scrollbar_shadow, "scrollbar.shadow");
-        set(
-            &mut self.overview_ruler_border,
-            "editorOverviewRuler.border",
-        );
-        set(
-            &mut self.find_match_background,
-            "editor.findMatchBackground",
-        );
-        set(
-            &mut self.find_match_highlight_background,
-            "editor.findMatchHighlightBackground",
-        );
-        set(
-            &mut self.find_range_highlight_background,
-            "editor.findRangeHighlightBackground",
-        );
-        set(&mut self.error_foreground, "errorForeground");
-        set(
-            &mut self.sticky_scroll_hover_background,
-            "editorStickyScrollHover.background",
-        );
-        set(&mut self.focus_border, "focusBorder");
-        set(
-            &mut self.find_match_overview,
-            "editorOverviewRuler.findMatchForeground",
-        );
-        self.symbol_highlight_background = self.find_match_highlight_background;
-        set(
-            &mut self.symbol_highlight_background,
-            "editor.symbolHighlightBackground",
-        );
-        set(
-            &mut self.message_background,
-            "inputValidation.infoBackground",
-        );
-        set(&mut self.message_border, "inputValidation.infoBorder");
-        set(&mut self.fold_background, "editor.foldBackground");
-        set(
-            &mut self.link_active_foreground,
-            "editorLink.activeForeground",
-        );
-        set(
-            &mut self.inlay_hint_foreground,
-            "editorInlayHint.foreground",
-        );
-        set(
-            &mut self.inlay_hint_background,
-            "editorInlayHint.background",
-        );
-        // The kind colors default to the general ones.
-        self.inlay_hint_type_foreground = self.inlay_hint_foreground;
-        self.inlay_hint_type_background = self.inlay_hint_background;
-        self.inlay_hint_parameter_foreground = self.inlay_hint_foreground;
-        self.inlay_hint_parameter_background = self.inlay_hint_background;
-        set(
-            &mut self.inlay_hint_type_foreground,
-            "editorInlayHint.typeForeground",
-        );
-        set(
-            &mut self.inlay_hint_type_background,
-            "editorInlayHint.typeBackground",
-        );
-        set(
-            &mut self.inlay_hint_parameter_foreground,
-            "editorInlayHint.parameterForeground",
-        );
-        set(
-            &mut self.inlay_hint_parameter_background,
-            "editorInlayHint.parameterBackground",
-        );
-        set(&mut self.lightbulb_foreground, "editorLightBulb.foreground");
-        set(
-            &mut self.lightbulb_auto_fix_foreground,
-            "editorLightBulbAutoFix.foreground",
-        );
-        set(&mut self.peek_view_border, "peekView.border");
-        set(
-            &mut self.peek_view_title_background,
-            "peekViewTitle.background",
-        );
-        set(
-            &mut self.peek_view_title_foreground,
-            "peekViewTitleLabel.foreground",
-        );
-        set(
-            &mut self.peek_view_title_description_foreground,
-            "peekViewTitleDescription.foreground",
-        );
-        set(
-            &mut self.peek_view_result_background,
-            "peekViewResult.background",
-        );
-        set(
-            &mut self.peek_view_result_line_foreground,
-            "peekViewResult.lineForeground",
-        );
-        set(
-            &mut self.peek_view_result_file_foreground,
-            "peekViewResult.fileForeground",
-        );
-        set(
-            &mut self.peek_view_result_selection_background,
-            "peekViewResult.selectionBackground",
-        );
-        set(
-            &mut self.peek_view_result_selection_foreground,
-            "peekViewResult.selectionForeground",
-        );
-        set(
-            &mut self.peek_view_result_match_highlight_background,
-            "peekViewResult.matchHighlightBackground",
-        );
-        set(
-            &mut self.peek_view_editor_background,
-            "peekViewEditor.background",
-        );
-        set(
-            &mut self.peek_view_editor_match_highlight_background,
-            "peekViewEditor.matchHighlightBackground",
-        );
-        set(
-            &mut self.word_highlight_background,
-            "editor.wordHighlightBackground",
-        );
-        set(
-            &mut self.word_highlight_strong_background,
-            "editor.wordHighlightStrongBackground",
-        );
-        set(
-            &mut self.word_highlight_overview,
-            "editorOverviewRuler.wordHighlightForeground",
-        );
-        set(
-            &mut self.word_highlight_strong_overview,
-            "editorOverviewRuler.wordHighlightStrongForeground",
-        );
-        set(
-            &mut self.selection_highlight_background,
-            "editor.selectionHighlightBackground",
-        );
-        set(
-            &mut self.selection_highlight_overview,
-            "editorOverviewRuler.selectionHighlightForeground",
-        );
-        for (i, slot) in self.bracket_highlights.iter_mut().enumerate() {
-            if let Some(color) = get(&format!("editorBracketHighlight.foreground{}", i + 1)) {
-                *slot = (color.a > 0.).then_some(color);
-            }
-        }
-        set(
-            &mut self.unexpected_bracket,
-            "editorBracketHighlight.unexpectedBracket.foreground",
-        );
-        set(&mut self.whitespace, "editorWhitespace.foreground");
-        self.word_wrap_indicator = get("editorWordWrapIndicator.foreground")
-            .or_else(|| get("editorWhitespace.foreground"))
-            .unwrap_or(self.word_wrap_indicator);
-        set(&mut self.indent_guide, "editorIndentGuide.background");
-        set(&mut self.indent_guide, "editorIndentGuide.background1");
-        set(
-            &mut self.indent_guide_active,
-            "editorIndentGuide.activeBackground",
-        );
-        set(
-            &mut self.indent_guide_active,
-            "editorIndentGuide.activeBackground1",
-        );
-        set(&mut self.ruler, "editorRuler.foreground");
-        set(
-            &mut self.unnecessary_code_opacity,
-            "editorUnnecessaryCode.opacity",
-        );
-        set(
-            &mut self.unnecessary_code_border,
-            "editorUnnecessaryCode.border",
-        );
-        set(&mut self.widget_background, "editorWidget.background");
-        set(&mut self.widget_foreground, "editorWidget.foreground");
-        set(&mut self.widget_border, "editorWidget.border");
-        set(
-            &mut self.snippet_tabstop_background,
-            "editor.snippetTabstopHighlightBackground",
-        );
-        set(
-            &mut self.snippet_tabstop_border,
-            "editor.snippetTabstopHighlightBorder",
-        );
-        set(
-            &mut self.snippet_final_tabstop_background,
-            "editor.snippetFinalTabstopHighlightBackground",
-        );
-        set(
-            &mut self.snippet_final_tabstop_border,
-            "editor.snippetFinalTabstopHighlightBorder",
-        );
-        self.suggest_background = self.widget_background;
-        self.suggest_border = self.widget_border;
-        self.suggest_foreground = self.foreground;
-        set(
-            &mut self.suggest_background,
-            "editorSuggestWidget.background",
-        );
-        set(&mut self.suggest_border, "editorSuggestWidget.border");
-        set(
-            &mut self.suggest_foreground,
-            "editorSuggestWidget.foreground",
-        );
-        set(
-            &mut self.suggest_selected_foreground,
-            "quickInputList.focusForeground",
-        );
-        set(
-            &mut self.suggest_selected_foreground,
-            "editorSuggestWidget.selectedForeground",
-        );
-        set(
-            &mut self.suggest_selected_background,
-            "quickInputList.focusBackground",
-        );
-        set(
-            &mut self.suggest_selected_background,
-            "editorSuggestWidget.selectedBackground",
-        );
-        set(
-            &mut self.suggest_highlight_foreground,
-            "list.highlightForeground",
-        );
-        set(
-            &mut self.suggest_highlight_foreground,
-            "editorSuggestWidget.highlightForeground",
-        );
-        set(
-            &mut self.suggest_focus_highlight_foreground,
-            "list.focusHighlightForeground",
-        );
-        set(
-            &mut self.suggest_focus_highlight_foreground,
-            "editorSuggestWidget.focusHighlightForeground",
-        );
-        set(&mut self.input_background, "input.background");
-        set(&mut self.button_background, "button.background");
-        set(
-            &mut self.menu_selection_background,
-            "menu.selectionBackground",
-        );
-        set(
-            &mut self.menu_selection_foreground,
-            "menu.selectionForeground",
-        );
-        set(&mut self.button_foreground, "button.foreground");
-        set(
-            &mut self.input_option_active_background,
-            "inputOption.activeBackground",
-        );
-        set(
-            &mut self.input_option_active_border,
-            "inputOption.activeBorder",
-        );
-        set(
-            &mut self.bracket_match_background,
-            "editorBracketMatch.background",
-        );
-        set(&mut self.bracket_match_border, "editorBracketMatch.border");
-        set(
-            &mut self.overview_ruler_bracket_match,
-            "editorOverviewRuler.bracketMatchForeground",
-        );
-        set(&mut self.minimap_slider, "minimapSlider.background");
-        set(
-            &mut self.minimap_slider_hover,
-            "minimapSlider.hoverBackground",
-        );
-        if let Some(color) = get("minimap.background") {
-            self.minimap_background = Some(color);
-        }
-        if let Some(color) = get("editorStickyScroll.background") {
-            self.sticky_scroll_background = Some(color);
-        }
-        // The gutter defaults to the editor background (and keeps following
-        // it unless a base theme gave it its own color).
-        match get("editorGutter.background") {
-            Some(color) => self.gutter_background = color,
-            None if self.gutter_background == previous_background => {
-                self.gutter_background = self.background
-            }
-            None => {}
-        }
-        if let Some(color) = get("editor.lineHighlightBackground") {
-            self.line_highlight_background = Some(color);
-        }
-        if let Some(color) = get("editor.lineHighlightBorder") {
-            self.line_highlight_border = Some(color);
-        } else if self.line_highlight_background.is_some() {
-            self.line_highlight_border = None;
-        }
-        self.ime_underline = self.foreground;
-    }
-}
-
-impl EditorColors {
-    /// The color for brackets at nesting `level` (Monaco cycles through the
-    /// non-transparent `editorBracketHighlight.foreground*` colors).
-    pub fn bracket_color(&self, level: u32) -> Option<Hsla> {
-        let colors: Vec<Hsla> = self.bracket_highlights.iter().flatten().copied().collect();
-        (!colors.is_empty()).then(|| colors[level as usize % colors.len()])
-    }
-}
-
 impl Default for EditorColors {
     fn default() -> Self {
         Self::vs_dark()
     }
 }
 
-/// `#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA`.
+/// `#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA` (Monaco `Color.fromHex`), as
+/// theme colors are written.
 pub fn parse_hex_color(value: &str) -> Option<Hsla> {
     let hex = value.trim().strip_prefix('#')?;
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
     let expand = |s: &str| -> String { s.chars().flat_map(|c| [c, c]).collect() };
     let full = match hex.len() {
         3 => format!("{}ff", expand(hex)),
@@ -1827,6 +1400,16 @@ pub fn parse_hex_color(value: &str) -> Option<Hsla> {
     };
     let value = u32::from_str_radix(&full, 16).ok()?;
     Some(rgba(value).into())
+}
+
+/// A Monaco token rule's color: `RRGGBB` or `RRGGBBAA`, with an optional
+/// `#`; the alpha is dropped (Monaco's `ColorMap.getId`).
+pub fn parse_token_color(value: &str) -> Option<Hsla> {
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    if !matches!(hex.len(), 6 | 8) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(rgb(u32::from_str_radix(&hex[..6], 16).ok()?).into())
 }
 
 /// How a token is drawn.
@@ -1846,17 +1429,35 @@ pub struct TokenStyle {
     pub opacity: Option<f32>,
 }
 
-impl TokenStyle {
-    fn from_font_style(foreground: Option<Hsla>, font_style: Option<&str>) -> Self {
-        let font_style = font_style.unwrap_or_default();
-        Self {
-            foreground,
-            bold: font_style.contains("bold"),
-            italic: font_style.contains("italic"),
-            underline: font_style.contains("underline"),
-            strikethrough: font_style.contains("strikethrough"),
-            opacity: None,
+/// A token rule's `fontStyle` (Monaco `FontStyle`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenFontStyle {
+    /// `bold`.
+    pub bold: bool,
+    /// `italic`.
+    pub italic: bool,
+    /// `underline`.
+    pub underline: bool,
+    /// `strikethrough`.
+    pub strikethrough: bool,
+}
+
+impl TokenFontStyle {
+    /// Parses a `fontStyle` such as `"bold italic"`: space-separated whole
+    /// words, the unknown ones ignored, so `""` is no style (Monaco
+    /// `parseTokenTheme`).
+    pub fn parse(font_style: &str) -> Self {
+        let mut style = Self::default();
+        for segment in font_style.split(' ') {
+            match segment {
+                "bold" => style.bold = true,
+                "italic" => style.italic = true,
+                "underline" => style.underline = true,
+                "strikethrough" => style.strikethrough = true,
+                _ => {}
+            }
         }
+        style
     }
 }
 
@@ -1869,16 +1470,47 @@ pub enum RuleKind {
     TextMate,
 }
 
-/// A theme rule: tokens matching `selector` get `style`.
+/// A theme rule: tokens matching `selector` get its color and font style.
+/// Fields left `None` are inherited from the rule for the selector's parent
+/// (`keyword` for `keyword.flow`), as in Monaco's `TokenTheme`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TokenRule {
     /// Which vocabulary `selector` is in.
     pub kind: RuleKind,
-    /// A dotted token name or scope; matches itself and names extending it with `.`
-    /// (`keyword` matches `keyword.control`). The longest match wins, later rules on ties.
+    /// A dotted token name or scope; matches itself and names extending it
+    /// with `.` (`keyword` matches `keyword.control`), the deepest match
+    /// winning. `""` sets the default for every token.
     pub selector: String,
-    /// The style for matching tokens.
-    pub style: TokenStyle,
+    /// Text color; `None` keeps the parent rule's.
+    pub foreground: Option<Hsla>,
+    /// Font style; `None` keeps the parent rule's, and an empty
+    /// [`TokenFontStyle`] (Monaco's `fontStyle: ''`) clears it.
+    pub font_style: Option<TokenFontStyle>,
+}
+
+impl TokenRule {
+    /// A Monaco rule, as `monaco.editor.defineTheme` takes them (`{ token,
+    /// foreground, fontStyle }`). Fails, like Monaco, for a color other than
+    /// `RRGGBB` or `RRGGBBAA` (with an optional `#`; the alpha is ignored).
+    pub fn monaco(
+        token: impl Into<String>,
+        foreground: Option<&str>,
+        font_style: Option<&str>,
+    ) -> anyhow::Result<Self> {
+        let foreground = match foreground {
+            Some(color) => Some(
+                parse_token_color(color)
+                    .ok_or_else(|| anyhow::anyhow!("Illegal value for token color: {color}"))?,
+            ),
+            None => None,
+        };
+        Ok(Self {
+            kind: RuleKind::Monaco,
+            selector: token.into(),
+            foreground,
+            font_style: font_style.map(TokenFontStyle::parse),
+        })
+    }
 }
 
 /// Whether a theme is light or dark (Monaco `base`).
@@ -1899,7 +1531,13 @@ pub struct Theme {
     /// Editor chrome colors.
     pub colors: EditorColors,
     rules: Vec<TokenRule>,
-    cache: Mutex<HashMap<HighlightId, TokenStyle>>,
+    monaco_rules: TokenTrie,
+    textmate_rules: TokenTrie,
+    /// The colors the theme sets itself (Monaco `IStandaloneThemeData.colors`),
+    /// which [`Theme::define`] builds on.
+    own_colors: HashMap<String, Hsla>,
+    /// Styles by highlight and language.
+    cache: Mutex<HashMap<HighlightId, HashMap<String, TokenStyle>>>,
     /// Whether semantic tokens color the text when
     /// `semantic_highlighting` is `ConfiguredByTheme` (VS Code's theme
     /// `semanticHighlighting`; Monaco's standalone themes say no).
@@ -1921,6 +1559,7 @@ impl Clone for Theme {
             self.colors.clone(),
             self.rules.clone(),
         );
+        theme.own_colors = self.own_colors.clone();
         theme.semantic_highlighting = self.semantic_highlighting;
         theme.high_contrast = self.high_contrast;
         theme.semantic_rules = self.semantic_rules.clone();
@@ -1939,12 +1578,33 @@ macro_rules! monaco_rules {
         vec![$(TokenRule {
             kind: RuleKind::Monaco,
             selector: $token.to_string(),
-            style: TokenStyle::from_font_style(
-                if $color.is_empty() { None } else { parse_hex_color(concat!("#", $color)) },
-                None $(.or(Some($style)))?,
-            ),
+            foreground: if $color.is_empty() { None } else { parse_token_color($color) },
+            font_style: None $(.or(Some(TokenFontStyle::parse($style))))?,
         }),*]
     };
+}
+
+fn trie(rules: &[TokenRule], kind: RuleKind) -> TokenTrie {
+    TokenTrie::new(
+        rules
+            .iter()
+            .filter(|rule| rule.kind == kind)
+            .map(|rule| (rule.selector.as_str(), rule.foreground, rule.font_style)),
+    )
+}
+
+/// `token` with the `.language` suffix Monaco's tokens carry, unless it
+/// already ends with it.
+fn with_language(token: &str, language: &str) -> String {
+    if language.is_empty()
+        || token
+            .strip_suffix(language)
+            .is_some_and(|rest| rest.ends_with('.'))
+    {
+        token.to_string()
+    } else {
+        format!("{token}.{language}")
+    }
 }
 
 impl Theme {
@@ -1959,7 +1619,10 @@ impl Theme {
             name: name.into(),
             kind,
             colors,
+            monaco_rules: trie(&rules, RuleKind::Monaco),
+            textmate_rules: trie(&rules, RuleKind::TextMate),
             rules,
+            own_colors: HashMap::new(),
             cache: Mutex::default(),
             semantic_highlighting: false,
             high_contrast: false,
@@ -1973,9 +1636,37 @@ impl Theme {
         &self.rules
     }
 
+    pub(crate) fn scheme(&self) -> ColorScheme {
+        ColorScheme::new(self.kind == ThemeKind::Light, self.high_contrast)
+    }
+
+    fn builtin(
+        name: &str,
+        scheme: ColorScheme,
+        colors: &[(&str, u32)],
+        rules: Vec<TokenRule>,
+    ) -> Self {
+        let own_colors = color_map(colors);
+        let kind = if scheme.is_light() {
+            ThemeKind::Light
+        } else {
+            ThemeKind::Dark
+        };
+        let mut theme = Self::new(
+            name,
+            kind,
+            EditorColors::resolve(scheme, &own_colors),
+            rules,
+        );
+        theme.own_colors = own_colors;
+        theme.high_contrast = scheme.is_high_contrast();
+        theme
+    }
+
     /// Monaco's `vs-dark`.
     pub fn vs_dark() -> Self {
         let rules = monaco_rules! {
+            "" => "D4D4D4";
             "invalid" => "f44747";
             "emphasis" => "", "italic";
             "strong" => "", "bold";
@@ -1993,24 +1684,41 @@ impl Theme {
             "delimiter.html" => "808080";
             "delimiter.xml" => "808080";
             "tag" => "569CD6";
+            "tag.id.pug" => "4F76AC";
+            "tag.class.pug" => "4F76AC";
+            "meta.scss" => "A79873";
             "meta.tag" => "CE9178";
             "metatag" => "DD6A6F";
+            "metatag.content.html" => "9CDCFE";
+            "metatag.html" => "569CD6";
+            "metatag.xml" => "569CD6";
+            "metatag.php" => "", "bold";
             "key" => "9CDCFE";
             "string.key.json" => "9CDCFE";
             "string.value.json" => "CE9178";
             "attribute.name" => "9CDCFE";
             "attribute.value" => "CE9178";
+            "attribute.value.number.css" => "B5CEA8";
+            "attribute.value.unit.css" => "B5CEA8";
+            "attribute.value.hex.css" => "D4D4D4";
             "string" => "CE9178";
+            "string.sql" => "FF0000";
             "keyword" => "569CD6";
             "keyword.flow" => "C586C0";
             "keyword.json" => "CE9178";
+            "keyword.flow.scss" => "569CD6";
+            "operator.scss" => "909090";
+            "operator.sql" => "778899";
+            "operator.swift" => "909090";
+            "predefined.sql" => "FF00FF";
         };
-        Self::new("vs-dark", ThemeKind::Dark, EditorColors::vs_dark(), rules)
+        Self::builtin("vs-dark", ColorScheme::Dark, VS_DARK_COLORS, rules)
     }
 
     /// Monaco's `vs`.
     pub fn vs() -> Self {
         let rules = monaco_rules! {
+            "" => "000000";
             "invalid" => "cd3131";
             "emphasis" => "", "italic";
             "strong" => "", "bold";
@@ -2027,24 +1735,44 @@ impl Theme {
             "delimiter.html" => "383838";
             "delimiter.xml" => "0000FF";
             "tag" => "800000";
+            "tag.id.pug" => "4F76AC";
+            "tag.class.pug" => "4F76AC";
+            "meta.scss" => "800000";
             "metatag" => "e00000";
+            "metatag.content.html" => "FF0000";
+            "metatag.html" => "808080";
+            "metatag.xml" => "808080";
+            "metatag.php" => "", "bold";
             "key" => "863B00";
             "string.key.json" => "A31515";
             "string.value.json" => "0451A5";
             "attribute.name" => "FF0000";
             "attribute.value" => "0451A5";
+            "attribute.value.number" => "098658";
+            "attribute.value.unit" => "098658";
+            "attribute.value.html" => "0000FF";
+            "attribute.value.xml" => "0000FF";
             "string" => "A31515";
+            "string.html" => "0000FF";
+            "string.sql" => "FF0000";
+            "string.yaml" => "0451A5";
             "keyword" => "0000FF";
             "keyword.json" => "0451A5";
             "keyword.flow" => "AF00DB";
+            "keyword.flow.scss" => "0000FF";
+            "operator.scss" => "666666";
+            "operator.sql" => "778899";
+            "operator.swift" => "666666";
+            "predefined.sql" => "C700C7";
         };
-        Self::new("vs", ThemeKind::Light, EditorColors::vs(), rules)
+        Self::builtin("vs", ColorScheme::Light, VS_COLORS, rules)
     }
 
     /// Monaco's `hc-black` (high contrast dark). [`ThemeKind`] has no
     /// high-contrast variant, so its kind is [`ThemeKind::Dark`].
     pub fn hc_black() -> Self {
         let rules = monaco_rules! {
+            "" => "FFFFFF";
             "invalid" => "f44747";
             "emphasis" => "", "italic";
             "strong" => "", "bold";
@@ -2059,27 +1787,36 @@ impl Theme {
             "delimiter" => "FFFF00";
             "delimiter.html" => "FFFF00";
             "tag" => "569CD6";
+            "tag.id.pug" => "4F76AC";
+            "tag.class.pug" => "4F76AC";
             "meta" => "D4D4D4";
             "meta.tag" => "CE9178";
             "metatag" => "569CD6";
+            "metatag.content.html" => "1AEBFF";
+            "metatag.html" => "569CD6";
+            "metatag.xml" => "569CD6";
+            "metatag.php" => "", "bold";
             "key" => "9CDCFE";
             "string.key" => "9CDCFE";
             "string.value" => "CE9178";
             "attribute.name" => "569CD6";
             "attribute.value" => "3FF23F";
             "string" => "CE9178";
+            "string.sql" => "FF0000";
             "keyword" => "569CD6";
             "keyword.flow" => "C586C0";
+            "operator.sql" => "778899";
+            "operator.swift" => "909090";
+            "predefined.sql" => "FF00FF";
         };
-        let mut theme = Self::new("hc-black", ThemeKind::Dark, EditorColors::hc_black(), rules);
-        theme.high_contrast = true;
-        theme
+        Self::builtin("hc-black", ColorScheme::HcDark, HC_BLACK_COLORS, rules)
     }
 
     /// Monaco's `hc-light` (high contrast light). [`ThemeKind`] has no
     /// high-contrast variant, so its kind is [`ThemeKind::Light`].
     pub fn hc_light() -> Self {
         let rules = monaco_rules! {
+            "" => "292929";
             "invalid" => "B5200D";
             "emphasis" => "", "italic";
             "strong" => "", "bold";
@@ -2095,28 +1832,43 @@ impl Theme {
             "delimiter" => "000000";
             "delimiter.html" => "383838";
             "tag" => "800000";
+            "tag.id.pug" => "4F76AC";
+            "tag.class.pug" => "4F76AC";
+            "meta.scss" => "800000";
             "metatag" => "e00000";
+            "metatag.content.html" => "B5200D";
+            "metatag.html" => "808080";
+            "metatag.xml" => "808080";
+            "metatag.php" => "", "bold";
             "key" => "863B00";
             "string.key.json" => "A31515";
             "string.value.json" => "0451A5";
             "attribute.name" => "264F78";
             "attribute.value" => "0451A5";
             "string" => "A31515";
+            "string.sql" => "B5200D";
             "keyword" => "0000FF";
             "keyword.flow" => "AF00DB";
+            "operator.sql" => "778899";
+            "operator.swift" => "666666";
+            "predefined.sql" => "C700C7";
         };
-        let mut theme = Self::new(
-            "hc-light",
-            ThemeKind::Light,
-            EditorColors::hc_light(),
-            rules,
-        );
-        theme.high_contrast = true;
-        theme
+        Self::builtin("hc-light", ColorScheme::HcLight, HC_LIGHT_COLORS, rules)
     }
 
     /// Monaco `defineTheme`: `base` plus extra Monaco rules and VS Code color
-    /// keys. With `inherit: false` the base's token rules are dropped.
+    /// keys.
+    ///
+    /// With `inherit`, the base's rules come first and its colors stay
+    /// unless `colors` changes them, directly or through a color derived
+    /// from one (`editor.selectionBackground` also moves the inactive
+    /// selection). Without it, only `colors` and the registry defaults for
+    /// the base's kind apply, and only `rules`. As in Monaco,
+    /// `editor.foreground` and `editor.background` in `colors` also become a
+    /// `''` rule, the default token style.
+    ///
+    /// Unlike Monaco, which only accepts `vs`, `vs-dark`, `hc-black` and
+    /// `hc-light`, any theme can be the base.
     pub fn define(
         name: impl Into<String>,
         base: &Theme,
@@ -2124,15 +1876,38 @@ impl Theme {
         rules: Vec<TokenRule>,
         colors: &HashMap<String, String>,
     ) -> Self {
+        let scheme = base.scheme();
+        let own = parse_colors(colors);
         let mut all_rules = if inherit {
             base.rules.clone()
         } else {
             Vec::new()
         };
+        if let Some(foreground) = own.get("editor.foreground") {
+            all_rules.push(TokenRule {
+                kind: RuleKind::Monaco,
+                selector: String::new(),
+                foreground: Some(Hsla {
+                    a: 1.,
+                    ..*foreground
+                }),
+                font_style: None,
+            });
+        }
         all_rules.extend(rules);
-        let mut editor_colors = base.colors.clone();
-        editor_colors.apply_vscode_colors(colors);
+        let (editor_colors, own_colors) = if inherit {
+            let mut merged = base.own_colors.clone();
+            merged.extend(own);
+            let before = EditorColors::resolve(scheme, &base.own_colors);
+            let after = EditorColors::resolve(scheme, &merged);
+            let mut colors = base.colors.clone();
+            colors.merge_changed(&before, &after);
+            (colors, merged)
+        } else {
+            (EditorColors::resolve(scheme, &own), own)
+        };
         let mut theme = Self::new(name, base.kind, editor_colors, all_rules);
+        theme.own_colors = own_colors;
         theme.high_contrast = base.high_contrast;
         theme
     }
@@ -2147,6 +1922,9 @@ impl Theme {
     /// Like [`Theme::from_vscode_json`], resolving `include` paths (as written
     /// in the JSON, e.g. `./dark_vs.json`) with `resolve`. Included themes are
     /// applied first, so the including theme's colors and rules win.
+    ///
+    /// Colors the theme doesn't set get the registry defaults for its
+    /// `type`: `light`, `dark`, `hcDark` (or `hc`) or `hcLight`.
     pub fn from_vscode_json_with_includes(
         json: &str,
         resolve: &dyn Fn(&str) -> Option<String>,
@@ -2155,35 +1933,37 @@ impl Theme {
         load_vscode_theme(json, resolve, 0, &mut merged)?;
         // VS Code's bundled themes leave `type` to the extension manifest
         // (`uiTheme`), so fall back to the background's lightness.
-        let kind = match merged.kind.as_deref() {
-            Some("light") | Some("hcLight") => ThemeKind::Light,
-            Some(_) => ThemeKind::Dark,
+        let scheme = match merged.kind.as_deref() {
+            Some("light" | "vs") => ColorScheme::Light,
+            Some("hcLight" | "hc-light") => ColorScheme::HcLight,
+            Some("hc" | "hcDark" | "hc-black") => ColorScheme::HcDark,
+            Some(_) => ColorScheme::Dark,
             None => match merged
                 .colors
                 .get("editor.background")
                 .and_then(|c| parse_hex_color(c))
             {
-                Some(background) if background.l > 0.5 => ThemeKind::Light,
-                _ => ThemeKind::Dark,
+                Some(background) if background.l > 0.5 => ColorScheme::Light,
+                _ => ColorScheme::Dark,
             },
         };
-        let mut colors = match kind {
-            ThemeKind::Light => EditorColors::vs(),
-            ThemeKind::Dark => EditorColors::vs_dark(),
-        };
-        colors.apply_vscode_colors(&merged.colors);
+        let own_colors = parse_colors(&merged.colors);
+        let colors = EditorColors::resolve(scheme, &own_colors);
         let mut rules = Vec::new();
         for token_color in merged.token_colors {
-            let style = TokenStyle::from_font_style(
-                token_color
-                    .settings
-                    .foreground
-                    .as_deref()
-                    .and_then(parse_hex_color),
-                token_color.settings.font_style.as_deref(),
-            );
+            let foreground = token_color
+                .settings
+                .foreground
+                .as_deref()
+                .and_then(parse_hex_color);
+            let font_style = token_color
+                .settings
+                .font_style
+                .as_deref()
+                .map(TokenFontStyle::parse);
             let scopes = match token_color.scope {
-                None => continue,
+                // A rule without a scope sets the defaults.
+                None => vec![String::new()],
                 Some(Scope::One(scopes)) => scopes
                     .split(',')
                     .map(|s| s.trim().to_string())
@@ -2193,27 +1973,29 @@ impl Theme {
             for scope in scopes {
                 // Descendant selectors ("meta.embedded string") are matched on
                 // their last segment only.
-                let Some(selector) = scope.split_whitespace().last() else {
-                    continue;
-                };
+                let selector = scope.split_whitespace().last().unwrap_or_default();
                 rules.push(TokenRule {
                     kind: RuleKind::TextMate,
                     selector: selector.to_string(),
-                    style,
+                    foreground,
+                    font_style,
                 });
             }
         }
+        let kind = if scheme.is_light() {
+            ThemeKind::Light
+        } else {
+            ThemeKind::Dark
+        };
         let mut theme = Self::new(
             merged.name.unwrap_or_else(|| "VS Code theme".into()),
             kind,
             colors,
             rules,
         );
+        theme.own_colors = own_colors;
         theme.semantic_highlighting = merged.semantic_highlighting.unwrap_or(false);
-        theme.high_contrast = matches!(
-            merged.kind.as_deref(),
-            Some("hc" | "hcDark" | "hcLight" | "hc-black" | "hc-light")
-        );
+        theme.high_contrast = scheme.is_high_contrast();
         theme.semantic_rules = merged
             .semantic_token_colors
             .iter()
@@ -2237,52 +2019,90 @@ impl Theme {
         .map_err(std::io::Error::other)
     }
 
-    /// The style for a highlight capture or Monarch token.
+    /// The style for a highlight capture or Monarch token, without a
+    /// language: language-specific rules (`keyword.json`) don't apply to
+    /// captures. See [`Theme::style_for_language`].
     pub fn style_for(&self, highlight: HighlightId) -> TokenStyle {
-        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        *cache.entry(highlight).or_insert_with(|| {
-            if highlight.is_monaco_token() {
-                self.resolve_monaco_token(&highlight.name())
-            } else {
-                self.resolve(&highlight.name())
-            }
-        })
+        self.style_for_language(highlight, None)
     }
 
-    /// The style for a Monarch token such as `keyword.rust`: the longest
-    /// matching Monaco rule (`keyword.rust`, then `keyword`), as Monaco's
-    /// `TokenTheme.match` picks, else the longest TextMate rule matching the
-    /// token as a scope, else the TextMate scopes of the capture its first
-    /// segment names (`type` gives `entity.name.type`, ...).
+    /// The style for a highlight capture in `language` (a language id such
+    /// as `json`), or a Monarch token. A capture's Monaco token gets the
+    /// language as a suffix, as Monaco's tokens have, so `keyword.json`
+    /// rules apply to JSON's `true`.
+    pub fn style_for_language(&self, highlight: HighlightId, language: Option<&str>) -> TokenStyle {
+        let language = language.unwrap_or_default();
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let by_language = cache.entry(highlight).or_default();
+        if let Some(style) = by_language.get(language) {
+            return *style;
+        }
+        let style = if highlight.is_monaco_token() {
+            self.resolve_monaco_token(&highlight.name())
+        } else {
+            self.resolve(&highlight.name(), language)
+        };
+        by_language.insert(language.to_string(), style);
+        style
+    }
+
+    /// The style of tokens no rule matches: the `''` rules', Monaco's first.
+    fn default_style(&self) -> TokenStyle {
+        self.monaco_rules
+            .root()
+            .or_else(|| self.textmate_rules.root())
+            .unwrap_or_default()
+    }
+
+    /// The most specific TextMate rule's style for `scope`, if one matches.
+    pub(crate) fn textmate_style(&self, scope: &str) -> Option<TokenStyle> {
+        self.textmate_rules.specific(scope)
+    }
+
+    /// Monaco `TokenTheme._match` over the Monaco rules: the style for
+    /// `token`, the default one if no rule matches. `None` if the theme has
+    /// no Monaco rules (it isn't a standalone theme).
+    pub(crate) fn monaco_style(&self, token: &str) -> Option<TokenStyle> {
+        self.rules
+            .iter()
+            .any(|rule| rule.kind == RuleKind::Monaco)
+            .then(|| self.monaco_rules.match_token(token).0.style())
+    }
+
+    /// The style for a Monarch token such as `keyword.rust`: the Monaco
+    /// rules matching it (`keyword.rust`, then `keyword`), as Monaco's
+    /// `TokenTheme.match` picks, else the TextMate rules matching the token
+    /// as a scope, else the TextMate scopes of the capture its first segment
+    /// names (`type` gives `entity.name.type`, ...).
     fn resolve_monaco_token(&self, token: &str) -> TokenStyle {
-        if let Some(style) = best_match(&self.rules, RuleKind::Monaco, token)
-            .or_else(|| best_match(&self.rules, RuleKind::TextMate, token))
+        if let Some(style) = self
+            .monaco_rules
+            .specific(token)
+            .or_else(|| self.textmate_rules.specific(token))
         {
             return style;
         }
         for scope in textmate_scopes_for_capture(token) {
-            if let Some(style) = best_match(&self.rules, RuleKind::TextMate, scope) {
+            if let Some(style) = self.textmate_rules.specific(scope) {
                 return style;
             }
         }
-        TokenStyle::default()
+        self.default_style()
     }
 
-    fn resolve(&self, capture: &str) -> TokenStyle {
-        // TextMate rules: the first candidate scope with a matching rule wins;
-        // among rules matching it, the longest (most specific) selector, and
-        // later rules on ties.
+    fn resolve(&self, capture: &str, language: &str) -> TokenStyle {
+        // TextMate rules: the first candidate scope with a matching rule wins.
         for scope in textmate_scopes_for_capture(capture) {
-            if let Some(style) = best_match(&self.rules, RuleKind::TextMate, scope) {
+            if let Some(style) = self.textmate_rules.specific(scope) {
                 return style;
             }
         }
-        if let Some(token) = monaco_token_for_capture(capture)
-            && let Some(style) = best_match(&self.rules, RuleKind::Monaco, token)
+        if let Some(token) = monaco_token_for_capture_in(capture, language)
+            && let Some(style) = self.monaco_rules.specific(&with_language(token, language))
         {
             return style;
         }
-        TokenStyle::default()
+        self.default_style()
     }
 }
 
@@ -2359,25 +2179,8 @@ fn load_vscode_theme(
     Ok(())
 }
 
-/// `selector` matches `name` if equal or a dot-segment prefix of it.
-fn selector_matches(selector: &str, name: &str) -> bool {
-    name == selector
-        || (name.starts_with(selector) && name.as_bytes().get(selector.len()) == Some(&b'.'))
-}
-
-pub(crate) fn best_match(rules: &[TokenRule], kind: RuleKind, name: &str) -> Option<TokenStyle> {
-    let mut best: Option<&TokenRule> = None;
-    for rule in rules.iter().filter(|rule| rule.kind == kind) {
-        if selector_matches(&rule.selector, name)
-            && best.is_none_or(|b| rule.selector.len() >= b.selector.len())
-        {
-            best = Some(rule);
-        }
-    }
-    best.map(|rule| rule.style)
-}
-
-/// The Monarch token a tree-sitter capture corresponds to in Monaco themes.
+/// The Monarch token a tree-sitter capture corresponds to in Monaco themes,
+/// without a language (see [`monaco_token_for_capture_in`]).
 pub fn monaco_token_for_capture(capture: &str) -> Option<&'static str> {
     let first = capture.split('.').next().unwrap_or(capture);
     Some(match capture {
@@ -2410,6 +2213,27 @@ pub fn monaco_token_for_capture(capture: &str) -> Option<&'static str> {
     })
 }
 
+/// The Monarch token a tree-sitter capture in `language` corresponds to,
+/// before the language suffix: what Monaco's own tokenizer for the language
+/// emits where it differs from [`monaco_token_for_capture`] (JSON string
+/// values are `string.value`, HTML attribute values `attribute.value`, YAML
+/// keys `type`, CSS properties `attribute.name`, ...).
+pub fn monaco_token_for_capture_in(capture: &str, language: &str) -> Option<&'static str> {
+    let specific = match (language, capture) {
+        ("json" | "jsonc", "string") => Some("string.value"),
+        ("json" | "jsonc", "string.special.key") => Some("string.key"),
+        ("html", "string") => Some("attribute.value"),
+        ("html", "constant") => Some("metatag"),
+        ("yaml", "property") => Some("type"),
+        ("css" | "scss" | "less", "property") => Some("attribute.name"),
+        ("css" | "scss" | "less", "number") => Some("attribute.value.number"),
+        ("css" | "scss" | "less", "type") => Some("attribute.value.unit"),
+        ("css" | "scss" | "less", "string.special") => Some("attribute.value.hex"),
+        _ => None,
+    };
+    specific.or_else(|| monaco_token_for_capture(capture))
+}
+
 /// The Monaco token type Monaco's `tokenize` reports for a highlight: a
 /// Monarch token as it is (`keyword.rust`), or a capture's Monaco token
 /// with the language as a suffix.
@@ -2418,8 +2242,8 @@ pub(crate) fn monaco_token_type(highlight: HighlightId, language: &str) -> Strin
     if highlight.is_monaco_token() {
         return name.to_string();
     }
-    let token = monaco_token_for_capture(&name).unwrap_or(&name);
-    format!("{token}.{language}")
+    let token = monaco_token_for_capture_in(&name, language).unwrap_or(&name);
+    with_language(token, language)
 }
 
 /// Candidate TextMate scopes for a tree-sitter capture, most specific first.
@@ -2596,11 +2420,63 @@ pub fn global_theme(cx: &gpui::App) -> Option<Arc<Theme>> {
 mod tests {
     use super::*;
 
+    /// `#rrggbbaa`, as Monaco prints colors.
+    fn hex(color: Hsla) -> String {
+        let rgba = gpui::Rgba::from(color);
+        let channel = |c: f32| (c * 255.).round() as u8;
+        format!(
+            "#{:02x}{:02x}{:02x}{:02x}",
+            channel(rgba.r),
+            channel(rgba.g),
+            channel(rgba.b),
+            channel(rgba.a)
+        )
+    }
+
+    fn opt_hex(color: Option<Hsla>) -> Option<String> {
+        color.map(hex)
+    }
+
+    fn colors(entries: &[(&str, &str)]) -> HashMap<String, String> {
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn json_style(theme: &Theme, capture: &str, language: &str) -> Option<String> {
+        opt_hex(
+            theme
+                .style_for_language(HighlightId::intern(capture), Some(language))
+                .foreground,
+        )
+    }
+
     #[test]
     fn hex_colors() {
         assert_eq!(parse_hex_color("#fff"), Some(rgba(0xffffffff).into()));
         assert_eq!(parse_hex_color("#11223344"), Some(rgba(0x11223344).into()));
         assert_eq!(parse_hex_color("nope"), None);
+        assert_eq!(parse_hex_color("#ggg"), None);
+    }
+
+    #[test]
+    fn token_colors_are_parsed_like_monaco() {
+        // Monaco's `ColorMap.getId`: 6 or 8 digits, `#` optional, alpha dropped.
+        assert_eq!(parse_token_color("FF0000"), Some(rgb(0xff0000).into()));
+        assert_eq!(parse_token_color("#ff000080"), Some(rgb(0xff0000).into()));
+        assert_eq!(parse_token_color("#fff"), None);
+        assert_eq!(parse_token_color("red"), None);
+        assert!(TokenRule::monaco("keyword", Some("#fff"), None).is_err());
+        let rule = TokenRule::monaco("keyword", None, Some("italic bolder")).unwrap();
+        assert_eq!(rule.foreground, None);
+        assert_eq!(
+            rule.font_style,
+            Some(TokenFontStyle {
+                italic: true,
+                ..Default::default()
+            })
+        );
     }
 
     #[test]
@@ -2610,11 +2486,178 @@ mod tests {
         assert_eq!(keyword.foreground, parse_hex_color("#569CD6"));
         let key = theme.style_for(HighlightId::intern("string.special.key"));
         assert_eq!(key.foreground, parse_hex_color("#9CDCFE"));
+        // Monaco's vs-dark doesn't color functions: they get the `''` rule.
         let function = theme.style_for(HighlightId::intern("function"));
+        assert_eq!(function.foreground, parse_hex_color("#D4D4D4"));
+    }
+
+    #[test]
+    fn language_specific_rules_apply_to_captures() {
+        let (dark, light) = (Theme::vs_dark(), Theme::vs());
+        // JSON `true`, `false` and `null` are `keyword.json`.
         assert_eq!(
-            function.foreground, None,
-            "Monaco's vs-dark doesn't color functions"
+            json_style(&dark, "constant.builtin", "json").as_deref(),
+            Some("#ce9178ff")
         );
+        assert_eq!(
+            json_style(&light, "constant.builtin", "json").as_deref(),
+            Some("#0451a5ff")
+        );
+        // Without the language, the plain `keyword` rule.
+        assert_eq!(
+            opt_hex(
+                light
+                    .style_for(HighlightId::intern("constant.builtin"))
+                    .foreground
+            )
+            .as_deref(),
+            Some("#0000ffff")
+        );
+        // JSON string values and keys.
+        assert_eq!(
+            json_style(&light, "string", "json").as_deref(),
+            Some("#0451a5ff")
+        );
+        assert_eq!(
+            json_style(&light, "string.special.key", "json").as_deref(),
+            Some("#a31515ff")
+        );
+        // HTML punctuation and attribute values.
+        assert_eq!(
+            json_style(&light, "punctuation.bracket", "html").as_deref(),
+            Some("#383838ff")
+        );
+        assert_eq!(
+            json_style(&light, "string", "html").as_deref(),
+            Some("#0000ffff")
+        );
+        // YAML strings.
+        assert_eq!(
+            json_style(&light, "string", "yaml").as_deref(),
+            Some("#0451a5ff")
+        );
+        // Other languages fall back to the language-less rules.
+        assert_eq!(
+            json_style(&light, "string", "rust").as_deref(),
+            Some("#a31515ff")
+        );
+        assert_eq!(
+            monaco_token_type(HighlightId::intern("string.special.key"), "json"),
+            "string.key.json"
+        );
+        assert_eq!(
+            monaco_token_type(HighlightId::intern("constant.builtin"), "json"),
+            "keyword.json"
+        );
+    }
+
+    #[test]
+    fn builtin_themes_have_monacos_language_rules() {
+        let theme = Theme::vs_dark();
+        let monarch = |token: &str| theme.style_for(HighlightId::intern_monaco_token(token));
+        assert_eq!(
+            opt_hex(monarch("operator.sql").foreground).as_deref(),
+            Some("#778899ff")
+        );
+        assert_eq!(
+            opt_hex(monarch("attribute.value.hex.css").foreground).as_deref(),
+            Some("#d4d4d4ff")
+        );
+        // `metatag.php` only sets bold, keeping `metatag`'s color.
+        let php = monarch("metatag.php");
+        assert!(php.bold);
+        assert_eq!(opt_hex(php.foreground).as_deref(), Some("#dd6a6fff"));
+        assert_eq!(
+            opt_hex(
+                Theme::vs()
+                    .style_for(HighlightId::intern_monaco_token("string.yaml"))
+                    .foreground
+            )
+            .as_deref(),
+            Some("#0451a5ff")
+        );
+    }
+
+    #[test]
+    fn token_rules_inherit_from_parents_and_the_default_rule() {
+        let rules = vec![
+            TokenRule::monaco("comment.doc", None, Some("italic")).unwrap(),
+            TokenRule::monaco("keyword.custom", Some("123456"), None).unwrap(),
+            TokenRule::monaco("keyword", None, Some("bold")).unwrap(),
+            TokenRule::monaco("", Some("abcdef"), None).unwrap(),
+        ];
+        let theme = Theme::define(
+            "inherit-test",
+            &Theme::vs_dark(),
+            true,
+            rules,
+            &HashMap::new(),
+        );
+        let monarch = |token: &str| theme.style_for(HighlightId::intern_monaco_token(token));
+        // A font-style-only rule keeps the parent's color.
+        let doc = monarch("comment.doc.rust");
+        assert!(doc.italic);
+        assert_eq!(opt_hex(doc.foreground).as_deref(), Some("#608b4eff"));
+        // A color-only rule keeps the parent's font style, and a later
+        // `keyword` rule merges into vs-dark's.
+        let custom = monarch("keyword.custom");
+        assert!(custom.bold);
+        assert_eq!(opt_hex(custom.foreground).as_deref(), Some("#123456ff"));
+        assert_eq!(
+            opt_hex(monarch("keyword").foreground).as_deref(),
+            Some("#569cd6ff")
+        );
+        // The `''` rule is the default.
+        assert_eq!(
+            opt_hex(monarch("unknown").foreground).as_deref(),
+            Some("#abcdefff")
+        );
+        // `editor.foreground` becomes a `''` rule, as in Monaco.
+        let theme = Theme::define(
+            "fg-test",
+            &Theme::vs_dark(),
+            true,
+            Vec::new(),
+            &colors(&[("editor.foreground", "#112233")]),
+        );
+        let unknown = theme.style_for(HighlightId::intern_monaco_token("unknown"));
+        assert_eq!(opt_hex(unknown.foreground).as_deref(), Some("#112233ff"));
+        // A `fontStyle: ''` clears an inherited style.
+        let theme = Theme::define(
+            "reset-test",
+            &Theme::vs_dark(),
+            true,
+            vec![
+                TokenRule::monaco("a", None, Some("bold")).unwrap(),
+                TokenRule::monaco("a.b", None, Some("")).unwrap(),
+            ],
+            &HashMap::new(),
+        );
+        assert!(
+            !theme
+                .style_for(HighlightId::intern_monaco_token("a.b"))
+                .bold
+        );
+    }
+
+    #[test]
+    fn textmate_rules_inherit_too() {
+        let theme = Theme::from_vscode_json(
+            r##"{
+                "tokenColors": [
+                    { "settings": { "foreground": "#010101" } },
+                    { "scope": "comment", "settings": { "foreground": "#6A9955", "fontStyle": "italic" } },
+                    { "scope": "comment.block.documentation", "settings": { "foreground": "#777777" } }
+                ]
+            }"##,
+        )
+        .unwrap();
+        let doc = theme.style_for(HighlightId::intern("comment.doc"));
+        assert!(doc.italic);
+        assert_eq!(opt_hex(doc.foreground).as_deref(), Some("#777777ff"));
+        // A rule without a scope is the default.
+        let other = theme.style_for(HighlightId::intern("nothing.matches"));
+        assert_eq!(opt_hex(other.foreground).as_deref(), Some("#010101ff"));
     }
 
     #[test]
@@ -2625,11 +2668,32 @@ mod tests {
         let colors = &theme.colors;
         assert_eq!(Some(colors.background), parse_hex_color("#000000"));
         assert_eq!(Some(colors.foreground), parse_hex_color("#FFFFFF"));
-        assert_eq!(Some(colors.indent_guide), parse_hex_color("#FFFFFF"));
+        assert_eq!(colors.indent_guides[0], parse_hex_color("#FFFFFF"));
         assert_eq!(Some(colors.widget_border), parse_hex_color("#6FC3DF"));
         assert_eq!(Some(colors.peek_view_border), parse_hex_color("#6FC3DF"));
         assert_eq!(Some(colors.focus_border), parse_hex_color("#F38518"));
         assert_eq!(colors.line_highlight_border, parse_hex_color("#F38518"));
+        // Highlights are outlined, not filled.
+        assert_eq!(colors.find_match_highlight_background.a, 0.);
+        assert_eq!(
+            colors.find_match_highlight_border,
+            parse_hex_color("#F38518")
+        );
+        assert_eq!(
+            colors.selection_highlight_border,
+            parse_hex_color("#F38518")
+        );
+        assert_eq!(
+            colors.word_highlight_strong_border,
+            parse_hex_color("#F38518")
+        );
+        assert_eq!(
+            opt_hex(colors.find_range_highlight_border).as_deref(),
+            Some("#f3851866")
+        );
+        assert_eq!(colors.input_border, parse_hex_color("#6FC3DF"));
+        assert_eq!(colors.button_border, parse_hex_color("#6FC3DF"));
+        assert_eq!(colors.widget_shadow, None);
         let keyword = theme.style_for(HighlightId::intern("keyword"));
         assert_eq!(keyword.foreground, parse_hex_color("#569CD6"));
         let delimiter = theme.style_for(HighlightId::intern("punctuation.bracket"));
@@ -2650,12 +2714,195 @@ mod tests {
         assert_eq!(Some(colors.widget_border), parse_hex_color("#0F4A85"));
         assert_eq!(Some(colors.focus_border), parse_hex_color("#006BBD"));
         assert_eq!(Some(colors.active_line_number), parse_hex_color("#006BBD"));
+        assert_eq!(Some(colors.multi_diff_border), parse_hex_color("#CCCCCC"));
         let keyword = theme.style_for(HighlightId::intern("keyword"));
         assert_eq!(keyword.foreground, parse_hex_color("#0000FF"));
-        let invalid = best_match(theme.rules(), RuleKind::Monaco, "invalid");
-        assert_eq!(invalid.unwrap().foreground, parse_hex_color("#B5200D"));
+        let invalid = theme.style_for(HighlightId::intern_monaco_token("invalid"));
+        assert_eq!(invalid.foreground, parse_hex_color("#B5200D"));
         let string = theme.style_for(HighlightId::intern("string"));
         assert_eq!(string.foreground, parse_hex_color("#A31515"));
+    }
+
+    #[test]
+    fn builtin_defaults_match_monaco() {
+        let (dark, light) = (EditorColors::vs_dark(), EditorColors::vs());
+        let (hc_dark, hc_light) = (EditorColors::hc_black(), EditorColors::hc_light());
+        let all = [&dark, &light, &hc_dark, &hc_light];
+        let each = |get: &dyn Fn(&EditorColors) -> Hsla| all.map(|colors| hex(get(colors)));
+        // Monaco's themes.ts.
+        assert_eq!(hex(light.selection_highlight_background), "#add6ff4d");
+        // `transparent(editorWidget.foreground, 0.2)`, contrastBorder in hc.
+        assert_eq!(
+            each(&|c| c.widget_border),
+            ["#cccccc33", "#61616133", "#6fc3dfff", "#0f4a85ff"]
+        );
+        assert_eq!(
+            each(&|c| c.menu_separator_background),
+            ["#cccccc33", "#61616133", "#6fc3dfff", "#0f4a85ff"]
+        );
+        // `editorInfo.foreground`, which `peekView.border` and the banner icon
+        // follow outside high contrast.
+        assert_eq!(
+            each(&|c| c.editor_info_foreground),
+            ["#59a4f9ff", "#0063d3ff", "#59a4f9ff", "#0063d3ff"]
+        );
+        assert_eq!(hex(dark.peek_view_border), "#59a4f9ff");
+        assert_eq!(hex(light.peek_view_border), "#0063d3ff");
+        assert_eq!(hex(light.banner_icon_foreground), "#0063d3ff");
+        assert_eq!(
+            hex(light.peek_view_title_description_foreground),
+            "#616161ff"
+        );
+        assert_eq!(hex(light.code_lens_foreground), "#919191ff");
+        assert_eq!(hex(light.snippet_tabstop_background), "#0a326433");
+        assert_eq!(hex(light.input_option_active_background), "#0090f133");
+        assert_eq!(hex(light.minimap_slider), "#64646433");
+        assert_eq!(
+            light.minimap_slider_hover,
+            transparent(light.scrollbar_slider_hover, 0.5)
+        );
+        assert_eq!(
+            dark.minimap_slider_active,
+            transparent(dark.scrollbar_slider_active, 0.5)
+        );
+        assert_eq!(hex(light.find_range_highlight_background), "#b4b4b44d");
+        assert_eq!(
+            each(&|c| c.ime_underline),
+            ["#ffffffff", "#000000ff", "#ffffffff", "#000000ff"]
+        );
+        // Inline edits.
+        assert_eq!(
+            hex(light.inline_edit.gutter_indicator_primary[2]),
+            "#007acc80"
+        );
+        assert_eq!(
+            hex(dark.inline_edit.gutter_indicator_primary[2]),
+            "#0e639c66"
+        );
+        assert!(light.inline_edit.modified_border.l < light.diff_inserted_text_background.l);
+        assert_eq!(
+            hc_dark.inline_edit.modified_changed_line_background,
+            hc_dark.diff_inserted_line_background
+        );
+        // Menus are dropdowns.
+        assert_eq!(
+            each(&|c| c.menu_background),
+            ["#3c3c3cff", "#ffffffff", "#000000ff", "#ffffffff"]
+        );
+        assert_eq!(
+            each(&|c| c.menu_foreground),
+            ["#f0f0f0ff", "#616161ff", "#ffffffff", "#292929ff"]
+        );
+        assert_eq!(opt_hex(hc_dark.menu_border).as_deref(), Some("#6fc3dfff"));
+        assert_eq!(
+            opt_hex(hc_dark.menu_selection_border).as_deref(),
+            Some("#f38518ff")
+        );
+        assert_eq!(dark.menu_border, None);
+        // Lists and quick input.
+        assert_eq!(
+            opt_hex(dark.list_active_selection_background).as_deref(),
+            Some("#04395eff")
+        );
+        assert_eq!(
+            opt_hex(light.action_list_focus_background).as_deref(),
+            Some("#0060c0ff")
+        );
+        assert_eq!(
+            opt_hex(dark.quick_input_list_focus_background).as_deref(),
+            Some("#04395eff")
+        );
+        assert_eq!(
+            hex(dark.quick_input_list_focus_highlight_foreground),
+            "#2aaaffff"
+        );
+        assert_eq!(hex(light.list_highlight_foreground), "#0066bfff");
+        assert_eq!(hex(hc_dark.list_highlight_foreground), "#f38518ff");
+        assert_eq!(hex(dark.keybinding_label_foreground), "#ccccccff");
+        assert_eq!(
+            opt_hex(dark.toolbar_hover_background).as_deref(),
+            Some("#5a5d5e50")
+        );
+        assert_eq!(hex(dark.input_option_hover_background), "#5a5d5e80");
+        // Hovers.
+        assert_eq!(dark.hover_background, dark.widget_background);
+        assert_eq!(hex(dark.hover_highlight_background), "#264f7840");
+        // Editor surfaces.
+        assert_eq!(dark.multi_cursor_secondary_foreground, dark.cursor);
+        assert_eq!(
+            dark.peek_view_editor_gutter_background,
+            dark.peek_view_editor_background
+        );
+        assert_eq!(
+            opt_hex(dark.fold_placeholder_foreground).as_deref(),
+            Some("#808080ff")
+        );
+        assert_eq!(
+            each(&|c| c.folding_control_foreground),
+            ["#c5c5c5ff", "#424242ff", "#ffffffff", "#292929ff"]
+        );
+        assert_eq!(dark.sticky_scroll_shadow, dark.scrollbar_shadow);
+        assert_eq!(
+            dark.indent_guide_colors(0).map(|(a, b)| (hex(a), hex(b))),
+            Some(("#404040ff".into(), "#707070ff".into()))
+        );
+        // Levels 2-6 are transparent, so every level uses the first.
+        assert_eq!(dark.indent_guide_colors(3), dark.indent_guide_colors(0));
+        let (guide, active) = dark.bracket_pair_guide_colors(1).unwrap();
+        assert_eq!(
+            (hex(guide), hex(active)),
+            ("#da70d64d".into(), "#da70d6ff".into())
+        );
+    }
+
+    #[test]
+    fn marker_colors_follow_the_theme() {
+        let all = [
+            EditorColors::vs_dark(),
+            EditorColors::vs(),
+            EditorColors::hc_black(),
+            EditorColors::hc_light(),
+        ];
+        let each =
+            |get: &dyn Fn(&EditorColors) -> Hsla| all.clone().map(|colors| hex(get(&colors)));
+        assert_eq!(
+            each(&|c| c.editor_error_foreground),
+            ["#f14c4cff", "#e51400ff", "#f48771ff", "#b5200dff"]
+        );
+        assert_eq!(
+            each(&|c| c.editor_warning_foreground),
+            ["#cca700ff", "#bf8803ff", "#ffd370ff", "#895503ff"]
+        );
+        assert_eq!(
+            opt_hex(all[0].editor_hint_foreground).as_deref(),
+            Some("#eeeeeeb3")
+        );
+        assert_eq!(
+            opt_hex(all[1].editor_hint_foreground).as_deref(),
+            Some("#6c6c6cff")
+        );
+        assert_eq!(all[2].editor_hint_foreground, None);
+        assert_eq!(
+            opt_hex(all[2].editor_error_border).as_deref(),
+            Some("#e47777cc")
+        );
+        assert_eq!(
+            each(&|c| c.overview_ruler_error),
+            ["#ff1212b3", "#ff1212b3", "#ff3232ff", "#b5200dff"]
+        );
+        assert_eq!(hex(all[0].overview_ruler_warning), "#cca700ff");
+        assert_eq!(hex(all[2].overview_ruler_warning), "#ffcc00cc");
+        assert_eq!(hex(all[0].marker_navigation_error_background), "#f14c4cff");
+        assert_eq!(
+            hex(all[0].marker_navigation_error_header_background),
+            "#f14c4c1a"
+        );
+        assert_eq!(hex(all[2].marker_navigation_error_background), "#6fc3dfff");
+        assert_eq!(
+            hex(all[2].marker_navigation_warning_header_background),
+            "#0c141fff"
+        );
+        assert_eq!(all[0].marker_navigation_background, all[0].background);
     }
 
     #[test]
@@ -2680,5 +2927,207 @@ mod tests {
         assert_eq!(flow.foreground, parse_hex_color("#C586C0"));
         let comment = theme.style_for(HighlightId::intern("comment"));
         assert!(comment.italic);
+    }
+
+    #[test]
+    fn vscode_colors_map_to_fields() {
+        let theme = Theme::from_vscode_json(
+            r##"{
+                "type": "dark",
+                "colors": {
+                    "editorCodeLens.foreground": "#010101",
+                    "editor.linkedEditingBackground": "#020202",
+                    "editor.rangeHighlightBackground": "#030303",
+                    "diffEditor.move.border": "#040404",
+                    "diffEditor.moveActive.border": "#050505",
+                    "multiDiffEditor.headerBackground": "#060606",
+                    "multiDiffEditor.border": "#070707",
+                    "editorActiveLineNumber.foreground": "#080808",
+                    "menu.background": "#090909",
+                    "editorHoverWidget.background": "#0a0a0a",
+                    "editorError.foreground": "#0b0b0b",
+                    "minimapSlider.activeBackground": "#0c0c0c",
+                    "keybindingLabel.foreground": "#0d0d0d",
+                    "toolbar.hoverBackground": "#0e0e0e",
+                    "editorBracketPairGuide.background1": "#0f0f0f",
+                    "editorIndentGuide.background2": "#101010",
+                    "editorStickyScroll.shadow": "#111111",
+                    "editorOverviewRuler.background": "#121212"
+                }
+            }"##,
+        )
+        .unwrap();
+        let c = &theme.colors;
+        assert_eq!(hex(c.code_lens_foreground), "#010101ff");
+        assert_eq!(hex(c.linked_editing_background), "#020202ff");
+        assert_eq!(hex(c.range_highlight_background), "#030303ff");
+        assert_eq!(hex(c.diff_move_border), "#040404ff");
+        assert_eq!(hex(c.diff_move_active_border), "#050505ff");
+        assert_eq!(hex(c.multi_diff_header_background), "#060606ff");
+        assert_eq!(hex(c.multi_diff_border), "#070707ff");
+        // The deprecated id is `editorLineNumber.activeForeground`'s default.
+        assert_eq!(hex(c.active_line_number), "#080808ff");
+        assert_eq!(hex(c.menu_background), "#090909ff");
+        assert_eq!(hex(c.hover_background), "#0a0a0aff");
+        assert_eq!(hex(c.editor_error_foreground), "#0b0b0bff");
+        assert_eq!(hex(c.marker_navigation_error_background), "#0b0b0bff");
+        assert_eq!(hex(c.minimap_slider_active), "#0c0c0cff");
+        assert_eq!(hex(c.keybinding_label_foreground), "#0d0d0dff");
+        assert_eq!(
+            opt_hex(c.toolbar_hover_background).as_deref(),
+            Some("#0e0e0eff")
+        );
+        assert_eq!(
+            opt_hex(c.bracket_pair_guides[0]).as_deref(),
+            Some("#0f0f0fff")
+        );
+        assert_eq!(opt_hex(c.indent_guides[1]).as_deref(), Some("#101010ff"));
+        assert_eq!(hex(c.sticky_scroll_shadow), "#111111ff");
+        assert_eq!(
+            opt_hex(c.overview_ruler_background).as_deref(),
+            Some("#121212ff")
+        );
+    }
+
+    #[test]
+    fn vscode_high_contrast_themes_get_high_contrast_defaults() {
+        let theme = Theme::from_vscode_json(r##"{ "type": "hcDark", "colors": {} }"##).unwrap();
+        assert!(theme.high_contrast);
+        assert_eq!(theme.kind, ThemeKind::Dark);
+        assert_eq!(hex(theme.colors.widget_border), "#6fc3dfff");
+        assert_eq!(
+            opt_hex(theme.colors.find_match_border).as_deref(),
+            Some("#f38518ff")
+        );
+        let theme = Theme::from_vscode_json(r##"{ "type": "hcLight" }"##).unwrap();
+        assert!(theme.high_contrast);
+        assert_eq!(theme.kind, ThemeKind::Light);
+        assert_eq!(hex(theme.colors.widget_border), "#0f4a85ff");
+        // A plain dark theme gets the dark registry defaults.
+        let theme = Theme::from_vscode_json(r##"{ "type": "dark" }"##).unwrap();
+        assert_eq!(hex(theme.colors.background), "#1e1e1eff");
+        assert_eq!(hex(theme.colors.foreground), "#bbbbbbff");
+    }
+
+    #[test]
+    fn derived_defaults_follow_their_source() {
+        let define = |base: &Theme, inherit: bool, entries: &[(&str, &str)]| {
+            Theme::define("derived", base, inherit, Vec::new(), &colors(entries)).colors
+        };
+        let dark = Theme::vs_dark();
+        let c = define(&dark, true, &[("editor.selectionBackground", "#ff0000")]);
+        assert_eq!(hex(c.fold_background), "#ff00004d");
+        // vs-dark sets the inactive selection itself.
+        assert_eq!(hex(c.inactive_selection_background), "#3a3d41ff");
+        let c = define(&dark, true, &[("foreground", "#ff0000")]);
+        assert_eq!(hex(c.widget_foreground), "#ff0000ff");
+        assert_eq!(hex(c.widget_border), "#ff000033");
+        assert_eq!(hex(c.menu_separator_background), "#ff000033");
+        assert_eq!(hex(c.symbol_icons.array), "#ff0000ff");
+        let c = define(&dark, true, &[("focusBorder", "#ff0000")]);
+        assert_eq!(hex(c.input_option_active_background), "#ff000066");
+        let c = define(&dark, true, &[("scrollbarSlider.background", "#ff0000")]);
+        assert_eq!(hex(c.minimap_slider), "#ff000080");
+        let c = define(&dark, true, &[("editorInfo.foreground", "#ff0000")]);
+        assert_eq!(hex(c.peek_view_border), "#ff0000ff");
+        assert_eq!(hex(c.banner_icon_foreground), "#ff0000ff");
+        let c = define(&dark, true, &[("editorWidget.border", "#ff0000")]);
+        assert_eq!(hex(c.hover_border), "#ff0000ff");
+        assert_eq!(hex(c.suggest_border), "#ff0000ff");
+        let c = define(&dark, true, &[("editorCursor.foreground", "#ff0000")]);
+        assert_eq!(hex(c.multi_cursor_primary_foreground), "#ff0000ff");
+        let c = define(&dark, true, &[("badge.background", "#ff0000")]);
+        assert_eq!(hex(c.inlay_hint_background), "#ff00001a");
+        let c = define(&dark, true, &[("peekViewEditor.background", "#ff0000")]);
+        assert_eq!(hex(c.peek_view_editor_gutter_background), "#ff0000ff");
+        let c = define(
+            &dark,
+            true,
+            &[("list.activeSelectionBackground", "#ff0000")],
+        );
+        assert_eq!(hex(c.menu_selection_background), "#ff0000ff");
+        assert_eq!(
+            opt_hex(c.quick_input_list_focus_background).as_deref(),
+            Some("#ff0000ff")
+        );
+        assert_eq!(hex(c.banner_background), "#ff0000ff");
+        let c = define(&dark, true, &[("editor.background", "#ff0000")]);
+        assert_eq!(hex(c.gutter_background), "#ff0000ff");
+        assert_eq!(hex(c.marker_navigation_background), "#ff0000ff");
+        let c = define(&dark, true, &[("editorWhitespace.foreground", "#ff0000")]);
+        assert_eq!(hex(c.word_wrap_indicator), "#ff0000ff");
+        // A line highlight background drops the default border...
+        let c = define(
+            &dark,
+            true,
+            &[("editor.lineHighlightBackground", "#ff0000")],
+        );
+        assert_eq!(c.line_highlight_border, None);
+        // ...unless it's transparent or the theme sets the border too.
+        let c = define(
+            &dark,
+            true,
+            &[("editor.lineHighlightBackground", "#ff000000")],
+        );
+        assert_eq!(
+            opt_hex(c.line_highlight_border).as_deref(),
+            Some("#282828ff")
+        );
+        let c = define(
+            &dark,
+            true,
+            &[
+                ("editor.lineHighlightBackground", "#ff0000"),
+                ("editor.lineHighlightBorder", "#00ff00"),
+            ],
+        );
+        assert_eq!(
+            opt_hex(c.line_highlight_border).as_deref(),
+            Some("#00ff00ff")
+        );
+    }
+
+    #[test]
+    fn define_without_inherit_uses_only_registry_defaults() {
+        let theme = Theme::define(
+            "bare",
+            &Theme::vs(),
+            false,
+            Vec::new(),
+            &colors(&[("editor.background", "#ffffff")]),
+        );
+        let c = &theme.colors;
+        // `transparent(editor.selectionBackground, 0.5)`, not themes.ts' #E5EBF1.
+        assert_eq!(hex(c.inactive_selection_background), "#add6ff80");
+        // `editorIndentGuide.background1` → `editorWhitespace.foreground`.
+        assert_eq!(opt_hex(c.indent_guides[0]).as_deref(), Some("#33333333"));
+        // `lessProminent(selection, background, 0.3, 0.6)`.
+        assert_ne!(hex(c.selection_highlight_background), "#add6ff4d");
+        assert_eq!(theme.rules().len(), 0);
+        // With inherit, themes.ts' colors stay.
+        let theme = Theme::define("full", &Theme::vs(), true, Vec::new(), &HashMap::new());
+        assert_eq!(hex(theme.colors.inactive_selection_background), "#e5ebf1ff");
+        assert_eq!(theme.colors, EditorColors::vs());
+    }
+
+    #[test]
+    fn define_keeps_a_custom_bases_own_colors() {
+        let mut colors = EditorColors::vs_dark();
+        colors.cursor = rgb(0xff0000).into();
+        let base = Theme::new("custom", ThemeKind::Dark, colors, Vec::new());
+        let theme = Theme::define(
+            "derived",
+            &base,
+            true,
+            Vec::new(),
+            &colors_map(&[("editor.background", "#000000")]),
+        );
+        assert_eq!(hex(theme.colors.cursor), "#ff0000ff");
+        assert_eq!(hex(theme.colors.background), "#000000ff");
+        assert_eq!(hex(theme.colors.gutter_background), "#000000ff");
+    }
+
+    fn colors_map(entries: &[(&str, &str)]) -> HashMap<String, String> {
+        colors(entries)
     }
 }

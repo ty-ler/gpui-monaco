@@ -276,8 +276,13 @@ impl RenameInput {
                 .gap(px(5.))
                 .rounded(px(2.))
                 .cursor_pointer()
+                // Monaco's list colors.
                 .when(self.focused == Some(ix), |row| {
-                    row.bg(colors.peek_view_result_selection_background)
+                    colors.focused_list_row(
+                        row,
+                        colors.list_active_selection_background,
+                        colors.list_active_selection_foreground,
+                    )
                 })
                 .child(
                     div()

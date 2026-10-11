@@ -816,7 +816,6 @@ impl HighlightSource {
         range: Range<usize>,
     ) -> Vec<(Range<usize>, TokenStyle)> {
         let syntax = &self.syntax;
-        let style = |span: &syntax::HighlightSpan| theme.style_for(span.highlight);
         let old_range = match &self.patch {
             None => range,
             Some(patch) => {
@@ -824,6 +823,42 @@ impl HighlightSource {
                 inverse.transform_offset(range.start, text::Bias::Left)
                     ..inverse.transform_offset(range.end, text::Bias::Right)
             }
+        };
+        // Monaco's tokens carry their language (`keyword.json`): a span's is
+        // the deepest visible injection at its start, else the root's.
+        let tree = syntax.state.syntax();
+        let root = tree
+            .and_then(|tree| tree.root())
+            .map(|layer| &*layer.language.id);
+        let injections: Vec<_> = tree
+            .map(|tree| {
+                tree.layers()
+                    .iter()
+                    .filter(|layer| {
+                        layer.depth > 0
+                            && !layer.language.hidden
+                            && layer
+                                .ranges
+                                .iter()
+                                .any(|r| r.start <= old_range.end && old_range.start <= r.end)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let style = |span: &syntax::HighlightSpan| {
+            let offset = span.range.start;
+            let language = injections
+                .iter()
+                .filter(|layer| {
+                    layer
+                        .ranges
+                        .iter()
+                        .any(|r| r.start <= offset && offset < r.end)
+                })
+                .max_by_key(|layer| layer.depth)
+                .map(|layer| &*layer.language.id)
+                .or(root);
+            theme.style_for_language(span.highlight, language)
         };
         let mut result = Vec::new();
         // Monaco `maxTokenizationLineLength`: long lines stay plain, and
@@ -1234,7 +1269,9 @@ pub struct PrepaintState {
     /// The minimap's image and where it goes; replaced images to free.
     minimap_image: Option<(std::sync::Arc<gpui::RenderImage>, Bounds<Pixels>)>,
     minimap_stale: Vec<std::sync::Arc<gpui::RenderImage>>,
-    minimap_slider_visible: bool,
+    /// The minimap slider's color, if it shows: `minimapSlider.background`,
+    /// or its hover or active color.
+    minimap_slider: Option<Hsla>,
     sticky: Vec<(usize, Pixels, LineLayout, Option<ShapedLine>)>,
     /// The keyboard-focused and hovered sticky lines.
     sticky_focused: Option<usize>,
@@ -2968,7 +3005,13 @@ fn prepaint_editor(
             let top = layout.line_top(line.view_line);
             let height = layout.line_height_of(line.view_line);
             let text_top = layout.text_top(line.view_line);
-            if options.background.is_some() || options.border.is_some() {
+            // A marker's `editorError.background` and the like.
+            let background = options.background.or_else(|| {
+                options
+                    .severity
+                    .and_then(|severity| colors.marker_background(severity))
+            });
+            if background.is_some() || options.border.is_some() {
                 let range = if options.is_whole_line {
                     Some((px(0.) - layout.scroll_left, text_width + layout.scroll_left))
                 } else {
@@ -2981,7 +3024,7 @@ fn prepaint_editor(
                         point(origin_x + from, top),
                         size((to - from).max(px(2.)), height),
                     );
-                    decoration_quads.push((bounds, options.background, options.border));
+                    decoration_quads.push((bounds, background, options.border));
                 }
             }
             // Monaco's `border-left` on an inline decoration: at its start.
@@ -2997,7 +3040,15 @@ fn prepaint_editor(
             }
             // Monaco `squiggly-unnecessary`: a themed underline for unused
             // code without a squiggle.
-            let underline = options.underline.or_else(|| {
+            // A marker's squiggle is in the theme's color.
+            let underline = options.underline.map(|underline| match options.severity {
+                Some(severity) => crate::decorations::DecorationUnderline {
+                    color: colors.marker_color(severity),
+                    ..underline
+                },
+                None => underline,
+            });
+            let underline = underline.or_else(|| {
                 (options.unnecessary
                     && editor.options.show_unused
                     && colors.unnecessary_code_border.a > 0.)
@@ -3145,6 +3196,11 @@ fn prepaint_editor(
         for decoration in all {
             let Some((color, lane)) = decoration.options.overview_ruler else {
                 continue;
+            };
+            // A marker's mark is in the theme's color.
+            let color = match decoration.options.severity {
+                Some(severity) => colors.marker_overview_color(severity).unwrap_or(color),
+                None => color,
             };
             let row = snapshot.offset_to_point(decoration.range.start).row;
             let (view_line, _) = view_lines.to_view(PointUtf16::new(row, 0), false);
@@ -3360,14 +3416,12 @@ fn prepaint_editor(
                 .unwrap_or_default();
             let draw_bracket_guide =
                 |guide: &BracketGuide, guides: &mut Vec<(Bounds<Pixels>, Hsla)>| {
-                    let Some(color) = colors.bracket_color(guide.level) else {
+                    // `editorBracketPairGuide.*`, else the bracket color.
+                    let Some((inactive, active)) = colors.bracket_pair_guide_colors(guide.level)
+                    else {
                         return;
                     };
-                    let color = if guide.active {
-                        color
-                    } else {
-                        color.opacity(0.3)
-                    };
+                    let color = if guide.active { active } else { inactive };
                     let left = match guide.column {
                         Some(column) => origin_x + line.x_for_column(column - 1),
                         None => origin_x + metrics.em_width * (guide.visible_column - 1) as f32,
@@ -3407,11 +3461,11 @@ fn prepaint_editor(
                     && active.is_some_and(|a| {
                         a.indent == level && a.start_row <= line.row && line.row <= a.end_row
                     });
-                let color = if is_active {
-                    colors.indent_guide_active
-                } else {
-                    colors.indent_guide
+                // `editorIndentGuide.background*` by level.
+                let Some((inactive, active)) = colors.indent_guide_colors(level - 1) else {
+                    continue;
                 };
+                let color = if is_active { active } else { inactive };
                 let x = origin_x + metrics.em_width * ((level - 1) * ctx.indent_size) as f32;
                 guides.push((Bounds::new(point(x, top), size(px(1.), line_height)), color));
             }
@@ -3735,7 +3789,15 @@ fn prepaint_editor(
         placeholder,
         dnd_target,
         minimap_stale: std::mem::take(&mut editor.minimap_cache.stale),
-        minimap_slider_visible: options.minimap.always_show_slider || editor.minimap_hovered,
+        minimap_slider: (options.minimap.always_show_slider || editor.minimap_hovered).then(|| {
+            if editor.minimap_drag.is_some() {
+                colors.minimap_slider_active
+            } else if editor.minimap_slider_hovered {
+                colors.minimap_slider_hover
+            } else {
+                colors.minimap_slider
+            }
+        }),
         sticky: sticky_shaped,
         sticky_focused: editor.sticky.focused,
         sticky_hovered: editor.sticky.hovered,
@@ -3808,15 +3870,27 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                     layout.line_height_of(state.cursor_view_lines[0]),
                 ),
             );
-            if let Some(background) = colors.line_highlight_background {
+            // Monaco `editor.inactiveLineHighlightBackground` when unfocused.
+            let background = if state.focused {
+                colors.line_highlight_background
+            } else {
+                colors.inactive_line_highlight_background
+            };
+            if let Some(background) = background {
                 window.paint_quad(fill(line_bounds, background));
             }
             if let Some(border) = colors.line_highlight_border {
+                // 1px in high contrast themes, which have a contrast border.
+                let width = if colors.contrast_border.is_some() {
+                    px(1.)
+                } else {
+                    px(2.)
+                };
                 window.paint_quad(quad(
                     line_bounds,
                     Corners::default(),
                     gpui::transparent_black(),
-                    Edges::all(px(2.)),
+                    Edges::all(width),
                     border,
                     BorderStyle::Solid,
                 ));
@@ -3856,7 +3930,7 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
         // Fold controls: always for collapsed regions, otherwise per option.
         for control in &layout.fold_controls {
             if control.collapsed || state.show_fold_controls {
-                paint_chevron(control, colors.line_number, window);
+                paint_chevron(control, colors.folding_control_foreground, window);
             }
         }
 
@@ -4102,6 +4176,16 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
             };
             window.with_content_mask(Some(ContentMask { bounds: area }), |window| {
                 window.paint_quad(fill(area, background));
+                // `editorStickyScrollGutter.background`.
+                if let Some(gutter) = colors.sticky_scroll_gutter_background {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            area.origin,
+                            size(layout.text_bounds.left() - area.left(), area.size.height),
+                        ),
+                        gutter,
+                    ));
+                }
                 for (ix, top, line, number) in &state.sticky {
                     let y = bounds.top() + *top;
                     let content = Bounds::new(
@@ -4162,14 +4246,19 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                     if let Some(control) = &sticky.fold
                         && (control.collapsed || state.show_fold_controls)
                     {
-                        paint_chevron(control, colors.line_number, window);
+                        paint_chevron(control, colors.folding_control_foreground, window);
                     }
                 }
                 let shadow = Bounds::new(
                     point(area.left(), area.bottom() - px(1.)),
                     size(area.size.width, px(1.)),
                 );
-                window.paint_quad(fill(shadow, colors.scrollbar_shadow.opacity(0.6)));
+                // `editorStickyScroll.shadow`, or the high contrast
+                // `editorStickyScroll.border`.
+                window.paint_quad(fill(shadow, colors.sticky_scroll_shadow.opacity(0.6)));
+                if let Some(border) = colors.sticky_scroll_border {
+                    window.paint_quad(fill(shadow, border));
+                }
             });
         }
 
@@ -4196,6 +4285,9 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
             window.paint_quad(fill(*bounds, *color));
         }
         if let Some(ruler) = state.overview_ruler {
+            if let Some(background) = colors.overview_ruler_background {
+                window.paint_quad(fill(ruler, background));
+            }
             window.paint_quad(fill(
                 Bounds::new(ruler.origin, size(px(1.), ruler.size.height)),
                 colors.overview_ruler_border,
@@ -4275,8 +4367,8 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                             window.paint_quad(fill(*separator, colors.foreground.opacity(0.4)));
                         }
                     }
-                    if state.minimap_slider_visible {
-                        window.paint_quad(fill(minimap.slider, colors.minimap_slider));
+                    if let Some(color) = state.minimap_slider {
+                        window.paint_quad(fill(minimap.slider, color));
                     }
                     // `minimap.autohide`: fade it into the editor's
                     // background (GPUI images have no opacity).
@@ -4478,7 +4570,11 @@ fn paint_fold_placeholder(
         window.paint_quad(quad(
             Bounds::new(point(x, y), size(dot, dot)),
             Corners::all(dot / 2.),
-            colors.foreground.opacity(0.7),
+            // `editor.foldPlaceholderForeground` (none in high contrast:
+            // the text color).
+            colors
+                .fold_placeholder_foreground
+                .unwrap_or(colors.foreground.opacity(0.7)),
             Edges::default(),
             gpui::transparent_black(),
             BorderStyle::Solid,

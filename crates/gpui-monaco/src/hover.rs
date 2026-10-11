@@ -215,7 +215,7 @@ impl Render for HoverWidget {
         let mut sections = Vec::new();
         for marker in &self.markers {
             if !sections.is_empty() {
-                sections.push(div().h(px(1.)).bg(colors.widget_border).into_any_element());
+                sections.push(div().h(px(1.)).bg(colors.hover_border).into_any_element());
             }
             let copy = match marker.source_label() {
                 Some(label) => format!("{} {label}", marker.message),
@@ -226,13 +226,13 @@ impl Render for HoverWidget {
         }
         if let Some(picker) = &self.color_picker {
             if !sections.is_empty() {
-                sections.push(div().h(px(1.)).bg(colors.widget_border).into_any_element());
+                sections.push(div().h(px(1.)).bg(colors.hover_border).into_any_element());
             }
             sections.push(picker.clone().into_any_element());
         }
         for (ix, hover) in self.unicode.iter().enumerate() {
             if !sections.is_empty() {
-                sections.push(div().h(px(1.)).bg(colors.widget_border).into_any_element());
+                sections.push(div().h(px(1.)).bg(colors.hover_border).into_any_element());
             }
             // The reason, then Monaco's "Adjust settings" link.
             let editor = self.editor.clone();
@@ -271,7 +271,7 @@ impl Render for HoverWidget {
         }
         for ix in 0..self.parts.len() {
             if !sections.is_empty() {
-                sections.push(div().h(px(1.)).bg(colors.widget_border).into_any_element());
+                sections.push(div().h(px(1.)).bg(colors.hover_border).into_any_element());
             }
             let row = self.render_markdown_part(ix, &registry, cx);
             let copy = self.parts[ix]
@@ -284,13 +284,13 @@ impl Render for HoverWidget {
         }
         if let Some(toolbar) = &self.inline_toolbar {
             if !sections.is_empty() {
-                sections.push(div().h(px(1.)).bg(colors.widget_border).into_any_element());
+                sections.push(div().h(px(1.)).bg(colors.hover_border).into_any_element());
             }
             sections.push(toolbar.clone().into_any_element());
         }
         if let Some((command, keys)) = &self.command {
             if !sections.is_empty() {
-                sections.push(div().h(px(1.)).bg(colors.widget_border).into_any_element());
+                sections.push(div().h(px(1.)).bg(colors.hover_border).into_any_element());
             }
             let editor = self.editor.clone();
             let run = command.clone();
@@ -339,12 +339,13 @@ impl Render for HoverWidget {
             .flex()
             .flex_col()
             .gap(px(6.))
-            .bg(colors.widget_background)
+            .bg(colors.hover_background)
+            .text_color(colors.hover_foreground)
             .border_1()
             .border_color(if self.focus_handle.is_focused(_window) {
                 colors.focus_border
             } else {
-                colors.widget_border
+                colors.hover_border
             })
             .children(sections);
         div()
@@ -428,7 +429,7 @@ impl HoverWidget {
                     .cursor_pointer()
                     .opacity(0.)
                     .group_hover(group, |style| style.opacity(1.))
-                    .hover(|style| style.bg(colors.scrollbar_slider_hover))
+                    .hover(|style| colors.toolbar_hover(style))
                     .tooltip(crate::tooltip::tooltip("Copy", colors))
                     .on_mouse_down(
                         gpui::MouseButton::Left,
@@ -525,7 +526,7 @@ impl HoverWidget {
                     .w(px(22.))
                     .px(px(5.))
                     .border_r_1()
-                    .border_color(colors.widget_border)
+                    .border_color(colors.hover_border)
                     .flex()
                     .flex_col()
                     .justify_end()
@@ -692,11 +693,13 @@ impl HoverWidget {
         let mac = cfg!(target_os = "macos");
         let view_marker = marker.clone();
         let fix_at = marker.range.start;
+        // Monaco's status bar row (`editorHoverWidget.statusBarBackground`).
         let actions = div()
             .mt(px(4.))
             .pt(px(4.))
             .border_t_1()
-            .border_color(colors.widget_border)
+            .border_color(colors.hover_border)
+            .bg(colors.hover_status_bar_background)
             .flex()
             .gap(px(12.))
             .child(action(

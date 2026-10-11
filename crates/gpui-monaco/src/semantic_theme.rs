@@ -11,7 +11,7 @@
 
 use gpui::Hsla;
 
-use crate::theme::{RuleKind, Theme, TokenStyle, best_match, parse_hex_color};
+use crate::theme::{Theme, TokenFontStyle, TokenStyle, parse_hex_color};
 
 /// A semantic token's style: only the properties it sets override the
 /// syntax highlighting's (Monaco's `SEMANTIC_USE_*` flags).
@@ -99,10 +99,11 @@ impl SemanticTokenRule {
                     .and_then(|c| c.as_str())
                     .and_then(parse_hex_color);
                 if let Some(font_style) = style.get("fontStyle").and_then(|f| f.as_str()) {
-                    rule.bold = Some(font_style.contains("bold"));
-                    rule.italic = Some(font_style.contains("italic"));
-                    rule.underline = Some(font_style.contains("underline"));
-                    rule.strikethrough = Some(font_style.contains("strikethrough"));
+                    let font_style = TokenFontStyle::parse(font_style);
+                    rule.bold = Some(font_style.bold);
+                    rule.italic = Some(font_style.italic);
+                    rule.underline = Some(font_style.underline);
+                    rule.strikethrough = Some(font_style.strikethrough);
                 }
                 let flag = |name: &str| style.get(name).and_then(|v| v.as_bool());
                 rule.bold = flag("bold").or(rule.bold);
@@ -286,7 +287,7 @@ impl Theme {
         candidates.sort_by_key(|(specificity, _)| std::cmp::Reverse(*specificity));
         for (_, scopes) in candidates {
             for scope in scopes {
-                if let Some(style) = best_match(self.rules(), RuleKind::TextMate, scope) {
+                if let Some(style) = self.textmate_style(scope) {
                     return Some(SemanticStyle::from_rule(style));
                 }
             }
@@ -296,9 +297,10 @@ impl Theme {
             .chain(modifiers.iter().copied())
             .collect::<Vec<_>>()
             .join(".");
-        // Monaco's standalone theme sets every property, falling back to
-        // the default foreground: such tokens fully replace the syntax style.
-        best_match(self.rules(), RuleKind::Monaco, &name).map(|style| SemanticStyle {
+        // Monaco's standalone theme always has a style, the default rule's
+        // when nothing else matches, and sets every property: such tokens
+        // fully replace the syntax style.
+        self.monaco_style(&name).map(|style| SemanticStyle {
             foreground: Some(style.foreground.unwrap_or(self.colors.foreground)),
             bold: Some(style.bold),
             italic: Some(style.italic),
@@ -396,22 +398,8 @@ mod tests {
             crate::theme::ThemeKind::Dark,
             crate::theme::EditorColors::vs_dark(),
             vec![
-                crate::theme::TokenRule {
-                    kind: RuleKind::Monaco,
-                    selector: "variable".into(),
-                    style: TokenStyle {
-                        foreground: Some(rgb(0x123456).into()),
-                        ..Default::default()
-                    },
-                },
-                crate::theme::TokenRule {
-                    kind: RuleKind::Monaco,
-                    selector: "variable.readonly".into(),
-                    style: TokenStyle {
-                        foreground: Some(rgb(0x654321).into()),
-                        ..Default::default()
-                    },
-                },
+                crate::theme::TokenRule::monaco("variable", Some("123456"), None).unwrap(),
+                crate::theme::TokenRule::monaco("variable.readonly", Some("654321"), None).unwrap(),
             ],
         );
         let hex = |hex| Some(Hsla::from(rgb(hex)));
@@ -423,5 +411,10 @@ mod tests {
             color(theme.semantic_style("variable", &["readonly", "static"], None)),
             hex(0x654321)
         );
+        // Unmatched: the default style (the editor foreground, no font
+        // style), replacing the syntax style as in Monaco.
+        let unmatched = theme.semantic_style("label", &[], None).unwrap();
+        assert_eq!(unmatched.foreground, Some(theme.colors.foreground));
+        assert_eq!(unmatched.bold, Some(false));
     }
 }

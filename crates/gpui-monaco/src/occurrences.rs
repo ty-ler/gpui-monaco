@@ -80,13 +80,20 @@ impl CodeEditor {
             .map(|h| {
                 let range = rope.point_utf16_to_offset(h.range.start)
                     ..rope.point_utf16_to_offset(h.range.end);
-                let (background, overview) = match h.kind {
+                let (background, border, overview) = match h.kind {
                     DocumentHighlightKind::Write => (
                         colors.word_highlight_strong_background,
+                        colors.word_highlight_strong_border,
                         colors.word_highlight_strong_overview,
+                    ),
+                    DocumentHighlightKind::Text => (
+                        colors.word_highlight_text_background,
+                        colors.word_highlight_text_border,
+                        colors.word_highlight_text_overview,
                     ),
                     _ => (
                         colors.word_highlight_background,
+                        colors.word_highlight_border,
                         colors.word_highlight_overview,
                     ),
                 };
@@ -94,6 +101,7 @@ impl CodeEditor {
                     range,
                     DecorationOptions {
                         background: Some(background),
+                        border,
                         overview_ruler: Some((overview, OverviewRulerLane::Center)),
                         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
                         ..Default::default()
@@ -340,6 +348,7 @@ impl CodeEditor {
                     range,
                     DecorationOptions {
                         background: Some(colors.selection_highlight_background),
+                        border: colors.selection_highlight_border,
                         overview_ruler: Some((
                             colors.selection_highlight_overview,
                             OverviewRulerLane::Center,
