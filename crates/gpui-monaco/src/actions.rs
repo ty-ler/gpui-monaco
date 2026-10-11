@@ -15,6 +15,9 @@ const SINGLE_LINE: Option<&str> = Some("CodeEditor && single_line");
 /// The editor while the suggest widget is open (Monaco's
 /// `suggestWidgetVisible`).
 const SUGGEST: Option<&str> = Some("CodeEditor && suggest_widget_visible");
+/// While the suggest widget's details panel has the focus (Monaco's
+/// `suggestWidgetDetailsFocused`).
+const SUGGEST_DETAILS_FOCUSED: Option<&str> = Some("CodeEditor && suggest_widget_details_focused");
 /// The quick access input (inside the quick input widget).
 const QUICK_INPUT: Option<&str> = Some("QuickInput > CodeEditor");
 /// The editor while a sticky line has keyboard focus.
@@ -881,6 +884,15 @@ actions!(
         /// Forgets the suggest widget's resized size (Monaco
         /// `editor.action.resetSuggestSize`).
         ResetSuggestSize,
+        /// Moves the focus between the suggest list and its details panel,
+        /// whose keys then scroll it (Monaco `toggleSuggestionFocus`).
+        ToggleSuggestionFocus,
+        /// Copies the focused suggest details panel's text (Monaco
+        /// `suggestWidgetCopy`).
+        SuggestWidgetCopy,
+        /// Inserts a line break in a find widget input (Monaco's find and
+        /// replace inputs handle Ctrl+Enter themselves).
+        FindInputNewline,
         /// Asks for a match number and selects that match (Monaco
         /// `editor.action.goToMatchFindAction`).
         GoToMatch,
@@ -1050,6 +1062,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         // Also Monaco `focusSuggestion` while no suggestion is focused.
         KeyBinding::new("ctrl-space", ToggleSuggestionDetails, SUGGEST),
         KeyBinding::new("secondary-/", ToggleExplainMode, SUGGEST),
+        // Monaco: Cmd/Ctrl+Alt+Space, Ctrl+Alt+Space on macOS.
+        KeyBinding::new("ctrl-alt-space", ToggleSuggestionFocus, SUGGEST),
         KeyBinding::new("secondary-k f12", RevealDefinitionAside, ctx),
         KeyBinding::new("secondary-k f2", TogglePeekWidgetFocus, ctx),
         KeyBinding::new("alt-\\", TriggerInlineSuggest, ctx),
@@ -1135,6 +1149,12 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-enter", PreviousMatch, SINGLE_LINE),
         KeyBinding::new("alt-enter", SelectAllMatches, SINGLE_LINE),
         KeyBinding::new("secondary-enter", ReplaceAll, SINGLE_LINE),
+        // After those, so they win: Monaco's find inputs take Ctrl+Enter
+        // (on macOS too) for a line break.
+        KeyBinding::new("ctrl-enter", FindInputNewline, FIND_INPUT),
+        // Monaco `suggestWidgetCopy` (and Ctrl+Insert on Windows), after
+        // Copy so it wins while the details panel has the focus.
+        KeyBinding::new("secondary-c", SuggestWidgetCopy, SUGGEST_DETAILS_FOCUSED),
     ];
 
     bindings.push(KeyBinding::new(
@@ -1344,6 +1364,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             bindings.extend([
                 KeyBinding::new("shift-delete", Cut, ctx),
                 KeyBinding::new("ctrl-insert", Copy, ctx),
+                KeyBinding::new("ctrl-insert", SuggestWidgetCopy, SUGGEST_DETAILS_FOCUSED),
                 KeyBinding::new("ctrl-shift-up", CursorUpSelect, ctx),
                 KeyBinding::new("ctrl-shift-down", CursorDownSelect, ctx),
             ]);

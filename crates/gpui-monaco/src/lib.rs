@@ -92,6 +92,7 @@ pub mod snippet;
 mod snippet_session;
 mod sticky_model;
 pub mod suggest;
+mod suggest_inline_completions;
 mod suggest_widget;
 pub mod theme;
 pub mod unicode_highlight;

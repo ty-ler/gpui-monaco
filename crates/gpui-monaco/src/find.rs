@@ -110,8 +110,38 @@ struct FindStart {
     force_reveal_replace: bool,
     seed: SeedMode,
     seed_non_empty_only: bool,
+    /// Monaco `seedSearchStringFromGlobalClipboard`: without a seed from
+    /// the selection, seed from the find clipboard (with
+    /// `find.global_find_clipboard`).
+    seed_from_global_clipboard: bool,
     focus: StartFocus,
     update_search_scope: bool,
+}
+
+/// The shared find string where there's no system find pasteboard (Monaco's
+/// browser clipboard service keeps its `findText` in memory).
+#[derive(Default)]
+struct FindClipboard(String);
+
+impl gpui::Global for FindClipboard {}
+
+/// Monaco `IClipboardService.readFindText`: macOS's find pasteboard, else
+/// the app's find string.
+fn read_find_text(cx: &gpui::App) -> String {
+    #[cfg(target_os = "macos")]
+    if let Some(item) = cx.read_from_find_pasteboard() {
+        return item.text().unwrap_or_default();
+    }
+    cx.try_global::<FindClipboard>()
+        .map(|clipboard| clipboard.0.clone())
+        .unwrap_or_default()
+}
+
+/// Monaco `IClipboardService.writeFindText`.
+fn write_find_text(text: &str, cx: &mut gpui::App) {
+    #[cfg(target_os = "macos")]
+    cx.write_to_find_pasteboard(gpui::ClipboardItem::new_string(text.to_string()));
+    cx.default_global::<FindClipboard>().0 = text.to_string();
 }
 
 /// The search and replace strings entered in any editor's find widget
@@ -331,7 +361,9 @@ impl CodeEditor {
         }
         let old = std::mem::replace(&mut self.find.options, options);
         let new = &self.find.options;
-        let research = new.query != old.query
+        let query_changed = new.query != old.query;
+        let replace_changed = new.replace != old.replace;
+        let research = query_changed
             || new.is_regex != old.is_regex
             || new.match_case != old.match_case
             || new.whole_word != old.whole_word;
@@ -339,7 +371,59 @@ impl CodeEditor {
             let scope = scope_changed.then(|| self.find.search_scope.clone());
             self.find_research(move_cursor, scope, cx);
         }
+        // Monaco's controller `_onStateChanged`.
+        if query_changed {
+            let query = self.find.options.query.clone();
+            self.set_global_find_term(&query, cx);
+        }
+        // Multi-line inputs make the widget taller (Monaco
+        // `_tryUpdateHeight`).
+        if self.find.visible && (query_changed || replace_changed) {
+            self.update_find_view_zone(cx);
+        }
         cx.notify();
+    }
+
+    /// Monaco `getGlobalBufferTerm`: the find clipboard's text with
+    /// `find.global_find_clipboard`, else empty.
+    fn global_find_term(&self, cx: &gpui::App) -> String {
+        if self.options.find.global_find_clipboard {
+            read_find_text(cx)
+        } else {
+            String::new()
+        }
+    }
+
+    /// Monaco `setGlobalBufferTerm`: writes `text` to the find clipboard
+    /// with `find.global_find_clipboard`.
+    fn set_global_find_term(&self, text: &str, cx: &mut gpui::App) {
+        if self.options.find.global_find_clipboard {
+            write_find_text(text, cx);
+        }
+    }
+
+    /// The editor (or a widget in it) got the focus: with
+    /// `find.global_find_clipboard`, the open find widget takes a different
+    /// search string from the find clipboard and selects it (Monaco's find
+    /// widget on `onDidFocusEditorWidget`).
+    pub(crate) fn find_widget_focus_in(&mut self, cx: &mut Context<Self>) {
+        if !self.find.visible {
+            return;
+        }
+        let term = self.global_find_term(cx);
+        if term.is_empty() || term == self.find.options.query {
+            return;
+        }
+        let mut options = self.find.options.clone();
+        options.query = term;
+        self.change_find_options(options.clone(), false, cx);
+        let replace = self.find.replace_visible;
+        if let Some((widget, _)) = &self.find.widget {
+            widget.update(cx, |widget, cx| {
+                widget.set_inputs(&options, replace, cx);
+                widget.select_find_input(cx);
+            });
+        }
     }
 
     /// Sets the find scope (Monaco `searchScope`): search only these ranges,
@@ -1322,7 +1406,14 @@ impl CodeEditor {
             };
         self.stop_find_model(cx);
         let mut options = self.find.options.clone();
+        // Whether `new_state` brings a search string (Monaco's
+        // `stateChanges.searchString`).
+        let previous = std::mem::take(&mut options.query);
         new_state(&mut options);
+        let mut seeded = !options.query.is_empty();
+        if !seeded {
+            options.query = previous;
+        }
         match start.seed {
             SeedMode::Single => {
                 if let Some(seed) =
@@ -1334,14 +1425,22 @@ impl CodeEditor {
                     } else {
                         seed
                     };
+                    seeded = true;
                 }
             }
             SeedMode::Multiple if !update_scope => {
                 if let Some(seed) = self.selection_search_string(true, false, cx) {
                     options.query = seed;
+                    seeded = true;
                 }
             }
             _ => {}
+        }
+        if !seeded && start.seed_from_global_clipboard {
+            let term = self.global_find_term(cx);
+            if !term.is_empty() {
+                options.query = term;
+            }
         }
         let was_visible = self.find.visible;
         if start.force_reveal_replace {
@@ -1428,6 +1527,7 @@ impl CodeEditor {
                 FindStart {
                     seed,
                     seed_non_empty_only,
+                    seed_from_global_clipboard: self.options.find.global_find_clipboard,
                     focus: StartFocus::FindInput,
                     ..Default::default()
                 },
@@ -1457,6 +1557,8 @@ impl CodeEditor {
                     SeedMode::None
                 },
                 seed_non_empty_only,
+                seed_from_global_clipboard: self.options.find.seed_search_string_from_selection
+                    != crate::options::SeedSearchString::Never,
                 focus: if find_focused || seed_from_selection {
                     StartFocus::ReplaceInput
                 } else {
@@ -1493,6 +1595,7 @@ impl CodeEditor {
                 force_reveal_replace: args.replace_string.is_some(),
                 seed,
                 seed_non_empty_only: option == SeedSearchString::Selection,
+                seed_from_global_clipboard: true,
                 focus: StartFocus::FindInput,
                 update_search_scope: args.find_in_selection,
             },
@@ -1519,6 +1622,8 @@ impl CodeEditor {
             window,
             cx,
         );
+        let query = self.find.options.query.clone();
+        self.set_global_find_term(&query, cx);
     }
 
     /// The number of matches, as the find widget counts them.
@@ -1571,6 +1676,8 @@ impl CodeEditor {
             window,
             cx,
         );
+        let query = self.find.options.query.clone();
+        self.set_global_find_term(&query, cx);
     }
 
     /// Monaco `matchFindAction` (Find Next/Previous, F3, Cmd/Ctrl+G): moves
@@ -1618,6 +1725,7 @@ impl CodeEditor {
             FindStart {
                 seed,
                 seed_non_empty_only,
+                seed_from_global_clipboard: true,
                 ..Default::default()
             },
             window,
@@ -1672,10 +1780,16 @@ impl CodeEditor {
     /// The find widget's height: one row, or two with replace (Monaco
     /// `_getHeight`).
     fn find_widget_height(&self) -> gpui::Pixels {
-        let row = self.options.resolved_line_height() + gpui::px(4.);
-        let rows = if self.find.replace_visible { 2. } else { 1. };
-        // Padding, borders and the gap between rows.
-        row * rows + gpui::px(10.) + gpui::px(4.) * (rows - 1.)
+        // Each input grows with its lines (Monaco `flexibleHeight`).
+        let line_height = self.options.resolved_line_height();
+        let mut height = crate::find_widget::input_height(&self.find.options.query, line_height);
+        if self.find.replace_visible {
+            height += crate::find_widget::input_height(&self.find.options.replace, line_height);
+            // The gap between rows.
+            height += gpui::px(4.);
+        }
+        // Padding and borders.
+        height + gpui::px(10.)
     }
 
     /// Monaco `_showViewZone`/`_removeViewZone`: while the widget shows,
@@ -1707,6 +1821,13 @@ impl CodeEditor {
             self.scroll_top += height;
         }
         cx.notify();
+    }
+
+    /// The height of the space kept above the text for the find widget
+    /// (`find.add_extra_space_on_top`), for tests.
+    #[doc(hidden)]
+    pub fn find_zone_height_for_tests(&self) -> Option<gpui::Pixels> {
+        self.find.zone.map(|(_, height)| height)
     }
 
     /// Shows or hides the replace input (Monaco `isReplaceRevealed`).

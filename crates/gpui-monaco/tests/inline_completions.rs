@@ -570,3 +570,47 @@ fn syntax_highlighted_ghost_text(cx: &mut TestAppContext) {
     assert_eq!(plain.len(), 1, "{plain:?}");
     assert_eq!(plain[0].0, " x = 42;");
 }
+
+/// One completion item, `label`, for the word at the cursor.
+struct Item(&'static str);
+
+impl CompletionProvider for Item {
+    fn provide_completions(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        _: CompletionTrigger,
+        _: &mut App,
+    ) -> Task<anyhow::Result<CompletionList>> {
+        Task::ready(Ok(CompletionList {
+            items: vec![CompletionItem::new(self.0, CompletionItemKind::Function)],
+            incomplete: false,
+        }))
+    }
+}
+
+#[gpui::test]
+fn quick_suggestions_inline_join_the_providers(cx: &mut TestAppContext) {
+    // Monaco `quickSuggestions: 'inline'`: completion items are one more
+    // inline completions provider, after the registered ones.
+    let (editor, cx, _) = setup(vec!["alpha"], cx);
+    cx.update(|_, cx| register_completion_provider(cx, LanguageSelector::All, Item("alps")));
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.quick_suggestions = gpui_monaco::options::QuickSuggestions::INLINE;
+        e.update_options(options, cx);
+    });
+    cx.simulate_input("al");
+    settle(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_suggest_visible()));
+    assert_eq!(ghost(&editor, cx), Some(vec![(2, "pha".into())]));
+    editor.update(cx, |e, cx| e.show_next_inline_suggestion(true, cx));
+    settle(cx);
+    assert_eq!(ghost(&editor, cx), Some(vec![(2, "ps".into())]));
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.inline_suggestion_index(cx)),
+        Some((1, 2))
+    );
+    cx.simulate_keystrokes("tab");
+    assert_eq!(text(&editor, cx), "alps");
+}

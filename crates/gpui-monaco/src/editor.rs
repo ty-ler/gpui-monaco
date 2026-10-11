@@ -455,7 +455,8 @@ impl CodeEditor {
                 cx.notify();
             }),
             // Monaco's widget focus: the text or a widget inside the editor.
-            cx.on_focus_in(&focus_handle, window, |_, _, cx| {
+            cx.on_focus_in(&focus_handle, window, |this, _, cx| {
+                this.find_widget_focus_in(cx);
                 cx.emit(CodeEditorEvent::WidgetFocused);
             }),
             cx.on_focus_out(&focus_handle, window, |_, _, _, cx| {
@@ -1607,20 +1608,17 @@ impl CodeEditor {
             }
         }
         if !select && self.is_suggest_visible() {
-            let page = self.suggest_page_size(cx) as isize;
-            let delta = match command {
-                MoveCommand::Up => Some(-1),
-                MoveCommand::Down => Some(1),
-                MoveCommand::PageUp => Some(-page),
-                MoveCommand::PageDown => Some(page),
+            let handled = match command {
+                MoveCommand::Up => Some(self.suggest_navigate(-1, cx)),
+                MoveCommand::Down => Some(self.suggest_navigate(1, cx)),
+                MoveCommand::PageUp => Some(self.suggest_navigate_page(false, cx)),
+                MoveCommand::PageDown => Some(self.suggest_navigate_page(true, cx)),
                 _ => None,
             };
-            if let Some(delta) = delta {
-                if self.suggest_navigate(delta, cx) {
-                    return;
-                }
-            } else {
-                self.hide_suggest(cx);
+            match handled {
+                Some(true) => return,
+                Some(false) => {}
+                None => self.hide_suggest(cx),
             }
         }
         let config = self.cursor_config(cx);
@@ -3867,6 +3865,9 @@ impl Render for CodeEditor {
         }
         if self.is_suggest_visible() {
             key_context.add("suggest_widget_visible");
+            if self.is_suggestion_details_focused() {
+                key_context.add("suggest_widget_details_focused");
+            }
         }
         if self.is_signature_help_visible() {
             key_context.add("parameter_hints_visible");
@@ -4661,6 +4662,12 @@ impl Render for CodeEditor {
                 this.toggle_suggest_explain_mode(cx);
             }))
             .on_action(cx.listener(|this, _: &ResetSuggestSize, _, cx| this.reset_suggest_size(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSuggestionFocus, _, cx| {
+                this.toggle_suggestion_focus(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SuggestWidgetCopy, _, cx| {
+                this.copy_suggestion_details(cx);
+            }))
             .on_action(cx.listener(|this, action: &FindWithArgs, window, cx| {
                 if this.options.single_line {
                     return cx.propagate();
@@ -4775,13 +4782,11 @@ impl Render for CodeEditor {
                 this.suggest_navigate(-1, cx);
             }))
             .on_action(cx.listener(|this, _: &SelectNextPageSuggestion, _, cx| {
-                let page = this.suggest_page_size(cx) as isize;
-                this.suggest_navigate(page, cx);
+                this.suggest_navigate_page(true, cx);
             }))
             .on_action(
                 cx.listener(|this, _: &SelectPreviousPageSuggestion, _, cx| {
-                    let page = this.suggest_page_size(cx) as isize;
-                    this.suggest_navigate(-page, cx);
+                    this.suggest_navigate_page(false, cx);
                 }),
             )
             .on_action(cx.listener(|this, _: &SelectFirstSuggestion, _, cx| {

@@ -506,6 +506,8 @@ static COMMANDS: &[Command] = &[
     Command("focusSuggestion", "code_editor::FocusSuggestion"),
     Command("focusAndAcceptSuggestion", "code_editor::FocusAndAcceptSuggestion"),
     Command("toggleExplainMode", "code_editor::ToggleExplainMode"),
+    Command("toggleSuggestionFocus", "code_editor::ToggleSuggestionFocus"),
+    Command("suggestWidgetCopy", "code_editor::SuggestWidgetCopy"),
     Command("togglePeekWidgetFocus", "code_editor::TogglePeekWidgetFocus"),
     // Monaco's alias for `revealDefinitionAside`.
     Command("editor.action.openDeclarationToTheSide", "code_editor::RevealDefinitionAside"),

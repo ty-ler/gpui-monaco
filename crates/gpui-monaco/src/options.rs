@@ -429,6 +429,14 @@ pub struct FindEditorOptions {
     /// Search as the find input is typed in (Monaco `find.findOnType`,
     /// default `true`); when off, Enter searches.
     pub find_on_type: bool,
+    /// Read and write the shared find clipboard (Monaco
+    /// `find.globalFindClipboard`, default `false`): opening find seeds an
+    /// empty search string from it, finding writes the search string to it,
+    /// and focusing the editor picks up a search string another app or
+    /// editor put there. On macOS this is the system's find pasteboard;
+    /// elsewhere a string shared by every editor in the app (as Monaco's
+    /// browser clipboard service keeps it).
+    pub global_find_clipboard: bool,
 }
 
 impl Default for FindEditorOptions {
@@ -443,6 +451,7 @@ impl Default for FindEditorOptions {
             replace_history: true,
             close_on_result: false,
             find_on_type: true,
+            global_find_clipboard: false,
         }
     }
 }
@@ -725,39 +734,89 @@ pub enum SuggestInsertMode {
     Replace,
 }
 
-/// Monaco `quickSuggestions`: where suggestions open while typing.
+/// Monaco `QuickSuggestionsValue`: how suggestions show while typing in
+/// one kind of token.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum QuickSuggestionsValue {
+    /// In the suggest widget (Monaco `'on'`, or `true`).
+    On,
+    /// As ghost text: the best completion item shows as an inline
+    /// completion, accepted with Tab (Monaco `'inline'`).
+    Inline,
+    /// Not at all (Monaco `'off'`, or `false`).
+    #[default]
+    Off,
+    /// In the suggest widget, unless an inline completion shows: the widget
+    /// waits for inline completions (up to 750ms) and stays closed if one
+    /// shows (Monaco `'offWhenInlineCompletions'`).
+    OffWhenInlineCompletions,
+}
+
+impl From<bool> for QuickSuggestionsValue {
+    /// Monaco's boolean shorthand: `true` is `On`, `false` is `Off`.
+    fn from(on: bool) -> Self {
+        if on { Self::On } else { Self::Off }
+    }
+}
+
+/// Monaco `quickSuggestions`: where and how suggestions show while typing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QuickSuggestions {
     /// In code.
-    pub other: bool,
+    pub other: QuickSuggestionsValue,
     /// In comments.
-    pub comments: bool,
+    pub comments: QuickSuggestionsValue,
     /// In strings.
-    pub strings: bool,
+    pub strings: QuickSuggestionsValue,
 }
 
 impl QuickSuggestions {
-    /// Everywhere.
-    pub const ON: Self = Self {
-        other: true,
-        comments: true,
-        strings: true,
-    };
+    /// Everywhere, in the suggest widget.
+    pub const ON: Self = Self::all(QuickSuggestionsValue::On);
     /// Nowhere.
-    pub const OFF: Self = Self {
-        other: false,
-        comments: false,
-        strings: false,
-    };
+    pub const OFF: Self = Self::all(QuickSuggestionsValue::Off);
+    /// Everywhere, as ghost text (Monaco `quickSuggestions: 'inline'`).
+    pub const INLINE: Self = Self::all(QuickSuggestionsValue::Inline);
+
+    /// `value` for every kind of token (Monaco's string shorthand).
+    pub const fn all(value: QuickSuggestionsValue) -> Self {
+        Self {
+            other: value,
+            comments: value,
+            strings: value,
+        }
+    }
+
+    /// Monaco `QuickSuggestionsOptions.isAllOff`.
+    pub fn is_all_off(&self) -> bool {
+        *self == Self::OFF
+    }
+
+    /// Monaco `QuickSuggestionsOptions.isAllOn`.
+    pub fn is_all_on(&self) -> bool {
+        *self == Self::ON
+    }
+
+    /// Monaco `QuickSuggestionsOptions.valueFor`: the value for a token
+    /// type.
+    pub fn value_for(&self, token: crate::cursor::StandardTokenType) -> QuickSuggestionsValue {
+        use crate::cursor::StandardTokenType;
+        match token {
+            StandardTokenType::Comment => self.comments,
+            StandardTokenType::String => self.strings,
+            _ => self.other,
+        }
+    }
 }
 
 impl Default for QuickSuggestions {
-    /// Monaco's default: in code only.
+    /// Monaco's default: in code (unless inline completions show), not in
+    /// comments or strings.
     fn default() -> Self {
         Self {
-            other: true,
-            comments: false,
-            strings: false,
+            other: QuickSuggestionsValue::OffWhenInlineCompletions,
+            comments: QuickSuggestionsValue::Off,
+            strings: QuickSuggestionsValue::Off,
         }
     }
 }

@@ -259,3 +259,141 @@ fn go_to_match(cx: &mut TestAppContext) {
     assert!(!editor.read_with(cx, |e, _| e.is_quick_access_open()));
     assert_eq!(selection(&editor, cx), (0, 0, 0, 2));
 }
+
+#[gpui::test]
+fn multi_line_search_and_replace_inputs(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("foo\nbar foo\nbaz", cx);
+    cx.simulate_keystrokes("secondary-f");
+    type_query("foo", cx);
+    let zone = |cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, _| e.find_zone_height_for_tests())
+            .unwrap()
+    };
+    let one_line = zone(cx);
+    // Monaco: Ctrl+Enter inserts a line break in the find input.
+    cx.simulate_keystrokes("ctrl-enter");
+    cx.simulate_input("bar");
+    assert_eq!(query(&editor, cx), "foo\nbar");
+    assert_eq!(editor.read_with(cx, |e, _| e.find_matches_count()), 1);
+    // The input grows, and the space above the text with it.
+    assert!(zone(cx) > one_line);
+
+    // Up moves in the input (Monaco `stopPropagationForMultiLineUpwards`)
+    // until it's at the start; then it walks the history.
+    cx.executor().advance_clock(Duration::from_millis(600));
+    cx.simulate_keystrokes("up up");
+    assert_eq!(query(&editor, cx), "foo\nbar");
+    cx.simulate_keystrokes("up");
+    assert_eq!(query(&editor, cx), "foo");
+    cx.simulate_keystrokes("down");
+    assert_eq!(query(&editor, cx), "foo\nbar");
+
+    // The replace input too.
+    cx.update(|window, cx| editor.update(cx, |e, cx| e.open_find(true, window, cx)));
+    cx.simulate_input("x");
+    cx.simulate_keystrokes("ctrl-enter");
+    cx.simulate_input("y");
+    cx.run_until_parked();
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.find_options().replace.clone()),
+        "x\ny"
+    );
+    editor.update(cx, |e, cx| e.replace_all(cx));
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.model().read(cx).text()),
+        "x\ny foo\nbaz"
+    );
+}
+
+#[gpui::test]
+fn pasting_line_breaks_into_the_find_input(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("a\nb a", cx);
+    cx.simulate_keystrokes("secondary-f");
+    cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("a\r\nb".into())));
+    cx.simulate_keystrokes("secondary-a secondary-v");
+    // Kept, as in Monaco's textarea (line breaks normalized).
+    assert_eq!(query(&editor, cx), "a\nb");
+    assert_eq!(editor.read_with(cx, |e, _| e.find_matches_count()), 1);
+    // Text without line breaks pastes as usual.
+    cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("b".into())));
+    cx.simulate_keystrokes("secondary-a secondary-v");
+    assert_eq!(query(&editor, cx), "b");
+}
+
+/// Moves the focus out of `editor` and back (focus events need an active
+/// window and a frame).
+fn refocus(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) {
+    let draw = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+    };
+    cx.update(|window, _| window.activate_window());
+    draw(cx);
+    cx.update(|window, cx| window.blur(cx));
+    draw(cx);
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    draw(cx);
+}
+
+#[gpui::test]
+fn global_find_clipboard(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("alpha beta\n", cx);
+    let set_global = |editor: &Entity<CodeEditor>, on: bool, cx: &mut VisualTestContext| {
+        editor.update(cx, |e, cx| {
+            let mut options = e.options().clone();
+            options.find.global_find_clipboard = on;
+            e.update_options(options, cx);
+        })
+    };
+    set_global(&editor, true, cx);
+    // Another editor sharing the find clipboard.
+    let other = cx.update(|window, cx| {
+        cx.new(|cx| {
+            let model = cx.new(|_| TextModel::new("x"));
+            CodeEditor::new(model, window, cx)
+        })
+    });
+    set_global(&other, true, cx);
+    let set_query = |editor: &Entity<CodeEditor>, query: &str, cx: &mut VisualTestContext| {
+        editor.update(cx, |e, cx| {
+            let mut options = e.find_options().clone();
+            options.query = query.into();
+            e.set_find_options(options, cx);
+        })
+    };
+    // Finding writes the search string to the find clipboard.
+    set_query(&other, "beta", cx);
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        cx.update(|_, cx| cx.read_from_find_pasteboard())
+            .and_then(|item| item.text())
+            .as_deref(),
+        Some("beta")
+    );
+    // Opening find with nothing to seed from takes it.
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(
+                text::PointUtf16::new(1, 0),
+            )],
+            cx,
+        )
+    });
+    cx.simulate_keystrokes("secondary-f");
+    assert_eq!(query(&editor, cx), "beta");
+
+    // Focusing the editor picks up a search string written meanwhile.
+    set_query(&other, "alpha", cx);
+    refocus(&editor, cx);
+    assert_eq!(query(&editor, cx), "alpha");
+
+    // Off: neither read nor written.
+    set_global(&editor, false, cx);
+    set_query(&other, "gamma", cx);
+    refocus(&editor, cx);
+    assert_eq!(query(&editor, cx), "alpha");
+}

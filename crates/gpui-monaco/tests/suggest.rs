@@ -1125,3 +1125,235 @@ fn monaco_completion_kinds(cx: &mut TestAppContext) {
         Some(vec!["red".to_string(), "run".to_string()])
     );
 }
+
+#[gpui::test]
+fn toggle_suggestion_focus_scrolls_and_copies_the_details(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    provide(cx, |_| {
+        vec![
+            CompletionItem {
+                detail: Some("fn print()".into()),
+                documentation: Some("Prints.".into()),
+                ..CompletionItem::new("print", CompletionItemKind::Function)
+            },
+            CompletionItem::new("process", CompletionItemKind::Function),
+        ]
+    });
+    let details_focused =
+        |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.is_suggestion_details_focused());
+    let scroll = |cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, cx| e.suggest_details_scroll_for_tests(cx))
+    };
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert!(!editor.read_with(cx, |e, cx| e.is_suggestion_details_visible(cx)));
+    // Monaco `toggleSuggestionFocus` opens the details and focuses them.
+    cx.simulate_keystrokes("ctrl-alt-space");
+    assert!(details_focused(cx));
+    assert!(editor.read_with(cx, |e, cx| e.is_suggestion_details_visible(cx)));
+    // The keys scroll the details (Monaco `scrollDown`, `pageDown`)
+    // instead of moving in the list.
+    cx.simulate_keystrokes("down");
+    assert_eq!(scroll(cx), Some(gpui::px(8.)));
+    // A page (Monaco's 80px), within the docs.
+    cx.simulate_keystrokes("pagedown");
+    let paged = scroll(cx).unwrap();
+    assert!(paged > gpui::px(8.) && paged <= gpui::px(88.), "{paged:?}");
+    cx.simulate_keystrokes("up pageup");
+    assert_eq!(scroll(cx), Some(gpui::px(0.)));
+    assert_eq!(focused(&editor, cx).as_deref(), Some("print"));
+    // Monaco `suggestWidgetCopy`.
+    cx.simulate_keystrokes("secondary-c");
+    assert_eq!(
+        cx.update(|_, cx| cx.read_from_clipboard())
+            .and_then(|item| item.text())
+            .as_deref(),
+        Some("fn print()\n\nPrints.")
+    );
+    assert_eq!(text(&editor, cx), "");
+    // Back to the list.
+    cx.simulate_keystrokes("ctrl-alt-space");
+    assert!(!details_focused(cx));
+    cx.simulate_keystrokes("down");
+    assert_eq!(focused(&editor, cx).as_deref(), Some("process"));
+    // Nothing to focus for an item without details.
+    cx.simulate_keystrokes("ctrl-alt-space");
+    assert!(!details_focused(cx));
+    // Typing goes back to the list; hiding resets it.
+    cx.simulate_keystrokes("up ctrl-alt-space");
+    assert!(details_focused(cx));
+    cx.simulate_input("p");
+    assert!(!details_focused(cx));
+    cx.simulate_keystrokes("ctrl-alt-space escape");
+    assert!(!details_focused(cx));
+    assert!(!visible(&editor, cx));
+}
+
+/// `hello` and `world` for the word at the cursor.
+fn provide_hello_world(cx: &mut VisualTestContext) {
+    provide(cx, |_| {
+        ["hello", "world"]
+            .into_iter()
+            .map(|label| CompletionItem::new(label, CompletionItemKind::Function))
+            .collect()
+    });
+}
+
+fn ghost(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Option<String> {
+    editor.read_with(cx, |e, cx| {
+        e.ghost_text_for_tests(cx)
+            .map(|(_, parts)| parts.into_iter().map(|(_, text)| text).collect())
+    })
+}
+
+/// Waits out the quick suggestions and inline completions delays.
+fn settle_inline(cx: &mut VisualTestContext) {
+    cx.executor().advance_clock(Duration::from_millis(200));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn quick_suggestions_inline_show_as_ghost_text(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |o| o.quick_suggestions = QuickSuggestions::INLINE, cx);
+    provide_hello_world(cx);
+    cx.simulate_input("he");
+    settle_inline(cx);
+    // No widget: the matching item shows as ghost text.
+    assert!(!visible(&editor, cx));
+    assert_eq!(ghost(&editor, cx).as_deref(), Some("llo"));
+    // Typing more refilters it.
+    cx.simulate_input("l");
+    settle_inline(cx);
+    assert_eq!(ghost(&editor, cx).as_deref(), Some("lo"));
+    cx.simulate_keystrokes("tab");
+    assert_eq!(text(&editor, cx), "hello");
+    // Ctrl+Space still opens the widget.
+    cx.simulate_input(" w");
+    settle_inline(cx);
+    assert_eq!(ghost(&editor, cx).as_deref(), Some("orld"));
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert!(visible(&editor, cx));
+}
+
+#[gpui::test]
+fn quick_suggestions_inline_only_where_set(cx: &mut TestAppContext) {
+    use gpui_monaco::options::QuickSuggestionsValue;
+    // `Inline` in comments and strings only: code gets neither.
+    let (editor, cx) = setup(
+        "",
+        |o| {
+            o.quick_suggestions = QuickSuggestions {
+                other: QuickSuggestionsValue::Off,
+                ..QuickSuggestions::INLINE
+            }
+        },
+        cx,
+    );
+    provide_hello_world(cx);
+    cx.simulate_input("he");
+    settle_inline(cx);
+    assert!(!visible(&editor, cx));
+    assert_eq!(ghost(&editor, cx), None);
+}
+
+/// An inline completions provider offering `text` for a line it starts
+/// with, after `delay`.
+struct InlineText {
+    text: Option<&'static str>,
+    delay: Duration,
+}
+
+impl InlineCompletionsProvider for InlineText {
+    fn provide_inline_completions(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        _: InlineCompletionContext,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<InlineCompletionList>> {
+        let line = context.snapshot.line(position.row);
+        let items = self
+            .text
+            .filter(|text| text.starts_with(&line))
+            .map(|text| InlineCompletion {
+                insert_text: text.to_string(),
+                range: Some(
+                    PointUtf16::new(position.row, 0)
+                        ..PointUtf16::new(position.row, line.len() as u32),
+                ),
+                ..Default::default()
+            })
+            .into_iter()
+            .collect();
+        let delay = self.delay;
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(delay).await;
+            Ok(InlineCompletionList {
+                items,
+                ..Default::default()
+            })
+        })
+    }
+}
+
+fn provide_inline(cx: &mut VisualTestContext, text: Option<&'static str>, delay: Duration) {
+    cx.update(|_, cx| {
+        register_inline_completions_provider(cx, LanguageSelector::All, InlineText { text, delay })
+    });
+}
+
+#[gpui::test]
+fn off_when_inline_completions_keeps_the_widget_closed_for_ghost_text(cx: &mut TestAppContext) {
+    // Monaco's default, `offWhenInlineCompletions` in code.
+    let (editor, cx) = setup("", |_| {}, cx);
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.options().quick_suggestions),
+        QuickSuggestions::default()
+    );
+    provide_hello_world(cx);
+    provide_inline(cx, Some("hello there"), Duration::ZERO);
+    cx.simulate_input("he");
+    settle_inline(cx);
+    assert!(!visible(&editor, cx));
+    assert_eq!(ghost(&editor, cx).as_deref(), Some("llo there"));
+
+    // `On` opens the widget anyway (which hides the ghost text).
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.quick_suggestions = QuickSuggestions::ON;
+        e.update_options(options, cx);
+    });
+    cx.simulate_input("l");
+    settle_inline(cx);
+    assert!(visible(&editor, cx));
+}
+
+#[gpui::test]
+fn off_when_inline_completions_opens_without_ghost_text(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |_| {}, cx);
+    provide_hello_world(cx);
+    provide_inline(cx, None, Duration::ZERO);
+    cx.simulate_input("he");
+    settle_inline(cx);
+    assert!(visible(&editor, cx));
+    assert_eq!(labels(&editor, cx), Some(vec!["hello".to_string()]));
+}
+
+#[gpui::test]
+fn off_when_inline_completions_stops_waiting_after_750ms(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |_| {}, cx);
+    provide_hello_world(cx);
+    provide_inline(cx, Some("hello there"), Duration::from_secs(5));
+    cx.simulate_input("he");
+    settle_inline(cx);
+    // Still waiting for inline completions.
+    assert!(!visible(&editor, cx));
+    cx.executor().advance_clock(Duration::from_millis(600));
+    cx.run_until_parked();
+    // Monaco opens the widget and stops the inline completions.
+    assert!(visible(&editor, cx));
+    cx.executor().advance_clock(Duration::from_secs(5));
+    cx.run_until_parked();
+    assert_eq!(ghost(&editor, cx), None);
+}

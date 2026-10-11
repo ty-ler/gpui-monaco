@@ -78,7 +78,7 @@ editor.update(cx, |editor, cx| {
 | `color_decorators_limit` | `colorDecoratorsLimit` | at most this many swatches (500) |
 | `color_decorators_activated_on` | `colorDecoratorsActivatedOn` | what opens the color picker from a swatch |
 | `default_color_decorators` | `defaultColorDecorators` | when the built-in color finder runs (auto) |
-| `quick_suggestions` | `quickSuggestions` | completion while typing, per token type: `other` (on), `comments`, `strings` |
+| `quick_suggestions` | `quickSuggestions` | completion while typing, per token type (`other`, `comments`, `strings`): `On` (the suggest widget), `Inline` (the items as ghost text), `Off`, or `OffWhenInlineCompletions` (the widget unless ghost text shows; the default for `other`, the others are `Off`) |
 | `quick_suggestions_delay` | `quickSuggestionsDelay` | wait before quick suggestions (10ms) |
 | `suggest_on_trigger_characters` | `suggestOnTriggerCharacters` | open on provider trigger characters (on) |
 | `accept_suggestion_on_enter` | `acceptSuggestionOnEnter` | `On`, `Smart` (Enter types a new line when the word is already complete) or `Off` |
@@ -100,7 +100,7 @@ editor.update(cx, |editor, cx| {
 | `goto_location` | `gotoLocation` | what go to definition, references and the other navigation commands do with several results, and their alternative commands |
 | `peek_widget_default_focus` | `peekWidgetDefaultFocus` | what a new peek view focuses: `Tree` (the results list, default) or `Editor` (the preview) |
 | `definition_link_opens_in_peek` | `definitionLinkOpensInPeek` | Cmd/Ctrl+click on a symbol shows its definitions in a peek view (off) |
-| `find` | `find.*` | `cursor_move_on_type` (on), `seed_search_string_from_selection`, `auto_find_in_selection`, `add_extra_space_on_top` (on), `loop_` (on), `history` and `replace_history` (on), `close_on_result` (off), `find_on_type` (search while typing; when off, Enter searches; on) |
+| `find` | `find.*` | `cursor_move_on_type` (on), `seed_search_string_from_selection`, `auto_find_in_selection`, `add_extra_space_on_top` (on), `loop_` (on), `history` and `replace_history` (on), `close_on_result` (off), `find_on_type` (search while typing; when off, Enter searches; on), `global_find_clipboard` (share the search string through the find pasteboard on macOS, or between the app's editors; off) |
 | `format_on_type` | `formatOnType` | format with the on-type formatter after its trigger characters (off) |
 | `format_on_paste` | `formatOnPaste` | format pasted text with the range formatter (off) |
 | `empty_selection_clipboard` | `emptySelectionClipboard` | copying with no selection copies the line |
