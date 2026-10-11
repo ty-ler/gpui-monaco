@@ -401,7 +401,9 @@ fn push_line_ending_is_undoable(cx: &mut TestAppContext) {
     // The same line ending again does nothing.
     model.update(cx, |m, cx| m.push_line_ending(LineEnding::Crlf, cx));
     assert_eq!(changes.get(), 1);
-    assert_eq!(model.read_with(cx, |m, _| m.version()), version);
+    // A new version (Monaco `setEOL` increases it), with nothing to
+    // transform.
+    assert_eq!(model.read_with(cx, |m, _| m.version()), version + 1);
     assert!(model.read_with(cx, |m, _| m.can_undo()));
     model.update(cx, |m, cx| m.undo(None, cx));
     assert_eq!(model.read_with(cx, |m, _| m.text()), "Hello\nworld");

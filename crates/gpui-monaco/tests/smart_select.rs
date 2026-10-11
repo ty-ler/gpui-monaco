@@ -43,7 +43,9 @@ fn setup<'a>(
 fn selected(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> String {
     editor.read_with(cx, |e, cx| {
         let s = e.selections()[0];
-        e.model().read(cx).value_in_range(s.start()..s.end())
+        e.model()
+            .read(cx)
+            .value_in_range(s.start()..s.end(), Default::default())
     })
 }
 

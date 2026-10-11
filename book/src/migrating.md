@@ -14,7 +14,8 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | Monaco | gpui-monaco |
 |---|---|
 | `monaco.editor.create(el, { value, language })` | `cx.new(\|cx\| TextModel::new(value).with_language(language))`, then `CodeEditor::new(model, window, cx)` |
-| `monaco.editor.createModel(value, language, uri)` | `TextModel::new(value).with_language(language).with_uri(uri)`, then `register_model` so providers can find it |
+| `monaco.editor.createModel(value, language, uri)` | `TextModel::new(value).with_language(language).with_uri(uri)` (a language id or MIME type), then `register_model` so providers can find it |
+| `monaco.editor.registerLinkOpener(opener)`, `registerEditorOpener(opener)` | `register_link_opener(cx, \|url, cx\| …)`, `register_editor_opener(cx, \|editor, uri, selection, cx\| …)`, returning a `Disposable`; they answer synchronously |
 | `monaco.editor.getModel(uri)` | `model_for_uri(cx, uri)` |
 | `monaco.editor.getModels()`, `getEditors()`, `getDiffEditors()` | `models(cx)`, `editors(cx)`, `diff_editors(cx)` (the editor's own inputs, such as find's, aren't listed, as Monaco's are DOM inputs) |
 | `monaco.editor.setModelLanguage(model, id)` | `model.set_language(id, cx)` |
@@ -37,10 +38,12 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 
 | Monaco `ITextModel` | `TextModel` |
 |---|---|
-| `getValue()` / `setValue(v)` | `text()` / `set_value(v, cx)` |
+| `getValue()` / `setValue(v)` | `text()` / `set_value(v, cx)` (removes every decoration, as Monaco's) |
+| `getValue(eol, preserveBOM)` | `value(EndOfLinePreference::…, preserve_bom)` |
 | `getLineCount()`, `getLineContent(n)`, `getLineLength(n)` | `line_count()`, `line_content(row)`, `line_len_utf16(row)` |
-| `getOffsetAt(pos)` / `getPositionAt(offset)` | `offset_at(point)` / `position_at(offset)` (byte offsets) |
-| `getValueInRange(range)` | `value_in_range(range)` |
+| `getOffsetAt(pos)` / `getPositionAt(offset)` | `get_offset_at(point)` / `get_position_at(offset)` (Monaco's: UTF-16 units, line breaks as the model's line ending); `offset_at` / `position_at` are byte offsets into the stored `\n` text |
+| `getValueInRange(range, eol)` | `value_in_range(range, EndOfLinePreference::TextDefined)` |
+| `getValueLength(eol, preserveBOM)`, `getValueLengthInRange(range, eol)`, `getCharacterCountInRange(range, eol)` | `value_length_with(eol, preserve_bom)`, `value_length_in_range(range, eol)`, `character_count_in_range(range, eol)` |
 | `validatePosition`, `validateRange` | `validate_position`, `validate_range` |
 | `getWordAtPosition`, `getWordUntilPosition` | `word_at_position`, `word_until_position` |
 | `findMatches(...)` | `find_matches(query, is_regex, match_case, whole_word, …)`, or `find_matches_in(query, scope, …, capture_matches, limit)` |
@@ -54,25 +57,28 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `bracketPairs.getBracketPairsInRange`, `matchBracket`, `findEnclosingBrackets` | `bracket_pairs_in_range`, `match_bracket`, `find_enclosing_brackets` |
 | `guides.getLinesIndentGuides`, `getActiveIndentGuide` | `lines_indent_guides`, `active_indent_guide` |
 | `undo()` / `redo()`, `canUndo()` / `canRedo()` | `undo(source, cx)` / `redo(source, cx)`, `can_undo()` / `can_redo()` |
-| `getEOL()` / `setEOL(...)` / `pushEOL(...)` | `line_ending()` / `set_line_ending(...)` / `push_line_ending(...)` (an undo step) |
+| `getEOL()` / `setEOL(...)` / `pushEOL(...)` | `line_ending()` / `set_line_ending(...)` / `push_line_ending(...)` (an undo step); both are new versions and content changes (`is_eol_change`) |
 | `isAttachedToEditor()`, `onDidChangeAttached` | `is_attached_to_editor()`, `TextModelEvent::AttachedChanged` |
 | `normalizeIndentation(s)` | `normalize_indentation(s)` |
 | `getLineFirstNonWhitespaceColumn(n)`, `getLineLastNonWhitespaceColumn(n)` | `line_first_non_whitespace_column(row)`, `line_last_non_whitespace_column(row)` (0-based, `None` for blank lines) |
 | `tokenization.getLineTokens(n)` | `line_tokens(row, cx)` (`colorize::Token`s) |
 | `getOptions()` / `updateOptions(...)` | `options()` / `update_options(...)` (tab size, insert spaces, …) |
-| `deltaDecorations(old, new)` | `delta_decorations(owner, &old, new, cx)` (byte ranges) |
-| `getDecorationsInRange(range)` | `decorations_in_range(range, editor)` |
-| `onDidChangeContent` | `TextModelEvent::Edited { changes, version, … }` |
-| `onDidChangeLanguage`, `onDidChangeOptions`, `onDidChangeDecorations` | `LanguageChanged { old_language, new_language }`, `OptionsChanged`, `DecorationsChanged` |
+| `deltaDecorations(old, new)` | `delta_decorations_at(owner, &old, new, cx)` (positions), or `delta_decorations` with byte ranges |
+| `getDecorationsInRange(range, ownerId, filterOutValidation)` | `decorations_in_point_range(range, owner, filter_out_validation)` (positions), or `decorations_in_range(range, editor)` with byte ranges |
+| `getDecorationRange(id)`, `getDecorationOptions(id)`, `getLineDecorations`, `getLinesDecorations`, `getAllDecorations`, `getOverviewRulerDecorations`, `getInjectedTextDecorations`, `getAllMarginDecorations` | `decoration_range(id)`, `decoration_options(id)`, `line_decorations`, `lines_decorations`, `all_model_decorations`, `overview_ruler_decorations`, `injected_text_decorations`, `all_margin_decorations` (`ModelDecoration`s) |
+| `onDidChangeContent` | `TextModelEvent::Edited { changes, version, eol, is_eol_change, … }` |
+| `onDidChangeLanguage`, `onDidChangeOptions`, `onDidChangeDecorations` | `LanguageChanged { old_language, new_language }`, `OptionsChanged(ModelOptionsChange)`, `DecorationsChanged(DecorationsChange)` |
 
 ## Editor
 
 | Monaco `ICodeEditor` | `CodeEditor` |
 |---|---|
 | `getModel()` / `setModel(m)` | `model()` / `set_model(m, cx)` |
-| `getValue()` / `setValue(v)` | through the model: `model().read(cx).text()`, `set_value` |
-| `getOptions()` / `updateOptions(o)` | `options()` / `update_options(full_options, cx)`: clone, change, set |
-| `getPosition()` / `setPosition(p)` | `selections()[0].head` / `set_selections(&[Selection::collapsed(p)], cx)` |
+| `getValue()` / `setValue(v)` | `value(eol, preserve_bom, cx)` / `set_value(v, cx)` |
+| `getOptions()` / `updateOptions(o)` | `options()` / `update_options_with(\|o\| o.read_only = true, cx)`, or `update_options(full_options, cx)` |
+| `getPosition()` / `setPosition(p)`, `getSelection()` / `setSelection(s)` | `position()` / `set_position(p, cx)`, `selection()` / `set_selection(s, cx)` |
+| `getConfiguredWordAtPosition(p)` | `configured_word_at_position(p, cx)` |
+| `getOption(EditorOption.fontInfo)` | `font_info()` (after the first frame) |
 | `getSelections()` / `setSelections(s)` | `selections()` / `set_selections(&s, cx)` |
 | `revealLine`, `revealLineInCenter`, `revealLines…`, `revealRange…`, `revealPosition…` | `reveal_line`, `reveal_line_in_center`, `reveal_lines…`, `reveal_range…`, `reveal_position…` |
 | `revealRange(range, ScrollType.Immediate)` | `reveal_range_with_scroll_type(range, RevealType::Simple, ScrollType::Immediate, cx)`; `reveal_lines_with_scroll_type` for lines |
@@ -85,21 +91,22 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `getStatusbarColumn(p)` | `statusbar_column(p, cx)` (1-based, as in Monaco) |
 | `inComposition` | `in_composition()` |
 | `getContentWidth()`, `getContentHeight()`, `getScrollWidth()`, `getScrollHeight()` | `content_width()`, `content_height()`, `scroll_width()`, `scroll_height()` |
-| `getVisibleRanges()` | `visible_ranges(cx)` |
-| `getScrolledVisiblePosition(p)` | `scrolled_visible_position(p)` |
+| `getVisibleRanges()`, `getVisibleRangesPlusViewportAboveBelow()` | `visible_ranges(cx)`, `visible_ranges_plus_viewport_above_below(cx)` |
+| `getScrolledVisiblePosition(p)` | `scrolled_visible_position_in_editor(p)` (`top`, `left`, `height` from the editor's top-left), or `scrolled_visible_position(p)` in window coordinates |
 | `getTargetAtClientPoint(x, y)` | `mouse_target(point, window, cx)` |
 | `focus()` / `hasTextFocus()` / `hasWidgetFocus()` | `window.focus(&editor.focus_handle(cx), cx)` / `has_text_focus(window)` / `has_widget_focus(window, cx)` |
 | `saveViewState()` / `restoreViewState(s)` | `save_view_state(cx)` / `restore_view_state(&s, cx)` (with the folded regions) |
-| `executeEdits(source, edits, endCursorState)` | `execute_edits(edits, end_selections, cx)` |
-| `pushUndoStop()` | `push_undo_stop(cx)` |
+| `executeEdits(source, edits, endCursorState)` | `execute_edits(edits, end_selections, cx)`, or `execute_edit_operations(edits, end_cursor_state, cx)` with `SingleEditOperation`s (`force_move_markers`) and an `EndCursorState` (selections or a cursor state computer) |
+| `pushUndoStop()` / `popUndoStop()` | `push_undo_stop(cx)` / `pop_undo_stop(cx)` |
 | `trigger(source, handlerId, payload)` | `trigger(id, window, cx)`, taking a Monaco action or command id (`cursorDown`, `undo`, …) or a GPUI action name; `DiffEditor::trigger` for `diffEditor.*` ids |
 | `getAction(id).run()` | `run_action(id, window, cx)` |
 | `addAction(descriptor)` | `add_action(EditorActionDescriptor::new(id, label, run).keybinding(…), cx)` |
 | `addCommand(keybinding, handler)` | define a GPUI action and bind it in `actions::KEY_CONTEXT`, or `add_command` plus `add_keybinding_rule` |
 | `getSupportedActions()` | `supported_actions(cx)` |
 | `createDecorationsCollection(d)` | `create_decorations_collection(d, cx)` |
-| `deltaDecorations(old, new)` | the model's `delta_decorations(Some(editor_id), …)` (editor-owned) |
-| `setHiddenAreas(ranges)` | `set_hidden_areas(rows, cx)` (0-based rows, end exclusive) |
+| `deltaDecorations(old, new)`, `removeDecorations(ids)` | `delta_decorations(&old, new, cx)`, `remove_decorations(&ids, cx)` (editor-owned) |
+| `getLineDecorations(n)`, `getDecorationsInRange(range)` | `line_decorations(row, cx)`, `decorations_in_range(range, cx)` |
+| `setHiddenAreas(ranges, source)` | `set_hidden_areas(rows, cx)`, `set_hidden_areas_from(source, rows, cx)` (0-based rows, end exclusive) |
 | `changeViewZones(a => a.addZone(z))` | `add_view_zone(zone, cx)`, `set_view_zone_height`, `remove_widget` |
 | `addContentWidget(w)` / `layoutContentWidget(w)` | `add_content_widget(w, cx)` / `set_content_widget_position(…)` |
 | `addOverlayWidget(w)` | `add_overlay_widget(w, cx)` |
@@ -111,8 +118,8 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 
 | Monaco | `CodeEditorEvent` |
 |---|---|
-| `onDidChangeCursorSelection` / `onDidChangeCursorPosition` | `SelectionsChanged(SelectionChange { reason, source })` |
-| `onDidScrollChange` | `ScrollChanged` |
+| `onDidChangeCursorSelection` / `onDidChangeCursorPosition` | `SelectionsChanged(SelectionChange { reason, source, selection, secondary_selections, old_selections, … })` / `CursorPositionChanged(CursorPositionChange)`, only when the selections changed |
+| `onDidScrollChange` | `ScrollChanged(ScrollEvent)`, only when something changed |
 | `onDidFocusEditorText` / `onDidBlurEditorText` | `Focused` / `Blurred` |
 | `onMouseDown`, `onMouseUp`, `onMouseMove`, `onMouseLeave`, `onContextMenu` | `MouseDown`, `MouseUp`, `MouseMove`, `MouseLeave`, `ContextMenu` (with `EditorMouseEvent`) |
 | `onDidAttemptReadOnlyEdit` | `ReadOnlyEditAttempt` |
@@ -128,8 +135,8 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `onDidCompositionStart` / `onDidCompositionEnd` | `CompositionStarted` / `CompositionEnded` |
 | `onDidChangeHiddenAreas`, `onDidChangeViewZones` | `HiddenAreasChanged` (after the next frame), `ViewZonesChanged` |
 | `onBeginUpdate` / `onEndUpdate` | `BeginUpdate` / `EndUpdate` |
-| `onDidChangeModelContent` | subscribe to the model's `TextModelEvent::Edited` |
-| opener service / `registerEditorOpener` | `OpenLocation(location)` and `OpenLink(url)`: the host opens them |
+| `onDidChangeModelContent`, `onDidChangeModelDecorations`, `onDidChangeModelOptions`, `onDidChangeModelTokens`, `onDidChangeModelLanguageConfiguration` | `ModelContentChanged(ModelContentChange)`, `ModelDecorationsChanged`, `ModelOptionsChanged`, `ModelTokensChanged`, `ModelLanguageConfigurationChanged` |
+| opener service | `OpenLocation(location)` and `OpenLink(url)`, for what no `register_editor_opener`/`register_link_opener` opener opened |
 | `commandService.executeCommand` from providers | `ExecuteCommand(command)`, or `register_command` |
 
 ### Global events

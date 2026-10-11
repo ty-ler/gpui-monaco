@@ -41,7 +41,7 @@ use super::inline_edits::{Changes, Replacements, UpdatedEdit, diffed_edits, new_
 use crate::cursor::Selection;
 use crate::decorations::{DecorationId, DecorationOptions, InjectedText};
 use crate::editor::CodeEditor;
-use crate::events::{CursorChangeReason, CursorChangeSource, SelectionChange};
+use crate::events::{CursorChangeCause, CursorChangeReason, CursorChangeSource};
 use crate::model::{EditKind, TextModel};
 use crate::options::InlineSuggestMode;
 use crate::providers::{
@@ -2269,7 +2269,7 @@ impl CodeEditor {
     /// hides the ghost text, but not an inline edit (Monaco's controller).
     pub(crate) fn inline_selections_changed(
         &mut self,
-        change: &SelectionChange,
+        change: &CursorChangeCause,
         cx: &mut Context<Self>,
     ) {
         if self.inline.updating {

@@ -15,7 +15,7 @@ use text::PointUtf16;
 use crate::actions::{CommandLocation, CommandPosition, GoToLocations, PeekLocations};
 use crate::cursor::Selection;
 use crate::decorations::DecorationOptions;
-use crate::editor::{CodeEditor, CodeEditorEvent};
+use crate::editor::CodeEditor;
 use crate::options::{GoToLocation, LocationKind};
 use crate::providers::{
     Location, ReferenceContext, declaration_providers, definition_providers,
@@ -166,8 +166,10 @@ impl CodeEditor {
 
     /// Go to definition in an editor beside this one (Monaco
     /// `editor.action.revealDefinitionAside`, Cmd/Ctrl+K F12): the result
-    /// goes to the host as [`CodeEditorEvent::OpenLocationToSide`], even
-    /// in this editor's model. (Standalone Monaco has no editor groups and
+    /// goes to the host's [editor openers](crate::register_editor_opener),
+    /// else as
+    /// [`CodeEditorEvent::OpenLocationToSide`](crate::CodeEditorEvent::OpenLocationToSide),
+    /// even in this editor's model. (Standalone Monaco has no editor groups and
     /// opens it in place; a host without one can do the same with
     /// [`CodeEditor::go_to_location`].)
     pub fn reveal_definition_aside(&mut self, cx: &mut Context<Self>) {
@@ -363,7 +365,7 @@ impl CodeEditor {
         let peek = locations.len() > 1 && preference == GoToLocation::GotoAndPeek;
         let opened_here = if open_to_side {
             // The peek view would belong to the other editor.
-            cx.emit(CodeEditorEvent::OpenLocationToSide(first.clone()));
+            self.open_location_with_openers(first.clone(), true, cx);
             false
         } else {
             self.open_location(&first, !peek, cx)
@@ -377,9 +379,10 @@ impl CodeEditor {
     }
 
     /// Selects the start of `location` and reveals it near the top if it's
-    /// in this editor's model, briefly highlighting it; otherwise emits
-    /// [`CodeEditorEvent::OpenLocation`] for the host. Returns whether it
-    /// was in this model.
+    /// in this editor's model, briefly highlighting it; otherwise offers it
+    /// to the host's editor openers, else emits
+    /// [`CodeEditorEvent::OpenLocation`](crate::CodeEditorEvent::OpenLocation).
+    /// Returns whether it was in this model.
     pub(crate) fn open_location(
         &mut self,
         location: &Location,
@@ -388,7 +391,7 @@ impl CodeEditor {
     ) -> bool {
         let here = location.uri.is_none() || location.uri.as_ref() == self.model().read(cx).uri();
         if !here {
-            cx.emit(CodeEditorEvent::OpenLocation(location.clone()));
+            self.open_location_with_openers(location.clone(), false, cx);
             return false;
         }
         // Monaco `_openReference`: a link's `targetSelectionRange`, else its

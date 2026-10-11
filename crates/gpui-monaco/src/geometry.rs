@@ -231,5 +231,8 @@ impl CodeEditor {
                 },
             ));
         }
+        // The frame may have scrolled (revealing the cursor) or changed the
+        // scrollable size.
+        self.emit_scroll_changed(cx);
     }
 }

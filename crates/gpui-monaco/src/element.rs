@@ -1274,6 +1274,8 @@ pub(crate) struct EditorLayout {
     pub widget_bounds: Vec<Bounds<Pixels>>,
     /// What each of `widget_bounds` is.
     pub widget_kinds: Vec<crate::mouse_target::EmbeddedKind>,
+    /// The view of each of `widget_bounds`, to tell which widget it is.
+    pub widget_views: Vec<gpui::EntityId>,
     /// Whether the wheel over each of `widget_bounds` leaves the editor
     /// alone (overlay and overflowing widgets, zone widgets).
     pub widget_captures_wheel: Vec<bool>,
@@ -1609,6 +1611,7 @@ impl Element for EditorElement {
         let viewport = Bounds::new(gpui::Point::default(), window.viewport_size());
         let mut widgets = WidgetHits::default();
         for embedded in std::mem::take(&mut state.embedded) {
+            widgets.view = Some(embedded.view_id());
             match embedded {
                 Embedded::Zone {
                     view,
@@ -1855,6 +1858,7 @@ impl Element for EditorElement {
             if let Some(layout) = editor.layout.as_mut() {
                 layout.widget_bounds = widgets.bounds;
                 layout.widget_kinds = widgets.kinds;
+                layout.widget_views = widgets.views;
                 layout.widget_captures_wheel = widgets.captures_wheel;
             }
         });
@@ -2789,6 +2793,7 @@ fn prepaint_editor(
         zones: zones.clone(),
         widget_bounds: Vec::new(),
         widget_kinds: Vec::new(),
+        widget_views: Vec::new(),
         widget_captures_wheel: Vec::new(),
         lightbulb: None,
         minimap: None,
@@ -5350,6 +5355,18 @@ pub(crate) enum Embedded {
     },
 }
 
+impl Embedded {
+    /// The embedded view's entity, which identifies the widget.
+    fn view_id(&self) -> gpui::EntityId {
+        match self {
+            Self::Zone { view, .. }
+            | Self::Content { view, .. }
+            | Self::Overlay { view, .. }
+            | Self::Glyph { view, .. } => view.entity_id(),
+        }
+    }
+}
+
 /// Where overflowing widgets paint among GPUI's deferred draws: above
 /// GPUI's usual popovers (priority 1), then by their layer.
 const OVERFLOW_PRIORITY: usize = 2;
@@ -5372,9 +5389,17 @@ fn overflowing(view: gpui::AnyView) -> gpui::AnyElement {
 struct WidgetHits {
     bounds: Vec<Bounds<Pixels>>,
     kinds: Vec<crate::mouse_target::EmbeddedKind>,
+    views: Vec<gpui::EntityId>,
     captures_wheel: Vec<bool>,
-    /// The overflowing widgets and their layers; above the rest.
-    overflowing: Vec<(Bounds<Pixels>, crate::mouse_target::EmbeddedKind, usize)>,
+    /// The overflowing widgets, their layers and views; above the rest.
+    overflowing: Vec<(
+        Bounds<Pixels>,
+        crate::mouse_target::EmbeddedKind,
+        usize,
+        gpui::EntityId,
+    )>,
+    /// The view of the widget being pushed.
+    view: Option<gpui::EntityId>,
 }
 
 impl WidgetHits {
@@ -5389,6 +5414,8 @@ impl WidgetHits {
         }
         self.bounds.push(visible);
         self.kinds.push(kind);
+        self.views
+            .push(self.view.unwrap_or(gpui::EntityId::from(0u64)));
         self.captures_wheel.push(captures_wheel);
     }
 
@@ -5400,22 +5427,24 @@ impl WidgetHits {
         layer: usize,
     ) {
         if !visible.is_empty() {
-            self.overflowing.push((visible, kind, layer));
+            let view = self.view.unwrap_or(gpui::EntityId::from(0u64));
+            self.overflowing.push((visible, kind, layer, view));
         }
     }
 
     /// Puts the overflowing widgets last, in paint order; returns their
     /// bounds.
     fn finish(&mut self) -> Vec<Bounds<Pixels>> {
-        self.overflowing.sort_by_key(|(_, _, layer)| *layer);
-        for (bounds, kind, _) in &self.overflowing {
+        self.overflowing.sort_by_key(|(_, _, layer, _)| *layer);
+        for (bounds, kind, _, view) in &self.overflowing {
             self.bounds.push(*bounds);
             self.kinds.push(*kind);
+            self.views.push(*view);
             self.captures_wheel.push(true);
         }
         self.overflowing
             .iter()
-            .map(|(bounds, _, _)| *bounds)
+            .map(|(bounds, _, _, _)| *bounds)
             .collect()
     }
 }

@@ -13,8 +13,8 @@ mod point;
 mod rope;
 
 pub use buffer::{
-    Anchor, Buffer, BufferSnapshot, EditError, Stickiness, TransactionId, TransactionMetadata,
-    UndoOutcome, Version,
+    Anchor, Buffer, BufferSnapshot, EditError, JOIN_OPEN_UNDO_STEP, Stickiness, TransactionId,
+    TransactionMetadata, UndoOutcome, Version,
 };
 pub use indentation::{GuessedIndentation, guess_indentation};
 pub use line_ending::{LineEnding, normalize_line_endings};

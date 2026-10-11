@@ -224,7 +224,7 @@ impl CodeEditor {
                         .collect()
                 };
                 self.cursors.set_selections(&selections);
-                self.next_selection_change = crate::events::SelectionChange {
+                self.next_selection_change = crate::events::CursorChangeCause {
                     reason: crate::events::CursorChangeReason::Explicit,
                     source: crate::events::CursorChangeSource::Mouse,
                 };

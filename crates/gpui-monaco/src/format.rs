@@ -552,8 +552,12 @@ impl CodeEditor {
                     // Monaco cancels when a change ends at or above the
                     // cursor's line; edits below are mapped through.
                     let patch = buffer.edits_since(requested.version());
-                    let changes =
-                        crate::events::content_changes(requested.rope(), current.rope(), &patch);
+                    let changes = crate::events::content_changes(
+                        requested.rope(),
+                        current.rope(),
+                        &patch,
+                        requested.line_ending(),
+                    );
                     if changes.iter().any(|c| c.range.end.row <= position.row) {
                         return;
                     }

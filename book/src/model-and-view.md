@@ -31,9 +31,10 @@ Other common calls:
 | Call | Monaco equivalent |
 |---|---|
 | `model.text()` | `getValue()` |
-| `model.set_value(text, cx)` (replaces the text and clears undo history) | `setValue` |
-| `model.set_language(Some("json".into()), cx)` | `setModelLanguage` |
-| `model.line_ending()` / `set_line_ending(eol, cx)` (emits `LineEndingChanged`) | `getEOL` / `setEOL` |
+| `model.value(EndOfLinePreference::Lf, preserve_bom)` | `getValue(eol, preserveBOM)` |
+| `model.set_value(text, cx)` (replaces the text, clears undo history and, as in Monaco, removes every decoration) | `setValue` |
+| `model.set_language(Some("json".into()), cx)` (a language id or a MIME type) | `setModelLanguage` |
+| `model.line_ending()` / `set_line_ending(eol, cx)` (a new version, reported as an `Edited` with `is_eol_change`, then `LineEndingChanged`) | `getEOL` / `setEOL` |
 | `model.push_line_ending(eol, cx)` (an undo step, joining the open one like an edit) | `pushEOL` |
 | `model.is_attached_to_editor()` / `attached_editor_count()`, `TextModelEvent::AttachedChanged` | `isAttachedToEditor` / `getAttachedEditorCount`, `onDidChangeAttached` |
 | `model.undo(None, cx)` / `redo(None, cx)` / `push_stack_element()` | `undo` / `redo` / `pushStackElement` |
@@ -42,26 +43,28 @@ Other common calls:
 More `ITextModel` helpers:
 
 - **Lines:** `line_count`, `line_content`, `line_len_utf16` and `lines_content`.
-- **Positions:** `validate_position` and `validate_range`, `offset_at` and `position_at` (byte offsets), `modify_position` (Monaco's UTF-16 offsets) and `full_model_range`.
-- **Text:** `value_in_range` and `value_length`.
+- **Positions:** `validate_position`, `validate_range` and `full_model_range`. Offsets come in two kinds (see [Coordinates](#coordinates)): `get_offset_at` and `get_position_at` are Monaco's `getOffsetAt`/`getPositionAt` (UTF-16 units, each line break counted as the model's line ending), as `modify_position` and `value_length` count; `offset_at` and `position_at` are byte offsets into the stored text, what `edit` and decorations' byte ranges use.
+- **Text:** `value_in_range(range, eol)` (Monaco `getValueInRange`; `EndOfLinePreference::TextDefined` gives the model's line ending, `Lf` the stored `\n`), `value_length`, `value_length_with(eol, preserve_bom)`, `value_length_in_range` and `character_count_in_range`.
 - **Words:** `word_at_position` and `word_until_position`, using the language's `wordPattern`.
 - **Search:** `find_matches`, `find_matches_in` (with search scopes and regex captures), `find_next_match` and `find_previous_match`.
 - **Edits:** `apply_edits` returns the edits that undo it. `push_edit_operations` joins the open undo step until `push_stack_element`, and takes a cursor state computer. `pop_stack_element` reopens the last step. `alternative_version_id` returns to earlier values on undo and redo, so it can tell whether the text is back to a saved state.
 - **Brackets and guides:** `bracket_pairs_in_range`, `match_bracket`, `find_enclosing_brackets`, `lines_indent_guides` and `active_indent_guide`. Brackets in strings and comments don't count.
 - **Indentation:** `normalize_indentation` (Monaco `normalizeIndentation`) rewrites a string's leading whitespace with the model's `indent_size` and `insert_spaces`. `line_first_non_whitespace_column` and `line_last_non_whitespace_column` are 0-based, `None` for blank lines (Monaco's `0`). `line_indent_column` counts leading spaces and tabs (`getLineIndentColumn`). `line_indent_level` is the indentation's width with tabs expanded, `None` for blank lines (Monaco `computeIndentLevel`).
+- **Decorations:** `delta_decorations_at` takes positions; `decoration_range`, `decoration_options`, `line_decorations`, `lines_decorations`, `decorations_in_point_range`, `all_model_decorations`, `overview_ruler_decorations`, `injected_text_decorations` and `all_margin_decorations` (Monaco's getters, with its `ownerId` and `filterOutValidation`) return `ModelDecoration`s in positions. Ids are unique across models.
 - **Tokens:** `line_tokens(row, cx)` (Monaco `tokenization.getLineTokens`) gives a line's tokens like `colorize::tokenize`: each token's UTF-16 start, its Monaco token type with the language suffix (`keyword.rust`) and its language, the injected one inside a code fence. A model that hasn't parsed the latest text is tokenized right away.
 
 A model emits `TextModelEvent::Edited` for each change. Subscribe to it with `cx.subscribe(&model, …)` to sync with something else, such as an LSP server. The event carries:
 
-- **`changes`:** Monaco's `IModelContentChange`s. Each has the replaced `range` (UTF-16 positions), its byte `range_offset` and `range_length`, and the new `text`. They're in descending order in the old text's coordinates, so applying them one after another reproduces the new text.
+- **`changes`:** Monaco's `IModelContentChange`s. Each has the replaced `range` (UTF-16 positions), Monaco's `range_offset_utf16` and `range_length_utf16` (UTF-16 units, line breaks as the model's line ending), the byte `range_offset` and `range_length` into the stored `\n` text, and the new `text` with `\n` line breaks. They're in descending order in the old text's coordinates, so applying them one after another reproduces the new text: by byte offsets on a `\n` copy, or by the UTF-16 offsets on Monaco's value, with the text's `\n` turned into `eol`.
 - **`patch`:** the same edits as byte ranges.
 - **`kind`:** an edit, undo, redo or `set_value`.
+- **`eol` and `is_eol_change`:** the model's line ending, and whether only it changed (Monaco `setEOL`): then `patch` is empty and the one change replaces the whole text with itself, as Monaco's does.
 
 ### Coordinates
 
 The text API uses three kinds of position:
 
-- **Byte offsets** (`usize`), into the UTF-8 text.
+- **Byte offsets** (`usize`), into the UTF-8 text, whose line breaks are always `\n`. Monaco's offsets are different: UTF-16 units with the model's line ending, which `get_offset_at`, `get_position_at` and `ContentChange::range_offset_utf16` give. Code ported from Monaco wants those.
 - **`Point { row, column }`**: 0-based rows and byte columns.
 - **`PointUtf16 { row, column }`**: 0-based rows and UTF-16 columns. This is the editor-facing type. Selections, providers and markers use it because it matches Monaco and LSP.
 
@@ -105,8 +108,14 @@ A `ViewState` (Monaco `ICodeEditorViewState`) holds the selections, the scroll p
 | `reveal_range_with_scroll_type(range, RevealType::…, ScrollType::Immediate, cx)`, `reveal_lines_with_scroll_type` | the reveal methods' `scrollType` argument |
 | `reveal_all_cursors(reveal_horizontal, minimal_reveal, cx)` | `revealAllCursors` |
 | `visible_ranges(cx)` | `getVisibleRanges` |
-| `execute_edits(edits, Some(end_selections), cx)` | `executeEdits` |
-| `push_undo_stop(cx)` | `pushUndoStop` |
+| `execute_edits(edits, Some(end_selections), cx)`, `execute_edit_operations(edits, end_cursor_state, cx)` (`SingleEditOperation` with `force_move_markers`, `EndCursorState::Computer`) | `executeEdits`: joins the open undo step, and returns `false` in a read-only editor without the read-only message |
+| `push_undo_stop(cx)`, `pop_undo_stop(cx)` | `pushUndoStop`, `popUndoStop` |
+| `position()`, `set_position(p, cx)`, `selection()`, `set_selection(s, cx)` | `getPosition`, `setPosition`, `getSelection`, `setSelection` |
+| `value(eol, preserve_bom, cx)`, `set_value(text, cx)` | `getValue`, `setValue` |
+| `configured_word_at_position(p, cx)` | `getConfiguredWordAtPosition` (the editor's `word_separators`) |
+| `update_options_with(\|o\| o.read_only = true, cx)` | `updateOptions` with some options |
+| `set_hidden_areas(areas, cx)`, `set_hidden_areas_from(source, areas, cx)` | `setHiddenAreas(ranges, source)`: each source's areas are kept apart |
+| `line_decorations(row, cx)`, `decorations_in_range(range, cx)`, `delta_decorations(old, new, cx)`, `remove_decorations(ids, cx)`, `create_decorations_collection` | `getLineDecorations`, `getDecorationsInRange`, `deltaDecorations`, `removeDecorations`, `createDecorationsCollection` (which acts on the current model, also after `set_model`) |
 | `trigger("code_editor::CommentLine", window, cx)` | `trigger` (with GPUI action names) |
 | `has_text_focus(window)`, `has_widget_focus(window, cx)` | `hasTextFocus`, `hasWidgetFocus` |
 
@@ -123,23 +132,27 @@ These answer from the last frame, so they return `None` until the editor was pai
 | `offset_for_column(row, column)`, `width_of_line(row)` | `getOffsetForColumn`, `getWidthOfLine` (rendered lines only) |
 | `visible_column_from_position(p, cx)` | `getVisibleColumnFromPosition`, 0-based |
 | `statusbar_column(p, cx)` | `getStatusbarColumn`: 1-based, tabs expanded, every other character one column |
-| `content_width()`, `content_height()`, `scroll_width()`, `scroll_height()` | `getContentWidth`, `getContentHeight` (without `scroll_beyond_last_line`), `getScrollWidth`, `getScrollHeight` |
+| `content_width()`, `content_height()`, `scroll_width()`, `scroll_height()` | `getContentWidth`, `getContentHeight` (the lines and view zones, without the `scroll_beyond_last_line` room or horizontal scrollbar Monaco adds), `getScrollWidth`, `getScrollHeight` |
+| `scrolled_visible_position_in_editor(p)` (`top`, `left`, `height` from the editor's top-left); `scrolled_visible_position(p)` in window coordinates | `getScrolledVisiblePosition` |
+| `font_info()` | `getOption(EditorOption.fontInfo)` |
+| `visible_ranges_plus_viewport_above_below(cx)` | `getVisibleRangesPlusViewportAboveBelow` |
 | `scroll_top()`, `scroll_left()` | `getScrollTop`, `getScrollLeft` (where a smooth scroll is going) |
 
 ### Events
 
 `CodeEditor` emits `CodeEditorEvent`:
 
-- `SelectionsChanged(SelectionChange)`: the `reason` is Monaco's `CursorChangeReason` (`Explicit`, `Paste`, `Undo`, `Redo`, `ContentFlush`, `RecoverFromMarkers` or `NotSet`). The `source` is `Keyboard`, `Mouse`, `Api`, `Model`, `ModelChange` or `RestoreState`.
-- `ScrollChanged`
+- `SelectionsChanged(SelectionChange)`: the selections changed (only then, as in Monaco). The `reason` is Monaco's `CursorChangeReason` (`Explicit`, `Paste`, `Undo`, `Redo`, `ContentFlush`, `RecoverFromMarkers` or `NotSet`). The `source` is `Keyboard`, `Mouse`, `Api`, `Model`, `ModelChange` or `RestoreState`. It also has the primary and secondary selections, the old ones and the model versions (Monaco `ICursorSelectionChangedEvent`). `CursorPositionChanged` comes right before it with the positions (Monaco `onDidChangeCursorPosition`).
+- `ScrollChanged(ScrollEvent)`: the scroll position or the scrollable size changed, and which (Monaco `IScrollEvent`). Since an unchanged position reports nothing, two editors can sync their scroll positions (or selections) both ways, as Monaco hosts do.
+- `ModelContentChanged`, `ModelDecorationsChanged`, `ModelOptionsChanged`, `ModelTokensChanged` and `ModelLanguageConfigurationChanged` forward the shown model's events (Monaco's editor-level `onDidChangeModel*`), so a host needn't resubscribe after `set_model`.
 - `ReadOnlyEditAttempt`: an edit was refused because the editor is read-only. The editor also shows `read_only_message`.
 - `Focused`
 - `Blurred`
 - `MouseDown`, `MouseUp`, `MouseMove`, `MouseLeave` and `ContextMenu` (on right click): each carries an `EditorMouseEvent` whose `target` says what's under the mouse. The editor shows its own context menu unless the `context_menu` option is off.
   - Targets include the glyph margin, line numbers, line decorations, text, empty area, view zones, widgets, scrollbars, minimap and sticky scroll.
-  - Each target also gives the text position. Use `editor.mouse_target(point, window, cx)` to hit-test any point.
+  - Each target also gives the text position, the `range` (the whole line in the gutter), the `mouse_column` and a `detail` (Monaco `IMouseTarget.detail`): which view zone (and the line it's after), content, overlay or glyph margin widget, the margin's layout and lane, or the distance past a line's end. Use `editor.mouse_target(point, window, cx)` to hit-test any point.
   - The playground toggles breakpoints from glyph margin clicks.
-- `OpenLocation(Location)`: a navigation command or the peek view wants a location in another model. Open it and call `go_to_location` on the new editor.
+- `OpenLocation(Location)`: a navigation command or the peek view wants a location in another model. Open it and call `go_to_location` on the new editor. `OpenLink(url)` is a followed link. Instead of subscribing to every editor, register once with `register_editor_opener` and `register_link_opener` (Monaco `registerEditorOpener`/`registerLinkOpener`), which cover peek and diff editors too; the events then come only for what no opener opened.
 - `WillChangeModel` and `ModelChanged`, with the old and new model's uri. `ModelLanguageChanged` forwards the model's language change.
 - `ConfigurationChanged(change)`: some option changed. `change.has_changed(|o| &o.font_size)` says which.
 - `LayoutChanged(LayoutInfo)` and `ContentSizeChanged`: sent after the frame that changed them, including the first frame.

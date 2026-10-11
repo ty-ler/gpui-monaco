@@ -7,8 +7,9 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{Modifiers, Pixels, Point, SharedString};
-use text::{Patch, PointUtf16, Rope};
+use text::{LineEnding, Patch, PointUtf16, Rope};
 
+use crate::cursor::Selection;
 use crate::options::EditorOptions;
 
 /// One change in a [`TextModelEvent::Edited`](crate::TextModelEvent)
@@ -17,34 +18,192 @@ use crate::options::EditorOptions;
 /// An event's changes are in descending order, in the coordinates of the
 /// text before the event, so applying them one after another to that text
 /// reproduces the new text.
+///
+/// There are two kinds of offsets. `range_offset` and `range_length` are
+/// UTF-8 byte offsets into the stored text, whose line breaks are always
+/// `\n` (what [`TextModel::offset_at`](crate::TextModel::offset_at) and
+/// [`Buffer`](text::Buffer) use). `range_offset_utf16` and
+/// `range_length_utf16` are Monaco's: UTF-16 code units, with each line
+/// break counted as the model's line ending at the time (two for CRLF),
+/// as [`TextModel::get_offset_at`](crate::TextModel::get_offset_at)
+/// counts them. Code ported from Monaco wants the latter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContentChange {
     /// The replaced range (0-based rows, UTF-16 columns).
     pub range: Range<PointUtf16>,
-    /// The byte offset of the replaced range (Monaco `rangeOffset`, which
-    /// counts UTF-16 units).
+    /// The byte offset of the replaced range in the stored (`\n`) text.
     pub range_offset: usize,
-    /// The byte length of the replaced range (Monaco `rangeLength`).
+    /// The byte length of the replaced range in the stored (`\n`) text.
     pub range_length: usize,
-    /// The new text for the range.
+    /// The offset of the replaced range as Monaco counts it (Monaco
+    /// `rangeOffset`): UTF-16 units, line breaks as the model's line ending.
+    pub range_offset_utf16: usize,
+    /// The length of the replaced range as Monaco counts it (Monaco
+    /// `rangeLength`).
+    pub range_length_utf16: usize,
+    /// The new text for the range, with `\n` line breaks (Monaco's has the
+    /// model's line ending).
     pub text: String,
+}
+
+/// Monaco's offset of byte `offset` of `rope`: UTF-16 units, each line
+/// break counted as `eol`.
+pub(crate) fn utf16_offset(rope: &Rope, offset: usize, eol: LineEnding) -> usize {
+    let row = rope.offset_to_point(offset).row as usize;
+    rope.offset_to_offset_utf16(offset).0 + row * (eol.as_str().len() - 1)
 }
 
 /// The [`ContentChange`]s of `patch`, which took `old` to `new` (e.g. from
 /// [`Buffer::edits_since`](text::Buffer::edits_since)), in descending order.
-pub fn content_changes(old: &Rope, new: &Rope, patch: &Patch) -> Vec<ContentChange> {
+/// `eol` is the line ending of `old`, which the UTF-16 offsets count.
+pub fn content_changes(
+    old: &Rope,
+    new: &Rope,
+    patch: &Patch,
+    eol: LineEnding,
+) -> Vec<ContentChange> {
     patch
         .edits()
         .iter()
         .rev()
-        .map(|edit| ContentChange {
-            range: old.offset_to_point_utf16(edit.old.start)
-                ..old.offset_to_point_utf16(edit.old.end),
-            range_offset: edit.old.start,
-            range_length: edit.old.len(),
-            text: new.text_for_range(edit.new.clone()),
+        .map(|edit| {
+            let start = utf16_offset(old, edit.old.start, eol);
+            ContentChange {
+                range: old.offset_to_point_utf16(edit.old.start)
+                    ..old.offset_to_point_utf16(edit.old.end),
+                range_offset: edit.old.start,
+                range_length: edit.old.len(),
+                range_offset_utf16: start,
+                range_length_utf16: utf16_offset(old, edit.old.end, eol) - start,
+                text: new.text_for_range(edit.new.clone()),
+            }
         })
         .collect()
+}
+
+/// Monaco `setEOL`'s change: the whole of `rope` replaced with itself,
+/// its length counted with the `old` line ending.
+pub(crate) fn eol_change(rope: &Rope, old: LineEnding) -> ContentChange {
+    ContentChange {
+        range: PointUtf16::zero()..rope.max_point_utf16(),
+        range_offset: 0,
+        range_length: rope.len(),
+        range_offset_utf16: 0,
+        range_length_utf16: utf16_offset(rope, rope.len(), old),
+        text: rope.to_string(),
+    }
+}
+
+/// The details of a
+/// [`CodeEditorEvent::ModelContentChanged`](crate::CodeEditorEvent)
+/// (Monaco `IModelContentChangedEvent`), from the model's
+/// [`TextModelEvent::Edited`](crate::TextModelEvent).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelContentChange {
+    /// The changes, in descending order (Monaco `changes`).
+    pub changes: Arc<[ContentChange]>,
+    /// The model's line ending (Monaco `eol`).
+    pub eol: LineEnding,
+    /// The model's version after the change (Monaco `versionId`).
+    pub version_id: text::Version,
+    /// An undo (Monaco `isUndoing`).
+    pub is_undoing: bool,
+    /// A redo (Monaco `isRedoing`).
+    pub is_redoing: bool,
+    /// The whole text was replaced by
+    /// [`TextModel::set_value`](crate::TextModel::set_value) (Monaco
+    /// `isFlush`).
+    pub is_flush: bool,
+    /// Only the line ending changed (Monaco `isEolChange`).
+    pub is_eol_change: bool,
+}
+
+/// Which model options changed, in a
+/// [`TextModelEvent::OptionsChanged`](crate::TextModelEvent) (Monaco
+/// `IModelOptionsChangedEvent`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ModelOptionsChange {
+    /// `tab_size` changed (Monaco `tabSize`).
+    pub tab_size: bool,
+    /// `indent_size` changed (Monaco `indentSize`).
+    pub indent_size: bool,
+    /// `insert_spaces` changed (Monaco `insertSpaces`).
+    pub insert_spaces: bool,
+    /// `trim_auto_whitespace` changed (Monaco `trimAutoWhitespace`).
+    pub trim_auto_whitespace: bool,
+}
+
+/// What a [`TextModelEvent::DecorationsChanged`](crate::TextModelEvent)
+/// affects, from the options of the decorations added, removed or changed
+/// (Monaco `IModelDecorationsChangedEvent`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DecorationsChange {
+    /// The minimap (Monaco `affectsMinimap`). Decorations don't show in
+    /// the minimap yet, so this is always `false`.
+    pub affects_minimap: bool,
+    /// The overview ruler: a decoration with an `overview_ruler` mark or a
+    /// marker `severity` (Monaco `affectsOverviewRuler`).
+    pub affects_overview_ruler: bool,
+    /// The glyph margin: a decoration with a `glyph` (Monaco
+    /// `affectsGlyphMargin`).
+    pub affects_glyph_margin: bool,
+    /// The line numbers: a decoration with a `line_number_color` (Monaco
+    /// `affectsLineNumber`).
+    pub affects_line_number: bool,
+}
+
+impl DecorationsChange {
+    /// This change, plus what a decoration with `options` affects.
+    pub(crate) fn with(self, options: &crate::decorations::DecorationOptions) -> Self {
+        Self {
+            affects_minimap: self.affects_minimap,
+            affects_overview_ruler: self.affects_overview_ruler
+                || options.overview_ruler.is_some()
+                || options.severity.is_some(),
+            affects_glyph_margin: self.affects_glyph_margin || options.glyph.is_some(),
+            affects_line_number: self.affects_line_number || options.line_number_color.is_some(),
+        }
+    }
+}
+
+/// The details of a [`CodeEditorEvent::ScrollChanged`](crate::CodeEditorEvent)
+/// (Monaco `IScrollEvent`). It's only reported when one of the four
+/// changed, so syncing two editors' scroll positions both ways settles.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ScrollEvent {
+    /// See [`CodeEditor::scroll_top`](crate::CodeEditor::scroll_top).
+    pub scroll_top: Pixels,
+    /// See [`CodeEditor::scroll_left`](crate::CodeEditor::scroll_left).
+    pub scroll_left: Pixels,
+    /// See [`CodeEditor::scroll_width`](crate::CodeEditor::scroll_width);
+    /// zero before the first frame.
+    pub scroll_width: Pixels,
+    /// See [`CodeEditor::scroll_height`](crate::CodeEditor::scroll_height);
+    /// zero before the first frame.
+    pub scroll_height: Pixels,
+    /// Whether `scroll_top` changed (Monaco `scrollTopChanged`).
+    pub scroll_top_changed: bool,
+    /// Whether `scroll_left` changed (Monaco `scrollLeftChanged`).
+    pub scroll_left_changed: bool,
+    /// Whether `scroll_width` changed (Monaco `scrollWidthChanged`).
+    pub scroll_width_changed: bool,
+    /// Whether `scroll_height` changed (Monaco `scrollHeightChanged`).
+    pub scroll_height_changed: bool,
+}
+
+/// The details of a
+/// [`CodeEditorEvent::CursorPositionChanged`](crate::CodeEditorEvent)
+/// (Monaco `ICursorPositionChangedEvent`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CursorPositionChange {
+    /// The primary cursor's position (Monaco `position`).
+    pub position: PointUtf16,
+    /// The other cursors' positions (Monaco `secondaryPositions`).
+    pub secondary_positions: Vec<PointUtf16>,
+    /// Why they changed.
+    pub reason: CursorChangeReason,
+    /// What changed them.
+    pub source: CursorChangeSource,
 }
 
 /// Why the selections changed (Monaco `CursorChangeReason`).
@@ -88,13 +247,33 @@ pub enum CursorChangeSource {
 }
 
 /// The details of a [`CodeEditorEvent::SelectionsChanged`](crate::CodeEditorEvent)
-/// (Monaco `ICursorSelectionChangedEvent`; the selections themselves come
-/// from [`CodeEditor::selections`](crate::CodeEditor::selections)).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// (Monaco `ICursorSelectionChangedEvent`). It's only reported when the
+/// selections changed, as Monaco compares the cursor states.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SelectionChange {
     /// Why they changed.
     pub reason: CursorChangeReason,
     /// What changed them.
+    pub source: CursorChangeSource,
+    /// The primary selection (Monaco `selection`).
+    pub selection: Selection,
+    /// The other selections (Monaco `secondarySelections`).
+    pub secondary_selections: Vec<Selection>,
+    /// The selections last reported, `None` for the first report (Monaco
+    /// `oldSelections`).
+    pub old_selections: Option<Vec<Selection>>,
+    /// The model's version (Monaco `modelVersionId`).
+    pub model_version_id: text::Version,
+    /// The model's version at the last report, 0 for the first (Monaco
+    /// `oldModelVersionId`).
+    pub old_model_version_id: text::Version,
+}
+
+/// Why and how the selections are about to change: what the next
+/// [`SelectionChange`] reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CursorChangeCause {
+    pub reason: CursorChangeReason,
     pub source: CursorChangeSource,
 }
 

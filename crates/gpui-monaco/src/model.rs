@@ -8,7 +8,9 @@ use std::sync::Arc;
 use gpui::{App, Context, EntityId, EventEmitter, Global, SharedString, Task};
 
 use crate::decorations::{Decoration, DecorationId, DecorationOptions, DecorationSet};
-use crate::events::{ContentChange, content_changes};
+use crate::events::{
+    ContentChange, DecorationsChange, ModelOptionsChange, content_changes, eol_change,
+};
 use syntax::{HighlightState, Highlighter, Language, LanguageRegistry, TreeSitterHighlighter};
 use text::{
     Buffer, BufferSnapshot, EditError, LineEnding, Patch, Rope, TransactionMetadata, UndoOutcome,
@@ -221,8 +223,9 @@ pub enum EditKind {
 /// Events emitted by a [`TextModel`].
 #[derive(Clone, Debug)]
 pub enum TextModelEvent {
-    /// The text changed from `version - 1` (or older, for `SetValue`) to
-    /// `version`. `patch` is in byte offsets of the previous snapshot.
+    /// The text or its line ending changed (Monaco `onDidChangeContent`),
+    /// from an older version to `version`. `patch` is in byte offsets of the
+    /// previous snapshot; it's empty for a line ending change.
     Edited {
         /// The changes, in byte offsets of the previous text.
         patch: Patch,
@@ -239,9 +242,17 @@ pub enum TextModelEvent {
         /// Cursor state to restore for undo/redo (from the editor that made the
         /// original edit).
         restore: Option<TransactionMetadata>,
+        /// The model's line ending after the change (Monaco `eol`).
+        eol: LineEnding,
+        /// Only the line ending changed (Monaco `isEolChange`):
+        /// [`TextModel::set_line_ending`], [`TextModel::push_line_ending`],
+        /// or undoing or redoing such a step. `changes` then replaces the
+        /// whole text with itself, as Monaco's does, and `patch` is empty.
+        is_eol_change: bool,
     },
-    /// [`TextModel::update_options`] changed the options.
-    OptionsChanged,
+    /// [`TextModel::update_options`] changed the options (Monaco
+    /// `onDidChangeOptions`), and which.
+    OptionsChanged(ModelOptionsChange),
     /// [`TextModel::set_language`] changed the language id (Monaco
     /// `onDidChangeLanguage`).
     LanguageChanged {
@@ -254,8 +265,9 @@ pub enum TextModelEvent {
     /// `onDidChangeLanguageConfiguration`).
     LanguageConfigurationChanged,
     /// The line ending changed: [`TextModel::set_line_ending`],
-    /// [`TextModel::push_line_ending`], or undoing or redoing a step that
-    /// changed it.
+    /// [`TextModel::push_line_ending`], [`TextModel::set_value`], or undoing
+    /// or redoing a step that changed it. Follows the
+    /// [`TextModelEvent::Edited`] that reports it.
     LineEndingChanged,
     /// The model got its first editor or lost its last one (Monaco
     /// `onDidChangeAttached`); see [`TextModel::is_attached_to_editor`].
@@ -265,8 +277,9 @@ pub enum TextModelEvent {
     MarkersChanged,
     /// New highlights are available (background parse finished).
     SyntaxUpdated,
-    /// Decorations were added, removed or changed.
-    DecorationsChanged,
+    /// Decorations were added, removed or changed (Monaco
+    /// `onDidChangeDecorations`), and what they affect.
+    DecorationsChanged(DecorationsChange),
 }
 
 /// A text document: buffer, undo history, language and options.
@@ -294,6 +307,9 @@ pub struct TextModel {
     attached_editors: usize,
     /// Made for the editor's own use; not in the global registry.
     internal: bool,
+    /// Byte ranges whose edges the next edit moves decorations past
+    /// (Monaco `forceMoveMarkers`).
+    force_move_markers: Vec<Range<usize>>,
 }
 
 /// Monaco `TextModel.LARGE_FILE_SIZE_THRESHOLD`, in characters.
@@ -323,6 +339,7 @@ impl TextModel {
             too_large_for_tokenization: false,
             attached_editors: 0,
             internal: false,
+            force_move_markers: Vec::new(),
         }
         .with_options(ModelOptions::default())
     }
@@ -395,7 +412,9 @@ impl TextModel {
     }
 
     /// Sets the language id, resolved against the registry the first time the
-    /// model is shown (see [`TextModel::ensure_syntax`]).
+    /// model is shown (see [`TextModel::ensure_syntax`]). A MIME type works
+    /// too, as in Monaco's `createModel`: the model then gets its
+    /// language's id.
     pub fn with_language(mut self, language_id: impl Into<SharedString>) -> Self {
         self.language_id = Some(language_id.into());
         self.language_pending = true;
@@ -458,28 +477,51 @@ impl TextModel {
     }
 
     /// Sets the line ending [`TextModel::text`] joins lines with (Monaco
-    /// `setEOL`), emitting [`TextModelEvent::LineEndingChanged`] if it
-    /// differs. The stored text is unchanged, and this isn't an undo step:
-    /// see [`TextModel::push_line_ending`].
+    /// `setEOL`). If it differs, that's a new version, reported as Monaco
+    /// does: [`TextModelEvent::Edited`] with `is_eol_change` (an empty patch,
+    /// and a change replacing the whole text with itself), then
+    /// [`TextModelEvent::LineEndingChanged`]. The stored text is unchanged,
+    /// and this isn't an undo step: see [`TextModel::push_line_ending`].
     pub fn set_line_ending(&mut self, line_ending: LineEnding, cx: &mut Context<Self>) {
-        if self.buffer.line_ending() != line_ending {
-            self.buffer.set_line_ending(line_ending);
-            cx.emit(TextModelEvent::LineEndingChanged);
-            cx.notify();
+        let old = self.buffer.line_ending();
+        if self.buffer.set_eol(line_ending) {
+            self.emit_eol_change(old, EditKind::Edit, None, cx);
         }
     }
 
-    /// Sets the line ending as an undo step (Monaco `pushEOL`), emitting
-    /// [`TextModelEvent::LineEndingChanged`] if it differs. Like an edit, it
-    /// joins the open undo step (one not ended by
-    /// [`TextModel::push_stack_element`], or a transaction), else it's its
-    /// own; undoing it restores the previous line ending. The version
-    /// doesn't change: the stored text and offsets are the same.
+    /// Sets the line ending as an undo step (Monaco `pushEOL`), reported as
+    /// [`TextModel::set_line_ending`] reports it. Like an edit, it joins the
+    /// open undo step (one not ended by [`TextModel::push_stack_element`],
+    /// or a transaction), else it's its own; undoing it restores the
+    /// previous line ending.
     pub fn push_line_ending(&mut self, line_ending: LineEnding, cx: &mut Context<Self>) {
+        let old = self.buffer.line_ending();
         if self.buffer.push_line_ending(line_ending) {
-            cx.emit(TextModelEvent::LineEndingChanged);
-            cx.notify();
+            self.emit_eol_change(old, EditKind::Edit, None, cx);
         }
+    }
+
+    /// Reports a line ending change from `old` (Monaco `setEOL`'s event: the
+    /// whole text replaced with itself, `isEolChange`).
+    fn emit_eol_change(
+        &mut self,
+        old: LineEnding,
+        kind: EditKind,
+        restore: Option<TransactionMetadata>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(TextModelEvent::Edited {
+            patch: Patch::default(),
+            changes: vec![eol_change(self.buffer.rope(), old)].into(),
+            version: self.buffer.version(),
+            kind,
+            source: None,
+            restore,
+            eol: self.buffer.line_ending(),
+            is_eol_change: true,
+        });
+        cx.emit(TextModelEvent::LineEndingChanged);
+        cx.notify();
     }
 
     /// Whether an editor shows the model (Monaco `isAttachedToEditor`).
@@ -553,8 +595,16 @@ impl TextModel {
     pub fn update_options(&mut self, options: ModelOptions, cx: &mut Context<Self>) {
         let options = options.validated();
         if self.options != options {
+            let old = &self.options;
+            let change = ModelOptionsChange {
+                tab_size: old.tab_size != options.tab_size,
+                indent_size: old.indent_size != options.indent_size
+                    || old.indent_size_is_tab_size != options.indent_size_is_tab_size,
+                insert_spaces: old.insert_spaces != options.insert_spaces,
+                trim_auto_whitespace: old.trim_auto_whitespace != options.trim_auto_whitespace,
+            };
             self.options = options;
-            cx.emit(TextModelEvent::OptionsChanged);
+            cx.emit(TextModelEvent::OptionsChanged(change));
             cx.notify();
         }
     }
@@ -573,12 +623,16 @@ impl TextModel {
     /// Changes the language id (Monaco `setModelLanguage`), resolving it right away
     /// and emitting [`TextModelEvent::LanguageChanged`] (and the global
     /// [`on_did_change_model_language`](crate::on_did_change_model_language))
-    /// if it differs.
+    /// if it differs. A MIME type gives its language's id, as in Monaco.
     pub fn set_language(&mut self, language_id: Option<SharedString>, cx: &mut Context<Self>) {
         if self.language_id != language_id {
             let old_language = std::mem::replace(&mut self.language_id, language_id);
             self.language_pending = true;
             self.ensure_syntax(cx);
+            // A MIME type of the language it had.
+            if self.language_id == old_language {
+                return;
+            }
             cx.emit(TextModelEvent::LanguageChanged {
                 old_language: old_language.clone(),
                 new_language: self.language_id.clone(),
@@ -613,6 +667,14 @@ impl TextModel {
             registry
                 .language_for_id(id)
                 .or_else(|| registry.language_for_name(id))
+        });
+        // Monaco `createModel` and `setModelLanguage` also take a MIME type
+        // (`getLanguageIdByMimeType`): the model gets that language's id.
+        let language = language.or_else(|| {
+            let language = registry.language_for_mime_type(self.language_id.as_deref()?)?;
+            self.language_id = Some(SharedString::from(language.id.to_string()));
+            crate::languages::language_requested(self.language_id.as_ref()?, cx);
+            Some(language)
         });
         self.syntax = language
             .filter(|l| l.has_highlighter())
@@ -886,14 +948,20 @@ impl TextModel {
 
     /// Replaces the whole text and clears undo history (Monaco `setValue`),
     /// detecting the line ending from `text` (see
-    /// [`ModelOptions::default_eol`]). It's a whole-text edit, so versions keep increasing and anchors,
-    /// decorations and syntax update normally.
+    /// [`ModelOptions::default_eol`]) and whether it starts with a BOM
+    /// (stripped, and kept for [`TextModel::value`]). It's a whole-text
+    /// edit, so versions keep increasing and anchors and syntax update
+    /// normally. As in Monaco, every decoration is removed; editors add
+    /// their own back as they recompute them.
     pub fn set_value(&mut self, text: &str, cx: &mut Context<Self>) {
+        let has_bom = text.starts_with('\u{feff}');
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        self.buffer.set_has_bom(has_bom);
         // Monaco builds a new text buffer, detecting its line ending with
         // `defaultEOL` for text without line breaks.
         let line_ending = LineEnding::detect(text, self.options.default_eol);
-        let line_ending_changed = line_ending != self.buffer.line_ending();
+        let old_line_ending = self.buffer.line_ending();
+        let line_ending_changed = line_ending != old_line_ending;
         self.buffer.set_line_ending(line_ending);
         let len = self.buffer.len();
         let old = self.buffer.rope().clone();
@@ -902,18 +970,24 @@ impl TextModel {
         };
         self.auto_whitespace.clear();
         self.buffer.clear_history();
-        self.decorations.apply_patch(&patch);
+        // Monaco `_setValueFromTextBuffer`: "Destroy all my decorations".
+        let decorations = self.decorations.clear();
         self.reparse(cx);
         cx.emit(TextModelEvent::Edited {
-            changes: content_changes(&old, self.buffer.rope(), &patch).into(),
+            changes: content_changes(&old, self.buffer.rope(), &patch, old_line_ending).into(),
             patch,
             version: self.buffer.version(),
             kind: EditKind::SetValue,
             source: None,
             restore: None,
+            eol: line_ending,
+            is_eol_change: false,
         });
         if line_ending_changed {
             cx.emit(TextModelEvent::LineEndingChanged);
+        }
+        if let Some(change) = decorations {
+            cx.emit(TextModelEvent::DecorationsChanged(change));
         }
         cx.notify();
     }
@@ -982,15 +1056,19 @@ impl TextModel {
         cx: &mut Context<Self>,
     ) {
         if !patch.is_empty() {
-            self.decorations.apply_patch(patch);
+            let force = std::mem::take(&mut self.force_move_markers);
+            self.decorations.apply_patch_forcing(patch, &force);
             self.reparse(cx);
+            let eol = self.buffer.line_ending();
             cx.emit(TextModelEvent::Edited {
-                changes: content_changes(old, self.buffer.rope(), patch).into(),
+                changes: content_changes(old, self.buffer.rope(), patch, eol).into(),
                 patch: patch.clone(),
                 version: self.buffer.version(),
                 kind: EditKind::Edit,
                 source,
                 restore: None,
+                eol,
+                is_eol_change: false,
             });
             cx.notify();
         }
@@ -1015,10 +1093,37 @@ impl TextModel {
                 .clip_offset(range.end.min(len), text::Bias::Right);
             (start..end, options)
         });
+        let mut change = old
+            .iter()
+            .filter_map(|id| self.decorations.get(*id))
+            .fold(DecorationsChange::default(), |change, decoration| {
+                change.with(&decoration.options)
+            });
+        let new: Vec<_> = new
+            .inspect(|(_, options)| change = change.with(options))
+            .collect();
         let ids = self.decorations.delta(owner, old, new);
-        cx.emit(TextModelEvent::DecorationsChanged);
+        cx.emit(TextModelEvent::DecorationsChanged(change));
         cx.notify();
         ids
+    }
+
+    /// Makes the next edit move the decorations in or at the edges of
+    /// `ranges` (byte ranges of the current text, each an edit's) past the
+    /// edit's new text, whatever their stickiness (Monaco
+    /// `forceMoveMarkers`).
+    pub(crate) fn force_move_markers_on_next_edit(&mut self, ranges: Vec<Range<usize>>) {
+        self.force_move_markers = ranges;
+    }
+
+    /// Removes every decoration `owner` owns (Monaco
+    /// `removeAllDecorationsWithOwnerId`), as an editor does with its own
+    /// when it stops showing the model.
+    pub fn remove_all_decorations_with_owner(&mut self, owner: EntityId, cx: &mut Context<Self>) {
+        if let Some(change) = self.decorations.remove_owned_by(owner) {
+            cx.emit(TextModelEvent::DecorationsChanged(change));
+            cx.notify();
+        }
     }
 
     /// Starts an explicit transaction: every edit until the matching
@@ -1046,8 +1151,14 @@ impl TextModel {
         options: DecorationOptions,
         cx: &mut Context<Self>,
     ) {
+        let Some(old) = self.decorations.get(id) else {
+            return;
+        };
+        let change = DecorationsChange::default()
+            .with(&old.options)
+            .with(&options);
         if self.decorations.change_options(id, options) {
-            cx.emit(TextModelEvent::DecorationsChanged);
+            cx.emit(TextModelEvent::DecorationsChanged(change));
             cx.notify();
         }
     }
@@ -1075,6 +1186,11 @@ impl TextModel {
     /// The decoration with `id`, if it still exists.
     pub fn decoration(&self, id: DecorationId) -> Option<&Decoration> {
         self.decorations.get(id)
+    }
+
+    /// Every decoration, unsorted.
+    pub(crate) fn decoration_set(&self) -> &DecorationSet {
+        &self.decorations
     }
 
     /// Records cursor state with the most recent undo step.
@@ -1141,18 +1257,27 @@ impl TextModel {
             return false;
         };
         self.auto_whitespace.clear();
+        let eol = self.buffer.line_ending();
+        // A step that only changed the line ending (Monaco `pushEOL`).
+        if outcome.patch.is_empty() && eol != old_line_ending {
+            self.emit_eol_change(old_line_ending, kind, outcome.metadata, cx);
+            return true;
+        }
         self.decorations.apply_patch(&outcome.patch);
         self.reparse(cx);
         cx.emit(TextModelEvent::Edited {
-            changes: content_changes(old, self.buffer.rope(), &outcome.patch).into(),
+            changes: content_changes(old, self.buffer.rope(), &outcome.patch, old_line_ending)
+                .into(),
             patch: outcome.patch,
             version: self.buffer.version(),
             kind,
             source,
             restore: outcome.metadata,
+            eol,
+            is_eol_change: false,
         });
         // Monaco `_applyUndoRedoEdits` sets the step's line ending.
-        if self.buffer.line_ending() != old_line_ending {
+        if eol != old_line_ending {
             cx.emit(TextModelEvent::LineEndingChanged);
         }
         cx.notify();

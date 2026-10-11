@@ -1,6 +1,7 @@
 //! Links (Monaco's `contrib/links`): URLs found by the link computer and
 //! link providers are underlined; Cmd/Ctrl+hover highlights one and
-//! Cmd/Ctrl+click follows it by emitting [`CodeEditorEvent::OpenLink`].
+//! Cmd/Ctrl+click follows it: the host's link openers get it, else the
+//! editor emits [`CodeEditorEvent::OpenLink`](crate::CodeEditorEvent::OpenLink).
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -10,7 +11,7 @@ use gpui::{App, Context, SharedString, Task};
 use text::PointUtf16;
 
 use crate::decorations::{DecorationId, DecorationOptions};
-use crate::editor::{CodeEditor, CodeEditorEvent};
+use crate::editor::CodeEditor;
 use crate::options::MultiCursorModifier;
 use crate::providers::{DocumentLink, LinkProvider, link_providers};
 use crate::theme::TokenStyle;
@@ -359,8 +360,10 @@ impl CodeEditor {
         }));
     }
 
-    /// Emits [`CodeEditorEvent::OpenLink`], resolving `file://./relative`
-    /// links against a `file://` model's directory as Monaco does.
+    /// Offers the link to the link openers, else emits
+    /// [`CodeEditorEvent::OpenLink`](crate::CodeEditorEvent::OpenLink),
+    /// resolving `file://./relative` links against a `file://` model's
+    /// directory as Monaco does.
     fn emit_open_link(&mut self, url: SharedString, cx: &mut Context<Self>) {
         let model_uri = self.model().read(cx).uri().cloned();
         let url = match model_uri.as_deref() {
@@ -381,7 +384,7 @@ impl CodeEditor {
             }
             _ => url,
         };
-        cx.emit(CodeEditorEvent::OpenLink(url));
+        self.open_link_with_openers(url, cx);
     }
 
     /// The links found, with their current ranges (for tests).

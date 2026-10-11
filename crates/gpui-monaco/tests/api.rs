@@ -3,7 +3,7 @@
 use gpui::{AppContext as _, Entity, Focusable, TestAppContext, VisualTestContext, px};
 use gpui_monaco::cursor::Selection;
 use gpui_monaco::text::PointUtf16;
-use gpui_monaco::{CodeEditor, RevealType, TextModel};
+use gpui_monaco::{CodeEditor, EndOfLinePreference, RevealType, TextModel};
 
 fn p(row: u32, column: u32) -> PointUtf16 {
     PointUtf16::new(row, column)
@@ -42,7 +42,10 @@ fn model_helpers(cx: &mut TestAppContext) {
         assert_eq!(m.validate_range(p(1, 3)..p(0, 4)), p(0, 4)..p(1, 3));
         assert_eq!(m.offset_at(p(1, 0)), 17);
         assert_eq!(m.position_at(17), p(1, 0));
-        assert_eq!(m.value_in_range(p(0, 4)..p(1, 3)), "foo_bar = 1;\nfoo");
+        assert_eq!(
+            m.value_in_range(p(0, 4)..p(1, 3), EndOfLinePreference::TextDefined),
+            "foo_bar = 1;\nfoo"
+        );
 
         let word = m.word_at_position(p(0, 6)).unwrap();
         assert_eq!(
@@ -289,12 +292,17 @@ fn content_change_events(cx: &mut TestAppContext) {
                 range: p(1, 2)..p(1, 3),
                 range_offset: 7,
                 range_length: 1,
+                // Monaco's offsets count "é" as one UTF-16 unit.
+                range_offset_utf16: 6,
+                range_length_utf16: 1,
                 text: "ef".into(),
             },
             ContentChange {
                 range: p(0, 1)..p(0, 2),
                 range_offset: 1,
                 range_length: 1,
+                range_offset_utf16: 1,
+                range_length_utf16: 1,
                 text: "X".into(),
             },
         ]
@@ -354,8 +362,10 @@ fn selection_change_reasons(cx: &mut TestAppContext) {
         e.set_selections(&[Selection::collapsed(p(1, 2))], cx)
     });
     assert_eq!(last(cx), (R::NotSet, S::Api));
+    // An edit that moves the cursor (Monaco reports nothing when the
+    // cursor stays put).
     editor.update(cx, |e, cx| {
-        e.execute_edits(vec![(p(0, 0)..p(0, 0), "a".into())], None, cx);
+        e.execute_edits(vec![(p(1, 0)..p(1, 0), "a".into())], None, cx);
     });
     assert_eq!(last(cx), (R::NotSet, S::Api));
 
@@ -370,7 +380,11 @@ fn selection_change_reasons(cx: &mut TestAppContext) {
 
     // Edits made elsewhere move the cursors along.
     let model = editor.read_with(cx, |e, _| e.model().clone());
-    model.update(cx, |m, cx| m.edit([(0..0, "zz")], cx).unwrap());
+    // (On the cursor's line: Monaco reports nothing when the cursors stay.)
+    model.update(cx, |m, cx| {
+        let start = m.offset_at(p(1, 0));
+        m.edit([(start..start, "zz")], cx).unwrap();
+    });
     assert_eq!(last(cx), (R::RecoverFromMarkers, S::ModelChange));
     model.update(cx, |m, cx| m.set_value("fresh", cx));
     assert_eq!(last(cx), (R::ContentFlush, S::Model));
