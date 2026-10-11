@@ -593,6 +593,8 @@ pub(crate) struct OverlayWidgetState {
 pub(crate) struct WidgetPositions {
     pub content: Vec<(Option<PointUtf16>, Option<PointUtf16>)>,
     pub glyphs: Vec<u32>,
+    /// Widgets across the gutter (the inline edit indicator).
+    pub gutter: Vec<u32>,
 }
 
 /// What cached zone rows were computed for: the view lines (pointer), the
@@ -606,6 +608,11 @@ pub(crate) struct Widgets {
     pub content: Vec<ContentWidgetState>,
     pub overlays: Vec<OverlayWidgetState>,
     pub glyphs: Vec<GlyphWidgetState>,
+    /// Widgets across the whole gutter beside a line (glyph margin, line
+    /// numbers and line decorations), above its glyphs, shown whenever
+    /// the gutter has a width: Monaco's inline edit gutter indicator, an
+    /// overlay over the gutter (`lane` and `z_index` are unused).
+    pub gutter: Vec<GlyphWidgetState>,
     next_id: u64,
     /// Bumped when zones are added or removed.
     pub zones_generation: u64,
@@ -648,8 +655,11 @@ impl Widgets {
     }
 
     pub fn remove(&mut self, id: WidgetId) -> bool {
-        let before =
-            self.zones.len() + self.content.len() + self.overlays.len() + self.glyphs.len();
+        let before = self.zones.len()
+            + self.content.len()
+            + self.overlays.len()
+            + self.glyphs.len()
+            + self.gutter.len();
         let zones = self.zones.len();
         self.zones.retain(|z| z.id != id);
         if self.zones.len() != zones {
@@ -658,7 +668,13 @@ impl Widgets {
         self.content.retain(|w| w.id != id);
         self.overlays.retain(|w| w.id != id);
         self.glyphs.retain(|w| w.id != id);
-        before != self.zones.len() + self.content.len() + self.overlays.len() + self.glyphs.len()
+        self.gutter.retain(|w| w.id != id);
+        before
+            != self.zones.len()
+                + self.content.len()
+                + self.overlays.len()
+                + self.glyphs.len()
+                + self.gutter.len()
     }
 
     /// Drops every view zone (Monaco's go with the old view when the model

@@ -12,7 +12,11 @@
 //!   (`jumpToView.ts`) views, as boxes in content widgets rather than DOM
 //!   overlays,
 //! - `components/gutterIndicatorView.ts` (with the line number in the pill
-//!   and the pulse when the view is hovered) and `gutterIndicatorMenu.ts`,
+//!   and the pulse when the view is hovered; across the whole gutter, so it
+//!   shows without a glyph margin too) and `gutterIndicatorMenu.ts` (a
+//!   popup kept in the window that closes when the editor scrolls, as
+//!   Monaco's instant hover; with the keyboard once it has focus: Up,
+//!   Down, Home and End move, Enter or Space runs, Escape closes),
 //! - `inlineSuggestionsView.ts` (`_gutterIndicatorState`: the indicator for
 //!   ghost text with `showInlineEditMenu`).
 
@@ -21,8 +25,8 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Animation, AnimationExt as _, AppContext as _, Context, Entity, Hsla, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString,
+    Animation, AnimationExt as _, AppContext as _, Context, Entity, FocusHandle, Hsla,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString,
     StatefulInteractiveElement, Styled, Task, WeakEntity, Window, div, point, px,
 };
 use text::PointUtf16;
@@ -33,15 +37,20 @@ use super::inline_edits::{
     grow_edits_until_whitespace, utf16_to_byte,
 };
 use super::long_distance_hint::{LongDistanceHintState, LongDistanceState};
+use crate::actions::{
+    ContextMenuFirst, ContextMenuHide, ContextMenuLast, ContextMenuNext, ContextMenuPrevious,
+    ContextMenuSelect,
+};
 use crate::codicons::{Codicon, icon as codicon};
+use crate::context_menu::CONTEXT_MENU_KEY_CONTEXT;
 use crate::decorations::{BlockDecoration, DecorationId, DecorationOptions, InjectedText};
 use crate::editor::CodeEditor;
 use crate::options::LineNumbers;
 use crate::providers::{Command, InlineCompletionHintStyle};
 use crate::theme::{Theme, TokenStyle};
 use crate::widgets::{
-    ContentWidget, ContentWidgetPreference, GlyphMarginWidget, OverlayPosition, OverlayWidget,
-    ViewZone, WidgetId, ZoneHeight,
+    ContentWidget, ContentWidgetPreference, OverlayPosition, OverlayWidget, ViewZone, WidgetId,
+    ZoneHeight,
 };
 
 /// Monaco `ORIGINAL_END_PADDING`: the gap between the text and the side by
@@ -66,6 +75,10 @@ const CUSTOM_HORIZONTAL_OFFSET: f32 = 4.;
 /// Monaco `InlineEditsCustomView`'s `VERTICAL_OFFSET_WHEN_ABOVE_BELOW`.
 const CUSTOM_VERTICAL_OFFSET: f32 = 2.;
 
+/// The gutter menu paints above the editor's overflowing widgets, as
+/// Monaco's hover service's hovers do.
+const MENU_PRIORITY: usize = 1000;
+
 /// What Tab does (Monaco `InlineEditTabAction`); it colors the indicator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TabAction {
@@ -80,7 +93,7 @@ pub(crate) enum TabAction {
 /// Where the gutter indicator is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IndicatorPlacement {
-    /// In the glyph margin beside this row.
+    /// In the gutter beside this row.
     Docked(u32),
     /// Pinned to the top of the editor: the edit is above.
     Above,
@@ -361,14 +374,27 @@ pub(crate) struct GutterIndicator {
     menu_hovered: bool,
     menu_open: bool,
     close: Option<Task<()>>,
+    /// The menu's keyboard-selected (or hovered) row.
+    active: Option<usize>,
+    /// The menu's focus: while it has it, the menu stays open (Monaco
+    /// `_focusIsInMenu`).
+    focus: FocusHandle,
+    /// The editor's scroll position when the menu opened: scrolling
+    /// closes it (Monaco's `onDidScrollChange`).
+    scroll: gpui::Point<Pixels>,
 }
 
 impl GutterIndicator {
-    fn hover_changed(&mut self, cx: &mut Context<Self>) {
+    fn hover_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.hovered || self.menu_hovered {
             self.close = None;
-            self.menu_open = true;
-            cx.notify();
+            if !self.menu_open {
+                let scroll = self.editor.upgrade().map(|e| e.read(cx).scroll_position());
+                self.open_menu(scroll, cx);
+            }
+            return;
+        }
+        if self.focus.contains_focused(window, cx) {
             return;
         }
         // Let the mouse move from the pill to the menu.
@@ -379,11 +405,59 @@ impl GutterIndicator {
             this.update(cx, |this, cx| {
                 if !this.hovered && !this.menu_hovered {
                     this.menu_open = false;
+                    this.active = None;
                     cx.notify();
                 }
             })
             .ok();
         }));
+    }
+
+    /// Opens the menu, with the editor's scroll position now.
+    fn open_menu(&mut self, scroll: Option<gpui::Point<Pixels>>, cx: &mut Context<Self>) {
+        self.menu_open = true;
+        self.active = None;
+        if let Some(scroll) = scroll {
+            self.scroll = scroll;
+        }
+        cx.notify();
+    }
+
+    /// Closes the menu; with `refocus`, gives the editor the keyboard back
+    /// if the menu had it.
+    fn close_menu(&mut self, refocus: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let had_focus = self.focus.contains_focused(window, cx);
+        self.menu_open = false;
+        self.active = None;
+        cx.notify();
+        if refocus
+            && had_focus
+            && let Some(editor) = self.editor.upgrade()
+        {
+            let focus = editor.read(cx).focus_handle.clone();
+            window.focus(&focus, cx);
+        }
+    }
+
+    fn move_active(&mut self, delta: isize, cx: &mut Context<Self>) {
+        self.active = super::toolbar::step_menu(self.active, self.menu.len(), delta);
+        cx.notify();
+    }
+
+    /// Runs row `ix` (Monaco's option `onAction`: closes, focuses the
+    /// editor, runs the command).
+    fn run(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((_, _, action)) = self.menu.get(ix).cloned() else {
+            return;
+        };
+        self.close_menu(false, window, cx);
+        if let Some(editor) = self.editor.upgrade() {
+            let focus = editor.read(cx).focus_handle.clone();
+            window.focus(&focus, cx);
+            editor.update(cx, |editor, cx| {
+                editor.run_inline_edit_gutter_menu_action(action, cx)
+            });
+        }
     }
 
     /// Monaco's indicator codicon: `check` while hovered, `keyboard-tab`
@@ -458,15 +532,16 @@ impl Render for GutterIndicator {
             .text_color(foreground)
             .text_size(px(12.))
             .cursor_pointer()
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
                 this.hovered = *hovered;
-                this.hover_changed(cx);
+                this.hover_changed(window, cx);
             }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.menu_open = false;
+                    this.active = None;
                     if let Some(editor) = editor.upgrade() {
                         editor.update(cx, |editor, cx| {
                             editor.click_inline_edit_gutter_indicator(cx);
@@ -521,10 +596,26 @@ impl Render for GutterIndicator {
         let menu = self.menu_open.then(|| {
             let mut menu = div()
                 .id("inline-edit-gutter-menu")
-                .absolute()
-                .left_full()
-                .top_0()
-                .ml(px(4.))
+                .track_focus(&self.focus)
+                .key_context(CONTEXT_MENU_KEY_CONTEXT)
+                .on_action(cx.listener(|this, _: &ContextMenuNext, _, cx| this.move_active(1, cx)))
+                .on_action(
+                    cx.listener(|this, _: &ContextMenuPrevious, _, cx| this.move_active(-1, cx)),
+                )
+                .on_action(cx.listener(|this, _: &ContextMenuFirst, _, cx| {
+                    this.move_active(-(isize::MAX / 2), cx)
+                }))
+                .on_action(cx.listener(|this, _: &ContextMenuLast, _, cx| {
+                    this.move_active(isize::MAX / 2, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ContextMenuSelect, window, cx| {
+                    if let Some(ix) = this.active {
+                        this.run(ix, window, cx);
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &ContextMenuHide, window, cx| {
+                    this.close_menu(true, window, cx)
+                }))
                 .p(px(4.))
                 .min_w(px(180.))
                 .flex()
@@ -536,10 +627,18 @@ impl Render for GutterIndicator {
                 .text_color(colors.widget_foreground)
                 .text_size(px(13.))
                 .shadow_md()
-                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
                     this.menu_hovered = *hovered;
-                    this.hover_changed(cx);
+                    this.hover_changed(window, cx);
                 }))
+                // A click on the menu gives it the keyboard.
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        window.focus(&this.focus, cx);
+                    }),
+                )
                 .child(
                     div()
                         .px(px(4.))
@@ -558,8 +657,7 @@ impl Render for GutterIndicator {
                 if separator {
                     menu = menu.child(div().my(px(4.)).h(px(1.)).bg(colors.widget_border));
                 }
-                let editor = self.editor.clone();
-                let action = action.clone();
+                let active = self.active == Some(ix);
                 menu = menu.child(
                     div()
                         .id(("inline-edit-gutter-menu-item", ix))
@@ -570,26 +668,40 @@ impl Render for GutterIndicator {
                         .py(px(3.))
                         .rounded(px(3.))
                         .cursor_pointer()
-                        .hover(|style| style.bg(colors.menu_selection_background))
+                        // Monaco's `.monaco-menu-option.active`, set by the
+                        // mouse or the keyboard.
+                        .when(active, |this| {
+                            this.bg(colors.menu_selection_background)
+                                .text_color(colors.menu_selection_foreground)
+                        })
+                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                            if *hovered && this.active != Some(ix) {
+                                this.active = Some(ix);
+                                cx.notify();
+                            }
+                        }))
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
+                            cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.menu_open = false;
-                                cx.notify();
-                                if let Some(editor) = editor.upgrade() {
-                                    let action = action.clone();
-                                    editor.update(cx, |editor, cx| {
-                                        editor.run_inline_edit_gutter_menu_action(action, cx)
-                                    });
-                                }
+                                this.run(ix, window, cx);
                             }),
                         )
                         .child(title.clone())
                         .children(keys.map(|keys| div().opacity(0.6).child(keys))),
                 );
             }
-            menu
+            // Monaco shows it with the hover service, kept in the window:
+            // a popup beside the pill, moved to fit.
+            let left = if docked { pill_width + px(1.) } else { px(22.) };
+            div().absolute().top_0().left(left).child(
+                gpui::deferred(
+                    gpui::anchored()
+                        .snap_to_window_with_margin(px(4.))
+                        .child(div().pl(px(4.)).child(menu)),
+                )
+                .with_priority(MENU_PRIORITY),
+            )
         });
         div()
             .relative()
@@ -770,6 +882,31 @@ impl CodeEditor {
         if let Some((_, _, action)) = menu.into_iter().find(|(t, _, _)| t == title) {
             self.run_inline_edit_gutter_menu_action(action, cx);
         }
+    }
+
+    /// Opens the gutter indicator's menu as hovering it does, focused as
+    /// clicking it makes it, for tests.
+    #[doc(hidden)]
+    pub fn open_inline_edit_gutter_menu_for_tests(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let scroll = self.scroll_position();
+        if let Some(indicator) = self.inline.edit_view.indicator.clone() {
+            indicator.update(cx, |indicator, cx| {
+                indicator.open_menu(Some(scroll), cx);
+                window.focus(&indicator.focus, cx);
+            });
+        }
+    }
+
+    /// Whether the gutter indicator's menu is open, and its selected row,
+    /// for tests.
+    #[doc(hidden)]
+    pub fn inline_edit_gutter_menu_state_for_tests(&self, cx: &gpui::App) -> Option<Option<usize>> {
+        let indicator = self.inline.edit_view.indicator.as_ref()?.read(cx);
+        indicator.menu_open.then_some(indicator.active)
     }
 
     /// The gutter indicator was clicked: it accepts the edit when beside it
@@ -1160,11 +1297,6 @@ impl CodeEditor {
                 (px(0.), px(0.), px(0.)),
             ),
         };
-        let docked_without_margin = matches!(placement, IndicatorPlacement::Docked(_))
-            && self
-                .layout
-                .as_ref()
-                .is_some_and(|layout| layout.glyph_margin_width <= px(0.));
         let cursor_above = self.cursors.primary().position.row <= row;
         let (header, menu) = self.inline_edit_gutter_menu(cx);
         let line_number = match placement {
@@ -1173,6 +1305,7 @@ impl CodeEditor {
         };
         let background = self.theme.colors.background;
         let edit_hovered = self.inline.edit_view.view_hovered;
+        let scroll = self.scroll_position();
         let indicator = match self.inline.edit_view.indicator.clone() {
             Some(indicator) => {
                 indicator.update(cx, |indicator, cx| {
@@ -1192,6 +1325,14 @@ impl CodeEditor {
                     indicator.line_number = line_number;
                     indicator.gutter = gutter;
                     indicator.background = background;
+                    // Monaco closes the menu when the editor scrolls.
+                    if indicator.menu_open && indicator.scroll != scroll {
+                        indicator.menu_open = false;
+                        indicator.active = None;
+                        indicator.hovered = false;
+                        indicator.menu_hovered = false;
+                        cx.notify();
+                    }
                     if changed {
                         cx.notify();
                     }
@@ -1201,7 +1342,7 @@ impl CodeEditor {
             None => {
                 let editor = cx.entity().downgrade();
                 let theme = self.theme.clone();
-                let indicator = cx.new(|_| GutterIndicator {
+                let indicator = cx.new(|cx| GutterIndicator {
                     editor,
                     theme,
                     tab_action,
@@ -1219,6 +1360,9 @@ impl CodeEditor {
                     menu_hovered: false,
                     menu_open: false,
                     close: None,
+                    active: None,
+                    focus: cx.focus_handle(),
+                    scroll,
                 });
                 self.inline.edit_view.indicator = Some(indicator.clone());
                 indicator
@@ -1235,19 +1379,14 @@ impl CodeEditor {
         if let Some((id, _)) = self.inline.edit_view.indicator_widget.take() {
             self.remove_widget(id, cx);
         }
-        if docked_without_margin {
-            // Monaco also uses the line numbers' space; here the indicator
-            // needs the glyph margin.
-            return;
-        }
         let height = self
             .layout
             .as_ref()
             .map_or(px(0.), |layout| layout.bounds.size.height);
         let id = match placement {
-            IndicatorPlacement::Docked(row) => {
-                self.add_glyph_margin_widget(GlyphMarginWidget::new(row, indicator), cx)
-            }
+            // Monaco's indicator spans the gutter, so it shows without a
+            // glyph margin too.
+            IndicatorPlacement::Docked(row) => self.add_gutter_widget(row, indicator.into(), cx),
             IndicatorPlacement::Above => self.add_overlay_widget(
                 OverlayWidget::new(
                     OverlayPosition::Custom(point(px(1.), px(2.))),

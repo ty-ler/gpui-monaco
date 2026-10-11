@@ -533,6 +533,20 @@ impl CodeEditor {
             .is_some_and(|s| s.focused && s.selected < s.model.filtered().len())
     }
 
+    /// Whether the focused suggestion's provider gave an incomplete list
+    /// (Monaco `SuggestItemInfo.listIncomplete`).
+    pub(crate) fn selected_suggestion_incomplete(&self) -> bool {
+        let Some(session) = self.suggest.session.as_ref().filter(|s| s.focused) else {
+            return false;
+        };
+        session
+            .model
+            .filtered()
+            .get(session.selected)
+            .and_then(|scored| session.item_providers[scored.index])
+            .is_some_and(|provider| session.provider_incomplete[provider])
+    }
+
     /// The focused suggestion and its index in the list; `None` while
     /// none is focused (see `suggest.selection_mode`).
     pub fn selected_suggestion(&self) -> Option<(usize, CompletionItem)> {
@@ -2101,6 +2115,8 @@ impl CodeEditor {
         if self.suggest.session.as_ref().is_some_and(|s| !s.focused) {
             return false;
         }
+        // Monaco's `onWillInsertSuggestItem` for inline completions.
+        let suggest_edit = self.selected_suggestion_edit();
         let Some(session) = self.suggest.session.take() else {
             return false;
         };
@@ -2108,6 +2124,9 @@ impl CodeEditor {
             self.hide_suggest(cx);
             return false;
         };
+        if let Some((range, text)) = suggest_edit {
+            self.inline_suggest_accepted(range, text, cx);
+        }
         let item: CompletionItem = session.model.items()[scored.index].clone();
         let selected = session.selected;
         let provider = session.item_providers[scored.index].map(|p| session.providers[p].clone());
@@ -2168,6 +2187,9 @@ impl CodeEditor {
                     .ok();
             }));
         }
+        // Monaco's inline completions controller asks again after
+        // `acceptSelectedSuggestion`.
+        self.trigger_inline_completions(cx);
         // Monaco runs the item's command after inserting.
         if let Some(command) = &item.command {
             if command.id == crate::snippet_session::NEXT_PLACEHOLDER_COMMAND {

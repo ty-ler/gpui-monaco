@@ -970,6 +970,40 @@ pub struct InlineSuggestOptions {
     pub font_family: Option<SharedString>,
     /// `edits`: inline edits (next edit suggestions).
     pub edits: InlineSuggestEditsOptions,
+    /// `triggerCommandOnProviderChange`: when a provider says it has new
+    /// results ([`refresh_inline_completions`](crate::providers::refresh_inline_completions)),
+    /// ask every provider for inline edits, instead of asking that provider
+    /// for everything (off).
+    pub trigger_command_on_provider_change: bool,
+    /// `experimental`.
+    pub experimental: InlineSuggestExperimentalOptions,
+}
+
+/// When an inline completion shows instead of the suggest widget's preview
+/// while both are there (Monaco `inlineSuggest.experimental.showOnSuggestConflict`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShowOnSuggestConflict {
+    /// Always: the inline completion shows, and requests don't pass the
+    /// suggest widget's selection.
+    Always,
+    /// Never: the suggest widget's selection wins (the default).
+    #[default]
+    Never,
+    /// Only while the selected suggestion's list is incomplete.
+    WhenSuggestListIsIncomplete,
+}
+
+/// Monaco `inlineSuggest.experimental` (`emptyResponseInformation`, which
+/// only controls telemetry, isn't ported).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InlineSuggestExperimentalOptions {
+    /// `suppressInlineSuggestions`: providers whose
+    /// [`group_id`](crate::providers::InlineCompletionsProvider::group_id)
+    /// is listed aren't asked (Monaco's comma-separated string, as a list;
+    /// empty by default).
+    pub suppress_inline_suggestions: Vec<SharedString>,
+    /// `showOnSuggestConflict` (`Never`).
+    pub show_on_suggest_conflict: ShowOnSuggestConflict,
 }
 
 impl Default for InlineSuggestOptions {
@@ -985,6 +1019,8 @@ impl Default for InlineSuggestOptions {
             syntax_highlighting_enabled: true,
             font_family: None,
             edits: InlineSuggestEditsOptions::default(),
+            trigger_command_on_provider_change: false,
+            experimental: InlineSuggestExperimentalOptions::default(),
         }
     }
 }
@@ -2059,6 +2095,11 @@ pub struct EditorOptions {
     /// Monaco `screenReaderAnnounceInlineSuggestion`: screen readers announce
     /// ghost text when it shows (default `true`).
     pub screen_reader_announce_inline_suggestion: bool,
+    /// Monaco `inlineCompletionsAccessibilityVerbose`: announcing an inline
+    /// suggestion adds where to inspect it in the accessible view (default
+    /// `false`). Like standalone Monaco, which registers no accessible view
+    /// keybinding, the editor has no accessible view, so it adds nothing.
+    pub inline_completions_accessibility_verbose: bool,
     /// Monaco `tabFocusMode`: Tab moves focus instead of inserting a tab
     /// (also on for every editor with [`set_tab_focus_mode`](crate::set_tab_focus_mode)).
     pub tab_focus_mode: bool,
@@ -2173,6 +2214,7 @@ impl Default for EditorOptions {
             accessibility_help_url: None,
             accessibility_support: AccessibilitySupport::Auto,
             screen_reader_announce_inline_suggestion: true,
+            inline_completions_accessibility_verbose: false,
             auto_closing_brackets: Default::default(),
             auto_closing_quotes: Default::default(),
             auto_closing_comments: Default::default(),

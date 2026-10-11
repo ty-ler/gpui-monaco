@@ -35,7 +35,8 @@ use gpui::{
 use text::PointUtf16;
 
 use super::ghost_text::{
-    GhostText, GhostTextMode, TextReplacement, compute_ghost_text, single_text_remove_common_prefix,
+    GhostText, GhostTextMode, TextReplacement, compute_ghost_text, single_text_edit_augments,
+    single_text_remove_common_prefix,
 };
 use super::inline_edits::{Changes, Replacements, UpdatedEdit, diffed_edits, new_ranges};
 use crate::cursor::Selection;
@@ -45,9 +46,10 @@ use crate::events::{CursorChangeCause, CursorChangeReason, CursorChangeSource};
 use crate::model::{EditKind, TextModel};
 use crate::options::InlineSuggestMode;
 use crate::providers::{
-    Command, InlineCompletion, InlineCompletionContext, InlineCompletionEndOfLifeReason,
-    InlineCompletionHint, InlineCompletionList, InlineCompletionTriggerKind,
-    InlineCompletionsProvider, Location,
+    Command, InlineCompletion, InlineCompletionChangeHint, InlineCompletionContext,
+    InlineCompletionEndOfLifeReason, InlineCompletionHint, InlineCompletionList,
+    InlineCompletionTriggerKind, InlineCompletionsProvider, Location, PartialAcceptInfo,
+    PartialAcceptTriggerKind, SelectedSuggestionInfo,
 };
 use crate::theme::TokenStyle;
 use crate::widgets::{ViewZone, WidgetId, ZoneHeight};
@@ -65,6 +67,10 @@ pub(crate) type InlineView = (Vec<(usize, TextReplacement)>, usize, GhostText);
 pub(crate) struct Item {
     pub(crate) provider: Arc<dyn InlineCompletionsProvider>,
     pub(crate) completion: InlineCompletion,
+    /// The text it inserts: `completion.insert_text` with Monaco's
+    /// `closeBrackets` when `complete_bracket_pairs` (Monaco's item
+    /// `insertText`, while `completion` is the provider's).
+    pub(crate) insert_text: String,
     /// Its range as byte offsets in the text of `version`.
     range: Range<usize>,
     version: text::Version,
@@ -120,7 +126,7 @@ impl InlineEditItem {
 
 /// How a request is made (Monaco `trigger`'s options and the change
 /// summary of `_fetchInlineCompletionsPromise`).
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct FetchOptions {
     /// Monaco `noDelay`: ask again even if an equal request was made (still
     /// debounced, as in Monaco).
@@ -130,6 +136,11 @@ pub(crate) struct FetchOptions {
     /// Monaco `preserveCurrentCompletion` (undo and redo): keep this item,
     /// if it still applies, ahead of the new ones.
     pub preserve: Option<u64>,
+    /// Ask only this provider (Monaco `_fetchSpecificProviderSignal`, after
+    /// the provider's `onDidChangeInlineCompletions`).
+    pub provider: Option<Arc<dyn InlineCompletionsProvider>>,
+    /// The hint that provider passed (Monaco `changeHint`).
+    pub change_hint: Option<InlineCompletionChangeHint>,
 }
 
 /// Cross-file inline edits accepted while no editor showed their model, by
@@ -218,6 +229,21 @@ pub(crate) struct InlineCompletionsState {
     last_shown: Option<usize>,
     /// Monaco `FadeoutDecoration`: the accepted text's highlight, fading.
     fade_out: Option<(Vec<DecorationId>, Task<()>)>,
+    /// Monaco `suggestWidgetInlineCompletions`: the items of the last
+    /// request made with the suggest widget's selection, which extend that
+    /// selection's preview; `items` is empty meanwhile.
+    pub(crate) suggest_items: Vec<Item>,
+    /// The request sequence numbers of `items` and `suggest_items` (Monaco
+    /// compares their requests' versions when seeding).
+    items_request: u64,
+    suggest_items_request: u64,
+    next_request: u64,
+    /// The suggest widget's selection last seen (Monaco
+    /// `SuggestWidgetAdaptor.selectedItem`), and whether its list was
+    /// incomplete.
+    suggest_item: Option<(SelectedSuggestionInfo, bool)>,
+    /// The suggest widget's selection the last request passed.
+    requested_selection: Option<SelectedSuggestionInfo>,
 }
 
 /// Monaco `provideInlineCompletions`' yield graph: for each provider, the
@@ -538,6 +564,7 @@ impl CodeEditor {
             force: false,
             only_inline_edits,
             preserve,
+            ..Default::default()
         };
         if matches!(kind, EditKind::Undo | EditKind::Redo) {
             // Undo and redo restore the cursor after the change: ask for
@@ -605,30 +632,28 @@ impl CodeEditor {
         let model = self.model().clone();
         let buffer = model.read(cx).buffer();
         let count = self.inline.change_count;
-        let mut dropped = Vec::new();
-        for (ix, item) in self.inline.items.iter_mut().enumerate() {
-            let Some(edit) = item.edit.as_mut() else {
-                continue;
-            };
-            if !follow_inline_edit(edit, buffer, count) {
-                dropped.push(ix);
-            }
-        }
-        for ix in dropped.into_iter().rev() {
-            let item = self.inline.items.remove(ix);
-            item.provider.handle_end_of_lifetime(
-                &item.completion,
-                &InlineCompletionEndOfLifeReason::Ignored {
-                    superseded_by: None,
-                    user_typing_disagreed: false,
-                },
-            );
+        for items in [&mut self.inline.items, &mut self.inline.suggest_items] {
+            let mut dropped = Vec::new();
+            items.retain_mut(|item| {
+                let keep = item
+                    .edit
+                    .as_mut()
+                    .is_none_or(|edit| follow_inline_edit(edit, buffer, count));
+                if !keep {
+                    dropped.push(item.clone());
+                }
+                keep
+            });
+            end_items(dropped);
         }
     }
 
     /// Monaco `InlineCompletionsSource.fetch`: debounced for automatic
     /// requests; an equal request already made satisfies it, unless
-    /// `options.force`.
+    /// `options.force`. While the suggest widget has a selection (and
+    /// `show_on_suggest_conflict` doesn't say otherwise), the request
+    /// passes it (Monaco `selectedSuggestionInfo`) and its results become
+    /// `suggest_items`.
     fn fetch_inline_completions(
         &mut self,
         kind: InlineCompletionTriggerKind,
@@ -642,21 +667,28 @@ impl CodeEditor {
         let model = self.model().read(cx);
         let version = model.buffer().version();
         let position = self.cursors.primary().position;
+        let selected = self.inline_request_suggest_item(cx);
         if let Some((v, p, k)) = &self.inline.requested
             && !options.force
+            && options.provider.is_none()
             && *v == version
             && *p == position
+            && self.inline.requested_selection == selected
             && (kind == InlineCompletionTriggerKind::Automatic
                 || *k == InlineCompletionTriggerKind::Explicit)
         {
             return;
         }
-        let providers = self.editor_inline_completions_providers(cx);
+        let providers = match &options.provider {
+            Some(provider) => vec![provider.clone()],
+            None => self.available_inline_completions_providers(cx),
+        };
         if providers.is_empty() {
             return;
         }
         let updating = self.inline.task.is_some();
         self.inline.requested = Some((version, position, kind));
+        self.inline.requested_selection = selected.clone();
         self.inline.explicit = kind == InlineCompletionTriggerKind::Explicit;
         let debounce = providers
             .iter()
@@ -677,8 +709,22 @@ impl CodeEditor {
                 self.options.inline_suggest.min_show_delay
             };
         let started = Instant::now();
+        let issued = web_time::SystemTime::now();
         let include_inline_edits = self.options.inline_suggest.edits.enabled;
         let include_inline_completions = !options.only_inline_edits;
+        self.inline.next_request += 1;
+        let request = self.inline.next_request;
+        let context = InlineCompletionContext {
+            trigger_kind: kind,
+            selected_suggestion_info: selected.clone(),
+            include_inline_edits,
+            include_inline_completions,
+            request_uuid: uuid::Uuid::new_v4().to_string().into(),
+            request_issued_date_time: issued,
+            earliest_shown_date_time: issued + min_show,
+            change_hint: options.change_hint.clone(),
+        };
+        let for_suggest = selected.is_some();
         self.inline.task = Some(cx.spawn(async move |this, cx| {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
@@ -691,16 +737,11 @@ impl CodeEditor {
             let query = move |this: &mut CodeEditor,
                               provider: &Arc<dyn InlineCompletionsProvider>,
                               cx: &mut Context<CodeEditor>| {
-                let context = this.model().read(cx).provider_context();
+                let provider_context = this.model().read(cx).provider_context();
                 provider.provide_inline_completions(
-                    &context,
+                    &provider_context,
                     position,
-                    InlineCompletionContext {
-                        trigger_kind: kind,
-                        selected_suggestion_info: None,
-                        include_inline_edits,
-                        include_inline_completions,
-                    },
+                    context.clone(),
                     cx,
                 )
             };
@@ -768,18 +809,63 @@ impl CodeEditor {
                 if this.model().read(cx).buffer().version() != version {
                     return;
                 }
-                this.set_inline_completions(lists, version, position, options, cx);
+                this.set_inline_completions(
+                    lists,
+                    version,
+                    position,
+                    options,
+                    request,
+                    for_suggest,
+                    cx,
+                );
             })
             .ok();
         }));
     }
 
+    /// Monaco `getAvailableProviders`: the editor's providers, less those
+    /// whose group `inline_suggest.experimental.suppress_inline_suggestions`
+    /// lists or another provider excludes (`excludesGroupIds`).
+    fn available_inline_completions_providers(
+        &mut self,
+        cx: &gpui::App,
+    ) -> Vec<Arc<dyn InlineCompletionsProvider>> {
+        let suppressed = self
+            .options
+            .inline_suggest
+            .experimental
+            .suppress_inline_suggestions
+            .clone();
+        let providers: Vec<_> = self
+            .editor_inline_completions_providers(cx)
+            .into_iter()
+            .filter(|p| {
+                p.group_id()
+                    .is_none_or(|group| !suppressed.contains(&group))
+            })
+            .collect();
+        let excluded: HashSet<SharedString> = providers
+            .iter()
+            .flat_map(|p| p.excludes_group_ids())
+            .collect();
+        providers
+            .into_iter()
+            .filter(|p| p.group_id().is_none_or(|group| !excluded.contains(&group)))
+            .collect()
+    }
+
+    /// Monaco `createStateWithAppliedResults`: the new items replace the
+    /// old ones (or, for a request with the suggest widget's selection,
+    /// become `suggest_items` while `items` empties).
+    #[allow(clippy::too_many_arguments)]
     fn set_inline_completions(
         &mut self,
         lists: Vec<(Arc<dyn InlineCompletionsProvider>, InlineCompletionList)>,
         version: text::Version,
         position: PointUtf16,
         options: FetchOptions,
+        request: u64,
+        for_suggest: bool,
         cx: &mut Context<Self>,
     ) {
         let rope = self.model().read(cx).buffer().rope().clone();
@@ -848,8 +934,6 @@ impl CodeEditor {
                             ..PointUtf16::new(position.row, line)
                     }
                 });
-                let start = target_offset(range.start);
-                let end = target_offset(range.end).max(start);
                 let completion = InlineCompletion {
                     insert_text: completion
                         .insert_text
@@ -857,6 +941,28 @@ impl CodeEditor {
                         .replace('\r', "\n"),
                     ..completion
                 };
+                // Monaco `closeBrackets`, for this model's edits: the range
+                // grows or shrinks at its end by what it added or removed.
+                let mut range = range;
+                let insert_text = if completion.complete_bracket_pairs && target.is_none() {
+                    let fixed =
+                        self.close_inline_brackets(&completion.insert_text, range.start, cx);
+                    let diff = fixed.encode_utf16().count() as i64
+                        - completion.insert_text.encode_utf16().count() as i64;
+                    if diff != 0 {
+                        let column = (range.end.column as i64 + diff).max(0) as u32;
+                        range.end = rope.clip_point_utf16(
+                            PointUtf16::new(range.end.row, column),
+                            text::Bias::Left,
+                        );
+                        range.end = range.end.max(range.start);
+                    }
+                    fixed
+                } else {
+                    completion.insert_text.clone()
+                };
+                let start = target_offset(range.start);
+                let end = target_offset(range.end).max(start);
                 let jump_to = completion.jump_to_position.map(target_offset);
                 let offset = |point: PointUtf16| {
                     rope.point_utf16_to_offset(rope.clip_point_utf16(point, text::Bias::Left))
@@ -867,7 +973,7 @@ impl CodeEditor {
                     edits: if jump_to.is_some() {
                         Vec::new()
                     } else {
-                        diffed_edits(&target_rope, start..end, &completion.insert_text)
+                        diffed_edits(&target_rope, start..end, &insert_text)
                             .into_iter()
                             .map(|(range, text)| {
                                 let replaced = target_rope.text_for_range(range.clone());
@@ -904,6 +1010,7 @@ impl CodeEditor {
                 items.push(Item {
                     provider: provider.clone(),
                     completion,
+                    insert_text,
                     range: start..end,
                     version: target_version,
                     original_start: range.start,
@@ -981,12 +1088,34 @@ impl CodeEditor {
                 },
             );
         }
+        // Monaco: a request with the suggest widget's selection empties the
+        // items and fills the suggest widget's; any other empties those.
+        let other = if for_suggest {
+            self.inline.items_request = 0;
+            self.inline.suggest_items_request = request;
+            std::mem::take(&mut self.inline.items)
+        } else {
+            self.inline.items_request = request;
+            self.inline.suggest_items_request = 0;
+            std::mem::take(&mut self.inline.suggest_items)
+        };
+        end_items(other);
+        let target = if for_suggest {
+            &mut self.inline.suggest_items
+        } else {
+            &mut self.inline.items
+        };
         // Monaco: replaced items end, superseded by an equal new one, which
         // keeps their identity (and so whether they showed or were jumped
         // to). A preserved item kept as it was lives on.
-        for old in std::mem::replace(&mut self.inline.items, kept) {
+        for old in std::mem::replace(target, kept) {
+            let target = if for_suggest {
+                &mut self.inline.suggest_items
+            } else {
+                &mut self.inline.items
+            };
             if Some(old.id) == kept_old {
-                if !self.inline.items.iter().any(|item| item.id == old.id) {
+                if !target.iter().any(|item| item.id == old.id) {
                     old.provider.handle_end_of_lifetime(
                         &old.completion,
                         &InlineCompletionEndOfLifeReason::Ignored {
@@ -997,9 +1126,7 @@ impl CodeEditor {
                 }
                 continue;
             }
-            let superseded_by = self
-                .inline
-                .items
+            let superseded_by = target
                 .iter_mut()
                 .find(|new| same_item(new, &old))
                 .map(|new| {
@@ -1082,7 +1209,7 @@ impl CodeEditor {
         Some(TextReplacement {
             range: rope.offset_to_point_utf16(range.start.min(rope.len()))
                 ..rope.offset_to_point_utf16(range.end.min(rope.len())),
-            text: item.completion.insert_text.clone(),
+            text: item.insert_text.clone(),
         })
     }
 
@@ -1470,7 +1597,13 @@ impl CodeEditor {
         let item = &mut self.inline.items[ix];
         item.shown = true;
         if self.inline.shown.insert(format!("edit:{}", item.id)) {
-            item.provider.handle_item_did_show(&item.completion);
+            // Monaco passes the edit's text, none for a jump.
+            let text = match &item.edit {
+                Some(edit) if edit.jump_to.is_some() => "",
+                _ => item.insert_text.as_str(),
+            };
+            item.provider.handle_item_did_show(&item.completion, text);
+            run_shown_command(&item.completion, cx);
             let alternative_version = self.model().update(cx, |model, _| {
                 model.push_stack_element();
                 model.alternative_version_id()
@@ -1778,6 +1911,16 @@ impl CodeEditor {
     /// The visible items (deduplicated by their edit), the selected index,
     /// and its ghost text.
     pub(crate) fn inline_state(&self, cx: &gpui::App) -> Option<InlineView> {
+        // The suggest widget's preview shows instead, unless Monaco's
+        // `showOnSuggestConflict` says otherwise.
+        if self.is_suggest_visible() && !self.inline_shows_on_suggest_conflict(cx) {
+            return None;
+        }
+        self.inline_state_unchecked(cx)
+    }
+
+    /// [`Self::inline_state`] whether or not the suggest widget shows.
+    fn inline_state_unchecked(&self, cx: &gpui::App) -> Option<InlineView> {
         if !self.inline.active
             || !self.options.inline_suggest.enabled
             || self.marked_range.is_some()
@@ -1785,9 +1928,6 @@ impl CodeEditor {
             return None;
         }
         if self.options.inline_suggest.suppress_in_snippet_mode && self.in_snippet_mode() {
-            return None;
-        }
-        if self.is_suggest_visible() {
             return None;
         }
         let cursor = self.cursors.primary().position;
@@ -1833,16 +1973,25 @@ impl CodeEditor {
     }
 
     /// Monaco's suggest preview (`suggest.preview`): the suggest widget's
-    /// selected item as ghost text, not italic.
-    fn suggest_preview(&self) -> Option<GhostText> {
-        if !self.options.suggest.preview || !self.is_suggest_visible() {
+    /// selected item as ghost text, not italic, extended by an inline
+    /// completion asked with that selection that starts with it (Monaco
+    /// `_computeAugmentation`, which shows even without `suggest.preview`).
+    fn suggest_preview(&self, cx: &gpui::App) -> Option<GhostText> {
+        if !self.is_suggest_visible() || self.inline_shows_on_suggest_conflict(cx) {
             return None;
         }
         let (range, text) = self.selected_suggestion_edit()?;
         let line_text = |row: u32| self.snapshot.line(row);
-        let length = text.encode_utf16().count();
+        let suggest_edit =
+            single_text_remove_common_prefix(&TextReplacement { range, text }, &line_text);
+        let augmentation = self.inline_suggest_augmentation(&suggest_edit, cx);
+        if !self.options.suggest.preview && augmentation.is_none() {
+            return None;
+        }
+        let edit = augmentation.map_or(suggest_edit, |(_, edit)| edit);
+        let length = edit.text.encode_utf16().count();
         compute_ghost_text(
-            &TextReplacement { range, text },
+            &edit,
             &line_text,
             Self::ghost_mode(self.options.suggest.preview_mode),
             Some(self.cursors.primary().position),
@@ -1873,7 +2022,7 @@ impl CodeEditor {
         let ghost = self
             .inline_state(cx)
             .map(|(_, _, ghost)| ghost)
-            .or_else(|| self.suggest_preview())?;
+            .or_else(|| self.suggest_preview(cx))?;
         Some((
             ghost.line,
             ghost.parts.iter().map(|p| (p.column, p.text())).collect(),
@@ -2009,6 +2158,7 @@ impl CodeEditor {
     /// Renders the ghost text before painting.
     pub(crate) fn refresh_ghost_text(&mut self, cx: &mut Context<Self>) {
         self.take_pending_inline_edit(cx);
+        self.refresh_inline_suggest_item(cx);
         // The jump resets once the cursor leaves the edit (Monaco
         // `jumpToReset`).
         if self.inline.jumped_to.is_some() && !self.cursor_at_inline_edit(cx) {
@@ -2018,7 +2168,7 @@ impl CodeEditor {
         let state = self.inline_state(cx);
         self.refresh_inline_toolbar(state.as_ref().map(|(_, _, ghost)| ghost), cx);
         let preview = if state.is_none() {
-            self.suggest_preview()
+            self.suggest_preview(cx)
         } else {
             None
         };
@@ -2053,6 +2203,23 @@ impl CodeEditor {
         };
         let rope = self.model().read(cx).buffer().rope().clone();
         let (firsts, extra_lines) = self.ghost_segments(&ghost, style, cx);
+        // Monaco `USE_SQUIGGLES_FOR_WARNING`: ghost text with a warning gets
+        // the warning squiggle.
+        let warning = shown
+            .as_ref()
+            .and_then(|(visible, selected)| {
+                self.inline.items[visible[*selected].0]
+                    .completion
+                    .warning
+                    .as_ref()
+            })
+            .map(|_| crate::decorations::DecorationUnderline {
+                color: self
+                    .theme
+                    .colors
+                    .marker_color(crate::MarkerSeverity::Warning),
+                wavy: true,
+            });
         let colors = &self.theme.colors;
         let font_family = self.options.inline_suggest.font_family.clone();
         let mut decorations = Vec::new();
@@ -2069,6 +2236,7 @@ impl CodeEditor {
                             background: visible_color(colors.ghost_text_background),
                             swatch: None,
                             font_family: font_family.clone(),
+                            underline: warning,
                             ..Default::default()
                         }),
                         border: visible_color(colors.ghost_text_border),
@@ -2106,12 +2274,12 @@ impl CodeEditor {
         if let Some((visible, selected)) = shown {
             self.inline.items[visible[selected].0].shown = true;
             let item = &self.inline.items[visible[selected].0];
-            let identity = format!(
-                "{:?}{}",
-                visible[selected].1.range, item.completion.insert_text
-            );
-            if self.inline.shown.insert(identity) {
-                item.provider.handle_item_did_show(&item.completion);
+            // Once per item: an equal item from a newer request keeps its
+            // identity (Monaco `_didShow`).
+            if self.inline.shown.insert(format!("item:{}", item.id)) {
+                item.provider
+                    .handle_item_did_show(&item.completion, &item.insert_text);
+                run_shown_command(&item.completion, cx);
             }
         }
         self.inline.rendered = Some(Rendered {
@@ -2203,6 +2371,45 @@ impl CodeEditor {
             .toolbar
             .as_ref()
             .and(self.inline.toolbar_session)
+    }
+
+    /// The shown ghost text's warning message, and whether the ghost text
+    /// is drawn with the warning squiggle, for tests.
+    #[doc(hidden)]
+    pub fn inline_warning_for_tests(&self, cx: &gpui::App) -> Option<(String, bool)> {
+        let warning = self.inline_warning(cx)?;
+        let model = self.model().read(cx);
+        let squiggled = self.inline.rendered.as_ref().is_some_and(|rendered| {
+            rendered.decorations.iter().any(|id| {
+                model
+                    .decoration(*id)
+                    .and_then(|d| d.options.after.as_ref())
+                    .and_then(|after| after.underline)
+                    .is_some_and(|underline| underline.wavy)
+            })
+        });
+        Some((warning.message.as_str().to_string(), squiggled))
+    }
+
+    /// Opens the always-shown toolbar's "⋯" menu, which takes the
+    /// keyboard, for tests.
+    #[doc(hidden)]
+    pub fn open_inline_toolbar_menu_for_tests(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((toolbar, _)) = self.inline.toolbar.clone() {
+            toolbar.update(cx, |toolbar, cx| toolbar.open_menu_for_tests(window, cx));
+        }
+    }
+
+    /// Whether the always-shown toolbar's menu is open, and its selected
+    /// row, for tests.
+    #[doc(hidden)]
+    pub fn inline_toolbar_menu_for_tests(&self, cx: &gpui::App) -> Option<Option<usize>> {
+        let (toolbar, _) = self.inline.toolbar.as_ref()?;
+        toolbar.read(cx).menu_for_tests()
     }
 
     fn clear_ghost_text(&mut self, cx: &mut Context<Self>) {
@@ -2407,7 +2614,7 @@ impl CodeEditor {
             );
             self.set_selections(&[Selection::collapsed(edit.range.start)], cx);
             self.insert_snippet(
-                &item.completion.insert_text,
+                &item.insert_text,
                 crate::snippet_session::SnippetInsertOptions {
                     undo_stop_before: false,
                     undo_stop_after: false,
@@ -2461,13 +2668,15 @@ impl CodeEditor {
     /// Cmd/Ctrl+Right).
     pub fn accept_next_inline_word(&mut self, cx: &mut Context<Self>) -> bool {
         let regex = self.word_regex(cx);
-        self.accept_inline_partially(cx, |text| next_word_length(text, &regex))
+        self.accept_inline_partially(PartialAcceptTriggerKind::Word, cx, |text| {
+            next_word_length(text, &regex)
+        })
     }
 
     /// Accepts the ghost text up to and including the next line break
     /// (Monaco `acceptNextLine`).
     pub fn accept_next_inline_line(&mut self, cx: &mut Context<Self>) -> bool {
-        self.accept_inline_partially(cx, |text| {
+        self.accept_inline_partially(PartialAcceptTriggerKind::Line, cx, |text| {
             text.find('\n').map_or(text.encode_utf16().count(), |ix| {
                 text[..=ix].encode_utf16().count()
             })
@@ -2486,6 +2695,7 @@ impl CodeEditor {
     /// Monaco `_acceptNext`.
     fn accept_inline_partially(
         &mut self,
+        kind: PartialAcceptTriggerKind,
         cx: &mut Context<Self>,
         length: impl FnOnce(&str) -> usize,
     ) -> bool {
@@ -2524,12 +2734,19 @@ impl CodeEditor {
         // Monaco counts from the start of the item's range.
         let accepted_length = self
             .current_edit(&item, cx)
-            .filter(|edit| edit.range.start.row == end.row)
+            .filter(|edit| edit.range.start <= end)
             .map_or(accepted, |edit| {
-                end.column.saturating_sub(edit.range.start.column) as usize
+                self.text_range(edit.range.start..end)
+                    .encode_utf16()
+                    .count()
             });
-        item.provider
-            .handle_partial_accept(&item.completion, accepted_length);
+        item.provider.handle_partial_accept(
+            &item.completion,
+            PartialAcceptInfo {
+                kind,
+                accepted_length,
+            },
+        );
         cx.notify();
         true
     }
@@ -2567,6 +2784,351 @@ impl CodeEditor {
     }
 }
 
+/// Monaco's `SuggestWidgetAdaptor` and the parts of `InlineCompletionsModel`
+/// that follow the suggest widget, the provider's
+/// `onDidChangeInlineCompletions`, and `closeBrackets`.
+impl CodeEditor {
+    /// The suggest widget's selection (Monaco `SuggestItemInfo`) and whether
+    /// its list was incomplete; `None` while the widget is closed or has no
+    /// focused suggestion.
+    fn current_suggest_item(&self) -> Option<(SelectedSuggestionInfo, bool)> {
+        if !self.is_suggest_visible() {
+            return None;
+        }
+        let (range, text) = self.selected_suggestion_edit()?;
+        let (_, item) = self.selected_suggestion()?;
+        Some((
+            SelectedSuggestionInfo {
+                range,
+                text,
+                completion_kind: item.kind,
+                is_snippet_text: item.insert_text_is_snippet,
+            },
+            self.selected_suggestion_incomplete(),
+        ))
+    }
+
+    /// Monaco `_shouldShowOnSuggestConflict`: with
+    /// `inline_suggest.experimental.show_on_suggest_conflict`, a visible
+    /// inline completion shows instead of the suggest widget's preview.
+    pub(crate) fn inline_shows_on_suggest_conflict(&self, cx: &gpui::App) -> bool {
+        use crate::options::ShowOnSuggestConflict;
+        let mode = self
+            .options
+            .inline_suggest
+            .experimental
+            .show_on_suggest_conflict;
+        if mode == ShowOnSuggestConflict::Never || self.inline_state_unchecked(cx).is_none() {
+            return false;
+        }
+        match self.current_suggest_item() {
+            None => false,
+            Some((_, incomplete)) => mode == ShowOnSuggestConflict::Always || incomplete,
+        }
+    }
+
+    /// The selection a request passes (Monaco `selectedSuggestionInfo`).
+    fn inline_request_suggest_item(&self, cx: &gpui::App) -> Option<SelectedSuggestionInfo> {
+        if self.inline_shows_on_suggest_conflict(cx) {
+            return None;
+        }
+        self.current_suggest_item().map(|(info, _)| info)
+    }
+
+    /// Before painting: follows the suggest widget's selection (Monaco
+    /// `onDidSelectedItemChange`). A new selection asks the providers with
+    /// it; once there's none, the items asked with it become the items
+    /// (Monaco `seedInlineCompletionsWithSuggestWidget`) and, while active,
+    /// the providers are asked again.
+    pub(crate) fn refresh_inline_suggest_item(&mut self, cx: &mut Context<Self>) {
+        let current = self.current_suggest_item();
+        if current == self.inline.suggest_item {
+            return;
+        }
+        self.inline.suggest_item = current.clone();
+        let enabled = self.options.inline_suggest.enabled && !self.options.read_only;
+        if current.is_some() && !self.inline_shows_on_suggest_conflict(cx) {
+            if enabled {
+                self.fetch_inline_completions(
+                    InlineCompletionTriggerKind::Automatic,
+                    FetchOptions::default(),
+                    cx,
+                );
+            }
+            return;
+        }
+        self.seed_inline_completions_with_suggest_items();
+        if enabled && self.inline.active {
+            self.fetch_inline_completions(
+                InlineCompletionTriggerKind::Automatic,
+                FetchOptions::default(),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// Monaco `seedInlineCompletionsWithSuggestWidget`: the items asked with
+    /// the suggest widget's selection replace older items.
+    fn seed_inline_completions_with_suggest_items(&mut self) {
+        if self.inline.suggest_items.is_empty() {
+            return;
+        }
+        let suggest_items = std::mem::take(&mut self.inline.suggest_items);
+        if self.inline.items.is_empty()
+            || self.inline.suggest_items_request > self.inline.items_request
+        {
+            end_items(std::mem::replace(&mut self.inline.items, suggest_items));
+            self.inline.items_request = self.inline.suggest_items_request;
+        } else {
+            end_items(suggest_items);
+        }
+        self.inline.suggest_items_request = 0;
+    }
+
+    /// Monaco `_computeAugmentation`: the first item asked with the suggest
+    /// widget's selection whose edit extends `suggest_edit` (the selection's
+    /// edit less the text it keeps), with that edit.
+    pub(crate) fn inline_suggest_augmentation(
+        &self,
+        suggest_edit: &TextReplacement,
+        cx: &gpui::App,
+    ) -> Option<(usize, TextReplacement)> {
+        let line_text = |row: u32| self.snapshot.line(row);
+        self.inline
+            .suggest_items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.edit.is_none())
+            .find_map(|(ix, item)| {
+                let edit = self.current_edit(item, cx)?;
+                // Monaco intersects the range with the suggestion's start
+                // to its end before removing the common prefix.
+                let edit = if edit.range.start <= suggest_edit.range.end {
+                    let restricted = TextReplacement {
+                        range: edit.range.start..edit.range.end.min(suggest_edit.range.end),
+                        text: edit.text.clone(),
+                    };
+                    let trimmed = single_text_remove_common_prefix(&restricted, &line_text);
+                    TextReplacement {
+                        range: trimmed.range.start..edit.range.end,
+                        text: trimmed.text,
+                    }
+                } else {
+                    edit
+                };
+                single_text_edit_augments(&edit, suggest_edit).then_some((ix, edit))
+            })
+    }
+
+    /// Monaco `handleSuggestAccepted`: the suggestion inserting `text` over
+    /// `range` is being accepted; the inline completion extending it gets a
+    /// partial accept of kind `Suggest`.
+    pub(crate) fn inline_suggest_accepted(
+        &mut self,
+        range: Range<PointUtf16>,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let line_text = |row: u32| self.snapshot.line(row);
+        let item_edit =
+            single_text_remove_common_prefix(&TextReplacement { range, text }, &line_text);
+        let Some((ix, _)) = self.inline_suggest_augmentation(&item_edit, cx) else {
+            return;
+        };
+        let item = &self.inline.suggest_items[ix];
+        let Some(edit) = self.current_edit(item, cx) else {
+            return;
+        };
+        let already = self.text_range(edit.range).encode_utf16().count();
+        item.provider.handle_partial_accept(
+            &item.completion,
+            PartialAcceptInfo {
+                kind: PartialAcceptTriggerKind::Suggest,
+                accepted_length: already + item_edit.text.encode_utf16().count(),
+            },
+        );
+    }
+
+    /// Monaco's handler of a provider's `onDidChangeInlineCompletions` (see
+    /// [`crate::providers::refresh_inline_completions`]): only the focused
+    /// editor, if `provider` serves it and nothing from another provider
+    /// shows, asks `provider` again with `change_hint`; with
+    /// `trigger_command_on_provider_change` it asks every provider for
+    /// inline edits instead.
+    pub(crate) fn inline_provider_changed(
+        &mut self,
+        provider: Arc<dyn InlineCompletionsProvider>,
+        change_hint: Option<InlineCompletionChangeHint>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.options.inline_suggest.enabled
+            || self.options.read_only
+            || self.widget_input
+            || !self.has_focus
+        {
+            return;
+        }
+        let same = |other: &Arc<dyn InlineCompletionsProvider>| {
+            std::ptr::addr_eq(Arc::as_ptr(other), Arc::as_ptr(&provider))
+        };
+        if !self
+            .editor_inline_completions_providers(cx)
+            .iter()
+            .any(same)
+        {
+            return;
+        }
+        if self
+            .options
+            .inline_suggest
+            .trigger_command_on_provider_change
+        {
+            self.inline.active = true;
+            self.fetch_inline_completions(
+                InlineCompletionTriggerKind::Automatic,
+                FetchOptions {
+                    force: true,
+                    only_inline_edits: true,
+                    ..Default::default()
+                },
+                cx,
+            );
+            return;
+        }
+        // Monaco ignores it while another provider's suggestion shows.
+        let shown = self
+            .inline_state(cx)
+            .map(|(visible, selected, _)| visible[selected].0)
+            .or_else(|| self.inline_edit_state(cx).map(|(ix, _)| ix));
+        if let Some(ix) = shown
+            && !same(&self.inline.items[ix].provider)
+        {
+            return;
+        }
+        self.inline.active = true;
+        self.fetch_inline_completions(
+            InlineCompletionTriggerKind::Automatic,
+            FetchOptions {
+                force: true,
+                provider: Some(provider),
+                change_hint,
+                ..Default::default()
+            },
+            cx,
+        );
+    }
+
+    /// Monaco `closeBrackets`: `text` inserted at `start` (replacing the
+    /// rest of the line) with the brackets it opens closed and those it
+    /// closes without opening removed, by the language's bracket pairs.
+    /// Brackets in strings and comments of that line, tokenized on its
+    /// own, don't count.
+    fn close_inline_brackets(&self, text: &str, start: PointUtf16, cx: &gpui::App) -> String {
+        let model = self.model().read(cx);
+        let (Some(language), Some(language_id)) = (model.language(), model.language_id()) else {
+            return text.to_string();
+        };
+        let pairs = language.config.brackets().to_vec();
+        if pairs.is_empty() {
+            return text.to_string();
+        }
+        let line = self.snapshot.line(start.row);
+        let prefix_len = utf16_split(&line, start.column as usize).0.len();
+        let proposed = format!("{}{text}", &line[..prefix_len]);
+        let registry = crate::model::language_registry(cx);
+        let mut skip: Vec<Range<usize>> =
+            crate::colorize::capture_spans(&proposed, language_id, &registry)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(range, highlight)| {
+                    let name = highlight.name();
+                    range.end > prefix_len
+                        && (name.starts_with("comment")
+                            || name.starts_with("string")
+                            || name.starts_with("character")
+                            || name.contains("regex"))
+                })
+                .map(|(range, _)| range.start.saturating_sub(prefix_len)..range.end - prefix_len)
+                .collect();
+        skip.sort_by_key(|range| range.start);
+        fix_brackets(text, &pairs, &skip)
+    }
+
+    /// The shown ghost text's warning (Monaco `InlineCompletionsModel.warning`).
+    pub(crate) fn inline_warning(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<crate::providers::InlineCompletionWarning> {
+        let (visible, selected, _) = self.inline_state(cx)?;
+        self.inline.items[visible[selected].0]
+            .completion
+            .warning
+            .clone()
+    }
+}
+
+/// Monaco `fixBracketsInLine` over `text`: a closing bracket closes the
+/// nearest open bracket it closes, closing the unclosed ones inside it
+/// first; a closing bracket with nothing to close is dropped, and the
+/// brackets still open at the end are closed, innermost first. Brackets in
+/// `skip` (sorted byte ranges) don't count.
+pub(crate) fn fix_brackets(
+    text: &str,
+    pairs: &[(String, String)],
+    skip: &[Range<usize>],
+) -> String {
+    let pairs: Vec<(&str, &str)> = pairs
+        .iter()
+        .filter(|(open, close)| !open.is_empty() && !close.is_empty())
+        .map(|(open, close)| (open.as_str(), close.as_str()))
+        .collect();
+    let mut out = String::with_capacity(text.len() + 4);
+    let mut open: Vec<usize> = Vec::new();
+    let mut ix = 0;
+    while ix < text.len() {
+        let rest = &text[ix..];
+        let skipped = skip.iter().any(|range| range.start <= ix && ix < range.end);
+        // The longest bracket starting here.
+        let found = if skipped {
+            None
+        } else {
+            pairs
+                .iter()
+                .enumerate()
+                .flat_map(|(pair, (o, c))| [(pair, true, *o), (pair, false, *c)])
+                .filter(|(_, _, bracket)| rest.starts_with(bracket))
+                .max_by_key(|(_, _, bracket)| bracket.len())
+        };
+        match found {
+            Some((pair, true, bracket)) => {
+                open.push(pair);
+                out.push_str(bracket);
+                ix += bracket.len();
+            }
+            Some((_, false, bracket)) => {
+                if let Some(at) = open.iter().rposition(|&pair| pairs[pair].1 == bracket) {
+                    for pair in open.drain(at + 1..).rev() {
+                        out.push_str(pairs[pair].1);
+                    }
+                    open.pop();
+                    out.push_str(bracket);
+                }
+                ix += bracket.len();
+            }
+            None => {
+                let ch = rest.chars().next().unwrap_or_default();
+                out.push(ch);
+                ix += ch.len_utf8().max(1);
+            }
+        }
+    }
+    for pair in open.into_iter().rev() {
+        out.push_str(pairs[pair].1);
+    }
+    out
+}
+
 /// Where `item`'s first change (or jump) starts in `buffer`, its model.
 fn edits_target_start(item: &Item, buffer: &text::Buffer) -> Option<PointUtf16> {
     let edit = item.edit.as_ref()?;
@@ -2579,9 +3141,31 @@ fn edits_target_start(item: &Item, buffer: &text::Buffer) -> Option<PointUtf16> 
     Some(rope.offset_to_point_utf16(offset.min(rope.len())))
 }
 
+/// Runs `completion`'s `shown_command` (Monaco `reportInlineEditShown`).
+fn run_shown_command(completion: &InlineCompletion, cx: &mut gpui::App) {
+    if let Some(command) = &completion.shown_command
+        && let Err(err) = crate::commands::execute_command(cx, command)
+    {
+        log::warn!("{err:#}");
+    }
+}
+
+/// Ends `items`' lifetimes as ignored (Monaco disposing a state).
+fn end_items(items: Vec<Item>) {
+    for item in items {
+        item.provider.handle_end_of_lifetime(
+            &item.completion,
+            &InlineCompletionEndOfLifeReason::Ignored {
+                superseded_by: None,
+                user_typing_disagreed: false,
+            },
+        );
+    }
+}
+
 /// Monaco's item hash: the same edit from a newer request.
 fn same_item(new: &Item, old: &Item) -> bool {
-    new.completion.insert_text == old.completion.insert_text
+    new.insert_text == old.insert_text
         && new.original_start == old.original_start
         && new.completion.is_inline_edit == old.completion.is_inline_edit
         && new.completion.jump_to_position == old.completion.jump_to_position
@@ -2729,6 +3313,28 @@ mod tests {
         assert_eq!(next_word_length("(a, b)", word), 1);
         assert_eq!(next_word_length("  foo", word), 2);
         assert_eq!(next_word_length("abc", word), 3);
+    }
+
+    /// Monaco `fixBracketsInLine`, as `completeBracketPairs` uses it.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn fix_brackets_closes_and_drops() {
+        let pairs: Vec<(String, String)> = [("(", ")"), ("[", "]"), ("{", "}")]
+            .iter()
+            .map(|(o, c)| (o.to_string(), c.to_string()))
+            .collect();
+        let fix = |text: &str| fix_brackets(text, &pairs, &[]);
+        assert_eq!(fix("foo(bar"), "foo(bar)");
+        assert_eq!(fix("a[b{c"), "a[b{c}]");
+        // Closing an outer bracket closes the ones open inside it first.
+        assert_eq!(fix("(a[b)"), "(a[b])");
+        // A closing bracket with nothing to close goes.
+        assert_eq!(fix("x)]"), "x");
+        assert_eq!(fix("f(a))"), "f(a)");
+        assert_eq!(fix("ok()"), "ok()");
+        // Brackets in strings and comments don't count.
+        assert_eq!(fix_brackets("f(\"(\"", &pairs, &[2..5]), "f(\"(\")");
+        assert_eq!(fix_brackets("x // )", &pairs, &[2..6]), "x // )");
     }
 
     #[test]

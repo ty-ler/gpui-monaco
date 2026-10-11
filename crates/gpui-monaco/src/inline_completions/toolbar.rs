@@ -3,16 +3,26 @@
 //! count, Accept and Accept Word, and a menu with Accept Line, Always Show
 //! Toolbar and the provider's commands. It shows above the ghost text with
 //! `show_toolbar: Always`, or in the hover over ghost text with `OnHover`.
+//! A warning on the shown completion shows above it (Monaco's
+//! `warningMessage`). The menu takes the keyboard while open, as Monaco's
+//! context menu: Up, Down, Home and End move, Enter or Space runs, Escape
+//! closes.
 
 use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, Entity, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    Render, SharedString, StatefulInteractiveElement, Styled, WeakEntity, Window, div, px,
+    AnyElement, Context, Entity, FocusHandle, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, WeakEntity, Window,
+    div, px,
 };
 
+use crate::actions::{
+    ContextMenuFirst, ContextMenuHide, ContextMenuLast, ContextMenuNext, ContextMenuPrevious,
+    ContextMenuSelect,
+};
 use crate::codicons::{Codicon, icon as codicon};
+use crate::context_menu::CONTEXT_MENU_KEY_CONTEXT;
 use crate::editor::CodeEditor;
 
 /// The More Actions menu paints above the editor's overflowing widgets,
@@ -32,6 +42,32 @@ pub struct InlineToolbar {
     with_border: bool,
     /// The "⋯" menu is open.
     menu_open: bool,
+    /// The menu's keyboard-selected row.
+    active: Option<usize>,
+    /// The menu's focus, while it's open.
+    focus: FocusHandle,
+    /// The menu had the keyboard at the last frame.
+    focus_seen: bool,
+}
+
+/// A menu row: its label, whether it's checked, and what it runs.
+type MenuItem = (SharedString, bool, ToolbarAction);
+
+/// Monaco's menu navigation: the next (`delta` 1) or previous (-1) row,
+/// wrapping, or the first or last for larger steps.
+pub(crate) fn step_menu(active: Option<usize>, count: usize, delta: isize) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    let count = count as isize;
+    let next = match (active, delta) {
+        (Some(active), 1 | -1) => (active as isize + delta).rem_euclid(count),
+        (None, 1) => 0,
+        (None, -1) => count - 1,
+        (_, delta) if delta > 0 => count - 1,
+        _ => 0,
+    };
+    Some(next as usize)
 }
 
 impl InlineToolbar {
@@ -48,7 +84,106 @@ impl InlineToolbar {
             theme,
             with_border,
             menu_open: false,
+            active: None,
+            focus: cx.focus_handle(),
+            focus_seen: false,
         }
+    }
+
+    /// The menu's rows: Accept Line, Always Show Toolbar, then the
+    /// provider's commands.
+    fn menu_items(&self, always: bool, commands: Vec<crate::providers::Command>) -> Vec<MenuItem> {
+        let mut items: Vec<MenuItem> = vec![
+            (
+                "Accept Line".into(),
+                false,
+                Arc::new(|editor: &mut CodeEditor, cx: &mut Context<CodeEditor>| {
+                    editor.accept_next_inline_line(cx);
+                }),
+            ),
+            (
+                "Always Show Toolbar".into(),
+                always,
+                Arc::new(|editor: &mut CodeEditor, cx: &mut Context<CodeEditor>| {
+                    editor.toggle_always_show_inline_toolbar(cx)
+                }),
+            ),
+        ];
+        for command in commands {
+            let title = command.title.clone();
+            items.push((
+                title,
+                false,
+                Arc::new(move |_: &mut CodeEditor, cx: &mut Context<CodeEditor>| {
+                    if let Err(err) = crate::commands::execute_command(cx, &command) {
+                        log::warn!("{err:#}");
+                    }
+                }),
+            ));
+        }
+        items
+    }
+
+    fn current_menu_items(&self, cx: &gpui::App) -> Vec<MenuItem> {
+        let Some(editor) = self.editor.upgrade() else {
+            return Vec::new();
+        };
+        let editor = editor.read(cx);
+        self.menu_items(
+            editor.options().inline_suggest.show_toolbar == InlineSuggestShowToolbar::Always,
+            editor.inline.commands.clone(),
+        )
+    }
+
+    /// Opens or closes the menu; opened, it takes the keyboard.
+    fn set_menu_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_open = open;
+        self.active = None;
+        if open {
+            window.focus(&self.focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// Closes the menu and gives the editor the keyboard back.
+    fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_menu_open(false, window, cx);
+        if let Some(editor) = self.editor.upgrade() {
+            let focus = editor.read(cx).focus_handle.clone();
+            window.focus(&focus, cx);
+        }
+    }
+
+    fn move_active(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.current_menu_items(cx).len();
+        self.active = step_menu(self.active, count, delta);
+        cx.notify();
+    }
+
+    /// Runs the keyboard-selected row.
+    fn run_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(active) = self.active else {
+            return;
+        };
+        let Some((_, _, run)) = self.current_menu_items(cx).into_iter().nth(active) else {
+            return;
+        };
+        self.close_menu(window, cx);
+        if let Some(editor) = self.editor.upgrade() {
+            editor.update(cx, |editor, cx| run(editor, cx));
+        }
+    }
+
+    /// Whether the menu is open, and its selected row, for tests.
+    #[doc(hidden)]
+    pub(crate) fn menu_for_tests(&self) -> Option<Option<usize>> {
+        self.menu_open.then_some(self.active)
+    }
+
+    /// Opens the menu as clicking "⋯" does, for tests.
+    #[doc(hidden)]
+    pub(crate) fn open_menu_for_tests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_menu_open(true, window, cx);
     }
 
     fn button(
@@ -95,13 +230,13 @@ impl InlineToolbar {
     fn menu_item(
         &self,
         id: (&'static str, usize),
-        label: SharedString,
-        checked: bool,
-        run: ToolbarAction,
+        (label, checked, run): MenuItem,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = &self.theme.colors;
         let editor = self.editor.clone();
+        let ix = id.1;
+        let active = self.active == Some(ix);
         div()
             .id(id)
             .flex()
@@ -109,13 +244,22 @@ impl InlineToolbar {
             .px(px(6.))
             .py(px(2.))
             .cursor_pointer()
-            .hover(|style| style.bg(colors.scrollbar_slider_hover))
+            .when(active, |this| {
+                this.bg(colors.menu_selection_background)
+                    .text_color(colors.menu_selection_foreground)
+            })
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                // Monaco's menus follow the mouse.
+                if *hovered && this.active != Some(ix) {
+                    this.active = Some(ix);
+                    cx.notify();
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
+                cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
-                    this.menu_open = false;
-                    cx.notify();
+                    this.close_menu(window, cx);
                     if let Some(editor) = editor.upgrade() {
                         editor.update(cx, |editor, cx| run(editor, cx));
                     }
@@ -131,18 +275,26 @@ impl InlineToolbar {
 }
 
 impl Render for InlineToolbar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(editor) = self.editor.upgrade() else {
             return div().into_any_element();
         };
-        let (count, always, commands) = {
+        let (count, always, commands, warning, markdown_style) = {
             let editor = editor.read(cx);
             (
                 editor.inline_suggestion_index(cx),
                 editor.options().inline_suggest.show_toolbar == InlineSuggestShowToolbar::Always,
                 editor.inline.commands.clone(),
+                editor.inline_warning(cx),
+                editor.markdown_style(),
             )
         };
+        // The menu closes once the keyboard leaves it.
+        if self.menu_open && !self.focus.contains_focused(window, cx) && self.focus_seen {
+            self.menu_open = false;
+            self.active = None;
+        }
+        self.focus_seen = self.menu_open && self.focus.contains_focused(window, cx);
         let mac = cfg!(target_os = "macos");
         let colors = &self.theme.colors;
         // Monaco enables previous/next with more than one suggestion.
@@ -224,10 +376,13 @@ impl Render for InlineToolbar {
                 .tooltip(crate::tooltip::tooltip("More Actions...", colors))
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
+                    cx.listener(|this, _, window, cx| {
                         cx.stop_propagation();
-                        this.menu_open = !this.menu_open;
-                        cx.notify();
+                        if this.menu_open {
+                            this.close_menu(window, cx);
+                        } else {
+                            this.set_menu_open(true, window, cx);
+                        }
                     }),
                 )
                 // `toolbar-more`.
@@ -235,6 +390,27 @@ impl Render for InlineToolbar {
         );
         let menu = self.menu_open.then(|| {
             let mut menu = div()
+                .id("inline-menu")
+                .track_focus(&self.focus)
+                .key_context(CONTEXT_MENU_KEY_CONTEXT)
+                .on_action(cx.listener(|this, _: &ContextMenuNext, _, cx| this.move_active(1, cx)))
+                .on_action(
+                    cx.listener(|this, _: &ContextMenuPrevious, _, cx| this.move_active(-1, cx)),
+                )
+                .on_action(cx.listener(|this, _: &ContextMenuFirst, _, cx| {
+                    this.move_active(-(isize::MAX / 2), cx)
+                }))
+                .on_action(cx.listener(|this, _: &ContextMenuLast, _, cx| {
+                    this.move_active(isize::MAX / 2, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ContextMenuSelect, window, cx| {
+                    this.run_active(window, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &ContextMenuHide, window, cx| {
+                        this.close_menu(window, cx)
+                    }),
+                )
                 .occlude()
                 .mt(px(2.))
                 .py(px(4.))
@@ -244,39 +420,13 @@ impl Render for InlineToolbar {
                 .bg(colors.widget_background)
                 .border_1()
                 .border_color(colors.widget_border)
-                .shadow_md()
-                .child(self.menu_item(
-                    ("inline-menu", 0),
-                    "Accept Line".into(),
-                    false,
-                    Arc::new(|editor, cx| {
-                        editor.accept_next_inline_line(cx);
-                    }),
-                    cx,
-                ))
-                .child(self.menu_item(
-                    ("inline-menu", 1),
-                    "Always Show Toolbar".into(),
-                    always,
-                    Arc::new(|editor, cx| editor.toggle_always_show_inline_toolbar(cx)),
-                    cx,
-                ));
-            if !commands.is_empty() {
-                menu = menu.child(div().my(px(4.)).h(px(1.)).bg(colors.widget_border));
-            }
-            for (ix, command) in commands.into_iter().enumerate() {
-                let title = command.title.clone();
-                menu = menu.child(self.menu_item(
-                    ("inline-command", ix),
-                    title,
-                    false,
-                    Arc::new(move |_, cx| {
-                        if let Err(err) = crate::commands::execute_command(cx, &command) {
-                            log::warn!("{err:#}");
-                        }
-                    }),
-                    cx,
-                ));
+                .shadow_md();
+            let fixed = 2;
+            for (ix, item) in self.menu_items(always, commands).into_iter().enumerate() {
+                if ix == fixed {
+                    menu = menu.child(div().my(px(4.)).h(px(1.)).bg(colors.widget_border));
+                }
+                menu = menu.child(self.menu_item(("inline-menu-item", ix), item, cx));
             }
             // Monaco's More Actions menu is a context menu outside the
             // widget: a popup above everything (the hover card around an
@@ -303,6 +453,26 @@ impl Render for InlineToolbar {
             })
             // Clicks stay out of the text behind it.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            // Monaco's `warningMessage`: above the toolbar, at most 400px
+            // wide.
+            .children(warning.map(|warning| {
+                div()
+                    .max_w(px(400.))
+                    .m(px(4.))
+                    .flex()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .text_color(colors.marker_color(crate::MarkerSeverity::Warning))
+                            .child(codicon(warning.icon.unwrap_or(Codicon::Warning))),
+                    )
+                    .child(crate::markdown::render_documentation(
+                        &warning.message,
+                        &markdown_style,
+                        &self.theme,
+                        cx,
+                    ))
+            }))
             .child(bar)
             .children(menu)
             .into_any_element()

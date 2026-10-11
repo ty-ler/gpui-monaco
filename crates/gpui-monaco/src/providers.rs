@@ -1636,6 +1636,75 @@ pub struct InlineCompletionContext {
     /// Whether classic inline completions are wanted (Monaco
     /// `includeInlineCompletions`).
     pub include_inline_completions: bool,
+    /// Identifies this request, a random UUID (Monaco `requestUuid`).
+    pub request_uuid: SharedString,
+    /// When the editor asked (Monaco `requestIssuedDateTime`).
+    pub request_issued_date_time: web_time::SystemTime,
+    /// The earliest the results show: the request time plus
+    /// `inline_suggest.min_show_delay`, unless explicit or right after
+    /// accepting (Monaco `earliestShownDateTime`).
+    pub earliest_shown_date_time: web_time::SystemTime,
+    /// The hint passed to [`refresh_inline_completions`] when that asked
+    /// for this request (Monaco `changeHint`).
+    pub change_hint: Option<InlineCompletionChangeHint>,
+}
+
+impl Default for InlineCompletionContext {
+    /// An automatic request for both kinds, issued at the Unix epoch.
+    fn default() -> Self {
+        Self {
+            trigger_kind: InlineCompletionTriggerKind::Automatic,
+            selected_suggestion_info: None,
+            include_inline_edits: true,
+            include_inline_completions: true,
+            request_uuid: SharedString::default(),
+            request_issued_date_time: web_time::SystemTime::UNIX_EPOCH,
+            earliest_shown_date_time: web_time::SystemTime::UNIX_EPOCH,
+            change_hint: None,
+        }
+    }
+}
+
+/// What a provider passes when it asks the editor to request again
+/// (Monaco `IInlineCompletionChangeHint`), handed back in the next
+/// request's [`InlineCompletionContext::change_hint`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InlineCompletionChangeHint {
+    /// Whatever identifies what changed (Monaco `data`, JSON serializable).
+    pub data: Option<serde_json::Value>,
+}
+
+/// How a partial accept was made (Monaco `PartialAcceptTriggerKind`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartialAcceptTriggerKind {
+    /// Accept Word (Cmd/Ctrl+Right).
+    Word,
+    /// Accept Line.
+    Line,
+    /// A suggestion was accepted from the suggest widget, and the inline
+    /// completion extending it stays (Monaco `handleSuggestAccepted`).
+    Suggest,
+}
+
+/// A partial accept (Monaco `PartialAcceptInfo`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PartialAcceptInfo {
+    /// How it was made.
+    pub kind: PartialAcceptTriggerKind,
+    /// The UTF-16 length of the item's text accepted so far, from the start
+    /// of its range.
+    pub accepted_length: usize,
+}
+
+/// A warning shown with an inline completion (Monaco
+/// `InlineCompletionWarning`): its ghost text gets a warning squiggle and
+/// the toolbar shows the message.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlineCompletionWarning {
+    /// The message, plain text or markdown.
+    pub message: Documentation,
+    /// Its icon; `None` is the `warning` codicon.
+    pub icon: Option<Codicon>,
 }
 
 /// One inline completion (Monaco `InlineCompletion`).
@@ -1694,6 +1763,15 @@ pub struct InlineCompletion {
     /// renames; here the provider supplies it). An inline edit with one
     /// shows as a word replacement.
     pub alternative_action: Option<InlineCompletionAlternativeAction>,
+    /// Closes the brackets `insert_text` opens and drops those it closes
+    /// without opening, by the language's bracket pairs, ignoring brackets
+    /// in strings and comments; the range grows or shrinks at its end by
+    /// as much (Monaco `completeBracketPairs`, `closeBrackets`).
+    pub complete_bracket_pairs: bool,
+    /// A warning shown with the ghost text (Monaco `warning`).
+    pub warning: Option<InlineCompletionWarning>,
+    /// Run when it first shows (Monaco's deprecated `shownCommand`).
+    pub shown_command: Option<Command>,
 }
 
 /// How an inline completion's [`hint`](InlineCompletion::hint) is drawn
@@ -1786,12 +1864,14 @@ pub trait InlineCompletionsProvider: 'static {
         None
     }
 
-    /// `item` was shown for the first time.
-    fn handle_item_did_show(&self, _item: &InlineCompletion) {}
+    /// `item` was shown for the first time, with `updated_insert_text` (its
+    /// text after [`complete_bracket_pairs`](InlineCompletion::complete_bracket_pairs);
+    /// empty for a jump) (Monaco `handleItemDidShow`).
+    fn handle_item_did_show(&self, _item: &InlineCompletion, _updated_insert_text: &str) {}
 
-    /// The first `accepted_length` UTF-16 units of `item` were accepted
-    /// word by word or line by line.
-    fn handle_partial_accept(&self, _item: &InlineCompletion, _accepted_length: usize) {}
+    /// Part of `item` was accepted: word by word, line by line, or as the
+    /// suggestion it extends (Monaco `handlePartialAccept`).
+    fn handle_partial_accept(&self, _item: &InlineCompletion, _info: PartialAcceptInfo) {}
 
     /// `item` was shown and then dismissed (Monaco's deprecated
     /// `handleRejection`; also see `handle_end_of_lifetime`).
@@ -1817,6 +1897,13 @@ pub trait InlineCompletionsProvider: 'static {
     /// at all if one of them has a visible completion (Monaco
     /// `yieldsToGroupIds`).
     fn yields_to_group_ids(&self) -> Vec<SharedString> {
+        Vec::new()
+    }
+
+    /// Groups this provider excludes: while it's asked, providers in them
+    /// aren't (Monaco `excludesGroupIds`, applied as Monaco's
+    /// `getAvailableProviders` does).
+    fn excludes_group_ids(&self) -> Vec<SharedString> {
         Vec::new()
     }
 
@@ -3348,6 +3435,45 @@ pub fn inline_completions_providers(
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.inline_completions, &target.into()))
         .unwrap_or_default()
+}
+
+/// The inline completions provider registered as `registration`.
+pub(crate) fn inline_completions_provider(
+    cx: &App,
+    registration: ProviderRegistration,
+) -> Option<Arc<dyn InlineCompletionsProvider>> {
+    cx.try_global::<LanguageFeatures>()?
+        .inline_completions
+        .iter()
+        .find(|entry| entry.id == registration)
+        .map(|entry| entry.provider.clone())
+}
+
+/// The inline completions provider registered as `provider` has new
+/// results (Monaco's provider `onDidChangeInlineCompletions`): the focused
+/// editor it serves asks it again, passing `change_hint` in the request's
+/// [`InlineCompletionContext::change_hint`]. An editor showing another
+/// provider's suggestion ignores it; with
+/// `inline_suggest.trigger_command_on_provider_change` every provider is
+/// asked for inline edits instead.
+pub fn refresh_inline_completions(
+    cx: &mut App,
+    provider: ProviderRegistration,
+    change_hint: Option<InlineCompletionChangeHint>,
+) {
+    // Deferred, so a provider can call it while the editor asks it.
+    cx.defer(move |cx| {
+        let Some(provider) = inline_completions_provider(cx, provider) else {
+            return;
+        };
+        for editor in crate::registry::editors(cx) {
+            let provider = provider.clone();
+            let change_hint = change_hint.clone();
+            editor.update(cx, |editor, cx| {
+                editor.inline_provider_changed(provider, change_hint, cx)
+            });
+        }
+    });
 }
 
 /// The registered document semantic tokens providers whose selector

@@ -56,7 +56,7 @@ impl InlineCompletionsProvider for Edits {
         }))
     }
 
-    fn handle_item_did_show(&self, item: &InlineCompletion) {
+    fn handle_item_did_show(&self, item: &InlineCompletion, _: &str) {
         self.events
             .borrow_mut()
             .push(format!("shown {}", item.insert_text));
@@ -1178,4 +1178,157 @@ fn cross_file_edits_wait_for_an_editor(cx: &mut TestAppContext) {
         other.read_with(other_cx, |e, cx| e.inline_edit_for_tests(cx)),
         Some(vec![pair("old", "new")])
     );
+}
+
+#[gpui::test]
+fn the_gutter_indicator_without_a_glyph_margin(cx: &mut TestAppContext) {
+    // Monaco's indicator spans the gutter: it shows in the line numbers'
+    // space without a glyph margin.
+    let provider = Edits::new(|text, _| replace(text, "colour", "shade"));
+    let (editor, cx) = setup(DOC, provider, |o| o.glyph_margin = false, cx);
+    type_at(&editor, p(4, 10), " ", cx);
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.inline_edit_gutter_indicator_for_tests()),
+        Some(Ok(0))
+    );
+    // The pill shows the line number.
+    let pill = editor.read_with(cx, |e, cx| e.inline_edit_gutter_pill_for_tests(cx));
+    assert_eq!(pill.map(|(number, _, _)| number), Some("1".to_string()));
+    editor.update(cx, |e, cx| e.click_inline_edit_gutter_indicator(cx));
+    assert!(text(&editor, cx).starts_with("let shade = 1;"));
+}
+
+#[gpui::test]
+fn the_gutter_menu_takes_the_keyboard_and_closes_on_scroll(cx: &mut TestAppContext) {
+    let mut doc = DOC.to_string();
+    for ix in 0..100 {
+        doc.push_str(&format!("let v{ix} = {ix};\n"));
+    }
+    let provider = Edits::new(|text, _| replace(text, "colour", "shade"));
+    let events = provider.events.clone();
+    let (editor, cx) = setup(&doc, provider, |_| {}, cx);
+    type_at(&editor, p(4, 10), " ", cx);
+    let menu = |cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, cx| e.inline_edit_gutter_menu_state_for_tests(cx))
+    };
+    assert_eq!(menu(cx), None);
+    editor.update_in(cx, |e, window, cx| {
+        e.open_inline_edit_gutter_menu_for_tests(window, cx)
+    });
+    draw(cx);
+    assert_eq!(menu(cx), Some(None));
+    // Rows: Go To / Accept, Reject, Show Collapsed.
+    cx.simulate_keystrokes("down down");
+    assert_eq!(menu(cx), Some(Some(1)));
+    cx.simulate_keystrokes("home");
+    assert_eq!(menu(cx), Some(Some(0)));
+    cx.simulate_keystrokes("up");
+    assert_eq!(menu(cx), Some(Some(2)));
+    // Escape closes it, back to the editor.
+    cx.simulate_keystrokes("escape");
+    assert_eq!(menu(cx), None);
+    assert!(visible(&editor, cx));
+    assert!(cx.update(|window, cx| editor.focus_handle(cx).is_focused(window)));
+    // Enter runs the row: Reject.
+    editor.update_in(cx, |e, window, cx| {
+        e.open_inline_edit_gutter_menu_for_tests(window, cx)
+    });
+    draw(cx);
+    cx.simulate_keystrokes("down down enter");
+    assert_eq!(menu(cx), None);
+    assert!(!visible(&editor, cx));
+    assert!(events.borrow().contains(&"rejected shade".to_string()));
+    // Scrolling the editor closes it (Monaco's hover closes on scroll).
+    type_at(&editor, p(4, 11), " ", cx);
+    editor.update_in(cx, |e, window, cx| {
+        e.open_inline_edit_gutter_menu_for_tests(window, cx)
+    });
+    draw(cx);
+    assert_eq!(menu(cx), Some(None));
+    editor.update(cx, |e, cx| {
+        e.set_scroll_position(gpui::point(gpui::px(0.), gpui::px(40.)), cx)
+    });
+    draw(cx);
+    assert_eq!(menu(cx), None);
+}
+
+/// Suggests words starting with `s`.
+struct SWords;
+impl CompletionProvider for SWords {
+    fn provide_completions(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        _: CompletionTrigger,
+        _: &mut App,
+    ) -> Task<anyhow::Result<CompletionList>> {
+        Task::ready(Ok(CompletionList {
+            items: ["select_all", "selections", "snapshot"]
+                .into_iter()
+                .map(|word| CompletionItem::new(word, CompletionItemKind::Method))
+                .collect(),
+            incomplete: false,
+        }))
+    }
+}
+
+#[gpui::test]
+fn inline_edits_hide_while_the_suggest_widget_has_a_selection(cx: &mut TestAppContext) {
+    // Monaco asks with the suggest widget's selection, which empties the
+    // inline completions (`createStateWithAppliedResults` into
+    // `suggestWidgetInlineCompletions`), so no inline edit or long-distance
+    // hint draws around the list; closing the list brings it back.
+    let doc = long_doc();
+    let provider = Edits::new(|text, _| replace(text, "let v250 = 250;", "let v250 = 2500;"));
+    let contexts = provider.contexts.clone();
+    let (editor, cx) = setup(&doc, provider, |_| {}, cx);
+    cx.update(|_, cx| register_completion_provider(cx, LanguageSelector::All, SWords));
+    type_at(&editor, p(0, 0), " ", cx);
+    assert!(visible(&editor, cx));
+    let hint = |cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, cx| e.inline_edit_long_distance_hint_for_tests(cx))
+    };
+    assert!(hint(cx).is_some());
+    cx.simulate_input("s");
+    cx.simulate_keystrokes("ctrl-space");
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_suggest_visible()));
+    assert!(
+        contexts
+            .borrow()
+            .last()
+            .is_some_and(|c| c.selected_suggestion_info.is_some())
+    );
+    assert!(!visible(&editor, cx));
+    assert_eq!(hint(cx), None);
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.inline_edit_gutter_indicator_for_tests()),
+        None
+    );
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_suggest_visible()));
+    assert!(visible(&editor, cx));
+    assert!(hint(cx).is_some());
+}
+
+/// The gutter indicator's widget follows `set_model` like glyph margin
+/// widgets: re-anchored in the new model, clipped to it, so drawing never
+/// resolves an anchor of the old one.
+#[gpui::test]
+fn the_gutter_indicator_survives_set_model(cx: &mut TestAppContext) {
+    let provider = Edits::new(|text, _| replace(text, "colour", "shade"));
+    let (editor, cx) = setup(DOC, provider, |_| {}, cx);
+    type_at(&editor, p(4, 10), " ", cx);
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.inline_edit_gutter_indicator_for_tests()),
+        Some(Ok(0))
+    );
+    editor.update(cx, |e, cx| {
+        let model = cx.new(|_| TextModel::new("x"));
+        e.set_model(model, cx);
+    });
+    draw(cx);
+    draw(cx);
+    assert_eq!(text(&editor, cx), "x");
 }
