@@ -27,6 +27,10 @@ const SUGGEST_DETAILS_FOCUSED: Option<&str> = Some("CodeEditor && suggest_widget
 const QUICK_INPUT: Option<&str> = Some("QuickInput > CodeEditor");
 /// The editor while a sticky line has keyboard focus.
 const STICKY_FOCUSED: Option<&str> = Some("CodeEditor && sticky_scroll_focused");
+/// Monaco `ctxReferenceSearchVisible || PeekContext.inPeekEditor`: a peek
+/// view is open in this editor, or this editor is a peek view's preview.
+const REFERENCE_SEARCH: Option<&str> =
+    Some("CodeEditor && (referenceSearchVisible || inReferenceSearchEditor)");
 /// While the drop or paste options button shows.
 const POST_EDIT_WIDGET: Option<&str> = Some("CodeEditor && post_edit_widget");
 /// With tab focus mode on.
@@ -843,19 +847,32 @@ actions!(
         /// The previous result in the peek view (Monaco
         /// `goToPreviousReference`).
         GoToPreviousReference,
-        /// Peek view list: the next row.
+        /// Peek view list: the next row (Monaco `list.focusDown`).
         PeekSelectNext,
-        /// Peek view list: the previous row.
+        /// Peek view list: the previous row (Monaco `list.focusUp`).
         PeekSelectPrevious,
-        /// Peek view list: the first result.
+        /// Peek view list: the first row (Monaco `list.focusFirst`).
         PeekSelectFirst,
-        /// Peek view list: the last result.
+        /// Peek view list: the last row (Monaco `list.focusLast`).
         PeekSelectLast,
-        /// Peek view list: go to the selected result.
+        /// Peek view list: a page down (Monaco `list.focusPageDown`).
+        PeekPageDown,
+        /// Peek view list: a page up (Monaco `list.focusPageUp`).
+        PeekPageUp,
+        /// Peek view list: go to the focused result, or toggle the focused
+        /// file (Monaco `revealReference`, `list.select`).
         PeekOpen,
-        /// Peek view list: collapse the selected file.
+        /// Peek view list: open the focused result to the side (Monaco
+        /// `openReferenceToSide`).
+        PeekOpenToSide,
+        /// Peek view list: expand or collapse the focused file (Monaco
+        /// `list.toggleExpand`).
+        PeekToggle,
+        /// Peek view list: collapse the focused file, or go to a result's
+        /// file (Monaco `list.collapse`).
         PeekCollapse,
-        /// Peek view list: expand the selected file.
+        /// Peek view list: expand the focused file, or go to its first
+        /// result (Monaco `list.expand`).
         PeekExpand,
         /// Closes the peek view (Monaco `closeReferenceSearch`).
         ClosePeek,
@@ -1715,6 +1732,14 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-shift-f3", PreviousSelectionMatch, ctx),
         KeyBinding::new("alt-f8", GoToNextMarker, ctx),
         KeyBinding::new("f8", GoToNextMarkerInFiles, ctx),
+        // Monaco `goToNextReference`'s and `goToPreviousReference`'s
+        // secondary keys (weight `EditorContrib - 10`), then
+        // `editor.gotoNextSymbolFromResult` (`EditorContrib`): Go to
+        // Definition and Go to References come later and win while their
+        // preconditions hold, as in Monaco.
+        KeyBinding::new("f12", GoToNextReference, REFERENCE_SEARCH),
+        KeyBinding::new("shift-f12", GoToPreviousReference, REFERENCE_SEARCH),
+        KeyBinding::new("f12", GoToNextSymbolFromResult, ctx),
         KeyBinding::new("f12", GoToDefinition, ctx),
         KeyBinding::new("shift-f12", GoToReferences, ctx),
         KeyBinding::new("f2", Rename, ctx),
@@ -1730,8 +1755,9 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             AutoFix,
             ctx,
         ),
-        KeyBinding::new("f4", GoToNextReference, ctx),
-        KeyBinding::new("shift-f4", GoToPreviousReference, ctx),
+        // Monaco binds F4 only while a peek view is open (or in its preview).
+        KeyBinding::new("f4", GoToNextReference, REFERENCE_SEARCH),
+        KeyBinding::new("shift-f4", GoToPreviousReference, REFERENCE_SEARCH),
         KeyBinding::new("secondary-shift-space", TriggerParameterHints, ctx),
         KeyBinding::new("ctrl-space", TriggerSuggest, ctx),
         // Monaco's secondary keys (Alt+Esc only on macOS).
@@ -2126,17 +2152,27 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("up", PeekSelectPrevious, peek),
         KeyBinding::new("home", PeekSelectFirst, peek),
         KeyBinding::new("end", PeekSelectLast, peek),
+        KeyBinding::new("pagedown", PeekPageDown, peek),
+        KeyBinding::new("pageup", PeekPageUp, peek),
         KeyBinding::new("enter", PeekOpen, peek),
+        // Monaco: Ctrl+Enter (WinCtrl on macOS, CtrlCmd elsewhere).
+        KeyBinding::new("ctrl-enter", PeekOpenToSide, peek),
+        KeyBinding::new("space", PeekToggle, peek),
         KeyBinding::new("left", PeekCollapse, peek),
         KeyBinding::new("right", PeekExpand, peek),
         KeyBinding::new("escape", ClosePeek, peek),
         KeyBinding::new("shift-escape", ClosePeek, peek),
         KeyBinding::new("f4", GoToNextReference, peek),
-        // Monaco's secondary key (the editor keeps F12 for go to
-        // definition).
+        // Monaco's secondary keys (the editor keeps F12 for go to
+        // definition while it has text focus).
         KeyBinding::new("f12", GoToNextReference, peek),
         KeyBinding::new("shift-f4", GoToPreviousReference, peek),
+        KeyBinding::new("shift-f12", GoToPreviousReference, peek),
     ]);
+    // Monaco's macOS secondary key for `revealReference`.
+    if cfg!(target_os = "macos") {
+        bindings.push(KeyBinding::new("cmd-down", PeekOpen, peek));
+    }
     // Monaco's secondary keys for moving in the suggest list (first and last
     // have none). Bound last: they share the editor's context depth, where
     // later bindings win, and must beat Cmd/Ctrl+Up/Down and Ctrl+N/P.

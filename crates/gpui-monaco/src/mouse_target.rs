@@ -16,6 +16,8 @@ use crate::widgets::WidgetId;
 pub enum EmbeddedKind {
     /// A view zone between lines.
     ViewZone,
+    /// A view zone's margin part, in the gutter (Monaco `marginDomNode`).
+    ViewZoneMargin,
     /// A content widget.
     ContentWidget,
     /// An overlay widget.
@@ -96,6 +98,12 @@ pub enum MouseTargetDetail {
         /// The line the zone is after, 1-based, 0 above the first line
         /// (Monaco `afterLineNumber`, as [`ViewZone::after_line`](crate::ViewZone)).
         after_line: Option<u32>,
+        /// The end of the line above the zone, if any (Monaco
+        /// `positionBefore`).
+        position_before: Option<PointUtf16>,
+        /// The start of the line below the zone, if any (Monaco
+        /// `positionAfter`).
+        position_after: Option<PointUtf16>,
     },
     /// A content widget (Monaco `IMouseTargetContentWidget.detail`).
     ContentWidget(WidgetId),
@@ -156,6 +164,11 @@ impl CodeEditor {
                 .iter()
                 .find(|w| w.view.entity_id() == view)
                 .map(|w| w.id),
+            EmbeddedKind::ViewZoneMargin => widgets
+                .zones
+                .iter()
+                .find(|w| w.margin_view.as_ref().map(|v| v.entity_id()) == Some(view))
+                .map(|w| w.id),
             EmbeddedKind::ContentWidget => widgets
                 .content
                 .iter()
@@ -172,6 +185,46 @@ impl CodeEditor {
                 .find(|w| w.view.entity_id() == view)
                 .map(|w| w.id),
         }
+    }
+
+    /// A view zone's target (Monaco `HitTestContext.getZoneAtCoord`): the
+    /// position before the zone in its upper half, after it in the lower
+    /// half (whichever exists), with `zone` the part of it hit.
+    fn zone_target(
+        &self,
+        id: Option<WidgetId>,
+        zone: Option<gpui::Bounds<Pixels>>,
+        point: Point<Pixels>,
+        cx: &App,
+    ) -> (Option<PointUtf16>, MouseTargetDetail) {
+        let after_line = id.and_then(|id| self.zone_after_line(id, cx));
+        let model = self.model().read(cx);
+        let line_count = model.buffer().max_point().row + 1;
+        let (position_before, position_after) = match after_line {
+            Some(after) => (
+                (after > 0).then(|| {
+                    let row = (after - 1).min(line_count - 1);
+                    PointUtf16::new(row, model.line_len_utf16(row))
+                }),
+                (after < line_count).then(|| PointUtf16::new(after, 0)),
+            ),
+            None => (None, None),
+        };
+        let upper_half = zone.is_none_or(|zone| point.y < zone.top() + zone.size.height / 2.);
+        let position = match (position_before, position_after) {
+            (before, None) => before,
+            (None, after) => after,
+            (Some(before), Some(after)) => Some(if upper_half { before } else { after }),
+        };
+        (
+            position,
+            MouseTargetDetail::ViewZone {
+                id,
+                after_line,
+                position_before,
+                position_after,
+            },
+        )
     }
 
     /// The line view zone `id` is after (Monaco `afterLineNumber`).
@@ -247,13 +300,15 @@ impl CodeEditor {
                     MouseTargetKind::OverlayWidget,
                     id.map_or(MouseTargetDetail::None, MouseTargetDetail::OverlayWidget),
                 ),
-                EmbeddedKind::ViewZone => (
-                    MouseTargetKind::ContentViewZone,
-                    MouseTargetDetail::ViewZone {
-                        id,
-                        after_line: id.and_then(|id| self.zone_after_line(id, cx)),
-                    },
-                ),
+                EmbeddedKind::ViewZone | EmbeddedKind::ViewZoneMargin => {
+                    let kind = if *kind == EmbeddedKind::ViewZone {
+                        MouseTargetKind::ContentViewZone
+                    } else {
+                        MouseTargetKind::GutterViewZone
+                    };
+                    let (position, detail) = self.zone_target(id, Some(*bounds), point, cx);
+                    return target(kind, position, detail);
+                }
                 EmbeddedKind::GlyphMarginWidget => {
                     (MouseTargetKind::GutterGlyphMargin, margin(false, id))
                 }
@@ -320,23 +375,23 @@ impl CodeEditor {
                 );
             }
             // The zone at this height, gutter side included.
-            let id = hits
+            let zone = hits
                 .filter(|((bounds, kind), _)| {
-                    **kind == EmbeddedKind::ViewZone
+                    matches!(kind, EmbeddedKind::ViewZone | EmbeddedKind::ViewZoneMargin)
                         && bounds.top() <= point.y
                         && point.y < bounds.bottom()
                 })
-                .find_map(|((_, kind), view)| self.widget_for_view(*kind, *view));
-            let detail = MouseTargetDetail::ViewZone {
-                id,
-                after_line: id.and_then(|id| self.zone_after_line(id, cx)),
-            };
+                .find_map(|((bounds, kind), view)| {
+                    Some((self.widget_for_view(*kind, *view)?, *bounds))
+                });
+            let (position, detail) =
+                self.zone_target(zone.map(|z| z.0), zone.map(|z| z.1), point, cx);
             let kind = if in_gutter {
                 MouseTargetKind::GutterViewZone
             } else {
                 MouseTargetKind::ContentViewZone
             };
-            return target(kind, None, detail);
+            return target(kind, position, detail);
         };
         if in_gutter {
             let x = point.x - layout.bounds.left();

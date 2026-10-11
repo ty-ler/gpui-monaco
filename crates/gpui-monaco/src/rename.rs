@@ -537,13 +537,15 @@ impl CodeEditor {
         });
         let widget = self.add_content_widget(
             ContentWidget {
-                position: location.range.start,
-                preference: vec![
-                    ContentWidgetPreference::Below,
-                    ContentWidgetPreference::Above,
-                ],
-                view: view.clone().into(),
                 allow_editor_overflow: true,
+                ..ContentWidget::new(
+                    location.range.start,
+                    vec![
+                        ContentWidgetPreference::Below,
+                        ContentWidgetPreference::Above,
+                    ],
+                    view.clone().into(),
+                )
             },
             cx,
         );

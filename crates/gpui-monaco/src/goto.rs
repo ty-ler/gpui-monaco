@@ -1,6 +1,6 @@
 //! Symbol navigation: go to definition, declaration, type definition,
 //! implementations and references, with several results shown in a peek
-//! view or stepped through with F4, and the `editor.action.goToLocations`
+//! view or stepped through with F12, and the `editor.action.goToLocations`
 //! and `editor.action.peekLocations` API commands for given locations.
 //!
 //! Ports Monaco's `src/vs/editor/contrib/gotoSymbol/browser/goToCommands.ts`,
@@ -98,7 +98,7 @@ fn no_result_message(kind: LocationKind, word: Option<&str>) -> String {
     }
 }
 
-/// The results F4 steps through after a `Goto` navigation (Monaco
+/// The results F12 steps through after a `Goto` navigation (Monaco
 /// `SymbolNavigationService`). Shared by all editors, like Monaco's.
 #[derive(Default)]
 struct SymbolNavigation {
@@ -108,7 +108,7 @@ struct SymbolNavigation {
 
 impl Global for SymbolNavigation {}
 
-/// Whether F4 has results to step through.
+/// Whether F12 has results to step through.
 pub fn has_symbol_navigation(cx: &App) -> bool {
     cx.try_global::<SymbolNavigation>()
         .is_some_and(|nav| !nav.locations.is_empty())
@@ -474,7 +474,7 @@ impl CodeEditor {
         }
     }
 
-    /// F4 after a navigation command with several results in `Goto` mode:
+    /// F12 after a navigation command with several results in `Goto` mode:
     /// goes to the next one (Monaco `editor.gotoNextSymbolFromResult`).
     /// Returns whether there were results.
     pub fn go_to_next_symbol_from_result(&mut self, cx: &mut Context<Self>) -> bool {
@@ -491,7 +491,7 @@ impl CodeEditor {
         true
     }
 
-    /// Escape: stops F4 navigation (Monaco
+    /// Escape: stops F12 navigation (Monaco
     /// `editor.gotoNextSymbolFromResult.cancel`). Returns whether it was on.
     pub(crate) fn cancel_symbol_navigation(&mut self, cx: &mut Context<Self>) -> bool {
         if !has_symbol_navigation(cx) {
@@ -501,7 +501,7 @@ impl CodeEditor {
         true
     }
 
-    /// Stops F4 navigation once the cursor leaves the results (Monaco resets
+    /// Stops F12 navigation once the cursor leaves the results (Monaco resets
     /// when the active editor's position isn't in one of them).
     pub(crate) fn check_symbol_navigation(&mut self, cx: &mut Context<Self>) {
         let Some(nav) = cx.try_global::<SymbolNavigation>() else {

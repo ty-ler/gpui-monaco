@@ -499,7 +499,6 @@ static COMMANDS: &[Command] = &[
     Command("closeParameterHints", "code_editor::CloseParameterHints", "parameterHintsVisible"),
     Command("showNextParameterHint", "code_editor::ShowNextParameterHint", "parameterHintsVisible && parameterHintsMultipleSignatures"),
     Command("showPrevParameterHint", "code_editor::ShowPrevParameterHint", "parameterHintsVisible && parameterHintsMultipleSignatures"),
-    // F4 also steps through symbol navigation here.
     Command("goToNextReference", "code_editor::GoToNextReference", ""),
     Command("goToPreviousReference", "code_editor::GoToPreviousReference", ""),
     Command("closeReferenceSearch", "code_editor::ClosePeek", ""),

@@ -717,11 +717,7 @@ fn zones_scrolled_out_take_no_clicks_outside_the_text(cx: &mut TestAppContext) {
     let zone = cx.update(|_, cx| cx.new(|_| Zone(clicks.clone())));
     editor.update(cx, |e, cx| {
         e.add_view_zone(
-            gpui_monaco::ViewZone {
-                after_line: 10,
-                height: gpui_monaco::ZoneHeight::Pixels(px(200.)),
-                view: zone.into(),
-            },
+            gpui_monaco::ViewZone::new(10, gpui_monaco::ZoneHeight::Pixels(px(200.)), zone.into()),
             cx,
         );
     });

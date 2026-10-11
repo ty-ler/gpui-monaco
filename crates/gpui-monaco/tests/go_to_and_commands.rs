@@ -143,11 +143,15 @@ fn go_to_locations_follows_multiple(cx: &mut TestAppContext) {
             "multiple": "goto",
         }),
     );
-    // `goto`: the first result, and F4 steps through the rest.
+    // `goto`: the first result, and F12 steps through the rest (Monaco
+    // `editor.gotoNextSymbolFromResult`; there's no definition provider to
+    // take the key). F4 is only for peek views.
     assert_eq!(peek_rows(&editor, cx), None);
     assert_eq!(head(&editor, cx), p(0, 3));
     assert!(cx.update(|_, cx| gpui_monaco::has_symbol_navigation(cx)));
     cx.simulate_keystrokes("f4");
+    assert_eq!(head(&editor, cx), p(0, 3));
+    cx.simulate_keystrokes("f12");
     assert_eq!(head(&editor, cx), p(3, 4));
 }
 

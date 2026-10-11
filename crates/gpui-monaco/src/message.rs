@@ -111,13 +111,15 @@ impl CodeEditor {
         });
         let id = self.add_content_widget(
             ContentWidget {
-                position,
-                preference: vec![
-                    ContentWidgetPreference::Above,
-                    ContentWidgetPreference::Below,
-                ],
-                view: view.into(),
                 allow_editor_overflow: true,
+                ..ContentWidget::new(
+                    position,
+                    vec![
+                        ContentWidgetPreference::Above,
+                        ContentWidgetPreference::Below,
+                    ],
+                    view.into(),
+                )
             },
             cx,
         );

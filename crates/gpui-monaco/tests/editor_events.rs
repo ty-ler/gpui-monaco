@@ -480,14 +480,7 @@ fn vertical_geometry(cx: &mut TestAppContext) {
     // A 50px view zone after row 2 (Monaco line 3).
     let view = cx.update(|_, cx| cx.new(|_| gpui::Empty).into());
     editor.update(cx, |e, cx| {
-        e.add_view_zone(
-            ViewZone {
-                after_line: 3,
-                height: ZoneHeight::Pixels(px(50.)),
-                view,
-            },
-            cx,
-        );
+        e.add_view_zone(ViewZone::new(3, ZoneHeight::Pixels(px(50.)), view), cx);
     });
     draw(cx);
     // Monaco `getTopForLineNumber(4)` counts the zone above; with
@@ -733,14 +726,7 @@ fn view_state_keeps_folds_and_the_first_line(cx: &mut TestAppContext) {
     editor.update(cx, |e, cx| {
         e.set_model(model.clone(), cx);
         let view = cx.new(|_| gpui::Empty).into();
-        e.add_view_zone(
-            ViewZone {
-                after_line: 1,
-                height: ZoneHeight::Pixels(px(40.)),
-                view,
-            },
-            cx,
-        );
+        e.add_view_zone(ViewZone::new(1, ZoneHeight::Pixels(px(40.)), view), cx);
         e.restore_view_state(&state, cx);
     });
     draw(cx);
@@ -903,14 +889,7 @@ fn view_zone_events(cx: &mut TestAppContext) {
     let zones = CodeEditorEvent::ViewZonesChanged;
     let view = cx.update(|_, cx| cx.new(|_| gpui::Empty).into());
     let id = editor.update(cx, |e, cx| {
-        e.add_view_zone(
-            ViewZone {
-                after_line: 1,
-                height: ZoneHeight::Lines(2.),
-                view,
-            },
-            cx,
-        )
+        e.add_view_zone(ViewZone::new(1, ZoneHeight::Lines(2.), view), cx)
     });
     assert_eq!(take_count(&events, &zones), 1);
     editor.update(cx, |e, cx| {

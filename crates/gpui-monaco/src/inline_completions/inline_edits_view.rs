@@ -1249,22 +1249,20 @@ impl CodeEditor {
                 self.add_glyph_margin_widget(GlyphMarginWidget::new(row, indicator), cx)
             }
             IndicatorPlacement::Above => self.add_overlay_widget(
-                OverlayWidget {
-                    position: OverlayPosition::Custom(point(px(1.), px(2.))),
-                    view: indicator.into(),
-                    allow_editor_overflow: false,
-                },
+                OverlayWidget::new(
+                    OverlayPosition::Custom(point(px(1.), px(2.))),
+                    indicator.into(),
+                ),
                 cx,
             ),
             IndicatorPlacement::Below => self.add_overlay_widget(
-                OverlayWidget {
-                    position: OverlayPosition::Custom(point(
+                OverlayWidget::new(
+                    OverlayPosition::Custom(point(
                         px(1.),
                         (height - line_height - px(2.)).max(px(0.)),
                     )),
-                    view: indicator.into(),
-                    allow_editor_overflow: false,
-                },
+                    indicator.into(),
+                ),
                 cx,
             ),
         };
@@ -1376,12 +1374,7 @@ impl CodeEditor {
             line_height,
         });
         let widget = self.add_content_widget(
-            ContentWidget {
-                position: at,
-                preference: vec![ContentWidgetPreference::Exact],
-                view: view.into(),
-                allow_editor_overflow: false,
-            },
+            ContentWidget::new(at, vec![ContentWidgetPreference::Exact], view.into()),
             cx,
         );
         (decorations, vec![widget])
@@ -1505,12 +1498,7 @@ impl CodeEditor {
             cx,
         );
         let widget = self.add_content_widget(
-            ContentWidget {
-                position,
-                preference: vec![preference],
-                view: view.into(),
-                allow_editor_overflow: false,
-            },
+            ContentWidget::new(position, vec![preference], view.into()),
             cx,
         );
         (Vec::new(), vec![widget])
@@ -1787,12 +1775,11 @@ impl CodeEditor {
                         cx,
                     );
                     widgets.push(self.add_content_widget(
-                        ContentWidget {
-                            position: range.start,
-                            preference: vec![ContentWidgetPreference::Below],
-                            view: view.into(),
-                            allow_editor_overflow: false,
-                        },
+                        ContentWidget::new(
+                            range.start,
+                            vec![ContentWidgetPreference::Below],
+                            view.into(),
+                        ),
                         cx,
                     ));
                 }
@@ -1826,12 +1813,11 @@ impl CodeEditor {
                     .saturating_sub(1)
                     .min(rope.max_point().row);
                 widgets.push(self.add_content_widget(
-                    ContentWidget {
-                        position: PointUtf16::new(anchor_row, 0),
-                        preference: vec![ContentWidgetPreference::Below],
-                        view: view.into(),
-                        allow_editor_overflow: false,
-                    },
+                    ContentWidget::new(
+                        PointUtf16::new(anchor_row, 0),
+                        vec![ContentWidgetPreference::Below],
+                        view.into(),
+                    ),
                     cx,
                 ));
             }
@@ -1885,12 +1871,11 @@ impl CodeEditor {
                     cx,
                 );
                 widgets.push(self.add_content_widget(
-                    ContentWidget {
-                        position: PointUtf16::new(start_row, rope.line_len_utf16(start_row)),
-                        preference: vec![ContentWidgetPreference::Exact],
-                        view: view.into(),
-                        allow_editor_overflow: false,
-                    },
+                    ContentWidget::new(
+                        PointUtf16::new(start_row, rope.line_len_utf16(start_row)),
+                        vec![ContentWidgetPreference::Exact],
+                        view.into(),
+                    ),
                     cx,
                 ));
             }
@@ -1971,11 +1956,7 @@ impl CodeEditor {
                         cx,
                     );
                     widgets.push(self.add_view_zone(
-                        ViewZone {
-                            after_line: at.row + 1,
-                            height: ZoneHeight::Lines(count as f32),
-                            view: view.into(),
-                        },
+                        ViewZone::new(at.row + 1, ZoneHeight::Lines(count as f32), view.into()),
                         cx,
                     ));
                 }
@@ -2001,12 +1982,7 @@ impl CodeEditor {
                 let color = colors.inline_edit_gutter_indicator_primary()[1];
                 let view = cx.new(|_| CollapsedMarker { color });
                 widgets.push(self.add_content_widget(
-                    ContentWidget {
-                        position: start,
-                        preference: vec![ContentWidgetPreference::Exact],
-                        view: view.into(),
-                        allow_editor_overflow: false,
-                    },
+                    ContentWidget::new(start, vec![ContentWidgetPreference::Exact], view.into()),
                     cx,
                 ));
             }

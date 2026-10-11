@@ -1586,6 +1586,27 @@ impl EditorLayout {
         self.lines.iter().find(|line| line.contains(point))
     }
 
+    /// [`Self::line_for_point`], where a left `affinity` puts a point at a
+    /// wrap boundary at the end of the previous view line (Monaco
+    /// `convertModelPositionToViewPosition` with `PositionAffinity.Left`).
+    pub fn line_for_point_with_affinity(
+        &self,
+        point: PointUtf16,
+        affinity: crate::widgets::PositionAffinity,
+    ) -> Option<&LineLayout> {
+        if affinity.prefers_previous()
+            && let Some(line) = self.lines.iter().find(|line| {
+                line.row == point.row
+                    && !line.is_last_segment
+                    && line.columns.end == point.column
+                    && line.columns.start < point.column
+            })
+        {
+            return Some(line);
+        }
+        self.line_for_point(point)
+    }
+
     pub fn view_line(&self, view_line: u32) -> Option<&LineLayout> {
         let first = self.lines.first()?.view_line;
         self.lines.get(view_line.checked_sub(first)? as usize)
@@ -1716,6 +1737,8 @@ pub struct PrepaintState {
     numbers_right: Pixels,
     zone_elements: Vec<gpui::AnyElement>,
     full_width_zone_elements: Vec<gpui::AnyElement>,
+    /// View zones' margin parts, painted in the gutter.
+    zone_margin_elements: Vec<gpui::AnyElement>,
     /// Content widgets, painted in the text area under the sticky scroll.
     content_elements: Vec<gpui::AnyElement>,
     /// Glyph margin widgets, painted in the gutter under the sticky scroll.
@@ -1861,6 +1884,13 @@ impl Element for EditorElement {
         ));
         let viewport = Bounds::new(gpui::Point::default(), window.viewport_size());
         let mut widgets = WidgetHits::default();
+        let mut overlays = Vec::new();
+        // Monaco `typicalFullwidthCharacterWidth`, for secondary positions.
+        let wide_char = state
+            .layout
+            .metrics
+            .full_width_cell
+            .unwrap_or(state.layout.metrics.em_width * 2.);
         for embedded in std::mem::take(&mut state.embedded) {
             widgets.view = Some(embedded.view_id());
             match embedded {
@@ -1907,9 +1937,36 @@ impl Element for EditorElement {
                         state.zone_elements.push(element);
                     }
                 }
+                Embedded::ZoneMargin {
+                    view,
+                    bounds: margin,
+                } => {
+                    let mut element = view.into_any_element();
+                    element.layout_as_root(
+                        size(
+                            AvailableSpace::Definite(margin.size.width),
+                            AvailableSpace::Definite(margin.size.height),
+                        ),
+                        window,
+                        cx,
+                    );
+                    window.with_content_mask(
+                        Some(ContentMask {
+                            bounds: gutter_hits,
+                        }),
+                        |window| element.prepaint_at(margin.origin, window, cx),
+                    );
+                    widgets.push(
+                        margin.intersect(&gutter_hits),
+                        crate::mouse_target::EmbeddedKind::ViewZoneMargin,
+                        false,
+                    );
+                    state.zone_margin_elements.push(element);
+                }
                 Embedded::Content {
                     view,
                     anchor,
+                    secondary_x,
                     line_height,
                     preference,
                     overflow: Some((layer, room)),
@@ -1927,12 +1984,10 @@ impl Element for EditorElement {
                             - crate::widgets::OVERFLOW_HORIZONTAL_PADDING
                             - anchor.x,
                     });
-                    let mut element = overflowing(view);
-                    let measured = element.layout_as_root(
-                        size(AvailableSpace::MinContent, AvailableSpace::MinContent),
-                        window,
-                        cx,
-                    );
+                    // Monaco's `maxWidth` for overflowing widgets: the
+                    // window's width.
+                    let (element, measured) =
+                        layout_capped(&view, true, viewport.size.width, window, cx);
                     // The part placed against the line: the whole widget, or
                     // the box it asked for (the suggest list, with its
                     // details around it), on the side it asked for.
@@ -1940,12 +1995,14 @@ impl Element for EditorElement {
                         Some(asked) => (vec![asked.preference], asked.anchor_box),
                         None => (preference, Bounds::new(point(px(0.), px(0.)), measured)),
                     };
+                    let anchor_x =
+                        reduce_anchor_x(anchor.x, secondary_x, anchor_box.size.width, wide_char);
                     // `_layoutHorizontalSegmentInPage`.
                     let min_x = (viewport.left() + crate::widgets::OVERFLOW_HORIZONTAL_PADDING)
                         .max(bounds.left() - anchor_box.size.width);
                     let max_x = (bounds.right() + anchor_box.size.width)
                         .min(viewport.right() - crate::widgets::OVERFLOW_HORIZONTAL_PADDING);
-                    let x = anchor.x.min(max_x - anchor_box.size.width).max(min_x);
+                    let x = anchor_x.min(max_x - anchor_box.size.width).max(min_x);
                     let Some(y) = crate::widgets::place_content_widget(
                         &preference,
                         anchor.y,
@@ -1966,18 +2023,18 @@ impl Element for EditorElement {
                 Embedded::Content {
                     view,
                     anchor,
+                    secondary_x,
                     line_height,
                     preference,
                     overflow: None,
                 } => {
-                    let mut element = view.into_any_element();
-                    let measured = element.layout_as_root(
-                        size(AvailableSpace::MinContent, AvailableSpace::MinContent),
-                        window,
-                        cx,
-                    );
+                    // Monaco's `maxWidth`: the text area's width.
+                    let (mut element, measured) =
+                        layout_capped(&view, false, text.size.width, window, cx);
+                    let anchor_x =
+                        reduce_anchor_x(anchor.x, secondary_x, measured.width, wide_char);
                     // Monaco `_layoutBoxInViewport`: kept in the text area.
-                    let x = anchor.x.min(text.right() - measured.width).max(text.left());
+                    let x = anchor_x.min(text.right() - measured.width).max(text.left());
                     let Some(y) = crate::widgets::place_content_widget(
                         &preference,
                         anchor.y,
@@ -2033,67 +2090,94 @@ impl Element for EditorElement {
                 Embedded::Overlay {
                     view,
                     position,
+                    stack_ordinal,
                     overflow,
                 } => {
                     let mut element = match overflow {
                         Some(_) => overflowing(view),
                         None => view.into_any_element(),
                     };
-                    let measured = element.layout_as_root(
-                        size(AvailableSpace::MinContent, AvailableSpace::MinContent),
-                        window,
-                        cx,
-                    );
-                    let mut origin = match position {
-                        OverlayPosition::TopRight => {
-                            point(text.right() - measured.width, bounds.top())
-                        }
-                        OverlayPosition::BottomRight => point(
-                            text.right() - measured.width,
-                            bounds.bottom() - measured.height,
-                        ),
-                        OverlayPosition::TopCenter => point(
-                            text.left() + (text.size.width - measured.width) / 2.,
-                            bounds.top(),
-                        ),
-                        OverlayPosition::Custom(offset) => bounds.origin + offset,
+                    // A self-placing widget gets the editor's size.
+                    let available = if position == OverlayPosition::Manual {
+                        size(
+                            AvailableSpace::Definite(bounds.size.width),
+                            AvailableSpace::Definite(bounds.size.height),
+                        )
+                    } else {
+                        size(AvailableSpace::MinContent, AvailableSpace::MinContent)
                     };
-                    if let Some(layer) = overflow {
-                        // Kept inside the window.
-                        origin.x = origin
-                            .x
-                            .min(viewport.right() - measured.width)
-                            .max(viewport.left());
-                        origin.y = origin
-                            .y
-                            .min(viewport.bottom() - measured.height)
-                            .max(viewport.top());
-                        widgets.push_overflowing(
-                            Bounds::new(origin, measured).intersect(&viewport),
-                            crate::mouse_target::EmbeddedKind::OverlayWidget,
-                            layer,
-                        );
-                        window.defer_draw(element, origin, OVERFLOW_PRIORITY + layer, None);
-                        continue;
-                    }
-                    let visible = Bounds::new(origin, measured).intersect(&bounds);
-                    if !visible.is_empty() {
-                        cursor_areas.push((
-                            MouseCursor::Arrow,
-                            window.insert_hitbox(visible, HitboxBehavior::Normal),
-                        ));
-                    }
-                    window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                        element.prepaint_at(origin, window, cx)
+                    let measured = element.layout_as_root(available, window, cx);
+                    overlays.push(PendingOverlay {
+                        view: widgets.view,
+                        element,
+                        measured,
+                        position,
+                        stack_ordinal,
+                        overflow,
                     });
-                    widgets.push(
-                        visible,
-                        crate::mouse_target::EmbeddedKind::OverlayWidget,
-                        true,
-                    );
-                    state.overlay_elements.push(element);
                 }
             }
+        }
+        // Overlay widgets, placed together as they stack (Monaco
+        // `OverlayWidgets.render`).
+        let layout_info = &state.layout.layout_info;
+        let origins = crate::widgets::place_overlay_widgets(
+            &overlays
+                .iter()
+                .map(|overlay| (overlay.position, overlay.stack_ordinal))
+                .collect::<Vec<_>>(),
+            &overlays
+                .iter()
+                .map(|overlay| overlay.measured)
+                .collect::<Vec<_>>(),
+            bounds,
+            text,
+            layout_info.vertical_scrollbar_width * 2. + layout_info.minimap.minimap_width,
+            layout_info.horizontal_scrollbar_height * 2.,
+        );
+        for (overlay, mut origin) in overlays.into_iter().zip(origins) {
+            let PendingOverlay {
+                view,
+                mut element,
+                measured,
+                overflow,
+                ..
+            } = overlay;
+            widgets.view = view;
+            if let Some(layer) = overflow {
+                // Kept inside the window.
+                origin.x = origin
+                    .x
+                    .min(viewport.right() - measured.width)
+                    .max(viewport.left());
+                origin.y = origin
+                    .y
+                    .min(viewport.bottom() - measured.height)
+                    .max(viewport.top());
+                widgets.push_overflowing(
+                    Bounds::new(origin, measured).intersect(&viewport),
+                    crate::mouse_target::EmbeddedKind::OverlayWidget,
+                    layer,
+                );
+                window.defer_draw(element, origin, OVERFLOW_PRIORITY + layer, None);
+                continue;
+            }
+            let visible = Bounds::new(origin, measured).intersect(&bounds);
+            if !visible.is_empty() {
+                cursor_areas.push((
+                    MouseCursor::Arrow,
+                    window.insert_hitbox(visible, HitboxBehavior::Normal),
+                ));
+            }
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                element.prepaint_at(origin, window, cx)
+            });
+            widgets.push(
+                visible,
+                crate::mouse_target::EmbeddedKind::OverlayWidget,
+                true,
+            );
+            state.overlay_elements.push(element);
         }
         // Monaco's `linesDecorationsTooltip` on the folding control under
         // the mouse.
@@ -2140,7 +2224,7 @@ impl Element for EditorElement {
                 match kind {
                     EmbeddedKind::ContentWidget | EmbeddedKind::OverlayWidget => true,
                     EmbeddedKind::ViewZone => **captures,
-                    EmbeddedKind::GlyphMarginWidget => false,
+                    EmbeddedKind::ViewZoneMargin | EmbeddedKind::GlyphMarginWidget => false,
                 }
             })
             .map(|((bounds, _), _)| *bounds)
@@ -2380,9 +2464,11 @@ fn prepaint_editor(
 
     // Code lens zones follow font and zoom changes (Monaco `updateHeight`).
     editor.update_code_lens_heights();
-    // View zones: after the last view line of their row; hidden in folds.
-    // (after view line, height, view, (full width, captures the wheel)).
-    let mut zone_specs: Vec<(i64, Pixels, gpui::AnyView, (bool, bool))> = Vec::new();
+    // View zones (Monaco `ViewZones._computeWhitespaceProps`): after the
+    // last view line of their row, or the one showing `afterColumn`;
+    // hidden when the position after them is folded away, unless
+    // `showInHiddenAreas`.
+    let mut zone_specs: Vec<ZoneSpec> = Vec::new();
     {
         let model = editor.model().clone();
         let buffer = model.read(cx).buffer();
@@ -2421,20 +2507,44 @@ fn prepaint_editor(
             for (&i, point) in order.iter().zip(buffer.rope().offsets_to_points(&sorted)) {
                 zone_rows[i] = point.row;
             }
+            let rope = buffer.rope();
+            let max_row = rope.max_point().row;
             offsets
                 .iter()
                 .zip(zone_rows)
-                .map(|(offset, row)| {
+                .zip(&editor.widgets.zones)
+                .map(|((offset, row), zone)| {
                     // No anchor: above the first line.
-                    if offset.is_none() {
+                    let Some(offset) = *offset else {
                         return Some(-1);
-                    }
-                    if view_lines.is_row_hidden(row) {
+                    };
+                    // The zone's column: its anchor's with `afterColumn`,
+                    // else the line's end. Measured only when needed: this
+                    // runs for every zone after each edit.
+                    let column = zone
+                        .after_column
+                        .then(|| buffer.offset_to_point_utf16(offset).column);
+                    // The position right after the zone: the next line's
+                    // start after a line's end (the last line's end at the
+                    // end of the text).
+                    let at_line_end = column.is_none_or(|c| c >= rope.line_len_utf16(row));
+                    let before_row = if at_line_end {
+                        (row + 1).min(max_row)
+                    } else {
+                        row
+                    };
+                    if !zone.show_in_hidden_areas && view_lines.is_row_hidden(before_row) {
                         return None;
                     }
-                    let first = view_lines.first_view_line_of_row(row);
-                    let next = view_lines.first_view_line_of_row(row + 1);
-                    Some(next.max(first + 1) as i64 - 1)
+                    if !zone.after_column && !view_lines.is_row_hidden(row) {
+                        let first = view_lines.first_view_line_of_row(row);
+                        let next = view_lines.first_view_line_of_row(row + 1);
+                        return Some(next.max(first + 1) as i64 - 1);
+                    }
+                    let column = column.unwrap_or_else(|| rope.line_len_utf16(row));
+                    let point = PointUtf16::new(row, column);
+                    let prefer_previous = zone.after_column_affinity.prefers_previous();
+                    Some(view_lines.to_view(point, prefer_previous).0 as i64)
                 })
                 .collect()
         });
@@ -2446,19 +2556,24 @@ fn prepaint_editor(
                 crate::widgets::ZoneHeight::Lines(lines) => line_height * lines,
                 crate::widgets::ZoneHeight::Pixels(height) => height,
             };
-            zone_specs.push((
+            zone_specs.push(ZoneSpec {
                 after,
+                ordinal: zone.ordinal,
                 height,
-                zone.view.clone(),
-                (zone.full_width, zone.captures_wheel),
-            ));
+                view: zone.view.clone(),
+                margin_view: zone.margin_view.clone(),
+                full_width: zone.full_width,
+                captures_wheel: zone.captures_wheel,
+            });
         }
         editor.widgets.zone_rows = Some((key, rows));
     }
     // Monaco `padding.top` comes before everything, view zones above the
     // first line included.
-    let mut zone_heights: Vec<(i64, Pixels)> =
-        zone_specs.iter().map(|(a, h, _, _)| (*a, *h)).collect();
+    let mut zone_heights: Vec<(i64, Pixels)> = zone_specs
+        .iter()
+        .map(|zone| (zone.after, zone.height))
+        .collect();
     if options.padding.top > px(0.) {
         zone_heights.push((-1, options.padding.top));
     }
@@ -2481,9 +2596,13 @@ fn prepaint_editor(
                 .min(options.stop_rendering_line_after.unwrap_or(u32::MAX)) as f32
                 + options.scroll_beyond_last_column as f32)
     };
-    // Monaco `minWidthInPx`: view zones that need a wider scroll range.
+    // Monaco `minWidthInPx` and `getMinContentWidthInPx`: view zones and
+    // overlay widgets that need a wider scroll range.
     for zone in &editor.widgets.zones {
         content_width = content_width.max(zone.min_width);
+    }
+    for widget in &editor.widgets.overlays {
+        content_width = content_width.max(widget.min_content_width);
     }
     let show_hbar = content_width > text_width;
 
@@ -3161,8 +3280,10 @@ fn prepaint_editor(
         );
         // View zones in the viewport, besides the top padding (Monaco
         // `whitespaceViewportData`).
-        let whitespace_gaps = zone_specs.iter().any(|(after, height, _, _)| {
-            *height > px(0.) && *after + 1 >= first_line as i64 && *after <= last_line as i64
+        let whitespace_gaps = zone_specs.iter().any(|zone| {
+            zone.height > px(0.)
+                && zone.after + 1 >= first_line as i64
+                && zone.after <= last_line as i64
         });
         let (minimap, paint) = crate::minimap::prepaint(
             editor,
@@ -4329,15 +4450,25 @@ fn prepaint_editor(
     // host views may read the editor while rendering.
     let mut embedded = Vec::new();
     let mut zone_specs = zone_specs;
-    zone_specs.sort_by_key(|(after, _, _, _)| *after);
+    // Monaco `LinesLayout`: zones after the same view line by ordinal, ties
+    // in insertion order (a stable sort).
+    zone_specs.sort_by_key(|zone| (zone.after, zone.ordinal));
+    // Monaco's zones layer is in the scrolled `linesContent`, as wide as
+    // the scroll width (`ViewZones.render`); the margin part is the
+    // gutter's width and doesn't scroll horizontally.
+    let zone_width = layout.content_width.max(text_width);
+    let margin_width = text_bounds.left() - layout.bounds.left();
     let mut ix = 0;
     while ix < zone_specs.len() {
-        // Zones after the same line stack in insertion order.
-        let after = zone_specs[ix].0;
-        let group_end = ix + zone_specs[ix..].iter().take_while(|z| z.0 == after).count();
+        let after = zone_specs[ix].after;
+        let group_end = ix
+            + zone_specs[ix..]
+                .iter()
+                .take_while(|z| z.after == after)
+                .count();
         let group_height = zone_specs[ix..group_end]
             .iter()
-            .map(|(_, h, _, _)| *h)
+            .map(|zone| zone.height)
             .fold(px(0.), |a, b| a + b);
         let mut top = layout.bounds.top() + zones.line_y((after + 1) as u32, line_height)
             - group_height
@@ -4347,22 +4478,44 @@ fn prepaint_editor(
             ix = group_end;
             continue;
         }
-        for (_, height, view, (full_width, captures_wheel)) in &zone_specs[ix..group_end] {
-            let left = if *full_width {
-                layout.bounds.left()
+        for zone in &zone_specs[ix..group_end] {
+            // Zone widgets (peek, the problem zone) are overlay widgets in
+            // Monaco: they don't scroll horizontally.
+            let bounds = if zone.full_width {
+                Bounds::from_corners(
+                    point(layout.bounds.left(), top),
+                    point(text_bounds.left() + text_width, top + zone.height),
+                )
+            } else if zone.captures_wheel {
+                Bounds::new(
+                    point(text_bounds.left(), top),
+                    size(text_width, zone.height),
+                )
             } else {
-                text_bounds.left()
+                Bounds::new(
+                    point(text_bounds.left() - scroll_left, top),
+                    size(zone_width, zone.height),
+                )
             };
             embedded.push(Embedded::Zone {
-                view: view.clone(),
-                bounds: Bounds::new(
-                    point(left, top),
-                    size(text_bounds.left() + text_width - left, *height),
-                ),
-                full_width: *full_width,
-                captures_wheel: *captures_wheel,
+                view: zone.view.clone(),
+                bounds,
+                full_width: zone.full_width,
+                captures_wheel: zone.captures_wheel,
             });
-            top += *height;
+            if let Some(margin) = &zone.margin_view
+                && !zone.full_width
+                && margin_width > px(0.)
+            {
+                embedded.push(Embedded::ZoneMargin {
+                    view: margin.clone(),
+                    bounds: Bounds::new(
+                        point(layout.bounds.left(), top),
+                        size(margin_width, zone.height),
+                    ),
+                });
+            }
+            top += zone.height;
         }
         ix = group_end;
     }
@@ -4425,15 +4578,41 @@ fn prepaint_editor(
             }
         }
         layout.glyphs_drawn = glyphs_drawn;
+        // Monaco `ContentWidget._getAnchorsCoordinates`: hidden without a
+        // position or preference, or when its line isn't laid out.
         for widget in &editor.widgets.content {
-            let position = buffer.offset_to_point_utf16(buffer.resolve(&widget.anchor));
-            let Some(line) = layout.line_for_point(position) else {
+            let Some(anchor) = widget
+                .anchor
+                .as_ref()
+                .filter(|_| !widget.preference.is_empty())
+            else {
                 continue;
             };
-            let x = layout.text_origin_x() + line.x_for_column(position.column);
+            let affinity = widget.affinity.unwrap_or_default();
+            let position = buffer.offset_to_point_utf16(buffer.resolve(anchor));
+            let Some(line) = layout.line_for_point_with_affinity(position, affinity) else {
+                continue;
+            };
+            // Left-aligned before injected text at a line's start.
+            let x_for = |line: &LineLayout, column: u32| {
+                if column == 0 && affinity == crate::widgets::PositionAffinity::LeftOfInjectedText {
+                    layout.text_origin_x()
+                } else {
+                    layout.text_origin_x() + line.x_for_column(column)
+                }
+            };
+            let x = x_for(line, position.column);
+            // The secondary position counts only on the same view line.
+            let secondary_x = widget.secondary.as_ref().and_then(|secondary| {
+                let secondary = buffer.offset_to_point_utf16(buffer.resolve(secondary));
+                let secondary_line = layout.line_for_point_with_affinity(secondary, affinity)?;
+                (secondary_line.view_line == line.view_line)
+                    .then(|| x_for(secondary_line, secondary.column))
+            });
             embedded.push(Embedded::Content {
                 view: widget.view.clone(),
                 anchor: point(x, layout.line_top(line.view_line)),
+                secondary_x,
                 line_height: layout.line_height_of(line.view_line),
                 preference: widget.preference.clone(),
                 overflow: widget
@@ -4446,6 +4625,7 @@ fn prepaint_editor(
         embedded.push(Embedded::Overlay {
             view: widget.view.clone(),
             position: widget.position,
+            stack_ordinal: widget.stack_ordinal,
             overflow: widget.allow_overflow.then_some(widget.layer),
         });
     }
@@ -4544,6 +4724,7 @@ fn prepaint_editor(
         numbers_right,
         zone_elements: Vec::new(),
         full_width_zone_elements: Vec::new(),
+        zone_margin_elements: Vec::new(),
         content_elements: Vec::new(),
         glyph_elements: Vec::new(),
         fold_tooltip: None,
@@ -4570,6 +4751,7 @@ fn prepaint_editor(
 fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
     let mut zone_elements = std::mem::take(&mut state.zone_elements);
     let mut full_width_zone_elements = std::mem::take(&mut state.full_width_zone_elements);
+    let mut zone_margin_elements = std::mem::take(&mut state.zone_margin_elements);
     let mut content_elements = std::mem::take(&mut state.content_elements);
     let mut glyph_elements = std::mem::take(&mut state.glyph_elements);
     let mut fold_tooltip = state.fold_tooltip.take();
@@ -4901,6 +5083,9 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
             point(text.left(), text.bottom()),
         );
         window.with_content_mask(Some(ContentMask { bounds: gutter }), |window| {
+            for element in &mut zone_margin_elements {
+                element.paint(window, cx);
+            }
             for element in &mut glyph_elements {
                 element.paint(window, cx);
             }
@@ -5954,10 +6139,17 @@ pub(crate) enum Embedded {
         full_width: bool,
         captures_wheel: bool,
     },
+    /// A zone's margin part (Monaco `marginDomNode`), in the gutter.
+    ZoneMargin {
+        view: gpui::AnyView,
+        bounds: Bounds<Pixels>,
+    },
     Content {
         view: gpui::AnyView,
         /// Top-left of the anchored character's line.
         anchor: gpui::Point<Pixels>,
+        /// The secondary position's x, on the same line.
+        secondary_x: Option<Pixels>,
         /// The line's height.
         line_height: Pixels,
         preference: Vec<ContentWidgetPreference>,
@@ -5967,6 +6159,7 @@ pub(crate) enum Embedded {
     Overlay {
         view: gpui::AnyView,
         position: OverlayPosition,
+        stack_ordinal: Option<i32>,
         /// When it overflows the editor: its layer.
         overflow: Option<usize>,
     },
@@ -5981,10 +6174,43 @@ impl Embedded {
     fn view_id(&self) -> gpui::EntityId {
         match self {
             Self::Zone { view, .. }
+            | Self::ZoneMargin { view, .. }
             | Self::Content { view, .. }
             | Self::Overlay { view, .. }
             | Self::Glyph { view, .. } => view.entity_id(),
         }
+    }
+}
+
+/// A view zone as laid out this frame.
+pub(crate) struct ZoneSpec {
+    /// The view line it's after (-1: above the first line).
+    after: i64,
+    /// Monaco's ordinal among zones after the same view line.
+    ordinal: i64,
+    height: Pixels,
+    view: gpui::AnyView,
+    margin_view: Option<gpui::AnyView>,
+    full_width: bool,
+    captures_wheel: bool,
+}
+
+/// Monaco `ContentWidget._reduceAnchorCoordinates`: the anchor's x moved
+/// toward the secondary position's, keeping a full-width character's width
+/// of a `width` wide widget over the primary position.
+fn reduce_anchor_x(
+    primary: Pixels,
+    secondary: Option<Pixels>,
+    width: Pixels,
+    char: Pixels,
+) -> Pixels {
+    let Some(secondary) = secondary else {
+        return primary;
+    };
+    if secondary < primary {
+        secondary.max(primary - width + char)
+    } else {
+        secondary.min(primary + width - char)
     }
 }
 
@@ -6002,6 +6228,54 @@ fn overflowing(view: gpui::AnyView) -> gpui::AnyElement {
         .cursor(MouseCursor::Arrow)
         .child(view)
         .into_any_element()
+}
+
+/// Lays out a content widget's view at its min-content size, again at
+/// `max_width` when that's wider (Monaco's `maxWidth` on the widget's
+/// node). `overflow` wraps it as an overflowing widget.
+fn layout_capped(
+    view: &gpui::AnyView,
+    overflow: bool,
+    max_width: Pixels,
+    window: &mut Window,
+    cx: &mut App,
+) -> (gpui::AnyElement, gpui::Size<Pixels>) {
+    let element = |view: &gpui::AnyView| {
+        if overflow {
+            overflowing(view.clone())
+        } else {
+            view.clone().into_any_element()
+        }
+    };
+    let mut measured_element = element(view);
+    let measured = measured_element.layout_as_root(
+        size(AvailableSpace::MinContent, AvailableSpace::MinContent),
+        window,
+        cx,
+    );
+    if measured.width <= max_width.max(px(0.)) {
+        return (measured_element, measured);
+    }
+    let mut capped = element(view);
+    let measured = capped.layout_as_root(
+        size(
+            AvailableSpace::Definite(max_width.max(px(0.))),
+            AvailableSpace::MinContent,
+        ),
+        window,
+        cx,
+    );
+    (capped, measured)
+}
+
+/// An overlay widget laid out, waiting to be placed with the others.
+struct PendingOverlay {
+    view: Option<gpui::EntityId>,
+    element: gpui::AnyElement,
+    measured: gpui::Size<Pixels>,
+    position: OverlayPosition,
+    stack_ordinal: Option<i32>,
+    overflow: Option<usize>,
 }
 
 /// The visible parts of the embedded views, for the editor's hit testing,

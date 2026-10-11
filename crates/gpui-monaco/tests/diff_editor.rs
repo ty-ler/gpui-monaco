@@ -1084,11 +1084,11 @@ fn alignment_counts_other_view_zones(cx: &mut TestAppContext) {
     let view = cx.update(|_, cx| cx.new(|_| gpui::Empty));
     let zone = modified.update(cx, |e, cx| {
         e.add_view_zone(
-            gpui_monaco::widgets::ViewZone {
-                after_line: 1,
-                height: gpui_monaco::widgets::ZoneHeight::Pixels(px(40.)),
-                view: view.into(),
-            },
+            gpui_monaco::widgets::ViewZone::new(
+                1,
+                gpui_monaco::widgets::ZoneHeight::Pixels(px(40.)),
+                view.into(),
+            ),
             cx,
         )
     });

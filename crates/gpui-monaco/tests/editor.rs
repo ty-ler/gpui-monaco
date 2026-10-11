@@ -275,14 +275,7 @@ fn view_zone_follows_its_line(cx: &mut TestAppContext) {
     let (editor, cx) = editor_with_text("a\nb\nc", cx);
     let view = cx.update(|_, cx| cx.new(|_| gpui::Empty).into());
     editor.update(cx, |editor, cx| {
-        editor.add_view_zone(
-            ViewZone {
-                after_line: 2,
-                height: ZoneHeight::Lines(3.),
-                view,
-            },
-            cx,
-        );
+        editor.add_view_zone(ViewZone::new(2, ZoneHeight::Lines(3.), view), cx);
     });
     cx.run_until_parked();
     // Clicking below the zone lands on line 3; the zone pushed it down.

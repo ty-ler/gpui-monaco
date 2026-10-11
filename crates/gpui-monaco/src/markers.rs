@@ -794,11 +794,11 @@ impl CodeEditor {
             bounds: Default::default(),
         });
         let id = self.add_view_zone(
-            ViewZone {
-                after_line: marker.range.start.row + 1,
-                height: ZoneHeight::Lines(lines),
-                view: zone.clone().into(),
-            },
+            ViewZone::new(
+                marker.range.start.row + 1,
+                ZoneHeight::Lines(lines),
+                zone.clone().into(),
+            ),
             cx,
         );
         // A zone widget in Monaco, outside the scrollable element.

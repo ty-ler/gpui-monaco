@@ -1255,14 +1255,9 @@ impl Render for FindWidget {
             // `padding-left: 2px`.
             self.matches_width = self.matches_width.max(text_width + px(2.));
         }
-        let (editor_width, content_width, minimap_width, scrollbar_width) =
-            layout_info.map_or((px(800.), px(800.), px(0.), px(14.)), |l| {
-                (
-                    l.width,
-                    l.content_width,
-                    l.minimap.minimap_width,
-                    l.vertical_scrollbar_width,
-                )
+        let (editor_width, content_width, minimap_width) = layout_info
+            .map_or((px(800.), px(800.), px(0.)), |l| {
+                (l.width, l.content_width, l.minimap.minimap_width)
             });
         let layout = FindWidgetLayout::compute(
             editor_width,
@@ -1759,10 +1754,6 @@ impl Render for FindWidget {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .relative()
             .flex_none()
-            // Monaco's overlay sits a scrollbar's width left of the
-            // scrollbar (`2 * verticalScrollbarWidth + minimapWidth` from
-            // the right edge).
-            .pr(scrollbar_width)
             .child(widget)
             .child(measure)
             .children(message)

@@ -869,19 +869,11 @@ fn mouse_target_details(cx: &mut TestAppContext) {
     });
     let (zone, overlay) = editor.update(cx, |e, cx| {
         let zone = e.add_view_zone(
-            ViewZone {
-                after_line: 1,
-                height: ZoneHeight::Pixels(px(40.)),
-                view: zone_view.into(),
-            },
+            ViewZone::new(1, ZoneHeight::Pixels(px(40.)), zone_view.into()),
             cx,
         );
         let overlay = e.add_overlay_widget(
-            OverlayWidget {
-                position: OverlayPosition::BottomRight,
-                view: overlay_view.into(),
-                allow_editor_overflow: false,
-            },
+            OverlayWidget::new(OverlayPosition::BottomRight, overlay_view.into()),
             cx,
         );
         (zone, overlay)
@@ -906,8 +898,15 @@ fn mouse_target_details(cx: &mut TestAppContext) {
         MouseTargetDetail::ViewZone {
             id: Some(zone),
             after_line: Some(1),
+            position_before: Some(p(0, 5)),
+            position_after: Some(p(1, 0)),
         }
     );
+    // Monaco `getZoneAtCoord`: the lower half is the position after it.
+    assert_eq!(t.position, Some(p(1, 0)));
+    let upper = bounds(EmbeddedKind::ViewZone).top() + px(2.);
+    let t = target(point(bounds(EmbeddedKind::ViewZone).center().x, upper), cx);
+    assert_eq!(t.position, Some(p(0, 5)));
     let t = target(bounds(EmbeddedKind::OverlayWidget).center(), cx);
     assert_eq!(
         (t.kind, t.detail),

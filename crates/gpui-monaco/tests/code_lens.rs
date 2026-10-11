@@ -415,3 +415,31 @@ fn lenses_line_up_with_the_text(cx: &mut TestAppContext) {
     assert!(near(lens_x(1, cx), before - gpui::px(50.)));
     assert!(near(lens_x(1, cx), text_x(1, 1, cx)));
 }
+
+/// Monaco `_detachModel` drops the old view's zones; `CodeLensContribution`
+/// fetches the new model's lenses and gives them zones again.
+#[gpui::test]
+fn lenses_come_back_after_set_model(cx: &mut TestAppContext) {
+    let (editor, cx, _) = setup("fn a() {}\n", cx);
+    draw(cx);
+    // The height of the zones above a row.
+    let zones_above = |row: u32, editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, _| {
+            e.top_for_line_number(row, false).unwrap() - e.top_for_line_number(row, true).unwrap()
+        })
+    };
+    let lens_height = zones_above(0, &editor, cx);
+    assert!(lens_height > gpui::px(0.));
+    editor.update(cx, |e, cx| {
+        let model = cx.new(|_| TextModel::new("\nfn b() {}\n"));
+        e.set_model(model, cx);
+    });
+    draw(cx);
+    assert_eq!(
+        lenses(&editor, cx),
+        vec![(1, vec![Some("2 references".into())])]
+    );
+    draw(cx);
+    assert_eq!(zones_above(0, &editor, cx), gpui::px(0.));
+    assert_eq!(zones_above(1, &editor, cx), lens_height);
+}
