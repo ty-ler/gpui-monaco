@@ -98,16 +98,31 @@ fn textual_word_highlights(cx: &mut TestAppContext) {
         vec![(1, 1, 1, 4), (1, 9, 1, 12), (2, 8, 2, 11)]
     );
 
-    // F7 / Shift+F7 move through them.
+    // F7 / Shift+F7 move the caret to the start of the next / previous one
+    // (Monaco `WordHighlighter.moveNext` / `moveBack`).
+    let caret = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        let s = editor.read_with(cx, |e, _| e.selections()[0]);
+        assert!(s.is_empty(), "{s:?}");
+        s.head
+    };
     cx.simulate_keystrokes("f7");
-    let s = editor.read_with(cx, |e, _| e.selections()[0]);
-    assert_eq!((s.anchor, s.head), (p(1, 9), p(1, 12)));
+    assert_eq!(caret(&editor, cx), p(1, 9));
+    // The screen-reader alert: "line, i of n for 'word'".
+    let announcement = editor.read_with(cx, |e, _| e.last_announcement_for_tests());
+    assert_eq!(
+        announcement.as_deref(),
+        Some("foo bar foo, 2 of 3 for 'foo'")
+    );
     cx.simulate_keystrokes("f7 f7");
-    let s = editor.read_with(cx, |e, _| e.selections()[0]);
-    assert_eq!((s.anchor, s.head), (p(1, 1), p(1, 4)));
+    assert_eq!(caret(&editor, cx), p(1, 1));
     cx.simulate_keystrokes("shift-f7");
-    let s = editor.read_with(cx, |e, _| e.selections()[0]);
-    assert_eq!((s.anchor, s.head), (p(2, 8), p(2, 11)));
+    assert_eq!(caret(&editor, cx), p(2, 8));
+    // The highlights stay while the caret is on one of them.
+    wait(cx);
+    assert_eq!(
+        words(&editor, cx),
+        vec![(1, 1, 1, 4), (1, 9, 1, 12), (2, 8, 2, 11)]
+    );
 
     // Typing clears them until the cursor moves again.
     set(&editor, cx, p(1, 6), p(1, 6));
@@ -160,6 +175,51 @@ fn document_highlight_provider(cx: &mut TestAppContext) {
         highlighted(&editor, cx, |c| c.word_highlight_strong_background),
         vec![(1, 1, 1, 2)]
     );
+}
+
+/// Highlights every `aa` on the cursor's row, wherever the cursor is.
+struct EveryAa;
+impl DocumentHighlightProvider for EveryAa {
+    fn provide_document_highlights(
+        &self,
+        _: &ProviderContext,
+        position: PointUtf16,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Option<Vec<DocumentHighlight>>>> {
+        Task::ready(Ok(Some(
+            [0, 6, 12]
+                .into_iter()
+                .map(|column| DocumentHighlight {
+                    range: PointUtf16::new(position.row, column)
+                        ..PointUtf16::new(position.row, column + 2),
+                    kind: DocumentHighlightKind::Text,
+                })
+                .collect(),
+        )))
+    }
+}
+
+/// Monaco `moveNext` / `moveBack` from outside every highlight (index -1):
+/// F7 goes to the first, Shift+F7 to `(-1 - 1 + n) % n`.
+#[gpui::test]
+fn word_highlight_navigation_from_outside_the_highlights(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("aa bb aa bb aa", cx);
+    cx.update(|_, cx| register_document_highlight_provider(cx, LanguageSelector::All, EveryAa));
+    set(&editor, cx, p(1, 5), p(1, 5));
+    wait(cx);
+    assert_eq!(
+        words(&editor, cx),
+        vec![(1, 1, 1, 3), (1, 7, 1, 9), (1, 13, 1, 15)]
+    );
+    cx.simulate_keystrokes("f7");
+    let head = editor.read_with(cx, |e, _| e.selections()[0].head);
+    assert_eq!(head, p(1, 1));
+
+    set(&editor, cx, p(1, 5), p(1, 5));
+    wait(cx);
+    cx.simulate_keystrokes("shift-f7");
+    let head = editor.read_with(cx, |e, _| e.selections()[0].head);
+    assert_eq!(head, p(1, 7));
 }
 
 /// Highlights on the cursor's row: (start column, end column, kind).

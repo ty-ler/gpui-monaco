@@ -639,7 +639,9 @@ pub(crate) type Injection = (u32, bool, InjectedText, Option<DecorationId>);
 
 /// Shapes one view line. `highlights` are styled spans in row-relative byte
 /// offsets, sorted and non-overlapping. `marked` is an IME composition range
-/// in UTF-16 columns of the row, drawn underlined.
+/// in UTF-16 columns of the row, drawn underlined 1px, with the IME's
+/// selected part (its active clause) 2px (Monaco
+/// `edit-context-composition-secondary` / `-primary`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn layout_segment<'a>(
     rope: &Rope,
@@ -649,7 +651,7 @@ pub(crate) fn layout_segment<'a>(
     color: Hsla,
     highlights: &[(Range<usize>, TokenStyle)],
     injections: &'a [Injection],
-    marked: Option<(Range<u32>, Hsla)>,
+    marked: Option<(Range<u32>, Option<Range<u32>>, Hsla)>,
     window: &mut Window,
 ) -> LineLayout {
     let full = rope.line(segment.row);
@@ -751,10 +753,16 @@ pub(crate) fn layout_segment<'a>(
         display_index[((column - segment.columns.start) as usize).min(display_index.len() - 1)]
     };
 
-    let marked_display = marked.as_ref().and_then(|(range, underline)| {
+    let marked_display = marked.as_ref().and_then(|(range, _, underline)| {
         let start = column_to_display(range.start);
         let end = column_to_display(range.end);
         (end > start).then_some((start..end, *underline))
+    });
+    let active_display = marked.as_ref().and_then(|(_, active, _)| {
+        let active = active.as_ref()?;
+        let start = column_to_display(active.start);
+        let end = column_to_display(active.end);
+        (end > start).then_some(start..end)
     });
     let styled: Vec<(Range<usize>, TokenStyle)> = highlights
         .iter()
@@ -772,6 +780,9 @@ pub(crate) fn layout_segment<'a>(
         bounds.extend([range.start, range.end]);
     }
     if let Some((range, _)) = &marked_display {
+        bounds.extend([range.start, range.end]);
+    }
+    if let Some(range) = &active_display {
         bounds.extend([range.start, range.end]);
     }
     bounds.sort_unstable();
@@ -836,7 +847,15 @@ pub(crate) fn layout_segment<'a>(
                         .filter(|_| is_marked)
                         .map_or(text_run.color, |(_, underline)| *underline),
                 ),
-                thickness: px(1.),
+                thickness: if is_marked
+                    && active_display
+                        .as_ref()
+                        .is_some_and(|range| range.start <= start && end <= range.end)
+                {
+                    px(2.)
+                } else {
+                    px(1.)
+                },
                 wavy: false,
             });
         }
@@ -2306,7 +2325,7 @@ fn prepaint_editor(
                 line_height: f32::from(line_height),
                 surrounding_lines: if mouse { 0. } else { surrounding },
                 mouse,
-                minimal: false,
+                minimal: editor.autoscroll_minimal,
             },
             crate::view::reveal::RevealType::Simple,
         ));
@@ -2341,6 +2360,7 @@ fn prepaint_editor(
         .collect();
 
     let marked = editor.marked_range_points();
+    let marked_active = editor.marked_selection_points();
     let (visible_start, visible_end) = match (segments.first(), segments.last()) {
         (Some(first), Some(last)) => (
             snapshot.point_to_offset(text::Point::new(first.row, 0)),
@@ -2423,12 +2443,29 @@ fn prepaint_editor(
             })
             .collect();
         // High contrast themes box the composition instead (below).
+        // The composition's columns on this row (it may span rows), with
+        // the IME's selected part.
+        let row_columns = |range: &Range<PointUtf16>| {
+            (range.start.row <= segment.row && segment.row <= range.end.row).then(|| {
+                let start = if range.start.row == segment.row {
+                    range.start.column
+                } else {
+                    0
+                };
+                let end = if range.end.row == segment.row {
+                    range.end.column
+                } else {
+                    u32::MAX
+                };
+                start..end
+            })
+        };
         let marked_cols = marked
             .as_ref()
             .filter(|_| !editor.theme.high_contrast)
             .and_then(|range| {
-                (range.start.row == segment.row && range.end.row == segment.row)
-                    .then_some((range.start.column..range.end.column, colors.ime_underline))
+                let active = marked_active.as_ref().and_then(row_columns);
+                row_columns(range).map(|columns| (columns, active, colors.ime_underline))
             });
         // Decoration text styles override syntax colors; injected text goes
         // before/after decorated ranges.
@@ -2577,6 +2614,9 @@ fn prepaint_editor(
 
     // Horizontal autoscroll to the primary cursor.
     let max_scroll_left = (content_width - text_width).max(px(0.));
+    if std::mem::take(&mut editor.autoscroll_vertical_only) {
+        editor.autoscroll_requested = false;
+    }
     if editor.autoscroll_requested {
         let primary_x = lines
             .iter()

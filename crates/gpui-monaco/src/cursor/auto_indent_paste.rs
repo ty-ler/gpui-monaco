@@ -29,7 +29,7 @@ use super::{
 
 /// Monaco `indentUtils.getSpaceCnt`: the width of `indentation` with tabs
 /// counted as `tab_size` columns.
-fn space_count(indentation: &str, tab_size: u32) -> i64 {
+pub(crate) fn space_count(indentation: &str, tab_size: u32) -> i64 {
     indentation
         .encode_utf16()
         .map(|c| {
@@ -43,7 +43,7 @@ fn space_count(indentation: &str, tab_size: u32) -> i64 {
 }
 
 /// Monaco `indentUtils.generateIndent`.
-fn generate_indent(spaces: i64, tab_size: u32, insert_spaces: bool) -> String {
+pub(crate) fn generate_indent(spaces: i64, tab_size: u32, insert_spaces: bool) -> String {
     let mut spaces = spaces.max(0) as usize;
     let mut result = String::new();
     if !insert_spaces {

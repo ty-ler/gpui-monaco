@@ -697,6 +697,10 @@ pub(crate) struct VirtualModel<'a> {
     /// still comes from the model's tokens, like the virtual model of
     /// `AutoIndentOnPaste`.
     replaced_processed: bool,
+    /// Monaco `createVirtualModel`'s `lineNumberMapper` (`MoveLinesCommand`):
+    /// the 1-based model line whose content and tokens each 1-based line
+    /// has. A `replaced` line's content still wins.
+    line_map: Option<&'a dyn Fn(u32) -> u32>,
 }
 
 impl<'a> VirtualModel<'a> {
@@ -707,7 +711,19 @@ impl<'a> VirtualModel<'a> {
             lang,
             replaced: None,
             replaced_processed: false,
+            line_map: None,
         }
+    }
+
+    /// The model with its lines rearranged: 1-based line `n` has the
+    /// content and tokens of model line `map(n)`.
+    pub(crate) fn with_line_map(mut self, map: &'a dyn Fn(u32) -> u32) -> Self {
+        self.line_map = Some(map);
+        self
+    }
+
+    fn mapped(&self, line_number: u32) -> u32 {
+        self.line_map.map_or(line_number, |map| map(line_number))
     }
 
     /// The model with the content (not the tokens) of 1-based `line_number`
@@ -721,7 +737,7 @@ impl<'a> VirtualModel<'a> {
     fn line(&self, line_number: u32) -> String {
         match &self.replaced {
             Some((n, text)) if *n == line_number => text.clone(),
-            _ => self.model.line_content(line_number - 1),
+            _ => self.model.line_content(self.mapped(line_number) - 1),
         }
     }
 
@@ -729,7 +745,9 @@ impl<'a> VirtualModel<'a> {
     fn processed(&self, line_number: u32) -> String {
         match &self.replaced {
             Some((n, text)) if *n == line_number && self.replaced_processed => text.clone(),
-            _ => self.lang.processed_line(self.model, line_number - 1),
+            _ => self
+                .lang
+                .processed_line(self.model, self.mapped(line_number) - 1),
         }
     }
 
@@ -913,6 +931,7 @@ pub(crate) fn indent_for_enter(
         lang,
         replaced: Some((range.start.row + 1, before)),
         replaced_processed: true,
+        line_map: None,
     };
     let Some(after_enter_action) =
         inherit_indent_for_line(config.auto_indent, &vm, range.start.row + 2, true)

@@ -294,15 +294,6 @@ pub(crate) struct ClipboardMetadata {
     pub(crate) provider_copy_mime_types: Vec<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MouseSelectMode {
-    Character,
-    Word,
-    Line,
-    /// Shift+Alt drag: box (column) selection.
-    Column,
-}
-
 /// Where the mouse is outside the text while drag-selecting (Monaco
 /// `outsidePosition`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -329,6 +320,8 @@ struct DragScroll {
     mouse: Point<Pixels>,
     /// The line under the mouse, for left and right.
     row: u32,
+    /// When the last frame scrolled (Monaco `DragScrollingOperation._tick`).
+    last_time: web_time::Instant,
     _task: Task<()>,
 }
 
@@ -338,13 +331,87 @@ impl DragScroll {
     }
 }
 
+/// Monaco `MouseDownState`'s gesture state while a mouse button is down
+/// (`MouseDownOperation`): what the mouse down started, which every drag
+/// step dispatches again (Monaco `_dispatchMouse` / `dispatchMouse`).
 struct MouseSelection {
-    mode: MouseSelectMode,
-    /// The selection made by the initial click (a word or line for
-    /// double/triple click).
-    origin: Selection,
-    /// Index of the cursor being dragged.
-    cursor_index: usize,
+    /// The click count (Monaco `MouseDownState.count`).
+    count: usize,
+    /// The gesture started on the line numbers (Monaco
+    /// `startedOnLineNumbers`): it selects whole lines.
+    started_on_line_numbers: bool,
+    /// The middle button started it (Monaco `middleButton`): it
+    /// column-selects.
+    middle_button: bool,
+    /// The modifiers, updated as the mouse moves (Monaco `setModifiers`).
+    modifiers: gpui::Modifiers,
+    /// The mouse went down on injected text (an inlay hint), where a
+    /// double click selects nothing (Monaco `onInjectedText`).
+    on_injected_text: bool,
+}
+
+/// Monaco `MouseDownState`'s click counting: the platform's click count,
+/// reset unless the clicks land on the same position within 400ms.
+#[derive(Default)]
+struct MouseDownCount {
+    last_position: Option<PointUtf16>,
+    last_position_equal_count: usize,
+    last_count: usize,
+    last_time: Option<web_time::Instant>,
+}
+
+impl MouseDownCount {
+    /// Monaco `MouseDownState.CLEAR_MOUSE_DOWN_COUNT_TIME`.
+    const CLEAR_TIME: Duration = Duration::from_millis(400);
+
+    /// Monaco `MouseDownState.trySetCount`: the count of a mouse down at
+    /// `position` the platform counted `count`.
+    fn try_set_count(
+        &mut self,
+        mut count: usize,
+        position: PointUtf16,
+        now: web_time::Instant,
+    ) -> usize {
+        // a. Too much time has passed.
+        if self
+            .last_time
+            .is_none_or(|last| now.saturating_duration_since(last) > Self::CLEAR_TIME)
+        {
+            count = 1;
+        }
+        self.last_time = Some(now);
+        // b. No jump from a single to a triple click in one go.
+        count = count.min(self.last_count + 1);
+        // c. The clicks are at different positions.
+        if self.last_position == Some(position) {
+            self.last_position_equal_count += 1;
+        } else {
+            self.last_position_equal_count = 1;
+        }
+        self.last_position = Some(position);
+        self.last_count = count.min(self.last_position_equal_count);
+        self.last_count
+    }
+}
+
+/// Monaco `CoreNavigationCommands.CreateCursor`: adds `state` as a cursor;
+/// with several cursors, a click in one of them removes it instead (a
+/// toggle).
+fn create_cursor(
+    mut states: Vec<SingleCursorState>,
+    state: SingleCursorState,
+) -> Vec<SingleCursorState> {
+    if states.len() > 1
+        && let Some(ix) = states.iter().position(|s| {
+            let selection = s.selection();
+            selection.start() <= state.position && state.position <= selection.end()
+        })
+    {
+        states.remove(ix);
+        return states;
+    }
+    states.push(state);
+    states
 }
 
 #[derive(Clone, Copy)]
@@ -477,11 +544,21 @@ pub struct CodeEditor {
     /// The autoscroll comes from a mouse gesture (Monaco ignores
     /// `cursorSurroundingLines` for those by default).
     pub(crate) autoscroll_from_mouse: bool,
+    /// The autoscroll is a mouse gesture's `NavigationCommandRevealType.Minimal`
+    /// (Monaco `revealAllCursors(_, revealHorizontal, true)`): no extra line
+    /// of room.
+    pub(crate) autoscroll_minimal: bool,
+    /// The autoscroll is only vertical (Monaco's line select reveals with
+    /// `revealHorizontal: false`).
+    pub(crate) autoscroll_vertical_only: bool,
     /// Animations of the view (smooth scrolling, the caret, blinking).
     pub(crate) animation: crate::view::animation::ViewAnimation,
     pub(crate) cursor_visible: bool,
     /// IME composition range, in byte offsets.
     pub(crate) marked_range: Option<Range<usize>>,
+    /// The part of the composition the IME selected (byte offsets), drawn
+    /// as its active clause (Monaco `edit-context-composition-primary`).
+    pub(crate) marked_selection: Option<Range<usize>>,
     /// Nesting of [`CodeEditor::begin_update`] (Monaco `_updateCounter`).
     update_depth: usize,
     pub(crate) prev_edit_kind: Option<EditOperationType>,
@@ -535,6 +612,7 @@ pub struct CodeEditor {
     /// frame (Monaco `StableEditorScrollState`).
     pub(crate) pending_cursor_offset: Option<Pixels>,
     mouse_selection: Option<MouseSelection>,
+    mouse_down_count: MouseDownCount,
     /// Scrolling while drag-selecting outside the text.
     drag_scroll: Option<DragScroll>,
     pub(crate) scrollbar_drag: Option<ScrollbarDrag>,
@@ -708,9 +786,12 @@ impl CodeEditor {
             layout: None,
             autoscroll_requested: false,
             autoscroll_from_mouse: false,
+            autoscroll_minimal: false,
+            autoscroll_vertical_only: false,
             animation: Default::default(),
             cursor_visible: true,
             marked_range: None,
+            marked_selection: None,
             update_depth: 0,
             prev_edit_kind: None,
             edit_group: None,
@@ -735,6 +816,7 @@ impl CodeEditor {
             last_cursor_offset: None,
             pending_cursor_offset: None,
             mouse_selection: None,
+            mouse_down_count: MouseDownCount::default(),
             drag_scroll: None,
             scrollbar_drag: None,
             scrollbar_arrow_task: None,
@@ -1676,6 +1758,67 @@ impl CodeEditor {
         )
     }
 
+    /// The IME's selected part of the composition (its active clause), if
+    /// it selected any text.
+    pub(crate) fn marked_selection_points(&self) -> Option<Range<PointUtf16>> {
+        self.marked_range.as_ref()?;
+        let range = self.marked_selection.as_ref().filter(|r| !r.is_empty())?;
+        Some(
+            self.snapshot.offset_to_point_utf16(range.start)
+                ..self.snapshot.offset_to_point_utf16(range.end),
+        )
+    }
+
+    /// The IME composition range and its selected part (active clause), as
+    /// UTF-16 columns, for tests.
+    #[doc(hidden)]
+    pub fn composition_for_tests(&self) -> Option<(Range<PointUtf16>, Option<Range<PointUtf16>>)> {
+        Some((self.marked_range_points()?, self.marked_selection_points()))
+    }
+
+    /// Monaco `compositionType` across cursors: replaces `range` (bytes),
+    /// which must be around the collapsed primary cursor on its line, by
+    /// `text` at every cursor (the same number of characters before and
+    /// after each), leaving each cursor `position_delta` UTF-16 units from
+    /// the end of its text. Returns the primary cursor's new composition
+    /// range, or `None` (nothing done) when `range` isn't around the
+    /// primary cursor.
+    fn composition_type_at_cursors(
+        &mut self,
+        range: Range<usize>,
+        text: &str,
+        position_delta: i32,
+        cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        let primary = self.cursors.primary().selection();
+        let head = primary.head;
+        let start = self.snapshot.offset_to_point_utf16(range.start);
+        let end = self.snapshot.offset_to_point_utf16(range.end);
+        if !primary.is_empty() || start.row != head.row || end.row != head.row {
+            return None;
+        }
+        if start > head || head > end {
+            return None;
+        }
+        let operation = cursor::composition_type(
+            self.snapshot.rope(),
+            &self.cursors,
+            text,
+            head.column - start.column,
+            end.column - head.column,
+            position_delta,
+            self.prev_edit_kind,
+        );
+        self.apply(operation, cx);
+        let head = self.cursors.primary().position;
+        let len = text.encode_utf16().count() as i64;
+        let column = (head.column as i64 - position_delta as i64 - len).max(0) as u32;
+        let start = self
+            .snapshot
+            .point_utf16_to_offset(PointUtf16::new(head.row, column));
+        Some(start..start + text.len())
+    }
+
     fn page_lines(&self) -> u32 {
         self.layout.as_ref().map_or(20, EditorLayout::page_rows)
     }
@@ -1996,6 +2139,8 @@ impl CodeEditor {
             // Monaco's commands do; the API's don't.
             if autoscroll && cause.source != CursorChangeSource::Api {
                 self.autoscroll_requested = true;
+                self.autoscroll_minimal = false;
+                self.autoscroll_vertical_only = false;
                 self.autoscroll_from_mouse = cause.source == CursorChangeSource::Mouse;
                 cx.notify();
             }
@@ -2006,6 +2151,8 @@ impl CodeEditor {
         self.snippet_selections_changed(cx);
         if autoscroll {
             self.autoscroll_requested = true;
+            self.autoscroll_minimal = false;
+            self.autoscroll_vertical_only = false;
             self.autoscroll_from_mouse =
                 self.next_selection_change.source == CursorChangeSource::Mouse;
             self.animation.smooth_scroll_requested = true;
@@ -2724,7 +2871,30 @@ impl CodeEditor {
     }
 
     fn delete_word_left(&mut self, _: &DeleteWordLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.run_edit(cx, cursor::delete_word_left);
+        self.delete_word(true, cursor::WordNavigationType::WordStart, true, cx);
+    }
+
+    /// Monaco's `DeleteWordCommand` family; to the left, a cursor between an
+    /// auto-closed pair (`(|)`) deletes both characters.
+    fn delete_word(
+        &mut self,
+        left: bool,
+        nav: cursor::WordNavigationType,
+        whitespace_heuristics: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let operation = self.with_language(cx, |config, rope, cursors, lang| {
+            cursor::delete_word_with_language(
+                config,
+                rope,
+                cursors,
+                left,
+                nav,
+                whitespace_heuristics,
+                lang,
+            )
+        });
+        self.apply(operation, cx);
     }
 
     fn delete_word_right(&mut self, _: &DeleteWordRight, _: &mut Window, cx: &mut Context<Self>) {
@@ -2861,11 +3031,13 @@ impl CodeEditor {
     }
 
     fn move_lines_up(&mut self, _: &MoveLinesUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.run_edit(cx, cursor::move_lines_up);
+        let operation = self.with_language(cx, cursor::move_lines_up_with_language);
+        self.apply(operation, cx);
     }
 
     fn move_lines_down(&mut self, _: &MoveLinesDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.run_edit(cx, cursor::move_lines_down);
+        let operation = self.with_language(cx, cursor::move_lines_down_with_language);
+        self.apply(operation, cx);
     }
 
     fn copy_lines_up(&mut self, _: &CopyLinesUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -3563,23 +3735,23 @@ impl CodeEditor {
             }
             return;
         }
-        let config = self.cursor_config(cx);
-        let visible_column = self.mouse_visible_column(event.position);
-        cursor::column_select_to(
-            &config,
-            self.snapshot.rope(),
-            &mut self.cursors,
-            position,
-            visible_column,
-            false,
-        );
         // Dragging extends it.
+        let count = self.count_mouse_down(event.click_count, position, cx);
         self.mouse_selection = Some(MouseSelection {
-            mode: MouseSelectMode::Column,
-            origin: Selection::collapsed(position),
-            cursor_index: 0,
+            count,
+            started_on_line_numbers: false,
+            middle_button: true,
+            modifiers: event.modifiers,
+            on_injected_text: false,
         });
-        self.cursors_changed(false, cx);
+        self.dispatch_mouse(position, event.position, event.modifiers.shift, true, cx);
+    }
+
+    /// Monaco `MouseDownState.trySetCount` for a mouse down at `position`.
+    fn count_mouse_down(&mut self, click_count: usize, position: PointUtf16, cx: &App) -> usize {
+        let now = cx.background_executor().now();
+        self.mouse_down_count
+            .try_set_count(click_count.max(1), position, now)
     }
 
     /// Monaco `selectionClipboard` applies on Linux only.
@@ -3844,14 +4016,10 @@ impl CodeEditor {
             return;
         }
         self.hide_suggest(cx);
+        let count = self.count_mouse_down(event.click_count, position, cx);
         // Monaco: a click on the selection may start dragging it.
         if event.button == MouseButton::Left
-            && self.dnd_mouse_down(
-                mouse.target.kind,
-                position,
-                &event.modifiers,
-                event.click_count,
-            )
+            && self.dnd_mouse_down(mouse.target.kind, position, &event.modifiers, count)
         {
             return;
         }
@@ -3864,91 +4032,203 @@ impl CodeEditor {
         {
             return;
         }
-        let config = self.cursor_config(cx);
-        let mode = if in_gutter {
-            MouseSelectMode::Line
-        } else {
-            match event.click_count {
-                0 | 1 => MouseSelectMode::Character,
-                2 => MouseSelectMode::Word,
-                _ => MouseSelectMode::Line,
-            }
-        };
-        let clicked = match mode {
-            MouseSelectMode::Character | MouseSelectMode::Column => Selection::collapsed(position),
-            MouseSelectMode::Word => self
-                .block_selection_at(position, cx)
-                .or_else(|| {
-                    cursor::word_at(&config, self.snapshot.rope(), position).map(|range| {
-                        Selection {
-                            anchor: range.start,
-                            head: range.end,
-                        }
-                    })
-                })
-                .unwrap_or_else(|| Selection::collapsed(position)),
-            MouseSelectMode::Line => self.line_selection(position.row),
-        };
+        // Monaco `MouseDownOperation.start`: the gesture, dispatched now
+        // (extending the selection with Shift) and on every drag step.
+        self.mouse_selection = Some(MouseSelection {
+            count,
+            started_on_line_numbers: in_gutter,
+            middle_button: false,
+            modifiers: event.modifiers,
+            on_injected_text: self.inlay_hint_part_at(event.position).is_some(),
+        });
+        self.prev_edit_kind = None;
+        self.dispatch_mouse(position, event.position, event.modifiers.shift, true, cx);
+    }
 
-        if ((event.modifiers.shift && event.modifiers.alt) || self.options.column_selection)
-            && !in_gutter
-        {
-            let visible_column = self.mouse_visible_column(event.position);
+    /// Monaco `_hasNonMulticursorModifier`: a modifier other than the one
+    /// that adds cursors.
+    fn has_non_multicursor_modifier(&self, modifiers: &gpui::Modifiers) -> bool {
+        match self.options.multi_cursor_modifier {
+            crate::options::MultiCursorModifier::Alt => modifiers.control || modifiers.platform,
+            crate::options::MultiCursorModifier::CtrlCmd => {
+                if cfg!(target_os = "macos") {
+                    modifiers.control || modifiers.alt
+                } else {
+                    modifiers.alt || modifiers.platform
+                }
+            }
+        }
+    }
+
+    /// Monaco `ViewController.dispatchMouse`: what the mouse gesture in
+    /// [`Self::mouse_selection`] does at `position` (`mouse` in window
+    /// coordinates), extending the selection when `in_selection_mode` (a
+    /// Shift click, or a drag step). With `reveal`, the cursor is revealed
+    /// minimally (Monaco `NavigationCommandRevealType.Minimal`; drag
+    /// scrolling passes `None`).
+    ///
+    /// - The middle button column-selects.
+    /// - From the line numbers: lines (with the multi-cursor modifier, a
+    ///   new cursor on the line).
+    /// - Four clicks select all; three, the line; two, the word (or with
+    ///   `doubleClickSelectsBlock`, the bracket or string content). With
+    ///   the multi-cursor modifier these act on the last added cursor.
+    /// - One click moves the cursor (Shift: extends the selection by
+    ///   characters, words or lines, as it was started). The multi-cursor
+    ///   modifier adds a cursor or removes the one there, and with Shift
+    ///   column-selects; so does Alt-drag when Ctrl/Cmd adds cursors, and
+    ///   any drag with `columnSelection`.
+    fn dispatch_mouse(
+        &mut self,
+        position: PointUtf16,
+        mouse: Point<Pixels>,
+        in_selection_mode: bool,
+        reveal: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.mouse_selection.as_ref() else {
+            return;
+        };
+        let (count, on_line_numbers, middle, modifiers, on_injected_text) = (
+            state.count,
+            state.started_on_line_numbers,
+            state.middle_button,
+            state.modifiers,
+            state.on_injected_text,
+        );
+        let multi = self.is_add_cursor_modifier(&modifiers);
+        let config = self.cursor_config(cx);
+        let model: &dyn cursor::CursorModel = self.snapshot.rope();
+        let mut states = self.cursors.all().to_vec();
+        let last = self.cursors.last_added_cursor_index();
+        // What to reveal (Monaco: the single-cursor commands reveal, the
+        // multi-cursor ones don't) and which cursor stays on a wrapped
+        // segment's end.
+        let mut reveal_kind: Option<bool> = None;
+        let mut keep_on_wrapped = None;
+        let column = |this: &mut Self, extend: bool| {
+            let visible_column = this.mouse_visible_column(mouse);
             cursor::column_select_to(
                 &config,
-                self.snapshot.rope(),
-                &mut self.cursors,
+                this.snapshot.rope(),
+                &mut this.cursors,
                 position,
                 visible_column,
-                false,
+                extend,
             );
-            self.mouse_selection = Some(MouseSelection {
-                mode: MouseSelectMode::Column,
-                origin: Selection::collapsed(position),
-                cursor_index: 0,
-            });
-            self.next_selection_change = CursorChangeCause {
-                reason: CursorChangeReason::Explicit,
-                source: CursorChangeSource::Mouse,
-            };
-            self.cursors_changed(false, cx);
-            return;
+        };
+        enum Next {
+            States(Vec<SingleCursorState>),
+            Column(bool),
+            SelectAll,
+            Nothing,
         }
-        let add_cursor = self.is_add_cursor_modifier(&event.modifiers);
-        let mut states: Vec<SingleCursorState> = self.cursors.all().to_vec();
-        let cursor_index;
-        if event.modifiers.shift && mode == MouseSelectMode::Character {
-            let primary = &states[0];
-            let anchor = primary.selection().anchor;
-            states = vec![SingleCursorState::from_selection(Selection {
-                anchor,
-                head: position,
-            })];
-            cursor_index = 0;
-        } else if add_cursor {
-            states.push(SingleCursorState::from_selection(clicked));
-            cursor_index = states.len() - 1;
+        let next = if middle && !self.selection_clipboard_on() {
+            Next::Column(in_selection_mode)
+        } else if on_line_numbers {
+            if multi {
+                if in_selection_mode {
+                    states[last] = cursor::line_state(model, &states[last], position, false);
+                    Next::States(states)
+                } else {
+                    let state = cursor::line_state(model, &states[0], position, false);
+                    Next::States(create_cursor(states, state))
+                }
+            } else {
+                reveal_kind = Some(false);
+                Next::States(vec![cursor::line_state(
+                    model,
+                    &states[0],
+                    position,
+                    in_selection_mode,
+                )])
+            }
+        } else if count >= 4 {
+            Next::SelectAll
+        } else if count == 3 {
+            if multi {
+                states[last] =
+                    cursor::line_state(model, &states[last], position, in_selection_mode);
+                Next::States(states)
+            } else {
+                reveal_kind = Some(false);
+                Next::States(vec![cursor::line_state(
+                    model,
+                    &states[0],
+                    position,
+                    in_selection_mode,
+                )])
+            }
+        } else if count == 2 {
+            if on_injected_text {
+                Next::Nothing
+            } else if multi {
+                let select = states[last].has_selection();
+                states[last] = cursor::word_state(&config, model, &states[last], position, select);
+                Next::States(states)
+            } else if in_selection_mode {
+                reveal_kind = Some(true);
+                Next::States(vec![cursor::word_state(
+                    &config, model, &states[0], position, true,
+                )])
+            } else if let Some(block) = self.block_selection_at(position, cx) {
+                Next::States(vec![SingleCursorState::from_selection(block)])
+            } else {
+                reveal_kind = Some(true);
+                Next::States(vec![cursor::word_state(
+                    &config, model, &states[0], position, false,
+                )])
+            }
+        } else if multi {
+            if self.has_non_multicursor_modifier(&modifiers) {
+                Next::Nothing
+            } else if modifiers.shift {
+                Next::Column(true)
+            } else if in_selection_mode {
+                states[last] = cursor::move_to_state(&config, model, &states[last], position, true);
+                keep_on_wrapped = Some(last);
+                Next::States(states)
+            } else {
+                let state = cursor::move_to_state(&config, model, &states[0], position, false);
+                let states = create_cursor(states, state);
+                keep_on_wrapped = Some(states.len() - 1);
+                Next::States(states)
+            }
+        } else if in_selection_mode && (modifiers.alt || self.options.column_selection) {
+            Next::Column(true)
         } else {
-            states = vec![SingleCursorState::from_selection(clicked)];
-            cursor_index = 0;
+            reveal_kind = Some(true);
+            keep_on_wrapped = Some(0);
+            Next::States(vec![cursor::move_to_state(
+                &config,
+                model,
+                &states[0],
+                position,
+                in_selection_mode,
+            )])
+        };
+        match next {
+            Next::States(states) => self.cursors.validated_states(model, states),
+            Next::Column(extend) => column(self, extend),
+            Next::SelectAll => cursor::select_all(self.snapshot.rope(), &mut self.cursors),
+            Next::Nothing => return,
         }
-        let origin = states[cursor_index].selection();
-        self.mouse_selection = Some(MouseSelection {
-            mode,
-            origin,
-            cursor_index,
-        });
-        self.cursors.set_states(states);
-        if mode == MouseSelectMode::Character {
-            self.keep_mouse_on_wrapped_line(cursor_index, event.position);
+        if let Some(index) = keep_on_wrapped
+            && index < self.cursors.all().len()
+        {
+            self.keep_mouse_on_wrapped_line(index, mouse);
         }
-        self.prev_edit_kind = None;
         self.model.update(cx, |model, _| model.push_stack_element());
         self.next_selection_change = CursorChangeCause {
             reason: CursorChangeReason::Explicit,
             source: CursorChangeSource::Mouse,
         };
-        self.cursors_changed(false, cx);
+        let reveal_kind = reveal_kind.filter(|_| reveal);
+        self.cursors_changed(reveal_kind.is_some(), cx);
+        if let Some(horizontal) = reveal_kind {
+            self.autoscroll_minimal = true;
+            self.autoscroll_vertical_only = !horizontal;
+        }
     }
 
     /// Monaco's mouse targets are view positions: a click past the end of a
@@ -4015,19 +4295,6 @@ impl CodeEditor {
                 .round()
                 .max(0.) as u32
         })
-    }
-
-    fn line_selection(&self, row: u32) -> Selection {
-        let max = self.snapshot.max_point_utf16();
-        let end = if row < max.row {
-            PointUtf16::new(row + 1, 0)
-        } else {
-            max
-        };
-        Selection {
-            anchor: PointUtf16::new(row, 0),
-            head: end,
-        }
     }
 
     /// Mouse moves over the editor or its overflowing widgets, and anywhere
@@ -4200,19 +4467,23 @@ impl CodeEditor {
             }
             return;
         }
-        let Some(drag) = self.mouse_selection.as_ref() else {
+        let Some(drag) = self.mouse_selection.as_mut() else {
             return;
         };
-        // Middle drags column-select (Monaco).
-        let middle_column = drag.mode == MouseSelectMode::Column
-            && event.pressed_button == Some(MouseButton::Middle);
-        if event.pressed_button != Some(MouseButton::Left) && !middle_column {
+        let button = if drag.middle_button {
+            MouseButton::Middle
+        } else {
+            MouseButton::Left
+        };
+        if event.pressed_button != Some(button) {
             self.mouse_selection = None;
             self.drag_scroll = None;
             return;
         }
-        // Monaco `_onMouseDownThenMove`: outside the text, scroll towards
-        // the mouse on a timer; inside, select to the mouse.
+        // Monaco `_onMouseDownThenMove`: the modifiers follow the mouse;
+        // outside the text, scroll towards the mouse every frame; inside,
+        // dispatch the gesture to the mouse.
+        drag.modifiers = event.modifiers;
         if let Some((outside, distance)) = self.drag_outside(event.position) {
             let row = self.position_for_point(event.position, window, cx).row;
             self.start_drag_scroll(outside, distance, event.position, row, window, cx);
@@ -4220,88 +4491,7 @@ impl CodeEditor {
         }
         self.drag_scroll = None;
         let position = self.position_for_point(event.position, window, cx);
-        self.extend_mouse_selection(position, event.position, cx);
-    }
-
-    /// Extends the selection being dragged to `position`, with the mouse at
-    /// `mouse` (Monaco `_dispatchMouse` in selection mode).
-    fn extend_mouse_selection(
-        &mut self,
-        position: PointUtf16,
-        mouse: Point<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(drag) = self.mouse_selection.as_ref() else {
-            return;
-        };
-        let (mode, origin, index) = (drag.mode, drag.origin, drag.cursor_index);
-        let config = self.cursor_config(cx);
-        if mode == MouseSelectMode::Column {
-            let visible_column = self.mouse_visible_column(mouse);
-            cursor::column_select_to(
-                &config,
-                self.snapshot.rope(),
-                &mut self.cursors,
-                position,
-                visible_column,
-                true,
-            );
-            self.next_selection_change = CursorChangeCause {
-                reason: CursorChangeReason::Explicit,
-                source: CursorChangeSource::Mouse,
-            };
-            self.cursors_changed(false, cx);
-            return;
-        }
-        let selection = match mode {
-            MouseSelectMode::Character => Selection {
-                anchor: origin.anchor,
-                head: position,
-            },
-            MouseSelectMode::Word => {
-                let word = cursor::word_at(&config, self.snapshot.rope(), position)
-                    .unwrap_or(position..position);
-                if position < origin.start() {
-                    Selection {
-                        anchor: origin.end(),
-                        head: word.start,
-                    }
-                } else {
-                    Selection {
-                        anchor: origin.start(),
-                        head: word.end.max(origin.end()),
-                    }
-                }
-            }
-            MouseSelectMode::Column => return,
-            MouseSelectMode::Line => {
-                let line = self.line_selection(position.row);
-                if position.row < origin.start().row {
-                    Selection {
-                        anchor: origin.end(),
-                        head: line.anchor,
-                    }
-                } else {
-                    Selection {
-                        anchor: origin.start(),
-                        head: line.head,
-                    }
-                }
-            }
-        };
-        let mut states = self.cursors.all().to_vec();
-        if let Some(state) = states.get_mut(index) {
-            *state = SingleCursorState::from_selection(selection);
-        }
-        self.cursors.set_states(states);
-        if mode == MouseSelectMode::Character {
-            self.keep_mouse_on_wrapped_line(index, mouse);
-        }
-        self.next_selection_change = CursorChangeCause {
-            reason: CursorChangeReason::Explicit,
-            source: CursorChangeSource::Mouse,
-        };
-        self.cursors_changed(false, cx);
+        self.dispatch_mouse(position, event.position, true, true, cx);
     }
 
     /// Whether a mouse drag that started in the editor is going on, so it
@@ -4376,6 +4566,7 @@ impl CodeEditor {
             distance,
             mouse,
             row,
+            last_time: cx.background_executor().now(),
             _task: task,
         });
     }
@@ -4392,7 +4583,12 @@ impl CodeEditor {
         }
         let (outside, distance, mouse, row) =
             (scroll.outside, scroll.distance, scroll.mouse, scroll.row);
-        let elapsed = DRAG_SCROLL_FRAME.as_secs_f32();
+        // Monaco `_tick`: the time since the last frame, not the frame
+        // length, so late timers don't slow it down.
+        let now = cx.background_executor().now();
+        let elapsed = now
+            .saturating_duration_since(scroll.last_time)
+            .as_secs_f32();
         // Monaco `_getScrollSpeed`: lines (or characters) per second.
         let speed = |viewport: f32, outside: f32| {
             if outside <= 1.5 {
@@ -4443,7 +4639,11 @@ impl CodeEditor {
         if before != (self.scroll_top, self.scroll_left) {
             self.emit_scroll_changed(cx);
         }
-        self.extend_mouse_selection(position, mouse, cx);
+        if let Some(scroll) = self.drag_scroll.as_mut() {
+            scroll.last_time = now;
+        }
+        // Monaco dispatches with `NavigationCommandRevealType.None`.
+        self.dispatch_mouse(position, mouse, true, false, cx);
         cx.notify();
         true
     }
@@ -4793,6 +4993,7 @@ impl EntityInputHandler for CodeEditor {
     }
 
     fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.marked_selection = None;
         self.set_marked_range(None, cx);
         cx.notify();
     }
@@ -4814,9 +5015,21 @@ impl EntityInputHandler for CodeEditor {
         }
         let from_composition = range_utf16.is_none() && self.marked_range.is_some();
         let marked = self.marked_range.take();
+        self.marked_selection = None;
         let explicit = range_utf16
             .map(|r| self.range_from_utf16(&r))
             .or(marked.clone());
+        // Monaco commits a composition at every cursor.
+        if marked.is_some()
+            && self.cursors.all().len() > 1
+            && let Some(range) = explicit.clone()
+            && self
+                .composition_type_at_cursors(range, text, 0, cx)
+                .is_some()
+        {
+            cx.emit(CodeEditorEvent::CompositionEnded);
+            return;
+        }
         match explicit {
             Some(range) => {
                 self.replace_range(range.clone(), text, cx);
@@ -4846,7 +5059,7 @@ impl EntityInputHandler for CodeEditor {
             self.read_only_edit_attempt(cx);
             return;
         }
-        let range = range_utf16
+        let mut range = range_utf16
             .map(|r| self.range_from_utf16(&r))
             .or(self.marked_range.clone())
             .unwrap_or_else(|| self.primary_selection_offsets().0);
@@ -4855,21 +5068,51 @@ impl EntityInputHandler for CodeEditor {
         if starting {
             cx.emit(CodeEditorEvent::CompositionStarted);
         }
-        self.replace_range(range.clone(), new_text, cx);
         let was_marked = self.marked_range.is_some();
-        self.marked_range =
-            (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
+        // Monaco composes at every cursor (`compositionType`): the primary
+        // cursor's text, typed at each of them. A composition starting over
+        // selections first replaces them.
+        let multi = self.cursors.all().len() > 1;
+        if multi && starting && range == self.primary_selection_offsets().0 {
+            let selections = self.cursors.selections();
+            if selections.iter().any(|s| !s.is_empty()) {
+                self.run_edit(cx, |c, m, s| cursor::type_text(c, m, s, "", None));
+                range = self.primary_selection_offsets().0;
+            }
+        }
+        let len_utf16 = new_text.encode_utf16().count();
+        let composed = if multi {
+            let delta = new_selected_range_utf16
+                .as_ref()
+                .map_or(0, |selected| selected.end as i64 - len_utf16 as i64);
+            self.composition_type_at_cursors(range.clone(), new_text, delta as i32, cx)
+        } else {
+            None
+        };
+        let composed_at_cursors = composed.is_some();
+        let composition = match composed {
+            Some(composition) => composition,
+            None => {
+                self.replace_range(range.clone(), new_text, cx);
+                range.start..range.start + new_text.len()
+            }
+        };
+        self.marked_range = (!new_text.is_empty()).then(|| composition.clone());
+        // The IME's selected part: its caret, or the clause it converts.
+        let base = self.offset_to_utf16(composition.start);
+        self.marked_selection = new_selected_range_utf16.as_ref().map(|selected| {
+            let start = self.offset_from_utf16(base + selected.start.min(len_utf16));
+            let end = self.offset_from_utf16(base + selected.end.min(len_utf16));
+            start..end
+        });
         // Marking nothing cancels the composition.
         if was_marked && self.marked_range.is_none() {
             cx.emit(CodeEditorEvent::CompositionEnded);
         }
-        if let Some(selected) = new_selected_range_utf16 {
-            let base = self.offset_to_utf16(range.start);
-            let start = self.offset_from_utf16(base + selected.start);
-            let end = self.offset_from_utf16(base + selected.end);
+        if !composed_at_cursors && let Some(selected) = self.marked_selection.clone() {
             let selection = Selection {
-                anchor: self.snapshot.offset_to_point_utf16(start),
-                head: self.snapshot.offset_to_point_utf16(end),
+                anchor: self.snapshot.offset_to_point_utf16(selected.start),
+                head: self.snapshot.offset_to_point_utf16(selected.end),
             };
             self.cursors.set_selections(&[selection]);
         }
@@ -5115,14 +5358,10 @@ impl Render for CodeEditor {
             .on_action(cx.listener(Self::delete_right))
             .on_action(cx.listener(Self::delete_word_left))
             .on_action(cx.listener(|this, _: &DeleteWordStartLeft, _, cx| {
-                this.run_edit(cx, |c, m, s| {
-                    cursor::delete_word(c, m, s, true, cursor::WordNavigationType::WordStart, false)
-                })
+                this.delete_word(true, cursor::WordNavigationType::WordStart, false, cx)
             }))
             .on_action(cx.listener(|this, _: &DeleteWordEndLeft, _, cx| {
-                this.run_edit(cx, |c, m, s| {
-                    cursor::delete_word(c, m, s, true, cursor::WordNavigationType::WordEnd, false)
-                })
+                this.delete_word(true, cursor::WordNavigationType::WordEnd, false, cx)
             }))
             .on_action(cx.listener(|this, _: &DeleteWordStartRight, _, cx| {
                 this.run_edit(cx, |c, m, s| {
@@ -5142,7 +5381,10 @@ impl Render for CodeEditor {
                 })
             }))
             .on_action(cx.listener(|this, _: &DeleteWordPartLeft, _, cx| {
-                this.run_edit(cx, |c, m, s| cursor::delete_word_part(c, m, s, true))
+                let operation = this.with_language(cx, |config, rope, cursors, lang| {
+                    cursor::delete_word_part_with_language(config, rope, cursors, true, lang)
+                });
+                this.apply(operation, cx);
             }))
             .on_action(cx.listener(|this, _: &DeleteWordPartRight, _, cx| {
                 this.run_edit(cx, |c, m, s| cursor::delete_word_part(c, m, s, false))

@@ -143,14 +143,16 @@ fn selection_and_word_at_position_find_japanese_words(cx: &mut TestAppContext) {
         e.scrolled_visible_position(PointUtf16::new(0, 4)).unwrap()
     });
     let position = point(p.x + px(1.), p.y + px(5.));
-    cx.simulate_event(MouseDownEvent {
-        position,
-        button: MouseButton::Left,
-        modifiers: Modifiers::default(),
-        click_count: 2,
-        first_mouse: false,
-    });
-    cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+    for click_count in 1..=2 {
+        cx.simulate_event(MouseDownEvent {
+            position,
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+            click_count,
+            first_mouse: false,
+        });
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+    }
     assert_eq!(selection(&editor, cx), (3, 6));
 
     // `getConfiguredWordAtPosition` (case transforms of an empty selection).

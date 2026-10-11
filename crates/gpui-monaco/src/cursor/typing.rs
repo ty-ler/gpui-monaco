@@ -662,7 +662,28 @@ pub fn delete_word(
     nav: WordNavigationType,
     whitespace_heuristics: bool,
 ) -> EditOperation {
-    let model: &dyn CursorModel = model;
+    delete_word_with(
+        config,
+        model,
+        cursors,
+        left,
+        nav,
+        whitespace_heuristics,
+        &|_| false,
+    )
+}
+
+/// [`delete_word`], deleting both characters of an auto-closing pair
+/// around a cursor for which `auto_closing_pair_delete` holds.
+pub(crate) fn delete_word_with(
+    config: &CursorConfig,
+    model: &dyn CursorModel,
+    cursors: &CursorCollection,
+    left: bool,
+    nav: WordNavigationType,
+    whitespace_heuristics: bool,
+    auto_closing_pair_delete: &dyn Fn(Selection) -> bool,
+) -> EditOperation {
     let classifier = WordClassifier::for_config(config);
     let selections = cursors.selections();
     let ranges = selections
@@ -673,6 +694,7 @@ pub fn delete_word(
                 model,
                 selection,
                 whitespace_heuristics,
+                auto_closing_pair_delete: left && auto_closing_pair_delete(selection),
             };
             if left {
                 word::delete_word_left_range(&ctx, nav)
@@ -728,7 +750,18 @@ pub fn delete_word_part(
     cursors: &CursorCollection,
     left: bool,
 ) -> EditOperation {
-    let model: &dyn CursorModel = model;
+    delete_word_part_with(config, model, cursors, left, &|_| false)
+}
+
+/// [`delete_word_part`], deleting both characters of an auto-closing pair
+/// around a cursor for which `auto_closing_pair_delete` holds.
+pub(crate) fn delete_word_part_with(
+    config: &CursorConfig,
+    model: &dyn CursorModel,
+    cursors: &CursorCollection,
+    left: bool,
+    auto_closing_pair_delete: &dyn Fn(Selection) -> bool,
+) -> EditOperation {
     let classifier = WordClassifier::for_config(config);
     let selections = cursors.selections();
     let ranges = selections
@@ -739,6 +772,7 @@ pub fn delete_word_part(
                 model,
                 selection,
                 whitespace_heuristics: true,
+                auto_closing_pair_delete: left && auto_closing_pair_delete(selection),
             };
             if left {
                 word::delete_word_part_left_range(&ctx)
