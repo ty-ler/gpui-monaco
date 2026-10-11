@@ -3649,6 +3649,12 @@ impl Render for CodeEditor {
             .on_action(cx.listener(|this, _: &SelectToBracket, _, cx| this.select_to_bracket(cx)))
             .on_action(cx.listener(|this, _: &GoToNextMarker, _, cx| this.go_to_marker(true, cx)))
             .on_action(
+                cx.listener(|this, _: &GoToNextMarkerInFiles, _, cx| this.go_to_marker(true, cx)),
+            )
+            .on_action(cx.listener(|this, _: &GoToPreviousMarkerInFiles, _, cx| {
+                this.go_to_marker(false, cx)
+            }))
+            .on_action(
                 cx.listener(|this, _: &GoToPreviousMarker, _, cx| this.go_to_marker(false, cx)),
             )
             .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| this.go_to_definition(cx)))
@@ -3855,6 +3861,22 @@ impl Render for CodeEditor {
             .on_action(cx.listener(|this, _: &AcceptAlternativeSuggestion, _, cx| {
                 this.accept_alternative_suggestion(cx);
             }))
+            .on_action(cx.listener(|this, _: &SelectNextSuggestion, _, cx| {
+                this.suggest_navigate(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectPreviousSuggestion, _, cx| {
+                this.suggest_navigate(-1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectNextPageSuggestion, _, cx| {
+                let page = this.suggest_page_size(cx) as isize;
+                this.suggest_navigate(page, cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &SelectPreviousPageSuggestion, _, cx| {
+                    let page = this.suggest_page_size(cx) as isize;
+                    this.suggest_navigate(-page, cx);
+                }),
+            )
             .on_action(cx.listener(|this, _: &SelectFirstSuggestion, _, cx| {
                 this.select_first_suggestion(cx);
             }))

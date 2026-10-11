@@ -193,6 +193,8 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.selectToBracket", "code_editor::SelectToBracket", "Select to Bracket", always),
     Builtin("editor.action.marker.next", "code_editor::GoToNextMarker", "Go to Next Problem (Error, Warning, Info)", always),
     Builtin("editor.action.marker.prev", "code_editor::GoToPreviousMarker", "Go to Previous Problem (Error, Warning, Info)", always),
+    Builtin("editor.action.marker.nextInFiles", "code_editor::GoToNextMarkerInFiles", "Go to Next Problem in Files (Error, Warning, Info)", always),
+    Builtin("editor.action.marker.prevInFiles", "code_editor::GoToPreviousMarkerInFiles", "Go to Previous Problem in Files (Error, Warning, Info)", always),
     Builtin("editor.action.wordHighlight.next", "code_editor::WordHighlightNext", "Go to Next Symbol Highlight", always),
     Builtin("editor.action.wordHighlight.prev", "code_editor::WordHighlightPrev", "Go to Previous Symbol Highlight", always),
     Builtin("editor.action.wordHighlight.trigger", "code_editor::WordHighlightTrigger", "Trigger Symbol Highlight", always),
