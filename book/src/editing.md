@@ -11,10 +11,15 @@ Every feature here works out of the box. Each follows Monaco's behavior, which t
   - Cmd+Alt+Up/Down adds a cursor on the line above or below (Shift+Alt+Up/Down on Linux).
   - Cmd+D adds the next match to the selection, Cmd+K Cmd+D moves the last selection to the next match, and Cmd+Shift+L selects all occurrences.
   - Escape returns to one cursor.
-- **Column (box) selection:** Shift+Alt+drag.
-- **Mouse:** double-click selects a word and triple-click selects a line. Dragging extends the selection by character, word or line, depending on the click count.
+- **Column (box) selection:** Shift+Alt+drag or Shift+Alt+click (Shift+Cmd/Ctrl, or an Alt drag, with `multi_cursor_modifier: CtrlCmd`), a middle-button drag, or any drag with `column_selection`.
+- **Mouse:**
+  - Double-click selects a word, triple-click a line and quadruple-click everything. Clicks count only at the same position within 400ms.
+  - Dragging extends the selection by character, word or line, depending on the click count. Shift+click, Shift+double-click and Shift+triple-click extend the selection the same way.
+  - Clicking the line numbers selects the line; Shift+click and dragging there extend by lines.
+  - Alt+click adds a cursor, or removes the one clicked; Alt+double-click and Alt+triple-click select the new cursor's word or line.
+  - Dragging past the editor's edge scrolls, faster the farther away the mouse is.
 - **Clipboard:** copy, cut and paste with Monaco's multi-cursor rules. With one cursor per line, each cursor pastes its own line. With no selection, the whole line is copied (`empty_selection_clipboard`).
-- **IME:** marked text is shown inline, and the candidate window is positioned at the cursor.
+- **IME:** marked text is shown inline, underlined, with the clause being converted underlined thicker, and the candidate window is positioned at the cursor. With several cursors, the composition is typed at each of them.
 
 ## Typing helpers
 
@@ -120,7 +125,7 @@ Expand Selection grows each selection through the enclosing syntax nodes: word p
 
 - **Symbol at the cursor:** after the cursor rests on a word, its occurrences are highlighted.
   - They come from a [`DocumentHighlightProvider`](providers.md), or the word's whole-word occurrences.
-  - F7 and Shift+F7 select the next and previous occurrence.
+  - F7 and Shift+F7 move the cursor to the start of the next and previous occurrence.
 - **Selected text:** other occurrences of the selected text are highlighted. The highlight skips whitespace-only and multi-line selections, and selections longer than 200 characters.
 
 ## Quick access

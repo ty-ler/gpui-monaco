@@ -10,7 +10,9 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 `gpui_monaco::init(cx)` binds Monaco's default keys for the current platform. On macOS, for example:
 
 - **Cmd+D:** add the next match to the selection
-- **Alt+Up / Alt+Down:** move lines
+- **Alt+Up / Alt+Down:** move lines, reindenting them by the language's rules (`auto_indent: Full`)
+- **Alt+Backspace:** delete the word to the left, or both characters of an auto-closed pair around the cursor
+- **F7 / Shift+F7:** move to the next / previous highlighted occurrence
 - **Cmd+Alt+[ / Cmd+Alt+]:** fold and unfold
 - **Alt+F8 / F8:** next problem (Monaco's `marker.next` and `marker.nextInFiles`, which act the same within one model)
 - **Cmd+Shift+, / Cmd+Shift+.:** replace the value at the cursor with the previous or next one (`1` → `2`, `true` → `false`)

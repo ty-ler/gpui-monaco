@@ -4,16 +4,18 @@
 //!
 //! `cursorWordLeft - Recognize words` and `cursorWordRight - Recognize words`
 //! need the `word-segmenter` cargo feature (`wordSegmenterLocales`).
-//!
-//! Skipped:
-//! - `deleteWordLeft - issue #91855`: needs language auto-closing pairs.
 
 use super::harness::{TestEditor, pos, sel};
+use super::language_configs::pair;
 use super::word_test_utils::{
     deserialize_pipe_positions, serialize_pipe_positions,
     test_repeated_action_and_extract_positions,
 };
-use crate::cursor::{CursorConfig, Position, WordNavigationType, delete_inside_word, delete_word};
+use crate::cursor::{
+    AutoClosingEditStrategy, CursorConfig, Position, WordNavigationType, delete_inside_word,
+    delete_word_part_with_language, delete_word_with_language,
+};
+use syntax::LanguageConfiguration;
 
 use WordNavigationType::*;
 
@@ -43,7 +45,18 @@ fn move_word_start_right(ed: &mut TestEditor, select: bool) {
     ed.move_word(false, WordStart, select);
 }
 fn delete_word_with(ed: &mut TestEditor, left: bool, nav: WordNavigationType, heuristics: bool) {
-    ed.run(|c, b, cur| delete_word(c, b, cur, left, nav, heuristics));
+    let op = ed.with_lang(|lang| {
+        delete_word_with_language(
+            &ed.config,
+            &ed.buffer,
+            &ed.cursors,
+            left,
+            nav,
+            heuristics,
+            lang,
+        )
+    });
+    ed.apply(op);
 }
 fn delete_word_left(ed: &mut TestEditor) {
     delete_word_with(ed, true, WordStart, true);
@@ -601,6 +614,58 @@ fn delete_word_left_issue_3882_2_ctrl_delete_at_end_of_line() {
     editor.set_position(2, 1);
     delete_word_left(&mut editor);
     assert_eq!(editor.line(1), "A line with text.   And another one", "001");
+}
+
+#[test]
+fn delete_word_left_issue_91855_matching_quote_bracket_paren_doesnt_get_deleted_when_hitting_ctrl_backspace()
+ {
+    let language = LanguageConfiguration {
+        auto_closing_pairs: Some(vec![pair("\"", "\"")]),
+        ..Default::default()
+    };
+    let config = CursorConfig {
+        auto_closing_delete: AutoClosingEditStrategy::Always,
+        ..Default::default()
+    };
+    let mut editor = TestEditor::with_config("a \"\"", config).with_language(language);
+    editor.set_position(1, 4);
+    delete_word_left(&mut editor);
+    assert_eq!(editor.line(1), "a ");
+}
+
+// Not in Monaco's tests: with the default `autoClosingDelete: auto`, only a
+// pair the editor auto-closed is deleted, by every delete-word-left command.
+#[test]
+fn delete_word_left_deletes_an_auto_closed_pair() {
+    let language = || LanguageConfiguration {
+        auto_closing_pairs: Some(vec![pair("(", ")")]),
+        ..Default::default()
+    };
+    for delete in [
+        delete_word_left as fn(&mut TestEditor),
+        delete_word_start_left,
+        delete_word_end_left,
+        |ed: &mut TestEditor| {
+            let op = ed.with_lang(|lang| {
+                delete_word_part_with_language(&ed.config, &ed.buffer, &ed.cursors, true, lang)
+            });
+            ed.apply(op);
+        },
+    ] {
+        let mut editor = TestEditor::new("foo").with_language(language());
+        editor.set_position(1, 4);
+        editor.type_keyboard("(");
+        assert_eq!(editor.value(), "foo()");
+        delete(&mut editor);
+        assert_eq!(editor.value(), "foo");
+        editor.assert_cursor(1, 4);
+
+        // Typed by hand: just the word to the left goes.
+        let mut editor = TestEditor::new("foo()").with_language(language());
+        editor.set_position(1, 5);
+        delete(&mut editor);
+        assert_eq!(editor.value(), "foo)");
+    }
 }
 
 #[test]

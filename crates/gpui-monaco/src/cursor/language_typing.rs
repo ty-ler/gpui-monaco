@@ -36,8 +36,11 @@ use super::language::{
     indent_action_for_type, indent_for_enter, indentation_at_position, is_electric_character,
     is_quote, on_electric_character, unshift_indent,
 };
-use super::typing::{delete_left, enter_text, line_break, tab, tab_with_good_indent, type_text};
-use super::word::{WordCharClass, WordClassifier};
+use super::typing::{
+    delete_left, delete_word_part_with, delete_word_with, enter_text, line_break, tab,
+    tab_with_good_indent, type_text,
+};
+use super::word::{WordCharClass, WordClassifier, WordNavigationType};
 use super::{
     AutoClosedPair, AutoClosingEditStrategy, AutoClosingStrategy, AutoIndent, AutoSurroundStrategy,
     CursorCollection, CursorConfig, CursorModel, Position, Selection, line_units, strings,
@@ -211,6 +214,63 @@ pub fn delete_left_with_language<M: CursorModel>(
         );
     }
     delete_left(config, model, cursors, prev)
+}
+
+/// Deletes words to the left or right of every cursor like
+/// [`delete_word`](super::delete_word); to the left, a cursor between an
+/// auto-closing pair's opening and closing character (`(|)`) deletes both,
+/// as [`CursorConfig::auto_closing_delete`] allows (Monaco
+/// `WordOperations.deleteWordLeft` with `autoClosingDelete`). With
+/// `lang == None` this is exactly [`delete_word`](super::delete_word).
+#[allow(clippy::too_many_arguments)]
+pub fn delete_word_with_language<M: CursorModel>(
+    config: &CursorConfig,
+    model: &M,
+    cursors: &CursorCollection,
+    left: bool,
+    nav: WordNavigationType,
+    whitespace_heuristics: bool,
+    lang: Option<&LanguageContext>,
+) -> EditOperation {
+    let dm: &dyn CursorModel = model;
+    let lang = lang.map(LanguageSupport::new);
+    let auto_closed = cursors.auto_closed_ranges().closing_ranges();
+    let pair_delete = |selection: Selection| {
+        lang.as_ref().is_some_and(|lang| {
+            is_auto_closing_pair_delete(config, lang, dm, &[selection], &auto_closed)
+        })
+    };
+    delete_word_with(
+        config,
+        dm,
+        cursors,
+        left,
+        nav,
+        whitespace_heuristics,
+        &pair_delete,
+    )
+}
+
+/// [`delete_word_part`](super::delete_word_part) that, to the left, deletes
+/// both characters of an auto-closing pair around a cursor, like
+/// [`delete_word_with_language`] (Monaco `deleteWordPartLeft`, whose
+/// candidates include `deleteWordLeft`'s).
+pub fn delete_word_part_with_language<M: CursorModel>(
+    config: &CursorConfig,
+    model: &M,
+    cursors: &CursorCollection,
+    left: bool,
+    lang: Option<&LanguageContext>,
+) -> EditOperation {
+    let dm: &dyn CursorModel = model;
+    let lang = lang.map(LanguageSupport::new);
+    let auto_closed = cursors.auto_closed_ranges().closing_ranges();
+    let pair_delete = |selection: Selection| {
+        lang.as_ref().is_some_and(|lang| {
+            is_auto_closing_pair_delete(config, lang, dm, &[selection], &auto_closed)
+        })
+    };
+    delete_word_part_with(config, dm, cursors, left, &pair_delete)
 }
 
 /// The Tab key like [`tab`], except that on a whitespace-only line it

@@ -596,16 +596,40 @@ pub fn move_to(
     select: bool,
 ) {
     let model: &dyn CursorModel = model;
-    let primary = cursors.primary().clone();
+    let state = move_to_state(config, model, cursors.primary(), p, select);
+    cursors.validated_states(model, vec![state]);
+}
+
+/// Monaco `CursorMoveCommands.moveTo` for `cursor`: moves it to `p`, or
+/// with `select` extends its selection, by words or lines when it was
+/// started by a word or line selection.
+pub(crate) fn move_to_state(
+    config: &CursorConfig,
+    model: &dyn CursorModel,
+    cursor: &SingleCursorState,
+    p: Position,
+    select: bool,
+) -> SingleCursorState {
     if select {
-        match primary.selection_start_kind {
-            SelectionStartKind::Word => return select_word_impl(config, model, cursors, p, true),
-            SelectionStartKind::Line => return select_line_impl(model, cursors, p, true),
+        match cursor.selection_start_kind {
+            SelectionStartKind::Word => return word_state(config, model, cursor, p, true),
+            SelectionStartKind::Line => return line_state(model, cursor, p, true),
             SelectionStartKind::Simple => {}
         }
     }
-    let p = validate_position(model, p);
-    cursors.validated_states(model, vec![primary.move_to(select, p, 0)]);
+    cursor.move_to(select, validate_position(model, p), 0)
+}
+
+/// Monaco `CursorMoveCommands.word` for `cursor`: selects the word at `p`,
+/// or with `select` extends its word selection to `p`.
+pub(crate) fn word_state(
+    config: &CursorConfig,
+    model: &dyn CursorModel,
+    cursor: &SingleCursorState,
+    p: Position,
+    select: bool,
+) -> SingleCursorState {
+    word::word_selection(config, model, cursor, select, validate_position(model, p))
 }
 
 /// Selects the word at `p` with the primary cursor (double click), or with
@@ -628,8 +652,7 @@ fn select_word_impl(
     p: Position,
     select: bool,
 ) {
-    let p = validate_position(model, p);
-    let state = word::word_selection(config, model, cursors.primary(), select, p);
+    let state = word_state(config, model, cursors.primary(), p, select);
     cursors.validated_states(model, vec![state]);
 }
 
@@ -651,6 +674,18 @@ fn select_line_impl(
     p: Position,
     select: bool,
 ) {
+    let state = line_state(model, cursors.primary(), p, select);
+    cursors.validated_states(model, vec![state]);
+}
+
+/// Monaco `CursorMoveCommands.line` for `cursor`: selects the line at `p`,
+/// or with `select` extends its line selection to `p`.
+pub(crate) fn line_state(
+    model: &dyn CursorModel,
+    cursor: &SingleCursorState,
+    p: Position,
+    select: bool,
+) -> SingleCursorState {
     let position = validate_position(model, p);
     let last = last_row(model);
     let line_end = |row: u32| {
@@ -660,8 +695,7 @@ fn select_line_impl(
             Position::new(row + 1, 0)
         }
     };
-    let primary = cursors.primary().clone();
-    let state = if !select {
+    if !select {
         let end = line_end(position.row);
         SingleCursorState {
             selection_start: Position::new(position.row, 0)..end,
@@ -671,14 +705,13 @@ fn select_line_impl(
             leftover_visible_columns: 0,
         }
     } else {
-        let entering_row = primary.selection_start.start.row;
+        let entering_row = cursor.selection_start.start.row;
         if position.row < entering_row {
-            primary.move_to(true, Position::new(position.row, 0), 0)
+            cursor.move_to(true, Position::new(position.row, 0), 0)
         } else if position.row > entering_row {
-            primary.move_to(true, line_end(position.row), 0)
+            cursor.move_to(true, line_end(position.row), 0)
         } else {
-            primary.move_to(true, primary.selection_start.end, 0)
+            cursor.move_to(true, cursor.selection_start.end, 0)
         }
-    };
-    cursors.validated_states(model, vec![state]);
+    }
 }

@@ -578,6 +578,10 @@ pub(crate) struct DeleteWordContext<'a> {
     pub model: &'a dyn CursorModel,
     pub selection: super::Selection,
     pub whitespace_heuristics: bool,
+    /// Whether the (collapsed) cursor is between an auto-closing pair it
+    /// may delete (Monaco `DeleteOperations.isAutoClosingPairDelete` with
+    /// the context's `autoClosingDelete`, brackets, quotes and pairs).
+    pub auto_closing_pair_delete: bool,
 }
 
 fn delete_word_left_whitespace(
@@ -598,8 +602,9 @@ fn delete_word_left_whitespace(
     None
 }
 
-/// Monaco `WordOperations.deleteWordLeft` (without auto-closing pair
-/// deletion, which needs language configuration).
+/// Monaco `WordOperations.deleteWordLeft`: between an auto-closing pair
+/// (`(|)`, see [`DeleteWordContext::auto_closing_pair_delete`]) it deletes
+/// both characters.
 pub(crate) fn delete_word_left_range(
     ctx: &DeleteWordContext,
     nav: WordNavigationType,
@@ -609,6 +614,12 @@ pub(crate) fn delete_word_left_range(
         return Some(ctx.selection.range());
     }
     let position = ctx.selection.head;
+    if ctx.auto_closing_pair_delete {
+        return Some(
+            Position::new(position.row, position.column - 1)
+                ..Position::new(position.row, position.column + 1),
+        );
+    }
     let mut row = position.row;
     let mut column = position.column;
     if row == 0 && column == 0 {

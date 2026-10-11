@@ -29,7 +29,9 @@ Issues are linked by number.
 | Typing, delete, tab, outdent, newline | `coreCommands` | ✅ | |
 | Cursor movement: char, word, word part, line, page, document | `coreCommands`, `wordOperations`, `wordPartOperations` | ✅ | #81 |
 | Word segmentation for languages without spaces (Japanese, Chinese, Thai) in word movement, deletion and selection | `wordSegmenterLocales` | ✅ ICU4X's segmenter instead of `Intl.Segmenter`, with the first valid locale only; needs the `word-segmenter` cargo feature (on by default) | #234 |
-| Multi-cursor: add above/below, Cmd+D and previous-match variants, select all occurrences, cursors at line ends/top/bottom, Alt+click, box select by mouse and keyboard, options | `multicursor` | ✅ | #81 |
+| Multi-cursor: add above/below, Cmd+D and previous-match variants, select all occurrences, cursors at line ends/top/bottom, Alt+click, box select by mouse and keyboard, options | `multicursor` | ✅ | #81, #260 |
+| Mouse gestures: click counting, quadruple-click select all, Shift+double/triple-click and line-number Shift+click extension, `createCursor` toggle, column select following `multiCursorModifier`, middle-drag, drag autoscroll | `mouseHandler`, `viewController.dispatchMouse`, `dragScrolling` | ✅ | #245, #260 |
+| IME composition at every cursor, active-clause underline | `compositionType`, `nativeEditContext` | 🟡 GPUI passes the IME's selected range but not its clause boundaries or underline styles, so only the selected clause is drawn thick | #260 |
 | Cursor undo, selection anchor, overtype mode | `cursorUndo`, `anchorSelect` | ✅ | #81 |
 | Scroll commands (Ctrl+Up/Down, …) | `coreCommands` | ✅ | #81 |
 | Clipboard with multi-cursor distribution | `clipboard` | ✅ | |
@@ -40,7 +42,7 @@ Issues are linked by number.
 | Auto-indent (`onEnterRules`, `indentationRules`, electric characters) | `indentation` | ✅ | |
 | Reindent lines | `indentation` | ✅ | #80 |
 | Indentation detection and conversion commands | `indentation` | ✅ | #197 |
-| Line operations: move, copy, delete, insert, indent | `linesOperations` | ✅ | |
+| Line operations: move (reindenting with `autoIndent: full`), copy, delete, insert, indent | `linesOperations`, `moveLinesCommand` | ✅ | #260 |
 | Sort, join, reverse, transpose, case transforms, delete duplicates, trim whitespace | `linesOperations`, `caretOperations` | ✅ | #80 |
 | Insert final new line | `insertFinalNewLine` | ✅ | #202 |
 | In-place replace | `inPlaceReplace` | ✅ | #80 |

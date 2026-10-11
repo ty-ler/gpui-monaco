@@ -309,32 +309,46 @@ impl CodeEditor {
         self.update_word_highlights(true, cx);
     }
 
-    /// Selects the next (or previous) highlighted occurrence (Monaco
+    /// Moves the caret to the start of the next (or previous) highlighted
+    /// occurrence, revealing it, and reads it to screen readers (Monaco
+    /// `WordHighlighter.moveNext` / `moveBack`,
     /// `editor.action.wordHighlight.next` / `.prev`, F7 / Shift+F7).
+    ///
+    /// The highlights are taken in order from the one containing the caret.
+    /// From outside every highlight, F7 goes to the first; Shift+F7 keeps
+    /// Monaco's arithmetic (`(-1 - 1 + n) % n`), which lands on the second
+    /// to last of two or more.
     pub fn go_to_word_highlight(&mut self, next: bool, cx: &mut Context<Self>) {
         let ranges = self.word_highlight_ranges(cx);
         if ranges.is_empty() {
             return;
         }
         let head = self.cursors.primary().position;
-        let current = ranges.iter().position(|r| r.start <= head && head <= r.end);
-        let index = match (current, next) {
-            (Some(i), true) => (i + 1) % ranges.len(),
-            (Some(i), false) => (i + ranges.len() - 1) % ranges.len(),
-            (None, true) => ranges.iter().position(|r| r.start > head).unwrap_or(0),
-            (None, false) => ranges
-                .iter()
-                .rposition(|r| r.end < head)
-                .unwrap_or(ranges.len() - 1),
-        };
-        let range = ranges[index].clone();
-        self.set_selections(
-            &[Selection {
-                anchor: range.start,
-                head: range.end,
-            }],
-            cx,
-        );
+        let len = ranges.len() as i64;
+        // Monaco `Range.containsPosition`: both ends included.
+        let index = ranges
+            .iter()
+            .position(|r| r.start <= head && head <= r.end)
+            .map_or(-1, |i| i as i64);
+        let new_index = if next {
+            (index + 1).rem_euclid(len)
+        } else {
+            (index - 1 + len).rem_euclid(len)
+        } as usize;
+        let dest = ranges[new_index].clone();
+        self.set_selections(&[Selection::collapsed(dest.start)], cx);
+        self.reveal_range_in_center_if_outside_viewport(dest.clone(), cx);
+        let word = self.model().read(cx).word_at_position(dest.start);
+        if let Some(word) = word {
+            let line = self.snapshot.rope().line(dest.start.row);
+            let message = format!(
+                "{line}, {} of {} for '{}'",
+                new_index + 1,
+                ranges.len(),
+                word.word
+            );
+            self.announce(message, cx);
+        }
     }
 
     // ----- selection highlights -----------------------------------------------

@@ -3,18 +3,23 @@
 //! (MIT): `DeleteAllLeftAction`, `InsertLineBeforeAction`,
 //! `InsertLineAfterAction`, `Bug 18276`, `issue #80736`, `Indenting on empty
 //! line should move cursor`, `issue #62112` and the delete lines tests. The
-//! copy/move lines command tests are generated into `lines_command_cases.rs`.
+//! copy/move lines command tests are generated into `lines_command_cases.rs`;
+//! the move lines tests with indentation or onEnter rules (suites `Move
+//! Lines Command honors Indentation Rules` and `honors onEnter Rules` of
+//! `moveLinesCommand.test.ts`) are ported here.
 //!
 //! Not ported from that file: sort, delete duplicate lines, join lines,
 //! reverse lines, transpose, case transforms, delete all right, duplicate
-//! selection (commands not ported), and the move lines tests that need
-//! indentation or onEnter rules.
+//! selection (commands not ported).
 
 use super::harness::{TestEditor, sel};
+use super::language_configs::{brackets, re, rules};
 use crate::cursor::{
     self, Selection, copy_lines_down, copy_lines_up, delete_all_left, delete_lines,
-    insert_line_above, insert_line_below, move_lines_down, move_lines_up,
+    insert_line_above, insert_line_below, move_lines_down, move_lines_down_with_language,
+    move_lines_up, move_lines_up_with_language,
 };
+use syntax::{IndentationRules, LanguageConfiguration};
 
 #[derive(Clone, Copy, Debug)]
 pub enum LinesCommand {
@@ -421,6 +426,173 @@ fn delete_lines_multicursor_1() {
         ],
         &[sel(4, 1, 4, 1), sel(9, 1, 9, 1), sel(14, 1, 14, 1)],
     );
+}
+
+// ---------------------------------------------------------------------------
+// moveLinesCommand.test.ts: suites `Move Lines Command honors Indentation
+// Rules` and `Move Lines Command honors onEnter Rules` (`autoIndent: full`).
+
+/// Monaco `testMoveLinesUpOrDownWithIndentCommand`.
+#[track_caller]
+fn test_move_lines_with_indent(
+    down: bool,
+    language: Option<LanguageConfiguration>,
+    lines: &[&str],
+    selection: Selection,
+    expected_lines: &[&str],
+    expected_selection: Selection,
+) {
+    let mut editor = TestEditor::lines(lines);
+    if let Some(language) = language {
+        editor = editor.with_language(language);
+    }
+    editor.set_selections(&[selection]);
+    let op = editor.with_lang(|lang| {
+        if down {
+            move_lines_down_with_language(&editor.config, &editor.buffer, &editor.cursors, lang)
+        } else {
+            move_lines_up_with_language(&editor.config, &editor.buffer, &editor.cursors, lang)
+        }
+    });
+    editor.apply(op);
+    assert_eq!(editor.value(), expected_lines.join("\n"));
+    editor.assert_selection(expected_selection);
+}
+
+/// The `IndentRulesMode` of `moveLinesCommand.test.ts`.
+fn move_lines_indent_rules_mode() -> LanguageConfiguration {
+    LanguageConfiguration {
+        indentation_rules: Some(IndentationRules {
+            decrease_indent_pattern: re(
+                r"^\s*((?!\S.*\/[*]).*[*]\/\s*)?[})\]]|^\s*(case\b.*|default):\s*(\/\/.*|\/[*].*[*]\/\s*)?$",
+            ),
+            increase_indent_pattern: re(
+                r#"(\{[^}"'`]*|\([^)"']*|\[[^\]"']*|^\s*(\{\}|\(\)|\[\]|(case\b.*|default):))\s*(\/\/.*|\/[*].*[*]\/\s*)?$"#,
+            ),
+            indent_next_line_pattern: Some(re(
+                r"^\s*(for|while|if|else)\b(?!.*[;{}]\s*(\/\/.*|\/[*].*[*]\/\s*)?$)",
+            )),
+            un_indented_line_pattern: Some(re(
+                r#"^(?!.*([;{}]|\S:)\s*(\/\/.*|\/[*].*[*]\/\s*)?$)(?!.*(\{[^}"']*|\([^)"']*|\[[^\]"']*|^\s*(\{\}|\(\)|\[\]|(case\b.*|default):))\s*(\/\/.*|\/[*].*[*]\/\s*)?$)(?!^\s*((?!\S.*\/[*]).*[*]\/\s*)?[})\]]|^\s*(case\b.*|default):\s*(\/\/.*|\/[*].*[*]\/\s*)?$)(?!^\s*(for|while|if|else)\b(?!.*[;{}]\s*(\/\/.*|\/[*].*[*]\/\s*)?$))"#,
+            )),
+        }),
+        ..Default::default()
+    }
+}
+
+/// The `EnterRulesMode` of `moveLinesCommand.test.ts`.
+fn move_lines_enter_rules_mode() -> LanguageConfiguration {
+    LanguageConfiguration {
+        indentation_rules: Some(rules(re(r"^\s*\]$"), re(r"^\s*\[$"))),
+        brackets: Some(brackets(&[("{", "}")])),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn move_lines_first_line_indentation_adjust_to_0() {
+    test_move_lines_with_indent(
+        false,
+        Some(move_lines_indent_rules_mode()),
+        &["class X {", "\tz = 2", "}"],
+        sel(2, 1, 2, 1),
+        &["z = 2", "class X {", "}"],
+        sel(1, 1, 1, 1),
+    );
+}
+
+#[test]
+fn move_lines_across_block() {
+    test_move_lines_with_indent(
+        true,
+        Some(move_lines_indent_rules_mode()),
+        &[
+            "const value = 2;",
+            "const standardLanguageDescriptions = [",
+            "    {",
+            "        diagnosticSource: 'js',",
+            "    }",
+            "];",
+        ],
+        sel(1, 1, 1, 1),
+        &[
+            "const standardLanguageDescriptions = [",
+            "    const value = 2;",
+            "    {",
+            "        diagnosticSource: 'js',",
+            "    }",
+            "];",
+        ],
+        sel(2, 5, 2, 5),
+    );
+}
+
+#[test]
+fn move_line_should_still_work_as_before_if_there_is_no_indentation_rules() {
+    test_move_lines_with_indent(
+        false,
+        None,
+        &[
+            "if (true) {",
+            "    var task = new Task(() => {",
+            "        var work = 1234;",
+            "    });",
+            "}",
+        ],
+        sel(3, 1, 3, 1),
+        &[
+            "if (true) {",
+            "        var work = 1234;",
+            "    var task = new Task(() => {",
+            "    });",
+            "}",
+        ],
+        sel(2, 1, 2, 1),
+    );
+}
+
+#[test]
+fn issue_54829_move_block_across_block() {
+    test_move_lines_with_indent(
+        true,
+        Some(move_lines_enter_rules_mode()),
+        &[
+            "if (true) {",
+            "    if (false) {",
+            "        if (1) {",
+            "            console.log('b');",
+            "        }",
+            "        console.log('a');",
+            "    }",
+            "}",
+        ],
+        sel(3, 9, 5, 10),
+        &[
+            "if (true) {",
+            "    if (false) {",
+            "        console.log('a');",
+            "        if (1) {",
+            "            console.log('b');",
+            "        }",
+            "    }",
+            "}",
+        ],
+        sel(4, 9, 6, 10),
+    );
+}
+
+// Not in Monaco's tests: `autoIndent` below `full` only moves the text.
+#[test]
+fn move_lines_keeps_indentation_below_auto_indent_full() {
+    let mut editor = TestEditor::lines(&["class X {", "\tz = 2", "}"])
+        .with_language(move_lines_indent_rules_mode());
+    editor.config.auto_indent = cursor::AutoIndent::Advanced;
+    editor.set_selections(&[sel(2, 1, 2, 1)]);
+    let op = editor.with_lang(|lang| {
+        move_lines_up_with_language(&editor.config, &editor.buffer, &editor.cursors, lang)
+    });
+    editor.apply(op);
+    assert_eq!(editor.value(), "\tz = 2\nclass X {\n}");
 }
 
 // ---------------------------------------------------------------------------

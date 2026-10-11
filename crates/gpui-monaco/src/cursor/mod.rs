@@ -58,18 +58,22 @@ pub use edit::{EditOperation, EditOperationType};
 pub use in_place_replace::in_place_replace;
 pub use language::{LanguageContext, StandardTokenType};
 pub use language_typing::{
-    delete_left_with_language, line_break_insert, line_break_with_language, tab_with_language,
-    type_with_language,
+    delete_left_with_language, delete_word_part_with_language, delete_word_with_language,
+    line_break_insert, line_break_with_language, tab_with_language, type_with_language,
 };
 pub use lines::{
     copy_lines_down, copy_lines_up, delete_lines, indent_lines, insert_line_above,
-    insert_line_below, move_lines_down, move_lines_up, outdent_lines,
+    insert_line_below, move_lines_down, move_lines_down_with_language, move_lines_up,
+    move_lines_up_with_language, outdent_lines,
 };
 pub use movement::{
     MoveCommand, add_cursor_above, add_cursor_below, expand_line_selection, move_cursors, move_to,
     select_all, select_line, select_word,
 };
-pub(crate) use movement::{move_left, move_right, move_to_beginning_of_line, move_to_end_of_line};
+pub(crate) use movement::{
+    line_state, move_left, move_right, move_to_beginning_of_line, move_to_end_of_line,
+    move_to_state, word_state,
+};
 pub use reindent::{reindent_lines, reindent_selected_lines};
 pub use text::PointUtf16 as Position;
 pub use transforms::{

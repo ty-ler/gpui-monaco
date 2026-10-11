@@ -132,15 +132,18 @@ fn clicking_the_selection_without_dragging_places_the_cursor(cx: &mut TestAppCon
 fn double_click_selects_blocks(cx: &mut TestAppContext) {
     let (editor, cx) = setup("f(a, b);\nlet s = \"hello world\";", cx);
     paint(cx);
+    // Monaco counts a double click only after a click at the same place.
     let double_click = |cx: &mut VisualTestContext, position: Point<Pixels>| {
-        cx.simulate_event(MouseDownEvent {
-            position,
-            button: MouseButton::Left,
-            modifiers: Modifiers::default(),
-            click_count: 2,
-            first_mouse: false,
-        });
-        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+        for click_count in 1..=2 {
+            cx.simulate_event(MouseDownEvent {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::default(),
+                click_count,
+                first_mouse: false,
+            });
+            cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+        }
     };
     // Just inside the parentheses.
     let p = at(&editor, cx, 0, 2);
