@@ -1,6 +1,9 @@
 //! Inline edits (next edit suggestions, Monaco's `inlineEdits`) with mock
 //! providers: the view chosen for an edit, Tab jumping to and accepting it,
-//! Escape, the gutter indicator and its menu, and end-of-lifetime reports.
+//! Escape, the gutter indicator and its menu, and end-of-lifetime reports;
+//! jumps, hints, alternative actions, the inline edit menu on ghost text,
+//! the long-distance hint, cross-file edits, Monaco's undo and redo special
+//! cases and the fade-out after accepting.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -71,7 +74,10 @@ impl InlineCompletionsProvider for Edits {
         reason: &InlineCompletionEndOfLifeReason,
     ) {
         let reason = match reason {
-            InlineCompletionEndOfLifeReason::Accepted => "accepted",
+            InlineCompletionEndOfLifeReason::Accepted {
+                alternative_action: true,
+            } => "accepted-alternative",
+            InlineCompletionEndOfLifeReason::Accepted { .. } => "accepted",
             InlineCompletionEndOfLifeReason::Rejected => "rejected",
             InlineCompletionEndOfLifeReason::Ignored { .. } => "ignored",
         };
@@ -659,4 +665,514 @@ fn inline_edit_stays_on_unrelated_edit(cx: &mut TestAppContext) {
     // The provider no longer finds the text.
     draw(cx);
     assert_eq!(inline_edit(&editor, cx), None);
+}
+
+// Remaining features (#230).
+
+/// Shows `completion` (asked for with Alt+\, with the cursor at `at`).
+fn show_item(
+    next: &Rc<RefCell<Vec<InlineCompletion>>>,
+    editor: &Entity<CodeEditor>,
+    completion: InlineCompletion,
+    at: PointUtf16,
+    cx: &mut VisualTestContext,
+) {
+    *next.borrow_mut() = vec![completion];
+    editor.update(cx, |e, cx| e.hide_inline_suggestion(cx));
+    set_cursor(editor, at, cx);
+    editor.update(cx, |e, cx| e.trigger_inline_suggest(cx));
+    draw(cx);
+}
+
+/// A provider offering whatever `next` holds.
+fn offering() -> (Rc<RefCell<Vec<InlineCompletion>>>, Edits) {
+    let next: Rc<RefCell<Vec<InlineCompletion>>> = Rc::default();
+    let provider = {
+        let next = next.clone();
+        Edits::new(move |_, _| next.borrow().clone())
+    };
+    (next, provider)
+}
+
+/// A document long enough to scroll its end away.
+fn long_doc() -> String {
+    (0..300).map(|ix| format!("let v{ix} = {ix};\n")).collect()
+}
+
+#[gpui::test]
+fn jump_to_position_items(cx: &mut TestAppContext) {
+    let (next, provider) = offering();
+    let (events, contexts) = (provider.events.clone(), provider.contexts.clone());
+    let (editor, cx) = setup(DOC, provider, |_| {}, cx);
+    let jump = InlineCompletion {
+        jump_to_position: Some(p(2, 4)),
+        ..Default::default()
+    };
+    show_item(&next, &editor, jump.clone(), p(4, 10), cx);
+    // Monaco `JumpToView`: a "Tab to jump" label at the target.
+    assert!(visible(&editor, cx));
+    assert_eq!(view(&editor, cx), Some(InlineEditViewKind::JumpTo));
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.inline_edit_target_for_tests(cx)),
+        Some(p(2, 4)..p(2, 4))
+    );
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.inline_edit_gutter_indicator_for_tests()),
+        Some(Ok(2))
+    );
+    // Tab jumps, never accepts, even from the target's line.
+    set_cursor(&editor, p(2, 0), cx);
+    assert!(editor.read_with(cx, |e, cx| e.tab_should_jump_to_inline_edit(cx)));
+    assert!(!editor.read_with(cx, |e, cx| e.tab_should_accept_inline_edit(cx)));
+    // Jumping accepts it.
+    cx.simulate_keystrokes("tab");
+    assert_eq!(cursor(&editor, cx), p(2, 4));
+    assert_eq!(text(&editor, cx), DOC);
+    assert!(events.borrow().contains(&"accepted ".to_string()));
+    draw(cx);
+    assert!(!visible(&editor, cx));
+    // Accepting one with the commit command asks again although the text
+    // didn't change (Monaco's `noDelay` trigger).
+    show_item(&next, &editor, jump, p(4, 10), cx);
+    let asked = contexts.borrow().len();
+    editor.update(cx, |e, cx| e.accept_inline_suggestion(cx));
+    draw(cx);
+    assert_eq!(contexts.borrow().len(), asked + 1);
+}
+
+#[gpui::test]
+fn hints_show_where_the_provider_says(cx: &mut TestAppContext) {
+    let (next, provider) = offering();
+    let (editor, cx) = setup(DOC, provider, |_| {}, cx);
+    let mut item = replace(DOC, "colour", "shade").remove(0);
+    item.hint = Some(InlineCompletionHint {
+        range: p(3, 4)..p(3, 5),
+        style: InlineCompletionHintStyle::Label,
+        content: "rename colour".into(),
+    });
+    show_item(&next, &editor, item, p(1, 0), cx);
+    // Monaco's custom view, not the diff.
+    assert_eq!(view(&editor, cx), Some(InlineEditViewKind::Custom));
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.inline_edit_target_for_tests(cx)),
+        Some(p(3, 4)..p(3, 5))
+    );
+    // Never collapsed, and beside the hint.
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.inline_edit_gutter_indicator_for_tests()),
+        Some(Ok(3))
+    );
+    // The hint follows typing before it.
+    type_now(&editor, p(3, 0), "  ", cx);
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.inline_edit_target_for_tests(cx)),
+        Some(p(3, 6)..p(3, 7))
+    );
+    // From afar, Tab jumps to the hint, then accepts, leaving the cursor
+    // where it is.
+    set_cursor(&editor, p(0, 0), cx);
+    assert!(editor.read_with(cx, |e, cx| e.tab_should_jump_to_inline_edit(cx)));
+    editor.update(cx, |e, cx| e.jump_to_next_inline_edit(cx));
+    assert_eq!(cursor(&editor, cx), p(3, 6));
+    draw(cx);
+    assert!(editor.read_with(cx, |e, cx| e.tab_should_accept_inline_edit(cx)));
+    cx.simulate_keystrokes("tab");
+    assert!(text(&editor, cx).starts_with("let shade = 1;"));
+    assert_eq!(cursor(&editor, cx), p(3, 6));
+}
+
+#[gpui::test]
+fn alternative_actions_run_with_shift_tab(cx: &mut TestAppContext) {
+    let (next, provider) = offering();
+    let events = provider.events.clone();
+    let (editor, cx) = setup(DOC, provider, |_| {}, cx);
+    let ran = Rc::new(RefCell::new(0));
+    let counter = ran.clone();
+    cx.update(|_, cx| {
+        gpui_monaco::register_command(cx, "test.rename", move |_, _| {
+            *counter.borrow_mut() += 1;
+        })
+    });
+    let mut item = replace(DOC, "let b = 2;", "let bb = 2;").remove(0);
+    item.alternative_action = Some(InlineCompletionAlternativeAction {
+        label: "Rename".into(),
+        command: Command {
+            id: "test.rename".into(),
+            title: "Rename Symbol".into(),
+            arguments: Vec::new(),
+        },
+        count: Some(3),
+    });
+    show_item(&next, &editor, item, p(1, 0), cx);
+    // Monaco shows an edit with an alternative action as a word
+    // replacement, and its gutter menu offers it.
+    assert_eq!(
+        view(&editor, cx),
+        Some(InlineEditViewKind::WordReplacements)
+    );
+    assert!(editor.read_with(cx, |e, cx| {
+        e.inline_suggestion_alternative_action_visible(cx)
+    }));
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.inline_edit_gutter_menu_for_tests(cx))[1..3],
+        ["Go To / Accept".to_string(), "Rename Symbol".to_string()]
+    );
+    let actions = editor.read_with(cx, |e, cx| e.supported_actions(cx));
+    assert!(
+        actions
+            .iter()
+            .any(|a| a.id == "editor.action.inlineSuggest.commitAlternativeAction")
+    );
+    // Shift+Tab runs the command instead of the edit, and asks again.
+    next.borrow_mut().clear();
+    cx.simulate_keystrokes("shift-tab");
+    assert_eq!(*ran.borrow(), 1);
+    assert_eq!(text(&editor, cx), DOC);
+    assert!(
+        events
+            .borrow()
+            .contains(&"accepted-alternative let bb = 2;".to_string())
+    );
+    draw(cx);
+    assert!(!visible(&editor, cx));
+    // Without one, Shift+Tab outdents as usual.
+    set_cursor(&editor, p(1, 0), cx);
+    cx.simulate_input("  ");
+    cx.simulate_keystrokes("shift-tab");
+    assert_eq!(text(&editor, cx), DOC);
+}
+
+#[gpui::test]
+fn ghost_text_can_ask_for_the_inline_edit_menu(cx: &mut TestAppContext) {
+    let (next, provider) = offering();
+    let (editor, cx) = setup(DOC, provider, |_| {}, cx);
+    *next.borrow_mut() = vec![InlineCompletion {
+        insert_text: "let f = 6;".into(),
+        range: Some(p(5, 0)..p(5, 1)),
+        show_inline_edit_menu: true,
+        ..Default::default()
+    }];
+    type_at(&editor, p(5, 0), "l", cx);
+    assert!(editor.read_with(cx, |e, cx| e.inline_suggestion_visible(cx)));
+    assert!(!visible(&editor, cx));
+    // Monaco `_gutterIndicatorState`: the indicator beside the ghost text.
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.inline_edit_gutter_indicator_for_tests()),
+        Some(Ok(5))
+    );
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.inline_edit_gutter_menu_for_tests(cx))[..3],
+        [
+            "Test Edits".to_string(),
+            "Go To / Accept".to_string(),
+            "Reject".to_string()
+        ]
+    );
+    editor.update(cx, |e, cx| e.click_inline_edit_gutter_indicator(cx));
+    assert!(text(&editor, cx).ends_with("let f = 6;"));
+}
+
+#[gpui::test]
+fn the_gutter_pill_shows_the_line_number_and_pulses(cx: &mut TestAppContext) {
+    let provider = Edits::new(|text, _| replace(text, "let c = 3;", "let cc = 3;"));
+    let (editor, cx) = setup(DOC, provider, |_| {}, cx);
+    type_at(&editor, p(4, 10), " ", cx);
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.inline_edit_gutter_indicator_for_tests()),
+        Some(Ok(2))
+    );
+    // Monaco `_lineNumberToRender`.
+    let pill = editor.read_with(cx, |e, cx| e.inline_edit_gutter_pill_for_tests(cx));
+    assert_eq!(pill, Some(("3".to_string(), "↑".to_string(), 0)));
+    // Relative line numbers count from the cursor.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.line_numbers = gpui_monaco::options::LineNumbers::Relative;
+        e.update_options(options, cx);
+    });
+    draw(cx);
+    let pill = editor.read_with(cx, |e, cx| e.inline_edit_gutter_pill_for_tests(cx));
+    assert_eq!(pill.map(|(number, _, _)| number), Some("2".to_string()));
+    // Hovering the view shows the check mark and pulses the pill.
+    editor.update(cx, |e, cx| e.set_inline_edit_view_hovered(true, cx));
+    let pill = editor.read_with(cx, |e, cx| e.inline_edit_gutter_pill_for_tests(cx));
+    assert_eq!(
+        pill.map(|(_, icon, pulses)| (icon, pulses)),
+        Some(("✓".to_string(), 1))
+    );
+}
+
+#[gpui::test]
+fn accepted_text_fades_out(cx: &mut TestAppContext) {
+    let provider = Edits::new(|text, _| replace(text, "colour", "shade"));
+    let (editor, cx) = setup(DOC, provider, |_| {}, cx);
+    type_at(&editor, p(4, 10), " ", cx);
+    editor.update(cx, |e, cx| e.jump_to_next_inline_edit(cx));
+    draw(cx);
+    cx.simulate_keystrokes("tab");
+    let fade = editor.read_with(cx, |e, cx| e.inline_edit_fade_out_for_tests(cx));
+    assert_eq!(fade, [(p(0, 4)..p(0, 9), 1.)]);
+    cx.executor().advance_clock(Duration::from_millis(300));
+    cx.run_until_parked();
+    let fade = editor.read_with(cx, |e, cx| e.inline_edit_fade_out_for_tests(cx));
+    assert_eq!(fade.len(), 1);
+    assert!(fade[0].1 > 0. && fade[0].1 < 1., "{fade:?}");
+    cx.executor().advance_clock(Duration::from_millis(800));
+    cx.run_until_parked();
+    assert!(
+        editor
+            .read_with(cx, |e, cx| e.inline_edit_fade_out_for_tests(cx))
+            .is_empty()
+    );
+}
+
+#[gpui::test]
+fn undoing_an_accepted_inline_edit_does_not_ask_again(cx: &mut TestAppContext) {
+    let provider = Edits::new(|text, _| replace(text, "colour", "shade"));
+    let contexts = provider.contexts.clone();
+    let (editor, cx) = setup(DOC, provider, |_| {}, cx);
+    type_at(&editor, p(4, 10), " ", cx);
+    editor.update(cx, |e, cx| e.jump_to_next_inline_edit(cx));
+    draw(cx);
+    cx.simulate_keystrokes("tab");
+    draw(cx);
+    assert!(text(&editor, cx).starts_with("let shade"));
+    let asked = contexts.borrow().len();
+    // Monaco `_didUndoInlineEdits`: no request, so it doesn't come back.
+    editor.update(cx, |e, cx| e.undo(cx));
+    draw(cx);
+    assert!(text(&editor, cx).starts_with("let colour"));
+    assert_eq!(contexts.borrow().len(), asked);
+    assert!(!visible(&editor, cx));
+}
+
+#[gpui::test]
+fn undoing_back_to_a_shown_inline_edit_asks_for_inline_edits(cx: &mut TestAppContext) {
+    let provider = Edits::new(|text, _| replace(text, "colour", "shade"));
+    let contexts = provider.contexts.clone();
+    let (editor, cx) = setup(DOC, provider, |_| {}, cx);
+    type_at(&editor, p(4, 10), " ", cx);
+    assert!(visible(&editor, cx));
+    assert!(contexts.borrow().last().unwrap().include_inline_completions);
+    // Showing it ended the undo step, so this undoes on its own.
+    type_at(&editor, p(4, 11), "x", cx);
+    editor.update(cx, |e, cx| e.undo(cx));
+    draw(cx);
+    assert_eq!(text(&editor, cx), DOC.replace("e = 5;", "e = 5; "));
+    // Monaco `_lastShownInlineCompletionInfo`.
+    let context = contexts.borrow().last().cloned().unwrap();
+    assert!(context.include_inline_edits);
+    assert!(!context.include_inline_completions);
+    assert!(visible(&editor, cx));
+}
+
+#[gpui::test]
+fn undo_and_redo_keep_the_shown_completion(cx: &mut TestAppContext) {
+    // Ported from Monaco's "Forward Stability: when accepting undo".
+    let answer = Rc::new(RefCell::new("foo bar".to_string()));
+    let provider = {
+        let answer = answer.clone();
+        Edits::new(move |text, position| {
+            let line = text.lines().nth(position.row as usize).unwrap_or("");
+            let end = line.encode_utf16().count() as u32;
+            vec![InlineCompletion {
+                insert_text: answer.borrow().clone(),
+                range: Some(p(position.row, 0)..p(position.row, end)),
+                ..Default::default()
+            }]
+        })
+    };
+    let (editor, cx) = setup("", provider, |_| {}, cx);
+    let ghost = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, cx| {
+            e.ghost_text_for_tests(cx)
+                .map(|(_, parts)| parts.into_iter().map(|(_, t)| t).collect::<String>())
+        })
+    };
+    cx.simulate_input("f");
+    editor.update(cx, |e, cx| e.trigger_inline_suggest(cx));
+    draw(cx);
+    assert_eq!(ghost(&editor, cx).as_deref(), Some("oo bar"));
+    *answer.borrow_mut() = "foo baz".into();
+    editor.update(cx, |e, cx| e.accept_next_inline_word(cx));
+    draw(cx);
+    assert_eq!(text(&editor, cx), "foo");
+    assert_eq!(ghost(&editor, cx).as_deref(), Some(" bar"));
+    // Undo goes back to "f", keeping "foo bar" although the provider now
+    // says "foo baz".
+    editor.update(cx, |e, cx| e.undo(cx));
+    draw(cx);
+    assert_eq!(text(&editor, cx), "f");
+    assert_eq!(ghost(&editor, cx).as_deref(), Some("oo bar"));
+    editor.update(cx, |e, cx| e.redo(cx));
+    draw(cx);
+    assert_eq!(text(&editor, cx), "foo");
+    assert_eq!(ghost(&editor, cx).as_deref(), Some(" bar"));
+}
+
+#[gpui::test]
+fn the_long_distance_hint(cx: &mut TestAppContext) {
+    let doc = long_doc();
+    let provider = Edits::new(|text, _| replace(text, "let v250 = 250;", "let v250 = 2500;"));
+    let (editor, cx) = setup(&doc, provider, |_| {}, cx);
+    type_at(&editor, p(0, 0), " ", cx);
+    draw(cx);
+    // The edit is off screen: its line with the edit applied, near the
+    // cursor.
+    let hint = editor.read_with(cx, |e, cx| e.inline_edit_long_distance_hint_for_tests(cx));
+    let (lines, bar) = hint.expect("long distance hint");
+    assert_eq!(lines, ["let v250 = 2500;"]);
+    assert!(bar.ends_with("Tab to jump ↓"), "{bar}");
+    // Jumping hides it.
+    cx.simulate_keystrokes("tab");
+    draw(cx);
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.inline_edit_long_distance_hint_for_tests(cx)),
+        None
+    );
+}
+
+#[gpui::test]
+fn the_long_distance_hint_options(cx: &mut TestAppContext) {
+    let doc = long_doc();
+    let provider = Edits::new(|text, _| replace(text, "let v250 = 250;", "let v250 = 2500;"));
+    let (editor, cx) = setup(
+        &doc,
+        provider,
+        |options| {
+            options
+                .inline_suggest
+                .edits
+                .long_distance_hint_context_line_count = 1
+        },
+        cx,
+    );
+    type_at(&editor, p(0, 0), " ", cx);
+    draw(cx);
+    let (lines, _) = editor
+        .read_with(cx, |e, cx| e.inline_edit_long_distance_hint_for_tests(cx))
+        .unwrap();
+    assert_eq!(
+        lines,
+        ["let v249 = 249;", "let v250 = 2500;", "let v251 = 251;"]
+    );
+    // `show_long_distance_hint: false` turns it off.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.inline_suggest.edits.show_long_distance_hint = false;
+        e.update_options(options, cx);
+    });
+    draw(cx);
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.inline_edit_long_distance_hint_for_tests(cx)),
+        None
+    );
+}
+
+#[gpui::test]
+fn cross_file_edits_move_to_their_editor(cx: &mut TestAppContext) {
+    let (next, provider) = offering();
+    let events = provider.events.clone();
+    let (editor, cx) = setup(DOC, provider, |_| {}, cx);
+    // Another editor shows the edited file.
+    let other_model = cx.update(|_, cx| {
+        cx.new(|_| TextModel::new("fn a() {}\nfn b() {}\n").with_uri("file:///b.rs"))
+    });
+    let other = cx.update(|window, cx| {
+        let model = other_model.clone();
+        cx.new(|cx| CodeEditor::new(model, window, cx))
+    });
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let sink = opened.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(
+            &editor,
+            move |_, event: &gpui_monaco::CodeEditorEvent, _| {
+                if let gpui_monaco::CodeEditorEvent::OpenLocation(location) = event {
+                    sink.borrow_mut().push(location.clone());
+                }
+            },
+        )
+        .detach();
+    });
+    let item = InlineCompletion {
+        insert_text: "fn bb() {}".into(),
+        range: Some(p(1, 0)..p(1, 9)),
+        uri: Some("file:///b.rs".into()),
+        ..Default::default()
+    };
+    show_item(&next, &editor, item, p(4, 10), cx);
+    assert!(visible(&editor, cx));
+    // Diffed against the other file; no view or indicator here, but the
+    // long-distance hint names the file.
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.inline_edit_for_tests(cx)),
+        Some(vec![pair("", "b")])
+    );
+    assert_eq!(view(&editor, cx), Some(InlineEditViewKind::Custom));
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.inline_edit_gutter_indicator_for_tests()),
+        None
+    );
+    let (lines, bar) = editor
+        .read_with(cx, |e, cx| e.inline_edit_long_distance_hint_for_tests(cx))
+        .unwrap();
+    assert_eq!(lines, ["fn bb() {}"]);
+    assert_eq!(bar, "b.rs | Tab to open →");
+    // Tab opens it: the host hears about it, and the edit moves to the
+    // other editor.
+    assert!(editor.read_with(cx, |e, cx| e.tab_should_jump_to_inline_edit(cx)));
+    cx.simulate_keystrokes("tab");
+    assert_eq!(text(&editor, cx), DOC);
+    assert!(!visible(&editor, cx));
+    assert_eq!(
+        opened
+            .borrow()
+            .iter()
+            .map(|l| l.uri.clone())
+            .collect::<Vec<_>>(),
+        [Some("file:///b.rs".into())]
+    );
+    assert!(events.borrow().contains(&"accepted fn bb() {}".to_string()));
+    assert_eq!(
+        other.read_with(cx, |e, cx| e.inline_edit_for_tests(cx)),
+        Some(vec![pair("", "b")])
+    );
+    other.update(cx, |e, cx| e.accept_inline_suggestion(cx));
+    assert_eq!(
+        other_model.read_with(cx, |m, _| m.text()),
+        "fn a() {}\nfn bb() {}\n"
+    );
+}
+
+#[gpui::test]
+fn cross_file_edits_wait_for_an_editor(cx: &mut TestAppContext) {
+    let (next, provider) = offering();
+    let (editor, cx) = setup(DOC, provider, |_| {}, cx);
+    cx.update(|_, cx| {
+        gpui_monaco::set_model_resolver(cx, |uri, cx| {
+            (uri == "file:///c.rs").then(|| cx.new(|_| TextModel::new("old\n").with_uri(uri)))
+        })
+    });
+    let item = InlineCompletion {
+        insert_text: "new".into(),
+        range: Some(p(0, 0)..p(0, 3)),
+        uri: Some("file:///c.rs".into()),
+        ..Default::default()
+    };
+    show_item(&next, &editor, item, p(4, 10), cx);
+    assert!(visible(&editor, cx));
+    editor.update(cx, |e, cx| e.accept_inline_suggestion(cx));
+    // The host opens the file; its editor takes the edit when it shows.
+    let model = cx.update(|_, cx| gpui_monaco::model_for_uri(cx, "file:///c.rs").unwrap());
+    let mut app = cx.cx.clone();
+    let (other, other_cx) =
+        app.add_window_view(move |window, cx| CodeEditor::new(model, window, cx));
+    other_cx.run_until_parked();
+    other_cx.update(|window, _| window.refresh());
+    other_cx.run_until_parked();
+    assert_eq!(
+        other.read_with(other_cx, |e, cx| e.inline_edit_for_tests(cx)),
+        Some(vec![pair("old", "new")])
+    );
 }

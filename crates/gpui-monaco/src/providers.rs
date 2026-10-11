@@ -1217,6 +1217,69 @@ pub struct InlineCompletion {
     /// A link at the bottom of the inline edit's gutter menu, shown as
     /// "title..." (Monaco `gutterMenuLinkAction`).
     pub gutter_menu_link_action: Option<Command>,
+    /// The document `range` and `additional_text_edits` refer to, when it
+    /// isn't the one asked about (Monaco `uri`): a cross-file inline edit.
+    /// The editor diffs it against that model ([`crate::model_for_uri`]),
+    /// shows where it goes in the long-distance hint, and accepting (or
+    /// jumping) moves it to an editor showing that model, after emitting
+    /// [`CodeEditorEvent::OpenLocation`](crate::CodeEditorEvent::OpenLocation)
+    /// so the host can open or focus one. An item with a `uri` is an inline
+    /// edit.
+    pub uri: Option<SharedString>,
+    /// Suggests moving the cursor here instead of editing (Monaco
+    /// `jumpToPosition`): Tab jumps there, which accepts it, and
+    /// `insert_text` is ignored. Such an item is an inline edit.
+    pub jump_to_position: Option<PointUtf16>,
+    /// Shows the item as `content` at `range` rather than as a diff, until
+    /// it's jumped to (Monaco `hint`, the "custom" view). Such an item is an
+    /// inline edit; accepting it leaves the cursor where it is.
+    pub hint: Option<InlineCompletionHint>,
+    /// Shows the inline edit gutter indicator and its menu for this ghost
+    /// text too (Monaco `showInlineEditMenu`). Such items count as inline
+    /// edits for `include_inline_edits`, and sort after the others.
+    pub show_inline_edit_menu: bool,
+    /// A second way to accept the inline edit, run with Shift+Tab or from
+    /// the word replacement view's label (Monaco's
+    /// `InlineSuggestAlternativeAction`, which VS Code fills in itself for
+    /// renames; here the provider supplies it). An inline edit with one
+    /// shows as a word replacement.
+    pub alternative_action: Option<InlineCompletionAlternativeAction>,
+}
+
+/// How an inline completion's [`hint`](InlineCompletion::hint) is drawn
+/// (Monaco `InlineCompletionHintStyle`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InlineCompletionHintStyle {
+    /// Colored like code in the model's language.
+    #[default]
+    Code,
+    /// Plain text.
+    Label,
+}
+
+/// Where and what an inline completion shows instead of its diff (Monaco
+/// `IInlineCompletionHint`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InlineCompletionHint {
+    /// The range it's shown at, in the model asked about; it follows edits.
+    pub range: Range<PointUtf16>,
+    /// How `content` is drawn.
+    pub style: InlineCompletionHintStyle,
+    /// The text shown.
+    pub content: String,
+}
+
+/// A second way to accept an inline edit (Monaco
+/// `InlineSuggestAlternativeAction`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlineCompletionAlternativeAction {
+    /// Shown beside the new word, e.g. "Rename".
+    pub label: SharedString,
+    /// Run instead of applying the edit.
+    pub command: Command,
+    /// How many places it changes, shown as "label (n)" when more than one
+    /// (Monaco's `count`).
+    pub count: Option<usize>,
 }
 
 /// What an inline completions provider returns (Monaco
@@ -1237,8 +1300,12 @@ pub struct InlineCompletionList {
 #[derive(Clone, Debug, PartialEq)]
 #[allow(clippy::large_enum_variant)] // Matches Monaco's shape; rarely built.
 pub enum InlineCompletionEndOfLifeReason {
-    /// The user accepted it.
-    Accepted,
+    /// The user accepted it (Monaco also passes `alternativeAction`).
+    Accepted {
+        /// Its [`alternative_action`](InlineCompletion::alternative_action)
+        /// ran instead of its edit (Shift+Tab).
+        alternative_action: bool,
+    },
     /// The user dismissed it while it showed (Escape).
     Rejected,
     /// Neither: it was hidden, replaced or never shown.

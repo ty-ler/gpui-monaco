@@ -39,7 +39,7 @@ pub(crate) type Changes = Vec<(Range<usize>, String)>;
 const WORD_REPLACEMENT_MAX_LENGTH: u32 = 100;
 
 /// How an inline edit shows (Monaco `InlineCompletionViewKind`, without the
-/// ghost text, custom and jump-to kinds).
+/// ghost text kind).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InlineEditViewKind {
     /// The new word in a box below the changed one (Monaco
@@ -58,6 +58,11 @@ pub enum InlineEditViewKind {
     SideBySide,
     /// Only a marker at the edit until it's jumped to (`collapsed`).
     Collapsed,
+    /// The item's hint, or nothing for a cross-file edit without one
+    /// (`custom`).
+    Custom,
+    /// A "Tab to jump" label at the item's `jump_to_position` (`jumpTo`).
+    JumpTo,
 }
 
 /// The byte length of the longest common prefix of `a` and `b`.
@@ -593,6 +598,32 @@ impl InlineEditDiff {
     /// The modified rows the edit touches, from the window's start.
     pub fn modified_window(&self) -> (u32, &[String]) {
         (self.window_start, &self.modified_lines)
+    }
+
+    /// How many rows the text has with the edit applied, given
+    /// `row_count`, the original's.
+    pub fn modified_row_count(&self, row_count: u32) -> u32 {
+        (row_count + self.modified_lines.len() as u32)
+            .saturating_sub(self.original_lines.len() as u32)
+    }
+
+    /// Row `row` of the whole text with the edit applied (`rope` is the
+    /// original).
+    pub fn modified_document_line(&self, rope: &Rope, row: u32) -> String {
+        let window_end = self.window_start + self.modified_lines.len() as u32;
+        if row < self.window_start {
+            rope.line(row)
+        } else if row < window_end {
+            self.modified_lines[(row - self.window_start) as usize].clone()
+        } else {
+            let original_row =
+                row - window_end + self.window_start + self.original_lines.len() as u32;
+            if original_row <= rope.max_point().row {
+                rope.line(original_row)
+            } else {
+                String::new()
+            }
+        }
     }
 
     /// The original rows shown (Monaco `displayRange`): the replaced rows,

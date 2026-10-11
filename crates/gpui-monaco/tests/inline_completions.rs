@@ -328,7 +328,7 @@ impl InlineCompletionsProvider for Recorder {
         reason: &InlineCompletionEndOfLifeReason,
     ) {
         let reason = match reason {
-            InlineCompletionEndOfLifeReason::Accepted => "accepted".to_string(),
+            InlineCompletionEndOfLifeReason::Accepted { .. } => "accepted".to_string(),
             InlineCompletionEndOfLifeReason::Rejected => "rejected".to_string(),
             InlineCompletionEndOfLifeReason::Ignored { superseded_by, .. } => format!(
                 "ignored{}",

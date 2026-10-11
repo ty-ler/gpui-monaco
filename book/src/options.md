@@ -71,7 +71,7 @@ editor.update(cx, |editor, cx| {
 | `match_brackets` | `matchBrackets` | `Always` (the pair at the cursor, or else the enclosing pair), `Near` or `Never` |
 | `code_lens`, `code_lens_font_family`, `code_lens_font_size` | `codeLens`, … | show code lenses (on); their font (the editor's; 90% of its size) |
 | `linked_editing` | `linkedEditing` | mirror edits between linked ranges, like HTML tag pairs (off) |
-| `inline_suggest` | `inlineSuggest.*` | `enabled` (on), `mode` (`SubwordSmart`), `suppress_suggestions`, `keep_on_blur`, `min_show_delay`, `suppress_in_snippet_mode` (on), `show_toolbar` (`OnHover`, `Always`, `Never`), `syntax_highlighting_enabled` (on), `font_family` (the editor's), `edits` (inline edits: `enabled` (on), `show_collapsed` (off), `render_side_by_side` (`Auto`, `Never`), `allow_code_shifting` (`Always`, `Horizontal`, `Never`)) |
+| `inline_suggest` | `inlineSuggest.*` | `enabled` (on), `mode` (`SubwordSmart`), `suppress_suggestions`, `keep_on_blur`, `min_show_delay`, `suppress_in_snippet_mode` (on), `show_toolbar` (`OnHover`, `Always`, `Never`), `syntax_highlighting_enabled` (on), `font_family` (the editor's), `edits` (inline edits: `enabled` (on), `show_collapsed` (off), `render_side_by_side` (`Auto`, `Never`), `allow_code_shifting` (`Always`, `Horizontal`, `Never`), `show_long_distance_hint` (on), `long_distance_hint_context_line_count` (0, up to 10)) |
 | `semantic_highlighting` | `semanticHighlighting.enabled` | `On`, `Off` or `ConfiguredByTheme` (the theme's `semanticHighlighting`) |
 | `links` | `links` | detect links and follow them with Cmd/Ctrl+click (on) |
 | `color_decorators` | `colorDecorators` | swatches before colors (on) |

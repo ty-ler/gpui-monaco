@@ -891,6 +891,12 @@ pub struct InlineSuggestEditsOptions {
     pub render_side_by_side: InlineEditsRenderSideBySide,
     /// `allowCodeShifting`.
     pub allow_code_shifting: InlineEditsCodeShifting,
+    /// `showLongDistanceHint`: while the inline edit is off screen (or in
+    /// another file), preview it in a box near the cursor (on).
+    pub show_long_distance_hint: bool,
+    /// `longDistanceHintContextLineCount`: lines shown above and below the
+    /// target line in that preview, 0 to 10 (0).
+    pub long_distance_hint_context_line_count: u32,
 }
 
 impl Default for InlineSuggestEditsOptions {
@@ -900,6 +906,8 @@ impl Default for InlineSuggestEditsOptions {
             show_collapsed: false,
             render_side_by_side: InlineEditsRenderSideBySide::Auto,
             allow_code_shifting: InlineEditsCodeShifting::Always,
+            show_long_distance_hint: true,
+            long_distance_hint_context_line_count: 0,
         }
     }
 }

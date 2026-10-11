@@ -1250,7 +1250,7 @@ impl CodeEditor {
                 self.cancel_rename(false, cx);
                 self.inlay_hints_after_edit(cx);
                 self.semantic_tokens_after_edit(changes, cx);
-                self.inline_completions_after_edit(cx);
+                self.inline_completions_after_edit(*kind, cx);
                 self.linked_editing_after_edit(changes, own, cx);
                 let latest = model.read(cx).snapshot();
                 if latest.version() == self.snapshot.version() {
@@ -2056,6 +2056,11 @@ impl CodeEditor {
     fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
         if self.options.single_line {
             cx.propagate();
+            return;
+        }
+        // Monaco `inlineSuggest.commitAlternativeAction` (Shift+Tab, weighed
+        // above snippets and outdenting).
+        if self.accept_inline_suggestion_alternative_action(cx) {
             return;
         }
         if self.has_prev_tabstop() {
@@ -3897,6 +3902,9 @@ impl Render for CodeEditor {
             if self.tab_should_accept_inline_edit(cx) {
                 key_context.add("tab_should_accept_inline_edit");
             }
+            if self.inline_suggestion_alternative_action_visible(cx) {
+                key_context.add("inline_suggestion_alternative_action_visible");
+            }
         }
         let root = div()
             .id("code-editor")
@@ -4539,6 +4547,11 @@ impl Render for CodeEditor {
             .on_action(cx.listener(|this, _: &JumpToNextInlineEdit, _, cx| {
                 this.jump_to_next_inline_edit(cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &AcceptInlineSuggestionAlternativeAction, _, cx| {
+                    this.accept_inline_suggestion_alternative_action(cx);
+                }),
+            )
             .on_action(
                 cx.listener(|this, _: &ToggleInlineSuggestionShowCollapsed, _, cx| {
                     this.toggle_inline_edits_show_collapsed(cx)
