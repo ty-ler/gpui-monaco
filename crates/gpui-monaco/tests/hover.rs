@@ -270,7 +270,7 @@ impl HoverProvider for LevelHover {
             Some(request) => {
                 self.0.borrow_mut().push(request.verbosity_delta);
                 let previous: i32 = request.previous_hover.contents[0]
-                    .0
+                    .value
                     .trim_start_matches("level ")
                     .parse()
                     .unwrap();

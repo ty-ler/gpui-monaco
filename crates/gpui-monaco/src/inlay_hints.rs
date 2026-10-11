@@ -23,8 +23,8 @@ use crate::decorations::{DecorationId, DecorationOptions, InjectedText};
 use crate::editor::{CodeEditor, CodeEditorEvent};
 use crate::options::{InlayHintsMode, MultiCursorModifier};
 use crate::providers::{
-    Command, InlayHint, InlayHintKind, InlayHintsEpoch, InlayHintsProvider, MarkdownString,
-    inlay_hints_providers,
+    Command, Documentation, InlayHint, InlayHintKind, InlayHintsEpoch, InlayHintsProvider,
+    MarkdownString, inlay_hints_providers,
 };
 use crate::theme::TokenStyle;
 
@@ -646,8 +646,9 @@ impl CodeEditor {
             let label_part = hint.label.parts().get(part.part).cloned()?;
             let mut contents = Vec::new();
             // The hint's tooltip, then the part's (Monaco's ordinals 0, 1).
-            contents.extend(hint.tooltip.clone());
-            contents.extend(label_part.tooltip.clone());
+            // String tooltips are plain text (Monaco `appendText`).
+            contents.extend(hint.tooltip.as_ref().map(Documentation::to_markdown));
+            contents.extend(label_part.tooltip.as_ref().map(Documentation::to_markdown));
             let mut command = None;
             if label_part.location.is_some() {
                 contents.push(format!("Go to Definition ({keys})").into());

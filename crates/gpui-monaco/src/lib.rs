@@ -17,6 +17,10 @@
 //!   data, for Monaco's `wordSegmenterLocales`
 //!   ([`EditorOptions::word_segmenter_locales`]). Without it the option has
 //!   no effect.
+//! - `codicons` (off): Microsoft's codicon icon font from the
+//!   `gpui-monaco-codicons` crate, licensed CC-BY-4.0 (apps that enable it
+//!   must ship its attribution), so the widgets draw Monaco's icons. Without
+//!   it they draw Unicode stand-ins; see [`codicons`].
 #![warn(missing_docs)]
 
 mod accessibility;
@@ -27,6 +31,7 @@ mod bracket_matching;
 mod bulk_edit;
 pub mod code_action;
 mod code_lens;
+pub mod codicons;
 pub mod color;
 mod color_picker;
 pub use color_picker::{ColorPickerWidget, STANDALONE_COLOR_PICKER_KEY_CONTEXT};
@@ -187,11 +192,13 @@ pub use widgets::{
     ViewZone, WidgetId, ZoneHeight,
 };
 
-/// Binds Monaco's default keybindings in the editor's key context, starts
+/// Registers the codicon font with the `codicons` feature ([`codicons`]),
+/// binds Monaco's default keybindings in the editor's key context, starts
 /// tracking models for [`models`] and [`on_did_create_model`], and registers
 /// Monaco's `editor.action.goToLocations` and `editor.action.peekLocations`
 /// API commands for [`execute_command`].
 pub fn init(cx: &mut gpui::App) {
+    codicons::register_codicon_font(cx);
     registry::ensure(cx);
     goto::register_commands(cx);
     actions::bind_default_keys(cx);

@@ -21,6 +21,7 @@ use gpui::{
 };
 use text::{Point, PointUtf16};
 
+use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
 use crate::decorations::{BlockDecoration, DecorationId, DecorationOptions, InjectedText};
 use crate::diff::{
@@ -688,8 +689,8 @@ impl Render for MoveCaption {
                             });
                         }
                     })
-                    // TODO(#246): Monaco's `compare-changes` codicon.
-                    .child("⇄"),
+                    // The moved block's `compare-changes` action, 12px.
+                    .child(codicon(Codicon::CompareChanges).size(px(12.))),
             )
     }
 }
@@ -804,7 +805,7 @@ impl RevertArrow {
                     .ok();
                 });
             })
-            .child("→")
+            .child(codicon(Codicon::ArrowRight))
     }
 }
 
@@ -1082,12 +1083,17 @@ impl Render for UnchangedBar {
                         });
                     }
                 })
-                // TODO(#246): Monaco's symbol kind codicons.
-                .child(div().text_color(glyph_color).child(glyph))
+                // The symbol kind's codicon, and `chevron-right` between
+                // breadcrumbs.
+                .child(codicon(glyph).size(px(13.)).color(glyph_color))
                 .child("\u{a0}")
                 .child(item.name.clone())
                 .when(ix + 1 < breadcrumb_count, |item| {
-                    item.child("\u{a0}›\u{a0}")
+                    item.child(
+                        div()
+                            .px(px(2.))
+                            .child(codicon(Codicon::ChevronRight).size(px(13.))),
+                    )
                 })
         });
         div()
@@ -1110,8 +1116,7 @@ impl Render for UnchangedBar {
                         .px_1()
                         .hover(|style| style.text_color(link))
                         .on_click(move |_, _, cx| unfold(cx, |r, _| r.show_all()))
-                        // TODO(#246): Monaco's `unfold` codicon.
-                        .child("↕"),
+                        .child(codicon(Codicon::Unfold)),
                 ),
             )
             .child(
@@ -1204,8 +1209,8 @@ impl Render for FoldUnchangedGlyph {
                     });
                 }
             })
-            // TODO(#246): Monaco's `fold` codicon.
-            .child("⊟")
+            // Monaco's "Fold Unchanged Region" glyph: the `fold` codicon.
+            .child(codicon(Codicon::Fold))
     }
 }
 
@@ -1675,8 +1680,8 @@ impl Render for DeletedCode {
                                     .text_size(px(11.))
                                     .opacity(0.7)
                                     .text_color(colors.foreground)
-                                    // TODO(#246): Monaco's `remove` codicon.
-                                    .child("−"),
+                                    // `.delete-sign`: 11px `remove`.
+                                    .child(codicon(Codicon::Remove).size(px(11.))),
                             )
                         })
                         .when(bulb, |margin| {
@@ -1684,8 +1689,14 @@ impl Render for DeletedCode {
                             margin.child(
                                 canvas(
                                     |_, _, _| {},
-                                    move |bounds, _, window, _| {
-                                        crate::element::paint_lightbulb(bounds, color, window)
+                                    move |bounds, _, window, cx| {
+                                        crate::element::paint_lightbulb(
+                                            bounds,
+                                            color,
+                                            Codicon::LightBulb,
+                                            window,
+                                            cx,
+                                        )
                                     },
                                 )
                                 .absolute()
@@ -1962,6 +1973,19 @@ pub struct DiffHunkContext {
     pub original_with_modified_changes: String,
 }
 
+/// `text` with its `$(name)` codicons drawn as icons.
+fn label_with_icons(text: &str) -> Vec<gpui::AnyElement> {
+    crate::codicons::parse_label_with_icons(text)
+        .into_iter()
+        .map(|part| match part {
+            crate::codicons::LabelPart::Text(text) => {
+                SharedString::from(text.to_string()).into_any_element()
+            }
+            crate::codicons::LabelPart::Icon(icon) => codicon(icon).into_any_element(),
+        })
+        .collect()
+}
+
 /// What a [`DiffHunkAction`] runs.
 pub type DiffHunkHandler = Rc<dyn Fn(&DiffHunkContext, &mut Window, &mut App)>;
 
@@ -1974,7 +1998,8 @@ pub struct DiffHunkAction {
     pub id: SharedString,
     /// Its tooltip and screen reader label.
     pub label: SharedString,
-    /// The button's text (Monaco shows a codicon).
+    /// The button's label (Monaco shows a codicon): text, where `$(name)`
+    /// is the codicon `name`, such as `"$(discard)"`.
     pub icon: SharedString,
     /// The toolbar it's in.
     pub toolbar: DiffHunkToolbar,
@@ -4832,8 +4857,14 @@ impl DiffEditor {
             actions.push(DiffHunkAction {
                 id: id.into(),
                 label: label.into(),
-                // TODO(#246): Monaco's `arrow-right`/`discard` codicons.
-                icon: if self.inline { "↺" } else { "→" }.into(),
+                // Monaco's gutter menu: `discard` inline, `arrow-right` side
+                // by side.
+                icon: if self.inline {
+                    "$(discard)"
+                } else {
+                    "$(arrow-right)"
+                }
+                .into(),
                 toolbar,
                 // Run by `run_hunk_action`, which knows the revert.
                 run: Rc::new(|_, _, _| {}),
@@ -4957,7 +4988,7 @@ impl DiffEditor {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.run_hunk_action(&action, &revert, &mapping, window, cx)
                     }))
-                    .child(icon)
+                    .children(label_with_icons(&icon))
             });
             let element = div()
                 .absolute()
@@ -5702,13 +5733,13 @@ fn diff_decorations(
             (
                 colors.diff_inserted_line_background,
                 colors.diff_gutter_inserted_line_background,
-                "+",
+                Codicon::Add,
             )
         } else {
             (
                 colors.diff_removed_line_background,
                 colors.diff_gutter_removed_line_background,
-                "−",
+                Codicon::Remove,
             )
         };
         DecorationOptions {
@@ -5718,7 +5749,7 @@ fn diff_decorations(
             // Monaco's `insert-sign`/`delete-sign`: 0.7 opacity.
             lines_decoration_text: options
                 .render_indicators
-                .then(|| (SharedString::from(sign), colors.foreground.opacity(0.7))),
+                .then(|| (sign.text(), colors.foreground.opacity(0.7))),
             ..Default::default()
         }
     };

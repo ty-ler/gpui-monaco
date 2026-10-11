@@ -14,9 +14,10 @@ use gpui::{
     Size, StatefulInteractiveElement, Styled, StyledText, WeakEntity, Window, div, px, rgb, size,
 };
 
+use crate::codicons::{Codicon, icon as codicon};
 use crate::completion::Session;
 use crate::editor::CodeEditor;
-use crate::markdown::{MarkdownStyle, render_markdown};
+use crate::markdown::{MarkdownStyle, render_documentation};
 use crate::options::{SuggestInsertMode, SuggestOptions};
 use crate::providers::{CompletionItem, CompletionItemKind, CompletionItemTag};
 use crate::theme::{EditorColors, Theme};
@@ -196,25 +197,11 @@ pub struct SuggestWidget {
     wheel_remainder: Pixels,
 }
 
-/// A short glyph per kind, standing in for Monaco's codicons, in the
+/// The kind's codicon (Monaco `CompletionItemKinds.toIcon`), in the
 /// theme's `symbolIcon.*Foreground` color (the row's text color for kinds
 /// without one).
-fn kind_icon(kind: CompletionItemKind, colors: &EditorColors) -> (&'static str, Option<Hsla>) {
-    use CompletionItemKind::*;
-    let glyph = match kind {
-        Method | Function | Constructor => "ƒ",
-        Field | Variable | Property | Value | Reference | TypeParameter => "𝑥",
-        Class | Struct | Interface | Enum | Module => "◆",
-        EnumMember | Constant => "π",
-        Keyword | Operator => "⌘",
-        Snippet => "{}",
-        File | Folder => "▤",
-        Event | Unit | Color | Customcolor | Text => "ab",
-        User => "@",
-        Issue => "◎",
-        Tool => "⚒",
-    };
-    (glyph, colors.symbol_icons.for_completion_kind(kind))
+fn kind_icon(kind: CompletionItemKind, colors: &EditorColors) -> (Codicon, Option<Hsla>) {
+    (kind.icon(), colors.symbol_icons.for_completion_kind(kind))
 }
 
 /// Monaco's `ColorExtractor` pattern: hex, `rgb[a]()` and `hsl[a]()`.
@@ -236,7 +223,7 @@ pub(crate) fn completion_item_color(item: &CompletionItem) -> Option<Hsla> {
     if let Some(detail) = item.detail.as_ref().filter(|d| strict.is_match(d)) {
         return parse_css_color(detail);
     }
-    let docs = &item.documentation.as_ref()?.0;
+    let docs = item.documentation.as_ref()?.as_str();
     let found = relaxed.find(docs)?;
     (found.start() == 0 || found.end() == docs.len())
         .then(|| parse_css_color(found.as_str()))
@@ -402,7 +389,7 @@ impl SuggestWidget {
         let parts: Vec<String> = detail
             .map(|d| d.to_string())
             .into_iter()
-            .chain(docs.map(|d| d.0.to_string()))
+            .chain(docs.map(|d| d.as_str().to_string()))
             .collect();
         (!parts.is_empty()).then(|| parts.join("\n\n"))
     }
@@ -579,7 +566,8 @@ impl SuggestWidget {
                 if let Some(glyph_color) = glyph_color {
                     icon = icon.text_color(glyph_color);
                 }
-                icon = icon.child(glyph);
+                // `.suggest-icon`: a 16px codicon.
+                icon = icon.child(codicon(glyph));
             }
             icon
         });
@@ -660,7 +648,8 @@ impl SuggestWidget {
                                 });
                             }
                         })
-                        .child("›"),
+                        // `suggest-more-info`: `chevron-right` at 14px.
+                        .child(codicon(Codicon::ChevronRight).size(px(14.))),
                 )
             })
     }
@@ -724,11 +713,14 @@ impl SuggestWidget {
         &self,
     ) -> Option<(
         Option<SharedString>,
-        Option<crate::providers::MarkdownString>,
+        Option<crate::providers::Documentation>,
     )> {
         let item = self.state.focused_item()?;
         Some(match &self.state.explanation {
-            Some((detail, docs)) => (Some(detail.clone()), Some(docs.clone().into())),
+            Some((detail, docs)) => (
+                Some(detail.clone()),
+                Some(crate::providers::MarkdownString::new(docs.clone()).into()),
+            ),
             None => (
                 item.detail.clone().filter(|detail| *detail != item.label),
                 item.documentation.clone(),
@@ -739,7 +731,14 @@ impl SuggestWidget {
     fn render_details(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let colors = &self.theme.colors;
         let (detail, docs) = self.details_content()?;
-        let registry = crate::model::language_registry(cx);
+        // Monaco `SuggestDetailsWidget`: the suggest font size, and its line
+        // height over it.
+        let style = MarkdownStyle {
+            font_size: self.metrics.font_size,
+            line_height: f32::from(self.metrics.item_height) / f32::from(self.metrics.font_size),
+            foreground: colors.suggest_foreground,
+            ..self.style.clone()
+        };
         let detail = detail.map(|detail| -> SharedString {
             // Monaco caps the detail at 100000 characters.
             if detail.len() > 100_000 {
@@ -784,7 +783,8 @@ impl SuggestWidget {
                                 });
                             }
                         })
-                        .child("×"),
+                        // `suggest-details-close`: `close` at 14px.
+                        .child(codicon(Codicon::Close).size(px(14.))),
                 )
                 .when_some(detail, |this, detail| {
                     this.child(
@@ -798,11 +798,11 @@ impl SuggestWidget {
                     )
                 })
                 .when_some(docs, |this, docs| {
-                    this.child(div().px(px(5.)).py(px(4.)).child(render_markdown(
-                        &docs.0,
-                        &self.style,
+                    this.child(div().px(px(5.)).py(px(4.)).child(render_documentation(
+                        &docs,
+                        &style,
                         &self.theme,
-                        &registry,
+                        cx,
                     )))
                 }),
         )
@@ -973,7 +973,7 @@ mod tests {
     fn extracts_completion_item_colors() {
         let item = |label: &str, detail: Option<&str>, docs: Option<&str>| CompletionItem {
             detail: detail.map(|d| d.to_string().into()),
-            documentation: docs.map(Into::into),
+            documentation: docs.map(|d| d.to_string().into()),
             ..CompletionItem::new(label.to_string(), CompletionItemKind::Color)
         };
         assert!(completion_item_color(&item("#FFF", None, None)).is_some());

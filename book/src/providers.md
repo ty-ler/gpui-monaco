@@ -88,6 +88,7 @@ impl CompletionProvider for MyCompletions {
     ) -> Task<anyhow::Result<CompletionList>> {
         let mut item = CompletionItem::new("push", CompletionItemKind::Method);
         item.detail = Some("fn push(&mut self, value: T)".into());
+        // Plain text; use `MarkdownString::new("…").into()` for markdown.
         item.documentation = Some("Appends an element.".into());
         Task::ready(Ok(CompletionList { items: vec![item], incomplete: false }))
     }
@@ -95,6 +96,8 @@ impl CompletionProvider for MyCompletions {
 ```
 
 Completion is triggered by Ctrl+Space, by trigger characters (`suggest_on_trigger_characters`), or automatically after `quick_suggestions_delay` while typing a word. `quick_suggestions` turns that on separately for code, comments and strings, and can show the items as ghost text instead (`Inline`). By default, in code, the widget waits for inline completions and stays closed while ghost text shows (`OffWhenInlineCompletions`). When no provider has items, the editor suggests words from open documents (`word_based_suggestions`).
+
+Documentation is a `Documentation`, Monaco's `string | IMarkdownString`: strings convert to plain text, shown as written, and a `MarkdownString` renders as markdown. The same goes for signature and parameter documentation and inlay hint tooltips. A `MarkdownString` (Monaco `IMarkdownString`) also carries `is_trusted` (`command:` links run commands), `support_theme_icons` (`$(name)` draws a codicon) and `support_html` (a sanitized HTML subset, `markdown::HTML_TAGS`). Markdown renders GFM tables, block quotes, nested lists, strikethrough, images and syntax highlighted code blocks; the text can't be selected, as GPUI has no selectable text outside inputs.
 
 The widget shows each item's `label_detail` right after the label and its `label_description` at the right. The focused item's `detail` also shows at the right. Ctrl+Space while the list is open toggles the details panel with the item's `detail` and `documentation`; it is collapsed by default, as in Monaco. Ctrl+Alt+Space moves the focus into the details panel, so the arrow and page keys scroll it and Cmd/Ctrl+C copies it, and back. Drag the list's right or bottom edge to resize it.
 

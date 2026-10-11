@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use gpui::{AppContext as _, Context, SharedString, Task, Window};
 
+use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::StandardTokenType;
 use crate::decorations::{DecorationId, DecorationOptions, TrackedRangeStickiness};
 use crate::editor::CodeEditor;
@@ -539,7 +540,8 @@ impl gpui::Render for UnicodeBanner {
                     .pl(px(10.))
                     .pr(px(6.))
                     .text_color(self.colors.banner_icon_foreground)
-                    .child("⚠"),
+                    // `extensions-warning-message`: the `warning` codicon.
+                    .child(codicon(Codicon::Warning)),
             )
             .child(
                 div()
@@ -571,7 +573,8 @@ impl gpui::Render for UnicodeBanner {
                     .id("unicode-highlight-banner-close")
                     .px(px(10.))
                     .cursor_pointer()
-                    .child("✕")
+                    // `widget-close`: the `close` codicon.
+                    .child(codicon(Codicon::Close))
                     .tooltip(crate::tooltip::tooltip("Close Banner", &self.colors))
                     .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
                         cx.stop_propagation();

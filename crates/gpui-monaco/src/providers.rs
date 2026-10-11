@@ -12,6 +12,8 @@ use std::sync::Arc;
 use gpui::{App, Global, SharedString, Task};
 use text::{BufferSnapshot, PointUtf16};
 
+use crate::codicons::Codicon;
+
 /// Which models a provider applies to (Monaco `LanguageSelector`).
 ///
 /// Lookups rank the providers whose selector matches a model by
@@ -193,13 +195,151 @@ pub struct ProviderContext {
     pub snapshot: BufferSnapshot,
 }
 
-/// Markdown text (Monaco `IMarkdownString`).
+/// Markdown text and how to render it (Monaco `IMarkdownString`).
+///
+/// `"text".into()` makes an untrusted string without theme icons or HTML,
+/// like Monaco's `new MarkdownString(text)`.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub struct MarkdownString(pub SharedString);
+pub struct MarkdownString {
+    /// The markdown source (Monaco `value`).
+    pub value: SharedString,
+    /// Whether `command:` links run commands ([`crate::execute_command`])
+    /// when clicked (Monaco `isTrusted`). Untrusted strings open only web
+    /// and mail links.
+    pub is_trusted: bool,
+    /// Whether `$(name)` renders the codicon `name` (Monaco
+    /// `supportThemeIcons`); see [`crate::codicons::parse_label_with_icons`].
+    pub support_theme_icons: bool,
+    /// Whether raw HTML renders, limited to a sanitized subset like
+    /// Monaco's (Monaco `supportHtml`); otherwise HTML tags are dropped.
+    pub support_html: bool,
+}
+
+impl MarkdownString {
+    /// An untrusted markdown string (Monaco `new MarkdownString(value)`).
+    pub fn new(value: impl Into<SharedString>) -> Self {
+        Self {
+            value: value.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Plain text escaped so it renders as written (Monaco
+    /// `new MarkdownString().appendText(text)`, newlines as paragraph
+    /// breaks).
+    pub fn from_plain_text(text: &str) -> Self {
+        Self::new(escape_markdown_syntax_tokens(text))
+    }
+
+    /// Sets [`Self::is_trusted`].
+    pub fn trusted(mut self, is_trusted: bool) -> Self {
+        self.is_trusted = is_trusted;
+        self
+    }
+
+    /// Sets [`Self::support_theme_icons`].
+    pub fn with_theme_icons(mut self, support_theme_icons: bool) -> Self {
+        self.support_theme_icons = support_theme_icons;
+        self
+    }
+
+    /// Sets [`Self::support_html`].
+    pub fn with_html(mut self, support_html: bool) -> Self {
+        self.support_html = support_html;
+        self
+    }
+
+    /// The markdown source.
+    pub fn as_str(&self) -> &str {
+        &self.value
+    }
+}
 
 impl<T: Into<SharedString>> From<T> for MarkdownString {
     fn from(value: T) -> Self {
-        Self(value.into())
+        Self::new(value)
+    }
+}
+
+/// Monaco `MarkdownString.appendText`'s escaping
+/// (`escapeMarkdownSyntaxTokens`): markdown punctuation is backslash
+/// escaped, leading spaces and tabs become non-breaking spaces and each
+/// newline starts a new paragraph. (Monaco makes every space
+/// non-breaking, which keeps the text from wrapping; only indentation
+/// needs it.)
+pub fn escape_markdown_syntax_tokens(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 8);
+    let mut line_start = true;
+    for ch in text.chars() {
+        match ch {
+            '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '(' | ')' | '#' | '+' | '-' | '!'
+            | '~' | '>' | '|' | '<' | '.' | '$' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            ' ' | '\t' if line_start => out.push('\u{a0}'),
+            '\n' => out.push_str("\n\n"),
+            _ => out.push(ch),
+        }
+        line_start = ch == '\n' || (line_start && (ch == ' ' || ch == '\t'));
+    }
+    out
+}
+
+/// Documentation that is either plain text or markdown (Monaco's
+/// `string | IMarkdownString` for completion, signature and parameter
+/// documentation and inlay hint tooltips). Plain text is shown as written,
+/// keeping its line breaks and indentation (`white-space: pre-wrap`).
+///
+/// Strings convert to [`Documentation::PlainText`], as in Monaco; convert a
+/// [`MarkdownString`] for markdown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Documentation {
+    /// Plain text (a Monaco `string`).
+    PlainText(SharedString),
+    /// Markdown (a Monaco `IMarkdownString`).
+    Markdown(MarkdownString),
+}
+
+impl Documentation {
+    /// The text: plain text, or the markdown source.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Documentation::PlainText(text) => text,
+            Documentation::Markdown(markdown) => &markdown.value,
+        }
+    }
+
+    /// As markdown: plain text is escaped (Monaco `appendText`).
+    pub fn to_markdown(&self) -> MarkdownString {
+        match self {
+            Documentation::PlainText(text) => MarkdownString::from_plain_text(text),
+            Documentation::Markdown(markdown) => markdown.clone(),
+        }
+    }
+}
+
+impl From<MarkdownString> for Documentation {
+    fn from(markdown: MarkdownString) -> Self {
+        Documentation::Markdown(markdown)
+    }
+}
+
+impl From<&'static str> for Documentation {
+    fn from(text: &'static str) -> Self {
+        Documentation::PlainText(text.into())
+    }
+}
+
+impl From<String> for Documentation {
+    fn from(text: String) -> Self {
+        Documentation::PlainText(text.into())
+    }
+}
+
+impl From<SharedString> for Documentation {
+    fn from(text: SharedString) -> Self {
+        Documentation::PlainText(text)
     }
 }
 
@@ -269,6 +409,45 @@ pub enum CompletionItemKind {
     Snippet,
 }
 
+impl CompletionItemKind {
+    /// The kind's codicon in the suggest widget (Monaco
+    /// `CompletionItemKinds.toIcon`).
+    pub fn icon(self) -> Codicon {
+        use CompletionItemKind::*;
+        match self {
+            Method => Codicon::SymbolMethod,
+            Function => Codicon::SymbolFunction,
+            Constructor => Codicon::SymbolConstructor,
+            Field => Codicon::SymbolField,
+            Variable => Codicon::SymbolVariable,
+            Class => Codicon::SymbolClass,
+            Struct => Codicon::SymbolStruct,
+            Interface => Codicon::SymbolInterface,
+            Module => Codicon::SymbolModule,
+            Property => Codicon::SymbolProperty,
+            Event => Codicon::SymbolEvent,
+            Operator => Codicon::SymbolOperator,
+            Unit => Codicon::SymbolUnit,
+            Value => Codicon::SymbolValue,
+            Enum => Codicon::SymbolEnum,
+            Constant => Codicon::SymbolConstant,
+            EnumMember => Codicon::SymbolEnumMember,
+            Keyword => Codicon::SymbolKeyword,
+            Snippet => Codicon::SymbolSnippet,
+            Text => Codicon::SymbolText,
+            Color => Codicon::SymbolColor,
+            File => Codicon::SymbolFile,
+            Reference => Codicon::SymbolReference,
+            Customcolor => Codicon::SymbolCustomColor,
+            Folder => Codicon::SymbolFolder,
+            TypeParameter => Codicon::SymbolTypeParameter,
+            User => Codicon::Account,
+            Issue => Codicon::Issues,
+            Tool => Codicon::Tools,
+        }
+    }
+}
+
 /// Monaco `CompletionItem`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CompletionItem {
@@ -279,7 +458,7 @@ pub struct CompletionItem {
     /// Shown next to the label (e.g. a type signature).
     pub detail: Option<SharedString>,
     /// Shown in the details pane while the item is selected.
-    pub documentation: Option<MarkdownString>,
+    pub documentation: Option<Documentation>,
     /// Sorts items with equal filter scores; defaults to the label.
     pub sort_text: Option<SharedString>,
     /// Text matched against what was typed; defaults to the label.
@@ -1090,7 +1269,7 @@ pub struct InlayHintLabelPart {
     /// Its text.
     pub label: SharedString,
     /// Shown on hover, after the hint's tooltip.
-    pub tooltip: Option<MarkdownString>,
+    pub tooltip: Option<Documentation>,
     /// Where Cmd/Ctrl+click goes (opened like go to definition).
     pub location: Option<Location>,
     /// Run by Cmd/Ctrl+click when there's no location, and offered in the
@@ -1169,7 +1348,7 @@ pub struct InlayHint {
     /// Its kind, if any.
     pub kind: Option<InlayHintKind>,
     /// Shown on hover.
-    pub tooltip: Option<MarkdownString>,
+    pub tooltip: Option<Documentation>,
     /// Applied when the hint is double-clicked (e.g. to insert the type it
     /// shows).
     pub text_edits: Vec<TextEdit>,
@@ -1247,6 +1426,39 @@ pub enum SymbolKind {
 }
 
 impl SymbolKind {
+    /// The kind's codicon (Monaco `SymbolKinds.toIcon`).
+    pub fn icon(self) -> Codicon {
+        use SymbolKind::*;
+        match self {
+            File => Codicon::SymbolFile,
+            Module => Codicon::SymbolModule,
+            Namespace => Codicon::SymbolNamespace,
+            Package => Codicon::SymbolPackage,
+            Class => Codicon::SymbolClass,
+            Method => Codicon::SymbolMethod,
+            Property => Codicon::SymbolProperty,
+            Field => Codicon::SymbolField,
+            Constructor => Codicon::SymbolConstructor,
+            Enum => Codicon::SymbolEnum,
+            Interface => Codicon::SymbolInterface,
+            Function => Codicon::SymbolFunction,
+            Variable => Codicon::SymbolVariable,
+            Constant => Codicon::SymbolConstant,
+            String => Codicon::SymbolString,
+            Number => Codicon::SymbolNumber,
+            Boolean => Codicon::SymbolBoolean,
+            Array => Codicon::SymbolArray,
+            Object => Codicon::SymbolObject,
+            Key => Codicon::SymbolKey,
+            Null => Codicon::SymbolNull,
+            EnumMember => Codicon::SymbolEnumMember,
+            Struct => Codicon::SymbolStruct,
+            Event => Codicon::SymbolEvent,
+            Operator => Codicon::SymbolOperator,
+            TypeParameter => Codicon::SymbolTypeParameter,
+        }
+    }
+
     /// Monaco's name for the kind, as shown when grouping symbols
     /// (`symbolKindNames`).
     pub fn name(self) -> &'static str {
@@ -1909,7 +2121,7 @@ pub struct ParameterInformation {
     /// The parameter's position in the signature label.
     pub label: ParameterLabel,
     /// Shown below the signature while this parameter is active.
-    pub documentation: Option<MarkdownString>,
+    pub documentation: Option<Documentation>,
 }
 
 /// Where a parameter appears in its signature label.
@@ -1927,7 +2139,7 @@ pub struct SignatureInformation {
     /// The full signature text; the active parameter is highlighted in it.
     pub label: SharedString,
     /// Shown below the signature.
-    pub documentation: Option<MarkdownString>,
+    pub documentation: Option<Documentation>,
     /// The parameters, in order.
     pub parameters: Vec<ParameterInformation>,
     /// Overrides `SignatureHelp::active_parameter` for this signature.

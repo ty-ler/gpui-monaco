@@ -12,6 +12,7 @@ use gpui::{
     Render, SharedString, StatefulInteractiveElement, Styled, WeakEntity, Window, div, px,
 };
 
+use crate::codicons::{Codicon, icon as codicon};
 use crate::editor::CodeEditor;
 
 /// The More Actions menu paints above the editor's overflowing widgets,
@@ -53,7 +54,7 @@ impl InlineToolbar {
     fn button(
         &self,
         id: &'static str,
-        label: impl Into<SharedString>,
+        label: impl IntoElement,
         keys: Option<&'static str>,
         enabled: bool,
         run: ToolbarAction,
@@ -86,7 +87,7 @@ impl InlineToolbar {
                     }
                 }),
             )
-            .child(label.into())
+            .child(label)
             .children(keys.map(|keys| div().ml(px(4.)).opacity(0.6).child(keys)))
             .into_any_element()
     }
@@ -120,7 +121,10 @@ impl InlineToolbar {
                     }
                 }),
             )
-            .child(div().w(px(12.)).child(if checked { "✓" } else { "" }))
+            .child(div().w(px(16.)).when(checked, |this| {
+                // `menu-selection`: the `check` codicon.
+                this.child(codicon(Codicon::MenuSelection))
+            }))
             .child(label)
             .into_any_element()
     }
@@ -157,7 +161,9 @@ impl Render for InlineToolbar {
                 ))
                 .child(self.button(
                     "inline-previous-button",
-                    "‹",
+                    // `inline-suggestion-hints-previous` / `-next`:
+                    // `chevron-left` and `chevron-right`.
+                    codicon(Codicon::ChevronLeft),
                     None,
                     several,
                     Arc::new(|editor, cx| editor.show_next_inline_suggestion(false, cx)),
@@ -179,7 +185,7 @@ impl Render for InlineToolbar {
                 ))
                 .child(self.button(
                     "inline-next-button",
-                    "›",
+                    codicon(Codicon::ChevronRight),
                     None,
                     several,
                     Arc::new(|editor, cx| editor.show_next_inline_suggestion(true, cx)),
@@ -224,7 +230,8 @@ impl Render for InlineToolbar {
                         cx.notify();
                     }),
                 )
-                .child("⋯"),
+                // `toolbar-more`.
+                .child(codicon(Codicon::ToolBarMore)),
         );
         let menu = self.menu_open.then(|| {
             let mut menu = div()

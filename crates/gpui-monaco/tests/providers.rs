@@ -102,7 +102,7 @@ async fn hover_order(cx: &mut TestAppContext, target: ProviderTarget) -> Vec<Str
     let mut names = Vec::new();
     for task in tasks {
         let hover = task.await.unwrap().unwrap();
-        names.push(hover.contents[0].0.to_string());
+        names.push(hover.contents[0].value.to_string());
     }
     names
 }

@@ -40,7 +40,6 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
 - **Quick access:**
   - Symbols are matched with the suggest widget's fuzzy scorer, not VS Code's quick open scorer.
   - The command palette has no similar-command or TF-IDF suggestions (those are VS Code workbench features), and accents aren't folded when matching.
-  - Icons are glyphs, not codicons.
 - **Inline completions:**
   - Secondary cursors don't get it.
   - `completeBracketPairs` isn't supported.
@@ -61,7 +60,7 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
 - **Diff editor:** only Monaco's advanced diff algorithm exists, and there's no `maxFileSize` cut-off, `hideOriginalLineNumbers`, `compactMode` or `diffWordWrap` (#203).
 - **Long lines:** as in Monaco, very long lines stop rendering after `stop_rendering_line_after` with a "Show more (…)" chip, and clicking at or past that column (Monaco's `longLinesHelper`) sets the option to `None`, so everything draws.
 - **Developer actions:** "Developer: Inspect Tokens" shows tree-sitter tokens: the token type is the Monaco-style name `tokenize` gives (`keyword.rust`), followed by the capture and the TextMate scopes it's matched against. Escape closes it on key down rather than key up. "Developer: Force Retokenize" reparses the whole model on the spot and logs how long it took.
-- **Symbol icons:** the suggest widget and quick outline draw glyphs rather than codicons, colored by the theme's `symbolIcon.*Foreground` colors.
+- **Icons:** the codicon font is optional (the `codicons` feature, CC-BY-4.0); without it the widgets draw Unicode stand-ins for Monaco's codicons.
 
 ## Platform
 

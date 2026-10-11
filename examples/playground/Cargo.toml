@@ -18,7 +18,7 @@ screenshot = ["gpui/test-support", "gpui_platform/test-support", "dep:image"]
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 gpui.workspace = true
 gpui_platform.workspace = true
-gpui-monaco.workspace = true
+gpui-monaco = { workspace = true, features = ["codicons"] }
 gpui-monaco-languages.workspace = true
 gpui-monaco-lsp.workspace = true
 anyhow.workspace = true

@@ -534,6 +534,19 @@ editor_colors! { r;
     hover_highlight_foreground: Hsla = r.color("editorHoverWidget.highlightForeground");
     /// The hovered word's range (`editor.hoverHighlightBackground`).
     hover_highlight_background: Hsla = r.color("editor.hoverHighlightBackground");
+    /// Links in markdown (`textLink.foreground`).
+    text_link_foreground: Hsla = r.color("textLink.foreground");
+    /// Hovered links (`textLink.activeForeground`).
+    text_link_active_foreground: Hsla = r.color("textLink.activeForeground");
+    /// Inline code in markdown (`textCodeBlock.background`).
+    text_code_block_background: Hsla = r.color("textCodeBlock.background");
+    /// Block quotes in markdown (`textBlockQuote.background`); `None` in
+    /// dark high contrast.
+    text_block_quote_background: Option<Hsla> = r.visible("textBlockQuote.background");
+    /// Block quotes' left border (`textBlockQuote.border`).
+    text_block_quote_border: Hsla = r.color("textBlockQuote.border");
+    /// Separators in text (`textSeparator.foreground`): markdown tables.
+    text_separator_foreground: Hsla = r.color("textSeparator.foreground");
     /// Input boxes in widgets (`input.background`).
     input_background: Hsla = r.color("input.background");
     /// Their text (`input.foreground`).

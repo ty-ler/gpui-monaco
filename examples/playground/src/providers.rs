@@ -48,13 +48,21 @@ impl HoverProvider for DemoHover {
             .verbosity_request
             .as_ref()
             .map_or(0, |request| {
-                let previous = request.previous_hover.contents.len() as i32 - 2;
+                let previous = request.previous_hover.contents.len() as i32 - 3;
                 (previous + request.verbosity_delta).clamp(0, 2)
             });
         let mut contents = vec![
             format!("```rust\nfn {word}(&self) -> usize\n```").into(),
             format!("Documentation for **{word}**, rendered as *markdown* with `inline code`.")
                 .into(),
+            // Monaco's GFM tables, theme icons, lists and quotes.
+            MarkdownString::new(
+                "$(info) Returns ~~a guess~~ the count.\n\n\
+                 | Case | Result |\n|:--|--:|\n| empty | `0` |\n| one item | `1` |\n\n\
+                 - counts every item\n  - including hidden ones\n\n\
+                 > Never negative.",
+            )
+            .with_theme_icons(true),
         ];
         if level >= 1 {
             contents.push(format!("More detail about `{word}`: it returns a count.").into());
@@ -90,7 +98,7 @@ impl SignatureHelpProvider for DemoSignatures {
         };
         let parameter = |label: &str, doc: &str| ParameterInformation {
             label: ParameterLabel::Text(label.into()),
-            documentation: Some(doc.into()),
+            documentation: Some(doc.to_string().into()),
         };
         Task::ready(Ok(Some(SignatureHelp {
             signatures: vec![SignatureInformation {
@@ -123,7 +131,7 @@ impl CompletionProvider for DemoCompletions {
     ) -> Task<anyhow::Result<CompletionList>> {
         let item = |label: &str, kind, detail: &str, docs: &str| CompletionItem {
             detail: Some(detail.to_string().into()),
-            documentation: Some(docs.into()),
+            documentation: Some(MarkdownString::new(docs.to_string()).into()),
             ..CompletionItem::new(label.to_string(), kind)
         };
         let items = vec![

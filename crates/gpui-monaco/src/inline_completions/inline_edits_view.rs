@@ -33,6 +33,7 @@ use super::inline_edits::{
     grow_edits_until_whitespace, utf16_to_byte,
 };
 use super::long_distance_hint::{LongDistanceHintState, LongDistanceState};
+use crate::codicons::{Codicon, icon as codicon};
 use crate::decorations::{BlockDecoration, DecorationId, DecorationOptions, InjectedText};
 use crate::editor::CodeEditor;
 use crate::options::LineNumbers;
@@ -385,22 +386,24 @@ impl GutterIndicator {
         }));
     }
 
-    fn icon(&self) -> &'static str {
+    /// Monaco's indicator codicon: `check` while hovered, `keyboard-tab`
+    /// when Tab accepts, else `arrow-down` / `arrow-up` towards the edit.
+    fn icon(&self) -> Codicon {
         match self.placement {
             IndicatorPlacement::Docked(_) => {
                 if self.hovered || self.edit_hovered {
-                    "✓"
+                    Codicon::Check
                 } else if self.tab_action == TabAction::Accept {
-                    "⇥"
+                    Codicon::KeyboardTab
                 } else if self.cursor_above {
-                    "↓"
+                    Codicon::ArrowDown
                 } else {
-                    "↑"
+                    Codicon::ArrowUp
                 }
             }
-            _ if self.tab_action == TabAction::Accept => "⇥",
-            IndicatorPlacement::Above => "↑",
-            IndicatorPlacement::Below => "↓",
+            _ if self.tab_action == TabAction::Accept => Codicon::KeyboardTab,
+            IndicatorPlacement::Above => Codicon::ArrowUp,
+            IndicatorPlacement::Below => Codicon::ArrowDown,
         }
     }
 
@@ -493,10 +496,10 @@ impl Render for GutterIndicator {
                             .items_center()
                             .justify_center()
                             .when(!icon_visible, |this| this.opacity(0.))
-                            .child(self.icon()),
+                            .child(codicon(self.icon())),
                     )
             })
-            .when(!docked, |this| this.child(self.icon()));
+            .when(!docked, |this| this.child(codicon(self.icon())));
         // Monaco's pulse: an outline growing from the pill as it fades.
         let pulse = (self.pulses > 0).then(|| {
             let width = if docked { pill_width } else { px(22.) };
@@ -843,7 +846,8 @@ impl CodeEditor {
             })
     }
 
-    /// The gutter indicator's line number, icon and pulse count, for tests.
+    /// The gutter indicator's line number, icon (as its Unicode stand-in)
+    /// and pulse count, for tests.
     #[doc(hidden)]
     pub fn inline_edit_gutter_pill_for_tests(
         &self,
@@ -852,7 +856,7 @@ impl CodeEditor {
         let indicator = self.inline.edit_view.indicator.as_ref()?.read(cx);
         Some((
             indicator.line_number.to_string(),
-            indicator.icon().to_string(),
+            indicator.icon().fallback().to_string(),
             indicator.pulses,
         ))
     }

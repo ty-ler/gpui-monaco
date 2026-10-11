@@ -19,6 +19,7 @@ use crate::actions::{
     ContextMenuFirst, ContextMenuHide, ContextMenuLast, ContextMenuNext, ContextMenuPrevious,
     ContextMenuSelect, ContextMenuSubmenuClose, ContextMenuSubmenuOpen,
 };
+use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
 use crate::editor::CodeEditor;
 use crate::widgets::{OverlayPosition, WidgetId};
@@ -341,7 +342,10 @@ impl ContextMenu {
                                     .text_size(px(12.))
                                     .child(keys)
                             }))
-                            .children(is_submenu.then(|| div().pl(px(8.)).child("›")))
+                            .children(is_submenu.then(|| {
+                                // `menu-submenu`: `chevron-right`.
+                                div().pl(px(8.)).child(codicon(Codicon::MenuSubmenu))
+                            }))
                             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                                 if !*hovered {
                                     return;

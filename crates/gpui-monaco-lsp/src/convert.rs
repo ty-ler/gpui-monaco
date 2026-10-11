@@ -11,8 +11,8 @@ use gpui_monaco::providers::{
 };
 use gpui_monaco::providers::{
     CompletionItem, CompletionItemKind, CompletionList, DocumentHighlight, DocumentHighlightKind,
-    Hover, Location, MarkdownString, ParameterInformation, ParameterLabel, SignatureHelp,
-    SignatureInformation, WorkspaceEdit,
+    Documentation, Hover, Location, MarkdownString, ParameterInformation, ParameterLabel,
+    SignatureHelp, SignatureInformation, WorkspaceEdit,
 };
 use gpui_monaco::text::PointUtf16;
 use gpui_monaco::{Marker, MarkerSeverity, MarkerTag, RelatedInformation};
@@ -67,10 +67,19 @@ fn marked_string(value: lsp::MarkedString) -> MarkdownString {
     }
 }
 
-fn documentation(documentation: lsp::Documentation) -> MarkdownString {
+/// LSP documentation: plain strings and `plaintext` markup stay plain text
+/// (Monaco's `string` documentation), `markdown` markup is markdown.
+fn documentation(documentation: lsp::Documentation) -> Documentation {
     match documentation {
-        lsp::Documentation::String(text) => escape_markdown(&text).into(),
-        lsp::Documentation::MarkupContent(content) => markup(content),
+        lsp::Documentation::String(text) => Documentation::PlainText(text.into()),
+        lsp::Documentation::MarkupContent(content) => markup_documentation(content),
+    }
+}
+
+fn markup_documentation(content: lsp::MarkupContent) -> Documentation {
+    match content.kind {
+        lsp::MarkupKind::Markdown => Documentation::Markdown(content.value.into()),
+        lsp::MarkupKind::PlainText => Documentation::PlainText(content.value.into()),
     }
 }
 
@@ -84,7 +93,7 @@ pub fn hover(hover: lsp::Hover) -> Hover {
     Hover {
         contents: contents
             .into_iter()
-            .filter(|c| !c.0.trim().is_empty())
+            .filter(|c| !c.value.trim().is_empty())
             .collect(),
         range: hover.range.map(range),
         ..Default::default()
@@ -634,11 +643,11 @@ pub fn code_action(action: lsp::CodeActionOrCommand) -> anyhow::Result<CodeActio
     })
 }
 
-/// An LSP tooltip as markdown.
-fn tooltip(tooltip: lsp::InlayHintTooltip) -> MarkdownString {
+/// An LSP tooltip: plain text or markdown.
+fn tooltip(tooltip: lsp::InlayHintTooltip) -> Documentation {
     match tooltip {
-        lsp::InlayHintTooltip::String(text) => escape_markdown(&text).into(),
-        lsp::InlayHintTooltip::MarkupContent(content) => markup(content),
+        lsp::InlayHintTooltip::String(text) => Documentation::PlainText(text.into()),
+        lsp::InlayHintTooltip::MarkupContent(content) => markup_documentation(content),
     }
 }
 
@@ -655,9 +664,11 @@ pub fn inlay_hint(hint: lsp::InlayHint, queried: &str) -> InlayHint {
                     label: part.value.into(),
                     tooltip: part.tooltip.map(|tooltip| match tooltip {
                         lsp::InlayHintLabelPartTooltip::String(text) => {
-                            escape_markdown(&text).into()
+                            Documentation::PlainText(text.into())
                         }
-                        lsp::InlayHintLabelPartTooltip::MarkupContent(content) => markup(content),
+                        lsp::InlayHintLabelPartTooltip::MarkupContent(content) => {
+                            markup_documentation(content)
+                        }
                     }),
                     location: part.location.map(|location| Location {
                         uri: (location.uri.as_str() != queried)
@@ -820,7 +831,10 @@ mod tests {
             Some(PointUtf16::new(0, 2)..PointUtf16::new(0, 4))
         );
         assert_eq!(item.commit_characters, vec!['(']);
-        assert_eq!(item.documentation, Some("Appends.".into()));
+        assert_eq!(
+            item.documentation,
+            Some(MarkdownString::new("Appends.").into())
+        );
         assert_eq!(item.additional_text_edits[0].1, "use x;\n");
     }
 

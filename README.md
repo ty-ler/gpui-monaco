@@ -15,7 +15,7 @@ A Monaco-like code editor component for [GPUI](https://github.com/zed-industries
   `CodeEditor` views; host-supplied providers for completion, hover, diagnostics and more.
 - **Large files**: 100k+ lines stay smooth (rope on `sum_tree`, viewport-only layout,
   incremental tree-sitter parsing off the main thread).
-- **Permissive license**: MIT OR Apache-2.0.
+- **Permissive license**: MIT OR Apache-2.0 (the optional codicon font is CC-BY-4.0; see [License](#license)).
 
 ## Non-goals (for the MVP)
 
@@ -77,3 +77,12 @@ PLAYGROUND_SCREENSHOT=/tmp/pg.png cargo run -p playground --features screenshot
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option.
+
+Monaco's icons come from Microsoft's [codicon](https://github.com/microsoft/vscode-codicons)
+font, which is optional: `gpui-monaco`'s `codicons` cargo feature (off by
+default) adds the `gpui-monaco-codicons` crate, which contains the font,
+© Microsoft Corporation, licensed under
+[CC-BY-4.0](crates/gpui-monaco-codicons/LICENSE) (with an `m` added to its
+character map; see [NOTICE](crates/gpui-monaco-codicons/NOTICE)). An app
+that enables the feature must ship that attribution. Without the feature
+the widgets draw Unicode stand-ins and nothing CC-BY-4.0 is included.

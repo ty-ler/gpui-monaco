@@ -53,7 +53,7 @@ Positions need no conversion: both the editor and LSP use 0-based lines and UTF-
 |---|---|
 | `semanticTokensProvider` | Semantic tokens: full, delta and range requests, with `workspace/semanticTokens/refresh`. |
 | `completionProvider` | The suggest widget, with the server's trigger characters, insert-and-replace edits, deprecated tags, commands and `completionItem/resolve`. Snippet items are expanded as snippets, and `insertTextMode: asIs` keeps their indentation. |
-| `hoverProvider` | Hovers. Markdown and code blocks render as markdown; plain text is escaped. |
+| `hoverProvider` | Hovers. Markdown and code blocks render as markdown; plain text is escaped. Plain-text completion and signature documentation and inlay hint tooltips stay `Documentation::PlainText`. |
 | `definitionProvider` | Go to definition. Locations in other documents come back with their uri, as `OpenLocation`. |
 | `referencesProvider`, `declarationProvider`, `typeDefinitionProvider`, `implementationProvider` | Go to and peek references, declarations, type definitions and implementations. |
 | `documentHighlightProvider` | Occurrence highlights, with read and write kinds. |

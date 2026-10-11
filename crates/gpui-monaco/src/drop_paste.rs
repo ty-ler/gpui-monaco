@@ -13,6 +13,7 @@ use gpui::{
 };
 use text::PointUtf16;
 
+use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
 use crate::editor::CodeEditor;
 use crate::providers::{
@@ -431,7 +432,11 @@ impl Render for PostEditButton {
                     editor.update(cx, |editor, cx| editor.show_post_edit_selector(window, cx));
                 }
             })
+            .flex()
+            .items_center()
+            .gap(px(2.))
             .child(self.label.clone())
+            .child(codicon(Codicon::ChevronDown).size(px(11.)))
     }
 }
 
@@ -843,8 +848,8 @@ impl CodeEditor {
         }
         let position = self.cursors.primary().position;
         let label: SharedString = match kind {
-            PostEditKind::Drop => "Drop options ▾".into(),
-            PostEditKind::Paste => "Paste options ▾".into(),
+            PostEditKind::Drop => "Drop options".into(),
+            PostEditKind::Paste => "Paste options".into(),
         };
         let editor = cx.entity().downgrade();
         let view = cx.new(|_| PostEditButton {

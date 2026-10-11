@@ -143,7 +143,8 @@ Issues are linked by number.
 | Themes by name for every editor | `editor.defineTheme`, `editor.setTheme` | ✅ | #204 |
 | High-contrast themes (`hc-black`, `hc-light`) | standalone themes | ✅ | #53 |
 | Toggle high contrast, force retokenize, inspect tokens | `toggleHighContrast`, `tokenization`, `inspectTokens` | ✅ inspect tokens shows tree-sitter captures and their TextMate scopes | #227 |
-| Symbol icon colors | `symbolIcon.*Foreground` | ✅ suggest widget and quick outline (glyphs, not codicons) | #227 |
+| Symbol icon colors | `symbolIcon.*Foreground` | ✅ suggest widget and quick outline codicons | #227, #246 |
+| Codicons | `base/common/codicons.ts`, `@vscode/codicons` | ✅ the codicon font (CC-BY-4.0) behind the optional `codicons` feature, else Unicode stand-ins; every Monaco icon id (`codicons::Codicon`) and the icons Monaco's widgets use, with Unicode fallbacks when the font can't load | #246 |
 
 ## Language features (providers)
 
@@ -156,6 +157,7 @@ Issues are linked by number.
 | Completion: `selectionMode` and `focusSuggestion`, explain mode, reset size, `snippetsPreventQuickSuggestions`, every item kind | `suggest` | 🟡 no `shareSuggestSelections` | #202 |
 | Completion: `quickSuggestions: 'inline'` (completion items as ghost text) and `'offWhenInlineCompletions'`, details focus (`toggleSuggestionFocus`), `suggestWidgetCopy` | `suggest`, `suggestInlineCompletions` | ✅ copying takes the whole details panel (there's no text selection in it); inline items skip word-based suggestions and eager resolving | #226 |
 | Hover | `hover` | ✅ content and gutter hovers, options, keyboard focus and scrolling, resizing, verbosity, copy button, long line warnings | #199 |
+| Markdown in hovers, suggest details, parameter hints and messages | `MarkdownRenderer`, `IMarkdownString` | 🟡 GFM tables, quotes, nested lists, strikethrough, images, highlighted code blocks, `$(icon)`s (`supportThemeIcons`), a sanitized HTML subset (`supportHtml`), trusted `command:` links, plain-text documentation, the editor's line height; text can't be selected (GPUI has no selectable text) and inline code isn't rounded | #246 |
 | Signature help: overload cycling and arrows, `enabled`/`cycle` options, close and next/previous commands | `parameterHints` | ✅ | #200 |
 | Go to definition (link, F12) | `gotoSymbol` | ✅ | |
 | Definition preview hover (Cmd/Ctrl+hover, `showDefinitionPreviewHover`) | `gotoSymbol` | ✅ | #225 |

@@ -223,7 +223,7 @@ impl InlayHintsProvider for Parts {
             label: vec![
                 label_part(": "),
                 InlayHintLabelPart {
-                    tooltip: Some("**Foo** docs".into()),
+                    tooltip: Some(MarkdownString::new("**Foo** docs").into()),
                     location: Some(Location {
                         uri: None,
                         range: p(1, 7)..p(1, 10),
@@ -255,7 +255,7 @@ impl InlayHintsProvider for Parts {
     ) -> Option<Task<anyhow::Result<InlayHint>>> {
         self.resolves.set(self.resolves.get() + 1);
         let resolved = InlayHint {
-            tooltip: Some("the type of `a`".into()),
+            tooltip: Some(MarkdownString::new("the type of `a`").into()),
             ..hint.clone()
         };
         let timer = cx.background_executor().timer(self.resolve_delay);
