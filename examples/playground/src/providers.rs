@@ -604,10 +604,17 @@ impl InlayHintsProvider for DemoInlayHints {
         for row in range.start.row..=range.end.row.min(rows - 1) {
             let line = &lines[row as usize];
             if let Some(at) = line.find("let ") {
-                let name_at = at + 4;
+                // The binding's name, after any `mut`.
+                let mut name_at = at + 4;
+                if line[name_at..].starts_with("mut ") {
+                    name_at += 4;
+                }
                 let name = ident(&line[name_at..]);
                 let end = name_at + name.len();
-                if !name.is_empty() && !line[end..].trim_start().starts_with(':') {
+                // A plain binding: not typed already, nor a pattern
+                // (`let Some(x)`, `let Point { .. }`).
+                let after = line[end..].trim_start();
+                if !name.is_empty() && !after.starts_with([':', '(', '{']) {
                     // The type: a `Name::` or `Name {` after `=`, else i32.
                     let value = line[end..].split('=').nth(1).unwrap_or("").trim_start();
                     let ty = ident(value);

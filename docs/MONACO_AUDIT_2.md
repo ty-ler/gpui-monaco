@@ -1,5 +1,7 @@
 # Monaco parity audit 2 (2026-10-11)
 
+> **Status:** every issue filed from this audit (#245–#265, #272) is fixed. The findings below describe the port as it was on 2026-10-11.
+
 A second, wider audit, done after the F8 problem zone turned out to be a placeholder rather than a port (#244). Eleven read-only audits compared the port against the vendored Monaco source and CSS: every widget's sizing, clipping, scrolling, click-through, focus, keyboard and styling, plus the core view and input, the diff editors, every `contrib/` command and keybinding, every option, the theme colors and built-in themes, and the standalone editor and languages APIs. Widget findings were confirmed with playground screenshots where possible. Mouse drags can't be scripted in the playground, so those findings come from reading the code.
 
 Some vendored folders are missing (`vs/platform`, most of `vs/base/browser/ui`). Where a report relies on Monaco code or defaults from outside the vendored tree, it says so.
