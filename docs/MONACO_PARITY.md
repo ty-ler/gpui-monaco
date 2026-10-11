@@ -123,6 +123,7 @@ Issues are linked by number.
 | Hover | `hover` | ✅ content and gutter hovers, options, keyboard focus and scrolling, resizing, verbosity, copy button, long line warnings | #199 |
 | Signature help: overload cycling and arrows, `enabled`/`cycle` options, close and next/previous commands | `parameterHints` | ✅ | #200 |
 | Go to definition (link, F12) | `gotoSymbol` | ✅ | |
+| Definition preview hover (Cmd/Ctrl+hover, `showDefinitionPreviewHover`) | `gotoSymbol` | ✅ | #225 |
 | References, declaration, type definition, implementation, peek view | `gotoSymbol`, `peekView` | ✅ | #95 |
 | Open definition to the side (host event), peek focus toggle and default, resizable peek view, `definitionLinkOpensInPeek` | `gotoSymbol`, `peekView` | ✅ | #202 |
 | Diagnostics: squiggles, ruler, hover, F8 | `gotoError` | ✅ | |
@@ -130,9 +131,11 @@ Issues are linked by number.
 | Document highlights | `wordHighlighter` | ✅ | #83 |
 | Formatting: document, range, on type, on paste | `format` | ✅ | #94 |
 | Rename | `rename` | ✅ | #56 |
-| Code actions and lightbulb (no AI actions, "Show Disabled" toggle, refactor preview or nearby quick fixes) | `codeAction` | ✅ | #56 |
+| Rename preview (`acceptRenameInputWithPreview`, through a host preview handler) | `rename` | ✅ | #225 |
+| Code actions and lightbulb (no AI actions or nearby quick fixes) | `codeAction` | ✅ | #56 |
+| Code action menu: "Show Disabled", documentation links, preview (Cmd/Ctrl+Enter, through a host preview handler; no Refactor Preview panel) | `codeAction` | ✅ | #225 |
 | The `editor.action.codeAction` command with `kind`, `apply` and `preferred` | `codeAction` | ✅ | #202 |
-| Rename suggestions (`NewSymbolNamesProvider`) | `rename` | ❌ | #202 |
+| Rename suggestions (`NewSymbolNamesProvider`) | `rename` | ✅ | #225 |
 | Inlay hints: label parts, tooltips, Cmd/Ctrl+click, double-click edits, resolve, font options (no part context menu or location hovers) | `inlayHints` | ✅ | #56, #200 |
 | Code lens | `codelens` | ✅ (and "Show CodeLens Commands for Current Line", #202) | #96 |
 | Color decorators (providers, default finder) | `colorDecorators` | ✅ | #97 |

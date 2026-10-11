@@ -1,27 +1,41 @@
-//! Rename (F2): an inline box to type the new name, then the providers'
-//! edits applied across documents.
+//! Rename (F2): an inline box to type the new name, with suggestions from
+//! [`NewSymbolNamesProvider`](crate::providers::NewSymbolNamesProvider)s,
+//! then the providers' edits applied across documents (Enter), or previewed
+//! first (Cmd/Ctrl+Enter, through
+//! [`set_workspace_edit_preview_handler`](crate::set_workspace_edit_preview_handler)).
 //!
 //! Ports Monaco's `src/vs/editor/contrib/rename/browser/rename.ts` and
-//! `renameWidget.ts` (MIT), without rename suggestions or the refactor
-//! preview.
+//! `renameWidget.ts` (MIT).
 
+use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
     AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, Styled, Subscription, Task, WeakEntity, Window, div, px,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, Task, WeakEntity, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use text::PointUtf16;
 
-use crate::actions::{Newline, RemoveSecondaryCursors};
+use crate::actions::{
+    AcceptRenameInput, AcceptRenameInputWithPreview, CancelRenameInput, FocusNextRenameSuggestion,
+    FocusPreviousRenameSuggestion,
+};
 use crate::cursor::Selection;
 use crate::editor::{CodeEditor, CodeEditorEvent};
-use crate::model::model_for_uri;
+use crate::model::{TextModelEvent, model_for_uri};
 use crate::options::EditorOptions;
-use crate::providers::{RenameLocation, TextEdit, WorkspaceEdit, rename_providers};
+use crate::providers::{
+    NewSymbolName, NewSymbolNameTag, NewSymbolNameTriggerKind, RenameLocation, TextEdit,
+    WorkspaceEdit, new_symbol_names_providers, rename_providers,
+};
 use crate::theme::{EditorColors, Theme};
 use crate::widgets::{ContentWidget, ContentWidgetPreference, WidgetId};
+
+/// Monaco `RenameCandidateListView`'s `MAX_N_CANDIDATES`: suggestions shown
+/// at once.
+const MAX_VISIBLE_CANDIDATES: usize = 7;
 
 #[derive(Default)]
 pub(crate) struct RenameState {
@@ -32,14 +46,20 @@ pub(crate) struct RenameState {
 
 struct Session {
     widget: WidgetId,
+    view: Entity<RenameInput>,
     location: RenameLocation,
     position: PointUtf16,
     provider: usize,
+    /// Rename suggestions being asked for (Monaco
+    /// `_renameCandidateProvidersCts`); dropping it cancels them.
+    candidates: Option<Task<()>>,
 }
 
-/// Monaco `RenameWidget`: the input box.
+/// Monaco `RenameWidget`: the input box, its suggestions button and the
+/// list of suggestions.
 struct RenameInput {
     editor: WeakEntity<CodeEditor>,
+    /// The symbol's current name (Monaco `_currentName`).
     name: String,
     /// Selected UTF-16 columns of `name`.
     selection: Range<u32>,
@@ -47,6 +67,21 @@ struct RenameInput {
     theme: Arc<Theme>,
     colors: EditorColors,
     font_size: gpui::Pixels,
+    /// Previews are possible: the label shows (Monaco `supportPreview`).
+    support_preview: bool,
+    /// Suggestion providers exist: the button shows.
+    has_suggestions: bool,
+    /// Suggestions are being asked for: the button stops them (Monaco's
+    /// `'stop'` button state).
+    requesting: bool,
+    /// The suggestions, newest first.
+    candidates: Vec<NewSymbolName>,
+    /// Every suggestion received this session (Monaco `_candidates`).
+    seen: HashSet<SharedString>,
+    /// The focused suggestion.
+    focused: Option<usize>,
+    /// The text last put in the input by the box itself, not the user.
+    programmatic: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -72,49 +107,252 @@ impl RenameInput {
             editor
         });
         window.focus(&input.read(cx).focus_handle.clone(), cx);
+        self.programmatic = Some(name);
         // Monaco cancels when focus leaves the editor and the box.
         self._subscriptions.push(
-            cx.subscribe(&input, |this, _, event: &CodeEditorEvent, cx| {
-                if matches!(event, CodeEditorEvent::Blurred) {
+            cx.subscribe(&input, |this, _, event: &CodeEditorEvent, cx| match event {
+                CodeEditorEvent::Blurred => {
                     this.with_editor(cx, |editor, cx| {
                         editor.cancel_rename(false, cx);
                     });
                 }
+                CodeEditorEvent::SelectionsChanged(_) | CodeEditorEvent::MouseDown(_) => {
+                    this.input_changed(cx)
+                }
+                _ => {}
             }),
         );
+        let model = input.read(cx).model().clone();
+        self._subscriptions
+            .push(cx.subscribe(&model, |this, _, event: &TextModelEvent, cx| {
+                if matches!(event, TextModelEvent::Edited { .. }) {
+                    this.input_changed(cx);
+                }
+            }));
         self.input = Some(input);
     }
 
+    /// Runs `f` on the editor once this update is done (the editor reads
+    /// the box).
     fn with_editor(
         &self,
         cx: &mut Context<Self>,
-        f: impl FnOnce(&mut CodeEditor, &mut Context<CodeEditor>),
+        f: impl FnOnce(&mut CodeEditor, &mut Context<CodeEditor>) + 'static,
     ) {
-        if let Some(editor) = self.editor.upgrade() {
-            editor.update(cx, f);
+        let editor = self.editor.clone();
+        cx.defer(move |cx| {
+            editor.update(cx, f).ok();
+        });
+    }
+
+    fn input_text(&self, cx: &gpui::App) -> String {
+        self.input
+            .as_ref()
+            .map(|input| input.read(cx).model().read(cx).text())
+            .unwrap_or_else(|| self.name.clone())
+    }
+
+    /// Puts `text` in the input with the cursor after it (Monaco's
+    /// `input.value = …`, which isn't an input event).
+    fn set_input_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.programmatic = Some(text.to_string());
+        let Some(input) = &self.input else {
+            return;
+        };
+        input.update(cx, |editor, cx| {
+            editor
+                .model()
+                .clone()
+                .update(cx, |model, cx| model.set_value(text, cx));
+            let end = PointUtf16::new(0, text.encode_utf16().count() as u32);
+            editor.set_selections(&[Selection::collapsed(end)], cx);
+        });
+    }
+
+    /// Monaco's `onDidInputChange` (typing, Left/Right, clicks): stops
+    /// asking for suggestions and unfocuses the focused one.
+    fn input_changed(&mut self, cx: &mut Context<Self>) {
+        let text = self.input_text(cx);
+        if self.programmatic.as_deref() == Some(text.as_str()) {
+            return;
         }
+        self.programmatic = None;
+        if self.requesting {
+            self.requesting = false;
+            self.with_editor(cx, |editor, _| {
+                if let Some(session) = &mut editor.rename.session {
+                    session.candidates = None;
+                }
+            });
+        }
+        self.focused = None;
+        cx.notify();
+    }
+
+    /// The name to rename to: the focused suggestion or the input (Monaco
+    /// `_currentAcceptInput`).
+    fn new_name(&self, cx: &gpui::App) -> String {
+        match self.focused.and_then(|ix| self.candidates.get(ix)) {
+            Some(candidate) => candidate.new_symbol_name.to_string(),
+            None => self.input_text(cx),
+        }
+    }
+
+    /// Monaco `RenameCandidateListView.focusNext` / `focusPrevious`, then
+    /// the input shows the focused suggestion, or the current name when
+    /// focus moved off the list.
+    fn move_focus(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let len = self.candidates.len();
+        self.focused = match (self.focused, forward) {
+            _ if len == 0 => None,
+            (None, true) => Some(0),
+            (None, false) => Some(len - 1),
+            (Some(ix), true) if ix + 1 < len => Some(ix + 1),
+            (Some(ix), false) if ix > 0 => Some(ix - 1),
+            (Some(_), _) => None,
+        };
+        let text = match self.focused {
+            Some(ix) => self.candidates[ix].new_symbol_name.to_string(),
+            None => self.name.clone(),
+        };
+        self.set_input_text(&text, cx);
+        cx.notify();
+    }
+
+    /// Monaco `_updateRenameCandidates`: adds new, distinct, non-blank
+    /// suggestions that aren't the current name or the input, first.
+    fn add_candidates(&mut self, names: Vec<NewSymbolName>, cx: &mut Context<Self>) {
+        self.requesting = false;
+        let input = self.input_text(cx);
+        let mut added: Vec<NewSymbolName> = Vec::new();
+        for name in names {
+            let text = &name.new_symbol_name;
+            if text.trim().is_empty()
+                || text.as_ref() == input
+                || text.as_ref() == self.name
+                || self.seen.contains(text)
+                || added.iter().any(|n| &n.new_symbol_name == text)
+            {
+                continue;
+            }
+            added.push(name);
+        }
+        for name in &added {
+            self.seen.insert(name.new_symbol_name.clone());
+        }
+        if added.is_empty() {
+            cx.notify();
+            return;
+        }
+        // Monaco `setCandidates` splices them in at the top.
+        if let Some(focused) = &mut self.focused {
+            *focused += added.len();
+        }
+        added.append(&mut self.candidates);
+        self.candidates = added;
+        cx.notify();
+    }
+
+    fn render_candidates(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let colors = &self.colors;
+        let row_height = self.font_size * 1.4 + px(4.);
+        let rows = self.candidates.iter().enumerate().map(|(ix, candidate)| {
+            let ai = candidate.tags.contains(&NewSymbolNameTag::AIGenerated);
+            div()
+                .id(("rename-candidate", ix))
+                .h(row_height)
+                .p(px(2.))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .rounded(px(2.))
+                .cursor_pointer()
+                .when(self.focused == Some(ix), |row| {
+                    row.bg(colors.peek_view_result_selection_background)
+                })
+                .child(
+                    div()
+                        .w(self.font_size)
+                        .flex_none()
+                        .when(ai, |icon| icon.child("✨")),
+                )
+                .child(candidate.new_symbol_name.clone())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    // Monaco's list selection: pick it and rename, without
+                    // a preview.
+                    this.focused = Some(ix);
+                    let name = this.new_name(cx);
+                    this.with_editor(cx, |editor, cx| editor.accept_rename_impl(name, false, cx));
+                }))
+        });
+        div()
+            .id("rename-candidates")
+            .max_h(row_height * MAX_VISIBLE_CANDIDATES as f32)
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .children(rows)
+            .into_any_element()
+    }
+}
+
+/// The label under the box (Monaco's `rename-label`, shown with previews).
+fn rename_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Enter to Rename, ⌘Enter to Preview"
+    } else {
+        "Enter to Rename, Ctrl+Enter to Preview"
     }
 }
 
 impl Render for RenameInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_input(window, cx);
-        let colors = &self.colors;
+        let colors = self.colors.clone();
+        let candidates = (!self.candidates.is_empty()).then(|| self.render_candidates(cx));
+        // Monaco's `InputWithButton`: sparkle to ask, stop to cancel.
+        let button = self.has_suggestions.then(|| {
+            let (icon, title) = if self.requesting {
+                ("⏹", "Cancel")
+            } else {
+                ("✨", "Generate New Name Suggestions")
+            };
+            div()
+                .id("rename-suggestions-button")
+                .flex_none()
+                .px(px(3.))
+                .rounded(px(5.))
+                .cursor_pointer()
+                .child(icon)
+                .tooltip(crate::tooltip::tooltip(title, &colors))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.with_editor(cx, |editor, cx| editor.request_rename_suggestions(cx));
+                }))
+        });
         div()
             .key_context("RenameInput")
-            .on_action(cx.listener(|this, _: &Newline, _, cx| {
-                let name = this
-                    .input
-                    .as_ref()
-                    .map(|input| input.read(cx).model().read(cx).text())
-                    .unwrap_or_default();
-                this.with_editor(cx, |editor, cx| editor.accept_rename(name, cx));
+            .on_action(cx.listener(|this, _: &AcceptRenameInput, _, cx| {
+                this.with_editor(cx, |editor, cx| editor.accept_rename_input(false, cx));
             }))
-            .on_action(cx.listener(|this, _: &RemoveSecondaryCursors, _, cx| {
+            .on_action(
+                cx.listener(|this, _: &AcceptRenameInputWithPreview, _, cx| {
+                    this.with_editor(cx, |editor, cx| editor.accept_rename_input(true, cx));
+                }),
+            )
+            .on_action(cx.listener(|this, _: &CancelRenameInput, _, cx| {
                 this.with_editor(cx, |editor, cx| {
                     editor.cancel_rename(true, cx);
                 });
             }))
+            .on_action(
+                cx.listener(|this, _: &FocusNextRenameSuggestion, _, cx| this.move_focus(true, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &FocusPreviousRenameSuggestion, _, cx| {
+                    this.move_focus(false, cx)
+                }),
+            )
+            .min_w(px(200.))
             .w(px(220.))
             .p(px(4.))
             .flex()
@@ -124,21 +362,33 @@ impl Render for RenameInput {
             .border_1()
             .border_color(colors.widget_border)
             .rounded(px(4.))
+            .text_size(self.font_size)
+            .text_color(colors.widget_foreground)
             .child(
                 div()
-                    .h(self.font_size * 1.6)
+                    .flex()
+                    .items_center()
                     .px(px(2.))
                     .bg(colors.input_background)
                     .border_1()
                     .border_color(colors.input_option_active_border)
-                    .children(self.input.clone()),
+                    .child(
+                        div()
+                            .flex_1()
+                            .h(self.font_size * 1.6)
+                            .children(self.input.clone()),
+                    )
+                    .children(button),
             )
-            .child(
-                div()
-                    .text_size(self.font_size * 0.85)
-                    .text_color(colors.widget_foreground.opacity(0.8))
-                    .child("Enter to Rename"),
-            )
+            .children(candidates)
+            .when(self.support_preview, |this| {
+                this.child(
+                    div()
+                        .text_size(self.font_size * 0.8)
+                        .text_color(colors.widget_foreground.opacity(0.8))
+                        .child(rename_label()),
+                )
+            })
     }
 }
 
@@ -254,6 +504,8 @@ impl CodeEditor {
         theme.colors.background = theme.colors.input_background;
         theme.colors.gutter_background = theme.colors.input_background;
         let editor = cx.entity().downgrade();
+        let has_suggestions = !new_symbol_names_providers(cx, self.provider_target(cx)).is_empty();
+        let support_preview = crate::has_workspace_edit_preview_handler(cx);
         let view = cx.new(|_| RenameInput {
             editor,
             name: location.text.to_string(),
@@ -262,6 +514,13 @@ impl CodeEditor {
             theme: Arc::new(theme),
             colors: self.theme.colors.clone(),
             font_size: self.options.font_size,
+            support_preview,
+            has_suggestions,
+            requesting: false,
+            candidates: Vec::new(),
+            seen: HashSet::new(),
+            focused: None,
+            programmatic: None,
             _subscriptions: Vec::new(),
         });
         let widget = self.add_content_widget(
@@ -271,21 +530,152 @@ impl CodeEditor {
                     ContentWidgetPreference::Below,
                     ContentWidgetPreference::Above,
                 ],
-                view: view.into(),
+                view: view.clone().into(),
             },
             cx,
         );
         self.rename.session = Some(Session {
             widget,
+            view,
             location,
             position,
             provider,
+            candidates: None,
         });
+        // Monaco asks providers that support it right away.
+        if has_suggestions {
+            self.request_rename_candidates(false, cx);
+        }
+    }
+
+    /// Asks the [`NewSymbolNamesProvider`](crate::providers::NewSymbolNamesProvider)s
+    /// for names for the symbol being renamed (Monaco
+    /// `RenameWidget._requestRenameCandidates`): all of them when
+    /// `manual` (the box's button), else those supporting automatic
+    /// requests. While a request runs, the button cancels it instead.
+    fn request_rename_candidates(&mut self, manual: bool, cx: &mut Context<Self>) {
+        let target = self.provider_target(cx);
+        let Some(session) = &mut self.rename.session else {
+            return;
+        };
+        let view = session.view.clone();
+        // A request in flight: the stop button cancels it.
+        if session.candidates.take().is_some() && view.read(cx).requesting {
+            view.update(cx, |view, cx| {
+                view.requesting = false;
+                cx.notify();
+            });
+            return;
+        }
+        let trigger = if manual {
+            NewSymbolNameTriggerKind::Invoke
+        } else {
+            NewSymbolNameTriggerKind::Automatic
+        };
+        let providers: Vec<_> = new_symbol_names_providers(cx, target)
+            .into_iter()
+            .filter(|provider| {
+                manual || provider.supports_automatic_new_symbol_names_trigger_kind()
+            })
+            .collect();
+        if providers.is_empty() {
+            return;
+        }
+        let range = session.location.range.clone();
+        let context = self.model().read(cx).provider_context();
+        let tasks: Vec<_> = providers
+            .iter()
+            .map(|provider| provider.provide_new_symbol_names(&context, range.clone(), trigger, cx))
+            .collect();
+        view.update(cx, |view, cx| {
+            view.requesting = true;
+            cx.notify();
+        });
+        let task = cx.spawn(async move |_, cx| {
+            let mut names = Vec::new();
+            for task in tasks {
+                match task.await {
+                    Ok(found) => names.extend(found),
+                    Err(err) => log::warn!("rename suggestions failed: {err:#}"),
+                }
+            }
+            view.update(cx, |view, cx| view.add_candidates(names, cx));
+        });
+        if let Some(session) = &mut self.rename.session {
+            session.candidates = Some(task);
+        }
+    }
+
+    /// Clicks the rename box's suggestions button (Monaco's "Generate New
+    /// Name Suggestions"): asks every
+    /// [`NewSymbolNamesProvider`](crate::providers::NewSymbolNamesProvider)
+    /// for names, or cancels the request in flight.
+    pub fn request_rename_suggestions(&mut self, cx: &mut Context<Self>) {
+        self.request_rename_candidates(true, cx);
     }
 
     /// Whether the rename box is showing.
     pub fn is_rename_visible(&self) -> bool {
         self.rename.session.is_some()
+    }
+
+    /// The rename box's suggestions, newest first (from
+    /// [`NewSymbolNamesProvider`](crate::providers::NewSymbolNamesProvider)s).
+    pub fn rename_suggestions(&self, cx: &gpui::App) -> Vec<SharedString> {
+        self.rename
+            .session
+            .as_ref()
+            .map(|session| {
+                session
+                    .view
+                    .read(cx)
+                    .candidates
+                    .iter()
+                    .map(|c| c.new_symbol_name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The rename box's input text and the focused suggestion's index, for
+    /// tests.
+    #[doc(hidden)]
+    pub fn rename_input_for_tests(&self, cx: &gpui::App) -> Option<(String, Option<usize>)> {
+        let session = self.rename.session.as_ref()?;
+        let view = session.view.read(cx);
+        Some((view.input_text(cx), view.focused))
+    }
+
+    /// Whether the rename box shows its "Enter to Rename, Cmd/Ctrl+Enter to
+    /// Preview" label and suggestions button, for tests.
+    #[doc(hidden)]
+    pub fn rename_box_extras_for_tests(&self, cx: &gpui::App) -> Option<(bool, bool)> {
+        let session = self.rename.session.as_ref()?;
+        let view = session.view.read(cx);
+        Some((view.support_preview, view.has_suggestions))
+    }
+
+    /// Focuses the next rename suggestion, showing it in the box (Monaco
+    /// `focusNextRenameSuggestion`, Down). Past the last one, or with none,
+    /// the box shows the current name again.
+    pub fn focus_next_rename_suggestion(&mut self, cx: &mut Context<Self>) {
+        if let Some(session) = &self.rename.session {
+            session
+                .view
+                .clone()
+                .update(cx, |view, cx| view.move_focus(true, cx));
+        }
+    }
+
+    /// Focuses the previous rename suggestion (Monaco
+    /// `focusPreviousRenameSuggestion`, Up).
+    pub fn focus_previous_rename_suggestion(&mut self, cx: &mut Context<Self>) {
+        if let Some(session) = &self.rename.session {
+            session
+                .view
+                .clone()
+                .update(cx, |view, cx| view.move_focus(false, cx));
+        }
     }
 
     /// Closes the rename box (Monaco `cancelRenameInput`, Escape), focusing
@@ -314,12 +704,36 @@ impl CodeEditor {
         }
     }
 
-    /// Enter in the rename box: asks the providers for edits and applies
-    /// them (Monaco `RenameController.run`, part 2).
+    /// Enter in the rename box: renames to the focused suggestion or the
+    /// typed name (Monaco `acceptRenameInput`), or with `wants_preview`
+    /// (Cmd/Ctrl+Enter, Monaco `acceptRenameInputWithPreview`) previews
+    /// the edits first when a
+    /// [preview handler](crate::set_workspace_edit_preview_handler) is set.
+    pub fn accept_rename_input(&mut self, wants_preview: bool, cx: &mut Context<Self>) {
+        let Some(session) = &self.rename.session else {
+            return;
+        };
+        let name = session.view.read(cx).new_name(cx);
+        self.accept_rename_impl(name, wants_preview, cx);
+    }
+
+    /// Renames to `new_name`, as if typed in the rename box and Enter
+    /// pressed: asks the providers for edits and applies them (Monaco
+    /// `RenameController.run`, part 2).
     pub fn accept_rename(&mut self, new_name: String, cx: &mut Context<Self>) {
+        self.accept_rename_impl(new_name, false, cx);
+    }
+
+    fn accept_rename_impl(
+        &mut self,
+        new_name: String,
+        wants_preview: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(session) = self.rename.session.take() else {
             return;
         };
+        let wants_preview = wants_preview && session.view.read(cx).support_preview;
         self.remove_widget(session.widget, cx);
         self.refocus = true;
         // Unchanged or blank names do nothing.
@@ -338,6 +752,8 @@ impl CodeEditor {
             })
             .collect();
         let position = session.position;
+        let label: SharedString =
+            format!("Renaming '{}' to '{new_name}'", session.location.text).into();
         self.rename.task = Some(cx.spawn(async move |this, cx| {
             let mut rejects: Vec<String> = Vec::new();
             let mut edit = None;
@@ -351,24 +767,29 @@ impl CodeEditor {
                     Err(err) => rejects.push(err.to_string()),
                 }
             }
-            this.update(cx, |this, cx| {
-                this.rename.task = None;
+            // `rename.task` is this task: it stays until the edits are in.
+            let Ok(Some(apply)) = this.update(cx, |this, cx| {
                 if this.rename_state(cx) != state {
-                    return;
+                    return None;
                 }
                 let Some(edit) = edit else {
                     this.show_message(rejects.join("\n"), position, cx);
-                    return;
+                    return None;
                 };
                 // Collapse the selection to its active end, then apply.
                 let head = this.cursors.primary().position;
                 this.set_selections(&[Selection::collapsed(head)], cx);
-                if let Err(err) = this.apply_workspace_edit(edit, cx) {
-                    log::warn!("rename failed to apply edits: {err:#}");
-                    this.show_message("Rename failed to apply edits", position, cx);
-                }
-            })
-            .ok();
+                Some(this.apply_workspace_edit_with_preview(edit, label, wants_preview, cx))
+            }) else {
+                return;
+            };
+            if let Err(err) = apply.await {
+                log::warn!("rename failed to apply edits: {err:#}");
+                this.update(cx, |this, cx| {
+                    this.show_message("Rename failed to apply edits", position, cx)
+                })
+                .ok();
+            }
         }));
     }
 

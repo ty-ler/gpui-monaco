@@ -626,6 +626,10 @@ actions!(
         SelectLastSuggestion,
         /// Shows the hover for the cursor position (Monaco `editor.action.showHover`).
         ShowHover,
+        /// Shows the definition preview hover for the symbol at the cursor,
+        /// as Cmd/Ctrl+hover does (Monaco
+        /// `editor.action.showDefinitionPreviewHover`).
+        ShowDefinitionPreviewHover,
         /// Hides the hover (Monaco `editor.action.hideHover`; Escape in a
         /// focused hover).
         HideHover,
@@ -817,6 +821,22 @@ actions!(
         ClosePeek,
         /// Renames the symbol at the cursor (Monaco `editor.action.rename`).
         Rename,
+        /// Rename box: rename to the focused suggestion or the typed name
+        /// (Monaco `acceptRenameInput`, Enter).
+        AcceptRenameInput,
+        /// Rename box: as [`AcceptRenameInput`], previewing the edits first
+        /// when a [preview handler](crate::set_workspace_edit_preview_handler)
+        /// is set (Monaco `acceptRenameInputWithPreview`, Cmd/Ctrl+Enter).
+        AcceptRenameInputWithPreview,
+        /// Rename box: close it (Monaco `cancelRenameInput`, Escape or
+        /// Shift+Escape).
+        CancelRenameInput,
+        /// Rename box: focus the next suggestion (Monaco
+        /// `focusNextRenameSuggestion`, Down).
+        FocusNextRenameSuggestion,
+        /// Rename box: focus the previous suggestion (Monaco
+        /// `focusPreviousRenameSuggestion`, Up).
+        FocusPreviousRenameSuggestion,
         /// Shows code actions (Monaco `editor.action.quickFix`).
         QuickFix,
         /// Shows refactorings (Monaco `editor.action.refactor`).
@@ -833,8 +853,13 @@ actions!(
         CodeActionMenuNext,
         /// Code action menu: the previous action.
         CodeActionMenuPrevious,
-        /// Code action menu: apply the focused action.
+        /// Code action menu: apply the focused action (Monaco
+        /// `acceptSelectedCodeAction`).
         CodeActionMenuAccept,
+        /// Code action menu: apply the focused action, previewing its edits
+        /// first when a [preview handler](crate::set_workspace_edit_preview_handler)
+        /// is set (Monaco `previewSelectedCodeAction`, Cmd/Ctrl+Enter).
+        CodeActionMenuPreview,
         /// Code action menu: close it.
         CodeActionMenuHide,
         /// Formats the selections, or the cursor's line (Monaco
@@ -1347,6 +1372,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", CodeActionMenuNext, menu),
         KeyBinding::new("up", CodeActionMenuPrevious, menu),
         KeyBinding::new("enter", CodeActionMenuAccept, menu),
+        KeyBinding::new("secondary-enter", CodeActionMenuPreview, menu),
         KeyBinding::new("escape", CodeActionMenuHide, menu),
         KeyBinding::new("shift-escape", CodeActionMenuHide, menu),
     ]);
@@ -1356,6 +1382,16 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-p", CodeActionMenuPrevious, menu),
         ]);
     }
+    // The rename box's input (Monaco `renameInputVisible`).
+    let rename = Some("RenameInput > CodeEditor");
+    bindings.extend([
+        KeyBinding::new("enter", AcceptRenameInput, rename),
+        KeyBinding::new("secondary-enter", AcceptRenameInputWithPreview, rename),
+        KeyBinding::new("escape", CancelRenameInput, rename),
+        KeyBinding::new("shift-escape", CancelRenameInput, rename),
+        KeyBinding::new("down", FocusNextRenameSuggestion, rename),
+        KeyBinding::new("up", FocusPreviousRenameSuggestion, rename),
+    ]);
     // A focused hover (Monaco `hoverFocused`).
     let hover = Some(crate::hover::HOVER_KEY_CONTEXT);
     bindings.extend([

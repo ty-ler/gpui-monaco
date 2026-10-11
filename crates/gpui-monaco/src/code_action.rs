@@ -5,8 +5,10 @@
 //! Ports Monaco's `src/vs/editor/contrib/codeAction/` (`codeAction.ts`,
 //! `codeActionModel.ts`, `codeActionController.ts`, `codeActionMenu.ts`,
 //! `lightBulbWidget.ts`, `common/types.ts`) and the action list widget
-//! (MIT). Not ported: AI actions, the "Show Disabled" toggle, refactor
-//! previews and nearby quick fixes.
+//! with its action bar (documentation and "Show Disabled") and preview
+//! (Cmd/Ctrl+Enter, through
+//! [`set_workspace_edit_preview_handler`](crate::set_workspace_edit_preview_handler))
+//! (MIT). Not ported: AI actions and nearby quick fixes.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -25,7 +27,7 @@ use crate::decorations::DecorationOptions;
 use crate::editor::CodeEditor;
 use crate::options::LightbulbMode;
 use crate::providers::{
-    CodeAction, CodeActionContext, CodeActionKind, CodeActionProvider, CodeActionTrigger,
+    CodeAction, CodeActionContext, CodeActionKind, CodeActionProvider, CodeActionTrigger, Command,
     code_action_providers,
 };
 use crate::theme::EditorColors;
@@ -114,6 +116,72 @@ pub(crate) struct Item {
     provider: Arc<dyn CodeActionProvider>,
 }
 
+/// The actions a request found and the providers' documentation for them
+/// (Monaco `CodeActionSet`).
+#[derive(Clone, Default)]
+pub(crate) struct CodeActionSet {
+    /// Every action, disabled ones included (Monaco `allActions`).
+    pub items: Vec<Item>,
+    /// Documentation commands for the menu's action bar.
+    pub documentation: Vec<Command>,
+}
+
+/// Monaco `getDocumentationFromProvider`: the documentation entry whose
+/// kind most specifically contains `only`, else the first containing one
+/// of `actions`' kinds.
+fn documentation_for(
+    documentation: &[(CodeActionKind, Command)],
+    actions: &[CodeAction],
+    only: Option<&CodeActionKind>,
+) -> Option<Command> {
+    if documentation.is_empty() {
+        return None;
+    }
+    if let Some(only) = only {
+        let mut best: Option<&(CodeActionKind, Command)> = None;
+        for entry in documentation {
+            if entry.0.contains(only) {
+                match best {
+                    Some(current) if !current.0.contains(&entry.0) => {}
+                    _ => best = Some(entry),
+                }
+            }
+        }
+        if let Some((_, command)) = best {
+            return Some(command.clone());
+        }
+    }
+    actions.iter().find_map(|action| {
+        let kind = action.kind.as_ref()?;
+        documentation
+            .iter()
+            .find(|(entry, _)| entry.contains(kind))
+            .map(|(_, command)| command.clone())
+    })
+}
+
+/// Monaco `CodeActionController`'s `onHover`: refactorings, source actions
+/// and actions with edits can be previewed.
+fn can_preview(action: &CodeAction) -> bool {
+    let previewable = [
+        CodeActionKind::REFACTOR_EXTRACT,
+        CodeActionKind::REFACTOR_INLINE,
+        CodeActionKind::REFACTOR_REWRITE,
+        CodeActionKind::REFACTOR_MOVE,
+        CodeActionKind::SOURCE,
+    ];
+    let by_kind = action.kind.as_ref().is_some_and(|kind| {
+        previewable
+            .iter()
+            .any(|group| CodeActionKind::from(*group).contains(kind))
+    });
+    by_kind
+        || action
+            .edit
+            .as_ref()
+            .is_some_and(|edit| !edit.edits.is_empty())
+}
+
 /// Monaco `ManagedCodeActionSet`'s order: actions with diagnostics first,
 /// then preferred ones; otherwise provider order.
 fn sort_items(items: &mut [Item]) {
@@ -163,6 +231,52 @@ pub(crate) struct CodeActionState {
     pub lightbulb: Option<Lightbulb>,
     menu: Option<(WidgetId, Entity<CodeActionMenu>)>,
     highlight: Option<DecorationsCollection>,
+    /// The menu lists disabled actions too (Monaco `_showDisabled`, kept
+    /// across menus).
+    show_disabled: bool,
+}
+
+/// How the menu was opened (Monaco `IActionShowOptions`).
+#[derive(Clone, Copy, Debug, Default)]
+struct MenuOptions {
+    /// Disabled actions may be listed: a command asked for a kind.
+    include_disabled: bool,
+    /// The lightbulb was clicked: no action bar.
+    from_lightbulb: bool,
+}
+
+/// A button in the menu's action bar (Monaco `_getActionBarActions`).
+#[derive(Clone)]
+enum BarAction {
+    /// A provider's documentation command.
+    Documentation(Command),
+    /// Monaco `showMoreActions` / `hideMoreActions`.
+    ToggleDisabled { showing: bool },
+}
+
+impl BarAction {
+    fn label(&self) -> SharedString {
+        match self {
+            BarAction::Documentation(command) => command.title.clone(),
+            BarAction::ToggleDisabled { showing: true } => "Hide Disabled".into(),
+            BarAction::ToggleDisabled { showing: false } => "Show Disabled".into(),
+        }
+    }
+}
+
+/// The keybinding labels in the menu's tooltips (Monaco's
+/// `acceptSelectedCodeAction` and `previewSelectedCodeAction`).
+fn apply_tooltip(preview: bool) -> SharedString {
+    let preview_keys = if cfg!(target_os = "macos") {
+        "⌘Enter"
+    } else {
+        "Ctrl+Enter"
+    };
+    if preview {
+        format!("Enter to Apply, {preview_keys} to Preview").into()
+    } else {
+        "Enter to Apply".into()
+    }
 }
 
 /// Where the lightbulb is drawn (Monaco `LightBulbWidget`).
@@ -309,8 +423,14 @@ fn keybinding_label(action: &CodeAction) -> Option<&'static str> {
 /// Monaco's action list widget for code actions.
 pub(crate) struct CodeActionMenu {
     editor: WeakEntity<CodeEditor>,
+    /// The listed actions.
     items: Vec<Item>,
     rows: Vec<Row>,
+    /// Everything the request found, to list again with "Show Disabled".
+    set: std::rc::Rc<CodeActionSet>,
+    position: PointUtf16,
+    options: MenuOptions,
+    bar: Vec<BarAction>,
     focused: Option<usize>,
     colors: EditorColors,
     font_size: gpui::Pixels,
@@ -370,7 +490,9 @@ impl CodeActionMenu {
         cx.notify();
     }
 
-    fn accept(&mut self, row: usize, cx: &mut Context<Self>) {
+    /// Monaco `acceptSelected`: applies the action at `row`, previewing
+    /// its edits first if `preview`.
+    fn accept(&mut self, row: usize, preview: bool, cx: &mut Context<Self>) {
         // Headers and disabled actions can't be accepted.
         let Row::Action(ix) = self.rows[row] else {
             return;
@@ -382,7 +504,31 @@ impl CodeActionMenu {
         if let Some(editor) = self.editor.upgrade() {
             editor.update(cx, |editor, cx| {
                 editor.hide_code_action_menu(cx);
-                editor.apply_code_action(item, true, cx);
+                editor.apply_code_action(item, true, preview, cx);
+            });
+        }
+    }
+
+    /// Runs action bar button `ix`.
+    fn run_bar_action(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(action) = self.bar.get(ix).cloned() else {
+            return;
+        };
+        let (set, position, options) = (self.set.clone(), self.position, self.options);
+        if let Some(editor) = self.editor.upgrade() {
+            editor.update(cx, |editor, cx| match action {
+                BarAction::Documentation(command) => {
+                    editor.hide_code_action_menu(cx);
+                    // Unregistered commands are the host's, as for code
+                    // lenses.
+                    if crate::commands::execute_command(cx, &command).is_err() {
+                        cx.emit(crate::CodeEditorEvent::ExecuteCommand(command));
+                    }
+                }
+                BarAction::ToggleDisabled { showing } => {
+                    editor.code_actions.show_disabled = !showing;
+                    editor.show_code_action_list(set, position, options, cx);
+                }
             });
         }
     }
@@ -421,6 +567,11 @@ impl Render for CodeActionMenu {
                     let disabled = action.disabled.is_some();
                     let focused = self.focused == Some(row);
                     let label: String = action.title.replace(['\r', '\n'], " ");
+                    // Monaco's row titles: why it's disabled, or the keys.
+                    let tooltip = match &action.disabled {
+                        Some(reason) => reason.clone(),
+                        None => apply_tooltip(can_preview(action)),
+                    };
                     div()
                         .id(("code-action", row))
                         .flex()
@@ -445,7 +596,8 @@ impl Render for CodeActionMenu {
                                 this.set_focus(Some(row), cx);
                             }
                         }))
-                        .on_click(cx.listener(move |this, _, _, cx| this.accept(row, cx)))
+                        .on_click(cx.listener(move |this, _, _, cx| this.accept(row, false, cx)))
+                        .tooltip(crate::tooltip::tooltip(tooltip, &colors))
                         .into_any_element()
                 }
             })
@@ -460,7 +612,12 @@ impl Render for CodeActionMenu {
             )
             .on_action(cx.listener(|this, _: &CodeActionMenuAccept, _, cx| {
                 if let Some(row) = this.focused {
-                    this.accept(row, cx);
+                    this.accept(row, false, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CodeActionMenuPreview, _, cx| {
+                if let Some(row) = this.focused {
+                    this.accept(row, true, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &CodeActionMenuHide, _, cx| this.hide(cx)))
@@ -478,6 +635,29 @@ impl Render for CodeActionMenu {
             .text_size(self.font_size)
             .text_color(colors.widget_foreground)
             .children(rows)
+            .when(!self.bar.is_empty(), |menu| {
+                // Monaco's action bar: links under the list.
+                let buttons = self.bar.iter().enumerate().map(|(ix, action)| {
+                    div()
+                        .id(("code-action-bar", ix))
+                        .cursor_pointer()
+                        .text_color(colors.link_active_foreground)
+                        .text_size(px(12.))
+                        .child(action.label())
+                        .on_click(cx.listener(move |this, _, _, cx| this.run_bar_action(ix, cx)))
+                });
+                menu.child(
+                    div()
+                        .mt(px(4.))
+                        .pt(px(4.))
+                        .px(px(8.))
+                        .border_t_1()
+                        .border_color(colors.widget_border)
+                        .flex()
+                        .gap(px(12.))
+                        .children(buttons),
+                )
+            })
     }
 }
 
@@ -501,7 +681,7 @@ impl CodeEditor {
         filter: CodeActionFilter,
         trigger: CodeActionTrigger,
         cx: &mut Context<Self>,
-    ) -> Task<Vec<Item>> {
+    ) -> Task<CodeActionSet> {
         let model = self.model().read(cx);
         let context = model.provider_context();
         let action_context = CodeActionContext {
@@ -525,22 +705,32 @@ impl CodeEditor {
         // Providers aren't `Send`: wait on the foreground.
         cx.spawn(async move |_, _| {
             let mut items = Vec::new();
+            let mut documentation = Vec::new();
             for (provider, task) in tasks {
                 match task.await {
-                    Ok(actions) => items.extend(
-                        actions
+                    Ok(actions) => {
+                        let actions: Vec<CodeAction> = actions
                             .into_iter()
                             .filter(|action| filter.keeps(action))
-                            .map(|action| Item {
-                                action,
-                                provider: provider.clone(),
-                            }),
-                    ),
+                            .collect();
+                        documentation.extend(documentation_for(
+                            &provider.documentation(),
+                            &actions,
+                            filter.include.as_ref(),
+                        ));
+                        items.extend(actions.into_iter().map(|action| Item {
+                            action,
+                            provider: provider.clone(),
+                        }));
+                    }
                     Err(err) => log::warn!("code actions failed: {err:#}"),
                 }
             }
             sort_items(&mut items);
-            items
+            CodeActionSet {
+                items,
+                documentation,
+            }
         })
     }
 
@@ -570,7 +760,7 @@ impl CodeEditor {
             }) else {
                 return;
             };
-            let items = request.await;
+            let items = request.await.items;
             this.update(cx, |this, cx| {
                 this.code_actions.auto = None;
                 // Monaco drops results once the cursor left the line, and
@@ -662,7 +852,8 @@ impl CodeEditor {
         let request =
             self.request_code_actions(range, filter.clone(), CodeActionTrigger::Invoke, cx);
         self.code_actions.invoke = Some(cx.spawn(async move |this, cx| {
-            let items = request.await;
+            let set = request.await;
+            let items = set.items.clone();
             this.update(cx, |this, cx| {
                 this.code_actions.invoke = None;
                 if this.cursors.primary().position.row != position.row {
@@ -682,7 +873,7 @@ impl CodeEditor {
                     };
                     if let Some(item) = apply.cloned() {
                         this.code_actions.lightbulb = None;
-                        this.apply_code_action(item, false, cx);
+                        this.apply_code_action(item, false, false, cx);
                         return;
                     }
                     // What would have been applied is disabled: say why.
@@ -704,15 +895,11 @@ impl CodeEditor {
                     this.show_message(not_available, position, cx);
                     return;
                 }
-                let shown = if include_disabled && valid_count == 0 {
-                    items
-                } else {
-                    items
-                        .into_iter()
-                        .filter(|item| item.action.disabled.is_none())
-                        .collect()
+                let options = MenuOptions {
+                    include_disabled,
+                    from_lightbulb: false,
                 };
-                this.show_code_action_menu(shown, position, cx);
+                this.show_code_action_list(std::rc::Rc::new(set), position, options, cx);
             })
             .ok();
         }));
@@ -833,22 +1020,63 @@ impl CodeEditor {
         let Some(lightbulb) = self.code_actions.lightbulb.clone() else {
             return;
         };
-        let items: Vec<Item> = valid(&lightbulb.items).into_iter().cloned().collect();
+        let set = CodeActionSet {
+            items: lightbulb.items.to_vec(),
+            documentation: Vec::new(),
+        };
         let anchor = PointUtf16::new(lightbulb.position.row, 0);
-        self.show_code_action_menu(items, anchor, cx);
+        let options = MenuOptions {
+            include_disabled: false,
+            from_lightbulb: true,
+        };
+        self.show_code_action_list(std::rc::Rc::new(set), anchor, options, cx);
     }
 
-    fn show_code_action_menu(
+    /// Clicks the lightbulb, for tests.
+    #[doc(hidden)]
+    pub fn show_lightbulb_menu_for_tests(&mut self, cx: &mut Context<Self>) {
+        self.show_lightbulb_menu(cx);
+    }
+
+    /// Monaco `CodeActionController.showCodeActionList`: the valid actions
+    /// (all of them with `include_disabled` when "Show Disabled" is on or
+    /// none is valid), with an action bar unless from the lightbulb.
+    fn show_code_action_list(
         &mut self,
-        items: Vec<Item>,
+        set: std::rc::Rc<CodeActionSet>,
         position: PointUtf16,
+        options: MenuOptions,
         cx: &mut Context<Self>,
     ) {
         self.hide_code_action_menu(cx);
+        let valid_count = valid(&set.items).len();
+        let items: Vec<Item> =
+            if options.include_disabled && (self.code_actions.show_disabled || valid_count == 0) {
+                set.items.clone()
+            } else {
+                valid(&set.items).into_iter().cloned().collect()
+            };
         if items.is_empty() {
             return;
         }
+        // Monaco `_getActionBarActions`.
+        let mut bar = Vec::new();
+        if !options.from_lightbulb {
+            bar.extend(
+                set.documentation
+                    .iter()
+                    .cloned()
+                    .map(BarAction::Documentation),
+            );
+            if options.include_disabled && valid_count > 0 && set.items.len() != valid_count {
+                bar.push(BarAction::ToggleDisabled {
+                    showing: self.code_actions.show_disabled,
+                });
+            }
+        }
         let rows = menu_rows(&items);
+        // The new menu takes the focus the old one gave back.
+        self.refocus = false;
         let editor = cx.entity().downgrade();
         let colors = self.theme.colors.clone();
         let font_size = self.options.font_size;
@@ -857,6 +1085,10 @@ impl CodeEditor {
                 editor,
                 items,
                 rows,
+                set,
+                position,
+                options,
+                bar,
                 focused: None,
                 colors,
                 font_size,
@@ -903,6 +1135,34 @@ impl CodeEditor {
             .collect()
     }
 
+    /// The labels of the open code action menu's action bar (Monaco's
+    /// documentation links and "Show Disabled" / "Hide Disabled").
+    pub fn code_action_menu_bar_actions(&self, cx: &gpui::App) -> Vec<SharedString> {
+        let Some((_, menu)) = &self.code_actions.menu else {
+            return Vec::new();
+        };
+        menu.read(cx).bar.iter().map(BarAction::label).collect()
+    }
+
+    /// Clicks the action bar button labelled `label` in the open code
+    /// action menu. Returns whether there was one.
+    pub fn run_code_action_menu_bar_action(&mut self, label: &str, cx: &mut Context<Self>) -> bool {
+        let Some((_, menu)) = self.code_actions.menu.clone() else {
+            return false;
+        };
+        let Some(ix) = menu
+            .read(cx)
+            .bar
+            .iter()
+            .position(|action| action.label() == label)
+        else {
+            return false;
+        };
+        // The menu calls back into the editor: run it after this update.
+        cx.defer(move |cx| menu.update(cx, |menu, cx| menu.run_bar_action(ix, cx)));
+        true
+    }
+
     /// Closes the code action menu and focuses the editor.
     pub fn hide_code_action_menu(&mut self, cx: &mut Context<Self>) {
         if let Some((id, _)) = self.code_actions.menu.take() {
@@ -938,12 +1198,14 @@ impl CodeEditor {
     }
 
     /// Monaco `applyCodeAction`: resolves the action if it has no edit,
-    /// applies its edit, then runs its command. `retrigger` asks for the
-    /// lightbulb again afterwards.
+    /// applies its edit (through the preview handler if `preview`), then
+    /// runs its command. `retrigger` asks for the lightbulb again
+    /// afterwards.
     pub(crate) fn apply_code_action(
         &mut self,
         item: Item,
         retrigger: bool,
+        preview: bool,
         cx: &mut Context<Self>,
     ) {
         let resolve = if item.action.edit.is_none() {
@@ -960,14 +1222,33 @@ impl CodeEditor {
                     Err(err) => log::warn!("resolving a code action failed: {err:#}"),
                 }
             }
+            let apply = this.update(cx, |this, cx| {
+                action
+                    .edit
+                    .clone()
+                    .filter(|edit| !edit.edits.is_empty())
+                    .map(|edit| {
+                        this.apply_workspace_edit_with_preview(
+                            edit,
+                            action.title.clone(),
+                            preview,
+                            cx,
+                        )
+                    })
+            });
+            if let Ok(Some(apply)) = apply {
+                match apply.await {
+                    Ok(true) => {}
+                    // The preview was cancelled: no command either.
+                    Ok(false) => return,
+                    Err(err) => {
+                        log::warn!("code action failed to apply: {err:#}");
+                        return;
+                    }
+                }
+            }
             this.update(cx, |this, cx| {
                 this.code_actions.apply = None;
-                if let Some(edit) = action.edit.filter(|edit| !edit.edits.is_empty())
-                    && let Err(err) = this.apply_workspace_edit(edit, cx)
-                {
-                    log::warn!("code action failed to apply: {err:#}");
-                    return;
-                }
                 if let Some(command) = &action.command
                     && let Err(err) = crate::commands::execute_command(cx, command)
                 {
@@ -1086,6 +1367,60 @@ mod tests {
                 "plain"
             ]
         );
+    }
+
+    #[test]
+    fn documentation_and_previews() {
+        let command = |id: &str| Command {
+            id: id.to_string().into(),
+            title: id.to_string().into(),
+            arguments: Vec::new(),
+        };
+        let docs = vec![
+            (CodeActionKind::from("refactor"), command("refactor")),
+            ("refactor.extract".into(), command("extract")),
+            ("source".into(), command("source")),
+        ];
+        let id = |found: Option<Command>| found.map(|c| c.id.to_string());
+        let extract = [action("a", Some("refactor.extract.constant"), false, false)];
+        // Monaco `getDocumentationFromProvider`: the most specific entry
+        // containing what was asked for.
+        let only = CodeActionKind::from("refactor.extract.constant");
+        assert_eq!(
+            id(documentation_for(&docs, &[], Some(&only))),
+            Some("extract".into())
+        );
+        let only = CodeActionKind::from("refactor");
+        assert_eq!(
+            id(documentation_for(&docs, &extract, Some(&only))),
+            Some("refactor".into())
+        );
+        // Else the first entry containing an action's kind.
+        assert_eq!(
+            id(documentation_for(&docs, &extract, None)),
+            Some("refactor".into())
+        );
+        let fix = [action("a", Some("quickfix"), false, false)];
+        assert_eq!(id(documentation_for(&docs, &fix, None)), None);
+        assert_eq!(id(documentation_for(&[], &extract, None)), None);
+
+        // Refactorings and source actions can be previewed, as can edits.
+        assert!(can_preview(&extract[0]));
+        assert!(can_preview(&action(
+            "a",
+            Some("source.organizeImports"),
+            false,
+            false
+        )));
+        assert!(!can_preview(&fix[0]));
+        let mut with_edit = fix[0].clone();
+        with_edit.edit = Some(crate::providers::WorkspaceEdit {
+            edits: vec![(
+                None,
+                vec![(PointUtf16::zero()..PointUtf16::zero(), "x".into())],
+            )],
+        });
+        assert!(can_preview(&with_edit));
     }
 
     struct Nothing;
