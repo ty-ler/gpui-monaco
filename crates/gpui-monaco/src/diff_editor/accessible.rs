@@ -359,6 +359,41 @@ impl Render for AccessibleDiffViewer {
             }
         };
         let group_count = self.groups.len();
+        let em_width = modified_editor
+            .layout
+            .as_ref()
+            .map_or(px(8.), |l| l.metrics.em_width);
+        // Rows are as wide as the longest line, so the list scrolls
+        // sideways (Monaco's `DomScrollableElement`).
+        let longest = self
+            .groups
+            .get(self.current_group)
+            .map(|group| {
+                group
+                    .lines
+                    .iter()
+                    .map(|element| match *element {
+                        ViewElement::Unchanged { modified, .. }
+                        | ViewElement::Added { modified } => line_text(&modified_rope, modified),
+                        ViewElement::Deleted { original, .. } => {
+                            line_text(&original_rope, original)
+                        }
+                        ViewElement::Header => String::new(),
+                    })
+                    .map(|text| {
+                        crate::colorize::expand_tabs(&text, tab_size)
+                            .0
+                            .chars()
+                            .count()
+                    })
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        let row_width = original_numbers_width
+            + modified_numbers_width
+            + px(10. + 14. + 20.)
+            + em_width * longest as f32;
         let mut rows = Vec::new();
         if let Some(group) = self.groups.get(self.current_group) {
             for (ix, element) in group.lines.iter().enumerate() {
@@ -470,6 +505,7 @@ impl Render for AccessibleDiffViewer {
                         row
                     }
                 };
+                let row = row.min_w(row_width).flex_none();
                 let row = if selected {
                     row.border_1().border_color(colors.focus_border)
                 } else {
@@ -488,6 +524,10 @@ impl Render for AccessibleDiffViewer {
             .on_key_down(cx.listener(Self::on_key_down))
             .absolute()
             .size_full()
+            // Monaco hides the editors (`visibility: hidden`) while the
+            // viewer shows: nothing reaches them through it.
+            .occlude()
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .bg(colors.background)
             .text_color(colors.foreground)
             .font_family(options.font_family.clone())
@@ -497,7 +537,9 @@ impl Render for AccessibleDiffViewer {
                 div()
                     .id("diff-review-table")
                     .size_full()
-                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .overflow_scroll()
                     .track_scroll(&self.scroll)
                     .role(gpui::Role::List)
                     .aria_label(SharedString::from(

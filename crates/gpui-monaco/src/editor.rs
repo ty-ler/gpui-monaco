@@ -1314,6 +1314,7 @@ impl CodeEditor {
             view,
             full_width,
             captures_wheel: false,
+            min_width: px(0.),
         });
         self.widgets.zones_generation += 1;
         cx.emit(CodeEditorEvent::ViewZonesChanged);

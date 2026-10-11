@@ -2140,6 +2140,10 @@ fn prepaint_editor(
                 .min(options.stop_rendering_line_after.unwrap_or(u32::MAX)) as f32
                 + options.scroll_beyond_last_column as f32)
     };
+    // Monaco `minWidthInPx`: view zones that need a wider scroll range.
+    for zone in &editor.widgets.zones {
+        content_width = content_width.max(zone.min_width);
+    }
     let show_hbar = content_width > text_width;
 
     let lines_height =
@@ -3238,7 +3242,15 @@ fn prepaint_editor(
                 let range = if options.is_whole_line {
                     Some((px(0.) - layout.scroll_left, text_width + layout.scroll_left))
                 } else {
-                    decoration_x_range(line, *start, *end)
+                    // Monaco `shouldFillLineOnLineBreak`: a range going on
+                    // past the line break fills to the line's end.
+                    decoration_x_range(line, *start, *end).map(|(from, to)| {
+                        if options.should_fill_line_on_line_break && end.row > line.row {
+                            (from, to.max(text_width + layout.scroll_left))
+                        } else {
+                            (from, to)
+                        }
+                    })
                 };
                 if let Some((from, to)) = range {
                     // Monaco gives empty ranges (e.g. a snippet's final tab
@@ -4867,7 +4879,7 @@ fn paint_scrollbar_arrow(
 }
 
 /// A lightbulb: a round bulb over a small base.
-fn paint_lightbulb(bounds: Bounds<Pixels>, color: Hsla, window: &mut Window) {
+pub(crate) fn paint_lightbulb(bounds: Bounds<Pixels>, color: Hsla, window: &mut Window) {
     let h = bounds.size.height;
     let center = point(
         bounds.left() + bounds.size.width / 2.,

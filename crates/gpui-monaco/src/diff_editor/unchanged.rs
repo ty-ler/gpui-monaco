@@ -11,8 +11,7 @@ use crate::diff::{DetailedLineRangeMapping, LineRange, LineRangeMapping};
 pub(crate) enum RevealPreference {
     FromCloserSide,
     FromTop,
-    // Monaco's breadcrumbs reveal from the bottom; there are none here yet.
-    #[allow(dead_code)]
+    /// Monaco's breadcrumbs reveal from the bottom.
     FromBottom,
 }
 

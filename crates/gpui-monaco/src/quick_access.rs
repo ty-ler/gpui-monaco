@@ -137,7 +137,10 @@ pub struct QuickInput {
 
 /// A short glyph per symbol kind, standing in for Monaco's codicons, in
 /// the theme's `symbolIcon.*Foreground` color.
-fn symbol_icon(kind: SymbolKind, colors: &crate::theme::EditorColors) -> (&'static str, Hsla) {
+pub(crate) fn symbol_icon(
+    kind: SymbolKind,
+    colors: &crate::theme::EditorColors,
+) -> (&'static str, Hsla) {
     use SymbolKind::*;
     let glyph = match kind {
         Method | Function | Constructor | Operator => "ƒ",

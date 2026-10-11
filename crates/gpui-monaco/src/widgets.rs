@@ -234,6 +234,10 @@ pub(crate) struct ZoneState {
     /// widgets (peek, the problem zone) are overlay widgets, outside its
     /// scrollable element, while plain view zones scroll it.
     pub captures_wheel: bool,
+    /// Monaco `IViewZone.minWidthInPx`: the zone widens the horizontal
+    /// scroll range to at least this (the diff editor's inline deleted
+    /// lines).
+    pub min_width: Pixels,
 }
 
 #[derive(Clone)]

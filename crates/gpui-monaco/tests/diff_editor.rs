@@ -119,10 +119,12 @@ fn inline_view_shows_deleted_lines_in_the_modified_editor(cx: &mut TestAppContex
     });
     paint(cx);
     assert!(!diff.read_with(cx, |d, _| d.renders_side_by_side()));
-    // One zone for the deleted `d`; the insertion has nothing deleted.
+    // One zone for the deleted `d`; the insertion has nothing deleted. The
+    // original column pads after each change (Monaco's `gutter-delete`
+    // zones).
     assert_eq!(
         diff.read_with(cx, |d, _| d.alignment_zones_for_tests()),
-        (0, 1)
+        (2, 1)
     );
     // Back to side by side.
     diff.update(cx, |d, cx| {
@@ -148,7 +150,7 @@ fn narrow_diff_editors_show_inline(cx: &mut TestAppContext) {
     assert!(!diff.read_with(cx, |d, _| d.renders_side_by_side()));
     assert_eq!(
         diff.read_with(cx, |d, _| d.alignment_zones_for_tests()),
-        (0, 1)
+        (1, 1)
     );
     // Unless that's turned off.
     diff.update(cx, |d, cx| {
@@ -919,10 +921,11 @@ fn true_inline_view(cx: &mut TestAppContext) {
             .collect::<Vec<_>>()
     };
     update_options(&diff, cx, |o| o.render_side_by_side = false);
-    // The deleted line shows above.
+    // The deleted line shows above, the original column pads for the
+    // modified line.
     assert_eq!(
         diff.read_with(cx, |d, _| d.alignment_zones_for_tests()),
-        (0, 1)
+        (1, 1)
     );
     assert!(deleted_text(&diff, cx).is_empty());
     // Monaco `experimental.useTrueInlineView`: the deleted `r` struck
@@ -985,4 +988,628 @@ fn diff_toggle_actions(cx: &mut TestAppContext) {
     assert!(options.hide_unchanged_regions.enabled);
     assert!(options.show_moves);
     assert!(!options.use_inline_view_when_space_is_limited);
+}
+
+// ----- Diff editor fidelity (#257) -----------------------------------------
+
+fn editors(
+    diff: &Entity<DiffEditor>,
+    cx: &mut VisualTestContext,
+) -> (
+    Entity<gpui_monaco::CodeEditor>,
+    Entity<gpui_monaco::CodeEditor>,
+) {
+    diff.read_with(cx, |d, _| {
+        (d.original_editor().clone(), d.modified_editor().clone())
+    })
+}
+
+fn set_editor_options(
+    editor: &Entity<gpui_monaco::CodeEditor>,
+    cx: &mut VisualTestContext,
+    f: impl FnOnce(&mut gpui_monaco::EditorOptions),
+) {
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        f(&mut options);
+        e.update_options(options, cx);
+    });
+    paint(cx);
+}
+
+/// Monaco `_adjustOptionsForSubEditor`: no minimap or folding, no sticky
+/// scroll with hidden unchanged regions, and the hidden original editor of
+/// the inline view without sticky scroll, unicode highlighting or glyph
+/// margin.
+#[gpui::test]
+fn sub_editors_turn_off_minimap_folding_and_sticky_scroll(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb", "a\nc", cx);
+    let (original, modified) = editors(&diff, cx);
+    for editor in [&original, &modified] {
+        let options = editor.read_with(cx, |e, _| e.options().clone());
+        assert!(!options.minimap.enabled);
+        assert!(!options.folding);
+        assert!(options.sticky_scroll.enabled);
+    }
+    // A host turning the minimap back on doesn't win.
+    set_editor_options(&modified, cx, |o| o.minimap.enabled = true);
+    assert!(!modified.read_with(cx, |e, _| e.options().minimap.enabled));
+    update_options(&diff, cx, |o| o.hide_unchanged_regions.enabled = true);
+    assert!(!modified.read_with(cx, |e, _| e.options().sticky_scroll.enabled));
+    update_options(&diff, cx, |o| o.hide_unchanged_regions.enabled = false);
+    assert!(modified.read_with(cx, |e, _| e.options().sticky_scroll.enabled));
+    // Inline, the original editor only shows its line numbers.
+    update_options(&diff, cx, |o| o.render_side_by_side = false);
+    let options = original.read_with(cx, |e, _| e.options().clone());
+    assert!(!options.sticky_scroll.enabled);
+    assert!(!options.glyph_margin);
+    assert!(!options.unicode_highlight.invisible_characters);
+    assert!(!options.unicode_highlight.ambiguous_characters);
+    update_options(&diff, cx, |o| o.render_side_by_side = true);
+    let options = original.read_with(cx, |e, _| e.options().clone());
+    assert!(options.sticky_scroll.enabled);
+    assert!(options.glyph_margin);
+    assert!(options.unicode_highlight.invisible_characters);
+}
+
+/// Monaco `originalAriaLabel`/`modifiedAriaLabel`.
+#[gpui::test]
+fn aria_label_options(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a", "b", cx);
+    update_options(&diff, cx, |o| {
+        o.original_aria_label = Some("Before".into());
+        o.modified_aria_label = Some("After".into());
+    });
+    let (original, modified) = editors(&diff, cx);
+    assert_eq!(
+        original.read_with(cx, |e, _| e.options().aria_label.clone()),
+        "Before"
+    );
+    assert_eq!(
+        modified.read_with(cx, |e, _| e.options().aria_label.clone()),
+        "After"
+    );
+}
+
+/// Monaco `getAdditionalLineHeights`: other view zones count, and
+/// alignment follows their changes.
+#[gpui::test]
+fn alignment_counts_other_view_zones(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb\nc", "a\nb\nc", cx);
+    let (_, modified) = editors(&diff, cx);
+    assert!(
+        diff.read_with(cx, |d, _| d.alignment_heights_for_tests())
+            .is_empty()
+    );
+    let view = cx.update(|_, cx| cx.new(|_| gpui::Empty));
+    let zone = modified.update(cx, |e, cx| {
+        e.add_view_zone(
+            gpui_monaco::widgets::ViewZone {
+                after_line: 1,
+                height: gpui_monaco::widgets::ZoneHeight::Pixels(px(40.)),
+                view: view.into(),
+            },
+            cx,
+        )
+    });
+    paint(cx);
+    // The original pads after line 1 by as much.
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.alignment_heights_for_tests()),
+        vec![(true, 1, 40.)]
+    );
+    modified.update(cx, |e, cx| e.remove_widget(zone, cx));
+    paint(cx);
+    assert!(
+        diff.read_with(cx, |d, _| d.alignment_heights_for_tests())
+            .is_empty()
+    );
+}
+
+/// Monaco realigns on `lineHeight` changes (e.g. the font zoom).
+#[gpui::test]
+fn alignment_follows_the_line_height(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb", "a\nx\nb", cx);
+    let (original, modified) = editors(&diff, cx);
+    let height =
+        |cx: &mut VisualTestContext| diff.read_with(cx, |d, _| d.alignment_heights_for_tests());
+    let line_height = f32::from(modified.read_with(cx, |e, _| e.options().resolved_line_height()));
+    assert_eq!(height(cx), vec![(true, 1, line_height)]);
+    for editor in [&original, &modified] {
+        set_editor_options(editor, cx, |o| o.line_height = Some(px(30.)));
+    }
+    paint(cx);
+    assert_eq!(height(cx), vec![(true, 1, 30.)]);
+}
+
+/// Monaco `renderLines` with the modified editor's line breaks and
+/// `minWidthInPx`.
+#[gpui::test]
+fn inline_deleted_lines_wrap_and_widen_the_scroll_range(cx: &mut TestAppContext) {
+    let long = "x".repeat(400);
+    let (diff, cx) = setup(&format!("a\n{long}\nb"), "a\nb", cx);
+    update_options(&diff, cx, |o| o.render_side_by_side = false);
+    let layout = diff.read_with(cx, |d, cx| d.deleted_code_layout_for_tests(cx));
+    assert_eq!(layout.len(), 1);
+    let (lines, min_width) = layout[0];
+    assert_eq!(lines, 1);
+    // The modified text is short, but the deleted line can be scrolled to.
+    let (_, modified) = editors(&diff, cx);
+    let width = modified.read_with(cx, |e, _| e.content_width().unwrap());
+    assert!(min_width > px(400. * 5.), "{min_width:?}");
+    assert!(width >= min_width, "{width:?} {min_width:?}");
+    // With word wrap the deleted line wraps, and the original column pads
+    // for its extra rows.
+    update_options(&diff, cx, |o| {
+        o.diff_word_wrap = gpui_monaco::options::WordWrapOverride::On
+    });
+    paint(cx);
+    let (lines, _) = diff.read_with(cx, |d, cx| d.deleted_code_layout_for_tests(cx))[0];
+    assert!(lines > 1, "{lines}");
+    let zones = diff.read_with(cx, |d, _| d.alignment_heights_for_tests());
+    let line_height = f32::from(modified.read_with(cx, |e, _| e.options().resolved_line_height()));
+    assert!(
+        zones.contains(&(false, 1, lines as f32 * line_height)),
+        "{zones:?}"
+    );
+    assert!(
+        zones.contains(&(true, 2, (lines - 1) as f32 * line_height)),
+        "{zones:?}"
+    );
+}
+
+/// Monaco hides the editors behind the accessible diff viewer: clicks and
+/// the wheel don't reach them.
+#[gpui::test]
+fn the_accessible_diff_viewer_blocks_the_editors(cx: &mut TestAppContext) {
+    let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    let (diff, cx) = setup(&text, &text.replace("line 5\n", "five\n"), cx);
+    let (_, modified) = editors(&diff, cx);
+    diff.update_in(cx, |d, window, cx| {
+        d.accessible_diff_viewer_next(window, cx)
+    });
+    paint(cx);
+    let position = point(px(700.), px(300.));
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position,
+        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-200.))),
+        ..Default::default()
+    });
+    paint(cx);
+    assert_eq!(modified.read_with(cx, |e, _| e.scroll_position().y), px(0.));
+    let before = modified.read_with(cx, |e, _| e.selections()[0].head);
+    cx.simulate_click(position, gpui::Modifiers::none());
+    paint(cx);
+    assert_eq!(
+        modified.read_with(cx, |e, _| e.selections()[0].head),
+        before
+    );
+    assert!(diff.read_with(cx, |d, _| d.is_accessible_diff_viewer_visible()));
+}
+
+/// Monaco's inline view keeps the original editor as a column of its line
+/// numbers, unless `hideOriginalLineNumbers` (or `compactMode`).
+#[gpui::test]
+fn inline_view_shows_original_line_numbers(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb\nc\nd", "a\nc\nd", cx);
+    update_options(&diff, cx, |o| o.render_side_by_side = false);
+    paint(cx);
+    let width = diff.read_with(cx, |d, cx| d.inline_original_width_for_tests(cx));
+    assert!(width > px(5.), "{width:?}");
+    // The deleted line's number shows in it.
+    let (original, _) = editors(&diff, cx);
+    let labels = original.read_with(cx, |e, _| e.line_number_labels_for_tests());
+    assert!(labels.contains(&(1, "2".to_string())), "{labels:?}");
+    update_options(&diff, cx, |o| o.hide_original_line_numbers = true);
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.inline_original_width_for_tests(cx)),
+        px(0.)
+    );
+}
+
+/// Monaco `InlineDiffDeletedCodeMargin` and `copySelection`.
+#[gpui::test]
+fn inline_deleted_lines_copy_and_revert(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nold one\nold two\nz", "a\nz", cx);
+    update_options(&diff, cx, |o| o.render_side_by_side = false);
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.deleted_menu_for_tests(0, 2, cx)),
+        vec![
+            "Copy deleted lines".to_string(),
+            "Copy deleted line (3)".to_string(),
+            "Revert this change".to_string(),
+        ]
+    );
+    diff.update(cx, |d, cx| d.run_deleted_menu_item_for_tests(0, 2, 0, cx));
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|c| c.text()),
+        Some("old one\nold two\n".to_string())
+    );
+    diff.update(cx, |d, cx| d.run_deleted_menu_item_for_tests(0, 2, 1, cx));
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|c| c.text()),
+        Some("old two".to_string())
+    );
+    // A selection in the deleted text copies.
+    assert!(diff.update(cx, |d, cx| {
+        d.copy_deleted_text_for_tests(0, PointUtf16::new(1, 4)..PointUtf16::new(2, 3), cx)
+    }));
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|c| c.text()),
+        Some("one\nold".to_string())
+    );
+    // Revert this change.
+    diff.update(cx, |d, cx| d.run_deleted_menu_item_for_tests(0, 1, 2, cx));
+    paint(cx);
+    assert_eq!(modified_text(&diff, cx), "a\nold one\nold two\nz");
+}
+
+/// Monaco `OverviewRulerFeature`: the diff's marks are in its own two
+/// columns, not in the editors' rulers.
+#[gpui::test]
+fn the_diff_overview_ruler(cx: &mut TestAppContext) {
+    let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let (diff, cx) = setup(&text, &text.replace("line 50\n", "changed\n"), cx);
+    let (original_marks, modified_marks) =
+        diff.read_with(cx, |d, cx| d.overview_zones_for_tests(cx));
+    assert_eq!((original_marks.len(), modified_marks.len()), (1, 1));
+    let (top, bottom) = modified_marks[0];
+    assert!(top > 0.2 && bottom < 0.8 && top < bottom, "{top} {bottom}");
+    assert!(
+        side_decorations(&diff, true, cx)
+            .iter()
+            .all(|(_, o)| o.overview_ruler.is_none())
+    );
+    // The modified editor leaves room for the 30px column.
+    let (_, modified) = editors(&diff, cx);
+    let width = modified.read_with(cx, |e, _| e.layout_info().unwrap().width);
+    let window = cx.update(|window, _| window.viewport_size().width);
+    let sash = diff.read_with(cx, |d, _| d.sash_left_for_tests());
+    assert_eq!(width, window - sash - px(30.));
+}
+
+/// Monaco `DiffEditorSash`: 100px minimum per side, double click resets.
+#[gpui::test]
+fn the_sash(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a", "b", cx);
+    cx.simulate_resize(gpui::size(px(1230.), px(600.)));
+    paint(cx);
+    // The width less the overview ruler, split in half.
+    assert_eq!(diff.read_with(cx, |d, _| d.sash_left_for_tests()), px(600.));
+    diff.update(cx, |d, cx| d.drag_sash_for_tests(px(600.), px(10.), cx));
+    assert_eq!(diff.read_with(cx, |d, _| d.sash_left_for_tests()), px(100.));
+    diff.update(cx, |d, cx| d.drag_sash_for_tests(px(100.), px(5000.), cx));
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.sash_left_for_tests()),
+        px(1100.)
+    );
+    diff.update(cx, |d, cx| d.reset_sash(cx));
+    assert_eq!(diff.read_with(cx, |d, _| d.sash_left_for_tests()), px(600.));
+    // A double click on it resets it too.
+    diff.update(cx, |d, cx| d.drag_sash_for_tests(px(600.), px(400.), cx));
+    paint(cx);
+    let at = point(px(400.), px(300.));
+    cx.simulate_event(gpui::MouseDownEvent {
+        button: gpui::MouseButton::Left,
+        position: at,
+        modifiers: gpui::Modifiers::none(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    cx.simulate_event(gpui::MouseUpEvent {
+        button: gpui::MouseButton::Left,
+        position: at,
+        modifiers: gpui::Modifiers::none(),
+        click_count: 2,
+    });
+    paint(cx);
+    assert_eq!(diff.read_with(cx, |d, _| d.sash_left_for_tests()), px(600.));
+}
+
+/// Monaco: a click on the gutter focuses the modified editor.
+#[gpui::test]
+fn clicking_the_gutter_focuses_the_modified_editor(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb", "a\nc", cx);
+    cx.simulate_resize(gpui::size(px(1230.), px(600.)));
+    paint(cx);
+    let (original, modified) = editors(&diff, cx);
+    cx.update(|window, cx| window.focus(&original.focus_handle(cx), cx));
+    let sash = diff.read_with(cx, |d, _| d.sash_left_for_tests());
+    // The gutter is the 35px left of the sash.
+    cx.simulate_click(point(sash - px(20.), px(300.)), gpui::Modifiers::none());
+    paint(cx);
+    assert!(cx.update(|window, cx| modified.focus_handle(cx).contains_focused(window, cx)));
+}
+
+/// Monaco `shouldFillLineOnLineBreak` on the changed characters.
+#[gpui::test]
+fn char_changes_fill_to_the_line_end(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nfoo\nb", "a\nfoo bar\nbaz\nb", cx);
+    let chars: Vec<_> = side_decorations(&diff, true, cx)
+        .into_iter()
+        .filter(|(_, o)| !o.is_whole_line && o.background.is_some())
+        .collect();
+    assert!(!chars.is_empty());
+    assert!(chars.iter().all(|(_, o)| o.should_fill_line_on_line_break));
+}
+
+/// Monaco's "Fold Unchanged Region" glyph and `_runWithLowerScrollAnchor`.
+#[gpui::test]
+fn hidden_region_fold_glyph_and_bottom_drag(cx: &mut TestAppContext) {
+    let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let modified = original.replace("line 50\n", "changed\n");
+    let (diff, cx) = setup(&original, &modified, cx);
+    hide_unchanged(&diff, cx);
+    assert_eq!(diff.read_with(cx, |d, _| d.fold_glyphs_for_tests()), (0, 0));
+    diff.update(cx, |d, cx| d.show_all_unchanged_regions(cx));
+    paint(cx);
+    // Fully shown regions get the glyph on both sides.
+    assert_eq!(diff.read_with(cx, |d, _| d.fold_glyphs_for_tests()), (2, 2));
+    diff.update(cx, |d, cx| d.fold_unchanged_for_tests(1, cx));
+    paint(cx);
+    assert_eq!(diff.read_with(cx, |d, _| d.fold_glyphs_for_tests()), (1, 1));
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests()),
+        vec![55..102]
+    );
+    // Dragging the first region's bottom edge up shows lines above the
+    // change and scrolls by as much, so what's below stays put.
+    diff.update(cx, |d, cx| d.collapse_all_unchanged_regions(cx));
+    paint(cx);
+    let (_, modified_editor) = editors(&diff, cx);
+    let line_height = modified_editor.read_with(cx, |e, _| e.options().resolved_line_height());
+    let before = modified_editor.read_with(cx, |e, _| e.scroll_position().y);
+    diff.update(cx, |d, cx| {
+        d.drag_unchanged_for_tests(0, false, px(100.), px(100.) - line_height * 2., cx)
+    });
+    let after = modified_editor.read_with(cx, |e, _| e.scroll_position().y);
+    assert_eq!(after - before, line_height * 2.);
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests())[0],
+        1..46
+    );
+}
+
+struct Symbols;
+impl gpui_monaco::providers::DocumentSymbolProvider for Symbols {
+    fn provide_document_symbols(
+        &self,
+        _: &gpui_monaco::providers::ProviderContext,
+        _: &mut gpui::App,
+    ) -> gpui::Task<anyhow::Result<Vec<gpui_monaco::providers::DocumentSymbol>>> {
+        use gpui_monaco::providers::{DocumentSymbol, SymbolKind};
+        let symbol = |name: &str, start: u32, end: u32, children| DocumentSymbol {
+            name: name.to_string().into(),
+            kind: SymbolKind::Function,
+            range: PointUtf16::new(start, 0)..PointUtf16::new(end, 0),
+            children,
+            ..Default::default()
+        };
+        gpui::Task::ready(Ok(vec![symbol(
+            "outer",
+            10,
+            80,
+            vec![
+                symbol("inner", 20, 75, Vec::new()),
+                symbol("small", 5, 8, Vec::new()),
+            ],
+        )]))
+    }
+}
+
+/// Monaco `diffEditorBreadcrumbs`: the symbols the hidden lines start that
+/// end after them, outermost first; clicking one reveals it.
+#[gpui::test]
+fn hidden_region_breadcrumbs(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::providers::register_document_symbol_provider(
+            cx,
+            gpui_monaco::providers::LanguageSelector::All,
+            Symbols,
+        );
+    });
+    let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let modified = original.replace("line 70\n", "changed\n");
+    let (diff, cx) = setup(&original, &modified, cx);
+    hide_unchanged(&diff, cx);
+    paint(cx);
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.breadcrumbs_for_tests(0)),
+        vec!["outer".to_string(), "inner".to_string()]
+    );
+    diff.update(cx, |d, cx| d.click_breadcrumb_for_tests(0, 1, cx));
+    let hidden = diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests());
+    assert!(hidden[0].end <= 21, "{hidden:?}");
+}
+
+/// Monaco hides the margin revert arrows while comparing a moved block and
+/// keeps the other changes' arrows with a selection.
+#[gpui::test]
+fn margin_arrows_with_selection_and_compare(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb\nc\nd\ne", "a\nB\nc\nD\ne", cx);
+    update_options(&diff, cx, |o| o.render_gutter_menu = false);
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.revert_arrow_bounds_for_tests(cx))
+            .len(),
+        2
+    );
+    let (_, modified) = editors(&diff, cx);
+    modified.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection {
+                anchor: PointUtf16::new(1, 0),
+                head: PointUtf16::new(1, 1),
+            }],
+            cx,
+        )
+    });
+    paint(cx);
+    // The selection's arrow and the other change's.
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.revert_arrow_bounds_for_tests(cx))
+            .len(),
+        2
+    );
+}
+
+/// Monaco's extensible `DiffEditorHunkToolbar`.
+#[gpui::test]
+fn host_hunk_actions(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb\nc", "a\nB\nc", cx);
+    let (_, modified) = editors(&diff, cx);
+    set_editor_options(&modified, cx, |o| o.read_only = true);
+    // Read-only: no built-in revert, so no gutter.
+    assert!(!diff.read_with(cx, |d, cx| d.shows_gutter_for_tests(cx)));
+    let staged = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let sink = staged.clone();
+    diff.update(cx, |d, cx| {
+        d.add_hunk_action(
+            gpui_monaco::DiffHunkAction {
+                id: "stage".into(),
+                label: "Stage".into(),
+                icon: "+".into(),
+                toolbar: gpui_monaco::DiffHunkToolbar::Hunk,
+                run: std::rc::Rc::new(move |context, _, _| {
+                    *sink.borrow_mut() = Some(context.original_with_modified_changes.clone());
+                }),
+            },
+            cx,
+        )
+    });
+    assert!(diff.read_with(cx, |d, cx| d.shows_gutter_for_tests(cx)));
+    assert!(diff.update_in(cx, |d, window, cx| {
+        d.run_hunk_action_for_tests(0, "stage", window, cx)
+    }));
+    assert_eq!(staged.borrow().as_deref(), Some("a\nB\nc"));
+    assert!(diff.update(cx, |d, cx| d.remove_hunk_action("stage", cx)));
+    assert!(!diff.read_with(cx, |d, cx| d.shows_gutter_for_tests(cx)));
+}
+
+/// Monaco `getLineChanges`, `identical`, `setModel(null)` and
+/// `waitForDiff`.
+#[gpui::test]
+fn diff_editor_api(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb\nc\nd", "a\nB\nc", cx);
+    let changes = diff.read_with(cx, |d, _| d.line_changes().unwrap());
+    assert_eq!(changes.len(), 2);
+    assert_eq!(
+        (
+            changes[0].original_start_line_number,
+            changes[0].original_end_line_number,
+            changes[0].modified_start_line_number,
+            changes[0].modified_end_line_number,
+        ),
+        (2, 2, 2, 2)
+    );
+    assert_eq!(changes[0].char_changes.as_ref().unwrap().len(), 1);
+    // A deletion: the modified side is the line before, with end 0.
+    assert_eq!(
+        (
+            changes[1].modified_start_line_number,
+            changes[1].modified_end_line_number
+        ),
+        (3, 0)
+    );
+    assert!(changes[1].char_changes.is_none());
+    assert_eq!(diff.read_with(cx, |d, _| d.identical()), Some(false));
+
+    // Trimmed whitespace: no changes, but not identical.
+    let model = |text: &str, cx: &mut VisualTestContext| {
+        let text = text.to_string();
+        cx.update(|_, cx| cx.new(|_| TextModel::new(&text)))
+    };
+    let (original, modified) = (model("a", cx), model("a  ", cx));
+    diff.update(cx, |d, cx| d.set_models(original, modified, cx));
+    let wait = diff.update(cx, |d, _| d.wait_for_diff());
+    paint(cx);
+    futures::executor::block_on(wait);
+    assert!(diff.read_with(cx, |d, _| d.diff().unwrap().changes.is_empty()));
+    assert_eq!(diff.read_with(cx, |d, _| d.identical()), Some(false));
+    let (original, modified) = (model("x", cx), model("x", cx));
+    diff.update(cx, |d, cx| d.set_models(original, modified, cx));
+    paint(cx);
+    assert_eq!(diff.read_with(cx, |d, _| d.identical()), Some(true));
+
+    // `setModel(null)`.
+    diff.update(cx, |d, cx| d.set_model(None, cx));
+    paint(cx);
+    assert!(diff.read_with(cx, |d, cx| d.model(cx).is_none()));
+    assert!(diff.read_with(cx, |d, _| d.diff().is_none()));
+    assert_eq!(modified_text(&diff, cx), "");
+}
+
+/// Monaco `IStandaloneDiffEditor.addAction` goes to the modified editor.
+#[gpui::test]
+fn diff_editor_add_action(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a", "b", cx);
+    diff.update(cx, |d, cx| {
+        d.add_action(
+            gpui_monaco::EditorActionDescriptor::new("my.action", "My Action", |_, _, _| {}),
+            cx,
+        )
+    });
+    let (_, modified) = editors(&diff, cx);
+    assert!(modified.read_with(cx, |e, cx| {
+        e.supported_actions(cx)
+            .iter()
+            .any(|a| a.id.as_ref() == "my.action")
+    }));
+}
+
+/// Monaco's signals from `goToDiff` and cursor moves onto changes.
+#[gpui::test]
+fn accessibility_signals_for_changes(cx: &mut TestAppContext) {
+    use gpui_monaco::{AccessibilitySignal, DiffEditorEvent};
+    let (diff, cx) = setup("a\nb\nc\nd\ne", "a\nB\nc\nnew\nd\ne", cx);
+    let signals = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = signals.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&diff, move |_, event: &DiffEditorEvent, _| {
+            if let DiffEditorEvent::AccessibilitySignal(signal) = event {
+                sink.borrow_mut().push(*signal);
+            }
+        })
+        .detach()
+    });
+    diff.update_in(cx, |d, window, cx| d.go_to_diff(true, window, cx));
+    diff.update_in(cx, |d, window, cx| d.go_to_diff(true, window, cx));
+    paint(cx);
+    assert_eq!(
+        signals.borrow().as_slice(),
+        &[
+            AccessibilitySignal::DiffLineModified,
+            AccessibilitySignal::DiffLineInserted
+        ]
+    );
+}
+
+/// Monaco `applyEditToLineRange`: an edit moves the shown diff until it's
+/// computed again.
+#[gpui::test]
+fn edits_move_the_diff_while_it_recomputes(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb\nc", "a\nb\nX\nc", cx);
+    let change = |cx: &mut VisualTestContext| {
+        diff.read_with(cx, |d, _| d.diff().unwrap().changes[0].modified.to_string())
+    };
+    assert_eq!(change(cx), "[3,4)");
+    let model = diff.read_with(cx, |d, cx| d.modified_editor().read(cx).model().clone());
+    model.update(cx, |m, cx| {
+        m.edit([(0..0, "new\n")], cx).unwrap();
+    });
+    // Before the diff is computed again.
+    assert_eq!(change(cx), "[4,5)");
+    recompute(cx);
+    let changes = diff.read_with(cx, |d, _| d.diff().unwrap().changes.len());
+    assert_eq!(changes, 2);
+}
+
+/// Monaco `couldShowInlineViewBecauseOfSize` is `width <= breakpoint`.
+#[gpui::test]
+fn the_inline_breakpoint_is_inclusive(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a", "b", cx);
+    cx.simulate_resize(gpui::size(px(900.), px(600.)));
+    paint(cx);
+    paint(cx);
+    assert!(!diff.read_with(cx, |d, _| d.renders_side_by_side()));
 }
