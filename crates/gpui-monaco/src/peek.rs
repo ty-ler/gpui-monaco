@@ -372,12 +372,14 @@ impl PeekView {
                 group.highlights = Some(highlights);
             }
         }
-        // A double click in the preview opens the result (Monaco).
+        // A double click in the preview opens the result (Monaco), unless
+        // `stablePeek`.
         self._subscriptions
             .push(cx.subscribe(&preview, |this, _, event, cx| {
                 if let CodeEditorEvent::MouseDown(mouse) = event
                     && mouse.click_count == 2
                     && mouse.target.kind == MouseTargetKind::ContentText
+                    && !this.stable_peek(cx)
                 {
                     this.open_selected(true, cx);
                 }
@@ -493,6 +495,14 @@ impl PeekView {
         editor.update(cx, |editor, cx| {
             editor.peek_open_location(location, close, results, cx)
         });
+    }
+
+    /// Monaco `stablePeek`: Escape and double clicks in the preview leave
+    /// the peek view open.
+    fn stable_peek(&self, cx: &gpui::App) -> bool {
+        self.editor
+            .upgrade()
+            .is_some_and(|editor| editor.read(cx).options.stable_peek)
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
@@ -798,9 +808,15 @@ impl Render for PeekView {
                                         this.groups[group].collapsed = false;
                                         cx.notify();
                                     }))
-                                    .on_action(
-                                        cx.listener(|this, _: &ClosePeek, _, cx| this.close(cx)),
-                                    )
+                                    .on_action(cx.listener(|this, _: &ClosePeek, _, cx| {
+                                        // Monaco's Escape keybinding
+                                        // is off with `stablePeek`.
+                                        if this.stable_peek(cx) {
+                                            cx.propagate();
+                                        } else {
+                                            this.close(cx);
+                                        }
+                                    }))
                                     .on_action(cx.listener(|this, _: &GoToNextReference, _, cx| {
                                         this.select_relative(1, cx)
                                     }))

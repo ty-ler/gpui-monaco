@@ -18,6 +18,10 @@ use crate::search::{self, SearchParams};
 /// Monaco's `SelectionHighlighter` waits this long after edits.
 const SELECTION_UPDATE_DELAY: Duration = Duration::from_millis(300);
 
+/// Monaco `WordHighlighter.runDelayer`: the word highlights are computed
+/// once the cursor has rested this long.
+const WORD_HIGHLIGHT_RUN_DELAY: Duration = Duration::from_millis(50);
+
 /// Monaco `mergeHighlights`: the answers in provider order, keeping the
 /// first highlight of each range.
 fn merge_highlights(answers: Vec<Vec<DocumentHighlight>>) -> Vec<DocumentHighlight> {
@@ -130,9 +134,11 @@ impl CodeEditor {
         ranges
     }
 
-    /// Monaco `WordHighlighter._run`: after the cursor rests in a word,
-    /// highlight the symbol's occurrences from the document highlight
-    /// providers, or the word's textual occurrences.
+    /// Monaco `WordHighlighter._run`: after the cursor rests in a word
+    /// (50ms), highlight the symbol's occurrences from the document
+    /// highlight providers, or the word's textual occurrences, no sooner
+    /// than `occurrences_highlight_delay` after the cursor moved (Monaco
+    /// `_beginRenderDecorations`).
     fn update_word_highlights(&mut self, force: bool, cx: &mut Context<Self>) {
         // Monaco has no word highlighter for models too large to tokenize.
         if (self.options.occurrences_highlight == crate::options::OccurrencesHighlight::Off
@@ -176,14 +182,18 @@ impl CodeEditor {
         let text = rope.text_for_range(
             rope.point_utf16_to_offset(word.start)..rope.point_utf16_to_offset(word.end),
         );
-        let delay = if force {
-            Duration::ZERO
+        let (run_delay, render_delay) = if force {
+            (Duration::ZERO, Duration::ZERO)
         } else {
-            self.options.occurrences_highlight_delay
+            (
+                WORD_HIGHLIGHT_RUN_DELAY,
+                self.options.occurrences_highlight_delay,
+            )
         };
+        let moved = cx.background_executor().now();
         let merge = self.options.occurrences_highlight_from_all_providers;
         self.occurrences.word_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(delay).await;
+            cx.background_executor().timer(run_delay).await;
             let highlights = if merge && !providers.is_empty() {
                 // Monaco `getOccurrencesAtPosition` with `mergeProviders`:
                 // every provider at once, their answers merged in provider
@@ -254,6 +264,14 @@ impl CodeEditor {
                         .await
                 }
             };
+            // Monaco `_beginRenderDecorations`: the highlights show no
+            // sooner than the delay after the cursor moved.
+            let elapsed = cx.background_executor().now() - moved;
+            if let Some(wait) = render_delay.checked_sub(elapsed)
+                && !wait.is_zero()
+            {
+                cx.background_executor().timer(wait).await;
+            }
             this.update(cx, |this, cx| {
                 if this.snapshot.version() != version {
                     return;

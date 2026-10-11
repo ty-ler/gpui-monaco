@@ -1052,16 +1052,17 @@ impl Render for DeletedCode {
         let colors = editor.colors().clone();
         let theme = editor.theme().clone();
         let line_height = options.resolved_line_height();
-        let (gutter_width, text_left, sign_left, scroll_left) = match &editor.layout {
+        let (gutter_width, text_left, sign_left, scroll_left, char_width) = match &editor.layout {
             Some(layout) => (
                 layout.gutter_width,
                 layout.text_bounds.left() - layout.bounds.left(),
                 layout.glyph_margin_width + layout.line_numbers_width,
                 layout.scroll_left,
+                layout.metrics.em_width,
             ),
-            None => (px(0.), px(0.), px(0.), px(0.)),
+            None => (px(0.), px(0.), px(0.), px(0.), px(0.)),
         };
-        let decorations_width = options.line_decorations_width;
+        let decorations_width = options.line_decorations_width.resolve(char_width);
         let font_family = options.font_family.clone();
         let font_size = options.font_size;
         let font_weight = options.font_weight;
