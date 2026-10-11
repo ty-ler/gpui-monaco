@@ -131,6 +131,8 @@ const INLINE_OR_EDIT: &str = "inlineSuggestionVisible || inlineEditIsVisible";
 const CODE_ACTIONS: &str = "!editorReadonly && editorHasCodeActionsProvider";
 /// Monaco `SuggestContext.Visible`.
 const SUGGEST_VISIBLE: &str = "suggestWidgetVisible";
+/// Monaco's precondition for moving in the suggest list.
+const SUGGEST_NAVIGABLE: &str = "suggestWidgetVisible && (suggestWidgetMultipleSuggestions || !suggestWidgetHasFocusedSuggestion)";
 
 /// Monaco's labelled editor actions that this editor implements.
 #[rustfmt::skip]
@@ -470,12 +472,12 @@ static COMMANDS: &[Command] = &[
     Command("insertNextSuggestion", "code_editor::InsertNextSuggestion", "hasOtherSuggestions"),
     Command("insertPrevSuggestion", "code_editor::InsertPrevSuggestion", "hasOtherSuggestions"),
     Command("toggleSuggestionDetails", "code_editor::ToggleSuggestionDetails", SUGGEST_VISIBLE),
-    Command("selectNextSuggestion", "code_editor::SelectNextSuggestion", SUGGEST_VISIBLE),
-    Command("selectPrevSuggestion", "code_editor::SelectPreviousSuggestion", SUGGEST_VISIBLE),
-    Command("selectNextPageSuggestion", "code_editor::SelectNextPageSuggestion", SUGGEST_VISIBLE),
-    Command("selectPrevPageSuggestion", "code_editor::SelectPreviousPageSuggestion", SUGGEST_VISIBLE),
-    Command("selectFirstSuggestion", "code_editor::SelectFirstSuggestion", SUGGEST_VISIBLE),
-    Command("selectLastSuggestion", "code_editor::SelectLastSuggestion", SUGGEST_VISIBLE),
+    Command("selectNextSuggestion", "code_editor::SelectNextSuggestion", SUGGEST_NAVIGABLE),
+    Command("selectPrevSuggestion", "code_editor::SelectPreviousSuggestion", SUGGEST_NAVIGABLE),
+    Command("selectNextPageSuggestion", "code_editor::SelectNextPageSuggestion", SUGGEST_NAVIGABLE),
+    Command("selectPrevPageSuggestion", "code_editor::SelectPreviousPageSuggestion", SUGGEST_NAVIGABLE),
+    Command("selectFirstSuggestion", "code_editor::SelectFirstSuggestion", SUGGEST_NAVIGABLE),
+    Command("selectLastSuggestion", "code_editor::SelectLastSuggestion", SUGGEST_NAVIGABLE),
     Command("focusSuggestion", "code_editor::FocusSuggestion", SUGGEST_VISIBLE),
     Command("focusAndAcceptSuggestion", "code_editor::FocusAndAcceptSuggestion", SUGGEST_VISIBLE),
     Command("toggleExplainMode", "code_editor::ToggleExplainMode", SUGGEST_VISIBLE),

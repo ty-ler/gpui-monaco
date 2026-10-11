@@ -150,18 +150,48 @@ impl OverflowRoom {
     }
 }
 
+/// How an overflowing content widget asks to be placed, set while it
+/// renders (the suggest widget, whose details panel sits beside or around
+/// the list).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct WidgetAnchor {
+    /// The side of the line it goes on, instead of its preferences (Monaco's
+    /// `SuggestContentWidget` gives a single preference).
+    pub preference: ContentWidgetPreference,
+    /// The part of the widget placed against the line, relative to the
+    /// widget's top left; the rest lies around it.
+    pub anchor_box: gpui::Bounds<Pixels>,
+}
+
+#[derive(Default)]
+struct OverflowRoomState {
+    room: Cell<Option<OverflowRoom>>,
+    anchor: Cell<Option<WidgetAnchor>>,
+}
+
 /// Where the editor publishes a widget's [`OverflowRoom`] before laying it
-/// out each frame.
+/// out each frame, and where the widget may ask for a [`WidgetAnchor`].
 #[derive(Clone, Default)]
-pub(crate) struct OverflowRoomCell(Rc<Cell<Option<OverflowRoom>>>);
+pub(crate) struct OverflowRoomCell(Rc<OverflowRoomState>);
 
 impl OverflowRoomCell {
     pub fn get(&self) -> Option<OverflowRoom> {
-        self.0.get()
+        self.0.room.get()
     }
 
     pub fn set(&self, room: OverflowRoom) {
-        self.0.set(Some(room));
+        self.0.room.set(Some(room));
+    }
+
+    /// How the widget asked to be placed this frame, if it did.
+    pub fn anchor(&self) -> Option<WidgetAnchor> {
+        self.0.anchor.get()
+    }
+
+    /// Places the widget by `anchor` (or by its preferences and whole box
+    /// with `None`).
+    pub fn set_anchor(&self, anchor: Option<WidgetAnchor>) {
+        self.0.anchor.set(anchor);
     }
 
     /// `max` capped to the tallest the widget can be in the window (but at

@@ -2173,9 +2173,12 @@ pub enum SignatureHelpTrigger {
 ///
 /// Register with [`register_signature_help_provider`].
 pub trait SignatureHelpProvider: 'static {
-    /// Characters that open signature help (e.g. `(`, `,`).
+    /// Characters that open signature help (e.g. `(`, `,`). None by
+    /// default, as Monaco's `signatureHelpTriggerCharacters` is optional: a
+    /// provider without any answers only explicit requests (Cmd/Ctrl+Shift+
+    /// Space) and re-queries while parameter hints show.
     fn trigger_characters(&self) -> Vec<char> {
-        vec!['(', ',']
+        Vec::new()
     }
 
     /// Characters that re-query while it's open (e.g. `)`).

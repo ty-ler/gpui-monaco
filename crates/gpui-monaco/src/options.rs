@@ -1147,6 +1147,15 @@ pub struct SuggestOptions {
     /// `snippetsPreventQuickSuggestions`: no quick suggestions while a
     /// snippet is active (off).
     pub snippets_prevent_quick_suggestions: bool,
+    /// `shareSuggestSelections`: the suggestions remembered for
+    /// `suggest_selection` are shared by every window; otherwise (the
+    /// default) each window remembers its own, as Monaco keeps them per
+    /// workspace.
+    pub share_suggest_selections: bool,
+    /// `fitWidthToDetails`: until the list is resized, widen it to show the
+    /// widest suggestion with its inline details, up to the editor's width
+    /// (off).
+    pub fit_width_to_details: bool,
 }
 
 impl Default for SuggestOptions {
@@ -1167,6 +1176,8 @@ impl Default for SuggestOptions {
             preview_mode: InlineSuggestMode::SubwordSmart,
             selection_mode: SuggestSelectionMode::Always,
             snippets_prevent_quick_suggestions: false,
+            share_suggest_selections: false,
+            fit_width_to_details: false,
         }
     }
 }

@@ -53,7 +53,7 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
   - `$CURRENT_*` day and month names are English.
   - There's no overtyping capture for `$SELECTION`.
 - **Word-based suggestions:** words are not ranked by distance from the cursor, and the documents are the models registered with `register_model`.
-- **Suggestion memories:** they are kept in memory for the app's lifetime, not persisted. The same goes for the suggest widget's size and whether details are expanded.
+- **Suggestion memories:** they are kept in memory for the app's lifetime, not persisted, per window (Monaco's workspace storage) or, with `suggest.share_suggest_selections`, for every window (its profile storage). The same goes for the suggest widget's size and whether details are expanded.
 - **Suggest widget:** the details panel goes beside the list or below it, never to the left or above. Its contents can't be focused or scrolled with the keyboard, and explain mode (`toggleExplainMode`) isn't ported. Icons are glyphs, not codicons.
 - **Code actions, rename, inlay hints:** there's no Refactor Preview panel: previews go to your `set_workspace_edit_preview_handler`, and apply directly without one, as in standalone Monaco. There's no `editor.rename.enablePreview` setting; previews are offered whenever a handler is set. [`docs/MONACO_AUDIT.md`](https://github.com/ty-ler/gpui-monaco/blob/main/docs/MONACO_AUDIT.md) lists every known gap.
 - **Folding:** there is no folding by tree-sitter fold queries yet. Ranges come from indentation, markers and folding range providers.

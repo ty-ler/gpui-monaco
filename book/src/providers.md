@@ -99,11 +99,15 @@ Completion is triggered by Ctrl+Space, by trigger characters (`suggest_on_trigge
 
 Documentation is a `Documentation`, Monaco's `string | IMarkdownString`: strings convert to plain text, shown as written, and a `MarkdownString` renders as markdown. The same goes for signature and parameter documentation and inlay hint tooltips. A `MarkdownString` (Monaco `IMarkdownString`) also carries `is_trusted` (`command:` links run commands), `support_theme_icons` (`$(name)` draws a codicon) and `support_html` (a sanitized HTML subset, `markdown::HTML_TAGS`). Markdown renders GFM tables, block quotes, nested lists, strikethrough, images and syntax highlighted code blocks; the text can't be selected, as GPUI has no selectable text outside inputs.
 
-The widget shows each item's `label_detail` right after the label and its `label_description` at the right. The focused item's `detail` also shows at the right. Ctrl+Space while the list is open toggles the details panel with the item's `detail` and `documentation`; it is collapsed by default, as in Monaco. Ctrl+Alt+Space moves the focus into the details panel, so the arrow and page keys scroll it and Cmd/Ctrl+C copies it, and back. Drag the list's right or bottom edge to resize it.
+The widget shows each item's `label_detail` right after the label and its `label_description` at the right. The focused item's `detail` also shows at the right. Ctrl+Space while the list is open toggles the details panel with the item's `detail` and `documentation`; it is collapsed by default, as in Monaco. Ctrl+Alt+Space moves the focus into the details panel, so the arrow and page keys scroll it and Cmd/Ctrl+C copies it, and back.
+
+As in Monaco, the list fits the room above or below the cursor in the window. It goes above when it doesn't fit below, and stays on that side while you type. The wheel scrolls it, with a scrollbar. Drag its right edge, or the edge away from the cursor, to resize it; the size is kept for later sessions. The details panel goes east of the list, else west, else below or above it, as tall as its content, and its free edges resize it for the session. With `suggest.show_status_bar`, the status bar's Insert, Replace and Show More / Show Less can be clicked. `suggest.fit_width_to_details` widens the list to its widest label and details until you resize it.
+
+Left and Right keep the list open and refilter while the cursor stays in the word. With a single focused suggestion, Up and Down move the cursor instead, closing the list.
 
 With `tab_completion: On`, Tab at the end of a word inserts the best suggestion without showing the list. Tab and Shift+Tab then swap in the next or previous one, until the cursor moves.
 
-Which item is selected first follows `suggest_selection`: the best match, or the item you picked last (for the same prefix). When the list opens by itself, `suggest.selection_mode` can leave it without a focused item (Monaco's `selectionMode`): Enter and Tab then type as usual, and the arrow keys or Ctrl+Space focus one. Cmd/Ctrl+/ shows how the focused item was scored, with the provider's `debug_display_name` (Monaco's explain mode), and "Reset Suggest Widget Size" forgets the resized size.
+Which item is selected first follows `suggest_selection`: the best match, or the item you picked last (for the same prefix). Each window remembers its own picks unless `suggest.share_suggest_selections` is on. When the list opens by itself, `suggest.selection_mode` can leave it without a focused item (Monaco's `selectionMode`): Enter and Tab then type as usual, and the arrow keys or Ctrl+Space focus one. Cmd/Ctrl+/ shows how the focused item was scored, with the provider's `debug_display_name` (Monaco's explain mode), and "Reset Suggest Widget Size" forgets the resized size.
 
 Filtering and ranking use Monaco's `fuzzyScore`, and the editor re-filters as you type without asking the provider again. If you return `incomplete: true`, the editor asks again as the word grows: only the providers whose lists were incomplete are asked, and the others' items are kept. A trigger character asks only the providers that declare it, keeping the open list's items from the others, as Monaco does.
 
@@ -171,7 +175,7 @@ Return a `SignatureHelp` with:
 - `active_signature` and `active_parameter`
 - the parameter labels, either as substrings of the signature label or as UTF-16 ranges into it
 
-The widget highlights the active parameter and re-queries as the cursor moves. The defaults open it on `(` and `,`; override `trigger_characters` and `retrigger_characters` to change that. With several signatures, Up/Down or the widget's arrows go through them. `options.parameter_hints` turns opening while typing off (`enabled`) and stops them wrapping around (`cycle`).
+The widget highlights the active parameter (a text label matches whole words only) and re-queries as the cursor moves, 120ms after typing stops, as Monaco does. As in Monaco, a provider has no trigger characters by default, so it only answers Cmd/Ctrl+Shift+Space; return them from `trigger_characters` (e.g. `(` and `,`), and `retrigger_characters` for characters that re-query while the hints show. With several signatures, Up/Down or the widget's arrows go through them. `options.parameter_hints` turns opening while typing off (`enabled`) and stops them wrapping around (`cycle`).
 
 ## Formatting
 

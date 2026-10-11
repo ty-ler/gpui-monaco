@@ -26,23 +26,48 @@ use crate::widgets::{ContentWidgetPreference, WidgetId};
 /// Monaco stops collecting document words past this many.
 const MAX_WORDS: usize = 10_000;
 
-/// Selection memories, shared by all editors (Monaco keeps them per
-/// profile or workspace).
+/// Selection memories (Monaco's `SuggestMemoryService` storage): one set
+/// shared by every window (Monaco's profile scope, with
+/// `suggest.shareSuggestSelections`) and one per window (Monaco's
+/// workspace scope, the default).
 #[derive(Default)]
-struct Memories(SuggestMemories);
+struct Memories {
+    shared: SuggestMemories,
+    windows: std::collections::HashMap<gpui::WindowId, SuggestMemories>,
+}
 
 impl gpui::Global for Memories {}
+
+/// Which selection memories an editor uses (see
+/// `suggest.share_suggest_selections`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MemoryScope {
+    /// Shared by every window.
+    Shared,
+    /// The window's own.
+    Window(gpui::WindowId),
+}
+
+impl Memories {
+    fn get(&mut self, scope: MemoryScope) -> &mut SuggestMemories {
+        match scope {
+            MemoryScope::Shared => &mut self.shared,
+            MemoryScope::Window(id) => self.windows.entry(id).or_default(),
+        }
+    }
+}
 
 /// The item the selection memories pick (`suggest_selection`) among
 /// `candidates` (Monaco `ISuggestMemoryService.select`).
 pub(crate) fn memory_select(
+    scope: MemoryScope,
     mode: crate::options::SuggestSelection,
     context: &MemoryContext,
     candidates: &[Candidate],
     cx: &mut gpui::App,
 ) -> usize {
     cx.default_global::<Memories>()
-        .0
+        .get(scope)
         .select(mode, context, candidates)
 }
 
@@ -179,6 +204,8 @@ impl Alternatives {
 }
 
 pub(crate) struct Session {
+    /// Identifies the request's completion model.
+    pub(crate) id: u64,
     /// Where the request was made.
     position: PointUtf16,
     /// Start column of the word being completed.
@@ -243,6 +270,12 @@ pub(crate) struct SuggestState {
         Option<Arc<crate::suggest_inline_completions::SuggestInlineCompletions>>,
     /// Monaco `_waitForInlineCompletions` (`OffWhenInlineCompletions`).
     inline_wait: Option<InlineWait>,
+    /// Sessions started, for their ids.
+    sessions: u64,
+    /// What screen readers last read for the widget (Monaco reads the
+    /// focused row as the list's active descendant), so it isn't read again
+    /// on every keystroke.
+    announced: Option<String>,
 }
 
 /// A quick suggestion waiting for inline completions to settle before
@@ -374,6 +407,70 @@ impl CodeEditor {
         Some((widget.first_visible_row(), widget.visible_rows(cx)))
     }
 
+    /// The suggest list's side of the cursor line and its size (border box
+    /// width, rows and status bar height), for tests.
+    #[doc(hidden)]
+    pub fn suggest_list_layout_for_tests(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<(ContentWidgetPreference, gpui::Size<gpui::Pixels>)> {
+        let (widget, _) = self.suggest.widget.as_ref()?;
+        let widget = widget.read(cx);
+        Some((widget.list_side(cx), widget.list_size(cx)))
+    }
+
+    /// Where the details panel was last placed (`"east"`, `"west"`,
+    /// `"south"` or `"north"`) and its border box relative to the list's,
+    /// for tests.
+    #[doc(hidden)]
+    pub fn suggest_details_placement_for_tests(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<(&'static str, gpui::Bounds<gpui::Pixels>)> {
+        use crate::suggest_widget::DetailsSide;
+        let (widget, _) = self.suggest.widget.as_ref()?;
+        let (side, bounds) = widget.read(cx).details_placement()?;
+        let side = match side {
+            DetailsSide::East => "east",
+            DetailsSide::West => "west",
+            DetailsSide::South => "south",
+            DetailsSide::North => "north",
+        };
+        Some((side, bounds))
+    }
+
+    /// Where the suggest list's rows and the details panel's content were
+    /// last painted, in window coordinates (inside their borders), for
+    /// tests.
+    #[doc(hidden)]
+    pub fn suggest_painted_bounds_for_tests(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<(
+        gpui::Bounds<gpui::Pixels>,
+        Option<gpui::Bounds<gpui::Pixels>>,
+    )> {
+        let (widget, _) = self.suggest.widget.as_ref()?;
+        widget.read(cx).painted_bounds(cx)
+    }
+
+    /// The suggest status bar's left and right actions as shown, for tests.
+    #[doc(hidden)]
+    pub fn suggest_status_bar_for_tests(&self, cx: &gpui::App) -> Option<(String, String)> {
+        let (widget, _) = self.suggest.widget.as_ref()?;
+        widget.read(cx).status_bar_text(cx)
+    }
+
+    /// Whether the suggest scrollbars show without the mouse over them
+    /// (for a while after scrolling), for tests.
+    #[doc(hidden)]
+    pub fn suggest_scrollbars_revealed_for_tests(&self, cx: &gpui::App) -> bool {
+        self.suggest
+            .widget
+            .as_ref()
+            .is_some_and(|(widget, _)| widget.read(cx).scrollbars_revealed())
+    }
+
     /// The size the suggest widget was resized to, if any.
     #[doc(hidden)]
     pub fn suggest_size_for_tests(cx: &gpui::App) -> Option<gpui::Size<gpui::Pixels>> {
@@ -416,6 +513,24 @@ impl CodeEditor {
             item.insert_text().to_string()
         };
         Some((PointUtf16::new(head.row, start)..head, text))
+    }
+
+    /// The selection memories this editor uses: its window's, or with
+    /// `suggest.share_suggest_selections` the ones every window shares.
+    pub(crate) fn memory_scope(&self) -> MemoryScope {
+        match self.window_id {
+            Some(id) if !self.options.suggest.share_suggest_selections => MemoryScope::Window(id),
+            _ => MemoryScope::Shared,
+        }
+    }
+
+    /// Whether a suggestion is focused (Monaco
+    /// `suggestWidgetHasFocusedSuggestion`).
+    pub(crate) fn has_focused_suggestion(&self) -> bool {
+        self.suggest
+            .session
+            .as_ref()
+            .is_some_and(|s| s.focused && s.selected < s.model.filtered().len())
     }
 
     /// The focused suggestion and its index in the list; `None` while
@@ -499,6 +614,7 @@ impl CodeEditor {
         self.suggest.session = None;
         self.suggest.explain_mode = false;
         self.suggest.details_focused = false;
+        self.suggest.announced = None;
         if let Some((_, id)) = self.suggest.widget.take() {
             self.remove_widget(id, cx);
         }
@@ -767,7 +883,9 @@ impl CodeEditor {
             model.set_distances(distances);
         }
         let leading_whitespace = leading_whitespace(&self.snapshot.line(position.row)).to_string();
+        self.suggest.sessions += 1;
         self.suggest.session = Some(Session {
+            id: self.suggest.sessions,
             position,
             word_start,
             word_end,
@@ -1029,7 +1147,8 @@ impl CodeEditor {
     fn select_by_memory(&mut self, cx: &mut Context<Self>) {
         let (language, line, column, word_until) = self.memory_context(cx);
         let mode = self.options.suggest_selection;
-        let memories = cx.default_global::<Memories>();
+        let scope = self.memory_scope();
+        let memories = cx.default_global::<Memories>().get(scope);
         let Some(session) = self.suggest.session.as_mut() else {
             return;
         };
@@ -1055,7 +1174,7 @@ impl CodeEditor {
             column,
             word_until: &word_until,
         };
-        session.selected = memories.0.select(mode, &context, &candidates);
+        session.selected = memories.select(mode, &context, &candidates);
     }
 
     fn refresh_suggest_widget(&mut self, cx: &mut Context<Self>) {
@@ -1182,20 +1301,29 @@ impl CodeEditor {
         height.clamp(gpui::px(8.), gpui::px(1000.))
     }
 
+    /// The height of the line showing `point` (the editor's while it isn't
+    /// laid out).
+    fn line_height_at(&self, point: PointUtf16) -> gpui::Pixels {
+        self.layout
+            .as_ref()
+            .and_then(|layout| {
+                let line = layout.line_for_point(point)?;
+                Some(layout.line_height_of(line.view_line))
+            })
+            .unwrap_or_else(|| self.options.resolved_line_height())
+    }
+
     fn suggest_metrics(&self, anchor: PointUtf16) -> SuggestWidgetMetrics {
         let font_size = if self.options.suggest.font_size > 0. {
             gpui::px(self.options.suggest.font_size)
         } else {
             self.options.font_size
         };
-        let available_width = self.layout.as_ref().and_then(|layout| {
-            let origin = self.scrolled_visible_position(anchor)?;
-            Some(layout.bounds.right() - origin.x)
-        });
         SuggestWidgetMetrics {
             item_height: self.suggest_item_height(),
             font_size,
-            available_width,
+            line_height: self.line_height_at(anchor),
+            editor_width: self.layout_size().map(|size| size.width),
         }
     }
 
@@ -1233,6 +1361,32 @@ impl CodeEditor {
                 widget.update(cx, |widget, _| widget.room = room);
                 self.suggest.widget = Some((widget, id));
             }
+        }
+        self.announce_suggest_widget(cx);
+    }
+
+    /// Has screen readers read what the suggest widget shows when it
+    /// changes: its "Loading..." or "No suggestions." status, or the focused
+    /// suggestion (Monaco's list `getAriaLabel`, read as the editor's active
+    /// descendant), with its docs once resolved while the details panel
+    /// shows.
+    fn announce_suggest_widget(&mut self, cx: &mut Context<Self>) {
+        let Some((widget, _)) = &self.suggest.widget else {
+            return;
+        };
+        let resolved = self.suggest.session.as_ref().is_some_and(|session| {
+            session
+                .model
+                .filtered()
+                .get(session.selected)
+                .is_some_and(|scored| session.resolved[scored.index])
+        });
+        let Some(text) = widget.read(cx).announcement(resolved, cx) else {
+            return;
+        };
+        if self.suggest.announced.as_ref() != Some(&text) {
+            self.announce(text.clone(), cx);
+            self.suggest.announced = Some(text);
         }
     }
 
@@ -1786,6 +1940,13 @@ impl CodeEditor {
         if count == 0 || self.suggest.widget.is_none() {
             return false;
         }
+        // Monaco's `selectNextSuggestion` and the others need several
+        // suggestions or none focused (`suggestWidgetMultipleSuggestions ||
+        // !suggestWidgetHasFocusedSuggestion`); otherwise the keys move the
+        // cursor, which closes the widget.
+        if count == 1 && session.focused {
+            return false;
+        }
         // Monaco's list moves from no focus as if from before the first
         // row (forward) or from the first (back).
         let current = if session.focused {
@@ -1954,7 +2115,8 @@ impl CodeEditor {
         // Monaco memorizes before inserting.
         let (language, line, column, word_until) = self.memory_context(cx);
         let mode = self.options.suggest_selection;
-        cx.default_global::<Memories>().0.memorize(
+        let scope = self.memory_scope();
+        cx.default_global::<Memories>().get(scope).memorize(
             mode,
             &MemoryContext {
                 language: &language,
