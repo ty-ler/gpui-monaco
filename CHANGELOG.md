@@ -5,6 +5,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Playground demo inlay hints:** the type hint after `let mut name` goes after the name, not after `mut`, and patterns like `let Some(x)` get none.
 - **Decoration options and editor API (#272):** the last of Monaco's `IModelDecorationOptions` and `InjectedTextOptions`, injected text cursor stops, token change ranges and the remaining `ICodeEditor` and `monaco.editor` API.
   - **`showIfCollapsed`:** `DecorationOptions::show_if_collapsed`. As in Monaco (`getInjectedTextInInterval`), `before`/`after` text on an empty range shows only with it, and with it an empty or narrow background is widened to a typical character's width, centered, and a range ending at a line's start stops at the end of the line before. Inlay hints, inline suggestions and edits, and the diff editor's inline deleted text set it.
   - **`firstLineDecorationClassName`:** `DecorationOptions::first_line_decoration` (`LinesDecoration`: a bar or text in the line decorations area), drawn only on the first view line of a wrapped line.

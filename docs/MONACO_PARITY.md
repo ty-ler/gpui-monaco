@@ -12,7 +12,7 @@ These were checked against our actions, options and modules. The Monaco source c
 
 [`MONACO_AUDIT.md`](MONACO_AUDIT.md) is a finer-grained audit (2026-10) of sub-features, every option and command id, and the public API, with gaps tracked as #193–#206.
 
-> **Second audit (2026-10-11):** [`MONACO_AUDIT_2.md`](MONACO_AUDIT_2.md) checks widget fidelity, core view and input, the diff editors, commands, options, theme and API in more depth. Several rows below marked ✅ have open fidelity issues there (tracked as #245–#265). Until those are fixed, read ✅ as "the feature exists", not "pixel- and behavior-identical".
+> **Second audit (2026-10-11):** [`MONACO_AUDIT_2.md`](MONACO_AUDIT_2.md) checked widget fidelity, core view and input, the diff editors, commands, options, theme and API in more depth. Its issues (#245–#265, #272) are all fixed. What still differs is listed in each row and in the book's differences page; #231–#233 wait on GPUI.
 
 **Legend:**
 
