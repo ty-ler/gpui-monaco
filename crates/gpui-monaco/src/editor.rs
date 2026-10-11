@@ -3879,6 +3879,24 @@ impl Render for CodeEditor {
             .on_action(cx.listener(|this, _: &AcceptAlternativeSuggestion, _, cx| {
                 this.accept_alternative_suggestion(cx);
             }))
+            .on_action(
+                cx.listener(|this, _: &IndentationToSpaces, _, cx| this.indentation_to_spaces(cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &IndentationToTabs, _, cx| this.indentation_to_tabs(cx)),
+            )
+            .on_action(cx.listener(|this, _: &IndentUsingSpaces, window, cx| {
+                this.change_indentation_size(Some(true), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &IndentUsingTabs, window, cx| {
+                this.change_indentation_size(Some(false), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ChangeTabDisplaySize, window, cx| {
+                this.change_indentation_size(None, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &DetectIndentation, _, cx| this.detect_indentation(cx)),
+            )
             .on_action(cx.listener(|this, _: &SelectNextSuggestion, _, cx| {
                 this.suggest_navigate(1, cx);
             }))

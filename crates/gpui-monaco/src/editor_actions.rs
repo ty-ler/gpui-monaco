@@ -319,6 +319,13 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.peekImplementation", "code_editor::PeekImplementation", "Peek Implementations", has_implementation),
     Builtin("editor.action.goToReferences", "code_editor::GoToReferences", "Go to References", has_references),
     Builtin("editor.action.referenceSearch.trigger", "code_editor::PeekReferences", "Peek References", has_references),
+    // Indentation.
+    Builtin("editor.action.indentationToSpaces", "code_editor::IndentationToSpaces", "Convert Indentation to Spaces", writable),
+    Builtin("editor.action.indentationToTabs", "code_editor::IndentationToTabs", "Convert Indentation to Tabs", writable),
+    Builtin("editor.action.indentUsingTabs", "code_editor::IndentUsingTabs", "Indent Using Tabs", always),
+    Builtin("editor.action.indentUsingSpaces", "code_editor::IndentUsingSpaces", "Indent Using Spaces", always),
+    Builtin("editor.action.changeTabDisplaySize", "code_editor::ChangeTabDisplaySize", "Change Tab Display Size", always),
+    Builtin("editor.action.detectIndentation", "code_editor::DetectIndentation", "Detect Indentation from Content", always),
     // Find, inline suggestions, the color picker, sticky scroll.
     Builtin("deleteInsideWord", "code_editor::DeleteInsideWord", "Delete Word", writable),
     Builtin("actions.findWithSelection", "code_editor::StartFindWithSelection", "Find with Selection", always),

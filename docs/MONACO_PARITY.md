@@ -36,7 +36,7 @@ Issues are linked by number.
 | Auto-closing, overtype, auto-surround | `cursor` | ✅ | |
 | Auto-indent (`onEnterRules`, `indentationRules`, electric characters) | `indentation` | ✅ | |
 | Reindent lines | `indentation` | ✅ | #80 |
-| Indentation detection and conversion commands | `indentation` | ❌ | #197 |
+| Indentation detection and conversion commands | `indentation` | ✅ | #197 |
 | Line operations: move, copy, delete, insert, indent | `linesOperations` | ✅ | |
 | Sort, join, reverse, transpose, case transforms, delete duplicates, trim whitespace | `linesOperations`, `caretOperations` | ✅ | #80 |
 | In-place replace | `inPlaceReplace` | ✅ | #80 |

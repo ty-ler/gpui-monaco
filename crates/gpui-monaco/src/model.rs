@@ -122,6 +122,10 @@ pub struct ModelOptions {
     /// and count as plain text for brackets and indentation (default
     /// 20 000 UTF-16 units).
     pub max_tokenization_line_length: u32,
+    /// Monaco `detectIndentation`: when the model is created, `tab_size`,
+    /// `indent_size` and `insert_spaces` are guessed from its text, with the
+    /// values here as the defaults (default `true`).
+    pub detect_indentation: bool,
 }
 
 impl Default for ModelOptions {
@@ -131,6 +135,7 @@ impl Default for ModelOptions {
             indent_size: 4,
             insert_spaces: true,
             max_tokenization_line_length: 20_000,
+            detect_indentation: true,
         }
     }
 }
@@ -219,6 +224,45 @@ impl TextModel {
             markers: Default::default(),
             language_pending: false,
         }
+        .with_options(ModelOptions::default())
+    }
+
+    /// Sets the creation options (Monaco `createModel`'s options): with
+    /// `detect_indentation`, the indentation is guessed from the text, with
+    /// `options` as the defaults.
+    pub fn with_options(mut self, options: ModelOptions) -> Self {
+        self.options = options;
+        if self.options.detect_indentation {
+            let guessed = text::guess_indentation(
+                self.buffer.rope(),
+                self.options.tab_size,
+                self.options.insert_spaces,
+            );
+            self.options.insert_spaces = guessed.insert_spaces;
+            self.options.tab_size = guessed.tab_size;
+            self.options.indent_size = guessed.tab_size;
+        }
+        self
+    }
+
+    /// Guesses the indentation from the text and applies it (Monaco
+    /// `ITextModel.detectIndentation`), falling back to the given defaults.
+    pub fn detect_indentation(
+        &mut self,
+        default_insert_spaces: bool,
+        default_tab_size: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let guessed =
+            text::guess_indentation(self.buffer.rope(), default_tab_size, default_insert_spaces);
+        let options = ModelOptions {
+            insert_spaces: guessed.insert_spaces,
+            tab_size: guessed.tab_size,
+            // Monaco: "guess indentSize independent of tabSize" is a TODO.
+            indent_size: guessed.tab_size,
+            ..self.options.clone()
+        };
+        self.update_options(options, cx);
     }
 
     /// Sets the language id, resolved against the registry the first time the

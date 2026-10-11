@@ -106,5 +106,6 @@ Model-level settings live in `ModelOptions` (Monaco `ITextModelUpdateOptions`), 
 - `indent_size`
 - `insert_spaces`
 - `max_tokenization_line_length` (Monaco `maxTokenizationLineLength`, default 20 000): longer lines aren't highlighted
+- `detect_indentation` (Monaco `detectIndentation`, default on): when the model is created, `tab_size`, `indent_size` and `insert_spaces` are guessed from its text, with the given values as the fallback. Pass creation options with `TextModel::new(text).with_options(…)`. `model.detect_indentation(…)` and the "Detect Indentation from Content" command guess again later.
 
 Changing options takes effect on the next frame. Wrapping, folding and the minimap update incrementally.

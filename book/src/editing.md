@@ -29,10 +29,13 @@ Every feature here works out of the box. Each follows Monaco's behavior, which t
   - Move, copy and delete lines, insert a line above or below, indent and outdent.
   - Join lines, sort, reverse and delete duplicate lines.
   - Trim trailing whitespace and reindent.
+- **Indentation:**
+  - Models detect their indentation from their text when created (`detect_indentation`).
+  - The commands "Convert Indentation to Spaces"/"to Tabs", "Indent Using Spaces"/"Tabs", "Change Tab Display Size" (a 1–8 picker) and "Detect Indentation from Content" change it, as in Monaco.
 - **Text transforms:**
   - Upper, lower, title, snake, camel, Pascal and kebab case.
   - Transpose characters, duplicate the selection and move the selected text left or right.
-  - Step numbers and `true`/`false` with in-place replace (Cmd+Shift+. / ,).
+  - Step numbers and `true`/`false` with in-place replace (Cmd+Shift+, / .).
   - Remove the brackets around the cursor (Cmd+Alt+Backspace).
 
 ## Undo
