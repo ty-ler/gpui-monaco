@@ -673,3 +673,81 @@ fn edits_needing_confirmation_are_previewed(cx: &mut TestAppContext) {
     assert_eq!(text(&editor, cx), TEXT);
     cx.update(|_, cx| handler.dispose(cx));
 }
+
+fn rename_layout(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> (gpui::Pixels, bool) {
+    editor
+        .read_with(cx, |e, cx| e.rename_layout_for_tests(cx))
+        .unwrap()
+}
+
+/// Monaco `RenameCandidateListView`: at most seven candidates show, and
+/// focusing past them reveals the focused one.
+#[gpui::test]
+fn focusing_past_seven_suggestions_keeps_the_focused_one_in_view(cx: &mut TestAppContext) {
+    let names = Suggest {
+        names: vec![
+            "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10", "a11",
+        ],
+        automatic: true,
+        ..Default::default()
+    };
+    let (editor, _lib, cx) = setup(vec![words(Words::default()), suggest(names)], cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(2, 5))], cx)
+    });
+    cx.simulate_keystrokes("f2");
+    draw(cx);
+    for expected in 0..11 {
+        cx.simulate_keystrokes("down");
+        draw(cx);
+        draw(cx);
+        assert_eq!(input(&editor, cx).1, Some(expected));
+        assert!(rename_layout(&editor, cx).1, "suggestion {expected} hidden");
+    }
+}
+
+/// Monaco sizes the input to `max(1.1 × name length, 20)` characters.
+#[gpui::test]
+fn the_box_widens_for_long_names(cx: &mut TestAppContext) {
+    let (editor, _lib, cx) = setup(vec![words(Words::default())], cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(2, 5))], cx)
+    });
+    cx.simulate_keystrokes("f2");
+    draw(cx);
+    let short = rename_layout(&editor, cx).0;
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    let long = "a_much_longer_function_name_than_twenty";
+    editor.update(cx, |e, cx| {
+        e.model()
+            .update(cx, |m, cx| m.set_value(&format!("fn {long}() {{}}"), cx));
+        e.set_selections(&[Selection::collapsed(p(0, 5))], cx)
+    });
+    cx.simulate_keystrokes("f2");
+    draw(cx);
+    let wide = rename_layout(&editor, cx).0;
+    let expected = short / 20. * (long.len() as f32 * 1.1).ceil();
+    assert_eq!(wide, expected);
+}
+
+/// Monaco `afterRender(null)`: scrolling the box's line out of view
+/// cancels the rename.
+#[gpui::test]
+fn scrolling_the_box_out_of_view_cancels(cx: &mut TestAppContext) {
+    let (editor, _lib, cx) = setup(vec![words(Words::default())], cx);
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| {
+            m.set_value(&format!("fn foo() {{}}\n{}", "\n".repeat(300)), cx)
+        });
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    cx.simulate_keystrokes("f2");
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_rename_visible()));
+    editor.update(cx, |e, cx| {
+        e.set_scroll_position(gpui::point(gpui::px(0.), gpui::px(3000.)), cx)
+    });
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_rename_visible()));
+}

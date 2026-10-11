@@ -65,7 +65,7 @@ To move a widget, call `set_content_widget_position(id, position, cx)`. `layout_
 
 ## Messages
 
-`show_message(text, position, cx)` and `show_markdown_message(markdown, position, cx)` show a short message above a position (Monaco `MessageController`). It closes when the cursor moves, the editor loses focus, the mouse moves away or Escape is pressed. The editor uses it for "No definition found" and the read-only message.
+`show_message(text, position, cx)` and `show_markdown_message(markdown, position, cx)` show a short message above a position (Monaco `MessageController`), or below it when there's no room above, with an arrow pointing at it. The line scrolls into view first. It closes when the cursor moves, the editor loses focus (unless the mouse is over the message), the mouse moves away or Escape is pressed, fading in over 150ms and out over 100ms. The editor uses it for "No definition found" and the read-only message.
 
 ## Overlay widgets
 

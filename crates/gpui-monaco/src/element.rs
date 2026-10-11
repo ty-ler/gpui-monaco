@@ -1711,6 +1711,10 @@ pub struct PrepaintState {
     margin_backgrounds: Vec<(Bounds<Pixels>, Hsla)>,
     glyphs: Vec<(gpui::Point<Pixels>, ShapedLine)>,
     lightbulb: Option<(Bounds<Pixels>, Hsla, crate::codicons::Codicon)>,
+    /// The lightbulb's title (none in the gutter).
+    lightbulb_title: Option<SharedString>,
+    /// The lightbulb's hover target: the pointer and its title.
+    lightbulb_tooltip: Option<gpui::AnyElement>,
     /// Indent and bracket pair guides.
     guides: Vec<(Bounds<Pixels>, Hsla)>,
     /// Monaco `rulers`.
@@ -2212,6 +2216,34 @@ impl Element for EditorElement {
             );
             element.prepaint_at(control.bounds.origin, window, cx);
             state.fold_tooltip = Some(element);
+        }
+        // Monaco's `.lightBulbWidget:hover { cursor: pointer }` and its
+        // title, while the editor has focus (when it shows).
+        if state.focused
+            && let Some((bulb, _, _)) = state.lightbulb
+            && bulb.contains(&mouse)
+        {
+            use gpui::prelude::FluentBuilder as _;
+            use gpui::{InteractiveElement as _, StatefulInteractiveElement as _, Styled as _};
+            let mut element = gpui::div()
+                .id("lightbulb")
+                .w(bulb.size.width)
+                .h(bulb.size.height)
+                .cursor_pointer()
+                .when_some(state.lightbulb_title.clone(), |element, title| {
+                    element.tooltip(crate::tooltip::tooltip(title, &state.colors))
+                })
+                .into_any_element();
+            element.layout_as_root(
+                size(
+                    AvailableSpace::Definite(bulb.size.width),
+                    AvailableSpace::Definite(bulb.size.height),
+                ),
+                window,
+                cx,
+            );
+            element.prepaint_at(bulb.origin, window, cx);
+            state.lightbulb_tooltip = Some(element);
         }
         state.cursor_areas = cursor_areas;
         state.widgets_keeping_focus = widgets
@@ -3741,6 +3773,7 @@ fn prepaint_editor(
 
     // The code action lightbulb (Monaco `LightBulbWidget`).
     let mut lightbulb = None;
+    let mut lightbulb_title = None;
     if let Some(bulb) = editor.code_actions.lightbulb.clone() {
         let model = editor.model().read(cx);
         let line_count = snapshot.max_point().row + 1;
@@ -3793,12 +3826,37 @@ fn prepaint_editor(
             None => None,
         };
         lightbulb = bounds.map(|bounds| {
+            let icon = crate::code_action::lightbulb_icon(&bulb);
             (
                 bounds,
-                crate::code_action::lightbulb_color(&colors, bulb.auto_fix),
-                crate::code_action::lightbulb_icon(&bulb),
+                crate::code_action::lightbulb_color(&colors, icon),
+                icon,
             )
         });
+        // Monaco's `LightBulbWidget` title, with the Auto Fix and Quick Fix
+        // keys; the gutter lightbulb (a glyph decoration) has none.
+        let in_gutter = matches!(
+            placement,
+            Some(crate::code_action::LightbulbPlacement::Gutter(_)) if glyph_width > px(0.)
+        );
+        // Only under the mouse, where the title can show.
+        let hovered = lightbulb
+            .as_ref()
+            .is_some_and(|(bounds, _, _)| bounds.contains(&window.mouse_position()));
+        if hovered && !in_gutter {
+            let keys = |action: &dyn gpui::Action| {
+                window
+                    .highest_precedence_binding_for_action_in(action, &editor.focus_handle)
+                    .map(|binding| crate::keybinding_label::binding_label(&binding))
+            };
+            let preferred = keys(&crate::actions::AutoFix);
+            let quick_fix = keys(&crate::actions::QuickFix);
+            lightbulb_title = Some(SharedString::from(crate::code_action::lightbulb_title(
+                &bulb,
+                preferred.as_deref(),
+                quick_fix.as_deref(),
+            )));
+        }
     }
     layout.lightbulb = lightbulb.map(|(bounds, _, _)| bounds);
 
@@ -4687,6 +4745,27 @@ fn prepaint_editor(
     );
     editor.layout = Some(layout.clone());
     editor.report_layout(cx);
+    // Monaco `RenameWidget.afterRender(null)`: the box's line scrolled out
+    // of view, so rename is cancelled.
+    if editor.rename_out_of_view(cx) {
+        let entity = cx.entity();
+        window.defer(cx, move |_, cx| {
+            entity.update(cx, |editor, cx| {
+                if editor.rename_out_of_view(cx) {
+                    editor.cancel_rename(true, cx);
+                }
+            });
+        });
+    }
+    // Shift+F10 revealed the cursor: the menu goes below it now.
+    if editor.context_menu.show_at_cursor {
+        let entity = cx.entity();
+        window.defer(cx, move |window, cx| {
+            entity.update(cx, |editor, cx| {
+                editor.show_pending_context_menu(window, cx)
+            });
+        });
+    }
     PrepaintState {
         layout,
         selections,
@@ -4704,6 +4783,8 @@ fn prepaint_editor(
         margin_backgrounds,
         glyphs,
         lightbulb,
+        lightbulb_title,
+        lightbulb_tooltip: None,
         guides,
         rulers,
         whitespace,
@@ -4755,6 +4836,7 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
     let mut content_elements = std::mem::take(&mut state.content_elements);
     let mut glyph_elements = std::mem::take(&mut state.glyph_elements);
     let mut fold_tooltip = state.fold_tooltip.take();
+    let mut lightbulb_tooltip = state.lightbulb_tooltip.take();
     let mut overlay_elements = std::mem::take(&mut state.overlay_elements);
     let state = &*state;
     let layout = &state.layout;
@@ -4797,6 +4879,9 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
             && let Some((bulb, color, icon)) = state.lightbulb
         {
             paint_lightbulb(bulb, color, icon, window, cx);
+        }
+        if let Some(element) = &mut lightbulb_tooltip {
+            element.paint(window, cx);
         }
 
         // Fold controls (`editorGutter.foldingControlForeground`, 140% of

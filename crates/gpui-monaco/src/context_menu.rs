@@ -9,9 +9,9 @@
 use std::collections::BTreeMap;
 
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, Pixels, Point, Render, SharedString, StatefulInteractiveElement,
-    Styled, WeakEntity, Window, div, px,
+    App, AppContext as _, Context, Entity, FocusHandle, FontWeight, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, Pixels, Point, Render, SharedString,
+    StatefulInteractiveElement, Styled, Task, WeakEntity, Window, div, px,
 };
 use text::PointUtf16;
 
@@ -22,6 +22,7 @@ use crate::actions::{
 use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
 use crate::editor::CodeEditor;
+use crate::keybinding_label::ui_text_width;
 use crate::options::LocationKind;
 use crate::providers::{Command, Location};
 use crate::widgets::{OverlayPosition, WidgetId};
@@ -32,7 +33,17 @@ pub const CONTEXT_MENU_KEY_CONTEXT: &str = "EditorContextMenu";
 /// Monaco's menu row height.
 const ROW_HEIGHT: f32 = 24.;
 const SEPARATOR_HEIGHT: f32 = 9.;
-const MENU_WIDTH: f32 = 260.;
+/// The menu's font size, and its keybindings'.
+const MENU_FONT_SIZE: f32 = 13.;
+const KEYBINDING_FONT_SIZE: f32 = 12.;
+/// The label's padding on each side (room for the check mark on the left)
+/// and the keybinding's on its left.
+const LABEL_PADDING: f32 = 20.;
+const KEYBINDING_PADDING: f32 = 16.;
+/// `.context-view .monaco-menu { min-width: 130px }`; at most the window
+/// less this on each side.
+const MENU_MIN_WIDTH: f32 = 130.;
+const MENU_WINDOW_MARGIN: f32 = 8.;
 
 /// Whether a menu item shows.
 type When = fn(&CodeEditor, &App) -> bool;
@@ -158,6 +169,8 @@ enum Entry {
         label: SharedString,
         keybinding: Option<SharedString>,
         run: Run,
+        /// Monaco's `checked` actions (`menu-selection` before the label).
+        checked: bool,
     },
     Submenu {
         label: SharedString,
@@ -171,6 +184,15 @@ impl Entry {
         match self {
             Entry::Item { label, .. } | Entry::Submenu { label, .. } => Some(label),
             Entry::Separator => None,
+        }
+    }
+
+    fn item(label: SharedString, keybinding: Option<SharedString>, run: Run) -> Self {
+        Entry::Item {
+            label,
+            keybinding,
+            run,
+            checked: false,
         }
     }
 }
@@ -206,11 +228,21 @@ pub struct ContextMenu {
     active: Option<usize>,
     /// The open submenu and its active row.
     submenu: Option<(usize, Option<usize>)>,
+    /// Monaco's submenu show delay: a hovered submenu row opens after
+    /// 250ms.
+    submenu_timer: Option<Task<()>>,
     focus: FocusHandle,
     colors: crate::theme::EditorColors,
+    /// Where the menu is in the window.
+    origin: Point<Pixels>,
+    /// Its measured width.
+    width: Pixels,
     /// The window's height: the list scrolls past it.
     max_height: Pixels,
 }
+
+/// Monaco's submenu `showDelayer`.
+const SUBMENU_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl ContextMenu {
     fn items(entries: &[Entry]) -> Vec<usize> {
@@ -251,6 +283,7 @@ impl ContextMenu {
     }
 
     fn open_submenu(&mut self, cx: &mut Context<Self>) {
+        self.submenu_timer = None;
         if let Some(ix) = self.active
             && let Entry::Submenu { entries, .. } = &self.entries[ix]
         {
@@ -310,16 +343,40 @@ impl ContextMenu {
         }
     }
 
+    /// The mouse is over row `ix` of the top menu: it becomes active, and
+    /// a submenu row opens its submenu after Monaco's delay.
+    fn hover_row(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if self.active == Some(ix) && (self.submenu_timer.is_some() || self.submenu.is_some()) {
+            return;
+        }
+        self.active = Some(ix);
+        self.submenu = None;
+        self.submenu_timer = None;
+        if matches!(self.entries[ix], Entry::Submenu { .. }) {
+            self.submenu_timer = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SUBMENU_DELAY).await;
+                this.update(cx, |this, cx| {
+                    if this.active == Some(ix) {
+                        this.open_submenu(cx);
+                    }
+                })
+                .ok();
+            }));
+        }
+        cx.notify();
+    }
+
     fn render_entries(
         &self,
         entries: &[Entry],
         active: Option<usize>,
         submenu_of: Option<usize>,
+        width: Pixels,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let colors = &self.colors;
         div()
-            .w(px(MENU_WIDTH))
+            .w(width)
             .py(px(4.))
             .flex()
             .flex_col()
@@ -330,7 +387,7 @@ impl ContextMenu {
             .border_color(colors.menu_border.unwrap_or_else(gpui::transparent_black))
             .rounded(px(5.))
             .shadow_md()
-            .text_size(px(13.))
+            .text_size(px(MENU_FONT_SIZE))
             .text_color(colors.menu_foreground)
             .children(entries.iter().enumerate().map(|(ix, entry)| {
                 let is_active = active == Some(ix);
@@ -348,9 +405,13 @@ impl ContextMenu {
                         )
                         .into_any_element(),
                     Entry::Item { label, .. } | Entry::Submenu { label, .. } => {
-                        let keybinding = match entry {
-                            Entry::Item { keybinding, .. } => keybinding.clone(),
-                            _ => None,
+                        let (keybinding, checked) = match entry {
+                            Entry::Item {
+                                keybinding,
+                                checked,
+                                ..
+                            } => (keybinding.clone(), *checked),
+                            _ => (None, false),
                         };
                         let is_submenu = matches!(entry, Entry::Submenu { .. });
                         let id: SharedString = match submenu_of {
@@ -359,25 +420,53 @@ impl ContextMenu {
                         };
                         div()
                             .id(id)
+                            .relative()
                             .h(px(ROW_HEIGHT))
                             .mx(px(4.))
-                            .px(px(20.))
+                            .px(px(LABEL_PADDING))
                             .flex()
                             .items_center()
                             .rounded(px(3.))
                             .cursor_pointer()
+                            .whitespace_nowrap()
                             .when_active(is_active, colors)
-                            .child(div().flex_1().whitespace_nowrap().child(label.clone()))
+                            // `.menu-item-check`: `menu-selection` in the
+                            // label's left padding.
+                            .children(checked.then(|| {
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .w(px(LABEL_PADDING))
+                                    .h_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(codicon(Codicon::MenuSelection))
+                            }))
+                            // One line, cut with an ellipsis when the menu
+                            // is at its widest.
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(label.clone()),
+                            )
                             .children(keybinding.map(|keys| {
                                 div()
-                                    .pl(px(16.))
+                                    .flex_none()
+                                    .pl(px(KEYBINDING_PADDING))
                                     .opacity(0.8)
-                                    .text_size(px(12.))
+                                    .text_size(px(KEYBINDING_FONT_SIZE))
                                     .child(keys)
                             }))
                             .children(is_submenu.then(|| {
                                 // `menu-submenu`: `chevron-right`.
-                                div().pl(px(8.)).child(codicon(Codicon::MenuSubmenu))
+                                div()
+                                    .flex_none()
+                                    .pl(px(8.))
+                                    .child(codicon(Codicon::MenuSubmenu))
                             }))
                             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                                 if !*hovered {
@@ -386,16 +475,10 @@ impl ContextMenu {
                                 match submenu_of {
                                     Some(parent) => {
                                         this.submenu = Some((parent, Some(ix)));
+                                        cx.notify();
                                     }
-                                    None => {
-                                        this.active = Some(ix);
-                                        this.submenu = None;
-                                        if is_submenu {
-                                            this.open_submenu(cx);
-                                        }
-                                    }
+                                    None => this.hover_row(ix, cx),
                                 }
-                                cx.notify();
                             }))
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -440,23 +523,31 @@ impl<E: Styled> ActiveRow for E {
 }
 
 impl Render for ContextMenu {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entries = self.entries.clone();
+        let viewport = window.viewport_size();
         let menu = div()
             .id("context-menu-list")
             .max_h(self.max_height)
             .overflow_y_scroll()
-            .child(self.render_entries(&entries, self.active, None, cx));
+            .child(self.render_entries(&entries, self.active, None, self.width, cx));
         let submenu = self.submenu.and_then(|(ix, active)| match &entries[ix] {
             Entry::Submenu { entries, .. } => {
-                // Beside its row.
-                let top = entries_offset(&self.entries, ix);
+                // Beside its row, on the side with room for it (Monaco
+                // `layout` with `LayoutAnchorPosition.Before` when it
+                // doesn't fit after), kept in the window vertically.
+                let width = menu_width(entries, viewport.width, window);
+                let height = menu_height(entries);
+                let row_top = self.origin.y + entries_offset(&self.entries, ix) - px(4.);
+                let top = row_top.min(viewport.height - height).max(px(0.)) - self.origin.y;
+                let left =
+                    submenu_left(self.origin.x, self.width, width, viewport.width) - self.origin.x;
                 Some(
                     div()
                         .absolute()
-                        .left(px(MENU_WIDTH - 4.))
+                        .left(left)
                         .top(top)
-                        .child(self.render_entries(entries, active, Some(ix), cx)),
+                        .child(self.render_entries(entries, active, Some(ix), width, cx)),
                 )
             }
             _ => None,
@@ -480,6 +571,7 @@ impl Render for ContextMenu {
             )
             .on_action(cx.listener(|this, _: &ContextMenuSubmenuOpen, _, cx| this.open_submenu(cx)))
             .on_action(cx.listener(|this, _: &ContextMenuSubmenuClose, _, cx| {
+                this.submenu_timer = None;
                 if this.submenu.take().is_some() {
                     cx.notify();
                 }
@@ -488,6 +580,55 @@ impl Render for ContextMenu {
             .child(menu)
             .children(submenu)
     }
+}
+
+/// The submenu's left edge in the window: after its parent menu when it
+/// fits, else before it (Monaco's submenu `layout`), and in the window.
+fn submenu_left(
+    parent_left: Pixels,
+    parent_width: Pixels,
+    width: Pixels,
+    window: Pixels,
+) -> Pixels {
+    let after = parent_left + parent_width - px(4.);
+    if after + width <= window {
+        after
+    } else {
+        (parent_left - width + px(4.)).max(px(0.))
+    }
+}
+
+/// The menu's measured width (Monaco's menu sizes to its widest row): the
+/// row margins and label padding, the label, the keybinding and the
+/// submenu indicator, at least Monaco's `min-width: 130px` and at most the
+/// window less a margin on each side.
+fn menu_width(entries: &[Entry], window_width: Pixels, window: &mut Window) -> Pixels {
+    let mut widest = px(0.);
+    for entry in entries {
+        let width = match entry {
+            Entry::Separator => continue,
+            Entry::Item {
+                label, keybinding, ..
+            } => {
+                let mut width =
+                    ui_text_width(label, px(MENU_FONT_SIZE), FontWeight::NORMAL, window);
+                if let Some(keys) = keybinding {
+                    width += px(KEYBINDING_PADDING)
+                        + ui_text_width(keys, px(KEYBINDING_FONT_SIZE), FontWeight::NORMAL, window);
+                }
+                width
+            }
+            Entry::Submenu { label, .. } => {
+                ui_text_width(label, px(MENU_FONT_SIZE), FontWeight::NORMAL, window) + px(8. + 16.)
+            }
+        };
+        widest = widest.max(width);
+    }
+    // Row margins, label padding and the border.
+    let width = (widest + px(4. * 2. + LABEL_PADDING * 2. + 2.)).ceil();
+    width
+        .max(px(MENU_MIN_WIDTH))
+        .min((window_width - px(MENU_WINDOW_MARGIN * 2.)).max(px(MENU_MIN_WIDTH)))
 }
 
 /// The top of entry `ix` within the menu.
@@ -510,6 +651,8 @@ fn menu_height(entries: &[Entry]) -> Pixels {
 #[derive(Default)]
 pub(crate) struct ContextMenuState {
     menu: Option<(Entity<ContextMenu>, WidgetId)>,
+    /// Shift+F10 revealed the cursor: show the menu below it once laid out.
+    pub(crate) show_at_cursor: bool,
 }
 
 impl CodeEditor {
@@ -519,15 +662,7 @@ impl CodeEditor {
             let action = cx.build_action(name, None).ok()?;
             let binding = window
                 .highest_precedence_binding_for_action_in(action.as_ref(), &self.focus_handle)?;
-            Some(
-                binding
-                    .keystrokes()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .into(),
-            )
+            Some(crate::keybinding_label::binding_label(&binding))
         };
         let builtin = |items: &[BuiltinItem]| -> Vec<Grouped> {
             items
@@ -537,11 +672,7 @@ impl CodeEditor {
                     (
                         item.0.into(),
                         item.1,
-                        Entry::Item {
-                            label: item.2.into(),
-                            keybinding: keys(item.3),
-                            run: Run::Action(item.3),
-                        },
+                        Entry::item(item.2.into(), keys(item.3), Run::Action(item.3)),
                     )
                 })
                 .collect()
@@ -580,18 +711,11 @@ impl CodeEditor {
             items.push((
                 group.clone(),
                 action.context_menu_order,
-                Entry::Item {
-                    label: action.label.clone(),
-                    keybinding: binding.map(|b| {
-                        b.keystrokes()
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                            .into()
-                    }),
-                    run: Run::EditorAction(action.id.clone()),
-                },
+                Entry::item(
+                    action.label.clone(),
+                    binding.map(|b| crate::keybinding_label::binding_label(&b)),
+                    Run::EditorAction(action.id.clone()),
+                ),
             ));
         }
         build_menu(items)
@@ -609,8 +733,68 @@ impl CodeEditor {
         if !self.options.context_menu {
             return;
         }
+        // Monaco `_doShowContextMenu` without a mouse event: reveals the
+        // cursor, renders, then anchors below it. A cursor out of view shows
+        // the menu once the next frame has laid it out.
+        if position.is_none() && !self.cursor_fully_visible() {
+            let cursor = self.cursors.primary().position;
+            self.reveal_range_with_scroll_type(
+                cursor..cursor,
+                crate::view::reveal::RevealType::Simple,
+                crate::view::reveal::ScrollType::Immediate,
+                cx,
+            );
+            self.context_menu.show_at_cursor = true;
+            cx.notify();
+            return;
+        }
         let entries = self.context_menu_entries(window, cx);
         self.show_menu(entries, position, None, window, cx);
+    }
+
+    /// After a frame laid out the cursor Shift+F10 revealed: the menu below
+    /// it.
+    pub(crate) fn show_pending_context_menu(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if std::mem::take(&mut self.context_menu.show_at_cursor) && self.options.context_menu {
+            let entries = self.context_menu_entries(window, cx);
+            self.show_menu(entries, None, None, window, cx);
+        }
+    }
+
+    /// Whether the primary cursor's line is laid out inside the text area.
+    fn cursor_fully_visible(&self) -> bool {
+        let Some(layout) = self.layout.as_ref() else {
+            return false;
+        };
+        let cursor = self.cursors.primary().position;
+        layout.line_for_point(cursor).is_some_and(|line| {
+            let top = layout.line_top(line.view_line);
+            top >= layout.text_bounds.top()
+                && top + layout.line_height_of(line.view_line) <= layout.text_bounds.bottom()
+        })
+    }
+
+    /// Monaco's sticky scroll context menu (`MenuId.StickyScrollContext`):
+    /// the Toggle Editor Sticky Scroll action, rendered with its toggled
+    /// title, "Sticky Scroll", checked.
+    pub(crate) fn show_sticky_scroll_context_menu(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.hide_context_menu(cx);
+        let entries = vec![Entry::Item {
+            label: "Sticky Scroll".into(),
+            keybinding: None,
+            run: Run::Action("code_editor::ToggleStickyScroll"),
+            checked: self.options.sticky_scroll.enabled,
+        }];
+        self.show_menu(entries, Some(position), None, window, cx);
     }
 
     /// Monaco `showGoToContextMenu`: the navigation commands for an inlay
@@ -627,25 +811,29 @@ impl CodeEditor {
         self.hide_context_menu(cx);
         let mut entries: Vec<Entry> = LOCATION_ITEMS
             .iter()
-            .map(|(label, kind)| Entry::Item {
-                label: (*label).into(),
-                keybinding: None,
-                run: Run::Navigate(*kind, location.clone()),
+            .map(|(label, kind)| {
+                Entry::item(
+                    (*label).into(),
+                    None,
+                    Run::Navigate(*kind, location.clone()),
+                )
             })
             .collect();
         if let Some(command) = command {
             entries.push(Entry::Separator);
-            entries.push(Entry::Item {
-                label: command.title.clone(),
-                keybinding: None,
-                run: Run::Command(command),
-            });
+            entries.push(Entry::item(
+                command.title.clone(),
+                None,
+                Run::Command(command),
+            ));
         }
         self.show_menu(entries, Some(anchor), Some(0), window, cx);
     }
 
     /// Shows a menu of `entries` at `position` (or below the cursor), with
-    /// `active` the active row.
+    /// `active` the active row: measured, in the window, flipped up or left
+    /// at its edges and scrolling when it's taller than the window (Monaco's
+    /// context view).
     fn show_menu(
         &mut self,
         entries: Vec<Entry>,
@@ -661,7 +849,7 @@ impl CodeEditor {
             return;
         };
         let anchor = position.unwrap_or_else(|| {
-            // Below the cursor.
+            // Below the cursor (after any injected text before it).
             let cursor = self.cursors.primary().position;
             match layout.line_for_point(cursor) {
                 Some(line) => gpui::point(
@@ -671,13 +859,10 @@ impl CodeEditor {
                 None => layout.text_bounds.origin,
             }
         });
-        // Monaco's context view: in the window, not just the editor,
-        // flipping up or left at its edges, and scrolling when it's taller
-        // than the window.
         let viewport = window.viewport_size();
         let max_height = viewport.height;
         let height = menu_height(&entries).min(max_height);
-        let width = px(MENU_WIDTH);
+        let width = menu_width(&entries, viewport.width, window);
         let mut origin = anchor;
         if anchor.y + height > viewport.height {
             origin.y = (anchor.y - height).max(px(0.));
@@ -694,8 +879,11 @@ impl CodeEditor {
             entries,
             active,
             submenu: None,
+            submenu_timer: None,
             focus: focus.clone(),
             colors,
+            origin,
+            width,
             max_height,
         });
         let id = self.add_overflow_overlay_widget(
@@ -727,6 +915,28 @@ impl CodeEditor {
                 }
             })
             .detach();
+    }
+
+    /// Whether `point` (window coordinates) is over injected text, such as
+    /// an inlay hint (Monaco's mouse target `detail.injectedText`).
+    pub(crate) fn injected_text_at(&self, point: Point<Pixels>) -> bool {
+        let Some(layout) = self.layout.as_ref() else {
+            return false;
+        };
+        if !layout.text_bounds.contains(&point) {
+            return false;
+        }
+        let Some(line) = layout.lines.iter().find(|line| {
+            let top = layout.line_top(line.view_line);
+            top <= point.y && point.y < top + layout.line_height_of(line.view_line)
+        }) else {
+            return false;
+        };
+        let x = point.x - layout.text_origin_x() - line.indent_x;
+        line.injected.iter().any(|injected| {
+            line.shaped.x_for_index(injected.range.start) <= x
+                && x < line.shaped.x_for_index(injected.range.end)
+        })
     }
 
     /// Hides the context menu.
@@ -766,6 +976,12 @@ impl CodeEditor {
         }
     }
 
+    /// The open menu's measured width, for tests.
+    #[doc(hidden)]
+    pub fn context_menu_width_for_tests(&self, cx: &App) -> Option<Pixels> {
+        Some(self.context_menu.menu.as_ref()?.0.read(cx).width)
+    }
+
     /// The menu's rows as text (`---` for separators, `>` before the active
     /// row, submenus nested with two spaces), for tests.
     #[doc(hidden)]
@@ -779,7 +995,10 @@ impl CodeEditor {
             let active = if menu.active == Some(ix) { "> " } else { "" };
             match entry {
                 Entry::Separator => rows.push("---".to_string()),
-                Entry::Item { label, .. } => rows.push(format!("{active}{label}")),
+                Entry::Item { label, checked, .. } => {
+                    let check = if *checked { "✓ " } else { "" };
+                    rows.push(format!("{active}{check}{label}"))
+                }
                 Entry::Submenu { label, entries } => {
                     rows.push(format!("{active}{label} ›"));
                     for sub in entries {
@@ -799,11 +1018,26 @@ mod tests {
     use super::*;
 
     fn item(label: &str) -> Entry {
-        Entry::Item {
-            label: label.to_string().into(),
-            keybinding: None,
-            run: Run::Action("code_editor::Copy"),
-        }
+        Entry::item(
+            label.to_string().into(),
+            None,
+            Run::Action("code_editor::Copy"),
+        )
+    }
+
+    /// Monaco's submenu `layout`: after its parent when it fits in the
+    /// window, else before it.
+    #[test]
+    fn submenus_flip_at_the_window_edge() {
+        assert_eq!(
+            submenu_left(px(100.), px(200.), px(150.), px(1000.)),
+            px(296.)
+        );
+        assert_eq!(
+            submenu_left(px(700.), px(200.), px(150.), px(1000.)),
+            px(554.)
+        );
+        assert_eq!(submenu_left(px(50.), px(200.), px(400.), px(500.)), px(0.));
     }
 
     #[test]
