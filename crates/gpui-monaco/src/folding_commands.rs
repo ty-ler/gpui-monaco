@@ -3,11 +3,11 @@
 //! comments, regions, all but the selection, fold navigation, manual
 //! folding ranges and the gutter and `⋯` clicks.
 
-use gpui::Context;
+use gpui::{App, Context};
 use text::PointUtf16;
 
 use crate::cursor::Selection;
-use crate::editor::CodeEditor;
+use crate::editor::{CodeEditor, FoldingRegionState, FoldingViewState};
 use crate::providers::FoldingRangeKind;
 use crate::view::fold_model::{self as fm, FoldingModel, SelectedRows};
 use crate::view::reveal::RevealType;
@@ -331,6 +331,11 @@ impl CodeEditor {
 
     /// Moves cursors out of hidden rows to the end of their fold's start row.
     pub(crate) fn after_fold_change(&mut self, cx: &mut Context<Self>) {
+        self.move_cursors_out_of_folds(cx);
+        self.cursors_changed(true, cx);
+    }
+
+    fn move_cursors_out_of_folds(&mut self, cx: &mut Context<Self>) {
         let buffer = self.model().read(cx).buffer().clone();
         let collapsed = self.folds.collapsed_rows(&buffer);
         let fix = |p: PointUtf16| match collapsed
@@ -350,6 +355,131 @@ impl CodeEditor {
             })
             .collect();
         self.cursors.set_selections(&selections);
-        self.cursors_changed(true, cx);
+    }
+
+    /// Monaco `FoldingController.saveViewState` (`FoldingModel.getMemento`):
+    /// the collapsed regions and the manual ranges, with a checksum of
+    /// their lines.
+    pub(crate) fn save_folding_state(&self, cx: &App) -> FoldingViewState {
+        let model = self.model().read(cx);
+        if !self.options.folding || model.is_too_large_for_tokenization() {
+            return FoldingViewState::default();
+        }
+        let buffer = model.buffer();
+        let line_count = buffer.rope().line_count();
+        let manual = self.folds.manual_rows(buffer);
+        let collapsed = self.folds.collapsed_rows(buffer);
+        let mut regions: Vec<FoldingRegionState> = collapsed
+            .iter()
+            .map(|&(start_row, end_row)| FoldingRegionState {
+                start_row,
+                end_row,
+                is_collapsed: true,
+                manual: manual.contains(&(start_row, end_row)),
+                checksum: None,
+            })
+            .collect();
+        regions.extend(
+            manual
+                .iter()
+                .filter(|range| !collapsed.contains(range))
+                .map(|&(start_row, end_row)| FoldingRegionState {
+                    start_row,
+                    end_row,
+                    is_collapsed: false,
+                    manual: true,
+                    checksum: None,
+                }),
+        );
+        regions.retain(|r| r.start_row < r.end_row && r.end_row < line_count);
+        regions.sort_by_key(|r| (r.start_row, std::cmp::Reverse(r.end_row)));
+        for region in &mut regions {
+            region.checksum = Some(lines_checksum(
+                buffer.rope(),
+                region.start_row,
+                region.end_row,
+            ));
+        }
+        FoldingViewState {
+            regions,
+            line_count,
+        }
+    }
+
+    /// Monaco `FoldingController.restoreViewState`
+    /// (`FoldingModel.applyMemento`): the regions whose lines still match
+    /// their checksum fold again, without revealing the cursor.
+    pub(crate) fn restore_folding_state(
+        &mut self,
+        state: &FoldingViewState,
+        cx: &mut Context<Self>,
+    ) {
+        let model = self.model().read(cx);
+        if !self.options.folding
+            || model.is_too_large_for_tokenization()
+            || state.regions.is_empty()
+        {
+            return;
+        }
+        let buffer = model.buffer().clone();
+        let line_count = buffer.rope().line_count();
+        for region in &state.regions {
+            let (start, end) = (region.start_row, region.end_row);
+            if start >= end || end >= line_count {
+                continue;
+            }
+            if region
+                .checksum
+                .is_some_and(|checksum| checksum != lines_checksum(buffer.rope(), start, end))
+            {
+                continue;
+            }
+            if region.manual {
+                if !self.folds.manual_rows(&buffer).contains(&(start, end)) {
+                    self.folds.add_manual(&buffer, start, end);
+                }
+                if !region.is_collapsed {
+                    self.folds.expand(&buffer, start);
+                }
+            } else if region.is_collapsed {
+                self.folds.collapse(&buffer, start, end);
+            }
+        }
+        self.move_cursors_out_of_folds(cx);
+        cx.notify();
+    }
+}
+
+/// Monaco `FoldingModel._getLinesChecksum`: `hash` of the region's second
+/// and last lines, modulo 1,000,000.
+fn lines_checksum(rope: &text::Rope, start_row: u32, end_row: u32) -> i32 {
+    let text = rope.line(start_row + 1) + &rope.line(end_row);
+    string_hash(&text) % 1_000_000
+}
+
+/// Monaco `stringHash(s, 0)` (`base/common/hash.ts`): `hash * 31 + code
+/// unit` over UTF-16, in 32-bit integers.
+fn string_hash(s: &str) -> i32 {
+    let step = |hash: i32, value: i32| hash.wrapping_shl(5).wrapping_sub(hash).wrapping_add(value);
+    s.encode_utf16()
+        .fold(step(0, 149_417), |hash, unit| step(hash, unit as i32))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn string_hash_matches_monaco() {
+        // `stringHash('', 0)` and `hash('a')`, as Monaco computes them.
+        assert_eq!(string_hash(""), 149_417);
+        assert_eq!(string_hash("a"), 149_417 * 31 + 97);
+        // Overflow wraps like JavaScript's `| 0`.
+        let long = "x".repeat(100);
+        let mut expected: i32 = 149_417;
+        for _ in 0..100 {
+            expected = expected.wrapping_mul(31).wrapping_add(120);
+        }
+        assert_eq!(string_hash(&long), expected);
     }
 }

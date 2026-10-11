@@ -2,7 +2,23 @@
 //!
 //! Ports `_computeScrollTopToRevealRange` and `_computeMinimumScrolling` from
 //! Monaco's `src/vs/editor/browser/viewParts/viewLines/viewLines.ts` (MIT),
-//! in pixels.
+//! in pixels, and Monaco's `ScrollType` (`editorCommon.ts`).
+
+/// Whether a scroll animates (Monaco `ScrollType`).
+///
+/// Monaco's reveal methods default to [`ScrollType::Smooth`] and its
+/// `setScrollTop`/`setScrollLeft`/`setScrollPosition` to
+/// [`ScrollType::Immediate`]; the methods without a scroll type here do
+/// the same. Smooth scrolls animate only with the `smooth_scrolling`
+/// option, and reveals of a line or less jump, as in Monaco.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScrollType {
+    /// Animate to the new position when `smooth_scrolling` is on.
+    #[default]
+    Smooth,
+    /// Jump to the new position, stopping any animation.
+    Immediate,
+}
 
 /// How a range is revealed vertically (Monaco `VerticalRevealType`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -46,10 +62,15 @@ pub struct RevealRequest {
     /// with `cursorSurroundingLinesStyle: default`): no context lines, but
     /// one line of room above.
     pub mouse: bool,
+    /// Monaco's `minimalReveal` (`revealAllCursors(_, true)`): no extra
+    /// line of room above or below. Callers also set `mouse` for it with
+    /// the default `cursorSurroundingLinesStyle`, which drops the context
+    /// lines.
+    pub minimal: bool,
 }
 
 /// Monaco `_computeMinimumScrolling`.
-fn minimum_scrolling(
+pub(crate) fn minimum_scrolling(
     viewport_start: f32,
     viewport_end: f32,
     box_start: f32,
@@ -79,8 +100,24 @@ fn minimum_scrolling(
 }
 
 /// The scroll top that reveals the request's box (Monaco
-/// `_computeScrollTopToRevealRange` for API reveals of a single range).
+/// `_computeScrollTopToRevealRange` for a single range).
 pub fn scroll_top_to_reveal(request: RevealRequest, reveal: RevealType) -> f32 {
+    scroll_top_to_reveal_box(request, reveal, true).unwrap_or(request.viewport_top)
+}
+
+/// The scroll top that reveals the box around several cursors (Monaco
+/// `_computeScrollTopToRevealRange` with `selections`, from
+/// `revealAllCursors`), or `None` when they don't fit in the viewport:
+/// Monaco then doesn't scroll.
+pub fn scroll_top_to_reveal_cursors(request: RevealRequest, reveal: RevealType) -> Option<f32> {
+    scroll_top_to_reveal_box(request, reveal, false)
+}
+
+fn scroll_top_to_reveal_box(
+    request: RevealRequest,
+    reveal: RevealType,
+    single_range: bool,
+) -> Option<f32> {
     let RevealRequest {
         viewport_top,
         viewport_height,
@@ -89,15 +126,17 @@ pub fn scroll_top_to_reveal(request: RevealRequest, reveal: RevealType) -> f32 {
         line_height,
         surrounding_lines,
         mouse,
+        minimal,
     } = request;
     let viewport_end = viewport_top + viewport_height;
     let (padding_top, mut padding_bottom) = if mouse {
-        (line_height, 0.)
+        // Reveal one more line above (when dragging).
+        (if minimal { 0. } else { line_height }, 0.)
     } else {
         let context = (viewport_height / line_height / 2.).min(surrounding_lines);
         (context * line_height, (context - 1.).max(0.) * line_height)
     };
-    if matches!(reveal, RevealType::Simple | RevealType::Bottom) {
+    if !minimal && matches!(reveal, RevealType::Simple | RevealType::Bottom) {
         // One more line where the horizontal scrollbar may cover it.
         padding_bottom += line_height;
     }
@@ -105,7 +144,8 @@ pub fn scroll_top_to_reveal(request: RevealRequest, reveal: RevealType) -> f32 {
     box_end += padding_bottom;
 
     if box_end - box_start > viewport_height {
-        return box_start.max(0.);
+        // Don't reveal more cursors than fit.
+        return single_range.then_some(box_start.max(0.));
     }
     let inside = viewport_top <= box_start && box_end <= viewport_end;
     let top = match reveal {
@@ -133,7 +173,7 @@ pub fn scroll_top_to_reveal(request: RevealRequest, reveal: RevealType) -> f32 {
             reveal == RevealType::Bottom,
         ),
     };
-    top.max(0.)
+    Some(top.max(0.))
 }
 
 #[cfg(test)]
@@ -149,6 +189,7 @@ mod tests {
             line_height: 10.,
             surrounding_lines: 0.,
             mouse: false,
+            minimal: false,
         }
     }
 
@@ -203,5 +244,34 @@ mod tests {
         r.surrounding_lines = 5.;
         // Five lines above, four (plus one) below.
         assert_eq!(scroll_top_to_reveal(r, RevealType::Simple), 160.);
+    }
+
+    #[test]
+    fn minimal_reveal_adds_no_room() {
+        // Monaco `minimalReveal` with the default surrounding lines style.
+        let mut r = request(0., 30.);
+        r.mouse = true;
+        r.minimal = true;
+        // Just the line itself: no line of room above or below.
+        assert_eq!(scroll_top_to_reveal(r, RevealType::Simple), 110.);
+        r.viewport_top = 500.;
+        assert_eq!(scroll_top_to_reveal(r, RevealType::Simple), 300.);
+    }
+
+    #[test]
+    fn cursor_boxes_larger_than_the_viewport_dont_scroll() {
+        // Lines 10 to 40 (310px with the extra line) don't fit in 200px.
+        let mut r = request(0., 10.);
+        r.box_end = 410.;
+        assert_eq!(scroll_top_to_reveal_cursors(r, RevealType::Simple), None);
+        // A single range scrolls to its start instead.
+        assert_eq!(scroll_top_to_reveal(r, RevealType::Simple), 100.);
+        // Lines 30 to 32 fit.
+        let mut r = request(0., 30.);
+        r.box_end = 330.;
+        assert_eq!(
+            scroll_top_to_reveal_cursors(r, RevealType::Simple),
+            Some(140.)
+        );
     }
 }

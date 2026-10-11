@@ -606,7 +606,7 @@ impl CodeEditor {
         let visible_rows = ((height * 0.4 / px(ROW_HEIGHT)).floor() as usize).max(3);
         self.quick = Some(QuickAccessState {
             widget: None,
-            view_state: self.save_view_state(),
+            view_state: self.save_view_state(cx),
             decorations: Vec::new(),
             symbols: None,
             _symbols_task: None,

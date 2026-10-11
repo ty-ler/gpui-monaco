@@ -869,6 +869,18 @@ impl FoldState {
         self.merge(buffer);
     }
 
+    /// The manual ranges as inclusive model row ranges `(start, end)`.
+    pub fn manual_rows(&self, buffer: &text::Buffer) -> Vec<(u32, u32)> {
+        let mut rows: Vec<(u32, u32)> = self
+            .manual
+            .iter()
+            .map(|range| Self::anchor_rows(buffer, range))
+            .filter(|(start, end)| end > start)
+            .collect();
+        rows.sort();
+        rows
+    }
+
     /// Whether the ranges came from providers, with kinds: commands then
     /// pick comments and regions by kind rather than by their first line.
     pub fn has_types(&self) -> bool {

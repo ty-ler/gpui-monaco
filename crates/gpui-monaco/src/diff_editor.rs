@@ -3052,8 +3052,8 @@ impl DiffEditor {
     /// (Monaco `saveViewState`).
     pub fn save_view_state(&self, cx: &App) -> DiffEditorViewState {
         DiffEditorViewState {
-            original: self.original.read(cx).save_view_state(),
-            modified: self.modified.read(cx).save_view_state(),
+            original: self.original.read(cx).save_view_state(cx),
+            modified: self.modified.read(cx).save_view_state(cx),
             collapsed_regions: self
                 .unchanged
                 .iter()

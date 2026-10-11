@@ -70,13 +70,20 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `getOptions()` / `updateOptions(o)` | `options()` / `update_options(full_options, cx)`: clone, change, set |
 | `getPosition()` / `setPosition(p)` | `selections()[0].head` / `set_selections(&[Selection::collapsed(p)], cx)` |
 | `getSelections()` / `setSelections(s)` | `selections()` / `set_selections(&s, cx)` |
-| `revealLine`, `revealLineInCenter`, `revealRange…`, `revealPosition…` | `reveal_line`, `reveal_line_in_center`, `reveal_range…`, `reveal_position…` |
-| `getScrollTop()` / `setScrollTop(y)` | `scroll_position()` / `set_scroll_position(p, cx)` |
+| `revealLine`, `revealLineInCenter`, `revealLines…`, `revealRange…`, `revealPosition…` | `reveal_line`, `reveal_line_in_center`, `reveal_lines…`, `reveal_range…`, `reveal_position…` |
+| `revealRange(range, ScrollType.Immediate)` | `reveal_range_with_scroll_type(range, RevealType::Simple, ScrollType::Immediate, cx)`; `reveal_lines_with_scroll_type` for lines |
+| `revealAllCursors(revealHorizontal, minimalReveal)` | `reveal_all_cursors(reveal_horizontal, minimal_reveal, cx)` |
+| `getScrollTop()` / `setScrollTop(y, scrollType)` | `scroll_top()` / `set_scroll_top(y, ScrollType::…, cx)`, likewise `scroll_left`, and `scroll_position()` / `set_scroll_position(p, cx)` |
+| `hasPendingScrollAnimation()` | `has_pending_scroll_animation()` |
+| `getLayoutInfo()` | `layout_info()` (a `LayoutInfo`, after the first frame) |
+| `getTopForLineNumber(n, includeViewZones)`, `getBottomForLineNumber(n)`, `getTopForPosition(n, c)` | `top_for_line_number(row, include_view_zones)`, `bottom_for_line_number(row, include_view_zones)`, `top_for_position(p)` |
+| `getOffsetForColumn(n, c)`, `getWidthOfLine(n)`, `getVisibleColumnFromPosition(p)` | `offset_for_column(row, column)`, `width_of_line(row)`, `visible_column_from_position(p, cx)` (0-based) |
+| `getContentWidth()`, `getContentHeight()`, `getScrollWidth()`, `getScrollHeight()` | `content_width()`, `content_height()`, `scroll_width()`, `scroll_height()` |
 | `getVisibleRanges()` | `visible_ranges(cx)` |
 | `getScrolledVisiblePosition(p)` | `scrolled_visible_position(p)` |
 | `getTargetAtClientPoint(x, y)` | `mouse_target(point, window, cx)` |
-| `focus()` / `hasTextFocus()` | `window.focus(&editor.focus_handle(cx), cx)` / `has_text_focus(window)` |
-| `saveViewState()` / `restoreViewState(s)` | `save_view_state()` / `restore_view_state(&s, cx)` |
+| `focus()` / `hasTextFocus()` / `hasWidgetFocus()` | `window.focus(&editor.focus_handle(cx), cx)` / `has_text_focus(window)` / `has_widget_focus(window, cx)` |
+| `saveViewState()` / `restoreViewState(s)` | `save_view_state(cx)` / `restore_view_state(&s, cx)` (with the folded regions) |
 | `executeEdits(source, edits, endCursorState)` | `execute_edits(edits, end_selections, cx)` |
 | `pushUndoStop()` | `push_undo_stop(cx)` |
 | `trigger(source, handlerId, payload)` | `trigger(id, window, cx)`, taking a Monaco action or command id (`cursorDown`, `undo`, …) or a GPUI action name; `DiffEditor::trigger` for `diffEditor.*` ids |
@@ -103,6 +110,15 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `onDidFocusEditorText` / `onDidBlurEditorText` | `Focused` / `Blurred` |
 | `onMouseDown`, `onMouseUp`, `onMouseMove`, `onMouseLeave`, `onContextMenu` | `MouseDown`, `MouseUp`, `MouseMove`, `MouseLeave`, `ContextMenu` (with `EditorMouseEvent`) |
 | `onDidAttemptReadOnlyEdit` | `ReadOnlyEditAttempt` |
+| `onWillChangeModel` / `onDidChangeModel` | `WillChangeModel` / `ModelChanged` (`ModelChange { old_uri, new_uri }`) |
+| `onDidChangeModelLanguage` | `ModelLanguageChanged { old_language, new_language }` |
+| `onDidChangeConfiguration` | `ConfigurationChanged(change)`; `change.has_changed(\|o\| &o.font_size)` |
+| `onDidLayoutChange` / `onDidContentSizeChange` | `LayoutChanged(LayoutInfo)` / `ContentSizeChanged` |
+| `onDidFocusEditorWidget` / `onDidBlurEditorWidget` | `WidgetFocused` / `WidgetBlurred` |
+| `onWillType` / `onDidType` | `WillType` / `DidType` |
+| `onWillPaste` / `onDidPaste`, `onWillCopy`, `onWillCut` | `WillPaste` / `DidPaste`, `WillCopy`, `WillCut` (notifications: the clipboard data can't be changed) |
+| `onKeyDown` / `onKeyUp`, `onMouseWheel` | `KeyDown` / `KeyUp` (a gpui `Keystroke`; can't be prevented), `MouseWheel` |
+| `onMouseDrag`, `onMouseDrop`, `onMouseDropCanceled` | `MouseDrag`, `MouseDrop`, `MouseDropCanceled` |
 | `onDidChangeModelContent` | subscribe to the model's `TextModelEvent::Edited` |
 | opener service / `registerEditorOpener` | `OpenLocation(location)` and `OpenLink(url)`: the host opens them |
 | `commandService.executeCommand` from providers | `ExecuteCommand(command)`, or `register_command` |

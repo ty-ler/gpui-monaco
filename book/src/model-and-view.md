@@ -85,22 +85,41 @@ Several editors can share one model, for example in a split view. An edit in one
 editor.update(cx, |editor, cx| {
     editor.set_selections(&[Selection::collapsed(PointUtf16::new(10, 0))], cx);
     editor.type_text("inserted", cx);       // like typing: auto-close, auto-indent, …
-    let state = editor.save_view_state();   // selections and scroll
+    let state = editor.save_view_state(cx); // selections, scroll, folds
     editor.set_model(other_model, cx);
     editor.restore_view_state(&state, cx);
 });
 ```
 
+A `ViewState` (Monaco `ICodeEditorViewState`) holds the selections, the scroll position, the first visible position and the folded regions. Restoring it scrolls back to the same first line, even if view zones or wrapping moved it. A folded region comes back only if its lines haven't changed, which Monaco checks with a checksum.
+
 ### Revealing, edits and commands
 
 | Call | Monaco equivalent |
 |---|---|
-| `reveal_line`, `reveal_line_in_center`, `reveal_position`, `reveal_range(range, RevealType::…)` | `revealLine`, `revealLineInCenter`, `revealPosition`, `revealRange*` |
+| `reveal_line`, `reveal_line_in_center`, `reveal_lines…`, `reveal_position…`, `reveal_range(range, RevealType::…)`, `reveal_range_…` | `revealLine*`, `revealLines*`, `revealPosition*`, `revealRange*` |
+| `reveal_range_with_scroll_type(range, RevealType::…, ScrollType::Immediate, cx)`, `reveal_lines_with_scroll_type` | the reveal methods' `scrollType` argument |
+| `reveal_all_cursors(reveal_horizontal, minimal_reveal, cx)` | `revealAllCursors` |
 | `visible_ranges(cx)` | `getVisibleRanges` |
 | `execute_edits(edits, Some(end_selections), cx)` | `executeEdits` |
 | `push_undo_stop(cx)` | `pushUndoStop` |
 | `trigger("code_editor::CommentLine", window, cx)` | `trigger` (with GPUI action names) |
-| `has_text_focus(window)` | `hasTextFocus` |
+| `has_text_focus(window)`, `has_widget_focus(window, cx)` | `hasTextFocus`, `hasWidgetFocus` |
+
+Reveals scroll smoothly (with `smooth_scrolling` on) unless given `ScrollType::Immediate`. A reveal that moves a line or less always jumps. `set_scroll_position`, `set_scroll_top` and `set_scroll_left` take a `ScrollType` (`set_scroll_position` jumps, like Monaco's default). `has_pending_scroll_animation` says whether a smooth scroll is still running.
+
+### Geometry
+
+These answer from the last frame, so they return `None` until the editor was painted. Pixel offsets are measured from the top of the content (or the start of the line), before scrolling.
+
+| Call | Monaco equivalent |
+|---|---|
+| `layout_info()` → `LayoutInfo` | `getLayoutInfo` (`EditorLayoutInfo`: glyph margin, line numbers, decorations, content, minimap, scrollbars, overview ruler) |
+| `top_for_line_number(row, include_view_zones)`, `bottom_for_line_number(row, …)`, `top_for_position(p)`, `line_height_for_position(p)` | `getTopForLineNumber`, `getBottomForLineNumber`, `getTopForPosition`, `getLineHeightForPosition` |
+| `offset_for_column(row, column)`, `width_of_line(row)` | `getOffsetForColumn`, `getWidthOfLine` (rendered lines only) |
+| `visible_column_from_position(p, cx)` | `getVisibleColumnFromPosition`, 0-based |
+| `content_width()`, `content_height()`, `scroll_width()`, `scroll_height()` | `getContentWidth`, `getContentHeight` (without `scroll_beyond_last_line`), `getScrollWidth`, `getScrollHeight` |
+| `scroll_top()`, `scroll_left()` | `getScrollTop`, `getScrollLeft` (where a smooth scroll is going) |
 
 ### Events
 
@@ -116,6 +135,14 @@ editor.update(cx, |editor, cx| {
   - Each target also gives the text position. Use `editor.mouse_target(point, window, cx)` to hit-test any point.
   - The playground toggles breakpoints from glyph margin clicks.
 - `OpenLocation(Location)`: a navigation command or the peek view wants a location in another model. Open it and call `go_to_location` on the new editor.
+- `WillChangeModel` and `ModelChanged`, with the old and new model's uri. `ModelLanguageChanged` forwards the model's language change.
+- `ConfigurationChanged(change)`: some option changed. `change.has_changed(|o| &o.font_size)` says which.
+- `LayoutChanged(LayoutInfo)` and `ContentSizeChanged`: sent after the frame that changed them, including the first frame.
+- `WillType`/`DidType` (typed text), `WillPaste`/`DidPaste` (the pasted range and the language it was copied from), `WillCopy`/`WillCut`.
+- `KeyDown` (sent before key bindings run) and `KeyUp`, `MouseWheel`, and `MouseDrag`/`MouseDrop`/`MouseDropCanceled` while the selection is dragged.
+- `WidgetFocused`/`WidgetBlurred`: focus entered or left the editor, including its widgets such as the find input. `Focused`/`Blurred` track the text only.
+
+These events are notifications. Unlike Monaco, a listener can't change the clipboard data or stop a key.
 
 ```rust,ignore
 cx.subscribe(&editor, |this, editor, event: &CodeEditorEvent, cx| {

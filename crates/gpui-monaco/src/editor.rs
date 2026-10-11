@@ -21,7 +21,11 @@ use crate::cursor::{
     SingleCursorState,
 };
 use crate::element::{EditorElement, EditorLayout, layout_segment, row_segment};
-use crate::events::{CursorChangeReason, CursorChangeSource, SelectionChange};
+use crate::events::{
+    ClipboardCopyEvent, ClipboardPasteEvent, ConfigurationChange, ContentSizeChange,
+    CursorChangeReason, CursorChangeSource, ModelChange, MouseWheelEvent, PasteEvent,
+    SelectionChange,
+};
 use crate::model::{EditKind, TextModel, TextModelEvent, metadata};
 use crate::options::EditorOptions;
 use crate::options::LocationKind;
@@ -75,13 +79,79 @@ pub enum CodeEditorEvent {
     /// `onContextMenu`). The editor shows its own unless the
     /// `context_menu` option is off.
     ContextMenu(crate::mouse_target::EditorMouseEvent),
+    /// The editor is about to show another model (Monaco
+    /// `onWillChangeModel`), from [`CodeEditor::set_model`].
+    WillChangeModel(ModelChange),
+    /// The editor shows another model (Monaco `onDidChangeModel`), from
+    /// [`CodeEditor::set_model`].
+    ModelChanged(ModelChange),
+    /// The model's language changed (Monaco's editor-level
+    /// `onDidChangeModelLanguage`), forwarding
+    /// [`TextModelEvent::LanguageChanged`].
+    ModelLanguageChanged {
+        /// The previous language id (Monaco `oldLanguage`).
+        old_language: Option<gpui::SharedString>,
+        /// The new language id (Monaco `newLanguage`).
+        new_language: Option<gpui::SharedString>,
+    },
+    /// The options changed (Monaco `onDidChangeConfiguration`), through
+    /// [`CodeEditor::update_options`] or the font zoom.
+    ConfigurationChanged(ConfigurationChange),
+    /// The layout changed (Monaco `onDidLayoutChange`), reported after the
+    /// frame that changed it, the first included.
+    LayoutChanged(crate::layout_info::LayoutInfo),
+    /// The content width or height changed (Monaco
+    /// `onDidContentSizeChange`), reported after the frame that changed it.
+    ContentSizeChanged(ContentSizeChange),
+    /// The editor or a widget in it gained focus (Monaco
+    /// `onDidFocusEditorWidget`), e.g. the find widget's input.
+    WidgetFocused,
+    /// Focus left the editor and its widgets (Monaco
+    /// `onDidBlurEditorWidget`).
+    WidgetBlurred,
+    /// Text is about to be typed (Monaco `onWillType`), from the keyboard
+    /// or [`CodeEditor::type_text`].
+    WillType(gpui::SharedString),
+    /// Text was typed (Monaco `onDidType`).
+    DidType(gpui::SharedString),
+    /// The clipboard's text is about to be pasted (Monaco `onWillPaste`).
+    WillPaste(ClipboardPasteEvent),
+    /// The editor pasted (Monaco `onDidPaste`). Not emitted when a paste
+    /// edit provider handled the paste.
+    DidPaste(PasteEvent),
+    /// The selection is about to be copied (Monaco `onWillCopy`).
+    WillCopy(ClipboardCopyEvent),
+    /// The selection is about to be cut (Monaco `onWillCut`).
+    WillCut(ClipboardCopyEvent),
+    /// A key went down while the editor had focus, before key bindings
+    /// handle it (Monaco `onKeyDown`).
+    KeyDown(gpui::Keystroke),
+    /// A key went up while the editor had focus (Monaco `onKeyUp`).
+    KeyUp(gpui::Keystroke),
+    /// The mouse wheel turned over the editor (Monaco `onMouseWheel`),
+    /// before the editor scrolls or zooms.
+    MouseWheel(MouseWheelEvent),
+    /// The selected text is being dragged (Monaco `onMouseDrag`), with the
+    /// `drag_and_drop` option.
+    MouseDrag(crate::mouse_target::EditorMouseEvent),
+    /// Dragged text was dropped (Monaco `onMouseDrop`).
+    MouseDrop(crate::mouse_target::EditorMouseEvent),
+    /// Dragging text was cancelled with Escape (Monaco
+    /// `onMouseDropCanceled`).
+    MouseDropCanceled,
 }
 
 /// Monaco's folding update scheduler waits at least this long.
 const FOLD_UPDATE_DELAY: Duration = Duration::from_millis(200);
 
-/// Saved per-model view state (Monaco `saveViewState`/`restoreViewState`).
-#[derive(Clone, Debug, PartialEq)]
+/// Saved per-model view state (Monaco `ICodeEditorViewState`, from
+/// `saveViewState`).
+///
+/// Besides the selections and the scroll position it keeps the first
+/// visible position, which [`CodeEditor::restore_view_state`] scrolls back
+/// to even when wrapping or view zones moved it, and the folded regions
+/// (Monaco's folding contribution state).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ViewState {
     /// The selections; the first is the primary one.
     pub selections: Vec<Selection>,
@@ -89,6 +159,67 @@ pub struct ViewState {
     pub scroll_top: Pixels,
     /// Horizontal scroll offset in pixels.
     pub scroll_left: Pixels,
+    /// The model position at the top of the first visible line (Monaco
+    /// `firstPosition`), once the editor was laid out.
+    pub first_position: Option<PointUtf16>,
+    /// The first visible line's top relative to the viewport's (Monaco
+    /// `firstPositionDeltaTop`, 0 or less).
+    pub first_position_delta_top: Pixels,
+    /// The folding state (Monaco `FoldingStateMemento`).
+    pub folding: FoldingViewState,
+}
+
+/// Saved folding state (Monaco `FoldingStateMemento`): the collapsed and
+/// manual regions.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FoldingViewState {
+    /// The collapsed regions and manual ranges (Monaco `collapsedRegions`).
+    pub regions: Vec<FoldingRegionState>,
+    /// The model's line count when saved (Monaco `lineCount`).
+    pub line_count: u32,
+}
+
+/// One saved folding region (Monaco `ILineMemento`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FoldingRegionState {
+    /// Its header row, 0-based.
+    pub start_row: u32,
+    /// Its last row, 0-based.
+    pub end_row: u32,
+    /// Whether it's collapsed.
+    pub is_collapsed: bool,
+    /// A manual range (Monaco `FoldSource.userDefined`).
+    pub manual: bool,
+    /// A hash of its second and last lines (Monaco `checksum`): if they
+    /// changed, the region isn't restored.
+    pub checksum: Option<i32>,
+}
+
+/// An API reveal, done in the next prepaint (Monaco
+/// `ViewRevealRangeRequestEvent`).
+#[derive(Clone, Debug)]
+pub(crate) struct PendingReveal {
+    /// One range, or every cursor's selection.
+    pub ranges: Vec<Range<PointUtf16>>,
+    /// The ranges are the cursors (Monaco's `selections`): no scrolling
+    /// when they don't fit.
+    pub cursors: bool,
+    pub reveal: crate::view::reveal::RevealType,
+    /// Also scroll horizontally (Monaco `revealHorizontal`).
+    pub horizontal: bool,
+    /// Monaco `minimalReveal`.
+    pub minimal: bool,
+    pub scroll_type: crate::view::reveal::ScrollType,
+}
+
+/// A horizontal reveal, done once the target lines are laid out (Monaco
+/// `HorizontalRevealRequest`).
+#[derive(Clone, Debug)]
+pub(crate) struct HorizontalReveal {
+    /// Single-line ranges.
+    pub ranges: Vec<Range<PointUtf16>>,
+    pub cursors: bool,
+    pub minimal: bool,
 }
 
 /// Clipboard metadata so pastes can reproduce Monaco's empty-selection and
@@ -97,6 +228,9 @@ pub struct ViewState {
 struct ClipboardMetadata {
     is_from_empty_selection: bool,
     multicursor_text: Option<Vec<String>>,
+    /// The language id of the editor it was copied from (Monaco `mode`).
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -171,9 +305,18 @@ pub struct CodeEditor {
     pub(crate) occurrences: crate::occurrences::OccurrenceHighlights,
     pub(crate) bracket_colors: crate::bracket_colors::BracketColors,
     /// A reveal requested by the API, done in the next prepaint.
-    pub(crate) pending_reveal: Option<(Range<PointUtf16>, crate::view::reveal::RevealType)>,
-    /// Where the next prepaint scrolls horizontally to (after a reveal).
-    pub(crate) pending_reveal_x: Option<PointUtf16>,
+    pub(crate) pending_reveal: Option<PendingReveal>,
+    /// What the next prepaint reveals horizontally (after a reveal).
+    pub(crate) pending_reveal_x: Option<HorizontalReveal>,
+    /// Where the scroll position anchors after
+    /// [`CodeEditor::restore_view_state`]: the first visible position and
+    /// its top relative to the viewport (Monaco `reduceRestoreState`).
+    pub(crate) pending_scroll_anchor: Option<(PointUtf16, Pixels)>,
+    /// The layout info last reported with `LayoutChanged`.
+    pub(crate) last_layout_info: Option<crate::layout_info::LayoutInfo>,
+    /// The content width and height last reported with
+    /// `ContentSizeChanged`.
+    pub(crate) last_content_size: Option<(Pixels, Pixels)>,
     /// Monaco's `overtype` input mode (Insert key).
     pub(crate) overtype: bool,
     pub(crate) hover: crate::hover::HoverState,
@@ -306,6 +449,28 @@ impl CodeEditor {
                 cx.emit(CodeEditorEvent::Blurred);
                 cx.notify();
             }),
+            // Monaco's widget focus: the text or a widget inside the editor.
+            cx.on_focus_in(&focus_handle, window, |_, _, cx| {
+                cx.emit(CodeEditorEvent::WidgetFocused);
+            }),
+            cx.on_focus_out(&focus_handle, window, |_, _, _, cx| {
+                cx.emit(CodeEditorEvent::WidgetBlurred);
+            }),
+            // Monaco `onKeyDown` fires before key bindings run, so it's an
+            // interceptor rather than a key down listener (which bound keys
+            // never reach).
+            {
+                let editor = cx.weak_entity();
+                let focus = focus_handle.clone();
+                cx.intercept_keystrokes(move |event, window, cx| {
+                    if focus.is_focused(window) {
+                        let keystroke = event.keystroke.clone();
+                        editor
+                            .update(cx, |_, cx| cx.emit(CodeEditorEvent::KeyDown(keystroke)))
+                            .ok();
+                    }
+                })
+            },
         ];
         let mut subscriptions = subscriptions;
         // Providers coming and going (e.g. a language server starting) and
@@ -372,6 +537,9 @@ impl CodeEditor {
             bracket_colors: Default::default(),
             pending_reveal: None,
             pending_reveal_x: None,
+            pending_scroll_anchor: None,
+            last_layout_info: None,
+            last_content_size: None,
             navigation: crate::navigation_history::NavigationHistory::starting_at(
                 vec![Selection::collapsed(PointUtf16::zero())],
                 snapshot.version(),
@@ -425,6 +593,15 @@ impl CodeEditor {
     /// Shows a different model, resetting cursors and scroll (Monaco
     /// `setModel`). Save and restore [`ViewState`] to keep them per model.
     pub fn set_model(&mut self, model: Entity<TextModel>, cx: &mut Context<Self>) {
+        // Monaco does nothing for the same model.
+        if model == self.model {
+            return;
+        }
+        let change = ModelChange {
+            old_uri: self.model.read(cx).uri().cloned(),
+            new_uri: model.read(cx).uri().cloned(),
+        };
+        cx.emit(CodeEditorEvent::WillChangeModel(change.clone()));
         crate::model::register_model(cx, &model);
         self.request_unusual_line_terminators_check();
         // Popups and decorations this editor owns refer to the old model: its
@@ -477,6 +654,9 @@ impl CodeEditor {
             .set_merge_overlapping(self.options.multi_cursor_merge_overlapping);
         self.scroll_top = px(0.);
         self.scroll_left = px(0.);
+        self.pending_reveal = None;
+        self.pending_reveal_x = None;
+        self.pending_scroll_anchor = None;
         self.marked_range = None;
         self.prev_edit_kind = None;
         self.record_cursor_change();
@@ -486,26 +666,56 @@ impl CodeEditor {
             source: CursorChangeSource::Model,
         }));
         cx.emit(CodeEditorEvent::ScrollChanged);
+        cx.emit(CodeEditorEvent::ModelChanged(change));
         cx.notify();
     }
 
-    /// Captures the selections and scroll position (Monaco `saveViewState`).
-    pub fn save_view_state(&self) -> ViewState {
+    /// Captures the selections, the scroll position and the folded regions
+    /// (Monaco `saveViewState`).
+    pub fn save_view_state(&self, cx: &App) -> ViewState {
+        // Monaco `ViewModel.saveState`: the first visible line and how far
+        // above the viewport its top is.
+        let (first_position, first_position_delta_top) = match self.layout.as_ref() {
+            Some(layout) => {
+                let line_height = layout.metrics.line_height;
+                let count = self.view_lines.line_count().max(1);
+                let line = layout.zones.line_at(self.scroll_top, line_height, count);
+                let position = self.view_lines.to_model(line, 0);
+                let top = layout.zones.line_y(line, line_height);
+                (Some(position), top - self.scroll_top)
+            }
+            None => (None, px(0.)),
+        };
         ViewState {
             selections: self.cursors.selections(),
             scroll_top: self.scroll_top,
             scroll_left: self.scroll_left,
+            first_position,
+            first_position_delta_top,
+            folding: self.save_folding_state(cx),
         }
     }
 
-    /// Restores a [`ViewState`] from [`CodeEditor::save_view_state`], clamping
-    /// selections to the current text (Monaco `restoreViewState`). Emits
+    /// Restores a [`ViewState`] from [`CodeEditor::save_view_state`] (Monaco
+    /// `restoreViewState`): the selections, clamped to the current text,
+    /// the folded regions whose lines didn't change, and the scroll
+    /// position, anchored on the first visible line once laid out. Emits
     /// [`CodeEditorEvent::SelectionsChanged`].
     pub fn restore_view_state(&mut self, state: &ViewState, cx: &mut Context<Self>) {
-        self.cursors.set_selections(&state.selections);
-        self.cursors.validate(self.snapshot.rope());
+        if !state.selections.is_empty() {
+            self.cursors.set_selections(&state.selections);
+            self.cursors.validate(self.snapshot.rope());
+        }
+        self.restore_folding_state(&state.folding, cx);
+        self.animation.cancel_scroll();
         self.scroll_top = state.scroll_top;
         self.scroll_left = state.scroll_left;
+        self.pending_scroll_anchor = state
+            .first_position
+            .map(|position| (position, state.first_position_delta_top));
+        self.pending_reveal = None;
+        self.pending_reveal_x = None;
+        self.autoscroll_requested = false;
         cx.emit(CodeEditorEvent::SelectionsChanged(SelectionChange {
             reason: CursorChangeReason::NotSet,
             source: CursorChangeSource::RestoreState,
@@ -525,8 +735,17 @@ impl CodeEditor {
 
     /// Replaces the editor options (Monaco `updateOptions`, but with a full set).
     pub fn update_options(&mut self, options: EditorOptions, cx: &mut Context<Self>) {
-        self.options =
-            crate::font_zoom::zoomed_options(&options, crate::font_zoom::editor_zoom_level(cx));
+        let old = std::mem::replace(
+            &mut self.options,
+            crate::font_zoom::zoomed_options(&options, crate::font_zoom::editor_zoom_level(cx)),
+        );
+        // Monaco `onDidChangeConfiguration` fires when an option changed.
+        let change = (old != self.options).then(|| {
+            CodeEditorEvent::ConfigurationChanged(ConfigurationChange::new(
+                old,
+                self.options.clone(),
+            ))
+        });
         if options.unusual_line_terminators != self.user_options.unusual_line_terminators {
             self.request_unusual_line_terminators_check();
         }
@@ -540,6 +759,9 @@ impl CodeEditor {
         // Monaco `ParameterHintsModel.onEditorConfigurationChange`.
         if !self.options.parameter_hints.enabled {
             self.hide_signature_help(cx);
+        }
+        if let Some(change) = change {
+            cx.emit(change);
         }
         cx.notify();
     }
@@ -591,9 +813,28 @@ impl CodeEditor {
         point(self.scroll_left, self.scroll_top)
     }
 
-    /// Scrolls to `position` in pixels, clamped to the scroll range, and emits
+    /// Scrolls to `position` in pixels right away (Monaco
+    /// `setScrollPosition` with its default `ScrollType.Immediate`),
+    /// clamped to the scroll range, and emits
     /// [`CodeEditorEvent::ScrollChanged`].
     pub fn set_scroll_position(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.set_scroll_position_with_scroll_type(
+            position,
+            crate::view::reveal::ScrollType::Immediate,
+            cx,
+        );
+    }
+
+    /// [`CodeEditor::set_scroll_position`], animating with
+    /// [`ScrollType::Smooth`](crate::ScrollType) when `smooth_scrolling` is
+    /// on (Monaco `setScrollPosition(position, scrollType)`).
+    pub fn set_scroll_position_with_scroll_type(
+        &mut self,
+        position: Point<Pixels>,
+        scroll_type: crate::view::reveal::ScrollType,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_scroll_type(scroll_type);
         self.scroll_left = position.x;
         self.scroll_top = position.y;
         self.clamp_scroll();
@@ -601,8 +842,22 @@ impl CodeEditor {
         cx.notify();
     }
 
+    /// Makes the next scroll change animate or jump.
+    pub(crate) fn apply_scroll_type(&mut self, scroll_type: crate::view::reveal::ScrollType) {
+        match scroll_type {
+            crate::view::reveal::ScrollType::Smooth => {
+                self.animation.smooth_scroll_requested = true;
+            }
+            crate::view::reveal::ScrollType::Immediate => {
+                self.animation.smooth_scroll_requested = false;
+                self.animation.cancel_scroll();
+            }
+        }
+    }
+
     /// The height of the lines and view zones as of the last layout
-    /// (Monaco `getContentHeight`), not counting `scroll_beyond_last_line`.
+    /// (Monaco `getContentHeight`), not counting `scroll_beyond_last_line`
+    /// (Monaco adds it; see [`CodeEditor::scroll_height`]).
     pub fn content_height(&self) -> Option<Pixels> {
         self.layout.as_ref().map(|layout| layout.content_height)
     }
@@ -1035,10 +1290,17 @@ impl CodeEditor {
                 }
                 cx.notify();
             }
-            TextModelEvent::LanguageChanged { .. } => {
+            TextModelEvent::LanguageChanged {
+                old_language,
+                new_language,
+            } => {
                 // Monaco closes the peek view.
                 self.close_peek(cx);
                 self.reset_inlay_hints(cx);
+                cx.emit(CodeEditorEvent::ModelLanguageChanged {
+                    old_language: old_language.clone(),
+                    new_language: new_language.clone(),
+                });
                 cx.notify();
             }
             TextModelEvent::MarkersChanged => {
@@ -1433,6 +1695,8 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         if self.dnd_cancel(cx) {
+            // Monaco `onMouseDropCanceled`: Escape while dragging.
+            cx.emit(CodeEditorEvent::MouseDropCanceled);
             return;
         }
         if self.options.single_line {
@@ -1502,8 +1766,20 @@ impl CodeEditor {
 
     // ----- editing ------------------------------------------------------------
 
-    /// Types `text` at every cursor, as if from the keyboard.
+    /// Types `text` at every cursor, as if from the keyboard. Emits
+    /// [`CodeEditorEvent::WillType`] and [`CodeEditorEvent::DidType`]
+    /// around it (Monaco's `'keyboard'` source).
     pub fn type_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        let typed = gpui::SharedString::from(text.to_string());
+        cx.emit(CodeEditorEvent::WillType(typed.clone()));
+        self.type_text_inner(text, cx);
+        cx.emit(CodeEditorEvent::DidType(typed));
+    }
+
+    fn type_text_inner(&mut self, text: &str, cx: &mut Context<Self>) {
         let single_line;
         let text = if self.options.single_line && text.contains('\n') {
             single_line = text.replace(['\r', '\n'], " ");
@@ -1859,16 +2135,16 @@ impl CodeEditor {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        self.write_selection_to_clipboard(cx);
+        self.write_selection_to_clipboard(false, cx);
     }
 
     fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
-        if self.write_selection_to_clipboard(cx) {
+        if self.write_selection_to_clipboard(true, cx) {
             self.run_edit(cx, cursor::cut);
         }
     }
 
-    fn write_selection_to_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
+    fn write_selection_to_clipboard(&mut self, is_cut: bool, cx: &mut Context<Self>) -> bool {
         let config = self.cursor_config(cx);
         let (text, is_from_empty_selection, per_cursor) =
             cursor::copy_text(&config, self.snapshot.rope(), &self.cursors);
@@ -1876,11 +2152,26 @@ impl CodeEditor {
             return false;
         }
         let multicursor_text = (per_cursor.len() > 1).then_some(per_cursor);
+        let mode = self.model.read(cx).language_id().cloned();
+        // Monaco `onWillCopy`/`onWillCut`, before the clipboard is written.
+        let event = ClipboardCopyEvent {
+            is_cut,
+            text: text.clone(),
+            is_from_empty_selection,
+            multicursor_text: multicursor_text.clone(),
+            language_id: mode.clone(),
+        };
+        cx.emit(if is_cut {
+            CodeEditorEvent::WillCut(event)
+        } else {
+            CodeEditorEvent::WillCopy(event)
+        });
         cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(
             text,
             ClipboardMetadata {
                 is_from_empty_selection,
                 multicursor_text,
+                mode: mode.map(|mode| mode.to_string()),
             },
         ));
         true
@@ -1893,6 +2184,14 @@ impl CodeEditor {
         self.paste_item(item, cx);
     }
 
+    /// The editor metadata stored with clipboard text copied from an editor.
+    fn clipboard_metadata(item: &ClipboardItem) -> Option<ClipboardMetadata> {
+        item.entries().iter().find_map(|entry| match entry {
+            gpui::ClipboardEntry::String(string) => string.metadata_json::<ClipboardMetadata>(),
+            _ => None,
+        })
+    }
+
     /// The editor's own paste, when paste edit providers leave it to it.
     pub(crate) fn paste_item_for_providers(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
         self.paste_item_inner(item, cx);
@@ -1900,6 +2199,19 @@ impl CodeEditor {
     }
 
     fn paste_item(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
+        // Monaco `onWillPaste`, before anything handles it.
+        let metadata = Self::clipboard_metadata(&item);
+        cx.emit(CodeEditorEvent::WillPaste(ClipboardPasteEvent {
+            text: item.text().unwrap_or_default(),
+            is_from_empty_selection: metadata
+                .as_ref()
+                .is_some_and(|meta| meta.is_from_empty_selection),
+            language_id: metadata
+                .as_ref()
+                .and_then(|meta| meta.mode.clone())
+                .map(Into::into),
+            multicursor_text: metadata.and_then(|meta| meta.multicursor_text),
+        }));
         // Monaco `CopyPasteController`: providers may handle it.
         let data = crate::drop_paste::clipboard_data(&item);
         if self.paste_with_providers(data, item.clone(), cx) {
@@ -1919,13 +2231,22 @@ impl CodeEditor {
             .map(|s| s.start())
             .min()
             .unwrap_or_default();
+        let language_id = Self::clipboard_metadata(&item)
+            .and_then(|meta| meta.mode)
+            .map(Into::into);
         self.next_selection_change.reason = CursorChangeReason::Paste;
         self.paste_clipboard_item(item, cx);
         // Nothing may have changed.
         self.next_selection_change = SelectionChange::default();
         if self.snapshot.version() != version {
-            // Monaco's `onDidPaste` range: from the first selection's start
-            // to the last cursor.
+            // Monaco `onDidPaste`: from the primary selection's start before
+            // to its start after.
+            cx.emit(CodeEditorEvent::DidPaste(PasteEvent {
+                range: primary_start..self.cursors.primary().selection().start(),
+                language_id,
+            }));
+            // Format from the first selection's start to the last cursor,
+            // which covers every cursor's pasted text.
             let end = self
                 .cursors
                 .selections()
@@ -1958,11 +2279,7 @@ impl CodeEditor {
                 .trim_end_matches(['\r', '\n'])
                 .replace(['\r', '\n'], " ");
         }
-        let metadata = item.entries().iter().find_map(|entry| match entry {
-            gpui::ClipboardEntry::String(string) => string.metadata_json::<ClipboardMetadata>(),
-            _ => None,
-        });
-        let (from_empty, multicursor) = match metadata {
+        let (from_empty, multicursor) = match Self::clipboard_metadata(&item) {
             Some(meta) => (meta.is_from_empty_selection, meta.multicursor_text),
             None => (false, None),
         };
@@ -2925,6 +3242,16 @@ impl CodeEditor {
         }
         if self.dnd.active {
             if event.pressed_button == Some(MouseButton::Left) {
+                // Monaco `onMouseDrag`.
+                let mouse = self.emit_mouse(
+                    event.position,
+                    Some(MouseButton::Left),
+                    event.modifiers,
+                    1,
+                    window,
+                    cx,
+                );
+                cx.emit(CodeEditorEvent::MouseDrag(mouse));
                 let position = self.position_for_point(event.position, window, cx);
                 self.dnd_mouse_drag(Some(position), &event.modifiers, cx);
             } else {
@@ -3042,6 +3369,16 @@ impl CodeEditor {
             cx.emit(CodeEditorEvent::MouseUp(mouse));
         }
         if self.dnd.active && event.button == MouseButton::Left {
+            // Monaco `onMouseDrop`.
+            let mouse = self.emit_mouse(
+                event.position,
+                Some(event.button),
+                event.modifiers,
+                event.click_count,
+                window,
+                cx,
+            );
+            cx.emit(CodeEditorEvent::MouseDrop(mouse));
             self.dnd_mouse_drop(drop_target, &event.modifiers, cx);
         }
         // Monaco `_installDblClickGesture`: a double-click on an inlay hint
@@ -3115,16 +3452,26 @@ impl CodeEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.mouse_wheel_zoom(event, cx) {
-            cx.stop_propagation();
-            return;
-        }
         let line_height = self
             .layout
             .as_ref()
             .map_or(self.options.resolved_line_height(), |l| {
                 l.metrics.line_height
             });
+        // Monaco `onMouseWheel`, before zooming or scrolling.
+        cx.emit(CodeEditorEvent::MouseWheel(MouseWheelEvent {
+            position: event.position,
+            delta: event.delta.pixel_delta(line_height),
+            lines: match event.delta {
+                gpui::ScrollDelta::Lines(lines) => Some(lines),
+                gpui::ScrollDelta::Pixels(_) => None,
+            },
+            modifiers: event.modifiers,
+        }));
+        if self.mouse_wheel_zoom(event, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if !self.options.scrollbar.handle_mouse_wheel {
             return;
         }
@@ -4320,6 +4667,12 @@ impl Render for CodeEditor {
             )
             .on_key_down(cx.listener(|this, _: &gpui::KeyDownEvent, _, cx| {
                 this.end_middle_scroll(cx);
+            }))
+            // Monaco `onKeyUp`, for the text (not the editor's widgets).
+            .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, window, cx| {
+                if this.focus_handle.is_focused(window) {
+                    cx.emit(CodeEditorEvent::KeyUp(event.keystroke.clone()));
+                }
             }))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 // Monaco reveals `auto` scrollbars while the mouse is over.

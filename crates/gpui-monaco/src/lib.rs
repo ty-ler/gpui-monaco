@@ -53,11 +53,13 @@ mod indentation_commands;
 mod tooltip;
 pub use font_zoom::{editor_zoom_level, set_editor_zoom_level};
 mod format;
+mod geometry;
 mod goto;
 mod hover;
 mod inlay_hints;
 mod inline_completions;
 mod languages;
+pub mod layout_info;
 pub mod link_computer;
 mod linked_editing;
 mod links;
@@ -105,18 +107,23 @@ pub use decorations::{
     BlockDecoration, DecorationId, DecorationOptions, DecorationUnderline, InjectedText,
     OverviewRulerLane,
 };
-pub use editor::{CodeEditor, CodeEditorEvent, ViewState};
+pub use editor::{CodeEditor, CodeEditorEvent, FoldingRegionState, FoldingViewState, ViewState};
 pub use editor_actions::{
     ActionPrecondition, ActionRun, EditorActionDescriptor, EditorActionInfo, KeybindingRule,
     add_editor_action, add_keybinding_rule, add_keybinding_rules,
 };
 pub use element::EditorElement;
-pub use events::{ContentChange, CursorChangeReason, CursorChangeSource, SelectionChange};
+pub use events::{
+    ClipboardCopyEvent, ClipboardPasteEvent, ConfigurationChange, ContentChange, ContentSizeChange,
+    CursorChangeReason, CursorChangeSource, ModelChange, MouseWheelEvent, PasteEvent,
+    SelectionChange,
+};
 pub use find::{FindOptions, MATCHES_LIMIT};
 pub use find_widget::FindWidget;
 pub use goto::has_symbol_navigation;
 pub use hover::{HOVER_DELAY, HoverWidget};
 pub use languages::{on_language, set_language_configuration};
+pub use layout_info::{LayoutInfo, MinimapLayoutInfo, OverviewRulerPosition, RenderMinimap};
 pub use markers::{
     Marker, MarkerFilter, MarkerSeverity, MarkerTag, MarkerZone, ModelMarker, RelatedInformation,
     model_markers, remove_all_markers,
@@ -139,7 +146,7 @@ pub use text;
 pub use theme::{
     EditorColors, Theme, ThemeKind, TokenStyle, define_theme, global_theme, set_theme, theme_named,
 };
-pub use view::reveal::RevealType;
+pub use view::reveal::{RevealType, ScrollType};
 pub use widgets::{
     ContentWidget, ContentWidgetPreference, GlyphMarginWidget, OverlayPosition, OverlayWidget,
     ViewZone, WidgetId, ZoneHeight,
