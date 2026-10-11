@@ -56,7 +56,7 @@ editor.update(cx, |editor, cx| {
 | `auto_closing_brackets`, `auto_closing_quotes`, `auto_closing_comments` | `autoClosingBrackets`, … | `Always`, `LanguageDefined`, `BeforeWhitespace`, `Never` |
 | `auto_closing_overtype`, `auto_closing_delete`, `auto_surround` | same names | |
 | `auto_indent` | `autoIndent` | `None`, `Keep`, `Brackets`, `Advanced`, `Full` |
-| `match_brackets` | `matchBrackets` | |
+| `match_brackets` | `matchBrackets` | `Always` (the pair at the cursor, or else the enclosing pair), `Near` or `Never` |
 | `code_lens`, `code_lens_font_family`, `code_lens_font_size` | `codeLens`, … | show code lenses (on); their font (the editor's; 90% of its size) |
 | `linked_editing` | `linkedEditing` | mirror edits between linked ranges, like HTML tag pairs (off) |
 | `inline_suggest` | `inlineSuggest.*` | `enabled` (on), `mode` (`SubwordSmart`), `suppress_suggestions`, `keep_on_blur`, `min_show_delay`, `suppress_in_snippet_mode` (on) |

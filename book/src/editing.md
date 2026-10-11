@@ -171,7 +171,7 @@ Lines are indented like the cursor's line unless `adjust_whitespace` is off. `se
 
 ## Brackets
 
-- **Highlighting:** the bracket pair around the cursor is highlighted (`match_brackets`). Brackets inside strings and comments are skipped.
+- **Highlighting:** while the editor has focus, the bracket pair next to the cursor is highlighted and marked in the overview ruler. With `match_brackets: Always` (the default, as in Monaco) the pair enclosing the cursor is highlighted when no bracket is next to it. Brackets inside strings and comments are skipped.
 - **Navigation:** Cmd+Shift+\ jumps to the matching bracket.
 
 ## View

@@ -50,7 +50,7 @@ Issues are linked by number.
 | Find/replace: case, word, regex, in selection, replace all | `find` | ✅ | |
 | Find model (Monaco's `FindModel`), preserve case, case escapes in replace, loop, seed and auto find in selection options | `find` | ✅ | #104 |
 | Find controller commands, history, extra space on top, widget width and states, remembered toggles | `find` | ✅ | #104 |
-| Bracket matching and jump | `bracketMatching` | 🟡 brackets next to the cursor; enclosing brackets (`'always'`), `'near'` and the overview ruler mark to come | #195 |
+| Bracket matching and jump | `bracketMatching` | ✅ `always`/`near`/`never`, overview ruler mark | #195 |
 
 ## View
 

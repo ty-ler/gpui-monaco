@@ -9,8 +9,9 @@ use gpui::Context;
 use text::{Point, PointUtf16};
 
 use crate::cursor::{self, Selection};
-use crate::decorations::DecorationOptions;
+use crate::decorations::{DecorationOptions, OverviewRulerLane};
 use crate::editor::CodeEditor;
+use crate::options::MatchBrackets;
 
 /// Bracket highlighting is skipped with more cursors than this.
 const MAX_CURSORS: usize = 32;
@@ -86,25 +87,35 @@ impl CodeEditor {
         self.apply(operation, cx);
     }
 
-    /// Re-highlights the bracket pairs next to the cursors (Monaco
-    /// `matchBrackets: "always"`).
+    /// Re-highlights the bracket pairs at the cursors (Monaco
+    /// `BracketMatchingController._recomputeBrackets`): the pair next to a
+    /// cursor, with an overview ruler mark, or with `matchBrackets:
+    /// "always"` the pair enclosing it. Only while the editor has focus.
     pub(crate) fn update_bracket_highlights(&mut self, cx: &mut Context<Self>) {
-        let mut ranges: Vec<Range<PointUtf16>> = Vec::new();
+        // (open, close, whether it's next to the cursor).
+        let mut pairs: Vec<(Range<PointUtf16>, Range<PointUtf16>, bool)> = Vec::new();
         let selections = self.cursors.selections();
-        if self.options.match_brackets
+        if self.options.match_brackets != MatchBrackets::Never
+            && self.has_focus
             && !self.options.single_line
             && selections.len() <= MAX_CURSORS
         {
             for selection in selections.iter().filter(|s| s.is_empty()) {
-                if let Some((open, close)) = self.bracket_pair(selection.head, cx)
-                    && (contains(&open, selection.head) || contains(&close, selection.head))
-                {
-                    ranges.extend([open, close]);
+                let Some((open, close)) = self.bracket_pair(selection.head, cx) else {
+                    continue;
+                };
+                let near = contains(&open, selection.head) || contains(&close, selection.head);
+                if near || self.options.match_brackets == MatchBrackets::Always {
+                    pairs.push((open, close, near));
                 }
             }
         }
-        ranges.sort_by_key(|r| (r.start, r.end));
-        ranges.dedup();
+        let mut ranges: Vec<(Range<PointUtf16>, bool)> = pairs
+            .into_iter()
+            .flat_map(|(open, close, near)| [(open, near), (close, near)])
+            .collect();
+        ranges.sort_by_key(|(r, near)| (r.start, r.end, !near));
+        ranges.dedup_by(|a, b| a.0 == b.0);
         let old = std::mem::take(&mut self.bracket_decorations);
         if old.is_empty() && ranges.is_empty() {
             return;
@@ -113,13 +124,18 @@ impl CodeEditor {
         let rope = self.snapshot.rope();
         let new = ranges
             .into_iter()
-            .map(|range| {
+            .map(|(range, near)| {
                 (
                     rope.point_utf16_to_offset(range.start)..rope.point_utf16_to_offset(range.end),
                     DecorationOptions {
                         background: Some(colors.bracket_match_background),
                         border: Some(colors.bracket_match_border),
                         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
+                        // Monaco marks only a pair next to the cursor.
+                        overview_ruler: near.then_some((
+                            colors.overview_ruler_bracket_match,
+                            OverviewRulerLane::Center,
+                        )),
                         ..Default::default()
                     },
                 )

@@ -279,6 +279,9 @@ pub struct EditorColors {
     pub bracket_match_background: Hsla,
     /// `editorBracketMatch.border`.
     pub bracket_match_border: Hsla,
+    /// The overview ruler mark for matching brackets
+    /// (`editorOverviewRuler.bracketMatchForeground`).
+    pub overview_ruler_bracket_match: Hsla,
     /// `minimap.background` (defaults to the editor background).
     pub minimap_background: Option<Hsla>,
     /// `minimapSlider.background` / `.hoverBackground`.
@@ -422,6 +425,7 @@ impl EditorColors {
             input_option_active_border: c(rgb(0x007acc)),
             bracket_match_background: c(rgba(0x0064001a)),
             bracket_match_border: c(rgb(0x888888)),
+            overview_ruler_bracket_match: c(rgb(0xa0a0a0)),
             minimap_background: None,
             minimap_slider: c(rgba(0x79797933)),
             minimap_slider_hover: c(rgba(0x64646459)),
@@ -555,6 +559,7 @@ impl EditorColors {
             input_option_active_border: c(rgb(0x007acc)),
             bracket_match_background: c(rgba(0x0064001a)),
             bracket_match_border: c(rgb(0xb9b9b9)),
+            overview_ruler_bracket_match: c(rgb(0xa0a0a0)),
             minimap_background: None,
             minimap_slider: c(rgba(0x79797933)),
             minimap_slider_hover: c(rgba(0x64646459)),
@@ -705,6 +710,7 @@ impl EditorColors {
             input_option_active_border: c(rgb(0x6fc3df)),
             bracket_match_background: c(rgba(0x0064001a)),
             bracket_match_border: c(rgb(0x6fc3df)),
+            overview_ruler_bracket_match: c(rgb(0xa0a0a0)),
             minimap_background: None,
             minimap_slider: c(rgba(0x6fc3df4d)),
             minimap_slider_hover: c(rgba(0x6fc3df66)),
@@ -851,6 +857,7 @@ impl EditorColors {
             input_option_active_border: c(rgb(0x0f4a85)),
             bracket_match_background: gpui::transparent_black(),
             bracket_match_border: c(rgb(0x0f4a85)),
+            overview_ruler_bracket_match: c(rgb(0xa0a0a0)),
             minimap_background: None,
             minimap_slider: c(rgba(0x0f4a8533)),
             minimap_slider_hover: c(rgba(0x0f4a8566)),
@@ -1229,6 +1236,10 @@ impl EditorColors {
             "editorBracketMatch.background",
         );
         set(&mut self.bracket_match_border, "editorBracketMatch.border");
+        set(
+            &mut self.overview_ruler_bracket_match,
+            "editorOverviewRuler.bracketMatchForeground",
+        );
         set(&mut self.minimap_slider, "minimapSlider.background");
         set(
             &mut self.minimap_slider_hover,
