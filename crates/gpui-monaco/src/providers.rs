@@ -1027,6 +1027,26 @@ pub struct InlineCompletionList {
     pub items: Vec<InlineCompletion>,
     /// Keep the suggest widget from opening by itself while one shows.
     pub suppress_suggestions: Option<bool>,
+    /// Extra commands for the inline suggestion toolbar's menu (Monaco
+    /// `InlineCompletions.commands`).
+    pub commands: Vec<Command>,
+}
+
+/// Why an inline completion stopped showing for good (Monaco
+/// `InlineCompletionEndOfLifeReason`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum InlineCompletionEndOfLifeReason {
+    /// The user accepted it.
+    Accepted,
+    /// The user dismissed it while it showed (Escape).
+    Rejected,
+    /// Neither: it was hidden, replaced or never shown.
+    Ignored {
+        /// The completion from a newer request that replaced it.
+        superseded_by: Option<InlineCompletion>,
+        /// The user typed text it didn't match.
+        user_typing_disagreed: bool,
+    },
 }
 
 /// Supplies ghost text at the cursor (Monaco `InlineCompletionsProvider`).
@@ -1054,6 +1074,33 @@ pub trait InlineCompletionsProvider: 'static {
     /// The first `accepted_length` UTF-16 units of `item` were accepted
     /// word by word or line by line.
     fn handle_partial_accept(&self, _item: &InlineCompletion, _accepted_length: usize) {}
+
+    /// `item` was shown and then dismissed (Monaco's deprecated
+    /// `handleRejection`; also see `handle_end_of_lifetime`).
+    fn handle_rejection(&self, _item: &InlineCompletion) {}
+
+    /// `item` won't show again: it was accepted, rejected or ignored.
+    /// Called once per item (Monaco `handleEndOfLifetime`).
+    fn handle_end_of_lifetime(
+        &self,
+        _item: &InlineCompletion,
+        _reason: &InlineCompletionEndOfLifeReason,
+    ) {
+    }
+
+    /// The group this provider belongs to, for other providers'
+    /// [`yields_to_group_ids`](Self::yields_to_group_ids) (Monaco
+    /// `groupId`).
+    fn group_id(&self) -> Option<SharedString> {
+        None
+    }
+
+    /// Groups this provider yields to: it's asked only after them, and not
+    /// at all if one of them has a visible completion (Monaco
+    /// `yieldsToGroupIds`).
+    fn yields_to_group_ids(&self) -> Vec<SharedString> {
+        Vec::new()
+    }
 }
 
 // ----- semantic tokens -------------------------------------------------------------

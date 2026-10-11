@@ -471,6 +471,7 @@ static COMMANDS: &[Command] = &[
     Command("editor.action.clipboardCutAction", "code_editor::Cut"),
     Command("editor.action.clipboardCopyAction", "code_editor::Copy"),
     Command("editor.action.hideLongLineWarningHover", "code_editor::HideLongLineWarningHover"),
+    Command("editor.action.inlineSuggest.toggleAlwaysShowToolbar", "code_editor::ToggleAlwaysShowInlineSuggestionToolbar"),
 ];
 
 /// The GPUI action name for the unlabelled Monaco command `id`.

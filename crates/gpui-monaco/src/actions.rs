@@ -746,6 +746,10 @@ actions!(
         AcceptNextInlineLine,
         /// Hides the ghost text (Monaco `editor.action.inlineSuggest.hide`).
         HideInlineSuggestion,
+        /// Switches the inline suggestion toolbar between always shown and
+        /// shown on hover (Monaco
+        /// `editor.action.inlineSuggest.toggleAlwaysShowToolbar`).
+        ToggleAlwaysShowInlineSuggestionToolbar,
         /// Formats the document (Monaco `editor.action.formatDocument`).
         FormatDocument,
         /// Goes to the declaration (Monaco `editor.action.revealDeclaration`).

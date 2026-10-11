@@ -3861,6 +3861,11 @@ impl Render for CodeEditor {
                     this.hide_inline_suggestion(cx)
                 }),
             )
+            .on_action(
+                cx.listener(|this, _: &ToggleAlwaysShowInlineSuggestionToolbar, _, cx| {
+                    this.toggle_always_show_inline_toolbar(cx)
+                }),
+            )
             .on_modifiers_changed(cx.listener(
                 |this, event: &gpui::ModifiersChangedEvent, _, cx| {
                     this.inlay_hints_modifiers(&event.modifiers, cx);

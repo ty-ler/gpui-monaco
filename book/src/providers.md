@@ -249,7 +249,7 @@ impl InlineCompletionsProvider for MyCompletions {
                 range: Some(PointUtf16::new(position.row, 0)..position),
                 ..Default::default()
             }],
-            suppress_suggestions: None,
+            ..Default::default()
         }))
     }
 }
@@ -262,6 +262,14 @@ To accept:
 - Cmd/Ctrl+Right takes the next word, and `AcceptNextInlineLine` the next line.
 
 Alt+] and Alt+[ show the other completions, and Alt+\\ asks explicitly. Escape or moving the cursor hides it.
+
+Hovering the ghost text shows Monaco's toolbar: previous and next with a "1/3" count, Accept, Accept Word, and a "⋯" menu with Accept Line, Always Show Toolbar and the list's `commands`. With `inline_suggest.show_toolbar: Always` it stays above the ghost text instead.
+
+Ghost text is colored like code (`syntax_highlighting_enabled`, faded to 70%). The toolbar's count needs all completions, so showing it asks explicitly.
+
+Providers can also:
+- hear how each completion ended through `handle_end_of_lifetime` (accepted, rejected with Escape, or ignored) and `handle_rejection`;
+- set a `group_id`, and list in `yields_to_group_ids` the groups they defer to. A provider is asked only after those groups answer, and not at all if one of them has a visible completion.
 
 The `inline_suggest` options control this; see [Options](options.md). With `suggest.preview`, the suggest widget's selected item shows as ghost text too.
 
