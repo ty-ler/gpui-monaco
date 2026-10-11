@@ -412,6 +412,48 @@ impl TextModel {
             .map(|pair| (pair.open, pair.close))
     }
 
+    /// `s` with its leading whitespace converted to the model's indentation
+    /// (Monaco `normalizeIndentation`): tabs and spaces measured with
+    /// `indent_size`, then written as tabs and spaces without
+    /// `insert_spaces`, or as spaces with it.
+    pub fn normalize_indentation(&self, s: &str) -> String {
+        let options = self.options();
+        cursor::strings::normalize_indentation(s, options.indent_size.max(1), options.insert_spaces)
+    }
+
+    /// The column of `row`'s first character that isn't a space or a tab
+    /// (Monaco `getLineFirstNonWhitespaceColumn`, 0-based), or `None` when
+    /// the line is only whitespace (Monaco's `0`).
+    pub fn line_first_non_whitespace_column(&self, row: u32) -> Option<u32> {
+        let line = self.line_content(row);
+        let index = line.find(|c| c != ' ' && c != '\t')?;
+        Some(line[..index].encode_utf16().count() as u32)
+    }
+
+    /// The column after `row`'s last character that isn't a space or a tab
+    /// (Monaco `getLineLastNonWhitespaceColumn`, 0-based), or `None` when
+    /// the line is only whitespace (Monaco's `0`).
+    pub fn line_last_non_whitespace_column(&self, row: u32) -> Option<u32> {
+        let line = self.line_content(row);
+        let end = line.trim_end_matches([' ', '\t']).len();
+        (end > 0).then(|| line[..end].encode_utf16().count() as u32)
+    }
+
+    /// Where `row`'s leading spaces and tabs end (Monaco
+    /// `getLineIndentColumn`, 0-based): each counts as one column.
+    pub fn line_indent_column(&self, row: u32) -> u32 {
+        let line = self.line_content(row);
+        line.chars().take_while(|&c| c == ' ' || c == '\t').count() as u32
+    }
+
+    /// The visible width of `row`'s indentation, tabs expanded to
+    /// `tab_size` (Monaco `computeIndentLevel`, what indent guides and
+    /// indentation folding use), or `None` for a line that's only
+    /// whitespace (Monaco's `-1`).
+    pub fn line_indent_level(&self, row: u32) -> Option<u32> {
+        crate::view::folding::indent_level(&self.line_content(row), self.options().tab_size.max(1))
+    }
+
     /// The number of indent guides on each of `rows` (Monaco
     /// `guides.getLinesIndentGuides`).
     pub fn lines_indent_guides(&self, rows: Range<u32>) -> Vec<u32> {

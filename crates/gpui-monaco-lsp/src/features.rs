@@ -33,7 +33,8 @@ use gpui_monaco::providers::{
     DocumentSymbol, DocumentSymbolProvider, register_document_symbol_provider,
 };
 use gpui_monaco::providers::{
-    FoldingRange, FoldingRangeKind, FoldingRangeProvider, register_folding_range_provider,
+    FoldingContext, FoldingRange, FoldingRangeKind, FoldingRangeProvider,
+    register_folding_range_provider,
 };
 use gpui_monaco::providers::{InlayHint, InlayHintsProvider, register_inlay_hints_provider};
 use gpui_monaco::providers::{
@@ -909,6 +910,7 @@ impl FoldingRangeProvider for LspFeatures {
     fn provide_folding_ranges(
         &self,
         context: &ProviderContext,
+        _: &FoldingContext,
         cx: &mut App,
     ) -> Task<Result<Option<Vec<FoldingRange>>>> {
         let Some((connection, position)) = self.prepare(context, PointUtf16::zero(), cx) else {

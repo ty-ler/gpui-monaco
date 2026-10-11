@@ -468,7 +468,7 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
 
     // Folding ranges.
     let folds = cx
-        .update(|cx| features.provide_folding_ranges(&context, cx))
+        .update(|cx| features.provide_folding_ranges(&context, &Default::default(), cx))
         .await
         .unwrap()
         .unwrap();

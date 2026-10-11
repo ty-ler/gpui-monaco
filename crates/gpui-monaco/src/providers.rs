@@ -833,6 +833,13 @@ pub struct FoldingRange {
     pub kind: Option<FoldingRangeKind>,
 }
 
+/// What a folding range request is for (Monaco `FoldingContext`). Empty, as
+/// in Monaco; it's there so information can be added without changing
+/// [`FoldingRangeProvider`] again.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FoldingContext {}
+
 /// Computes folding ranges (Monaco `FoldingRangeProvider`), replacing the
 /// syntax and indentation ranges with `folding_strategy: Auto`.
 ///
@@ -844,6 +851,7 @@ pub trait FoldingRangeProvider: 'static {
     fn provide_folding_ranges(
         &self,
         context: &ProviderContext,
+        folding_context: &FoldingContext,
         cx: &mut App,
     ) -> Task<anyhow::Result<Option<Vec<FoldingRange>>>>;
 }
@@ -1793,7 +1801,8 @@ pub struct FormattingOptions {
 
 /// Formats a whole document (Monaco `DocumentFormattingEditProvider`).
 ///
-/// Register with [`register_document_formatting_provider`].
+/// Register with [`register_document_formatting_provider`]. When several
+/// formatters match a model, [`set_formatter_selector`] picks one.
 pub trait DocumentFormattingProvider: 'static {
     /// The edits that format the document. Big replacements are fine: the
     /// editor reduces them to the characters that actually change.
@@ -1803,6 +1812,18 @@ pub trait DocumentFormattingProvider: 'static {
         options: FormattingOptions,
         cx: &mut App,
     ) -> Task<anyhow::Result<Vec<TextEdit>>>;
+
+    /// The name to show when choosing between formatters (Monaco
+    /// `displayName`).
+    fn display_name(&self) -> Option<SharedString> {
+        None
+    }
+
+    /// Who provides it (Monaco's internal `extensionId`): a range formatter
+    /// with the same id isn't offered again as a document formatter.
+    fn extension_id(&self) -> Option<SharedString> {
+        None
+    }
 }
 
 /// Formats part of a document (Monaco
@@ -1833,6 +1854,117 @@ pub trait DocumentRangeFormattingProvider: 'static {
     ) -> Option<Task<anyhow::Result<Vec<TextEdit>>>> {
         None
     }
+
+    /// The name to show when choosing between formatters (Monaco
+    /// `displayName`).
+    fn display_name(&self) -> Option<SharedString> {
+        None
+    }
+
+    /// Who provides it (Monaco's internal `extensionId`); see
+    /// [`DocumentFormattingProvider::extension_id`].
+    fn extension_id(&self) -> Option<SharedString> {
+        None
+    }
+}
+
+/// What is being formatted (Monaco `FormattingKind`), for
+/// [`set_formatter_selector`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormattingKind {
+    /// The whole document (`editor.action.formatDocument`).
+    File,
+    /// Selections or pasted text (`editor.action.formatSelection`,
+    /// `format_on_paste`).
+    Selection,
+}
+
+/// Why it's formatted (Monaco `FormattingMode`), for
+/// [`set_formatter_selector`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormattingMode {
+    /// The user asked (a format command).
+    Explicit,
+    /// Automatically (`format_on_paste`): don't interrupt the user.
+    Silent,
+}
+
+/// A formatter offered to a [`set_formatter_selector`] selector.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FormatterInfo {
+    /// Its [`display_name`](DocumentFormattingProvider::display_name).
+    pub display_name: Option<SharedString>,
+    /// Its [`extension_id`](DocumentFormattingProvider::extension_id).
+    pub extension_id: Option<SharedString>,
+}
+
+/// The formatters a [`set_formatter_selector`] selector chooses from
+/// (Monaco `IFormattingEditProviderSelector`'s arguments).
+#[derive(Clone)]
+pub struct FormatterSelection {
+    /// The matching formatters, in the order they're tried (registration
+    /// order). For [`FormattingKind::File`], the document formatters, then
+    /// the range formatters (formatting the whole text) whose extension id
+    /// no document formatter has.
+    pub formatters: Vec<FormatterInfo>,
+    /// The model being formatted (Monaco `document`).
+    pub context: ProviderContext,
+    /// Why.
+    pub mode: FormattingMode,
+    /// What.
+    pub kind: FormattingKind,
+}
+
+type FormatterSelector = dyn Fn(&FormatterSelection, &mut App) -> Task<Option<usize>>;
+
+/// The selectors from [`set_formatter_selector`], newest first.
+#[derive(Default)]
+struct FormatterSelectors {
+    next_id: u64,
+    selectors: Vec<(u64, std::rc::Rc<FormatterSelector>)>,
+}
+
+impl Global for FormatterSelectors {}
+
+/// Chooses which formatter runs when formatting (Monaco
+/// `FormattingConflicts.setFormatterSelector`): `selector` gets the
+/// matching formatters and answers the index of the one to use, or `None`
+/// to not format, e.g. after asking the user. The newest selector set is
+/// used; [`Disposable::dispose`](crate::Disposable::dispose) removes it.
+///
+/// Without one, the first formatter is used, as in the standalone editor
+/// (`editor.api.ts`). With one, it's asked whenever a formatter matches,
+/// even only one, as in Monaco; on-type formatting doesn't ask.
+pub fn set_formatter_selector(
+    cx: &mut App,
+    selector: impl Fn(&FormatterSelection, &mut App) -> Task<Option<usize>> + 'static,
+) -> crate::Disposable {
+    let selectors = cx.default_global::<FormatterSelectors>();
+    selectors.next_id += 1;
+    let id = selectors.next_id;
+    selectors
+        .selectors
+        .insert(0, (id, std::rc::Rc::new(selector)));
+    crate::Disposable::new(move |cx| {
+        cx.default_global::<FormatterSelectors>()
+            .selectors
+            .retain(|(other, _)| *other != id);
+    })
+}
+
+/// Monaco `FormattingConflicts.select`: the newest selector's choice, or
+/// `None` without a selector (the caller then takes the first formatter).
+pub(crate) fn select_formatter(
+    selection: &FormatterSelection,
+    cx: &mut App,
+) -> Option<Task<Option<usize>>> {
+    let selector = cx
+        .try_global::<FormatterSelectors>()?
+        .selectors
+        .first()?
+        .1
+        .clone();
+    Some(selector(selection, cx))
 }
 
 /// Formats as you type (Monaco `OnTypeFormattingEditProvider`), with the

@@ -34,6 +34,8 @@ Other common calls:
 | `model.set_value(text, cx)` (replaces the text and clears undo history) | `setValue` |
 | `model.set_language(Some("json".into()), cx)` | `setModelLanguage` |
 | `model.line_ending()` / `set_line_ending(eol, cx)` (emits `LineEndingChanged`) | `getEOL` / `setEOL` |
+| `model.push_line_ending(eol, cx)` (an undo step, joining the open one like an edit) | `pushEOL` |
+| `model.is_attached_to_editor()` / `attached_editor_count()`, `TextModelEvent::AttachedChanged` | `isAttachedToEditor` / `getAttachedEditorCount`, `onDidChangeAttached` |
 | `model.undo(None, cx)` / `redo(None, cx)` / `push_stack_element()` | `undo` / `redo` / `pushStackElement` |
 | `model.snapshot()` | a cheap, immutable copy of the text for background work |
 
@@ -46,6 +48,8 @@ More `ITextModel` helpers:
 - **Search:** `find_matches`, `find_matches_in` (with search scopes and regex captures), `find_next_match` and `find_previous_match`.
 - **Edits:** `apply_edits` returns the edits that undo it. `push_edit_operations` joins the open undo step until `push_stack_element`, and takes a cursor state computer. `pop_stack_element` reopens the last step. `alternative_version_id` returns to earlier values on undo and redo, so it can tell whether the text is back to a saved state.
 - **Brackets and guides:** `bracket_pairs_in_range`, `match_bracket`, `find_enclosing_brackets`, `lines_indent_guides` and `active_indent_guide`. Brackets in strings and comments don't count.
+- **Indentation:** `normalize_indentation` (Monaco `normalizeIndentation`) rewrites a string's leading whitespace with the model's `indent_size` and `insert_spaces`. `line_first_non_whitespace_column` and `line_last_non_whitespace_column` are 0-based, `None` for blank lines (Monaco's `0`). `line_indent_column` counts leading spaces and tabs (`getLineIndentColumn`). `line_indent_level` is the indentation's width with tabs expanded, `None` for blank lines (Monaco `computeIndentLevel`).
+- **Tokens:** `line_tokens(row, cx)` (Monaco `tokenization.getLineTokens`) gives a line's tokens like `colorize::tokenize`: each token's UTF-16 start, its Monaco token type with the language suffix (`keyword.rust`) and its language, the injected one inside a code fence. A model that hasn't parsed the latest text is tokenized right away.
 
 A model emits `TextModelEvent::Edited` for each change. Subscribe to it with `cx.subscribe(&model, …)` to sync with something else, such as an LSP server. The event carries:
 
@@ -118,6 +122,7 @@ These answer from the last frame, so they return `None` until the editor was pai
 | `top_for_line_number(row, include_view_zones)`, `bottom_for_line_number(row, …)`, `top_for_position(p)`, `line_height_for_position(p)` | `getTopForLineNumber`, `getBottomForLineNumber`, `getTopForPosition`, `getLineHeightForPosition` |
 | `offset_for_column(row, column)`, `width_of_line(row)` | `getOffsetForColumn`, `getWidthOfLine` (rendered lines only) |
 | `visible_column_from_position(p, cx)` | `getVisibleColumnFromPosition`, 0-based |
+| `statusbar_column(p, cx)` | `getStatusbarColumn`: 1-based, tabs expanded, every other character one column |
 | `content_width()`, `content_height()`, `scroll_width()`, `scroll_height()` | `getContentWidth`, `getContentHeight` (without `scroll_beyond_last_line`), `getScrollWidth`, `getScrollHeight` |
 | `scroll_top()`, `scroll_left()` | `getScrollTop`, `getScrollLeft` (where a smooth scroll is going) |
 
@@ -141,6 +146,10 @@ These answer from the last frame, so they return `None` until the editor was pai
 - `WillType`/`DidType` (typed text), `WillPaste`/`DidPaste` (the pasted range and the language it was copied from), `WillCopy`/`WillCut`.
 - `KeyDown` (sent before key bindings run) and `KeyUp`, `MouseWheel`, and `MouseDrag`/`MouseDrop`/`MouseDropCanceled` while the selection is dragged.
 - `WidgetFocused`/`WidgetBlurred`: focus entered or left the editor, including its widgets such as the find input. `Focused`/`Blurred` track the text only.
+- `CompositionStarted`/`CompositionEnded`: an input method marked text, then committed, cancelled or unmarked it. `in_composition()` says whether one is in progress.
+- `HiddenAreasChanged`: folding or `set_hidden_areas` changed the hidden lines, reported when the next frame applies them.
+- `ViewZonesChanged`: a view zone was added, removed or resized, including the editor's own (code lenses, peek views).
+- `BeginUpdate`/`EndUpdate`: bracket an operation that may change the model or view several times (edits, typing, pasting, undo, redo, setting selections or the model), once however nested. As in Monaco, not every operation is bracketed.
 
 These events are notifications. Unlike Monaco, a listener can't change the clipboard data or stop a key.
 

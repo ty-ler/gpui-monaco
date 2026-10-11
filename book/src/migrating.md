@@ -54,7 +54,11 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `bracketPairs.getBracketPairsInRange`, `matchBracket`, `findEnclosingBrackets` | `bracket_pairs_in_range`, `match_bracket`, `find_enclosing_brackets` |
 | `guides.getLinesIndentGuides`, `getActiveIndentGuide` | `lines_indent_guides`, `active_indent_guide` |
 | `undo()` / `redo()`, `canUndo()` / `canRedo()` | `undo(source, cx)` / `redo(source, cx)`, `can_undo()` / `can_redo()` |
-| `getEOL()` / `setEOL(...)` | `line_ending()` / `set_line_ending(...)` |
+| `getEOL()` / `setEOL(...)` / `pushEOL(...)` | `line_ending()` / `set_line_ending(...)` / `push_line_ending(...)` (an undo step) |
+| `isAttachedToEditor()`, `onDidChangeAttached` | `is_attached_to_editor()`, `TextModelEvent::AttachedChanged` |
+| `normalizeIndentation(s)` | `normalize_indentation(s)` |
+| `getLineFirstNonWhitespaceColumn(n)`, `getLineLastNonWhitespaceColumn(n)` | `line_first_non_whitespace_column(row)`, `line_last_non_whitespace_column(row)` (0-based, `None` for blank lines) |
+| `tokenization.getLineTokens(n)` | `line_tokens(row, cx)` (`colorize::Token`s) |
 | `getOptions()` / `updateOptions(...)` | `options()` / `update_options(...)` (tab size, insert spaces, …) |
 | `deltaDecorations(old, new)` | `delta_decorations(owner, &old, new, cx)` (byte ranges) |
 | `getDecorationsInRange(range)` | `decorations_in_range(range, editor)` |
@@ -78,6 +82,8 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `getLayoutInfo()` | `layout_info()` (a `LayoutInfo`, after the first frame) |
 | `getTopForLineNumber(n, includeViewZones)`, `getBottomForLineNumber(n)`, `getTopForPosition(n, c)` | `top_for_line_number(row, include_view_zones)`, `bottom_for_line_number(row, include_view_zones)`, `top_for_position(p)` |
 | `getOffsetForColumn(n, c)`, `getWidthOfLine(n)`, `getVisibleColumnFromPosition(p)` | `offset_for_column(row, column)`, `width_of_line(row)`, `visible_column_from_position(p, cx)` (0-based) |
+| `getStatusbarColumn(p)` | `statusbar_column(p, cx)` (1-based, as in Monaco) |
+| `inComposition` | `in_composition()` |
 | `getContentWidth()`, `getContentHeight()`, `getScrollWidth()`, `getScrollHeight()` | `content_width()`, `content_height()`, `scroll_width()`, `scroll_height()` |
 | `getVisibleRanges()` | `visible_ranges(cx)` |
 | `getScrolledVisiblePosition(p)` | `scrolled_visible_position(p)` |
@@ -119,6 +125,9 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `onWillPaste` / `onDidPaste`, `onWillCopy`, `onWillCut` | `WillPaste` / `DidPaste`, `WillCopy`, `WillCut` (notifications: the clipboard data can't be changed) |
 | `onKeyDown` / `onKeyUp`, `onMouseWheel` | `KeyDown` / `KeyUp` (a gpui `Keystroke`; can't be prevented), `MouseWheel` |
 | `onMouseDrag`, `onMouseDrop`, `onMouseDropCanceled` | `MouseDrag`, `MouseDrop`, `MouseDropCanceled` |
+| `onDidCompositionStart` / `onDidCompositionEnd` | `CompositionStarted` / `CompositionEnded` |
+| `onDidChangeHiddenAreas`, `onDidChangeViewZones` | `HiddenAreasChanged` (after the next frame), `ViewZonesChanged` |
+| `onBeginUpdate` / `onEndUpdate` | `BeginUpdate` / `EndUpdate` |
 | `onDidChangeModelContent` | subscribe to the model's `TextModelEvent::Edited` |
 | opener service / `registerEditorOpener` | `OpenLocation(location)` and `OpenLink(url)`: the host opens them |
 | `commandService.executeCommand` from providers | `ExecuteCommand(command)`, or `register_command` |
@@ -153,7 +162,7 @@ Monaco's `monaco.languages.register…Provider(selector, provider)` functions be
 | `registerInlineCompletionsProvider` | `InlineCompletionsProvider` |
 | `registerDocumentFormattingEditProvider`, `…RangeFormatting…`, `…OnTypeFormatting…` | `DocumentFormattingProvider`, `DocumentRangeFormattingProvider`, `OnTypeFormattingProvider` |
 | `registerDocumentSymbolProvider` | `DocumentSymbolProvider` |
-| `registerFoldingRangeProvider` | `FoldingRangeProvider` |
+| `registerFoldingRangeProvider` | `FoldingRangeProvider` (given Monaco's empty `FoldingContext`) |
 | `registerSelectionRangeProvider` | `SelectionRangeProvider` |
 | `registerLinkedEditingRangeProvider` | `LinkedEditingRangeProvider` |
 | `registerLinkProvider` | `LinkProvider` |
@@ -164,6 +173,7 @@ Monaco's `monaco.languages.register…Provider(selector, provider)` functions be
 | `register({ id, extensions, filenames, filenamePatterns, firstLine, mimetypes })` | `Language::new(id, name)` with `with_extensions`, `with_file_names`, `with_filename_patterns`, `with_first_line` and `with_mimetypes` |
 | `onLanguage(id, callback)` | `on_language(cx, id, callback)` |
 | `LanguageFilter { language, scheme, pattern }` | `LanguageSelector::Filters(vec![LanguageFilter { … }])` |
+| `FormattingConflicts.setFormatterSelector` (not public in Monaco's API) | `set_formatter_selector(cx, …)` |
 | `setMonarchTokensProvider` | a tree-sitter grammar with highlight queries (see [Languages](languages.md)) |
 
 The `gpui-monaco-lsp` bridge registers these providers from a language server (see [Language servers](lsp.md)).

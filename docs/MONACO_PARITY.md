@@ -108,10 +108,11 @@ Issues are linked by number.
 | Go to offset (`::`, `editor.action.gotoOffset`) | `quickAccess` | ✅ | #100, #227 |
 | Command palette, `addAction` | `quickAccess` | ✅ | #100 |
 | Reveal APIs, `executeEdits`, mouse hit-test events, word and position helpers, content-change details, cursor change reasons, decorations collections | editor API | ✅ | #105 |
-| Editor events: model, language, configuration, layout and content size changes, typing, clipboard, key, wheel and drag events, widget focus | `ICodeEditor.on*` | ✅ no composition, hidden-area, view-zone or begin/end update events; listeners can't change clipboard data or cancel keys | #205 |
-| Geometry and scrolling: `getLayoutInfo`, line and column offsets, `getWidthOfLine`, content and scroll sizes, `ScrollType`, `revealAllCursors`, view state with folding and the first visible line | `ICodeEditor` | ✅ answered from the last frame (`None` before it) | #205 |
+| Editor events: model, language, configuration, layout and content size changes, typing, clipboard, key, wheel and drag events, widget focus, IME composition, hidden areas, view zones, begin/end update | `ICodeEditor.on*` | ✅ hidden-area changes are reported when the next frame applies them; listeners can't change clipboard data or cancel keys | #205, #229 |
+| Geometry and scrolling: `getLayoutInfo`, line and column offsets, `getWidthOfLine`, content and scroll sizes, `ScrollType`, `revealAllCursors`, view state with folding and the first visible line, `getStatusbarColumn` | `ICodeEditor` | ✅ answered from the last frame (`None` before it) | #205, #229 |
 | Model helpers: lines, `modifyPosition`, find next/previous/scoped with captures, `applyEdits` undo edits, `pushEditOperations` with a cursor computer, `popStackElement`, alternative version id, bracket pairs and guides | `ITextModel` | ✅ | #206 |
-| Language extras: `register` file associations (patterns, first line, mimetypes), `onLanguage`, runtime `setLanguageConfiguration`, `LanguageFilter` scheme and pattern, `SignatureHelpContext`, folding and code lens `onDidChange`, multi-range formatting | `monaco.languages` | ✅ | #206 |
+| Model extras: `isAttachedToEditor`/`onDidChangeAttached`, undoable `pushEOL`, per-line tokens (`tokenization.getLineTokens`), `normalizeIndentation`, first/last non-whitespace and indent columns, indent levels | `ITextModel` | ✅ tokens are tree-sitter captures mapped to Monaco token types, not encoded metadata | #229 |
+| Language extras: `register` file associations (patterns, first line, mimetypes), `onLanguage`, runtime `setLanguageConfiguration`, `LanguageFilter` scheme and pattern, `SignatureHelpContext`, folding and code lens `onDidChange`, multi-range formatting, `FoldingContext` | `monaco.languages` | ✅ | #206, #229 |
 | Custom highlighter | tokenization support | ✅ (`Language::with_highlighter`) | |
 | Static colorize and tokenize | `colorizer` | ✅ | #108 |
 | Colorize a model line | `colorizeModelLine` | ✅ | #204 |
@@ -142,6 +143,7 @@ Issues are linked by number.
 | Diagnostic tags (unused, deprecated), related information | `gotoError` | ✅ | #90 |
 | Document highlights | `wordHighlighter` | ✅ | #83 |
 | Formatting: document, range, on type, on paste | `format` | ✅ | #94 |
+| Choosing between formatters (`FormattingConflicts.setFormatterSelector`, `displayName`) | `format` | ✅ the first by default, as standalone Monaco; no built-in picker (`formatDocument.multiple` is VS Code workbench) | #229 |
 | Rename | `rename` | ✅ | #56 |
 | Rename preview (`acceptRenameInputWithPreview`, through a host preview handler) | `rename` | ✅ | #225 |
 | Code actions and lightbulb (no AI actions or nearby quick fixes) | `codeAction` | ✅ | #56 |

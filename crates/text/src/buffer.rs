@@ -181,6 +181,17 @@ struct Transaction {
     /// `beforeVersionId`/`afterVersionId`).
     before_version: Version,
     after_version: Version,
+    /// The line ending before and after it (Monaco `beforeEOL`/`afterEOL`):
+    /// undo and redo restore them.
+    before_line_ending: LineEnding,
+    after_line_ending: LineEnding,
+}
+
+impl Transaction {
+    /// Whether it changes anything: edits or the line ending.
+    fn is_empty(&self) -> bool {
+        self.batches.is_empty() && self.before_line_ending == self.after_line_ending
+    }
 }
 
 #[derive(Default, Clone)]
@@ -199,6 +210,7 @@ impl History {
         group: Option<u64>,
         before: Option<TransactionMetadata>,
         before_version: Version,
+        line_ending: LineEnding,
     ) -> Transaction {
         self.next_id += 1;
         Transaction {
@@ -211,6 +223,8 @@ impl History {
             after: None,
             before_version,
             after_version: before_version,
+            before_line_ending: line_ending,
+            after_line_ending: line_ending,
         }
     }
 }
@@ -297,10 +311,46 @@ impl Buffer {
         self.line_ending
     }
 
-    /// Changes the line ending used by [`Buffer::text`]. The stored text and
-    /// offsets are unaffected, so this is not an undoable edit.
+    /// Changes the line ending used by [`Buffer::text`] (Monaco `setEOL`).
+    /// The stored text and offsets are unaffected, and it isn't an undo
+    /// step; see [`Buffer::push_line_ending`].
     pub fn set_line_ending(&mut self, line_ending: LineEnding) {
         self.line_ending = line_ending;
+    }
+
+    /// Changes the line ending as an undo step (Monaco `pushEOL`): it joins
+    /// the open transaction or the last step if it's still open (not ended
+    /// by [`Buffer::push_stack_element`]), or else becomes its own step. Undoing it restores the previous line ending. Returns
+    /// whether the line ending changed. The version doesn't change, since
+    /// the stored text and offsets don't.
+    pub fn push_line_ending(&mut self, line_ending: LineEnding) -> bool {
+        let before = self.line_ending;
+        if before == line_ending {
+            return false;
+        }
+        self.line_ending = line_ending;
+        let version = self.alternative_version;
+        let history = &mut self.history;
+        history.redo.clear();
+        if let Some(open) = history.open.as_mut() {
+            open.after_line_ending = line_ending;
+            return true;
+        }
+        // Monaco appends to the open stack element, whatever its group.
+        if let Some(last) = history.undo.last_mut()
+            && !last.sealed
+        {
+            last.after_line_ending = line_ending;
+            return true;
+        }
+        if let Some(last) = history.undo.last_mut() {
+            last.sealed = true;
+        }
+        let mut transaction = history.new_transaction(None, None, version, before);
+        transaction.after_line_ending = line_ending;
+        transaction.sealed = true;
+        history.undo.push(transaction);
+        true
     }
 
     /// Whether the original text started with a UTF-8 BOM.
@@ -459,11 +509,13 @@ impl Buffer {
 
     fn record(&mut self, batch: Vec<RecordedEdit>, group: Option<u64>, before_version: Version) {
         let after_version = self.version();
+        let line_ending = self.line_ending;
         let history = &mut self.history;
         history.redo.clear();
         if let Some(open) = history.open.as_mut() {
             open.batches.push(batch);
             open.after_version = after_version;
+            open.after_line_ending = line_ending;
             return;
         }
         if let Some(last) = history.undo.last_mut()
@@ -472,12 +524,13 @@ impl Buffer {
         {
             last.batches.push(batch);
             last.after_version = after_version;
+            last.after_line_ending = line_ending;
             return;
         }
         if let Some(last) = history.undo.last_mut() {
             last.sealed = true;
         }
-        let mut transaction = history.new_transaction(group, None, before_version);
+        let mut transaction = history.new_transaction(group, None, before_version, line_ending);
         transaction.batches.push(batch);
         transaction.after_version = after_version;
         transaction.sealed = group.is_none();
@@ -489,7 +542,8 @@ impl Buffer {
     pub fn start_transaction(&mut self, before: Option<TransactionMetadata>) {
         let history = &mut self.history;
         if history.open_depth == 0 {
-            let transaction = history.new_transaction(None, before, self.alternative_version);
+            let transaction =
+                history.new_transaction(None, before, self.alternative_version, self.line_ending);
             history.open = Some(transaction);
         }
         history.open_depth += 1;
@@ -505,7 +559,7 @@ impl Buffer {
             return None;
         }
         let mut transaction = history.open.take()?;
-        if transaction.batches.is_empty() {
+        if transaction.is_empty() {
             return None;
         }
         transaction.after = after;
@@ -516,6 +570,7 @@ impl Buffer {
         {
             last.batches.append(&mut transaction.batches);
             last.after_version = transaction.after_version;
+            last.after_line_ending = transaction.after_line_ending;
             if transaction.after.is_some() {
                 last.after = transaction.after;
             }
@@ -583,6 +638,8 @@ impl Buffer {
         if let Some(open) = history.open.as_mut() {
             open.batches.clear();
             open.before = None;
+            open.before_line_ending = self.line_ending;
+            open.after_line_ending = self.line_ending;
         }
     }
 
@@ -625,6 +682,8 @@ impl Buffer {
         }
         transaction.sealed = true;
         transaction.reopened = false;
+        // Monaco `_applyUndo` sets the step's `beforeEOL`.
+        self.line_ending = transaction.before_line_ending;
         self.alternative_version = transaction.before_version;
         let outcome = UndoOutcome {
             transaction_id: transaction.id,
@@ -647,6 +706,7 @@ impl Buffer {
             let (step, _) = self.apply(forward);
             patch = patch.compose(&step);
         }
+        self.line_ending = transaction.after_line_ending;
         self.alternative_version = transaction.after_version;
         let outcome = UndoOutcome {
             transaction_id: transaction.id,
@@ -963,5 +1023,54 @@ mod tests {
         // "b", "c" and "d" were one step.
         buffer.undo().unwrap();
         assert_eq!(buffer.text(), "a");
+    }
+
+    /// Monaco `pushEOL`: an undoable line ending change.
+    #[test]
+    fn push_line_ending_is_an_undo_step() {
+        let mut buffer = Buffer::new("a\nb");
+        buffer.edit([(0..0, "x")]).unwrap();
+        let version = buffer.version();
+        assert!(buffer.push_line_ending(LineEnding::Crlf));
+        assert!(!buffer.push_line_ending(LineEnding::Crlf));
+        assert_eq!(buffer.text(), "xa\r\nb");
+        assert_eq!(buffer.version(), version);
+        // Its own step: undo restores LF and keeps the edit.
+        let outcome = buffer.undo().unwrap();
+        assert!(outcome.patch.is_empty());
+        assert_eq!(buffer.text(), "xa\nb");
+        buffer.redo().unwrap();
+        assert_eq!(buffer.line_ending(), LineEnding::Crlf);
+        // Undoing the earlier edit restores its line ending too, as
+        // Monaco's `_applyUndo` does.
+        buffer.undo().unwrap();
+        buffer.undo().unwrap();
+        assert_eq!(
+            (buffer.text().as_str(), buffer.line_ending()),
+            ("a\nb", LineEnding::Lf)
+        );
+        buffer.redo().unwrap();
+        buffer.redo().unwrap();
+        assert_eq!(buffer.text(), "xa\r\nb");
+
+        // Inside a transaction it joins the edits.
+        let mut buffer = Buffer::new("a");
+        buffer.start_transaction(None);
+        buffer.edit([(1..1, "\nb")]).unwrap();
+        buffer.push_line_ending(LineEnding::Crlf);
+        assert!(buffer.end_transaction(None).is_some());
+        buffer.undo().unwrap();
+        assert_eq!(
+            (buffer.text().as_str(), buffer.line_ending()),
+            ("a", LineEnding::Lf)
+        );
+        assert!(!buffer.can_undo());
+
+        // A transaction that only changes the line ending is a step.
+        buffer.start_transaction(None);
+        buffer.push_line_ending(LineEnding::Crlf);
+        assert!(buffer.end_transaction(None).is_some());
+        buffer.undo().unwrap();
+        assert_eq!(buffer.line_ending(), LineEnding::Lf);
     }
 }

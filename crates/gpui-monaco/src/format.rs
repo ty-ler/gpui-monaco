@@ -5,16 +5,69 @@
 //! `computeMoreMinimalEdits` (`editorWebWorker.ts`) (MIT).
 
 use std::ops::Range;
+use std::sync::Arc;
 
-use gpui::{Context, Task};
+use gpui::{App, Context, Task};
 use text::{Bias, PointUtf16, Rope};
 
 use crate::editor::CodeEditor;
 use crate::providers::{
-    FormattingOptions, TextEdit, document_formatting_providers,
-    document_range_formatting_providers, on_type_formatting_providers,
+    DocumentFormattingProvider, DocumentRangeFormattingProvider, FormatterInfo, FormatterSelection,
+    FormattingKind, FormattingMode, FormattingOptions, ProviderTarget, TextEdit,
+    document_formatting_providers, document_range_formatting_providers,
+    on_type_formatting_providers, select_formatter,
 };
 use crate::view::reveal::RevealType;
+
+/// A formatter for whole documents: a document formatter, or a range
+/// formatter given the whole text (Monaco's synthetic document formatter).
+#[derive(Clone)]
+enum DocumentFormatter {
+    Document(Arc<dyn DocumentFormattingProvider>),
+    Range(Arc<dyn DocumentRangeFormattingProvider>),
+}
+
+impl DocumentFormatter {
+    fn info(&self) -> FormatterInfo {
+        match self {
+            Self::Document(provider) => FormatterInfo {
+                display_name: provider.display_name(),
+                extension_id: provider.extension_id(),
+            },
+            Self::Range(provider) => range_formatter_info(provider),
+        }
+    }
+}
+
+fn range_formatter_info(provider: &Arc<dyn DocumentRangeFormattingProvider>) -> FormatterInfo {
+    FormatterInfo {
+        display_name: provider.display_name(),
+        extension_id: provider.extension_id(),
+    }
+}
+
+/// Monaco `getRealAndSyntheticDocumentFormattersOrdered`: the document
+/// formatters, then the range formatters whose extension didn't already
+/// offer one.
+fn document_formatters(cx: &App, target: ProviderTarget) -> Vec<DocumentFormatter> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for provider in document_formatting_providers(cx, target.clone()) {
+        if let Some(id) = provider.extension_id() {
+            seen.insert(id);
+        }
+        result.push(DocumentFormatter::Document(provider));
+    }
+    for provider in document_range_formatting_providers(cx, target) {
+        if let Some(id) = provider.extension_id()
+            && !seen.insert(id)
+        {
+            continue;
+        }
+        result.push(DocumentFormatter::Range(provider));
+    }
+    result
+}
 
 /// Monaco `EditorWorker._diffLimit`: longer edits aren't diffed.
 const DIFF_LIMIT: usize = 100_000;
@@ -143,7 +196,7 @@ fn edits_intersect(a: &[TextEdit], b: &[TextEdit]) -> bool {
 
 impl CodeEditor {
     /// The model's indentation, for formatters.
-    pub fn formatting_options(&self, cx: &gpui::App) -> FormattingOptions {
+    pub fn formatting_options(&self, cx: &App) -> FormattingOptions {
         let options = self.model().read(cx).options();
         FormattingOptions {
             tab_size: options.tab_size,
@@ -151,33 +204,89 @@ impl CodeEditor {
         }
     }
 
-    /// Formats the document with the first document formatter, or the
-    /// first range formatter over the whole text (Monaco
-    /// `editor.action.formatDocument`). Returns whether there was a
-    /// formatter. Typing or moving the cursor before the result arrives
-    /// cancels it.
+    /// Formats the document with a document formatter, or a range
+    /// formatter over the whole text (Monaco
+    /// `editor.action.formatDocument`): the first one, or the one the
+    /// [`set_formatter_selector`](crate::providers::set_formatter_selector)
+    /// selector chooses. Returns whether there was a formatter. Typing or
+    /// moving the cursor before the result arrives cancels it.
     pub fn format_document(&mut self, cx: &mut Context<Self>) -> bool {
         if self.options.read_only {
             return false;
         }
-        let model = self.model().read(cx);
-        let context = model.provider_context();
-        let options = self.formatting_options(cx);
-        if let Some(provider) = document_formatting_providers(cx, self.provider_target(cx))
-            .into_iter()
-            .next()
-        {
-            let task = provider.provide_document_formatting_edits(&context, options, cx);
-            self.finish_format(vec![task], true, cx);
-            return true;
+        let formatters = document_formatters(cx, self.provider_target(cx));
+        if formatters.is_empty() {
+            return false;
         }
-        let full = PointUtf16::zero()..self.snapshot.max_point_utf16();
-        self.format_ranges(vec![full], true, cx)
+        let infos = formatters.iter().map(DocumentFormatter::info).collect();
+        self.with_selected_formatter(
+            formatters,
+            infos,
+            FormattingMode::Explicit,
+            FormattingKind::File,
+            cx,
+            |this, formatter, cx| this.format_document_with(formatter, cx),
+        );
+        true
     }
 
-    /// Formats the selections with the first range formatter; an empty
-    /// selection formats its line (Monaco `editor.action.formatSelection`).
-    /// Returns whether there was a formatter.
+    /// Monaco `formatDocumentWithProvider`.
+    fn format_document_with(&mut self, formatter: DocumentFormatter, cx: &mut Context<Self>) {
+        let context = self.model().read(cx).provider_context();
+        let options = self.formatting_options(cx);
+        let task = match formatter {
+            DocumentFormatter::Document(provider) => {
+                provider.provide_document_formatting_edits(&context, options, cx)
+            }
+            DocumentFormatter::Range(provider) => {
+                let full = PointUtf16::zero()..self.snapshot.max_point_utf16();
+                provider.provide_document_range_formatting_edits(&context, full, options, cx)
+            }
+        };
+        self.finish_format(vec![task], true, cx);
+    }
+
+    /// Monaco `FormattingConflicts.select`: runs `run` with the formatter
+    /// the selector chooses, after it answers, or the first without a
+    /// selector. A new format request drops a pending choice.
+    fn with_selected_formatter<P: Clone + 'static>(
+        &mut self,
+        formatters: Vec<P>,
+        infos: Vec<FormatterInfo>,
+        mode: FormattingMode,
+        kind: FormattingKind,
+        cx: &mut Context<Self>,
+        run: impl FnOnce(&mut Self, P, &mut Context<Self>) + 'static,
+    ) {
+        let selection = FormatterSelection {
+            formatters: infos,
+            context: self.model().read(cx).provider_context(),
+            mode,
+            kind,
+        };
+        let Some(choice) = select_formatter(&selection, cx) else {
+            if let Some(first) = formatters.first().cloned() {
+                run(self, first, cx);
+            }
+            return;
+        };
+        self.format_task = Some(cx.spawn(async move |this, cx| {
+            let Some(formatter) = choice.await.and_then(|i| formatters.get(i).cloned()) else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.format_task = None;
+                run(this, formatter, cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// Formats the selections with the first range formatter, or the one
+    /// the [`set_formatter_selector`](crate::providers::set_formatter_selector)
+    /// selector chooses; an empty selection formats its line (Monaco
+    /// `editor.action.formatSelection`). Returns whether there was a
+    /// formatter.
     pub fn format_selection(&mut self, cx: &mut Context<Self>) -> bool {
         if self.options.read_only {
             return false;
@@ -200,22 +309,45 @@ impl CodeEditor {
         self.format_ranges(ranges, true, cx)
     }
 
-    /// Monaco `formatDocumentRangesWithProvider`: formats each merged range,
-    /// and re-formats ranges whose edits would collide as one.
+    /// Monaco `formatDocumentRangesWithSelectedProvider`: formats `ranges`
+    /// with the selected range formatter. Returns whether there was one.
     fn format_ranges(
         &mut self,
         ranges: Vec<Range<PointUtf16>>,
         explicit: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        let model = self.model().read(cx);
-        let Some(provider) = document_range_formatting_providers(cx, self.provider_target(cx))
-            .into_iter()
-            .next()
-        else {
+        let providers = document_range_formatting_providers(cx, self.provider_target(cx));
+        if providers.is_empty() {
             return false;
+        }
+        let infos = providers.iter().map(range_formatter_info).collect();
+        let mode = if explicit {
+            FormattingMode::Explicit
+        } else {
+            FormattingMode::Silent
         };
-        let context = model.provider_context();
+        self.with_selected_formatter(
+            providers,
+            infos,
+            mode,
+            FormattingKind::Selection,
+            cx,
+            move |this, provider, cx| this.format_ranges_with(provider, ranges, explicit, cx),
+        );
+        true
+    }
+
+    /// Monaco `formatDocumentRangesWithProvider`: formats each merged range,
+    /// and re-formats ranges whose edits would collide as one.
+    fn format_ranges_with(
+        &mut self,
+        provider: Arc<dyn DocumentRangeFormattingProvider>,
+        ranges: Vec<Range<PointUtf16>>,
+        explicit: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let context = self.model().read(cx).provider_context();
         let options = self.formatting_options(cx);
         let mut ranges = merge_ranges(ranges);
         // Monaco: a provider that formats several ranges at once gets them
@@ -241,7 +373,7 @@ impl CodeEditor {
                 })
                 .ok();
             }));
-            return true;
+            return;
         }
         let requests: Vec<Task<anyhow::Result<Vec<TextEdit>>>> = ranges
             .iter()
@@ -308,7 +440,6 @@ impl CodeEditor {
             })
             .ok();
         }));
-        true
     }
 
     /// Applies the results of `tasks` unless the text or cursors changed
@@ -343,7 +474,7 @@ impl CodeEditor {
         }));
     }
 
-    fn format_state(&self, cx: &gpui::App) -> (text::Version, Vec<crate::cursor::Selection>) {
+    fn format_state(&self, cx: &App) -> (text::Version, Vec<crate::cursor::Selection>) {
         (
             self.model().read(cx).buffer().version(),
             self.cursors.selections(),
@@ -446,8 +577,9 @@ impl CodeEditor {
         }));
     }
 
-    /// After a paste of `range`: formats it with the first range formatter,
-    /// with the `format_on_paste` option (Monaco `FormatOnPaste`).
+    /// After a paste of `range`: formats it with the selected range
+    /// formatter (silently), with the `format_on_paste` option (Monaco
+    /// `FormatOnPaste`).
     pub(crate) fn format_on_paste(&mut self, range: Range<PointUtf16>, cx: &mut Context<Self>) {
         if self.options.format_on_paste && !self.options.read_only {
             self.format_ranges(vec![range], false, cx);

@@ -168,6 +168,27 @@ pub(crate) fn visible_column_from_column(line: &str, column: u32, tab_size: u32)
     result
 }
 
+/// Monaco `CursorColumns.toStatusbarColumn`, with a 0-based `column`: the
+/// 1-based column a status bar shows, counting a tab to the next tab stop
+/// and anything else, a surrogate pair included, as one.
+pub(crate) fn to_statusbar_column(line: &str, column: u32, tab_size: u32) -> u32 {
+    let mut result = 0;
+    let mut offset = 0;
+    for ch in line.chars() {
+        if offset >= column {
+            break;
+        }
+        // Half of a surrogate pair counts as one code point too.
+        offset += ch.len_utf16() as u32;
+        result = if ch == '\t' {
+            next_render_tab_stop(result, tab_size)
+        } else {
+            result + 1
+        };
+    }
+    result + 1
+}
+
 /// Monaco `CursorColumns.columnFromVisibleColumn`, returning a 0-based column.
 pub(crate) fn column_from_visible_column(line: &str, visible_column: i64, tab_size: u32) -> u32 {
     if visible_column <= 0 {
@@ -451,6 +472,45 @@ mod tests {
         assert_eq!(column_from_visible_column(line, 9, 4), 3);
         assert_eq!(column_from_visible_column(line, 5, 4), 1);
         assert_eq!(column_from_visible_column(line, 7, 4), 2);
+    }
+
+    /// Monaco `cursorColumns.test.ts` "toStatusbarColumn" (1-based columns
+    /// there, 0-based here).
+    #[test]
+    fn statusbar_columns() {
+        let t = |text: &str, tab_size: u32, column: u32, expected: u32| {
+            assert_eq!(
+                to_statusbar_column(text, column - 1, tab_size),
+                expected,
+                "{text:?} {tab_size} {column}"
+            );
+        };
+        for column in 1..=11 {
+            t("    spaces", 4, column, column);
+        }
+        t("\ttab", 4, 1, 1);
+        t("\ttab", 4, 2, 5);
+        t("\ttab", 4, 3, 6);
+        t("\ttab", 4, 4, 7);
+        t("\ttab", 4, 5, 8);
+        let text = "𐌀𐌁𐌂𐌃𐌄𐌅𐌆";
+        t(text, 4, 1, 1);
+        t(text, 4, 2, 2);
+        t(text, 4, 3, 2);
+        t(text, 4, 4, 3);
+        t(text, 4, 5, 3);
+        t(text, 4, 6, 4);
+        t(text, 4, 7, 4);
+        t(text, 4, 8, 5);
+        t(text, 4, 9, 5);
+        t(text, 4, 10, 6);
+        t(text, 4, 11, 6);
+        t(text, 4, 12, 7);
+        t(text, 4, 13, 7);
+        t(text, 4, 14, 8);
+        t(text, 4, 15, 8);
+        // Past the end, as Monaco clamps.
+        t("ab", 4, 10, 3);
     }
 
     #[test]

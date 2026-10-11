@@ -178,6 +178,18 @@ Formatters return `TextEdit`s, which are `(Range<PointUtf16>, String)` pairs in 
 
 Both options are off by default, as in Monaco. You can also call `editor.format_document(cx)` and `editor.format_selection(cx)` directly.
 
+When several formatters match a model, the first registered one runs, as in the standalone Monaco editor. Format Document also offers the range formatters, formatting the whole text, unless a document formatter has the same `extension_id`. To choose differently, for example by asking the user, set a selector (Monaco `FormattingConflicts.setFormatterSelector`). It gets each formatter's `display_name` and `extension_id`, the model, why (`FormattingMode::Explicit` for commands, `Silent` for format on paste) and what (`FormattingKind::File` or `Selection`). It answers with a task resolving to the index to use, or `None` to not format:
+
+```rust,ignore
+let selector = providers::set_formatter_selector(cx, |selection, cx| {
+    let names: Vec<_> = selection.formatters.iter().map(|f| f.display_name.clone()).collect();
+    ask_the_user(names, cx) // a Task<Option<usize>>
+});
+// Later: selector.dispose(cx);
+```
+
+The newest selector wins, and it's asked even when only one formatter matches, as in Monaco. On-type formatting always uses the first formatter.
+
 ## Rename
 
 F2 (`editor.rename(cx)`) renames the symbol at the cursor, as in Monaco:

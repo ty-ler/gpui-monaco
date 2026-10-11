@@ -215,8 +215,13 @@ pub enum TextModelEvent {
     /// The language's configuration changed at runtime (Monaco
     /// `onDidChangeLanguageConfiguration`).
     LanguageConfigurationChanged,
-    /// [`TextModel::set_line_ending`] changed the line ending.
+    /// The line ending changed: [`TextModel::set_line_ending`],
+    /// [`TextModel::push_line_ending`], or undoing or redoing a step that
+    /// changed it.
     LineEndingChanged,
+    /// The model got its first editor or lost its last one (Monaco
+    /// `onDidChangeAttached`); see [`TextModel::is_attached_to_editor`].
+    AttachedChanged,
     /// [`TextModel::set_markers`] changed the markers; setting none where
     /// there were none isn't a change.
     MarkersChanged,
@@ -247,6 +252,8 @@ pub struct TextModel {
     /// Decided from the creation options and text, then kept (Monaco
     /// `_isTooLargeForTokenization`).
     too_large_for_tokenization: bool,
+    /// How many editors show it (Monaco `_attachedEditorCount`).
+    attached_editors: usize,
 }
 
 /// Monaco `TextModel.LARGE_FILE_SIZE_THRESHOLD`, in characters.
@@ -274,6 +281,7 @@ impl TextModel {
             guess_language: false,
             auto_whitespace: AutoWhitespaceLines::default(),
             too_large_for_tokenization: false,
+            attached_editors: 0,
         }
         .with_options(ModelOptions::default())
     }
@@ -392,12 +400,52 @@ impl TextModel {
 
     /// Sets the line ending [`TextModel::text`] joins lines with (Monaco
     /// `setEOL`), emitting [`TextModelEvent::LineEndingChanged`] if it
-    /// differs. The stored text is unchanged, so this isn't an undoable edit.
+    /// differs. The stored text is unchanged, and this isn't an undo step:
+    /// see [`TextModel::push_line_ending`].
     pub fn set_line_ending(&mut self, line_ending: LineEnding, cx: &mut Context<Self>) {
         if self.buffer.line_ending() != line_ending {
             self.buffer.set_line_ending(line_ending);
             cx.emit(TextModelEvent::LineEndingChanged);
             cx.notify();
+        }
+    }
+
+    /// Sets the line ending as an undo step (Monaco `pushEOL`), emitting
+    /// [`TextModelEvent::LineEndingChanged`] if it differs. Like an edit, it
+    /// joins the open undo step (one not ended by
+    /// [`TextModel::push_stack_element`], or a transaction), else it's its
+    /// own; undoing it restores the previous line ending. The version
+    /// doesn't change: the stored text and offsets are the same.
+    pub fn push_line_ending(&mut self, line_ending: LineEnding, cx: &mut Context<Self>) {
+        if self.buffer.push_line_ending(line_ending) {
+            cx.emit(TextModelEvent::LineEndingChanged);
+            cx.notify();
+        }
+    }
+
+    /// Whether an editor shows the model (Monaco `isAttachedToEditor`).
+    pub fn is_attached_to_editor(&self) -> bool {
+        self.attached_editors > 0
+    }
+
+    /// How many editors show the model (Monaco `getAttachedEditorCount`).
+    pub fn attached_editor_count(&self) -> usize {
+        self.attached_editors
+    }
+
+    /// An editor started showing the model (Monaco `onBeforeAttached`).
+    pub(crate) fn attach_editor(&mut self, cx: &mut Context<Self>) {
+        self.attached_editors += 1;
+        if self.attached_editors == 1 {
+            cx.emit(TextModelEvent::AttachedChanged);
+        }
+    }
+
+    /// An editor stopped showing the model (Monaco `onBeforeDetached`).
+    pub(crate) fn detach_editor(&mut self, cx: &mut Context<Self>) {
+        self.attached_editors = self.attached_editors.saturating_sub(1);
+        if self.attached_editors == 0 {
+            cx.emit(TextModelEvent::AttachedChanged);
         }
     }
 
@@ -977,8 +1025,9 @@ impl TextModel {
     /// was undone.
     pub fn undo(&mut self, source: Option<EntityId>, cx: &mut Context<Self>) -> bool {
         let old = self.buffer.rope().clone();
+        let line_ending = self.buffer.line_ending();
         let outcome = self.buffer.undo();
-        self.emit_undo(&old, outcome, EditKind::Undo, source, cx)
+        self.emit_undo(&old, line_ending, outcome, EditKind::Undo, source, cx)
     }
 
     /// Redoes the last undone step on behalf of `source`, emitting
@@ -986,13 +1035,15 @@ impl TextModel {
     /// was redone.
     pub fn redo(&mut self, source: Option<EntityId>, cx: &mut Context<Self>) -> bool {
         let old = self.buffer.rope().clone();
+        let line_ending = self.buffer.line_ending();
         let outcome = self.buffer.redo();
-        self.emit_undo(&old, outcome, EditKind::Redo, source, cx)
+        self.emit_undo(&old, line_ending, outcome, EditKind::Redo, source, cx)
     }
 
     fn emit_undo(
         &mut self,
         old: &Rope,
+        old_line_ending: LineEnding,
         outcome: Option<UndoOutcome>,
         kind: EditKind,
         source: Option<EntityId>,
@@ -1012,6 +1063,10 @@ impl TextModel {
             source,
             restore: outcome.metadata,
         });
+        // Monaco `_applyUndoRedoEdits` sets the step's line ending.
+        if self.buffer.line_ending() != old_line_ending {
+            cx.emit(TextModelEvent::LineEndingChanged);
+        }
         cx.notify();
         true
     }
