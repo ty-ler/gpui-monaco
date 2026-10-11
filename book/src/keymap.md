@@ -25,7 +25,7 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **Ctrl+Space (or Alt+Esc, Cmd+I):** trigger completion
 - **F1 / Ctrl+G / Cmd+Shift+O:** command palette, go to line, go to symbol
 - **Shift+F10:** context menu
-- **Tab / Cmd+Right / Alt+] / Alt+[ / Alt+\\** with ghost text: accept, accept a word, next, previous, ask explicitly
+- **Tab / Cmd+Right / Alt+] / Alt+[** with ghost text: accept, accept a word, next, previous (asking explicitly, `editor.action.inlineSuggest.trigger`, has no key, as in Monaco)
 - **Tab / Escape** with an inline edit: jump to it while the cursor is away from it (or open its file, for a cross-file edit), then accept it; reject it
 - **Shift+Tab** with an inline edit that has an alternative action: run it instead of the edit (`editor.action.inlineSuggest.commitAlternativeAction`)
 - **Tab / Shift+Tab / Escape** in a snippet: next and previous tab stop, leave the snippet
@@ -38,12 +38,35 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **Cmd+K Cmd+I** with a hover showing: focus it. Arrows scroll it, PageUp / PageDown (or Alt+Up / Alt+Down) page, Home / End (or Cmd+Up / Cmd+Down) go to the top and bottom, and Escape closes it
 - **Tab / Shift+Tab** with `tab_completion: On`: insert the best completion, then cycle through the others
 - **Cmd+Shift+Space:** parameter hints. While they show, **Escape / Shift+Escape** close them, and with several signatures **Up / Down (or Alt+Up / Alt+Down, Ctrl+P / Ctrl+N)** go to the previous and next one
+- **Shift+Escape:** Monaco's second Escape. It closes the suggest widget, parameter hints, the problem zone, the reference peek and the find widget, leaves snippet mode and linked editing, then removes the other cursors and the selection. Unlike Escape, it leaves ghost text, the hover, inline messages and the selection anchor alone
+- **Ctrl+Left / Ctrl+Right** on Windows with a screen reader: Monaco's accessibility word navigation (`cursorWordAccessibilityLeft`/`Right`)
 
 Tab focus mode (Ctrl+M; Ctrl+Shift+M on macOS) makes Tab and Shift+Tab move focus out of the editor, for keyboard and screen reader users.
 
 Font zoom (`FontZoomIn`, `FontZoomOut`, `FontZoomReset`) has no default key, as in Monaco. Run it from the command palette, or bind it yourself. The zoom level is shared by every editor; `set_editor_zoom_level` sets it directly.
 
-All of these bindings live in the `CodeEditor` key context (`actions::KEY_CONTEXT`). Single-line editors also set `single_line`, and while parameter hints show the editor sets `parameter_hints_visible` (plus `parameter_hints_multiple_signatures` with several signatures), as Monaco's `parameterHintsVisible` context keys.
+All of these bindings live in the `CodeEditor` key context (`actions::KEY_CONTEXT`). As in Monaco, an action's precondition is part of its keybindings: in a read-only editor Cmd+/ does nothing (the key reaches your app), F12 needs a definition provider, and Shift+Alt+O needs a code action provider declaring `source.organizeImports`. `trigger` and the command palette follow the same preconditions.
+
+## Context keys
+
+The editor sets Monaco's context keys on its key context, so `KeybindingRule::when` and your own `KeyBinding`s can test them with GPUI's predicate syntax:
+
+```rust,ignore
+KeybindingRule::new("cmd-k cmd-r", "my.runSnippet")
+    .when("CodeEditor && editorTextFocus && !editorReadonly && editorLangId == rust")
+```
+
+They include Monaco's `EditorContextKeys` (`editorTextFocus`, `editorFocus`, `editorReadonly`, `editorLangId`, `editorHasSelection`, `editorHasMultipleSelections`, `editorHas…Provider`, `editorSelectionHasDiagnostics`, `canUndo`, `isComposing`, …) and the contributions' keys (`suggestWidgetVisible`, `suggestWidgetHasFocusedSuggestion`, `inSnippetMode`, `hasNextTabstop`, `messageVisible`, `hasWordHighlights`, `renameInputVisible`, `LinkedEditingInputVisible`, `findWidgetVisible`, `findInputFocussed`, `referenceSearchVisible`, `selectionAnchorSet`, `foldingEnabled`, `markersNavigationVisible`, `parameterHintsVisible`, `inlineSuggestionVisible`, …). `CodeEditor::context_keys(cx)` returns them all. Boolean keys are present while true; string and number keys are `key = value` entries, which GPUI compares as identifiers. Monaco's `supportedCodeAction` lists the code action providers' kinds separated by spaces, which predicates can't match, so each kind the built-in actions test also has its own key (`supportedCodeAction_quickfix`, `supportedCodeAction_refactor`, `supportedCodeAction_source`, `supportedCodeAction_source_organizeImports`, `supportedCodeAction_source_fixAll`).
+
+Your own keys work like Monaco's `createContextKey`:
+
+```rust,ignore
+let in_review = editor.update(cx, |editor, cx| editor.create_context_key("inReview", false, cx));
+in_review.set(true, cx); // `CodeEditor && inReview` bindings now apply
+in_review.reset(cx);
+```
+
+The editor also keeps its older snake_case keys (`single_line`, `suggest_widget_visible`, `parameter_hints_visible`, `inline_suggestion_visible`, …), which the default bindings use.
 
 ## Rebinding
 
@@ -64,7 +87,30 @@ To build a keymap from scratch, skip `init` and bind exactly what you want. `act
 
 ## Your own commands
 
-Monaco's `addAction` corresponds to GPUI's usual pattern: define an action, bind it in the editor's context, and handle it on an element that contains the editor. While the editor has focus, its key context is part of the dispatch path, and actions bubble up to your handler.
+Monaco's per-editor `addCommand(keybinding, handler, context)` and `addAction` bind keys in that editor only, until the returned `Disposable` is disposed:
+
+```rust,ignore
+let (id, command) = editor.update(cx, |editor, cx| {
+    editor.add_command(
+        "cmd-k cmd-m",
+        |editor, window, cx| { /* … */ },
+        Some("inReview"), // Monaco's `context`: a predicate over the context keys
+        cx,
+    )
+})?;
+editor.update(cx, |editor, cx| editor.trigger(&id, window, cx))?; // also by its id
+
+let action = editor.update(cx, |editor, cx| {
+    editor.add_action(
+        EditorActionDescriptor::new("my.upper", "Make Upper", |editor, window, cx| { /* … */ })
+            .keybinding("ctrl-alt-u"),
+        cx,
+    )
+});
+action.dispose(cx); // gone from the palette, the context menu and the keymap
+```
+
+You can also use GPUI's usual pattern: define an action, bind it in the editor's context, and handle it on an element that contains the editor. While the editor has focus, its key context is part of the dispatch path, and actions bubble up to your handler.
 
 ```rust,ignore
 gpui::actions!(my_app, [FormatDocument]);
@@ -124,9 +170,14 @@ A rule's `when` is a GPUI key context predicate; without one it applies in the e
 
 ## Commands by Monaco id
 
-`editor.trigger(id, window, cx)` runs a command by its Monaco id, as Monaco's `trigger` does:
+`editor.trigger(id, window, cx)` runs a command by its Monaco id, as Monaco's `trigger` does. Every command Monaco registers for the editor resolves (a test checks the list from Monaco's source):
 - **Labelled actions** such as `"editor.action.commentLine"` or `"actions.findWithSelection"`. These are the ones the command palette lists and `run_action` and `supported_actions` know.
-- **Unlabelled commands** such as `"cursorDown"`, `"undo"`, `"deleteWordLeft"`, `"closeReferenceSearch"` or `"acceptAlternativeSelectedSuggestion"`.
+- **Unlabelled commands** such as `"cursorDown"`, `"undo"`, `"deleteWordLeft"`, `"closeReferenceSearch"`, `"acceptSelectedSuggestion"`, `"leaveSnippet"`, `"cancelLinkedEditingInput"`, `"leaveEditorMessage"` or `"acceptRenameInput"`.
+- **Handler commands** such as `"type"`, `"paste"`, `"cut"`, `"compositionStart"` and their `default:` ids.
+- **Aliases** such as `"editor.action.goToDeclaration"`, `"editor.action.previewDeclaration"` or `"acceptSelectedSuggestionOnEnter"`.
+- **Your commands** from `add_command`, `register_command` and `add_editor_action`.
+
+A command whose precondition fails does nothing, as in Monaco.
 
 It falls back to GPUI action names (`"code_editor::CursorDown"`). `DiffEditor::trigger` also takes the diff editor's ids (`"diffEditor.revert"`, `"diffEditor.switchSide"`, `"diffEditor.toggleCollapseUnchangedRegions"`, `"editor.action.accessibleDiffViewer.next"`, …) and passes any others to the modified editor.
 
@@ -145,6 +196,43 @@ editor.trigger_with_payload(
     window,
     cx,
 )?;
+editor.trigger_with_payload("type", serde_json::json!({ "text": "hello" }), window, cx)?;
+editor.trigger_with_payload(
+    "cursorMove",
+    serde_json::json!({ "to": "down", "by": "wrappedLine", "value": 3, "select": true }),
+    window,
+    cx,
+)?;
+editor.trigger_with_payload("editor.fold", serde_json::json!({ "levels": 2, "selectionLines": [0] }), window, cx)?;
+editor.trigger_with_payload("revealLine", serde_json::json!({ "lineNumber": 40, "at": "center" }), window, cx)?;
 ```
 
-The same arguments are the fields of the `FindWithArgs` and `TriggerCodeAction` actions, which can be bound to keys.
+The same arguments are the fields of the actions (`FindWithArgs`, `TriggerCodeAction`, `CursorMove`, `EditorScroll`, `Fold`, `Refactor`, `ShowHover`, …), which can be bound to keys, and of `RunCommand`'s `args` in keybinding rules.
+
+## Edit commands
+
+Monaco's `executeCommand(source, command)` runs an `ICommand`: it adds its edits for the text as it is, then says where the cursor goes. Implement `EditorCommand`:
+
+```rust,ignore
+struct Wrap(Selection, Option<TrackedSelection>);
+
+impl EditorCommand for Wrap {
+    fn edit_operations(&mut self, _: &dyn CursorModel, builder: &mut EditOperationBuilder) {
+        let range = self.0.range();
+        builder.add_edit_operation(range.start..range.start, "(");
+        builder.add_edit_operation(range.end..range.end, ")");
+        self.1 = Some(builder.track_selection(self.0, None));
+    }
+
+    fn compute_cursor_state(&self, data: &CursorStateComputerData) -> Selection {
+        data.tracked_selection(self.1.unwrap())
+    }
+}
+
+editor.update(cx, |editor, cx| {
+    let selection = editor.selections()[0];
+    editor.execute_command(Some("my-extension"), Wrap(selection, None), cx);
+});
+```
+
+`execute_commands` runs one command per cursor (`None` leaves one alone) as a single edit.

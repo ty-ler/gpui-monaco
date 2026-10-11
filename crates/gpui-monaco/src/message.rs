@@ -99,6 +99,8 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         self.close_message(cx);
+        // Monaco `showMessage` reads every message to screen readers.
+        self.announce(text.clone(), cx);
         let colors = &self.theme.colors;
         let view = cx.new(|_| MessageView {
             content,

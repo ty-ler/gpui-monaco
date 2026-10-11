@@ -316,6 +316,14 @@ impl CodeEditor {
         self.suggest.widget.is_some()
     }
 
+    /// How many suggestions the open widget lists.
+    pub(crate) fn suggest_item_count(&self) -> usize {
+        match (&self.suggest.widget, &self.suggest.session) {
+            (Some(_), Some(session)) => session.model.filtered().len(),
+            _ => 0,
+        }
+    }
+
     /// Labels in the open suggest widget, in order.
     #[doc(hidden)]
     pub fn suggest_labels_for_tests(&self) -> Option<Vec<String>> {

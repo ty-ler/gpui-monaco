@@ -860,6 +860,19 @@ impl CodeEditor {
         self.color_picker.standalone.is_some()
     }
 
+    /// Whether the standalone picker has the focus (Monaco
+    /// `standaloneColorPickerFocused`).
+    pub(crate) fn is_standalone_color_picker_focused(
+        &self,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> bool {
+        self.color_picker
+            .standalone
+            .as_ref()
+            .is_some_and(|(widget, _)| widget.focus_handle(cx).contains_focused(window, cx))
+    }
+
     /// Hides the standalone picker (Monaco `editor.action.hideColorPicker`).
     pub fn hide_standalone_color_picker(&mut self, cx: &mut Context<Self>) {
         self.color_picker.task = None;

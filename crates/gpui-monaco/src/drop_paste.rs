@@ -886,6 +886,15 @@ impl CodeEditor {
         self.drop_paste.post_edit.is_some()
     }
 
+    /// Monaco `pasteWidgetVisible` and `dropWidgetVisible`.
+    pub(crate) fn post_edit_widget_kind(&self) -> (bool, bool) {
+        match self.drop_paste.post_edit.as_ref().map(|p| &p.kind) {
+            Some(PostEditKind::Paste) => (true, false),
+            Some(PostEditKind::Drop) => (false, true),
+            None => (false, false),
+        }
+    }
+
     /// Monaco `editor.hidePasteWidget` / `editor.hideDropWidget`.
     pub(crate) fn clear_post_edit(&mut self, cx: &mut Context<Self>) -> bool {
         match self.drop_paste.post_edit.take() {

@@ -209,6 +209,15 @@ impl CodeEditor {
         self.snippet.session.is_some()
     }
 
+    /// Whether the current tab stop offers a choice (Monaco
+    /// `inSnippetChoice`).
+    pub(crate) fn in_snippet_choice(&self) -> bool {
+        self.snippet
+            .session
+            .as_ref()
+            .is_some_and(|s| s.current_choice.is_some())
+    }
+
     /// Whether Tab moves to another tab stop (Monaco `hasNextTabstop`).
     pub fn has_next_tabstop(&self) -> bool {
         self.snippet

@@ -789,6 +789,11 @@ impl CodeEditor {
         ))
     }
 
+    /// Whether the marker zone shows (Monaco `markersNavigationVisible`).
+    pub(crate) fn is_marker_zone_visible(&self) -> bool {
+        self.marker_navigation.zone.is_some()
+    }
+
     /// Closes the marker zone opened by [`CodeEditor::go_to_marker`]. Returns
     /// whether one was open.
     pub fn close_marker_zone(&mut self, cx: &mut Context<Self>) -> bool {

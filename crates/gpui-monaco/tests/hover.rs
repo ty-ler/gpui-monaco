@@ -94,7 +94,7 @@ fn disabled_hovers_and_the_delay(cx: &mut TestAppContext) {
     rest(cx, 1000);
     assert!(!visible(&editor, cx));
     // Show or Focus Hover still works.
-    cx.dispatch_action(gpui_monaco::actions::ShowHover);
+    cx.dispatch_action(gpui_monaco::actions::ShowHover::default());
     rest(cx, 0);
     assert!(visible(&editor, cx));
 }
@@ -169,10 +169,10 @@ fn sticky_hovers_wait_for_the_mouse(cx: &mut TestAppContext) {
 fn focusing_and_scrolling_the_hover(cx: &mut TestAppContext) {
     let (editor, cx) = setup(HoverOptions::default(), 40, cx);
     // Cmd/Ctrl+K Cmd/Ctrl+I shows the hover, then focuses it.
-    cx.dispatch_action(gpui_monaco::actions::ShowHover);
+    cx.dispatch_action(gpui_monaco::actions::ShowHover::default());
     rest(cx, 0);
     assert!(visible(&editor, cx));
-    cx.dispatch_action(gpui_monaco::actions::ShowHover);
+    cx.dispatch_action(gpui_monaco::actions::ShowHover::default());
     rest(cx, 0);
     assert!(cx.update(|window, cx| editor.read(cx).is_hover_focused(window, cx)));
     let offset = |cx: &mut VisualTestContext| {
@@ -327,7 +327,7 @@ fn trigger(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, id: &str) {
 fn hover_verbosity(cx: &mut TestAppContext) {
     let deltas = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let (editor, cx) = setup_with("alpha beta\n", LevelHover(deltas.clone()), cx);
-    cx.dispatch_action(gpui_monaco::actions::ShowHover);
+    cx.dispatch_action(gpui_monaco::actions::ShowHover::default());
     rest(cx, 0);
     assert_eq!(parts(&editor, cx), [["level 0"]]);
     // Can't decrease at level 0.
@@ -357,7 +357,7 @@ fn long_line_warnings(cx: &mut TestAppContext) {
             e.set_selections(&[Selection::collapsed(PointUtf16::new(1, column))], cx);
             e.hide_hover(cx);
         });
-        cx.dispatch_action(gpui_monaco::actions::ShowHover);
+        cx.dispatch_action(gpui_monaco::actions::ShowHover::default());
         rest(cx, 0);
     };
     show_at(cx, 4);
@@ -371,7 +371,7 @@ fn long_line_warnings(cx: &mut TestAppContext) {
         e.set_selections(&[Selection::collapsed(PointUtf16::new(0, 1))], cx);
         e.hide_hover(cx);
     });
-    cx.dispatch_action(gpui_monaco::actions::ShowHover);
+    cx.dispatch_action(gpui_monaco::actions::ShowHover::default());
     rest(cx, 0);
     assert_eq!(parts(&editor, cx), [["line 0\n\n"]]);
     // "Don't Show Again".
@@ -384,7 +384,7 @@ fn long_line_warnings(cx: &mut TestAppContext) {
 #[gpui::test]
 fn copying_a_hover_part(cx: &mut TestAppContext) {
     let (editor, cx) = setup(HoverOptions::default(), 1, cx);
-    cx.dispatch_action(gpui_monaco::actions::ShowHover);
+    cx.dispatch_action(gpui_monaco::actions::ShowHover::default());
     rest(cx, 0);
     let card = editor
         .read_with(cx, |e, cx| e.hover_card_bounds_for_tests(cx))
@@ -401,7 +401,7 @@ fn copying_a_hover_part(cx: &mut TestAppContext) {
 #[gpui::test]
 fn resizing_the_hover(cx: &mut TestAppContext) {
     let (editor, cx) = setup(HoverOptions::default(), 3, cx);
-    cx.dispatch_action(gpui_monaco::actions::ShowHover);
+    cx.dispatch_action(gpui_monaco::actions::ShowHover::default());
     rest(cx, 0);
     let bounds = |cx: &mut VisualTestContext| {
         editor

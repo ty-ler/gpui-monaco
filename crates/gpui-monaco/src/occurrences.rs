@@ -124,6 +124,12 @@ impl CodeEditor {
         }
     }
 
+    /// Whether symbol occurrences are highlighted (Monaco
+    /// `hasWordHighlights`).
+    pub(crate) fn has_word_highlights(&self) -> bool {
+        !self.occurrences.word.is_empty()
+    }
+
     /// The current word highlight ranges, in order.
     fn word_highlight_ranges(&self, cx: &gpui::App) -> Vec<Range<PointUtf16>> {
         let model = self.model().read(cx);
@@ -154,6 +160,11 @@ impl CodeEditor {
             || self.model().read(cx).is_too_large_for_tokenization()
         {
             self.clear_word_highlights(cx);
+            return;
+        }
+        // Monaco `_run`: only with text focus (the highlights from before
+        // stay while another editor has it).
+        if !force && !self.has_focus {
             return;
         }
         let selection = self.cursors.primary().selection();
@@ -300,6 +311,34 @@ impl CodeEditor {
         if self.options.occurrences_highlight != crate::options::OccurrencesHighlight::Off {
             self.update_word_highlights(false, cx);
         }
+    }
+
+    /// Monaco `WordHighlighter`'s focus listeners: focusing the text
+    /// highlights the symbol there; focus leaving the editor and its widgets
+    /// drops the highlights unless another editor took it.
+    pub(crate) fn word_highlights_focus_changed(&mut self, focused: bool, cx: &mut Context<Self>) {
+        if self.options.occurrences_highlight == crate::options::OccurrencesHighlight::Off {
+            return;
+        }
+        if focused {
+            if self.occurrences.word_task.is_none() {
+                self.update_word_highlights(false, cx);
+            }
+            return;
+        }
+        let id = cx.entity_id();
+        cx.spawn(async move |this, cx| {
+            this.update(cx, |this, cx| {
+                let other_focused = crate::editors(cx)
+                    .iter()
+                    .any(|editor| editor.entity_id() != id && editor.read(cx).has_focus);
+                if !this.has_focus && !other_focused {
+                    this.clear_word_highlights(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Highlights the symbol's occurrences right away, even with

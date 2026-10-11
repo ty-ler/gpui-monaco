@@ -1543,7 +1543,7 @@ fn diff_editor_api(cx: &mut TestAppContext) {
 #[gpui::test]
 fn diff_editor_add_action(cx: &mut TestAppContext) {
     let (diff, cx) = setup("a", "b", cx);
-    diff.update(cx, |d, cx| {
+    let _action = diff.update(cx, |d, cx| {
         d.add_action(
             gpui_monaco::EditorActionDescriptor::new("my.action", "My Action", |_, _, _| {}),
             cx,

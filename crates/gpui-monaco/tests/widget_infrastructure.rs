@@ -442,9 +442,9 @@ fn suggest_and_parameter_hints_close_when_the_editor_loses_focus(cx: &mut TestAp
     assert!(editor.read_with(cx, |e, _| e.is_signature_help_visible()));
     // Focus within the editor's widgets keeps them: the hover.
     cx.update(|_, cx| register_hover_provider(cx, LanguageSelector::All, LongHover(3)));
-    cx.dispatch_action(gpui_monaco::actions::ShowHover);
+    cx.dispatch_action(gpui_monaco::actions::ShowHover::default());
     rest(cx, 0);
-    cx.dispatch_action(gpui_monaco::actions::ShowHover);
+    cx.dispatch_action(gpui_monaco::actions::ShowHover::default());
     rest(cx, 0);
     assert!(cx.update(|window, cx| editor.read(cx).is_hover_focused(window, cx)));
     assert!(editor.read_with(cx, |e, _| e.is_suggest_visible()));

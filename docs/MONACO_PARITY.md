@@ -108,13 +108,18 @@ Issues are linked by number.
 |---|---|---|---|
 | Decorations: background, underline, glyph, gutter bar, before/after text, overview ruler, hover message, stickiness, owner | `deltaDecorations` | ✅ | |
 | View zones, content widgets, overlay widgets, `allowEditorOverflow`; widgets keep their wheel, clicks and focus, clipped to the text area | widget API | ✅ overflowing widgets are GPUI deferred draws above the whole window | #245 |
-| Custom commands and keybindings | `addAction`, `addCommand` | ✅ (GPUI actions) | |
+| Custom commands and keybindings | `addAction`, `addCommand` | ✅ `add_action` and `add_command(keystrokes, handler, when)` bind in their editor only and return a `Disposable`; GPUI keystrokes | #261 |
+| Commands by id with their arguments: core (`type`, `paste`, `cut`, `cursorMove`, `editorScroll`, `revealLine`, `setSelection`, `createCursor`, `columnSelect`, the mouse commands, `compositionStart`/`End`, `default:*`), the contributions' commands and aliases, `editor.fold`/`unfold` `FoldingArguments`, `refactor`/`sourceAction`/`pasteAs`/`showHover`/`inlineSuggest.trigger` arguments | `trigger`, `executeCommand` | ✅ a test checks every id registered in `coreCommands.ts`, `editorExtensions.ts`, `contrib/` and `standalone/` resolves; mouse commands take model positions (`viewPosition` is ignored) | #261 |
+| Preconditions on the palette, `trigger` and keybindings (a failing one lets the key fall through) | `precondition`, `kbOpts` | ✅ Monaco's expressions over the context keys; bindings in a widget's own key context (hover, rename input, peek list) keep theirs | #261 |
+| Context keys for keybinding rules (`EditorContextKeys` and the contributions' keys), host keys | `createContextKey`, `when` clauses | ✅ GPUI key context entries; values compare as identifiers, so `supportedCodeAction`'s kinds also have one key each (`supportedCodeAction_refactor`, …) | #261 |
+| `executeCommand(source, ICommand)`, `executeCommands` | `ICodeEditor` | ✅ `EditorCommand` with Monaco's builder and cursor state data | #261 |
+| Internal API commands | `_executeLinkProvider`, `_executeSignatureHelpProvider`, `_executeSelectionRangeProvider`, `_executeCompletionItemProvider`, `_provideDocument(Range)SemanticTokens(Legend)` | ✅ functions in `api_commands` returning the providers' answers (commands return nothing); the other `_execute*` ids are left to the extension host | #261 |
 | Global commands, actions and removable keybinding rules | `editor.addCommand`, `addEditorAction`, `addKeybindingRule(s)` | ✅ (`Disposable`; GPUI keystrokes and key contexts) | #204 |
 | Editor, diff editor and model registries and events | `getEditors`, `getDiffEditors`, `onDidCreateEditor`, `onDidCreateDiffEditor`, `getModels`, `onDidCreateModel`, `onWillDisposeModel`, `onDidChangeModelLanguage` | ✅ widget inputs and placeholder models are left out (Monaco `isSimpleWidget`) | #204, #245 |
 | Markers across models | `getModelMarkers`, `removeAllMarkers`, `onDidChangeMarkers` | ✅ markers live in their model, so none for uris without one | #204 |
 | Context menu, with host items | `contextmenu` | ✅ | #91 |
 | Go to line, quick outline (quick input) | `quickAccess` | ✅ | #100 |
-| Go to offset (`::`, `editor.action.gotoOffset`) | `quickAccess` | ✅ | #100, #227 |
+| Go to offset (`::`, `editor.action.gotoOffset`), with the zero-based toggle | `quickAccess` | ✅ the toggle is app-wide state, not storage | #100, #227, #261 |
 | Command palette, `addAction` | `quickAccess` | ✅ | #100 |
 | Reveal APIs, `executeEdits`, mouse hit-test events, word and position helpers, content-change details, cursor change reasons, decorations collections | editor API | ✅ | #105 |
 | Editor events: model, language, configuration, layout and content size changes, typing, clipboard, key, wheel and drag events, widget focus, IME composition, hidden areas, view zones, begin/end update | `ICodeEditor.on*` | ✅ hidden-area changes are reported when the next frame applies them; listeners can't change clipboard data or cancel keys | #205, #229 |

@@ -15,9 +15,6 @@ use crate::editor::CodeEditor;
 use crate::providers;
 use crate::registry::Disposable;
 
-/// Whether an action can run in an editor (Monaco's precondition).
-type Precondition = fn(&CodeEditor, &App) -> bool;
-
 /// A host action's body.
 pub type ActionRun = Rc<dyn Fn(&mut CodeEditor, &mut Window, &mut Context<CodeEditor>)>;
 
@@ -108,450 +105,532 @@ pub struct EditorActionInfo {
     pub alias: Option<SharedString>,
 }
 
-/// A built-in action: Monaco id, GPUI action name, label, precondition.
-struct Builtin(&'static str, &'static str, &'static str, Precondition);
+/// A built-in action: Monaco id, GPUI action name, label, and Monaco's
+/// precondition as a predicate over the editor's
+/// [context keys](CodeEditor::context_keys) (empty for none). The command
+/// palette lists the action while it holds, [`CodeEditor::trigger`] does
+/// nothing while it doesn't, and the default keybindings require it, so the
+/// key falls through as in Monaco.
+struct Builtin(&'static str, &'static str, &'static str, &'static str);
 
-fn always(_: &CodeEditor, _: &App) -> bool {
-    true
-}
-
-fn sticky_visible(editor: &CodeEditor, _: &App) -> bool {
-    editor.options.sticky_scroll.enabled
-        && editor
-            .layout
-            .as_ref()
-            .is_some_and(|l| !l.sticky_lines.is_empty())
-}
-
-fn writable(editor: &CodeEditor, _: &App) -> bool {
-    !editor.options.read_only
-}
-
-/// Monaco `inlineSuggestionVisible`.
-fn inline_visible(editor: &CodeEditor, cx: &App) -> bool {
-    editor.inline_suggestion_visible(cx)
-}
-
-fn inline_visible_writable(editor: &CodeEditor, cx: &App) -> bool {
-    writable(editor, cx) && inline_visible(editor, cx)
-}
-
-/// Monaco `inlineEditIsVisible`.
-fn inline_edit_visible(editor: &CodeEditor, cx: &App) -> bool {
-    editor.inline_edit_visible(cx)
-}
-
-/// Monaco `inlineSuggestionAlternativeActionVisible && inlineEditIsVisible`.
-fn inline_alternative_action_visible(editor: &CodeEditor, cx: &App) -> bool {
-    editor.inline_suggestion_alternative_action_visible(cx)
-}
-
+/// Monaco `EditorContextKeys.writable`.
+const WRITABLE: &str = "!editorReadonly";
+/// Monaco `CONTEXT_FOLDING_ENABLED`.
+const FOLDING: &str = "foldingEnabled";
+/// Monaco `EditorContextKeys.hoverFocused`.
+const HOVER_FOCUSED: &str = "editorHoverFocused";
+/// Monaco `EditorContextKeys.stickyScrollFocused`.
+const STICKY_FOCUSED: &str = "stickyScrollFocused";
+/// Monaco `SelectionAnchorSet`.
+const ANCHOR_SET: &str = "selectionAnchorSet";
+/// Monaco `writable && inlineSuggestionVisible`.
+const INLINE_WRITABLE: &str = "!editorReadonly && inlineSuggestionVisible";
 /// Monaco `inlineSuggestionVisible || inlineEditIsVisible`.
-fn inline_or_edit_visible(editor: &CodeEditor, cx: &App) -> bool {
-    inline_visible(editor, cx) || inline_edit_visible(editor, cx)
-}
-
-/// Monaco `standaloneColorPickerVisible`.
-fn color_picker_visible(editor: &CodeEditor, _: &App) -> bool {
-    editor.is_standalone_color_picker_visible()
-}
-
-/// Monaco `hoverVisible` (Monaco requires `hoverFocused` for scrolling,
-/// which preconditions here can't see).
-fn hover_visible(editor: &CodeEditor, _: &App) -> bool {
-    editor.is_hover_visible()
-}
-
-/// Monaco `stickyScrollFocused`.
-fn sticky_focused(editor: &CodeEditor, _: &App) -> bool {
-    editor.sticky.focused.is_some()
-}
-
-/// Whether some `providers::$lookup` serves the editor's language.
-macro_rules! has_provider {
-    ($name:ident, $lookup:ident) => {
-        fn $name(editor: &CodeEditor, cx: &App) -> bool {
-            let language = editor.model().read(cx).language_id().map(|l| l.to_string());
-            !providers::$lookup(cx, language.as_deref()).is_empty()
-        }
-    };
-    ($name:ident, writable, $lookup:ident) => {
-        fn $name(editor: &CodeEditor, cx: &App) -> bool {
-            let language = editor.model().read(cx).language_id().map(|l| l.to_string());
-            writable(editor, cx) && !providers::$lookup(cx, language.as_deref()).is_empty()
-        }
-    };
-}
-
-has_provider!(has_definition, definition_providers);
-has_provider!(has_declaration, declaration_providers);
-has_provider!(has_type_definition, type_definition_providers);
-has_provider!(has_implementation, implementation_providers);
-has_provider!(has_references, reference_providers);
-has_provider!(has_signature_help, signature_help_providers);
-has_provider!(can_format, writable, document_formatting_providers);
-has_provider!(
-    can_format_selection,
-    writable,
-    document_range_formatting_providers
-);
-has_provider!(can_rename, writable, rename_providers);
-has_provider!(can_code_action, writable, code_action_providers);
-has_provider!(has_code_lens, code_lens_providers);
-
-/// Monaco `findWidgetVisible`.
-fn find_visible(editor: &CodeEditor, _: &App) -> bool {
-    editor.is_find_visible()
-}
-
-/// Monaco's `hasDefinitionProvider` and not `isInEmbeddedEditor` (a peek
-/// view's preview).
-fn has_definition_not_embedded(editor: &CodeEditor, cx: &App) -> bool {
-    !editor.in_peek && has_definition(editor, cx)
-}
+const INLINE_OR_EDIT: &str = "inlineSuggestionVisible || inlineEditIsVisible";
+/// Monaco `writable && hasCodeActionsProvider`.
+const CODE_ACTIONS: &str = "!editorReadonly && editorHasCodeActionsProvider";
+/// Monaco `SuggestContext.Visible`.
+const SUGGEST_VISIBLE: &str = "suggestWidgetVisible";
 
 /// Monaco's labelled editor actions that this editor implements.
 #[rustfmt::skip]
 static BUILTINS: &[Builtin] = &[
-    Builtin("editor.action.quickCommand", "code_editor::QuickCommand", "Command Palette", always),
-    Builtin("editor.action.gotoLine", "code_editor::GotoLine", "Go to Line/Column...", always),
-    Builtin("editor.action.quickOutline", "code_editor::QuickOutline", "Go to Symbol...", always),
-    Builtin("editor.action.gotoOffset", "code_editor::GotoOffset", "Go to Offset...", always),
+    Builtin("editor.action.quickCommand", "code_editor::QuickCommand", "Command Palette", ""),
+    Builtin("editor.action.gotoLine", "code_editor::GotoLine", "Go to Line/Column...", ""),
+    // Monaco requires a document symbol provider; the `tags.scm` outline
+    // counts as one here.
+    Builtin("editor.action.quickOutline", "code_editor::QuickOutline", "Go to Symbol...", "editorHasDocumentSymbolProvider"),
+    Builtin("editor.action.gotoOffset", "code_editor::GotoOffset", "Go to Offset...", ""),
     // Developer and theme.
-    Builtin("editor.action.forceRetokenize", "code_editor::ForceRetokenize", "Developer: Force Retokenize", always),
-    Builtin("editor.action.inspectTokens", "code_editor::InspectTokens", "Developer: Inspect Tokens", always),
-    Builtin("editor.action.toggleHighContrast", "code_editor::ToggleHighContrast", "Toggle High Contrast Theme", always),
+    Builtin("editor.action.forceRetokenize", "code_editor::ForceRetokenize", "Developer: Force Retokenize", ""),
+    Builtin("editor.action.inspectTokens", "code_editor::InspectTokens", "Developer: Inspect Tokens", ""),
+    Builtin("editor.action.toggleHighContrast", "code_editor::ToggleHighContrast", "Toggle High Contrast Theme", ""),
     // Cursors and selections.
-    Builtin("expandLineSelection", "code_editor::ExpandLineSelection", "Expand Line Selection", always),
-    Builtin("editor.action.insertCursorAbove", "code_editor::AddCursorAbove", "Add Cursor Above", always),
-    Builtin("editor.action.insertCursorBelow", "code_editor::AddCursorBelow", "Add Cursor Below", always),
-    Builtin("editor.action.insertCursorAtEndOfEachLineSelected", "code_editor::InsertCursorAtEndOfEachLineSelected", "Add Cursors to Line Ends", always),
-    Builtin("editor.action.addCursorsToBottom", "code_editor::AddCursorsToBottom", "Add Cursors to Bottom", always),
-    Builtin("editor.action.addCursorsToTop", "code_editor::AddCursorsToTop", "Add Cursors to Top", always),
-    Builtin("editor.action.addSelectionToNextFindMatch", "code_editor::AddSelectionToNextFindMatch", "Add Selection to Next Find Match", always),
-    Builtin("editor.action.addSelectionToPreviousFindMatch", "code_editor::AddSelectionToPreviousFindMatch", "Add Selection to Previous Find Match", always),
-    Builtin("editor.action.moveSelectionToNextFindMatch", "code_editor::MoveSelectionToNextFindMatch", "Move Last Selection to Next Find Match", always),
-    Builtin("editor.action.moveSelectionToPreviousFindMatch", "code_editor::MoveSelectionToPreviousFindMatch", "Move Last Selection to Previous Find Match", always),
-    Builtin("editor.action.selectHighlights", "code_editor::SelectAllOccurrences", "Select All Occurrences of Find Match", always),
-    Builtin("editor.action.focusNextCursor", "code_editor::FocusNextCursor", "Focus Next Cursor", always),
-    Builtin("editor.action.focusPreviousCursor", "code_editor::FocusPreviousCursor", "Focus Previous Cursor", always),
-    Builtin("cursorUndo", "code_editor::CursorUndo", "Cursor Undo", always),
-    Builtin("cursorRedo", "code_editor::CursorRedo", "Cursor Redo", always),
-    Builtin("editor.action.setSelectionAnchor", "code_editor::SetSelectionAnchor", "Set Selection Anchor", always),
-    Builtin("editor.action.goToSelectionAnchor", "code_editor::GoToSelectionAnchor", "Go to Selection Anchor", always),
-    Builtin("editor.action.selectFromAnchorToCursor", "code_editor::SelectFromAnchorToCursor", "Select from Anchor to Cursor", always),
-    Builtin("editor.action.cancelSelectionAnchor", "code_editor::CancelSelectionAnchor", "Cancel Selection Anchor", always),
-    Builtin("editor.action.smartSelect.expand", "code_editor::ExpandSelection", "Expand Selection", always),
-    Builtin("editor.action.smartSelect.shrink", "code_editor::ShrinkSelection", "Shrink Selection", always),
-    Builtin("editor.action.toggleOvertypeInsertMode", "code_editor::ToggleOvertypeInsertMode", "Toggle Overtype/Insert Mode", always),
+    Builtin("expandLineSelection", "code_editor::ExpandLineSelection", "Expand Line Selection", ""),
+    Builtin("editor.action.insertCursorAbove", "code_editor::AddCursorAbove", "Add Cursor Above", ""),
+    Builtin("editor.action.insertCursorBelow", "code_editor::AddCursorBelow", "Add Cursor Below", ""),
+    Builtin("editor.action.insertCursorAtEndOfEachLineSelected", "code_editor::InsertCursorAtEndOfEachLineSelected", "Add Cursors to Line Ends", ""),
+    Builtin("editor.action.addCursorsToBottom", "code_editor::AddCursorsToBottom", "Add Cursors to Bottom", ""),
+    Builtin("editor.action.addCursorsToTop", "code_editor::AddCursorsToTop", "Add Cursors to Top", ""),
+    Builtin("editor.action.addSelectionToNextFindMatch", "code_editor::AddSelectionToNextFindMatch", "Add Selection to Next Find Match", ""),
+    Builtin("editor.action.addSelectionToPreviousFindMatch", "code_editor::AddSelectionToPreviousFindMatch", "Add Selection to Previous Find Match", ""),
+    Builtin("editor.action.moveSelectionToNextFindMatch", "code_editor::MoveSelectionToNextFindMatch", "Move Last Selection to Next Find Match", ""),
+    Builtin("editor.action.moveSelectionToPreviousFindMatch", "code_editor::MoveSelectionToPreviousFindMatch", "Move Last Selection to Previous Find Match", ""),
+    Builtin("editor.action.selectHighlights", "code_editor::SelectAllOccurrences", "Select All Occurrences of Find Match", ""),
+    Builtin("editor.action.focusNextCursor", "code_editor::FocusNextCursor", "Focus Next Cursor", ""),
+    Builtin("editor.action.focusPreviousCursor", "code_editor::FocusPreviousCursor", "Focus Previous Cursor", ""),
+    Builtin("cursorUndo", "code_editor::CursorUndo", "Cursor Undo", ""),
+    Builtin("cursorRedo", "code_editor::CursorRedo", "Cursor Redo", ""),
+    Builtin("editor.action.setSelectionAnchor", "code_editor::SetSelectionAnchor", "Set Selection Anchor", ""),
+    Builtin("editor.action.goToSelectionAnchor", "code_editor::GoToSelectionAnchor", "Go to Selection Anchor", ANCHOR_SET),
+    Builtin("editor.action.selectFromAnchorToCursor", "code_editor::SelectFromAnchorToCursor", "Select from Anchor to Cursor", ANCHOR_SET),
+    Builtin("editor.action.cancelSelectionAnchor", "code_editor::CancelSelectionAnchor", "Cancel Selection Anchor", ANCHOR_SET),
+    Builtin("editor.action.smartSelect.expand", "code_editor::ExpandSelection", "Expand Selection", ""),
+    Builtin("editor.action.smartSelect.shrink", "code_editor::ShrinkSelection", "Shrink Selection", ""),
+    Builtin("editor.action.toggleOvertypeInsertMode", "code_editor::ToggleOvertypeInsertMode", "Toggle Overtype/Insert Mode", ""),
     // Find.
-    Builtin("actions.find", "code_editor::StartFind", "Find", always),
-    Builtin("editor.action.startFindReplaceAction", "code_editor::StartFindReplace", "Replace", always),
-    Builtin("editor.action.nextMatchFindAction", "code_editor::NextMatch", "Find Next", always),
-    Builtin("editor.action.previousMatchFindAction", "code_editor::PreviousMatch", "Find Previous", always),
-    Builtin("editor.actions.findWithArgs", "code_editor::FindWithArgs", "Find with Arguments", always),
-    Builtin("editor.action.goToMatchFindAction", "code_editor::GoToMatch", "Go to Match...", find_visible),
+    Builtin("actions.find", "code_editor::StartFind", "Find", ""),
+    Builtin("editor.action.startFindReplaceAction", "code_editor::StartFindReplace", "Replace", ""),
+    Builtin("editor.action.nextMatchFindAction", "code_editor::NextMatch", "Find Next", ""),
+    Builtin("editor.action.previousMatchFindAction", "code_editor::PreviousMatch", "Find Previous", ""),
+    Builtin("editor.actions.findWithArgs", "code_editor::FindWithArgs", "Find with Arguments", ""),
+    Builtin("editor.action.goToMatchFindAction", "code_editor::GoToMatch", "Go to Match...", "findWidgetVisible"),
     // Brackets, problems, highlights.
-    Builtin("editor.action.jumpToBracket", "code_editor::JumpToBracket", "Go to Bracket", always),
-    Builtin("editor.action.selectToBracket", "code_editor::SelectToBracket", "Select to Bracket", always),
-    Builtin("editor.action.marker.next", "code_editor::GoToNextMarker", "Go to Next Problem (Error, Warning, Info)", always),
-    Builtin("editor.action.marker.prev", "code_editor::GoToPreviousMarker", "Go to Previous Problem (Error, Warning, Info)", always),
-    Builtin("editor.action.marker.nextInFiles", "code_editor::GoToNextMarkerInFiles", "Go to Next Problem in Files (Error, Warning, Info)", always),
-    Builtin("editor.action.marker.prevInFiles", "code_editor::GoToPreviousMarkerInFiles", "Go to Previous Problem in Files (Error, Warning, Info)", always),
-    Builtin("editor.action.wordHighlight.next", "code_editor::WordHighlightNext", "Go to Next Symbol Highlight", always),
-    Builtin("editor.action.wordHighlight.prev", "code_editor::WordHighlightPrev", "Go to Previous Symbol Highlight", always),
-    Builtin("editor.action.wordHighlight.trigger", "code_editor::WordHighlightTrigger", "Trigger Symbol Highlight", always),
-    Builtin("editor.action.showHover", "code_editor::ShowHover", "Show or Focus Hover", always),
-    Builtin("editor.action.hideHover", "code_editor::HideHover", "Hide Hover", always),
-    Builtin("editor.action.showDefinitionPreviewHover", "code_editor::ShowDefinitionPreviewHover", "Show Definition Preview Hover", always),
-    Builtin("editor.action.scrollUpHover", "code_editor::ScrollUpHover", "Scroll Up Hover", hover_visible),
-    Builtin("editor.action.scrollDownHover", "code_editor::ScrollDownHover", "Scroll Down Hover", hover_visible),
-    Builtin("editor.action.scrollLeftHover", "code_editor::ScrollLeftHover", "Scroll Left Hover", hover_visible),
-    Builtin("editor.action.scrollRightHover", "code_editor::ScrollRightHover", "Scroll Right Hover", hover_visible),
-    Builtin("editor.action.pageUpHover", "code_editor::PageUpHover", "Page Up Hover", hover_visible),
-    Builtin("editor.action.pageDownHover", "code_editor::PageDownHover", "Page Down Hover", hover_visible),
-    Builtin("editor.action.goToTopHover", "code_editor::GoToTopHover", "Go To Top Hover", hover_visible),
-    Builtin("editor.action.goToBottomHover", "code_editor::GoToBottomHover", "Go To Bottom Hover", hover_visible),
-    Builtin("editor.action.increaseHoverVerbosityLevel", "code_editor::IncreaseHoverVerbosityLevel", "Increase Hover Verbosity Level", hover_visible),
-    Builtin("editor.action.decreaseHoverVerbosityLevel", "code_editor::DecreaseHoverVerbosityLevel", "Decrease Hover Verbosity Level", hover_visible),
-    Builtin("editor.action.openLink", "code_editor::OpenLink", "Open Link", always),
-    Builtin("editor.action.fontZoomIn", "code_editor::FontZoomIn", "Increase Editor Font Size", always),
-    Builtin("editor.action.fontZoomOut", "code_editor::FontZoomOut", "Decrease Editor Font Size", always),
-    Builtin("editor.action.fontZoomReset", "code_editor::FontZoomReset", "Reset Editor Font Size", always),
-    Builtin("editor.action.toggleStickyScroll", "code_editor::ToggleStickyScroll", "Toggle Editor Sticky Scroll", always),
-    Builtin("editor.action.focusStickyScroll", "code_editor::FocusStickyScroll", "Focus Editor Sticky Scroll", sticky_visible),
-    Builtin("editor.action.showContextMenu", "code_editor::ShowContextMenu", "Show Editor Context Menu", always),
-    Builtin("editor.action.showOrFocusStandaloneColorPicker", "code_editor::ShowOrFocusStandaloneColorPicker", "Show or Focus Standalone Color Picker", always),
+    Builtin("editor.action.jumpToBracket", "code_editor::JumpToBracket", "Go to Bracket", ""),
+    Builtin("editor.action.selectToBracket", "code_editor::SelectToBracket", "Select to Bracket", ""),
+    Builtin("editor.action.marker.next", "code_editor::GoToNextMarker", "Go to Next Problem (Error, Warning, Info)", ""),
+    Builtin("editor.action.marker.prev", "code_editor::GoToPreviousMarker", "Go to Previous Problem (Error, Warning, Info)", ""),
+    Builtin("editor.action.marker.nextInFiles", "code_editor::GoToNextMarkerInFiles", "Go to Next Problem in Files (Error, Warning, Info)", ""),
+    Builtin("editor.action.marker.prevInFiles", "code_editor::GoToPreviousMarkerInFiles", "Go to Previous Problem in Files (Error, Warning, Info)", ""),
+    Builtin("editor.action.wordHighlight.next", "code_editor::WordHighlightNext", "Go to Next Symbol Highlight", "hasWordHighlights"),
+    Builtin("editor.action.wordHighlight.prev", "code_editor::WordHighlightPrev", "Go to Previous Symbol Highlight", "hasWordHighlights"),
+    Builtin("editor.action.wordHighlight.trigger", "code_editor::WordHighlightTrigger", "Trigger Symbol Highlight", ""),
+    Builtin("editor.action.showHover", "code_editor::ShowHover", "Show or Focus Hover", ""),
+    Builtin("editor.action.hideHover", "code_editor::HideHover", "Hide Hover", ""),
+    Builtin("editor.action.showDefinitionPreviewHover", "code_editor::ShowDefinitionPreviewHover", "Show Definition Preview Hover", ""),
+    Builtin("editor.action.scrollUpHover", "code_editor::ScrollUpHover", "Scroll Up Hover", HOVER_FOCUSED),
+    Builtin("editor.action.scrollDownHover", "code_editor::ScrollDownHover", "Scroll Down Hover", HOVER_FOCUSED),
+    Builtin("editor.action.scrollLeftHover", "code_editor::ScrollLeftHover", "Scroll Left Hover", HOVER_FOCUSED),
+    Builtin("editor.action.scrollRightHover", "code_editor::ScrollRightHover", "Scroll Right Hover", HOVER_FOCUSED),
+    Builtin("editor.action.pageUpHover", "code_editor::PageUpHover", "Page Up Hover", HOVER_FOCUSED),
+    Builtin("editor.action.pageDownHover", "code_editor::PageDownHover", "Page Down Hover", HOVER_FOCUSED),
+    Builtin("editor.action.goToTopHover", "code_editor::GoToTopHover", "Go To Top Hover", HOVER_FOCUSED),
+    Builtin("editor.action.goToBottomHover", "code_editor::GoToBottomHover", "Go To Bottom Hover", HOVER_FOCUSED),
+    Builtin("editor.action.increaseHoverVerbosityLevel", "code_editor::IncreaseHoverVerbosityLevel", "Increase Hover Verbosity Level", "editorHoverVisible"),
+    Builtin("editor.action.decreaseHoverVerbosityLevel", "code_editor::DecreaseHoverVerbosityLevel", "Decrease Hover Verbosity Level", "editorHoverVisible"),
+    Builtin("editor.action.openLink", "code_editor::OpenLink", "Open Link", ""),
+    Builtin("editor.action.fontZoomIn", "code_editor::FontZoomIn", "Increase Editor Font Size", ""),
+    Builtin("editor.action.fontZoomOut", "code_editor::FontZoomOut", "Decrease Editor Font Size", ""),
+    Builtin("editor.action.fontZoomReset", "code_editor::FontZoomReset", "Reset Editor Font Size", ""),
+    Builtin("editor.action.toggleStickyScroll", "code_editor::ToggleStickyScroll", "Toggle Editor Sticky Scroll", ""),
+    Builtin("editor.action.focusStickyScroll", "code_editor::FocusStickyScroll", "Focus Editor Sticky Scroll", "stickyScrollVisible"),
+    Builtin("editor.action.showContextMenu", "code_editor::ShowContextMenu", "Show Editor Context Menu", ""),
+    Builtin("editor.action.showOrFocusStandaloneColorPicker", "code_editor::ShowOrFocusStandaloneColorPicker", "Show or Focus Standalone Color Picker", ""),
     // Editing.
-    Builtin("deleteAllLeft", "code_editor::DeleteAllLeft", "Delete All Left", writable),
-    Builtin("deleteAllRight", "code_editor::DeleteAllRight", "Delete All Right", writable),
-    Builtin("editor.action.sortLinesAscending", "code_editor::SortLinesAscending", "Sort Lines Ascending", writable),
-    Builtin("editor.action.sortLinesDescending", "code_editor::SortLinesDescending", "Sort Lines Descending", writable),
-    Builtin("editor.action.removeDuplicateLines", "code_editor::DeleteDuplicateLines", "Delete Duplicate Lines", writable),
-    Builtin("editor.action.reverseLines", "code_editor::ReverseLines", "Reverse lines", writable),
-    Builtin("editor.action.trimTrailingWhitespace", "code_editor::TrimTrailingWhitespace", "Trim Trailing Whitespace", writable),
-    Builtin("editor.action.deleteLines", "code_editor::DeleteLines", "Delete Line", writable),
-    Builtin("editor.action.joinLines", "code_editor::JoinLines", "Join Lines", writable),
-    Builtin("editor.action.transpose", "code_editor::Transpose", "Transpose Characters around the Cursor", writable),
-    Builtin("editor.action.transposeLetters", "code_editor::TransposeLetters", "Transpose Letters", writable),
-    Builtin("editor.action.transformToUppercase", "code_editor::TransformToUppercase", "Transform to Uppercase", writable),
-    Builtin("editor.action.transformToLowercase", "code_editor::TransformToLowercase", "Transform to Lowercase", writable),
-    Builtin("editor.action.transformToTitlecase", "code_editor::TransformToTitlecase", "Transform to Title Case", writable),
-    Builtin("editor.action.transformToSnakecase", "code_editor::TransformToSnakecase", "Transform to Snake Case", writable),
-    Builtin("editor.action.transformToCamelcase", "code_editor::TransformToCamelcase", "Transform to Camel Case", writable),
-    Builtin("editor.action.transformToPascalcase", "code_editor::TransformToPascalcase", "Transform to Pascal Case", writable),
-    Builtin("editor.action.transformToKebabcase", "code_editor::TransformToKebabcase", "Transform to Kebab Case", writable),
-    Builtin("editor.action.duplicateSelection", "code_editor::DuplicateSelection", "Duplicate Selection", writable),
-    Builtin("editor.action.moveCarretLeftAction", "code_editor::MoveCaretLeft", "Move Selected Text Left", writable),
-    Builtin("editor.action.moveCarretRightAction", "code_editor::MoveCaretRight", "Move Selected Text Right", writable),
-    Builtin("editor.action.reindentlines", "code_editor::ReindentLines", "Reindent Lines", writable),
-    Builtin("editor.action.reindentselectedlines", "code_editor::ReindentSelectedLines", "Reindent Selected Lines", writable),
-    Builtin("editor.action.inPlaceReplace.up", "code_editor::InPlaceReplaceUp", "Replace with Previous Value", writable),
-    Builtin("editor.action.inPlaceReplace.down", "code_editor::InPlaceReplaceDown", "Replace with Next Value", writable),
-    Builtin("editor.action.removeBrackets", "code_editor::RemoveBrackets", "Remove Brackets", writable),
-    Builtin("editor.action.commentLine", "code_editor::CommentLine", "Toggle Line Comment", writable),
-    Builtin("editor.action.addCommentLine", "code_editor::AddCommentLine", "Add Line Comment", writable),
-    Builtin("editor.action.removeCommentLine", "code_editor::RemoveCommentLine", "Remove Line Comment", writable),
-    Builtin("editor.action.blockComment", "code_editor::BlockComment", "Toggle Block Comment", writable),
-    Builtin("editor.action.indentLines", "code_editor::IndentLines", "Indent Line", writable),
-    Builtin("editor.action.outdentLines", "code_editor::OutdentLines", "Outdent Line", writable),
-    Builtin("editor.action.moveLinesUpAction", "code_editor::MoveLinesUp", "Move Line Up", writable),
-    Builtin("editor.action.moveLinesDownAction", "code_editor::MoveLinesDown", "Move Line Down", writable),
-    Builtin("editor.action.copyLinesUpAction", "code_editor::CopyLinesUp", "Copy Line Up", writable),
-    Builtin("editor.action.copyLinesDownAction", "code_editor::CopyLinesDown", "Copy Line Down", writable),
-    Builtin("editor.action.insertLineAfter", "code_editor::InsertLineAfter", "Insert Line Below", writable),
-    Builtin("editor.action.insertLineBefore", "code_editor::InsertLineBefore", "Insert Line Above", writable),
-    Builtin("editor.action.linkedEditing", "code_editor::StartLinkedEditing", "Start Linked Editing", writable),
-    Builtin("editor.action.triggerSuggest", "code_editor::TriggerSuggest", "Trigger Suggest", writable),
-    Builtin("editor.action.resetSuggestSize", "code_editor::ResetSuggestSize", "Reset Suggest Widget Size", always),
-    Builtin("editor.action.insertFinalNewLine", "code_editor::InsertFinalNewLine", "Insert Final New Line", writable),
-    Builtin("editor.action.inlineSuggest.trigger", "code_editor::TriggerInlineSuggest", "Trigger Inline Suggestion", writable),
-    Builtin("editor.action.triggerParameterHints", "code_editor::TriggerParameterHints", "Trigger Parameter Hints", has_signature_help),
+    Builtin("deleteAllLeft", "code_editor::DeleteAllLeft", "Delete All Left", WRITABLE),
+    Builtin("deleteAllRight", "code_editor::DeleteAllRight", "Delete All Right", WRITABLE),
+    Builtin("editor.action.sortLinesAscending", "code_editor::SortLinesAscending", "Sort Lines Ascending", WRITABLE),
+    Builtin("editor.action.sortLinesDescending", "code_editor::SortLinesDescending", "Sort Lines Descending", WRITABLE),
+    Builtin("editor.action.removeDuplicateLines", "code_editor::DeleteDuplicateLines", "Delete Duplicate Lines", WRITABLE),
+    Builtin("editor.action.reverseLines", "code_editor::ReverseLines", "Reverse lines", WRITABLE),
+    Builtin("editor.action.trimTrailingWhitespace", "code_editor::TrimTrailingWhitespace", "Trim Trailing Whitespace", WRITABLE),
+    Builtin("editor.action.deleteLines", "code_editor::DeleteLines", "Delete Line", WRITABLE),
+    Builtin("editor.action.joinLines", "code_editor::JoinLines", "Join Lines", WRITABLE),
+    Builtin("editor.action.transpose", "code_editor::Transpose", "Transpose Characters around the Cursor", WRITABLE),
+    Builtin("editor.action.transposeLetters", "code_editor::TransposeLetters", "Transpose Letters", WRITABLE),
+    Builtin("editor.action.transformToUppercase", "code_editor::TransformToUppercase", "Transform to Uppercase", WRITABLE),
+    Builtin("editor.action.transformToLowercase", "code_editor::TransformToLowercase", "Transform to Lowercase", WRITABLE),
+    Builtin("editor.action.transformToTitlecase", "code_editor::TransformToTitlecase", "Transform to Title Case", WRITABLE),
+    Builtin("editor.action.transformToSnakecase", "code_editor::TransformToSnakecase", "Transform to Snake Case", WRITABLE),
+    Builtin("editor.action.transformToCamelcase", "code_editor::TransformToCamelcase", "Transform to Camel Case", WRITABLE),
+    Builtin("editor.action.transformToPascalcase", "code_editor::TransformToPascalcase", "Transform to Pascal Case", WRITABLE),
+    Builtin("editor.action.transformToKebabcase", "code_editor::TransformToKebabcase", "Transform to Kebab Case", WRITABLE),
+    Builtin("editor.action.duplicateSelection", "code_editor::DuplicateSelection", "Duplicate Selection", WRITABLE),
+    Builtin("editor.action.moveCarretLeftAction", "code_editor::MoveCaretLeft", "Move Selected Text Left", WRITABLE),
+    Builtin("editor.action.moveCarretRightAction", "code_editor::MoveCaretRight", "Move Selected Text Right", WRITABLE),
+    Builtin("editor.action.reindentlines", "code_editor::ReindentLines", "Reindent Lines", WRITABLE),
+    Builtin("editor.action.reindentselectedlines", "code_editor::ReindentSelectedLines", "Reindent Selected Lines", WRITABLE),
+    Builtin("editor.action.inPlaceReplace.up", "code_editor::InPlaceReplaceUp", "Replace with Previous Value", WRITABLE),
+    Builtin("editor.action.inPlaceReplace.down", "code_editor::InPlaceReplaceDown", "Replace with Next Value", WRITABLE),
+    // Monaco has no precondition here; read-only editors say they can't
+    // be edited.
+    Builtin("editor.action.removeBrackets", "code_editor::RemoveBrackets", "Remove Brackets", ""),
+    Builtin("editor.action.commentLine", "code_editor::CommentLine", "Toggle Line Comment", WRITABLE),
+    Builtin("editor.action.addCommentLine", "code_editor::AddCommentLine", "Add Line Comment", WRITABLE),
+    Builtin("editor.action.removeCommentLine", "code_editor::RemoveCommentLine", "Remove Line Comment", WRITABLE),
+    Builtin("editor.action.blockComment", "code_editor::BlockComment", "Toggle Block Comment", WRITABLE),
+    Builtin("editor.action.indentLines", "code_editor::IndentLines", "Indent Line", WRITABLE),
+    Builtin("editor.action.outdentLines", "code_editor::OutdentLines", "Outdent Line", WRITABLE),
+    Builtin("editor.action.moveLinesUpAction", "code_editor::MoveLinesUp", "Move Line Up", WRITABLE),
+    Builtin("editor.action.moveLinesDownAction", "code_editor::MoveLinesDown", "Move Line Down", WRITABLE),
+    Builtin("editor.action.copyLinesUpAction", "code_editor::CopyLinesUp", "Copy Line Up", WRITABLE),
+    Builtin("editor.action.copyLinesDownAction", "code_editor::CopyLinesDown", "Copy Line Down", WRITABLE),
+    Builtin("editor.action.insertLineAfter", "code_editor::InsertLineAfter", "Insert Line Below", WRITABLE),
+    Builtin("editor.action.insertLineBefore", "code_editor::InsertLineBefore", "Insert Line Above", WRITABLE),
+    Builtin("editor.action.linkedEditing", "code_editor::StartLinkedEditing", "Start Linked Editing", "!editorReadonly && editorHasRenameProvider"),
+    Builtin("editor.action.triggerSuggest", "code_editor::TriggerSuggest", "Trigger Suggest", "!editorReadonly && editorHasCompletionItemProvider && !suggestWidgetVisible"),
+    Builtin("editor.action.resetSuggestSize", "code_editor::ResetSuggestSize", "Reset Suggest Widget Size", ""),
+    Builtin("editor.action.insertFinalNewLine", "code_editor::InsertFinalNewLine", "Insert Final New Line", WRITABLE),
+    Builtin("editor.action.inlineSuggest.trigger", "code_editor::TriggerInlineSuggest", "Trigger Inline Suggestion", WRITABLE),
+    Builtin("editor.action.triggerParameterHints", "code_editor::TriggerParameterHints", "Trigger Parameter Hints", "editorHasSignatureHelpProvider"),
     // Folding.
-    Builtin("editor.fold", "code_editor::Fold", "Fold", always),
-    Builtin("editor.unfold", "code_editor::Unfold", "Unfold", always),
-    Builtin("editor.toggleFold", "code_editor::ToggleFold", "Toggle Fold", always),
-    Builtin("editor.foldRecursively", "code_editor::FoldRecursively", "Fold Recursively", always),
-    Builtin("editor.unfoldRecursively", "code_editor::UnfoldRecursively", "Unfold Recursively", always),
-    Builtin("editor.toggleFoldRecursively", "code_editor::ToggleFoldRecursively", "Toggle Fold Recursively", always),
-    Builtin("editor.foldAll", "code_editor::FoldAll", "Fold All", always),
-    Builtin("editor.unfoldAll", "code_editor::UnfoldAll", "Unfold All", always),
-    Builtin("editor.foldAllBlockComments", "code_editor::FoldAllBlockComments", "Fold All Block Comments", always),
-    Builtin("editor.foldAllMarkerRegions", "code_editor::FoldAllMarkerRegions", "Fold All Regions", always),
-    Builtin("editor.unfoldAllMarkerRegions", "code_editor::UnfoldAllMarkerRegions", "Unfold All Regions", always),
-    Builtin("editor.foldAllExcept", "code_editor::FoldAllExcept", "Fold All Except Selected", always),
-    Builtin("editor.unfoldAllExcept", "code_editor::UnfoldAllExcept", "Unfold All Except Selected", always),
-    Builtin("editor.foldLevel1", "code_editor::FoldLevel1", "Fold Level 1", always),
-    Builtin("editor.foldLevel2", "code_editor::FoldLevel2", "Fold Level 2", always),
-    Builtin("editor.foldLevel3", "code_editor::FoldLevel3", "Fold Level 3", always),
-    Builtin("editor.foldLevel4", "code_editor::FoldLevel4", "Fold Level 4", always),
-    Builtin("editor.foldLevel5", "code_editor::FoldLevel5", "Fold Level 5", always),
-    Builtin("editor.foldLevel6", "code_editor::FoldLevel6", "Fold Level 6", always),
-    Builtin("editor.foldLevel7", "code_editor::FoldLevel7", "Fold Level 7", always),
-    Builtin("editor.gotoParentFold", "code_editor::GoToParentFold", "Go to Parent Fold", always),
-    Builtin("editor.gotoPreviousFold", "code_editor::GoToPreviousFold", "Go to Previous Folding Range", always),
-    Builtin("editor.gotoNextFold", "code_editor::GoToNextFold", "Go to Next Folding Range", always),
-    Builtin("editor.createFoldingRangeFromSelection", "code_editor::CreateFoldFromSelection", "Create Folding Range from Selection", always),
-    Builtin("editor.removeManualFoldingRanges", "code_editor::RemoveManualFoldingRanges", "Remove Manual Folding Ranges", always),
-    Builtin("editor.toggleImportFold", "code_editor::ToggleImportFold", "Toggle Import Fold", always),
+    Builtin("editor.fold", "code_editor::Fold", "Fold", FOLDING),
+    Builtin("editor.unfold", "code_editor::Unfold", "Unfold", FOLDING),
+    Builtin("editor.toggleFold", "code_editor::ToggleFold", "Toggle Fold", FOLDING),
+    Builtin("editor.foldRecursively", "code_editor::FoldRecursively", "Fold Recursively", FOLDING),
+    Builtin("editor.unfoldRecursively", "code_editor::UnfoldRecursively", "Unfold Recursively", FOLDING),
+    Builtin("editor.toggleFoldRecursively", "code_editor::ToggleFoldRecursively", "Toggle Fold Recursively", FOLDING),
+    Builtin("editor.foldAll", "code_editor::FoldAll", "Fold All", FOLDING),
+    Builtin("editor.unfoldAll", "code_editor::UnfoldAll", "Unfold All", FOLDING),
+    Builtin("editor.foldAllBlockComments", "code_editor::FoldAllBlockComments", "Fold All Block Comments", FOLDING),
+    Builtin("editor.foldAllMarkerRegions", "code_editor::FoldAllMarkerRegions", "Fold All Regions", FOLDING),
+    Builtin("editor.unfoldAllMarkerRegions", "code_editor::UnfoldAllMarkerRegions", "Unfold All Regions", FOLDING),
+    Builtin("editor.foldAllExcept", "code_editor::FoldAllExcept", "Fold All Except Selected", FOLDING),
+    Builtin("editor.unfoldAllExcept", "code_editor::UnfoldAllExcept", "Unfold All Except Selected", FOLDING),
+    Builtin("editor.foldLevel1", "code_editor::FoldLevel1", "Fold Level 1", FOLDING),
+    Builtin("editor.foldLevel2", "code_editor::FoldLevel2", "Fold Level 2", FOLDING),
+    Builtin("editor.foldLevel3", "code_editor::FoldLevel3", "Fold Level 3", FOLDING),
+    Builtin("editor.foldLevel4", "code_editor::FoldLevel4", "Fold Level 4", FOLDING),
+    Builtin("editor.foldLevel5", "code_editor::FoldLevel5", "Fold Level 5", FOLDING),
+    Builtin("editor.foldLevel6", "code_editor::FoldLevel6", "Fold Level 6", FOLDING),
+    Builtin("editor.foldLevel7", "code_editor::FoldLevel7", "Fold Level 7", FOLDING),
+    Builtin("editor.gotoParentFold", "code_editor::GoToParentFold", "Go to Parent Fold", FOLDING),
+    Builtin("editor.gotoPreviousFold", "code_editor::GoToPreviousFold", "Go to Previous Folding Range", FOLDING),
+    Builtin("editor.gotoNextFold", "code_editor::GoToNextFold", "Go to Next Folding Range", FOLDING),
+    Builtin("editor.createFoldingRangeFromSelection", "code_editor::CreateFoldFromSelection", "Create Folding Range from Selection", FOLDING),
+    Builtin("editor.removeManualFoldingRanges", "code_editor::RemoveManualFoldingRanges", "Remove Manual Folding Ranges", FOLDING),
+    Builtin("editor.toggleImportFold", "code_editor::ToggleImportFold", "Toggle Import Fold", FOLDING),
     // Language features.
-    Builtin("editor.action.formatDocument", "code_editor::FormatDocument", "Format Document", can_format),
-    Builtin("editor.action.formatSelection", "code_editor::FormatSelection", "Format Selection", can_format_selection),
-    Builtin("editor.action.rename", "code_editor::Rename", "Rename Symbol", can_rename),
-    Builtin("editor.action.toggleTabFocusMode", "code_editor::ToggleTabFocusMode", "Toggle Tab Key Moves Focus", always),
-    Builtin("editor.action.pasteAs", "code_editor::PasteAs", "Paste As...", writable),
-    Builtin("editor.action.pasteAsText", "code_editor::PasteAsText", "Paste as Text", writable),
-    Builtin("editor.action.quickFix", "code_editor::QuickFix", "Quick Fix...", can_code_action),
-    Builtin("editor.action.refactor", "code_editor::Refactor", "Refactor...", can_code_action),
-    Builtin("editor.action.sourceAction", "code_editor::SourceAction", "Source Action...", can_code_action),
-    Builtin("editor.action.organizeImports", "code_editor::OrganizeImports", "Organize Imports", can_code_action),
-    Builtin("editor.action.fixAll", "code_editor::FixAll", "Fix All", can_code_action),
-    Builtin("editor.action.autoFix", "code_editor::AutoFix", "Auto Fix...", can_code_action),
-    Builtin("editor.action.revealDefinition", "code_editor::GoToDefinition", "Go to Definition", has_definition),
-    Builtin("editor.action.peekDefinition", "code_editor::PeekDefinition", "Peek Definition", has_definition),
-    Builtin("editor.action.revealDefinitionAside", "code_editor::RevealDefinitionAside", "Open Definition to the Side", has_definition_not_embedded),
-    Builtin("codelens.showLensesInCurrentLine", "code_editor::ShowLensesInCurrentLine", "Show CodeLens Commands for Current Line", has_code_lens),
-    Builtin("editor.action.revealDeclaration", "code_editor::GoToDeclaration", "Go to Declaration", has_declaration),
-    Builtin("editor.action.peekDeclaration", "code_editor::PeekDeclaration", "Peek Declaration", has_declaration),
-    Builtin("editor.action.goToTypeDefinition", "code_editor::GoToTypeDefinition", "Go to Type Definition", has_type_definition),
-    Builtin("editor.action.peekTypeDefinition", "code_editor::PeekTypeDefinition", "Peek Type Definition", has_type_definition),
-    Builtin("editor.action.goToImplementation", "code_editor::GoToImplementation", "Go to Implementations", has_implementation),
-    Builtin("editor.action.peekImplementation", "code_editor::PeekImplementation", "Peek Implementations", has_implementation),
-    Builtin("editor.action.goToReferences", "code_editor::GoToReferences", "Go to References", has_references),
-    Builtin("editor.action.referenceSearch.trigger", "code_editor::PeekReferences", "Peek References", has_references),
+    Builtin("editor.action.formatDocument", "code_editor::FormatDocument", "Format Document", "!inCompositeEditor && !editorReadonly && editorHasDocumentFormattingProvider"),
+    Builtin("editor.action.formatSelection", "code_editor::FormatSelection", "Format Selection", "!editorReadonly && editorHasDocumentSelectionFormattingProvider"),
+    Builtin("editor.action.rename", "code_editor::Rename", "Rename Symbol", "!editorReadonly && editorHasRenameProvider"),
+    Builtin("editor.action.toggleTabFocusMode", "code_editor::ToggleTabFocusMode", "Toggle Tab Key Moves Focus", ""),
+    Builtin("editor.action.pasteAs", "code_editor::PasteAs", "Paste As...", WRITABLE),
+    Builtin("editor.action.pasteAsText", "code_editor::PasteAsText", "Paste as Text", WRITABLE),
+    Builtin("editor.action.quickFix", "code_editor::QuickFix", "Quick Fix...", CODE_ACTIONS),
+    Builtin("editor.action.refactor", "code_editor::Refactor", "Refactor...", CODE_ACTIONS),
+    Builtin("editor.action.sourceAction", "code_editor::SourceAction", "Source Action...", CODE_ACTIONS),
+    Builtin("editor.action.organizeImports", "code_editor::OrganizeImports", "Organize Imports", "!editorReadonly && supportedCodeAction_source_organizeImports"),
+    Builtin("editor.action.fixAll", "code_editor::FixAll", "Fix All", "!editorReadonly && supportedCodeAction_source_fixAll"),
+    Builtin("editor.action.autoFix", "code_editor::AutoFix", "Auto Fix...", "!editorReadonly && supportedCodeAction_quickfix"),
+    Builtin("editor.action.revealDefinition", "code_editor::GoToDefinition", "Go to Definition", "editorHasDefinitionProvider"),
+    Builtin("editor.action.peekDefinition", "code_editor::PeekDefinition", "Peek Definition", "editorHasDefinitionProvider && !inReferenceSearchEditor && !isInEmbeddedEditor"),
+    Builtin("editor.action.revealDefinitionAside", "code_editor::RevealDefinitionAside", "Open Definition to the Side", "editorHasDefinitionProvider && !isInEmbeddedEditor"),
+    Builtin("codelens.showLensesInCurrentLine", "code_editor::ShowLensesInCurrentLine", "Show CodeLens Commands for Current Line", "editorHasCodeLensProvider"),
+    Builtin("editor.action.revealDeclaration", "code_editor::GoToDeclaration", "Go to Declaration", "editorHasDeclarationProvider && !isInEmbeddedEditor"),
+    Builtin("editor.action.peekDeclaration", "code_editor::PeekDeclaration", "Peek Declaration", "editorHasDeclarationProvider && !inReferenceSearchEditor && !isInEmbeddedEditor"),
+    Builtin("editor.action.goToTypeDefinition", "code_editor::GoToTypeDefinition", "Go to Type Definition", "editorHasTypeDefinitionProvider"),
+    Builtin("editor.action.peekTypeDefinition", "code_editor::PeekTypeDefinition", "Peek Type Definition", "editorHasTypeDefinitionProvider && !inReferenceSearchEditor && !isInEmbeddedEditor"),
+    Builtin("editor.action.goToImplementation", "code_editor::GoToImplementation", "Go to Implementations", "editorHasImplementationProvider"),
+    Builtin("editor.action.peekImplementation", "code_editor::PeekImplementation", "Peek Implementations", "editorHasImplementationProvider && !inReferenceSearchEditor && !isInEmbeddedEditor"),
+    Builtin("editor.action.goToReferences", "code_editor::GoToReferences", "Go to References", "editorHasReferenceProvider && !inReferenceSearchEditor && !isInEmbeddedEditor"),
+    Builtin("editor.action.referenceSearch.trigger", "code_editor::PeekReferences", "Peek References", "editorHasReferenceProvider && !inReferenceSearchEditor && !isInEmbeddedEditor"),
     // Indentation.
-    Builtin("editor.action.indentationToSpaces", "code_editor::IndentationToSpaces", "Convert Indentation to Spaces", writable),
-    Builtin("editor.action.indentationToTabs", "code_editor::IndentationToTabs", "Convert Indentation to Tabs", writable),
-    Builtin("editor.action.indentUsingTabs", "code_editor::IndentUsingTabs", "Indent Using Tabs", always),
-    Builtin("editor.action.indentUsingSpaces", "code_editor::IndentUsingSpaces", "Indent Using Spaces", always),
-    Builtin("editor.action.changeTabDisplaySize", "code_editor::ChangeTabDisplaySize", "Change Tab Display Size", always),
-    Builtin("editor.action.detectIndentation", "code_editor::DetectIndentation", "Detect Indentation from Content", always),
+    Builtin("editor.action.indentationToSpaces", "code_editor::IndentationToSpaces", "Convert Indentation to Spaces", WRITABLE),
+    Builtin("editor.action.indentationToTabs", "code_editor::IndentationToTabs", "Convert Indentation to Tabs", WRITABLE),
+    Builtin("editor.action.indentUsingTabs", "code_editor::IndentUsingTabs", "Indent Using Tabs", ""),
+    Builtin("editor.action.indentUsingSpaces", "code_editor::IndentUsingSpaces", "Indent Using Spaces", ""),
+    Builtin("editor.action.changeTabDisplaySize", "code_editor::ChangeTabDisplaySize", "Change Tab Display Size", ""),
+    Builtin("editor.action.detectIndentation", "code_editor::DetectIndentation", "Detect Indentation from Content", ""),
     // Find, inline suggestions, the color picker, sticky scroll.
-    Builtin("deleteInsideWord", "code_editor::DeleteInsideWord", "Delete Word", writable),
-    Builtin("actions.findWithSelection", "code_editor::StartFindWithSelection", "Find with Selection", always),
-    Builtin("editor.action.nextSelectionMatchFindAction", "code_editor::NextSelectionMatch", "Find Next Selection", always),
-    Builtin("editor.action.previousSelectionMatchFindAction", "code_editor::PreviousSelectionMatch", "Find Previous Selection", always),
-    Builtin("editor.action.selectNextStickyScrollLine", "code_editor::SelectNextStickyScrollLine", "Select the next editor sticky scroll line", sticky_focused),
-    Builtin("editor.action.selectPreviousStickyScrollLine", "code_editor::SelectPreviousStickyScrollLine", "Select the previous sticky scroll line", sticky_focused),
-    Builtin("editor.action.goToFocusedStickyScrollLine", "code_editor::GoToFocusedStickyScrollLine", "Go to the focused sticky scroll line", sticky_focused),
-    Builtin("editor.action.selectEditor", "code_editor::SelectEditor", "Select Editor", sticky_focused),
-    Builtin("editor.action.hideColorPicker", "code_editor::HideColorPicker", "Hide the Color Picker", color_picker_visible),
-    Builtin("editor.action.insertColorWithStandaloneColorPicker", "code_editor::InsertColorWithStandaloneColorPicker", "Insert Color with Standalone Color Picker", color_picker_visible),
-    Builtin("editor.action.inlineSuggest.showNext", "code_editor::ShowNextInlineSuggestion", "Show Next Inline Suggestion", inline_visible_writable),
-    Builtin("editor.action.inlineSuggest.showPrevious", "code_editor::ShowPreviousInlineSuggestion", "Show Previous Inline Suggestion", inline_visible_writable),
-    Builtin("editor.action.inlineSuggest.commit", "code_editor::AcceptInlineSuggestion", "Accept Inline Suggestion", inline_or_edit_visible),
-    Builtin("editor.action.inlineSuggest.jump", "code_editor::JumpToNextInlineEdit", "Jump to next inline edit", inline_edit_visible),
-    Builtin("editor.action.inlineSuggest.commitAlternativeAction", "code_editor::AcceptInlineSuggestionAlternativeAction", "Accept Inline Suggestion Alternative Action", inline_alternative_action_visible),
-    Builtin("editor.action.inlineSuggest.toggleShowCollapsed", "code_editor::ToggleInlineSuggestionShowCollapsed", "Toggle Inline Suggestions Show Collapsed", always),
-    Builtin("editor.action.inlineSuggest.acceptNextWord", "code_editor::AcceptNextInlineWord", "Accept Next Word Of Inline Suggestion", inline_visible_writable),
-    Builtin("editor.action.inlineSuggest.acceptNextLine", "code_editor::AcceptNextInlineLine", "Accept Next Line Of Inline Suggestion", inline_visible_writable),
-    Builtin("editor.action.inlineSuggest.hide", "code_editor::HideInlineSuggestion", "Hide Inline Suggestion", inline_or_edit_visible),
-    Builtin("editor.action.changeAll", "code_editor::SelectAllOccurrences", "Change All Occurrences", writable),
+    Builtin("deleteInsideWord", "code_editor::DeleteInsideWord", "Delete Word", WRITABLE),
+    Builtin("actions.findWithSelection", "code_editor::StartFindWithSelection", "Find with Selection", ""),
+    Builtin("editor.action.nextSelectionMatchFindAction", "code_editor::NextSelectionMatch", "Find Next Selection", ""),
+    Builtin("editor.action.previousSelectionMatchFindAction", "code_editor::PreviousSelectionMatch", "Find Previous Selection", ""),
+    Builtin("editor.action.selectNextStickyScrollLine", "code_editor::SelectNextStickyScrollLine", "Select the next editor sticky scroll line", STICKY_FOCUSED),
+    Builtin("editor.action.selectPreviousStickyScrollLine", "code_editor::SelectPreviousStickyScrollLine", "Select the previous sticky scroll line", STICKY_FOCUSED),
+    Builtin("editor.action.goToFocusedStickyScrollLine", "code_editor::GoToFocusedStickyScrollLine", "Go to the focused sticky scroll line", STICKY_FOCUSED),
+    Builtin("editor.action.selectEditor", "code_editor::SelectEditor", "Select Editor", STICKY_FOCUSED),
+    Builtin("editor.action.hideColorPicker", "code_editor::HideColorPicker", "Hide the Color Picker", "standaloneColorPickerVisible"),
+    Builtin("editor.action.insertColorWithStandaloneColorPicker", "code_editor::InsertColorWithStandaloneColorPicker", "Insert Color with Standalone Color Picker", "standaloneColorPickerFocused"),
+    Builtin("editor.action.inlineSuggest.showNext", "code_editor::ShowNextInlineSuggestion", "Show Next Inline Suggestion", INLINE_WRITABLE),
+    Builtin("editor.action.inlineSuggest.showPrevious", "code_editor::ShowPreviousInlineSuggestion", "Show Previous Inline Suggestion", INLINE_WRITABLE),
+    Builtin("editor.action.inlineSuggest.commit", "code_editor::AcceptInlineSuggestion", "Accept Inline Suggestion", INLINE_OR_EDIT),
+    Builtin("editor.action.inlineSuggest.jump", "code_editor::JumpToNextInlineEdit", "Jump to next inline edit", "inlineEditIsVisible"),
+    Builtin("editor.action.inlineSuggest.commitAlternativeAction", "code_editor::AcceptInlineSuggestionAlternativeAction", "Accept Inline Suggestion Alternative Action", "inlineSuggestionAlternativeActionVisible && inlineEditIsVisible"),
+    Builtin("editor.action.inlineSuggest.toggleShowCollapsed", "code_editor::ToggleInlineSuggestionShowCollapsed", "Toggle Inline Suggestions Show Collapsed", ""),
+    Builtin("editor.action.inlineSuggest.acceptNextWord", "code_editor::AcceptNextInlineWord", "Accept Next Word Of Inline Suggestion", INLINE_WRITABLE),
+    Builtin("editor.action.inlineSuggest.acceptNextLine", "code_editor::AcceptNextInlineLine", "Accept Next Line Of Inline Suggestion", INLINE_WRITABLE),
+    Builtin("editor.action.inlineSuggest.hide", "code_editor::HideInlineSuggestion", "Hide Inline Suggestion", INLINE_OR_EDIT),
+    Builtin("editor.action.changeAll", "code_editor::SelectAllOccurrences", "Change All Occurrences", WRITABLE),
 ];
 
-/// An editor command without a label (Monaco `registerEditorCommand` and
-/// core commands such as `cursorDown`): [`CodeEditor::trigger`] runs it by
-/// its Monaco id, but the command palette doesn't list it.
-struct Command(&'static str, &'static str);
+/// An editor command without a label (Monaco `registerEditorCommand`, core
+/// commands such as `cursorDown` and their handler commands such as
+/// `type`): [`CodeEditor::trigger`] runs it by its Monaco id, with its
+/// arguments, but the command palette doesn't list it. Monaco id, GPUI
+/// action name, precondition (as for [`Builtin`]).
+struct Command(&'static str, &'static str, &'static str);
 
 #[rustfmt::skip]
 static COMMANDS: &[Command] = &[
-    Command("cursorLeft", "code_editor::CursorLeft"),
-    Command("cursorLeftSelect", "code_editor::CursorLeftSelect"),
-    Command("cursorRight", "code_editor::CursorRight"),
-    Command("cursorRightSelect", "code_editor::CursorRightSelect"),
-    Command("cursorUp", "code_editor::CursorUp"),
-    Command("cursorUpSelect", "code_editor::CursorUpSelect"),
-    Command("cursorDown", "code_editor::CursorDown"),
-    Command("cursorDownSelect", "code_editor::CursorDownSelect"),
-    Command("cursorWordLeft", "code_editor::CursorWordLeft"),
-    Command("cursorWordLeftSelect", "code_editor::CursorWordLeftSelect"),
-    Command("cursorWordRight", "code_editor::CursorWordRight"),
-    Command("cursorWordRightSelect", "code_editor::CursorWordRightSelect"),
-    Command("cursorWordPartLeft", "code_editor::CursorWordPartLeft"),
-    Command("cursorWordPartLeftSelect", "code_editor::CursorWordPartLeftSelect"),
-    Command("cursorWordPartRight", "code_editor::CursorWordPartRight"),
-    Command("cursorWordPartRightSelect", "code_editor::CursorWordPartRightSelect"),
-    Command("cursorHome", "code_editor::CursorHome"),
-    Command("cursorHomeSelect", "code_editor::CursorHomeSelect"),
-    Command("cursorEnd", "code_editor::CursorEnd"),
-    Command("cursorEndSelect", "code_editor::CursorEndSelect"),
-    Command("cursorTop", "code_editor::CursorTop"),
-    Command("cursorTopSelect", "code_editor::CursorTopSelect"),
-    Command("cursorBottom", "code_editor::CursorBottom"),
-    Command("cursorBottomSelect", "code_editor::CursorBottomSelect"),
-    Command("cursorPageUp", "code_editor::CursorPageUp"),
-    Command("cursorPageUpSelect", "code_editor::CursorPageUpSelect"),
-    Command("cursorPageDown", "code_editor::CursorPageDown"),
-    Command("cursorPageDownSelect", "code_editor::CursorPageDownSelect"),
-    Command("editor.action.selectAll", "code_editor::SelectAll"),
-    Command("cursorWordStartLeft", "code_editor::CursorWordStartLeft"),
-    Command("cursorWordStartLeftSelect", "code_editor::CursorWordStartLeftSelect"),
-    Command("cursorWordStartRight", "code_editor::CursorWordStartRight"),
-    Command("cursorWordStartRightSelect", "code_editor::CursorWordStartRightSelect"),
-    Command("cursorWordEndLeft", "code_editor::CursorWordEndLeft"),
-    Command("cursorWordEndLeftSelect", "code_editor::CursorWordEndLeftSelect"),
-    Command("cursorWordEndRight", "code_editor::CursorWordEndRight"),
-    Command("cursorWordEndRightSelect", "code_editor::CursorWordEndRightSelect"),
-    Command("deleteWordStartLeft", "code_editor::DeleteWordStartLeft"),
-    Command("deleteWordStartRight", "code_editor::DeleteWordStartRight"),
-    Command("deleteWordEndLeft", "code_editor::DeleteWordEndLeft"),
-    Command("deleteWordEndRight", "code_editor::DeleteWordEndRight"),
-    Command("deleteWordPartLeft", "code_editor::DeleteWordPartLeft"),
-    Command("deleteWordPartRight", "code_editor::DeleteWordPartRight"),
-    Command("lineBreakInsert", "code_editor::LineBreakInsert"),
-    Command("cursorLineStart", "code_editor::CursorLineStart"),
-    Command("cursorLineStartSelect", "code_editor::CursorLineStartSelect"),
-    Command("cursorLineEnd", "code_editor::CursorLineEnd"),
-    Command("cursorLineEndSelect", "code_editor::CursorLineEndSelect"),
-    Command("cursorColumnSelectLeft", "code_editor::CursorColumnSelectLeft"),
-    Command("cursorColumnSelectRight", "code_editor::CursorColumnSelectRight"),
-    Command("cursorColumnSelectUp", "code_editor::CursorColumnSelectUp"),
-    Command("cursorColumnSelectDown", "code_editor::CursorColumnSelectDown"),
-    Command("cursorColumnSelectPageUp", "code_editor::CursorColumnSelectPageUp"),
-    Command("cursorColumnSelectPageDown", "code_editor::CursorColumnSelectPageDown"),
-    Command("scrollLineUp", "code_editor::ScrollLineUp"),
-    Command("scrollLineDown", "code_editor::ScrollLineDown"),
-    Command("scrollPageUp", "code_editor::ScrollPageUp"),
-    Command("scrollPageDown", "code_editor::ScrollPageDown"),
-    Command("scrollEditorTop", "code_editor::ScrollEditorTop"),
-    Command("scrollEditorBottom", "code_editor::ScrollEditorBottom"),
-    Command("cancelSelection", "code_editor::CancelSelection"),
-    Command("removeSecondaryCursors", "code_editor::RemoveSecondaryCursors"),
-    Command("deleteLeft", "code_editor::DeleteLeft"),
-    Command("deleteRight", "code_editor::DeleteRight"),
-    Command("deleteWordLeft", "code_editor::DeleteWordLeft"),
-    Command("deleteWordRight", "code_editor::DeleteWordRight"),
-    Command("tab", "code_editor::Tab"),
-    Command("outdent", "code_editor::Outdent"),
-    Command("undo", "code_editor::Undo"),
-    Command("redo", "code_editor::Redo"),
-    Command("editor.action.clipboardPasteAction", "code_editor::Paste"),
-    Command("editor.changePasteType", "code_editor::ChangePasteType"),
-    Command("editor.changeDropType", "code_editor::ChangeDropType"),
-    Command("editor.hidePasteWidget", "code_editor::HidePostEditWidget"),
-    Command("editor.action.replaceOne", "code_editor::ReplaceOne"),
-    Command("editor.action.replaceAll", "code_editor::ReplaceAll"),
-    Command("editor.action.selectAllMatches", "code_editor::SelectAllMatches"),
-    Command("toggleFindCaseSensitive", "code_editor::ToggleCaseSensitive"),
-    Command("toggleFindRegex", "code_editor::ToggleRegex"),
-    Command("toggleFindWholeWord", "code_editor::ToggleWholeWord"),
-    Command("toggleFindInSelection", "code_editor::ToggleFindInSelection"),
-    Command("togglePreserveCase", "code_editor::TogglePreserveCase"),
-    Command("history.showPrevious", "code_editor::FindHistoryPrevious"),
-    Command("history.showNext", "code_editor::FindHistoryNext"),
-    Command("acceptAlternativeSelectedSuggestion", "code_editor::AcceptAlternativeSuggestion"),
-    Command("toggleSuggestionDetails", "code_editor::ToggleSuggestionDetails"),
-    Command("selectNextSuggestion", "code_editor::SelectNextSuggestion"),
-    Command("selectPrevSuggestion", "code_editor::SelectPreviousSuggestion"),
-    Command("selectNextPageSuggestion", "code_editor::SelectNextPageSuggestion"),
-    Command("selectPrevPageSuggestion", "code_editor::SelectPreviousPageSuggestion"),
-    Command("selectFirstSuggestion", "code_editor::SelectFirstSuggestion"),
-    Command("selectLastSuggestion", "code_editor::SelectLastSuggestion"),
-    Command("focusSuggestion", "code_editor::FocusSuggestion"),
-    Command("focusAndAcceptSuggestion", "code_editor::FocusAndAcceptSuggestion"),
-    Command("toggleExplainMode", "code_editor::ToggleExplainMode"),
-    Command("toggleSuggestionFocus", "code_editor::ToggleSuggestionFocus"),
-    Command("suggestWidgetCopy", "code_editor::SuggestWidgetCopy"),
-    Command("togglePeekWidgetFocus", "code_editor::TogglePeekWidgetFocus"),
-    // Monaco's alias for `revealDefinitionAside`.
-    Command("editor.action.openDeclarationToTheSide", "code_editor::RevealDefinitionAside"),
-    Command("editor.action.codeAction", "code_editor::TriggerCodeAction"),
-    Command("closeParameterHints", "code_editor::CloseParameterHints"),
-    Command("showNextParameterHint", "code_editor::ShowNextParameterHint"),
-    Command("showPrevParameterHint", "code_editor::ShowPrevParameterHint"),
-    Command("goToNextReference", "code_editor::GoToNextReference"),
-    Command("goToPreviousReference", "code_editor::GoToPreviousReference"),
-    Command("closeReferenceSearch", "code_editor::ClosePeek"),
-    Command("editor.action.clipboardCutAction", "code_editor::Cut"),
-    Command("editor.action.clipboardCopyAction", "code_editor::Copy"),
-    Command("editor.action.hideLongLineWarningHover", "code_editor::HideLongLineWarningHover"),
-    Command("editor.action.inlineSuggest.toggleAlwaysShowToolbar", "code_editor::ToggleAlwaysShowInlineSuggestionToolbar"),
-    Command("editor.action.goToLocations", "code_editor::GoToLocations"),
-    Command("editor.action.peekLocations", "code_editor::PeekLocations"),
-    // Monaco's alias for `peekLocations`.
-    Command("editor.action.showReferences", "code_editor::PeekLocations"),
-    Command("editor.cancelOperation", "code_editor::CancelOperation"),
-    Command("editor.action.unicodeHighlight.disableHighlightingOfAmbiguousCharacters", "code_editor::DisableHighlightingOfAmbiguousCharacters"),
-    Command("editor.action.unicodeHighlight.disableHighlightingOfInvisibleCharacters", "code_editor::DisableHighlightingOfInvisibleCharacters"),
-    Command("editor.action.unicodeHighlight.disableHighlightingOfNonBasicAsciiCharacters", "code_editor::DisableHighlightingOfNonBasicAsciiCharacters"),
+    Command("cursorLeft", "code_editor::CursorLeft", ""),
+    Command("cursorLeftSelect", "code_editor::CursorLeftSelect", ""),
+    Command("cursorRight", "code_editor::CursorRight", ""),
+    Command("cursorRightSelect", "code_editor::CursorRightSelect", ""),
+    Command("cursorUp", "code_editor::CursorUp", ""),
+    Command("cursorUpSelect", "code_editor::CursorUpSelect", ""),
+    Command("cursorDown", "code_editor::CursorDown", ""),
+    Command("cursorDownSelect", "code_editor::CursorDownSelect", ""),
+    Command("cursorWordLeft", "code_editor::CursorWordLeft", ""),
+    Command("cursorWordLeftSelect", "code_editor::CursorWordLeftSelect", ""),
+    Command("cursorWordRight", "code_editor::CursorWordRight", ""),
+    Command("cursorWordRightSelect", "code_editor::CursorWordRightSelect", ""),
+    Command("cursorWordPartLeft", "code_editor::CursorWordPartLeft", ""),
+    Command("cursorWordPartLeftSelect", "code_editor::CursorWordPartLeftSelect", ""),
+    Command("cursorWordPartRight", "code_editor::CursorWordPartRight", ""),
+    Command("cursorWordPartRightSelect", "code_editor::CursorWordPartRightSelect", ""),
+    Command("cursorWordAccessibilityLeft", "code_editor::CursorWordAccessibilityLeft", ""),
+    Command("cursorWordAccessibilityLeftSelect", "code_editor::CursorWordAccessibilityLeftSelect", ""),
+    Command("cursorWordAccessibilityRight", "code_editor::CursorWordAccessibilityRight", ""),
+    Command("cursorWordAccessibilityRightSelect", "code_editor::CursorWordAccessibilityRightSelect", ""),
+    Command("cursorHome", "code_editor::CursorHome", ""),
+    Command("cursorHomeSelect", "code_editor::CursorHomeSelect", ""),
+    Command("cursorEnd", "code_editor::CursorEnd", ""),
+    Command("cursorEndSelect", "code_editor::CursorEndSelect", ""),
+    Command("cursorTop", "code_editor::CursorTop", ""),
+    Command("cursorTopSelect", "code_editor::CursorTopSelect", ""),
+    Command("cursorBottom", "code_editor::CursorBottom", ""),
+    Command("cursorBottomSelect", "code_editor::CursorBottomSelect", ""),
+    Command("cursorPageUp", "code_editor::CursorPageUp", ""),
+    Command("cursorPageUpSelect", "code_editor::CursorPageUpSelect", ""),
+    Command("cursorPageDown", "code_editor::CursorPageDown", ""),
+    Command("cursorPageDownSelect", "code_editor::CursorPageDownSelect", ""),
+    Command("cursorMove", "code_editor::CursorMove", ""),
+    Command("editor.action.selectAll", "code_editor::SelectAll", ""),
+    Command("cursorWordStartLeft", "code_editor::CursorWordStartLeft", ""),
+    Command("cursorWordStartLeftSelect", "code_editor::CursorWordStartLeftSelect", ""),
+    Command("cursorWordStartRight", "code_editor::CursorWordStartRight", ""),
+    Command("cursorWordStartRightSelect", "code_editor::CursorWordStartRightSelect", ""),
+    Command("cursorWordEndLeft", "code_editor::CursorWordEndLeft", ""),
+    Command("cursorWordEndLeftSelect", "code_editor::CursorWordEndLeftSelect", ""),
+    Command("cursorWordEndRight", "code_editor::CursorWordEndRight", ""),
+    Command("cursorWordEndRightSelect", "code_editor::CursorWordEndRightSelect", ""),
+    Command("deleteWordStartLeft", "code_editor::DeleteWordStartLeft", WRITABLE),
+    Command("deleteWordStartRight", "code_editor::DeleteWordStartRight", WRITABLE),
+    Command("deleteWordEndLeft", "code_editor::DeleteWordEndLeft", WRITABLE),
+    Command("deleteWordEndRight", "code_editor::DeleteWordEndRight", WRITABLE),
+    Command("deleteWordPartLeft", "code_editor::DeleteWordPartLeft", WRITABLE),
+    Command("deleteWordPartRight", "code_editor::DeleteWordPartRight", WRITABLE),
+    Command("lineBreakInsert", "code_editor::LineBreakInsert", WRITABLE),
+    Command("cursorLineStart", "code_editor::CursorLineStart", ""),
+    Command("cursorLineStartSelect", "code_editor::CursorLineStartSelect", ""),
+    Command("cursorLineEnd", "code_editor::CursorLineEnd", ""),
+    Command("cursorLineEndSelect", "code_editor::CursorLineEndSelect", ""),
+    Command("cursorColumnSelectLeft", "code_editor::CursorColumnSelectLeft", ""),
+    Command("cursorColumnSelectRight", "code_editor::CursorColumnSelectRight", ""),
+    Command("cursorColumnSelectUp", "code_editor::CursorColumnSelectUp", ""),
+    Command("cursorColumnSelectDown", "code_editor::CursorColumnSelectDown", ""),
+    Command("cursorColumnSelectPageUp", "code_editor::CursorColumnSelectPageUp", ""),
+    Command("cursorColumnSelectPageDown", "code_editor::CursorColumnSelectPageDown", ""),
+    Command("columnSelect", "code_editor::ColumnSelect", ""),
+    Command("createCursor", "code_editor::CreateCursor", ""),
+    Command("_moveTo", "code_editor::MoveTo", ""),
+    Command("_moveToSelect", "code_editor::MoveToSelect", ""),
+    Command("_wordSelect", "code_editor::WordSelect", ""),
+    Command("_wordSelectDrag", "code_editor::WordSelectDrag", ""),
+    Command("_lineSelect", "code_editor::LineSelect", ""),
+    Command("_lineSelectDrag", "code_editor::LineSelectDrag", ""),
+    Command("_lastCursorMoveToSelect", "code_editor::LastCursorMoveToSelect", ""),
+    Command("lastCursorWordSelect", "code_editor::LastCursorWordSelect", ""),
+    Command("lastCursorLineSelect", "code_editor::LastCursorLineSelect", ""),
+    Command("lastCursorLineSelectDrag", "code_editor::LastCursorLineSelectDrag", ""),
+    Command("editorScroll", "code_editor::EditorScroll", ""),
+    Command("scrollLineUp", "code_editor::ScrollLineUp", ""),
+    Command("scrollLineDown", "code_editor::ScrollLineDown", ""),
+    Command("scrollPageUp", "code_editor::ScrollPageUp", ""),
+    Command("scrollPageDown", "code_editor::ScrollPageDown", ""),
+    Command("scrollEditorTop", "code_editor::ScrollEditorTop", ""),
+    Command("scrollEditorBottom", "code_editor::ScrollEditorBottom", ""),
+    Command("scrollLeft", "code_editor::ScrollLeft", ""),
+    Command("scrollRight", "code_editor::ScrollRight", ""),
+    Command("revealLine", "code_editor::RevealLine", ""),
+    Command("setSelection", "code_editor::SetSelection", ""),
+    Command("cancelSelection", "code_editor::CancelSelection", "editorHasSelection"),
+    // Escape's whole chain: Monaco's own precondition (several cursors)
+    // would stop it.
+    Command("removeSecondaryCursors", "code_editor::RemoveSecondaryCursors", ""),
+    Command("deleteLeft", "code_editor::DeleteLeft", ""),
+    Command("deleteRight", "code_editor::DeleteRight", ""),
+    Command("deleteWordLeft", "code_editor::DeleteWordLeft", WRITABLE),
+    Command("deleteWordRight", "code_editor::DeleteWordRight", WRITABLE),
+    Command("tab", "code_editor::Tab", ""),
+    Command("outdent", "code_editor::Outdent", ""),
+    Command("undo", "code_editor::Undo", ""),
+    Command("redo", "code_editor::Redo", ""),
+    // Monaco's overwritable handler commands (`editor.trigger(source,
+    // 'type', { text })`), with their `default:` variants as aliases.
+    Command("type", "code_editor::Type", ""),
+    Command("replacePreviousChar", "code_editor::ReplacePreviousChar", ""),
+    Command("compositionType", "code_editor::CompositionType", ""),
+    Command("compositionStart", "code_editor::CompositionStart", ""),
+    Command("compositionEnd", "code_editor::CompositionEnd", ""),
+    Command("paste", "code_editor::PasteText", ""),
+    Command("cut", "code_editor::CutText", ""),
+    Command("editor.action.clipboardPasteAction", "code_editor::Paste", ""),
+    Command("editor.changePasteType", "code_editor::ChangePasteType", "pasteWidgetVisible"),
+    Command("editor.changeDropType", "code_editor::ChangeDropType", "dropWidgetVisible"),
+    Command("editor.hidePasteWidget", "code_editor::HidePostEditWidget", "pasteWidgetVisible"),
+    Command("editor.hideDropWidget", "code_editor::HidePostEditWidget", "dropWidgetVisible"),
+    Command("editor.action.replaceOne", "code_editor::ReplaceOne", ""),
+    Command("editor.action.replaceAll", "code_editor::ReplaceAll", ""),
+    Command("editor.action.selectAllMatches", "code_editor::SelectAllMatches", ""),
+    Command("toggleFindCaseSensitive", "code_editor::ToggleCaseSensitive", ""),
+    Command("toggleFindRegex", "code_editor::ToggleRegex", ""),
+    Command("toggleFindWholeWord", "code_editor::ToggleWholeWord", ""),
+    Command("toggleFindInSelection", "code_editor::ToggleFindInSelection", ""),
+    Command("togglePreserveCase", "code_editor::TogglePreserveCase", ""),
+    Command("closeFindWidget", "code_editor::CloseFindWidget", "findWidgetVisible"),
+    Command("history.showPrevious", "code_editor::FindHistoryPrevious", ""),
+    Command("history.showNext", "code_editor::FindHistoryNext", ""),
+    Command("acceptSelectedSuggestion", "code_editor::AcceptSelectedSuggestion", SUGGEST_VISIBLE),
+    Command("acceptAlternativeSelectedSuggestion", "code_editor::AcceptAlternativeSuggestion", SUGGEST_VISIBLE),
+    Command("hideSuggestWidget", "code_editor::HideSuggestWidget", SUGGEST_VISIBLE),
+    Command("insertBestCompletion", "code_editor::InsertBestCompletion", ""),
+    Command("insertNextSuggestion", "code_editor::InsertNextSuggestion", "hasOtherSuggestions"),
+    Command("insertPrevSuggestion", "code_editor::InsertPrevSuggestion", "hasOtherSuggestions"),
+    Command("toggleSuggestionDetails", "code_editor::ToggleSuggestionDetails", SUGGEST_VISIBLE),
+    Command("selectNextSuggestion", "code_editor::SelectNextSuggestion", SUGGEST_VISIBLE),
+    Command("selectPrevSuggestion", "code_editor::SelectPreviousSuggestion", SUGGEST_VISIBLE),
+    Command("selectNextPageSuggestion", "code_editor::SelectNextPageSuggestion", SUGGEST_VISIBLE),
+    Command("selectPrevPageSuggestion", "code_editor::SelectPreviousPageSuggestion", SUGGEST_VISIBLE),
+    Command("selectFirstSuggestion", "code_editor::SelectFirstSuggestion", SUGGEST_VISIBLE),
+    Command("selectLastSuggestion", "code_editor::SelectLastSuggestion", SUGGEST_VISIBLE),
+    Command("focusSuggestion", "code_editor::FocusSuggestion", SUGGEST_VISIBLE),
+    Command("focusAndAcceptSuggestion", "code_editor::FocusAndAcceptSuggestion", SUGGEST_VISIBLE),
+    Command("toggleExplainMode", "code_editor::ToggleExplainMode", SUGGEST_VISIBLE),
+    Command("toggleSuggestionFocus", "code_editor::ToggleSuggestionFocus", SUGGEST_VISIBLE),
+    Command("suggestWidgetCopy", "code_editor::SuggestWidgetCopy", "suggestWidgetDetailsFocused"),
+    Command("jumpToNextSnippetPlaceholder", "code_editor::JumpToNextSnippetPlaceholder", "inSnippetMode && hasNextTabstop"),
+    Command("jumpToPrevSnippetPlaceholder", "code_editor::JumpToPrevSnippetPlaceholder", "inSnippetMode && hasPrevTabstop"),
+    Command("leaveSnippet", "code_editor::LeaveSnippet", "inSnippetMode"),
+    Command("acceptSnippet", "code_editor::AcceptSnippet", "inSnippetMode"),
+    Command("cancelLinkedEditingInput", "code_editor::CancelLinkedEditingInput", "LinkedEditingInputVisible"),
+    Command("acceptRenameInput", "code_editor::AcceptRenameInput", "renameInputVisible"),
+    Command("acceptRenameInputWithPreview", "code_editor::AcceptRenameInputWithPreview", "renameInputVisible"),
+    Command("cancelRenameInput", "code_editor::CancelRenameInput", "renameInputVisible"),
+    Command("focusNextRenameSuggestion", "code_editor::FocusNextRenameSuggestion", "renameInputVisible"),
+    Command("focusPreviousRenameSuggestion", "code_editor::FocusPreviousRenameSuggestion", "renameInputVisible"),
+    Command("leaveEditorMessage", "code_editor::LeaveEditorMessage", "messageVisible"),
+    Command("togglePeekWidgetFocus", "code_editor::TogglePeekWidgetFocus", ""),
+    Command("editor.action.codeAction", "code_editor::TriggerCodeAction", CODE_ACTIONS),
+    Command("closeParameterHints", "code_editor::CloseParameterHints", "parameterHintsVisible"),
+    Command("showNextParameterHint", "code_editor::ShowNextParameterHint", "parameterHintsVisible && parameterHintsMultipleSignatures"),
+    Command("showPrevParameterHint", "code_editor::ShowPrevParameterHint", "parameterHintsVisible && parameterHintsMultipleSignatures"),
+    // F4 also steps through symbol navigation here.
+    Command("goToNextReference", "code_editor::GoToNextReference", ""),
+    Command("goToPreviousReference", "code_editor::GoToPreviousReference", ""),
+    Command("closeReferenceSearch", "code_editor::ClosePeek", ""),
+    Command("editor.gotoNextSymbolFromResult", "code_editor::GoToNextSymbolFromResult", "hasSymbols"),
+    Command("editor.gotoNextSymbolFromResult.cancel", "code_editor::CancelSymbolNavigation", "hasSymbols"),
+    Command("closeMarkersNavigation", "code_editor::CloseMarkersNavigation", "markersNavigationVisible"),
+    Command("editor.action.clipboardCutAction", "code_editor::Cut", ""),
+    Command("editor.action.clipboardCopyAction", "code_editor::Copy", ""),
+    Command("editor.action.hideLongLineWarningHover", "code_editor::HideLongLineWarningHover", ""),
+    Command("editor.action.inlineSuggest.toggleAlwaysShowToolbar", "code_editor::ToggleAlwaysShowInlineSuggestionToolbar", ""),
+    Command("editor.action.goToLocations", "code_editor::GoToLocations", ""),
+    Command("editor.action.peekLocations", "code_editor::PeekLocations", ""),
+    Command("editor.action.findReferences", "code_editor::FindReferences", ""),
+    Command("editor.action.format", "code_editor::FormatSelectionOrDocument", ""),
+    Command("editor.cancelOperation", "code_editor::CancelOperation", "cancellableOperation"),
+    Command("editor.action.unicodeHighlight.disableHighlightingOfAmbiguousCharacters", "code_editor::DisableHighlightingOfAmbiguousCharacters", ""),
+    Command("editor.action.unicodeHighlight.disableHighlightingOfInvisibleCharacters", "code_editor::DisableHighlightingOfInvisibleCharacters", ""),
+    Command("editor.action.unicodeHighlight.disableHighlightingOfNonBasicAsciiCharacters", "code_editor::DisableHighlightingOfNonBasicAsciiCharacters", ""),
+    Command("editor.action.unicodeHighlight.showExcludeOptions", "code_editor::ShowUnicodeHighlightExcludeOptions", ""),
 ];
 
-/// The GPUI action name and precondition for the Monaco id `id`, labelled
-/// or not (unlabelled commands always run).
-pub(crate) fn action_name(id: &str) -> Option<(&'static str, Option<Precondition>)> {
-    builtin(id)
-        .map(|b| (b.1, Some(b.3)))
-        .or_else(|| command_action_name(id).map(|name| (name, None)))
+/// Monaco's command aliases (`CommandsRegistry.registerCommandAlias`, the
+/// overwritable handlers' `default:` ids, and ids registered twice): the
+/// alias and the id it runs.
+#[rustfmt::skip]
+static ALIASES: &[(&str, &str)] = &[
+    ("acceptSelectedSuggestionOnEnter", "acceptSelectedSuggestion"),
+    ("editor.action.smartSelect.grow", "editor.action.smartSelect.expand"),
+    ("cursorWordPartStartLeft", "cursorWordPartLeft"),
+    ("cursorWordPartStartLeftSelect", "cursorWordPartLeftSelect"),
+    ("goToNextReferenceFromEmbeddedEditor", "goToNextReference"),
+    ("goToPreviousReferenceFromEmbeddedEditor", "goToPreviousReference"),
+    ("closeReferenceSearchEditor", "closeReferenceSearch"),
+    ("editor.action.goToDeclaration", "editor.action.revealDefinition"),
+    ("editor.action.previewDeclaration", "editor.action.peekDefinition"),
+    ("editor.action.openDeclarationToTheSide", "editor.action.revealDefinitionAside"),
+    ("editor.action.showReferences", "editor.action.peekLocations"),
+    ("default:type", "type"),
+    ("default:replacePreviousChar", "replacePreviousChar"),
+    ("default:compositionType", "compositionType"),
+    ("default:compositionStart", "compositionStart"),
+    ("default:compositionEnd", "compositionEnd"),
+    ("default:paste", "paste"),
+    ("default:cut", "cut"),
+    ("default:undo", "undo"),
+    ("default:redo", "redo"),
+];
+
+/// The id `id` stands for, if it's an alias.
+fn resolve_alias(id: &str) -> &str {
+    ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == id)
+        .map_or(id, |(_, target)| target)
 }
 
-/// The GPUI action name for the unlabelled Monaco command `id`.
-pub(crate) fn command_action_name(id: &str) -> Option<&'static str> {
-    COMMANDS.iter().find(|c| c.0 == id).map(|c| c.1)
+/// The GPUI action name and precondition for the Monaco id (or alias)
+/// `id`, labelled or not.
+pub(crate) fn action_name(id: &str) -> Option<(&'static str, &'static str)> {
+    let id = resolve_alias(id);
+    builtin(id)
+        .map(|b| (b.1, b.3))
+        .or_else(|| COMMANDS.iter().find(|c| c.0 == id).map(|c| (c.1, c.2)))
 }
 
 fn builtin(id: &str) -> Option<&'static Builtin> {
     BUILTINS.iter().find(|b| b.0 == id)
+}
+
+/// The precondition of the action named `name` (a GPUI action name), if
+/// it's one of Monaco's: what its default keybindings require. An action
+/// that runs several Monaco ids needs one of their preconditions.
+fn action_precondition(name: &str) -> Option<gpui::KeyBindingContextPredicate> {
+    let whens: Vec<&'static str> = BUILTINS
+        .iter()
+        .filter(|b| b.1 == name)
+        .map(|b| b.3)
+        .chain(COMMANDS.iter().filter(|c| c.1 == name).map(|c| c.2))
+        .collect();
+    if whens.is_empty() || whens.iter().any(|when| when.is_empty()) {
+        return None;
+    }
+    whens
+        .into_iter()
+        .map(|when| (*crate::context_keys::predicate(when)).clone())
+        .reduce(|a, b| gpui::KeyBindingContextPredicate::Or(Box::new(a), Box::new(b)))
+}
+
+/// Whether `predicate` is evaluated in an editor's own key context (where
+/// its context keys are), not a widget's or a parent's.
+fn in_editor_context(predicate: &gpui::KeyBindingContextPredicate) -> bool {
+    use gpui::KeyBindingContextPredicate as P;
+    match predicate {
+        P::Identifier(name) => name.as_ref() == KEY_CONTEXT,
+        P::And(a, b) => in_editor_context(a) || in_editor_context(b),
+        _ => false,
+    }
+}
+
+/// Folds each binding's action's precondition into its context, as Monaco
+/// does for an action's keybinding (`editorExtensions.ts`): when the
+/// precondition fails, the key falls through, so Cmd+/ in a read-only
+/// editor does nothing (and reaches the host). Bindings in a widget's key
+/// context (the hover, the rename input, …) keep theirs: GPUI tests each
+/// context's own keys, and the editor's aren't there.
+pub(crate) fn with_preconditions(bindings: Vec<KeyBinding>) -> Vec<KeyBinding> {
+    bindings
+        .into_iter()
+        .map(|binding| {
+            let Some(when) = action_precondition(binding.action().name()) else {
+                return binding;
+            };
+            let Some(context) = binding.predicate().filter(|p| in_editor_context(p)) else {
+                return binding;
+            };
+            let predicate =
+                gpui::KeyBindingContextPredicate::And(Box::new((*context).clone()), Box::new(when));
+            let keystrokes: Vec<String> = binding
+                .keystrokes()
+                .iter()
+                .map(|keystroke| keystroke.inner().unparse())
+                .collect();
+            KeyBinding::load(
+                &keystrokes.join(" "),
+                binding.action().boxed_clone(),
+                Some(Rc::new(predicate)),
+                false,
+                None,
+                &gpui::DummyKeyboardMapper,
+            )
+            .unwrap_or(binding)
+        })
+        .collect()
 }
 
 /// The command palette's history (Monaco `CommandsHistory`): recently run
@@ -749,7 +828,7 @@ pub fn add_keybinding_rules(
 /// removes exactly them (told apart by their predicates' identity), so
 /// GPUI's keymap, which can't remove bindings, works like Monaco's dynamic
 /// keybindings.
-fn bind_removable(cx: &mut App, bindings: Vec<KeyBinding>) -> Disposable {
+pub(crate) fn bind_removable(cx: &mut App, bindings: Vec<KeyBinding>) -> Disposable {
     if bindings.is_empty() {
         return Disposable::none();
     }
@@ -774,10 +853,31 @@ fn bind_removable(cx: &mut App, bindings: Vec<KeyBinding>) -> Disposable {
 }
 
 impl CodeEditor {
-    /// Adds an action (Monaco `addAction`): the command palette lists it,
-    /// [`CodeEditor::run_action`] and [`RunAction`] run it, and its
-    /// keybindings are bound to [`RunAction`] in the editor's key context.
-    pub fn add_action(&mut self, descriptor: EditorActionDescriptor, cx: &mut Context<Self>) {
+    /// The key context predicate for this editor's own keybindings, with
+    /// `when` (a GPUI predicate over its [context keys](Self::context_keys))
+    /// if given.
+    fn own_keybinding_context(&self, when: Option<&str>) -> String {
+        let editor = format!(
+            "{KEY_CONTEXT} && {} == {}",
+            crate::context_keys::EDITOR_ID_KEY,
+            self.commands.id
+        );
+        match when {
+            Some(when) => format!("{editor} && ({when})"),
+            None => editor,
+        }
+    }
+
+    /// Adds an action (Monaco `addAction`) until the returned
+    /// [`Disposable`] is disposed (or [`CodeEditor::remove_action`]): the
+    /// command palette lists it, [`CodeEditor::run_action`] and
+    /// [`RunAction`] run it, and its keybindings run it in this editor only.
+    pub fn add_action(
+        &mut self,
+        descriptor: EditorActionDescriptor,
+        cx: &mut Context<Self>,
+    ) -> Disposable {
+        let context = self.own_keybinding_context(None);
         let bindings: Vec<KeyBinding> = descriptor
             .keybindings
             .iter()
@@ -787,31 +887,98 @@ impl CodeEditor {
                     RunAction {
                         id: descriptor.id.to_string(),
                     },
-                    Some(KEY_CONTEXT),
+                    Some(&context),
                 )
             })
             .collect();
-        if !bindings.is_empty() {
-            cx.bind_keys(bindings);
-        }
+        let id = descriptor.id.clone();
+        self.remove_action_bindings(&id, cx);
+        self.commands
+            .action_bindings
+            .insert(id.clone(), bind_removable(cx, bindings));
         self.added_actions.retain(|a| a.id != descriptor.id);
         self.added_actions.push(descriptor);
+        let editor = cx.weak_entity();
+        Disposable::new(move |cx| {
+            editor
+                .update(cx, |editor, cx| editor.remove_action_now(&id, cx))
+                .ok();
+        })
     }
 
-    /// Removes an action added with [`CodeEditor::add_action`]. Its
-    /// keybindings stay bound but do nothing in this editor.
+    /// Removes an action added with [`CodeEditor::add_action`], with its
+    /// keybindings.
     pub fn remove_action(&mut self, id: &str) -> bool {
         let len = self.added_actions.len();
         self.added_actions.retain(|a| a.id.as_ref() != id);
+        // Unbinding needs the app: on the next frame.
+        if let Some(bindings) = self.commands.action_bindings.remove(id) {
+            self.commands.pending_dispose.push(bindings);
+        }
         self.added_actions.len() != len
+    }
+
+    fn remove_action_now(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.added_actions.retain(|a| a.id.as_ref() != id);
+        self.remove_action_bindings(id, cx);
+        cx.notify();
+    }
+
+    fn remove_action_bindings(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(bindings) = self.commands.action_bindings.remove(id) {
+            bindings.dispose(cx);
+        }
+    }
+
+    /// Adds a command run by `keystrokes` (GPUI syntax, e.g. `"cmd-k
+    /// cmd-m"`) in this editor (Monaco `IStandaloneCodeEditor.addCommand`),
+    /// while `when` (a GPUI predicate over the editor's
+    /// [context keys](Self::context_keys), e.g. one from
+    /// [`CodeEditor::create_context_key`]) holds. Returns the command's
+    /// generated id, which [`CodeEditor::trigger`] and keybinding rules can
+    /// run too, and the [`Disposable`] that removes it. Fails if the
+    /// keystrokes or `when` don't parse.
+    pub fn add_command(
+        &mut self,
+        keystrokes: &str,
+        handler: impl Fn(&mut CodeEditor, &mut Window, &mut Context<CodeEditor>) + 'static,
+        when: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<(SharedString, Disposable)> {
+        let id: SharedString = crate::editor_commands::next_dynamic_command_id().into();
+        let predicate =
+            gpui::KeyBindingContextPredicate::parse(&self.own_keybinding_context(when))?;
+        let binding = KeyBinding::load(
+            keystrokes,
+            Box::new(RunCommand {
+                id: id.to_string(),
+                args: None,
+            }),
+            Some(Rc::new(predicate)),
+            false,
+            None,
+            &gpui::DummyKeyboardMapper,
+        )?;
+        let bindings = bind_removable(cx, vec![binding]);
+        self.commands.handlers.insert(id.clone(), Rc::new(handler));
+        let editor = cx.weak_entity();
+        let handler_id = id.clone();
+        let disposable = Disposable::new(move |cx| {
+            bindings.dispose(cx);
+            editor
+                .update(cx, |editor, _| editor.commands.handlers.remove(&handler_id))
+                .ok();
+        });
+        Ok((id, disposable))
     }
 
     /// The actions that can run now (Monaco `getSupportedActions`): the
     /// built-in ones whose precondition holds, then the added ones.
     pub fn supported_actions(&self, cx: &App) -> Vec<EditorActionInfo> {
+        let keys = [self.context_keys(cx)];
         let builtins = BUILTINS
             .iter()
-            .filter(|b| (b.3)(self, cx))
+            .filter(|b| b.3.is_empty() || crate::context_keys::predicate(b.3).eval(&keys))
             .map(|b| EditorActionInfo {
                 id: b.0.into(),
                 label: b.2.into(),
@@ -827,6 +994,11 @@ impl CodeEditor {
                 alias: a.alias.clone(),
             });
         builtins.chain(added).collect()
+    }
+
+    /// Whether the built-in action `id` can run now (its precondition holds).
+    pub(crate) fn action_enabled(&self, id: &str, cx: &App) -> bool {
+        builtin(resolve_alias(id)).is_some_and(|b| self.when(b.3, cx))
     }
 
     /// Runs the action `id` if it's supported (Monaco
@@ -846,10 +1018,10 @@ impl CodeEditor {
             (action.run)(self, window, cx);
             return true;
         }
-        let Some(builtin) = builtin(id) else {
+        let Some(builtin) = builtin(resolve_alias(id)) else {
             return false;
         };
-        if !(builtin.3)(self, cx) {
+        if !self.when(builtin.3, cx) {
             return false;
         }
         let Ok(action) = cx.build_action(builtin.1, None) else {
@@ -861,8 +1033,9 @@ impl CodeEditor {
     }
 
     /// Runs command `id` as a keybinding rule's [`RunCommand`] does
-    /// (Monaco's `commandService.executeCommand`): an editor action, a
-    /// Monaco command, a registered command (with `args`), or a GPUI
+    /// (Monaco's `commandService.executeCommand`): one of this editor's
+    /// commands ([`CodeEditor::add_command`]), an editor action, a Monaco
+    /// command (with `args`), a registered command (with `args`), or a GPUI
     /// action. Returns whether one was found.
     pub(crate) fn run_command(
         &mut self,
@@ -871,19 +1044,28 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.run_action(id, window, cx) {
+        if let Some(handler) = self.commands.handlers.get(id).cloned() {
+            handler(self, window, cx);
             return true;
         }
-        // Commands with a payload (`editor.action.goToLocations`, …) take
-        // `args` when they fit it.
-        if let Some(name) = command_action_name(id)
-            && let Ok(action) = args
+        if args.is_none() && self.run_action(id, window, cx) {
+            return true;
+        }
+        if let Some((name, when)) = action_name(id) {
+            if !self.when(when, cx) {
+                // Monaco runs nothing, as the precondition fails.
+                return true;
+            }
+            // Commands with a payload (`cursorMove`, `editor.fold`, …) take
+            // `args` when they fit it.
+            if let Ok(action) = args
                 .clone()
                 .and_then(|args| cx.build_action(name, Some(args)).ok())
                 .map_or_else(|| cx.build_action(name, None), Ok)
-        {
-            window.dispatch_action(action, cx);
-            return true;
+            {
+                window.dispatch_action(action, cx);
+                return true;
+            }
         }
         if crate::commands::has_command(cx, id) {
             let command = providers::Command {
@@ -893,6 +1075,9 @@ impl CodeEditor {
                 ..Default::default()
             };
             return crate::commands::execute_command(cx, &command).is_ok();
+        }
+        if self.run_action(id, window, cx) {
+            return true;
         }
         match cx.build_action(id, None) {
             Ok(action) => {
@@ -982,6 +1167,33 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), COMMANDS.len());
         assert!(COMMANDS.iter().all(|c| builtin(c.0).is_none()));
+    }
+
+    #[test]
+    fn preconditions_parse_and_aliases_resolve() {
+        for when in BUILTINS
+            .iter()
+            .map(|b| b.3)
+            .chain(COMMANDS.iter().map(|c| c.2))
+        {
+            if !when.is_empty() {
+                assert!(
+                    gpui::KeyBindingContextPredicate::parse(when).is_ok(),
+                    "bad precondition {when}"
+                );
+            }
+        }
+        for (alias, target) in ALIASES {
+            assert!(action_name(target).is_some(), "{alias} -> {target}");
+            assert!(
+                builtin(alias).is_none() && !COMMANDS.iter().any(|c| c.0 == *alias),
+                "{alias} is also an id"
+            );
+        }
+        assert_eq!(
+            action_name("editor.action.goToDeclaration").map(|a| a.0),
+            Some("code_editor::GoToDefinition")
+        );
     }
 
     #[gpui::test]

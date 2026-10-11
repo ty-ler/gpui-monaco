@@ -15,8 +15,9 @@ use std::ops::Range;
 
 use gpui::{
     AppContext as _, Context, Entity, FontWeight, HighlightStyle, Hsla, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString, Styled, StyledText,
-    Subscription, Task, WeakEntity, Window, div, px,
+    IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, StyledText, Subscription, Task, WeakEntity, Window,
+    div, px,
 };
 use text::PointUtf16;
 
@@ -555,10 +556,48 @@ impl Render for QuickInput {
                     div()
                         .h(px(24.))
                         .px(px(4.))
+                        .flex()
+                        .items_center()
                         .bg(colors.input_background)
                         .border_1()
                         .border_color(colors.input_option_active_border)
-                        .child(self.input.clone()),
+                        .child(div().flex_1().min_w_0().child(self.input.clone()))
+                        // Monaco's "Toggle Zero-Based Offset" button, shown
+                        // in `::` mode.
+                        .when(self.value(cx).trim_start().starts_with("::"), |this| {
+                            let checked = goto_offset_zero_based(cx);
+                            this.child(
+                                div()
+                                    .id("quick-zero-based-offset")
+                                    .flex_none()
+                                    .px(px(4.))
+                                    .rounded(px(3.))
+                                    .border_1()
+                                    .cursor_pointer()
+                                    .when(checked, |this| {
+                                        this.bg(colors.input_option_active_background)
+                                            .border_color(colors.input_option_active_border)
+                                            .text_color(colors.input_option_active_foreground)
+                                    })
+                                    .when(!checked, |this| {
+                                        this.border_color(gpui::transparent_black())
+                                    })
+                                    .tooltip(crate::tooltip::tooltip(
+                                        "Toggle Zero-Based Offset",
+                                        &colors,
+                                    ))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            let zero_based = !goto_offset_zero_based(cx);
+                                            set_goto_offset_zero_based(zero_based, cx);
+                                            this.refresh(cx);
+                                        }),
+                                    )
+                                    .child("0"),
+                            )
+                        }),
                 ),
             )
             .child(
@@ -589,6 +628,25 @@ impl QuickInput {
 }
 
 use gpui::prelude::FluentBuilder as _;
+
+/// Monaco's `gotoLine.useZeroBasedOffset` storage: whether `::offset`
+/// counts characters from 0.
+#[derive(Default)]
+struct ZeroBasedOffset(bool);
+
+impl gpui::Global for ZeroBasedOffset {}
+
+/// Whether Go to Offset (`::`) counts from 0 (Monaco's toggle in the
+/// picker, remembered for the app); `false` by default.
+pub fn goto_offset_zero_based(cx: &gpui::App) -> bool {
+    cx.try_global::<ZeroBasedOffset>().is_some_and(|z| z.0)
+}
+
+/// Sets whether Go to Offset (`::`) counts from 0, as the picker's
+/// "Toggle Zero-Based Offset" button does.
+pub fn set_goto_offset_zero_based(zero_based: bool, cx: &mut gpui::App) {
+    cx.set_global(ZeroBasedOffset(zero_based));
+}
 
 impl CodeEditor {
     /// Opens quick access with `value` in the input (Monaco
@@ -886,18 +944,29 @@ impl CodeEditor {
         }
     }
 
-    /// Monaco's `::offset` mode (1-based character offsets).
+    /// Monaco's `::offset` mode: character offsets from 1, or from 0 with
+    /// [`goto_offset_zero_based`].
     fn goto_offset_item(&self, query: &str, cx: &gpui::App) -> QuickItem {
         let rope = self.model().read(cx).buffer().rope().clone();
         let length = rope.len_utf16().0 as i64;
         let tab_size = self.model().read(cx).options().tab_size;
+        let zero_based = goto_offset_zero_based(cx);
         let Ok(mut offset) = query.trim().parse::<i64>() else {
             return QuickItem::message(
-                format!("Type a character position to go to (from 1 to {length})."),
+                if zero_based {
+                    format!(
+                        "Type a character position to go to (from 0 to {}).",
+                        length - 1
+                    )
+                } else {
+                    format!("Type a character position to go to (from 1 to {length}).")
+                },
                 QuickAction::None,
             );
         };
-        offset -= offset.signum();
+        if !zero_based {
+            offset -= offset.signum();
+        }
         if offset < 0 {
             offset += length;
         }

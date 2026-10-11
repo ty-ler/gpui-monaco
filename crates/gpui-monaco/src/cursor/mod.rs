@@ -54,6 +54,7 @@ pub use collection::{CursorCollection, SelectionStartKind, SingleCursorState};
 pub use column::{ColumnSelectCommand, ColumnSelectData, column_select, column_select_to};
 pub use comment::{CommentOptions, CommentsAt, LineCommentType, block_comment, line_comment};
 pub(crate) use edit::execute_edits_forcing;
+pub(crate) use edit::{Command, CursorStateHelper, EditBuilder, TrackedId, execute_commands};
 pub use edit::{EditOperation, EditOperationType};
 pub use in_place_replace::in_place_replace;
 pub use language::{LanguageContext, StandardTokenType};

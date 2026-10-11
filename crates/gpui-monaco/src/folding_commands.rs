@@ -47,6 +47,42 @@ impl CodeEditor {
         self.run_fold_command(cx, |m, rows| fm::set_collapse_state_up(m, true, rows));
     }
 
+    /// Monaco `editor.fold` (`collapse`) or `editor.unfold` with their
+    /// `FoldingArguments`: `levels` levels (1 by default), `"up"` around the
+    /// lines or `"down"` inside them, at the 0-based `lines` (by default
+    /// each selection's first line). Fold without `levels` or `direction`
+    /// is [`CodeEditor::fold`].
+    pub fn fold_with_args(
+        &mut self,
+        levels: Option<u32>,
+        direction: Option<&str>,
+        lines: Option<Vec<u32>>,
+        collapse: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.options.folding {
+            return;
+        }
+        let rows = lines.unwrap_or_else(|| self.selected_rows());
+        let buffer = self.model().read(cx).buffer().clone();
+        let collapsed = self.folds.collapsed_flags(&buffer);
+        let ranges = self.folds.ranges().to_vec();
+        let model = FoldingModel::new(&ranges, collapsed);
+        let up = direction == Some("up");
+        let toggle = if collapse && levels.is_none() && direction.is_none() {
+            fm::set_collapse_state_up(&model, true, &rows)
+        } else {
+            let levels = levels.unwrap_or(1).max(1) as usize;
+            if up {
+                fm::set_collapse_state_levels_up(&model, collapse, levels, &rows)
+            } else {
+                fm::set_collapse_state_levels_down(&model, collapse, levels, Some(&rows))
+            }
+        };
+        self.folds.toggle(&buffer, toggle);
+        self.after_fold_change(cx);
+    }
+
     /// Expands the region at each selection (Monaco `editor.unfold`).
     pub fn unfold(&mut self, cx: &mut Context<Self>) {
         self.run_fold_command(cx, |m, rows| {

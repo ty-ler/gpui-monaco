@@ -502,7 +502,7 @@ fn the_toolbar_in_the_hover(cx: &mut TestAppContext) {
     draw(cx);
     // The cursor is where the ghost text starts, so the hover there has the
     // toolbar.
-    cx.dispatch_action(gpui_monaco::actions::ShowHover);
+    cx.dispatch_action(gpui_monaco::actions::ShowHover::default());
     draw(cx);
     assert!(editor.read_with(cx, |e, cx| e.hover_has_inline_toolbar_for_tests(cx)));
     assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));
