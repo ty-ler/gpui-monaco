@@ -292,6 +292,31 @@ Providers can also:
 
 The `inline_suggest` options control this; see [Options](options.md). With `suggest.preview`, the suggest widget's selected item shows as ghost text too.
 
+### Inline edits
+
+A completion with `is_inline_edit` is an inline edit, Monaco's "next edit suggestion": it can change text anywhere, not only at the cursor. Its `range` may span lines:
+
+```rust,ignore
+InlineCompletion {
+    insert_text: "let color = 1;".into(),
+    range: Some(PointUtf16::new(0, 0)..PointUtf16::new(0, 15)),
+    is_inline_edit: true,
+    ..Default::default()
+}
+```
+
+The editor diffs `range` against `insert_text` and shows the changes where they are, the way Monaco picks:
+- a changed word in a box below it, and a changed line in a box below the line;
+- inserted text in place, and inserted lines pushing the text below down;
+- deleted text marked in place;
+- several changed lines in a card beside them, if it fits (else below them).
+
+An inline edit shows only while no completion is visible at the cursor. It follows typing: typing its own text moves it along, and typing inside it drops it. Once other typing moves it, it shows collapsed, as a small marker, until you jump to it (or always, with `inline_suggest.edits.show_collapsed`).
+
+A pill in the gutter marks it, or points up or down while it's scrolled away. Tab jumps to it when the cursor is away from it, and accepts it once there. Escape rejects it. Clicking the pill accepts it (or jumps there when it points away), and hovering it shows a menu: Go To / Accept, Reject, Show Collapsed, the list's `commands`, and the item's `gutter_menu_link_action`. `display_name` titles the menu.
+
+`show_range` limits where any item shows: only while the cursor is in that range. Providers see in `InlineCompletionContext::include_inline_edits` whether inline edits are wanted (`inline_suggest.edits.enabled`).
+
 ## Semantic tokens
 
 A `DocumentSemanticTokensProvider` colors identifiers by meaning, such as parameters, read-only variables and macros. It works as in LSP: a legend of token types and modifiers, plus five numbers per token. It can return all tokens, or edits against the result it returned last (`last_result_id`). A `DocumentRangeSemanticTokensProvider` colors the visible lines until a full result arrives.

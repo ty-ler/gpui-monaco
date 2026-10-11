@@ -750,15 +750,22 @@ actions!(
         /// Shows the previous inline completion (Monaco
         /// `editor.action.inlineSuggest.showPrevious`).
         ShowPreviousInlineSuggestion,
-        /// Accepts the ghost text (Monaco `editor.action.inlineSuggest.commit`).
+        /// Accepts the ghost text or inline edit (Monaco
+        /// `editor.action.inlineSuggest.commit`).
         AcceptInlineSuggestion,
+        /// Jumps to the inline edit (Monaco `editor.action.inlineSuggest.jump`).
+        JumpToNextInlineEdit,
+        /// Switches inline edits between showing collapsed and expanded
+        /// (Monaco `editor.action.inlineSuggest.toggleShowCollapsed`).
+        ToggleInlineSuggestionShowCollapsed,
         /// Accepts the ghost text's next word (Monaco
         /// `editor.action.inlineSuggest.acceptNextWord`).
         AcceptNextInlineWord,
         /// Accepts the ghost text's next line (Monaco
         /// `editor.action.inlineSuggest.acceptNextLine`).
         AcceptNextInlineLine,
-        /// Hides the ghost text (Monaco `editor.action.inlineSuggest.hide`).
+        /// Hides the ghost text or inline edit (Monaco
+        /// `editor.action.inlineSuggest.hide`).
         HideInlineSuggestion,
         /// Switches the inline suggestion toolbar between always shown and
         /// shown on hover (Monaco

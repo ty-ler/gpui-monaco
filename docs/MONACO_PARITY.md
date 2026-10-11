@@ -139,7 +139,7 @@ Issues are linked by number.
 | Color picker (hover and standalone) | `colorPicker` | ✅ | #97 |
 | Links | `links` | ✅ | #93 |
 | Semantic tokens | `semanticTokens` | ✅ | #98 |
-| Inline completions (ghost text) | `inlineCompletions` | 🟡 ghost text, toolbar (hover or always), commands, options, lifetime hooks and provider groups; inline edits (next-edit suggestions) to come | #99, #201 |
+| Inline completions (ghost text, inline edits) | `inlineCompletions` | 🟡 ghost text, toolbar (hover or always), commands, options, lifetime hooks and provider groups; inline edits with Monaco's word, line, insertion, deletion, side-by-side and collapsed views, the gutter indicator and menu, jump and accept; no long-distance hint, cross-file edits, `hint`/`jumpToPosition` items or alternative actions | #99, #201, #216 |
 | Document symbols | `documentSymbols` | ✅ | #100 |
 | Selection ranges | `smartSelect` | ✅ | #82 |
 | Folding ranges | `folding` | ✅ | #102 |

@@ -825,6 +825,8 @@ pub struct InlineSuggestOptions {
     /// `fontFamily`: the ghost text's font; `None` is the editor's
     /// (Monaco `'default'`).
     pub font_family: Option<SharedString>,
+    /// `edits`: inline edits (next edit suggestions).
+    pub edits: InlineSuggestEditsOptions,
 }
 
 impl Default for InlineSuggestOptions {
@@ -839,6 +841,59 @@ impl Default for InlineSuggestOptions {
             show_toolbar: InlineSuggestShowToolbar::OnHover,
             syntax_highlighting_enabled: true,
             font_family: None,
+            edits: InlineSuggestEditsOptions::default(),
+        }
+    }
+}
+
+/// Whether showing an inline edit may move the text to make room (Monaco
+/// `inlineSuggest.edits.allowCodeShifting`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InlineEditsCodeShifting {
+    /// Insertions show in place: inserted lines push the text down (the
+    /// default).
+    #[default]
+    Always,
+    /// Text inserted within a line shows in place; inserted lines show in a
+    /// box instead.
+    Horizontal,
+    /// The text never moves: insertions show in a box.
+    Never,
+}
+
+/// Whether larger inline edits may show beside the text (Monaco
+/// `inlineSuggest.edits.renderSideBySide`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InlineEditsRenderSideBySide {
+    /// Beside the text when it fits, else below it (the default).
+    #[default]
+    Auto,
+    /// Always below the text.
+    Never,
+}
+
+/// Monaco `inlineSuggest.edits`: how inline edits (next edit suggestions)
+/// show.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlineSuggestEditsOptions {
+    /// `enabled`: ask providers for inline edits and show them (on).
+    pub enabled: bool,
+    /// `showCollapsed`: show only a marker at the edit until jumping to it
+    /// (off).
+    pub show_collapsed: bool,
+    /// `renderSideBySide`.
+    pub render_side_by_side: InlineEditsRenderSideBySide,
+    /// `allowCodeShifting`.
+    pub allow_code_shifting: InlineEditsCodeShifting,
+}
+
+impl Default for InlineSuggestEditsOptions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            show_collapsed: false,
+            render_side_by_side: InlineEditsRenderSideBySide::Auto,
+            allow_code_shifting: InlineEditsCodeShifting::Always,
         }
     }
 }

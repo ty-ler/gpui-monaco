@@ -39,10 +39,9 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
   - The command palette has no similar-command or TF-IDF suggestions (those are VS Code workbench features), and accents aren't folded when matching.
   - Icons are glyphs, not codicons.
 - **Inline completions:**
-  - There is no toolbar (`showToolbar`).
-  - Ghost text isn't syntax highlighted.
   - Secondary cursors don't get it.
-  - Provider groups (`yieldsToGroupIds`) and `completeBracketPairs` aren't supported.
+  - `completeBracketPairs` isn't supported.
+  - Inline edits draw their boxes as content widgets: they don't animate, the gutter indicator needs the glyph margin, and there's no long-distance hint, cross-file edit, `hint`, `jumpToPosition` or alternative action.
   - The suggest widget's items aren't extended by inline completions.
   - A multi-line completion inserted mid-line keeps the rest of the line after its first line, rather than moving it to the end of the ghost text.
 - **Snippets:**

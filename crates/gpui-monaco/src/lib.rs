@@ -122,6 +122,7 @@ pub use find::{FindOptions, MATCHES_LIMIT};
 pub use find_widget::FindWidget;
 pub use goto::has_symbol_navigation;
 pub use hover::{HOVER_DELAY, HoverWidget};
+pub use inline_completions::inline_edits::InlineEditViewKind;
 pub use languages::{on_language, set_language_configuration};
 pub use layout_info::{LayoutInfo, MinimapLayoutInfo, OverviewRulerPosition, RenderMinimap};
 pub use markers::{
@@ -144,7 +145,8 @@ pub use suggest_widget::SuggestWidget;
 pub use syntax;
 pub use text;
 pub use theme::{
-    EditorColors, Theme, ThemeKind, TokenStyle, define_theme, global_theme, set_theme, theme_named,
+    EditorColors, InlineEditColors, Theme, ThemeKind, TokenStyle, define_theme, global_theme,
+    set_theme, theme_named,
 };
 pub use view::reveal::{RevealType, ScrollType};
 pub use widgets::{

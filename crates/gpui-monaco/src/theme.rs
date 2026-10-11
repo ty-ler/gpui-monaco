@@ -294,6 +294,137 @@ pub struct EditorColors {
     pub sticky_scroll_hover_background: Hsla,
     /// Keyboard focus outlines (`focusBorder`).
     pub focus_border: Hsla,
+    /// Inline edit colors (`inlineEdit.*`).
+    pub inline_edit: InlineEditColors,
+}
+
+/// Inline edit (next edit suggestion) colors, `inlineEdit.*`. Each is
+/// `None` until a theme sets it, and then derives from other colors as in
+/// Monaco; the [`EditorColors`] methods of the same names resolve them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InlineEditColors {
+    /// `inlineEdit.originalBackground`.
+    pub original_background: Option<Hsla>,
+    /// `inlineEdit.modifiedBackground`.
+    pub modified_background: Option<Hsla>,
+    /// `inlineEdit.originalChangedLineBackground`.
+    pub original_changed_line_background: Option<Hsla>,
+    /// `inlineEdit.originalChangedTextBackground`.
+    pub original_changed_text_background: Option<Hsla>,
+    /// `inlineEdit.modifiedChangedLineBackground`.
+    pub modified_changed_line_background: Option<Hsla>,
+    /// `inlineEdit.modifiedChangedTextBackground`.
+    pub modified_changed_text_background: Option<Hsla>,
+    /// `inlineEdit.originalBorder`.
+    pub original_border: Option<Hsla>,
+    /// `inlineEdit.modifiedBorder`.
+    pub modified_border: Option<Hsla>,
+    /// `inlineEdit.gutterIndicator.primaryForeground`, `primaryBorder` and
+    /// `primaryBackground`: the indicator when Tab jumps.
+    pub gutter_indicator_primary: [Option<Hsla>; 3],
+    /// `inlineEdit.gutterIndicator.secondaryForeground`, `secondaryBorder`
+    /// and `secondaryBackground`: when Tab does neither.
+    pub gutter_indicator_secondary: [Option<Hsla>; 3],
+    /// `inlineEdit.gutterIndicator.successfulForeground`,
+    /// `successfulBorder` and `successfulBackground`: when Tab accepts.
+    pub gutter_indicator_successful: [Option<Hsla>; 3],
+}
+
+/// Monaco's `transparent(color, factor)`.
+fn transparent(color: Hsla, factor: f32) -> Hsla {
+    Hsla {
+        a: color.a * factor,
+        ..color
+    }
+}
+
+impl EditorColors {
+    /// `inlineEdit.originalBackground` (20% of
+    /// `diffEditor.removedTextBackground`).
+    pub fn inline_edit_original_background(&self) -> Hsla {
+        (self.inline_edit.original_background)
+            .unwrap_or_else(|| transparent(self.diff_removed_text_background, 0.2))
+    }
+
+    /// `inlineEdit.modifiedBackground` (30% of
+    /// `diffEditor.insertedTextBackground`).
+    pub fn inline_edit_modified_background(&self) -> Hsla {
+        (self.inline_edit.modified_background)
+            .unwrap_or_else(|| transparent(self.diff_inserted_text_background, 0.3))
+    }
+
+    /// `inlineEdit.originalChangedLineBackground` (80% of
+    /// `diffEditor.removedTextBackground`).
+    pub fn inline_edit_original_changed_line_background(&self) -> Hsla {
+        (self.inline_edit.original_changed_line_background)
+            .unwrap_or_else(|| transparent(self.diff_removed_text_background, 0.8))
+    }
+
+    /// `inlineEdit.originalChangedTextBackground` (80% of
+    /// `diffEditor.removedTextBackground`).
+    pub fn inline_edit_original_changed_text_background(&self) -> Hsla {
+        (self.inline_edit.original_changed_text_background)
+            .unwrap_or_else(|| transparent(self.diff_removed_text_background, 0.8))
+    }
+
+    /// `inlineEdit.modifiedChangedLineBackground` (70% of
+    /// `diffEditor.insertedLineBackground`).
+    pub fn inline_edit_modified_changed_line_background(&self) -> Hsla {
+        (self.inline_edit.modified_changed_line_background)
+            .unwrap_or_else(|| transparent(self.diff_inserted_line_background, 0.7))
+    }
+
+    /// `inlineEdit.modifiedChangedTextBackground` (70% of
+    /// `diffEditor.insertedTextBackground`).
+    pub fn inline_edit_modified_changed_text_background(&self) -> Hsla {
+        (self.inline_edit.modified_changed_text_background)
+            .unwrap_or_else(|| transparent(self.diff_inserted_text_background, 0.7))
+    }
+
+    /// `inlineEdit.originalBorder` (`diffEditor.removedTextBackground`).
+    pub fn inline_edit_original_border(&self) -> Hsla {
+        (self.inline_edit.original_border).unwrap_or(self.diff_removed_text_background)
+    }
+
+    /// `inlineEdit.modifiedBorder` (`diffEditor.insertedTextBackground`).
+    pub fn inline_edit_modified_border(&self) -> Hsla {
+        (self.inline_edit.modified_border).unwrap_or(self.diff_inserted_text_background)
+    }
+
+    /// The gutter indicator's foreground, border and background when Tab
+    /// jumps (button colors, the background at 40%).
+    pub fn inline_edit_gutter_indicator_primary(&self) -> [Hsla; 3] {
+        let [fg, border, bg] = self.inline_edit.gutter_indicator_primary;
+        let border = border.unwrap_or(self.button_background);
+        [
+            fg.unwrap_or(self.button_foreground),
+            border,
+            bg.unwrap_or_else(|| transparent(border, 0.4)),
+        ]
+    }
+
+    /// The gutter indicator's foreground, border and background when Tab
+    /// does neither (the hover widget's colors).
+    pub fn inline_edit_gutter_indicator_secondary(&self) -> [Hsla; 3] {
+        let [fg, border, bg] = self.inline_edit.gutter_indicator_secondary;
+        [
+            fg.unwrap_or(self.widget_foreground),
+            border.unwrap_or(self.widget_border),
+            bg.unwrap_or(self.widget_background),
+        ]
+    }
+
+    /// The gutter indicator's foreground, border and background when Tab
+    /// accepts (button colors).
+    pub fn inline_edit_gutter_indicator_successful(&self) -> [Hsla; 3] {
+        let [fg, border, bg] = self.inline_edit.gutter_indicator_successful;
+        let border = border.unwrap_or(self.button_background);
+        [
+            fg.unwrap_or(self.button_foreground),
+            border,
+            bg.unwrap_or(border),
+        ]
+    }
 }
 
 fn c(color: Rgba) -> Hsla {
@@ -432,6 +563,7 @@ impl EditorColors {
             sticky_scroll_background: None,
             sticky_scroll_hover_background: c(rgb(0x2a2d2e)),
             focus_border: c(rgb(0x007fd4)),
+            inline_edit: InlineEditColors::default(),
         }
     }
 
@@ -566,6 +698,7 @@ impl EditorColors {
             sticky_scroll_background: None,
             sticky_scroll_hover_background: c(rgb(0xf0f0f0)),
             focus_border: c(rgb(0x0090f1)),
+            inline_edit: InlineEditColors::default(),
         }
     }
 
@@ -718,6 +851,7 @@ impl EditorColors {
             // `editorStickyScrollHover.background` is `null`.
             sticky_scroll_hover_background: gpui::transparent_black(),
             focus_border: c(rgb(0xf38518)),
+            inline_edit: InlineEditColors::default(),
         }
     }
 
@@ -864,6 +998,7 @@ impl EditorColors {
             sticky_scroll_background: None,
             sticky_scroll_hover_background: c(rgba(0x0f4a851a)),
             focus_border: c(rgb(0x006bbd)),
+            inline_edit: InlineEditColors::default(),
         }
     }
 
@@ -957,6 +1092,56 @@ impl EditorColors {
             "editorGhostText.background",
         );
         set(&mut self.ghost_text_border, "editorGhostText.border");
+        let inline_edit = &mut self.inline_edit;
+        for (slot, key) in [
+            (
+                &mut inline_edit.original_background,
+                "inlineEdit.originalBackground",
+            ),
+            (
+                &mut inline_edit.modified_background,
+                "inlineEdit.modifiedBackground",
+            ),
+            (
+                &mut inline_edit.original_changed_line_background,
+                "inlineEdit.originalChangedLineBackground",
+            ),
+            (
+                &mut inline_edit.original_changed_text_background,
+                "inlineEdit.originalChangedTextBackground",
+            ),
+            (
+                &mut inline_edit.modified_changed_line_background,
+                "inlineEdit.modifiedChangedLineBackground",
+            ),
+            (
+                &mut inline_edit.modified_changed_text_background,
+                "inlineEdit.modifiedChangedTextBackground",
+            ),
+            (
+                &mut inline_edit.original_border,
+                "inlineEdit.originalBorder",
+            ),
+            (
+                &mut inline_edit.modified_border,
+                "inlineEdit.modifiedBorder",
+            ),
+        ] {
+            if let Some(color) = get(key) {
+                *slot = Some(color);
+            }
+        }
+        for (slots, kind) in [
+            (&mut inline_edit.gutter_indicator_primary, "primary"),
+            (&mut inline_edit.gutter_indicator_secondary, "secondary"),
+            (&mut inline_edit.gutter_indicator_successful, "successful"),
+        ] {
+            for (slot, part) in slots.iter_mut().zip(["Foreground", "Border", "Background"]) {
+                if let Some(color) = get(&format!("inlineEdit.gutterIndicator.{kind}{part}")) {
+                    *slot = Some(color);
+                }
+            }
+        }
         self.unicode_highlight_border = get("editorUnicodeHighlight.border")
             .or_else(|| get("editorWarning.foreground"))
             .unwrap_or(self.unicode_highlight_border);

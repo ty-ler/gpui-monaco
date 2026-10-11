@@ -515,8 +515,39 @@ impl CodeLensProvider for DemoCodeLens {
     }
 }
 
-/// Ghost text completing a few lines from what's typed.
+/// Ghost text completing a few lines from what's typed, and an inline edit
+/// (a next edit suggestion) documenting the first undocumented `pub fn`.
 struct DemoInlineCompletions;
+
+/// An inline edit adding a doc comment above the first `pub fn` without one.
+fn demo_inline_edit(context: &ProviderContext) -> Option<InlineCompletion> {
+    let snapshot = &context.snapshot;
+    let rows = snapshot.rope().max_point().row + 1;
+    (0..rows).find_map(|row| {
+        let line = snapshot.line(row);
+        let name = line.trim_start().strip_prefix("pub fn ")?;
+        let name: String = name
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        let above = if row > 0 {
+            snapshot.line(row - 1)
+        } else {
+            String::new()
+        };
+        let above = above.trim_start();
+        if above.starts_with("///") || above.starts_with("#[") {
+            return None;
+        }
+        let indent = &line[..line.len() - line.trim_start().len()];
+        Some(InlineCompletion {
+            insert_text: format!("{indent}/// TODO: document `{name}`.\n"),
+            range: Some(PointUtf16::new(row, 0)..PointUtf16::new(row, 0)),
+            is_inline_edit: true,
+            ..Default::default()
+        })
+    })
+}
 impl InlineCompletionsProvider for DemoInlineCompletions {
     fn provide_inline_completions(
         &self,
@@ -534,7 +565,7 @@ impl InlineCompletionsProvider for DemoInlineCompletions {
         let before: String = line.chars().take(position.column as usize).collect();
         let typed = before.trim_start();
         let indent = &before[..before.len() - typed.len()];
-        let items = if typed.len() < 2 {
+        let mut items: Vec<InlineCompletion> = if typed.len() < 2 {
             Vec::new()
         } else {
             LINES
@@ -547,6 +578,8 @@ impl InlineCompletionsProvider for DemoInlineCompletions {
                 })
                 .collect()
         };
+        // The editor shows it when no ghost text does.
+        items.extend(demo_inline_edit(context));
         Task::ready(Ok(InlineCompletionList {
             items,
             suppress_suggestions: None,

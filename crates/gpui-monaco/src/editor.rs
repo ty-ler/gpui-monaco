@@ -1681,6 +1681,7 @@ impl CodeEditor {
             || self.linked_editing_active()
             || self.is_suggest_visible()
             || self.inline_suggestion_visible(cx)
+            || self.inline_edit_visible(cx)
         {
             self.remove_secondary_cursors(&RemoveSecondaryCursors, window, cx);
         } else {
@@ -1711,7 +1712,7 @@ impl CodeEditor {
             self.hide_suggest(cx);
             return;
         }
-        if self.inline_suggestion_visible(cx) {
+        if self.inline_suggestion_visible(cx) || self.inline_edit_visible(cx) {
             self.hide_inline_suggestion(cx);
             return;
         }
@@ -1953,6 +1954,15 @@ impl CodeEditor {
         // Monaco `inlineSuggest.commit` (it outranks snippets and tab
         // completion).
         if self.tab_accepts_inline_suggestion(cx) && self.accept_inline_suggestion(cx) {
+            return;
+        }
+        // Monaco `inlineSuggest.jump` (weighed above accepting) and
+        // `inlineSuggest.commit` for inline edits.
+        if self.tab_should_jump_to_inline_edit(cx) {
+            self.jump_to_next_inline_edit(cx);
+            return;
+        }
+        if self.tab_should_accept_inline_edit(cx) && self.accept_inline_suggestion(cx) {
             return;
         }
         if self.has_next_tabstop() {
@@ -3786,6 +3796,20 @@ impl Render for CodeEditor {
                 key_context.add("cursor_before_ghost_text");
             }
         }
+        // Monaco `inlineEditIsVisible`, `cursorAtInlineEdit`,
+        // `tabShouldJumpToInlineEdit` and `tabShouldAcceptInlineEdit`.
+        if self.inline_edit_visible(cx) {
+            key_context.add("inline_edit_visible");
+            if self.cursor_at_inline_edit(cx) {
+                key_context.add("cursor_at_inline_edit");
+            }
+            if self.tab_should_jump_to_inline_edit(cx) {
+                key_context.add("tab_should_jump_to_inline_edit");
+            }
+            if self.tab_should_accept_inline_edit(cx) {
+                key_context.add("tab_should_accept_inline_edit");
+            }
+        }
         let root = div()
             .id("code-editor")
             .key_context(key_context)
@@ -4405,6 +4429,14 @@ impl Render for CodeEditor {
             .on_action(
                 cx.listener(|this, _: &ToggleAlwaysShowInlineSuggestionToolbar, _, cx| {
                     this.toggle_always_show_inline_toolbar(cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &JumpToNextInlineEdit, _, cx| {
+                this.jump_to_next_inline_edit(cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &ToggleInlineSuggestionShowCollapsed, _, cx| {
+                    this.toggle_inline_edits_show_collapsed(cx)
                 }),
             )
             .on_modifiers_changed(cx.listener(
