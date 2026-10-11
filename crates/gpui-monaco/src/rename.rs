@@ -173,8 +173,7 @@ impl CodeEditor {
         }
         self.cancel_rename(false, cx);
         let model = self.model().read(cx);
-        let language = model.language_id().map(|l| l.to_string());
-        let providers = rename_providers(cx, language.as_deref());
+        let providers = rename_providers(cx, self.provider_target(cx));
         if providers.is_empty() {
             return;
         }
@@ -328,9 +327,8 @@ impl CodeEditor {
             return;
         }
         let model = self.model().read(cx);
-        let language = model.language_id().map(|l| l.to_string());
         let context = model.provider_context();
-        let providers = rename_providers(cx, language.as_deref());
+        let providers = rename_providers(cx, self.provider_target(cx));
         let state = self.rename_state(cx);
         let tasks: Vec<_> = providers
             .iter()

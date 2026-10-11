@@ -130,8 +130,9 @@ impl CodeEditor {
         let language = self.model().read(cx).language_id().cloned();
         // Monaco asks again when providers come and go (the registry's
         // `onDidChange`), e.g. once a language server starts.
-        let providers = document_semantic_tokens_providers(cx, language.as_deref()).len() as u64
-            + document_range_semantic_tokens_providers(cx, language.as_deref()).len() as u64;
+        let providers = document_semantic_tokens_providers(cx, self.provider_target(cx)).len()
+            as u64
+            + document_range_semantic_tokens_providers(cx, self.provider_target(cx)).len() as u64;
         let epoch = cx
             .try_global::<SemanticTokensEpoch>()
             .map_or(0, |e| e.0)
@@ -228,10 +229,9 @@ impl CodeEditor {
             return;
         }
         let model = self.model().read(cx);
-        let language = model.language_id().map(|l| l.to_string());
         let context = model.provider_context();
         // The most recently registered first, as Monaco orders them.
-        let mut providers = document_semantic_tokens_providers(cx, language.as_deref());
+        let mut providers = document_semantic_tokens_providers(cx, self.provider_target(cx));
         providers.reverse();
         if providers.is_empty() {
             if !self.semantic.store.is_empty() {
@@ -423,7 +423,6 @@ impl CodeEditor {
                     return None;
                 }
                 let model = this.model().read(cx);
-                let language = model.language_id().map(|l| l.to_string());
                 let context = model.provider_context();
                 let max_row = model.buffer().max_point().row;
                 let end_row = rows.end.min(max_row);
@@ -431,7 +430,7 @@ impl CodeEditor {
                     ..PointUtf16::new(end_row, model.buffer().line_len_utf16(end_row));
                 let version = model.buffer().version();
                 let provider =
-                    document_range_semantic_tokens_providers(cx, language.as_deref()).pop()?;
+                    document_range_semantic_tokens_providers(cx, this.provider_target(cx)).pop()?;
                 let task =
                     provider.provide_document_range_semantic_tokens(&context, range.clone(), cx);
                 Some((provider, task, range, version))

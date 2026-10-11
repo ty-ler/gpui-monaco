@@ -396,12 +396,8 @@ impl Render for PostEditButton {
 use gpui::InteractiveElement as _;
 
 impl CodeEditor {
-    fn provider_context_now(&self, cx: &App) -> (ProviderContext, Option<String>) {
-        let model = self.model().read(cx);
-        (
-            model.provider_context(),
-            model.language_id().map(|l| l.to_string()),
-        )
+    fn provider_context_now(&self, cx: &App) -> ProviderContext {
+        self.model().read(cx).provider_context()
     }
 
     /// Monaco `DropIntoEditorController.onDropIntoEditor`: runs the drop
@@ -420,8 +416,8 @@ impl CodeEditor {
         }
         self.clear_post_edit(cx);
         self.set_selections(&[Selection::collapsed(position)], cx);
-        let (context, language) = self.provider_context_now(cx);
-        let providers: Vec<_> = crate::providers::drop_edit_providers(cx, language.as_deref())
+        let context = self.provider_context_now(cx);
+        let providers: Vec<_> = crate::providers::drop_edit_providers(cx, self.provider_target(cx))
             .into_iter()
             .filter(|provider| {
                 provider
@@ -516,8 +512,7 @@ impl CodeEditor {
         only: Option<&str>,
         cx: &App,
     ) -> Vec<Arc<dyn DocumentPasteEditProvider>> {
-        let language = self.model().read(cx).language_id().map(|l| l.to_string());
-        crate::providers::paste_edit_providers(cx, language.as_deref())
+        crate::providers::paste_edit_providers(cx, self.provider_target(cx))
             .into_iter()
             .filter(|provider| {
                 provider
@@ -542,7 +537,7 @@ impl CodeEditor {
         trigger: DocumentPasteTriggerKind,
         cx: &mut App,
     ) -> Vec<Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>>> {
-        let (context, _) = self.provider_context_now(cx);
+        let context = self.provider_context_now(cx);
         providers
             .iter()
             .map(|p| p.provide_document_paste_edits(&context, ranges, data, trigger, cx))

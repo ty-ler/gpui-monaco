@@ -161,10 +161,9 @@ impl CodeEditor {
             return false;
         }
         let model = self.model().read(cx);
-        let language = model.language_id().map(|l| l.to_string());
         let context = model.provider_context();
         let options = self.formatting_options(cx);
-        if let Some(provider) = document_formatting_providers(cx, language.as_deref())
+        if let Some(provider) = document_formatting_providers(cx, self.provider_target(cx))
             .into_iter()
             .next()
         {
@@ -210,8 +209,7 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) -> bool {
         let model = self.model().read(cx);
-        let language = model.language_id().map(|l| l.to_string());
-        let Some(provider) = document_range_formatting_providers(cx, language.as_deref())
+        let Some(provider) = document_range_formatting_providers(cx, self.provider_target(cx))
             .into_iter()
             .next()
         else {
@@ -220,6 +218,30 @@ impl CodeEditor {
         let context = model.provider_context();
         let options = self.formatting_options(cx);
         let mut ranges = merge_ranges(ranges);
+        // Monaco: a provider that formats several ranges at once gets them
+        // all.
+        if let Some(task) =
+            provider.provide_document_ranges_formatting_edits(&context, &ranges, options, cx)
+        {
+            let state = self.format_state(cx);
+            self.format_task = Some(cx.spawn(async move |this, cx| {
+                let edits = match task.await {
+                    Ok(edits) => edits,
+                    Err(err) => {
+                        log::warn!("formatting failed: {err:#}");
+                        return;
+                    }
+                };
+                this.update(cx, |this, cx| {
+                    if this.format_state(cx) == state {
+                        this.apply_format_edits(edits, explicit, cx);
+                    }
+                    this.format_task = None;
+                })
+                .ok();
+            }));
+            return true;
+        }
         let requests: Vec<Task<anyhow::Result<Vec<TextEdit>>>> = ranges
             .iter()
             .map(|range| {
@@ -361,8 +383,7 @@ impl CodeEditor {
             return;
         }
         let model = self.model().read(cx);
-        let language = model.language_id().map(|l| l.to_string());
-        let Some(provider) = on_type_formatting_providers(cx, language.as_deref())
+        let Some(provider) = on_type_formatting_providers(cx, self.provider_target(cx))
             .into_iter()
             .next()
             .filter(|p| p.auto_format_trigger_characters().contains(&ch))

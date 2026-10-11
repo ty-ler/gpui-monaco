@@ -126,10 +126,9 @@ fn fix_space(text: &str) -> String {
 
 impl CodeEditor {
     fn inlay_hints_active(&self, cx: &gpui::App) -> bool {
-        let language = self.model().read(cx).language_id().map(|l| l.to_string());
         self.options.inlay_hints.enabled != InlayHintsMode::Off
             && !self.options.single_line
-            && !inlay_hints_providers(cx, language.as_deref()).is_empty()
+            && !inlay_hints_providers(cx, self.provider_target(cx)).is_empty()
     }
 
     /// Requests hints for the viewport after `delay` (Monaco's
@@ -204,8 +203,7 @@ impl CodeEditor {
             );
         let model = self.model().read(cx);
         let context = model.provider_context();
-        let language = model.language_id().map(|l| l.to_string());
-        inlay_hints_providers(cx, language.as_deref())
+        inlay_hints_providers(cx, self.provider_target(cx))
             .into_iter()
             .map(|provider| {
                 let task = provider.provide_inlay_hints(&context, range.clone(), cx);

@@ -42,6 +42,8 @@ pub(crate) struct CodeLensState {
     groups: Vec<Group>,
     /// The version the lenses were requested for.
     version: Option<text::Version>,
+    /// The `refresh_code_lenses` count they were requested at.
+    epoch: u64,
     pending: Option<text::Version>,
     task: Option<Task<()>>,
     resolve_task: Option<Task<()>>,
@@ -135,11 +137,10 @@ impl CodeEditor {
     /// after a pause otherwise. Called before painting.
     pub(crate) fn refresh_code_lenses(&mut self, cx: &mut Context<Self>) {
         let model = self.model().read(cx);
-        let language = model.language_id().map(|l| l.to_string());
         // Monaco: no lenses for models too large to tokenize.
         if !self.options.code_lens
             || model.is_too_large_for_tokenization()
-            || code_lens_providers(cx, language.as_deref()).is_empty()
+            || code_lens_providers(cx, self.provider_target(cx)).is_empty()
         {
             if !self.code_lens.groups.is_empty() || self.code_lens.task.is_some() {
                 self.clear_code_lenses(cx);
@@ -147,11 +148,17 @@ impl CodeEditor {
             return;
         }
         let version = model.buffer().version();
-        if self.code_lens.version.as_ref() == Some(&version)
-            || self.code_lens.pending.as_ref() == Some(&version)
+        // `refresh_code_lenses` asks again for the same text.
+        let epoch = cx
+            .try_global::<crate::providers::CodeLensEpoch>()
+            .map_or(0, |e| e.0);
+        if epoch == self.code_lens.epoch
+            && (self.code_lens.version.as_ref() == Some(&version)
+                || self.code_lens.pending.as_ref() == Some(&version))
         {
             return;
         }
+        self.code_lens.epoch = epoch;
         let delay = if self.code_lens.version.is_some() {
             self.code_lens_delay()
         } else {
@@ -165,8 +172,7 @@ impl CodeEditor {
             let Ok(requests) = this.update(cx, |this, cx| {
                 let model = this.model().read(cx);
                 let context = model.provider_context();
-                let language = model.language_id().map(|l| l.to_string());
-                code_lens_providers(cx, language.as_deref())
+                code_lens_providers(cx, this.provider_target(cx))
                     .into_iter()
                     .enumerate()
                     .map(|(rank, provider)| {

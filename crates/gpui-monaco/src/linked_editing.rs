@@ -43,8 +43,7 @@ impl CodeEditor {
             return false;
         }
         let model = self.model().read(cx);
-        let language = model.language_id().map(|l| l.to_string());
-        !linked_editing_range_providers(cx, language.as_deref()).is_empty()
+        !linked_editing_range_providers(cx, self.provider_target(cx)).is_empty()
             || model.syntax_snapshot().is_some()
     }
 
@@ -277,12 +276,11 @@ impl CodeEditor {
         }
         let model = self.model().read(cx);
         self.linked.requested = Some((position, version));
-        let language = model.language_id().map(|l| l.to_string());
         let language_pattern = model
             .language()
             .and_then(|language| language.config.word_pattern.clone());
         let context = model.provider_context();
-        let providers = linked_editing_range_providers(cx, language.as_deref());
+        let providers = linked_editing_range_providers(cx, self.provider_target(cx));
         // Without providers: HTML tag names from the syntax tree.
         let built_in = providers.is_empty().then(|| {
             let offset = model.buffer().point_utf16_to_offset(position);

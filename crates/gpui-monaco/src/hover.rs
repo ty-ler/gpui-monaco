@@ -1393,8 +1393,7 @@ impl CodeEditor {
         }));
         let model = self.model().read(cx);
         let context = model.provider_context();
-        let language = model.language_id().map(|l| l.to_string());
-        let providers = hover_providers(cx, language.as_deref());
+        let providers = hover_providers(cx, self.provider_target(cx));
         let tasks = providers
             .into_iter()
             .map(|provider| {
@@ -1478,9 +1477,8 @@ impl CodeEditor {
         };
         let style = self.markdown_style();
         let theme = self.theme.clone();
-        let language = self.model().read(cx).language_id().map(|l| l.to_string());
         let quick_fix =
-            !crate::providers::code_action_providers(cx, language.as_deref()).is_empty();
+            !crate::providers::code_action_providers(cx, self.provider_target(cx)).is_empty();
         let editor = cx.entity().downgrade();
         let line_height = self.options.resolved_line_height();
         // Monaco `ContentHoverWidget._updateMaxDimensions`.

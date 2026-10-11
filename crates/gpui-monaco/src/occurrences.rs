@@ -160,8 +160,7 @@ impl CodeEditor {
 
         let model = self.model().read(cx);
         let context = model.provider_context();
-        let language = model.language_id().map(|l| l.to_string());
-        let providers = document_highlight_providers(cx, language.as_deref());
+        let providers = document_highlight_providers(cx, self.provider_target(cx));
         let rope = self.snapshot.rope().clone();
         let text = rope.text_for_range(
             rope.point_utf16_to_offset(word.start)..rope.point_utf16_to_offset(word.end),

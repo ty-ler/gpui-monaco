@@ -33,8 +33,7 @@ impl CodeEditor {
     ) -> Vec<Task<anyhow::Result<Vec<Location>>>> {
         let model = self.model().read(cx);
         let context = model.provider_context();
-        let language = model.language_id().map(|l| l.to_string());
-        definition_providers(cx, language.as_deref())
+        definition_providers(cx, self.provider_target(cx))
             .into_iter()
             .map(|provider| provider.provide_definition(&context, position, cx))
             .collect()

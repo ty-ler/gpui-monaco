@@ -179,7 +179,7 @@ impl CodeEditor {
         }
         let model = self.model().read(cx);
         let language = model.language_id().map(|l| l.to_string());
-        let providers = document_symbol_providers(cx, language.as_deref()).len();
+        let providers = document_symbol_providers(cx, self.provider_target(cx)).len();
         let parsed = model.syntax_snapshot().map(|syntax| syntax.text.version());
         let key: StickyKey = (
             model.buffer().version(),

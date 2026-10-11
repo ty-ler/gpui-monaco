@@ -106,8 +106,7 @@ impl CodeEditor {
     /// providers.
     pub fn document_symbols(&self, cx: &mut App) -> Task<Vec<DocumentSymbol>> {
         let model = self.model().read(cx);
-        let language = model.language_id().map(|l| l.to_string());
-        let providers = document_symbol_providers(cx, language.as_deref());
+        let providers = document_symbol_providers(cx, self.provider_target(cx));
         if providers.is_empty() {
             let Some(syntax) = model.syntax_snapshot() else {
                 return Task::ready(Vec::new());

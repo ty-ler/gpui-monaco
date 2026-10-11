@@ -184,6 +184,7 @@ impl Grammar {
 
 /// A language: identity, file associations, editing configuration and an
 /// optional grammar.
+#[derive(Clone)]
 pub struct Language {
     /// Stable identifier, like Monaco's language id (e.g. `typescriptreact`).
     pub id: Arc<str>,
@@ -193,12 +194,21 @@ pub struct Language {
     pub aliases: Vec<String>,
     /// File extensions without the dot, matched case-insensitively.
     pub extensions: Vec<String>,
-    /// Exact file names, matched case-sensitively (e.g. `Cargo.lock`).
+    /// Exact file names, matched case-insensitively as in Monaco (e.g.
+    /// `Cargo.lock`).
     pub file_names: Vec<String>,
+    /// Glob patterns for file names, or whole paths when they contain a
+    /// `/` (Monaco `filenamePatterns`), e.g. `*.config.js`.
+    pub filename_patterns: Vec<String>,
+    /// A regex for the first line, used when no file name matches (Monaco
+    /// `firstLine`), e.g. `^#!.*\bpython`.
+    pub first_line: Option<String>,
+    /// MIME types (Monaco `mimetypes`), e.g. `text/x-rust`.
+    pub mimetypes: Vec<String>,
     /// Editing rules from `language-configuration.json`.
     pub config: LanguageConfiguration,
     /// The tree-sitter grammar; `None` means no syntax highlighting.
-    pub grammar: Option<Grammar>,
+    pub grammar: Option<Arc<Grammar>>,
     /// Hidden languages (e.g. `markdown_inline`) are only used as injections.
     pub hidden: bool,
     /// Builds a custom [`Highlighter`] for models of this language instead of
@@ -220,6 +230,9 @@ impl Language {
             aliases: Vec::new(),
             extensions: Vec::new(),
             file_names: Vec::new(),
+            filename_patterns: Vec::new(),
+            first_line: None,
+            mimetypes: Vec::new(),
             config: LanguageConfiguration::default(),
             grammar: None,
             hidden: false,
@@ -245,6 +258,24 @@ impl Language {
         self
     }
 
+    /// Sets [`Language::filename_patterns`].
+    pub fn with_filename_patterns(mut self, patterns: &[&str]) -> Self {
+        self.filename_patterns = patterns.iter().map(|p| p.to_string()).collect();
+        self
+    }
+
+    /// Sets [`Language::first_line`].
+    pub fn with_first_line(mut self, pattern: &str) -> Self {
+        self.first_line = Some(pattern.to_string());
+        self
+    }
+
+    /// Sets [`Language::mimetypes`].
+    pub fn with_mimetypes(mut self, mimetypes: &[&str]) -> Self {
+        self.mimetypes = mimetypes.iter().map(|m| m.to_string()).collect();
+        self
+    }
+
     /// Sets [`Language::config`].
     pub fn with_config(mut self, config: LanguageConfiguration) -> Self {
         self.config = config;
@@ -253,7 +284,7 @@ impl Language {
 
     /// Sets [`Language::grammar`].
     pub fn with_grammar(mut self, grammar: Grammar) -> Self {
-        self.grammar = Some(grammar);
+        self.grammar = Some(Arc::new(grammar));
         self
     }
 
@@ -353,23 +384,157 @@ impl LanguageRegistry {
             .cloned()
     }
 
-    /// Finds a visible language by file name or extension.
+    /// Finds a visible language by file name, file name pattern or
+    /// extension (Monaco's `getAssociationByPath`): an exact file name wins,
+    /// then the longest matching pattern, then the longest matching
+    /// extension; among equals, the language registered last. Matching
+    /// ignores case.
     pub fn language_for_path(&self, path: &Path) -> Option<Arc<Language>> {
-        let file_name = path.file_name()?.to_str()?;
-        let extension = path.extension().and_then(|e| e.to_str());
+        let path = path.to_str()?.replace('\\', "/").to_lowercase();
+        let file_name = path.rsplit('/').next().unwrap_or(&path).to_string();
+        let languages = self.languages.read().unwrap_or_else(|e| e.into_inner());
+        let mut pattern_match: Option<(usize, &Arc<Language>)> = None;
+        let mut extension_match: Option<(usize, &Arc<Language>)> = None;
+        for language in languages.iter().rev().filter(|l| !l.hidden) {
+            if language
+                .file_names
+                .iter()
+                .any(|name| name.to_lowercase() == file_name)
+            {
+                return Some(language.clone());
+            }
+            for pattern in &language.filename_patterns {
+                if pattern_match.is_none_or(|(len, _)| pattern.len() > len) {
+                    let target = if pattern.contains('/') {
+                        &path
+                    } else {
+                        &file_name
+                    };
+                    if glob_matches(&pattern.to_lowercase(), target) {
+                        pattern_match = Some((pattern.len(), language));
+                    }
+                }
+            }
+            for extension in &language.extensions {
+                let extension = format!(".{}", extension.trim_start_matches('.').to_lowercase());
+                if extension_match.is_none_or(|(len, _)| extension.len() > len)
+                    && file_name.ends_with(&extension)
+                {
+                    extension_match = Some((extension.len(), language));
+                }
+            }
+        }
+        pattern_match
+            .or(extension_match)
+            .map(|(_, language)| language.clone())
+    }
+
+    /// Monaco `guessLanguageIdByFilepathOrFirstLine`: by `path` (see
+    /// [`LanguageRegistry::language_for_path`]), else by the first line's
+    /// [`Language::first_line`] regex (the language registered last wins).
+    pub fn language_for_path_or_first_line(
+        &self,
+        path: Option<&Path>,
+        first_line: Option<&str>,
+    ) -> Option<Arc<Language>> {
+        if let Some(language) = path.and_then(|path| self.language_for_path(path)) {
+            return Some(language);
+        }
+        let first_line = first_line?;
+        let first_line = first_line.strip_prefix('\u{feff}').unwrap_or(first_line);
+        if first_line.is_empty() {
+            return None;
+        }
         let languages = self.languages.read().unwrap_or_else(|e| e.into_inner());
         languages
             .iter()
-            .filter(|language| !language.hidden)
+            .rev()
+            .filter(|l| !l.hidden)
             .find(|language| {
-                language.file_names.iter().any(|n| n == file_name)
-                    || extension.is_some_and(|ext| {
-                        language
-                            .extensions
-                            .iter()
-                            .any(|e| e.eq_ignore_ascii_case(ext))
-                    })
+                language.first_line.as_ref().is_some_and(|pattern| {
+                    fancy_regex::Regex::new(pattern)
+                        .is_ok_and(|regex| regex.is_match(first_line).unwrap_or(false))
+                })
             })
             .cloned()
     }
+
+    /// The language with this MIME type (Monaco `getLanguageIdByMimeType`).
+    pub fn language_for_mime_type(&self, mime_type: &str) -> Option<Arc<Language>> {
+        let languages = self.languages.read().unwrap_or_else(|e| e.into_inner());
+        languages
+            .iter()
+            .find(|language| language.mimetypes.iter().any(|m| m == mime_type))
+            .cloned()
+    }
+
+    /// Replaces the configuration of the language `id` (Monaco
+    /// `setLanguageConfiguration`). Returns whether it's registered. Models
+    /// pick it up when they next resolve their language.
+    pub fn set_configuration(&self, id: &str, config: LanguageConfiguration) -> bool {
+        let mut languages = self.languages.write().unwrap_or_else(|e| e.into_inner());
+        let Some(slot) = languages.iter_mut().find(|language| &*language.id == id) else {
+            return false;
+        };
+        let mut language = (**slot).clone();
+        language.config = config;
+        *slot = Arc::new(language);
+        true
+    }
+}
+
+/// Monaco's glob matching for file associations: `*` and `?` within a path
+/// segment, `**` across segments, `{a,b}` alternatives and `[...]` classes.
+pub fn glob_matches(pattern: &str, target: &str) -> bool {
+    glob_regex(pattern).is_some_and(|regex| regex.is_match(target))
+}
+
+fn glob_regex(pattern: &str) -> Option<regex::Regex> {
+    let mut out = String::from("^");
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+    let mut in_braces = false;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '*' if chars.get(i + 1) == Some(&'*') => {
+                // `**/` matches any number of segments, including none.
+                if chars.get(i + 2) == Some(&'/') {
+                    out.push_str("(?:[^/]*/)*");
+                    i += 3;
+                } else {
+                    out.push_str(".*");
+                    i += 2;
+                }
+                continue;
+            }
+            '*' => out.push_str("[^/]*"),
+            '?' => out.push_str("[^/]"),
+            '{' => {
+                in_braces = true;
+                out.push_str("(?:");
+            }
+            '}' if in_braces => {
+                in_braces = false;
+                out.push(')');
+            }
+            ',' if in_braces => out.push('|'),
+            '[' => {
+                let end = chars[i..].iter().position(|&c| c == ']')? + i;
+                let class: String = chars[i + 1..end].iter().collect();
+                let class = class
+                    .strip_prefix('!')
+                    .map_or(class.clone(), |rest| format!("^{rest}"));
+                out.push('[');
+                out.push_str(&class.replace('\\', "\\\\"));
+                out.push(']');
+                i = end + 1;
+                continue;
+            }
+            _ => out.push_str(&regex::escape(&c.to_string())),
+        }
+        i += 1;
+    }
+    out.push('$');
+    regex::Regex::new(&out).ok()
 }
