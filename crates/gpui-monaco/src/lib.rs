@@ -95,6 +95,7 @@ mod long_lines_helper;
 pub mod markdown;
 mod markers;
 mod message;
+mod minimap;
 mod model;
 pub mod mouse_target;
 mod multi_cursor;
@@ -142,7 +143,7 @@ pub use commands::{add_command, execute_command, register_command, unregister_co
 pub use context_keys::{ContextKey, ContextKeyValue};
 pub use decorations::{
     BlockDecoration, DecorationId, DecorationOptions, DecorationUnderline, InjectedText,
-    LeftBorder, OverviewRulerLane,
+    LeftBorder, MinimapDecoration, MinimapPosition, MinimapSectionHeaderStyle, OverviewRulerLane,
 };
 pub use editor::{CodeEditor, CodeEditorEvent, FoldingRegionState, FoldingViewState, ViewState};
 pub use editor_actions::{

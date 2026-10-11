@@ -36,6 +36,8 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
 - **Drop and paste:** GPUI delivers dropped files, not dragged text from other apps, and the clipboard's text only (no `text/html` or images), so the HTML provider only applies to data given to `drop_data`/providers directly. There's no relative path provider, because the editor has no workspace. Data prepared at copy time (`prepareDocumentPaste`) is kept in memory for the latest copy, as in Monaco, so it reaches pastes in the same app only. The options button is a small chip; its picker is the quick pick.
 - **Fonts:** `letterSpacing` and `fontVariations` aren't supported, because GPUI text has neither. Decorations can't change the font (`fontFamily`, `fontSize` and so on), because GPUI shapes a line in one font size. Taller lines from `line_height` stay uniform in the minimap and sticky scroll. A variable font's weight comes from `font_weight`.
 - **Minimap section headers:** `section_header_letter_spacing` is accepted but not applied, because GPUI text has no letter spacing.
+- **Minimap glyphs at `scale` 2 and 3 on Retina displays:** Monaco draws its built-in glyphs at scales 1 and 2 (in device pixels) and samples the editor font for larger ones. GPUI can't rasterize a font into a buffer, so larger scales enlarge the scale-2 glyphs.
+- **Minimap decoration colors:** `MinimapDecoration::color` is a resolved color, not a theme color id; markers take the theme's `minimap.{error,warning,info}Highlight`.
 - **Color picker:** the standalone picker isn't bound to a key (as in Monaco). It runs from the command palette or `ShowOrFocusStandaloneColorPicker`.
 - **Quick access:**
   - Symbols are matched with the suggest widget's fuzzy scorer, not VS Code's quick open scorer.

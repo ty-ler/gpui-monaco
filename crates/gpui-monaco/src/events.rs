@@ -138,8 +138,8 @@ pub struct ModelOptionsChange {
 /// (Monaco `IModelDecorationsChangedEvent`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DecorationsChange {
-    /// The minimap (Monaco `affectsMinimap`). Decorations don't show in
-    /// the minimap yet, so this is always `false`.
+    /// The minimap: a decoration with `minimap` options (Monaco
+    /// `affectsMinimap`).
     pub affects_minimap: bool,
     /// The overview ruler: a decoration with an `overview_ruler` mark or a
     /// marker `severity` (Monaco `affectsOverviewRuler`).
@@ -156,7 +156,7 @@ impl DecorationsChange {
     /// This change, plus what a decoration with `options` affects.
     pub(crate) fn with(self, options: &crate::decorations::DecorationOptions) -> Self {
         Self {
-            affects_minimap: self.affects_minimap,
+            affects_minimap: self.affects_minimap || options.minimap.is_some(),
             affects_overview_ruler: self.affects_overview_ruler
                 || options.overview_ruler.is_some()
                 || options.severity.is_some(),

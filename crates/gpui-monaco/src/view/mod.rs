@@ -9,6 +9,7 @@ mod fold_model_tests;
 pub mod folding;
 pub mod guides;
 pub mod line_breaks;
+pub(crate) mod minimap;
 pub mod prefix_sum;
 pub mod reveal;
 pub mod selections;

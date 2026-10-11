@@ -83,7 +83,7 @@ Issues are linked by number.
 | Folding: indentation and markers, gutter chevrons | `folding` | ✅ | |
 | Syntax and provider folding (`foldingStrategy`, `foldingMaximumRegions`) | `folding` | ✅ | #102 |
 | Fold level and recursive commands, fold navigation, manual ranges, unfold on `⋯` click, `foldingHighlight`, `foldingImportsByDefault` | `folding` | ✅ | #102 |
-| Minimap | `minimap` | ✅ | |
+| Minimap | `minimap` | ✅ Monaco's `MinimapLayout` (scroll, slider, start line), relative slider drags, click to reveal centered or drag (`fill`/`fit`), prebaked glyphs (`MinimapCharRenderer`) with `minimap.foregroundOpacity` and the light-theme variant, selection, find, occurrence, marker and custom decorations (`Inline`, `Gutter`), slider hover/active colors and the shadow. Scales above 2 device pixels enlarge the scale-2 glyphs; no touch gestures | #255 |
 | Minimap options (side, render characters, size, autohide), section headers | `minimap`, `sectionHeaders` | ✅ | #88, #203 |
 | Sticky scroll (outline, folding and indentation models) | `stickyScroll` | ✅ | |
 | Sticky scroll keyboard focus, toggle, folding controls, hover, scroll with editor | `stickyScroll` | ✅ | #106 |

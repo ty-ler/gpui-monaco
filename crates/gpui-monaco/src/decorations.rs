@@ -44,6 +44,44 @@ pub enum OverviewRulerLane {
     Full,
 }
 
+/// Monaco `MinimapPosition`: where a decoration shows in the minimap.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MinimapPosition {
+    /// Over the decorated characters, with a translucent band across the
+    /// line.
+    #[default]
+    Inline,
+    /// A 2px bar in the minimap's left gutter (e.g. dirty-diff marks).
+    Gutter,
+}
+
+/// Monaco `MinimapSectionHeaderStyle`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MinimapSectionHeaderStyle {
+    /// A label.
+    #[default]
+    Normal,
+    /// A label with a separator line above it.
+    Underlined,
+}
+
+/// Monaco `IModelDecorationMinimapOptions`: how a decoration shows in the
+/// minimap.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MinimapDecoration {
+    /// Its color (Monaco `color`, resolved). `None` draws no mark, as for
+    /// section headers; a marker's [`DecorationOptions::severity`] takes the
+    /// theme's `minimap.{error,warning,info}Highlight` instead.
+    pub color: Option<Hsla>,
+    /// Where it's drawn.
+    pub position: MinimapPosition,
+    /// Draws a section header at the decoration's first line (Monaco
+    /// `sectionHeaderStyle`).
+    pub section_header_style: Option<MinimapSectionHeaderStyle>,
+    /// The section header's label (Monaco `sectionHeaderText`).
+    pub section_header_text: Option<SharedString>,
+}
+
 /// Text injected before or after the decorated range (Monaco
 /// `before`/`after`). It's rendered inline but isn't part of the text.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -108,6 +146,8 @@ pub struct DecorationOptions {
     /// A mark in the overview ruler (the vertical scrollbar track) at the start row
     /// (Monaco `overviewRuler`).
     pub overview_ruler: Option<(Hsla, OverviewRulerLane)>,
+    /// How it shows in the minimap (Monaco `minimap`).
+    pub minimap: Option<MinimapDecoration>,
     /// Text shown before the range start (Monaco `before`).
     pub before: Option<InjectedText>,
     /// Text shown after the range end (Monaco `after`).

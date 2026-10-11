@@ -166,6 +166,8 @@ pub(crate) struct ViewAnimation {
     pub middle_scroll: Option<MiddleScroll>,
     pub scrollbars: ScrollbarFade,
     pub minimap: MinimapFade,
+    /// The minimap slider's fade (`minimap.showSlider: mouseover`).
+    pub minimap_slider: SliderFade,
     /// Inertial scrolling (`inertialScroll`).
     pub inertial: InertialScroll,
 }
@@ -183,6 +185,7 @@ impl Default for ViewAnimation {
             middle_scroll: None,
             scrollbars: ScrollbarFade::default(),
             minimap: MinimapFade::default(),
+            minimap_slider: SliderFade::default(),
             inertial: InertialScroll::default(),
         }
     }
@@ -435,6 +438,50 @@ impl MinimapFade {
         };
         let t = ((now - changed_at).as_secs_f32() / MINIMAP_FADE.as_secs_f32()).min(1.);
         self.from + (target - self.from) * ease(t)
+    }
+}
+
+/// Monaco's minimap slider with `showSlider: mouseover`: `opacity`
+/// changes over 100ms linearly (`.minimap.slider-mouseover .minimap-slider`
+/// in `minimap.css`).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SliderFade {
+    shown: bool,
+    changed_at: Option<Instant>,
+    /// The opacity the current transition started from.
+    from: f32,
+}
+
+/// The CSS `transition: opacity 100ms linear`.
+const SLIDER_FADE: Duration = Duration::from_millis(100);
+
+impl SliderFade {
+    /// (opacity, whether it's still changing) when it should show or not.
+    pub fn update(&mut self, shown: bool) -> (f32, bool) {
+        let now = Instant::now();
+        if shown != self.shown {
+            // The first frame shows the state without a transition.
+            self.from = if self.changed_at.is_some() {
+                self.opacity(now)
+            } else if shown {
+                1.
+            } else {
+                0.
+            };
+            self.shown = shown;
+            self.changed_at = Some(now);
+        }
+        let opacity = self.opacity(now);
+        (opacity, opacity != if self.shown { 1. } else { 0. })
+    }
+
+    fn opacity(&self, now: Instant) -> f32 {
+        let target = if self.shown { 1. } else { 0. };
+        let Some(changed_at) = self.changed_at else {
+            return target;
+        };
+        let t = ((now - changed_at).as_secs_f32() / SLIDER_FADE.as_secs_f32()).min(1.);
+        self.from + (target - self.from) * t
     }
 }
 

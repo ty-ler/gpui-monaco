@@ -164,25 +164,6 @@ fn collect_mark_headers(rope: &Rope, source: &str) -> Vec<SectionHeader> {
     headers
 }
 
-/// Monaco `_fitSectionHeader`: keeps `max_char_count` characters around
-/// an ellipsis in the middle.
-pub(crate) fn fit_section_header(text: &str, max_char_count: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max_char_count {
-        return text.to_string();
-    }
-    let keep = max_char_count;
-    let mut half = keep.div_ceil(2);
-    while half > 0 && chars[half - 1].is_whitespace() {
-        half -= 1;
-    }
-    let tail = keep - half;
-    let mut out: String = chars[..half].iter().collect();
-    out.push('…');
-    out.extend(&chars[chars.len() - tail..]);
-    out
-}
-
 #[derive(Default)]
 pub(crate) struct SectionHeaderState {
     pub headers: Vec<SectionHeader>,
@@ -340,11 +321,5 @@ mod tests {
         let rows: Vec<u32> = find(&text, None).into_iter().map(|h| h.0).collect();
         // Overlapping chunks don't repeat them.
         assert_eq!(rows, vec![0, 50, 100, 150, 200]);
-    }
-
-    #[test]
-    fn fitting_shortens_in_the_middle() {
-        assert_eq!(fit_section_header("Short", 10), "Short");
-        assert_eq!(fit_section_header("Hello wonderful world", 9), "Hello…orld");
     }
 }

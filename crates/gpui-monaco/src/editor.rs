@@ -513,7 +513,7 @@ pub struct CodeEditor {
     pub(crate) added_actions: Vec<crate::editor_actions::EditorActionDescriptor>,
     /// Context keys, the host's commands and their keybindings.
     pub(crate) commands: crate::editor_commands::EditorCommandsState,
-    pub(crate) minimap_cache: crate::element::MinimapCache,
+    pub(crate) minimap_cache: crate::minimap::MinimapCache,
     /// The editor font's measured character widths, for `Advanced`
     /// wrapping.
     pub(crate) char_widths: Option<Arc<crate::element::CharWidths>>,
@@ -527,7 +527,7 @@ pub struct CodeEditor {
     pub(crate) minimap_hovered: bool,
     /// The pointer is over the minimap's slider (`minimapSlider.hoverBackground`).
     pub(crate) minimap_slider_hovered: bool,
-    pub(crate) minimap_drag: Option<Pixels>,
+    pub(crate) minimap_drag: Option<crate::minimap::MinimapDrag>,
     fold_task: Option<Task<()>>,
     /// The editor has focus (Monaco `hasWidgetFocus`, for bracket matching).
     pub(crate) has_focus: bool,
@@ -3897,20 +3897,7 @@ impl CodeEditor {
             && minimap.interactive
             && minimap.bounds.contains(&event.position)
         {
-            // Clicking outside the slider centers the clicked line; then drag.
-            if !minimap.slider.contains(&event.position) {
-                let line = ((event.position.y - minimap.bounds.top() + minimap.scroll)
-                    / minimap.line_height)
-                    .floor()
-                    .max(0.);
-                let visible = layout.text_bounds.size.height;
-                self.scroll_top = (layout.metrics.line_height * line - visible / 2.).max(px(0.));
-                self.minimap_drag = Some(minimap.slider.size.height / 2.);
-            } else {
-                self.minimap_drag = Some(event.position.y - minimap.slider.top());
-            }
-            self.emit_scroll_changed(cx);
-            cx.notify();
+            self.minimap_mouse_down(minimap, event, cx);
             return;
         }
         if let Some(ix) = layout
@@ -4379,7 +4366,9 @@ impl CodeEditor {
                 .layout
                 .as_ref()
                 .and_then(|layout| layout.minimap)
-                .is_some_and(|minimap| minimap.slider.contains(&event.position));
+                .is_some_and(|minimap| {
+                    minimap.slider_needed && minimap.slider.contains(&event.position)
+                });
         if minimap_hovered != self.minimap_hovered
             || minimap_slider_hovered != self.minimap_slider_hovered
         {
@@ -4387,17 +4376,8 @@ impl CodeEditor {
             self.minimap_slider_hovered = minimap_slider_hovered;
             cx.notify();
         }
-        if let Some(grab) = self.minimap_drag {
-            if event.pressed_button == Some(MouseButton::Left) {
-                if let Some(minimap) = self.layout.as_ref().and_then(|layout| layout.minimap) {
-                    let slider_top = event.position.y - grab - minimap.bounds.top();
-                    self.scroll_top = (slider_top * minimap.drag_ratio).max(px(0.));
-                    self.emit_scroll_changed(cx);
-                    cx.notify();
-                }
-                return;
-            }
-            self.minimap_drag = None;
+        if self.minimap_mouse_move(event, cx) {
+            return;
         }
         let gutter_hovered = self.layout.as_ref().is_some_and(|layout| {
             layout.bounds.contains(&event.position) && event.position.x < layout.text_bounds.left()

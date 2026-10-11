@@ -728,7 +728,7 @@ impl CodeEditor {
 /// frame and scroll smoothly (Monaco's default `ScrollType.Smooth`); the
 /// `*_with_scroll_type` variants take a [`ScrollType`].
 impl CodeEditor {
-    fn request_reveal(&mut self, request: PendingReveal, cx: &mut Context<Self>) {
+    pub(crate) fn request_reveal(&mut self, request: PendingReveal, cx: &mut Context<Self>) {
         self.pending_reveal = Some(request);
         self.autoscroll_requested = false;
         cx.notify();
