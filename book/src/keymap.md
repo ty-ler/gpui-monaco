@@ -73,3 +73,11 @@ div()
 ```
 
 You can also drive the editor directly. `CodeEditor` exposes many commands as methods: `undo`, `redo`, `fold`, `unfold`, `fold_all`, `go_to_definition`, `type_text`, `set_selections` and others.
+
+## Commands by Monaco id
+
+`editor.trigger(id, window, cx)` runs a command by its Monaco id, as Monaco's `trigger` does:
+- **Labelled actions** such as `"editor.action.commentLine"` or `"actions.findWithSelection"`. These are the ones the command palette lists and `run_action` and `supported_actions` know.
+- **Unlabelled commands** such as `"cursorDown"`, `"undo"`, `"deleteWordLeft"`, `"closeReferenceSearch"` or `"acceptAlternativeSelectedSuggestion"`.
+
+It falls back to GPUI action names (`"code_editor::CursorDown"`). `DiffEditor::trigger` also takes the diff editor's ids (`"diffEditor.revert"`, `"diffEditor.toggleCollapseUnchangedRegions"`, `"editor.action.accessibleDiffViewer.next"`, …) and passes any others to the modified editor.

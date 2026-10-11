@@ -565,3 +565,29 @@ fn the_gutter_menu_follows_scrolling_without_a_frame_of_lag(cx: &mut TestAppCont
     let after = diff.read_with(cx, |d, cx| d.gutter_spans_for_tests(cx));
     assert_eq!(after[0].0, before[0].0 - px(100.));
 }
+
+#[gpui::test]
+fn diff_editor_commands_by_monaco_id(cx: &mut TestAppContext) {
+    let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let modified = original.replace("line 50\n", "changed\n");
+    let (diff, cx) = setup(&original, &modified, cx);
+    let trigger = |name: &'static str, cx: &mut VisualTestContext| {
+        diff.update_in(cx, |d, window, cx| d.trigger(name, window, cx).unwrap());
+        paint(cx);
+    };
+    // Other ids go to the modified editor.
+    trigger("cursorBottom", cx);
+    let modified_editor = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    assert_eq!(
+        modified_editor.read_with(cx, |e, _| e.selections()[0].head),
+        PointUtf16::new(100, 0)
+    );
+    trigger("diffEditor.toggleCollapseUnchangedRegions", cx);
+    assert!(diff.read_with(cx, |d, _| d.options().hide_unchanged_regions.enabled));
+    assert!(!diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests().is_empty()));
+    trigger("diffEditor.showAllUnchangedRegions", cx);
+    assert!(diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests().is_empty()));
+    trigger("diffEditor.collapseAllUnchangedRegions", cx);
+    assert!(!diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests().is_empty()));
+    assert!(diff.update_in(cx, |d, window, cx| d.trigger("nope", window, cx).is_err()));
+}

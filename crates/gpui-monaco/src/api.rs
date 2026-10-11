@@ -260,8 +260,8 @@ impl CodeEditor {
         self.prev_edit_kind = None;
     }
 
-    /// Runs the editor action with Monaco id `name` (e.g.
-    /// `"editor.action.commentLine"`, or one from
+    /// Runs the editor action or command with Monaco id `name` (e.g.
+    /// `"editor.action.commentLine"`, `"cursorDown"`, or one from
     /// [`CodeEditor::add_action`]), or else the GPUI action named `name`
     /// (e.g. `"code_editor::CommentLine"`), as if its key were pressed in
     /// this editor (Monaco `trigger`). Fails for unknown names.
@@ -274,6 +274,9 @@ impl CodeEditor {
         if self.run_action(name, window, cx) {
             return Ok(());
         }
+        // Monaco's unlabelled commands (`cursorDown`, `undo`, …), then GPUI
+        // action names.
+        let name = crate::editor_actions::command_action_name(name).unwrap_or(name);
         let action = cx.build_action(name, None)?;
         window.focus(&self.focus_handle, cx);
         window.dispatch_action(action, cx);

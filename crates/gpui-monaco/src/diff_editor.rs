@@ -2721,6 +2721,57 @@ impl DiffEditor {
         self.move_to_compare
     }
 
+    /// Runs the diff editor command with Monaco id `name` (e.g.
+    /// `"diffEditor.revert"`, `"diffEditor.toggleCollapseUnchangedRegions"`,
+    /// `"editor.action.accessibleDiffViewer.next"`), or else the modified
+    /// editor's command (see [`CodeEditor::trigger`]).
+    pub fn trigger(
+        &mut self,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let toggle = |this: &mut Self, f: fn(&mut DiffEditorOptions), cx: &mut Context<Self>| {
+            let mut options = this.options.clone();
+            f(&mut options);
+            this.update_options(options, cx);
+        };
+        match name {
+            "diffEditor.revert" => self.revert_focused_range_mappings(window, cx),
+            "diffEditor.collapseAllUnchangedRegions" => self.collapse_all_unchanged_regions(cx),
+            "diffEditor.showAllUnchangedRegions" => self.show_all_unchanged_regions(cx),
+            "diffEditor.exitCompareMove" => self.set_move_to_compare(None, cx),
+            "diffEditor.toggleCollapseUnchangedRegions" => toggle(
+                self,
+                |o| o.hide_unchanged_regions.enabled = !o.hide_unchanged_regions.enabled,
+                cx,
+            ),
+            "diffEditor.toggleShowMovedCodeBlocks" => {
+                toggle(self, |o| o.show_moves = !o.show_moves, cx)
+            }
+            "diffEditor.toggleUseInlineViewWhenSpaceIsLimited" => toggle(
+                self,
+                |o| {
+                    o.use_inline_view_when_space_is_limited =
+                        !o.use_inline_view_when_space_is_limited
+                },
+                cx,
+            ),
+            "editor.action.accessibleDiffViewer.next" => {
+                self.accessible_diff_viewer_next(window, cx)
+            }
+            "editor.action.accessibleDiffViewer.prev" => {
+                self.accessible_diff_viewer_prev(window, cx)
+            }
+            _ => {
+                return self
+                    .modified
+                    .update(cx, |editor, cx| editor.trigger(name, window, cx));
+            }
+        }
+        Ok(())
+    }
+
     /// Monaco `goToDiff`: moves the modified editor's cursor to the next or
     /// previous change and reveals it.
     pub fn go_to_diff(&mut self, next: bool, window: &mut Window, cx: &mut Context<Self>) {
