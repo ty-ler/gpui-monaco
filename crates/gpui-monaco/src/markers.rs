@@ -4,9 +4,11 @@
 
 use std::ops::Range;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement, Render, SharedString, Styled, Window, div, px, rgb,
+    App, AppContext as _, Context, Entity, Hsla, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement, PathBuilder, Pixels, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled, Window, canvas, div, point, px, rgb,
 };
 use text::PointUtf16;
 
@@ -53,16 +55,22 @@ pub struct RelatedInformation {
 impl RelatedInformation {
     /// `file.rs(3, 5): message`, as Monaco lists it (1-based).
     pub(crate) fn label(&self) -> String {
+        format!("{}{}", self.location_label(None), self.message)
+    }
+
+    /// `file.rs(3, 5): `, Monaco's link before the message. `this_uri`
+    /// names the file when the information is in the same model.
+    pub(crate) fn location_label(&self, this_uri: Option<&str>) -> String {
         let name = self
             .uri
             .as_deref()
-            .map(|uri| uri.rsplit('/').next().unwrap_or(uri).to_string())
+            .or(this_uri)
+            .map(basename)
             .unwrap_or_default();
         format!(
-            "{name}({}, {}): {}",
+            "{name}({}, {}): ",
             self.range.start.row + 1,
             self.range.start.column + 1,
-            self.message
         )
     }
 
@@ -72,6 +80,12 @@ impl RelatedInformation {
             range: self.range.clone(),
         }
     }
+}
+
+/// The last path segment of `uri` (Monaco `basename`).
+fn basename(uri: &str) -> String {
+    let path = uri.split(['?', '#']).next().unwrap_or(uri);
+    path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
 impl MarkerSeverity {
@@ -119,17 +133,6 @@ impl Marker {
             (None, Some(code)) => Some(format!("({code})")),
             (None, None) => None,
         }
-    }
-
-    pub(crate) fn hover_text(&self) -> String {
-        let mut text = self.message.to_string();
-        match (&self.source, &self.code) {
-            (Some(source), Some(code)) => text.push_str(&format!(" `{source}({code})`")),
-            (Some(source), None) => text.push_str(&format!(" `{source}`")),
-            (None, Some(code)) => text.push_str(&format!(" `({code})`")),
-            (None, None) => {}
-        }
-        text
     }
 }
 
@@ -380,62 +383,283 @@ pub fn remove_all_markers(cx: &mut App, owner: &str) {
     }
 }
 
-/// The inline problem view shown by F8 (Monaco's marker navigation widget,
-/// shown as a view zone below the line).
+/// Monaco `MessageWidget.getHeightInLines`: the body shows at most this
+/// many lines and scrolls the rest.
+const MAX_BODY_LINES: usize = 17;
+
+/// The inline problem view shown by F8 / Alt+F8 and "View Problem" (Monaco
+/// `MarkerNavigationWidget`, a peek view below the marker's line): a header
+/// with the file name, "2 of 4 problems" and next/previous/close, and a
+/// scrollable body with the message, its source and code, and related
+/// information.
 pub struct MarkerZone {
     marker: Marker,
     index: usize,
     total: usize,
+    /// The model's uri, for the title and same-file related information.
+    uri: Option<SharedString>,
     colors: crate::theme::EditorColors,
+    font_family: SharedString,
+    font_size: Pixels,
+    line_height: Pixels,
     editor: gpui::WeakEntity<CodeEditor>,
+    scroll: ScrollHandle,
+    /// Where it was painted.
+    bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
+}
+
+impl MarkerZone {
+    /// Monaco `MessageWidget.update`'s line count: the message's lines, then
+    /// a spacer and one line per related information.
+    fn content_lines(marker: &Marker) -> usize {
+        let mut lines = marker.message.split('\n').count();
+        if !marker.related_information.is_empty() {
+            lines += 1 + marker.related_information.len();
+        }
+        lines
+    }
+
+    /// Monaco `computeRequiredHeight`: 3 lines (header, arrow, frame and
+    /// padding) plus the body, at most 17 lines of it.
+    fn required_height_in_lines(marker: &Marker) -> f32 {
+        3. + Self::content_lines(marker).min(MAX_BODY_LINES) as f32
+    }
+
+    fn severity_glyph(severity: MarkerSeverity) -> &'static str {
+        match severity {
+            MarkerSeverity::Error => "⊗",
+            MarkerSeverity::Warning => "⚠",
+            MarkerSeverity::Info | MarkerSeverity::Hint => "ⓘ",
+        }
+    }
+
+    fn header_action(
+        &self,
+        id: &'static str,
+        glyph: &'static str,
+        label: &'static str,
+        run: fn(&mut CodeEditor, &mut Context<CodeEditor>),
+    ) -> gpui::AnyElement {
+        let editor = self.editor.clone();
+        div()
+            .id(id)
+            .px(px(4.))
+            .rounded(px(3.))
+            .cursor_pointer()
+            .text_color(self.colors.peek_view_title_foreground)
+            .hover(|style| style.bg(self.colors.scrollbar_slider_hover))
+            .tooltip(crate::tooltip::tooltip(label, &self.colors))
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                cx.stop_propagation();
+                if let Some(editor) = editor.upgrade() {
+                    editor.update(cx, run);
+                }
+            })
+            .child(glyph)
+            .into_any_element()
+    }
 }
 
 impl Render for MarkerZone {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let color = self.marker.severity.color();
-        let title = format!(
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.colors.clone();
+        let frame = self.marker.severity.color();
+        // Monaco `editorMarkerNavigation*.headerBackground`: the frame color
+        // at 10%.
+        let header_background = Hsla { a: 0.1, ..frame };
+        let line_height = self.line_height;
+        // Monaco: the arrow is a third of a line tall, under the marker.
+        let arrow_height = (line_height / 3.).round();
+        let arrow_x = self
+            .editor
+            .upgrade()
+            .and_then(|editor| {
+                let editor = editor.read(cx);
+                let left = editor.layout.as_ref()?.bounds.left();
+                let position = editor.scrolled_visible_position(self.marker.range.start)?;
+                Some(position.x - left)
+            })
+            .unwrap_or(px(30.));
+        let detail = format!(
             "{} of {} problem{}",
             self.index + 1,
             self.total,
-            if self.total == 1 { "" } else { "s" }
+            if self.total > 1 { "s" } else { "" }
         );
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .border_t_2()
-            .border_b_2()
-            .border_color(color)
-            .bg(self.colors.widget_background)
-            .text_color(self.colors.widget_foreground)
-            .text_size(px(12.))
-            .px(px(8.))
-            .py(px(4.))
-            .gap(px(2.))
-            .child(div().text_color(color).child(title))
-            .child(self.marker.hover_text())
-            .children(
-                self.marker
-                    .related_information
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, related)| {
+        let title = self.uri.as_deref().map(basename).unwrap_or_default();
+        let link = colors.input_option_active_border;
+        let painted = self.bounds.clone();
+
+        // Monaco `MessageWidget`: one row per message line, the source and
+        // code after the last, dimmed.
+        let lines: Vec<String> = self
+            .marker
+            .message
+            .split('\n')
+            .map(str::to_string)
+            .collect();
+        let last = lines.len() - 1;
+        let mut message = div().flex().flex_col();
+        for (ix, line) in lines.into_iter().enumerate() {
+            let mut row = div().h(line_height).flex().whitespace_nowrap().child(line);
+            if ix == last && (self.marker.source.is_some() || self.marker.code.is_some()) {
+                row = row.child(
+                    div()
+                        .pl(px(6.))
+                        .flex()
+                        .opacity(0.6)
+                        .children(self.marker.source.clone())
+                        .children(self.marker.code.as_ref().map(|code| format!("({code})"))),
+                );
+            }
+            message = message.child(row);
+        }
+        let related = (!self.marker.related_information.is_empty()).then(|| {
+            div()
+                .pt((line_height * 0.66).floor())
+                .flex()
+                .flex_col()
+                .children(self.marker.related_information.iter().enumerate().map(
+                    |(ix, related)| {
                         let editor = self.editor.clone();
                         let location = related.location();
                         div()
-                            .id(("related", ix))
-                            .cursor_pointer()
-                            .text_color(self.colors.input_option_active_border)
-                            .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
-                                cx.stop_propagation();
-                                if let Some(editor) = editor.upgrade() {
-                                    editor.update(cx, |editor, cx| {
-                                        editor.open_location(&location, true, cx);
-                                    });
-                                }
-                            })
-                            .child(related.label())
-                    }),
+                            .h(line_height)
+                            .flex()
+                            .whitespace_nowrap()
+                            .child(
+                                div()
+                                    .id(("marker-related", ix))
+                                    .cursor_pointer()
+                                    .text_color(link)
+                                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        if let Some(editor) = editor.upgrade() {
+                                            editor.update(cx, |editor, cx| {
+                                                editor.open_location(&location, true, cx);
+                                            });
+                                        }
+                                    })
+                                    .child(related.location_label(self.uri.as_deref())),
+                            )
+                            .child(related.message.clone())
+                    },
+                ))
+        });
+
+        let header = div()
+            .h((line_height * 1.2).ceil())
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(8.))
+            .bg(header_background)
+            .text_size(px(13.))
+            .child(
+                div()
+                    .text_color(frame)
+                    .child(Self::severity_glyph(self.marker.severity)),
+            )
+            .when(!title.is_empty(), |this| {
+                this.child(
+                    div()
+                        .text_color(colors.peek_view_title_foreground)
+                        .child(title),
+                )
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .text_color(colors.peek_view_title_description_foreground)
+                    .child(detail),
+            )
+            .child(self.header_action(
+                "marker-next",
+                "↓",
+                "Go to Next Problem (Error, Warning, Info)",
+                |editor, cx| editor.go_to_marker(true, cx),
+            ))
+            .child(self.header_action(
+                "marker-previous",
+                "↑",
+                "Go to Previous Problem (Error, Warning, Info)",
+                |editor, cx| editor.go_to_marker(false, cx),
+            ))
+            .child(
+                self.header_action("marker-close", "✕", "Close", |editor, cx| {
+                    editor.close_marker_zone(cx);
+                }),
+            );
+
+        // Monaco's `ScrollableElement` around the description: both axes,
+        // since lines don't wrap.
+        let body = div()
+            .id("marker-body")
+            .flex_1()
+            .min_h_0()
+            .overflow_scroll()
+            .track_scroll(&self.scroll)
+            .bg(colors.background)
+            .text_color(colors.foreground)
+            .font_family(self.font_family.clone())
+            .text_size(self.font_size)
+            .line_height(line_height)
+            // The editor would scroll too: GPUI doesn't stop the wheel event.
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .pt(px(8.))
+                    .pr(px(12.))
+                    .pl(px(20.))
+                    .flex()
+                    .flex_col()
+                    .child(message)
+                    .children(related),
+            );
+
+        div()
+            .size_full()
+            .relative()
+            // Clicks in the widget don't reach the text behind it.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        painted.set(Some(bounds));
+                        let x = bounds.left() + arrow_x;
+                        let top = bounds.top();
+                        let mut path = PathBuilder::fill();
+                        path.move_to(point(x - arrow_height, top + arrow_height));
+                        path.line_to(point(x, top));
+                        path.line_to(point(x + arrow_height, top + arrow_height));
+                        path.close();
+                        if let Ok(path) = path.build() {
+                            window.paint_path(path, frame);
+                        }
+                    },
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .top(arrow_height)
+                    .flex()
+                    .flex_col()
+                    // Monaco `frameWidth: 1`.
+                    .border_t_1()
+                    .border_b_1()
+                    .border_color(frame)
+                    .child(header)
+                    .child(body),
             )
     }
 }
@@ -500,27 +724,57 @@ impl CodeEditor {
             &[crate::cursor::Selection::collapsed(marker.range.start)],
             cx,
         );
-        let lines = 1.
-            + (marker.hover_text().len() as f32 / 80.).ceil()
-            + marker.related_information.len() as f32;
+        // Monaco `ZoneWidget._getMaximumHeightInLines`: 80% of the editor,
+        // at least 12 lines.
+        let line_height = self.options.resolved_line_height();
+        let editor_lines = self
+            .layout_size()
+            .map_or(0., |size| size.height / line_height);
+        let max_lines = (editor_lines * 0.8).max(12.);
+        let lines = MarkerZone::required_height_in_lines(&marker).min(max_lines);
         let editor = cx.entity().downgrade();
+        let uri = self.model().read(cx).uri().cloned();
         let zone = cx.new(|_| MarkerZone {
             marker: marker.clone(),
             index,
             total: markers.len(),
+            uri,
             colors: self.theme.colors.clone(),
+            font_family: self.options.font_family.clone(),
+            font_size: self.options.font_size,
+            line_height,
             editor,
+            scroll: ScrollHandle::new(),
+            bounds: Default::default(),
         });
         let id = self.add_view_zone(
             ViewZone {
                 after_line: marker.range.start.row + 1,
-                height: ZoneHeight::Lines(lines + 0.5),
+                height: ZoneHeight::Lines(lines),
                 view: zone.clone().into(),
             },
             cx,
         );
         self.marker_navigation.zone = Some((zone, id));
         self.marker_navigation.index = Some(index);
+    }
+
+    /// The marker zone's painted bounds, its height in lines and its body's
+    /// scroll offset, for tests.
+    #[doc(hidden)]
+    pub fn marker_zone_for_tests(
+        &self,
+        cx: &App,
+    ) -> Option<(gpui::Bounds<Pixels>, f32, gpui::Point<Pixels>)> {
+        let (zone, _) = self.marker_navigation.zone.as_ref()?;
+        let zone = zone.read(cx);
+        let line_height = zone.line_height;
+        let bounds = zone.bounds.get()?;
+        Some((
+            bounds,
+            bounds.size.height / line_height,
+            zone.scroll.offset(),
+        ))
     }
 
     /// Closes the marker zone opened by [`CodeEditor::go_to_marker`]. Returns
