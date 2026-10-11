@@ -301,7 +301,7 @@ pub fn captures(
 #[cfg(test)]
 mod tests {
     //! Ported from Monaco's `test/common/model/textModelSearch.test.ts`.
-    //! Skipped: capture-match tests (we don't return captures), `\r` tests
+    //! The capture-match tests are in `tests/model_api.rs`. Skipped: `\r` tests
     //! (text is `\n`-normalized), and `\W`-crosses-newlines (Rust `\W` with
     //! line-by-line search matches Monaco only for multiline sources, which
     //! we treat the same).

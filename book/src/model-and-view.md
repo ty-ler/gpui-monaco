@@ -39,11 +39,13 @@ Other common calls:
 
 More `ITextModel` helpers:
 
-- **Lines:** `line_count`, `line_content` and `line_len_utf16`.
-- **Positions:** `validate_position` and `validate_range`, plus `offset_at` and `position_at` (byte offsets).
-- **Text:** `value_in_range`.
+- **Lines:** `line_count`, `line_content`, `line_len_utf16` and `lines_content`.
+- **Positions:** `validate_position` and `validate_range`, `offset_at` and `position_at` (byte offsets), `modify_position` (Monaco's UTF-16 offsets) and `full_model_range`.
+- **Text:** `value_in_range` and `value_length`.
 - **Words:** `word_at_position` and `word_until_position`, using the language's `wordPattern`.
-- **Search:** `find_matches`.
+- **Search:** `find_matches`, `find_matches_in` (with search scopes and regex captures), `find_next_match` and `find_previous_match`.
+- **Edits:** `apply_edits` returns the edits that undo it. `push_edit_operations` joins the open undo step until `push_stack_element`, and takes a cursor state computer. `pop_stack_element` reopens the last step. `alternative_version_id` returns to earlier values on undo and redo, so it can tell whether the text is back to a saved state.
+- **Brackets and guides:** `bracket_pairs_in_range`, `match_bracket`, `find_enclosing_brackets`, `lines_indent_guides` and `active_indent_guide`. Brackets in strings and comments don't count.
 
 A model emits `TextModelEvent::Edited` for each change. Subscribe to it with `cx.subscribe(&model, …)` to sync with something else, such as an LSP server. The event carries:
 

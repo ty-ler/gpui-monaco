@@ -1044,8 +1044,13 @@ impl CodeEditor {
             if operation.push_stack_element_before {
                 model.push_stack_element();
             }
-            let result =
-                model.push_edit_operations(Some(&cursor_rows), edits, group, Some(source), cx);
+            let result = model.push_cursor_edit_operations(
+                Some(&cursor_rows),
+                edits,
+                group,
+                Some(source),
+                cx,
+            );
             if let Ok(applied) = &result {
                 crate::model::shift_past_trimmed(selections_after, &applied.trimmed);
                 model.set_undo_metadata(

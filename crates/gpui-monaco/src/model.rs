@@ -650,7 +650,7 @@ impl TextModel {
     /// the previous edit auto-inserted (see [`AutoWhitespaceLines::edit`]).
     /// `edits` are flagged when they insert auto whitespace, and
     /// `cursor_rows` are the rows each cursor's selection spans.
-    pub(crate) fn push_edit_operations(
+    pub(crate) fn push_cursor_edit_operations(
         &mut self,
         cursor_rows: Option<&[RangeInclusive<u32>]>,
         edits: Vec<(Range<usize>, String, bool)>,
@@ -786,6 +786,12 @@ impl TextModel {
     /// `pushStackElement`).
     pub fn push_stack_element(&mut self) {
         self.buffer.push_stack_element();
+    }
+
+    /// Reopens the last undo step, so the next edits join it until
+    /// [`TextModel::push_stack_element`] (Monaco `popStackElement`).
+    pub fn pop_stack_element(&mut self) {
+        self.buffer.pop_stack_element();
     }
 
     /// Whether there's an undo step to undo.
