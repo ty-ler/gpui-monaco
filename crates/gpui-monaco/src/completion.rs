@@ -306,7 +306,18 @@ impl CodeEditor {
             .collect();
         let word_start = self.word_start_at(position);
         let word_end = self.word_end_at(position);
-        let words = (self.options.word_based_suggestions != WordBasedSuggestions::Off).then(|| {
+        // Monaco `offWithInlineSuggestions`: off while an inline
+        // completions provider serves this language and they're enabled.
+        let words_enabled = match self.options.word_based_suggestions {
+            WordBasedSuggestions::Off => false,
+            WordBasedSuggestions::OffWithInlineSuggestions => {
+                !self.options.inline_suggest.enabled
+                    || crate::providers::inline_completions_providers(cx, language.as_deref())
+                        .is_empty()
+            }
+            _ => true,
+        };
+        let words = words_enabled.then(|| {
             let (documents, regex) = self.word_sources(cx);
             let current: String = self
                 .snapshot

@@ -50,10 +50,10 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
 - **Word-based suggestions:** words are not ranked by distance from the cursor, and the documents are the models registered with `register_model`.
 - **Suggestion memories:** they are kept in memory for the app's lifetime, not persisted. The same goes for the suggest widget's size and whether details are expanded.
 - **Suggest widget:** the details panel goes beside the list or below it, never to the left or above. Its contents can't be focused or scrolled with the keyboard, and explain mode (`toggleExplainMode`) isn't ported. Icons are glyphs, not codicons.
-- **Missing commands:** code actions, rename, formatting, inlay hints, color decorators and links are not built in.
-- **Folding:** clicking the `⋯` placeholder doesn't unfold the region, and there is no folding by tree-sitter fold queries yet. Ranges come from indentation and markers.
+- **Code actions, rename, inlay hints:** there's no refactor preview, no rename suggestions, and inlay hint label parts can't be clicked. [`docs/MONACO_AUDIT.md`](https://github.com/ty-ler/gpui-monaco/blob/main/docs/MONACO_AUDIT.md) lists every known gap.
+- **Folding:** there is no folding by tree-sitter fold queries yet. Ranges come from indentation, markers and folding range providers.
 - **Accessibility:** screen readers get the lines around the selection as AccessKit text runs, as Monaco's hidden textarea does. Tab focus mode is announced only in Monaco: GPUI has no live announcements. `accessibilitySupport` isn't an option: the text runs are built whenever assistive technology is connected.
-- **Diff editor:** not available.
+- **Diff editor:** only Monaco's advanced diff algorithm exists, and there's no `maxFileSize` cut-off, `hideOriginalLineNumbers`, `compactMode` or `diffWordWrap` (#203).
 - **Long lines:** as in Monaco, very long lines stop rendering after `stop_rendering_line_after` with a "Show more (…)" chip. Clicking the chip doesn't expand the line; set the option to `None` to draw everything.
 
 ## Platform

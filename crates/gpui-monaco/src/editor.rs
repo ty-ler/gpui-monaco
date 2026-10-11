@@ -823,6 +823,8 @@ impl CodeEditor {
             insert_spaces: model_options.insert_spaces,
             word_separators: self.options.word_separators.to_string(),
             sticky_tab_stops: self.options.sticky_tab_stops,
+            use_tab_stops: self.options.use_tab_stops,
+            trim_whitespace_on_delete: self.options.trim_whitespace_on_delete,
             empty_selection_clipboard: self.options.empty_selection_clipboard,
             auto_closing_brackets: self.options.auto_closing_brackets,
             auto_closing_quotes: self.options.auto_closing_quotes,
@@ -834,7 +836,6 @@ impl CodeEditor {
             overtype: self.overtype,
             overtype_on_paste: self.options.overtype_on_paste,
             multi_cursor_paste: self.options.multi_cursor_paste,
-            ..CursorConfig::default()
         }
     }
 
