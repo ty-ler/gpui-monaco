@@ -59,7 +59,8 @@ Ranges are byte offsets. To convert from `PointUtf16`, use `model.buffer().point
 | `lines_decoration_text` | `linesDecorationsClassName` (icons) | text such as `+` in the line decorations area on each decorated line |
 | `block` | `blockClassName` + `blockPadding` | a bordered box around the decorated lines and the view zones above them |
 | `line_height` | `lineHeight` | the covered lines' height, as a multiple of the line height; text stays centered |
-| `glyph` | `glyphMarginClassName` | a short glyph in the glyph margin |
+| `glyph` | `glyphMarginClassName` | a short glyph in the glyph margin, on every line of the range; the highest `z_index` wins a lane |
+| `glyph_margin` | `glyphMargin` | the glyph's lane (`GlyphMarginLane::Left`, `Center` or `Right`), and `persist_lane` to keep the lane on every line; the margin is a line height wide per lane in use |
 | `glyph_margin_hover_message` | `glyphMarginHoverMessage` | markdown shown when the mouse rests on the row's glyph margin or line number |
 | `line_number_color` | `lineNumberClassName` | colors the line number |
 | `gutter_bar` | `linesDecorationsClassName` | a bar between the line numbers and the text |

@@ -198,6 +198,34 @@ pub enum CodeEditorEvent {
 /// Monaco's folding update scheduler waits at least this long.
 const FOLD_UPDATE_DELAY: Duration = Duration::from_millis(200);
 
+/// Monaco `collectSyntaxRanges`: the valid ranges from every folding range
+/// provider, ranked by registration order, or `None` when none answered.
+pub(crate) async fn collect_provided_folding_ranges(
+    providers: Vec<Task<anyhow::Result<Option<Vec<crate::providers::FoldingRange>>>>>,
+    line_count: u32,
+) -> Option<Vec<FoldingRangeData>> {
+    let mut provided: Option<Vec<FoldingRangeData>> = None;
+    for (rank, task) in providers.into_iter().enumerate() {
+        match task.await {
+            Ok(Some(ranges)) => provided.get_or_insert_default().extend(
+                ranges
+                    .into_iter()
+                    .filter(|r| r.start_row < r.end_row && r.end_row < line_count)
+                    .map(|r| FoldingRangeData {
+                        start: r.start_row,
+                        end: r.end_row,
+                        rank,
+                        kind: r.kind,
+                        manual: false,
+                    }),
+            ),
+            Ok(None) => {}
+            Err(err) => log::warn!("folding ranges failed: {err:#}"),
+        }
+    }
+    provided
+}
+
 /// Saved per-model view state (Monaco `ICodeEditorViewState`, from
 /// `saveViewState`).
 ///
@@ -470,6 +498,8 @@ pub struct CodeEditor {
     pub view_lines: Arc<ViewLines>,
     pub(crate) folds: FoldState,
     pub(crate) gutter_hovered: bool,
+    /// The row of the folding control under the mouse, for its tooltip.
+    fold_control_hovered: Option<u32>,
     pub(crate) widgets: Widgets,
     pub(crate) find: crate::find::FindState,
     pub(crate) multi_cursor: Option<crate::multi_cursor::MultiCursorSession>,
@@ -829,6 +859,7 @@ impl CodeEditor {
             view_lines: Arc::new(ViewLines::new(snapshot.rope().clone(), snapshot.version())),
             folds: FoldState::default(),
             gutter_hovered: false,
+            fold_control_hovered: None,
             widgets: Widgets::default(),
             find: crate::find::FindState::new(cx),
             multi_cursor: None,
@@ -1464,6 +1495,8 @@ impl CodeEditor {
             id,
             anchor,
             view: widget.view,
+            lane: widget.lane,
+            z_index: widget.z_index,
         });
         cx.notify();
         id
@@ -1647,6 +1680,82 @@ impl CodeEditor {
         self.layout
             .as_ref()
             .map_or_else(Vec::new, |l| l.line_number_labels.clone())
+    }
+
+    /// The line numbers of the last frame: row, left edge and color, for
+    /// tests.
+    #[doc(hidden)]
+    pub fn line_number_styles_for_tests(&self) -> Vec<(u32, Pixels, Hsla)> {
+        self.layout
+            .as_ref()
+            .map_or_else(Vec::new, |l| l.line_number_styles.clone())
+    }
+
+    /// The sticky lines of the last frame: row, visible bounds and folding
+    /// control bounds, topmost first, and the widget's height, for tests.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    pub fn sticky_lines_for_tests(
+        &self,
+    ) -> (Vec<(u32, Bounds<Pixels>, Option<Bounds<Pixels>>)>, Pixels) {
+        self.layout.as_ref().map_or((Vec::new(), px(0.)), |l| {
+            let lines = l
+                .sticky_lines
+                .iter()
+                .map(|line| (line.row, line.bounds, line.fold.map(|f| f.bounds)))
+                .collect();
+            let height = l
+                .sticky_lines
+                .iter()
+                .map(|line| line.bounds.bottom() - l.bounds.top())
+                .fold(px(0.), Pixels::max);
+            (lines, height)
+        })
+    }
+
+    /// The current line highlight's boxes in the last frame: view line,
+    /// whether it's the gutter's, bounds, background and whether it has a
+    /// border, for tests.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    pub fn line_highlights_for_tests(
+        &self,
+    ) -> Vec<(u32, bool, Bounds<Pixels>, Option<Hsla>, bool)> {
+        self.layout.as_ref().map_or_else(Vec::new, |l| {
+            l.line_highlights
+                .iter()
+                .map(|h| {
+                    (
+                        h.view_line,
+                        h.margin,
+                        h.bounds,
+                        h.background,
+                        h.border.is_some(),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// The glyph margin glyphs and widgets drawn in the last frame, as (view
+    /// line, lane index), for tests.
+    #[doc(hidden)]
+    pub fn glyphs_for_tests(&self) -> Vec<(u32, usize)> {
+        self.layout
+            .as_ref()
+            .map_or_else(Vec::new, |l| l.glyphs_drawn.clone())
+    }
+
+    /// The folding controls of the last frame: row, bounds and whether
+    /// collapsed, for tests.
+    #[doc(hidden)]
+    pub fn fold_controls_for_tests(&self) -> Vec<(u32, Bounds<Pixels>, bool)> {
+        self.layout.as_ref().map_or_else(Vec::new, |l| {
+            l.fold_controls
+                .iter()
+                .map(|c| (c.row, c.bounds, c.collapsed))
+                .collect()
+        })
     }
 
     /// The cursors of the last frame and whether they're outlined, for
@@ -3498,33 +3607,14 @@ impl CodeEditor {
             }
             let Ok(inputs) = this.update(cx, |this, cx| {
                 this.fold_computing = true;
-                this.fold_inputs(cx)
+                let strategy = this.options.folding_strategy;
+                this.fold_inputs(strategy, cx)
             }) else {
                 return;
             };
             let (snapshot, version, providers, compute) = inputs;
-            let line_count = snapshot.rope().line_count();
-            // Monaco `collectSyntaxRanges`: valid ranges from every provider,
-            // ranked by registration order.
-            let mut provided: Option<Vec<FoldingRangeData>> = None;
-            for (rank, task) in providers.into_iter().enumerate() {
-                match task.await {
-                    Ok(Some(ranges)) => provided.get_or_insert_default().extend(
-                        ranges
-                            .into_iter()
-                            .filter(|r| r.start_row < r.end_row && r.end_row < line_count)
-                            .map(|r| FoldingRangeData {
-                                start: r.start_row,
-                                end: r.end_row,
-                                rank,
-                                kind: r.kind,
-                                manual: false,
-                            }),
-                    ),
-                    Ok(None) => {}
-                    Err(err) => log::warn!("folding ranges failed: {err:#}"),
-                }
-            }
+            let provided =
+                collect_provided_folding_ranges(providers, snapshot.rope().line_count()).await;
             let ranges = cx
                 .background_executor()
                 .spawn(async move { compute(provided) })
@@ -3563,11 +3653,13 @@ impl CodeEditor {
         }));
     }
 
-    /// What computing fold ranges needs: the text, provider requests, and
-    /// the rest of the computation for a background thread.
+    /// What computing fold ranges with `strategy` needs: the text, provider
+    /// requests, and the rest of the computation for a background thread.
+    /// Sticky scroll computes its own with folding off.
     #[allow(clippy::type_complexity)]
-    fn fold_inputs(
+    pub(crate) fn fold_inputs(
         &mut self,
+        strategy: crate::options::FoldingStrategy,
         cx: &mut Context<Self>,
     ) -> (
         BufferSnapshot,
@@ -3587,7 +3679,7 @@ impl CodeEditor {
         let config = model
             .language()
             .map(|language| language.config.folding.clone());
-        let auto = self.options.folding_strategy == crate::options::FoldingStrategy::Auto;
+        let auto = strategy == crate::options::FoldingStrategy::Auto;
         let limit = self.options.folding_maximum_regions;
         let context = model.provider_context();
         let syntax = if auto { model.syntax_snapshot() } else { None };
@@ -3918,7 +4010,23 @@ impl CodeEditor {
         if self.over_widget(event.position) {
             return;
         }
-        window.focus(&self.focus_handle, cx);
+        // Monaco `_onMouseDown`: the glyph margin and line decorations
+        // (folding controls included) don't steal focus, nor do the line
+        // numbers unless they select (`selectOnLineNumbers`).
+        let keeps_focus = match mouse.target.kind {
+            crate::mouse_target::MouseTargetKind::GutterGlyphMargin
+            | crate::mouse_target::MouseTargetKind::GutterLineDecorations => true,
+            crate::mouse_target::MouseTargetKind::GutterLineNumbers => {
+                !self.options.select_on_line_numbers
+            }
+            _ => false,
+        };
+        if keeps_focus {
+            // Also keeps GPUI from focusing the editor's root on the click.
+            window.prevent_default();
+        } else {
+            window.focus(&self.focus_handle, cx);
+        }
         let Some(layout) = self.layout.clone() else {
             return;
         };
@@ -3938,12 +4046,8 @@ impl CodeEditor {
             self.minimap_mouse_down(minimap, event, cx);
             return;
         }
-        if let Some(ix) = layout
-            .sticky_lines
-            .iter()
-            .position(|line| line.bounds.contains(&event.position))
-        {
-            self.sticky_click(ix, event, cx);
+        if let Some(ix) = layout.sticky_line_at(event.position) {
+            self.sticky_mouse_down(ix, event);
             return;
         }
         for (vertical, bar) in [
@@ -4444,6 +4548,19 @@ impl CodeEditor {
             self.gutter_hovered = gutter_hovered;
             cx.notify();
         }
+        // The folding control under the mouse gets its tooltip on the next
+        // frame.
+        let fold_control_hovered = self.layout.as_ref().and_then(|layout| {
+            layout
+                .fold_controls
+                .iter()
+                .find(|control| control.bounds.contains(&event.position))
+                .map(|control| control.row)
+        });
+        if fold_control_hovered != self.fold_control_hovered {
+            self.fold_control_hovered = fold_control_hovered;
+            cx.notify();
+        }
         if event.pressed_button.is_none() && self.mouse_selection.is_none() {
             let over_hover = self
                 .hover_card_bounds(cx)
@@ -4468,9 +4585,17 @@ impl CodeEditor {
                 // Monaco's inlay hint parts are their own mouse targets.
                 let inlay_part = self.inlay_hint_part_at(event.position);
                 self.inlay_hints_mouse_move(inlay_part, link_modifier, cx);
-                let position = match inlay_part {
-                    Some(_) => None,
-                    None => self.text_position_under_mouse(event.position, window, cx),
+                // Over a sticky line, its own text (Monaco links its
+                // definitions for Cmd/Ctrl+click, and shows no hovers).
+                let over_sticky = self.layout.as_ref().and_then(|layout| {
+                    layout
+                        .sticky_line_at(event.position)
+                        .map(|ix| layout.sticky_position(ix, event.position))
+                });
+                let position = match (inlay_part, over_sticky) {
+                    (Some(_), _) => None,
+                    (None, Some(sticky)) => sticky.filter(|_| link_modifier),
+                    (None, None) => self.text_position_under_mouse(event.position, window, cx),
                 };
                 self.links_mouse_move(position, link_modifier, cx);
                 if link_modifier && position.is_some() {
@@ -4480,6 +4605,14 @@ impl CodeEditor {
                 }
                 if let Some(part) = inlay_part {
                     self.hover_inlay_hint_part(part, cx);
+                } else if over_sticky.is_some() {
+                    self.hover_mouse_move(
+                        crate::hover::HoverTarget::None,
+                        false,
+                        hover_focused,
+                        event.modifiers,
+                        cx,
+                    );
                 } else {
                     // Monaco's glyph hover: the glyph margin and line numbers.
                     let gutter_row = self.layout.as_ref().and_then(|layout| {
@@ -4709,6 +4842,7 @@ impl CodeEditor {
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.scrollbar_arrow_task = None;
+        self.sticky_mouse_up(event.position, event.button, event.modifiers, cx);
         let mut drop_target = None;
         if self
             .layout

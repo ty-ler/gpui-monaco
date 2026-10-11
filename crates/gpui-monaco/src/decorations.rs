@@ -102,6 +102,31 @@ pub struct InjectedText {
     pub font_size: Option<Pixels>,
 }
 
+/// A lane of the glyph margin (Monaco `GlyphMarginLane`). The margin is a
+/// line height wide per lane in use, so glyphs in different lanes on the
+/// same line show side by side.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum GlyphMarginLane {
+    /// The left lane.
+    Left = 1,
+    /// The center lane, the default.
+    #[default]
+    Center = 2,
+    /// The right lane.
+    Right = 3,
+}
+
+/// Where a decoration's glyph goes in the glyph margin (Monaco
+/// `IModelDecorationGlyphMarginOptions`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GlyphMarginOptions {
+    /// Its lane.
+    pub position: GlyphMarginLane,
+    /// Keep the lane in the margin on every line, not just the
+    /// decoration's (Monaco `persistLane`).
+    pub persist_lane: bool,
+}
+
 /// Monaco `IModelDecorationOptions`, with styles instead of class names.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DecorationOptions {
@@ -120,11 +145,15 @@ pub struct DecorationOptions {
     /// `shouldFillLineOnLineBreak`, as on the diff editor's changed
     /// characters).
     pub should_fill_line_on_line_break: bool,
-    /// A glyph shown in the glyph margin on the start row (Monaco
-    /// `glyphMarginClassName`). Codicon characters
+    /// A glyph shown in the glyph margin on every line of the range
+    /// (Monaco `glyphMarginClassName`). Codicon characters
     /// ([`Codicon::char`](crate::codicons::Codicon::char)) are drawn with
-    /// the codicon font.
+    /// the codicon font. Where glyphs share a lane, the highest
+    /// [`z_index`](Self::z_index) shows.
     pub glyph: Option<(SharedString, Hsla)>,
+    /// The glyph margin lane [`glyph`](Self::glyph) goes in (Monaco
+    /// `glyphMargin`); `None` is the center lane.
+    pub glyph_margin: Option<GlyphMarginOptions>,
     /// Markdown shown when the mouse rests on the start row's glyph margin
     /// or line number (Monaco `glyphMarginHoverMessage`).
     pub glyph_margin_hover_message: Option<SharedString>,
@@ -233,6 +262,9 @@ pub struct DecorationSet {
     sorted: bool,
     /// Bumped on every change, so views can cache what they derive.
     version: u64,
+    /// Whether a glyph picks its glyph margin lane, computed when asked
+    /// after a change.
+    has_glyph_lanes: std::cell::Cell<Option<bool>>,
 }
 
 impl DecorationSet {
@@ -278,6 +310,7 @@ impl DecorationSet {
         }
         self.sorted = false;
         self.version += 1;
+        self.has_glyph_lanes.set(None);
         ids
     }
 
@@ -288,6 +321,7 @@ impl DecorationSet {
             Some(decoration) => {
                 decoration.options = Arc::new(options);
                 self.version += 1;
+                self.has_glyph_lanes.set(None);
                 true
             }
             None => false,
@@ -309,6 +343,7 @@ impl DecorationSet {
         self.decorations.clear();
         self.max_len = 0;
         self.version += 1;
+        self.has_glyph_lanes.set(None);
         Some(change)
     }
 
@@ -317,6 +352,7 @@ impl DecorationSet {
     /// `None` when there were none.
     pub fn remove_owned_by(&mut self, owner: EntityId) -> Option<crate::events::DecorationsChange> {
         let mut change = None;
+        self.has_glyph_lanes.set(None);
         self.decorations.retain(|d| {
             if d.owner == Some(owner) {
                 change = Some(
@@ -424,6 +460,21 @@ impl DecorationSet {
             .filter(|d| d.owner.is_none() || d.owner == editor)
             .filter_map(|d| Some((d.range.clone(), d.options.line_height?)))
             .collect()
+    }
+
+    /// Whether a glyph picks its glyph margin lane, so the margin may need
+    /// more than one (most models' don't, which skips Monaco's per-frame
+    /// `_computeGlyphMarginLanes`).
+    pub(crate) fn has_glyph_lanes(&self) -> bool {
+        if let Some(has) = self.has_glyph_lanes.get() {
+            return has;
+        }
+        let has = self
+            .decorations
+            .iter()
+            .any(|d| d.options.glyph.is_some() && d.options.glyph_margin.is_some());
+        self.has_glyph_lanes.set(Some(has));
+        has
     }
 
     /// All decorations visible to `editor` (for the overview ruler).

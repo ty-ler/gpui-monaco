@@ -113,7 +113,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `changeViewZones(a => a.addZone(z))` | `add_view_zone(zone, cx)`, `set_view_zone_height`, `remove_widget` |
 | `addContentWidget(w)` / `layoutContentWidget(w)` | `add_content_widget(w, cx)` / `set_content_widget_position(…)` |
 | `addOverlayWidget(w)` | `add_overlay_widget(w, cx)` |
-| `addGlyphMarginWidget(w)` | `add_glyph_margin_widget(GlyphMarginWidget { row, view }, cx)` |
+| `addGlyphMarginWidget(w)` | `add_glyph_margin_widget(GlyphMarginWidget { row, view, lane, z_index }, cx)` |
 | `getContribution('editor.contrib.findController')` | the find methods on `CodeEditor` (`start_find`, …) |
 | `getFoldingModel()…` | `folding_ranges(cx)`, `collapsed_folds(cx)` |
 

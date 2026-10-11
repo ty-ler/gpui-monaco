@@ -69,8 +69,10 @@ Issues are linked by number.
 | Feature | Monaco | Status | Issue |
 |---|---|---|---|
 | Gutter: line numbers (on, off, relative, interval, custom function), glyph margin, line decorations, `selectOnLineNumbers` | view parts | ✅ | #203 |
+| Gutter fidelity: the primary cursor's active number, the left-aligned relative current line, the dimmed final newline, glyph margin lanes (`GlyphMarginLanesModel`, decoration `glyphMargin.position` and widget lanes and z-index), glyphs on every line of a range, folding controls' size, color, fade and tooltip, the "⋯" placeholder, gutter clicks keeping focus | `lineNumbers`, `glyphMargin`, `foldingDecorations`, `mouseHandler` | ✅ glyph margin widgets take a row, not a range; no manual-folding icons | #254 |
 | Cursor styles (line, block, underline, thin variants, block outline), `mouseStyle`, `mouseMiddleClickAction` | options | ✅ | #203 |
 | Current-line highlight, scrollbars, overview ruler, scroll shadow | view parts (`DecorationsOverviewRuler`, `OverviewZoneManager`, `ScrollDecorationViewPart`) | ✅ marks placed by Monaco's scroll-height formula (view zones, padding, scrolling beyond the last line), spanning their lines with a 6px minimum, merged per color and lane; 2px cursor marks in the multi-cursor colors; Monaco's lanes, border and background; the 6px top shadow; paged track clicks that keep dragging, rounded sliders, the 100ms fade-in | #256 |
+| Current-line highlight modes (`gutter` only in the gutter and kept with a selection), every cursor's line and wrapped lines, border and inactive color | `currentLineHighlight` | ✅ | #254 |
 | Scrollbar and overview ruler options | `scrollbar`, `overviewRuler*` | ✅ | #88 |
 | Word wrap: off, on, column, bounded; wrapping indent | `wordWrap` | ✅ | |
 | Wrap for proportional fonts (`wrappingStrategy: advanced`), configurable break characters | `wordWrap*` | ✅ | #87 |
@@ -79,7 +81,7 @@ Issues are linked by number.
 | Horizontal scrollbar left out of the content height | `scrollbar.ignoreHorizontalScrollbarInContentHeight` | ✅ | #228 |
 | Large file optimizations, default line ending | `largeFileOptimizations`, `defaultEOL` | ✅ | #203 |
 | Option validation: clamps and sentinel values (`fontSize` 0, `lineHeight` 0 and multipliers, sensitivities, minimap, sticky scroll, folding and color limits, delays, …), `tabSize`/`indentSize` at least 1, `indentSize: 'tabSize'` | each option's `validate`, `TextModelResolvedOptions` | ✅ the editor renders with `EditorOptions::validated`, `options()` returns the options as set | #262 |
-| Layout widths: a line-height glyph margin, 16px folding column (none with `showFoldingControls: never`), the minimap's proportional share and `fill`/`fit` sizing, `lineDecorationsWidth` in characters | `EditorLayoutInfoComputer.computeLayout` | ✅ one glyph margin lane (no lane decorations); the widest digit is the typical character width | #262 |
+| Layout widths: a line-height glyph margin, 16px folding column (none with `showFoldingControls: never`), the minimap's proportional share and `fill`/`fit` sizing, `lineDecorationsWidth` in characters | `EditorLayoutInfoComputer.computeLayout` | ✅ | #262, #254 |
 | Platform defaults, `cursorWidth` 0 and its cap | `renderFinalNewline` (dimmed on Linux), `defaultEOL` (CRLF on Windows), `cursorWidth` | ✅ | #262 |
 | Inertial scrolling, two-cell full-width characters | `inertialScroll`, `fullwidthCharacterWidth` | ✅ ghost text and the inline diff's deleted lines keep the font's width | #203, #228 |
 | Folding: indentation and markers, gutter chevrons | `folding` | ✅ | |
@@ -89,6 +91,7 @@ Issues are linked by number.
 | Minimap options (side, render characters, size, autohide), section headers | `minimap`, `sectionHeaders` | ✅ | #88, #203 |
 | Sticky scroll (outline, folding and indentation models) | `stickyScroll` | ✅ | |
 | Sticky scroll keyboard focus, toggle, folding controls, hover, scroll with editor | `stickyScroll` | ✅ | #106 |
+| Sticky scroll widget state (`findScrollWidgetState`, the pushed last line, the 25% cap), models without `folding`, `offSide`, column and chevron clicks, Cmd/Ctrl+click definition, decorations and inlay hints, shadow, border and gutter colors | `stickyScroll` | ✅ no sticky scroll context menu; the `mouseover` chevrons don't fade | #254 |
 | Render whitespace, indent guides, rulers, control characters | view parts | ✅ whitespace always as Monaco's default SVG marks (no `experimentalWhitespaceRendering`) | #84, #259 |
 | Cursor and selection rendering: block cursor text, view positions at wrap points, multi-cursor colors, selection corners and insets, view part paint order | `viewCursors`, `selections`, `CursorState.viewState` | ✅ the "Show more" chip has no 4px padding | #259 |
 | Bracket pair guides, `guides.highlightActiveIndentation: 'always'` | view parts | ✅ | #118, #203 |
