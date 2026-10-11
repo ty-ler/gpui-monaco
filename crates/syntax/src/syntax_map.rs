@@ -202,6 +202,65 @@ impl SyntaxSnapshot {
         snapshot
     }
 
+    /// Byte ranges of `text` whose syntax may differ from `old`'s, which was
+    /// parsed from `old_text` (`patch` being the edits since): the edits,
+    /// the root tree's changed ranges (tree-sitter `changed_ranges`), and
+    /// the injected layers that appeared, went or were edited. Unsorted.
+    pub fn changed_ranges(
+        &self,
+        old: &SyntaxSnapshot,
+        old_text: &Rope,
+        text: &Rope,
+        patch: &Patch,
+    ) -> Vec<Range<usize>> {
+        let edited: Vec<Range<usize>> = patch.edits().iter().map(|e| e.new.clone()).collect();
+        let mut changed = edited.clone();
+        match (old.root(), self.root()) {
+            (Some(old_root), Some(root)) => {
+                let mut old_tree = old_root.tree.clone();
+                for edit in input_edits(old_text, text, patch) {
+                    old_tree.edit(&edit);
+                }
+                changed.extend(
+                    old_tree
+                        .changed_ranges(&root.tree)
+                        .map(|r| r.start_byte..r.end_byte),
+                );
+            }
+            (None, None) => {}
+            _ => changed.push(0..text.len()),
+        }
+        let transform = |range: &Range<usize>| {
+            patch.transform_offset(range.start, text::Bias::Right)
+                ..patch.transform_offset(range.end, text::Bias::Left)
+        };
+        let key = |layer: &SyntaxLayer, extent: Range<usize>| (extent, layer.language.name.clone());
+        let old_layers: std::collections::HashSet<_> = old
+            .layers
+            .iter()
+            .skip(1)
+            .map(|layer| key(layer, transform(&layer.extent())))
+            .collect();
+        let new_layers: std::collections::HashSet<_> = self
+            .layers
+            .iter()
+            .skip(1)
+            .map(|layer| key(layer, layer.extent()))
+            .collect();
+        changed.extend(
+            old_layers
+                .symmetric_difference(&new_layers)
+                .map(|(extent, _)| extent.clone()),
+        );
+        changed.extend(
+            new_layers
+                .iter()
+                .map(|(extent, _)| extent.clone())
+                .filter(|extent| touched(std::slice::from_ref(extent), &edited)),
+        );
+        changed
+    }
+
     /// Re-parses after edits, reusing the previous trees. `old_text` must be
     /// the text this snapshot was parsed from and `patch` the edits from it to
     /// `text` (e.g. `buffer.edits_since(old_text.version())`).

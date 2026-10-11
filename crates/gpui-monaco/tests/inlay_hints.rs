@@ -363,9 +363,9 @@ fn cmd_click_follows_a_part(cx: &mut TestAppContext) {
     let ran = Rc::new(RefCell::new(Vec::new()));
     let sink = ran.clone();
     cx.update(|_, cx| {
-        gpui_monaco::register_command(cx, "test.showT", move |args, _| {
+        let _ = gpui_monaco::register_command(cx, "test.showT", move |args, _| {
             sink.borrow_mut().push(args.to_vec())
-        })
+        });
     });
     let position = part_point(&editor, "Foo", cx);
     cx.simulate_mouse_move(position, None, Modifiers::secondary_key());

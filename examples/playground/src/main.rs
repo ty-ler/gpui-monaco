@@ -865,8 +865,8 @@ fn add_demo_widgets(editor: &Entity<CodeEditor>, cx: &mut App) {
 fn add_demo_decorations(editor: &Entity<CodeEditor>, cx: &mut App) {
     use gpui::{hsla, rgb};
     use gpui_monaco::{
-        DecorationOptions, DecorationUnderline, GlyphMarginLane, GlyphMarginOptions, InjectedText,
-        OverviewRulerLane, TokenStyle,
+        DecorationColor, DecorationOptions, DecorationUnderline, GlyphMarginLane,
+        GlyphMarginOptions, InjectedText, OverviewRulerDecoration, OverviewRulerLane, TokenStyle,
     };
     let model = editor.read(cx).model().clone();
     model.update(cx, |model, cx| {
@@ -888,7 +888,10 @@ fn add_demo_decorations(editor: &Entity<CodeEditor>, cx: &mut App) {
                             color: error,
                             wavy: true,
                         }),
-                        overview_ruler: Some((error, OverviewRulerLane::Right)),
+                        overview_ruler: Some(OverviewRulerDecoration::new(
+                            error,
+                            OverviewRulerLane::Right,
+                        )),
                         hover_message: Some("demo error".into()),
                         glyph: Some(("●".into(), error)),
                         ..Default::default()
@@ -901,7 +904,12 @@ fn add_demo_decorations(editor: &Entity<CodeEditor>, cx: &mut App) {
                         is_whole_line: true,
                         gutter_bar: Some(rgb(0x2ea043).into()),
                         line_number_color: Some(rgb(0x2ea043).into()),
-                        overview_ruler: Some((rgb(0x2ea043).into(), OverviewRulerLane::Left)),
+                        // A theme color (Monaco `ThemeColor`), following theme
+                        // changes.
+                        overview_ruler: Some(OverviewRulerDecoration::new(
+                            DecorationColor::theme("editorOverviewRuler.rangeHighlightForeground"),
+                            OverviewRulerLane::Left,
+                        )),
                         // Monaco `lineHeight`: a taller line.
                         line_height: Some(1.8),
                         ..Default::default()

@@ -652,3 +652,44 @@ fn manual_overlay_widgets_get_the_editor(cx: &mut TestAppContext) {
         size(editor_bounds.size.width, editor_bounds.size.height)
     );
 }
+
+/// Monaco `setModel(null)` then a model again: zones go with the first
+/// model, and content and glyph widgets keep their positions for the next
+/// model (Monaco reads `getPosition()` again), not resolved against nothing.
+#[gpui::test]
+fn widgets_wait_for_a_model_after_set_model_none(cx: &mut TestAppContext) {
+    let text = "zero\none\ntwo\nthree\nfour\nfive\nsix\nseven";
+    let (editor, cx) = setup(text, cx);
+    let (zone, _) = Probe::new(cx);
+    let (content, content_bounds) = Probe::sized(cx, 20., 10.);
+    let (glyph, glyph_bounds) = Probe::new(cx);
+    editor.update(cx, |e, cx| {
+        e.add_view_zone(ViewZone::new(3, ZoneHeight::Lines(2.), zone.into()), cx);
+        e.add_content_widget(
+            ContentWidget::new(
+                p(5, 2),
+                vec![ContentWidgetPreference::Exact],
+                content.into(),
+            ),
+            cx,
+        );
+        e.add_glyph_margin_widget(GlyphMarginWidget::new(6, glyph), cx);
+    });
+    draw(cx);
+    let original = editor.read_with(cx, |e, _| e.model().clone());
+    editor.update(cx, |e, cx| e.set_model(None, cx));
+    draw(cx);
+    assert!(widget_bounds(&editor, EmbeddedKind::ViewZone, cx).is_empty());
+    editor.update(cx, |e, cx| e.set_model(original, cx));
+    content_bounds.set(None);
+    glyph_bounds.set(None);
+    draw(cx);
+    assert!(widget_bounds(&editor, EmbeddedKind::ViewZone, cx).is_empty());
+    let expected = editor
+        .read_with(cx, |e, _| e.scrolled_visible_position(p(5, 2)))
+        .unwrap();
+    let content = content_bounds.get().unwrap();
+    assert_near(content.left(), expected.x);
+    assert_eq!(content.top(), expected.y);
+    assert_eq!(glyph_bounds.get().unwrap().top(), line_top(&editor, cx, 6));
+}

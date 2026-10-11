@@ -67,9 +67,13 @@ pub enum CodeEditorEvent {
     /// [`TextModelEvent::OptionsChanged`].
     ModelOptionsChanged(ModelOptionsChange),
     /// New syntax highlighting is available for the model (Monaco's
-    /// editor-level `onDidChangeModelTokens`, without the line ranges),
-    /// forwarding [`TextModelEvent::SyntaxUpdated`].
-    ModelTokensChanged,
+    /// editor-level `onDidChangeModelTokens`), forwarding
+    /// [`TextModelEvent::SyntaxUpdated`].
+    ModelTokensChanged {
+        /// The rows whose highlights may have changed (0-based, inclusive;
+        /// Monaco `IModelTokensChangedEvent.ranges`).
+        ranges: Arc<[std::ops::RangeInclusive<u32>]>,
+    },
     /// The model's language configuration changed (Monaco's editor-level
     /// `onDidChangeModelLanguageConfiguration`), forwarding
     /// [`TextModelEvent::LanguageConfigurationChanged`].
@@ -633,6 +637,16 @@ pub struct CodeEditor {
     /// This editor is an input in one of the editor's widgets (see
     /// [`CodeEditor::new_widget_input`]).
     pub(crate) widget_input: bool,
+    /// The editor has no model (Monaco `setModel(null)`): `model` is an
+    /// empty internal one, nothing is drawn and input is ignored.
+    pub(crate) detached: bool,
+    /// While detached, where the content, glyph margin and gutter widgets
+    /// were in the last model, by widget, for the next one.
+    detached_widget_positions: Option<DetachedWidgetPositions>,
+    /// The host's contributions by type (Monaco `getContribution`).
+    pub(crate) contributions: std::collections::HashMap<std::any::TypeId, Box<dyn std::any::Any>>,
+    /// Monaco `setAriaOptions`.
+    pub(crate) aria_options: crate::editor_api::AriaOptions,
     /// The window the editor was created in, for its per-window suggestion
     /// memories (see `suggest.share_suggest_selections`).
     pub(crate) window_id: Option<gpui::WindowId>,
@@ -849,6 +863,10 @@ impl CodeEditor {
             smart_select: Default::default(),
             in_peek: false,
             widget_input: false,
+            detached: false,
+            detached_widget_positions: None,
+            contributions: Default::default(),
+            aria_options: Default::default(),
             refocus: false,
             format_task: None,
             format_on_type_task: None,
@@ -924,23 +942,56 @@ impl CodeEditor {
         Self::new(model, window, cx)
     }
 
-    /// The model this editor shows.
+    /// The model this editor shows. After `set_model(None)` it's an empty
+    /// internal model that isn't in [`crate::models`]; see
+    /// [`CodeEditor::get_model`].
     pub fn model(&self) -> &Entity<TextModel> {
         &self.model
     }
 
+    /// The model this editor shows, or `None` after `set_model(None)`
+    /// (Monaco `getModel`).
+    pub fn get_model(&self) -> Option<&Entity<TextModel>> {
+        (!self.detached).then_some(&self.model)
+    }
+
+    /// Whether the editor shows a model (Monaco `hasModel`).
+    pub fn has_model(&self) -> bool {
+        !self.detached
+    }
+
     /// Shows a different model, resetting cursors and scroll (Monaco
     /// `setModel`). Save and restore [`ViewState`] to keep them per model.
-    pub fn set_model(&mut self, model: Entity<TextModel>, cx: &mut Context<Self>) {
-        // Monaco does nothing for the same model.
+    ///
+    /// `None` detaches the model (Monaco `setModel(null)`): the editor then
+    /// draws only its background, ignores keyboard and mouse input, and
+    /// [`CodeEditor::get_model`] is `None`, until it's given a model again.
+    pub fn set_model(
+        &mut self,
+        model: impl Into<Option<Entity<TextModel>>>,
+        cx: &mut Context<Self>,
+    ) {
         self.begin_update(cx);
-        if model != self.model {
-            self.set_model_inner(model, cx);
+        match model.into() {
+            // Monaco does nothing for the same model.
+            Some(model) => {
+                if model != self.model {
+                    self.set_model_inner(model, false, cx);
+                }
+                self.detached = false;
+            }
+            None if !self.detached => {
+                let empty = cx.new(|_| TextModel::new_internal(""));
+                self.set_model_inner(empty, true, cx);
+                self.detached = true;
+                self.layout = None;
+            }
+            None => {}
         }
         self.end_update(cx);
     }
 
-    fn set_model_inner(&mut self, model: Entity<TextModel>, cx: &mut Context<Self>) {
+    fn set_model_inner(&mut self, model: Entity<TextModel>, detach: bool, cx: &mut Context<Self>) {
         let change = ModelChange {
             old_uri: self.model.read(cx).uri().cloned(),
             new_uri: model.read(cx).uri().cloned(),
@@ -990,7 +1041,15 @@ impl CodeEditor {
         // Monaco `_detachModel` disposes the view and its view zones with
         // it; content, overlay and glyph margin widgets are re-added to the
         // new view, which reads their positions against the new model.
-        let widget_positions = self.widget_positions(cx);
+        let mut widget_positions = self.widget_positions(cx);
+        if detach {
+            // Without a model nothing is resolved: the positions wait, by
+            // widget, for the next model (Monaco re-reads `getPosition()`).
+            self.detached_widget_positions = Some(self.saved_widget_positions(&widget_positions));
+        } else if let Some(saved) = self.detached_widget_positions.take() {
+            // Widgets added while there was no model keep the start.
+            self.restore_widget_positions(&saved, &mut widget_positions);
+        }
         if self.widgets.clear_zones() {
             self.forget_find_view_zone();
             cx.emit(CodeEditorEvent::ViewZonesChanged);
@@ -1215,6 +1274,10 @@ impl CodeEditor {
         }
         self.cursors.set_selections(selections);
         self.cursors.validate(self.snapshot.rope());
+        // Monaco `CursorState.fromModelSelections`: the view positions come
+        // from the model again (before any injected text), even for the
+        // same selections.
+        self.cursor_views = None;
         self.next_selection_change.source = CursorChangeSource::Api;
         self.cursors_changed(true, cx);
         self.end_update(cx);
@@ -1748,6 +1811,57 @@ impl CodeEditor {
         }
     }
 
+    /// `positions` (in widget order) by widget id, to keep while there's no
+    /// model.
+    fn saved_widget_positions(&self, positions: &WidgetPositions) -> DetachedWidgetPositions {
+        let widgets = &self.widgets;
+        DetachedWidgetPositions {
+            content: widgets
+                .content
+                .iter()
+                .map(|w| w.id)
+                .zip(positions.content.iter().copied())
+                .collect(),
+            glyphs: widgets
+                .glyphs
+                .iter()
+                .map(|w| w.id)
+                .zip(positions.glyphs.iter().copied())
+                .collect(),
+            gutter: widgets
+                .gutter
+                .iter()
+                .map(|w| w.id)
+                .zip(positions.gutter.iter().copied())
+                .collect(),
+        }
+    }
+
+    /// Puts the positions `saved` when the model was detached back into
+    /// `positions` (in widget order) for the widgets still there.
+    fn restore_widget_positions(
+        &self,
+        saved: &DetachedWidgetPositions,
+        positions: &mut WidgetPositions,
+    ) {
+        let widgets = &self.widgets;
+        for (widget, position) in widgets.content.iter().zip(&mut positions.content) {
+            if let Some(saved) = saved.content.get(&widget.id) {
+                *position = *saved;
+            }
+        }
+        for (widget, row) in widgets.glyphs.iter().zip(&mut positions.glyphs) {
+            if let Some(saved) = saved.glyphs.get(&widget.id) {
+                *row = *saved;
+            }
+        }
+        for (widget, row) in widgets.gutter.iter().zip(&mut positions.gutter) {
+            if let Some(saved) = saved.gutter.get(&widget.id) {
+                *row = *saved;
+            }
+        }
+    }
+
     /// Anchors content, glyph margin and gutter widgets at `positions` in the new
     /// model, clipped to it (Monaco validates widget positions against the
     /// model it lays them out in).
@@ -1938,6 +2052,16 @@ impl CodeEditor {
         self.layout
             .as_ref()
             .map_or_else(Vec::new, |l| l.glyphs_drawn.clone())
+    }
+
+    /// The line decorations area's bars drawn in the last frame (Monaco
+    /// `linesDecorationsClassName` and `firstLineDecorationClassName`), for
+    /// tests.
+    #[doc(hidden)]
+    pub fn gutter_bars_for_tests(&self) -> Vec<(Bounds<Pixels>, Hsla)> {
+        self.layout
+            .as_ref()
+            .map_or_else(Vec::new, |l| l.gutter_bars.clone())
     }
 
     /// The folding controls of the last frame: row, bounds and whether
@@ -2268,7 +2392,7 @@ impl CodeEditor {
                 }
                 cx.notify();
             }
-            TextModelEvent::SyntaxUpdated => {
+            TextModelEvent::SyntaxUpdated { ranges } => {
                 self.update_bracket_highlights(cx);
                 self.refresh_bracket_colors(cx);
                 // Syntax folding follows the new trees.
@@ -2277,7 +2401,9 @@ impl CodeEditor {
                 {
                     self.compute_fold_ranges(cx);
                 }
-                cx.emit(CodeEditorEvent::ModelTokensChanged);
+                cx.emit(CodeEditorEvent::ModelTokensChanged {
+                    ranges: ranges.clone(),
+                });
                 cx.notify();
             }
             TextModelEvent::LanguageChanged {
@@ -2703,7 +2829,146 @@ impl CodeEditor {
         self.cursor_views = Some(CursorViewStates {
             model: self.cursors.all().to_vec(),
             view,
+            injected: Vec::new(),
         });
+    }
+
+    /// How far into the injected text at each cursor's head it shows, in
+    /// UTF-16 units (Monaco's view column); empty when every cursor shows
+    /// before the injected text there (where a model position puts it).
+    pub(crate) fn cursor_injected_offsets(&self) -> Vec<u32> {
+        match &self.cursor_views {
+            Some(views) if views.model.as_slice() == self.cursors.all() => views.injected.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Records where each cursor shows in the injected text at its head,
+    /// keeping the view states.
+    fn set_cursor_injected_offsets(&mut self, injected: Vec<u32>) {
+        let none = injected.iter().all(|offset| *offset == 0);
+        if self.cursor_views.is_none() {
+            if none {
+                return;
+            }
+            let count = self.cursors.all().len();
+            let views = self.cursor_view_states().into_iter().map(Some).collect();
+            self.set_cursor_view_states(views);
+            if self.cursor_views.is_none() || injected.len() != count {
+                return;
+            }
+        }
+        if let Some(views) = &mut self.cursor_views {
+            views.injected = if none { Vec::new() } else { injected };
+        }
+    }
+
+    /// The injected text on `row` (Monaco's line projection data), for the
+    /// cursor stops; `None` without any.
+    pub(crate) fn injected_text_projection(
+        &self,
+        row: u32,
+        cx: &mut Context<Self>,
+    ) -> Option<crate::view::injected_text::ModelLineProjectionData> {
+        use crate::view::injected_text::{Injection, ModelLineProjectionData};
+        let rope = self.snapshot.rope();
+        if row > rope.max_point().row {
+            return None;
+        }
+        let range = rope.point_to_offset(text::Point::new(row, 0))
+            ..rope.point_to_offset(text::Point::new(row, rope.line_len(row)));
+        let editor_id = Some(cx.entity_id());
+        let decorations = self
+            .model
+            .update(cx, |model, _| model.decorations_in_range(range, editor_id));
+        if decorations
+            .iter()
+            .all(|d| d.options.before.is_none() && d.options.after.is_none())
+        {
+            return None;
+        }
+        let show_validation = self.shows_validation_decorations();
+        let decorations: Vec<_> = decorations
+            .into_iter()
+            .filter(|d| show_validation || !d.options.validation)
+            .collect();
+        let points: Vec<_> = decorations
+            .iter()
+            .map(|d| {
+                (
+                    rope.offset_to_point_utf16(d.range.start),
+                    rope.offset_to_point_utf16(d.range.end),
+                    d,
+                )
+            })
+            .collect();
+        let injections: Vec<Injection> = crate::element::row_injections(row, &points)
+            .into_iter()
+            .map(|(column, _, text, _)| Injection {
+                offset: column,
+                length: text.content.encode_utf16().count() as u32,
+                cursor_stops: text.cursor_stops,
+            })
+            .collect();
+        (!injections.is_empty())
+            .then(|| ModelLineProjectionData::unwrapped(rope.line_len_utf16(row), injections))
+    }
+
+    /// Where each cursor shows in the injected text at its head after
+    /// `command` (Monaco's moves on view positions, then
+    /// `_validateViewState`): next to the character moved over, after it;
+    /// above, before it; below, after it; as its cursor stops allow.
+    fn update_cursor_injected_after_move(
+        &mut self,
+        command: MoveCommand,
+        select: bool,
+        before: &[Selection],
+        cx: &mut Context<Self>,
+    ) {
+        use crate::view::injected_text::{PositionAffinity, cursor_offset_after_move};
+        let affinity = match command {
+            MoveCommand::Left | MoveCommand::Right | MoveCommand::End | MoveCommand::LineEnd => {
+                PositionAffinity::Right
+            }
+            MoveCommand::Down | MoveCommand::PageDown => PositionAffinity::RightOfInjectedText,
+            _ => {
+                self.set_cursor_injected_offsets(Vec::new());
+                return;
+            }
+        };
+        let horizontal = matches!(command, MoveCommand::Left | MoveCommand::Right);
+        let heads: Vec<(PointUtf16, bool)> = self
+            .cursors
+            .all()
+            .iter()
+            .enumerate()
+            .map(|(ix, state)| {
+                let head = state.selection().head;
+                let before = before.get(ix);
+                // Collapsing a selection, or Left at the start of the text,
+                // leaves the cursor at a model position (before the text).
+                let collapsed = horizontal && !select && before.is_some_and(|b| !b.is_empty());
+                let stayed_left =
+                    command == MoveCommand::Left && before.is_some_and(|b| b.head == head);
+                (head, collapsed || stayed_left)
+            })
+            .collect();
+        let mut projections: std::collections::HashMap<u32, Option<_>> = Default::default();
+        let injected = heads
+            .into_iter()
+            .map(|(head, model_position)| {
+                if model_position {
+                    return 0;
+                }
+                let projection = projections
+                    .entry(head.row)
+                    .or_insert_with(|| self.injected_text_projection(head.row, cx));
+                projection.as_ref().map_or(0, |projection| {
+                    cursor_offset_after_move(projection, head.column, affinity)
+                })
+            })
+            .collect();
+        self.set_cursor_injected_offsets(injected);
     }
 
     /// The view position of the cursors' heads (view line, view column).
@@ -2895,6 +3160,7 @@ impl CodeEditor {
         self.cursors.set_states(model_states);
         self.cursors.validate(self.snapshot.rope());
         self.set_cursor_view_states(view_states);
+        self.update_cursor_injected_after_move(command, select, &before, cx);
         // Like Monaco, paging also scrolls the viewport by a page.
         if matches!(command, MoveCommand::PageUp | MoveCommand::PageDown)
             && let Some(layout) = self.layout.as_ref()
@@ -3663,22 +3929,37 @@ impl CodeEditor {
         window: &mut Window,
         cx: &App,
     ) -> PointUtf16 {
+        self.view_position_for_point(position, window, cx).0
+    }
+
+    /// [`Self::position_for_point`], and how far into the injected text at
+    /// that position the point is, in UTF-16 units (Monaco's view column),
+    /// when it's on injected text.
+    pub(crate) fn view_position_for_point(
+        &self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &App,
+    ) -> (PointUtf16, Option<u32>) {
         let Some(layout) = self.layout.as_ref() else {
-            return PointUtf16::zero();
+            return (PointUtf16::zero(), None);
         };
         let line_height = layout.metrics.line_height;
         let y = position.y - layout.bounds.top() + layout.scroll_top;
         if y < px(0.) {
-            return PointUtf16::zero();
+            return (PointUtf16::zero(), None);
         }
         let count = self.view_lines.line_count();
         if y >= layout.zones.line_y(count, line_height) {
-            return self.snapshot.max_point_utf16();
+            return (self.snapshot.max_point_utf16(), None);
         }
         let view_line = layout.zones.line_at(y, line_height, count);
         let x = position.x - layout.text_origin_x();
         match layout.view_line(view_line) {
-            Some(line) => PointUtf16::new(line.row, line.column_for_x(x)),
+            Some(line) => {
+                let (column, injected) = line.position_for_x(x);
+                (PointUtf16::new(line.row, column), injected)
+            }
             None => {
                 let segment = row_segment(&self.view_lines, view_line);
                 let tab_size = self.cursor_config(cx).tab_size;
@@ -3690,10 +3971,11 @@ impl CodeEditor {
                     self.theme.colors.foreground,
                     &[],
                     &[],
+                    &[],
                     None,
                     window,
                 );
-                PointUtf16::new(line.row, line.column_for_x(x))
+                (PointUtf16::new(line.row, line.column_for_x(x)), None)
             }
         }
     }
@@ -4669,6 +4951,7 @@ impl CodeEditor {
             && index < self.cursors.all().len()
         {
             self.keep_mouse_on_wrapped_line(index, mouse);
+            self.keep_mouse_on_injected_text(index, mouse, cx);
         }
         self.model.update(cx, |model, _| model.push_stack_element());
         self.next_selection_change = CursorChangeCause {
@@ -4719,6 +5002,46 @@ impl CodeEditor {
             state.selection_start = view..view;
         }
         self.set_cursor_view_states(views.into_iter().map(Some).collect());
+    }
+
+    /// Monaco's mouse targets are view positions: a click on or next to
+    /// injected text puts cursor `index` on the side of it the click was
+    /// closest to, as the text's cursor stops allow (`_validateViewState`).
+    fn keep_mouse_on_injected_text(
+        &mut self,
+        index: usize,
+        mouse: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let y = mouse.y - layout.bounds.top() + layout.scroll_top;
+        if y < px(0.) {
+            return;
+        }
+        let count = self.view_lines.line_count();
+        let view_line = layout.zones.line_at(y, layout.metrics.line_height, count);
+        let Some(line) = layout.view_line(view_line) else {
+            return;
+        };
+        let (column, Some(injected)) = line.position_for_x(mouse.x - layout.text_origin_x()) else {
+            return;
+        };
+        let row = line.row;
+        let state = &self.cursors.all()[index];
+        if state.position != PointUtf16::new(row, column) {
+            return;
+        }
+        let Some(projection) = self.injected_text_projection(row, cx) else {
+            return;
+        };
+        let offset =
+            crate::view::injected_text::validate_cursor_offset(&projection, column, injected);
+        let mut offsets = self.cursor_injected_offsets();
+        offsets.resize(self.cursors.all().len(), 0);
+        offsets[index] = offset;
+        self.set_cursor_injected_offsets(offsets);
     }
 
     /// The text position under the mouse, or `None` when the mouse isn't
@@ -5646,6 +5969,16 @@ impl Render for CodeEditor {
         if std::mem::take(&mut self.refocus) {
             window.focus(&self.focus_handle, cx);
         }
+        // Monaco without a model: the editor's container, empty; no keys,
+        // actions, text input or mouse handling.
+        if self.detached {
+            return div()
+                .id("code-editor")
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .bg(self.theme.colors.background)
+                .into_any_element();
+        }
         // Monaco `accessibilitySupport`, and reading new inline suggestions.
         self.screen_reader.optimized = self.screen_reader_optimized(window);
         self.announce_inline_suggestion(cx);
@@ -5724,11 +6057,16 @@ impl Render for CodeEditor {
             .track_focus(&self.focus_handle)
             // Screen readers: a text input whose text runs are the lines
             // around the selection (Monaco's screen reader content).
-            .role(if self.options.single_line {
-                gpui::Role::TextInput
-            } else {
-                gpui::Role::MultilineTextInput
-            })
+            // Monaco `setAriaOptions({ role })` overrides it.
+            .role(
+                self.aria_options
+                    .role
+                    .unwrap_or(if self.options.single_line {
+                        gpui::Role::TextInput
+                    } else {
+                        gpui::Role::MultilineTextInput
+                    }),
+            )
             // Monaco `ariaLabelForScreenReaderContent`.
             .aria_label(if accessibility_off {
                 crate::accessibility::NOT_ACCESSIBLE_LABEL.into()
@@ -5745,6 +6083,7 @@ impl Render for CodeEditor {
                 let announcement = self.announcement();
                 let rows = self.a11y_rows.clone();
                 let (read_only, required) = (self.options.read_only, self.options.aria_required);
+                let active_descendant = self.aria_options.active_descendant;
                 let editor = cx.entity().downgrade();
                 let action_rows = self.a11y_rows.clone();
                 root.a11y_synthetic_children(move |builder| {
@@ -5761,6 +6100,10 @@ impl Render for CodeEditor {
                     }
                     if required {
                         node.set_required();
+                    }
+                    // Monaco `setAriaOptions({ activeDescendant })`.
+                    if let Some(id) = active_descendant {
+                        node.set_active_descendant(id);
                     }
                 })
                 .on_a11y_action(
@@ -6707,8 +7050,11 @@ impl Render for CodeEditor {
                         .min_h_0()
                         .w_full()
                         .child(EditorElement::new(cx.entity())),
-                ),
-            None => root.child(EditorElement::new(cx.entity())),
+                )
+                .into_any_element(),
+            None => root
+                .child(EditorElement::new(cx.entity()))
+                .into_any_element(),
         }
     }
 }
@@ -6786,9 +7132,21 @@ fn map_state(state: &SingleCursorState, f: impl Fn(PointUtf16) -> PointUtf16) ->
 
 /// The cursors' view states and the model states they're for (see
 /// [`CodeEditor::cursor_view_states`]).
+/// Widget positions kept by widget while the editor has no model (see
+/// [`CodeEditor::set_model`]).
+struct DetachedWidgetPositions {
+    content: std::collections::HashMap<WidgetId, (Option<PointUtf16>, Option<PointUtf16>)>,
+    glyphs: std::collections::HashMap<WidgetId, u32>,
+    gutter: std::collections::HashMap<WidgetId, u32>,
+}
+
 struct CursorViewStates {
     model: Vec<SingleCursorState>,
     view: Vec<SingleCursorState>,
+    /// How far into the injected text at each cursor's head it shows, in
+    /// UTF-16 units (Monaco's view column there); empty when every cursor
+    /// is before it.
+    injected: Vec<u32>,
 }
 
 /// The cursor core's view of the view lines (Monaco's view model lines).

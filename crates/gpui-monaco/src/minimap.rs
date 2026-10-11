@@ -605,13 +605,15 @@ pub(crate) fn prepaint(
         let end = rope.offset_to_point_utf16(range.end.min(rope.len()));
         to_minimap_range((to_view(start, false), to_view(end, true)))
     };
+    let theme = editor.theme.clone();
     let decoration_color = |d: &crate::decorations::Decoration| -> Option<Hsla> {
         let color = match d.options.severity {
             Some(crate::MarkerSeverity::Error) => colors.minimap_error_highlight,
             Some(crate::MarkerSeverity::Warning) => colors.minimap_warning_highlight,
             Some(crate::MarkerSeverity::Info) => colors.minimap_info_highlight,
             Some(crate::MarkerSeverity::Hint) => None,
-            None => d.options.minimap.as_ref()?.color,
+            // A theme color id follows the editor's theme.
+            None => d.options.minimap.as_ref()?.resolve_color(&theme),
         };
         color.filter(|c| c.a > 0.)
     };

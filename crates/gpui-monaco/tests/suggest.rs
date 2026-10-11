@@ -469,7 +469,7 @@ fn resolves_the_focused_item_and_runs_commands(cx: &mut TestAppContext) {
             },
         );
         let ran = ran.clone();
-        register_command(cx, "test.after", move |args, _| {
+        let _ = register_command(cx, "test.after", move |args, _| {
             ran.set(args.first().and_then(|a| a.as_u64()))
         });
     });

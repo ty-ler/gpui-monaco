@@ -759,7 +759,10 @@ fn decoration_queries(cx: &mut TestAppContext) {
     };
     let validation = DecorationOptions {
         validation: true,
-        overview_ruler: Some((gpui::red(), gpui_monaco::OverviewRulerLane::Right)),
+        overview_ruler: Some(gpui_monaco::OverviewRulerDecoration::new(
+            gpui::red(),
+            gpui_monaco::OverviewRulerLane::Right,
+        )),
         ..Default::default()
     };
     let ids = model.update(cx, |m, cx| {

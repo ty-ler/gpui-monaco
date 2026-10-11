@@ -59,7 +59,7 @@ fn record(
                     | CodeEditorEvent::ScrollChanged(_)
                     | CodeEditorEvent::ModelContentChanged(_)
                     | CodeEditorEvent::ModelDecorationsChanged(_)
-                    | CodeEditorEvent::ModelTokensChanged
+                    | CodeEditorEvent::ModelTokensChanged { .. }
                     | CodeEditorEvent::MouseMove(_)
             ) {
                 sink.borrow_mut().push(event.clone());

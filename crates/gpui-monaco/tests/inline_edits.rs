@@ -791,9 +791,9 @@ fn alternative_actions_run_with_shift_tab(cx: &mut TestAppContext) {
     let ran = Rc::new(RefCell::new(0));
     let counter = ran.clone();
     cx.update(|_, cx| {
-        gpui_monaco::register_command(cx, "test.rename", move |_, _| {
+        let _ = gpui_monaco::register_command(cx, "test.rename", move |_, _| {
             *counter.borrow_mut() += 1;
-        })
+        });
     });
     let mut item = replace(DOC, "let b = 2;", "let bb = 2;").remove(0);
     item.alternative_action = Some(InlineCompletionAlternativeAction {

@@ -22,21 +22,20 @@ struct Commands {
 impl Global for Commands {}
 
 /// Registers `handler` for command `id` (Monaco
-/// `CommandsRegistry.registerCommand`), replacing any earlier one.
+/// `CommandsRegistry.registerCommand`) until the returned [`Disposable`] is
+/// disposed; dropping it keeps the command. As in Monaco, it shadows
+/// earlier handlers for `id`, which run again once it's disposed.
 pub fn register_command(
     cx: &mut App,
     id: impl Into<SharedString>,
     handler: impl Fn(&[serde_json::Value], &mut App) + 'static,
-) {
-    let commands = cx.default_global::<Commands>();
-    commands.next_id += 1;
-    let entry = (commands.next_id, Rc::new(handler) as Handler);
-    commands.handlers.insert(id.into(), vec![entry]);
+) -> Disposable {
+    add_command(cx, id, handler)
 }
 
-/// Adds `handler` for command `id` (Monaco `editor.addCommand`) until the
-/// returned [`Disposable`] is disposed. It shadows earlier handlers for
-/// `id`, which run again once it's disposed.
+/// Adds `handler` for command `id` (Monaco `editor.addCommand`, which is
+/// [`register_command`]) until the returned [`Disposable`] is disposed. It
+/// shadows earlier handlers for `id`, which run again once it's disposed.
 pub fn add_command(
     cx: &mut App,
     id: impl Into<SharedString>,

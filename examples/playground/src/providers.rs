@@ -790,7 +790,7 @@ pub fn register(cx: &mut App) {
     register_code_lens_provider(cx, LanguageSelector::All, DemoCodeLens);
     register_inlay_hints_provider(cx, LanguageSelector::All, DemoInlayHints);
     register_document_paste_edit_provider(cx, LanguageSelector::All, DemoPasteAsString);
-    gpui_monaco::register_command(cx, "playground.references", |args, _| {
+    let _ = gpui_monaco::register_command(cx, "playground.references", |args, _| {
         eprintln!("references to {args:?}");
     });
     register_inline_completions_provider(cx, LanguageSelector::All, DemoInlineCompletions);

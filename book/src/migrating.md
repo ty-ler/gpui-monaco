@@ -14,7 +14,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | Monaco | gpui-monaco |
 |---|---|
 | `monaco.editor.create(el, { value, language })` | `cx.new(\|cx\| TextModel::new(value).with_language(language))`, then `CodeEditor::new(model, window, cx)` |
-| `monaco.editor.createModel(value, language, uri)` | `TextModel::new(value).with_language(language).with_uri(uri)` (a language id or MIME type), then `register_model` so providers can find it |
+| `monaco.editor.createModel(value, language, uri)` | `create_model(cx, value, language, uri)`, which fails like Monaco's for a uri a live model has; or `TextModel::new(value).with_language(language).with_uri(uri)` (a language id or MIME type), then `register_model` so providers can find it |
 | `monaco.editor.registerLinkOpener(opener)`, `registerEditorOpener(opener)` | `register_link_opener(cx, \|url, cx\| …)`, `register_editor_opener(cx, \|editor, uri, selection, cx\| …)`, returning a `Disposable`; they answer synchronously |
 | `monaco.editor.getModel(uri)` | `model_for_uri(cx, uri)` |
 | `monaco.editor.getModels()`, `getEditors()`, `getDiffEditors()` | `models(cx)`, `editors(cx)`, `diff_editors(cx)` (the editor's own inputs, such as find's, aren't listed, as Monaco's are DOM inputs) |
@@ -73,7 +73,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 
 | Monaco `ICodeEditor` | `CodeEditor` |
 |---|---|
-| `getModel()` / `setModel(m)` | `model()` / `set_model(m, cx)` |
+| `getModel()` / `setModel(m)` / `setModel(null)` / `hasModel()` | `get_model()` (or `model()`) / `set_model(m, cx)` / `set_model(None, cx)` (the editor draws nothing and ignores input) / `has_model()` |
 | `getValue()` / `setValue(v)` | `value(eol, preserve_bom, cx)` / `set_value(v, cx)` |
 | `getOptions()` / `updateOptions(o)` | `options()` / `update_options_with(\|o\| o.read_only = true, cx)`, or `update_options(full_options, cx)` |
 | `getPosition()` / `setPosition(p)`, `getSelection()` / `setSelection(s)` | `position()` / `set_position(p, cx)`, `selection()` / `set_selection(s, cx)` |
@@ -114,7 +114,9 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `addContentWidget(w)` / `layoutContentWidget(w)` | `add_content_widget(w, cx)` / `set_content_widget_position(…)` |
 | `addOverlayWidget(w)` | `add_overlay_widget(w, cx)` |
 | `addGlyphMarginWidget(w)` | `add_glyph_margin_widget(GlyphMarginWidget { row, view, lane, z_index }, cx)` |
-| `getContribution('editor.contrib.findController')` | the find methods on `CodeEditor` (`start_find`, …) |
+| `getContribution(id)` | built-in contributions are `CodeEditor` methods (the find controller's are `start_find`, …); a host's own per-editor state goes in `add_contribution(value)` and comes back by type from `get_contribution::<T>()` |
+| `getFontSizeAtPosition(p)` | `get_font_size_at_position(p)` (`Pixels`; the editor's size, with the zoom) |
+| `writeScreenReaderContent(reason)`, `setAriaOptions({ activeDescendant, role })` | `write_screen_reader_content(reason, cx)`, `set_aria_options(AriaOptions { active_descendant, role }, cx)` (an AccessKit node id and role) |
 | `getFoldingModel()…` | `folding_ranges(cx)`, `collapsed_folds(cx)` |
 
 ### Editor events
@@ -138,7 +140,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `onDidCompositionStart` / `onDidCompositionEnd` | `CompositionStarted` / `CompositionEnded` |
 | `onDidChangeHiddenAreas`, `onDidChangeViewZones` | `HiddenAreasChanged` (after the next frame), `ViewZonesChanged` |
 | `onBeginUpdate` / `onEndUpdate` | `BeginUpdate` / `EndUpdate` |
-| `onDidChangeModelContent`, `onDidChangeModelDecorations`, `onDidChangeModelOptions`, `onDidChangeModelTokens`, `onDidChangeModelLanguageConfiguration` | `ModelContentChanged(ModelContentChange)`, `ModelDecorationsChanged`, `ModelOptionsChanged`, `ModelTokensChanged`, `ModelLanguageConfigurationChanged` |
+| `onDidChangeModelContent`, `onDidChangeModelDecorations`, `onDidChangeModelOptions`, `onDidChangeModelTokens`, `onDidChangeModelLanguageConfiguration` | `ModelContentChanged(ModelContentChange)`, `ModelDecorationsChanged`, `ModelOptionsChanged`, `ModelTokensChanged { ranges }`, `ModelLanguageConfigurationChanged` |
 | opener service | `OpenLocation(location)` and `OpenLink(url)`, for what no `register_editor_opener`/`register_link_opener` opener opened |
 | `commandService.executeCommand` from providers | `ExecuteCommand(command)`, or `register_command` |
 
@@ -150,6 +152,8 @@ Monaco's global `monaco.editor.on…` events are free functions returning a gpui
 |---|---|
 | `onDidCreateEditor`, `onDidCreateDiffEditor` | `on_did_create_editor(cx, …)`, `on_did_create_diff_editor(cx, …)` |
 | `onDidCreateModel`, `onWillDisposeModel` | `on_did_create_model(cx, …)`, `on_will_dispose_model(cx, …)` (the model's id and state, as it's released) |
+| `model.onWillDispose`, `model.onDidChangeTokens` | `TextModel::on_will_dispose(&model, cx, …)`, `TextModelEvent::SyntaxUpdated { ranges }` |
+| `CommandsRegistry.registerCommand(id, handler)` | `register_command(cx, id, handler)`, returning a `Disposable`; the newest handler for an id runs |
 | `onDidChangeModelLanguage` | `on_did_change_model_language(cx, …)` (the model and its old language id) |
 | `onDidChangeMarkers` | `on_did_change_markers(cx, …)` (the changed uris) |
 

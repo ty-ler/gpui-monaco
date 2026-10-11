@@ -2237,9 +2237,13 @@ impl CodeEditor {
                             swatch: None,
                             font_family: font_family.clone(),
                             underline: warning,
+                            // Monaco `GhostTextView`: the cursor stays before
+                            // the suggestion.
+                            cursor_stops: crate::InjectedTextCursorStops::Left,
                             ..Default::default()
                         }),
                         border: visible_color(colors.ghost_text_border),
+                        show_if_collapsed: true,
                         ..Default::default()
                     },
                 ));

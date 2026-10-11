@@ -275,7 +275,7 @@ fn decorations_are_drawn(cx: &mut TestAppContext) {
                         66..70,
                         DecorationOptions {
                             minimap: Some(MinimapDecoration {
-                                color: Some(red),
+                                color: Some(red.into()),
                                 position: MinimapPosition::Inline,
                                 ..Default::default()
                             }),
@@ -286,7 +286,7 @@ fn decorations_are_drawn(cx: &mut TestAppContext) {
                         30..31,
                         DecorationOptions {
                             minimap: Some(MinimapDecoration {
-                                color: Some(blue),
+                                color: Some(blue.into()),
                                 position: MinimapPosition::Gutter,
                                 ..Default::default()
                             }),

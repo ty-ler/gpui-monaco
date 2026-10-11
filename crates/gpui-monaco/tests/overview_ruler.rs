@@ -9,8 +9,8 @@ use gpui::{
 };
 use gpui_monaco::options::{EditorOptions, MinimapSide};
 use gpui_monaco::{
-    CodeEditor, DecorationOptions, Marker, MarkerSeverity, OverviewRulerLane, ScrollType,
-    TextModel, Theme, ViewZone, ZoneHeight,
+    CodeEditor, DecorationOptions, Marker, MarkerSeverity, OverviewRulerDecoration,
+    OverviewRulerLane, ScrollType, TextModel, Theme, ViewZone, ZoneHeight,
 };
 use text::PointUtf16;
 
@@ -100,7 +100,7 @@ fn decorate(
                     (
                         start..end,
                         DecorationOptions {
-                            overview_ruler: Some((color, lane)),
+                            overview_ruler: Some(OverviewRulerDecoration::new(color, lane)),
                             z_index,
                             ..Default::default()
                         },

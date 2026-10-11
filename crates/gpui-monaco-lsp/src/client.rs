@@ -89,8 +89,8 @@ pub struct LspClient {
     server_info: Option<lsp::ServerInfo>,
     documents: HashMap<String, Document>,
     registrations: Vec<ProviderRegistration>,
-    /// Command ids registered for the server.
-    commands: Vec<String>,
+    /// The server's commands, registered with [`gpui_monaco::register_command`].
+    commands: Vec<gpui_monaco::Disposable>,
     running: bool,
     _tasks: Vec<Task<()>>,
     _child: Option<async_process::Child>,
@@ -472,16 +472,16 @@ impl LspClient {
         let features = LspFeatures::new(cx.weak_entity(), &self.capabilities);
         self.registrations = features.register(selector, &self.capabilities, cx);
         // The server's commands run on the server (`workspace/executeCommand`).
-        self.commands = self
+        let ids = self
             .capabilities
             .execute_command_provider
             .as_ref()
             .map(|options| options.commands.clone())
             .unwrap_or_default();
-        for id in &self.commands {
+        for id in ids {
             let connection = self.connection.clone();
             let command = id.clone();
-            gpui_monaco::register_command(cx, id.clone(), move |arguments, cx| {
+            let registration = gpui_monaco::register_command(cx, id, move |arguments, cx| {
                 let request =
                     connection.request::<lsp::request::ExecuteCommand>(lsp::ExecuteCommandParams {
                         command: command.clone(),
@@ -496,6 +496,7 @@ impl LspClient {
                     })
                     .detach();
             });
+            self.commands.push(registration);
         }
     }
 
@@ -503,8 +504,9 @@ impl LspClient {
         for registration in self.registrations.drain(..) {
             unregister_provider(cx, registration);
         }
-        for id in self.commands.drain(..) {
-            gpui_monaco::unregister_command(cx, &id);
+        // Only this server's handlers go; another's for the same id stay.
+        for registration in self.commands.drain(..) {
+            registration.dispose(cx);
         }
     }
 

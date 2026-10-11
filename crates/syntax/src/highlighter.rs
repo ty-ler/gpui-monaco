@@ -90,6 +90,45 @@ pub trait Highlighter: Send + Sync {
     ) -> Option<Vec<Range<usize>>> {
         None
     }
+
+    /// The rows of `text` (end exclusive, sorted) whose highlights may
+    /// differ between `previous` (what [`Highlighter::update`] got) and
+    /// `state` (what it returned), as Monaco's `onDidChangeTokens` reports
+    /// the lines a retokenization changed; `None` if this highlighter can't
+    /// tell.
+    fn changed_rows(
+        &self,
+        _previous: (&HighlightState, &Rope, &Patch),
+        _state: &HighlightState,
+        _text: &Rope,
+    ) -> Option<Vec<Range<u32>>> {
+        None
+    }
+}
+
+/// Rows `ranges` (byte ranges of `text`) touch, merged and sorted, end
+/// exclusive.
+pub(crate) fn rows_of(
+    text: &Rope,
+    ranges: impl IntoIterator<Item = Range<usize>>,
+) -> Vec<Range<u32>> {
+    let mut rows: Vec<Range<u32>> = ranges
+        .into_iter()
+        .map(|range| {
+            let start = text.offset_to_point(range.start.min(text.len())).row;
+            let end = text.offset_to_point(range.end.min(text.len())).row;
+            start..end.max(start) + 1
+        })
+        .collect();
+    rows.sort_by_key(|rows| rows.start);
+    let mut merged: Vec<Range<u32>> = Vec::with_capacity(rows.len());
+    for range in rows {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
 }
 
 /// The tree-sitter [`Highlighter`]; its state is a [`SyntaxSnapshot`].
@@ -136,6 +175,18 @@ impl Highlighter for TreeSitterHighlighter {
 
     fn fold_ranges(&self, state: &HighlightState, text: &Rope) -> Option<Vec<(u32, u32)>> {
         state.syntax()?.fold_ranges(text)
+    }
+
+    fn changed_rows(
+        &self,
+        (previous, old_text, patch): (&HighlightState, &Rope, &Patch),
+        state: &HighlightState,
+        text: &Rope,
+    ) -> Option<Vec<Range<u32>>> {
+        let ranges = state
+            .syntax()?
+            .changed_ranges(previous.syntax()?, old_text, text, patch);
+        Some(rows_of(text, ranges))
     }
 
     fn selection_ranges(&self, state: &HighlightState, offset: usize) -> Option<Vec<Range<usize>>> {

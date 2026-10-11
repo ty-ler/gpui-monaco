@@ -87,15 +87,7 @@ pub(crate) fn registered_models(cx: &App) -> Vec<gpui::Entity<TextModel>> {
 /// The live model with `uri`, or one from the resolver (Monaco
 /// `getModel`, then `createModelReference`).
 pub fn model_for_uri(cx: &mut App, uri: &str) -> Option<gpui::Entity<TextModel>> {
-    let models = cx.default_global::<Models>();
-    if let Some(model) = models.by_uri.get(uri).and_then(|model| model.upgrade()) {
-        return Some(model);
-    }
-    // Any other live model with that uri.
-    if let Some(model) = crate::registry::models(cx)
-        .into_iter()
-        .find(|model| model.read(cx).uri().is_some_and(|u| u.as_ref() == uri))
-    {
+    if let Some(model) = live_model_for_uri(cx, uri) {
         return Some(model);
     }
     let models = cx.default_global::<Models>();
@@ -103,6 +95,99 @@ pub fn model_for_uri(cx: &mut App, uri: &str) -> Option<gpui::Entity<TextModel>>
     let model = resolver(uri, cx)?;
     register_model(cx, &model);
     Some(model)
+}
+
+/// The live model with `uri`, not asking the resolver.
+fn live_model_for_uri(cx: &mut App, uri: &str) -> Option<gpui::Entity<TextModel>> {
+    let models = cx.default_global::<Models>();
+    if let Some(model) = models.by_uri.get(uri).and_then(|model| model.upgrade()) {
+        return Some(model);
+    }
+    crate::registry::models(cx)
+        .into_iter()
+        .find(|model| model.read(cx).uri().is_some_and(|u| u.as_ref() == uri))
+}
+
+/// Creates a model holding `value`, in `language` (a language id or a MIME
+/// type) and with `uri`, and registers it (Monaco `editor.createModel`).
+/// As in Monaco, it fails when a live model already has `uri`; then
+/// [`model_for_uri`] finds that one. The builder methods
+/// ([`TextModel::new`], [`TextModel::with_language`],
+/// [`TextModel::with_uri`]) don't check.
+pub fn create_model(
+    cx: &mut App,
+    value: &str,
+    language: Option<&str>,
+    uri: Option<&str>,
+) -> anyhow::Result<gpui::Entity<TextModel>> {
+    if let Some(uri) = uri
+        && live_model_for_uri(cx, uri).is_some()
+    {
+        anyhow::bail!("Cannot add model because it already exists!");
+    }
+    let model = gpui::AppContext::new(cx, |_| {
+        let mut model = TextModel::new(value);
+        if let Some(language) = language {
+            model = model.with_language(language.to_string());
+        }
+        if let Some(uri) = uri {
+            model = model.with_uri(uri.to_string());
+        }
+        model
+    });
+    register_model(cx, &model);
+    Ok(model)
+}
+
+/// Every row of `rope`, for [`TextModelEvent::SyntaxUpdated`] after a
+/// full parse.
+fn whole_text_rows(rope: &Rope) -> Arc<[RangeInclusive<u32>]> {
+    std::iter::once(0..=rope.max_point().row).collect()
+}
+
+/// The rows whose highlights may have changed from `previous` to `state`
+/// (Monaco `IModelTokensChangedEvent.ranges`): the edited rows, with what
+/// the highlighter changed around them, or everything from the first edit
+/// on when it can't tell; every row after a full parse.
+fn changed_token_rows(
+    highlighter: &dyn Highlighter,
+    previous: Option<(&HighlightState, &Rope, &Patch)>,
+    state: &HighlightState,
+    text: &BufferSnapshot,
+) -> Arc<[RangeInclusive<u32>]> {
+    let rope = text.rope();
+    let Some(previous) = previous else {
+        return whole_text_rows(rope);
+    };
+    let patch = previous.2;
+    let last_row = rope.max_point().row;
+    let edited = patch.edits().iter().map(|edit| {
+        rope.offset_to_point(edit.new.start.min(rope.len())).row
+            ..rope.offset_to_point(edit.new.end.min(rope.len())).row + 1
+    });
+    let mut rows: Vec<Range<u32>> = match highlighter.changed_rows(previous, state, rope) {
+        Some(changed) => changed.into_iter().chain(edited).collect(),
+        None => edited
+            .map(|rows| rows.start)
+            .min()
+            .map(|first| std::iter::once(first..last_row + 1).collect())
+            .unwrap_or_default(),
+    };
+    rows.sort_by_key(|rows| rows.start);
+    let mut merged: Vec<RangeInclusive<u32>> = Vec::with_capacity(rows.len());
+    for range in rows {
+        if range.is_empty() {
+            continue;
+        }
+        let range = range.start.min(last_row)..=(range.end - 1).min(last_row);
+        match merged.last_mut() {
+            Some(last) if *range.start() <= last.end() + 1 => {
+                *last = *last.start()..=(*last.end()).max(*range.end());
+            }
+            _ => merged.push(range),
+        }
+    }
+    merged.into()
 }
 
 /// The highlighter and the latest highlight state with the text it describes.
@@ -275,8 +360,16 @@ pub enum TextModelEvent {
     /// [`TextModel::set_markers`] changed the markers; setting none where
     /// there were none isn't a change.
     MarkersChanged,
-    /// New highlights are available (background parse finished).
-    SyntaxUpdated,
+    /// New highlights are available (a background parse finished; Monaco
+    /// `onDidChangeTokens`).
+    SyntaxUpdated {
+        /// The rows whose highlights may have changed (0-based, inclusive),
+        /// sorted and apart (Monaco `IModelTokensChangedEvent.ranges`): the
+        /// whole text after a first parse, else the edited rows and what
+        /// the highlighter says it changed around them (tree-sitter's
+        /// changed ranges, the lines a Monarch grammar tokenized again).
+        ranges: Arc<[RangeInclusive<u32>]>,
+    },
     /// Decorations were added, removed or changed (Monaco
     /// `onDidChangeDecorations`), and what they affect.
     DecorationsChanged(DecorationsChange),
@@ -883,8 +976,9 @@ impl TextModel {
         let start = web_time::Instant::now();
         let state = syntax.highlighter.update(None, &snapshot);
         let elapsed = start.elapsed();
+        let ranges = whole_text_rows(snapshot.rope());
         syntax.latest = Some((state, snapshot));
-        cx.emit(TextModelEvent::SyntaxUpdated);
+        cx.emit(TextModelEvent::SyntaxUpdated { ranges });
         cx.notify();
         Some(elapsed)
     }
@@ -917,13 +1011,16 @@ impl TextModel {
         });
         syntax.task = Some(cx.spawn(async move |this, cx| {
             let parse_snapshot = snapshot.clone();
-            let state = cx
+            let (state, ranges) = cx
                 .background_executor()
                 .spawn(async move {
                     let previous = previous
                         .as_ref()
                         .map(|(state, text, patch)| (state, text.rope(), patch));
-                    highlighter.update(previous, &parse_snapshot)
+                    let state = highlighter.update(previous, &parse_snapshot);
+                    let ranges =
+                        changed_token_rows(&*highlighter, previous, &state, &parse_snapshot);
+                    (state, ranges)
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -933,7 +1030,7 @@ impl TextModel {
                 syntax.latest = Some((state, snapshot));
                 syntax.task = None;
                 let dirty = std::mem::take(&mut syntax.dirty);
-                cx.emit(TextModelEvent::SyntaxUpdated);
+                cx.emit(TextModelEvent::SyntaxUpdated { ranges });
                 cx.notify();
                 // Embedded languages the tokenizer met (Monaco's lexer
                 // requests their basic features).

@@ -7,10 +7,10 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use gpui::{EntityId, Hsla, Pixels, SharedString};
+use gpui::{EntityId, FontStyle, FontWeight, Hsla, Pixels, SharedString};
 use text::{Patch, Stickiness};
 
-use crate::theme::TokenStyle;
+use crate::theme::{Theme, TokenStyle};
 
 /// Identifies a decoration returned by `TextModel::delta_decorations`.
 /// Ids are unique across models, as Monaco's are, so an id from another
@@ -29,6 +29,88 @@ pub struct DecorationUnderline {
     pub color: Hsla,
     /// Draw a squiggle instead of a straight line.
     pub wavy: bool,
+}
+
+/// A decoration's color (Monaco `string | ThemeColor`): resolved, or a
+/// theme color id that's looked up in the editor's theme when drawn, so it
+/// follows theme changes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DecorationColor {
+    /// A resolved color.
+    Color(Hsla),
+    /// A theme color id, such as `editorOverviewRuler.findMatchForeground`
+    /// (Monaco `ThemeColor`).
+    Theme(SharedString),
+}
+
+impl DecorationColor {
+    /// The theme color `id` (Monaco `themeColorFromId`).
+    pub fn theme(id: impl Into<SharedString>) -> Self {
+        Self::Theme(id.into())
+    }
+
+    /// The color in `theme`: a theme color id is looked up there (Monaco
+    /// `IColorTheme.getColor`); `None` when the theme has no such color.
+    pub fn resolve(&self, theme: &Theme) -> Option<Hsla> {
+        match self {
+            Self::Color(color) => Some(*color),
+            Self::Theme(id) => theme.color(id),
+        }
+    }
+
+    /// Monaco's `darkColor`: `dark` in a dark theme (high contrast dark
+    /// included), else `color`.
+    fn pick<'a>(
+        color: &'a DecorationColor,
+        dark: Option<&'a DecorationColor>,
+        theme: &Theme,
+    ) -> &'a DecorationColor {
+        match dark {
+            Some(dark) if theme.kind == crate::theme::ThemeKind::Dark => dark,
+            _ => color,
+        }
+    }
+}
+
+impl From<Hsla> for DecorationColor {
+    fn from(color: Hsla) -> Self {
+        Self::Color(color)
+    }
+}
+
+impl From<gpui::Rgba> for DecorationColor {
+    fn from(color: gpui::Rgba) -> Self {
+        Self::Color(color.into())
+    }
+}
+
+/// Monaco `IModelDecorationOverviewRulerOptions`: a mark in the overview
+/// ruler (the vertical scrollbar's track).
+#[derive(Clone, Debug, PartialEq)]
+pub struct OverviewRulerDecoration {
+    /// Its color (Monaco `color`).
+    pub color: DecorationColor,
+    /// Its color in dark themes (Monaco `darkColor`); `None` uses `color`.
+    pub dark_color: Option<DecorationColor>,
+    /// Its lane (Monaco `position`).
+    pub position: OverviewRulerLane,
+}
+
+impl OverviewRulerDecoration {
+    /// A mark of `color` in `position`'s lane.
+    pub fn new(color: impl Into<DecorationColor>, position: OverviewRulerLane) -> Self {
+        Self {
+            color: color.into(),
+            dark_color: None,
+            position,
+        }
+    }
+
+    /// Its color in `theme` (Monaco `getColor`, with `darkColor` in dark
+    /// themes).
+    pub fn resolve(&self, theme: &Theme) -> Option<Hsla> {
+        DecorationColor::pick(&self.color, self.dark_color.as_ref(), theme).resolve(theme)
+    }
 }
 
 /// Monaco `OverviewRulerLane`.
@@ -69,10 +151,13 @@ pub enum MinimapSectionHeaderStyle {
 /// minimap.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MinimapDecoration {
-    /// Its color (Monaco `color`, resolved). `None` draws no mark, as for
-    /// section headers; a marker's [`DecorationOptions::severity`] takes the
-    /// theme's `minimap.{error,warning,info}Highlight` instead.
-    pub color: Option<Hsla>,
+    /// Its color (Monaco `color`), resolved or a theme color id. `None`
+    /// draws no mark, as for section headers; a marker's
+    /// [`DecorationOptions::severity`] takes the theme's
+    /// `minimap.{error,warning,info}Highlight` instead.
+    pub color: Option<DecorationColor>,
+    /// Its color in dark themes (Monaco `darkColor`); `None` uses `color`.
+    pub dark_color: Option<DecorationColor>,
     /// Where it's drawn.
     pub position: MinimapPosition,
     /// Draws a section header at the decoration's first line (Monaco
@@ -81,6 +166,78 @@ pub struct MinimapDecoration {
     /// The section header's label (Monaco `sectionHeaderText`).
     pub section_header_text: Option<SharedString>,
 }
+
+impl MinimapDecoration {
+    /// Its color in `theme`, if it has one (Monaco `getColor`, with
+    /// `darkColor` in dark themes).
+    pub fn resolve_color(&self, theme: &Theme) -> Option<Hsla> {
+        DecorationColor::pick(self.color.as_ref()?, self.dark_color.as_ref(), theme).resolve(theme)
+    }
+}
+
+/// Monaco `InjectedTextCursorStops`: where the cursor may stop around
+/// injected text. The text isn't part of the model, so moving over it
+/// doesn't change the cursor's position; the stops decide on which side of
+/// the text the cursor shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum InjectedTextCursorStops {
+    /// Before and after it (the default).
+    #[default]
+    Both,
+    /// After it only.
+    Right,
+    /// Before it only.
+    Left,
+    /// Neither.
+    None,
+}
+
+impl InjectedTextCursorStops {
+    /// Monaco `hasLeftCursorStop`.
+    pub(crate) fn has_left(self) -> bool {
+        matches!(self, Self::Both | Self::Left)
+    }
+
+    /// Monaco `hasRightCursorStop`.
+    pub(crate) fn has_right(self) -> bool {
+        matches!(self, Self::Both | Self::Right)
+    }
+}
+
+/// Data a host attaches to [`InjectedText`] (Monaco `attachedData`), read
+/// back from mouse targets ([`MouseTarget::injected_text`](crate::MouseTarget))
+/// and [`TextModel::injected_text_decorations`](crate::TextModel::injected_text_decorations).
+/// Two are equal when they're the same allocation.
+#[derive(Clone)]
+pub struct AttachedData(pub Arc<dyn std::any::Any + Send + Sync>);
+
+impl AttachedData {
+    /// Wraps `data`.
+    pub fn new(data: impl std::any::Any + Send + Sync) -> Self {
+        Self(Arc::new(data))
+    }
+
+    /// The data as a `T`, if that is its type.
+    pub fn downcast_ref<T: std::any::Any>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
+}
+
+impl PartialEq for AttachedData {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for AttachedData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("AttachedData").finish_non_exhaustive()
+    }
+}
+
+/// Token styles over byte ranges of [`InjectedText::content`], sorted and
+/// not overlapping.
+pub type InjectedTextTokens = Arc<[(Range<usize>, TokenStyle)]>;
 
 /// Text injected before or after the decorated range (Monaco
 /// `before`/`after`). It's rendered inline but isn't part of the text.
@@ -107,6 +264,17 @@ pub struct InjectedText {
     /// An underline under the text, e.g. the squiggle under ghost text
     /// with a warning (Monaco's `.ghost-text-decoration.warning`).
     pub underline: Option<DecorationUnderline>,
+    /// Token styles over parts of the text (Monaco's internal `tokens`, as
+    /// ghost text colors its suggestion like code): byte ranges of
+    /// `content`, sorted and not overlapping, drawn instead of
+    /// [`style`](Self::style) there.
+    pub tokens: Option<InjectedTextTokens>,
+    /// Where the cursor may stop around the text (Monaco `cursorStops`).
+    pub cursor_stops: InjectedTextCursorStops,
+    /// Host data, read back from mouse targets and
+    /// [`TextModel::injected_text_decorations`](crate::TextModel::injected_text_decorations)
+    /// (Monaco `attachedData`).
+    pub attached_data: Option<AttachedData>,
 }
 
 /// Room around [`InjectedText`] and the shape of its background (Monaco's
@@ -153,6 +321,10 @@ pub struct GlyphMarginOptions {
 }
 
 /// Monaco `IModelDecorationOptions`, with styles instead of class names.
+///
+/// Monaco's `inlineClassNameAffectsLetterSpacing` (here and on injected
+/// text) has no field: it tells Monaco's DOM renderer to measure the text
+/// again, and text here is always shaped with its styles.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DecorationOptions {
     /// Background behind the range (Monaco `className`).
@@ -188,6 +360,12 @@ pub struct DecorationOptions {
     /// A colored bar in the line decorations gutter area (Monaco
     /// `linesDecorationsClassName`, e.g. dirty-diff markers).
     pub gutter_bar: Option<Hsla>,
+    /// A bar or text in the line decorations area, as
+    /// [`gutter_bar`](Self::gutter_bar) and
+    /// [`lines_decoration_text`](Self::lines_decoration_text), but only on
+    /// the first view line of each wrapped line (Monaco
+    /// `firstLineDecorationClassName`).
+    pub first_line_decoration: Option<LinesDecoration>,
     /// Text centered in the line decorations area on every decorated line
     /// (Monaco `linesDecorationsClassName` with an icon, e.g. the diff
     /// editor's `add` and `remove` codicons). Codicon characters
@@ -197,9 +375,9 @@ pub struct DecorationOptions {
     /// A background across the whole gutter on the decorated lines (Monaco
     /// `marginClassName`).
     pub margin_background: Option<Hsla>,
-    /// A mark in the overview ruler (the vertical scrollbar track) at the start row
-    /// (Monaco `overviewRuler`).
-    pub overview_ruler: Option<(Hsla, OverviewRulerLane)>,
+    /// A mark in the overview ruler (the vertical scrollbar track) over the
+    /// decorated lines (Monaco `overviewRuler`).
+    pub overview_ruler: Option<OverviewRulerDecoration>,
     /// How it shows in the minimap (Monaco `minimap`).
     pub minimap: Option<MinimapDecoration>,
     /// Text shown before the range start (Monaco `before`).
@@ -208,6 +386,14 @@ pub struct DecorationOptions {
     pub after: Option<InjectedText>,
     /// Shown when hovering the range.
     pub hover_message: Option<SharedString>,
+    /// Draws the decoration when its range is empty too (Monaco
+    /// `showIfCollapsed`): on an empty range, its [`before`](Self::before)
+    /// and [`after`](Self::after) text only shows with this, and with it an
+    /// empty or narrow [`background`](Self::background) is widened to a
+    /// typical character's width (Monaco `typicalHalfwidthCharacterWidth`),
+    /// centered, and a range ending at the start of a line stops at the
+    /// end of the line before.
+    pub show_if_collapsed: bool,
     /// How the range grows when text is typed at its edges (Monaco `stickiness`).
     pub stickiness: Stickiness,
     /// Higher paints on top.
@@ -237,6 +423,39 @@ pub struct DecorationOptions {
     /// CSS `border-left`, as on the diff editor's `diff-range-empty`
     /// markers).
     pub left_border: Option<LeftBorder>,
+    /// The decorated text's font family (Monaco `fontFamily`); `None` keeps
+    /// the editor's. Line wrapping still measures the editor's font.
+    pub font_family: Option<SharedString>,
+    /// The decorated text's weight (Monaco `fontWeight`).
+    pub font_weight: Option<FontWeight>,
+    /// The decorated text's style, e.g. italic (Monaco `fontStyle`).
+    pub font_style: Option<FontStyle>,
+}
+
+impl DecorationOptions {
+    /// Whether its injected text shows on `range`: always on a non-empty
+    /// range, and on an empty one with
+    /// [`show_if_collapsed`](Self::show_if_collapsed) (Monaco
+    /// `getInjectedTextInInterval`).
+    pub(crate) fn shows_injected_text(&self, range: &Range<usize>) -> bool {
+        self.show_if_collapsed || !range.is_empty()
+    }
+
+    /// Whether it changes the decorated text's font.
+    pub(crate) fn has_font(&self) -> bool {
+        self.font_family.is_some() || self.font_weight.is_some() || self.font_style.is_some()
+    }
+}
+
+/// What a decoration draws in the line decorations area, between the line
+/// numbers and the text (Monaco's `linesDecorationsClassName` and
+/// `firstLineDecorationClassName` with a bar or an icon).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LinesDecoration {
+    /// A 3px colored bar, as [`DecorationOptions::gutter_bar`].
+    pub bar: Option<Hsla>,
+    /// Centered text, as [`DecorationOptions::lines_decoration_text`].
+    pub text: Option<(SharedString, Hsla)>,
 }
 
 /// A bar at a decoration's start ([`DecorationOptions::left_border`]).

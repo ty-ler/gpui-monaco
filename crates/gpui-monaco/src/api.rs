@@ -1055,7 +1055,8 @@ impl CodeEditor {
         end_cursor_state: Option<EndCursorState>,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.options.read_only {
+        // Monaco returns `false` without a model, or when read-only.
+        if self.options.read_only || self.detached {
             return false;
         }
         let selections = self.cursors.selections();
@@ -1209,6 +1210,10 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
+        // Monaco's `trigger` does nothing without a model.
+        if self.detached {
+            return Ok(());
+        }
         let added = self.added_actions.iter().any(|a| a.id.as_ref() == name)
             || crate::editor_actions::global_actions(cx)
                 .iter()
@@ -1606,10 +1611,12 @@ impl TextModel {
     }
 
     /// The decorations that inject text (Monaco
-    /// `getInjectedTextDecorations`): `before` or `after`.
+    /// `getInjectedTextDecorations`): `before` or `after`, on an empty range
+    /// only with `show_if_collapsed`.
     pub fn injected_text_decorations(&self, owner: Option<EntityId>) -> Vec<ModelDecoration> {
         self.query_decorations(owner, false, |d| {
-            d.options.before.is_some() || d.options.after.is_some()
+            (d.options.before.is_some() || d.options.after.is_some())
+                && d.options.shows_injected_text(&d.range)
         })
     }
 
@@ -1623,6 +1630,7 @@ impl TextModel {
                 || o.line_number_color.is_some()
                 || o.gutter_bar.is_some()
                 || o.lines_decoration_text.is_some()
+                || o.first_line_decoration.is_some()
                 || o.margin_background.is_some()
         })
     }

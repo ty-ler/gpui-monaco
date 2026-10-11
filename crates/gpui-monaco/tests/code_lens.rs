@@ -114,7 +114,7 @@ fn clicking_runs_the_command(cx: &mut TestAppContext) {
     let unhandled = Rc::new(RefCell::new(Vec::new()));
     cx.update(|_, cx| {
         let ran = ran.clone();
-        register_command(cx, "test.references", move |args, _| {
+        let _ = register_command(cx, "test.references", move |args, _| {
             ran.borrow_mut().push(args.to_vec())
         });
     });
@@ -169,7 +169,7 @@ fn show_lenses_in_current_line(cx: &mut TestAppContext) {
     let ran = Rc::new(RefCell::new(Vec::new()));
     cx.update(|_, cx| {
         let ran = ran.clone();
-        register_command(cx, "test.references", move |args, _| {
+        let _ = register_command(cx, "test.references", move |args, _| {
             ran.borrow_mut().push(args.to_vec())
         });
     });

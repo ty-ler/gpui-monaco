@@ -60,6 +60,8 @@ A model emits `TextModelEvent::Edited` for each change. Subscribe to it with `cx
 - **`kind`:** an edit, undo, redo or `set_value`.
 - **`eol` and `is_eol_change`:** the model's line ending, and whether only it changed (Monaco `setEOL`): then `patch` is empty and the one change replaces the whole text with itself, as Monaco's does.
 
+`TextModelEvent::SyntaxUpdated { ranges }` (Monaco `onDidChangeTokens`) follows each background parse, with the rows whose highlighting may have changed (0-based, inclusive): every row after the first parse, then the edited rows and what the parse changed around them. `TextModel::on_will_dispose(&model, cx, listener)` (Monaco `onWillDispose`) calls `listener` as the model is released.
+
 ### Coordinates
 
 The text API uses three kinds of position:
@@ -97,6 +99,8 @@ editor.update(cx, |editor, cx| {
     editor.restore_view_state(&state, cx);
 });
 ```
+
+`set_model(None, cx)` (Monaco `setModel(null)`) leaves the editor without a model: it draws only its background and ignores keys, the mouse, `execute_edits` and `trigger`, `get_model()` is `None` and `has_model()` false, until it's given a model again. `model()` then returns an empty internal model that isn't in `models()`.
 
 A `ViewState` (Monaco `ICodeEditorViewState`) holds the selections, the scroll position, the first visible position and the folded regions. Restoring it scrolls back to the same first line, even if view zones or wrapping moved it. A folded region comes back only if its lines haven't changed, which Monaco checks with a checksum.
 
