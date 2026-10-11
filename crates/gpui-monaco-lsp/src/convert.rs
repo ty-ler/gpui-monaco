@@ -416,6 +416,9 @@ pub fn marker(diagnostic: lsp::Diagnostic) -> Marker {
             lsp::NumberOrString::Number(n) => n.to_string().into(),
             lsp::NumberOrString::String(s) => s.into(),
         }),
+        code_target: diagnostic
+            .code_description
+            .map(|description| description.href.as_str().to_string().into()),
         tags: diagnostic
             .tags
             .unwrap_or_default()
@@ -585,6 +588,11 @@ pub fn diagnostic(marker: &Marker) -> lsp::Diagnostic {
             .code
             .as_ref()
             .map(|code| lsp::NumberOrString::String(code.to_string())),
+        code_description: marker
+            .code_target
+            .as_deref()
+            .and_then(|target| target.parse().ok())
+            .map(|href| lsp::CodeDescription { href }),
         source: marker.source.as_ref().map(|source| source.to_string()),
         message: marker.message.to_string(),
         tags: (!marker.tags.is_empty()).then(|| {
@@ -852,6 +860,7 @@ mod tests {
             "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 3 } },
             "severity": 2,
             "code": "unused",
+            "codeDescription": { "href": "https://example.com/unused" },
             "source": "rustc",
             "message": "unused variable",
         }))
@@ -859,6 +868,16 @@ mod tests {
         let marker = marker(diagnostic);
         assert_eq!(marker.severity, MarkerSeverity::Warning);
         assert_eq!(marker.code.as_deref(), Some("unused"));
+        assert_eq!(
+            marker.code_target.as_deref(),
+            Some("https://example.com/unused")
+        );
+        assert_eq!(
+            super::diagnostic(&marker)
+                .code_description
+                .map(|description| description.href.as_str().to_string()),
+            Some("https://example.com/unused".to_string())
+        );
         assert_eq!(marker.range, PointUtf16::new(1, 0)..PointUtf16::new(1, 3));
     }
 

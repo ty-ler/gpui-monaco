@@ -676,6 +676,7 @@ pub fn add_markers(editor: &Entity<CodeEditor>, cx: &mut App) {
             range: PointUtf16::new(row, 4)..PointUtf16::new(row, 14),
             source: Some("demo".into()),
             code: Some("E0308".into()),
+            code_target: Some("https://doc.rust-lang.org/error_codes/E0308.html".into()),
             related_information: vec![RelatedInformation {
                 uri: None,
                 range: PointUtf16::new(0, 0)..PointUtf16::new(0, 3),

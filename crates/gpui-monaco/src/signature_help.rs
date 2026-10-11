@@ -183,6 +183,10 @@ impl Render for SignatureHelpWidget {
             .max_w(self.room.cap_width(px(440.), px(100.)))
             .max_h(self.room.cap_height(self.max_height, px(24.)))
             .flex()
+            // `border-radius: var(--vscode-cornerRadius-large)` and
+            // `box-shadow: var(--vscode-shadow-lg)` (`parameterHints.css`).
+            .rounded(crate::widgets::card::CORNER_RADIUS)
+            .shadow(crate::widgets::card::shadow_lg())
             .bg(colors.hover_background)
             .border_1()
             .border_color(colors.hover_border)
