@@ -299,6 +299,303 @@ pub struct EditorColors {
     pub focus_border: Hsla,
     /// Inline edit colors (`inlineEdit.*`).
     pub inline_edit: InlineEditColors,
+    /// Symbol icon colors (`symbolIcon.*Foreground`), in the suggest
+    /// widget and the quick outline.
+    pub symbol_icons: SymbolIconColors,
+    /// An editor banner, such as the unicode highlighter's "too many
+    /// characters" one (`banner.background`).
+    pub banner_background: Hsla,
+    /// `banner.foreground`: a banner's text and links.
+    pub banner_foreground: Hsla,
+    /// `banner.iconForeground`: a banner's icon.
+    pub banner_icon_foreground: Hsla,
+}
+
+/// The colors of symbol icons, `symbolIcon.*Foreground` (Monaco
+/// `contrib/symbolIcons/browser/symbolIcons.ts`): the icons of the suggest
+/// widget's completion kinds and of the quick outline's symbol kinds. Those
+/// without a color of their own default to the theme's `foreground`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SymbolIconColors {
+    /// `symbolIcon.arrayForeground`.
+    pub array: Hsla,
+    /// `symbolIcon.booleanForeground`.
+    pub boolean: Hsla,
+    /// `symbolIcon.classForeground`.
+    pub class: Hsla,
+    /// `symbolIcon.colorForeground`.
+    pub color: Hsla,
+    /// `symbolIcon.constantForeground`.
+    pub constant: Hsla,
+    /// `symbolIcon.constructorForeground`.
+    pub constructor: Hsla,
+    /// `symbolIcon.enumeratorForeground`: enums and values.
+    pub enumerator: Hsla,
+    /// `symbolIcon.enumeratorMemberForeground`.
+    pub enumerator_member: Hsla,
+    /// `symbolIcon.eventForeground`.
+    pub event: Hsla,
+    /// `symbolIcon.fieldForeground`.
+    pub field: Hsla,
+    /// `symbolIcon.fileForeground`.
+    pub file: Hsla,
+    /// `symbolIcon.folderForeground`.
+    pub folder: Hsla,
+    /// `symbolIcon.functionForeground`.
+    pub function: Hsla,
+    /// `symbolIcon.interfaceForeground`.
+    pub interface: Hsla,
+    /// `symbolIcon.keyForeground`.
+    pub key: Hsla,
+    /// `symbolIcon.keywordForeground`.
+    pub keyword: Hsla,
+    /// `symbolIcon.methodForeground`.
+    pub method: Hsla,
+    /// `symbolIcon.moduleForeground`.
+    pub module: Hsla,
+    /// `symbolIcon.namespaceForeground`.
+    pub namespace: Hsla,
+    /// `symbolIcon.nullForeground`.
+    pub null: Hsla,
+    /// `symbolIcon.numberForeground`.
+    pub number: Hsla,
+    /// `symbolIcon.objectForeground`.
+    pub object: Hsla,
+    /// `symbolIcon.operatorForeground`.
+    pub operator: Hsla,
+    /// `symbolIcon.packageForeground`.
+    pub package: Hsla,
+    /// `symbolIcon.propertyForeground`.
+    pub property: Hsla,
+    /// `symbolIcon.referenceForeground`.
+    pub reference: Hsla,
+    /// `symbolIcon.snippetForeground`.
+    pub snippet: Hsla,
+    /// `symbolIcon.stringForeground`.
+    pub string: Hsla,
+    /// `symbolIcon.structForeground`.
+    pub structure: Hsla,
+    /// `symbolIcon.textForeground`.
+    pub text: Hsla,
+    /// `symbolIcon.typeParameterForeground`.
+    pub type_parameter: Hsla,
+    /// `symbolIcon.unitForeground`.
+    pub unit: Hsla,
+    /// `symbolIcon.variableForeground`.
+    pub variable: Hsla,
+}
+
+impl SymbolIconColors {
+    /// Monaco's defaults: `foreground` (the workbench text color) for most
+    /// kinds, and fixed colors for classes, functions, fields and the like,
+    /// the light themes' ones with `light`.
+    pub fn new(foreground: Hsla, light: bool) -> Self {
+        let pick = |dark: u32, light_color: u32| c(rgb(if light { light_color } else { dark }));
+        let orange = pick(0xee9d28, 0xd67e00);
+        let purple = pick(0xb180d7, 0x652d90);
+        let blue = pick(0x75beff, 0x007acc);
+        let mut colors = Self {
+            class: orange,
+            constructor: purple,
+            enumerator: orange,
+            enumerator_member: blue,
+            event: orange,
+            field: blue,
+            function: purple,
+            interface: blue,
+            method: purple,
+            variable: blue,
+            ..Self::all(foreground)
+        };
+        colors.set_foreground(foreground);
+        colors
+    }
+
+    fn all(color: Hsla) -> Self {
+        Self {
+            array: color,
+            boolean: color,
+            class: color,
+            color,
+            constant: color,
+            constructor: color,
+            enumerator: color,
+            enumerator_member: color,
+            event: color,
+            field: color,
+            file: color,
+            folder: color,
+            function: color,
+            interface: color,
+            key: color,
+            keyword: color,
+            method: color,
+            module: color,
+            namespace: color,
+            null: color,
+            number: color,
+            object: color,
+            operator: color,
+            package: color,
+            property: color,
+            reference: color,
+            snippet: color,
+            string: color,
+            structure: color,
+            text: color,
+            type_parameter: color,
+            unit: color,
+            variable: color,
+        }
+    }
+
+    /// Sets the colors that default to `foreground`.
+    fn set_foreground(&mut self, foreground: Hsla) {
+        for slot in [
+            &mut self.array,
+            &mut self.boolean,
+            &mut self.color,
+            &mut self.constant,
+            &mut self.file,
+            &mut self.folder,
+            &mut self.key,
+            &mut self.keyword,
+            &mut self.module,
+            &mut self.namespace,
+            &mut self.null,
+            &mut self.number,
+            &mut self.object,
+            &mut self.operator,
+            &mut self.package,
+            &mut self.property,
+            &mut self.reference,
+            &mut self.snippet,
+            &mut self.string,
+            &mut self.structure,
+            &mut self.text,
+            &mut self.type_parameter,
+            &mut self.unit,
+        ] {
+            *slot = foreground;
+        }
+    }
+
+    /// The color of a completion kind's icon (Monaco
+    /// `CompletionItemKinds.toIcon` and `symbolIcons.css`). `None` for the
+    /// kinds whose codicon has no symbol color: `Customcolor`, `User`,
+    /// `Issue` and `Tool`.
+    pub fn for_completion_kind(&self, kind: crate::providers::CompletionItemKind) -> Option<Hsla> {
+        use crate::providers::CompletionItemKind as K;
+        Some(match kind {
+            K::Method => self.method,
+            K::Function => self.function,
+            K::Constructor => self.constructor,
+            K::Field => self.field,
+            K::Variable => self.variable,
+            K::Class => self.class,
+            K::Struct => self.structure,
+            K::Interface => self.interface,
+            K::Module => self.module,
+            K::Property => self.property,
+            K::Event => self.event,
+            K::Operator => self.operator,
+            K::Unit => self.unit,
+            // `symbol-value` shares the enumerator color.
+            K::Value | K::Enum => self.enumerator,
+            K::Constant => self.constant,
+            K::EnumMember => self.enumerator_member,
+            K::Keyword => self.keyword,
+            K::Snippet => self.snippet,
+            K::Text => self.text,
+            K::Color => self.color,
+            K::File => self.file,
+            K::Reference => self.reference,
+            K::Folder => self.folder,
+            K::TypeParameter => self.type_parameter,
+            K::Customcolor | K::User | K::Issue | K::Tool => return None,
+        })
+    }
+
+    /// The color of a symbol kind's icon (Monaco `SymbolKinds.toIcon` and
+    /// `symbolIcons.css`).
+    pub fn for_symbol_kind(&self, kind: crate::providers::SymbolKind) -> Hsla {
+        use crate::providers::SymbolKind as K;
+        match kind {
+            K::File => self.file,
+            K::Module => self.module,
+            K::Namespace => self.namespace,
+            K::Package => self.package,
+            K::Class => self.class,
+            K::Method => self.method,
+            K::Property => self.property,
+            K::Field => self.field,
+            K::Constructor => self.constructor,
+            K::Enum => self.enumerator,
+            K::Interface => self.interface,
+            K::Function => self.function,
+            K::Variable => self.variable,
+            K::Constant => self.constant,
+            K::String => self.string,
+            K::Number => self.number,
+            K::Boolean => self.boolean,
+            K::Array => self.array,
+            K::Object => self.object,
+            K::Key => self.key,
+            K::Null => self.null,
+            K::EnumMember => self.enumerator_member,
+            K::Struct => self.structure,
+            K::Event => self.event,
+            K::Operator => self.operator,
+            K::TypeParameter => self.type_parameter,
+        }
+    }
+
+    /// Applies the `symbolIcon.*Foreground` keys, after `foreground` for
+    /// the colors that default to it.
+    fn apply_vscode_colors(&mut self, get: &dyn Fn(&str) -> Option<Hsla>) {
+        if let Some(foreground) = get("foreground") {
+            self.set_foreground(foreground);
+        }
+        for (slot, key) in [
+            (&mut self.array, "arrayForeground"),
+            (&mut self.boolean, "booleanForeground"),
+            (&mut self.class, "classForeground"),
+            (&mut self.color, "colorForeground"),
+            (&mut self.constant, "constantForeground"),
+            (&mut self.constructor, "constructorForeground"),
+            (&mut self.enumerator, "enumeratorForeground"),
+            (&mut self.enumerator_member, "enumeratorMemberForeground"),
+            (&mut self.event, "eventForeground"),
+            (&mut self.field, "fieldForeground"),
+            (&mut self.file, "fileForeground"),
+            (&mut self.folder, "folderForeground"),
+            (&mut self.function, "functionForeground"),
+            (&mut self.interface, "interfaceForeground"),
+            (&mut self.key, "keyForeground"),
+            (&mut self.keyword, "keywordForeground"),
+            (&mut self.method, "methodForeground"),
+            (&mut self.module, "moduleForeground"),
+            (&mut self.namespace, "namespaceForeground"),
+            (&mut self.null, "nullForeground"),
+            (&mut self.number, "numberForeground"),
+            (&mut self.object, "objectForeground"),
+            (&mut self.operator, "operatorForeground"),
+            (&mut self.package, "packageForeground"),
+            (&mut self.property, "propertyForeground"),
+            (&mut self.reference, "referenceForeground"),
+            (&mut self.snippet, "snippetForeground"),
+            (&mut self.string, "stringForeground"),
+            (&mut self.structure, "structForeground"),
+            (&mut self.text, "textForeground"),
+            (&mut self.type_parameter, "typeParameterForeground"),
+            (&mut self.unit, "unitForeground"),
+            (&mut self.variable, "variableForeground"),
+        ] {
+            if let Some(color) = get(&format!("symbolIcon.{key}")) {
+                *slot = color;
+            }
+        }
+    }
 }
 
 /// Inline edit (next edit suggestion) colors, `inlineEdit.*`. Each is
@@ -568,6 +865,13 @@ impl EditorColors {
             sticky_scroll_hover_background: c(rgb(0x2a2d2e)),
             focus_border: c(rgb(0x007fd4)),
             inline_edit: InlineEditColors::default(),
+            // Monaco's `foreground` is #CCCCCC.
+            symbol_icons: SymbolIconColors::new(c(rgb(0xcccccc)), false),
+            // `listActiveSelectionBackground`, `listActiveSelectionForeground`
+            // and `editorInfo.foreground`.
+            banner_background: c(rgb(0x04395e)),
+            banner_foreground: c(rgb(0xffffff)),
+            banner_icon_foreground: c(rgb(0x3794ff)),
         }
     }
 
@@ -704,6 +1008,13 @@ impl EditorColors {
             sticky_scroll_hover_background: c(rgb(0xf0f0f0)),
             focus_border: c(rgb(0x0090f1)),
             inline_edit: InlineEditColors::default(),
+            // Monaco's `foreground` is #616161.
+            symbol_icons: SymbolIconColors::new(c(rgb(0x616161)), true),
+            // `listActiveSelectionBackground`, `listActiveSelectionForeground`
+            // and `editorInfo.foreground`.
+            banner_background: c(rgb(0x0060c0)),
+            banner_foreground: c(rgb(0xffffff)),
+            banner_icon_foreground: c(rgb(0x1a85ff)),
         }
     }
 
@@ -858,6 +1169,12 @@ impl EditorColors {
             sticky_scroll_hover_background: gpui::transparent_black(),
             focus_border: c(rgb(0xf38518)),
             inline_edit: InlineEditColors::default(),
+            // Monaco's `foreground` is #FFFFFF.
+            symbol_icons: SymbolIconColors::new(c(rgb(0xffffff)), false),
+            // The list selection colors are `null` in high contrast.
+            banner_background: gpui::transparent_black(),
+            banner_foreground: c(rgb(0xffffff)),
+            banner_icon_foreground: c(rgb(0x3794ff)),
         }
     }
 
@@ -1006,6 +1323,12 @@ impl EditorColors {
             sticky_scroll_hover_background: c(rgba(0x0f4a851a)),
             focus_border: c(rgb(0x006bbd)),
             inline_edit: InlineEditColors::default(),
+            // Monaco's `foreground` is #292929.
+            symbol_icons: SymbolIconColors::new(c(rgb(0x292929)), true),
+            // The list selection colors are `null` in high contrast.
+            banner_background: gpui::transparent_black(),
+            banner_foreground: c(rgb(0x292929)),
+            banner_icon_foreground: c(rgb(0x1a85ff)),
         }
     }
 
@@ -1149,6 +1472,10 @@ impl EditorColors {
                 }
             }
         }
+        self.symbol_icons.apply_vscode_colors(&get);
+        set(&mut self.banner_background, "banner.background");
+        set(&mut self.banner_foreground, "banner.foreground");
+        set(&mut self.banner_icon_foreground, "banner.iconForeground");
         self.unicode_highlight_border = get("editorUnicodeHighlight.border")
             .or_else(|| get("editorWarning.foreground"))
             .unwrap_or(self.unicode_highlight_border);
@@ -1572,6 +1899,10 @@ pub struct Theme {
     /// `semantic_highlighting` is `ConfiguredByTheme` (VS Code's theme
     /// `semanticHighlighting`; Monaco's standalone themes say no).
     pub semantic_highlighting: bool,
+    /// Whether it's a high contrast theme (Monaco's `hc-black` and `hc-light`
+    /// bases, or a VS Code theme of `type` `hc`, `hcDark` or `hcLight`).
+    /// [`ThemeKind`] says whether it's light or dark.
+    pub high_contrast: bool,
     /// `semanticTokenColors` rules.
     pub(crate) semantic_rules: Vec<crate::semantic_theme::SemanticTokenRule>,
     pub(crate) semantic_cache: Mutex<HashMap<String, Option<crate::semantic_theme::SemanticStyle>>>,
@@ -1586,6 +1917,7 @@ impl Clone for Theme {
             self.rules.clone(),
         );
         theme.semantic_highlighting = self.semantic_highlighting;
+        theme.high_contrast = self.high_contrast;
         theme.semantic_rules = self.semantic_rules.clone();
         theme
     }
@@ -1625,6 +1957,7 @@ impl Theme {
             rules,
             cache: Mutex::default(),
             semantic_highlighting: false,
+            high_contrast: false,
             semantic_rules: Vec::new(),
             semantic_cache: Mutex::default(),
         }
@@ -1733,7 +2066,9 @@ impl Theme {
             "keyword" => "569CD6";
             "keyword.flow" => "C586C0";
         };
-        Self::new("hc-black", ThemeKind::Dark, EditorColors::hc_black(), rules)
+        let mut theme = Self::new("hc-black", ThemeKind::Dark, EditorColors::hc_black(), rules);
+        theme.high_contrast = true;
+        theme
     }
 
     /// Monaco's `hc-light` (high contrast light). [`ThemeKind`] has no
@@ -1765,12 +2100,14 @@ impl Theme {
             "keyword" => "0000FF";
             "keyword.flow" => "AF00DB";
         };
-        Self::new(
+        let mut theme = Self::new(
             "hc-light",
             ThemeKind::Light,
             EditorColors::hc_light(),
             rules,
-        )
+        );
+        theme.high_contrast = true;
+        theme
     }
 
     /// Monaco `defineTheme`: `base` plus extra Monaco rules and VS Code color
@@ -1790,7 +2127,9 @@ impl Theme {
         all_rules.extend(rules);
         let mut editor_colors = base.colors.clone();
         editor_colors.apply_vscode_colors(colors);
-        Self::new(name, base.kind, editor_colors, all_rules)
+        let mut theme = Self::new(name, base.kind, editor_colors, all_rules);
+        theme.high_contrast = base.high_contrast;
+        theme
     }
 
     /// Loads a VS Code color theme (`colors` + `tokenColors`). An `include`
@@ -1866,6 +2205,10 @@ impl Theme {
             rules,
         );
         theme.semantic_highlighting = merged.semantic_highlighting.unwrap_or(false);
+        theme.high_contrast = matches!(
+            merged.kind.as_deref(),
+            Some("hc" | "hcDark" | "hcLight" | "hc-black" | "hc-light")
+        );
         theme.semantic_rules = merged
             .semantic_token_colors
             .iter()
@@ -2173,6 +2516,13 @@ pub fn set_theme(cx: &mut gpui::App, name: &str) {
     else {
         return;
     };
+    set_theme_arc(cx, theme);
+}
+
+/// [`set_theme`] with the theme itself, which needn't be defined (the
+/// theme `toggleHighContrast` switches back to may be an editor's own).
+pub(crate) fn set_theme_arc(cx: &mut gpui::App, theme: Arc<Theme>) {
+    let themes = cx.default_global::<Themes>();
     if themes
         .current
         .as_ref()

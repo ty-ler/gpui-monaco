@@ -127,7 +127,7 @@ Expand Selection grows each selection through the enclosing syntax nodes: word p
 
 Ctrl+G opens go to line, and Cmd/Ctrl+Shift+O opens go to symbol. Both use a quick input at the top of the editor:
 
-- **`:line` or `:line:column`:** goes to a line, previewing it as you type. Negative numbers count from the end, and `::offset` goes to a character offset.
+- **`:line` or `:line:column`:** goes to a line, previewing it as you type. Negative numbers count from the end, and `::offset` goes to a character offset ("Go to Offset...", `editor.action.gotoOffset`, opens it with `::`).
 - **`@name`:** goes to a symbol from the [document symbols](providers.md#document-symbols), with fuzzy matching. A second word matches the container. `@:` groups the symbols by kind.
 - **`>command`:** the command palette (F1). It runs any supported editor action by label, and recently used actions come first.
 - **Anything else:** lists the prefixes.

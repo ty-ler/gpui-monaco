@@ -1,15 +1,18 @@
 //! Symbol navigation: go to definition, declaration, type definition,
 //! implementations and references, with several results shown in a peek
-//! view or stepped through with F4.
+//! view or stepped through with F4, and the `editor.action.goToLocations`
+//! and `editor.action.peekLocations` API commands for given locations.
 //!
 //! Ports Monaco's `src/vs/editor/contrib/gotoSymbol/browser/goToCommands.ts`,
 //! `symbolNavigation.ts` and `referencesModel.ts` (MIT).
 
 use std::time::Duration;
 
-use gpui::{App, Context, Global, SharedString, Task};
+use anyhow::Context as _;
+use gpui::{App, Context, Entity, Global, SharedString, Task};
 use text::PointUtf16;
 
+use crate::actions::{CommandLocation, CommandPosition, GoToLocations, PeekLocations};
 use crate::cursor::Selection;
 use crate::decorations::DecorationOptions;
 use crate::editor::{CodeEditor, CodeEditorEvent};
@@ -52,7 +55,7 @@ const HIGHLIGHT_DURATION: Duration = Duration::from_millis(350);
 
 #[derive(Default)]
 pub(crate) struct GotoState {
-    task: Option<Task<()>>,
+    pub(crate) task: Option<Task<()>>,
     highlight: Option<Task<()>>,
 }
 
@@ -194,6 +197,64 @@ impl CodeEditor {
         );
     }
 
+    /// Moves the cursor to `position` and goes to `locations` like a
+    /// navigation command (Monaco's `editor.action.goToLocations` API
+    /// command and its `GenericGoToLocationAction`): one is selected, and
+    /// several are handled as `multiple` says, or as
+    /// `goto_location.multiple_references` without it. The peek view's
+    /// title is "Locations". Without locations, `no_results_message` shows
+    /// at the cursor, if given. Locations without a uri are in this model.
+    pub fn go_to_locations(
+        &mut self,
+        position: PointUtf16,
+        locations: Vec<Location>,
+        multiple: Option<GoToLocation>,
+        no_results_message: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_go_to_locations(position, locations, multiple, no_results_message, false, cx);
+    }
+
+    /// [`CodeEditor::go_to_locations`] showing the locations in a peek
+    /// view, even a single one (Monaco's `editor.action.peekLocations` API
+    /// command, also `editor.action.showReferences`).
+    pub fn peek_locations(
+        &mut self,
+        position: PointUtf16,
+        locations: Vec<Location>,
+        multiple: Option<GoToLocation>,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_go_to_locations(position, locations, multiple, None, true, cx);
+    }
+
+    /// Monaco's `goToLocations` handler: `setPosition`, then the generic
+    /// action's `run` (which has no alternative command).
+    pub(crate) fn run_go_to_locations(
+        &mut self,
+        position: PointUtf16,
+        locations: Vec<Location>,
+        multiple: Option<GoToLocation>,
+        no_results_message: Option<SharedString>,
+        open_in_peek: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let position = self.model().read(cx).validate_position(position);
+        self.set_selections(&[Selection::collapsed(position)], cx);
+        self.reveal_position_in_center_if_outside_viewport(position, cx);
+        let uri = self.model().read(cx).uri().cloned();
+        let locations = sorted_locations(locations, uri.as_ref());
+        if locations.is_empty() {
+            // Monaco mutes the message unless one was given.
+            if let Some(message) = no_results_message {
+                self.show_message(message, position, cx);
+            }
+            return;
+        }
+        let preference = multiple.unwrap_or(self.options.goto_location.multiple_references);
+        self.on_locations(None, preference, locations, open_in_peek, false, cx);
+    }
+
     /// Monaco `SymbolNavigationAction.run`.
     pub(crate) fn navigate(
         &mut self,
@@ -211,6 +272,7 @@ impl CodeEditor {
         let tasks = self.request_locations(kind, position, cx);
         let state = self.navigation_state(cx);
         let uri = self.model().read(cx).uri().cloned();
+        self.start_cancellable(crate::editor_state::CancellableOperation::Navigation);
         self.goto.task = Some(cx.spawn(async move |this, cx| {
             let mut locations = Vec::new();
             for task in tasks {
@@ -257,7 +319,17 @@ impl CodeEditor {
                             cx,
                         );
                     }
-                    _ => this.on_locations(kind, locations, open_in_peek, open_to_side, cx),
+                    _ => {
+                        let preference = this.options.goto_location.multiple(kind);
+                        this.on_locations(
+                            Some(kind),
+                            preference,
+                            locations,
+                            open_in_peek,
+                            open_to_side,
+                            cx,
+                        )
+                    }
                 }
             })
             .ok();
@@ -271,16 +343,18 @@ impl CodeEditor {
         )
     }
 
-    /// Monaco `SymbolNavigationAction._onResult`.
+    /// Monaco `SymbolNavigationAction._onResult`: `preference` is what to
+    /// do with several results; `kind` names them in the peek view's title
+    /// ("Locations" without one).
     fn on_locations(
         &mut self,
-        kind: LocationKind,
+        kind: Option<LocationKind>,
+        preference: GoToLocation,
         locations: Vec<Location>,
         open_in_peek: bool,
         open_to_side: bool,
         cx: &mut Context<Self>,
     ) {
-        let preference = self.options.goto_location.multiple(kind);
         if !self.in_peek
             && (open_in_peek || (preference == GoToLocation::Peek && locations.len() > 1))
         {
@@ -407,6 +481,138 @@ impl CodeEditor {
         if !inside {
             cx.set_global(SymbolNavigation::default());
         }
+    }
+
+    /// Runs [`GoToLocations`] or [`PeekLocations`] in this editor: nothing
+    /// when `uri` names another model (standalone Monaco's
+    /// `openCodeEditor` only finds the focused editor's model).
+    pub(crate) fn go_to_locations_action(&mut self, args: GoToLocations, cx: &mut Context<Self>) {
+        let uri = self.model().read(cx).uri().cloned();
+        if args.uri.is_some() && args.uri.as_deref() != uri.as_deref() {
+            return;
+        }
+        let position = args
+            .position
+            .map_or(self.cursors.primary().position, CommandPosition::to_point);
+        let locations = args
+            .locations
+            .iter()
+            .map(CommandLocation::to_location)
+            .collect();
+        self.run_go_to_locations(
+            position,
+            locations,
+            args.multiple.as_deref().and_then(parse_go_to_location),
+            args.no_results_message.map(Into::into),
+            args.open_in_peek,
+            cx,
+        );
+    }
+}
+
+impl From<PeekLocations> for GoToLocations {
+    /// Monaco's `peekLocations` handler runs `goToLocations` with
+    /// `openInPeek`.
+    fn from(peek: PeekLocations) -> Self {
+        Self {
+            uri: peek.uri,
+            position: peek.position,
+            locations: peek.locations,
+            multiple: peek.multiple,
+            no_results_message: None,
+            open_in_peek: true,
+        }
+    }
+}
+
+/// Monaco `GoToLocationValues`.
+pub(crate) fn parse_go_to_location(value: &str) -> Option<GoToLocation> {
+    match value {
+        "peek" => Some(GoToLocation::Peek),
+        "gotoAndPeek" => Some(GoToLocation::GotoAndPeek),
+        "goto" => Some(GoToLocation::Goto),
+        _ => None,
+    }
+}
+
+/// `editor.action.goToLocations` arguments, positional as Monaco's
+/// `executeCommand` passes them: uri, position, locations, multiple,
+/// noResultsMessage, openInPeek.
+fn go_to_locations_args(args: &[serde_json::Value]) -> anyhow::Result<GoToLocations> {
+    let arg = |ix: usize| args.get(ix).filter(|value| !value.is_null()).cloned();
+    let uri: String = serde_json::from_value(arg(0).context("missing uri")?)?;
+    let position: CommandPosition = serde_json::from_value(arg(1).context("missing position")?)?;
+    let locations: Vec<CommandLocation> =
+        serde_json::from_value(arg(2).context("missing locations")?)?;
+    let multiple: Option<String> = arg(3).map(serde_json::from_value).transpose()?;
+    let no_results_message: Option<String> = arg(4).map(serde_json::from_value).transpose()?;
+    let open_in_peek: Option<bool> = arg(5).map(serde_json::from_value).transpose()?;
+    Ok(GoToLocations {
+        uri: Some(uri),
+        position: Some(position),
+        locations,
+        multiple,
+        no_results_message,
+        open_in_peek: open_in_peek.unwrap_or(false),
+    })
+}
+
+/// The editor to run a command for `uri` in: the focused one if it shows
+/// `uri` (as Monaco's `openCodeEditor` from the focused editor), else the
+/// first one showing it. Peek view previews don't count.
+fn editor_for_uri(uri: &str, cx: &App) -> Option<Entity<CodeEditor>> {
+    let editors: Vec<_> = crate::registry::editors(cx)
+        .into_iter()
+        .filter(|editor| {
+            let editor = editor.read(cx);
+            !editor.in_peek && editor.model().read(cx).uri().map(|u| u.as_ref()) == Some(uri)
+        })
+        .collect();
+    editors
+        .iter()
+        .find(|editor| editor.read(cx).has_focus)
+        .or(editors.first())
+        .cloned()
+}
+
+fn run_go_to_locations_command(args: anyhow::Result<GoToLocations>, cx: &mut App) {
+    let args = match args {
+        Ok(args) => args,
+        Err(err) => {
+            log::warn!("editor.action.goToLocations: {err:#}");
+            return;
+        }
+    };
+    // Commands often run inside an editor's update.
+    cx.defer(move |cx| {
+        let Some(editor) = args.uri.as_deref().and_then(|uri| editor_for_uri(uri, cx)) else {
+            return;
+        };
+        editor.update(cx, |editor, cx| editor.go_to_locations_action(args, cx));
+    });
+}
+
+/// Registers Monaco's `editor.action.goToLocations` and
+/// `editor.action.peekLocations` API commands (and the
+/// `editor.action.showReferences` alias), for
+/// [`execute_command`](crate::execute_command) and command ids in code
+/// lenses, code actions and completions.
+pub(crate) fn register_commands(cx: &mut App) {
+    crate::commands::register_command(cx, "editor.action.goToLocations", |args, cx| {
+        run_go_to_locations_command(go_to_locations_args(args), cx);
+    });
+    for id in [
+        "editor.action.peekLocations",
+        "editor.action.showReferences",
+    ] {
+        crate::commands::register_command(cx, id, |args, cx| {
+            // Monaco passes on uri, position, locations and multiple only.
+            let args = go_to_locations_args(&args[..args.len().min(4)]).map(|args| GoToLocations {
+                open_in_peek: true,
+                ..args
+            });
+            run_go_to_locations_command(args, cx);
+        });
     }
 }
 

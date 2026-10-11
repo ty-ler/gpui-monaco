@@ -225,12 +225,19 @@ pub(crate) struct HorizontalReveal {
 /// Clipboard metadata so pastes can reproduce Monaco's empty-selection and
 /// multi-cursor behavior.
 #[derive(Serialize, Deserialize)]
-struct ClipboardMetadata {
+pub(crate) struct ClipboardMetadata {
     is_from_empty_selection: bool,
     multicursor_text: Option<Vec<String>>,
     /// The language id of the editor it was copied from (Monaco `mode`).
     #[serde(default)]
     mode: Option<String>,
+    /// The copy whose `prepareDocumentPaste` data a paste merges in
+    /// (Monaco's copy metadata `id`).
+    #[serde(default)]
+    pub(crate) id: Option<String>,
+    /// The MIME types that data has (Monaco `providerCopyMimeTypes`).
+    #[serde(default)]
+    pub(crate) provider_copy_mime_types: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -386,6 +393,12 @@ pub struct CodeEditor {
     pub(crate) goto: crate::goto::GotoState,
     /// The peek view, if open.
     pub(crate) peek: crate::peek::PeekState,
+    /// The inspect tokens widget, if launched.
+    pub(crate) inspect_tokens: crate::developer::InspectTokensState,
+    /// Requests Escape can cancel (Monaco `editor.cancelOperation`).
+    pub(crate) cancellable: crate::editor_state::CancellableOperations,
+    /// A banner above the text and its height (Monaco `setBanner`).
+    pub(crate) banner: Option<(gpui::AnyView, Pixels)>,
     /// The rename box and requests.
     pub(crate) rename: crate::rename::RenameState,
     /// The lightbulb, the code action menu and requests.
@@ -474,6 +487,11 @@ impl CodeEditor {
                         editor
                             .update(cx, |this, cx| {
                                 this.dismiss_keyboard_definition_link(cx);
+                                // Monaco `InspectTokensController`: Escape
+                                // closes it, whatever else it does.
+                                if keystroke.key == "escape" {
+                                    this.stop_inspect_tokens(cx);
+                                }
                                 cx.emit(CodeEditorEvent::KeyDown(keystroke))
                             })
                             .ok();
@@ -525,6 +543,9 @@ impl CodeEditor {
             message: Default::default(),
             goto: Default::default(),
             peek: Default::default(),
+            inspect_tokens: Default::default(),
+            cancellable: Default::default(),
+            banner: None,
             rename: Default::default(),
             code_actions: Default::default(),
             inlay: Default::default(),
@@ -631,6 +652,7 @@ impl CodeEditor {
         self.close_message(cx);
         self.close_peek(cx);
         self.cancel_rename(false, cx);
+        self.stop_inspect_tokens(cx);
         self.hide_code_action_menu(cx);
         self.code_actions.lightbulb = None;
         self.reset_inlay_hints(cx);
@@ -1330,6 +1352,8 @@ impl CodeEditor {
             } => {
                 // Monaco closes the peek view.
                 self.close_peek(cx);
+                // And the inspect tokens widget.
+                self.stop_inspect_tokens(cx);
                 self.reset_inlay_hints(cx);
                 cx.emit(CodeEditorEvent::ModelLanguageChanged {
                     old_language: old_language.clone(),
@@ -1486,6 +1510,7 @@ impl CodeEditor {
         self.record_cursor_change();
         self.close_message(cx);
         self.check_symbol_navigation(cx);
+        self.inspect_tokens_cursor_changed(cx);
         self.check_rename(cx);
         self.dismiss_keyboard_definition_link(cx);
         self.smart_select_cursor_changed();
@@ -1778,6 +1803,11 @@ impl CodeEditor {
         // `removeSecondaryCursors`.
         if self.find.visible {
             self.close_find(window, cx);
+            return;
+        }
+        // Monaco `editor.cancelOperation` (weight `EditorContrib`) outranks
+        // the core commands.
+        if self.cancel_operation(cx) {
             return;
         }
         if self.cancel_selection_anchor(cx) {
@@ -2213,12 +2243,17 @@ impl CodeEditor {
         } else {
             CodeEditorEvent::WillCopy(event)
         });
+        // Monaco `CopyPasteController.handleCopy`: paste providers prepare
+        // data for pasting this text.
+        let (id, provider_copy_mime_types) = self.prepare_document_paste(cx);
         cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(
             text,
             ClipboardMetadata {
                 is_from_empty_selection,
                 multicursor_text,
                 mode: mode.map(|mode| mode.to_string()),
+                id,
+                provider_copy_mime_types,
             },
         ));
         true
@@ -2232,7 +2267,7 @@ impl CodeEditor {
     }
 
     /// The editor metadata stored with clipboard text copied from an editor.
-    fn clipboard_metadata(item: &ClipboardItem) -> Option<ClipboardMetadata> {
+    pub(crate) fn clipboard_metadata(item: &ClipboardItem) -> Option<ClipboardMetadata> {
         item.entries().iter().find_map(|entry| match entry {
             gpui::ClipboardEntry::String(string) => string.metadata_json::<ClipboardMetadata>(),
             _ => None,
@@ -2818,6 +2853,7 @@ impl CodeEditor {
             cx,
         );
         cx.emit(CodeEditorEvent::MouseDown(mouse));
+        self.long_lines_mouse_down(&mouse, cx);
         cx.emit(CodeEditorEvent::ContextMenu(mouse));
         // Monaco: only over text, and not on widgets.
         use crate::mouse_target::MouseTargetKind;
@@ -2847,6 +2883,7 @@ impl CodeEditor {
             cx,
         );
         cx.emit(CodeEditorEvent::MouseDown(mouse));
+        self.long_lines_mouse_down(&mouse, cx);
         // Embedded views (zones and widgets) handle their own clicks and
         // focus.
         if self.layout.as_ref().is_some_and(|layout| {
@@ -4023,7 +4060,8 @@ impl Render for CodeEditor {
             CursorLineEnd => (MoveCommand::LineEnd, false),
             CursorLineEndSelect => (MoveCommand::LineEnd, true),
         );
-        root.on_action(cx.listener(Self::select_all))
+        let root = root
+            .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::expand_line_selection))
             .on_action(cx.listener(Self::add_cursor_above))
             .on_action(cx.listener(Self::add_cursor_below))
@@ -4480,6 +4518,43 @@ impl Render for CodeEditor {
                 }
                 this.open_quick_access("@", window, cx)
             }))
+            .on_action(cx.listener(|this, _: &GotoOffset, window, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.open_quick_access("::", window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ForceRetokenize, _, cx| this.force_retokenize(cx)))
+            .on_action(cx.listener(|this, _: &InspectTokens, _, cx| this.launch_inspect_tokens(cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleHighContrast, _, cx| this.toggle_high_contrast(cx)),
+            )
+            .on_action(cx.listener(|this, _: &CancelOperation, _, cx| {
+                if !this.cancel_operation(cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, args: &GoToLocations, _, cx| {
+                this.go_to_locations_action(args.clone(), cx)
+            }))
+            .on_action(cx.listener(|this, args: &PeekLocations, _, cx| {
+                this.go_to_locations_action(args.clone().into(), cx)
+            }))
+            .on_action(cx.listener(
+                |this, _: &DisableHighlightingOfAmbiguousCharacters, _, cx| {
+                    this.disable_unicode_highlighting(|o| o.ambiguous_characters = false, cx)
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &DisableHighlightingOfInvisibleCharacters, _, cx| {
+                    this.disable_unicode_highlighting(|o| o.invisible_characters = false, cx)
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &DisableHighlightingOfNonBasicAsciiCharacters, _, cx| {
+                    this.disable_unicode_highlighting(|o| o.non_basic_ascii = false, cx)
+                },
+            ))
             .on_action(
                 cx.listener(|this, _: &ShowOrFocusStandaloneColorPicker, window, cx| {
                     if this.options.single_line {
@@ -4857,8 +4932,22 @@ impl Render for CodeEditor {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
-            .child(EditorElement::new(cx.entity()))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel));
+        // Monaco `setBanner`: the banner takes its height off the top.
+        match self.banner.clone() {
+            Some((banner, height)) => root
+                .flex()
+                .flex_col()
+                .child(div().flex_none().w_full().h(height).child(banner))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .child(EditorElement::new(cx.entity())),
+                ),
+            None => root.child(EditorElement::new(cx.entity())),
+        }
     }
 }
 

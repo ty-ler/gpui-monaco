@@ -677,6 +677,33 @@ actions!(
         /// Opens quick access to go to a symbol (Monaco
         /// `editor.action.quickOutline`).
         QuickOutline,
+        /// Opens quick access to go to a character offset (Monaco
+        /// `editor.action.gotoOffset`, "Go to Offset...").
+        GotoOffset,
+        /// Throws away the model's tokens and tokenizes it again right away
+        /// (Monaco `editor.action.forceRetokenize`, "Developer: Force
+        /// Retokenize").
+        ForceRetokenize,
+        /// Shows the token at the cursor, with its language, type and colors
+        /// (Monaco `editor.action.inspectTokens`, "Developer: Inspect
+        /// Tokens"); Escape closes it.
+        InspectTokens,
+        /// Switches every editor between the high contrast theme and the
+        /// theme before it (Monaco `editor.action.toggleHighContrast`).
+        ToggleHighContrast,
+        /// Cancels the newest pending request that Escape can cancel, such
+        /// as a go to definition, format, rename or paste (Monaco
+        /// `editor.cancelOperation`, Escape).
+        CancelOperation,
+        /// Turns off highlighting ambiguous characters (Monaco
+        /// `editor.action.unicodeHighlight.disableHighlightingOfAmbiguousCharacters`).
+        DisableHighlightingOfAmbiguousCharacters,
+        /// Turns off highlighting invisible characters (Monaco
+        /// `editor.action.unicodeHighlight.disableHighlightingOfInvisibleCharacters`).
+        DisableHighlightingOfInvisibleCharacters,
+        /// Turns off highlighting non-basic ASCII characters (Monaco
+        /// `editor.action.unicodeHighlight.disableHighlightingOfNonBasicAsciiCharacters`).
+        DisableHighlightingOfNonBasicAsciiCharacters,
         /// Opens the command palette (Monaco `editor.action.quickCommand`).
         QuickCommand,
         /// Turns sticky scroll on or off (Monaco
@@ -971,6 +998,189 @@ pub struct TriggerCodeAction {
     pub apply: Option<String>,
     /// Only preferred actions.
     pub preferred: bool,
+}
+
+/// A position as Monaco's API commands take it (`IPosition`): a 1-based
+/// line and UTF-16 column.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    serde::Serialize,
+    gpui::private::schemars::JsonSchema,
+)]
+#[schemars(crate = "gpui::private::schemars")]
+#[serde(rename_all = "camelCase")]
+pub struct CommandPosition {
+    /// The line, from 1.
+    pub line_number: u32,
+    /// The UTF-16 column, from 1.
+    pub column: u32,
+}
+
+impl CommandPosition {
+    /// The 0-based point.
+    pub fn to_point(self) -> text::PointUtf16 {
+        text::PointUtf16::new(
+            self.line_number.saturating_sub(1),
+            self.column.saturating_sub(1),
+        )
+    }
+}
+
+impl From<text::PointUtf16> for CommandPosition {
+    fn from(point: text::PointUtf16) -> Self {
+        Self {
+            line_number: point.row + 1,
+            column: point.column + 1,
+        }
+    }
+}
+
+/// A range as Monaco's API commands take it (`IRange`), 1-based.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    serde::Serialize,
+    gpui::private::schemars::JsonSchema,
+)]
+#[schemars(crate = "gpui::private::schemars")]
+#[serde(rename_all = "camelCase")]
+pub struct CommandRange {
+    /// The first line, from 1.
+    pub start_line_number: u32,
+    /// The first UTF-16 column, from 1.
+    pub start_column: u32,
+    /// The last line, from 1.
+    pub end_line_number: u32,
+    /// The UTF-16 column after the range, from 1.
+    pub end_column: u32,
+}
+
+impl CommandRange {
+    /// The 0-based range.
+    pub fn to_range(self) -> std::ops::Range<text::PointUtf16> {
+        CommandPosition {
+            line_number: self.start_line_number,
+            column: self.start_column,
+        }
+        .to_point()..CommandPosition {
+            line_number: self.end_line_number,
+            column: self.end_column,
+        }
+        .to_point()
+    }
+}
+
+impl From<std::ops::Range<text::PointUtf16>> for CommandRange {
+    fn from(range: std::ops::Range<text::PointUtf16>) -> Self {
+        Self {
+            start_line_number: range.start.row + 1,
+            start_column: range.start.column + 1,
+            end_line_number: range.end.row + 1,
+            end_column: range.end.column + 1,
+        }
+    }
+}
+
+/// A location as Monaco's API commands take it (`Location`).
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    serde::Serialize,
+    gpui::private::schemars::JsonSchema,
+)]
+#[schemars(crate = "gpui::private::schemars")]
+#[serde(rename_all = "camelCase")]
+pub struct CommandLocation {
+    /// The model's uri; without one, the editor's model.
+    #[serde(default)]
+    pub uri: Option<String>,
+    /// The range.
+    pub range: CommandRange,
+}
+
+impl CommandLocation {
+    /// The [`Location`](crate::providers::Location) it stands for.
+    pub fn to_location(&self) -> crate::providers::Location {
+        crate::providers::Location {
+            uri: self.uri.clone().map(Into::into),
+            range: self.range.to_range(),
+        }
+    }
+}
+
+/// Goes to `locations` from `position` (Monaco's `editor.action.goToLocations`
+/// API command): see [`CodeEditor::go_to_locations`](crate::CodeEditor::go_to_locations).
+/// Run in an editor, it does nothing when `uri` names another model, as in
+/// standalone Monaco.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    Action,
+    gpui::private::schemars::JsonSchema,
+)]
+#[schemars(crate = "gpui::private::schemars")]
+#[serde(default, rename_all = "camelCase")]
+#[action(namespace = code_editor)]
+pub struct GoToLocations {
+    /// The model to start in; unset for the editor's.
+    pub uri: Option<String>,
+    /// Where the cursor goes first; unset to stay.
+    pub position: Option<CommandPosition>,
+    /// The locations.
+    pub locations: Vec<CommandLocation>,
+    /// What to do with several: `"peek"`, `"gotoAndPeek"` or `"goto"`;
+    /// unset (or anything else) for `goto_location.multiple_references`.
+    pub multiple: Option<String>,
+    /// Shown when there are no locations; unset to show nothing.
+    pub no_results_message: Option<String>,
+    /// Show the locations in a peek view, even a single one.
+    pub open_in_peek: bool,
+}
+
+/// Peeks `locations` from `position` (Monaco's `editor.action.peekLocations`
+/// API command, also `editor.action.showReferences`): [`GoToLocations`]
+/// with `open_in_peek`.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    Action,
+    gpui::private::schemars::JsonSchema,
+)]
+#[schemars(crate = "gpui::private::schemars")]
+#[serde(default, rename_all = "camelCase")]
+#[action(namespace = code_editor)]
+pub struct PeekLocations {
+    /// The model to start in; unset for the editor's.
+    pub uri: Option<String>,
+    /// Where the cursor goes first; unset to stay.
+    pub position: Option<CommandPosition>,
+    /// The locations.
+    pub locations: Vec<CommandLocation>,
+    /// What to do with several, as for [`GoToLocations`].
+    pub multiple: Option<String>,
 }
 
 /// Monaco's default keybindings for the current platform.

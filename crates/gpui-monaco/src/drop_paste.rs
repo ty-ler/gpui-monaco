@@ -6,9 +6,10 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use futures::FutureExt as _;
 use gpui::{
-    App, AppContext as _, Context, IntoElement, ParentElement, Render, SharedString, Styled, Task,
-    Window, div, px,
+    App, AppContext as _, Context, Global, IntoElement, ParentElement, Render, SharedString,
+    Styled, Task, Window, div, px,
 };
 use text::PointUtf16;
 
@@ -359,7 +360,7 @@ pub(crate) struct PostEdit {
 
 #[derive(Default)]
 pub(crate) struct DropPasteState {
-    task: Option<Task<()>>,
+    pub(crate) task: Option<Task<()>>,
     pub(crate) post_edit: Option<PostEdit>,
 }
 
@@ -430,6 +431,7 @@ impl CodeEditor {
             .map(|provider| provider.provide_document_drop_edits(&context, position, &data, cx))
             .collect();
         let version = self.snapshot.version();
+        self.start_cancellable(crate::editor_state::CancellableOperation::DropOrPaste);
         self.drop_paste.task = Some(cx.spawn(async move |this, cx| {
             let mut edits = Vec::new();
             for task in tasks {
@@ -469,7 +471,8 @@ impl CodeEditor {
         if self.options.read_only || !self.options.paste_as.enabled {
             return false;
         }
-        let providers = self.paste_providers_for(&data, None, cx);
+        let copy_mime_types = copy_mime_types(&fallback);
+        let providers = self.paste_providers_for(&data, &copy_mime_types, None, cx);
         // Only our plain text provider: the normal paste.
         if providers.is_empty() || providers.iter().all(|p| p.is_default_text_provider()) {
             return false;
@@ -477,15 +480,35 @@ impl CodeEditor {
         self.close_message(cx);
         self.clear_post_edit(cx);
         let ranges: Vec<_> = self.selections().iter().map(|s| s.range()).collect();
-        let tasks = self.paste_tasks(
-            &providers,
+        let requests = self.paste_requests(
+            providers,
             &ranges,
-            &data,
+            data,
+            &fallback,
             DocumentPasteTriggerKind::Automatic,
             cx,
         );
         let version = self.snapshot.version();
+        self.start_cancellable(crate::editor_state::CancellableOperation::DropOrPaste);
         self.drop_paste.task = Some(cx.spawn(async move |this, cx| {
+            let tasks = match requests {
+                PasteRequests::Started(tasks) => tasks,
+                PasteRequests::AfterCopyData(pending) => {
+                    let (providers, data, ranges) = pending.merge().await;
+                    let Ok(tasks) = this.update(cx, |this, cx| {
+                        this.paste_tasks(
+                            &providers,
+                            &ranges,
+                            &data,
+                            DocumentPasteTriggerKind::Automatic,
+                            cx,
+                        )
+                    }) else {
+                        return;
+                    };
+                    tasks
+                }
+            };
             let edits = collect_edits(tasks).await;
             this.update(cx, |this, cx| {
                 if this.snapshot.version() != version {
@@ -506,25 +529,31 @@ impl CodeEditor {
         true
     }
 
+    /// The paste providers for `data`, plus the MIME types data prepared at
+    /// copy time will add (Monaco's `allPotentialMimeTypes`).
     fn paste_providers_for(
         &self,
         data: &DataTransfer,
+        copy_mime_types: &[String],
         only: Option<&str>,
         cx: &App,
     ) -> Vec<Arc<dyn DocumentPasteEditProvider>> {
         crate::providers::paste_edit_providers(cx, self.provider_target(cx))
             .into_iter()
             .filter(|provider| {
-                provider
-                    .paste_mime_types()
-                    .iter()
-                    .any(|mime| matches_mime_type(mime, data.mime_types().map(|m| m.as_ref())))
-                    && only.is_none_or(|only| {
-                        provider
-                            .provided_paste_edit_kinds()
-                            .iter()
-                            .any(|kind| edit_kind_contains(only, kind))
-                    })
+                provider.paste_mime_types().iter().any(|mime| {
+                    matches_mime_type(
+                        mime,
+                        data.mime_types()
+                            .map(|m| m.as_ref())
+                            .chain(copy_mime_types.iter().map(String::as_str)),
+                    )
+                }) && only.is_none_or(|only| {
+                    provider
+                        .provided_paste_edit_kinds()
+                        .iter()
+                        .any(|kind| edit_kind_contains(only, kind))
+                })
             })
             .collect()
     }
@@ -560,17 +589,38 @@ impl CodeEditor {
             return;
         };
         let data = clipboard_data(&item);
-        let providers = self.paste_providers_for(&data, only.as_deref(), cx);
+        let copy_mime_types = copy_mime_types(&item);
+        let providers = self.paste_providers_for(&data, &copy_mime_types, only.as_deref(), cx);
         let ranges: Vec<_> = self.selections().iter().map(|s| s.range()).collect();
-        let tasks = self.paste_tasks(
-            &providers,
+        let requests = self.paste_requests(
+            providers,
             &ranges,
-            &data,
+            data,
+            &item,
             DocumentPasteTriggerKind::PasteAs,
             cx,
         );
         let version = self.snapshot.version();
+        self.start_cancellable(crate::editor_state::CancellableOperation::DropOrPaste);
         self.drop_paste.task = Some(cx.spawn_in(window, async move |this, cx| {
+            let tasks = match requests {
+                PasteRequests::Started(tasks) => tasks,
+                PasteRequests::AfterCopyData(pending) => {
+                    let (providers, data, ranges) = pending.merge().await;
+                    let Ok(tasks) = this.update(cx, |this, cx| {
+                        this.paste_tasks(
+                            &providers,
+                            &ranges,
+                            &data,
+                            DocumentPasteTriggerKind::PasteAs,
+                            cx,
+                        )
+                    }) else {
+                        return;
+                    };
+                    tasks
+                }
+            };
             let mut edits = collect_edits(tasks).await;
             if let Some(only) = &only {
                 edits.retain(|e| e.kind.as_ref().is_some_and(|k| edit_kind_contains(only, k)));
@@ -765,6 +815,217 @@ impl CodeEditor {
     }
 }
 
+/// A provider's `prepareDocumentPaste` result, shared by the pastes that
+/// wait for it (failures become `None`).
+type CopyData = futures::future::Shared<Task<Option<DataTransfer>>>;
+
+/// Monaco `CopyPasteController._currentCopyOperation`: the data the last
+/// copy's providers prepare, shared by every editor. A new copy replaces
+/// (and so cancels) it.
+#[derive(Default)]
+struct CurrentCopyOperation {
+    /// The id in the copied text's metadata.
+    handle: String,
+    /// Each provider's copy MIME types and data.
+    operations: Vec<(Vec<SharedString>, CopyData)>,
+}
+
+impl Global for CurrentCopyOperation {}
+
+/// Monaco `getPlainTextToCopy`'s `sourceRanges`: the selections sorted,
+/// with an empty one standing for its whole line (once per line) when
+/// `empty_selection_clipboard` copies lines, else left out.
+pub(crate) fn copy_source_ranges(
+    selections: &[Selection],
+    rope: &text::Rope,
+    empty_selection_clipboard: bool,
+) -> Vec<Range<PointUtf16>> {
+    let mut ranges: Vec<Range<PointUtf16>> = selections.iter().map(|s| s.range()).collect();
+    ranges.sort_by_key(|range| (range.start, range.end));
+    let has_empty = ranges.iter().any(|range| range.is_empty());
+    let has_non_empty = ranges.iter().any(|range| !range.is_empty());
+    if !has_non_empty && !empty_selection_clipboard {
+        return Vec::new();
+    }
+    if !(has_empty && empty_selection_clipboard) {
+        ranges.retain(|range| !range.is_empty());
+        return ranges;
+    }
+    let mut result = Vec::new();
+    let mut previous_row = None;
+    for range in ranges {
+        let row = range.start.row;
+        if !range.is_empty() {
+            result.push(range);
+        } else if previous_row != Some(row) {
+            result.push(PointUtf16::new(row, 0)..PointUtf16::new(row, rope.line_len_utf16(row)));
+        }
+        previous_row = Some(row);
+    }
+    result
+}
+
+/// The MIME types the copy being pasted prepared data for (Monaco's copy
+/// metadata `providerCopyMimeTypes`).
+fn copy_mime_types(item: &gpui::ClipboardItem) -> Vec<String> {
+    CodeEditor::clipboard_metadata(item)
+        .map(|metadata| metadata.provider_copy_mime_types)
+        .unwrap_or_default()
+}
+
+/// The paste providers' requests: started right away, or once the data
+/// prepared at copy time is in.
+enum PasteRequests {
+    Started(Vec<Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>>>),
+    AfterCopyData(PendingPaste),
+}
+
+/// A paste waiting for data prepared at copy time.
+struct PendingPaste {
+    providers: Vec<Arc<dyn DocumentPasteEditProvider>>,
+    data: DataTransfer,
+    ranges: Vec<Range<PointUtf16>>,
+    operations: Vec<CopyData>,
+}
+
+impl PendingPaste {
+    /// Monaco `mergeInDataFromCopy`, then the providers that can handle the
+    /// merged data (`isSupportedPasteProvider`).
+    async fn merge(
+        self,
+    ) -> (
+        Vec<Arc<dyn DocumentPasteEditProvider>>,
+        DataTransfer,
+        Vec<Range<PointUtf16>>,
+    ) {
+        let mut data = self.data;
+        let results = futures::future::join_all(self.operations).await;
+        // Higher priority providers' values replace lower ones'.
+        for result in results.into_iter().rev().flatten() {
+            for (mime_type, item) in result.iter() {
+                data.insert(mime_type.clone(), item.clone());
+            }
+        }
+        let providers = self
+            .providers
+            .into_iter()
+            .filter(|provider| {
+                provider
+                    .paste_mime_types()
+                    .iter()
+                    .any(|mime| data.matches(mime))
+            })
+            .collect();
+        (providers, data, self.ranges)
+    }
+}
+
+impl CodeEditor {
+    /// Monaco `CopyPasteController.handleCopy`: the paste providers that
+    /// prepare pastes get the copied ranges, and their data is kept for
+    /// when the copy is pasted. Returns the copy's id and MIME types for
+    /// the clipboard metadata (none without such providers, or with
+    /// `paste_as` off).
+    pub(crate) fn prepare_document_paste(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> (Option<String>, Vec<String>) {
+        if !self.options.paste_as.enabled {
+            return (None, Vec::new());
+        }
+        let providers = crate::providers::paste_edit_providers(cx, self.provider_target(cx));
+        let context = self.provider_context_now(cx);
+        let ranges = copy_source_ranges(
+            &self.cursors.selections(),
+            self.snapshot.rope(),
+            self.options.empty_selection_clipboard,
+        );
+        let mut operations = Vec::new();
+        for provider in providers {
+            let Some(task) = provider.prepare_document_paste(&context, &ranges, cx) else {
+                continue;
+            };
+            let data = cx
+                .spawn(async move |_, _| match task.await {
+                    Ok(data) => Some(data),
+                    Err(err) => {
+                        log::error!("prepareDocumentPaste failed: {err:#}");
+                        None
+                    }
+                })
+                .shared();
+            operations.push((provider.copy_mime_types(), data));
+        }
+        if operations.is_empty() {
+            return (None, Vec::new());
+        }
+        let handle = uuid::Uuid::new_v4().to_string();
+        let mime_types = operations
+            .iter()
+            .flat_map(|(mime_types, _)| mime_types.iter().map(|m| m.to_string()))
+            .collect();
+        cx.set_global(CurrentCopyOperation {
+            handle: handle.clone(),
+            operations,
+        });
+        (Some(handle), mime_types)
+    }
+
+    /// Starts the paste providers' requests, after merging in the data
+    /// prepared when `item` was copied, if it was copied last (Monaco
+    /// `mergeInDataFromCopy`).
+    fn paste_requests(
+        &self,
+        providers: Vec<Arc<dyn DocumentPasteEditProvider>>,
+        ranges: &[Range<PointUtf16>],
+        data: DataTransfer,
+        item: &gpui::ClipboardItem,
+        trigger: DocumentPasteTriggerKind,
+        cx: &mut App,
+    ) -> PasteRequests {
+        let id = CodeEditor::clipboard_metadata(item).and_then(|metadata| metadata.id);
+        // Only the data some provider may want.
+        let operations: Vec<CopyData> = cx
+            .try_global::<CurrentCopyOperation>()
+            .filter(|current| id.as_deref() == Some(current.handle.as_str()))
+            .map(|current| {
+                current
+                    .operations
+                    .iter()
+                    .filter(|(mime_types, _)| {
+                        providers.iter().any(|provider| {
+                            provider.paste_mime_types().iter().any(|mime| {
+                                matches_mime_type(mime, mime_types.iter().map(|m| m.as_ref()))
+                            })
+                        })
+                    })
+                    .map(|(_, data)| data.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if operations.is_empty() {
+            let providers: Vec<_> = providers
+                .into_iter()
+                .filter(|provider| {
+                    provider
+                        .paste_mime_types()
+                        .iter()
+                        .any(|mime| data.matches(mime))
+                })
+                .collect();
+            return PasteRequests::Started(
+                self.paste_tasks(&providers, ranges, &data, trigger, cx),
+            );
+        }
+        PasteRequests::AfterCopyData(PendingPaste {
+            providers,
+            data,
+            ranges: ranges.to_vec(),
+            operations,
+        })
+    }
+}
+
 async fn collect_edits(
     tasks: Vec<Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>>>,
 ) -> Vec<DocumentDropOrPasteEdit> {
@@ -804,6 +1065,55 @@ pub(crate) fn clipboard_data(item: &gpui::ClipboardItem) -> DataTransfer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Monaco's `getPlainTextToCopy` tests (`viewModelImpl.test.ts`), on
+    /// the source ranges rather than the text.
+    #[test]
+    fn copy_source_ranges_like_monaco() {
+        let rope = text::Rope::from("\nline2\nline3\nline4\n");
+        let p = PointUtf16::new;
+        let at = |row, column| Selection::collapsed(p(row, column));
+        let select = |row, start, end| Selection {
+            anchor: p(row, start),
+            head: p(row, end),
+        };
+        // 0/1: an empty selection copies nothing, or its line.
+        assert_eq!(copy_source_ranges(&[at(1, 1)], &rope, false), vec![]);
+        assert_eq!(
+            copy_source_ranges(&[at(1, 1)], &rope, true),
+            vec![p(1, 0)..p(1, 5)]
+        );
+        // 1/1.
+        for empty_selection_clipboard in [false, true] {
+            assert_eq!(
+                copy_source_ranges(&[select(1, 1, 5)], &rope, empty_selection_clipboard),
+                vec![p(1, 1)..p(1, 5)]
+            );
+        }
+        // 0/2.
+        assert_eq!(
+            copy_source_ranges(&[at(1, 1), at(2, 1)], &rope, false),
+            vec![]
+        );
+        assert_eq!(
+            copy_source_ranges(&[at(1, 1), at(2, 1)], &rope, true),
+            vec![p(1, 0)..p(1, 5), p(2, 0)..p(2, 5)]
+        );
+        // 1/2: the empty one only counts with `emptySelectionClipboard`.
+        assert_eq!(
+            copy_source_ranges(&[select(1, 1, 5), at(2, 1)], &rope, false),
+            vec![p(1, 1)..p(1, 5)]
+        );
+        assert_eq!(
+            copy_source_ranges(&[at(2, 1), select(1, 1, 5)], &rope, true),
+            vec![p(1, 1)..p(1, 5), p(2, 0)..p(2, 5)]
+        );
+        // Two cursors on one line copy it once.
+        assert_eq!(
+            copy_source_ranges(&[at(1, 1), at(1, 3)], &rope, true),
+            vec![p(1, 0)..p(1, 5)]
+        );
+    }
 
     fn edit(
         title: &str,

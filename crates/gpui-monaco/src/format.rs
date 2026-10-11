@@ -224,6 +224,7 @@ impl CodeEditor {
             provider.provide_document_ranges_formatting_edits(&context, &ranges, options, cx)
         {
             let state = self.format_state(cx);
+            self.start_cancellable(crate::editor_state::CancellableOperation::Format);
             self.format_task = Some(cx.spawn(async move |this, cx| {
                 let edits = match task.await {
                     Ok(edits) => edits,
@@ -254,6 +255,7 @@ impl CodeEditor {
             })
             .collect();
         let state = self.format_state(cx);
+        self.start_cancellable(crate::editor_state::CancellableOperation::Format);
         self.format_task = Some(cx.spawn(async move |this, cx| {
             let mut results = Vec::new();
             for request in requests {
@@ -319,6 +321,7 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         let state = self.format_state(cx);
+        self.start_cancellable(crate::editor_state::CancellableOperation::Format);
         self.format_task = Some(cx.spawn(async move |this, cx| {
             let mut edits = Vec::new();
             for task in tasks {

@@ -106,7 +106,9 @@ enum Row {
 /// The peek view's content (Monaco `ReferenceWidget`).
 pub(crate) struct PeekView {
     editor: WeakEntity<CodeEditor>,
-    kind: LocationKind,
+    /// The command that found the results, for the title; `None` for
+    /// locations given to `goToLocations`.
+    kind: Option<LocationKind>,
     anchor: PointUtf16,
     groups: Vec<Group>,
     /// (group, reference).
@@ -209,7 +211,11 @@ fn line_preview(line: &str, start: u32, end: Option<u32>) -> (String, String, St
     )
 }
 
-fn kind_title(kind: LocationKind) -> &'static str {
+/// Monaco's `ReferencesModel` titles (`generic.title` for `goToLocations`).
+fn kind_title(kind: Option<LocationKind>) -> &'static str {
+    let Some(kind) = kind else {
+        return "Locations";
+    };
     match kind {
         LocationKind::Definition => "Definitions",
         LocationKind::Declaration => "Declarations",
@@ -226,7 +232,7 @@ impl PeekView {
         main_model: Entity<TextModel>,
         theme: Arc<Theme>,
         options: crate::options::EditorOptions,
-        kind: LocationKind,
+        kind: Option<LocationKind>,
         anchor: PointUtf16,
         locations: Vec<Location>,
         selected: usize,
@@ -873,7 +879,7 @@ impl CodeEditor {
     /// result nearest the cursor.
     pub(crate) fn open_peek(
         &mut self,
-        kind: LocationKind,
+        kind: Option<LocationKind>,
         locations: Vec<Location>,
         selected: Option<usize>,
         cx: &mut Context<Self>,
@@ -1008,7 +1014,7 @@ impl CodeEditor {
         &mut self,
         location: Location,
         close: bool,
-        (kind, locations, selected): (LocationKind, Vec<Location>, usize),
+        (kind, locations, selected): (Option<LocationKind>, Vec<Location>, usize),
         cx: &mut Context<Self>,
     ) {
         let here = location.uri.is_none() || location.uri.as_ref() == self.model().read(cx).uri();

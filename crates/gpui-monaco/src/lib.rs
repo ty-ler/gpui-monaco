@@ -32,6 +32,8 @@ mod completion;
 pub mod cursor;
 pub mod decorations;
 mod definition;
+mod developer;
+pub use developer::TokenInspection;
 pub mod diff;
 pub mod diff_editor;
 pub mod multi_diff_editor;
@@ -44,6 +46,7 @@ mod dnd;
 mod drop_paste;
 mod editor;
 mod editor_actions;
+mod editor_state;
 mod element;
 pub mod events;
 mod find;
@@ -64,6 +67,7 @@ pub mod layout_info;
 pub mod link_computer;
 mod linked_editing;
 mod links;
+mod long_lines_helper;
 pub mod markdown;
 mod markers;
 mod message;
@@ -148,8 +152,8 @@ pub use suggest_widget::SuggestWidget;
 pub use syntax;
 pub use text;
 pub use theme::{
-    EditorColors, InlineEditColors, Theme, ThemeKind, TokenStyle, define_theme, global_theme,
-    set_theme, theme_named,
+    EditorColors, InlineEditColors, SymbolIconColors, Theme, ThemeKind, TokenStyle, define_theme,
+    global_theme, set_theme, theme_named,
 };
 pub use view::reveal::{RevealType, ScrollType};
 pub use widgets::{
@@ -157,10 +161,13 @@ pub use widgets::{
     ViewZone, WidgetId, ZoneHeight,
 };
 
-/// Binds Monaco's default keybindings in the editor's key context, and
-/// starts tracking models for [`models`] and [`on_did_create_model`].
+/// Binds Monaco's default keybindings in the editor's key context, starts
+/// tracking models for [`models`] and [`on_did_create_model`], and registers
+/// Monaco's `editor.action.goToLocations` and `editor.action.peekLocations`
+/// API commands for [`execute_command`].
 pub fn init(cx: &mut gpui::App) {
     registry::ensure(cx);
+    goto::register_commands(cx);
     actions::bind_default_keys(cx);
     diff_editor::bind_keys(cx);
 }

@@ -835,6 +835,25 @@ impl CodeEditor {
         true
     }
 
+    /// Shows `banner` above the text, `height` tall, pushing the text down
+    /// (Monaco `setBanner`), or removes it with `None`. The unicode
+    /// highlighter's "too many characters" banner uses it too; there's one
+    /// at a time.
+    pub fn set_banner(
+        &mut self,
+        banner: Option<gpui::AnyView>,
+        height: gpui::Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        self.banner = banner.map(|banner| (banner, height));
+        cx.notify();
+    }
+
+    /// Whether a banner shows (see [`CodeEditor::set_banner`]).
+    pub fn has_banner(&self) -> bool {
+        self.banner.is_some()
+    }
+
     /// Ends the current undo group (Monaco `pushUndoStop`).
     pub fn push_undo_stop(&mut self, cx: &mut Context<Self>) {
         self.model()

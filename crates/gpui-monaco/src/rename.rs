@@ -39,7 +39,7 @@ const MAX_VISIBLE_CANDIDATES: usize = 7;
 
 #[derive(Default)]
 pub(crate) struct RenameState {
-    task: Option<Task<()>>,
+    pub(crate) task: Option<Task<()>>,
     /// The box, the location and the provider that resolved it.
     session: Option<Session>,
 }
@@ -439,6 +439,7 @@ impl CodeEditor {
                 None => break,
             }
         }
+        self.start_cancellable(crate::editor_state::CancellableOperation::Rename);
         self.rename.task = Some(cx.spawn(async move |this, cx| {
             let mut rejects: Vec<String> = Vec::new();
             let mut resolved = None;
@@ -754,6 +755,7 @@ impl CodeEditor {
         let position = session.position;
         let label: SharedString =
             format!("Renaming '{}' to '{new_name}'", session.location.text).into();
+        self.start_cancellable(crate::editor_state::CancellableOperation::Rename);
         self.rename.task = Some(cx.spawn(async move |this, cx| {
             let mut rejects: Vec<String> = Vec::new();
             let mut edit = None;

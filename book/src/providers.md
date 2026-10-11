@@ -135,6 +135,7 @@ Results from every matching provider are merged, sorted by uri and position, and
 - **Stale results:** they're dropped if the text or the cursor changed in the meantime.
 - **To the side:** Open Definition to the Side emits `CodeEditorEvent::OpenLocationToSide(location)` for the first result, even in this model, so the host can open it in an editor beside this one. (Standalone Monaco has no side-by-side editors and opens it in place; `go_to_location` does that.)
 - **Cmd/Ctrl+click:** with `definition_link_opens_in_peek`, the definitions show in a peek view instead.
+- **Escape** while a request is pending cancels it (Monaco's `editor.cancelOperation`, also for format, rename, paste and drop requests); `has_cancellable_operation` says whether one is.
 - **Definition preview:** resting the mouse on a Cmd/Ctrl+hover link shows the definition's code in the hover, in the target model's language (Monaco's `goToDefinitionAtPosition`). It's the location's range, or for 8 lines or more the lines up to the next one indented like the first, without their common indentation. Several definitions say "Click to show N definitions." Locations in other models need `model_for_uri` to find them. Show Definition Preview Hover (`editor.action.showDefinitionPreviewHover`, `show_definition_preview_hover`, unbound) shows the same at the cursor until it moves or a key is pressed.
 
 The peek view (Monaco's references widget) opens under the cursor's line:
@@ -145,6 +146,12 @@ The peek view (Monaco's references widget) opens under the cursor's line:
 - **Focus:** the list has focus when it opens, or the preview with `peek_widget_default_focus: Editor`. Cmd/Ctrl+K F2 moves focus between them.
 - **Resizing:** drag the line between the preview and the list, or the view's bottom edge (between 5 and 35 lines). The next peek view, in any editor, keeps the size.
 - **Going to a result:** a result in this model moves the peek view there; one elsewhere closes it and emits `OpenLocation`. Double-clicking in the preview always closes it.
+
+Hosts with locations of their own, such as a test explorer or a code lens that lists usages, show them the same way with Monaco's API commands:
+
+- **`go_to_locations(position, locations, multiple, no_results_message, cx)`** (Monaco `editor.action.goToLocations`) moves the cursor to `position` and handles `locations` like a navigation command. `multiple` (a `GoToLocation`) overrides `goto_location.multiple_references`. Without locations, `no_results_message` shows, if given. The peek view's title is "Locations". `goto_location.multiple_tests` (Monaco `gotoLocation.multipleTests`) is there for a host's go to test commands to pass as `multiple`.
+- **`peek_locations(position, locations, multiple, cx)`** (Monaco `editor.action.peekLocations`, also `editor.action.showReferences`) always peeks, even one location.
+- **By id:** `trigger_with_payload("editor.action.goToLocations", json, …)` takes Monaco's JSON shapes (`{ "uri", "position": { "lineNumber", "column" }, "locations": [{ "uri", "range": { "startLineNumber", … } }], "multiple", "noResultsMessage", "openInPeek" }`, 1-based). `execute_command` and command ids in code lenses, code actions and completions take Monaco's positional arguments (uri, position, locations, multiple, noResultsMessage, openInPeek) and run in the focused editor showing the uri (or the first one). As in standalone Monaco, a uri no editor shows does nothing.
 
 To preview other documents, the peek view looks models up by uri with `model_for_uri`. That covers models shown in an editor, models you `register_model`, and whatever your `set_model_resolver` callback returns, for example a model read from disk. Results it can't resolve show "no preview available".
 
@@ -402,6 +409,8 @@ Monaco's `DocumentDropEditProvider` and `DocumentPasteEditProvider` decide how d
 - `yield_to`, the edits it should rank below.
 
 The editor has built-in providers for plain text, paths and HTML. When other providers handle a paste, the first edit is applied. If there are alternatives, a button (or Cmd/Ctrl+.) switches between them. "Paste As..." (`paste_as`) lists every edit.
+
+A paste provider can also prepare data when text is copied or cut, as Monaco's `prepareDocumentPaste` does (with `paste_as.enabled` on). `prepare_document_paste` gets the copied ranges (whole lines for empty selections) and returns a `DataTransfer`, for example the imports the copied code needs; `copy_mime_types` names its MIME types. When that copy is pasted, in this editor or another, the paste waits for the data, adds it to the paste's `DataTransfer` (higher priority providers winning) and asks the providers that handle it. Text copied elsewhere, or before the latest copy, has no such data.
 
 ```rust
 register_document_paste_edit_provider(cx, LanguageSelector::All, MyProvider);
