@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, Context, CursorStyle as MouseCursor, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
-    Render, ScrollWheelEvent, StatefulInteractiveElement as _, Styled, Subscription, Task,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
+    Point, Render, ScrollWheelEvent, StatefulInteractiveElement as _, Styled, Subscription, Task,
     UTF16Selection, Window, div, point, px,
 };
 use serde::{Deserialize, Serialize};
@@ -514,6 +514,8 @@ pub struct CodeEditor {
     /// Context keys, the host's commands and their keybindings.
     pub(crate) commands: crate::editor_commands::EditorCommandsState,
     pub(crate) minimap_cache: crate::minimap::MinimapCache,
+    /// The overview ruler's decoration marks.
+    pub(crate) overview_ruler_cache: crate::view::overview_ruler::OverviewRulerCache,
     /// The editor font's measured character widths, for `Advanced`
     /// wrapping.
     pub(crate) char_widths: Option<Arc<crate::element::CharWidths>>,
@@ -863,6 +865,7 @@ impl CodeEditor {
             color_picker: Default::default(),
             context_menu: Default::default(),
             minimap_cache: Default::default(),
+            overview_ruler_cache: Default::default(),
             char_widths: None,
             wrap_classifier: None,
             minimap_hovered: false,
@@ -943,6 +946,7 @@ impl CodeEditor {
             model.remove_all_decorations_with_owner(owner, cx)
         });
         self.minimap_cache = Default::default();
+        self.overview_ruler_cache = Default::default();
         self.cancel_selection_anchor(cx);
         self.reset_navigation_history();
         self.clear_occurrence_highlights(cx);
@@ -1703,6 +1707,31 @@ impl CodeEditor {
     pub fn vertical_scrollbar_for_tests(&self) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
         let bar = self.layout.as_ref()?.vertical_scrollbar?;
         Some((bar.bar, bar.thumb))
+    }
+
+    /// The overview ruler from the last layout, for tests.
+    #[doc(hidden)]
+    pub fn overview_ruler_for_tests(&self) -> Option<OverviewRulerForTests> {
+        let ruler = self.overview_ruler_cache.painted.as_ref()?;
+        let marks = |marks: &[(crate::view::overview_ruler::CanvasRect, Hsla)]| {
+            marks
+                .iter()
+                .map(|(rect, color)| (ruler.bounds_of(*rect), *color))
+                .collect()
+        };
+        Some(OverviewRulerForTests {
+            bounds: ruler.bounds,
+            background: ruler.background,
+            marks: marks(&ruler.marks),
+            cursors: marks(&ruler.cursors),
+            border: ruler.border_rects(),
+        })
+    }
+
+    /// The top scroll shadow's box from the last layout, for tests.
+    #[doc(hidden)]
+    pub fn scroll_shadow_for_tests(&self) -> Option<Bounds<Pixels>> {
+        self.layout.as_ref()?.scroll_decoration
     }
 
     /// Whether the blinking cursor is in its visible phase, for tests.
@@ -3930,20 +3959,40 @@ impl CodeEditor {
                 (event.position.x, bar.thumb.left(), bar.thumb.size.width)
             };
             let on_thumb = bar.thumb.contains(&event.position);
-            // Monaco `scrollByPage`: the track pages towards the click.
+            // Monaco `scrollByPage`: the track pages towards the click by
+            // the visible size (`getDesiredScrollPositionFromOffsetPaged`),
+            // then drags from there (`_sliderPointerDown`).
             if !on_thumb && self.options.scrollbar.scroll_by_page {
                 let page = if vertical {
-                    layout.text_bounds.size.height
+                    layout.bounds.size.height
                 } else {
                     layout.text_bounds.size.width
                 };
                 let delta = if along < thumb_start { -page } else { page };
-                if vertical {
+                let track_start = if vertical {
                     self.scroll_top += delta;
+                    bar.track.top()
                 } else {
                     self.scroll_left += delta;
-                }
+                    bar.track.left()
+                };
                 self.clamp_scroll();
+                // Where the slider now is, so dragging moves it from there.
+                let scrolled = if vertical {
+                    self.scroll_top
+                } else {
+                    self.scroll_left
+                };
+                let thumb_start = track_start + scrolled / bar.ratio.max(f32::EPSILON);
+                self.scrollbar_drag = Some(if vertical {
+                    ScrollbarDrag::Vertical {
+                        grab_offset: along - thumb_start,
+                    }
+                } else {
+                    ScrollbarDrag::Horizontal {
+                        grab_offset: along - thumb_start,
+                    }
+                });
                 self.emit_scroll_changed(cx);
                 cx.notify();
                 return;
@@ -6323,4 +6372,17 @@ impl cursor::CursorModel for ViewCursorModel<'_> {
     fn line_max_column(&self, row: u32) -> u32 {
         self.0.line_max_column(row)
     }
+}
+
+/// The overview ruler as laid out, for tests: (bounds, color) of each
+/// mark.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct OverviewRulerForTests {
+    pub bounds: Bounds<Pixels>,
+    pub background: Option<Hsla>,
+    pub marks: Vec<(Bounds<Pixels>, Hsla)>,
+    pub cursors: Vec<(Bounds<Pixels>, Hsla)>,
+    /// The left and top edges and their color.
+    pub border: Option<([Bounds<Pixels>; 2], Hsla)>,
 }

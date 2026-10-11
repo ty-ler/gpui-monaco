@@ -63,7 +63,7 @@ Ranges are byte offsets. To convert from `PointUtf16`, use `model.buffer().point
 | `glyph_margin_hover_message` | `glyphMarginHoverMessage` | markdown shown when the mouse rests on the row's glyph margin or line number |
 | `line_number_color` | `lineNumberClassName` | colors the line number |
 | `gutter_bar` | `linesDecorationsClassName` | a bar between the line numbers and the text |
-| `overview_ruler` | `overviewRuler` | a mark in the scrollbar's overview ruler |
+| `overview_ruler` | `overviewRuler` | a mark in the scrollbar's overview ruler, in a color and lane, spanning the range's lines |
 | `minimap` (`MinimapDecoration`) | `minimap` | a mark in the minimap: `Inline` over the characters with a half-color band across the line, or a 2px `Gutter` bar; or a section header (`section_header_style`, `section_header_text`) |
 | `before`, `after` | `before`, `after` | text injected before or after the range; the cursor skips over it |
 | `hover_message` | `hoverMessage` | markdown shown in the hover |

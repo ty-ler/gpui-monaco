@@ -231,6 +231,8 @@ pub struct DecorationSet {
     /// Length of the longest decoration, to bound range queries.
     max_len: usize,
     sorted: bool,
+    /// Bumped on every change, so views can cache what they derive.
+    version: u64,
 }
 
 impl DecorationSet {
@@ -242,6 +244,12 @@ impl DecorationSet {
     /// Whether there are no decorations.
     pub fn is_empty(&self) -> bool {
         self.decorations.is_empty()
+    }
+
+    /// A number that changes whenever a decoration is added, removed,
+    /// changed or moved.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     /// Removes `old` and adds `new`, returning the new ids in order.
@@ -269,6 +277,7 @@ impl DecorationSet {
             ids.push(id);
         }
         self.sorted = false;
+        self.version += 1;
         ids
     }
 
@@ -278,6 +287,7 @@ impl DecorationSet {
         match self.decorations.iter_mut().find(|d| d.id == id) {
             Some(decoration) => {
                 decoration.options = Arc::new(options);
+                self.version += 1;
                 true
             }
             None => false,
@@ -298,6 +308,7 @@ impl DecorationSet {
             });
         self.decorations.clear();
         self.max_len = 0;
+        self.version += 1;
         Some(change)
     }
 
@@ -318,6 +329,9 @@ impl DecorationSet {
                 true
             }
         });
+        if change.is_some() {
+            self.version += 1;
+        }
         change
     }
 
@@ -356,6 +370,7 @@ impl DecorationSet {
         }
         self.max_len = max_len;
         self.sorted = false;
+        self.version += 1;
     }
 
     /// [`DecorationSet::apply_patch`], except that decoration edges inside

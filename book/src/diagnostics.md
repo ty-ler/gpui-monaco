@@ -25,7 +25,7 @@ model.update(cx, |model, cx| {
 Markers are rendered as:
 
 - **Squiggles:** red for errors, yellow for warnings and blue for info. Hints get no squiggle.
-- **Overview ruler marks** for warnings and errors.
+- **Overview ruler marks** for errors, warnings and infos, in the right lane, in the theme's `editorOverviewRuler.errorForeground`, `warningForeground` and `infoForeground`.
 - **Tags:**
   - `MarkerTag::Unnecessary` fades the code (`show_unused`, using the theme's `editorUnnecessaryCode.opacity`).
   - `MarkerTag::Deprecated` strikes it through (`show_deprecated`).

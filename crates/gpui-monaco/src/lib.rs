@@ -145,6 +145,8 @@ pub use decorations::{
     BlockDecoration, DecorationId, DecorationOptions, DecorationUnderline, InjectedText,
     LeftBorder, MinimapDecoration, MinimapPosition, MinimapSectionHeaderStyle, OverviewRulerLane,
 };
+#[doc(hidden)]
+pub use editor::OverviewRulerForTests;
 pub use editor::{CodeEditor, CodeEditorEvent, FoldingRegionState, FoldingViewState, ViewState};
 pub use editor_actions::{
     ActionPrecondition, ActionRun, EditorActionDescriptor, EditorActionInfo, KeybindingRule,

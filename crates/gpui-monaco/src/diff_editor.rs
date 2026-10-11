@@ -4001,11 +4001,17 @@ impl DiffEditor {
         // `diffInserted`/`diffRemoved` at twice their alpha.
         let insert_color = colors.diff_overview_inserted.unwrap_or_else(|| {
             let c = colors.diff_inserted_text_background;
-            c.opacity((c.a * 2.).min(1.))
+            Hsla {
+                a: (c.a * 2.).min(1.),
+                ..c
+            }
         });
         let remove_color = colors.diff_overview_removed.unwrap_or_else(|| {
             let c = colors.diff_removed_text_background;
-            c.opacity((c.a * 2.).min(1.))
+            Hsla {
+                a: (c.a * 2.).min(1.),
+                ..c
+            }
         });
         let (original_zones, modified_zones) = self.overview_zones(cx);
         let slider = modified.layout.as_ref().and_then(|layout| {
@@ -4029,18 +4035,28 @@ impl DiffEditor {
         };
         let half = DIFF_OVERVIEW_WIDTH / 2.;
         let paint = move |bounds: Bounds<Pixels>, window: &mut Window| {
-            let height = f32::from(bounds.size.height);
+            use crate::view::overview_ruler::{merge_color_zones, resolve_color_zones};
+            // Each side is a Monaco `OverviewRuler`: `OverviewZoneManager`
+            // zones (fractions of the scroll height here) at least 4px tall,
+            // in device pixels, with overlapping ones merged
+            // (`_renderOneLane`).
+            let pixel_ratio = window.scale_factor();
+            let device = |value: i32| px(value as f32 / pixel_ratio);
             for (zones, left, color) in [
                 (&original_zones, 0., remove_color),
                 (&modified_zones, half, insert_color),
             ] {
-                for (top, bottom) in zones.iter() {
-                    let top = (top * height).floor();
-                    let bottom = (bottom * height).ceil().max(top + 2.);
+                let resolved = resolve_color_zones(
+                    zones.iter().map(|(top, bottom)| (*top, *bottom, 1)),
+                    f32::from(bounds.size.height),
+                    1.,
+                    pixel_ratio,
+                );
+                for (_, from, to) in merge_color_zones(&resolved) {
                     window.paint_quad(gpui::fill(
                         Bounds::new(
-                            point(bounds.left() + px(left), bounds.top() + px(top)),
-                            gpui::size(px(half), px(bottom - top)),
+                            point(bounds.left() + px(left), bounds.top() + device(from)),
+                            gpui::size(px(half), device(to - from)),
                         ),
                         color,
                     ));

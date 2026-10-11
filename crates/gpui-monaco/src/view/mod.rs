@@ -10,6 +10,7 @@ pub mod folding;
 pub mod guides;
 pub mod line_breaks;
 pub(crate) mod minimap;
+pub(crate) mod overview_ruler;
 pub mod prefix_sum;
 pub mod reveal;
 pub mod selections;
