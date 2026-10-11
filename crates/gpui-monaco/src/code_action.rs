@@ -503,14 +503,13 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) -> Task<Vec<Item>> {
         let model = self.model().read(cx);
-        let language = model.language_id().map(|l| l.to_string());
         let context = model.provider_context();
         let action_context = CodeActionContext {
             only: filter.include.clone(),
             trigger,
             markers: self.markers_in(&range, cx),
         };
-        let tasks: Vec<_> = code_action_providers(cx, language.as_deref())
+        let tasks: Vec<_> = code_action_providers(cx, self.provider_target(cx))
             .into_iter()
             .filter(|provider| {
                 provider
@@ -548,12 +547,10 @@ impl CodeEditor {
     /// After the cursor moves or markers change: asks for actions for the
     /// lightbulb after a pause (Monaco `CodeActionOracle`).
     pub(crate) fn schedule_auto_code_actions(&mut self, cx: &mut Context<Self>) {
-        let model = self.model().read(cx);
-        let language = model.language_id().map(|l| l.to_string());
         if self.options.read_only
             || self.in_peek
             || self.options.single_line
-            || code_action_providers(cx, language.as_deref()).is_empty()
+            || code_action_providers(cx, self.provider_target(cx)).is_empty()
         {
             self.code_actions.lightbulb = None;
             self.code_actions.auto = None;

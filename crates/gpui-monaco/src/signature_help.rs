@@ -23,6 +23,8 @@ use crate::widgets::{ContentWidget, ContentWidgetPreference, WidgetId};
 #[derive(Default)]
 pub(crate) struct SignatureHelpState {
     task: Option<Task<()>>,
+    /// A request is in flight (Monaco's `Pending` state).
+    pending: bool,
     widget: Option<(Entity<SignatureHelpWidget>, WidgetId)>,
 }
 
@@ -218,6 +220,7 @@ impl CodeEditor {
     /// `closeParameterHints`).
     pub fn hide_signature_help(&mut self, cx: &mut Context<Self>) {
         self.signature_help.task = None;
+        self.signature_help.pending = false;
         if let Some((_, id)) = self.signature_help.widget.take() {
             self.remove_widget(id, cx);
         }
@@ -233,8 +236,7 @@ impl CodeEditor {
         let Some(ch) = text.chars().last() else {
             return;
         };
-        let language = self.model().read(cx).language_id().map(|l| l.to_string());
-        let providers = signature_help_providers(cx, language.as_deref());
+        let providers = signature_help_providers(cx, self.provider_target(cx));
         if providers.is_empty() {
             return;
         }
@@ -260,13 +262,23 @@ impl CodeEditor {
         let position = self.cursors.primary().position;
         let model = self.model().read(cx);
         let context = model.provider_context();
-        let language = model.language_id().map(|l| l.to_string());
-        let tasks: Vec<_> = signature_help_providers(cx, language.as_deref())
+        // Monaco `isRetrigger` and `activeSignatureHelp`.
+        let help_context = crate::providers::SignatureHelpContext {
+            trigger,
+            is_retrigger: self.signature_help.pending || self.signature_help.widget.is_some(),
+            active_signature_help: self
+                .signature_help
+                .widget
+                .as_ref()
+                .map(|(widget, _)| widget.read(cx).help.clone()),
+        };
+        let tasks: Vec<_> = signature_help_providers(cx, self.provider_target(cx))
             .into_iter()
             .map(|provider| {
-                provider.provide_signature_help(&context, position, trigger.clone(), cx)
+                provider.provide_signature_help_with_context(&context, position, &help_context, cx)
             })
             .collect();
+        self.signature_help.pending = true;
         self.signature_help.task = Some(cx.spawn(async move |this, cx| {
             let mut result = None;
             for task in tasks {
@@ -277,9 +289,12 @@ impl CodeEditor {
                     break;
                 }
             }
-            this.update(cx, |this, cx| match result {
-                Some(help) => this.show_signature_help(help, position, cx),
-                None => this.hide_signature_help(cx),
+            this.update(cx, |this, cx| {
+                this.signature_help.pending = false;
+                match result {
+                    Some(help) => this.show_signature_help(help, position, cx),
+                    None => this.hide_signature_help(cx),
+                }
             })
             .ok();
         }));

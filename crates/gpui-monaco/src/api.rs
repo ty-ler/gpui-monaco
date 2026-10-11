@@ -534,6 +534,13 @@ impl TextModel {
 }
 
 impl CodeEditor {
+    /// What provider lookups match against: the model's language and uri.
+    pub(crate) fn provider_target(&self, cx: &App) -> crate::providers::ProviderTarget {
+        self.model().read(cx).into()
+    }
+}
+
+impl CodeEditor {
     /// Scrolls so `range` shows (Monaco `revealRange` and friends). Takes
     /// effect on the next frame.
     pub fn reveal_range(

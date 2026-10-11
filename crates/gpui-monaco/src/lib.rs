@@ -57,6 +57,7 @@ mod goto;
 mod hover;
 mod inlay_hints;
 mod inline_completions;
+mod languages;
 pub mod link_computer;
 mod linked_editing;
 mod links;
@@ -115,6 +116,7 @@ pub use find::{FindOptions, MATCHES_LIMIT};
 pub use find_widget::FindWidget;
 pub use goto::has_symbol_navigation;
 pub use hover::{HOVER_DELAY, HoverWidget};
+pub use languages::{on_language, set_language_configuration};
 pub use markers::{
     Marker, MarkerFilter, MarkerSeverity, MarkerTag, MarkerZone, ModelMarker, RelatedInformation,
     model_markers, remove_all_markers,

@@ -144,7 +144,10 @@ Monaco's `monaco.languages.register…Provider(selector, provider)` functions be
 | `registerColorProvider` | `DocumentColorProvider` |
 | `registerDocumentSemanticTokensProvider`, `…RangeSemanticTokens…` | `DocumentSemanticTokensProvider`, `DocumentRangeSemanticTokensProvider` |
 | `registerDocumentDropEditProvider`, `registerDocumentPasteEditProvider` | `DocumentDropEditProvider`, `DocumentPasteEditProvider` |
-| `setLanguageConfiguration` | the language's configuration in the `LanguageRegistry` (`gpui-monaco-languages` reads Monaco's JSON) |
+| `setLanguageConfiguration` | the language's configuration in the `LanguageRegistry` (`gpui-monaco-languages` reads Monaco's JSON), or at runtime `set_language_configuration(cx, id, config)` |
+| `register({ id, extensions, filenames, filenamePatterns, firstLine, mimetypes })` | `Language::new(id, name)` with `with_extensions`, `with_file_names`, `with_filename_patterns`, `with_first_line` and `with_mimetypes` |
+| `onLanguage(id, callback)` | `on_language(cx, id, callback)` |
+| `LanguageFilter { language, scheme, pattern }` | `LanguageSelector::Filters(vec![LanguageFilter { … }])` |
 | `setMonarchTokensProvider` | a tree-sitter grammar with highlight queries (see [Languages](languages.md)) |
 
 The `gpui-monaco-lsp` bridge registers these providers from a language server (see [Language servers](lsp.md)).

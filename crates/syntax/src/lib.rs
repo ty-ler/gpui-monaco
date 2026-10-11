@@ -15,6 +15,8 @@ pub use config::{
 };
 pub use fancy_regex;
 pub use highlighter::{HighlightState, Highlighter, TreeSitterHighlighter};
-pub use language::{Grammar, HighlightId, HighlighterFactory, Language, LanguageRegistry};
+pub use language::{
+    Grammar, HighlightId, HighlighterFactory, Language, LanguageRegistry, glob_matches,
+};
 pub use syntax_map::{HighlightSpan, RopeTextProvider, SyntaxLayer, SyntaxSnapshot, Tag};
 pub use tree_sitter;

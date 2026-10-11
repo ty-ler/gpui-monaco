@@ -52,6 +52,20 @@ let registration = register_hover_provider(
 // Later: unregister_provider(cx, registration);
 ```
 
+Besides `All` and a list of languages, `LanguageSelector::Filters` takes Monaco's `LanguageFilter`s. A filter sets any of a `language`, a uri `scheme` and a glob `pattern` for the path (each can be `*`). A model matches when every field that's set matches:
+
+```rust,ignore
+LanguageSelector::Filters(vec![LanguageFilter {
+    scheme: Some("file".into()),
+    pattern: Some("**/*.test.ts".into()),
+    ..Default::default()
+}])
+```
+
+Some providers can ask for new results without an edit, like Monaco's provider `onDidChange` events: `refresh_folding_ranges(cx)`, `refresh_code_lenses(cx)`, `refresh_inlay_hints(cx)` and `refresh_semantic_tokens(cx)`.
+
+`SignatureHelpProvider::provide_signature_help_with_context` gets Monaco's `SignatureHelpContext`: the trigger, whether hints are already showing or requested (`is_retrigger`), and the hints showing (`active_signature_help`). A `DocumentRangeFormattingProvider` can implement `provide_document_ranges_formatting_edits` to format every selection in one request.
+
 If several providers match a model, the editor queries all of them. Hover contents and definition locations are concatenated, completion lists are merged, and the first signature help result wins.
 
 ## Completion

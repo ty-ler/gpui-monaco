@@ -78,6 +78,22 @@ registry.register(python);
 gpui_monaco::set_language_registry(cx, registry);
 ```
 
+### File associations
+
+A model created with `with_uri` and no language gets one from the uri when it's first shown, as Monaco's `createModel` does (`LanguageRegistry::language_for_path_or_first_line`):
+
+1. an exact file name (`with_file_names`), ignoring case;
+2. the longest matching `with_filename_patterns` glob, matched against the whole path when it contains a `/`;
+3. the longest matching extension, so `.d.ts` beats `.ts`;
+4. the first line's `with_first_line` regex, e.g. `^#!.*\bnode`.
+
+Among equal matches, the language registered last wins. `with_mimetypes` sets MIME types for `language_for_mime_type`. The bundled languages use VS Code's associations.
+
+### At runtime
+
+- `gpui_monaco::set_language_configuration(cx, "rust", config)` replaces a language's configuration (Monaco `setLanguageConfiguration`). Models of that language pick it up and emit `TextModelEvent::LanguageConfigurationChanged`.
+- `gpui_monaco::on_language(cx, "rust", |cx| …)` runs once, the first time a model uses the language (Monaco `onLanguage`), for example to register providers lazily.
+
 ### Highlighting rules
 
 Highlighting follows tree-sitter-highlight semantics: within a layer, the **last** matching pattern for a node wins. That's why queries list generic patterns such as `(identifier) @variable` first.

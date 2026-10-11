@@ -101,6 +101,7 @@ Issues are linked by number.
 | Command palette, `addAction` | `quickAccess` | ✅ | #100 |
 | Reveal APIs, `executeEdits`, mouse hit-test events, word and position helpers, content-change details, cursor change reasons, decorations collections | editor API | ✅ | #105 |
 | Model helpers: lines, `modifyPosition`, find next/previous/scoped with captures, `applyEdits` undo edits, `pushEditOperations` with a cursor computer, `popStackElement`, alternative version id, bracket pairs and guides | `ITextModel` | ✅ | #206 |
+| Language extras: `register` file associations (patterns, first line, mimetypes), `onLanguage`, runtime `setLanguageConfiguration`, `LanguageFilter` scheme and pattern, `SignatureHelpContext`, folding and code lens `onDidChange`, multi-range formatting | `monaco.languages` | ✅ | #206 |
 | Custom highlighter | tokenization support | ✅ (`Language::with_highlighter`) | |
 | Static colorize and tokenize | `colorizer` | ✅ | #108 |
 | Colorize a model line | `colorizeModelLine` | ✅ | #204 |

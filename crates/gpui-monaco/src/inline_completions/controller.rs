@@ -372,8 +372,7 @@ impl CodeEditor {
         {
             return;
         }
-        let language = model.language_id().map(|l| l.to_string());
-        let providers = inline_completions_providers(cx, language.as_deref());
+        let providers = inline_completions_providers(cx, self.provider_target(cx));
         if providers.is_empty() {
             return;
         }

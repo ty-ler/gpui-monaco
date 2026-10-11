@@ -212,6 +212,9 @@ pub enum TextModelEvent {
         /// The new language id (Monaco `newLanguage`).
         new_language: Option<SharedString>,
     },
+    /// The language's configuration changed at runtime (Monaco
+    /// `onDidChangeLanguageConfiguration`).
+    LanguageConfigurationChanged,
     /// [`TextModel::set_line_ending`] changed the line ending.
     LineEndingChanged,
     /// [`TextModel::set_markers`] changed the markers; setting none where
@@ -237,6 +240,9 @@ pub struct TextModel {
     pub(crate) markers: crate::markers::MarkerSet,
     /// Set when `language_id` hasn't been resolved against the registry yet.
     language_pending: bool,
+    /// No language was given: guess one from the uri and first line when
+    /// first shown (Monaco `createByFilepathOrFirstLine`).
+    guess_language: bool,
     auto_whitespace: AutoWhitespaceLines,
     /// Decided from the creation options and text, then kept (Monaco
     /// `_isTooLargeForTokenization`).
@@ -265,6 +271,7 @@ impl TextModel {
             ignore_unusual_line_terminators: false,
             markers: Default::default(),
             language_pending: false,
+            guess_language: false,
             auto_whitespace: AutoWhitespaceLines::default(),
             too_large_for_tokenization: false,
         }
@@ -325,12 +332,22 @@ impl TextModel {
     pub fn with_language(mut self, language_id: impl Into<SharedString>) -> Self {
         self.language_id = Some(language_id.into());
         self.language_pending = true;
+        self.guess_language = false;
         self
     }
 
     /// Identifies the document for providers (Monaco model uris).
+    ///
+    /// Without a language, the model's language is then guessed from the
+    /// uri's file name and the first line when it's first shown, as Monaco's
+    /// `createModel` does (see
+    /// [`LanguageRegistry::language_for_path_or_first_line`]).
     pub fn with_uri(mut self, uri: impl Into<SharedString>) -> Self {
         self.uri = Some(uri.into());
+        if self.language_id.is_none() {
+            self.language_pending = true;
+            self.guess_language = true;
+        }
         self
     }
 
@@ -445,6 +462,19 @@ impl TextModel {
         }
         self.language_pending = false;
         let registry = language_registry(cx);
+        if std::mem::take(&mut self.guess_language) && self.language_id.is_none() {
+            let path = self.uri.as_deref().and_then(crate::languages::uri_path);
+            let first_line = self.buffer.rope().line(0);
+            self.language_id = registry
+                .language_for_path_or_first_line(
+                    path.as_deref().map(std::path::Path::new),
+                    Some(&first_line),
+                )
+                .map(|language| SharedString::from(language.id.to_string()));
+        }
+        if let Some(id) = &self.language_id {
+            crate::languages::language_requested(id, cx);
+        }
         let language = self.language_id.as_ref().and_then(|id| {
             registry
                 .language_for_id(id)
@@ -463,6 +493,19 @@ impl TextModel {
                 dirty: false,
             });
         self.reparse(cx);
+    }
+
+    /// Resolves the language again after its configuration changed (see
+    /// [`set_language_configuration`](crate::set_language_configuration)),
+    /// emitting [`TextModelEvent::LanguageConfigurationChanged`].
+    pub(crate) fn refresh_language(&mut self, cx: &mut Context<Self>) {
+        if self.language_id.is_none() {
+            return;
+        }
+        self.language_pending = true;
+        self.ensure_syntax(cx);
+        cx.emit(TextModelEvent::LanguageConfigurationChanged);
+        cx.notify();
     }
 
     /// The latest highlight state, if the model has a grammar and a parse has

@@ -125,7 +125,7 @@ impl CodeEditor {
     pub(crate) fn refresh_colors(&mut self, cx: &mut Context<Self>) {
         let model = self.model().read(cx);
         let language = model.language_id().map(|l| l.to_string());
-        let providers = color_providers(cx, language.as_deref());
+        let providers = color_providers(cx, self.provider_target(cx));
         if !self.options.color_decorators
             || (providers.is_empty()
                 && self.options.default_color_decorators == DefaultColorDecorators::Never)
@@ -190,9 +190,8 @@ impl CodeEditor {
     ) -> Task<Vec<ColorData>> {
         let model = self.model().read(cx);
         let context = model.provider_context();
-        let language = model.language_id().map(|l| l.to_string());
         let mut providers: Vec<(Arc<dyn DocumentColorProvider>, bool)> =
-            color_providers(cx, language.as_deref())
+            color_providers(cx, self.provider_target(cx))
                 .into_iter()
                 .map(|provider| (provider, false))
                 .collect();

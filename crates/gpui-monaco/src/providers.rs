@@ -19,6 +19,90 @@ pub enum LanguageSelector {
     All,
     /// Models whose language id is one of these.
     Languages(Vec<SharedString>),
+    /// Models any of these filters match (Monaco's `LanguageFilter`s).
+    Filters(Vec<LanguageFilter>),
+}
+
+/// Selects models by language, uri scheme and path (Monaco
+/// `LanguageFilter`). Every field that's set must match, and at least one
+/// must be set.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LanguageFilter {
+    /// A language id, or `*` for any language.
+    pub language: Option<SharedString>,
+    /// A uri scheme such as `file` or `untitled`, or `*` for any.
+    pub scheme: Option<SharedString>,
+    /// A glob for the uri's path, such as `**/*.test.ts`.
+    pub pattern: Option<SharedString>,
+}
+
+impl LanguageFilter {
+    /// Monaco `score` for one filter: 0 when it doesn't match.
+    fn score(&self, target: &ProviderTarget) -> u32 {
+        let mut score = 0;
+        if let Some(scheme) = &self.scheme {
+            let uri_scheme = target
+                .uri
+                .as_deref()
+                .and_then(|uri| uri.split_once(':'))
+                .map(|(s, _)| s);
+            if uri_scheme == Some(scheme.as_ref()) {
+                score = 10;
+            } else if scheme == "*" {
+                score = 5;
+            } else {
+                return 0;
+            }
+        }
+        if let Some(language) = &self.language {
+            if target.language_id.as_deref() == Some(language.as_ref()) {
+                score = 10;
+            } else if language == "*" {
+                score = score.max(5);
+            } else {
+                return 0;
+            }
+        }
+        if let Some(pattern) = &self.pattern {
+            let path = target.uri.as_deref().and_then(crate::languages::uri_path);
+            if path.is_some_and(|path| {
+                path == pattern.as_ref() || syntax::glob_matches(pattern, &path)
+            }) {
+                score = 10;
+            } else {
+                return 0;
+            }
+        }
+        score
+    }
+}
+
+/// The model a provider lookup is for: its language id and uri (what
+/// Monaco's selectors score).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProviderTarget {
+    /// The model's language id.
+    pub language_id: Option<SharedString>,
+    /// The model's uri.
+    pub uri: Option<SharedString>,
+}
+
+impl From<Option<&str>> for ProviderTarget {
+    fn from(language_id: Option<&str>) -> Self {
+        Self {
+            language_id: language_id.map(|id| SharedString::from(id.to_string())),
+            uri: None,
+        }
+    }
+}
+
+impl From<&crate::TextModel> for ProviderTarget {
+    fn from(model: &crate::TextModel) -> Self {
+        Self {
+            language_id: model.language_id().cloned(),
+            uri: model.uri().cloned(),
+        }
+    }
 }
 
 impl LanguageSelector {
@@ -30,9 +114,19 @@ impl LanguageSelector {
     /// Whether a model with `language_id` is selected. Models without a language only
     /// match [`LanguageSelector::All`].
     pub fn matches(&self, language_id: Option<&str>) -> bool {
+        self.matches_target(&language_id.into())
+    }
+
+    /// Whether the model `target` describes is selected (Monaco `score`
+    /// above 0).
+    pub fn matches_target(&self, target: &ProviderTarget) -> bool {
         match self {
             Self::All => true,
-            Self::Languages(ids) => language_id.is_some_and(|id| ids.iter().any(|l| l == id)),
+            Self::Languages(ids) => target
+                .language_id
+                .as_ref()
+                .is_some_and(|id| ids.iter().any(|l| l == id)),
+            Self::Filters(filters) => filters.iter().any(|filter| filter.score(target) > 0),
         }
     }
 }
@@ -1226,6 +1320,8 @@ pub(crate) fn observe_language_features<V: 'static>(
         cx.observe_global::<LanguageFeatures>(|_, cx| cx.notify()),
         cx.observe_global::<SemanticTokensEpoch>(|_, cx| cx.notify()),
         cx.observe_global::<InlayHintsEpoch>(|_, cx| cx.notify()),
+        cx.observe_global::<FoldingRangesEpoch>(|_, cx| cx.notify()),
+        cx.observe_global::<CodeLensEpoch>(|_, cx| cx.notify()),
     ]
 }
 
@@ -1328,6 +1424,32 @@ impl Global for InlayHintsEpoch {}
 /// `workspace/inlayHint/refresh`.
 pub fn refresh_inlay_hints(cx: &mut App) {
     cx.default_global::<InlayHintsEpoch>().0 += 1;
+}
+
+/// Bumped by [`refresh_folding_ranges`]; editors recompute when it changes.
+#[derive(Default)]
+pub(crate) struct FoldingRangesEpoch(pub u64);
+
+impl Global for FoldingRangesEpoch {}
+
+/// Asks every editor to request folding ranges again (Monaco's
+/// `FoldingRangeProvider.onDidChange`), e.g. after a language server's
+/// `workspace/foldingRange/refresh`.
+pub fn refresh_folding_ranges(cx: &mut App) {
+    cx.default_global::<FoldingRangesEpoch>().0 += 1;
+}
+
+/// Bumped by [`refresh_code_lenses`]; editors request again when it changes.
+#[derive(Default)]
+pub(crate) struct CodeLensEpoch(pub u64);
+
+impl Global for CodeLensEpoch {}
+
+/// Asks every editor to request code lenses again (Monaco's
+/// `CodeLensProvider.onDidChange`), e.g. after a language server's
+/// `workspace/codeLens/refresh`.
+pub fn refresh_code_lenses(cx: &mut App) {
+    cx.default_global::<CodeLensEpoch>().0 += 1;
 }
 
 // ----- document highlights -------------------------------------------------------
@@ -1454,6 +1576,33 @@ pub trait SignatureHelpProvider: 'static {
         trigger: SignatureHelpTrigger,
         cx: &mut App,
     ) -> Task<anyhow::Result<Option<SignatureHelp>>>;
+
+    /// Like [`provide_signature_help`](Self::provide_signature_help), with
+    /// Monaco's whole `SignatureHelpContext`: whether hints are already
+    /// showing or requested, and what they show. Defaults to
+    /// `provide_signature_help`.
+    fn provide_signature_help_with_context(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        help_context: &SignatureHelpContext,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Option<SignatureHelp>>> {
+        self.provide_signature_help(context, position, help_context.trigger.clone(), cx)
+    }
+}
+
+/// Why and in what state signature help is asked for (Monaco
+/// `SignatureHelpContext`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SignatureHelpContext {
+    /// What asked (Monaco `triggerKind` and `triggerCharacter`).
+    pub trigger: SignatureHelpTrigger,
+    /// Hints are already showing or being requested (Monaco `isRetrigger`).
+    pub is_retrigger: bool,
+    /// The hints showing, with the signature the user chose (Monaco
+    /// `activeSignatureHelp`).
+    pub active_signature_help: Option<SignatureHelp>,
 }
 
 // ----- formatting ---------------------------------------------------------------
@@ -1501,6 +1650,19 @@ pub trait DocumentRangeFormattingProvider: 'static {
         options: FormattingOptions,
         cx: &mut App,
     ) -> Task<anyhow::Result<Vec<TextEdit>>>;
+
+    /// The edits that format all of `ranges` at once (Monaco
+    /// `provideDocumentRangesFormattingEdits`), for several selections.
+    /// `None`, the default, formats them one at a time.
+    fn provide_document_ranges_formatting_edits(
+        &self,
+        _context: &ProviderContext,
+        _ranges: &[Range<PointUtf16>],
+        _options: FormattingOptions,
+        _cx: &mut App,
+    ) -> Option<Task<anyhow::Result<Vec<TextEdit>>>> {
+        None
+    }
 }
 
 /// Formats as you type (Monaco `OnTypeFormattingEditProvider`), with the
@@ -2042,11 +2204,12 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
 /// `language_id`, newest first, then the built-in ones (Monaco's order).
 pub fn drop_edit_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn DocumentDropEditProvider>> {
+    let target = target.into();
     let mut providers = cx
         .try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.drop_edits, language_id))
+        .map(|f| matching(&f.drop_edits, &target))
         .unwrap_or_default();
     providers.reverse();
     providers.extend(crate::drop_paste::default_drop_providers());
@@ -2057,21 +2220,22 @@ pub fn drop_edit_providers(
 /// `language_id`, newest first, then the built-in ones (Monaco's order).
 pub fn paste_edit_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn DocumentPasteEditProvider>> {
+    let target = target.into();
     let mut providers = cx
         .try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.paste_edits, language_id))
+        .map(|f| matching(&f.paste_edits, &target))
         .unwrap_or_default();
     providers.reverse();
     providers.extend(crate::drop_paste::default_paste_providers());
     providers
 }
 
-fn matching<T: ?Sized>(entries: &[Entry<T>], language_id: Option<&str>) -> Vec<Arc<T>> {
+fn matching<T: ?Sized>(entries: &[Entry<T>], target: &ProviderTarget) -> Vec<Arc<T>> {
     entries
         .iter()
-        .filter(|e| e.selector.matches(language_id))
+        .filter(|e| e.selector.matches_target(target))
         .map(|e| e.provider.clone())
         .collect()
 }
@@ -2080,18 +2244,18 @@ fn matching<T: ?Sized>(entries: &[Entry<T>], language_id: Option<&str>) -> Vec<A
 /// registration order.
 pub fn completion_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn CompletionProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.completion, language_id))
+        .map(|f| matching(&f.completion, &target.into()))
         .unwrap_or_default()
 }
 
 /// The registered hover providers whose selector matches `language_id`, in
 /// registration order.
-pub fn hover_providers(cx: &App, language_id: Option<&str>) -> Vec<Arc<dyn HoverProvider>> {
+pub fn hover_providers(cx: &App, target: impl Into<ProviderTarget>) -> Vec<Arc<dyn HoverProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.hover, language_id))
+        .map(|f| matching(&f.hover, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2099,10 +2263,10 @@ pub fn hover_providers(cx: &App, language_id: Option<&str>) -> Vec<Arc<dyn Hover
 /// registration order.
 pub fn definition_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn DefinitionProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.definition, language_id))
+        .map(|f| matching(&f.definition, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2110,10 +2274,10 @@ pub fn definition_providers(
 /// in registration order.
 pub fn signature_help_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn SignatureHelpProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.signature_help, language_id))
+        .map(|f| matching(&f.signature_help, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2121,10 +2285,10 @@ pub fn signature_help_providers(
 /// `language_id`, in registration order.
 pub fn document_highlight_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn DocumentHighlightProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.document_highlight, language_id))
+        .map(|f| matching(&f.document_highlight, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2132,10 +2296,10 @@ pub fn document_highlight_providers(
 /// in registration order.
 pub fn document_formatting_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn DocumentFormattingProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.document_formatting, language_id))
+        .map(|f| matching(&f.document_formatting, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2143,10 +2307,10 @@ pub fn document_formatting_providers(
 /// registration order.
 pub fn document_range_formatting_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn DocumentRangeFormattingProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.range_formatting, language_id))
+        .map(|f| matching(&f.range_formatting, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2154,10 +2318,10 @@ pub fn document_range_formatting_providers(
 /// in registration order.
 pub fn on_type_formatting_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn OnTypeFormattingProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.on_type_formatting, language_id))
+        .map(|f| matching(&f.on_type_formatting, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2165,10 +2329,10 @@ pub fn on_type_formatting_providers(
 /// registration order.
 pub fn declaration_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn DeclarationProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.declaration, language_id))
+        .map(|f| matching(&f.declaration, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2176,10 +2340,10 @@ pub fn declaration_providers(
 /// registration order.
 pub fn type_definition_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn TypeDefinitionProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.type_definition, language_id))
+        .map(|f| matching(&f.type_definition, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2187,26 +2351,32 @@ pub fn type_definition_providers(
 /// registration order.
 pub fn implementation_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn ImplementationProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.implementation, language_id))
+        .map(|f| matching(&f.implementation, &target.into()))
         .unwrap_or_default()
 }
 
 /// The registered reference providers whose selector matches `language_id`, in
 /// registration order.
-pub fn reference_providers(cx: &App, language_id: Option<&str>) -> Vec<Arc<dyn ReferenceProvider>> {
+pub fn reference_providers(
+    cx: &App,
+    target: impl Into<ProviderTarget>,
+) -> Vec<Arc<dyn ReferenceProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.references, language_id))
+        .map(|f| matching(&f.references, &target.into()))
         .unwrap_or_default()
 }
 
 /// The registered rename providers whose selector matches `language_id`, in
 /// registration order.
-pub fn rename_providers(cx: &App, language_id: Option<&str>) -> Vec<Arc<dyn RenameProvider>> {
+pub fn rename_providers(
+    cx: &App,
+    target: impl Into<ProviderTarget>,
+) -> Vec<Arc<dyn RenameProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.rename, language_id))
+        .map(|f| matching(&f.rename, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2214,10 +2384,10 @@ pub fn rename_providers(cx: &App, language_id: Option<&str>) -> Vec<Arc<dyn Rena
 /// `language_id`, in registration order.
 pub fn code_action_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn CodeActionProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.code_action, language_id))
+        .map(|f| matching(&f.code_action, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2225,18 +2395,21 @@ pub fn code_action_providers(
 /// `language_id`, in registration order.
 pub fn document_symbol_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn DocumentSymbolProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.document_symbols, language_id))
+        .map(|f| matching(&f.document_symbols, &target.into()))
         .unwrap_or_default()
 }
 
 /// The registered code lens providers whose selector matches
 /// `language_id`, in registration order.
-pub fn code_lens_providers(cx: &App, language_id: Option<&str>) -> Vec<Arc<dyn CodeLensProvider>> {
+pub fn code_lens_providers(
+    cx: &App,
+    target: impl Into<ProviderTarget>,
+) -> Vec<Arc<dyn CodeLensProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.code_lens, language_id))
+        .map(|f| matching(&f.code_lens, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2244,10 +2417,10 @@ pub fn code_lens_providers(cx: &App, language_id: Option<&str>) -> Vec<Arc<dyn C
 /// `language_id`, in registration order.
 pub fn linked_editing_range_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn LinkedEditingRangeProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.linked_editing, language_id))
+        .map(|f| matching(&f.linked_editing, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2255,10 +2428,10 @@ pub fn linked_editing_range_providers(
 /// `language_id`, in registration order.
 pub fn inline_completions_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn InlineCompletionsProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.inline_completions, language_id))
+        .map(|f| matching(&f.inline_completions, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2266,10 +2439,10 @@ pub fn inline_completions_providers(
 /// matches `language_id`, in registration order.
 pub fn document_semantic_tokens_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn DocumentSemanticTokensProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.semantic_tokens, language_id))
+        .map(|f| matching(&f.semantic_tokens, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2277,26 +2450,29 @@ pub fn document_semantic_tokens_providers(
 /// `language_id`, in registration order.
 pub fn document_range_semantic_tokens_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn DocumentRangeSemanticTokensProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.range_semantic_tokens, language_id))
+        .map(|f| matching(&f.range_semantic_tokens, &target.into()))
         .unwrap_or_default()
 }
 
 /// The registered color providers whose selector matches `language_id`, in
 /// registration order.
-pub fn color_providers(cx: &App, language_id: Option<&str>) -> Vec<Arc<dyn DocumentColorProvider>> {
+pub fn color_providers(
+    cx: &App,
+    target: impl Into<ProviderTarget>,
+) -> Vec<Arc<dyn DocumentColorProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.colors, language_id))
+        .map(|f| matching(&f.colors, &target.into()))
         .unwrap_or_default()
 }
 
 /// The registered link providers whose selector matches `language_id`, in
 /// registration order.
-pub fn link_providers(cx: &App, language_id: Option<&str>) -> Vec<Arc<dyn LinkProvider>> {
+pub fn link_providers(cx: &App, target: impl Into<ProviderTarget>) -> Vec<Arc<dyn LinkProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.links, language_id))
+        .map(|f| matching(&f.links, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2304,10 +2480,10 @@ pub fn link_providers(cx: &App, language_id: Option<&str>) -> Vec<Arc<dyn LinkPr
 /// `language_id`, in registration order.
 pub fn inlay_hints_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn InlayHintsProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.inlay_hints, language_id))
+        .map(|f| matching(&f.inlay_hints, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2315,10 +2491,10 @@ pub fn inlay_hints_providers(
 /// `language_id`, in registration order.
 pub fn folding_range_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn FoldingRangeProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.folding, language_id))
+        .map(|f| matching(&f.folding, &target.into()))
         .unwrap_or_default()
 }
 
@@ -2326,10 +2502,10 @@ pub fn folding_range_providers(
 /// `language_id`, in registration order.
 pub fn selection_range_providers(
     cx: &App,
-    language_id: Option<&str>,
+    target: impl Into<ProviderTarget>,
 ) -> Vec<Arc<dyn SelectionRangeProvider>> {
     cx.try_global::<LanguageFeatures>()
-        .map(|f| matching(&f.selection_range, language_id))
+        .map(|f| matching(&f.selection_range, &target.into()))
         .unwrap_or_default()
 }
 

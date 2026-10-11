@@ -338,8 +338,7 @@ impl CodeEditor {
         let position = self.cursors.primary().position;
         let model = self.model().read(cx);
         let context = model.provider_context();
-        let language = model.language_id().map(|l| l.to_string());
-        let providers = completion_providers(cx, language.as_deref());
+        let providers = completion_providers(cx, self.provider_target(cx));
         let tasks: Vec<_> = providers
             .iter()
             .map(|provider| provider.provide_completions(&context, position, trigger.clone(), cx))
@@ -352,7 +351,7 @@ impl CodeEditor {
             WordBasedSuggestions::Off => false,
             WordBasedSuggestions::OffWithInlineSuggestions => {
                 !self.options.inline_suggest.enabled
-                    || crate::providers::inline_completions_providers(cx, language.as_deref())
+                    || crate::providers::inline_completions_providers(cx, self.provider_target(cx))
                         .is_empty()
             }
             _ => true,
@@ -1001,8 +1000,7 @@ impl CodeEditor {
         }
         // Typing triggers inline completions too.
         self.trigger_inline_completions(cx);
-        let language = self.model().read(cx).language_id().map(|l| l.to_string());
-        let providers = completion_providers(cx, language.as_deref());
+        let providers = completion_providers(cx, self.provider_target(cx));
         // Monaco `suppressSuggestions`: ghost text keeps the widget closed.
         if self.inline_suppresses_suggestions(cx) && self.suggest.session.is_none() {
             return;

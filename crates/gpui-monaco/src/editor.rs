@@ -215,6 +215,8 @@ pub struct CodeEditor {
     hidden_areas: Vec<Range<u32>>,
     /// The version `fold_task` was started for.
     fold_requested: Option<text::Version>,
+    /// The `refresh_folding_ranges` count the ranges were computed at.
+    fold_epoch: u64,
     /// A background fold computation is running (dropping `fold_task`
     /// wouldn't stop it), and whether a newer version waits for it.
     fold_computing: bool,
@@ -400,6 +402,7 @@ impl CodeEditor {
             fold_task: None,
             has_focus: false,
             fold_requested: None,
+            fold_epoch: 0,
             hidden_areas: Vec::new(),
             fold_computing: false,
             fold_rerun: false,
@@ -1040,6 +1043,11 @@ impl CodeEditor {
             }
             TextModelEvent::MarkersChanged => {
                 self.schedule_auto_code_actions(cx);
+                cx.notify();
+            }
+            TextModelEvent::LanguageConfigurationChanged => {
+                // Brackets may have changed: find the pairs again.
+                self.bracket_colors = Default::default();
                 cx.notify();
             }
             TextModelEvent::OptionsChanged
@@ -2075,11 +2083,17 @@ impl CodeEditor {
         // Each new version restarts the wait (Monaco's `Delayer`).
         let version = self.snapshot.version();
         // Monaco doesn't fold models too large to tokenize.
+        // `refresh_folding_ranges` asks again for the same text.
+        let epoch = cx
+            .try_global::<crate::providers::FoldingRangesEpoch>()
+            .map_or(0, |e| e.0);
         if self.options.folding
             && !self.model.read(cx).is_too_large_for_tokenization()
-            && self.folds.ranges_version() != Some(version)
-            && self.fold_requested.as_ref() != Some(&version)
+            && ((self.folds.ranges_version() != Some(version)
+                && self.fold_requested.as_ref() != Some(&version))
+                || epoch != self.fold_epoch)
         {
+            self.fold_epoch = epoch;
             self.fold_requested = Some(version);
             self.compute_fold_ranges(cx);
         }
@@ -2198,11 +2212,10 @@ impl CodeEditor {
             .map(|language| language.config.folding.clone());
         let auto = self.options.folding_strategy == crate::options::FoldingStrategy::Auto;
         let limit = self.options.folding_maximum_regions;
-        let language = model.language_id().map(|l| l.to_string());
         let context = model.provider_context();
         let syntax = if auto { model.syntax_snapshot() } else { None };
         let providers: Vec<_> = if auto {
-            crate::providers::folding_range_providers(cx, language.as_deref())
+            crate::providers::folding_range_providers(cx, self.provider_target(cx))
                 .into_iter()
                 .map(|provider| provider.provide_folding_ranges(&context, cx))
                 .collect()

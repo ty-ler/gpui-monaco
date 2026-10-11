@@ -86,8 +86,7 @@ impl CodeEditor {
         let positions: Vec<PointUtf16> = selections.iter().map(|s| s.head).collect();
         let model = self.model().read(cx);
         let context = model.provider_context();
-        let language = model.language_id().map(|l| l.to_string());
-        let tasks: Vec<_> = selection_range_providers(cx, language.as_deref())
+        let tasks: Vec<_> = selection_range_providers(cx, self.provider_target(cx))
             .into_iter()
             .map(|provider| provider.provide_selection_ranges(&context, &positions, cx))
             .collect();

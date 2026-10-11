@@ -131,7 +131,6 @@ impl CodeEditor {
             Duration::ZERO
         };
         let rope = model.buffer().rope().clone();
-        let language = model.language_id().map(|l| l.to_string());
         self.links.pending = Some(version);
         self.links.task = Some(cx.spawn(async move |this, cx| {
             if !delay.is_zero() {
@@ -147,7 +146,7 @@ impl CodeEditor {
                 .await;
             let Ok(requests) = this.update(cx, |this, cx| {
                 let context = this.model().read(cx).provider_context();
-                link_providers(cx, language.as_deref())
+                link_providers(cx, this.provider_target(cx))
                     .into_iter()
                     .map(|provider| {
                         let task = provider.provide_links(&context, cx);

@@ -5,6 +5,16 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Language extras (#206, part 2):**
+  - **File associations:** `Language` gains `filename_patterns`, `first_line` and `mimetypes` (Monaco's `register`). `LanguageRegistry::language_for_path` follows Monaco's priority: an exact file name (now ignoring case), then the longest glob pattern (on the whole path when it has a `/`), then the longest extension, with the language registered last winning ties. New `language_for_path_or_first_line`, `language_for_mime_type` and `syntax::glob_matches`. A model with a uri and no language guesses its language this way when first shown, as Monaco's `createModel` does. The bundled languages get VS Code's mimetypes, first lines and file names. Monaco's `languagesAssociations.test.ts` is ported.
+  - **Runtime:** `set_language_configuration(cx, id, config)` (Monaco `setLanguageConfiguration`) updates every model of the language, which emits the new `TextModelEvent::LanguageConfigurationChanged`. `on_language(cx, id, callback)` runs once, when a model first uses the language (Monaco `onLanguage`).
+  - **Language filters:** `LanguageSelector::Filters(Vec<LanguageFilter>)` matches by language, uri scheme and path glob, with Monaco's scoring rules. Provider lookups take a `ProviderTarget` (language and uri; `Option<&str>` still converts), and the editor passes the model's uri.
+  - **Signature help context:** `SignatureHelpProvider::provide_signature_help_with_context` gets a `SignatureHelpContext` with `is_retrigger` and `active_signature_help`. Monaco's "Provider should be retriggered if already active" test is ported.
+  - **Provider change events:** `refresh_folding_ranges(cx)` and `refresh_code_lenses(cx)` (Monaco's provider `onDidChange`).
+  - **Multi-range formatting:** `DocumentRangeFormattingProvider::provide_document_ranges_formatting_edits` formats every selection in one request.
+  - **Breaking:**
+    - `Language::grammar` is now an `Arc<Grammar>`, so `Language` is `Clone`, and `Language` has new public fields.
+    - `LanguageSelector` and `TextModelEvent` have new variants.
 - **Model helpers (#206, part 1):**
   - **Lines and positions:** `TextModel::lines_content`, `value_length` (UTF-16, line breaks as the model's line ending), `modify_position` and `full_model_range`. Monaco's `modifyPosition` test is ported.
   - **Search:** `find_next_match` and `find_previous_match` return a `FindMatch` with regex captures when asked. `find_matches_in` searches within scopes, which are merged first. Monaco's capturing-matches search tests are ported.

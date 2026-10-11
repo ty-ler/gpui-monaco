@@ -80,6 +80,9 @@ pub fn javascript() -> Language {
     Language::new("javascript", "JavaScript")
         .with_aliases(&["js", "jsx", "javascriptreact"])
         .with_extensions(&["js", "mjs", "cjs", "jsx"])
+        .with_file_names(&["jakefile"])
+        .with_mimetypes(&["text/javascript"])
+        .with_first_line(r"^#!.*\bnode")
         .with_config(config(include_str!("../configs/javascript.json")))
         .with_grammar(with_tags(
             with_folds(
@@ -107,6 +110,7 @@ pub fn typescript() -> Language {
     Language::new("typescript", "TypeScript")
         .with_aliases(&["ts"])
         .with_extensions(&["ts", "mts", "cts"])
+        .with_first_line(r"^#!.*\b(deno|bun|ts-node)\b")
         .with_config(config(include_str!("../configs/typescript.json")))
         .with_grammar(with_tags(
             with_folds(
@@ -168,7 +172,22 @@ pub fn json() -> Language {
     Language::new("json", "JSON")
         .with_aliases(&["jsonc"])
         .with_extensions(&["json", "jsonc", "json5"])
-        .with_file_names(&[".prettierrc", ".babelrc", ".eslintrc"])
+        .with_file_names(&[
+            ".prettierrc",
+            ".babelrc",
+            ".eslintrc",
+            "composer.lock",
+            ".watchmanconfig",
+            "tsconfig.json",
+            "jsconfig.json",
+        ])
+        .with_filename_patterns(&[
+            "tsconfig.*.json",
+            "jsconfig.*.json",
+            "tsconfig-*.json",
+            "jsconfig-*.json",
+        ])
+        .with_mimetypes(&["application/json", "application/manifest+json"])
         .with_config(config(include_str!("../configs/json.json")))
         .with_grammar(with_tags(
             with_folds(
@@ -194,6 +213,7 @@ pub fn yaml() -> Language {
     Language::new("yaml", "YAML")
         .with_aliases(&["yml"])
         .with_extensions(&["yaml", "yml"])
+        .with_first_line("^#cloud-config")
         .with_config(config(include_str!("../configs/yaml.json")))
         .with_grammar(with_folds(
             grammar(
@@ -266,6 +286,13 @@ pub fn html() -> Language {
     Language::new("html", "HTML")
         .with_aliases(&["htm", "xhtml"])
         .with_extensions(&["html", "htm", "xhtml"])
+        .with_mimetypes(&[
+            "text/html",
+            "text/x-jshtm",
+            "text/template",
+            "text/ng-template",
+            "application/xhtml+xml",
+        ])
         .with_config(config(include_str!("../configs/html.json")))
         .with_grammar(with_folds(
             grammar(
@@ -282,6 +309,7 @@ pub fn html() -> Language {
 pub fn css() -> Language {
     Language::new("css", "CSS")
         .with_extensions(&["css"])
+        .with_mimetypes(&["text/css"])
         .with_config(config(include_str!("../configs/css.json")))
         .with_grammar(with_tags(
             with_folds(
