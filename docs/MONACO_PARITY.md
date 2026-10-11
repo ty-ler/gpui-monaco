@@ -161,7 +161,7 @@ Issues are linked by number.
 | Completion widget: details toggle, side docs, resizing, status bar, loading and empty messages | `suggest` | ✅ | #103 |
 | Completion: `selectionMode` and `focusSuggestion`, explain mode, reset size, `snippetsPreventQuickSuggestions`, every item kind | `suggest` | 🟡 no `shareSuggestSelections` | #202 |
 | Completion: `quickSuggestions: 'inline'` (completion items as ghost text) and `'offWhenInlineCompletions'`, details focus (`toggleSuggestionFocus`), `suggestWidgetCopy` | `suggest`, `suggestInlineCompletions` | ✅ copying takes the whole details panel (there's no text selection in it); inline items skip word-based suggestions and eager resolving | #226 |
-| Hover | `hover` | ✅ content and gutter hovers, options, keyboard focus and scrolling, resizing, verbosity, copy button, long line warnings | #199 |
+| Hover | `hover` | ✅ content and gutter hovers, options, keyboard focus and scrolling, resizing from full edges, verbosity, copy button, long line warnings, the `hoverHighlight` range, rounded card with `shadow-lg`, full-width row separators, read on focus; the problem hover's status bar (View Problem, Quick Fix from the marker's quick fixes, "No quick fixes available", AI fixes; no menu-contributed actions), editor-font body with code and related-information links | #199, #247 |
 | Markdown in hovers, suggest details, parameter hints and messages | `MarkdownRenderer`, `IMarkdownString` | 🟡 GFM tables, quotes, nested lists, strikethrough, images, highlighted code blocks, `$(icon)`s (`supportThemeIcons`), a sanitized HTML subset (`supportHtml`), trusted `command:` links, plain-text documentation, the editor's line height; text can't be selected (GPUI has no selectable text) and inline code isn't rounded | #246 |
 | Signature help: overload cycling and arrows, `enabled`/`cycle` options, close and next/previous commands | `parameterHints` | ✅ | #200 |
 | Go to definition (link, F12) | `gotoSymbol` | ✅ | |
@@ -170,7 +170,7 @@ Issues are linked by number.
 | Open definition to the side (host event), peek focus toggle and default, resizable peek view, `definitionLinkOpensInPeek` | `gotoSymbol`, `peekView` | ✅ | #202 |
 | `goToLocations`/`peekLocations` API commands (and `showReferences`), `gotoLocation.multipleTests` | `gotoSymbol` | ✅ | #227 |
 | Diagnostics: squiggles, ruler, hover, F8 | `gotoError` | ✅ | |
-| Diagnostic tags (unused, deprecated), related information | `gotoError` | ✅ | #90 |
+| Diagnostic tags (unused, deprecated), related information, code links (`code: { value, target }` as `Marker::code_target`) | `gotoError` | ✅ | #90, #247 |
 | Document highlights | `wordHighlighter` | ✅ 50ms after the cursor rests, then `occurrencesHighlightDelay` (0) from the move | #83, #262 |
 | Formatting: document, range, on type, on paste | `format` | ✅ | #94 |
 | Choosing between formatters (`FormattingConflicts.setFormatterSelector`, `displayName`) | `format` | ✅ the first by default, as standalone Monaco; no built-in picker (`formatDocument.multiple` is VS Code workbench) | #229 |

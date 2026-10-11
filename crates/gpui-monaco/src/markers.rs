@@ -54,11 +54,6 @@ pub struct RelatedInformation {
 }
 
 impl RelatedInformation {
-    /// `file.rs(3, 5): message`, as Monaco lists it (1-based).
-    pub(crate) fn label(&self) -> String {
-        format!("{}{}", self.location_label(None), self.message)
-    }
-
     /// `file.rs(3, 5): `, Monaco's link before the message. `this_uri`
     /// names the file when the information is in the same model.
     pub(crate) fn location_label(&self, this_uri: Option<&str>) -> String {
@@ -82,6 +77,42 @@ impl RelatedInformation {
             ..Default::default()
         }
     }
+}
+
+/// A marker's code after its source: `(code)`, or with a target Monaco's
+/// `a.code-link`, the code underlined in `link` between the parentheses,
+/// opening the target through the editor's link openers.
+pub(crate) fn code_element(
+    code: &SharedString,
+    target: Option<&SharedString>,
+    link: Hsla,
+    editor: gpui::WeakEntity<CodeEditor>,
+) -> gpui::AnyElement {
+    let Some(target) = target.cloned() else {
+        return div().child(format!("({code})")).into_any_element();
+    };
+    div()
+        .flex()
+        .child("(")
+        .child(
+            div()
+                .id("marker-code-link")
+                .debug_selector(|| "marker-code-link".into())
+                .role(gpui::Role::Link)
+                .cursor_pointer()
+                .underline()
+                .text_color(link)
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(editor) = editor.upgrade() {
+                        let target = target.clone();
+                        editor.update(cx, |editor, cx| editor.open_link_with_openers(target, cx));
+                    }
+                })
+                .child(code.clone()),
+        )
+        .child(")")
+        .into_any_element()
 }
 
 /// The last path segment of `uri` (Monaco `basename`).
@@ -118,6 +149,10 @@ pub struct Marker {
     pub source: Option<SharedString>,
     /// E.g. a lint name; shown after the message with the source.
     pub code: Option<SharedString>,
+    /// Where the code links to (Monaco's `code: { value, target }`), e.g. the
+    /// lint's documentation: the hover and the marker zone show the code as
+    /// a link that opens it through the editor's link openers.
+    pub code_target: Option<SharedString>,
     /// Unnecessary or deprecated code.
     pub tags: Vec<MarkerTag>,
     /// Other places the diagnostic refers to.
@@ -127,16 +162,6 @@ pub struct Marker {
 impl Marker {
     fn has_tag(&self, tag: MarkerTag) -> bool {
         self.tags.contains(&tag)
-    }
-
-    /// The source and code, e.g. `rustc(E0308)`.
-    pub(crate) fn source_label(&self) -> Option<String> {
-        match (&self.source, &self.code) {
-            (Some(source), Some(code)) => Some(format!("{source}({code})")),
-            (Some(source), None) => Some(source.to_string()),
-            (None, Some(code)) => Some(format!("({code})")),
-            (None, None) => None,
-        }
     }
 }
 
@@ -521,7 +546,14 @@ impl Render for MarkerZone {
                         .flex()
                         .opacity(0.6)
                         .children(self.marker.source.clone())
-                        .children(self.marker.code.as_ref().map(|code| format!("({code})"))),
+                        .children(self.marker.code.as_ref().map(|code| {
+                            code_element(
+                                code,
+                                self.marker.code_target.as_ref(),
+                                colors.text_link_active_foreground,
+                                self.editor.clone(),
+                            )
+                        })),
                 );
             }
             message = message.child(row);

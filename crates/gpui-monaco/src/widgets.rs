@@ -71,6 +71,42 @@ pub(crate) const OVERFLOW_VERTICAL_PADDING: Pixels = px(22.);
 /// (`_layoutHorizontalSegmentInPage`'s `LEFT_PADDING` and `RIGHT_PADDING`).
 pub(crate) const OVERFLOW_HORIZONTAL_PADDING: Pixels = px(15.);
 
+/// The shared card shape of Monaco's floating widgets (hover, parameter
+/// hints, suggest list and details): VS Code's size and elevation tokens.
+pub(crate) mod card {
+    use gpui::{BoxShadow, Hsla, Pixels, hsla, point, px};
+
+    /// `--vscode-cornerRadius-large` (`cornerRadius.large`, 8px).
+    pub const CORNER_RADIUS: Pixels = px(8.);
+
+    /// `--vscode-shadow-lg` (`0 0 12px rgba(0, 0, 0, 0.14)`), on the hover
+    /// and parameter hints in every theme.
+    pub fn shadow_lg() -> Vec<BoxShadow> {
+        vec![BoxShadow {
+            color: hsla(0., 0., 0., 0.14),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(12.),
+            spread_radius: px(0.),
+            inset: false,
+        }]
+    }
+
+    /// The suggest widget's `box-shadow: 0 2px 8px var(--vscode-widget-shadow)`;
+    /// none when the theme has no `widget.shadow` (high contrast).
+    pub fn widget_shadow(shadow: Option<Hsla>) -> Vec<BoxShadow> {
+        shadow
+            .map(|color| BoxShadow {
+                color,
+                offset: point(px(0.), px(2.)),
+                blur_radius: px(8.),
+                spread_radius: px(0.),
+                inset: false,
+            })
+            .into_iter()
+            .collect()
+    }
+}
+
 /// Paint order of overflowing widgets, lowest first (Monaco's CSS
 /// `z-index`es). They all paint above the editor and its overlay widgets.
 pub(crate) mod layer {
@@ -356,5 +392,22 @@ mod tests {
         assert_eq!(place(&[Exact, Below], 0.), Some(px(0.)));
         // No preference: hidden.
         assert_eq!(place(&[], 100.), None);
+    }
+
+    #[gpui::test]
+    fn card_shape_tokens() {
+        use crate::theme::Theme;
+        assert_eq!(card::CORNER_RADIUS, px(8.));
+        let lg = card::shadow_lg();
+        assert_eq!(lg.len(), 1);
+        assert_eq!(lg[0].blur_radius, px(12.));
+        assert_eq!(lg[0].color.a, 0.14);
+        // The suggest widget's shadow follows `widget.shadow`: none in high
+        // contrast.
+        let dark = card::widget_shadow(Theme::vs_dark().colors.widget_shadow);
+        assert_eq!(dark.len(), 1);
+        assert_eq!(dark[0].offset, gpui::point(px(0.), px(2.)));
+        assert_eq!(dark[0].blur_radius, px(8.));
+        assert!(card::widget_shadow(Theme::hc_black().colors.widget_shadow).is_empty());
     }
 }

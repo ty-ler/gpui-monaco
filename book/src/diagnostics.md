@@ -14,6 +14,7 @@ model.update(cx, |model, cx| {
             range: PointUtf16::new(10, 4)..PointUtf16::new(10, 14),
             source: Some("rustc".into()),
             code: Some("E0308".into()),
+            code_target: Some("https://doc.rust-lang.org/error_codes/E0308.html".into()),
             ..Default::default()
         }],
         cx,
@@ -29,7 +30,7 @@ Markers are rendered as:
   - `MarkerTag::Unnecessary` fades the code (`show_unused`, using the theme's `editorUnnecessaryCode.opacity`).
   - `MarkerTag::Deprecated` strikes it through (`show_deprecated`).
   - Tagged hints get no squiggle.
-- **Hovers:** the message, then the source and code, then the `related_information` links, which open the location or emit `CodeEditorEvent::OpenLocation`. Below them, "View Problem" opens the marker zone and "Quick Fix..." runs the code actions.
+- **Hovers:** the message in the editor font, then the source and code, then each `related_information` entry, whose `file(line, col): ` link opens the location or emits `CodeEditorEvent::OpenLocation`. With a `code_target` (Monaco's `code: { value, target }`), the code is a link to it, here and in the marker zone, opened through the link openers or `CodeEditorEvent::OpenLink`. The marker's range is highlighted (`editor.hoverHighlightBackground`). At the bottom, the status bar for the most severe marker: "View Problem" (errors, warnings and infos) opens the marker zone, and Quick Fix, computed from the quick fix code actions for the marker, says "Checking for quick fixes...", then "Quick Fix..." (the code action menu with them) or "No quick fixes available". Read-only editors get no Quick Fix.
 
 `render_validation_decorations` hides all of this as Monaco does:
 - `Editable` (the default) shows it unless the editor is read-only.

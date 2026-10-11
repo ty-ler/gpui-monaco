@@ -909,8 +909,9 @@ impl CodeEditor {
             Some(serde_json::Value::Bool(true)) => Focus::Immediately,
             _ => Focus::IfVisible,
         };
-        let accessibility =
-            self.options.accessibility_support == crate::options::AccessibilitySupport::On;
+        // Monaco: the computed `accessibilitySupport` is `Enabled` (on, or
+        // auto with a screen reader).
+        let accessibility = self.is_screen_reader_optimized();
         if self.is_hover_visible() {
             if focus != Focus::Never {
                 self.show_or_focus_hover(window, cx);

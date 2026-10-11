@@ -758,6 +758,8 @@ impl SuggestWidget {
                 .track_scroll(&self.details_scroll)
                 .w_full()
                 .relative()
+                // `.suggest-details { border-radius: var(--vscode-cornerRadius-large) }`.
+                .rounded(crate::widgets::card::CORNER_RADIUS)
                 .bg(colors.suggest_background)
                 .border_1()
                 // Monaco outlines the focused details panel.
@@ -834,7 +836,11 @@ impl Render for SuggestWidget {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors.clone();
         let item_height = self.metrics.item_height;
+        // `suggest.css`: `border-radius: var(--vscode-cornerRadius-large)` and
+        // `box-shadow: 0 2px 8px var(--vscode-widget-shadow)`.
         let base = div()
+            .rounded(crate::widgets::card::CORNER_RADIUS)
+            .shadow(crate::widgets::card::widget_shadow(colors.widget_shadow))
             .bg(colors.suggest_background)
             .border_1()
             .border_color(colors.suggest_border)

@@ -127,6 +127,21 @@ pub(crate) struct CodeActionSet {
     pub documentation: Vec<Command>,
 }
 
+impl CodeActionSet {
+    /// Whether some action isn't disabled (Monaco `validActions.length > 0`).
+    pub(crate) fn has_valid(&self) -> bool {
+        !valid(&self.items).is_empty()
+    }
+
+    /// The first valid AI action (Monaco `validActions.find(a =>
+    /// a.action.isAI)`).
+    pub(crate) fn valid_ai(&self) -> Option<&Item> {
+        valid(&self.items)
+            .into_iter()
+            .find(|item| item.action.is_ai)
+    }
+}
+
 /// Monaco `getDocumentationFromProvider`: the documentation entry whose
 /// kind most specifically contains `only`, else the first containing one
 /// of `actions`' kinds.
@@ -769,6 +784,35 @@ impl CodeEditor {
                 documentation,
             }
         })
+    }
+
+    /// Monaco `MarkerHoverParticipant.getCodeActions`: the quick fixes for
+    /// `marker`'s range (`markerCodeActionTrigger`).
+    pub(crate) fn marker_quick_fixes(
+        &mut self,
+        marker: &crate::Marker,
+        cx: &mut Context<Self>,
+    ) -> Task<CodeActionSet> {
+        let filter = CodeActionFilter {
+            include: Some(CodeActionKind::QUICK_FIX.into()),
+            ..Default::default()
+        };
+        self.request_code_actions(marker.range.clone(), filter, CodeActionTrigger::Invoke, cx)
+    }
+
+    /// Monaco `CodeActionController.showCodeActions`, from the problem
+    /// hover's "Quick Fix...": the valid actions of `set` at `position`.
+    pub(crate) fn show_marker_quick_fixes(
+        &mut self,
+        set: std::rc::Rc<CodeActionSet>,
+        position: PointUtf16,
+        cx: &mut Context<Self>,
+    ) {
+        let options = MenuOptions {
+            include_disabled: false,
+            from_lightbulb: false,
+        };
+        self.show_code_action_list(set, position, options, cx);
     }
 
     /// After the cursor moves or markers change: asks for actions for the
