@@ -65,8 +65,10 @@ let documents = vec![
 let multi = cx.new(|cx| MultiDiffEditor::new(documents, window, cx));
 ```
 
-- **Headers:** the chevron collapses a file to its header (`set_collapsed`, `set_all_collapsed`). Headers show `A`, `D` or `R` for created, deleted and renamed (`original_label`) files.
-- **Scrolling:** `reveal(index)` scrolls a file's header to the top. Horizontal scrolling moves every file together.
-- **Options:** `update_options` applies `DiffEditorOptions` to every file. `diff_editor(index)` gives a file's `DiffEditor`.
-- **Colors:** `multiDiffEditor.headerBackground` and `multiDiffEditor.border`.
+- **Headers:** the chevron collapses a file to its header (`set_collapsed`, `set_all_collapsed`). Headers show the file name with its folder, and `A`, `D` or `R` for created, deleted and renamed (`original_label`) files. `add_file_action` adds a button to every header's toolbar (Monaco's `MultiDiffEditorFileToolbar`); its handler gets the file's index and document.
+- **Scrolling:** the list has Monaco's auto-hiding scrollbars, vertical and (for wide files) horizontal. `reveal(index)` scrolls a file's header to the top, and `reveal_range` centers one of its lines. Horizontal scrolling moves every file together.
+- **Navigation:** `go_to_next_change` and `go_to_previous_change` move through the changes of all files, and `go_to_file` goes to a file's first change. `active_item` is the file last focused or navigated to; its header and bottom border use `focusBorder`.
+- **Editors:** like Monaco, only the expanded files in view have a `DiffEditor`, reused from a small pool as you scroll; a file keeps its selections and collapsed regions while it has none. `diff_editor(index)` gives a file's editor while it has one.
+- **Options:** `update_options` applies `DiffEditorOptions` to every file.
+- **Colors:** `multiDiffEditor.background`, `multiDiffEditor.headerBackground`, `multiDiffEditor.border`, `sideBarSectionHeader.border`, `focusBorder` and the `scrollbarSlider.*` colors.
 

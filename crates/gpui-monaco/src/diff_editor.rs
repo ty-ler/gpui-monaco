@@ -2867,6 +2867,12 @@ impl DiffEditor {
         }
     }
 
+    /// Whether a diff is being computed, so what shows is about to change
+    /// (Monaco's `isDiffUpToDate` is false meanwhile).
+    pub(crate) fn is_computing_diff(&self) -> bool {
+        self.diff_task.is_some()
+    }
+
     /// The widest horizontal scroll range of the sides, as of the last
     /// layout.
     pub(crate) fn max_scroll_left(&self, cx: &App) -> Pixels {

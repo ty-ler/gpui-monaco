@@ -49,7 +49,10 @@ pub use diff_editor::{
     DiffEditorOptions, DiffEditorViewState, DiffHunkAction, DiffHunkContext, DiffHunkHandler,
     DiffHunkToolbar, HideUnchangedRegions, LineChange,
 };
-pub use multi_diff_editor::{MultiDiffDocument, MultiDiffEditor, MultiDiffEditorEvent};
+pub use multi_diff_editor::{
+    MultiDiffDocument, MultiDiffEditor, MultiDiffEditorEvent, MultiDiffFileAction,
+    MultiDiffFileHandler,
+};
 mod dnd;
 mod drop_paste;
 mod editor;
