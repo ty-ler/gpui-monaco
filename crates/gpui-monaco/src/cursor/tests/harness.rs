@@ -13,6 +13,7 @@ use crate::cursor::{
     self, CursorCollection, CursorConfig, EditOperation, EditOperationType, LanguageContext,
     MoveCommand, Position, Selection, StandardTokenType, WordNavigationType,
 };
+use crate::model::{AutoWhitespaceLines, shift_past_trimmed};
 
 /// Monaco `Position(lineNumber, column)`.
 pub fn pos(line: u32, column: u32) -> Position {
@@ -42,6 +43,9 @@ pub struct TestEditor {
     pub language: Option<LanguageConfiguration>,
     /// Where token types come from (only used with a `language`).
     pub tokenizer: Tokenizer,
+    /// Monaco's `trimAutoWhitespace` model option (default `true`).
+    pub trim_auto_whitespace: bool,
+    auto_whitespace: AutoWhitespaceLines,
 }
 
 impl TestEditor {
@@ -62,7 +66,15 @@ impl TestEditor {
             page_lines: 10,
             language: None,
             tokenizer: Tokenizer::None,
+            trim_auto_whitespace: true,
+            auto_whitespace: AutoWhitespaceLines::default(),
         }
+    }
+
+    /// Sets Monaco's `trimAutoWhitespace` model option.
+    pub fn with_trim_auto_whitespace(mut self, trim: bool) -> Self {
+        self.trim_auto_whitespace = trim;
+        self
     }
 
     /// Sets the language configuration (Monaco's `languageId`).
@@ -142,6 +154,7 @@ impl TestEditor {
         let start = rope.point_utf16_to_offset(pos(range.0, range.1));
         let end = rope.point_utf16_to_offset(pos(range.2, range.3));
         self.buffer.edit([(start..end, text)]).unwrap();
+        self.auto_whitespace.clear();
         self.prev = None;
         self.cursors.auto_closed_ranges_mut().clear();
         let buffer = &self.buffer;
@@ -152,6 +165,7 @@ impl TestEditor {
     pub fn set_value(&mut self, text: &str) {
         let len = self.buffer.rope().len();
         self.buffer.edit([(0..len, text)]).unwrap();
+        self.auto_whitespace.clear();
         self.prev = None;
         self.cursors = CursorCollection::default();
     }
@@ -303,7 +317,7 @@ impl TestEditor {
 
     /// Applies an operation the way Monaco's cursor controller does: undo
     /// stops, one atomic batch of edits, then the new selections.
-    pub fn apply(&mut self, op: EditOperation) {
+    pub fn apply(&mut self, mut op: EditOperation) {
         if op.push_stack_element_before {
             self.buffer.push_stack_element();
         }
@@ -315,17 +329,30 @@ impl TestEditor {
             let edits: Vec<_> = op
                 .edits
                 .iter()
-                .map(|(range, text)| {
+                .enumerate()
+                .map(|(i, (range, text))| {
                     (
                         rope.point_utf16_to_offset(range.start)
                             ..rope.point_utf16_to_offset(range.end),
                         text.clone(),
+                        op.auto_whitespace.contains(&i),
                     )
                 })
                 .collect();
             let before: Vec<Selection> = self.selections();
+            let cursor_rows: Vec<_> = before.iter().map(|s| s.start().row..=s.end().row).collect();
             let previous_transaction = self.buffer.last_transaction_id();
-            self.buffer.edit_grouped(edits, 0).unwrap();
+            let applied = self
+                .auto_whitespace
+                .edit(
+                    &mut self.buffer,
+                    self.trim_auto_whitespace,
+                    Some(&cursor_rows),
+                    edits,
+                    Some(0),
+                )
+                .unwrap();
+            shift_past_trimmed(&mut op.selections_after, &applied.trimmed);
             let new_transaction = self.buffer.last_transaction_id() != previous_transaction;
             self.buffer.set_last_transaction_metadata(
                 new_transaction.then(|| Arc::new(before) as text::TransactionMetadata),
@@ -461,6 +488,7 @@ impl TestEditor {
     /// Monaco `model.undo()`: reverts the last undo step and restores the
     /// selections from before it.
     pub fn undo(&mut self) {
+        self.auto_whitespace.clear();
         if let Some(outcome) = self.buffer.undo()
             && let Some(meta) = outcome.metadata
             && let Ok(selections) = meta.downcast::<Vec<Selection>>()
@@ -474,6 +502,7 @@ impl TestEditor {
     }
 
     pub fn redo(&mut self) {
+        self.auto_whitespace.clear();
         if let Some(outcome) = self.buffer.redo()
             && let Some(meta) = outcome.metadata
             && let Ok(selections) = meta.downcast::<Vec<Selection>>()

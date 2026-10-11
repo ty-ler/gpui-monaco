@@ -15,16 +15,15 @@
 //! The language-aware parts (auto-closing pairs and their overtyping and
 //! deletion, surround-selection, electric characters, onEnter rules and
 //! indentation rules) are in `language_typing.rs`, which falls back to the
-//! functions here. Not ported: overtype (insert key) mode, Monaco's
-//! auto-whitespace trimming (a text model feature), and `ShiftCommand`'s
+//! functions here. Not ported: overtype (insert key) mode and `ShiftCommand`'s
 //! onEnter-based alignment of continuation lines.
 
 use std::ops::Range;
 
 use super::edit::{
     Command, CursorStateHelper, EditBuilder, EditOperation, EditOperationType, ReplaceCommand,
-    ReplaceCommandThatPreservesSelection, ReplaceOvertypeCommand, TrackedId, execute_commands,
-    should_push_stack_element_between, typing_operation,
+    ReplaceCommandThatPreservesSelection, ReplaceOvertypeCommand, TrackedId, auto_whitespace,
+    execute_commands, should_push_stack_element_between, typing_operation,
 };
 use super::movement;
 use super::word::{self, DeleteWordContext, WordClassifier, WordNavigationType};
@@ -163,7 +162,12 @@ pub fn line_break(
     let selections = cursors.selections();
     let commands: Commands = selections
         .iter()
-        .map(|s| ReplaceCommand::boxed(s.range(), enter_text(config, model, &s.range())))
+        .map(|s| {
+            auto_whitespace(ReplaceCommand::boxed(
+                s.range(),
+                enter_text(config, model, &s.range()),
+            ))
+        })
         .collect();
     execute_commands(
         model,
@@ -184,13 +188,13 @@ pub(crate) fn enter_command(
     range: Range<Position>,
 ) -> Option<Box<dyn Command>> {
     let text = enter_text(config, model, &range);
-    if keep_position {
+    auto_whitespace(if keep_position {
         Some(Box::new(
             super::edit::ReplaceCommandWithoutChangingPosition { range, text },
         ))
     } else {
         ReplaceCommand::boxed(range, text)
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -246,13 +250,13 @@ pub(crate) fn tab_with_good_indent(
                     let possible_type_text = config.normalize_indentation(&good_indent);
                     if !line.starts_with(&possible_type_text) {
                         let len = model.line_max_column(start.row);
-                        return ReplaceCommand::boxed(
+                        return auto_whitespace(ReplaceCommand::boxed(
                             Position::new(start.row, 0)..Position::new(start.row, len),
                             possible_type_text,
-                        );
+                        ));
                     }
                 }
-                return replace_jump_to_next_indent(config, model, selection);
+                return auto_whitespace(replace_jump_to_next_indent(config, model, selection));
             }
             if start.row == end.row {
                 let max_column = model.line_max_column(start.row);
@@ -854,6 +858,7 @@ pub fn delete_all_left(
         push_stack_element_after: true,
         auto_closed: Vec::new(),
         follow_up: None,
+        auto_whitespace: Vec::new(),
     }
 }
 

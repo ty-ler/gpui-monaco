@@ -1145,6 +1145,7 @@ impl CodeEditor {
                     push_stack_element_after: true,
                     auto_closed: Vec::new(),
                     follow_up: None,
+                    auto_whitespace: Vec::new(),
                 },
                 cx,
             );

@@ -27,6 +27,7 @@ use super::language_configs::*;
 use super::tokenizer::Tokenizer;
 use crate::cursor::{
     AutoClosingEditStrategy, AutoClosingStrategy, AutoIndent, AutoSurroundStrategy, CursorConfig,
+    EditOperation,
 };
 
 fn using_cursor(text: &[&str], language: LanguageConfiguration) -> TestEditor {
@@ -249,8 +250,15 @@ fn issue_6862_editor_removes_auto_inserted_indentation_when_formatting_on_type()
     assert_eq!(ed.line(2), "    ");
     assert_eq!(ed.line(3), "}");
 
-    // Monaco runs a custom command deleting (1,13)-(1,14).
-    ed.apply_external_edit((1, 13, 1, 14), "");
+    // Monaco runs a custom command deleting (1,13)-(1,14), away from the
+    // cursor, so the auto-inserted indentation stays.
+    ed.run(|_, buffer, cursors| {
+        EditOperation::from_edits(
+            buffer,
+            &cursors.selections(),
+            vec![(pos(1, 13)..pos(1, 14), String::new())],
+        )
+    });
     assert_eq!(ed.line(1), "function foo(params: string) {");
     assert_eq!(ed.line(2), "    ");
     assert_eq!(ed.line(3), "}");

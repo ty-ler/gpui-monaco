@@ -2,7 +2,7 @@
 //!
 //! [`CodeEditor`]: crate::CodeEditor
 
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
 
 use gpui::{App, Context, EntityId, EventEmitter, Global, SharedString, Task};
@@ -126,6 +126,10 @@ pub struct ModelOptions {
     /// `indent_size` and `insert_spaces` are guessed from its text, with the
     /// values here as the defaults (default `true`).
     pub detect_indentation: bool,
+    /// Monaco `trimAutoWhitespace`: indentation that Enter or Tab inserted
+    /// is removed by the next edit if it is still all that's on its line
+    /// and that edit is near the cursors (default `true`).
+    pub trim_auto_whitespace: bool,
 }
 
 impl Default for ModelOptions {
@@ -136,6 +140,7 @@ impl Default for ModelOptions {
             insert_spaces: true,
             max_tokenization_line_length: 20_000,
             detect_indentation: true,
+            trim_auto_whitespace: true,
         }
     }
 }
@@ -204,6 +209,7 @@ pub struct TextModel {
     pub(crate) markers: crate::markers::MarkerSet,
     /// Set when `language_id` hasn't been resolved against the registry yet.
     language_pending: bool,
+    auto_whitespace: AutoWhitespaceLines,
 }
 
 impl EventEmitter<TextModelEvent> for TextModel {}
@@ -223,6 +229,7 @@ impl TextModel {
             ignore_unusual_line_terminators: false,
             markers: Default::default(),
             language_pending: false,
+            auto_whitespace: AutoWhitespaceLines::default(),
         }
         .with_options(ModelOptions::default())
     }
@@ -592,6 +599,7 @@ impl TextModel {
         let Ok(patch) = self.buffer.edit([(0..len, text)]) else {
             return;
         };
+        self.auto_whitespace.clear();
         self.buffer.clear_history();
         self.decorations.apply_patch(&patch);
         self.reparse(cx);
@@ -617,7 +625,9 @@ impl TextModel {
 
     /// Applies `edits` on behalf of `source`. With a `group`, consecutive
     /// edits with the same group merge into one undo step until
-    /// [`TextModel::push_stack_element`].
+    /// [`TextModel::push_stack_element`]. Like Monaco's `applyEdits`, this
+    /// doesn't trim auto-inserted whitespace (see
+    /// [`ModelOptions::trim_auto_whitespace`]); editing commands do.
     pub fn edit_from<S: AsRef<str>>(
         &mut self,
         edits: impl IntoIterator<Item = (Range<usize>, S)>,
@@ -626,15 +636,52 @@ impl TextModel {
         cx: &mut Context<Self>,
     ) -> Result<Patch, EditError> {
         let old = self.buffer.rope().clone();
+        self.auto_whitespace.clear();
         let patch = match group {
             Some(group) => self.buffer.edit_grouped(edits, group)?,
             None => self.buffer.edit(edits)?,
         };
+        self.emit_edit(&old, &patch, source, cx);
+        Ok(patch)
+    }
+
+    /// Monaco `pushEditOperations`: like [`TextModel::edit_from`], but with
+    /// [`ModelOptions::trim_auto_whitespace`] it also removes the whitespace
+    /// the previous edit auto-inserted (see [`AutoWhitespaceLines::edit`]).
+    /// `edits` are flagged when they insert auto whitespace, and
+    /// `cursor_rows` are the rows each cursor's selection spans.
+    pub(crate) fn push_edit_operations(
+        &mut self,
+        cursor_rows: Option<&[RangeInclusive<u32>]>,
+        edits: Vec<(Range<usize>, String, bool)>,
+        group: Option<u64>,
+        source: Option<EntityId>,
+        cx: &mut Context<Self>,
+    ) -> Result<AppliedEdits, EditError> {
+        let old = self.buffer.rope().clone();
+        let applied = self.auto_whitespace.edit(
+            &mut self.buffer,
+            self.options.trim_auto_whitespace,
+            cursor_rows,
+            edits,
+            group,
+        )?;
+        self.emit_edit(&old, &applied.patch, source, cx);
+        Ok(applied)
+    }
+
+    fn emit_edit(
+        &mut self,
+        old: &Rope,
+        patch: &Patch,
+        source: Option<EntityId>,
+        cx: &mut Context<Self>,
+    ) {
         if !patch.is_empty() {
-            self.decorations.apply_patch(&patch);
+            self.decorations.apply_patch(patch);
             self.reparse(cx);
             cx.emit(TextModelEvent::Edited {
-                changes: content_changes(&old, self.buffer.rope(), &patch).into(),
+                changes: content_changes(old, self.buffer.rope(), patch).into(),
                 patch: patch.clone(),
                 version: self.buffer.version(),
                 kind: EditKind::Edit,
@@ -643,7 +690,6 @@ impl TextModel {
             });
             cx.notify();
         }
-        Ok(patch)
     }
 
     /// Replaces decorations `old` with `new` (byte ranges), returning the new
@@ -781,6 +827,7 @@ impl TextModel {
         let Some(outcome) = outcome else {
             return false;
         };
+        self.auto_whitespace.clear();
         self.decorations.apply_patch(&outcome.patch);
         self.reparse(cx);
         cx.emit(TextModelEvent::Edited {
@@ -793,6 +840,205 @@ impl TextModel {
         });
         cx.notify();
         true
+    }
+}
+
+/// Monaco `TextModel._trimAutoWhitespaceLines`: the rows whose content is
+/// whitespace that the last edit auto-inserted, in descending order.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AutoWhitespaceLines(Option<Vec<u32>>);
+
+impl AutoWhitespaceLines {
+    /// Forgets the recorded rows, as any edit that doesn't record new ones
+    /// does.
+    pub(crate) fn clear(&mut self) {
+        self.0 = None;
+    }
+
+    /// Applies `edits` (byte ranges in the current text, each flagged when it
+    /// inserts auto whitespace) to `buffer` as one batch, like Monaco's
+    /// `TextModel._pushEditOperations` followed by
+    /// `PieceTreeTextBuffer.applyEdits`. With `trim`, it first adds
+    /// deletions of the recorded rows that don't conflict with `edits`
+    /// (unless some cursor in `cursor_rows` has no edit on its rows), then
+    /// records the rows the flagged edits left holding only auto-inserted
+    /// whitespace.
+    pub(crate) fn edit(
+        &mut self,
+        buffer: &mut Buffer,
+        trim: bool,
+        cursor_rows: Option<&[RangeInclusive<u32>]>,
+        edits: Vec<(Range<usize>, String, bool)>,
+        group: Option<u64>,
+    ) -> Result<AppliedEdits, EditError> {
+        let old = buffer.rope().clone();
+        let mut edits: Vec<(Range<usize>, String, bool)> = edits
+            .into_iter()
+            .map(|(range, text, auto)| {
+                let text = text::normalize_line_endings(&text).into_owned();
+                (
+                    range.start.min(range.end)..range.end.max(range.start),
+                    text,
+                    auto,
+                )
+            })
+            .collect();
+        let incoming = edits.len();
+        if let Some(rows) = self.0.take()
+            && trim
+        {
+            for row in trim_rows(&old, &rows, cursor_rows, &edits) {
+                edits.push((old.line_range(row), String::new(), false));
+            }
+        }
+        let batch = edits.iter().map(|(range, text, _)| (range.clone(), text));
+        let patch = match group {
+            Some(group) => buffer.edit_grouped(batch, group)?,
+            None => buffer.edit(batch)?,
+        };
+        let new = buffer.rope();
+
+        // Monaco `_getInverseEditRanges`: where each edit's text ended up.
+        let mut order: Vec<usize> = (0..edits.len()).collect();
+        order.sort_by_key(|&i| (edits[i].0.start, edits[i].0.end));
+        let mut inverse = vec![0..0; edits.len()];
+        let mut delta = 0isize;
+        for i in order {
+            let (range, text, _) = &edits[i];
+            let start = range.start.saturating_add_signed(delta);
+            inverse[i] = start..start + text.len();
+            delta += text.len() as isize - range.len() as isize;
+        }
+
+        let trimmed = (incoming..edits.len())
+            .map(|i| {
+                let row = new.offset_to_point(inverse[i].start).row;
+                let len = old
+                    .text_for_range(edits[i].0.clone())
+                    .encode_utf16()
+                    .count();
+                (row, len as u32)
+            })
+            .collect();
+
+        if trim {
+            let mut candidates: Vec<(u32, String)> = Vec::new();
+            for (i, (range, _, auto)) in edits.iter().enumerate() {
+                if !*auto || !range.is_empty() {
+                    continue;
+                }
+                let first = new.offset_to_point(inverse[i].start).row;
+                let last = new.offset_to_point(inverse[i].end).row;
+                for row in first..=last {
+                    let mut old_content = String::new();
+                    if row == first {
+                        old_content = old.line(old.offset_to_point(range.start).row);
+                        if !is_blank(&old_content) {
+                            continue;
+                        }
+                    }
+                    candidates.push((row, old_content));
+                }
+            }
+            candidates.sort_by_key(|(row, _)| std::cmp::Reverse(*row));
+            candidates.dedup_by_key(|(row, _)| *row);
+            let rows: Vec<u32> = candidates
+                .into_iter()
+                .filter(|(row, old_content)| {
+                    let content = new.line(*row);
+                    !content.is_empty() && content != *old_content && is_blank(&content)
+                })
+                .map(|(row, _)| row)
+                .collect();
+            self.0 = (!rows.is_empty()).then_some(rows);
+        }
+        inverse.truncate(incoming);
+        Ok(AppliedEdits {
+            patch,
+            ranges: inverse,
+            trimmed,
+        })
+    }
+}
+
+/// What [`AutoWhitespaceLines::edit`] did.
+pub(crate) struct AppliedEdits {
+    pub patch: Patch,
+    /// Where the text of each given edit ended up, in byte offsets of the new
+    /// text (Monaco's inverse edit ranges).
+    pub ranges: Vec<Range<usize>>,
+    /// Each trimmed row, in the new text, with the UTF-16 length of the
+    /// whitespace removed from its start.
+    pub trimmed: Vec<(u32, u32)>,
+}
+
+/// The recorded `rows` that Monaco's `_pushEditOperations` trims before
+/// applying `edits`: none unless every cursor has an edit on its rows, and
+/// only rows that no edit touches except by inserting a line break right
+/// after or before them.
+fn trim_rows(
+    rope: &Rope,
+    rows: &[u32],
+    cursor_rows: Option<&[RangeInclusive<u32>]>,
+    edits: &[(Range<usize>, String, bool)],
+) -> Vec<u32> {
+    let incoming: Vec<(text::Point, text::Point, &str)> = edits
+        .iter()
+        .map(|(range, text, _)| {
+            (
+                rope.offset_to_point(range.start),
+                rope.offset_to_point(range.end),
+                text.as_str(),
+            )
+        })
+        .collect();
+    // Auto-formatters can edit away from the cursors, which shouldn't trim.
+    let near_cursors = cursor_rows.unwrap_or_default().iter().all(|rows| {
+        incoming
+            .iter()
+            .any(|(start, end, _)| start.row <= *rows.end() && *rows.start() <= end.row)
+    });
+    if !near_cursors {
+        return Vec::new();
+    }
+    rows.iter()
+        .copied()
+        .filter(|&row| row < rope.line_count())
+        .filter(|&row| {
+            let max_column = rope.line_len(row);
+            incoming.iter().all(|&(start, end, text)| {
+                if row < start.row || row > end.row {
+                    return true;
+                }
+                start == end
+                    && start.row == row
+                    && ((start.column == max_column && text.starts_with('\n'))
+                        || (start.column == 0 && text.ends_with('\n')))
+            })
+        })
+        .collect()
+}
+
+/// Monaco `firstNonWhitespaceIndex(line) === -1`.
+fn is_blank(line: &str) -> bool {
+    line.chars().all(|c| c == ' ' || c == '\t')
+}
+
+/// Moves `selections` (in the text after an edit) left past the whitespace
+/// [`AutoWhitespaceLines::edit`] trimmed from the start of their rows, as
+/// Monaco's cursor state computation sees the trimming.
+pub(crate) fn shift_past_trimmed(
+    selections: &mut [crate::cursor::Selection],
+    trimmed: &[(u32, u32)],
+) {
+    for &(row, len) in trimmed {
+        for selection in selections.iter_mut() {
+            for p in [&mut selection.anchor, &mut selection.head] {
+                if p.row == row {
+                    p.column = p.column.saturating_sub(len);
+                }
+            }
+        }
     }
 }
 

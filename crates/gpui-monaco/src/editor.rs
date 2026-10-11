@@ -985,12 +985,18 @@ impl CodeEditor {
     /// Applies an edit computed by the cursor core: converts it to byte
     /// ranges, pushes it to the model with undo grouping and cursor metadata,
     /// then moves the cursors to the operation's resulting selections.
-    pub(crate) fn apply(&mut self, operation: EditOperation, cx: &mut Context<Self>) {
+    /// Returns where the text of each of the operation's edits ended up, in
+    /// byte offsets of the new text (empty if nothing was applied).
+    pub(crate) fn apply(
+        &mut self,
+        mut operation: EditOperation,
+        cx: &mut Context<Self>,
+    ) -> Vec<Range<usize>> {
         // Monaco `_executeCursorEdit`: read-only editors refuse cursor
         // edits, and say so.
         if self.options.read_only {
             self.read_only_edit_attempt(cx);
-            return;
+            return Vec::new();
         }
         // The hover's color picker edits the text without closing.
         if !self.color_picker.editing {
@@ -1001,40 +1007,51 @@ impl CodeEditor {
                 self.cursors.set_selections(&operation.selections_after);
                 self.cursors_changed(true, cx);
             }
-            return;
+            return Vec::new();
         }
         let snapshot = self.snapshot.clone();
-        let edits: Vec<(Range<usize>, String)> = operation
+        let edits: Vec<(Range<usize>, String, bool)> = operation
             .edits
             .iter()
-            .map(|(range, text)| {
+            .enumerate()
+            .map(|(i, (range, text))| {
                 (
                     snapshot.point_utf16_to_offset(range.start)
                         ..snapshot.point_utf16_to_offset(range.end),
                     text.clone(),
+                    operation.auto_whitespace.contains(&i),
                 )
             })
             .collect();
-        let before = metadata(self.cursors.selections());
-        let after = metadata(operation.selections_after.clone());
+        let selections_before = self.cursors.selections();
+        let cursor_rows: Vec<_> = selections_before
+            .iter()
+            .map(|s| s.start().row..=s.end().row)
+            .collect();
         let source = cx.entity_id();
         let group = undo_group(operation.kind);
+        let selections_after = &mut operation.selections_after;
         let result = self.model.update(cx, |model, cx| {
             if operation.push_stack_element_before {
                 model.push_stack_element();
             }
-            let result = model.edit_from(edits, group, Some(source), cx);
-            if result.is_ok() {
-                model.set_undo_metadata(Some(before), Some(after));
+            let result =
+                model.push_edit_operations(Some(&cursor_rows), edits, group, Some(source), cx);
+            if let Ok(applied) = &result {
+                crate::model::shift_past_trimmed(selections_after, &applied.trimmed);
+                model.set_undo_metadata(
+                    Some(metadata(selections_before)),
+                    Some(metadata(selections_after.clone())),
+                );
             }
             if operation.push_stack_element_after {
                 model.push_stack_element();
             }
             result
         });
-        if result.is_err() {
-            return;
-        }
+        let Ok(applied) = result else {
+            return Vec::new();
+        };
         self.cursors
             .track_auto_closed(snapshot.rope(), &operation.edits, &operation.auto_closed);
         self.snapshot = self.model.read(cx).snapshot();
@@ -1045,6 +1062,7 @@ impl CodeEditor {
         if let Some(follow_up) = operation.follow_up {
             self.apply(*follow_up, cx);
         }
+        applied.ranges
     }
 
     /// Whether `modifiers` add a cursor on click (Monaco
@@ -2963,6 +2981,7 @@ impl CodeEditor {
                 push_stack_element_after: true,
                 auto_closed: Vec::new(),
                 follow_up: None,
+                auto_whitespace: Vec::new(),
             },
             cx,
         );

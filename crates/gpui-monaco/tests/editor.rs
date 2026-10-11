@@ -81,6 +81,28 @@ fn redo(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) {
 }
 
 #[gpui::test]
+fn trim_auto_whitespace(cx: &mut TestAppContext) {
+    let (editor, cx) = editor_with_text("    x", cx);
+    cx.simulate_keystrokes("end enter enter");
+    // The next edit removed the indentation Enter inserted on line 2.
+    assert_eq!(text(&editor, cx), "    x\n\n    ");
+    assert_eq!(heads(&editor, cx), vec![(3, 5)]);
+    cx.simulate_keystrokes("secondary-z");
+    assert_eq!(text(&editor, cx), "    x\n    ");
+
+    let model = editor.read_with(cx, |editor, _| editor.model().clone());
+    model.update(cx, |model, cx| {
+        let options = gpui_monaco::ModelOptions {
+            trim_auto_whitespace: false,
+            ..model.options().clone()
+        };
+        model.update_options(options, cx);
+    });
+    cx.simulate_keystrokes("enter");
+    assert_eq!(text(&editor, cx), "    x\n    \n    ");
+}
+
+#[gpui::test]
 fn two_editors_share_a_model(cx: &mut TestAppContext) {
     cx.update(gpui_monaco::init);
     let model = cx.new(|_| TextModel::new("one\ntwo"));

@@ -66,6 +66,12 @@ pub struct EditOperation {
     /// this to auto-close multi-character pairs such as `begin`/`end` so
     /// that undo first removes only the auto-inserted closing text.
     pub follow_up: Option<Box<EditOperation>>,
+    /// Indices into `edits` of the edits that insert auto whitespace (Monaco
+    /// `isAutoWhitespaceEdit`, from a command's `insertsAutoWhitespace`):
+    /// indentation from Enter and Tab that the model removes again on the
+    /// next edit if it is all that's left on its line
+    /// ([`crate::ModelOptions::trim_auto_whitespace`]).
+    pub auto_whitespace: Vec<usize>,
 }
 
 impl EditOperation {
@@ -90,6 +96,7 @@ impl EditOperation {
             push_stack_element_after: false,
             auto_closed: Vec::new(),
             follow_up: None,
+            auto_whitespace: Vec::new(),
         }
     }
 }
@@ -177,6 +184,7 @@ struct RawOp {
     /// Monaco commands sometimes add a no-op edit just so their cursor state
     /// gets computed; such edits are not reported.
     is_noop: bool,
+    auto_whitespace: bool,
 }
 
 struct Tracked {
@@ -190,6 +198,7 @@ pub(crate) struct EditBuilder<'a> {
     model: &'a dyn CursorModel,
     major: usize,
     minor: usize,
+    auto_whitespace: bool,
     ops: Vec<RawOp>,
     tracked: Vec<Tracked>,
 }
@@ -237,6 +246,7 @@ impl EditBuilder<'_> {
             text,
             force_move_markers,
             is_noop,
+            auto_whitespace: self.auto_whitespace,
         });
         self.minor += 1;
     }
@@ -302,6 +312,37 @@ pub(crate) trait Command {
     fn auto_closed(&self, _helper: &CursorStateHelper) -> Option<AutoClosedPair> {
         None
     }
+    /// Monaco `ICommand.insertsAutoWhitespace`.
+    fn inserts_auto_whitespace(&self) -> bool {
+        false
+    }
+}
+
+/// A command whose edits insert auto whitespace (Monaco's
+/// `insertsAutoWhitespace` constructor argument of the replace commands).
+struct AutoWhitespace(Box<dyn Command>);
+
+impl Command for AutoWhitespace {
+    fn edit_operations(&mut self, model: &dyn CursorModel, builder: &mut EditBuilder) {
+        self.0.edit_operations(model, builder);
+    }
+
+    fn compute_cursor_state(&self, helper: &CursorStateHelper) -> Selection {
+        self.0.compute_cursor_state(helper)
+    }
+
+    fn auto_closed(&self, helper: &CursorStateHelper) -> Option<AutoClosedPair> {
+        self.0.auto_closed(helper)
+    }
+
+    fn inserts_auto_whitespace(&self) -> bool {
+        true
+    }
+}
+
+/// Marks `command` as inserting auto whitespace.
+pub(crate) fn auto_whitespace(command: Option<Box<dyn Command>>) -> Option<Box<dyn Command>> {
+    command.map(|command| Box::new(AutoWhitespace(command)) as Box<dyn Command>)
 }
 
 /// Monaco `ReplaceCommand`: replaces `range`, cursor after the new text.
@@ -643,12 +684,14 @@ pub(crate) fn execute_commands(
         push_stack_element_after,
         auto_closed: Vec::new(),
         follow_up: None,
+        auto_whitespace: Vec::new(),
     };
 
     let mut builder = EditBuilder {
         model,
         major: 0,
         minor: 0,
+        auto_whitespace: false,
         ops: Vec::new(),
         tracked: Vec::new(),
     };
@@ -656,6 +699,7 @@ pub(crate) fn execute_commands(
         if let Some(command) = command {
             builder.major = i;
             builder.minor = 0;
+            builder.auto_whitespace = command.inserts_auto_whitespace();
             command.edit_operations(model, &mut builder);
         }
     }
@@ -768,11 +812,14 @@ pub(crate) fn execute_commands(
         }
     }
 
-    result.edits = ops
-        .into_iter()
-        .filter(|op| !op.is_noop)
-        .map(|op| (op.range, op.text))
+    let ops: Vec<RawOp> = ops.into_iter().filter(|op| !op.is_noop).collect();
+    result.auto_whitespace = ops
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| op.auto_whitespace)
+        .map(|(i, _)| i)
         .collect();
+    result.edits = ops.into_iter().map(|op| (op.range, op.text)).collect();
     result.selections_after = selections_after;
     result.auto_closed = auto_closed;
     result
@@ -831,6 +878,7 @@ pub(crate) fn execute_edits(
         push_stack_element_after: true,
         auto_closed: Vec::new(),
         follow_up: None,
+        auto_whitespace: Vec::new(),
     }
 }
 
