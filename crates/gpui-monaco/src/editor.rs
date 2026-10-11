@@ -521,6 +521,10 @@ impl CodeEditor {
         self.refresh_bracket_colors(cx);
         self.update_bracket_highlights(cx);
         self.reset_inlay_hints(cx);
+        // Monaco `ParameterHintsModel.onEditorConfigurationChange`.
+        if !self.options.parameter_hints.enabled {
+            self.hide_signature_help(cx);
+        }
         cx.notify();
     }
 
@@ -1081,7 +1085,7 @@ impl CodeEditor {
 
     /// Whether `modifiers` show and follow definition links: the modifier
     /// that doesn't add cursors.
-    fn is_definition_modifier(&self, modifiers: &gpui::Modifiers) -> bool {
+    pub(crate) fn is_definition_modifier(&self, modifiers: &gpui::Modifiers) -> bool {
         match self.options.multi_cursor_modifier {
             crate::options::MultiCursorModifier::Alt => modifiers.secondary(),
             crate::options::MultiCursorModifier::CtrlCmd => modifiers.alt,
@@ -1244,12 +1248,6 @@ impl CodeEditor {
                 self.hide_suggest(cx);
             }
         }
-        if !select
-            && matches!(command, MoveCommand::Up | MoveCommand::Down)
-            && self.cycle_signature(if command == MoveCommand::Up { -1 } else { 1 }, cx)
-        {
-            return;
-        }
         let config = self.cursor_config(cx);
         let page = self.page_lines();
         let before = self.cursors.selections();
@@ -1327,6 +1325,26 @@ impl CodeEditor {
         cursor::add_cursor_below(&config, self.snapshot.rope(), &mut self.cursors);
         self.next_selection_change.reason = CursorChangeReason::Explicit;
         self.cursors_changed(true, cx);
+    }
+
+    /// Escape while parameter hints show (Monaco `closeParameterHints`):
+    /// Monaco weighs drag-and-drop, linked editing, the suggest widget and
+    /// ghost text higher, so those go first.
+    fn close_parameter_hints(
+        &mut self,
+        _: &CloseParameterHints,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dnd.active
+            || self.linked_editing_active()
+            || self.is_suggest_visible()
+            || self.inline_suggestion_visible(cx)
+        {
+            self.remove_secondary_cursors(&RemoveSecondaryCursors, window, cx);
+        } else {
+            self.hide_signature_help(cx);
+        }
     }
 
     fn remove_secondary_cursors(
@@ -2434,6 +2452,15 @@ impl CodeEditor {
             return;
         }
 
+        // Monaco: Cmd/Ctrl+click on an inlay hint part opens its location or
+        // runs its command.
+        if event.button == MouseButton::Left
+            && self.is_definition_modifier(&event.modifiers)
+            && let Some(part) = self.inlay_hint_part_at(event.position)
+            && self.inlay_hint_link_click(part, cx)
+        {
+            return;
+        }
         let position = self.position_for_point(event.position, window, cx);
         // Monaco: Cmd/Ctrl+click follows a link, else a definition.
         if self.is_definition_modifier(&event.modifiers)
@@ -2664,29 +2691,39 @@ impl CodeEditor {
                     cx,
                 );
             } else if !over_widget {
-                let position = self.text_position_under_mouse(event.position, window, cx);
                 let link_modifier = self.is_definition_modifier(&event.modifiers);
+                // Monaco's inlay hint parts are their own mouse targets.
+                let inlay_part = self.inlay_hint_part_at(event.position);
+                self.inlay_hints_mouse_move(inlay_part, link_modifier, cx);
+                let position = match inlay_part {
+                    Some(_) => None,
+                    None => self.text_position_under_mouse(event.position, window, cx),
+                };
                 self.links_mouse_move(position, link_modifier, cx);
-                if link_modifier {
+                if link_modifier && position.is_some() {
                     self.definition_mouse_move(position, cx);
                 } else if self.has_definition_link() {
                     self.clear_definition_link(cx);
                 }
-                // Monaco's glyph hover: the glyph margin and line numbers.
-                let gutter_row = self.layout.as_ref().and_then(|layout| {
-                    let gutter = layout.bounds.contains(&event.position)
-                        && event.position.x
-                            < layout.bounds.left()
-                                + layout.glyph_margin_width
-                                + layout.line_numbers_width;
-                    gutter.then(|| self.position_for_point(event.position, window, cx).row)
-                });
-                let target = match (position, gutter_row) {
-                    (_, Some(row)) => crate::hover::HoverTarget::Gutter(row),
-                    (Some(position), None) => crate::hover::HoverTarget::Text(position),
-                    (None, None) => crate::hover::HoverTarget::None,
-                };
-                self.hover_mouse_move(target, false, hover_focused, event.modifiers, cx);
+                if let Some(part) = inlay_part {
+                    self.hover_inlay_hint_part(part, cx);
+                } else {
+                    // Monaco's glyph hover: the glyph margin and line numbers.
+                    let gutter_row = self.layout.as_ref().and_then(|layout| {
+                        let gutter = layout.bounds.contains(&event.position)
+                            && event.position.x
+                                < layout.bounds.left()
+                                    + layout.glyph_margin_width
+                                    + layout.line_numbers_width;
+                        gutter.then(|| self.position_for_point(event.position, window, cx).row)
+                    });
+                    let target = match (position, gutter_row) {
+                        (_, Some(row)) => crate::hover::HoverTarget::Gutter(row),
+                        (Some(position), None) => crate::hover::HoverTarget::Text(position),
+                        (None, None) => crate::hover::HoverTarget::None,
+                    };
+                    self.hover_mouse_move(target, false, hover_focused, event.modifiers, cx);
+                }
             }
         }
         if self.scrollbar_drag.is_some() {
@@ -2817,6 +2854,14 @@ impl CodeEditor {
         }
         if self.dnd.active && event.button == MouseButton::Left {
             self.dnd_mouse_drop(drop_target, &event.modifiers, cx);
+        }
+        // Monaco `_installDblClickGesture`: a double-click on an inlay hint
+        // applies its text edits.
+        if event.button == MouseButton::Left
+            && event.click_count == 2
+            && let Some(part) = self.inlay_hint_part_at(event.position)
+        {
+            self.inlay_hint_double_click(part, cx);
         }
         self.minimap_drag = None;
         self.mouse_selection = None;
@@ -3184,6 +3229,12 @@ impl Render for CodeEditor {
         if self.is_suggest_visible() {
             key_context.add("suggest_widget_visible");
         }
+        if self.is_signature_help_visible() {
+            key_context.add("parameter_hints_visible");
+            if self.has_multiple_signatures(cx) {
+                key_context.add("parameter_hints_multiple_signatures");
+            }
+        }
         if self.sticky.focused.is_some() {
             key_context.add("sticky_scroll_focused");
         }
@@ -3251,7 +3302,10 @@ impl Render for CodeEditor {
                 } else {
                     MouseCursor::Arrow
                 }
-            } else if self.has_definition_link() || self.has_active_link() {
+            } else if self.has_definition_link()
+                || self.has_active_link()
+                || self.has_active_inlay_hint_link()
+            {
                 MouseCursor::PointingHand
             } else {
                 MouseCursor::IBeam
@@ -3987,6 +4041,13 @@ impl Render for CodeEditor {
             }))
             .on_action(cx.listener(|this, _: &TriggerParameterHints, _, cx| {
                 this.trigger_signature_help(crate::providers::SignatureHelpTrigger::Invoke, cx)
+            }))
+            .on_action(cx.listener(Self::close_parameter_hints))
+            .on_action(cx.listener(|this, _: &ShowNextParameterHint, _, cx| {
+                this.show_next_parameter_hint(cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowPrevParameterHint, _, cx| {
+                this.show_previous_parameter_hint(cx)
             }))
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))

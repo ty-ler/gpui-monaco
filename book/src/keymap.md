@@ -26,12 +26,13 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **Up / Down (or Cmd+Up / Cmd+Down, Ctrl+P / Ctrl+N), PageUp / PageDown** in the suggest widget: previous and next suggestion, by item or page
 - **Cmd+K Cmd+I** with a hover showing: focus it. Arrows scroll it, PageUp / PageDown (or Alt+Up / Alt+Down) page, Home / End (or Cmd+Up / Cmd+Down) go to the top and bottom, and Escape closes it
 - **Tab / Shift+Tab** with `tab_completion: On`: insert the best completion, then cycle through the others
+- **Cmd+Shift+Space:** parameter hints. While they show, **Escape / Shift+Escape** close them, and with several signatures **Up / Down (or Alt+Up / Alt+Down, Ctrl+P / Ctrl+N)** go to the previous and next one
 
 Tab focus mode (Ctrl+M; Ctrl+Shift+M on macOS) makes Tab and Shift+Tab move focus out of the editor, for keyboard and screen reader users.
 
 Font zoom (`FontZoomIn`, `FontZoomOut`, `FontZoomReset`) has no default key, as in Monaco. Run it from the command palette, or bind it yourself. The zoom level is shared by every editor; `set_editor_zoom_level` sets it directly.
 
-All of these bindings live in the `CodeEditor` key context (`actions::KEY_CONTEXT`). Single-line editors also set `single_line`.
+All of these bindings live in the `CodeEditor` key context (`actions::KEY_CONTEXT`). Single-line editors also set `single_line`, and while parameter hints show the editor sets `parameter_hints_visible` (plus `parameter_hints_multiple_signatures` with several signatures), as Monaco's `parameterHintsVisible` context keys.
 
 ## Rebinding
 

@@ -7,6 +7,7 @@ use std::ops::Range;
 use gpui::SharedString;
 use gpui_monaco::providers::{
     CodeAction, CodeActionKind, Command, CompletionItemTag, InlayHint, InlayHintKind,
+    InlayHintLabelPart,
 };
 use gpui_monaco::providers::{
     CompletionItem, CompletionItemKind, CompletionList, DocumentHighlight, DocumentHighlightKind,
@@ -538,27 +539,53 @@ pub fn code_action(action: lsp::CodeActionOrCommand) -> anyhow::Result<CodeActio
     })
 }
 
-/// An inlay hint; label parts are joined.
-pub fn inlay_hint(hint: lsp::InlayHint) -> InlayHint {
+/// An LSP tooltip as markdown.
+fn tooltip(tooltip: lsp::InlayHintTooltip) -> MarkdownString {
+    match tooltip {
+        lsp::InlayHintTooltip::String(text) => escape_markdown(&text).into(),
+        lsp::InlayHintTooltip::MarkupContent(content) => markup(content),
+    }
+}
+
+/// An inlay hint, with its label parts and text edits. Part locations in
+/// the `queried` document have no uri.
+pub fn inlay_hint(hint: lsp::InlayHint, queried: &str) -> InlayHint {
     InlayHint {
         position: point(hint.position),
         label: match hint.label {
             lsp::InlayHintLabel::String(label) => label.into(),
             lsp::InlayHintLabel::LabelParts(parts) => parts
                 .into_iter()
-                .map(|part| part.value)
-                .collect::<String>()
+                .map(|part| InlayHintLabelPart {
+                    label: part.value.into(),
+                    tooltip: part.tooltip.map(|tooltip| match tooltip {
+                        lsp::InlayHintLabelPartTooltip::String(text) => {
+                            escape_markdown(&text).into()
+                        }
+                        lsp::InlayHintLabelPartTooltip::MarkupContent(content) => markup(content),
+                    }),
+                    location: part.location.map(|location| Location {
+                        uri: (location.uri.as_str() != queried)
+                            .then(|| location.uri.as_str().to_string().into()),
+                        range: range(location.range),
+                    }),
+                    command: part.command.map(command),
+                })
+                .collect::<Vec<_>>()
                 .into(),
         },
+        text_edits: hint
+            .text_edits
+            .unwrap_or_default()
+            .into_iter()
+            .map(|edit| (range(edit.range), edit.new_text))
+            .collect(),
         kind: hint.kind.and_then(|kind| match kind {
             lsp::InlayHintKind::TYPE => Some(InlayHintKind::Type),
             lsp::InlayHintKind::PARAMETER => Some(InlayHintKind::Parameter),
             _ => None,
         }),
-        tooltip: hint.tooltip.map(|tooltip| match tooltip {
-            lsp::InlayHintTooltip::String(text) => escape_markdown(&text).into(),
-            lsp::InlayHintTooltip::MarkupContent(content) => markup(content),
-        }),
+        tooltip: hint.tooltip.map(tooltip),
         padding_left: hint.padding_left.unwrap_or(false),
         padding_right: hint.padding_right.unwrap_or(false),
     }

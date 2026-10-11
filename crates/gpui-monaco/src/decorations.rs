@@ -7,7 +7,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use gpui::{EntityId, Hsla, SharedString};
+use gpui::{EntityId, Hsla, Pixels, SharedString};
 use text::{Patch, Stickiness};
 
 use crate::theme::TokenStyle;
@@ -51,6 +51,11 @@ pub struct InjectedText {
     /// A bordered square of this color centered in the text (Monaco's
     /// `colorpicker-color-decoration`); the content just makes room.
     pub swatch: Option<Hsla>,
+    /// Its font; `None` uses the editor's.
+    pub font_family: Option<SharedString>,
+    /// Its font size; `None` uses the editor's. Smaller text is centered
+    /// vertically on the line.
+    pub font_size: Option<Pixels>,
 }
 
 /// Monaco `IModelDecorationOptions`, with styles instead of class names.
@@ -123,10 +128,10 @@ pub struct BlockDecoration {
     /// The border's color.
     pub border: Hsla,
     /// The border's width.
-    pub border_width: gpui::Pixels,
+    pub border_width: Pixels,
     /// Monaco `blockPadding`: top, right, bottom and left, outside the
     /// lines.
-    pub padding: [gpui::Pixels; 4],
+    pub padding: [Pixels; 4],
 }
 
 /// A decoration as stored in the model.

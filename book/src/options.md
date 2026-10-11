@@ -76,7 +76,8 @@ editor.update(cx, |editor, cx| {
 | `snippet_suggestions` | `snippetSuggestions` | where snippets sort; `None` hides them |
 | `suggest` | `suggest.*` | `insert_mode`, `filter_graceful`, `match_on_word_start_only`, `show_deprecated`, `hidden_kinds`, `locality_bonus`, `font_size`, `line_height`, `show_icons`, `show_status_bar`, `show_inline_details` |
 | `tab_completion` | `tabCompletion` | `Off`, `On` (Tab inserts the best suggestion and cycles through the others) or `OnlySnippets` (like `Off` until snippets land) |
-| `inlay_hints` | `inlayHints` | whether inlay hints show (`On`, `OnUnlessPressed`, `OffUnlessPressed`, `Off`), padding and the per-line maximum length |
+| `inlay_hints` | `inlayHints` | whether inlay hints show (`On`, `OnUnlessPressed`, `OffUnlessPressed`, `Off`), padding, the per-line maximum length, and `font_size` (0, under 5 or above the editor's uses the editor's) and `font_family` |
+| `parameter_hints` | `parameterHints` | `enabled`: open parameter hints while typing (on); `cycle`: going past the last or first signature wraps around instead of closing them (on) |
 | `folding_strategy` | `foldingStrategy` | `Auto` (providers, then syntax, then indentation) or `Indentation` |
 | `folding_maximum_regions` | `foldingMaximumRegions` | at most this many provider or syntax fold ranges (5000) |
 | `folding_highlight` | `foldingHighlight` | shade the first line of collapsed regions (on) |

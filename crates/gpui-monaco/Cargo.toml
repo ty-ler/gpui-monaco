@@ -17,6 +17,8 @@ workspace = true
 # `Instant` that works in browsers (std's on other targets).
 web-time = "1"
 anyhow.workspace = true
+# `Shared` futures (an inlay hint resolves once for every caller).
+futures = { version = "0.3", default-features = false, features = ["std"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 iana-time-zone = "0.1"
 pulldown-cmark = { version = "0.13", default-features = false }

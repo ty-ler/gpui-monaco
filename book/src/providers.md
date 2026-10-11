@@ -135,7 +135,7 @@ Return a `SignatureHelp` with:
 - `active_signature` and `active_parameter`
 - the parameter labels, either as substrings of the signature label or as UTF-16 ranges into it
 
-The widget highlights the active parameter and re-queries as the cursor moves. The defaults open it on `(` and `,`; override `trigger_characters` and `retrigger_characters` to change that.
+The widget highlights the active parameter and re-queries as the cursor moves. The defaults open it on `(` and `,`; override `trigger_characters` and `retrigger_characters` to change that. With several signatures, Up/Down or the widget's arrows go through them. `options.parameter_hints` turns opening while typing off (`enabled`) and stops them wrapping around (`cycle`).
 
 ## Formatting
 
@@ -200,17 +200,22 @@ As in Monaco:
 
 `provide_inlay_hints` gets a range covering the visible lines plus a screen above and below. It returns `InlayHint`s:
 
-- a `position` and `label`;
+- a `position` and `label`: text, or `InlayHintLabelPart`s, each with its own `tooltip`, `location` and `command`;
 - a `kind` (`Type` or `Parameter`), which picks the `editorInlayHint.*` colors;
 - `padding_left` and `padding_right`;
-- a `tooltip`.
+- a `tooltip`;
+- `text_edits`, applied when the hint is double-clicked.
+
+`resolve_inlay_hint` can fill in a hint's tooltip, label or edits before its hover shows or it's clicked; it runs once per hint.
 
 The editor shows them as injected text that moves with edits. As in Monaco:
 
 - **Requests:** made again when you scroll past the covered lines, shortly after edits, and when you call `refresh_inlay_hints(cx)`.
-- **Options:** `options.inlay_hints.enabled` is `On`, `OnUnlessPressed` or `OffUnlessPressed` (Ctrl+Alt toggles), or `Off`. Line text is cut at `maximum_length` (43) with `…`.
+- **Hover:** resting the mouse on a part shows the hint's and the part's tooltips, how to follow the part, and "Double-click to insert" when the hint has edits.
+- **Clicks:** Cmd/Ctrl+click on a part opens its `location` like go to definition (other models through `CodeEditorEvent::OpenLocation`), or else runs its `command` (through `register_command`, else `CodeEditorEvent::ExecuteCommand`).
+- **Options:** `options.inlay_hints.enabled` is `On`, `OnUnlessPressed` or `OffUnlessPressed` (Ctrl+Alt toggles), or `Off`. Line text is cut at `maximum_length` (43) with `…`. `font_size` and `font_family` change the hints' font.
 
-Unlike Monaco, hints use the editor's font size, and their label parts, tooltips and edits aren't interactive yet.
+Unlike Monaco, a part has no right-click menu, and its hover doesn't include the hover of its location.
 
 ## Document symbols
 

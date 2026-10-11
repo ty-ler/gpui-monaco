@@ -53,6 +53,8 @@ pub(crate) struct HoverState {
     /// The size the card was last resized to (Monaco
     /// `ContentHoverWidget._lastDimensions`): later cards may grow to it.
     last_size: Rc<Cell<Option<Size<Pixels>>>>,
+    /// The inlay hint label part it's about (Monaco `InlayHintsHover`).
+    inlay: Option<crate::inlay_hints::InlayHintPart>,
 }
 
 /// A provider's hover, kept to ask it for more or less detail (Monaco
@@ -145,6 +147,9 @@ pub struct HoverWidget {
     color_picker: Option<Entity<crate::ColorPickerWidget>>,
     /// Monaco's unicode highlighter hover parts.
     unicode: Vec<crate::unicode_highlighter::UnicodeHover>,
+    /// An inlay hint label part's command, offered as a link with the
+    /// keys that run it (Monaco's "Execute Command").
+    command: Option<(crate::providers::Command, String)>,
     style: MarkdownStyle,
     theme: Arc<crate::Theme>,
     focus_handle: FocusHandle,
@@ -271,6 +276,35 @@ impl Render for HoverWidget {
                 .collect::<Vec<_>>()
                 .join("\n");
             sections.push(self.copy_row(("markdown-row", ix), row, copy, cx));
+        }
+        if let Some((command, keys)) = &self.command {
+            if !sections.is_empty() {
+                sections.push(div().h(px(1.)).bg(colors.widget_border).into_any_element());
+            }
+            let editor = self.editor.clone();
+            let run = command.clone();
+            sections.push(
+                div()
+                    .flex()
+                    .child(
+                        div()
+                            .id("inlay-command")
+                            .cursor_pointer()
+                            .text_color(self.style.link)
+                            .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(editor) = editor.upgrade() {
+                                    editor.update(cx, |editor, cx| {
+                                        editor.hide_hover(cx);
+                                        editor.run_inlay_hint_command(&run, cx);
+                                    });
+                                }
+                            })
+                            .child("Execute Command"),
+                    )
+                    .child(keys.clone())
+                    .into_any_element(),
+            );
         }
         let bounds = self.bounds.clone();
         let line = self.line_height;
@@ -871,6 +905,7 @@ impl CodeEditor {
         self.hover.range = None;
         self.hover.gutter_row = None;
         self.hover.from_keyboard = false;
+        self.hover.inlay = None;
         if let Some((_, id)) = self.hover.widget.take() {
             self.remove_widget(id, cx);
         }
@@ -976,6 +1011,10 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         self.hover.last_mouse = Some((target, modifiers));
+        // Off an inlay hint's part.
+        if self.hover.inlay.is_some() && !over_hover && !hover_focused {
+            self.hide_hover(cx);
+        }
         let options = self.options.hover;
         let visible = self.hover.widget.is_some();
         // Monaco `_shouldKeepCurrentHover`.
@@ -1185,6 +1224,79 @@ impl CodeEditor {
         })
     }
 
+    /// The mouse is over an inlay hint's label `part`: after the hover
+    /// delay, shows the hint's and part's tooltips, resolving the hint
+    /// first (Monaco `InlayHintsHover`, which replaces the other hover
+    /// parts there).
+    pub(crate) fn hover_inlay_hint_part(
+        &mut self,
+        part: crate::inlay_hints::InlayHintPart,
+        cx: &mut Context<Self>,
+    ) {
+        if self.hover.inlay == Some(part) {
+            return;
+        }
+        self.hide_hover(cx);
+        self.hover.inlay = Some(part);
+        let delay = self.options.hover.delay;
+        self.hover.task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let Ok(contents) = this.update(cx, |this, cx| this.inlay_hint_hover_contents(part, cx))
+            else {
+                return;
+            };
+            let Some(crate::inlay_hints::InlayHintHover {
+                position,
+                contents,
+                command,
+            }) = contents.await
+            else {
+                return;
+            };
+            if contents.is_empty() && command.is_none() {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                let parts = contents
+                    .into_iter()
+                    .map(|content| MarkdownHoverPart::new(vec![content]))
+                    .collect();
+                this.show_hover(position..position, Vec::new(), parts, None, Vec::new(), cx);
+                this.hover.inlay = Some(part);
+                if let Some((widget, _)) = &this.hover.widget {
+                    widget.update(cx, |widget, cx| {
+                        widget.command = command;
+                        cx.notify();
+                    });
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// The markdown contents of the visible hover card, for tests.
+    #[doc(hidden)]
+    pub fn hover_contents_for_tests(&self, cx: &gpui::App) -> Vec<String> {
+        self.hover
+            .widget
+            .as_ref()
+            .map(|(widget, _)| {
+                let widget = widget.read(cx);
+                widget
+                    .parts
+                    .iter()
+                    .flat_map(|part| part.contents.iter().map(|c| c.0.to_string()))
+                    .chain(
+                        widget
+                            .command
+                            .iter()
+                            .map(|(_, keys)| format!("Execute Command{keys}")),
+                    )
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Markers and decoration hover messages at `position`, plus provider
     /// requests.
     #[allow(clippy::type_complexity)]
@@ -1330,6 +1442,7 @@ impl CodeEditor {
             last_size: self.hover.last_size.clone(),
             color_picker,
             unicode,
+            command: None,
             style,
             theme,
             focus_handle: cx.focus_handle(),

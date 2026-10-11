@@ -680,19 +680,96 @@ pub enum InlayHintKind {
     Parameter,
 }
 
+/// A piece of an inlay hint's label (Monaco `InlayHintLabelPart`), with its
+/// own hover, go-to target and command.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InlayHintLabelPart {
+    /// Its text.
+    pub label: SharedString,
+    /// Shown on hover, after the hint's tooltip.
+    pub tooltip: Option<MarkdownString>,
+    /// Where Cmd/Ctrl+click goes (opened like go to definition).
+    pub location: Option<Location>,
+    /// Run by Cmd/Ctrl+click when there's no location, and offered in the
+    /// hover.
+    pub command: Option<Command>,
+}
+
+/// An inlay hint's label (Monaco `string | InlayHintLabelPart[]`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum InlayHintLabel {
+    /// Plain text.
+    Text(SharedString),
+    /// Parts shown one after another.
+    Parts(Vec<InlayHintLabelPart>),
+}
+
+impl Default for InlayHintLabel {
+    fn default() -> Self {
+        Self::Text(SharedString::default())
+    }
+}
+
+impl InlayHintLabel {
+    /// The label as parts (a text label is one part).
+    pub fn parts(&self) -> Vec<InlayHintLabelPart> {
+        match self {
+            Self::Text(text) => vec![InlayHintLabelPart {
+                label: text.clone(),
+                ..Default::default()
+            }],
+            Self::Parts(parts) => parts.clone(),
+        }
+    }
+
+    /// The whole label's text.
+    pub fn text(&self) -> String {
+        match self {
+            Self::Text(text) => text.to_string(),
+            Self::Parts(parts) => parts.iter().map(|part| part.label.as_ref()).collect(),
+        }
+    }
+}
+
+impl From<&str> for InlayHintLabel {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_string().into())
+    }
+}
+
+impl From<String> for InlayHintLabel {
+    fn from(text: String) -> Self {
+        Self::Text(text.into())
+    }
+}
+
+impl From<SharedString> for InlayHintLabel {
+    fn from(text: SharedString) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<Vec<InlayHintLabelPart>> for InlayHintLabel {
+    fn from(parts: Vec<InlayHintLabelPart>) -> Self {
+        Self::Parts(parts)
+    }
+}
+
 /// Inline text the editor shows but that isn't part of the document
 /// (Monaco `InlayHint`), such as inferred types or parameter names.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct InlayHint {
     /// Where it shows (0-based row, UTF-16 column).
     pub position: PointUtf16,
-    /// Its text. (Monaco's label parts are joined; their locations and
-    /// commands aren't supported yet.)
-    pub label: SharedString,
+    /// Its text, or parts with their own tooltips, locations and commands.
+    pub label: InlayHintLabel,
     /// Its kind, if any.
     pub kind: Option<InlayHintKind>,
     /// Shown on hover.
     pub tooltip: Option<MarkdownString>,
+    /// Applied when the hint is double-clicked (e.g. to insert the type it
+    /// shows).
+    pub text_edits: Vec<TextEdit>,
     /// A little space before the hint.
     pub padding_left: bool,
     /// A little space after it.
@@ -712,6 +789,18 @@ pub trait InlayHintsProvider: 'static {
         range: Range<PointUtf16>,
         cx: &mut App,
     ) -> Task<anyhow::Result<Vec<InlayHint>>>;
+
+    /// Fills in a hint before its hover shows or it's clicked (Monaco
+    /// `resolveInlayHint`): the returned label replaces the hint's, and its
+    /// tooltip and text edits do when it has them. `None` (the default)
+    /// leaves the hint as it is.
+    fn resolve_inlay_hint(
+        &self,
+        _hint: &InlayHint,
+        _cx: &mut App,
+    ) -> Option<Task<anyhow::Result<InlayHint>>> {
+        None
+    }
 }
 
 // ----- document symbols ----------------------------------------------------------

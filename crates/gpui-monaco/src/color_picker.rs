@@ -835,13 +835,16 @@ impl CodeEditor {
             top <= point.y && point.y < top + layout.line_height_of(line.view_line)
         })?;
         let x = point.x - layout.text_origin_x() - line.indent_x;
-        let (range, _, _) = line.injected.iter().find(|(range, _, swatch)| {
-            swatch.is_some()
-                && line.shaped.x_for_index(range.start) <= x
-                && x < line.shaped.x_for_index(range.end)
+        let injected = line.injected.iter().find(|injected| {
+            injected.swatch.is_some()
+                && line.shaped.x_for_index(injected.range.start) <= x
+                && x < line.shaped.x_for_index(injected.range.end)
         })?;
         // The swatch sits before the first column displayed after it.
-        let column = line.display_index.iter().position(|d| *d >= range.end)?;
+        let column = line
+            .display_index
+            .iter()
+            .position(|d| *d >= injected.range.end)?;
         Some(PointUtf16::new(
             line.row,
             line.columns.start + column as u32,

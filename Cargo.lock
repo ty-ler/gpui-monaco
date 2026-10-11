@@ -2355,6 +2355,7 @@ dependencies = [
  "async-channel",
  "chrono",
  "criterion",
+ "futures",
  "gpui-monaco-languages",
  "gpui-monaco-syntax",
  "gpui-monaco-text",

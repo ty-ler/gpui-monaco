@@ -888,6 +888,7 @@ impl InlayHintsProvider for LspFeatures {
         let Some((connection, position)) = self.prepare(context, range.start, cx) else {
             return Task::ready(Ok(Vec::new()));
         };
+        let queried = position.text_document.uri.as_str().to_string();
         let request = connection.request::<lsp::request::InlayHintRequest>(lsp::InlayHintParams {
             text_document: position.text_document,
             range: convert::lsp_range(&range),
@@ -898,7 +899,7 @@ impl InlayHintsProvider for LspFeatures {
                 .await?
                 .unwrap_or_default()
                 .into_iter()
-                .map(convert::inlay_hint)
+                .map(|hint| convert::inlay_hint(hint, &queried))
                 .collect())
         })
     }

@@ -882,6 +882,7 @@ fn add_demo_decorations(editor: &Entity<CodeEditor>, cx: &mut App) {
                             },
                             background: Some(hsla(0., 0., 0.5, 0.15)),
                             swatch: None,
+                            ..Default::default()
                         }),
                         ..Default::default()
                     },
