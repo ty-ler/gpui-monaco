@@ -12,7 +12,9 @@ use gpui::{AppContext as _, Context, Entity, Task, Window};
 use text::PointUtf16;
 
 use crate::cursor::{self, Selection};
-use crate::decorations::{DecorationId, DecorationOptions, OverviewRulerLane};
+use crate::decorations::{
+    DecorationId, DecorationOptions, OverviewRulerDecoration, OverviewRulerLane,
+};
 use crate::editor::CodeEditor;
 use crate::events::CursorChangeReason;
 use crate::find_widget::FindWidget;
@@ -277,7 +279,9 @@ fn match_options(colors: &crate::theme::EditorColors, overview: bool) -> Decorat
                 foreground: Some(foreground),
                 ..Default::default()
             }),
-        overview_ruler: overview.then_some((colors.find_match_overview, OverviewRulerLane::Center)),
+        overview_ruler: overview.then(|| {
+            OverviewRulerDecoration::new(colors.find_match_overview, OverviewRulerLane::Center)
+        }),
         // Monaco's `_FIND_MATCH_NO_OVERVIEW_DECORATION` has no minimap mark.
         minimap: overview.then(|| find_match_minimap(colors)),
         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
@@ -296,7 +300,10 @@ fn current_match_options(colors: &crate::theme::EditorColors) -> DecorationOptio
                 foreground: Some(foreground),
                 ..Default::default()
             }),
-        overview_ruler: Some((colors.find_match_overview, OverviewRulerLane::Center)),
+        overview_ruler: Some(OverviewRulerDecoration::new(
+            colors.find_match_overview,
+            OverviewRulerLane::Center,
+        )),
         minimap: Some(find_match_minimap(colors)),
         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
         z_index: 13,
@@ -307,7 +314,7 @@ fn current_match_options(colors: &crate::theme::EditorColors) -> DecorationOptio
 /// Monaco's find match minimap mark: `minimap.findMatchHighlight`, inline.
 fn find_match_minimap(colors: &crate::theme::EditorColors) -> crate::MinimapDecoration {
     crate::MinimapDecoration {
-        color: colors.minimap_find_match_highlight,
+        color: colors.minimap_find_match_highlight.map(Into::into),
         position: crate::MinimapPosition::Inline,
         ..Default::default()
     }
@@ -974,7 +981,7 @@ impl CodeEditor {
                     rope.point_to_offset(text::Point::new(start, 0))
                         ..rope.point_to_offset(text::Point::new(end, 0)),
                     DecorationOptions {
-                        overview_ruler: Some((
+                        overview_ruler: Some(OverviewRulerDecoration::new(
                             colors.find_match_overview,
                             OverviewRulerLane::Center,
                         )),

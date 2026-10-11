@@ -13,7 +13,10 @@ use gpui::{
 use text::PointUtf16;
 
 use crate::codicons::{Codicon, icon as codicon};
-use crate::decorations::{DecorationId, DecorationOptions, DecorationUnderline, OverviewRulerLane};
+use crate::decorations::{
+    DecorationId, DecorationOptions, DecorationUnderline, OverviewRulerDecoration,
+    OverviewRulerLane,
+};
 use crate::editor::CodeEditor;
 use crate::model::TextModel;
 use crate::widgets::{ViewZone, WidgetId, ZoneHeight};
@@ -246,7 +249,7 @@ impl TextModel {
                         underline,
                         // Monaco marks infos too.
                         overview_ruler: (marker.severity >= MarkerSeverity::Info)
-                            .then_some((color, OverviewRulerLane::Right)),
+                            .then(|| OverviewRulerDecoration::new(color, OverviewRulerLane::Right)),
                         // Monaco marks infos, warnings and errors in the
                         // minimap, in the theme's colors for the severity.
                         minimap: (marker.severity >= MarkerSeverity::Info)

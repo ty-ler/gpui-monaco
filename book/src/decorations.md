@@ -11,7 +11,10 @@ Decorations (Monaco `deltaDecorations`) style ranges of text without changing it
 They live on the `TextModel`. Their ranges follow edits.
 
 ```rust,ignore
-use gpui_monaco::{DecorationOptions, DecorationUnderline, InjectedText, OverviewRulerLane};
+use gpui_monaco::{
+    DecorationColor, DecorationOptions, DecorationUnderline, InjectedText, OverviewRulerDecoration,
+    OverviewRulerLane,
+};
 
 let ids = model.update(cx, |model, cx| {
     model.delta_decorations(
@@ -20,7 +23,11 @@ let ids = model.update(cx, |model, cx| {
         vec![
             (range.clone(), DecorationOptions {
                 background: Some(hsla(0.15, 0.8, 0.5, 0.25)),
-                overview_ruler: Some((yellow, OverviewRulerLane::Center)),
+                // A theme color id follows theme changes (Monaco `ThemeColor`).
+                overview_ruler: Some(OverviewRulerDecoration::new(
+                    DecorationColor::theme("editorOverviewRuler.findMatchForeground"),
+                    OverviewRulerLane::Center,
+                )),
                 hover_message: Some("**Note:** found here".into()),
                 ..Default::default()
             }),
@@ -35,7 +42,7 @@ let ids = model.update(cx, |model, cx| {
                 after: Some(InjectedText {
                     content: ": i32".into(),
                     style: TokenStyle { foreground: Some(gray), italic: true, ..Default::default() },
-                    background: None,
+                    ..Default::default()
                 }),
                 ..Default::default()
             }),
@@ -64,12 +71,30 @@ Ranges are byte offsets. To convert from `PointUtf16`, use `model.buffer().point
 | `glyph_margin_hover_message` | `glyphMarginHoverMessage` | markdown shown when the mouse rests on the row's glyph margin or line number |
 | `line_number_color` | `lineNumberClassName` | colors the line number |
 | `gutter_bar` | `linesDecorationsClassName` | a bar between the line numbers and the text |
-| `overview_ruler` | `overviewRuler` | a mark in the scrollbar's overview ruler, in a color and lane, spanning the range's lines |
+| `first_line_decoration` (`LinesDecoration`) | `firstLineDecorationClassName` | a bar or text in the line decorations area, only on the first view line of a wrapped line |
+| `overview_ruler` (`OverviewRulerDecoration`) | `overviewRuler` | a mark in the scrollbar's overview ruler, in a color (`dark_color` in dark themes) and lane, spanning the range's lines |
 | `minimap` (`MinimapDecoration`) | `minimap` | a mark in the minimap: `Inline` over the characters with a half-color band across the line, or a 2px `Gutter` bar; or a section header (`section_header_style`, `section_header_text`) |
-| `before`, `after` | `before`, `after` | text injected before or after the range; the cursor skips over it |
+| `before`, `after` | `before`, `after` | text injected before or after the range (see below) |
+| `show_if_collapsed` | `showIfCollapsed` | an empty range still shows: its injected text only shows with it, and its background is widened to a character's width |
+| `font_family`, `font_weight`, `font_style` | `fontFamily`, `fontWeight`, `fontStyle` | the decorated text's font; line wrapping still measures the editor's font |
 | `hover_message` | `hoverMessage` | markdown shown in the hover |
 | `stickiness` | `stickiness` | whether typing at the edges grows the range |
 | `z_index` | `zIndex` | paint order for overlapping decorations |
+
+Monaco's class names become styles here, so `className` effects beyond these fields can't be expressed. `inlineClassNameAffectsLetterSpacing` has no equivalent: it tells Monaco's DOM renderer to measure again, and text here is always shaped with its styles. A decoration doesn't change the font size (`fontSize`); `get_font_size_at_position` is the editor's.
+
+### Theme colors
+
+Overview ruler and minimap colors are `DecorationColor`s: a resolved `Hsla` (`.into()` converts one) or `DecorationColor::theme(id)`, a theme color id (Monaco `ThemeColor`) looked up in the editor's theme when drawn, so the mark follows theme changes. `Theme::color(id)` resolves any of Monaco's color ids, with its defaults.
+
+### Injected text
+
+`before` and `after` (`InjectedText`) show text at the range's start and end that isn't part of the model. On an empty range they show only with `show_if_collapsed`, as in Monaco.
+
+- `style` colors the text, and `tokens` styles parts of it (Monaco's internal `tokens`, as ghost text uses), by byte ranges of `content`.
+- `font_family`, `font_size`, `background`, `swatch` and `text_box` (margins, padding and corners) shape and box it, as inlay hints and color decorators do.
+- `attached_data` (`AttachedData`) is the host's data, read back from the mouse target over the text (`MouseTarget::injected_text`) and from `injected_text_decorations`.
+- `cursor_stops` (`InjectedTextCursorStops`, Monaco `cursorStops`) says where the cursor may show around the text. The cursor never stops inside it: its model position is the same on both sides. From the model (typing, `set_selections`) the cursor shows before the text. Moving onto the text with Left, Right, Down, End or a click puts the cursor after it with `Both` or `Right`, and before it with `Left` or `None`; Up puts it before it. A click on the text goes to its nearer side the stops allow. Inlay hints stop only after the hint, and inline suggestions only before.
 
 ## Collections
 

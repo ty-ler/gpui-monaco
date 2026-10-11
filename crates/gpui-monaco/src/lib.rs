@@ -50,6 +50,8 @@ mod developer;
 pub use developer::TokenInspection;
 pub mod diff;
 pub mod diff_editor;
+mod editor_api;
+pub use editor_api::AriaOptions;
 pub mod multi_diff_editor;
 pub use diff_editor::{
     AccessibilitySignal, CharChange, DiffAlgorithm, DiffEditor, DiffEditorEvent, DiffEditorModel,
@@ -143,9 +145,10 @@ pub use bulk_edit::{
 pub use commands::{add_command, execute_command, register_command, unregister_command};
 pub use context_keys::{ContextKey, ContextKeyValue};
 pub use decorations::{
-    BlockDecoration, DecorationId, DecorationOptions, DecorationUnderline, GlyphMarginLane,
-    GlyphMarginOptions, InjectedText, InjectedTextBox, LeftBorder, MinimapDecoration,
-    MinimapPosition, MinimapSectionHeaderStyle, OverviewRulerLane,
+    AttachedData, BlockDecoration, DecorationColor, DecorationId, DecorationOptions,
+    DecorationUnderline, GlyphMarginLane, GlyphMarginOptions, InjectedText, InjectedTextBox,
+    InjectedTextCursorStops, InjectedTextTokens, LeftBorder, LinesDecoration, MinimapDecoration,
+    MinimapPosition, MinimapSectionHeaderStyle, OverviewRulerDecoration, OverviewRulerLane,
 };
 #[doc(hidden)]
 pub use editor::OverviewRulerForTests;
@@ -179,10 +182,12 @@ pub use markers::{
     model_markers, remove_all_markers,
 };
 pub use model::{
-    EditKind, ModelOptions, SyntaxSnapshot, TextModel, TextModelEvent, language_registry,
-    model_for_uri, register_model, set_language_registry, set_model_resolver,
+    EditKind, ModelOptions, SyntaxSnapshot, TextModel, TextModelEvent, create_model,
+    language_registry, model_for_uri, register_model, set_language_registry, set_model_resolver,
 };
-pub use mouse_target::{EditorMouseEvent, MouseTarget, MouseTargetDetail, MouseTargetKind};
+pub use mouse_target::{
+    EditorMouseEvent, InjectedTextTarget, MouseTarget, MouseTargetDetail, MouseTargetKind,
+};
 pub use openers::{register_editor_opener, register_link_opener};
 pub use options::EditorOptions;
 pub use registry::{

@@ -637,14 +637,15 @@ fn run_go_to_locations_command(args: anyhow::Result<GoToLocations>, cx: &mut App
 /// [`execute_command`](crate::execute_command) and command ids in code
 /// lenses, code actions and completions.
 pub(crate) fn register_commands(cx: &mut App) {
-    crate::commands::register_command(cx, "editor.action.goToLocations", |args, cx| {
+    // Built in for good: the registrations are never disposed.
+    let _ = crate::commands::register_command(cx, "editor.action.goToLocations", |args, cx| {
         run_go_to_locations_command(go_to_locations_args(args), cx);
     });
     for id in [
         "editor.action.peekLocations",
         "editor.action.showReferences",
     ] {
-        crate::commands::register_command(cx, id, |args, cx| {
+        let _ = crate::commands::register_command(cx, id, |args, cx| {
             // Monaco passes on uri, position, locations and multiple only.
             let args = go_to_locations_args(&args[..args.len().min(4)]).map(|args| GoToLocations {
                 open_in_peek: true,

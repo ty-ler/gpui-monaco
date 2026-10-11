@@ -203,7 +203,8 @@ fn shown_command_runs_once(cx: &mut TestAppContext) {
     let runs = Rc::new(Cell::new(0));
     cx.update(|_, cx| {
         let runs = runs.clone();
-        gpui_monaco::register_command(cx, "test.shown", move |_, _| runs.set(runs.get() + 1));
+        let _ =
+            gpui_monaco::register_command(cx, "test.shown", move |_, _| runs.set(runs.get() + 1));
     });
     cx.simulate_input("he");
     draw(cx);

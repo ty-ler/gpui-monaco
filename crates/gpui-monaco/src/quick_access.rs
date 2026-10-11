@@ -27,7 +27,9 @@ use crate::actions::{
 };
 use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
-use crate::decorations::{DecorationId, DecorationOptions, OverviewRulerLane};
+use crate::decorations::{
+    DecorationId, DecorationOptions, OverviewRulerDecoration, OverviewRulerLane,
+};
 use crate::editor::{CodeEditor, CodeEditorEvent, ViewState};
 use crate::model::TextModelEvent;
 use crate::outline::flatten_symbols;
@@ -1053,7 +1055,7 @@ impl CodeEditor {
                 border: self.theme.colors.range_highlight_border,
                 is_whole_line: true,
                 // Monaco `editorOverviewRuler.rangeHighlightForeground`.
-                overview_ruler: Some((
+                overview_ruler: Some(OverviewRulerDecoration::new(
                     self.theme.colors.range_highlight_overview,
                     OverviewRulerLane::Right,
                 )),

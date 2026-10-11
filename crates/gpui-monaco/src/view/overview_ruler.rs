@@ -457,8 +457,8 @@ impl<T> PartialEq for ByPtr<T> {
 
 /// What the decoration groups depend on: (model, decorations version,
 /// view lines generation, validation decorations shown, the marker
-/// colors).
-pub(crate) type GroupsKey = (gpui::EntityId, u64, u64, bool, [Hsla; 3]);
+/// colors, the theme for theme color ids).
+pub(crate) type GroupsKey = (gpui::EntityId, u64, u64, bool, [Hsla; 3], usize);
 
 /// The decoration marks and what they were computed from.
 #[derive(Clone)]

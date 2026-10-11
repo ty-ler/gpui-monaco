@@ -22,7 +22,9 @@ use text::PointUtf16;
 use web_time::Instant;
 
 use crate::api::DecorationsCollection;
-use crate::decorations::{DecorationId, DecorationOptions, InjectedText, InjectedTextBox};
+use crate::decorations::{
+    DecorationId, DecorationOptions, InjectedText, InjectedTextBox, InjectedTextCursorStops,
+};
 use crate::editor::{CodeEditor, CodeEditorEvent};
 use crate::options::{InlayHintsMode, LocationKind, MultiCursorModifier};
 use crate::providers::{
@@ -667,8 +669,17 @@ impl CodeEditor {
                                 padding_y,
                                 corner_radius: (edge(first, radius), edge(last, radius)),
                             }),
-                            underline: None,
+                            // Monaco: only the end of the hint (its last
+                            // part, or the padding after it) is a stop.
+                            cursor_stops: if last && pad == 0 {
+                                InjectedTextCursorStops::Right
+                            } else {
+                                InjectedTextCursorStops::None
+                            },
+                            ..Default::default()
                         }),
+                        // Monaco `showIfCollapsed: range.isEmpty()`.
+                        show_if_collapsed: true,
                         ..Default::default()
                     },
                 ));
@@ -691,8 +702,16 @@ impl CodeEditor {
                                 ),
                                 ..Default::default()
                             }),
+                            // Monaco's padding is `None`; the `paddingRight`
+                            // spacer after it is `Right`.
+                            cursor_stops: if hint.padding_right {
+                                InjectedTextCursorStops::Right
+                            } else {
+                                InjectedTextCursorStops::None
+                            },
                             ..Default::default()
                         }),
+                        show_if_collapsed: true,
                         ..Default::default()
                     },
                 ));

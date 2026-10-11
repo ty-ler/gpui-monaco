@@ -37,6 +37,9 @@ struct Line {
 #[derive(Clone, Debug, Default)]
 pub struct MonarchHighlightState {
     lines: Vec<Line>,
+    /// The rows the last update tokenized (end exclusive): from the first
+    /// edited line until the states converged.
+    retokenized: Range<u32>,
 }
 
 impl MonarchHighlightState {
@@ -278,11 +281,27 @@ impl Highlighter for MonarchHighlighter {
             row += 1;
             true
         });
+        // The tokenized rows, the converged one included.
+        let retokenized = start_row as u32..(row + 1).min(line_count) as u32;
         if let (Some(old_row), Some((old, ..))) = (converged_at, tail) {
             lines.extend_from_slice(&old.lines[old_row + 1..]);
         }
         debug_assert_eq!(lines.len(), line_count);
-        HighlightState::new(MonarchHighlightState { lines })
+        HighlightState::new(MonarchHighlightState { lines, retokenized })
+    }
+
+    fn changed_rows(
+        &self,
+        (_, _, patch): (&HighlightState, &Rope, &Patch),
+        state: &HighlightState,
+        _text: &Rope,
+    ) -> Option<Vec<Range<u32>>> {
+        let state = state.downcast_ref::<MonarchHighlightState>()?;
+        // Without edits the old state is kept as it was.
+        if patch.is_empty() {
+            return Some(Vec::new());
+        }
+        Some(vec![state.retokenized.clone()])
     }
 
     fn highlights(

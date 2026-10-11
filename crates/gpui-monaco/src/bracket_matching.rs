@@ -9,7 +9,7 @@ use gpui::Context;
 use text::{Point, PointUtf16};
 
 use crate::cursor::{self, Selection};
-use crate::decorations::{DecorationOptions, OverviewRulerLane};
+use crate::decorations::{DecorationOptions, OverviewRulerDecoration, OverviewRulerLane};
 use crate::editor::CodeEditor;
 use crate::options::MatchBrackets;
 
@@ -132,10 +132,12 @@ impl CodeEditor {
                         border: Some(colors.bracket_match_border),
                         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
                         // Monaco marks only a pair next to the cursor.
-                        overview_ruler: near.then_some((
-                            colors.overview_ruler_bracket_match,
-                            OverviewRulerLane::Center,
-                        )),
+                        overview_ruler: near.then(|| {
+                            OverviewRulerDecoration::new(
+                                colors.overview_ruler_bracket_match,
+                                OverviewRulerLane::Center,
+                            )
+                        }),
                         ..Default::default()
                     },
                 )

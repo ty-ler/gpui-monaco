@@ -364,6 +364,7 @@ fn sticky_lines_show_injected_text(cx: &mut TestAppContext) {
                             content: "hint: ".into(),
                             ..Default::default()
                         }),
+                        show_if_collapsed: true,
                         ..Default::default()
                     },
                 )],

@@ -1501,6 +1501,7 @@ impl CodeEditor {
                     content: "          ".into(),
                     ..Default::default()
                 }),
+                show_if_collapsed: true,
                 ..Default::default()
             },
         )];
@@ -1853,6 +1854,7 @@ impl CodeEditor {
                                     background: Some(inserted),
                                     ..Default::default()
                                 }),
+                                show_if_collapsed: true,
                                 z_index: 2,
                                 ..Default::default()
                             },
@@ -2067,6 +2069,7 @@ impl CodeEditor {
                                 background: line_background,
                                 ..Default::default()
                             }),
+                            show_if_collapsed: true,
                             ..Default::default()
                         },
                     ));

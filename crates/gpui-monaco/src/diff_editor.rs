@@ -1303,7 +1303,7 @@ impl DeletedCode {
     fn new(source: DeletedCodeSource, cx: &mut Context<Self>) -> Self {
         // Monaco renders the zone again once tokenization completes.
         let subscription = cx.subscribe(&source.original, |_, _, event: &TextModelEvent, cx| {
-            if matches!(event, TextModelEvent::SyntaxUpdated) {
+            if matches!(event, TextModelEvent::SyntaxUpdated { .. }) {
                 cx.notify();
             }
         });
@@ -5860,6 +5860,7 @@ fn diff_decorations(
                                     background: Some(colors.diff_removed_text_background),
                                     ..Default::default()
                                 }),
+                                show_if_collapsed: true,
                                 z_index: 100_000,
                                 ..Default::default()
                             },

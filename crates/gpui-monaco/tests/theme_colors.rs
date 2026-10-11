@@ -103,7 +103,10 @@ fn markers_carry_their_severity_for_the_theme(cx: &mut TestAppContext) {
         .map(|d| {
             (
                 d.options.severity,
-                d.options.overview_ruler.map(|(_, lane)| lane),
+                d.options
+                    .overview_ruler
+                    .as_ref()
+                    .map(|ruler| ruler.position),
             )
         })
         .collect();

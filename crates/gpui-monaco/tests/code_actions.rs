@@ -174,9 +174,9 @@ fn quick_fix_menu_applies_edits_and_commands(cx: &mut TestAppContext) {
     };
     let (editor, cx) = setup(provider, cx);
     cx.update(|_, cx| {
-        gpui_monaco::register_command(cx, "test.after", move |arguments, _| {
+        let _ = gpui_monaco::register_command(cx, "test.after", move |arguments, _| {
             log.borrow_mut().push(arguments.to_vec());
-        })
+        });
     });
     editor.update(cx, |e, cx| {
         e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
@@ -524,7 +524,7 @@ fn documentation_is_offered_in_the_action_bar(cx: &mut TestAppContext) {
     });
     cx.update(|cx| {
         register_code_action_provider(cx, LanguageSelector::All, provider);
-        gpui_monaco::register_command(cx, "docs.refactor", move |_, _| {
+        let _ = gpui_monaco::register_command(cx, "docs.refactor", move |_, _| {
             log.borrow_mut().push("docs.refactor");
         });
     });
@@ -582,7 +582,8 @@ fn previewing_an_action_goes_through_the_preview_handler(cx: &mut TestAppContext
     };
     let (editor, cx) = setup(provider, cx);
     cx.update(|_, cx| {
-        gpui_monaco::register_command(cx, "test.after", move |_, _| *count.borrow_mut() += 1)
+        let _ =
+            gpui_monaco::register_command(cx, "test.after", move |_, _| *count.borrow_mut() += 1);
     });
     editor.update(cx, |e, cx| {
         e.set_selections(&[Selection::collapsed(p(0, 4))], cx)

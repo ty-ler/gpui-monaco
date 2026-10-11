@@ -1672,6 +1672,14 @@ impl Theme {
         ColorScheme::new(self.kind == ThemeKind::Light, self.high_contrast)
     }
 
+    /// The theme's color `id` (such as `editorOverviewRuler.findMatchForeground`),
+    /// else Monaco's default for it in this kind of theme (Monaco
+    /// `IColorTheme.getColor` with `useDefault`); `None` for an unknown id
+    /// or a color that's null by default.
+    pub fn color(&self, id: &str) -> Option<Hsla> {
+        Resolver::new(self.scheme(), &self.own_colors).get(id)
+    }
+
     fn builtin(
         name: &str,
         scheme: ColorScheme,

@@ -139,6 +139,19 @@ pub struct MouseTarget {
     pub mouse_column: u32,
     /// More about the target (Monaco `detail`).
     pub detail: MouseTargetDetail,
+    /// Over text, the injected text under the mouse, if any (Monaco
+    /// `IMouseTargetContentText.detail.injectedText`).
+    pub injected_text: Option<InjectedTextTarget>,
+}
+
+/// Injected text under the mouse (Monaco's mouse target `injectedText`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct InjectedTextTarget {
+    /// The decoration whose `before` or `after` text it is.
+    pub decoration: Option<crate::DecorationId>,
+    /// Its [`InjectedText::attached_data`](crate::InjectedText::attached_data)
+    /// (Monaco `options.attachedData`).
+    pub attached_data: Option<crate::AttachedData>,
 }
 
 /// A mouse event over the editor (Monaco `IEditorMouseEvent`).
@@ -247,6 +260,7 @@ impl CodeEditor {
             range: None,
             mouse_column: 0,
             detail: MouseTargetDetail::None,
+            injected_text: None,
         };
         let Some(layout) = self.layout.as_ref() else {
             return unknown;
@@ -268,6 +282,7 @@ impl CodeEditor {
             range: position.map(|p| p..p),
             mouse_column,
             detail,
+            injected_text: None,
         };
         let margin = |is_after_lines, widget| MouseTargetDetail::Margin {
             is_after_lines,
@@ -421,11 +436,30 @@ impl CodeEditor {
                 },
             )
         } else {
-            target(
+            let mut target = target(
                 MouseTargetKind::ContentText,
                 Some(position),
                 MouseTargetDetail::None,
-            )
+            );
+            // Monaco `getInjectedTextAt`: strictly inside injected text.
+            let x = point.x - layout.text_origin_x() - line.indent_x;
+            let index = line.shaped.closest_index_for_x(x);
+            let between = |range: &Range<usize>| {
+                let (from, to) = (
+                    line.shaped.x_for_index(range.start),
+                    line.shaped.x_for_index(range.end),
+                );
+                from <= x && x < to && range.start <= index && index <= range.end
+            };
+            target.injected_text = line
+                .injected
+                .iter()
+                .find(|injected| !injected.chip && between(&injected.range))
+                .map(|injected| InjectedTextTarget {
+                    decoration: injected.decoration,
+                    attached_data: injected.attached_data.clone(),
+                });
+            target
         }
     }
 }

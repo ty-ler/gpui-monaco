@@ -10,7 +10,9 @@ use gpui::{Context, Task};
 use text::PointUtf16;
 
 use crate::cursor::{self, Selection};
-use crate::decorations::{DecorationId, DecorationOptions, OverviewRulerLane};
+use crate::decorations::{
+    DecorationId, DecorationOptions, OverviewRulerDecoration, OverviewRulerLane,
+};
 use crate::editor::CodeEditor;
 use crate::providers::{DocumentHighlight, DocumentHighlightKind, document_highlight_providers};
 use crate::search::{self, SearchParams};
@@ -102,10 +104,15 @@ impl CodeEditor {
                     DecorationOptions {
                         background: Some(background),
                         border,
-                        overview_ruler: Some((overview, OverviewRulerLane::Center)),
+                        overview_ruler: Some(OverviewRulerDecoration::new(
+                            overview,
+                            OverviewRulerLane::Center,
+                        )),
                         // Monaco `minimap.selectionOccurrenceHighlight`.
                         minimap: Some(crate::MinimapDecoration {
-                            color: colors.minimap_selection_occurrence_highlight,
+                            color: colors
+                                .minimap_selection_occurrence_highlight
+                                .map(Into::into),
                             ..Default::default()
                         }),
                         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
@@ -407,12 +414,14 @@ impl CodeEditor {
                     DecorationOptions {
                         background: Some(colors.selection_highlight_background),
                         border: colors.selection_highlight_border,
-                        overview_ruler: Some((
+                        overview_ruler: Some(OverviewRulerDecoration::new(
                             colors.selection_highlight_overview,
                             OverviewRulerLane::Center,
                         )),
                         minimap: Some(crate::MinimapDecoration {
-                            color: colors.minimap_selection_occurrence_highlight,
+                            color: colors
+                                .minimap_selection_occurrence_highlight
+                                .map(Into::into),
                             ..Default::default()
                         }),
                         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,

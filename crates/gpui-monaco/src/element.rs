@@ -68,6 +68,12 @@ pub(crate) struct LineLayout {
 /// Injected text on a laid out line.
 #[derive(Clone)]
 pub(crate) struct InjectedLayout {
+    /// The model column it's injected at.
+    pub column: u32,
+    /// Its text.
+    pub content: SharedString,
+    /// Its host data (Monaco `attachedData`).
+    pub attached_data: Option<crate::decorations::AttachedData>,
     /// Display byte range.
     pub range: Range<usize>,
     pub background: Option<Hsla>,
@@ -108,6 +114,69 @@ impl LineLayout {
             col
         };
         self.columns.start + col as u32
+    }
+
+    /// The injected text at `column`, in display order.
+    fn injected_at(&self, column: u32) -> impl Iterator<Item = &InjectedLayout> {
+        self.injected
+            .iter()
+            .filter(move |injected| injected.column == column && !injected.chip)
+    }
+
+    /// The caret's x at `column`, `injected` UTF-16 units into the
+    /// injected text there (Monaco's view column: 0 is before it all).
+    pub fn x_for_caret(&self, column: u32, injected: u32) -> Pixels {
+        let mut group = self.injected_at(column).peekable();
+        let Some(first) = group.peek() else {
+            return self.x_for_column(column);
+        };
+        let mut index = first.range.start;
+        let mut left = injected as usize;
+        for text in group {
+            let len = text.content.encode_utf16().count();
+            if left <= len {
+                let byte = utf16_to_byte(&text.content, left as u32);
+                index = if left == len {
+                    text.range.end
+                } else {
+                    text.range.start + byte
+                };
+                break;
+            }
+            left -= len;
+            index = text.range.end;
+        }
+        self.indent_x + self.shaped.x_for_index(index)
+    }
+
+    /// The column and UTF-16 offset into its injected text closest to `x`
+    /// (Monaco's view position under the mouse, before normalizing); the
+    /// offset is `None` off injected text.
+    pub fn position_for_x(&self, x: Pixels) -> (u32, Option<u32>) {
+        if self.injected.is_empty() {
+            return (self.column_for_x(x), None);
+        }
+        let ix = self.shaped.closest_index_for_x(x - self.indent_x);
+        let hit = self
+            .injected
+            .iter()
+            .find(|text| !text.chip && text.range.start <= ix && ix <= text.range.end);
+        let Some(hit) = hit else {
+            return (self.column_for_x(x), None);
+        };
+        let mut offset = 0;
+        for text in self.injected_at(hit.column) {
+            if std::ptr::eq(text, hit) {
+                let mut end = (ix - text.range.start).min(text.content.len());
+                while !text.content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                offset += text.content[..end].encode_utf16().count() as u32;
+                break;
+            }
+            offset += text.content.encode_utf16().count() as u32;
+        }
+        (hit.column, Some(offset))
     }
 
     /// Width up to the end of the text on this line.
@@ -725,6 +794,7 @@ pub(crate) fn layout_segment<'a>(
     metrics: &TextMetrics,
     color: Hsla,
     highlights: &[(Range<usize>, TokenStyle)],
+    fonts: &[(Range<usize>, DecorationFont)],
     injections: &'a [Injection],
     marked: Option<(Range<u32>, Option<Range<u32>>, Hsla)>,
     window: &mut Window,
@@ -844,12 +914,27 @@ pub(crate) fn layout_segment<'a>(
         .map(|(range, style)| (to_display(range.start)..to_display(range.end), *style))
         .filter(|(range, _)| !range.is_empty())
         .collect();
+    let fonts: Vec<(Range<usize>, &DecorationFont)> = fonts
+        .iter()
+        .map(|(range, font)| (to_display(range.start)..to_display(range.end), font))
+        .filter(|(range, _)| !range.is_empty())
+        .collect();
     let mut bounds = vec![0, display_len];
     for (range, _) in &styled {
         bounds.extend([range.start, range.end]);
     }
-    for (range, _) in &injected {
+    for (range, _) in &fonts {
         bounds.extend([range.start, range.end]);
+    }
+    for (range, (_, _, text, _)) in &injected {
+        bounds.extend([range.start, range.end]);
+        // Monaco's injected text `tokens`.
+        for (token, _) in text.tokens.iter().flat_map(|tokens| tokens.iter()) {
+            bounds.extend([
+                (range.start + token.start).min(range.end),
+                (range.start + token.end).min(range.end),
+            ]);
+        }
     }
     for range in &controls {
         bounds.extend([range.start, range.end]);
@@ -873,12 +958,14 @@ pub(crate) fn layout_segment<'a>(
         while span_ix < styled.len() && styled[span_ix].0.end <= start {
             span_ix += 1;
         }
-        let injected_text = injected
+        let injected_at = injected
             .iter()
-            .find(|(range, _)| range.start <= start && end <= range.end)
-            .map(|(_, (_, _, text, _))| text);
-        let style = injected_text
-            .map(|text| text.style)
+            .find(|(range, _)| range.start <= start && end <= range.end);
+        let injected_text = injected_at.map(|(_, (_, _, text, _))| text);
+        let style = injected_at
+            .map(|(range, (_, _, text, _))| {
+                injected_text_style(text, start - range.start..end - range.start)
+            })
             .or_else(|| {
                 styled
                     .get(span_ix)
@@ -889,6 +976,24 @@ pub(crate) fn layout_segment<'a>(
         let mut font = metrics.font.clone();
         if let Some(family) = injected_text.and_then(|text| text.font_family.clone()) {
             font.family = family;
+        }
+        // A decoration's font (Monaco `fontFamily`, `fontWeight`,
+        // `fontStyle`); token styles' bold and italic still apply.
+        if injected_text.is_none()
+            && let Some((_, decoration_font)) = fonts
+                .iter()
+                .rev()
+                .find(|(range, _)| range.start <= start && end <= range.end)
+        {
+            if let Some(family) = &decoration_font.family {
+                font.family = family.clone();
+            }
+            if let Some(weight) = decoration_font.weight {
+                font.weight = weight;
+            }
+            if let Some(style) = decoration_font.style {
+                font.style = style;
+            }
         }
         if style.bold {
             font.weight = FontWeight::BOLD;
@@ -989,8 +1094,11 @@ pub(crate) fn layout_segment<'a>(
         injected: injected
             .into_iter()
             .map(|(range, injection)| {
-                let (_, _, text, decoration) = injection;
+                let (column, _, text, decoration) = injection;
                 InjectedLayout {
+                    column: *column,
+                    content: text.content.clone(),
+                    attached_data: text.attached_data.clone(),
                     range,
                     background: text.background,
                     swatch: text.swatch,
@@ -1005,6 +1113,28 @@ pub(crate) fn layout_segment<'a>(
             })
             .collect(),
     }
+}
+
+/// Monaco `_renderNormalDecoration` with `showIfCollapsed`: a range
+/// narrower than a typical (half-width) character is widened to that,
+/// around its center (rounded, and not left of the line's start).
+pub(crate) fn widen_collapsed(from: Pixels, to: Pixels, half_width: Pixels) -> (Pixels, Pixels) {
+    if to - from >= half_width {
+        return (from, to);
+    }
+    let center = ((from + to) / 2.).round();
+    let from = (center - half_width / 2.).round().max(px(0.));
+    (from, from + half_width)
+}
+
+/// The style of bytes `range` of injected `text`: the token there (Monaco's
+/// injected text `tokens`), else the text's style.
+pub(crate) fn injected_text_style(text: &InjectedText, range: Range<usize>) -> TokenStyle {
+    text.tokens
+        .iter()
+        .flat_map(|tokens| tokens.iter())
+        .find(|(token, _)| token.start <= range.start && range.end <= token.end)
+        .map_or(text.style, |(_, style)| *style)
 }
 
 /// The segment shown on `view_line`.
@@ -1022,10 +1152,28 @@ pub(crate) fn row_segment(view_lines: &ViewLines, view_line: u32) -> RowSegment 
     }
 }
 
+/// A decoration's font over part of a row (Monaco's `fontFamily`,
+/// `fontWeight` and `fontStyle` decoration options), in row-relative bytes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct DecorationFont {
+    pub family: Option<SharedString>,
+    pub weight: Option<FontWeight>,
+    pub style: Option<FontStyle>,
+}
+
+/// A row's text styles, injected text and fonts from its decorations (see
+/// [`decoration_styles_and_injections`]).
+pub(crate) type RowDecorations = (
+    Vec<(Range<usize>, TokenStyle)>,
+    Vec<Injection>,
+    Vec<(Range<usize>, DecorationFont)>,
+);
+
 /// Row `row`'s inline decorations (Monaco `LineDecoration`s): the bracket
 /// pair colors and decoration text styles over the syntax colors, in
-/// row-relative bytes, and the injected text before and after decorated
-/// ranges, by column. `line_range` is the row's byte range.
+/// row-relative bytes, the injected text before and after decorated
+/// ranges, by column (see [`row_injections`]), and the decorations' fonts.
+/// `line_range` is the row's byte range.
 pub(crate) fn decoration_styles_and_injections(
     row: u32,
     line_range: Range<usize>,
@@ -1033,7 +1181,7 @@ pub(crate) fn decoration_styles_and_injections(
     decoration_points: &[(PointUtf16, PointUtf16, &crate::decorations::Decoration)],
     options: &EditorOptions,
     colors: &EditorColors,
-) -> (Vec<(Range<usize>, TokenStyle)>, Vec<Injection>) {
+) -> RowDecorations {
     let mut decoration_styles: Vec<(Range<usize>, TokenStyle)> = bracket_colors
         .iter()
         .filter(|(range, _)| line_range.start <= range.start && range.end <= line_range.end)
@@ -1047,12 +1195,41 @@ pub(crate) fn decoration_styles_and_injections(
             )
         })
         .collect();
+    let mut fonts = Vec::new();
     let mut injections = Vec::new();
     for (start, end, decoration) in decoration_points {
         if start.row > row || end.row < row {
             continue;
         }
+        push_injections(row, *start, *end, decoration, &mut injections);
         let decoration_options = &decoration.options;
+        let row_range = || {
+            let from = if start.row == row {
+                decoration.range.start - line_range.start
+            } else {
+                0
+            };
+            let to = if end.row == row {
+                decoration.range.end - line_range.start
+            } else {
+                line_range.len()
+            };
+            from..to
+        };
+        // Monaco's `fontFamily`, `fontWeight` and `fontStyle`.
+        if decoration_options.has_font() {
+            let range = row_range();
+            if !range.is_empty() {
+                fonts.push((
+                    range,
+                    DecorationFont {
+                        family: decoration_options.font_family.clone(),
+                        weight: decoration_options.font_weight,
+                        style: decoration_options.font_style,
+                    },
+                ));
+            }
+        }
         // Monaco's tag classes, when the editor shows them.
         let tag_style = TokenStyle {
             opacity: (decoration_options.unnecessary && options.show_unused)
@@ -1071,33 +1248,59 @@ pub(crate) fn decoration_styles_and_injections(
             (None, true) => None,
         };
         if let Some(style) = style {
-            let from = if start.row == row {
-                decoration.range.start - line_range.start
-            } else {
-                0
-            };
-            let to = if end.row == row {
-                decoration.range.end - line_range.start
-            } else {
-                line_range.len()
-            };
-            if to > from {
-                decoration_styles.push((from..to, style));
+            let range = row_range();
+            if !range.is_empty() {
+                decoration_styles.push((range, style));
             }
-        }
-        if let Some(before) = &decoration_options.before
-            && start.row == row
-        {
-            injections.push((start.column, false, before.clone(), Some(decoration.id)));
-        }
-        if let Some(after) = &decoration_options.after
-            && end.row == row
-        {
-            injections.push((end.column, true, after.clone(), Some(decoration.id)));
         }
     }
     injections.sort_by_key(|(column, _, _, _)| *column);
-    (decoration_styles, injections)
+    (decoration_styles, injections, fonts)
+}
+
+/// The injected text on row `row` (Monaco `LineInjectedText.fromDecorations`),
+/// by column: a decoration's `before` text at its start and `after` text at
+/// its end, on an empty range only with `show_if_collapsed`. At one column
+/// it's drawn `after` texts first, then `before` ones, in this order.
+pub(crate) fn row_injections(
+    row: u32,
+    decoration_points: &[(PointUtf16, PointUtf16, &crate::decorations::Decoration)],
+) -> Vec<Injection> {
+    let mut injections = Vec::new();
+    for (start, end, decoration) in decoration_points {
+        if start.row <= row && row <= end.row {
+            push_injections(row, *start, *end, decoration, &mut injections);
+        }
+    }
+    injections.sort_by_key(|(column, _, _, _)| *column);
+    injections
+}
+
+/// Adds `decoration`'s injected text on `row` (see [`row_injections`]),
+/// unsorted.
+fn push_injections(
+    row: u32,
+    start: PointUtf16,
+    end: PointUtf16,
+    decoration: &crate::decorations::Decoration,
+    injections: &mut Vec<Injection>,
+) {
+    let options = &decoration.options;
+    if (options.before.is_none() && options.after.is_none())
+        || !options.shows_injected_text(&decoration.range)
+    {
+        return;
+    }
+    if let Some(before) = &options.before
+        && start.row == row
+    {
+        injections.push((start.column, false, before.clone(), Some(decoration.id)));
+    }
+    if let Some(after) = &options.after
+        && end.row == row
+    {
+        injections.push((end.column, true, after.clone(), Some(decoration.id)));
+    }
 }
 
 /// Highlight spans for byte `range` of the current text, using the model's
@@ -1539,6 +1742,8 @@ pub(crate) struct EditorLayout {
     /// The glyph margin's glyphs and widgets drawn, as (view line, lane
     /// index) (for tests).
     pub glyphs_drawn: Vec<(u32, usize)>,
+    /// The line decorations area's bars drawn (for tests).
+    pub gutter_bars: Vec<(Bounds<Pixels>, Hsla)>,
 }
 
 impl EditorLayout {
@@ -2949,7 +3154,7 @@ fn prepaint_editor(
             });
         // Decoration text styles override syntax colors; injected text goes
         // before/after decorated ranges.
-        let (decoration_styles, mut injections) = decoration_styles_and_injections(
+        let (decoration_styles, mut injections, fonts) = decoration_styles_and_injections(
             segment.row,
             line_range.clone(),
             &bracket_colors,
@@ -3027,6 +3232,7 @@ fn prepaint_editor(
             &metrics,
             colors.foreground,
             &row_highlights,
+            &fonts,
             &injections,
             marked_cols,
             window,
@@ -3304,6 +3510,7 @@ fn prepaint_editor(
         line_highlights: Vec::new(),
         line_number_styles: Vec::new(),
         glyphs_drawn: Vec::new(),
+        gutter_bars: Vec::new(),
     };
 
     // Minimap (Monaco `Minimap`), sized per `minimap.size`
@@ -3438,7 +3645,7 @@ fn prepaint_editor(
             // Monaco renders sticky lines with their inline decorations and
             // injected text (`RenderedStickyLine`), so they line up with the
             // real lines.
-            let (row_highlights, injections) = {
+            let (row_highlights, injections, fonts) = {
                 let row_highlights: Vec<(Range<usize>, TokenStyle)> = {
                     let model = editor.model().read(cx);
                     current_highlights(model, &theme, line_range.clone())
@@ -3471,7 +3678,7 @@ fn prepaint_editor(
                     })
                     .collect();
                 let brackets = editor.bracket_colors_in(line_range.clone(), cx);
-                let (styles, injections) = decoration_styles_and_injections(
+                let (styles, injections, fonts) = decoration_styles_and_injections(
                     row,
                     line_range.clone(),
                     &brackets,
@@ -3484,7 +3691,7 @@ fn prepaint_editor(
                 } else {
                     overlay_styles(&row_highlights, &styles)
                 };
-                (row_highlights, injections)
+                (row_highlights, injections, fonts)
             };
             let shaped = layout_segment(
                 &snapshot,
@@ -3493,6 +3700,7 @@ fn prepaint_editor(
                 &metrics,
                 colors.foreground,
                 &row_highlights,
+                &fonts,
                 &injections,
                 None,
                 window,
@@ -3644,6 +3852,13 @@ fn prepaint_editor(
     let origin_x = layout.text_origin_x();
     for (start, end, decoration) in &decoration_points {
         let options = &decoration.options;
+        // Monaco `_renderNormalDecorations`: with `showIfCollapsed`, a range
+        // ending at the start of a line ends at the end of the line before.
+        let end = &if options.show_if_collapsed && end.column == 0 && end.row > start.row {
+            PointUtf16::new(end.row - 1, snapshot.line_len_utf16(end.row - 1))
+        } else {
+            *end
+        };
         for line in layout.lines.iter() {
             if line.row < start.row || line.row > end.row {
                 continue;
@@ -3671,7 +3886,10 @@ fn prepaint_editor(
                         }
                     })
                 };
-                if let Some((from, to)) = range {
+                if let Some((mut from, mut to)) = range {
+                    if options.show_if_collapsed && !options.is_whole_line {
+                        (from, to) = widen_collapsed(from, to, metrics.em_width);
+                    }
                     // Monaco gives empty ranges (e.g. a snippet's final tab
                     // stop) a 2px minimum width.
                     let bounds = Bounds::new(
@@ -3724,7 +3942,17 @@ fn prepaint_editor(
                     },
                 ));
             }
-            if let Some(color) = options.gutter_bar {
+            // Monaco `firstLineDecorationClassName`: in the line decorations
+            // area too, on a wrapped line's first view line only.
+            let first_line = options
+                .first_line_decoration
+                .as_ref()
+                .filter(|_| line.columns.start == 0);
+            let bars = options
+                .gutter_bar
+                .into_iter()
+                .chain(first_line.and_then(|first| first.bar));
+            for color in bars {
                 let left = bounds.left() + glyph_width + numbers_width + px(2.);
                 gutter_bars.push((Bounds::new(point(left, top), size(px(3.), height)), color));
             }
@@ -3734,7 +3962,11 @@ fn prepaint_editor(
                     color,
                 ));
             }
-            if let Some((text, color)) = &options.lines_decoration_text {
+            let texts = options
+                .lines_decoration_text
+                .iter()
+                .chain(first_line.and_then(|first| first.text.as_ref()));
+            for (text, color) in texts {
                 // Codicons (the diff editor's `add` / `remove` signs) are
                 // 11px, as Monaco's `.insert-sign` / `.delete-sign`.
                 let (text, font) = crate::codicons::decoration_text(text, cx);
@@ -3900,12 +4132,15 @@ fn prepaint_editor(
                 colors.overview_ruler_info,
             ];
             let model = editor.model().clone();
+            // Theme color ids resolve against the current theme.
+            let theme = editor.theme.clone();
             let key = (
                 model.entity_id(),
                 model.read(cx).decorations_version(),
                 view_lines.generation(),
                 show_validation,
                 marker_colors,
+                std::sync::Arc::as_ptr(&theme) as usize,
             );
             let mut cache = std::mem::take(&mut editor.overview_ruler_cache);
             // Monaco `getAllOverviewRulerDecorations`: grouped by color, in
@@ -3918,13 +4153,20 @@ fn prepaint_editor(
                     if !show_validation && decoration.options.validation {
                         continue;
                     }
-                    let Some((color, lane)) = decoration.options.overview_ruler else {
+                    let Some(ruler) = &decoration.options.overview_ruler else {
                         continue;
                     };
-                    // A marker's mark is in the theme's color.
+                    let lane = ruler.position;
+                    // A marker's mark is in the theme's color; a theme
+                    // color id is looked up in the theme.
                     let color = match decoration.options.severity {
-                        Some(severity) => colors.marker_overview_color(severity).unwrap_or(color),
-                        None => color,
+                        Some(severity) => colors
+                            .marker_overview_color(severity)
+                            .or_else(|| ruler.resolve(&theme)),
+                        None => ruler.resolve(&theme),
+                    };
+                    let Some(color) = color else {
+                        continue;
                     };
                     let view_line = |offset: usize| {
                         view_lines
@@ -4060,6 +4302,7 @@ fn prepaint_editor(
         )
     };
     let rope = snapshot.rope();
+    let cursor_injected = editor.cursor_injected_offsets();
     let mut cursor_view_lines = Vec::with_capacity(selections.len());
     // (bounds, the character inside, colors) of each cursor on screen.
     let mut cursor_targets = Vec::with_capacity(selections.len());
@@ -4075,7 +4318,10 @@ fn prepaint_editor(
             .head
             .column
             .clamp(line.columns.start, line.columns.end);
-        let x = layout.text_origin_x() + line.x_for_column(column);
+        // Monaco's view column: before injected text there, or as far into
+        // it as the cursor stops let a move or click take it.
+        let injected = cursor_injected.get(ix).copied().unwrap_or(0);
+        let x = layout.text_origin_x() + line.x_for_caret(column, injected);
         let y = layout.line_top(line.view_line);
         // Monaco's cursor fills a taller line.
         let line_height = layout.line_height_of(line.view_line);
@@ -4777,6 +5023,7 @@ fn prepaint_editor(
         cursors.iter().map(|cursor| cursor.bounds).collect(),
         cursor_style == CursorStyle::BlockOutline,
     );
+    layout.gutter_bars = gutter_bars.clone();
     editor.layout = Some(layout.clone());
     editor.report_layout(cx);
     // Monaco `RenameWidget.afterRender(null)`: the box's line scrolled out
@@ -6503,5 +6750,168 @@ mod fold_control_tests {
                 .iter()
                 .any(|text| text == "Click to collapse the range.")
         }));
+    }
+}
+
+#[cfg(test)]
+mod decoration_option_tests {
+    //! Monaco's `showIfCollapsed`, injected text `tokens` and the
+    //! decoration fonts, as the line layout reads them.
+
+    use std::sync::Arc;
+
+    use gpui::{FontStyle, FontWeight};
+    use text::PointUtf16;
+
+    use super::*;
+    use crate::decorations::{Decoration, DecorationId, DecorationOptions};
+
+    fn decoration(id: u64, range: Range<usize>, options: DecorationOptions) -> Decoration {
+        Decoration {
+            id: DecorationId(id),
+            range,
+            options: Arc::new(options),
+            owner: None,
+        }
+    }
+
+    fn points(decorations: &[Decoration]) -> Vec<(PointUtf16, PointUtf16, &Decoration)> {
+        decorations
+            .iter()
+            .map(|d| {
+                (
+                    PointUtf16::new(0, d.range.start as u32),
+                    PointUtf16::new(0, d.range.end as u32),
+                    d,
+                )
+            })
+            .collect()
+    }
+
+    fn text(content: &str) -> Option<InjectedText> {
+        Some(InjectedText {
+            content: content.to_string().into(),
+            ..Default::default()
+        })
+    }
+
+    /// Monaco `getInjectedTextInInterval`: an empty range's injected text
+    /// shows only with `showIfCollapsed`; a non-empty range's always does.
+    #[test]
+    fn injected_text_on_empty_ranges_needs_show_if_collapsed() {
+        let decorations = [
+            decoration(
+                1,
+                2..2,
+                DecorationOptions {
+                    before: text("hidden"),
+                    ..Default::default()
+                },
+            ),
+            decoration(
+                2,
+                3..3,
+                DecorationOptions {
+                    after: text("shown"),
+                    show_if_collapsed: true,
+                    ..Default::default()
+                },
+            ),
+            decoration(
+                3,
+                4..6,
+                DecorationOptions {
+                    before: text("ranged"),
+                    ..Default::default()
+                },
+            ),
+        ];
+        let injections = row_injections(0, &points(&decorations));
+        let contents: Vec<(u32, &str)> = injections
+            .iter()
+            .map(|(column, _, text, _)| (*column, text.content.as_ref()))
+            .collect();
+        assert_eq!(contents, [(3, "shown"), (4, "ranged")]);
+    }
+
+    /// Monaco's `fontFamily`, `fontWeight` and `fontStyle` become font
+    /// spans over the decorated text.
+    #[test]
+    fn decoration_fonts() {
+        let decorations = [decoration(
+            1,
+            1..4,
+            DecorationOptions {
+                font_family: Some("Courier".into()),
+                font_weight: Some(FontWeight::BOLD),
+                font_style: Some(FontStyle::Italic),
+                ..Default::default()
+            },
+        )];
+        let theme = Theme::vs_dark();
+        let (_, _, fonts) = decoration_styles_and_injections(
+            0,
+            0..8,
+            &[],
+            &points(&decorations),
+            &EditorOptions::default(),
+            &theme.colors,
+        );
+        assert_eq!(
+            fonts,
+            [(
+                1..4,
+                DecorationFont {
+                    family: Some("Courier".into()),
+                    weight: Some(FontWeight::BOLD),
+                    style: Some(FontStyle::Italic),
+                }
+            )]
+        );
+    }
+
+    /// Monaco `_renderNormalDecoration`: with `showIfCollapsed`, an empty or
+    /// narrow range is a typical character wide, centered.
+    #[test]
+    fn collapsed_ranges_widen() {
+        use gpui::px;
+        assert_eq!(
+            widen_collapsed(px(20.), px(20.), px(8.)),
+            (px(16.), px(24.))
+        );
+        assert_eq!(
+            widen_collapsed(px(20.), px(22.), px(8.)),
+            (px(17.), px(25.))
+        );
+        // Wide enough already.
+        assert_eq!(
+            widen_collapsed(px(20.), px(30.), px(8.)),
+            (px(20.), px(30.))
+        );
+        // Not past the line's start.
+        assert_eq!(widen_collapsed(px(0.), px(0.), px(8.)), (px(0.), px(8.)));
+    }
+
+    /// Monaco's injected text `tokens`: each part of the text in its
+    /// token's style, the rest in the text's.
+    #[test]
+    fn injected_text_tokens() {
+        let red = TokenStyle {
+            foreground: Some(gpui::red()),
+            ..Default::default()
+        };
+        let bold = TokenStyle {
+            bold: true,
+            ..Default::default()
+        };
+        let text = InjectedText {
+            content: "let x".into(),
+            style: bold,
+            tokens: Some(Arc::from([(0..3, red)])),
+            ..Default::default()
+        };
+        assert_eq!(injected_text_style(&text, 0..3), red);
+        assert_eq!(injected_text_style(&text, 1..2), red);
+        assert_eq!(injected_text_style(&text, 3..5), bold);
     }
 }
