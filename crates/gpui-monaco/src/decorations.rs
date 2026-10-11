@@ -69,6 +69,9 @@ pub struct DecorationOptions {
     /// A glyph shown in the glyph margin on the start row (Monaco
     /// `glyphMarginClassName`).
     pub glyph: Option<(SharedString, Hsla)>,
+    /// Markdown shown when the mouse rests on the start row's glyph margin
+    /// or line number (Monaco `glyphMarginHoverMessage`).
+    pub glyph_margin_hover_message: Option<SharedString>,
     /// Line number color on the decorated rows (Monaco
     /// `lineNumberClassName`).
     pub line_number_color: Option<Hsla>,

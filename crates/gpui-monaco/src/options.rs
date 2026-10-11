@@ -459,6 +459,47 @@ pub enum MultiCursorModifier {
     CtrlCmd,
 }
 
+/// Monaco `hover.enabled`: when the mouse shows hovers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HoverEnabled {
+    /// Always.
+    #[default]
+    On,
+    /// Never (Show or Focus Hover still works).
+    Off,
+    /// While Cmd/Ctrl, or Alt with `multi_cursor_modifier: CtrlCmd`, is
+    /// held (the opposite of the multi-cursor modifier).
+    OnKeyboardModifier,
+}
+
+/// Monaco `hover`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HoverOptions {
+    /// When the mouse shows hovers (default `On`).
+    pub enabled: HoverEnabled,
+    /// How long the mouse rests before the hover shows (default 300ms).
+    pub delay: std::time::Duration,
+    /// The hover stays while the mouse moves over it (default `true`).
+    pub sticky: bool,
+    /// With `sticky`, how long the hover waits before reacting to the
+    /// mouse leaving its word, so the mouse can reach it (default 300ms).
+    pub hiding_delay: std::time::Duration,
+    /// Prefer showing the hover above the line (default `true`).
+    pub above: bool,
+}
+
+impl Default for HoverOptions {
+    fn default() -> Self {
+        Self {
+            enabled: HoverEnabled::On,
+            delay: std::time::Duration::from_millis(300),
+            sticky: true,
+            hiding_delay: std::time::Duration::from_millis(300),
+            above: true,
+        }
+    }
+}
+
 /// Monaco `cursorStyle`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorStyle {
@@ -1320,6 +1361,8 @@ pub struct EditorOptions {
     pub selection_highlight_multiline: bool,
     /// Monaco `multiCursorModifier`.
     pub multi_cursor_modifier: MultiCursorModifier,
+    /// Monaco `hover`.
+    pub hover: HoverOptions,
     /// Monaco `multiCursorPaste`: how pasting with several cursors splits
     /// the text.
     pub multi_cursor_paste: crate::cursor::MultiCursorPaste,
@@ -1517,6 +1560,7 @@ impl Default for EditorOptions {
             selection_highlight_max_length: 200,
             selection_highlight_multiline: false,
             multi_cursor_modifier: MultiCursorModifier::Alt,
+            hover: HoverOptions::default(),
             multi_cursor_paste: Default::default(),
             inline_suggest: InlineSuggestOptions::default(),
             code_lens: true,

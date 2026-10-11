@@ -60,6 +60,7 @@ Ranges are byte offsets. To convert from `PointUtf16`, use `model.buffer().point
 | `block` | `blockClassName` + `blockPadding` | a bordered box around the decorated lines and the view zones above them |
 | `line_height` | `lineHeight` | the covered lines' height, as a multiple of the line height; text stays centered |
 | `glyph` | `glyphMarginClassName` | a short glyph in the glyph margin |
+| `glyph_margin_hover_message` | `glyphMarginHoverMessage` | markdown shown when the mouse rests on the row's glyph margin or line number |
 | `line_number_color` | `lineNumberClassName` | colors the line number |
 | `gutter_bar` | `linesDecorationsClassName` | a bar between the line numbers and the text |
 | `overview_ruler` | `overviewRuler` | a mark in the scrollbar's overview ruler |

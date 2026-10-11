@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Hover options and keyboard focus (#199):**
+  - **Options:** `EditorOptions::hover` (Monaco `hover`): `enabled` (`On`, `Off`, `OnKeyboardModifier`), `delay`, `sticky`, `hiding_delay` and `above`. Mouse moves follow Monaco's `ContentHoverController`: a sticky hover waits `hiding_delay` for the mouse to reach it, and a non-sticky one hides when the mouse moves onto it.
+  - **Keyboard:** Show or Focus Hover focuses a visible hover. The new hover actions (`hideHover` and the scroll, page and top/bottom actions) are bound to Monaco's keys while it has focus, and Escape returns to the editor.
+  - **Gutter hovers:** `DecorationOptions::glyph_margin_hover_message` shows on the row's glyph margin or line number, like Monaco's glyph hover.
 - **Indentation detection and commands (#197):**
   - **Detection:** a port of Monaco's `guessIndentation`, with all 40 of Monaco's guessing assertions. New models guess their indentation from their text (`ModelOptions::detect_indentation`, on by default as in standalone Monaco; `TextModel::with_options` sets creation options).
   - **API:** `TextModel::detect_indentation` guesses again.

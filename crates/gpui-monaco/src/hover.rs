@@ -5,20 +5,32 @@
 use std::ops::Range;
 use std::time::Duration;
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui::{
-    AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Task, Window, div, px,
+    AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, Modifiers, ParentElement, Pixels, Render, ScrollHandle,
+    StatefulInteractiveElement, Styled, Task, Window, canvas, div, point, px,
 };
 use text::PointUtf16;
 
+use crate::actions::{
+    GoToBottomHover, GoToTopHover, HideHover, PageDownHover, PageUpHover, ScrollDownHover,
+    ScrollLeftHover, ScrollRightHover, ScrollUpHover,
+};
 use crate::cursor;
 use crate::editor::CodeEditor;
 use crate::markdown::{MarkdownStyle, render_markdown};
+use crate::options::{HoverEnabled, MultiCursorModifier};
 use crate::providers::{MarkdownString, hover_providers};
 use crate::widgets::{ContentWidget, ContentWidgetPreference, WidgetId};
 
-/// Monaco `hover.delay`.
+/// Monaco's default `hover.delay`.
 pub const HOVER_DELAY: Duration = Duration::from_millis(300);
+
+/// The key context of a focused hover (Monaco `hoverFocused`).
+pub const HOVER_KEY_CONTEXT: &str = "HoverWidget";
 
 #[derive(Default)]
 pub(crate) struct HoverState {
@@ -26,6 +38,25 @@ pub(crate) struct HoverState {
     widget: Option<(Entity<HoverWidget>, WidgetId)>,
     /// The range the visible (or pending) hover is about.
     range: Option<Range<PointUtf16>>,
+    /// The gutter row a glyph margin hover is about.
+    gutter_row: Option<u32>,
+    /// Shown from the keyboard (Monaco `isVisibleFromKeyboard`).
+    from_keyboard: bool,
+    /// Monaco's `hidingDelay` grace period before reacting to the mouse.
+    hiding: Option<Task<()>>,
+    /// The last mouse target and modifiers, for `onKeyboardModifier`.
+    last_mouse: Option<(HoverTarget, Modifiers)>,
+}
+
+/// What the mouse is over, for hovers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HoverTarget {
+    /// Text at a position.
+    Text(PointUtf16),
+    /// The glyph margin or line numbers of a row (Monaco's glyph hover).
+    Gutter(u32),
+    /// Nothing that hovers.
+    None,
 }
 
 /// What a hover action link runs.
@@ -45,6 +76,36 @@ pub struct HoverWidget {
     unicode: Vec<crate::unicode_highlighter::UnicodeHover>,
     style: MarkdownStyle,
     theme: std::sync::Arc<crate::Theme>,
+    focus_handle: FocusHandle,
+    scroll: ScrollHandle,
+    /// The editor's line height: one scroll step (Monaco `scrollUp`).
+    line_height: Pixels,
+    /// Where the card was painted, so the editor knows the mouse is on it.
+    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+}
+
+impl Focusable for HoverWidget {
+    fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl HoverWidget {
+    /// Monaco `ContentHoverWidget.scrollUp` and friends: scrolls by `delta`
+    /// (positive scrolls down), or to the top or bottom.
+    fn scroll_by(&mut self, delta: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        let offset = self.scroll.offset();
+        let max = self.scroll.max_offset();
+        // Scroll offsets are negative, down to `-max`.
+        let x = (offset.x - delta.x).clamp(-max.x, px(0.));
+        let y = (offset.y - delta.y).clamp(-max.y, px(0.));
+        self.scroll.set_offset(point(x, y));
+        cx.notify();
+    }
+
+    fn page(&self) -> Pixels {
+        self.scroll.bounds().size.height
+    }
 }
 
 /// What asked for a hover (Monaco `HoverStartSource`).
@@ -125,19 +186,69 @@ impl Render for HoverWidget {
                 &registry,
             ));
         }
+        let bounds = self.bounds.clone();
+        let line = self.line_height;
         div()
             .id("hover")
+            .key_context(HOVER_KEY_CONTEXT)
+            .track_focus(&self.focus_handle)
+            .track_scroll(&self.scroll)
             .max_w(px(500.))
             .max_h(px(250.))
-            .overflow_y_scroll()
+            .overflow_scroll()
             .p(px(6.))
             .flex()
             .flex_col()
             .gap(px(6.))
             .bg(colors.widget_background)
             .border_1()
-            .border_color(colors.widget_border)
+            .border_color(if self.focus_handle.is_focused(_window) {
+                colors.focus_border
+            } else {
+                colors.widget_border
+            })
             .text_size(self.style.font_size)
+            .on_action(cx.listener(move |this, _: &ScrollUpHover, _, cx| {
+                this.scroll_by(point(px(0.), -line), cx)
+            }))
+            .on_action(cx.listener(move |this, _: &ScrollDownHover, _, cx| {
+                this.scroll_by(point(px(0.), line), cx)
+            }))
+            .on_action(cx.listener(move |this, _: &ScrollLeftHover, _, cx| {
+                this.scroll_by(point(-line, px(0.)), cx)
+            }))
+            .on_action(cx.listener(move |this, _: &ScrollRightHover, _, cx| {
+                this.scroll_by(point(line, px(0.)), cx)
+            }))
+            .on_action(cx.listener(|this, _: &PageUpHover, _, cx| {
+                let page = this.page();
+                this.scroll_by(point(px(0.), -page), cx)
+            }))
+            .on_action(cx.listener(|this, _: &PageDownHover, _, cx| {
+                let page = this.page();
+                this.scroll_by(point(px(0.), page), cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoToTopHover, _, cx| {
+                this.scroll_by(point(px(0.), px(-1e9)), cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoToBottomHover, _, cx| {
+                this.scroll_by(point(px(0.), px(1e9)), cx)
+            }))
+            .on_action(cx.listener(|this, _: &HideHover, window, cx| {
+                // Monaco: Escape in the focused hover closes it and returns
+                // focus to the editor.
+                if let Some(editor) = this.editor.upgrade() {
+                    editor.update(cx, |editor, cx| {
+                        editor.hide_hover(cx);
+                        window.focus(&editor.focus_handle, cx);
+                    });
+                }
+            }))
+            .child(
+                canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
             .children(sections)
     }
 }
@@ -285,10 +396,51 @@ impl CodeEditor {
     /// Hides the hover and cancels a pending one.
     pub fn hide_hover(&mut self, cx: &mut Context<Self>) {
         self.hover.task = None;
+        self.hover.hiding = None;
         self.hover.range = None;
+        self.hover.gutter_row = None;
+        self.hover.from_keyboard = false;
         if let Some((_, id)) = self.hover.widget.take() {
             self.remove_widget(id, cx);
         }
+    }
+
+    /// Monaco `editor.action.showHover` ("Show or Focus Hover", Cmd/Ctrl+K
+    /// Cmd/Ctrl+I): focuses a visible hover, or shows one at the cursor.
+    pub fn show_or_focus_hover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((widget, _)) = &self.hover.widget {
+            let handle = widget.read(cx).focus_handle.clone();
+            window.focus(&handle, cx);
+            return;
+        }
+        self.show_hover_at_cursor(cx);
+    }
+
+    /// Where the hover card was last painted.
+    pub(crate) fn hover_card_bounds(&self, cx: &gpui::App) -> Option<Bounds<Pixels>> {
+        let (widget, _) = self.hover.widget.as_ref()?;
+        widget.read(cx).bounds.get()
+    }
+
+    /// Where the hover card was last painted, for tests.
+    #[doc(hidden)]
+    pub fn hover_card_bounds_for_tests(&self, cx: &gpui::App) -> Option<Bounds<Pixels>> {
+        self.hover_card_bounds(cx)
+    }
+
+    /// The hover card's scroll offset, for tests.
+    #[doc(hidden)]
+    pub fn hover_scroll_offset_for_tests(&self, cx: &gpui::App) -> Option<gpui::Point<Pixels>> {
+        let (widget, _) = self.hover.widget.as_ref()?;
+        Some(widget.read(cx).scroll.offset())
+    }
+
+    /// Whether the visible hover has keyboard focus (Monaco `hoverFocused`).
+    pub fn is_hover_focused(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.hover
+            .widget
+            .as_ref()
+            .is_some_and(|(widget, _)| widget.read(cx).focus_handle.is_focused(window))
     }
 
     /// Shows the hover for the cursor position right away (Monaco
@@ -296,6 +448,7 @@ impl CodeEditor {
     pub fn show_hover_at_cursor(&mut self, cx: &mut Context<Self>) {
         let position = self.cursors.primary().position;
         self.hide_hover(cx);
+        self.hover.from_keyboard = true;
         let config = self.cursor_config(cx);
         let range =
             cursor::word_at(&config, self.snapshot.rope(), position).unwrap_or(position..position);
@@ -329,32 +482,141 @@ impl CodeEditor {
         }));
     }
 
-    /// Called on mouse moves over the text with the position under the
-    /// mouse (`None` outside text).
+    /// Monaco `ContentHoverController._onEditorMouseMove`: on mouse moves
+    /// over the editor (not over other widgets) with what's under the
+    /// mouse, whether it's over the hover card, and whether the card has
+    /// focus.
     pub(crate) fn hover_mouse_move(
         &mut self,
-        position: Option<PointUtf16>,
+        target: HoverTarget,
+        over_hover: bool,
+        hover_focused: bool,
+        modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) {
-        let Some(position) = position else {
-            if self.hover.widget.is_some() || self.hover.task.is_some() {
-                self.hide_hover(cx);
+        self.hover.last_mouse = Some((target, modifiers));
+        let options = self.options.hover;
+        let visible = self.hover.widget.is_some();
+        // Monaco `_shouldKeepCurrentHover`.
+        let keep = visible
+            && (hover_focused
+                || (options.sticky && self.hover.from_keyboard)
+                || (options.sticky && over_hover)
+                || (over_hover && self.hover_color_picker(cx).is_some()));
+        if keep {
+            self.hover.hiding = None;
+            return;
+        }
+        // Monaco `_shouldRescheduleHoverComputation`: a grace period for
+        // the mouse to reach a sticky hover.
+        if visible
+            && options.sticky
+            && !options.hiding_delay.is_zero()
+            && !self.mouse_in_hover(target)
+        {
+            if self.hover.hiding.is_none() {
+                let delay = options.hiding_delay;
+                self.hover.hiding = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(delay).await;
+                    this.update(cx, |this, cx| {
+                        this.hover.hiding = None;
+                        if let Some((target, modifiers)) = this.hover.last_mouse {
+                            this.react_to_hover_mouse(target, over_hover, modifiers, cx);
+                        }
+                    })
+                    .ok();
+                }));
             }
             return;
-        };
-        if let Some(range) = &self.hover.range
-            && range.start <= position
-            && position <= range.end
+        }
+        self.hover.hiding = None;
+        self.react_to_hover_mouse(target, over_hover, modifiers, cx);
+    }
+
+    /// Whether `target` is in what the hover is about, so it stays.
+    fn mouse_in_hover(&self, target: HoverTarget) -> bool {
+        match target {
+            HoverTarget::Text(position) => self
+                .hover
+                .range
+                .as_ref()
+                .is_some_and(|range| range.start <= position && position <= range.end),
+            HoverTarget::Gutter(row) => self.hover.gutter_row == Some(row),
+            HoverTarget::None => false,
+        }
+    }
+
+    /// Monaco `shouldShowHover`: `hover.enabled`, with `onKeyboardModifier`
+    /// the modifier opposite the multi-cursor one.
+    fn hover_enabled_for(&self, modifiers: &Modifiers) -> bool {
+        match self.options.hover.enabled {
+            HoverEnabled::On => true,
+            HoverEnabled::Off => false,
+            HoverEnabled::OnKeyboardModifier => match self.options.multi_cursor_modifier {
+                MultiCursorModifier::Alt => modifiers.control || modifiers.platform,
+                MultiCursorModifier::CtrlCmd => modifiers.alt,
+            },
+        }
+    }
+
+    /// Monaco `_onKeyDown` for `onKeyboardModifier`: pressing the modifier
+    /// shows the hover under the mouse.
+    pub(crate) fn hover_modifiers_changed(
+        &mut self,
+        modifiers: &Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        if self.options.hover.enabled != HoverEnabled::OnKeyboardModifier
+            || self.hover.widget.is_some()
+            || !self.hover_enabled_for(modifiers)
         {
             return;
         }
+        if let Some((target, _)) = self.hover.last_mouse {
+            self.react_to_hover_mouse(target, false, *modifiers, cx);
+        }
+    }
+
+    /// Monaco `_reactToEditorMouseMove`: keeps the hover if the mouse is
+    /// still on its range, starts a new one after `hover.delay`, or hides.
+    fn react_to_hover_mouse(
+        &mut self,
+        target: HoverTarget,
+        over_hover: bool,
+        modifiers: Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        if over_hover && self.hover.widget.is_some() && self.options.hover.sticky {
+            return;
+        }
+        if !self.hover_enabled_for(&modifiers) {
+            self.hide_hover(cx);
+            return;
+        }
+        if self.mouse_in_hover(target) {
+            return;
+        }
         self.hide_hover(cx);
+        let delay = self.options.hover.delay;
+        match target {
+            HoverTarget::None => {}
+            HoverTarget::Gutter(row) => self.schedule_gutter_hover(row, delay, cx),
+            HoverTarget::Text(position) => self.schedule_text_hover(position, delay, cx),
+        }
+    }
+
+    fn schedule_text_hover(
+        &mut self,
+        position: PointUtf16,
+        delay: Duration,
+        cx: &mut Context<Self>,
+    ) {
         let config = self.cursor_config(cx);
         let range =
             cursor::word_at(&config, self.snapshot.rope(), position).unwrap_or(position..position);
         self.hover.range = Some(range.clone());
         self.hover.task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(HOVER_DELAY).await;
+            cx.background_executor().timer(delay).await;
             let Ok(requests) = this.update(cx, |this, cx| {
                 let requests = this.hover_requests(position, cx);
                 let picker = this.color_picker_request(position, HoverSource::Mouse, cx);
@@ -388,6 +650,46 @@ impl CodeEditor {
             })
             .ok();
         }));
+    }
+
+    /// Monaco `GlyphHoverController`: the glyph margin hover messages of
+    /// decorations on `row`, after `delay`.
+    fn schedule_gutter_hover(&mut self, row: u32, delay: Duration, cx: &mut Context<Self>) {
+        self.hover.gutter_row = Some(row);
+        self.hover.task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update(cx, |this, cx| {
+                let messages = this.glyph_margin_hover_messages(row, cx);
+                if messages.is_empty() {
+                    return;
+                }
+                let start = PointUtf16::new(row, 0);
+                this.show_hover(start..start, Vec::new(), messages, None, Vec::new(), cx);
+                this.hover.range = None;
+                this.hover.gutter_row = Some(row);
+            })
+            .ok();
+        }));
+    }
+
+    /// The `glyph_margin_hover_message`s of decorations starting on `row`.
+    fn glyph_margin_hover_messages(&self, row: u32, cx: &mut Context<Self>) -> Vec<MarkdownString> {
+        let rope = self.snapshot.rope();
+        if row >= rope.line_count() {
+            return Vec::new();
+        }
+        let start = rope.point_to_offset(text::Point::new(row, 0));
+        let end = rope.point_to_offset(text::Point::new(row, u32::MAX));
+        let editor_id = Some(cx.entity_id());
+        self.model().update(cx, |model, _| {
+            model
+                .decorations_in_range(start..end, editor_id)
+                .into_iter()
+                .filter(|d| rope.offset_to_point(d.range.start).row == row)
+                .filter_map(|d| d.options.glyph_margin_hover_message.clone())
+                .map(MarkdownString)
+                .collect()
+        })
     }
 
     /// Markers and decoration hover messages at `position`, plus provider
@@ -507,7 +809,8 @@ impl CodeEditor {
         let quick_fix =
             !crate::providers::code_action_providers(cx, language.as_deref()).is_empty();
         let editor = cx.entity().downgrade();
-        let widget = cx.new(|_| HoverWidget {
+        let line_height = self.options.resolved_line_height();
+        let widget = cx.new(|cx| HoverWidget {
             markers,
             quick_fix,
             editor,
@@ -516,14 +819,27 @@ impl CodeEditor {
             unicode,
             style,
             theme,
+            focus_handle: cx.focus_handle(),
+            scroll: ScrollHandle::new(),
+            line_height,
+            bounds: Default::default(),
         });
+        // Monaco `hover.above`: the preferred side first.
+        let preference = if self.options.hover.above {
+            vec![
+                ContentWidgetPreference::Above,
+                ContentWidgetPreference::Below,
+            ]
+        } else {
+            vec![
+                ContentWidgetPreference::Below,
+                ContentWidgetPreference::Above,
+            ]
+        };
         let id = self.add_content_widget(
             ContentWidget {
                 position: range.start,
-                preference: vec![
-                    ContentWidgetPreference::Above,
-                    ContentWidgetPreference::Below,
-                ],
+                preference,
                 view: widget.clone().into(),
             },
             cx,

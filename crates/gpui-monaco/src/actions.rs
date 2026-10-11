@@ -594,6 +594,33 @@ actions!(
         SelectLastSuggestion,
         /// Shows the hover for the cursor position (Monaco `editor.action.showHover`).
         ShowHover,
+        /// Hides the hover (Monaco `editor.action.hideHover`; Escape in a
+        /// focused hover).
+        HideHover,
+        /// Scrolls the focused hover up a line (Monaco
+        /// `editor.action.scrollUpHover`, Up).
+        ScrollUpHover,
+        /// Scrolls the focused hover down a line (Monaco
+        /// `editor.action.scrollDownHover`, Down).
+        ScrollDownHover,
+        /// Scrolls the focused hover left (Monaco
+        /// `editor.action.scrollLeftHover`, Left).
+        ScrollLeftHover,
+        /// Scrolls the focused hover right (Monaco
+        /// `editor.action.scrollRightHover`, Right).
+        ScrollRightHover,
+        /// Scrolls the focused hover up a page (Monaco
+        /// `editor.action.pageUpHover`, PageUp or Alt+Up).
+        PageUpHover,
+        /// Scrolls the focused hover down a page (Monaco
+        /// `editor.action.pageDownHover`, PageDown or Alt+Down).
+        PageDownHover,
+        /// Scrolls the focused hover to the top (Monaco
+        /// `editor.action.goToTopHover`, Home or Cmd/Ctrl+Up).
+        GoToTopHover,
+        /// Scrolls the focused hover to the bottom (Monaco
+        /// `editor.action.goToBottomHover`, End or Cmd/Ctrl+Down).
+        GoToBottomHover,
         /// Opens the link at the cursor (Monaco `editor.action.openLink`).
         OpenLink,
         /// Opens quick access to go to a line (Monaco `editor.action.gotoLine`).
@@ -1183,6 +1210,23 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-p", CodeActionMenuPrevious, menu),
         ]);
     }
+    // A focused hover (Monaco `hoverFocused`).
+    let hover = Some(crate::hover::HOVER_KEY_CONTEXT);
+    bindings.extend([
+        KeyBinding::new("up", ScrollUpHover, hover),
+        KeyBinding::new("down", ScrollDownHover, hover),
+        KeyBinding::new("left", ScrollLeftHover, hover),
+        KeyBinding::new("right", ScrollRightHover, hover),
+        KeyBinding::new("pageup", PageUpHover, hover),
+        KeyBinding::new("alt-up", PageUpHover, hover),
+        KeyBinding::new("pagedown", PageDownHover, hover),
+        KeyBinding::new("alt-down", PageDownHover, hover),
+        KeyBinding::new("home", GoToTopHover, hover),
+        KeyBinding::new("secondary-up", GoToTopHover, hover),
+        KeyBinding::new("end", GoToBottomHover, hover),
+        KeyBinding::new("secondary-down", GoToBottomHover, hover),
+        KeyBinding::new("escape", HideHover, hover),
+    ]);
     // The peek view's results list.
     let peek = Some(crate::peek::PEEK_KEY_CONTEXT);
     bindings.extend([
