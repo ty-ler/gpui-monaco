@@ -44,12 +44,23 @@ pub(crate) fn tooltip(
     text: impl Into<SharedString>,
     colors: &EditorColors,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    let text = text.into();
-    let (background, foreground, border) = (
+    tooltip_with_colors(
+        text,
         colors.widget_background,
         colors.widget_foreground,
         colors.widget_border,
-    );
+    )
+}
+
+/// [`tooltip`] with the widget background, foreground and border colors
+/// given.
+pub(crate) fn tooltip_with_colors(
+    text: impl Into<SharedString>,
+    background: Hsla,
+    foreground: Hsla,
+    border: Hsla,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text = text.into();
     move |_, cx| {
         let text = text.clone();
         cx.new(|_| Tooltip {

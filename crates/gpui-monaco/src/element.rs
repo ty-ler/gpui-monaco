@@ -72,11 +72,22 @@ pub(crate) struct InjectedLayout {
     pub range: Range<usize>,
     pub background: Option<Hsla>,
     pub swatch: Option<Hsla>,
+    /// Its box (an inlay hint's spacers, padding and corners).
+    pub text_box: Option<crate::decorations::InjectedTextBox>,
     /// The decoration it comes from, if any (Monaco's mouse target
     /// `injectedText`).
     pub decoration: Option<DecorationId>,
     /// Monaco's `mtkoverflow` "Show more" chip, styled as a button.
     pub chip: bool,
+}
+
+impl InjectedLayout {
+    /// The x range of its background on `shaped` (its box less the
+    /// margins), relative to the line's text start.
+    pub fn background_range(&self, shaped: &ChunkedLine) -> Range<Pixels> {
+        let (left, right) = self.text_box.map_or((px(0.), px(0.)), |b| b.margin);
+        shaped.x_for_index(self.range.start) + left..shaped.x_for_index(self.range.end) - right
+    }
 }
 
 impl LineLayout {
@@ -349,6 +360,9 @@ const SHAPE_CHUNK: usize = 512;
 pub(crate) struct ChunkedLine {
     /// (display byte offset, x, shaped text) of each chunk.
     chunks: Vec<(usize, Pixels, ShapedLine)>,
+    /// Room left before each chunk's text (an injected text box's margin
+    /// and padding); empty when no chunk has any.
+    leads: Vec<Pixels>,
     /// The total width.
     pub width: Pixels,
     /// Full-width characters fitted to two cells (Monaco `twoCells`): their
@@ -358,15 +372,24 @@ pub(crate) struct ChunkedLine {
     cell_width: Pixels,
 }
 
+/// Injected text shaped on its own: in its own font size (centered on the
+/// line when painted), or with room before and after it.
+struct ShapeBox {
+    range: Range<usize>,
+    size: Option<Pixels>,
+    lead: Pixels,
+    trail: Pixels,
+}
+
 impl ChunkedLine {
-    /// Shapes `display` in `font_size`, except the `sizes` ranges, each
-    /// shaped on its own in its size (and centered on the line when
-    /// painted).
+    /// Shapes `display` in `font_size`, except the `boxes`, each shaped on
+    /// its own in its size, with its room before and after. A box's
+    /// [`Self::x_for_index`] range includes that room.
     fn shape(
         display: String,
         font_size: Pixels,
         full_width_cell: Option<Pixels>,
-        sizes: &[(Range<usize>, Pixels)],
+        boxes: &[ShapeBox],
         runs: &[TextRun],
         window: &mut Window,
     ) -> Self {
@@ -389,14 +412,15 @@ impl ChunkedLine {
             }
         }
         bounds.push(display.len());
-        if !sizes.is_empty() {
-            for (range, _) in sizes {
-                bounds.extend([range.start, range.end]);
+        if !boxes.is_empty() {
+            for shape_box in boxes {
+                bounds.extend([shape_box.range.start, shape_box.range.end]);
             }
             bounds.sort_unstable();
             bounds.dedup();
         }
         let mut chunks = Vec::with_capacity(bounds.len() - 1);
+        let mut leads = Vec::new();
         let mut cells = Vec::new();
         let mut x = px(0.);
         let mut run_ix = 0;
@@ -420,10 +444,27 @@ impl ChunkedLine {
                     run_ix += 1;
                 }
             }
-            let size = sizes
+            let shape_box = boxes
                 .iter()
-                .find(|(range, _)| range.start <= start && end <= range.end)
-                .map_or(font_size, |(_, size)| *size);
+                .find(|b| b.range.start <= start && end <= b.range.end);
+            let size = shape_box.and_then(|b| b.size).unwrap_or(font_size);
+            let (lead, trail) = shape_box.map_or((px(0.), px(0.)), |b| {
+                (
+                    if b.range.start == start {
+                        b.lead
+                    } else {
+                        px(0.)
+                    },
+                    if b.range.end == end { b.trail } else { px(0.) },
+                )
+            });
+            if lead > px(0.) && leads.is_empty() {
+                leads = vec![px(0.); chunks.len()];
+            }
+            if !leads.is_empty() {
+                leads.push(lead);
+            }
+            x += lead;
             let mut shaped = window.text_system().shape_line(
                 SharedString::from(display[start..end].to_string()),
                 size,
@@ -437,10 +478,11 @@ impl ChunkedLine {
             }
             let width = shaped.width;
             chunks.push((start, x, shaped));
-            x += width;
+            x += width + trail;
         }
         Self {
             chunks,
+            leads,
             width: x,
             cells,
             cell_width: full_width_cell.unwrap_or_default(),
@@ -467,8 +509,25 @@ impl ChunkedLine {
         if let Some((_, left)) = self.cell_at(index) {
             return *left;
         }
-        let (start, x, shaped) = &self.chunks[self.chunk(index)];
+        let ix = self.chunk(index);
+        let (start, x, shaped) = &self.chunks[ix];
+        // A box's range takes in the room before and after its text.
+        if index == *start
+            && let Some(lead) = self.leads.get(ix)
+        {
+            return *x - *lead;
+        }
+        if ix + 1 == self.chunks.len() && index - start >= shaped.len {
+            return self.width;
+        }
         *x + shaped.x_for_index(index - start)
+    }
+
+    /// The height of the text at display byte `index` (its font's ascent
+    /// and descent), which painting centers on the line.
+    pub fn text_height(&self, index: usize) -> Pixels {
+        let (_, _, shaped) = &self.chunks[self.chunk(index)];
+        shaped.ascent + shaped.descent
     }
 
     pub fn closest_index_for_x(&self, x: Pixels) -> usize {
@@ -883,19 +942,30 @@ pub(crate) fn layout_segment<'a>(
         }
         runs.push(text_run);
     }
-    // Injected text in its own font size is shaped on its own.
-    let sizes: Vec<(Range<usize>, Pixels)> = injected
+    // Injected text in its own font size, or with room around it, is
+    // shaped on its own.
+    let boxes: Vec<ShapeBox> = injected
         .iter()
         .filter_map(|(range, (_, _, text, _))| {
-            let size = text.font_size.filter(|size| *size != metrics.font_size)?;
-            (!range.is_empty()).then(|| (range.clone(), size))
+            let size = text.font_size.filter(|size| *size != metrics.font_size);
+            let (lead, trail) = text.text_box.map_or((px(0.), px(0.)), |b| {
+                (b.margin.0 + b.padding.0, b.padding.1 + b.margin.1)
+            });
+            (!range.is_empty() && (size.is_some() || lead > px(0.) || trail > px(0.))).then(|| {
+                ShapeBox {
+                    range: range.clone(),
+                    size,
+                    lead,
+                    trail,
+                }
+            })
         })
         .collect();
     let shaped = ChunkedLine::shape(
         display,
         metrics.font_size,
         metrics.full_width_cell,
-        &sizes,
+        &boxes,
         &runs,
         window,
     );
@@ -917,6 +987,7 @@ pub(crate) fn layout_segment<'a>(
                     range,
                     background: text.background,
                     swatch: text.swatch,
+                    text_box: text.text_box,
                     decoration: *decoration,
                     // The overflow chip is always the last injection.
                     chip: segment.overflow > 0
@@ -2300,6 +2371,8 @@ fn prepaint_editor(
     let view_line_count = view_lines.line_count().max(1);
     let snapshot = editor.snapshot.clone();
 
+    // Code lens zones follow font and zoom changes (Monaco `updateHeight`).
+    editor.update_code_lens_heights();
     // View zones: after the last view line of their row; hidden in folds.
     // (after view line, height, view, (full width, captures the wheel)).
     let mut zone_specs: Vec<(i64, Pixels, gpui::AnyView, (bool, bool))> = Vec::new();
@@ -4623,14 +4696,15 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                             CONTROL_CHARACTER_BACKGROUND,
                         ));
                     }
-                    for InjectedLayout {
-                        range,
-                        background,
-                        swatch,
-                        chip,
-                        ..
-                    } in &line.injected
-                    {
+                    for injected in &line.injected {
+                        let InjectedLayout {
+                            range,
+                            background,
+                            swatch,
+                            chip,
+                            text_box,
+                            ..
+                        } = injected;
                         let from = line.shaped.x_for_index(range.start);
                         let to = line.shaped.x_for_index(range.end);
                         if let Some(swatch) = swatch {
@@ -4679,9 +4753,35 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                                 BorderStyle::Solid,
                             ));
                         } else if let Some(background) = background {
+                            let (bounds, corners) = match text_box {
+                                // Monaco's inline box: the text's height
+                                // plus its padding, centered like the text.
+                                Some(text_box) => {
+                                    let x = injected.background_range(&line.shaped);
+                                    let height = line.shaped.text_height(range.start)
+                                        + text_box.padding_y * 2.;
+                                    let (left, right) = text_box.corner_radius;
+                                    (
+                                        Bounds::new(
+                                            point(
+                                                origin_x + line.indent_x + x.start,
+                                                top + (line_height - height) / 2.,
+                                            ),
+                                            size(x.end - x.start, height),
+                                        ),
+                                        Corners {
+                                            top_left: left,
+                                            bottom_left: left,
+                                            top_right: right,
+                                            bottom_right: right,
+                                        },
+                                    )
+                                }
+                                None => (bounds, Corners::all(px(3.))),
+                            };
                             window.paint_quad(quad(
                                 bounds,
-                                Corners::all(px(3.)),
+                                corners,
                                 *background,
                                 Edges::default(),
                                 gpui::transparent_black(),

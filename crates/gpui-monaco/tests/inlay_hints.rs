@@ -421,3 +421,287 @@ fn double_click_inserts_the_hint(cx: &mut TestAppContext) {
     let text = editor.read_with(cx, |e, cx| e.model().read(cx).text());
     assert_eq!(text, "let a: Foo<T> = make();\nstruct Foo;");
 }
+
+/// `a:` before the first argument of `f(`, padded on the right, and
+/// `b` after `x`, padded on the left.
+struct Padded;
+
+impl InlayHintsProvider for Padded {
+    fn provide_inlay_hints(
+        &self,
+        _: &ProviderContext,
+        _: Range<PointUtf16>,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<InlayHint>>> {
+        Task::ready(Ok(vec![
+            InlayHint {
+                position: p(0, 2),
+                label: "a:".into(),
+                kind: Some(InlayHintKind::Parameter),
+                padding_right: true,
+                ..Default::default()
+            },
+            InlayHint {
+                position: p(1, 1),
+                label: "b".into(),
+                padding_left: true,
+                ..Default::default()
+            },
+        ]))
+    }
+}
+
+fn near(a: Pixels, b: Pixels) -> bool {
+    (a - b).abs() < gpui::px(0.01)
+}
+
+/// Monaco `addInjectedWhitespace` and the `padding` option's CSS: hints
+/// are spaced by an inline block `(fontSize / 3) | 0` wide, and padding
+/// adds `max(1, fontSize / 4) | 0` beside the label and 1px above and
+/// below it.
+#[gpui::test]
+fn padding_is_real_space(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_with(
+        "f(1);\nx;\n",
+        |cx| {
+            register_inlay_hints_provider(cx, LanguageSelector::All, Padded);
+        },
+        cx,
+    );
+    let size = editor.read_with(cx, |e, _| f32::from(e.options().font_size));
+    let spacer = gpui::px((size / 3.).trunc());
+    let text_x = |row: u32, column: u32, cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, _| e.scrolled_visible_position(p(row, column)))
+            .unwrap()
+            .x
+    };
+    let bounds = |text: &str, cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, cx| e.inlay_hint_part_bounds_for_tests(text, cx))
+            .expect("part shown")
+    };
+    let line_height = editor.read_with(cx, |e, _| e.options().resolved_line_height());
+    // `paddingRight`: between the box and the argument.
+    let a = bounds("a:", cx);
+    assert!(near(text_x(0, 2, cx) - a.right(), spacer));
+    // `paddingLeft`: between `x` and the box.
+    let b = bounds("b", cx);
+    let char_width = text_x(0, 1, cx) - text_x(0, 0, cx);
+    assert!(near(b.left() - (text_x(1, 0, cx) + char_width), spacer));
+    // Without the padding option the box is just the text's height.
+    assert!(a.size.height < line_height);
+
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.inlay_hints.padding = true;
+        e.update_options(options, cx);
+    });
+    settle(cx);
+    let padded = bounds("a:", cx);
+    let padding = gpui::px((size / 4.).max(1.).trunc());
+    assert!(near(padded.size.width, a.size.width + padding * 2.));
+    assert!(near(padded.size.height, a.size.height + gpui::px(2.)));
+    assert!(near(text_x(0, 2, cx) - padded.right(), spacer));
+}
+
+/// The definition provider asked where a menu item ran.
+#[derive(Clone, Default)]
+struct Definitions {
+    asked: Rc<RefCell<Vec<PointUtf16>>>,
+}
+
+impl DefinitionProvider for Definitions {
+    fn provide_definition(
+        &self,
+        _: &ProviderContext,
+        position: PointUtf16,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<Location>>> {
+        self.asked.borrow_mut().push(position);
+        Task::ready(Ok(vec![Location::new(None, p(1, 0)..p(1, 6))]))
+    }
+}
+
+/// A hover at `struct Foo`'s name.
+struct FooHover;
+
+impl HoverProvider for FooHover {
+    fn provide_hover(
+        &self,
+        _: &ProviderContext,
+        position: PointUtf16,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Option<Hover>>> {
+        Task::ready(Ok((position == p(1, 7)).then(|| Hover {
+            contents: vec![MarkdownString::new("struct Foo")],
+            range: None,
+            can_increase_verbosity: false,
+            can_decrease_verbosity: false,
+        })))
+    }
+}
+
+/// Monaco `showGoToContextMenu`: right-clicking a part with a location
+/// lists the navigation commands, first one active; they run from the
+/// location.
+#[gpui::test]
+fn right_click_on_a_part_shows_its_location_menu(cx: &mut TestAppContext) {
+    let definitions = Definitions::default();
+    let asked = definitions.asked.clone();
+    let (editor, cx) = setup_with(
+        "let a = make();\nstruct Foo;",
+        move |cx| {
+            register_inlay_hints_provider(cx, LanguageSelector::All, Parts::default());
+            register_definition_provider(cx, LanguageSelector::All, definitions);
+        },
+        cx,
+    );
+    let position = part_point(&editor, "Foo", cx);
+    cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
+    cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.context_menu_rows_for_tests(cx)),
+        [
+            "> Go to Definition",
+            "Go to Declaration",
+            "Go to Type Definition",
+            "Go to Implementations",
+            "Go to References",
+        ]
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(*asked.borrow(), [p(1, 7)]);
+    assert_eq!(editor.read_with(cx, |e, _| e.selections()[0].head), p(1, 0));
+
+    // A part without a location keeps the editor's menu.
+    draw(cx);
+    let position = part_point(&editor, "<T>", cx);
+    cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
+    cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
+    cx.run_until_parked();
+    let rows = editor.read_with(cx, |e, cx| e.context_menu_rows_for_tests(cx));
+    assert!(rows.iter().any(|row| row.ends_with("Cut")));
+}
+
+/// Monaco `_resolveInlayHintLabelPartHover`: the hovers at a part's
+/// location come after the part's tooltip.
+#[gpui::test]
+fn part_hovers_include_their_location(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_with(
+        "let a = make();\nstruct Foo;",
+        |cx| {
+            register_inlay_hints_provider(cx, LanguageSelector::All, Parts::default());
+            register_hover_provider(cx, LanguageSelector::All, FooHover);
+        },
+        cx,
+    );
+    let position = part_point(&editor, "Foo", cx);
+    cx.simulate_mouse_move(position, None, Modifiers::default());
+    cx.executor().advance_clock(HOVER_DELAY * 2);
+    cx.run_until_parked();
+    let contents = editor.read_with(cx, |e, cx| e.hover_contents_for_tests(cx));
+    assert_eq!(
+        contents[..3],
+        ["the type of `a`", "**Foo** docs", "struct Foo"]
+    );
+    assert!(contents[3].starts_with("Go to Definition"));
+}
+
+/// `: ` and as many `T`s as the line is long, at the end of `let a`.
+struct Growing;
+
+impl InlayHintsProvider for Growing {
+    fn provide_inlay_hints(
+        &self,
+        context: &ProviderContext,
+        _: Range<PointUtf16>,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<InlayHint>>> {
+        let len = context.snapshot.line(0).len();
+        Task::ready(Ok(vec![InlayHint {
+            position: p(0, 5),
+            label: format!(": {}", "T".repeat(len)).into(),
+            ..Default::default()
+        }]))
+    }
+}
+
+/// Monaco's fixed lengths: right after typing, hints before the cursor
+/// on its line keep their length (cut with `…`, or padded), so the cursor
+/// doesn't move; 800ms later they're shown in full.
+#[gpui::test]
+fn hints_before_the_cursor_keep_their_length_while_typing(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_with(
+        "let a = 1;",
+        |cx| {
+            register_inlay_hints_provider(cx, LanguageSelector::All, Growing);
+        },
+        cx,
+    );
+    assert_eq!(hints(&editor, cx), [(p(0, 5), ": TTTTTTTTTT".to_string())]);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[gpui_monaco::cursor::Selection::collapsed(p(0, 9))], cx)
+    });
+    cx.simulate_input("2");
+    settle(cx);
+    // 13 characters cut to the old 12.
+    assert_eq!(hints(&editor, cx), [(p(0, 5), ": TTTTTTTTT…".to_string())]);
+    cx.executor().advance_clock(Duration::from_millis(600));
+    settle(cx);
+    assert_eq!(hints(&editor, cx), [(p(0, 5), ": TTTTTTTTTTT".to_string())]);
+
+    // Shorter: padded to the old length with hair spaces.
+    cx.simulate_keystrokes("backspace backspace");
+    settle(cx);
+    let (_, text) = hints(&editor, cx).remove(0);
+    assert_eq!(text.chars().count(), 13);
+    assert!(text.ends_with("\u{200a}\u{200a}"));
+}
+
+/// Monaco `InlayHintsCache`: switching back to a model shows its hints at
+/// once, before the provider answers again.
+#[gpui::test]
+fn hints_are_restored_from_the_cache(cx: &mut TestAppContext) {
+    #[derive(Clone)]
+    struct Late(Rc<Cell<bool>>);
+    impl InlayHintsProvider for Late {
+        fn provide_inlay_hints(
+            &self,
+            context: &ProviderContext,
+            range: Range<PointUtf16>,
+            cx: &mut App,
+        ) -> Task<anyhow::Result<Vec<InlayHint>>> {
+            let ready = Types::default().provide_inlay_hints(context, range, cx);
+            if !self.0.get() {
+                return ready;
+            }
+            let timer = cx.background_executor().timer(Duration::from_secs(5));
+            cx.background_executor().spawn(async move {
+                timer.await;
+                ready.await
+            })
+        }
+    }
+    let slow = Rc::new(Cell::new(false));
+    let provider = Late(slow.clone());
+    let (editor, cx) = setup_with(
+        "let x = 1;\n",
+        move |cx| {
+            register_inlay_hints_provider(cx, LanguageSelector::All, provider);
+        },
+        cx,
+    );
+    assert_eq!(hints(&editor, cx).len(), 1);
+    slow.set(true);
+    let first = editor.read_with(cx, |e, _| e.model().clone());
+    let other = cx.update(|_, cx| cx.new(|_| TextModel::new("fn b() {}\n")));
+    editor.update(cx, |e, cx| e.set_model(other, cx));
+    draw(cx);
+    assert!(hints(&editor, cx).is_empty());
+    editor.update(cx, |e, cx| e.set_model(first, cx));
+    draw(cx);
+    assert_eq!(hints(&editor, cx), [(p(0, 5), ": i32".to_string())]);
+}

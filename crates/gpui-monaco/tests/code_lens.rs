@@ -211,3 +211,207 @@ fn show_lenses_in_current_line(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(*ran.borrow(), vec![vec![serde_json::json!(0)]]);
 }
+
+/// A lens above every `fn` line, resolved after `delay`; the lens above a
+/// line with `fail` fails to resolve.
+struct Slow {
+    delay: Duration,
+}
+
+impl CodeLensProvider for Slow {
+    fn provide_code_lenses(
+        &self,
+        context: &ProviderContext,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<CodeLens>>> {
+        let rope = context.snapshot.rope().to_string();
+        let lenses = rope
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains("fn "))
+            .map(|(row, line)| {
+                let column = line.find("fn ").unwrap() as u32;
+                CodeLens {
+                    range: PointUtf16::new(row as u32, column)
+                        ..PointUtf16::new(row as u32, column + 2),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        Task::ready(Ok(lenses))
+    }
+
+    fn resolve_code_lens(
+        &self,
+        context: &ProviderContext,
+        lens: &CodeLens,
+        cx: &mut App,
+    ) -> Option<Task<anyhow::Result<CodeLens>>> {
+        let fail = context.snapshot.line(lens.range.start.row).contains("fail");
+        let lens = lens.clone();
+        let timer = cx.background_executor().timer(self.delay);
+        Some(cx.background_executor().spawn(async move {
+            timer.await;
+            anyhow::ensure!(!fail, "no references");
+            Ok(CodeLens {
+                command: Some(Command {
+                    id: "test.references".into(),
+                    title: "$(references) 3 references".into(),
+                    tooltip: Some("Show references".into()),
+                    ..Default::default()
+                }),
+                ..lens
+            })
+        }))
+    }
+}
+
+fn setup_slow<'a>(
+    text: &str,
+    delay: Duration,
+    cx: &'a mut TestAppContext,
+) -> (Entity<CodeEditor>, &'a mut VisualTestContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_code_lens_provider(cx, LanguageSelector::All, Slow { delay });
+    });
+    let text = text.to_string();
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new(&text));
+        CodeEditor::new(model, window, cx)
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    draw(cx);
+    (editor, cx)
+}
+
+fn draw(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+    });
+    cx.run_until_parked();
+}
+
+fn lines(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+) -> Vec<(u32, String, bool, gpui::Pixels)> {
+    editor.read_with(cx, |e, cx| e.code_lens_lines_for_tests(cx))
+}
+
+/// Monaco `CodeLensWidget`: lenses waiting to resolve leave their zone
+/// empty, then fade in once resolved; "no commands" shows only when
+/// resolving gave none.
+#[gpui::test]
+fn unresolved_lenses_leave_their_zone_empty(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_slow("fn a() {}\nfn fail() {}\n", Duration::from_millis(100), cx);
+    let shown = lines(&editor, cx);
+    assert_eq!(shown.len(), 2);
+    assert!(
+        shown
+            .iter()
+            .all(|(_, text, fading, _)| text.is_empty() && !fading)
+    );
+    cx.executor().advance_clock(Duration::from_millis(150));
+    draw(cx);
+    let shown = lines(&editor, cx);
+    assert_eq!(shown[0].1, "$(references) 3 references");
+    assert!(shown[0].2, "resolved lenses fade in");
+    assert_eq!(shown[1].1, "no commands");
+    assert!(!shown[1].2);
+}
+
+/// Monaco `_updateLensStyle`: the lenses' font size and zone height follow
+/// the editor's font size and zoom, and their color the theme.
+#[gpui::test]
+fn lenses_follow_font_zoom_and_theme(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_slow("\nfn a() {}\n", Duration::ZERO, cx);
+    draw(cx);
+    let style = |cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, cx| e.code_lens_style_for_tests(1, cx))
+            .unwrap()
+    };
+    let height = |cx: &mut VisualTestContext| lines(&editor, cx)[0].3;
+    let line_top = |cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, _| {
+                e.scrolled_visible_position(PointUtf16::new(1, 0))
+            })
+            .unwrap()
+            .y
+    };
+    let (_, size, color) = style(cx);
+    let zone = height(cx);
+    let top = line_top(cx);
+    // Monaco `_getLayoutInfo`: 90% of the editor's font size, and at least
+    // 1.3 times that tall.
+    let editor_size = editor.read_with(cx, |e, _| f32::from(e.options().font_size));
+    assert_eq!(size, gpui::px((editor_size * 0.9).floor()));
+
+    cx.update(|_, cx| gpui_monaco::set_editor_zoom_level(3., cx));
+    draw(cx);
+    let zoomed = style(cx).1;
+    assert_eq!(zoomed, gpui::px((editor_size * 1.3 * 0.9).floor()));
+    assert!(height(cx) > zone);
+    // The zone is laid out at its new height: the line below moves down
+    // by more than the first line grew.
+    assert!(line_top(cx) > top);
+
+    cx.update(|_, cx| gpui_monaco::set_editor_zoom_level(0., cx));
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.code_lens_font_size = 20.;
+        e.update_options(options, cx);
+    });
+    draw(cx);
+    assert_eq!(style(cx).1, gpui::px(20.));
+
+    editor.update(cx, |e, cx| {
+        e.set_theme(std::sync::Arc::new(gpui_monaco::Theme::vs()), cx)
+    });
+    draw(cx);
+    assert_ne!(style(cx).2, color);
+}
+
+/// Monaco puts the lenses at the line's first non-whitespace column: tabs
+/// count as tab stops, and the lenses scroll horizontally with the text.
+#[gpui::test]
+fn lenses_line_up_with_the_text(cx: &mut TestAppContext) {
+    let long = "x".repeat(400);
+    let (editor, cx) = setup_slow(
+        &format!("impl A {{\n\tfn a() {{}}\n\t\t  fn b() {{}}\n    // {long}\n}}\n"),
+        Duration::ZERO,
+        cx,
+    );
+    draw(cx);
+    let lens_x = |row: u32, cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, cx| e.code_lens_style_for_tests(row, cx))
+            .unwrap()
+            .0
+            .x
+    };
+    let text_x = |row: u32, column: u32, cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, _| {
+                e.scrolled_visible_position(PointUtf16::new(row, column))
+            })
+            .unwrap()
+            .x
+    };
+    assert_eq!(lens_x(1, cx), text_x(1, 1, cx));
+    assert_eq!(lens_x(2, cx), text_x(2, 4, cx));
+    // A tab is wider than a space.
+    assert!(lens_x(1, cx) - text_x(1, 0, cx) > gpui::px(20.));
+    let before = lens_x(1, cx);
+    editor.update(cx, |e, cx| {
+        e.set_scroll_left(gpui::px(50.), gpui_monaco::ScrollType::Immediate, cx)
+    });
+    draw(cx);
+    let near = |a: gpui::Pixels, b: gpui::Pixels| (a - b).abs() < gpui::px(0.01);
+    assert!(near(lens_x(1, cx), before - gpui::px(50.)));
+    assert!(near(lens_x(1, cx), text_x(1, 1, cx)));
+}

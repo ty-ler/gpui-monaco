@@ -22,6 +22,8 @@ use crate::actions::{
 use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
 use crate::editor::CodeEditor;
+use crate::options::LocationKind;
+use crate::providers::{Command, Location};
 use crate::widgets::{OverlayPosition, WidgetId};
 
 /// The key context of the context menu.
@@ -42,7 +44,22 @@ enum Run {
     Action(&'static str),
     /// An editor action, by id ([`CodeEditor::run_action`]).
     EditorAction(SharedString),
+    /// A navigation command from an inlay hint part's location.
+    Navigate(LocationKind, Location),
+    /// A command (an inlay hint part's).
+    Command(Command),
 }
+
+/// The navigation commands of Monaco's inlay hint location menu: the
+/// `SymbolNavigationAction`s in the `EditorContext` menu, in the order
+/// they're registered (`showGoToContextMenu`).
+const LOCATION_ITEMS: &[(&str, LocationKind)] = &[
+    ("Go to Definition", LocationKind::Definition),
+    ("Go to Declaration", LocationKind::Declaration),
+    ("Go to Type Definition", LocationKind::TypeDefinition),
+    ("Go to Implementations", LocationKind::Implementation),
+    ("Go to References", LocationKind::References),
+];
 
 /// One of Monaco's `EditorContext` menu items: group, order, label, what
 /// it runs, and when it shows.
@@ -275,6 +292,12 @@ impl ContextMenu {
                     }
                     Run::EditorAction(id) => {
                         editor.run_action(&id, window, cx);
+                    }
+                    Run::Navigate(kind, location) => {
+                        editor.run_inlay_hint_location(kind, &location, cx);
+                    }
+                    Run::Command(command) => {
+                        editor.run_inlay_hint_command(&command, cx);
                     }
                 }
             });
@@ -587,6 +610,50 @@ impl CodeEditor {
             return;
         }
         let entries = self.context_menu_entries(window, cx);
+        self.show_menu(entries, position, None, window, cx);
+    }
+
+    /// Monaco `showGoToContextMenu`: the navigation commands for an inlay
+    /// hint part's `location`, then the part's command, at `anchor`, with
+    /// the first item active (`autoSelectFirstItem`).
+    pub(crate) fn show_inlay_hint_location_menu(
+        &mut self,
+        location: Location,
+        command: Option<Command>,
+        anchor: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.hide_context_menu(cx);
+        let mut entries: Vec<Entry> = LOCATION_ITEMS
+            .iter()
+            .map(|(label, kind)| Entry::Item {
+                label: (*label).into(),
+                keybinding: None,
+                run: Run::Navigate(*kind, location.clone()),
+            })
+            .collect();
+        if let Some(command) = command {
+            entries.push(Entry::Separator);
+            entries.push(Entry::Item {
+                label: command.title.clone(),
+                keybinding: None,
+                run: Run::Command(command),
+            });
+        }
+        self.show_menu(entries, Some(anchor), Some(0), window, cx);
+    }
+
+    /// Shows a menu of `entries` at `position` (or below the cursor), with
+    /// `active` the active row.
+    fn show_menu(
+        &mut self,
+        entries: Vec<Entry>,
+        position: Option<Point<Pixels>>,
+        active: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if entries.is_empty() {
             return;
         }
@@ -625,7 +692,7 @@ impl CodeEditor {
         let menu = cx.new(|_| ContextMenu {
             editor,
             entries,
-            active: None,
+            active,
             submenu: None,
             focus: focus.clone(),
             colors,
@@ -639,12 +706,24 @@ impl CodeEditor {
         );
         self.context_menu.menu = Some((menu, id));
         window.focus(&focus, cx);
-        // Monaco hides it when it loses focus.
+        // It takes the focus from a menu it replaces.
+        self.refocus = false;
+        // Monaco hides it when it loses focus (unless another menu already
+        // replaced it).
         let editor = cx.entity().downgrade();
         window
             .on_focus_out(&focus, cx, move |_, _, cx| {
                 if let Some(editor) = editor.upgrade() {
-                    editor.update(cx, |editor, cx| editor.hide_context_menu(cx));
+                    editor.update(cx, |editor, cx| {
+                        if editor
+                            .context_menu
+                            .menu
+                            .as_ref()
+                            .is_some_and(|(_, m)| *m == id)
+                        {
+                            editor.hide_context_menu(cx);
+                        }
+                    });
                 }
             })
             .detach();

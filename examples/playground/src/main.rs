@@ -244,6 +244,10 @@ impl Playground {
                 Ok("mouseover") => options.show_folding_controls = ShowFoldingControls::Mouseover,
                 _ => {}
             }
+            // `PLAYGROUND_INLAY_PADDING=1`: Monaco's `inlayHints.padding`.
+            if std::env::var_os("PLAYGROUND_INLAY_PADDING").is_some() {
+                options.inlay_hints.padding = true;
+            }
             editor.update_options(options, cx);
         });
         if let Some(level) = std::env::var("PLAYGROUND_ZOOM")
