@@ -450,11 +450,7 @@ impl CodeEditor {
                 fade_start: None,
             });
             let zone = self.add_view_zone(
-                ViewZone {
-                    after_line: row,
-                    height: ZoneHeight::Pixels(height),
-                    view: view.clone().into(),
-                },
+                ViewZone::new(row, ZoneHeight::Pixels(height), view.clone().into()),
                 cx,
             );
             view.update(cx, |view, _| view.zone = Some(zone));
@@ -550,6 +546,16 @@ impl CodeEditor {
             }
         })
         .detach();
+    }
+
+    /// Monaco `CodeLensContribution._onModelChange`: the old model's lenses
+    /// and requests go, and the new model's are asked for on the next
+    /// frame (a new model can share the old one's text version).
+    pub(crate) fn reset_code_lenses(&mut self, cx: &mut Context<Self>) {
+        self.clear_code_lenses(cx);
+        self.code_lens.task = None;
+        self.code_lens.pending = None;
+        self.code_lens.version = None;
     }
 
     fn clear_code_lenses(&mut self, cx: &mut Context<Self>) {

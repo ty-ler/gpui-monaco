@@ -741,11 +741,7 @@ impl CodeEditor {
             generation,
         });
         let id = self.add_overlay_widget(
-            OverlayWidget {
-                position: OverlayPosition::Custom(position),
-                view: view.clone().into(),
-                allow_editor_overflow: false,
-            },
+            OverlayWidget::new(OverlayPosition::Custom(position), view.clone().into()),
             cx,
         );
         self.inline.edit_view.long_distance.view = Some((view, id, position));

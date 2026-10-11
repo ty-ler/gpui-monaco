@@ -707,6 +707,15 @@ editor_colors! { r;
     /// The selected row of an unfocused list
     /// (`list.inactiveSelectionBackground`).
     list_inactive_selection_background: Option<Hsla> = r.visible("list.inactiveSelectionBackground");
+    /// Its text (`list.inactiveSelectionForeground`).
+    list_inactive_selection_foreground: Option<Hsla> = r.get("list.inactiveSelectionForeground");
+    /// Count badges, like the peek view's per-file counts
+    /// (`badge.background`).
+    badge_background: Hsla = r.color("badge.background");
+    /// Their text (`badge.foreground`).
+    badge_foreground: Hsla = r.color("badge.foreground");
+    /// A hovered or dragged sash (`sash.hoverBorder`).
+    sash_hover_border: Hsla = r.color("sash.hoverBorder");
     /// A hovered list row (`list.hoverBackground`).
     list_hover_background: Option<Hsla> = r.visible("list.hoverBackground");
     /// Its text (`list.hoverForeground`).

@@ -182,14 +182,7 @@ fn marks_follow_the_scroll_height_like_the_slider(cx: &mut TestAppContext) {
     // So does a view zone above it (a code lens, say).
     editor.update(cx, |e, cx| {
         let view = cx.new(|_| Blank).into();
-        e.add_view_zone(
-            ViewZone {
-                after_line: 2,
-                height: ZoneHeight::Pixels(px(300.)),
-                view,
-            },
-            cx,
-        );
+        e.add_view_zone(ViewZone::new(2, ZoneHeight::Pixels(px(300.)), view), cx);
     });
     draw(cx);
     let top = f32::from(marks_in(&editor, cx, red())[0].top() - ruler_bounds.top());

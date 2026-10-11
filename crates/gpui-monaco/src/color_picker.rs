@@ -803,13 +803,15 @@ impl CodeEditor {
                 }
                 let id = this.add_content_widget(
                     ContentWidget {
-                        position,
-                        preference: vec![
-                            ContentWidgetPreference::Above,
-                            ContentWidgetPreference::Below,
-                        ],
-                        view: widget.clone().into(),
                         allow_editor_overflow: true,
+                        ..ContentWidget::new(
+                            position,
+                            vec![
+                                ContentWidgetPreference::Above,
+                                ContentWidgetPreference::Below,
+                            ],
+                            widget.clone().into(),
+                        )
                     },
                     cx,
                 );

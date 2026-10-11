@@ -2094,11 +2094,11 @@ impl CodeEditor {
                 left: px(0.),
             });
             self.add_view_zone(
-                ViewZone {
-                    after_line: ghost.line + 1,
-                    height: ZoneHeight::Lines(extra_lines.len() as f32),
-                    view: view.into(),
-                },
+                ViewZone::new(
+                    ghost.line + 1,
+                    ZoneHeight::Lines(extra_lines.len() as f32),
+                    view.into(),
+                ),
                 cx,
             )
         });
@@ -2166,13 +2166,15 @@ impl CodeEditor {
         };
         let id = self.add_content_widget(
             ContentWidget {
-                position,
-                preference: vec![
-                    ContentWidgetPreference::Above,
-                    ContentWidgetPreference::Below,
-                ],
-                view: view.clone().into(),
                 allow_editor_overflow: true,
+                ..ContentWidget::new(
+                    position,
+                    vec![
+                        ContentWidgetPreference::Above,
+                        ContentWidgetPreference::Below,
+                    ],
+                    view.clone().into(),
+                )
             },
             cx,
         );

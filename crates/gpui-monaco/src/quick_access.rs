@@ -720,11 +720,7 @@ impl CodeEditor {
             self.quick_access_preview(&action, cx);
         }
         let id = self.add_overlay_widget(
-            OverlayWidget {
-                position: OverlayPosition::TopCenter,
-                view: widget.clone().into(),
-                allow_editor_overflow: false,
-            },
+            OverlayWidget::new(OverlayPosition::TopCenter, widget.clone().into()),
             cx,
         );
         if let Some(state) = self.quick.as_mut() {

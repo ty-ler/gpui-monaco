@@ -160,6 +160,9 @@ struct Playground {
     breakpoints: Vec<(u32, DecorationId)>,
     /// The language server from `PLAYGROUND_LSP`, once it's running.
     lsp: Option<Entity<LspClient>>,
+    /// `PLAYGROUND_EXTRA_FILE`: another file's model, so the demo
+    /// references (Shift+F12) span two files.
+    _extra_model: Option<Entity<TextModel>>,
 }
 
 impl Playground {
@@ -185,6 +188,12 @@ impl Playground {
             start_language_server(command, file_name.as_ref(), language, &model, cx);
         }
         let editor = cx.new(|cx| CodeEditor::new(model, window, cx));
+        let extra_model = std::env::var("PLAYGROUND_EXTRA_FILE").ok().map(|path| {
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| format!("{path}: {e}"));
+            let model = cx.new(|_| TextModel::new(&text).with_uri(file_uri(&path)));
+            gpui_monaco::register_model(cx, &model);
+            model
+        });
         if let Ok(wrap) = std::env::var("PLAYGROUND_WRAP") {
             editor.update(cx, |editor, cx| {
                 let mut options = editor.options().clone();
@@ -336,6 +345,7 @@ impl Playground {
             file_name,
             breakpoints: Vec::new(),
             lsp: None,
+            _extra_model: extra_model,
         }
     }
 
@@ -812,6 +822,10 @@ fn add_demo_widgets(editor: &Entity<CodeEditor>, cx: &mut App) {
         text: "A view zone between lines 4 and 5 — any GPUI view".into(),
         background: hsla(0.6, 0.5, 0.3, 1.),
     });
+    let margin = cx.new(|_| DemoLabel {
+        text: "margin".into(),
+        background: hsla(0.6, 0.5, 0.2, 1.),
+    });
     let content = cx.new(|_| DemoLabel {
         text: "content widget".into(),
         background: rgb(0x0e639c).into(),
@@ -821,32 +835,23 @@ fn add_demo_widgets(editor: &Entity<CodeEditor>, cx: &mut App) {
         background: rgb(0x6c3483).into(),
     });
     editor.update(cx, |editor, cx| {
-        editor.add_view_zone(
-            ViewZone {
-                after_line: 4,
-                height: ZoneHeight::Lines(2.),
-                view: zone.into(),
-            },
-            cx,
-        );
+        // With a margin part in the gutter (Monaco `marginDomNode`).
+        let mut zone = ViewZone::new(4, ZoneHeight::Lines(2.), zone.into());
+        zone.margin_view = Some(margin.into());
+        editor.add_view_zone(zone, cx);
         editor.add_content_widget(
-            ContentWidget {
-                position: gpui_monaco::text::PointUtf16::new(16, 4),
-                preference: vec![
+            ContentWidget::new(
+                gpui_monaco::text::PointUtf16::new(16, 4),
+                vec![
                     ContentWidgetPreference::Above,
                     ContentWidgetPreference::Below,
                 ],
-                view: content.into(),
-                allow_editor_overflow: false,
-            },
+                content.into(),
+            ),
             cx,
         );
         editor.add_overlay_widget(
-            OverlayWidget {
-                position: OverlayPosition::TopRight,
-                view: overlay.into(),
-                allow_editor_overflow: false,
-            },
+            OverlayWidget::new(OverlayPosition::TopRight, overlay.into()),
             cx,
         );
     });

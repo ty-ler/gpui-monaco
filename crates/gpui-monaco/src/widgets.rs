@@ -13,29 +13,116 @@ use text::{Anchor, PointUtf16};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct WidgetId(pub u64);
 
-/// Height of a view zone.
+/// Height of a view zone (Monaco `heightInLines` or `heightInPx`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ZoneHeight {
-    /// A multiple of the editor's line height.
+    /// A multiple of the editor's line height (Monaco `heightInLines`).
     Lines(f32),
-    /// A fixed height in pixels.
+    /// A fixed height in pixels (Monaco `heightInPx`).
     Pixels(Pixels),
 }
 
+/// Which view position a model position means where several show it
+/// (Monaco `PositionAffinity`): at a wrap boundary, or next to injected
+/// text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PositionAffinity {
+    /// The end of the previous view line at a wrap boundary.
+    Left,
+    /// The start of the next view line at a wrap boundary.
+    Right,
+    /// Monaco's default: the next view line at a wrap boundary.
+    #[default]
+    None,
+    /// Before injected text at the position; a content widget at a line's
+    /// start is left-aligned to the line.
+    LeftOfInjectedText,
+    /// After injected text at the position.
+    RightOfInjectedText,
+}
+
+impl PositionAffinity {
+    /// Whether a point at a wrap boundary shows at the end of the previous
+    /// view line (Monaco `ModelLineProjection` with a left affinity).
+    pub(crate) fn prefers_previous(self) -> bool {
+        matches!(self, Self::Left | Self::LeftOfInjectedText)
+    }
+}
+
 /// A host view inserted between lines, pushing text down (Monaco
-/// `IViewZone`).
+/// `IViewZone`). Make one with [`ViewZone::new`], then set the other fields
+/// as needed.
 #[derive(Clone)]
 pub struct ViewZone {
     /// Monaco `afterLineNumber`: the zone shows after this 1-based line; `0`
     /// puts it above the first line. It follows edits.
     pub after_line: u32,
+    /// Monaco `afterColumn`, as a 0-based UTF-16 column: the zone shows
+    /// after the view line (of a wrapped line) showing this column of
+    /// `after_line`. `None`: after the line's last view line.
+    pub after_column: Option<u32>,
+    /// Monaco `afterColumnAffinity`: which view line `after_column` means
+    /// at a wrap boundary.
+    pub after_column_affinity: PositionAffinity,
+    /// Monaco `showInHiddenAreas`: shows the zone even when the line after
+    /// it is folded away (after the fold's first line).
+    pub show_in_hidden_areas: bool,
+    /// Monaco `ordinal`: orders zones after the same view line, lowest
+    /// first, ties in the order they were added. Defaults to
+    /// `after_column + 1` (Monaco's 1-based `afterColumn`), else 10000.
+    pub ordinal: Option<i32>,
+    /// Monaco `suppressMouseDown`: a mouse down on the zone focuses the
+    /// editor and places the cursor before or after the zone (the half
+    /// clicked), as on text. Otherwise the zone's view has the click.
+    pub suppress_mouse_down: bool,
     /// The zone's height.
     pub height: ZoneHeight,
-    /// The view to render, laid out at the zone's size.
+    /// Monaco `minWidthInPx`: the zone widens the horizontal scroll range to
+    /// at least this.
+    pub min_width: Pixels,
+    /// The view to render beside the text, laid out at the zone's height
+    /// and the scroll width: it scrolls horizontally with the text.
     pub view: AnyView,
+    /// Monaco `marginDomNode`: a view for the gutter beside the zone, laid
+    /// out at the gutter's width and the zone's height. It doesn't scroll
+    /// horizontally.
+    pub margin_view: Option<AnyView>,
 }
 
-/// Where a content widget prefers to show relative to its position.
+impl ViewZone {
+    /// A zone after 1-based `after_line` (`0`: above the first line), with
+    /// Monaco's defaults for everything else.
+    pub fn new(after_line: u32, height: ZoneHeight, view: AnyView) -> Self {
+        Self {
+            after_line,
+            after_column: None,
+            after_column_affinity: PositionAffinity::None,
+            show_in_hidden_areas: false,
+            ordinal: None,
+            suppress_mouse_down: false,
+            height,
+            min_width: px(0.),
+            view,
+            margin_view: None,
+        }
+    }
+
+    /// Monaco `ViewZones._getZoneOrdinal`.
+    pub(crate) fn effective_ordinal(&self) -> i64 {
+        zone_ordinal(self.ordinal, self.after_column)
+    }
+}
+
+/// Monaco `ViewZones._getZoneOrdinal`: `ordinal`, else the 1-based
+/// `afterColumn`, else 10000.
+fn zone_ordinal(ordinal: Option<i32>, after_column: Option<u32>) -> i64 {
+    ordinal
+        .map(i64::from)
+        .unwrap_or_else(|| after_column.map_or(10_000, |column| i64::from(column) + 1))
+}
+
+/// Where a content widget prefers to show relative to its position (Monaco
+/// `ContentWidgetPositionPreference`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContentWidgetPreference {
     /// Above the anchor's line, ending at its top.
@@ -46,21 +133,69 @@ pub enum ContentWidgetPreference {
     Exact,
 }
 
-/// A host view anchored to a text position (Monaco `IContentWidget`).
+/// A host view anchored to a text position (Monaco `IContentWidget`). Make
+/// one with [`ContentWidget::new`], then set the other fields as needed.
 #[derive(Clone)]
 pub struct ContentWidget {
     /// The anchor (0-based row, UTF-16 column); it follows edits.
     pub position: PointUtf16,
+    /// Monaco `secondaryPosition`: a position on the same line the widget
+    /// should also touch if it can. It's shifted toward it, keeping a
+    /// full-width character's width over `position`.
+    pub secondary_position: Option<PointUtf16>,
     /// Tried in order; the first that fits in the editor is used, else the
     /// first. An empty list hides the widget, as in Monaco.
     pub preference: Vec<ContentWidgetPreference>,
-    /// The view to render, laid out at its min-content size.
+    /// Monaco `positionAffinity`: which view position `position` means at a
+    /// wrap boundary or next to injected text.
+    pub position_affinity: Option<PositionAffinity>,
+    /// The view to render, laid out at its min-content size, at most as
+    /// wide as the text area (the window with `allow_editor_overflow`), as
+    /// Monaco's `maxWidth`.
     pub view: AnyView,
     /// Monaco `allowEditorOverflow`: the widget may extend past the
     /// editor (into the rest of the window), is painted above everything
     /// else, and fits above or below its line against the window rather
     /// than the editor. Otherwise it's clipped to the text area.
     pub allow_editor_overflow: bool,
+    /// Monaco `suppressMouseDown`: a mouse down on the widget focuses the
+    /// editor rather than the widget.
+    pub suppress_mouse_down: bool,
+}
+
+impl ContentWidget {
+    /// A widget at `position`, placed by `preference`, with Monaco's
+    /// defaults for everything else.
+    pub fn new(
+        position: PointUtf16,
+        preference: Vec<ContentWidgetPreference>,
+        view: AnyView,
+    ) -> Self {
+        Self {
+            position,
+            secondary_position: None,
+            preference,
+            position_affinity: None,
+            view,
+            allow_editor_overflow: false,
+            suppress_mouse_down: false,
+        }
+    }
+}
+
+/// Where a content widget shows, for
+/// [`CodeEditor::layout_content_widget`](crate::CodeEditor::layout_content_widget)
+/// (Monaco `IContentWidgetPosition`, which `layoutContentWidget` re-reads).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ContentWidgetPosition {
+    /// The anchor; `None` hides the widget (Monaco's `null` position).
+    pub position: Option<PointUtf16>,
+    /// Monaco `secondaryPosition`.
+    pub secondary_position: Option<PointUtf16>,
+    /// Monaco `preference`; empty hides the widget.
+    pub preference: Vec<ContentWidgetPreference>,
+    /// Monaco `positionAffinity`.
+    pub position_affinity: Option<PositionAffinity>,
 }
 
 /// Monaco's clearance from the window's top and bottom edges for
@@ -244,27 +379,114 @@ pub(crate) fn place_content_widget(
 /// `OverlayWidgetPositionPreference`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OverlayPosition {
-    /// Top right, aligned to the right edge of the text area.
+    /// Top right: left of the minimap and twice the vertical scrollbar's
+    /// width from the editor's right edge, as Monaco's `TOP_RIGHT_CORNER`.
     TopRight,
-    /// Bottom right, aligned to the right edge of the text area.
+    /// Bottom right: as `TopRight`, and twice the horizontal scrollbar's
+    /// height above the editor's bottom (`BOTTOM_RIGHT_CORNER`).
     BottomRight,
     /// Top, centered over the text area.
     TopCenter,
-    /// Offset from the editor's top-left corner.
+    /// Offset from the editor's top-left corner (Monaco
+    /// `IOverlayWidgetPositionCoordinates`).
     Custom(Point<Pixels>),
+    /// Monaco's `null` preference: the widget places itself. It's laid out
+    /// at the editor's top-left corner with the editor's size available.
+    Manual,
 }
 
-/// A host view pinned to the editor (Monaco `IOverlayWidget`).
+/// A host view pinned to the editor (Monaco `IOverlayWidget`). Make one
+/// with [`OverlayWidget::new`], then set the other fields as needed.
 #[derive(Clone)]
 pub struct OverlayWidget {
     /// Where the widget is pinned.
     pub position: OverlayPosition,
+    /// Monaco `stackOrdinal`: widgets with one stack, lowest first, with
+    /// the others at the same corner (top to bottom at the right corners
+    /// and the top center); without one they overlap.
+    pub stack_ordinal: Option<i32>,
     /// The view to render, laid out at its min-content size.
     pub view: AnyView,
     /// Monaco `allowEditorOverflow`: the widget may extend past the editor
     /// (it's kept inside the window) and is painted above everything else.
     /// Otherwise it's clipped to the editor.
     pub allow_editor_overflow: bool,
+    /// Monaco `getMinContentWidthInPx`: the widget widens the horizontal
+    /// scroll range to at least this.
+    pub min_content_width: Pixels,
+}
+
+impl OverlayWidget {
+    /// A widget pinned at `position`, with Monaco's defaults for everything
+    /// else.
+    pub fn new(position: OverlayPosition, view: AnyView) -> Self {
+        Self {
+            position,
+            stack_ordinal: None,
+            view,
+            allow_editor_overflow: false,
+            min_content_width: px(0.),
+        }
+    }
+}
+
+/// Monaco `OverlayWidgets._renderWidget`'s corners, laid out in stacking
+/// order (Monaco sorts by `stackOrdinal`, missing ones as 0): each widget's
+/// origin within `editor`, the text area being `text`. `sizes[i]` is
+/// widget `i`'s measured size. Right-corner widgets keep `right_inset`
+/// (twice the vertical scrollbar width plus the minimap's) from the
+/// editor's right edge; bottom ones keep `bottom_inset` (twice the
+/// horizontal scrollbar height) from its bottom.
+pub(crate) fn place_overlay_widgets(
+    widgets: &[(OverlayPosition, Option<i32>)],
+    sizes: &[gpui::Size<Pixels>],
+    editor: gpui::Bounds<Pixels>,
+    text: gpui::Bounds<Pixels>,
+    right_inset: Pixels,
+    bottom_inset: Pixels,
+) -> Vec<Point<Pixels>> {
+    let mut order: Vec<usize> = (0..widgets.len()).collect();
+    order.sort_by_key(|&ix| widgets[ix].1.unwrap_or(0));
+    // Where the next stacked widget goes, per corner (Monaco
+    // `stackCoordinates`): top right, bottom right, top center.
+    let mut stack = [px(0.); 3];
+    let mut origins = vec![editor.origin; widgets.len()];
+    let right = editor.right() - right_inset;
+    for ix in order {
+        let (position, stack_ordinal) = widgets[ix];
+        let size = sizes[ix];
+        let stacked = stack_ordinal.is_some();
+        origins[ix] = match position {
+            OverlayPosition::TopRight => {
+                let top = if stacked { stack[0] } else { px(0.) };
+                if stacked {
+                    stack[0] += size.height;
+                }
+                gpui::point(right - size.width, editor.top() + top)
+            }
+            OverlayPosition::BottomRight => {
+                let mut top = editor.size.height - size.height - bottom_inset;
+                if stacked {
+                    top -= stack[1];
+                    stack[1] += size.height;
+                }
+                gpui::point(right - size.width, editor.top() + top)
+            }
+            OverlayPosition::TopCenter => {
+                let top = if stacked { stack[2] } else { px(0.) };
+                if stacked {
+                    stack[2] += size.height;
+                }
+                gpui::point(
+                    text.left() + (text.size.width - size.width) / 2.,
+                    editor.top() + top,
+                )
+            }
+            OverlayPosition::Custom(offset) => editor.origin + offset,
+            OverlayPosition::Manual => editor.origin,
+        };
+    }
+    origins
 }
 
 /// A host view in the glyph margin beside a line (Monaco
@@ -309,10 +531,20 @@ pub(crate) struct GlyphWidgetState {
 #[derive(Clone)]
 pub(crate) struct ZoneState {
     pub id: WidgetId,
-    /// Anchor at the start of the line after the zone; `None` for line 0.
+    /// Anchor at the end of the line before the zone (at `after_column`
+    /// with one); `None` for line 0.
     pub anchor: Option<Anchor>,
+    /// Monaco `afterColumn` was given: the anchor is at that column.
+    pub after_column: bool,
+    pub after_column_affinity: PositionAffinity,
+    pub show_in_hidden_areas: bool,
+    /// Monaco `_getZoneOrdinal`.
+    pub ordinal: i64,
+    pub suppress_mouse_down: bool,
     pub height: ZoneHeight,
     pub view: AnyView,
+    /// Monaco `marginDomNode`.
+    pub margin_view: Option<AnyView>,
     /// Spans the gutter too, like Monaco's zone widgets (peek views).
     pub full_width: bool,
     /// The wheel over the zone doesn't scroll the editor: Monaco's zone
@@ -328,10 +560,14 @@ pub(crate) struct ZoneState {
 #[derive(Clone)]
 pub(crate) struct ContentWidgetState {
     pub id: WidgetId,
-    pub anchor: Anchor,
+    /// `None`: hidden (Monaco's `null` position).
+    pub anchor: Option<Anchor>,
+    pub secondary: Option<Anchor>,
+    pub affinity: Option<PositionAffinity>,
     pub preference: Vec<ContentWidgetPreference>,
     pub view: AnyView,
     pub allow_overflow: bool,
+    pub suppress_mouse_down: bool,
     /// Paint order among overflowing widgets (a [`layer`]).
     pub layer: usize,
     /// Where the editor publishes the room the widget has, when it
@@ -343,10 +579,20 @@ pub(crate) struct ContentWidgetState {
 pub(crate) struct OverlayWidgetState {
     pub id: WidgetId,
     pub position: OverlayPosition,
+    pub stack_ordinal: Option<i32>,
+    pub min_content_width: Pixels,
     pub view: AnyView,
     pub allow_overflow: bool,
     /// Paint order among overflowing widgets (a [`layer`]).
     pub layer: usize,
+}
+
+/// Widget positions carried from one model to the next: each content
+/// widget's (position, secondary position) and each glyph margin widget's
+/// row, in widget order.
+pub(crate) struct WidgetPositions {
+    pub content: Vec<(Option<PointUtf16>, Option<PointUtf16>)>,
+    pub glyphs: Vec<u32>,
 }
 
 /// What cached zone rows were computed for: the view lines (pointer), the
@@ -414,6 +660,18 @@ impl Widgets {
         self.glyphs.retain(|w| w.id != id);
         before != self.zones.len() + self.content.len() + self.overlays.len() + self.glyphs.len()
     }
+
+    /// Drops every view zone (Monaco's go with the old view when the model
+    /// changes). Returns whether there were any.
+    pub fn clear_zones(&mut self) -> bool {
+        if self.zones.is_empty() {
+            return false;
+        }
+        self.zones.clear();
+        self.zones_generation += 1;
+        self.zone_rows = None;
+        true
+    }
 }
 
 #[cfg(test)]
@@ -441,6 +699,62 @@ mod tests {
         assert_eq!(place(&[Exact, Below], 0.), Some(px(0.)));
         // No preference: hidden.
         assert_eq!(place(&[], 100.), None);
+    }
+
+    #[test]
+    fn zone_ordinals() {
+        // Monaco `_getZoneOrdinal`: `ordinal`, else `afterColumn`, else
+        // 10000 (columns are 1-based in Monaco, 0-based here).
+        assert_eq!(zone_ordinal(None, None), 10_000);
+        assert_eq!(zone_ordinal(None, Some(4)), 5);
+        assert_eq!(zone_ordinal(Some(-3), Some(4)), -3);
+    }
+
+    #[test]
+    fn overlay_corners_and_stacking() {
+        use gpui::{Bounds, point, size};
+        let editor = Bounds::new(point(px(100.), px(50.)), size(px(600.), px(400.)));
+        let text = Bounds::new(point(px(160.), px(50.)), size(px(400.), px(400.)));
+        let w = size(px(80.), px(20.));
+        let place = |widgets: &[(OverlayPosition, Option<i32>)]| {
+            place_overlay_widgets(
+                widgets,
+                &vec![w; widgets.len()],
+                editor,
+                text,
+                px(28.) + px(40.),
+                px(24.),
+            )
+        };
+        use OverlayPosition::*;
+        // Monaco `_renderWidget`: right = 2 × scrollbar + minimap; bottom
+        // keeps 2 × the horizontal scrollbar.
+        assert_eq!(
+            place(&[(TopRight, None), (BottomRight, None)]),
+            vec![
+                point(px(700. - 68. - 80.), px(50.)),
+                point(px(700. - 68. - 80.), px(450. - 24. - 20.)),
+            ]
+        );
+        // Stacked widgets go one under the other by ordinal; unstacked ones
+        // stay in the corner.
+        assert_eq!(
+            place(&[(TopRight, Some(2)), (TopRight, Some(1)), (TopRight, None)]),
+            vec![
+                point(px(552.), px(70.)),
+                point(px(552.), px(50.)),
+                point(px(552.), px(50.)),
+            ]
+        );
+        assert_eq!(
+            place(&[(TopCenter, Some(0)), (TopCenter, Some(0))]),
+            vec![point(px(320.), px(50.)), point(px(320.), px(70.))]
+        );
+        // Custom and manual positions are relative to the editor.
+        assert_eq!(
+            place(&[(Custom(point(px(5.), px(6.))), None), (Manual, None)]),
+            vec![point(px(105.), px(56.)), point(px(100.), px(50.))]
+        );
     }
 
     #[gpui::test]

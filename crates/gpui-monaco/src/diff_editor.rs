@@ -3594,7 +3594,7 @@ impl DiffEditor {
                     }
                 };
             let id = editor.update(cx, |editor, cx| {
-                let id = editor.add_zone(after, height, view, full_width, cx);
+                let id = editor.add_zone(ViewZone::new(after, height, view), full_width, cx);
                 if let Some(min_width) = min_width {
                     editor.set_zone_min_width(id, min_width, cx);
                 }
@@ -3661,11 +3661,11 @@ impl DiffEditor {
                 });
                 let id = editor.update(cx, |editor, cx| {
                     editor.add_view_zone(
-                        ViewZone {
-                            after_line: after as u32,
-                            height: ZoneHeight::Pixels(px(MOVE_CAPTION_HEIGHT)),
-                            view: view.into(),
-                        },
+                        ViewZone::new(
+                            after as u32,
+                            ZoneHeight::Pixels(px(MOVE_CAPTION_HEIGHT)),
+                            view.into(),
+                        ),
                         cx,
                     )
                 });
@@ -4321,9 +4321,11 @@ impl DiffEditor {
                 };
                 let id = editor.update(cx, |editor, cx| {
                     editor.add_zone(
-                        hidden.start_line_number as u32 - 1,
-                        ZoneHeight::Pixels(px(height)),
-                        bar.into(),
+                        ViewZone::new(
+                            hidden.start_line_number as u32 - 1,
+                            ZoneHeight::Pixels(px(height)),
+                            bar.into(),
+                        ),
                         true,
                         cx,
                     )

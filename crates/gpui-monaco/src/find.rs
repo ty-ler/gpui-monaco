@@ -1714,11 +1714,7 @@ impl CodeEditor {
                 let widget = cx.new(|cx| FindWidget::new(editor, theme, window, cx));
                 self.find.inputs = Some(widget.read(cx).inputs());
                 let id = self.add_overlay_widget(
-                    OverlayWidget {
-                        position: OverlayPosition::TopRight,
-                        view: widget.clone().into(),
-                        allow_editor_overflow: false,
-                    },
+                    OverlayWidget::new(OverlayPosition::TopRight, widget.clone().into()),
                     cx,
                 );
                 self.find.widget = Some((widget.clone(), id));
@@ -2052,6 +2048,12 @@ impl CodeEditor {
     /// space above the first line keeps it from covering text when
     /// scrolled to the top; the scroll position moves with it so the text
     /// doesn't jump. The editor's top padding counts towards the space.
+    /// The model changed and its view zones went with the old view (Monaco
+    /// `FindWidget` drops `_viewZoneId` on `onDidChangeModel`).
+    pub(crate) fn forget_find_view_zone(&mut self) {
+        self.find.zone = None;
+    }
+
     pub(crate) fn update_find_view_zone(&mut self, cx: &mut Context<Self>) {
         let wanted = (self.find.visible && self.options.find.add_extra_space_on_top)
             .then(|| {
@@ -2075,11 +2077,11 @@ impl CodeEditor {
         if let Some(height) = wanted {
             let view = cx.new(|_| FindZoneSpacer);
             let id = self.add_view_zone(
-                crate::widgets::ViewZone {
-                    after_line: 0,
-                    height: crate::widgets::ZoneHeight::Pixels(height),
-                    view: view.into(),
-                },
+                crate::widgets::ViewZone::new(
+                    0,
+                    crate::widgets::ZoneHeight::Pixels(height),
+                    view.into(),
+                ),
                 cx,
             );
             self.find.zone = Some((id, height));

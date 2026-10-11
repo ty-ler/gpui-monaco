@@ -199,8 +199,8 @@ pub use theme::{
 };
 pub use view::reveal::{RevealType, ScrollType};
 pub use widgets::{
-    ContentWidget, ContentWidgetPreference, GlyphMarginWidget, OverlayPosition, OverlayWidget,
-    ViewZone, WidgetId, ZoneHeight,
+    ContentWidget, ContentWidgetPosition, ContentWidgetPreference, GlyphMarginWidget,
+    OverlayPosition, OverlayWidget, PositionAffinity, ViewZone, WidgetId, ZoneHeight,
 };
 
 /// Registers the codicon font with the `codicons` feature ([`codicons`]),

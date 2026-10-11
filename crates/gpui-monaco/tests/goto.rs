@@ -328,7 +328,9 @@ fn opening_a_result_elsewhere_asks_the_host(cx: &mut TestAppContext) {
     set_cursor(&editor, cx, p(2, 5));
     cx.simulate_keystrokes("shift-f12");
     draw(cx);
-    cx.simulate_keystrokes("home");
+    // Home focuses the first row, lib.rs's file row (Monaco
+    // `list.focusFirst`); Down its result.
+    cx.simulate_keystrokes("home down");
     draw(cx);
     let preview = editor.read_with(cx, |e, cx| e.peek_preview(cx)).unwrap();
     let text = preview.read_with(cx, |p, cx| p.model().read(cx).text());
@@ -342,7 +344,7 @@ fn opening_a_result_elsewhere_asks_the_host(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn goto_mode_steps_through_results_with_f4(cx: &mut TestAppContext) {
+fn goto_mode_steps_through_results(cx: &mut TestAppContext) {
     let fixed = Fixed {
         implementations: vec![here(2, 4, 7), here(3, 4, 7), here(0, 3, 6)],
         ..Default::default()
@@ -362,9 +364,19 @@ fn goto_mode_steps_through_results_with_f4(cx: &mut TestAppContext) {
     assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
     assert_eq!(head(&editor, cx), p(0, 3));
     assert!(cx.update(|_, cx| gpui_monaco::has_symbol_navigation(cx)));
+    // F4 is only for peek views (Monaco `goToNextReference`); with a
+    // definition provider, F12 is Go to Definition, so step with the
+    // command (Monaco `editor.gotoNextSymbolFromResult`).
     cx.simulate_keystrokes("f4");
+    assert_eq!(head(&editor, cx), p(0, 3));
+    let next = |cx: &mut VisualTestContext| {
+        cx.dispatch_action(gpui_monaco::actions::GoToNextSymbolFromResult);
+        cx.run_until_parked();
+    };
+    next(cx);
     assert_eq!(head(&editor, cx), p(2, 4));
-    cx.simulate_keystrokes("f4 f4");
+    next(cx);
+    next(cx);
     assert_eq!(head(&editor, cx), p(0, 3));
     // Leaving the results ends it.
     set_cursor(&editor, cx, p(1, 0));

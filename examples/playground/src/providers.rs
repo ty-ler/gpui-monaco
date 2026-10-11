@@ -240,8 +240,9 @@ impl CompletionProvider for DemoCompletions {
     }
 }
 
-/// Jumps to the first `fn`, `struct`, `enum` or `trait` declaring the word.
-/// Every whole-word occurrence of the word at the cursor.
+/// Every whole-word occurrence of the word at the cursor, in this model
+/// and in the other models with a uri (`PLAYGROUND_EXTRA_FILE`), so the
+/// peek view can show several files.
 struct DemoReferences;
 impl ReferenceProvider for DemoReferences {
     fn provide_references(
@@ -249,35 +250,54 @@ impl ReferenceProvider for DemoReferences {
         context: &ProviderContext,
         position: PointUtf16,
         _: ReferenceContext,
-        _: &mut App,
+        cx: &mut App,
     ) -> Task<anyhow::Result<Vec<Location>>> {
         let word = word_at(context, position);
         if word.is_empty() {
             return Task::ready(Ok(Vec::new()));
         }
-        let is_word = |c: char| c.is_alphanumeric() || c == '_';
-        let rows = context.snapshot.rope().max_point().row + 1;
-        let mut found = Vec::new();
-        for row in 0..rows {
-            let line = context.snapshot.line(row);
-            for (start, _) in line.match_indices(word.as_str()) {
-                let end = start + word.len();
-                let before = line[..start].chars().next_back();
-                let after = line[end..].chars().next();
-                if before.is_some_and(is_word) || after.is_some_and(is_word) {
-                    continue;
-                }
-                let column = line[..start].encode_utf16().count() as u32;
-                let len = word.encode_utf16().count() as u32;
-                found.push(Location {
-                    uri: None,
-                    range: PointUtf16::new(row, column)..PointUtf16::new(row, column + len),
-                    ..Default::default()
-                });
+        let mut found = occurrences(&context.snapshot, &word, None);
+        for model in gpui_monaco::models(cx) {
+            let model = model.read(cx);
+            let Some(uri) = model.uri().cloned() else {
+                continue;
+            };
+            if Some(&uri) != context.uri.as_ref() {
+                found.extend(occurrences(&model.buffer().snapshot(), &word, Some(uri)));
             }
         }
         Task::ready(Ok(found))
     }
+}
+
+/// The whole-word occurrences of `word` in `snapshot`.
+fn occurrences(
+    snapshot: &gpui_monaco::text::BufferSnapshot,
+    word: &str,
+    uri: Option<gpui::SharedString>,
+) -> Vec<Location> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let rows = snapshot.rope().max_point().row + 1;
+    let mut found = Vec::new();
+    for row in 0..rows {
+        let line = snapshot.line(row);
+        for (start, _) in line.match_indices(word) {
+            let end = start + word.len();
+            let before = line[..start].chars().next_back();
+            let after = line[end..].chars().next();
+            if before.is_some_and(is_word) || after.is_some_and(is_word) {
+                continue;
+            }
+            let column = line[..start].encode_utf16().count() as u32;
+            let len = word.encode_utf16().count() as u32;
+            found.push(Location {
+                uri: uri.clone(),
+                range: PointUtf16::new(row, column)..PointUtf16::new(row, column + len),
+                ..Default::default()
+            });
+        }
+    }
+    found
 }
 
 /// Renames every whole-word occurrence (the demo references).
@@ -303,6 +323,8 @@ impl RenameProvider for DemoRename {
             let edits = references
                 .await?
                 .into_iter()
+                // This model's only.
+                .filter(|location| location.uri.is_none())
                 .map(|location| (location.range, new_name.clone()))
                 .collect();
             Ok(Some(WorkspaceEdit {

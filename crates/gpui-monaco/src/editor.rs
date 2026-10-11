@@ -37,7 +37,7 @@ use crate::view::folding::{
 use crate::view::view_lines::{ViewLines, WrapSettings, normalize_hidden};
 use crate::widgets::{
     ContentWidget, ContentWidgetState, OverlayPosition, OverlayWidget, OverlayWidgetState,
-    ViewZone, WidgetId, Widgets, ZoneHeight, ZoneState,
+    ViewZone, WidgetId, WidgetPositions, Widgets, ZoneHeight, ZoneState,
 };
 
 /// Events emitted by [`CodeEditor`].
@@ -965,6 +965,7 @@ impl CodeEditor {
         self.hide_code_action_menu(cx);
         self.code_actions.lightbulb = None;
         self.reset_inlay_hints(cx);
+        self.reset_code_lenses(cx);
         self.close_marker_zone(cx);
         self.clear_definition_link(cx);
         self.detach_find_from_model(cx);
@@ -986,6 +987,14 @@ impl CodeEditor {
         self.reset_navigation_history();
         self.clear_occurrence_highlights(cx);
         self.bracket_colors = Default::default();
+        // Monaco `_detachModel` disposes the view and its view zones with
+        // it; content, overlay and glyph margin widgets are re-added to the
+        // new view, which reads their positions against the new model.
+        let widget_positions = self.widget_positions(cx);
+        if self.widgets.clear_zones() {
+            self.forget_find_view_zone();
+            cx.emit(CodeEditorEvent::ViewZonesChanged);
+        }
 
         self._subscriptions[0] = cx.subscribe(&model, Self::on_model_event);
         // Monaco `_detachModel` and `_attachModel`.
@@ -1009,6 +1018,7 @@ impl CodeEditor {
         self.fold_rerun = false;
         *self.shared_model.borrow_mut() = model.downgrade();
         self.model = model;
+        self.reanchor_widgets(widget_positions, cx);
         // Monaco `InlayHintsController._update`: the new model's cached
         // hints, at once.
         self.restore_cached_inlay_hints(cx);
@@ -1417,38 +1427,81 @@ impl CodeEditor {
     /// Inserts a host view between lines (Monaco `changeViewZones` +
     /// `addZone`).
     pub fn add_view_zone(&mut self, zone: ViewZone, cx: &mut Context<Self>) -> WidgetId {
-        self.add_zone(zone.after_line, zone.height, zone.view, false, cx)
+        self.add_zone(zone, false, cx)
     }
 
     /// Adds a zone; `full_width` ones also cover the gutter (Monaco's zone
     /// widgets).
     pub(crate) fn add_zone(
         &mut self,
-        after_line: u32,
-        height: ZoneHeight,
-        view: gpui::AnyView,
+        zone: ViewZone,
         full_width: bool,
         cx: &mut Context<Self>,
     ) -> WidgetId {
         let id = self.widgets.next_id();
-        let buffer = self.model.read(cx).buffer();
-        let anchor = (after_line > 0).then(|| {
-            let row = (after_line - 1).min(buffer.max_point().row);
-            buffer.anchor_before(buffer.point_to_offset(text::Point::new(row, u32::MAX)))
-        });
+        let ordinal = zone.effective_ordinal();
+        let anchor = self.zone_anchor(zone.after_line, zone.after_column, cx);
         self.widgets.zones.push(ZoneState {
             id,
             anchor,
-            height,
-            view,
+            after_column: zone.after_column.is_some(),
+            after_column_affinity: zone.after_column_affinity,
+            show_in_hidden_areas: zone.show_in_hidden_areas,
+            ordinal,
+            suppress_mouse_down: zone.suppress_mouse_down,
+            height: zone.height,
+            view: zone.view,
+            margin_view: zone.margin_view,
             full_width,
             captures_wheel: false,
-            min_width: px(0.),
+            min_width: zone.min_width,
         });
         self.widgets.zones_generation += 1;
         cx.emit(CodeEditorEvent::ViewZonesChanged);
         cx.notify();
         id
+    }
+
+    /// The anchor of a zone after 1-based `after_line`: at the line's end,
+    /// or at `after_column` (Monaco validates both against the model).
+    fn zone_anchor(
+        &self,
+        after_line: u32,
+        after_column: Option<u32>,
+        cx: &App,
+    ) -> Option<text::Anchor> {
+        let buffer = self.model.read(cx).buffer();
+        (after_line > 0).then(|| {
+            let row = (after_line - 1).min(buffer.max_point().row);
+            let offset = match after_column {
+                Some(column) => buffer.point_utf16_to_offset(
+                    buffer.clip_point_utf16(PointUtf16::new(row, column), Bias::Left),
+                ),
+                None => buffer.point_to_offset(text::Point::new(row, u32::MAX)),
+            };
+            buffer.anchor_before(offset)
+        })
+    }
+
+    /// Moves a view zone after another line or column (Monaco
+    /// `IViewZoneChangeAccessor.layoutZone`, which re-reads `afterLineNumber`
+    /// and `afterColumn`).
+    pub fn layout_view_zone(
+        &mut self,
+        id: WidgetId,
+        after_line: u32,
+        after_column: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        let anchor = self.zone_anchor(after_line, after_column, cx);
+        if let Some(zone) = self.widgets.zones.iter_mut().find(|z| z.id == id) {
+            zone.anchor = anchor;
+            zone.after_column = after_column.is_some();
+            // Rows are cached per zones generation.
+            self.widgets.zones_generation += 1;
+            cx.emit(CodeEditorEvent::ViewZonesChanged);
+            cx.notify();
+        }
     }
 
     /// Changes the height of a zone added with [`CodeEditor::add_view_zone`].
@@ -1476,17 +1529,44 @@ impl CodeEditor {
     ) -> WidgetId {
         let id = self.widgets.next_id();
         let anchor = self.anchor_for(widget.position, cx);
+        let secondary = widget
+            .secondary_position
+            .map(|position| self.anchor_for(position, cx));
         self.widgets.content.push(ContentWidgetState {
             id,
-            anchor,
+            anchor: Some(anchor),
+            secondary,
+            affinity: widget.position_affinity,
             preference: widget.preference,
             view: widget.view,
             allow_overflow: widget.allow_editor_overflow,
+            suppress_mouse_down: widget.suppress_mouse_down,
             layer: crate::widgets::layer::DEFAULT,
             room: Default::default(),
         });
         cx.notify();
         id
+    }
+
+    /// Re-places a content widget (Monaco `layoutContentWidget`, which
+    /// re-reads the widget's `getPosition()`): its position, secondary
+    /// position, preference and affinity. A `None` position or an empty
+    /// preference hides it until the next call.
+    pub fn layout_content_widget(
+        &mut self,
+        id: WidgetId,
+        position: crate::widgets::ContentWidgetPosition,
+        cx: &mut Context<Self>,
+    ) {
+        let anchor = position.position.map(|p| self.anchor_for(p, cx));
+        let secondary = position.secondary_position.map(|p| self.anchor_for(p, cx));
+        if let Some(widget) = self.widgets.content.iter_mut().find(|w| w.id == id) {
+            widget.anchor = anchor;
+            widget.secondary = secondary;
+            widget.preference = position.preference;
+            widget.affinity = position.position_affinity;
+            cx.notify();
+        }
     }
 
     /// Adds a view in the glyph margin beside a line (Monaco
@@ -1518,7 +1598,7 @@ impl CodeEditor {
     ) {
         let anchor = self.anchor_for(position, cx);
         if let Some(widget) = self.widgets.content.iter_mut().find(|w| w.id == id) {
-            widget.anchor = anchor;
+            widget.anchor = Some(anchor);
             cx.notify();
         }
     }
@@ -1533,12 +1613,32 @@ impl CodeEditor {
         self.widgets.overlays.push(OverlayWidgetState {
             id,
             position: widget.position,
+            stack_ordinal: widget.stack_ordinal,
+            min_content_width: widget.min_content_width,
             view: widget.view,
             allow_overflow: widget.allow_editor_overflow,
             layer: crate::widgets::layer::DEFAULT,
         });
         cx.notify();
         id
+    }
+
+    /// Moves an overlay widget (Monaco `layoutOverlayWidget`, which re-reads
+    /// the widget's position and `stackOrdinal`).
+    pub fn layout_overlay_widget(
+        &mut self,
+        id: WidgetId,
+        position: OverlayPosition,
+        stack_ordinal: Option<i32>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(widget) = self.widgets.overlays.iter_mut().find(|w| w.id == id)
+            && (widget.position, widget.stack_ordinal) != (position, stack_ordinal)
+        {
+            widget.position = position;
+            widget.stack_ordinal = stack_ordinal;
+            cx.notify();
+        }
     }
 
     /// Adds one of the editor's own content widgets that overflow it
@@ -1554,10 +1654,8 @@ impl CodeEditor {
     ) -> (WidgetId, crate::widgets::OverflowRoomCell) {
         let id = self.add_content_widget(
             ContentWidget {
-                position,
-                preference,
-                view,
                 allow_editor_overflow: true,
+                ..ContentWidget::new(position, preference, view)
             },
             cx,
         );
@@ -1576,9 +1674,8 @@ impl CodeEditor {
     ) -> WidgetId {
         let id = self.add_overlay_widget(
             OverlayWidget {
-                position,
-                view,
                 allow_editor_overflow: true,
+                ..OverlayWidget::new(position, view)
             },
             cx,
         );
@@ -1594,6 +1691,60 @@ impl CodeEditor {
                 cx.emit(CodeEditorEvent::ViewZonesChanged);
             }
             cx.notify();
+        }
+    }
+
+    /// Where each content widget (position, secondary position) and glyph
+    /// margin widget (row) is in the current model.
+    fn widget_positions(&self, cx: &App) -> WidgetPositions {
+        let buffer = self.model.read(cx).buffer();
+        let point = |anchor: &text::Anchor| buffer.offset_to_point_utf16(buffer.resolve(anchor));
+        WidgetPositions {
+            content: self
+                .widgets
+                .content
+                .iter()
+                .map(|w| {
+                    (
+                        w.anchor.as_ref().map(point),
+                        w.secondary.as_ref().map(point),
+                    )
+                })
+                .collect(),
+            glyphs: self
+                .widgets
+                .glyphs
+                .iter()
+                .map(|w| point(&w.anchor).row)
+                .collect(),
+        }
+    }
+
+    /// Anchors content and glyph margin widgets at `positions` in the new
+    /// model, clipped to it (Monaco validates widget positions against the
+    /// model it lays them out in).
+    fn reanchor_widgets(&mut self, positions: WidgetPositions, cx: &App) {
+        let content: Vec<_> = positions
+            .content
+            .into_iter()
+            .map(|(primary, secondary)| {
+                (
+                    primary.map(|p| self.anchor_for(p, cx)),
+                    secondary.map(|p| self.anchor_for(p, cx)),
+                )
+            })
+            .collect();
+        for (widget, (anchor, secondary)) in self.widgets.content.iter_mut().zip(content) {
+            widget.anchor = anchor;
+            widget.secondary = secondary;
+        }
+        let glyphs: Vec<_> = positions
+            .glyphs
+            .into_iter()
+            .map(|row| self.anchor_for(PointUtf16::new(row, 0), cx))
+            .collect();
+        for (widget, anchor) in self.widgets.glyphs.iter_mut().zip(glyphs) {
+            widget.anchor = anchor;
         }
     }
 
@@ -4026,8 +4177,9 @@ impl CodeEditor {
         cx.emit(CodeEditorEvent::MouseDown(mouse.clone()));
         self.long_lines_mouse_down(&mouse, cx);
         // Embedded views (zones and widgets) handle their own clicks and
-        // focus.
+        // focus, except those with Monaco's `suppressMouseDown`.
         if self.over_widget(event.position) {
+            self.suppressed_widget_mouse_down(&mouse, event, window, cx);
             return;
         }
         // Monaco `_onMouseDown`: the glyph margin and line decorations
@@ -4233,6 +4385,64 @@ impl CodeEditor {
         });
         self.prev_edit_kind = None;
         self.dispatch_mouse(position, event.position, event.modifiers.shift, true, cx);
+    }
+
+    /// Monaco `MouseHandler._onMouseDown` over a view zone or content widget
+    /// with `suppressMouseDown`: the editor takes focus, and on a zone a
+    /// mouse-down operation starts at the zone's position (before or after
+    /// it), as on text.
+    fn suppressed_widget_mouse_down(
+        &mut self,
+        mouse: &crate::mouse_target::EditorMouseEvent,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::mouse_target::MouseTargetDetail;
+        // Monaco `shouldHandle`: the left or middle button, not a macOS
+        // Ctrl+click.
+        let should_handle = match event.button {
+            MouseButton::Left => !(cfg!(target_os = "macos") && event.modifiers.control),
+            MouseButton::Middle => true,
+            _ => false,
+        };
+        match mouse.target.detail {
+            MouseTargetDetail::ViewZone { id: Some(id), .. }
+                if should_handle
+                    && self
+                        .widgets
+                        .zones
+                        .iter()
+                        .any(|z| z.id == id && z.suppress_mouse_down) =>
+            {
+                window.focus(&self.focus_handle, cx);
+                window.prevent_default();
+                let Some(position) = mouse.target.position else {
+                    return;
+                };
+                let count = self.count_mouse_down(event.click_count, position, cx);
+                self.mouse_selection = Some(MouseSelection {
+                    count,
+                    started_on_line_numbers: false,
+                    middle_button: event.button == MouseButton::Middle,
+                    modifiers: event.modifiers,
+                    on_injected_text: false,
+                });
+                self.prev_edit_kind = None;
+                self.dispatch_mouse(position, event.position, event.modifiers.shift, true, cx);
+            }
+            MouseTargetDetail::ContentWidget(id)
+                if self
+                    .widgets
+                    .content
+                    .iter()
+                    .any(|w| w.id == id && w.suppress_mouse_down) =>
+            {
+                window.focus(&self.focus_handle, cx);
+                window.prevent_default();
+            }
+            _ => {}
+        }
     }
 
     /// Monaco `_hasNonMulticursorModifier`: a modifier other than the one
@@ -6300,9 +6510,7 @@ impl Render for CodeEditor {
             }))
             .on_action(cx.listener(|this, _: &GoToNextReference, _, cx| {
                 // A preview editor leaves F4 to the editor around it.
-                let handled = !this.in_peek
-                    && (this.peek_select_relative(1, cx) || this.go_to_next_symbol_from_result(cx));
-                if !handled {
+                if this.in_peek || !this.peek_select_relative(1, cx) {
                     cx.propagate();
                 }
             }))

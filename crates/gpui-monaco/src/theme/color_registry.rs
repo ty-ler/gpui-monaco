@@ -404,6 +404,8 @@ static REGISTRY: &[(&str, [V; 4])] = &[
     ("list.activeSelectionForeground", [H(0xffffffff), H(0xffffffff), N, N]),
     ("list.activeSelectionIconForeground", [N, N, N, N]),
     ("list.inactiveSelectionBackground", [H(0x37373dff), H(0xe4e6f1ff), N, H(0x0f4a851a)]),
+    ("list.inactiveSelectionForeground", [N, N, N, N]),
+    ("sash.hoverBorder", [R("focusBorder"), R("focusBorder"), R("focusBorder"), R("focusBorder")]),
     ("list.hoverBackground", [H(0x2a2d2eff), H(0xf0f0f0ff), H(0xffffff1a), H(0x0f4a851a)]),
     ("list.hoverForeground", [N, N, N, N]),
     ("list.highlightForeground", [H(0x2aaaffff), H(0x0066bfff), R("focusBorder"), R("focusBorder")]),
