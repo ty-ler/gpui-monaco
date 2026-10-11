@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 
 mod buffer;
+mod indentation;
 mod line_ending;
 mod patch;
 mod point;
@@ -15,6 +16,7 @@ pub use buffer::{
     Anchor, Buffer, BufferSnapshot, EditError, Stickiness, TransactionId, TransactionMetadata,
     UndoOutcome, Version,
 };
+pub use indentation::{GuessedIndentation, guess_indentation};
 pub use line_ending::{LineEnding, normalize_line_endings};
 pub use patch::{Edit, Patch};
 pub use point::{Location, OffsetUtf16, Point, PointUtf16, Target};

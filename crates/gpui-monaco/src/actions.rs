@@ -297,6 +297,24 @@ actions!(
         /// Reindents the selected lines (Monaco
         /// `editor.action.reindentselectedlines`).
         ReindentSelectedLines,
+        /// Converts the indentation to spaces (Monaco
+        /// `editor.action.indentationToSpaces`).
+        IndentationToSpaces,
+        /// Converts the indentation to tabs (Monaco
+        /// `editor.action.indentationToTabs`).
+        IndentationToTabs,
+        /// Asks for a tab size and indents with spaces (Monaco
+        /// `editor.action.indentUsingSpaces`).
+        IndentUsingSpaces,
+        /// Asks for a tab size and indents with tabs (Monaco
+        /// `editor.action.indentUsingTabs`).
+        IndentUsingTabs,
+        /// Asks for how wide tabs show (Monaco
+        /// `editor.action.changeTabDisplaySize`).
+        ChangeTabDisplaySize,
+        /// Guesses the indentation from the text (Monaco
+        /// `editor.action.detectIndentation`).
+        DetectIndentation,
         /// Steps the number or value at the cursor up: `1` → `2`, `true` →
         /// `false` (Monaco `editor.action.inPlaceReplace.up`, Cmd/Ctrl+Shift+,).
         InPlaceReplaceUp,

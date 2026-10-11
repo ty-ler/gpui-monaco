@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Indentation detection and commands (#197):**
+  - **Detection:** a port of Monaco's `guessIndentation`, with all 40 of Monaco's guessing assertions. New models guess their indentation from their text (`ModelOptions::detect_indentation`, on by default as in standalone Monaco; `TextModel::with_options` sets creation options).
+  - **API:** `TextModel::detect_indentation` guesses again.
+  - **Commands:** `indentationToSpaces`, `indentationToTabs`, `indentUsingSpaces`, `indentUsingTabs`, `changeTabDisplaySize` (a 1–8 picker) and `detectIndentation`. They come with Monaco's conversion tests.
 - **Commands by Monaco id (#194):**
   - **`trigger`:** `CodeEditor::trigger` runs about 100 of Monaco's unlabelled commands by id, as Monaco's `trigger` does: cursor and word movement, scrolling, deletion, `undo`/`redo`, clipboard, find toggles, suggest and peek navigation, paste/drop, inline suggestions and others.
   - **Palette:** 17 labelled actions that were missing are now listed and runnable with `run_action`: `deleteInsideWord`, `actions.findWithSelection`, the next/previous selection match finds, the six `inlineSuggest.*` actions, the color picker actions, the four sticky scroll actions, and `changeAll`.
