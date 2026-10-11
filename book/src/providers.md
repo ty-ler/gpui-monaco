@@ -334,15 +334,19 @@ To accept:
 
 Alt+] and Alt+[ show the other completions, and Alt+\\ asks explicitly. Escape or moving the cursor hides it.
 
-Hovering the ghost text shows Monaco's toolbar: previous and next with a "1/3" count, Accept, Accept Word, and a "⋯" menu with Accept Line, Always Show Toolbar and the list's `commands`. With `inline_suggest.show_toolbar: Always` it stays above the ghost text instead.
+Hovering the ghost text shows Monaco's toolbar: previous and next with a "1/3" count, Accept, Accept Word, and a "⋯" menu with Accept Line, Always Show Toolbar and the list's `commands`. With `inline_suggest.show_toolbar: Always` it stays above the ghost text instead. The open menu takes the keyboard: Up, Down, Home and End move, Enter or Space runs, Escape closes it.
 
 Ghost text is colored like code (`syntax_highlighting_enabled`, faded to 70%). The toolbar's count needs all completions, so showing it asks explicitly.
 
 Providers can also:
-- hear how each completion ended through `handle_end_of_lifetime` (accepted, rejected with Escape, or ignored) and `handle_rejection`;
-- set a `group_id`, and list in `yields_to_group_ids` the groups they defer to. A provider is asked only after those groups answer, and not at all if one of them has a visible completion.
+- hear how each completion ended through `handle_end_of_lifetime` (accepted, rejected with Escape, or ignored) and `handle_rejection`, when it first showed through `handle_item_did_show` (with its text after bracket completion), and when part of it was accepted through `handle_partial_accept` (`PartialAcceptInfo`: by word, by line, or as the suggestion it extends);
+- set a `group_id`, and list in `yields_to_group_ids` the groups they defer to. A provider is asked only after those groups answer, and not at all if one of them has a visible completion. Groups listed in `excludes_group_ids` aren't asked at all;
+- set `complete_bracket_pairs` on a completion to close the brackets it opens (and drop those it closes without opening), `warning` to squiggle its ghost text and show a message above the toolbar, and `shown_command` to run a command when it first shows;
+- ask the editor to request again with `refresh_inline_completions(cx, registration, change_hint)` (Monaco's `onDidChangeInlineCompletions`): the focused editor asks that provider, passing the hint in `InlineCompletionContext::change_hint`, unless another provider's suggestion shows.
 
-The `inline_suggest` options control this; see [Options](options.md). With `suggest.preview`, the suggest widget's selected item shows as ghost text too.
+`InlineCompletionContext` also has a `request_uuid`, when the request was issued and the earliest its results show (`min_show_delay`), and whether inline edits and classic completions are wanted.
+
+The `inline_suggest` options control this; see [Options](options.md). With `suggest.preview`, the suggest widget's selected item shows as ghost text too. While the suggest widget has a selection, requests pass it (`selected_suggestion_info`), as in Monaco: a completion that extends the selected suggestion extends its preview, and accepting the suggestion keeps the rest of it. Inline edits don't show meanwhile; they come back when the widget closes. With `inline_suggest.experimental.show_on_suggest_conflict`, a visible completion shows instead of the widget's preview.
 
 ### Inline edits
 
@@ -365,7 +369,7 @@ The editor diffs `range` against `insert_text` and shows the changes where they 
 
 An inline edit shows only while no completion is visible at the cursor. It follows typing: typing its own text moves it along, and typing inside it drops it. Once other typing moves it, it shows collapsed, as a small marker, until you jump to it (or always, with `inline_suggest.edits.show_collapsed`).
 
-A pill in the gutter marks it, or points up or down while it's scrolled away. Tab jumps to it when the cursor is away from it, and accepts it once there. Escape rejects it. Clicking the pill accepts it (or jumps there when it points away), and hovering it shows a menu: Go To / Accept, Reject, Show Collapsed, the list's `commands`, and the item's `gutter_menu_link_action`. `display_name` titles the menu.
+A pill in the gutter marks it, or points up or down while it's scrolled away. Tab jumps to it when the cursor is away from it, and accepts it once there. Escape rejects it. Clicking the pill accepts it (or jumps there when it points away), and hovering it shows a menu: Go To / Accept, Reject, Show Collapsed, the list's `commands`, and the item's `gutter_menu_link_action`. `display_name` titles the menu. The pill spans the gutter, so it shows without a glyph margin (in the line numbers' space). The menu is kept inside the window and closes when the editor scrolls; clicking it gives it the keyboard (Up, Down, Home, End, Enter, Escape).
 
 `show_range` limits where any item shows: only while the cursor is in that range. Providers see in `InlineCompletionContext::include_inline_edits` whether inline edits are wanted (`inline_suggest.edits.enabled`).
 

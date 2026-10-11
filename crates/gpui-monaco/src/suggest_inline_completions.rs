@@ -475,6 +475,7 @@ mod tests {
                     selected_suggestion_info: None,
                     include_inline_edits: false,
                     include_inline_completions: true,
+                    ..Default::default()
                 },
                 cx,
             ))

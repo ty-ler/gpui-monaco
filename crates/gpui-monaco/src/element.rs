@@ -934,6 +934,13 @@ pub(crate) fn layout_segment<'a>(
                 wavy: false,
             });
         }
+        if let Some(underline) = injected_text.and_then(|text| text.underline) {
+            text_run.underline = Some(UnderlineStyle {
+                color: Some(underline.color),
+                thickness: px(1.),
+                wavy: underline.wavy,
+            });
+        }
         if style.strikethrough {
             text_run.strikethrough = Some(gpui::StrikethroughStyle {
                 thickness: px(1.),
@@ -4636,6 +4643,33 @@ fn prepaint_editor(
             }
         }
         layout.glyphs_drawn = glyphs_drawn;
+        // Widgets across the whole gutter (the inline edit indicator), over
+        // its glyphs, whenever there is a gutter (Monaco's
+        // `InlineEditsGutterIndicator` overlay).
+        let info = &layout.layout_info;
+        let gutter_width = info.decorations_left + info.decorations_width - info.glyph_margin_left;
+        if gutter_width > px(0.) {
+            for widget in &editor.widgets.gutter {
+                let row = buffer.offset_to_point(buffer.resolve(&widget.anchor)).row;
+                let Some(line) = layout
+                    .lines
+                    .iter()
+                    .find(|line| line.row == row && line.columns.start == 0)
+                else {
+                    continue;
+                };
+                embedded.push(Embedded::Glyph {
+                    view: widget.view.clone(),
+                    bounds: Bounds::new(
+                        point(
+                            layout.bounds.left() + info.glyph_margin_left,
+                            layout.line_top(line.view_line),
+                        ),
+                        size(gutter_width, layout.line_height_of(line.view_line)),
+                    ),
+                });
+            }
+        }
         // Monaco `ContentWidget._getAnchorsCoordinates`: hidden without a
         // position or preference, or when its line isn't laid out.
         for widget in &editor.widgets.content {

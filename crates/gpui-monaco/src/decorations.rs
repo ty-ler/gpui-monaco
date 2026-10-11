@@ -104,6 +104,9 @@ pub struct InjectedText {
     /// theirs with CSS; `None` fills the line's height (less 1px above and
     /// below) behind it, with 3px corners.
     pub text_box: Option<InjectedTextBox>,
+    /// An underline under the text, e.g. the squiggle under ghost text
+    /// with a warning (Monaco's `.ghost-text-decoration.warning`).
+    pub underline: Option<DecorationUnderline>,
 }
 
 /// Room around [`InjectedText`] and the shape of its background (Monaco's

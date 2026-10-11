@@ -45,9 +45,10 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
   - The command palette has no similar-command or TF-IDF suggestions (those are VS Code workbench features), and accents aren't folded when matching.
 - **Inline completions:**
   - Secondary cursors don't get it.
-  - `completeBracketPairs` isn't supported.
-  - Inline edits draw their boxes as content widgets: they don't animate, the gutter indicator needs the glyph margin, and there's no long-distance hint, cross-file edit, `hint`, `jumpToPosition` or alternative action.
-  - The suggest widget's items aren't extended by inline completions.
+  - `completeBracketPairs` tokenizes the completed line on its own, so a completion inside a multi-line comment or string isn't recognized as such.
+  - Inline edits draw their boxes as content widgets, and they don't animate.
+  - The suggest widget doesn't preselect the suggestion an inline completion extends (Monaco's `registerSelector`).
+  - `disposeInlineCompletions`, `enableForwardStability`, `userPrompt`, the model picker (`modelInfo`) and provider options aren't ported, nor the `emptyResponseInformation` telemetry option.
   - A multi-line completion inserted mid-line keeps the rest of the line after its first line, rather than moving it to the end of the ghost text.
 - **Snippets:**
   - Transform regexes run on Rust's regex engine (via JavaScript translation), so exotic JavaScript syntax may not compile.

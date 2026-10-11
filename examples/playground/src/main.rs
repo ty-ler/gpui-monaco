@@ -253,6 +253,10 @@ impl Playground {
                 Ok("mouseover") => options.show_folding_controls = ShowFoldingControls::Mouseover,
                 _ => {}
             }
+            // `PLAYGROUND_NO_GLYPH_MARGIN=1`: Monaco's `glyphMargin: false`.
+            if std::env::var_os("PLAYGROUND_NO_GLYPH_MARGIN").is_some() {
+                options.glyph_margin = false;
+            }
             // `PLAYGROUND_INLAY_PADDING=1`: Monaco's `inlayHints.padding`.
             if std::env::var_os("PLAYGROUND_INLAY_PADDING").is_some() {
                 options.inlay_hints.padding = true;

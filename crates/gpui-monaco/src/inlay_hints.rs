@@ -667,6 +667,7 @@ impl CodeEditor {
                                 padding_y,
                                 corner_radius: (edge(first, radius), edge(last, radius)),
                             }),
+                            underline: None,
                         }),
                         ..Default::default()
                     },

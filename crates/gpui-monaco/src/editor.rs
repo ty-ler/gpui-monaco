@@ -1589,6 +1589,28 @@ impl CodeEditor {
         id
     }
 
+    /// Adds a view across the whole gutter beside `row` (see
+    /// `Widgets::gutter`), laid out the gutter's width and the line's
+    /// height.
+    pub(crate) fn add_gutter_widget(
+        &mut self,
+        row: u32,
+        view: gpui::AnyView,
+        cx: &mut Context<Self>,
+    ) -> WidgetId {
+        let id = self.widgets.next_id();
+        let anchor = self.anchor_for(PointUtf16::new(row, 0), cx);
+        self.widgets.gutter.push(crate::widgets::GlyphWidgetState {
+            id,
+            anchor,
+            view,
+            lane: Default::default(),
+            z_index: 0,
+        });
+        cx.notify();
+        id
+    }
+
     /// Moves a content widget (Monaco `layoutContentWidget`).
     pub fn set_content_widget_position(
         &mut self,
@@ -1717,10 +1739,16 @@ impl CodeEditor {
                 .iter()
                 .map(|w| point(&w.anchor).row)
                 .collect(),
+            gutter: self
+                .widgets
+                .gutter
+                .iter()
+                .map(|w| point(&w.anchor).row)
+                .collect(),
         }
     }
 
-    /// Anchors content and glyph margin widgets at `positions` in the new
+    /// Anchors content, glyph margin and gutter widgets at `positions` in the new
     /// model, clipped to it (Monaco validates widget positions against the
     /// model it lays them out in).
     fn reanchor_widgets(&mut self, positions: WidgetPositions, cx: &App) {
@@ -1744,6 +1772,14 @@ impl CodeEditor {
             .map(|row| self.anchor_for(PointUtf16::new(row, 0), cx))
             .collect();
         for (widget, anchor) in self.widgets.glyphs.iter_mut().zip(glyphs) {
+            widget.anchor = anchor;
+        }
+        let gutter: Vec<_> = positions
+            .gutter
+            .into_iter()
+            .map(|row| self.anchor_for(PointUtf16::new(row, 0), cx))
+            .collect();
+        for (widget, anchor) in self.widgets.gutter.iter_mut().zip(gutter) {
             widget.anchor = anchor;
         }
     }
