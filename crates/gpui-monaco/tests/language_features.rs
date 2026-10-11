@@ -54,6 +54,7 @@ impl HoverProvider for StaticHover {
         Task::ready(Ok(Some(Hover {
             contents: vec![format!("**{}**", word.trim()).into()],
             range: None,
+            ..Default::default()
         })))
     }
 }

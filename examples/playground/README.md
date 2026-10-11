@@ -23,7 +23,7 @@ The status bar shows the cursor position, selection count, language, line ending
 
 Demo providers are registered by default:
 
-- hover on `Edit` / `Patch`
+- hover on `Edit` / `Patch`, with + and − for more or less detail
 - completions (`Ctrl+Space`; press it again for details) with docs, label details, a deprecated item, one resolved lazily, and two snippets (`for` with tab stops, `derive` with a choice)
 - signature help inside `(`
 - go to definition (`F12` / Cmd+click)

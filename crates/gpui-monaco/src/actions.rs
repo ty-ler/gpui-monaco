@@ -621,6 +621,16 @@ actions!(
         /// Scrolls the focused hover to the bottom (Monaco
         /// `editor.action.goToBottomHover`, End or Cmd/Ctrl+Down).
         GoToBottomHover,
+        /// Asks the focused (else first) hover part's provider for more
+        /// detail (Monaco `editor.action.increaseHoverVerbosityLevel`).
+        IncreaseHoverVerbosityLevel,
+        /// Asks the focused (else first) hover part's provider for less
+        /// detail (Monaco `editor.action.decreaseHoverVerbosityLevel`).
+        DecreaseHoverVerbosityLevel,
+        /// Turns off long line warning hovers (Monaco
+        /// `editor.action.hideLongLineWarningHover`, the warning's "Don't
+        /// Show Again").
+        HideLongLineWarningHover,
         /// Opens the link at the cursor (Monaco `editor.action.openLink`).
         OpenLink,
         /// Opens quick access to go to a line (Monaco `editor.action.gotoLine`).

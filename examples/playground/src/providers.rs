@@ -27,20 +27,46 @@ impl HoverProvider for DemoHover {
         &self,
         context: &ProviderContext,
         position: PointUtf16,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Option<Hover>>> {
+        self.provide_hover_with_context(context, position, &HoverContext::default(), cx)
+    }
+
+    /// Three levels of detail, for the hover's + and − controls.
+    fn provide_hover_with_context(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        hover_context: &HoverContext,
         _: &mut App,
     ) -> Task<anyhow::Result<Option<Hover>>> {
         let word = word_at(context, position);
         if word.is_empty() {
             return Task::ready(Ok(None));
         }
-        let contents = vec![
+        let level = hover_context
+            .verbosity_request
+            .as_ref()
+            .map_or(0, |request| {
+                let previous = request.previous_hover.contents.len() as i32 - 2;
+                (previous + request.verbosity_delta).clamp(0, 2)
+            });
+        let mut contents = vec![
             format!("```rust\nfn {word}(&self) -> usize\n```").into(),
             format!("Documentation for **{word}**, rendered as *markdown* with `inline code`.")
                 .into(),
         ];
+        if level >= 1 {
+            contents.push(format!("More detail about `{word}`: it returns a count.").into());
+        }
+        if level >= 2 {
+            contents.push("Even more: the count is never negative.".into());
+        }
         Task::ready(Ok(Some(Hover {
             contents,
             range: None,
+            can_increase_verbosity: level < 2,
+            can_decrease_verbosity: level > 0,
         })))
     }
 }

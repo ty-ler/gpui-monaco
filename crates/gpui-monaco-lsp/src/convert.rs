@@ -86,6 +86,7 @@ pub fn hover(hover: lsp::Hover) -> Hover {
             .filter(|c| !c.0.trim().is_empty())
             .collect(),
         range: hover.range.map(range),
+        ..Default::default()
     }
 }
 

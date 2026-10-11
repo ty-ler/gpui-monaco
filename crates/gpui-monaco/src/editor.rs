@@ -752,6 +752,11 @@ impl CodeEditor {
         buffer.anchor_before(buffer.point_utf16_to_offset(position))
     }
 
+    /// The editor's size at its last layout.
+    pub(crate) fn layout_size(&self) -> Option<gpui::Size<Pixels>> {
+        Some(self.layout.as_ref()?.bounds.size)
+    }
+
     /// Window position of the top-left of `point`'s character, if it's laid
     /// out (Monaco `getScrolledVisiblePosition`).
     pub fn scrolled_visible_position(&self, point: PointUtf16) -> Option<Point<Pixels>> {
@@ -3725,6 +3730,15 @@ impl Render for CodeEditor {
                 cx.listener(|this, _: &ShowHover, window, cx| this.show_or_focus_hover(window, cx)),
             )
             .on_action(cx.listener(|this, _: &HideHover, _, cx| this.hide_hover(cx)))
+            .on_action(cx.listener(|this, _: &IncreaseHoverVerbosityLevel, _, cx| {
+                this.update_hover_verbosity_level(true, None, cx)
+            }))
+            .on_action(cx.listener(|this, _: &DecreaseHoverVerbosityLevel, _, cx| {
+                this.update_hover_verbosity_level(false, None, cx)
+            }))
+            .on_action(cx.listener(|this, _: &HideLongLineWarningHover, _, cx| {
+                this.hide_long_line_warning_hover(cx)
+            }))
             .on_action(cx.listener(|this, _: &OpenLink, _, cx| this.open_link(cx)))
             .on_action(cx.listener(|this, _: &GotoLine, window, cx| {
                 if this.options.single_line {

@@ -486,6 +486,10 @@ pub struct HoverOptions {
     pub hiding_delay: std::time::Duration,
     /// Prefer showing the hover above the line (default `true`).
     pub above: bool,
+    /// Show long line warning hovers, when rendering stops
+    /// (`stop_rendering_line_after`) or tokenization is skipped
+    /// (`max_tokenization_line_length`) (default `true`).
+    pub show_long_line_warning: bool,
 }
 
 impl Default for HoverOptions {
@@ -496,6 +500,7 @@ impl Default for HoverOptions {
             sticky: true,
             hiding_delay: std::time::Duration::from_millis(300),
             above: true,
+            show_long_line_warning: true,
         }
     }
 }
