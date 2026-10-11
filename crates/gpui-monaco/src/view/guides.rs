@@ -4,7 +4,7 @@
 //! `_getIndentLevelForWhitespaceLine` from Monaco's
 //! `src/vs/editor/common/model/guidesTextModelPart.ts`, and the whitespace
 //! selection of `_applyRenderWhitespace` in
-//! `common/viewLayout/viewLineRenderer.ts` (MIT). Rows are 0-based.
+//! `browser/viewParts/whitespace/whitespace.ts` (MIT). Rows are 0-based.
 
 use std::ops::Range;
 
@@ -185,51 +185,87 @@ pub fn active_indent_guide(
     }
 }
 
-/// The UTF-16 columns of `line` whose whitespace is drawn (Monaco
-/// `_applyRenderWhitespace`). `selections` are the selected column ranges on
-/// the line, for [`RenderWhitespace::Selection`].
+/// The UTF-16 columns of a view line whose whitespace is drawn (Monaco
+/// `WhitespaceOverlay._applyRenderWhitespace` in
+/// `browser/viewParts/whitespace/whitespace.ts`). `segment` is the text the
+/// view line shows, starting at model column `start_column`, after
+/// `faux_indent` columns of wrapped-line indentation;
+/// `continues_with_wrapped_line` says the model line goes on on the next
+/// view line. `selections` are the selected model column ranges on the line,
+/// for [`RenderWhitespace::Selection`]. Returns model columns.
+///
+/// With [`RenderWhitespace::Boundary`], a single space between other
+/// characters isn't drawn: Monaco looks only for a space on either side, so
+/// the space in `"a\t b"` isn't drawn but the tab is.
 pub fn whitespace_columns(
-    line: &str,
+    segment: &str,
+    start_column: u32,
+    faux_indent: u32,
+    continues_with_wrapped_line: bool,
     mode: RenderWhitespace,
     selections: &[Range<u32>],
 ) -> Vec<u32> {
-    if mode == RenderWhitespace::None {
+    let space = b' ' as u16;
+    let tab = b'\t' as u16;
+    if mode == RenderWhitespace::None
+        || (mode == RenderWhitespace::Trailing && continues_with_wrapped_line)
+    {
         return Vec::new();
     }
-    let units: Vec<u16> = line.encode_utf16().collect();
-    let is_space = |c: u16| c == b' ' as u16 || c == b'\t' as u16;
-    let first = units.iter().position(|&c| !is_space(c));
-    let last = units.iter().rposition(|&c| !is_space(c));
-    let (first, last, blank) = match (first, last) {
-        (Some(first), Some(last)) => (first, last, false),
-        _ => (units.len(), units.len(), true),
+    let faux = faux_indent as usize;
+    let content: Vec<u16> = std::iter::repeat_n(space, faux)
+        .chain(segment.encode_utf16())
+        .collect();
+    let model_column = |ix: usize| start_column + (ix - faux) as u32;
+    let selected = |ix: usize| {
+        let column = model_column(ix);
+        selections
+            .iter()
+            .any(|r| r.start <= column && column < r.end)
     };
-    let mut result = Vec::new();
-    let mut was_whitespace = false;
-    for (i, &c) in units.iter().enumerate() {
-        let mut whitespace = if i < first || i > last || c == b'\t' as u16 {
-            is_space(c)
-        } else if c == b' ' as u16 {
-            if mode == RenderWhitespace::Boundary {
-                was_whitespace || units.get(i + 1).is_some_and(|&n| is_space(n))
-            } else {
-                true
-            }
-        } else {
-            false
-        };
-        if whitespace && mode == RenderWhitespace::Selection {
-            whitespace = selections
+    if mode == RenderWhitespace::Selection && !(faux..content.len()).any(selected) {
+        return Vec::new();
+    }
+    let len = content.len();
+    let is_whitespace = |c: u16| c == space || c == tab;
+    let (first, last, empty_or_whitespace) = match content.iter().position(|&c| !is_whitespace(c)) {
+        Some(first) => (
+            first,
+            content
                 .iter()
-                .any(|r| r.start <= i as u32 && (i as u32) < r.end);
+                .rposition(|&c| !is_whitespace(c))
+                .unwrap_or(first),
+            false,
+        ),
+        None => (len, len, true),
+    };
+    let only_boundary = mode == RenderWhitespace::Boundary;
+    let at = |ix: Option<usize>| ix.and_then(|ix| content.get(ix)).copied();
+    let mut result = Vec::new();
+    for (ix, &c) in content.iter().enumerate().skip(faux) {
+        if !is_whitespace(c) {
+            continue;
         }
-        if whitespace && mode == RenderWhitespace::Trailing {
-            whitespace = blank || i > last;
+        if mode == RenderWhitespace::Trailing && !empty_or_whitespace && ix <= last {
+            continue;
         }
-        if whitespace {
-            result.push(i as u32);
+        if only_boundary && ix >= first && ix <= last && c == space {
+            let prev = at(ix.checked_sub(1));
+            let next = at(Some(ix + 1));
+            if prev != Some(space) && next != Some(space) {
+                continue;
+            }
         }
-        was_whitespace = whitespace;
+        if only_boundary && continues_with_wrapped_line && ix == len - 1 {
+            let prev = at(ix.checked_sub(1));
+            if c == space && prev != Some(space) && prev != Some(tab) {
+                continue;
+            }
+        }
+        if mode == RenderWhitespace::Selection && !selected(ix) {
+            continue;
+        }
+        result.push(model_column(ix));
     }
     result
 }
@@ -636,29 +672,87 @@ mod tests {
 
     #[test]
     fn whitespace_modes() {
+        let ws = |line: &str, mode, selections: &[Range<u32>]| {
+            whitespace_columns(line, 0, 0, false, mode, selections)
+        };
         let line = "  a b  c\t ";
         assert_eq!(
-            whitespace_columns(line, RenderWhitespace::All, &[]),
+            ws(line, RenderWhitespace::All, &[]),
             vec![0, 1, 3, 5, 6, 8, 9]
         );
         // Single spaces between words aren't boundary whitespace.
         assert_eq!(
-            whitespace_columns(line, RenderWhitespace::Boundary, &[]),
+            ws(line, RenderWhitespace::Boundary, &[]),
             vec![0, 1, 5, 6, 8, 9]
         );
+        assert_eq!(ws(line, RenderWhitespace::Trailing, &[]), vec![8, 9]);
         assert_eq!(
-            whitespace_columns(line, RenderWhitespace::Trailing, &[]),
-            vec![8, 9]
-        );
-        assert_eq!(
-            whitespace_columns(line, RenderWhitespace::Selection, &[2..4, 5..6]),
+            ws(line, RenderWhitespace::Selection, &[2..4, 5..6]),
             vec![3, 5]
         );
-        assert!(whitespace_columns(line, RenderWhitespace::None, &[]).is_empty());
+        assert!(ws(line, RenderWhitespace::Selection, &[]).is_empty());
+        assert!(ws(line, RenderWhitespace::None, &[]).is_empty());
         // A whitespace-only line is all trailing.
+        assert_eq!(ws("   ", RenderWhitespace::Trailing, &[]), vec![0, 1, 2]);
+    }
+
+    /// Monaco `whitespace.ts`: the boundary rule looks for spaces only, so a
+    /// tab next to a single space doesn't make it boundary whitespace.
+    #[test]
+    fn boundary_whitespace_next_to_tabs() {
+        let ws =
+            |line: &str| whitespace_columns(line, 0, 0, false, RenderWhitespace::Boundary, &[]);
+        assert_eq!(ws("a\t b"), vec![1]);
+        assert_eq!(ws("a \tb"), vec![2]);
+        assert_eq!(ws("a  \tb"), vec![1, 2, 3]);
+    }
+
+    /// Ported from Monaco's `viewLineRenderer.test.ts` `renderWhitespace`
+    /// cases (`ws-middle`, `ws-all-middle`, `ws-mixed`, `ws-faux-indent`,
+    /// `ws-trail-*`), as the columns each draws.
+    #[test]
+    fn monaco_render_whitespace_cases() {
+        let ws = |line: &str, faux: u32, mode| whitespace_columns(line, 0, faux, false, mode, &[]);
+        // ws-middle: one space between words isn't boundary whitespace.
         assert_eq!(
-            whitespace_columns("   ", RenderWhitespace::Trailing, &[]),
-            vec![0, 1, 2]
+            ws("it  it it  it", 0, RenderWhitespace::Boundary),
+            vec![2, 3, 9, 10]
+        );
+        assert_eq!(
+            ws(" Hello world!\t", 0, RenderWhitespace::All),
+            vec![0, 6, 13]
+        );
+        // ws-mixed: every leading and trailing space and tab, and the
+        // double space inside.
+        let mixed = "  \t\t  Hello world! \t  \t   \t    ";
+        let expected: Vec<u32> = (0..6).chain(18..31).collect();
+        assert_eq!(ws(mixed, 0, RenderWhitespace::Boundary), expected);
+        // ws-faux-indent: the wrapped line's indentation isn't drawn; its
+        // columns start after it.
+        let wrapped = "  Hello world! \t  \t   \t    ";
+        let columns = whitespace_columns(wrapped, 6, 2, false, RenderWhitespace::Boundary, &[]);
+        assert_eq!(
+            columns,
+            [0, 1]
+                .into_iter()
+                .chain(14..27)
+                .map(|c| c + 6)
+                .collect::<Vec<u32>>()
+        );
+        // ws-trail-with-trail and ws-trail-only.
+        assert_eq!(
+            ws(" Hello world! \t", 0, RenderWhitespace::Trailing),
+            vec![13, 14]
+        );
+        assert_eq!(ws(" \t ", 0, RenderWhitespace::Trailing), vec![0, 1, 2]);
+        // A segment that continues on the next view line has no trailing
+        // whitespace, and its single space at the wrap isn't boundary
+        // whitespace.
+        assert!(whitespace_columns("ab ", 0, 0, true, RenderWhitespace::Trailing, &[]).is_empty());
+        assert!(whitespace_columns("ab ", 0, 0, true, RenderWhitespace::Boundary, &[]).is_empty());
+        assert_eq!(
+            whitespace_columns("ab  ", 0, 0, true, RenderWhitespace::Boundary, &[]),
+            vec![2, 3]
         );
     }
 }

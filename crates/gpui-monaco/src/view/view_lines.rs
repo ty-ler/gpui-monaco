@@ -401,6 +401,37 @@ impl ViewLines {
         PointUtf16::new(view_line.row, column)
     }
 
+    /// The largest view column on view line `line` (Monaco
+    /// `getLineMaxColumn` on the view model): its continuation indentation
+    /// plus the columns it shows. The end of a wrapped segment is the same
+    /// model position as the start of the next.
+    pub fn line_max_column(&self, line: u32) -> u32 {
+        let info = self.segment_info(self.view_line(line));
+        info.indent + info.columns.len() as u32
+    }
+
+    /// Monaco `ModelLineProjectionData.normalizeOutputPosition` for view
+    /// position `point` (view line, view column): with `right` affinity the
+    /// end of a wrapped segment becomes the start of the next (after its
+    /// indentation); otherwise the start of a continuation segment becomes
+    /// the end of the previous one. Both name the same model position.
+    pub fn normalize_view_position(&self, point: PointUtf16, right: bool) -> PointUtf16 {
+        let line = self.view_line(point.row);
+        let info = self.segment_info(line);
+        if right {
+            if !info.is_last && point.column >= info.indent + info.columns.len() as u32 {
+                let next = self.segment_info(ViewLine {
+                    row: line.row,
+                    segment: line.segment + 1,
+                });
+                return PointUtf16::new(point.row + 1, next.indent);
+            }
+        } else if line.segment > 0 && point.column <= info.indent {
+            return PointUtf16::new(point.row - 1, self.line_max_column(point.row - 1));
+        }
+        point
+    }
+
     /// View line content, with continuation indentation as spaces.
     pub fn line_content(&self, line: u32) -> String {
         let view_line = self.view_line(line);

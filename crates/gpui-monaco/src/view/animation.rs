@@ -91,6 +91,52 @@ pub fn cursor_appearance(style: CursorBlinking, elapsed: Duration) -> (f32, f32)
     }
 }
 
+/// The keyframes' changing part of an iteration, as progress `from..to`.
+fn keyframe_range(style: CursorBlinking) -> Option<(f32, f32)> {
+    match style {
+        CursorBlinking::Smooth => Some((0.2, 0.6)),
+        CursorBlinking::Phase => Some((0.2, 0.9)),
+        CursorBlinking::Expand => Some((0.2, 0.8)),
+        CursorBlinking::Blink | CursorBlinking::Solid => None,
+    }
+}
+
+/// How long after `elapsed` the cursor's appearance next changes, for an
+/// animated blinking style: a frame while the keyframes ease, else the wait
+/// until they do again (their 0-20% and end ranges hold the opacity, so
+/// nothing needs repainting there); `None` once the animation is over.
+/// Monaco's CSS animation runs on the compositor; this keeps the repaints
+/// it costs here to the frames that change.
+pub fn cursor_repaint_delay(style: CursorBlinking, elapsed: Duration) -> Option<Duration> {
+    const FRAME: Duration = Duration::from_millis(16);
+    let (from, to) = keyframe_range(style)?;
+    if elapsed >= BLINK_ANIMATION_END {
+        return None;
+    }
+    let interval = BLINK_INTERVAL.as_secs_f32();
+    if elapsed < BLINK_INTERVAL {
+        return Some(BLINK_INTERVAL - elapsed + Duration::from_secs_f32(from * interval) + FRAME);
+    }
+    let t = (elapsed - BLINK_INTERVAL).as_secs_f32() / interval;
+    let u = t.fract();
+    // The changing part of this iteration in its own time (`alternate` runs
+    // odd iterations backwards), and where the next one starts.
+    let (start, end, next) = if (t.floor() as u32).is_multiple_of(2) {
+        (from, to, 1. + (1. - to))
+    } else {
+        (1. - to, 1. - from, 1. + from)
+    };
+    let wait = if u < start {
+        start - u
+    } else if u < end {
+        return Some(FRAME);
+    } else {
+        next - u
+    };
+    // One frame into the change, so it's under way when painted.
+    Some(Duration::from_secs_f32(wait * interval) + FRAME)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Transition<T> {
     from: T,
@@ -109,9 +155,8 @@ pub(crate) struct ViewAnimation {
     scroll: Option<Transition<Point<Pixels>>>,
     /// The scroll position last shown.
     shown_scroll: Option<Point<Pixels>>,
-    caret: Option<Transition<Bounds<Pixels>>>,
-    /// The primary cursor's last target, in content coordinates.
-    caret_target: Option<Bounds<Pixels>>,
+    /// Each cursor's smooth caret move, primary first.
+    carets: Vec<Caret>,
     /// The next caret move jumps (Monaco pauses the transition when the
     /// cursor count changes, or for non-explicit moves with `explicit`).
     pub caret_jump: bool,
@@ -132,8 +177,7 @@ impl Default for ViewAnimation {
             smooth_scroll_requested: false,
             scroll: None,
             shown_scroll: None,
-            caret: None,
-            caret_target: None,
+            carets: Vec::new(),
             caret_jump: false,
             cursor_count: 1,
             middle_scroll: None,
@@ -212,38 +256,74 @@ impl ViewAnimation {
         Some(point(lerp(s.from.x, s.to.x, t), lerp(s.from.y, s.to.y, t)))
     }
 
-    /// The primary cursor's bounds to show for `target` (content
-    /// coordinates), sliding there over Monaco's 80ms when `enabled`;
-    /// `true` while animating.
-    pub fn caret(&mut self, target: Bounds<Pixels>, enabled: bool) -> (Bounds<Pixels>, bool) {
+    /// The bounds to show for each cursor's `targets` (content
+    /// coordinates; `None` off screen), each sliding there over Monaco's
+    /// 80ms when `enabled` (every cursor element has the CSS transition);
+    /// `true` while any is animating.
+    pub fn carets(
+        &mut self,
+        targets: &[Option<Bounds<Pixels>>],
+        enabled: bool,
+    ) -> (Vec<Option<Bounds<Pixels>>>, bool) {
         let now = Instant::now();
         let jump = std::mem::take(&mut self.caret_jump);
-        if !enabled {
-            self.caret = None;
-            self.caret_target = Some(target);
-            return (target, false);
-        }
-        if self.caret_target != Some(target) {
-            let shown = self.current_caret(now).or(self.caret_target);
-            self.caret = match shown {
-                Some(from) if !jump => Some(Transition {
-                    from,
-                    to: target,
-                    start: now,
-                }),
-                _ => None,
-            };
-            self.caret_target = Some(target);
-        }
-        let shown = self.current_caret(now).unwrap_or(target);
-        if self.caret.is_some_and(|c| now - c.start >= CARET_DURATION) {
-            self.caret = None;
-        }
-        (shown, self.caret.is_some())
+        self.carets.resize(targets.len(), Caret::default());
+        let mut animating = false;
+        let shown = targets
+            .iter()
+            .zip(&mut self.carets)
+            .map(|(target, caret)| {
+                let Some(target) = *target else {
+                    // Monaco hides an off-screen cursor (`display: none`),
+                    // which doesn't transition when it's back.
+                    *caret = Caret::default();
+                    return None;
+                };
+                if !enabled {
+                    *caret = Caret {
+                        transition: None,
+                        target: Some(target),
+                    };
+                    return Some(target);
+                }
+                if caret.target != Some(target) {
+                    let shown = caret.current(now).or(caret.target);
+                    caret.transition = match shown {
+                        Some(from) if !jump => Some(Transition {
+                            from,
+                            to: target,
+                            start: now,
+                        }),
+                        _ => None,
+                    };
+                    caret.target = Some(target);
+                }
+                let shown = caret.current(now).unwrap_or(target);
+                if caret
+                    .transition
+                    .is_some_and(|c| now - c.start >= CARET_DURATION)
+                {
+                    caret.transition = None;
+                }
+                animating |= caret.transition.is_some();
+                Some(shown)
+            })
+            .collect();
+        (shown, animating)
     }
+}
 
-    fn current_caret(&self, now: Instant) -> Option<Bounds<Pixels>> {
-        let c = self.caret?;
+/// One cursor's `cursorSmoothCaretAnimation` state.
+#[derive(Clone, Copy, Debug, Default)]
+struct Caret {
+    transition: Option<Transition<Bounds<Pixels>>>,
+    /// Its last target, in content coordinates.
+    target: Option<Bounds<Pixels>>,
+}
+
+impl Caret {
+    fn current(&self, now: Instant) -> Option<Bounds<Pixels>> {
+        let c = self.transition?;
         let t = ease((now - c.start).as_secs_f32() / CARET_DURATION.as_secs_f32());
         Some(Bounds::new(
             point(
@@ -453,25 +533,6 @@ impl InertialScroll {
     }
 }
 
-/// Monaco's selection corner rounding (`roundedSelection`): which corners
-/// of a line's selection rectangle are outer corners, given the rows
-/// above and below as `(left, right)`.
-pub fn rounded_corners(
-    current: (Pixels, Pixels),
-    above: Option<(Pixels, Pixels)>,
-    below: Option<(Pixels, Pixels)>,
-) -> [bool; 4] {
-    let (left, right) = current;
-    let eps = px(0.5);
-    // top-left, top-right, bottom-right, bottom-left
-    [
-        above.is_none_or(|(l, r)| l > left + eps || r < left),
-        above.is_none_or(|(_, r)| r < right - eps),
-        below.is_none_or(|(_, r)| r < right - eps),
-        below.is_none_or(|(l, r)| l > left + eps || r < left),
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,6 +575,44 @@ mod tests {
         assert_eq!(expand, (1., 0.));
         // Done after 20 iterations.
         assert_eq!(at(11_000), (1., 1.));
+    }
+
+    #[test]
+    fn blink_repaints_only_while_changing() {
+        let delay = |ms: u64| {
+            cursor_repaint_delay(CursorBlinking::Smooth, Duration::from_millis(ms))
+                .map(|d| (d.as_secs_f64() * 1000.).round() as u64)
+        };
+        // Solid until the first change at 20% of the first iteration.
+        assert_eq!(delay(0), Some(500 + 100 + 16));
+        // Easing out: every frame.
+        assert_eq!(delay(500 + 150), Some(16));
+        // Hidden from 60%: wait for the second (reversed) iteration's
+        // change at its 40%.
+        assert_eq!(delay(500 + 400), Some(100 + 200 + 16));
+        assert_eq!(delay(1000 + 250), Some(16));
+        // Shown again from its 80%: wait for the third iteration's 20%.
+        assert_eq!(delay(1000 + 450), Some(50 + 100 + 16));
+        assert_eq!(delay(11_000), None);
+        // Blink and solid don't animate.
+        assert_eq!(
+            cursor_repaint_delay(CursorBlinking::Blink, Duration::ZERO),
+            None
+        );
+        // The frames it skips don't change the appearance.
+        for ms in (0..11_000).step_by(5) {
+            let now = Duration::from_millis(ms);
+            if let Some(wait) = cursor_repaint_delay(CursorBlinking::Smooth, now)
+                && wait > Duration::from_millis(16)
+            {
+                let later = now + wait - Duration::from_millis(17);
+                assert_eq!(
+                    cursor_appearance(CursorBlinking::Smooth, now),
+                    cursor_appearance(CursorBlinking::Smooth, later),
+                    "at {ms}ms"
+                );
+            }
+        }
     }
 
     #[test]
@@ -577,17 +676,5 @@ mod tests {
         fade.scrolled_at = Some(Instant::now() - Duration::from_millis(600));
         let (opacity, fading, interactive) = fade.update(MinimapAutohide::Scroll, false);
         assert!(opacity > 0. && fading && !interactive);
-    }
-
-    #[test]
-    fn selection_corners() {
-        let px2 = |a: f32, b: f32| (px(a), px(b));
-        // A single line: all round.
-        assert_eq!(rounded_corners(px2(0., 10.), None, None), [true; 4]);
-        // A middle line sticking out past the one above on both sides.
-        assert_eq!(
-            rounded_corners(px2(0., 20.), Some(px2(5., 10.)), Some(px2(0., 20.))),
-            [true, true, false, false]
-        );
     }
 }

@@ -340,6 +340,9 @@ pub struct CodeEditor {
     pub(crate) snapshot: BufferSnapshot,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) cursors: CursorCollection,
+    /// The cursors' view states from the last view-based move or click
+    /// (Monaco `CursorState.viewState`); see [`Self::cursor_view_states`].
+    cursor_views: Option<CursorViewStates>,
     /// The options with the font zoom applied; what rendering reads.
     pub(crate) options: EditorOptions,
     /// The options as the host set them.
@@ -637,6 +640,7 @@ impl CodeEditor {
             snapshot: snapshot.clone(),
             focus_handle,
             cursors: CursorCollection::new(SingleCursorState::from_position(PointUtf16::zero())),
+            cursor_views: None,
             options: crate::font_zoom::zoomed_options(
                 &EditorOptions::default(),
                 crate::font_zoom::editor_zoom_level(cx),
@@ -1424,6 +1428,16 @@ impl CodeEditor {
             .map_or_else(|| (Vec::new(), false), |l| l.cursors.clone())
     }
 
+    /// Each cursor's (view line, view column), Monaco's
+    /// `CursorState.viewState.position`, for tests.
+    #[doc(hidden)]
+    pub fn cursor_view_positions_for_tests(&self) -> Vec<(u32, u32)> {
+        self.cursor_view_positions()
+            .into_iter()
+            .map(|p| (p.row, p.column))
+            .collect()
+    }
+
     /// The (row, UTF-16 columns) of each view line laid out in the last
     /// frame, for tests.
     #[doc(hidden)]
@@ -1800,6 +1814,16 @@ impl CodeEditor {
             let kept = self.cursors.all()[..limit].to_vec();
             self.cursors.set_states(kept);
         }
+        // Cursors set from model positions (edits, `set_selections`, ...)
+        // get their view positions from the model again, as Monaco's
+        // `CursorState.fromModelState`.
+        if self
+            .cursor_views
+            .as_ref()
+            .is_some_and(|views| views.model.as_slice() != self.cursors.all())
+        {
+            self.cursor_views = None;
+        }
         if autoscroll {
             self.autoscroll_requested = true;
             self.autoscroll_from_mouse =
@@ -1868,14 +1892,15 @@ impl CodeEditor {
             CursorBlinking::Blink => {}
             _ => {
                 // The CSS animations start after one blink interval and
-                // run 20 half-second iterations; repaint while they run.
+                // run 20 half-second iterations; repaint while they change
+                // the cursor (Monaco's run on the compositor).
+                let style = self.cursor_blinking();
                 self._blink_task = Some(cx.spawn(async move |this, cx| {
-                    let end = crate::view::animation::BLINK_ANIMATION_END;
                     let start = web_time::Instant::now();
-                    while start.elapsed() < end {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(16))
-                            .await;
+                    while let Some(delay) =
+                        crate::view::animation::cursor_repaint_delay(style, start.elapsed())
+                    {
+                        cx.background_executor().timer(delay).await;
                         let keep_going = this
                             .update(cx, |this, cx| {
                                 cx.notify();
@@ -1910,6 +1935,92 @@ impl CodeEditor {
                 }
             }
         }));
+    }
+
+    /// Each cursor's state in view coordinates (view line, view column;
+    /// Monaco `CursorState.viewState`): the view state the last view-based
+    /// move or click left, while it still maps to the cursor's model
+    /// position (Monaco `validateViewPosition`), else the model position's
+    /// view position. At a wrap point the two differ: End leaves the caret
+    /// at the end of the first segment, where the model position would put
+    /// it at the start of the next.
+    pub(crate) fn cursor_view_states(&self) -> Vec<SingleCursorState> {
+        let lines = &self.view_lines;
+        let cached = self
+            .cursor_views
+            .as_ref()
+            .filter(|views| views.model.as_slice() == self.cursors.all());
+        let validate = |view: Option<PointUtf16>, model: PointUtf16| match view {
+            Some(view) if lines.to_model(view.row, view.column) == model => view,
+            _ => {
+                let (line, column) = lines.to_view(model, false);
+                PointUtf16::new(line, column)
+            }
+        };
+        self.cursors
+            .all()
+            .iter()
+            .enumerate()
+            .map(|(ix, state)| {
+                let view = cached.map(|views| &views.view[ix]);
+                SingleCursorState {
+                    selection_start: validate(
+                        view.map(|v| v.selection_start.start),
+                        state.selection_start.start,
+                    )
+                        ..validate(
+                            view.map(|v| v.selection_start.end),
+                            state.selection_start.end,
+                        ),
+                    position: validate(view.map(|v| v.position), state.position),
+                    ..state.clone()
+                }
+            })
+            .collect()
+    }
+
+    /// Records the cursors' view states after setting their model states
+    /// (Monaco `Cursor._setState` with a view state); `None`s take the
+    /// model position's. Dropped if the cursors merged.
+    pub(crate) fn set_cursor_view_states(&mut self, views: Vec<Option<SingleCursorState>>) {
+        if views.len() != self.cursors.all().len() || views.iter().all(Option::is_none) {
+            self.cursor_views = None;
+            return;
+        }
+        let lines = &self.view_lines;
+        let to_view = |p: PointUtf16| {
+            let (line, column) = lines.to_view(p, false);
+            PointUtf16::new(line, column)
+        };
+        let view = views
+            .into_iter()
+            .zip(self.cursors.all())
+            .map(|(view, model)| view.unwrap_or_else(|| map_state(model, to_view)))
+            .collect();
+        self.cursor_views = Some(CursorViewStates {
+            model: self.cursors.all().to_vec(),
+            view,
+        });
+    }
+
+    /// The view position of the cursors' heads (view line, view column).
+    pub(crate) fn cursor_view_positions(&self) -> Vec<PointUtf16> {
+        if self.cursor_views.is_none() {
+            // The common case: straight from the model.
+            return self
+                .cursors
+                .all()
+                .iter()
+                .map(|state| {
+                    let (line, column) = self.view_lines.to_view(state.position, false);
+                    PointUtf16::new(line, column)
+                })
+                .collect();
+        }
+        self.cursor_view_states()
+            .into_iter()
+            .map(|state| state.position)
+            .collect()
     }
 
     // ----- navigation ---------------------------------------------------------
@@ -1948,32 +2059,132 @@ impl CodeEditor {
         let config = self.cursor_config(cx);
         let page = self.page_lines();
         let before = self.cursors.selections();
-        // Like Monaco, movement runs on view lines (wrapped segments, folded
-        // rows skipped); edits run on the model.
+        // Like Monaco, movement runs on the cursors' view states (wrapped
+        // segments, folded rows skipped); edits run on the model.
         let lines = self.view_lines.clone();
-        let to_view = |p: PointUtf16| {
-            let (line, column) = lines.to_view(p, false);
-            PointUtf16::new(line, column)
-        };
         let to_model = |p: PointUtf16| lines.to_model(p.row, p.column);
-        let mut view_cursors = self.cursors.clone();
-        view_cursors.set_states(
-            self.cursors
-                .all()
-                .iter()
-                .map(|state| map_state(state, to_view))
-                .collect(),
-        );
+        let view_states = self.cursor_view_states();
         let model = ViewCursorModel(&lines);
-        cursor::move_cursors(&config, &model, &mut view_cursors, command, select, page);
-        self.cursors.set_states(
-            view_cursors
-                .all()
+        // (model state, view state if the move set one).
+        let moved: Vec<(SingleCursorState, Option<SingleCursorState>)> = match command {
+            MoveCommand::Home | MoveCommand::End => {
+                let rope = self.snapshot.rope();
+                self.cursors
+                    .all()
+                    .iter()
+                    .zip(&view_states)
+                    .map(|(model_state, view_state)| {
+                        let by_view = if command == MoveCommand::Home {
+                            // Monaco `_moveToLineStart`: by view line unless
+                            // on the first segment or at the view line's
+                            // first non-whitespace column.
+                            let first_segment =
+                                view_state.position.column == model_state.position.column;
+                            let first_non_blank = cursor::first_non_whitespace_column(
+                                &model,
+                                view_state.position.row,
+                            )
+                            .unwrap_or(0);
+                            !first_segment && view_state.position.column != first_non_blank
+                        } else {
+                            // Monaco `_moveToLineEnd`: by view line unless at
+                            // its end, or on the last segment.
+                            let view_max = lines.line_max_column(view_state.position.row);
+                            let model_max = rope.line_len_utf16(model_state.position.row);
+                            view_state.position.column != view_max
+                                && view_max - view_state.position.column
+                                    != model_max - model_state.position.column
+                        };
+                        let (cursor_model, state): (&dyn cursor::CursorModel, _) = if by_view {
+                            (&model, view_state)
+                        } else {
+                            (rope, model_state)
+                        };
+                        let moved = if command == MoveCommand::Home {
+                            cursor::move_to_beginning_of_line(cursor_model, state, select)
+                        } else {
+                            cursor::move_to_end_of_line(cursor_model, state, select, false)
+                        };
+                        if by_view {
+                            (map_state(&moved, to_model), Some(moved))
+                        } else {
+                            (moved, None)
+                        }
+                    })
+                    .collect()
+            }
+            // Monaco `MoveOperations.moveLeft`/`moveRight` on the view model:
+            // positions are normalized (`normalizePosition`) so a step over
+            // a wrap point, where two view positions are one model
+            // position, moves the cursor. Moving right never ends at a wrapped
+            // segment's end.
+            MoveCommand::Left | MoveCommand::Right => view_states
                 .iter()
-                .map(|state| map_state(state, to_model))
+                .map(|view_state| {
+                    let right = command == MoveCommand::Right;
+                    let moved = if view_state.has_selection() && !select {
+                        if right {
+                            cursor::move_right(&config, &model, view_state, select, 1)
+                        } else {
+                            cursor::move_left(&config, &model, view_state, select, 1)
+                        }
+                    } else {
+                        // Monaco normalizes just the position it moves
+                        // from; the selection start stays (and is the same
+                        // position when not selecting).
+                        let position = lines.normalize_view_position(view_state.position, right);
+                        let state = SingleCursorState {
+                            selection_start: if select {
+                                view_state.selection_start.clone()
+                            } else {
+                                position..position
+                            },
+                            position,
+                            ..view_state.clone()
+                        };
+                        if right {
+                            let moved = cursor::move_right(&config, &model, &state, select, 1);
+                            let position = lines.normalize_view_position(moved.position, true);
+                            state.move_to(select, position, 0)
+                        } else {
+                            cursor::move_left(&config, &model, &state, select, 1)
+                        }
+                    };
+                    (map_state(&moved, to_model), Some(moved))
+                })
                 .collect(),
-        );
+            // Monaco `cursorLineStart`/`cursorLineEnd` move on model lines.
+            MoveCommand::LineStart | MoveCommand::LineEnd => {
+                let mut model_cursors = self.cursors.clone();
+                cursor::move_cursors(
+                    &config,
+                    self.snapshot.rope(),
+                    &mut model_cursors,
+                    command,
+                    select,
+                    page,
+                );
+                model_cursors
+                    .all()
+                    .iter()
+                    .map(|state| (state.clone(), None))
+                    .collect()
+            }
+            _ => {
+                let mut view_cursors = self.cursors.clone();
+                view_cursors.set_states(view_states);
+                cursor::move_cursors(&config, &model, &mut view_cursors, command, select, page);
+                view_cursors
+                    .all()
+                    .iter()
+                    .map(|state| (map_state(state, to_model), Some(state.clone())))
+                    .collect()
+            }
+        };
+        let (model_states, view_states): (Vec<_>, Vec<_>) = moved.into_iter().unzip();
+        self.cursors.set_states(model_states);
         self.cursors.validate(self.snapshot.rope());
+        self.set_cursor_view_states(view_states);
         // Like Monaco, paging also scrolls the viewport by a page.
         if matches!(command, MoveCommand::PageUp | MoveCommand::PageDown)
             && let Some(layout) = self.layout.as_ref()
@@ -2756,6 +2967,9 @@ impl CodeEditor {
 
     pub(crate) fn sync_view_lines(&mut self, wrap: Option<WrapSettings>, cx: &mut Context<Self>) {
         if self.view_lines.version() != self.snapshot.version() {
+            // Monaco `onModelContentChanged`: the cursors' view states come
+            // from their model states again.
+            self.cursor_views = None;
             let model = self.model.clone();
             let buffer = model.read(cx).buffer();
             let patch = buffer.edits_since(self.view_lines.version());
@@ -3507,6 +3721,9 @@ impl CodeEditor {
             cursor_index,
         });
         self.cursors.set_states(states);
+        if mode == MouseSelectMode::Character {
+            self.keep_mouse_on_wrapped_line(cursor_index, event.position);
+        }
         self.prev_edit_kind = None;
         self.model.update(cx, |model, _| model.push_stack_element());
         self.next_selection_change = SelectionChange {
@@ -3514,6 +3731,44 @@ impl CodeEditor {
             source: CursorChangeSource::Mouse,
         };
         self.cursors_changed(false, cx);
+    }
+
+    /// Monaco's mouse targets are view positions: a click past the end of a
+    /// wrapped segment puts cursor `index` at the end of that view line, not
+    /// the start of the next one (the same model position).
+    fn keep_mouse_on_wrapped_line(&mut self, index: usize, mouse: Point<Pixels>) {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let y = mouse.y - layout.bounds.top() + layout.scroll_top;
+        if y < px(0.) {
+            return;
+        }
+        let count = self.view_lines.line_count();
+        let view_line = layout.zones.line_at(y, layout.metrics.line_height, count);
+        let Some(line) = layout.view_line(view_line) else {
+            return;
+        };
+        if line.is_last_segment
+            || line.column_for_x(mouse.x - layout.text_origin_x()) != line.columns.end
+        {
+            return;
+        }
+        let view = PointUtf16::new(view_line, self.view_lines.line_max_column(view_line));
+        let mut views = self.cursor_view_states();
+        let Some(state) = views.get_mut(index) else {
+            return;
+        };
+        if self.view_lines.to_model(view.row, view.column) != self.cursors.all()[index].position {
+            return;
+        }
+        state.position = view;
+        if self.cursors.all()[index].selection_start.is_empty()
+            && self.cursors.all()[index].selection_start.start == self.cursors.all()[index].position
+        {
+            state.selection_start = view..view;
+        }
+        self.set_cursor_view_states(views.into_iter().map(Some).collect());
     }
 
     /// The text position under the mouse, or `None` when the mouse isn't
@@ -3577,12 +3832,24 @@ impl CodeEditor {
                     .any(|b| position.is_some_and(|p| b.thumb.contains(&p)))
             })
         };
+        // The "Show more" chip's hover background.
+        let over_chip = |position: Option<Point<Pixels>>, layout: Option<&EditorLayout>| {
+            layout.is_some_and(|l| {
+                position.is_some_and(|p| l.overflow_chips().any(|b| b.contains(&p)))
+            })
+        };
         let was_over = over_thumb(
+            self.animation.scrollbars.mouse_position,
+            self.layout.as_ref(),
+        ) || over_chip(
             self.animation.scrollbars.mouse_position,
             self.layout.as_ref(),
         );
         self.animation.scrollbars.mouse_position = Some(event.position);
-        if was_over != over_thumb(Some(event.position), self.layout.as_ref()) {
+        if was_over
+            != (over_thumb(Some(event.position), self.layout.as_ref())
+                || over_chip(Some(event.position), self.layout.as_ref()))
+        {
             cx.notify();
         }
         if self
@@ -3809,6 +4076,9 @@ impl CodeEditor {
             *state = SingleCursorState::from_selection(selection);
         }
         self.cursors.set_states(states);
+        if mode == MouseSelectMode::Character {
+            self.keep_mouse_on_wrapped_line(index, mouse);
+        }
         self.next_selection_change = SelectionChange {
             reason: CursorChangeReason::Explicit,
             source: CursorChangeSource::Mouse,
@@ -5580,6 +5850,13 @@ fn map_state(state: &SingleCursorState, f: impl Fn(PointUtf16) -> PointUtf16) ->
     }
 }
 
+/// The cursors' view states and the model states they're for (see
+/// [`CodeEditor::cursor_view_states`]).
+struct CursorViewStates {
+    model: Vec<SingleCursorState>,
+    view: Vec<SingleCursorState>,
+}
+
 /// The cursor core's view of the view lines (Monaco's view model lines).
 struct ViewCursorModel<'a>(&'a ViewLines);
 
@@ -5593,6 +5870,6 @@ impl cursor::CursorModel for ViewCursorModel<'_> {
     }
 
     fn line_max_column(&self, row: u32) -> u32 {
-        self.0.line_content(row).encode_utf16().count() as u32
+        self.0.line_max_column(row)
     }
 }

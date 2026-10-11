@@ -472,7 +472,7 @@ fn move_to_next_blank_line(
 }
 
 /// Monaco `MoveOperations.moveToBeginningOfLine`.
-fn move_to_beginning_of_line(
+pub(crate) fn move_to_beginning_of_line(
     model: &dyn CursorModel,
     cursor: &SingleCursorState,
     select: bool,
@@ -489,7 +489,7 @@ fn move_to_beginning_of_line(
 
 /// Monaco `MoveOperations.moveToEndOfLine`. With `sticky`, the cursor keeps
 /// to line ends when later moving vertically.
-fn move_to_end_of_line(
+pub(crate) fn move_to_end_of_line(
     model: &dyn CursorModel,
     cursor: &SingleCursorState,
     select: bool,
