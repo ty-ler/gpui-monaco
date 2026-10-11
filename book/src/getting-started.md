@@ -38,6 +38,18 @@ The language features are `lang-rust`, `lang-js`, `lang-ts` (TypeScript and TSX)
 gpui-monaco = { git = "…", tag = "v0.1.0", default-features = false }
 ```
 
+### Icons and licensing
+
+Monaco's widgets draw their icons with Microsoft's [codicon](https://github.com/microsoft/vscode-codicons) font. In gpui-monaco the font is optional, behind the `codicons` feature (off by default):
+
+```toml
+gpui-monaco = { git = "…", tag = "v0.1.0", features = ["codicons"] }
+```
+
+With it, `gpui_monaco::init` registers the font (about 150 KB, from the `gpui-monaco-codicons` crate) with GPUI's text system and the suggest list, find widget, lightbulb, folding chevrons, peek view and other widgets show Monaco's icons. Without it they draw similar Unicode characters. Either way, `gpui_monaco::codicons` has every Monaco icon id (`Codicon::SymbolMethod`, `Codicon::from_id("symbol-method")`), the `icon(Codicon)` element for host UI and `codicons_available(cx)`.
+
+`gpui-monaco` is MIT OR Apache-2.0, but the font is © Microsoft Corporation under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/), which allows redistribution, including in commercial apps, with attribution. If you enable `codicons`, ship the notice from the `gpui-monaco-codicons` crate's `NOTICE` (or credit "Codicons © Microsoft Corporation, CC-BY-4.0") with your app's third-party notices. That crate's copy adds an `m` to the font's character map, since GPUI's macOS text system won't load a font without one.
+
 Without it, `word_segmenter_locales` is accepted but has no effect.
 
 ## A minimal editor

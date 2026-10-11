@@ -19,6 +19,10 @@ default = ["word-segmenter"]
 # data) for word navigation, deletion and selection in languages like
 # Japanese, Chinese and Thai. Without it the option has no effect.
 word-segmenter = ["dep:icu_segmenter", "dep:icu_locale_core"]
+# Microsoft's codicon font (the `gpui-monaco-codicons` crate, CC-BY-4.0, so
+# apps that enable it must ship its attribution), registered with GPUI so
+# the widgets draw Monaco's icons. Without it they draw Unicode stand-ins.
+codicons = ["dep:gpui-monaco-codicons"]
 
 [dependencies]
 # `Instant` that works in browsers (std's on other targets).
@@ -44,6 +48,7 @@ unicode-segmentation.workspace = true
 uuid = { version = "1", features = ["v4"] }
 icu_segmenter = { version = "2.3", optional = true }
 icu_locale_core = { version = "2.3", optional = true, default-features = false }
+gpui-monaco-codicons = { workspace = true, optional = true }
 
 [dev-dependencies]
 async-channel = "2"

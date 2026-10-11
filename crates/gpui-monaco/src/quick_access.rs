@@ -24,6 +24,7 @@ use crate::actions::{
     Newline, QuickInputFirst, QuickInputLast, QuickInputNext, QuickInputPageNext,
     QuickInputPagePrevious, QuickInputPrevious, RemoveSecondaryCursors,
 };
+use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
 use crate::decorations::{DecorationId, DecorationOptions, OverviewRulerLane};
 use crate::editor::{CodeEditor, CodeEditorEvent, ViewState};
@@ -78,7 +79,7 @@ pub(crate) struct QuickItem {
     /// Byte ranges of `label` that matched the query.
     pub highlights: Vec<Range<usize>>,
     pub description: Option<SharedString>,
-    pub icon: Option<(&'static str, Hsla)>,
+    pub icon: Option<(Codicon, Hsla)>,
     pub strikethrough: bool,
     /// The keys that run it, shown on the right.
     pub keybinding: Option<SharedString>,
@@ -135,22 +136,13 @@ pub struct QuickInput {
     _subscriptions: Vec<Subscription>,
 }
 
-/// A short glyph per symbol kind, standing in for Monaco's codicons, in
-/// the theme's `symbolIcon.*Foreground` color.
+/// The symbol kind's codicon (Monaco `SymbolKinds.toIcon`), in the theme's
+/// `symbolIcon.*Foreground` color.
 pub(crate) fn symbol_icon(
     kind: SymbolKind,
     colors: &crate::theme::EditorColors,
-) -> (&'static str, Hsla) {
-    use SymbolKind::*;
-    let glyph = match kind {
-        Method | Function | Constructor | Operator => "ƒ",
-        Field | Variable | Property | Key | TypeParameter => "𝑥",
-        Class | Struct | Interface | Enum | Object => "◆",
-        EnumMember | Constant | Number | Boolean | Null => "π",
-        Module | Namespace | Package | File => "{}",
-        String | Array | Event => "ab",
-    };
-    (glyph, colors.symbol_icons.for_symbol_kind(kind))
+) -> (Codicon, Hsla) {
+    (kind.icon(), colors.symbol_icons.for_symbol_kind(kind))
 }
 
 /// Monaco `NLS_SYMBOL_KIND_CACHE` groups for `@:`.
@@ -465,10 +457,7 @@ impl QuickInput {
                     this.accept(window, cx);
                 }),
             )
-            .children(
-                item.icon
-                    .map(|(glyph, color)| div().w(px(16.)).text_color(color).child(glyph)),
-            )
+            .children(item.icon.map(|(glyph, color)| codicon(glyph).color(color)))
             .child(StyledText::new(item.label.clone()).with_highlights(label_highlights))
             .children(
                 item.description

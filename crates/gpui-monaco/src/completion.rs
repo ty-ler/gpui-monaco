@@ -351,7 +351,10 @@ impl CodeEditor {
             return None;
         }
         let (detail, docs) = widget.details_content()?;
-        Some((detail.map(|d| d.to_string()), docs.map(|d| d.0.to_string())))
+        Some((
+            detail.map(|d| d.to_string()),
+            docs.map(|d| d.as_str().to_string()),
+        ))
     }
 
     /// The suggest list's first visible row and how many rows show, for

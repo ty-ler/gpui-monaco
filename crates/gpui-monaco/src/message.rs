@@ -76,19 +76,16 @@ impl CodeEditor {
     /// `IMarkdownString` messages). Links open on click.
     pub fn show_markdown_message(
         &mut self,
-        markdown: impl Into<SharedString>,
+        markdown: impl Into<crate::providers::MarkdownString>,
         position: PointUtf16,
         cx: &mut Context<Self>,
     ) {
-        let markdown: SharedString = markdown.into();
+        let markdown: crate::providers::MarkdownString = markdown.into();
         let style = self.markdown_style();
         let theme = self.theme.clone();
         self.show_message_content(
-            markdown.clone(),
-            Box::new(move |cx| {
-                let registry = crate::model::language_registry(cx);
-                crate::markdown::render_markdown(&markdown, &style, &theme, &registry)
-            }),
+            markdown.value.clone(),
+            Box::new(move |cx| crate::markdown::render_markdown(&markdown, &style, &theme, cx)),
             position,
             cx,
         );

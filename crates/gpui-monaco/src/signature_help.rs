@@ -13,8 +13,9 @@ use gpui::{
 };
 use text::PointUtf16;
 
+use crate::codicons::{Codicon, icon as codicon};
 use crate::editor::CodeEditor;
-use crate::markdown::{MarkdownStyle, render_markdown};
+use crate::markdown::{MarkdownStyle, render_documentation};
 use crate::providers::{
     ParameterLabel, SignatureHelp, SignatureHelpTrigger, signature_help_providers,
 };
@@ -88,7 +89,13 @@ impl SignatureHelpWidget {
                     });
                 }
             })
-            .child(if next { "⌄" } else { "⌃" })
+            // `parameter-hints-next` / `-previous`: `chevron-down` and
+            // `chevron-up`.
+            .child(codicon(if next {
+                Codicon::ChevronDown
+            } else {
+                Codicon::ChevronUp
+            }))
     }
 }
 
@@ -124,7 +131,6 @@ fn parameter_range(signature: &str, label: &ParameterLabel) -> Option<std::ops::
 impl Render for SignatureHelpWidget {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors.clone();
-        let registry = crate::model::language_registry(cx);
         let Some((signature, active)) = self.active() else {
             return div();
         };
@@ -166,10 +172,10 @@ impl Render for SignatureHelpWidget {
                     .child(StyledText::new(signature.label.clone()).with_highlights(highlights)),
             )
             .when_some(parameter_doc, |this, doc| {
-                this.child(render_markdown(&doc.0, &self.style, &self.theme, &registry))
+                this.child(render_documentation(&doc, &self.style, &self.theme, cx))
             })
             .when_some(signature.documentation.clone(), |this, doc| {
-                this.child(render_markdown(&doc.0, &self.style, &self.theme, &registry))
+                this.child(render_documentation(&doc, &self.style, &self.theme, cx))
             });
         div()
             // Monaco `.phwrapper { max-width: 440px }`, and `updateMaxHeight`
@@ -182,6 +188,9 @@ impl Render for SignatureHelpWidget {
             .border_color(colors.hover_border)
             .text_color(colors.hover_foreground)
             .text_size(self.style.font_size)
+            // The editor's line height (Monaco sets `line-height` to it over
+            // the font size), not GPUI's default.
+            .line_height(gpui::relative(self.style.line_height))
             // Monaco's `.controls` column, shown with several signatures.
             .when(multiple, |this| {
                 this.child(

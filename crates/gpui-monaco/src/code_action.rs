@@ -23,6 +23,7 @@ use text::PointUtf16;
 
 use crate::actions::*;
 use crate::api::DecorationsCollection;
+use crate::codicons::{Codicon, icon as codicon};
 use crate::decorations::DecorationOptions;
 use crate::editor::CodeEditor;
 use crate::options::LightbulbMode;
@@ -380,17 +381,36 @@ const GROUPS: [(&str, &str); 8] = [
     ("More Actions...", ""),
 ];
 
+/// The index in [`GROUPS`] of the group an action goes in.
+fn group_of(action: &CodeAction) -> usize {
+    match &action.kind {
+        Some(kind) => GROUPS
+            .iter()
+            .position(|(_, group)| CodeActionKind::from(*group).contains(kind))
+            .unwrap_or(GROUPS.len() - 1),
+        None => GROUPS.len() - 1,
+    }
+}
+
+/// A row's icon (Monaco `codeActionGroups`' icons): `sparkle` for AI
+/// actions, `wrench` for refactorings, `surround-with` and `symbol-file`
+/// for those groups, else `None` for the action list's default lightbulb.
+fn group_icon(action: &CodeAction) -> Option<Codicon> {
+    if action.is_ai {
+        return Some(Codicon::Sparkle);
+    }
+    match group_of(action) {
+        1..=4 => Some(Codicon::Wrench),
+        5 => Some(Codicon::SurroundWith),
+        6 => Some(Codicon::SymbolFile),
+        _ => None,
+    }
+}
+
 fn menu_rows(items: &[Item]) -> Vec<Row> {
     let mut groups: Vec<Vec<usize>> = vec![Vec::new(); GROUPS.len()];
     for (ix, item) in items.iter().enumerate() {
-        let group = match &item.action.kind {
-            Some(kind) => GROUPS
-                .iter()
-                .position(|(_, group)| CodeActionKind::from(*group).contains(kind))
-                .unwrap_or(GROUPS.len() - 1),
-            None => GROUPS.len() - 1,
-        };
-        groups[group].push(ix);
+        groups[group_of(&item.action)].push(ix);
     }
     let mut rows = Vec::new();
     for (group, items) in groups.into_iter().enumerate() {
@@ -593,7 +613,14 @@ impl Render for CodeActionMenu {
                             )
                         })
                         .when(disabled, |row| row.opacity(0.5))
-                        .child(div().text_color(colors.lightbulb_foreground).child("💡"))
+                        // Monaco's action list: the group's icon, or
+                        // `light-bulb` in `editorLightBulb.foreground`.
+                        .child(match group_icon(action) {
+                            Some(icon) => codicon(icon).size(px(12.)),
+                            None => codicon(Codicon::LightBulb)
+                                .size(px(12.))
+                                .color(colors.lightbulb_foreground),
+                        })
                         .child(div().flex_1().child(label))
                         .children(keybinding_label(action).map(|label| {
                             div()
@@ -1273,6 +1300,22 @@ impl CodeEditor {
             })
             .ok();
         }));
+    }
+}
+
+/// The lightbulb's codicon (Monaco `computeLightBulbInfo`): `sparkle-filled`
+/// when every action is an AI fix, the autofix variants when a preferred
+/// quick fix exists, and the sparkle variants when some action is AI.
+pub(crate) fn lightbulb_icon(bulb: &Lightbulb) -> Codicon {
+    let valid = valid(&bulb.items);
+    let all_ai = !valid.is_empty() && valid.iter().all(|item| item.action.is_ai);
+    let has_ai = valid.iter().any(|item| item.action.is_ai);
+    match (all_ai, bulb.auto_fix, has_ai) {
+        (true, _, _) => Codicon::SparkleFilled,
+        (false, true, true) => Codicon::LightbulbSparkleAutofix,
+        (false, true, false) => Codicon::LightbulbAutofix,
+        (false, false, true) => Codicon::LightbulbSparkle,
+        (false, false, false) => Codicon::LightBulb,
     }
 }
 

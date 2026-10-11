@@ -2356,6 +2356,7 @@ dependencies = [
  "chrono",
  "criterion",
  "futures",
+ "gpui-monaco-codicons",
  "gpui-monaco-languages",
  "gpui-monaco-syntax",
  "gpui-monaco-text",
@@ -2375,6 +2376,10 @@ dependencies = [
  "uuid",
  "web-time",
 ]
+
+[[package]]
+name = "gpui-monaco-codicons"
+version = "0.1.0"
 
 [[package]]
 name = "gpui-monaco-languages"

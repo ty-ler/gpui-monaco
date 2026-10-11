@@ -21,6 +21,7 @@ use crate::actions::{
     GoToBottomHover, GoToTopHover, HideHover, PageDownHover, PageUpHover, ScrollDownHover,
     ScrollLeftHover, ScrollRightHover, ScrollUpHover,
 };
+use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor;
 use crate::editor::CodeEditor;
 use crate::markdown::{MarkdownStyle, render_markdown};
@@ -202,7 +203,7 @@ type ProviderHoverTasks = Vec<(Arc<dyn HoverProvider>, Task<anyhow::Result<Optio
 
 /// Monaco `isValidHover`: some non-empty contents.
 fn is_valid_hover(hover: &Hover) -> bool {
-    hover.contents.iter().any(|c| !c.0.trim().is_empty())
+    hover.contents.iter().any(|c| !c.value.trim().is_empty())
 }
 
 /// A pending color picker hover part.
@@ -211,7 +212,6 @@ type PickerTask = Option<Task<Option<Entity<crate::ColorPickerWidget>>>>;
 impl Render for HoverWidget {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = &self.theme.colors;
-        let registry = crate::model::language_registry(cx);
         let mut sections = Vec::new();
         for marker in &self.markers {
             if !sections.is_empty() {
@@ -243,10 +243,10 @@ impl Render for HoverWidget {
                 .flex_col()
                 .gap(px(2.))
                 .child(div().w(px(480.)).child(render_markdown(
-                    &hover.reason,
+                    &MarkdownString::new(hover.reason.clone()),
                     &self.style,
                     &self.theme,
-                    &registry,
+                    cx,
                 )))
                 .child(
                     div()
@@ -273,11 +273,11 @@ impl Render for HoverWidget {
             if !sections.is_empty() {
                 sections.push(div().h(px(1.)).bg(colors.hover_border).into_any_element());
             }
-            let row = self.render_markdown_part(ix, &registry, cx);
+            let row = self.render_markdown_part(ix, cx);
             let copy = self.parts[ix]
                 .contents
                 .iter()
-                .map(|c| c.0.to_string())
+                .map(|c| c.value.to_string())
                 .collect::<Vec<_>>()
                 .join("\n");
             sections.push(self.copy_row(("markdown-row", ix), row, copy, cx));
@@ -354,6 +354,9 @@ impl Render for HoverWidget {
             .track_focus(&self.focus_handle)
             .relative()
             .text_size(self.style.font_size)
+            // The editor's line height (Monaco sets `line-height` to it over
+            // the font size), not GPUI's default.
+            .line_height(gpui::relative(self.style.line_height))
             .on_action(cx.listener(move |this, _: &ScrollUpHover, _, cx| {
                 this.scroll_by(point(px(0.), -line), cx)
             }))
@@ -440,7 +443,8 @@ impl HoverWidget {
                             }
                         }),
                     )
-                    .child("⧉"),
+                    // `.hover-copy-button`: a 16px `copy` codicon.
+                    .child(codicon(Codicon::Copy)),
             )
             .into_any_element()
     }
@@ -448,23 +452,13 @@ impl HoverWidget {
     /// Monaco `MarkdownHoverParticipant`: the part's markdown, with
     /// verbosity controls when its provider supports them and the long
     /// line warning's "Don't Show Again".
-    fn render_markdown_part(
-        &self,
-        ix: usize,
-        registry: &syntax::LanguageRegistry,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    fn render_markdown_part(&self, ix: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = &self.theme.colors;
         let part = &self.parts[ix];
         let link = self.style.link;
         let mut contents = div().flex_1().min_w_0().flex().flex_col().gap(px(6.));
         for content in &part.contents {
-            contents = contents.child(render_markdown(
-                &content.0,
-                &self.style,
-                &self.theme,
-                registry,
-            ));
+            contents = contents.child(render_markdown(content, &self.style, &self.theme, cx));
         }
         if part.long_line_warning {
             let editor = self.editor.clone();
@@ -519,7 +513,15 @@ impl HoverWidget {
                                 });
                             }
                         })
-                        .child(if increase { "+" } else { "−" })
+                        // `add` and `remove` codicons at 11px.
+                        .child(
+                            codicon(if increase {
+                                Codicon::Add
+                            } else {
+                                Codicon::Remove
+                            })
+                            .size(px(11.)),
+                        )
                 };
                 div()
                     .flex_none()
@@ -726,12 +728,20 @@ use gpui::prelude::FluentBuilder as _;
 impl CodeEditor {
     pub(crate) fn markdown_style(&self) -> MarkdownStyle {
         let colors = &self.theme.colors;
+        let font_size = self.options.font_size;
         MarkdownStyle {
-            foreground: colors.widget_foreground,
-            link: colors.input_option_active_border,
-            code_background: colors.input_background,
+            foreground: colors.hover_foreground,
+            link: colors.text_link_foreground,
+            code_background: colors.text_code_block_background,
             code_font: self.options.font_family.clone(),
-            font_size: self.options.font_size,
+            font_size,
+            // Monaco `ContentHoverWidget._updateFont` and
+            // `ParameterHintsWidget.updateFont`: the editor's line height
+            // over its font size.
+            line_height: f32::from(self.options.resolved_line_height()) / f32::from(font_size),
+            separator: colors.text_separator_foreground,
+            quote_background: colors.text_block_quote_background,
+            quote_border: colors.text_block_quote_border,
         }
     }
 
@@ -783,7 +793,7 @@ impl CodeEditor {
                     .read(cx)
                     .parts
                     .iter()
-                    .map(|part| part.contents.iter().map(|c| c.0.clone()).collect())
+                    .map(|part| part.contents.iter().map(|c| c.value.clone()).collect())
                     .collect()
             })
             .unwrap_or_default()
@@ -810,7 +820,7 @@ impl CodeEditor {
             _ => return Vec::new(),
         };
         vec![MarkdownHoverPart {
-            contents: vec![MarkdownString(message.into())],
+            contents: vec![MarkdownString::new(message)],
             source: None,
             long_line_warning: true,
         }]
@@ -1294,7 +1304,7 @@ impl CodeEditor {
                 .into_iter()
                 .filter(|d| rope.offset_to_point(d.range.start).row == row)
                 .filter_map(|d| d.options.glyph_margin_hover_message.clone())
-                .map(|message| MarkdownHoverPart::new(vec![MarkdownString(message)]))
+                .map(|message| MarkdownHoverPart::new(vec![MarkdownString::new(message)]))
                 .collect()
         })
     }
@@ -1360,7 +1370,7 @@ impl CodeEditor {
                 widget
                     .parts
                     .iter()
-                    .flat_map(|part| part.contents.iter().map(|c| c.0.to_string()))
+                    .flat_map(|part| part.contents.iter().map(|c| c.value.to_string()))
                     .chain(
                         widget
                             .command
@@ -1401,7 +1411,7 @@ impl CodeEditor {
                 .into_iter()
                 .filter(|d| d.range.start <= offset && offset <= d.range.end)
                 .filter_map(|d| d.options.hover_message.clone())
-                .map(|message| MarkdownHoverPart::new(vec![MarkdownString(message)]))
+                .map(|message| MarkdownHoverPart::new(vec![MarkdownString::new(message)]))
                 .collect::<Vec<_>>()
         }));
         let model = self.model().read(cx);

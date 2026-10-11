@@ -1,0 +1,17 @@
+[package]
+name = "gpui-monaco-codicons"
+description = "Microsoft's codicon icon font (CC-BY-4.0), for gpui-monaco's optional `codicons` feature."
+version.workspace = true
+edition.workspace = true
+# The package is the codicon font, © Microsoft Corporation, under CC-BY-4.0
+# (LICENSE, NOTICE). Its only code is the trivial `include_bytes!` in
+# src/lib.rs and the font patch script, which carry no separate license
+# terms beyond the font's.
+license = "CC-BY-4.0"
+repository.workspace = true
+publish.workspace = true
+keywords = ["gpui", "monaco", "codicons", "icons", "font"]
+categories.workspace = true
+
+[lints]
+workspace = true

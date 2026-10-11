@@ -13,6 +13,7 @@ use crate::actions::{
     FindHistoryNext, FindHistoryPrevious, FindInputNewline, Newline, Outdent, Paste,
     RemoveSecondaryCursors, Tab,
 };
+use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
 use crate::editor::CodeEditor;
 use crate::find::FindHistory;
@@ -499,9 +500,11 @@ impl FindWidget {
     }
 }
 
+/// A find option toggle (Monaco's `Toggle`: a 16px codicon in a 20px
+/// box).
 fn toggle(
     id: &'static str,
-    label: &'static str,
+    label: Codicon,
     active: bool,
     colors: &EditorColors,
     cx: &mut Context<FindWidget>,
@@ -509,7 +512,11 @@ fn toggle(
 ) -> impl IntoElement {
     div()
         .id(id)
-        .px(px(3.))
+        .size(px(20.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
         .rounded(px(3.))
         .border_1()
         .border_color(if active {
@@ -526,25 +533,31 @@ fn toggle(
             this.hover(move |style| style.bg(hover))
         })
         .cursor_pointer()
-        .child(label)
+        .child(codicon(label))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(cx.listener(move |this, _, _, cx| this.update_options(cx, |o| on_click(o))))
 }
 
+/// A find widget button (Monaco's `SimpleButton`: a 16px codicon in a
+/// 20px box).
 fn button(
     id: &'static str,
-    label: &'static str,
+    label: Codicon,
     colors: &EditorColors,
     cx: &mut Context<FindWidget>,
     on_click: impl Fn(&mut FindWidget, &mut Window, &mut Context<FindWidget>) + 'static,
 ) -> impl IntoElement {
     div()
         .id(id)
-        .px(px(4.))
+        .size(px(20.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
         .rounded(px(3.))
         .cursor_pointer()
         .hover(|style| colors.toolbar_hover(style))
-        .child(label)
+        .child(codicon(label))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
 }
@@ -686,7 +699,13 @@ impl Render for FindWidget {
                     .gap(px(4.))
                     .child(button(
                         "toggle-replace",
-                        if self.replace_visible { "▾" } else { "▸" },
+                        // `find-collapsed` / `find-expanded`: `chevron-right` and
+                        // `chevron-down`.
+                        if self.replace_visible {
+                            Codicon::ChevronDown
+                        } else {
+                            Codicon::ChevronRight
+                        },
                         &colors,
                         cx,
                         |this, _, cx| {
@@ -701,7 +720,7 @@ impl Render for FindWidget {
                     .child(input_box(&self.find_input, find_height, invalid))
                     .child(toggle(
                         "match-case",
-                        "Aa",
+                        Codicon::CaseSensitive,
                         options.match_case,
                         &colors,
                         cx,
@@ -709,15 +728,20 @@ impl Render for FindWidget {
                     ))
                     .child(toggle(
                         "whole-word",
-                        "ab",
+                        Codicon::WholeWord,
                         options.whole_word,
                         &colors,
                         cx,
                         |o| o.whole_word = !o.whole_word,
                     ))
-                    .child(toggle("regex", ".*", options.is_regex, &colors, cx, |o| {
-                        o.is_regex = !o.is_regex
-                    }))
+                    .child(toggle(
+                        "regex",
+                        Codicon::Regex,
+                        options.is_regex,
+                        &colors,
+                        cx,
+                        |o| o.is_regex = !o.is_regex,
+                    ))
                     .child(
                         div()
                             .min_w(px(70.))
@@ -726,25 +750,39 @@ impl Render for FindWidget {
                             })
                             .child(status_label),
                     )
-                    .child(button("previous", "↑", &colors, cx, |this, _, cx| {
-                        this.with_editor(cx, |editor, cx| editor.find_previous(cx))
-                    }))
-                    .child(button("next", "↓", &colors, cx, |this, _, cx| {
-                        this.with_editor(cx, |editor, cx| editor.find_next(cx))
-                    }))
+                    .child(button(
+                        "previous",
+                        Codicon::ArrowUp,
+                        &colors,
+                        cx,
+                        |this, _, cx| this.with_editor(cx, |editor, cx| editor.find_previous(cx)),
+                    ))
+                    .child(button(
+                        "next",
+                        Codicon::ArrowDown,
+                        &colors,
+                        cx,
+                        |this, _, cx| this.with_editor(cx, |editor, cx| editor.find_next(cx)),
+                    ))
                     .child(toggle(
                         "in-selection",
-                        "≡",
+                        Codicon::Selection,
                         options.in_selection,
                         &colors,
                         cx,
                         |o| o.in_selection = !o.in_selection,
                     ))
-                    .child(button("close", "×", &colors, cx, |this, window, cx| {
-                        if let Some(editor) = this.editor.upgrade() {
-                            editor.update(cx, |editor, cx| editor.close_find(window, cx));
-                        }
-                    })),
+                    .child(button(
+                        "close",
+                        Codicon::Close,
+                        &colors,
+                        cx,
+                        |this, window, cx| {
+                            if let Some(editor) = this.editor.upgrade() {
+                                editor.update(cx, |editor, cx| editor.close_find(window, cx));
+                            }
+                        },
+                    )),
             )
             .when(self.replace_visible, |this| {
                 this.child(
@@ -756,18 +794,26 @@ impl Render for FindWidget {
                         .child(input_box(&self.replace_input, replace_height, false))
                         .child(toggle(
                             "preserve-case",
-                            "AB",
+                            Codicon::PreserveCase,
                             options.preserve_case,
                             &colors,
                             cx,
                             |o| o.preserve_case = !o.preserve_case,
                         ))
-                        .child(button("replace", "Replace", &colors, cx, |this, _, cx| {
-                            this.with_editor(cx, |editor, cx| editor.replace_one(cx))
-                        }))
-                        .child(button("replace-all", "All", &colors, cx, |this, _, cx| {
-                            this.with_editor(cx, |editor, cx| editor.replace_all(cx))
-                        })),
+                        .child(button(
+                            "replace",
+                            Codicon::Replace,
+                            &colors,
+                            cx,
+                            |this, _, cx| this.with_editor(cx, |editor, cx| editor.replace_one(cx)),
+                        ))
+                        .child(button(
+                            "replace-all",
+                            Codicon::ReplaceAll,
+                            &colors,
+                            cx,
+                            |this, _, cx| this.with_editor(cx, |editor, cx| editor.replace_all(cx)),
+                        )),
                 )
             })
     }

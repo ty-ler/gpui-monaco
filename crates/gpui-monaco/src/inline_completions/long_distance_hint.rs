@@ -29,6 +29,7 @@ use text::PointUtf16;
 
 use super::inline_edits::InlineEditDiff;
 use super::inline_edits_view::{Segment, TabAction};
+use crate::codicons::{Codicon, icon as codicon};
 use crate::editor::CodeEditor;
 use crate::theme::Theme;
 use crate::widgets::{OverlayPosition, OverlayWidget, WidgetId};
@@ -338,7 +339,8 @@ pub(crate) struct LongDistanceHint {
     location: Option<SharedString>,
     /// "Tab to jump", "Tab to open".
     label: SharedString,
-    arrow: &'static str,
+    /// `arrow-right` (cross-file), `arrow-down` or `arrow-up`.
+    arrow: Codicon,
     width: Pixels,
     /// How far the preview is scrolled right (Monaco
     /// `desiredPreviewEditorScrollLeft`).
@@ -398,7 +400,7 @@ impl Render for LongDistanceHint {
                             .bg(pill_bg)
                             .text_color(pill_fg)
                             .text_size(px(10.))
-                            .child("⇥"),
+                            .child(codicon(Codicon::KeyboardTab).size(px(10.))),
                     )
                 })
                 .child((row + 1).to_string());
@@ -469,7 +471,11 @@ impl Render for LongDistanceHint {
                         div()
                             .flex_none()
                             .pl(px(6.))
-                            .child(format!("{}\u{a0}{}", self.label, self.arrow)),
+                            .flex()
+                            .items_center()
+                            .gap(px(3.))
+                            .child(self.label.clone())
+                            .child(codicon(self.arrow).size(px(12.))),
                     ),
             )
             .with_animation(
@@ -668,11 +674,11 @@ impl CodeEditor {
             "Tab to jump".into()
         };
         let arrow = if state.cross_file {
-            "→"
+            Codicon::ArrowRight
         } else if state.hint_row < state.preview.target_row {
-            "↓"
+            Codicon::ArrowDown
         } else {
-            "↑"
+            Codicon::ArrowUp
         };
         let font = self
             .options
@@ -942,8 +948,8 @@ impl CodeEditor {
             .map(|line| line.iter().map(|s| s.text.as_str()).collect())
             .collect();
         let bar = match &view.location {
-            Some(location) => format!("{location} | {} {}", view.label, view.arrow),
-            None => format!("{} {}", view.label, view.arrow),
+            Some(location) => format!("{location} | {} {}", view.label, view.arrow.fallback()),
+            None => format!("{} {}", view.label, view.arrow.fallback()),
         };
         Some((lines, bar))
     }

@@ -20,6 +20,7 @@ use gpui::{
 use text::PointUtf16;
 
 use crate::actions::{HideColorPicker, InsertColorWithStandaloneColorPicker};
+use crate::codicons::{Codicon, icon as codicon};
 use crate::color::{Color, ColorF, Hsva, Rgba as ColorRgba};
 use crate::color_detector::{ColorData, to_color};
 use crate::editor::CodeEditor;
@@ -460,7 +461,8 @@ impl Render for ColorPickerWidget {
                     .bg(colors.widget_background)
                     .border_l_1()
                     .border_color(colors.widget_border)
-                    .child("×")
+                    // The close button's `close` codicon.
+                    .child(codicon(Codicon::Close))
                     .on_click(cx.listener(|this, _, _, cx| this.close(cx)))
             }));
 

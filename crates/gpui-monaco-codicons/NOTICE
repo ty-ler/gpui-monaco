@@ -1,0 +1,35 @@
+Codicons
+========
+
+codicon.ttf is the icon font of Microsoft's Codicons, from the npm package
+@vscode/codicons version 0.0.46-43 (the version the vendored VS Code /
+Monaco sources depend on):
+
+  https://registry.npmjs.org/@vscode/codicons/-/codicons-0.0.46-43.tgz
+  sha512-E9PUY2D+koeiVN6Pe3QBAVDxc0ZTLIlXbgTvqla2vt9eL+9Z9GtJzSsIfQ9GUgwQ9KEHDx2iTMylTzFfdWCfDg==
+  Source: https://github.com/microsoft/vscode-codicons
+
+Copyright (c) Microsoft Corporation.
+
+The font is licensed under the Creative Commons Attribution 4.0
+International Public License (CC-BY-4.0); the full text is in LICENSE next
+to this file and at https://creativecommons.org/licenses/by/4.0/legalcode.
+
+Changes: the font's cmap also maps U+006D (`m`) to the `add` icon's glyph,
+because GPUI's macOS text system refuses to load fonts without an `m`
+glyph. The glyphs and the other tables are unchanged (apart from
+the file checksum in `head`). The change is made
+by patch-codicon-font.py next to this file:
+
+  ./patch-codicon-font.py package/dist/codicon.ttf codicon.ttf
+
+This crate's only code (src/lib.rs, which embeds the font) and the patch
+script are trivial and carry no license terms beyond the font's.
+
+The icon ids and code points in gpui-monaco's src/codicons.rs (MIT OR
+Apache-2.0, not part of this crate) are generated from Monaco's
+`codiconsLibrary.ts` and `codicons.ts` (VS Code, MIT License, Copyright (c)
+Microsoft Corporation).
+
+Microsoft's licenses do not grant rights to use any Microsoft names, logos
+or trademarks.

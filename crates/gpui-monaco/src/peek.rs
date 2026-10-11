@@ -18,6 +18,7 @@ use text::PointUtf16;
 
 use crate::actions::*;
 use crate::api::DecorationsCollection;
+use crate::codicons::{Codicon, icon as codicon};
 use crate::decorations::DecorationOptions;
 use crate::editor::{CodeEditor, CodeEditorEvent};
 use crate::model::{TextModel, model_for_uri};
@@ -557,7 +558,13 @@ impl PeekView {
                     .gap(px(6.))
                     .px(px(6.))
                     .text_color(colors.peek_view_result_file_foreground)
-                    .child(if group.collapsed { "▸" } else { "▾" })
+                    // The tree's twistie: `tree-item-expanded` (`chevron-down`),
+                    // turned to `chevron-right` when collapsed.
+                    .child(codicon(if group.collapsed {
+                        Codicon::ChevronRight
+                    } else {
+                        Codicon::TreeItemExpanded
+                    }))
                     .child(name)
                     .child(
                         div()
@@ -745,10 +752,14 @@ impl Render for PeekView {
                             .child(
                                 div()
                                     .id("peek-close")
-                                    .px(px(4.))
+                                    .p(px(2.))
+                                    .rounded(px(3.))
                                     .cursor_pointer()
                                     .text_color(colors.peek_view_title_foreground)
-                                    .child("✕")
+                                    .hover(|style| colors.toolbar_hover(style))
+                                    .tooltip(crate::tooltip::tooltip("Close", &colors))
+                                    // The `close` action's codicon.
+                                    .child(codicon(Codicon::Close))
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
                                     })

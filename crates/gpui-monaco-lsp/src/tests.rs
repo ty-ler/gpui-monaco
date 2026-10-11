@@ -497,7 +497,7 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
         (p(0, 7), ": Foo".into(), 2, Some(InlayHintKind::Type), true)
     );
     let foo = &hints[0].label.parts()[1];
-    assert_eq!(foo.tooltip.as_ref().map(|t| t.0.as_ref()), Some("a type"));
+    assert_eq!(foo.tooltip.as_ref().map(|t| t.as_str()), Some("a type"));
     assert_eq!(
         foo.location
             .as_ref()

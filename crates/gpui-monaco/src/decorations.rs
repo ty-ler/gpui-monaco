@@ -83,7 +83,9 @@ pub struct DecorationOptions {
     /// characters).
     pub should_fill_line_on_line_break: bool,
     /// A glyph shown in the glyph margin on the start row (Monaco
-    /// `glyphMarginClassName`).
+    /// `glyphMarginClassName`). Codicon characters
+    /// ([`Codicon::char`](crate::codicons::Codicon::char)) are drawn with
+    /// the codicon font.
     pub glyph: Option<(SharedString, Hsla)>,
     /// Markdown shown when the mouse rests on the start row's glyph margin
     /// or line number (Monaco `glyphMarginHoverMessage`).
@@ -96,7 +98,9 @@ pub struct DecorationOptions {
     pub gutter_bar: Option<Hsla>,
     /// Text centered in the line decorations area on every decorated line
     /// (Monaco `linesDecorationsClassName` with an icon, e.g. the diff
-    /// editor's `+` and `-`).
+    /// editor's `add` and `remove` codicons). Codicon characters
+    /// ([`Codicon::char`](crate::codicons::Codicon::char)) are drawn with
+    /// the codicon font at 11px.
     pub lines_decoration_text: Option<(SharedString, Hsla)>,
     /// A background across the whole gutter on the decorated lines (Monaco
     /// `marginClassName`).

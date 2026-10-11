@@ -4,6 +4,7 @@ members = [
     "crates/text",
     "crates/syntax",
     "crates/gpui-monaco",
+    "crates/gpui-monaco-codicons",
     "crates/gpui-monaco-languages",
     "crates/gpui-monaco-lsp",
     "examples/playground",
@@ -14,6 +15,7 @@ default-members = [
     "crates/text",
     "crates/syntax",
     "crates/gpui-monaco",
+    "crates/gpui-monaco-codicons",
     "crates/gpui-monaco-languages",
     "crates/gpui-monaco-lsp",
 ]
@@ -31,6 +33,7 @@ categories = ["gui", "text-editors"]
 gpui-monaco-text = { path = "crates/text", version = "0.1.0" }
 gpui-monaco-syntax = { path = "crates/syntax", version = "0.1.0" }
 gpui-monaco = { path = "crates/gpui-monaco", version = "0.1.0" }
+gpui-monaco-codicons = { path = "crates/gpui-monaco-codicons", version = "0.1.0" }
 gpui-monaco-languages = { path = "crates/gpui-monaco-languages", version = "0.1.0" }
 gpui-monaco-lsp = { path = "crates/gpui-monaco-lsp", version = "0.1.0" }
 

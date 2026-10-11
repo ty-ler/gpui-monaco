@@ -27,6 +27,7 @@ use gpui::{
 };
 use text::PointUtf16;
 
+use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
 use crate::diff_editor::{DiffEditor, DiffEditorEvent, DiffEditorOptions, DiffEditorViewState};
 use crate::model::TextModel;
@@ -1039,8 +1040,12 @@ impl MultiDiffEditor {
         } else {
             colors.multi_diff_border
         };
-        // TODO(#246): Monaco's `chevron-right`/`chevron-down` codicons.
-        let chevron = if collapsed { "›" } else { "⌄" };
+        // Monaco's `chevron-right` / `chevron-down` toggle.
+        let chevron = codicon(if collapsed {
+            Codicon::ChevronRight
+        } else {
+            Codicon::ChevronDown
+        });
         let status = match item.status {
             FileStatus::Modified => None,
             FileStatus::Added => Some("A"),
@@ -1298,13 +1303,13 @@ fn resource_label(
         // `1 1 auto`.
         .when(!primary, |label| label.flex_1())
         .child(
-            // TODO(#246): the file's icon (Monaco's `file` codicon or the
-            // icon theme's).
+            // Monaco's `file` codicon (the workbench shows the icon
+            // theme's).
             div()
                 .flex_none()
                 .pr(px(6.))
                 .text_color(colors.symbol_icons.file)
-                .child("▤"),
+                .child(codicon(Codicon::File)),
         )
         .child(
             div()

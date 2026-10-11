@@ -1456,7 +1456,7 @@ pub struct PrepaintState {
     /// Monaco `marginClassName` backgrounds.
     margin_backgrounds: Vec<(Bounds<Pixels>, Hsla)>,
     glyphs: Vec<(gpui::Point<Pixels>, ShapedLine)>,
-    lightbulb: Option<(Bounds<Pixels>, Hsla)>,
+    lightbulb: Option<(Bounds<Pixels>, Hsla, crate::codicons::Codicon)>,
     ruler_marks: Vec<(Bounds<Pixels>, Hsla)>,
     /// Indent and bracket pair guides.
     guides: Vec<(Bounds<Pixels>, Hsla)>,
@@ -3356,10 +3356,17 @@ fn prepaint_editor(
                 ));
             }
             if let Some((text, color)) = &options.lines_decoration_text {
+                // Codicons (the diff editor's `add` / `remove` signs) are
+                // 11px, as Monaco's `.insert-sign` / `.delete-sign`.
+                let (text, font) = crate::codicons::decoration_text(text, cx);
+                let (font, font_size) = match font {
+                    Some(font) => (font, px(11.)),
+                    None => (metrics.font.clone(), metrics.font_size),
+                };
                 let shaped = window.text_system().shape_line(
                     text.clone(),
-                    metrics.font_size,
-                    &[run(text.len(), &metrics.font, *color)],
+                    font_size,
+                    &[run(text.len(), &font, *color)],
                     None,
                 );
                 let area = options_line_decorations_width;
@@ -3374,10 +3381,12 @@ fn prepaint_editor(
                     && line.row == start.row
                     && options.glyph.is_some()
                 {
+                    let (glyph, font) = crate::codicons::decoration_text(glyph, cx);
+                    let font = font.unwrap_or_else(|| metrics.font.clone());
                     let shaped = window.text_system().shape_line(
                         glyph.clone(),
                         metrics.font_size,
-                        &[run(glyph.len(), &metrics.font, *color)],
+                        &[run(glyph.len(), &font, *color)],
                         None,
                     );
                     let x = bounds.left() + (glyph_width - shaped.width) / 2.;
@@ -3448,10 +3457,11 @@ fn prepaint_editor(
             (
                 bounds,
                 crate::code_action::lightbulb_color(&colors, bulb.auto_fix),
+                crate::code_action::lightbulb_icon(&bulb),
             )
         });
     }
-    layout.lightbulb = lightbulb.map(|(bounds, _)| bounds);
+    layout.lightbulb = lightbulb.map(|(bounds, _, _)| bounds);
 
     // Overview ruler marks in the vertical scrollbar track.
     let mut ruler_marks: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
@@ -4310,15 +4320,21 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
         }
         // Monaco shows the lightbulb only while the editor has focus.
         if state.focused
-            && let Some((bulb, color)) = state.lightbulb
+            && let Some((bulb, color, icon)) = state.lightbulb
         {
-            paint_lightbulb(bulb, color, window);
+            paint_lightbulb(bulb, color, icon, window, cx);
         }
 
         // Fold controls: always for collapsed regions, otherwise per option.
         for control in &layout.fold_controls {
             if control.collapsed || state.show_fold_controls {
-                paint_chevron(control, colors.folding_control_foreground, window);
+                paint_chevron(
+                    control,
+                    colors.folding_control_foreground,
+                    layout.metrics.font_size,
+                    window,
+                    cx,
+                );
             }
         }
 
@@ -4654,7 +4670,13 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                     if let Some(control) = &sticky.fold
                         && (control.collapsed || state.show_fold_controls)
                     {
-                        paint_chevron(control, colors.folding_control_foreground, window);
+                        paint_chevron(
+                            control,
+                            colors.folding_control_foreground,
+                            layout.metrics.font_size,
+                            window,
+                            cx,
+                        );
                     }
                 }
                 let shadow = Bounds::new(
@@ -4918,8 +4940,37 @@ fn paint_scrollbar_arrow(
     }
 }
 
-/// A lightbulb: a round bulb over a small base.
-pub(crate) fn paint_lightbulb(bounds: Bounds<Pixels>, color: Hsla, window: &mut Window) {
+/// Paints a shaped codicon centered in `bounds`.
+pub(crate) fn paint_icon(
+    shaped: ShapedLine,
+    bounds: Bounds<Pixels>,
+    size: Pixels,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let origin = point(
+        bounds.center().x - shaped.width / 2.,
+        bounds.center().y - size / 2.,
+    );
+    shaped
+        .paint(origin, size, TextAlign::Left, None, window, cx)
+        .ok();
+}
+
+/// The lightbulb (Monaco `LightBulbWidget`): its 16px codicon, or without
+/// the codicon font a round bulb over a small base.
+pub(crate) fn paint_lightbulb(
+    bounds: Bounds<Pixels>,
+    color: Hsla,
+    icon: crate::codicons::Codicon,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let icon_size = bounds.size.height.min(px(16.));
+    if let Some(shaped) = crate::codicons::shape_icon(icon, icon_size, color, window, cx) {
+        paint_icon(shaped, bounds, icon_size, window, cx);
+        return;
+    }
     let h = bounds.size.height;
     let center = point(
         bounds.left() + bounds.size.width / 2.,
@@ -4990,8 +5041,27 @@ fn paint_fold_placeholder(
     }
 }
 
-/// A chevron: pointing down when expanded, right when collapsed.
-fn paint_chevron(control: &FoldControl, color: Hsla, window: &mut Window) {
+/// A folding control (Monaco `foldingDecorations.ts`): the `chevron-down`
+/// codicon when expanded and `chevron-right` when collapsed, at 140% of the
+/// editor font size (`folding.css`); without the codicon font, a drawn
+/// chevron.
+fn paint_chevron(
+    control: &FoldControl,
+    color: Hsla,
+    font_size: Pixels,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let icon = if control.collapsed {
+        crate::codicons::Codicon::ChevronRight
+    } else {
+        crate::codicons::Codicon::ChevronDown
+    };
+    let icon_size = (font_size * 1.4).min(control.bounds.size.height);
+    if let Some(shaped) = crate::codicons::shape_icon(icon, icon_size, color, window, cx) {
+        paint_icon(shaped, control.bounds, icon_size, window, cx);
+        return;
+    }
     let center = control.bounds.center();
     let half = control.bounds.size.width.min(control.bounds.size.height) * 0.18;
     let mut path = PathBuilder::stroke(px(1.5));

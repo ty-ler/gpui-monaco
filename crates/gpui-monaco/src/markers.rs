@@ -12,6 +12,7 @@ use gpui::{
 };
 use text::PointUtf16;
 
+use crate::codicons::{Codicon, icon as codicon};
 use crate::decorations::{DecorationId, DecorationOptions, DecorationUnderline, OverviewRulerLane};
 use crate::editor::CodeEditor;
 use crate::model::TextModel;
@@ -430,18 +431,20 @@ impl MarkerZone {
         3. + Self::content_lines(marker).min(MAX_BODY_LINES) as f32
     }
 
-    fn severity_glyph(severity: MarkerSeverity) -> &'static str {
+    /// Monaco `SeverityIcon.className`: the `error`, `warning` and `info`
+    /// codicons.
+    fn severity_icon(severity: MarkerSeverity) -> Codicon {
         match severity {
-            MarkerSeverity::Error => "⊗",
-            MarkerSeverity::Warning => "⚠",
-            MarkerSeverity::Info | MarkerSeverity::Hint => "ⓘ",
+            MarkerSeverity::Error => Codicon::Error,
+            MarkerSeverity::Warning => Codicon::Warning,
+            MarkerSeverity::Info | MarkerSeverity::Hint => Codicon::Info,
         }
     }
 
     fn header_action(
         &self,
         id: &'static str,
-        glyph: &'static str,
+        glyph: Codicon,
         label: &'static str,
         run: fn(&mut CodeEditor, &mut Context<CodeEditor>),
     ) -> gpui::AnyElement {
@@ -460,7 +463,7 @@ impl MarkerZone {
                     editor.update(cx, run);
                 }
             })
-            .child(glyph)
+            .child(codicon(glyph))
             .into_any_element()
     }
 }
@@ -492,7 +495,7 @@ impl Render for MarkerZone {
             if self.total > 1 { "s" } else { "" }
         );
         let title = self.uri.as_deref().map(basename).unwrap_or_default();
-        let link = colors.input_option_active_border;
+        let link = colors.text_link_foreground;
         let painted = self.bounds.clone();
 
         // Monaco `MessageWidget`: one row per message line, the source and
@@ -564,7 +567,7 @@ impl Render for MarkerZone {
             .child(
                 div()
                     .text_color(icon)
-                    .child(Self::severity_glyph(self.marker.severity)),
+                    .child(codicon(Self::severity_icon(self.marker.severity))),
             )
             .when(!title.is_empty(), |this| {
                 this.child(
@@ -581,18 +584,20 @@ impl Render for MarkerZone {
             )
             .child(self.header_action(
                 "marker-next",
-                "↓",
+                // `marker-navigation-next` / `-previous`: `arrow-down` and
+                // `arrow-up`.
+                Codicon::ArrowDown,
                 "Go to Next Problem (Error, Warning, Info)",
                 |editor, cx| editor.go_to_marker(true, cx),
             ))
             .child(self.header_action(
                 "marker-previous",
-                "↑",
+                Codicon::ArrowUp,
                 "Go to Previous Problem (Error, Warning, Info)",
                 |editor, cx| editor.go_to_marker(false, cx),
             ))
             .child(
-                self.header_action("marker-close", "✕", "Close", |editor, cx| {
+                self.header_action("marker-close", Codicon::Close, "Close", |editor, cx| {
                     editor.close_marker_zone(cx);
                 }),
             );

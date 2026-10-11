@@ -10,6 +10,7 @@ use gpui::{
 };
 use text::PointUtf16;
 
+use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
 use crate::diff::{LineRange, LineRangeMapping};
 use crate::editor::CodeEditor;
@@ -464,14 +465,14 @@ impl Render for AccessibleDiffViewer {
                             1 => (
                                 Some(colors.diff_inserted_line_background),
                                 Some(colors.diff_inserted_text_background),
-                                "+",
+                                Some(Codicon::Add),
                             ),
                             -1 => (
                                 Some(colors.diff_removed_line_background),
                                 Some(colors.diff_removed_text_background),
-                                "−",
+                                Some(Codicon::Remove),
                             ),
-                            _ => (None, None, " "),
+                            _ => (None, None, None),
                         };
                         let number = |line: Option<usize>, width| {
                             let mut cell = div()
@@ -497,7 +498,14 @@ impl Render for AccessibleDiffViewer {
                             .aria_label(label)
                             .child(number(original, original_numbers_width))
                             .child(number(modified, modified_numbers_width).pr(px(10.)))
-                            .child(div().w(px(14.)).flex_none().child(sign))
+                            .child(
+                                div()
+                                    .w(px(14.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .children(sign.map(|sign| codicon(sign).size(px(14.)))),
+                            )
                             .child(text);
                         if let Some(background) = row_background {
                             row = row.bg(background);
@@ -562,7 +570,8 @@ impl Render for AccessibleDiffViewer {
                         .role(gpui::Role::Button)
                         .aria_label(SharedString::from("Close"))
                         .on_click(cx.listener(|this, _, window, cx| this.close(window, cx)))
-                        .child("×"),
+                        // `accessible-diff-viewer-close`: `close`.
+                        .child(codicon(Codicon::Close)),
                 )
             })
     }

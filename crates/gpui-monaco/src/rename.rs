@@ -22,6 +22,7 @@ use crate::actions::{
     AcceptRenameInput, AcceptRenameInputWithPreview, CancelRenameInput, FocusNextRenameSuggestion,
     FocusPreviousRenameSuggestion,
 };
+use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
 use crate::editor::{CodeEditor, CodeEditorEvent};
 use crate::model::TextModelEvent;
@@ -284,12 +285,9 @@ impl RenameInput {
                         colors.list_active_selection_foreground,
                     )
                 })
-                .child(
-                    div()
-                        .w(self.font_size)
-                        .flex_none()
-                        .when(ai, |icon| icon.child("✨")),
-                )
+                .child(div().w(self.font_size).flex_none().when(ai, |icon| {
+                    icon.child(codicon(Codicon::Sparkle).size(self.font_size))
+                }))
                 .child(candidate.new_symbol_name.clone())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     // Monaco's list selection: pick it and rename, without
@@ -327,9 +325,9 @@ impl Render for RenameInput {
         // Monaco's `InputWithButton`: sparkle to ask, stop to cancel.
         let button = self.has_suggestions.then(|| {
             let (icon, title) = if self.requesting {
-                ("⏹", "Cancel")
+                (Codicon::StopCircle, "Cancel")
             } else {
-                ("✨", "Generate New Name Suggestions")
+                (Codicon::Sparkle, "Generate New Name Suggestions")
             };
             div()
                 .id("rename-suggestions-button")
@@ -337,7 +335,7 @@ impl Render for RenameInput {
                 .px(px(3.))
                 .rounded(px(5.))
                 .cursor_pointer()
-                .child(icon)
+                .child(codicon(icon))
                 .tooltip(crate::tooltip::tooltip(title, &colors))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.with_editor(cx, |editor, cx| editor.request_rename_suggestions(cx));
