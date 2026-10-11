@@ -198,6 +198,8 @@ pub struct CodeEditor {
     pub(crate) minimap_hovered: bool,
     minimap_drag: Option<Pixels>,
     fold_task: Option<Task<()>>,
+    /// The editor has focus (Monaco `hasWidgetFocus`, for bracket matching).
+    pub(crate) has_focus: bool,
     /// Rows hidden by [`CodeEditor::set_hidden_areas`], besides folds.
     hidden_areas: Vec<Range<u32>>,
     /// The version `fold_task` was started for.
@@ -273,11 +275,15 @@ impl CodeEditor {
         let subscriptions = vec![
             cx.subscribe(&model, Self::on_model_event),
             cx.on_focus(&focus_handle, window, |this, _, cx| {
+                this.has_focus = true;
+                this.update_bracket_highlights(cx);
                 this.restart_blink(cx);
                 cx.emit(CodeEditorEvent::Focused);
                 cx.notify();
             }),
             cx.on_blur(&focus_handle, window, |this, _, cx| {
+                this.has_focus = false;
+                this.update_bracket_highlights(cx);
                 this.mouse_selection = None;
                 this.dnd_cancel(cx);
                 this.hide_hover(cx);
@@ -379,6 +385,7 @@ impl CodeEditor {
             minimap_hovered: false,
             minimap_drag: None,
             fold_task: None,
+            has_focus: false,
             fold_requested: None,
             hidden_areas: Vec::new(),
             fold_computing: false,
@@ -512,6 +519,7 @@ impl CodeEditor {
             .set_merge_overlapping(self.options.multi_cursor_merge_overlapping);
         self.bracket_colors = Default::default();
         self.refresh_bracket_colors(cx);
+        self.update_bracket_highlights(cx);
         self.reset_inlay_hints(cx);
         cx.notify();
     }
@@ -529,6 +537,8 @@ impl CodeEditor {
     /// Sets the theme (Monaco `editor.setTheme`).
     pub fn set_theme(&mut self, theme: Arc<Theme>, cx: &mut Context<Self>) {
         self.theme = theme;
+        // The bracket highlights carry the theme's colors.
+        self.update_bracket_highlights(cx);
         cx.notify();
     }
 
@@ -3108,6 +3118,13 @@ impl Render for CodeEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if std::mem::take(&mut self.refocus) {
             window.focus(&self.focus_handle, cx);
+        }
+        // Focus listeners can miss changes (e.g. before the window is
+        // active), so the frame keeps `has_focus` true to the window.
+        let focused = self.focus_handle.is_focused(window);
+        if focused != self.has_focus {
+            self.has_focus = focused;
+            self.update_bracket_highlights(cx);
         }
         let mut key_context = gpui::KeyContext::new_with_defaults();
         key_context.add(KEY_CONTEXT);

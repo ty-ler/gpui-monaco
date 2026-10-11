@@ -4,6 +4,18 @@
 pub use crate::suggest::memory::SuggestSelection;
 use gpui::{FontFeatures, FontWeight, Pixels, SharedString, px};
 
+/// Monaco `matchBrackets`: which bracket pairs are highlighted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MatchBrackets {
+    /// The pair at the cursor, or else the pair enclosing it.
+    #[default]
+    Always,
+    /// Only the pair when the cursor is next to one of its brackets.
+    Near,
+    /// None.
+    Never,
+}
+
 /// Monaco `lineNumbers`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LineNumbers {
@@ -1235,8 +1247,9 @@ pub struct EditorOptions {
     pub auto_surround: crate::cursor::AutoSurroundStrategy,
     /// Monaco `autoIndent`.
     pub auto_indent: crate::cursor::AutoIndent,
-    /// Monaco `matchBrackets`: highlight the bracket pair at the cursor.
-    pub match_brackets: bool,
+    /// Monaco `matchBrackets`: highlight the bracket pair at the cursor
+    /// (default `Always`).
+    pub match_brackets: MatchBrackets,
     /// Monaco `quickSuggestions`: where suggestions open while typing.
     pub quick_suggestions: QuickSuggestions,
     /// Monaco `quickSuggestionsDelay`: how long after typing they open.
@@ -1470,7 +1483,7 @@ impl Default for EditorOptions {
             auto_closing_delete: Default::default(),
             auto_surround: Default::default(),
             auto_indent: Default::default(),
-            match_brackets: true,
+            match_brackets: MatchBrackets::Always,
             quick_suggestions: QuickSuggestions::default(),
             quick_suggestions_delay: std::time::Duration::from_millis(10),
             suggest_on_trigger_characters: true,

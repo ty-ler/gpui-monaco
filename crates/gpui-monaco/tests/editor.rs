@@ -460,6 +460,8 @@ fn rust_auto_close_and_indent(cx: &mut TestAppContext) {
 #[gpui::test]
 fn bracket_matching_highlights_and_jumps(cx: &mut TestAppContext) {
     let (editor, cx) = rust_editor("fn f() { let v = [1, (2)]; }", cx);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
     let model = editor.read_with(cx, |e, _| e.model().clone());
     let editor_id = editor.entity_id();
     // Cursor right after `[`.
@@ -475,6 +477,42 @@ fn bracket_matching_highlights_and_jumps(cx: &mut TestAppContext) {
     });
     // `[` is byte 17 and its `]` byte 24.
     assert_eq!(highlighted, vec![17..18, 24..25]);
+    // Next to the cursor: marked in the overview ruler, as in Monaco.
+    let marked = model.update(cx, |m, _| {
+        m.decorations_in_range(0..100, Some(editor_id))
+            .iter()
+            .all(|d| d.options.overview_ruler.is_some())
+    });
+    assert!(marked);
+    // Monaco's default `matchBrackets: "always"`: inside `[1, (2)]` but next
+    // to no bracket, the enclosing pair is highlighted, without the mark.
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 21))], cx)
+    });
+    let decorations = model.update(cx, |m, _| {
+        m.decorations_in_range(0..100, Some(editor_id))
+            .into_iter()
+            .map(|d| (d.range, d.options.overview_ruler.is_some()))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(decorations, vec![(17..18, false), (24..25, false)]);
+    // `"near"`: only pairs next to the cursor.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.match_brackets = gpui_monaco::options::MatchBrackets::Near;
+        e.update_options(options, cx);
+        e.set_selections(&[Selection::collapsed(p(1, 20))], cx);
+    });
+    let count = model.update(cx, |m, _| {
+        m.decorations_in_range(0..100, Some(editor_id)).len()
+    });
+    assert_eq!(count, 0);
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.match_brackets = gpui_monaco::options::MatchBrackets::Always;
+        e.update_options(options, cx);
+        e.set_selections(&[Selection::collapsed(p(1, 19))], cx);
+    });
     cx.simulate_keystrokes("secondary-shift-\\");
     assert_eq!(heads(&editor, cx), vec![(1, 25)]);
     cx.simulate_keystrokes("secondary-shift-\\");
