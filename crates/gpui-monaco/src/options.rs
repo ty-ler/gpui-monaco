@@ -797,6 +797,11 @@ pub struct InlayHintsOptions {
     /// `maximumLength`: hint text per line, beyond which it's cut with
     /// `…`; 0 for no limit.
     pub maximum_length: usize,
+    /// `fontSize`: the hints' font size; 0, under 5 or above the editor's
+    /// uses the editor's.
+    pub font_size: f32,
+    /// `fontFamily`: the hints' font; `None` uses the editor's.
+    pub font_family: Option<SharedString>,
 }
 
 impl Default for InlayHintsOptions {
@@ -805,6 +810,28 @@ impl Default for InlayHintsOptions {
             enabled: InlayHintsMode::On,
             padding: false,
             maximum_length: 43,
+            font_size: 0.,
+            font_family: None,
+        }
+    }
+}
+
+/// Monaco `parameterHints`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParameterHintsOptions {
+    /// `enabled`: open parameter hints while typing (on). They still open
+    /// when requested (Cmd/Ctrl+Shift+Space).
+    pub enabled: bool,
+    /// `cycle`: going past the last or first signature wraps around
+    /// rather than closing the hints (on).
+    pub cycle: bool,
+}
+
+impl Default for ParameterHintsOptions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cycle: true,
         }
     }
 }
@@ -1322,6 +1349,8 @@ pub struct EditorOptions {
     pub lightbulb: LightbulbMode,
     /// Monaco `inlayHints`.
     pub inlay_hints: InlayHintsOptions,
+    /// Monaco `parameterHints`.
+    pub parameter_hints: ParameterHintsOptions,
     /// Monaco `smartSelect`.
     pub smart_select: crate::cursor::smart_select::SmartSelectOptions,
     /// Monaco `formatOnType`: format with the on-type formatter when one of
@@ -1545,6 +1574,7 @@ impl Default for EditorOptions {
             goto_location: GotoLocationOptions::default(),
             lightbulb: LightbulbMode::OnCode,
             inlay_hints: InlayHintsOptions::default(),
+            parameter_hints: ParameterHintsOptions::default(),
             smart_select: Default::default(),
             format_on_type: false,
             format_on_paste: false,

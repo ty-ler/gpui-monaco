@@ -249,7 +249,16 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
                 { "startLine": 0, "endLine": 2, "kind": "imports" },
             ]),
             "textDocument/inlayHint" => json!([
-                { "position": { "line": 0, "character": 7 }, "label": [{ "value": ": " }, { "value": "Foo" }], "kind": 1, "paddingLeft": true },
+                {
+                    "position": { "line": 0, "character": 7 },
+                    "label": [
+                        { "value": ": " },
+                        { "value": "Foo", "tooltip": "a type", "location": { "uri": "file:///project/lib.rs", "range": { "start": { "line": 2, "character": 0 }, "end": { "line": 2, "character": 3 } } } },
+                    ],
+                    "kind": 1,
+                    "paddingLeft": true,
+                    "textEdits": [{ "range": { "start": { "line": 0, "character": 7 }, "end": { "line": 0, "character": 7 } }, "newText": ": Foo" }],
+                },
             ]),
             "textDocument/codeAction" => {
                 assert_eq!(params["context"]["only"], json!(["quickfix"]));
@@ -472,7 +481,7 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
         }]
     );
 
-    // Inlay hints, with label parts joined.
+    // Inlay hints, with their label parts.
     let hints = cx
         .update(|cx| features.provide_inlay_hints(&context, p(0, 0)..p(1, 0), cx))
         .await
@@ -480,11 +489,24 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
     assert_eq!(
         (
             hints[0].position,
-            hints[0].label.as_ref(),
+            hints[0].label.text(),
+            hints[0].label.parts().len(),
             hints[0].kind,
             hints[0].padding_left
         ),
-        (p(0, 7), ": Foo", Some(InlayHintKind::Type), true)
+        (p(0, 7), ": Foo".into(), 2, Some(InlayHintKind::Type), true)
+    );
+    let foo = &hints[0].label.parts()[1];
+    assert_eq!(foo.tooltip.as_ref().map(|t| t.0.as_ref()), Some("a type"));
+    assert_eq!(
+        foo.location
+            .as_ref()
+            .map(|l| (l.uri.as_deref(), l.range.clone())),
+        Some((Some("file:///project/lib.rs"), p(2, 0)..p(2, 3)))
+    );
+    assert_eq!(
+        hints[0].text_edits,
+        vec![(p(0, 7)..p(0, 7), ": Foo".to_string())]
     );
 
     // Rename.

@@ -31,6 +31,16 @@ const FIND_INPUT: Option<&str> = Some("FindWidget > CodeEditor");
 const STANDALONE_COLOR_PICKER: Option<&str> = Some("StandaloneColorPicker");
 /// The editor while ghost text shows (Monaco's `inlineSuggestionVisible`).
 const INLINE: Option<&str> = Some("CodeEditor && inline_suggestion_visible");
+/// The editor while parameter hints show (Monaco's `parameterHintsVisible`).
+const PARAMETER_HINTS: Option<&str> = Some("CodeEditor && parameter_hints_visible");
+/// While parameter hints show several signatures (Monaco's
+/// `parameterHintsMultipleSignatures`).
+const PARAMETER_HINTS_MULTIPLE: Option<&str> =
+    Some("CodeEditor && parameter_hints_multiple_signatures");
+/// As [`PARAMETER_HINTS_MULTIPLE`], for keys the suggest widget takes first
+/// (Monaco weighs its list keys above parameter hints').
+const PARAMETER_HINTS_MULTIPLE_NO_SUGGEST: Option<&str> =
+    Some("CodeEditor && parameter_hints_multiple_signatures && !suggest_widget_visible");
 
 /// Runs the editor action `id` (Monaco `editor.trigger(source, id)`): a
 /// built-in one such as `"editor.action.formatDocument"`, or one added with
@@ -570,6 +580,14 @@ actions!(
         /// Requests parameter hints at the cursor (Monaco
         /// `editor.action.triggerParameterHints`).
         TriggerParameterHints,
+        /// Closes parameter hints (Monaco `closeParameterHints`).
+        CloseParameterHints,
+        /// Shows the next signature in parameter hints (Monaco
+        /// `showNextParameterHint`).
+        ShowNextParameterHint,
+        /// Shows the previous signature in parameter hints (Monaco
+        /// `showPrevParameterHint`).
+        ShowPrevParameterHint,
         /// Requests completions at the cursor (Monaco `editor.action.triggerSuggest`).
         TriggerSuggest,
         /// Accepts the selected suggestion in the other insert mode (Monaco
@@ -1264,6 +1282,38 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         bindings.extend([
             KeyBinding::new("ctrl-n", SelectNextSuggestion, SUGGEST),
             KeyBinding::new("ctrl-p", SelectPreviousSuggestion, SUGGEST),
+        ]);
+    }
+    // Parameter hints (Monaco weighs them above the editor's own keys, such
+    // as Escape and Alt+Up/Down for moving lines): bound after those.
+    bindings.extend([
+        KeyBinding::new("escape", CloseParameterHints, PARAMETER_HINTS),
+        KeyBinding::new("shift-escape", CloseParameterHints, PARAMETER_HINTS),
+        KeyBinding::new(
+            "down",
+            ShowNextParameterHint,
+            PARAMETER_HINTS_MULTIPLE_NO_SUGGEST,
+        ),
+        KeyBinding::new(
+            "up",
+            ShowPrevParameterHint,
+            PARAMETER_HINTS_MULTIPLE_NO_SUGGEST,
+        ),
+        KeyBinding::new("alt-down", ShowNextParameterHint, PARAMETER_HINTS_MULTIPLE),
+        KeyBinding::new("alt-up", ShowPrevParameterHint, PARAMETER_HINTS_MULTIPLE),
+    ]);
+    if cfg!(target_os = "macos") {
+        bindings.extend([
+            KeyBinding::new(
+                "ctrl-n",
+                ShowNextParameterHint,
+                PARAMETER_HINTS_MULTIPLE_NO_SUGGEST,
+            ),
+            KeyBinding::new(
+                "ctrl-p",
+                ShowPrevParameterHint,
+                PARAMETER_HINTS_MULTIPLE_NO_SUGGEST,
+            ),
         ]);
     }
     bindings

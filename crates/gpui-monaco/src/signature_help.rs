@@ -1,11 +1,15 @@
 //! Parameter hints (Monaco's `contrib/parameterHints`): typing a trigger
 //! character (e.g. `(`) shows the signature with the active parameter; it
 //! updates while typing and closes with Escape or when the provider returns
-//! nothing.
+//! nothing. Up/Down (and the widget's arrows) go through overloads.
+//!
+//! Ports `parameterHints.ts`, `parameterHintsModel.ts` and
+//! `parameterHintsWidget.ts` (MIT).
 
 use gpui::{
-    AppContext as _, Context, Entity, FontWeight, HighlightStyle, IntoElement, ParentElement,
-    Render, Styled, StyledText, Task, UnderlineStyle, Window, div, px,
+    AppContext as _, Context, Entity, FontWeight, HighlightStyle, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement, Render, Styled, StyledText, Task, UnderlineStyle,
+    WeakEntity, Window, div, px,
 };
 use text::PointUtf16;
 
@@ -26,6 +30,7 @@ pub(crate) struct SignatureHelpState {
 /// as a content widget.
 pub struct SignatureHelpWidget {
     help: SignatureHelp,
+    editor: WeakEntity<CodeEditor>,
     style: MarkdownStyle,
     theme: std::sync::Arc<crate::Theme>,
 }
@@ -39,6 +44,44 @@ impl SignatureHelpWidget {
                 .active_parameter
                 .unwrap_or(self.help.active_parameter),
         ))
+    }
+
+    /// Monaco's overload counter, e.g. `02/12`.
+    fn overloads(&self) -> String {
+        let count = self.help.signatures.len();
+        let width = count.to_string().len();
+        format!("{:0width$}/{count}", self.help.active_signature + 1)
+    }
+
+    /// A previous/next arrow (Monaco's `parameter-hints-previous`/`-next`
+    /// buttons).
+    fn button(&self, next: bool) -> impl IntoElement {
+        let editor = self.editor.clone();
+        div()
+            .id(if next {
+                "next-signature"
+            } else {
+                "previous-signature"
+            })
+            .w(px(16.))
+            .h(px(16.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                cx.stop_propagation();
+                if let Some(editor) = editor.upgrade() {
+                    editor.update(cx, |editor, cx| {
+                        if next {
+                            editor.show_next_parameter_hint(cx);
+                        } else {
+                            editor.show_previous_parameter_hint(cx);
+                        }
+                    });
+                }
+            })
+            .child(if next { "⌄" } else { "⌃" })
     }
 }
 
@@ -97,39 +140,60 @@ impl Render for SignatureHelpWidget {
                 },
             ));
         }
-        let count = self.help.signatures.len();
+        let multiple = self.help.signatures.len() > 1;
         let parameter_doc = signature
             .parameters
             .get(active)
             .and_then(|p| p.documentation.clone());
-        div()
-            .max_w(px(500.))
+        let body = div()
+            .flex_1()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap(px(4.))
             .p(px(6.))
-            .bg(colors.widget_background)
-            .border_1()
-            .border_color(colors.widget_border)
-            .text_color(colors.widget_foreground)
-            .text_size(self.style.font_size)
             .child(
                 div()
-                    .flex()
-                    .gap(px(6.))
-                    .when_some((count > 1).then_some(()), |this, _| {
-                        this.child(format!("{}/{}", self.help.active_signature + 1, count))
-                    })
-                    .child(div().font_family(self.style.code_font.clone()).child(
-                        StyledText::new(signature.label.clone()).with_highlights(highlights),
-                    )),
+                    .font_family(self.style.code_font.clone())
+                    .child(StyledText::new(signature.label.clone()).with_highlights(highlights)),
             )
             .when_some(parameter_doc, |this, doc| {
                 this.child(render_markdown(&doc.0, &self.style, &self.theme, &registry))
             })
             .when_some(signature.documentation.clone(), |this, doc| {
                 this.child(render_markdown(&doc.0, &self.style, &self.theme, &registry))
+            });
+        div()
+            .max_w(px(500.))
+            .flex()
+            .bg(colors.widget_background)
+            .border_1()
+            .border_color(colors.widget_border)
+            .text_color(colors.widget_foreground)
+            .text_size(self.style.font_size)
+            // Monaco's `.controls` column, shown with several signatures.
+            .when(multiple, |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .min_w(px(22.))
+                        .px(px(2.))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_between()
+                        .border_r_1()
+                        .border_color(colors.widget_border)
+                        .child(self.button(false))
+                        .child(
+                            div()
+                                .text_size(self.style.font_size * 0.85)
+                                .child(self.overloads()),
+                        )
+                        .child(self.button(true)),
+                )
             })
+            .child(body)
     }
 }
 
@@ -141,7 +205,17 @@ impl CodeEditor {
         self.signature_help.widget.is_some()
     }
 
-    /// Closes parameter hints and cancels a pending request.
+    /// Whether the parameter hints show several signatures (Monaco's
+    /// `parameterHintsMultipleSignatures`).
+    pub(crate) fn has_multiple_signatures(&self, cx: &gpui::App) -> bool {
+        self.signature_help
+            .widget
+            .as_ref()
+            .is_some_and(|(widget, _)| widget.read(cx).help.signatures.len() > 1)
+    }
+
+    /// Closes parameter hints and cancels a pending request (Monaco
+    /// `closeParameterHints`).
     pub fn hide_signature_help(&mut self, cx: &mut Context<Self>) {
         self.signature_help.task = None;
         if let Some((_, id)) = self.signature_help.widget.take() {
@@ -149,8 +223,13 @@ impl CodeEditor {
         }
     }
 
-    /// Called after `text` was typed: opens or updates parameter hints.
+    /// Called after `text` was typed: opens or updates parameter hints
+    /// (Monaco `ParameterHintsModel.onDidType`, only with
+    /// `parameter_hints.enabled`).
     pub(crate) fn signature_help_after_typing(&mut self, text: &str, cx: &mut Context<Self>) {
+        if !self.options.parameter_hints.enabled {
+            return;
+        }
         let Some(ch) = text.chars().last() else {
             return;
         };
@@ -219,11 +298,18 @@ impl CodeEditor {
                 cx.notify();
             });
             self.set_content_widget_position(id, position, cx);
+            cx.notify();
             return;
         }
         let style = self.markdown_style();
         let theme = self.theme.clone();
-        let widget = cx.new(|_| SignatureHelpWidget { help, style, theme });
+        let editor = cx.entity().downgrade();
+        let widget = cx.new(|_| SignatureHelpWidget {
+            help,
+            editor,
+            style,
+            theme,
+        });
         let id = self.add_content_widget(
             ContentWidget {
                 position,
@@ -236,23 +322,89 @@ impl CodeEditor {
             cx,
         );
         self.signature_help.widget = Some((widget, id));
+        cx.notify();
     }
 
-    /// Cycles overloads (Up/Down while hints with several signatures show).
-    /// Returns whether it handled the key.
-    pub(crate) fn cycle_signature(&mut self, delta: isize, cx: &mut Context<Self>) -> bool {
+    /// Shows the next signature (Monaco `showNextParameterHint`): past the
+    /// last one it wraps around with `parameter_hints.cycle`, else closes.
+    pub fn show_next_parameter_hint(&mut self, cx: &mut Context<Self>) {
+        self.step_signature(true, cx);
+    }
+
+    /// Shows the previous signature (Monaco `showPrevParameterHint`):
+    /// before the first one it wraps around with `parameter_hints.cycle`,
+    /// else closes.
+    pub fn show_previous_parameter_hint(&mut self, cx: &mut Context<Self>) {
+        self.step_signature(false, cx);
+    }
+
+    /// Monaco `ParameterHintsModel.next`/`previous`.
+    fn step_signature(&mut self, next: bool, cx: &mut Context<Self>) {
         let Some((widget, _)) = &self.signature_help.widget else {
-            return false;
+            return;
         };
-        widget.update(cx, |widget, cx| {
-            let count = widget.help.signatures.len();
-            if count < 2 {
+        let cycle = self.options.parameter_hints.cycle;
+        let stepped = widget.update(cx, |widget, cx| {
+            let length = widget.help.signatures.len();
+            let active = widget.help.active_signature;
+            let at_end = if next {
+                active % length == length - 1
+            } else {
+                active == 0
+            };
+            if (length < 2 || at_end) && !cycle {
                 return false;
             }
-            let next = (widget.help.active_signature as isize + delta).rem_euclid(count as isize);
-            widget.help.active_signature = next as usize;
+            widget.help.active_signature = match (next, at_end) {
+                (true, true) => 0,
+                (true, false) => active + 1,
+                (false, true) => length - 1,
+                (false, false) => active - 1,
+            };
             cx.notify();
             true
-        })
+        });
+        if !stepped {
+            self.hide_signature_help(cx);
+        }
+    }
+
+    /// The signature shown, as (label, index, count), for tests.
+    #[doc(hidden)]
+    pub fn active_signature_for_tests(&self, cx: &gpui::App) -> Option<(String, usize, usize)> {
+        let (widget, _) = self.signature_help.widget.as_ref()?;
+        let help = &widget.read(cx).help;
+        let signature = help.signatures.get(help.active_signature)?;
+        Some((
+            signature.label.to_string(),
+            help.active_signature,
+            help.signatures.len(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parameter_ranges() {
+        let label = "add(a: i32, b: i32)";
+        assert_eq!(
+            parameter_range(label, &ParameterLabel::Text("b: i32".into())),
+            Some(12..18)
+        );
+        assert_eq!(
+            parameter_range(label, &ParameterLabel::Range(4..10)),
+            Some(4..10)
+        );
+        assert_eq!(
+            parameter_range(label, &ParameterLabel::Range(12..19)),
+            Some(12..19)
+        );
+        assert_eq!(
+            parameter_range(label, &ParameterLabel::Text("c".into())),
+            None
+        );
     }
 }

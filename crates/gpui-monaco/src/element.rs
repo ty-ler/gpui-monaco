@@ -11,6 +11,7 @@ use gpui::{
 use text::{PointUtf16, Rope};
 
 use crate::cursor::Selection;
+use crate::decorations::{DecorationId, InjectedText};
 use crate::editor::CodeEditor;
 use crate::options::{
     CursorStyle, EditorOptions, LineNumbers, RenderLineHighlight, ShowFoldingControls, WordWrap,
@@ -41,10 +42,20 @@ pub(crate) struct LineLayout {
     /// Byte index into the shaped text for each column in `columns`,
     /// inclusive of the end.
     pub display_index: Vec<usize>,
-    /// Injected (decoration before/after) text: display byte range and
-    /// background.
-    /// Injected text: display range, background and swatch.
-    pub injected: Vec<(Range<usize>, Option<Hsla>, Option<Hsla>)>,
+    /// Injected (decoration before/after) text.
+    pub injected: Vec<InjectedLayout>,
+}
+
+/// Injected text on a laid out line.
+#[derive(Clone)]
+pub(crate) struct InjectedLayout {
+    /// Display byte range.
+    pub range: Range<usize>,
+    pub background: Option<Hsla>,
+    pub swatch: Option<Hsla>,
+    /// The decoration it comes from, if any (Monaco's mouse target
+    /// `injectedText`).
+    pub decoration: Option<DecorationId>,
 }
 
 impl LineLayout {
@@ -240,7 +251,16 @@ pub(crate) struct ChunkedLine {
 }
 
 impl ChunkedLine {
-    fn shape(display: String, font_size: Pixels, runs: &[TextRun], window: &mut Window) -> Self {
+    /// Shapes `display` in `font_size`, except the `sizes` ranges, each
+    /// shaped on its own in its size (and centered on the line when
+    /// painted).
+    fn shape(
+        display: String,
+        font_size: Pixels,
+        sizes: &[(Range<usize>, Pixels)],
+        runs: &[TextRun],
+        window: &mut Window,
+    ) -> Self {
         let mut bounds = vec![0];
         if display.len() > SHAPE_CHUNK * 2 {
             // Content-defined: the first delimiter after `SHAPE_CHUNK`
@@ -260,6 +280,13 @@ impl ChunkedLine {
             }
         }
         bounds.push(display.len());
+        if !sizes.is_empty() {
+            for (range, _) in sizes {
+                bounds.extend([range.start, range.end]);
+            }
+            bounds.sort_unstable();
+            bounds.dedup();
+        }
         let mut chunks = Vec::with_capacity(bounds.len() - 1);
         let mut x = px(0.);
         let mut run_ix = 0;
@@ -283,9 +310,13 @@ impl ChunkedLine {
                     run_ix += 1;
                 }
             }
+            let size = sizes
+                .iter()
+                .find(|(range, _)| range.start <= start && end <= range.end)
+                .map_or(font_size, |(_, size)| *size);
             let shaped = window.text_system().shape_line(
                 SharedString::from(display[start..end].to_string()),
-                font_size,
+                size,
                 &chunk_runs,
                 None,
             );
@@ -364,22 +395,25 @@ pub(crate) struct RowSegment {
     pub overflow: u32,
 }
 
-/// Injected text being laid out: display range, style, background and
-/// swatch.
-type Injected = (Range<usize>, TokenStyle, Option<Hsla>, Option<Hsla>);
+/// Injected text being laid out: display range and its injection.
+type Injected<'a> = (Range<usize>, &'a Injection);
+
+/// Text to inject on a row: UTF-16 column, whether it's `after` a range
+/// (else `before` one), the text, and its decoration.
+pub(crate) type Injection = (u32, bool, InjectedText, Option<DecorationId>);
 
 /// Shapes one view line. `highlights` are styled spans in row-relative byte
 /// offsets, sorted and non-overlapping. `marked` is an IME composition range
 /// in UTF-16 columns of the row, drawn underlined.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn layout_segment(
+pub(crate) fn layout_segment<'a>(
     rope: &Rope,
     segment: &RowSegment,
     tab_size: u32,
     metrics: &TextMetrics,
     color: Hsla,
     highlights: &[(Range<usize>, TokenStyle)],
-    injections: &[(u32, bool, crate::decorations::InjectedText)],
+    injections: &'a [Injection],
     marked: Option<(Range<u32>, Hsla)>,
     window: &mut Window,
 ) -> LineLayout {
@@ -393,14 +427,14 @@ pub(crate) fn layout_segment(
     // (row byte offset, display offset) for each char start.
     let mut char_starts = Vec::with_capacity(line.len());
     let mut visible_column = segment.start_visible_column as usize;
-    // (display range, style, background) of injected text.
+    // (display range, injection) of injected text.
     let mut injected: Vec<Injected> = Vec::new();
     let mut injection_ix = 0;
     // Emits injections at `column` (`after` ones first) and returns where the
     // column itself displays: before `after` text (it ends a decorated range)
     // or after `before` text (it starts one).
     let mut inject_at =
-        |column: u32, display: &mut String, injected: &mut Vec<Injected>| -> usize {
+        |column: u32, display: &mut String, injected: &mut Vec<Injected<'a>>| -> usize {
             let first = injection_ix;
             while injection_ix < injections.len() && injections[injection_ix].0 <= column {
                 injection_ix += 1;
@@ -408,17 +442,13 @@ pub(crate) fn layout_segment(
             let position_before = display.len();
             let mut has_after = false;
             for is_after in [true, false] {
-                for (at, after, text) in &injections[first..injection_ix] {
+                for injection in &injections[first..injection_ix] {
+                    let (at, after, text, _) = injection;
                     if *at == column && *after == is_after {
                         has_after |= *after;
                         let start = display.len();
                         display.push_str(&text.content);
-                        injected.push((
-                            start..display.len(),
-                            text.style,
-                            text.background,
-                            text.swatch,
-                        ));
+                        injected.push((start..display.len(), injection));
                     }
                 }
             }
@@ -488,7 +518,7 @@ pub(crate) fn layout_segment(
     for (range, _) in &styled {
         bounds.extend([range.start, range.end]);
     }
-    for (range, _, _, _) in &injected {
+    for (range, _) in &injected {
         bounds.extend([range.start, range.end]);
     }
     if let Some((range, _)) = &marked_display {
@@ -507,10 +537,12 @@ pub(crate) fn layout_segment(
         while span_ix < styled.len() && styled[span_ix].0.end <= start {
             span_ix += 1;
         }
-        let style = injected
+        let injected_text = injected
             .iter()
-            .find(|(range, _, _, _)| range.start <= start && end <= range.end)
-            .map(|(_, style, _, _)| *style)
+            .find(|(range, _)| range.start <= start && end <= range.end)
+            .map(|(_, (_, _, text, _))| text);
+        let style = injected_text
+            .map(|text| text.style)
             .or_else(|| {
                 styled
                     .get(span_ix)
@@ -519,6 +551,9 @@ pub(crate) fn layout_segment(
             })
             .unwrap_or_default();
         let mut font = metrics.font.clone();
+        if let Some(family) = injected_text.and_then(|text| text.font_family.clone()) {
+            font.family = family;
+        }
         if style.bold {
             font.weight = FontWeight::BOLD;
         }
@@ -553,7 +588,15 @@ pub(crate) fn layout_segment(
         }
         runs.push(text_run);
     }
-    let shaped = ChunkedLine::shape(display, metrics.font_size, &runs, window);
+    // Injected text in its own font size is shaped on its own.
+    let sizes: Vec<(Range<usize>, Pixels)> = injected
+        .iter()
+        .filter_map(|(range, (_, _, text, _))| {
+            let size = text.font_size.filter(|size| *size != metrics.font_size)?;
+            (!range.is_empty()).then(|| (range.clone(), size))
+        })
+        .collect();
+    let shaped = ChunkedLine::shape(display, metrics.font_size, &sizes, &runs, window);
     LineLayout {
         view_line: segment.view_line,
         row: segment.row,
@@ -565,7 +608,12 @@ pub(crate) fn layout_segment(
         display_index,
         injected: injected
             .into_iter()
-            .map(|(range, _, background, swatch)| (range, background, swatch))
+            .map(|(range, (_, _, text, decoration))| InjectedLayout {
+                range,
+                background: text.background,
+                swatch: text.swatch,
+                decoration: *decoration,
+            })
             .collect(),
     }
 }
@@ -1645,22 +1693,22 @@ fn prepaint_editor(
             if let Some(before) = &options.before
                 && start.row == segment.row
             {
-                injections.push((start.column, false, before.clone()));
+                injections.push((start.column, false, before.clone(), Some(decoration.id)));
             }
             if let Some(after) = &options.after
                 && end.row == segment.row
             {
-                injections.push((end.column, true, after.clone()));
+                injections.push((end.column, true, after.clone(), Some(decoration.id)));
             }
         }
-        injections.sort_by_key(|(column, _, _)| *column);
+        injections.sort_by_key(|(column, _, _, _)| *column);
         // Monaco's `mtkoverflow`: "Show more (1.9 MB)" where it stops.
         if segment.overflow > 0 {
-            injections.retain(|(column, _, _)| *column <= segment.columns.end);
+            injections.retain(|(column, _, _, _)| *column <= segment.columns.end);
             injections.push((
                 segment.columns.end,
                 true,
-                crate::decorations::InjectedText {
+                InjectedText {
                     content: format!("Show more ({})", overflow_size(segment.overflow)).into(),
                     style: TokenStyle {
                         foreground: Some(colors.button_foreground),
@@ -1668,7 +1716,9 @@ fn prepaint_editor(
                     },
                     background: Some(colors.button_background),
                     swatch: None,
+                    ..Default::default()
                 },
+                None,
             ));
         }
         let row_highlights = if decoration_styles.is_empty() {
@@ -3180,7 +3230,13 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                 }
                 // Injected text backgrounds.
                 for line in &layout.lines {
-                    for (range, background, swatch) in &line.injected {
+                    for InjectedLayout {
+                        range,
+                        background,
+                        swatch,
+                        ..
+                    } in &line.injected
+                    {
                         if let Some(swatch) = swatch {
                             // Monaco: a 0.8em square with a 0.1em border,
                             // centered in its 1.2em of room.

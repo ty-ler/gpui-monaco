@@ -549,6 +549,7 @@ impl CodeEditor {
                         style: style(part.preview),
                         background: visible_color(colors.ghost_text_background),
                         swatch: None,
+                        ..Default::default()
                     }),
                     border: visible_color(colors.ghost_text_border),
                     ..Default::default()

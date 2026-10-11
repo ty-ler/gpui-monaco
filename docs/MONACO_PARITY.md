@@ -105,7 +105,7 @@ Issues are linked by number.
 | Completion: tab completion, locality bonus, retrigger rules | `suggest` | ✅ | #103 |
 | Completion widget: details toggle, side docs, resizing, status bar, loading and empty messages | `suggest` | ✅ | #103 |
 | Hover | `hover` | ✅ content and gutter hovers, options, keyboard focus and scrolling, resizing, verbosity, copy button, long line warnings | #199 |
-| Signature help (with cycling) | `parameterHints` | ✅ | |
+| Signature help: overload cycling and arrows, `enabled`/`cycle` options, close and next/previous commands | `parameterHints` | ✅ | #200 |
 | Go to definition (link, F12) | `gotoSymbol` | ✅ | |
 | References, declaration, type definition, implementation, peek view | `gotoSymbol`, `peekView` | ✅ | #95 |
 | Diagnostics: squiggles, ruler, hover, F8 | `gotoError` | ✅ | |
@@ -114,7 +114,7 @@ Issues are linked by number.
 | Formatting: document, range, on type, on paste | `format` | ✅ | #94 |
 | Rename | `rename` | ✅ | #56 |
 | Code actions and lightbulb (no AI actions, "Show Disabled" toggle, refactor preview or nearby quick fixes) | `codeAction` | ✅ | #56 |
-| Inlay hints (no label part navigation, tooltips, double-click edits or smaller font) | `inlayHints` | ✅ | #56 |
+| Inlay hints: label parts, tooltips, Cmd/Ctrl+click, double-click edits, resolve, font options (no part context menu or location hovers) | `inlayHints` | ✅ | #56, #200 |
 | Code lens | `codelens` | ✅ | #96 |
 | Color decorators (providers, default finder) | `colorDecorators` | ✅ | #97 |
 | Color picker (hover and standalone) | `colorPicker` | ✅ | #97 |
