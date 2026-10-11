@@ -351,17 +351,44 @@ pub(crate) struct ScrollbarFade {
     pub mouse_position: Option<Point<Pixels>>,
     pub revealed_at: Option<Instant>,
     pub left_at: Option<Instant>,
+    /// When the sliders last turned visible, and their opacity then: they
+    /// fade in from it.
+    shown: Option<(Instant, f32)>,
+    /// The opacity last returned.
+    last: f32,
 }
 
 /// Monaco's `HIDE_TIMEOUT` before hiding, and its 800ms fade.
 const SCROLLBAR_HIDE_TIMEOUT: Duration = Duration::from_millis(500);
 const SCROLLBAR_FADE: Duration = Duration::from_millis(800);
+/// Monaco's `.visible` transition (`scrollbars.css`).
+const SCROLLBAR_FADE_IN: Duration = Duration::from_millis(100);
 
 impl ScrollbarFade {
-    /// The sliders' opacity, and whether it's still changing.
-    pub fn opacity(&self, dragging: bool) -> (f32, bool) {
+    /// The sliders' opacity, and whether it's still changing: Monaco's
+    /// `.visible` fades in over 100ms, `.invisible.fade` out over 800ms.
+    pub fn opacity(&mut self, dragging: bool) -> (f32, bool) {
+        let now = Instant::now();
+        let (opacity, animating) = match self.hidden_opacity(dragging, now) {
+            None => {
+                let (since, from) = *self.shown.get_or_insert((now, self.last));
+                let t = (now - since).as_secs_f32() / SCROLLBAR_FADE_IN.as_secs_f32();
+                (from + (1. - from) * t.min(1.), t < 1.)
+            }
+            Some(fading) => {
+                self.shown = None;
+                fading
+            }
+        };
+        self.last = opacity;
+        (opacity, animating)
+    }
+
+    /// `None` while the sliders should show, else their fading opacity and
+    /// whether it's still changing.
+    fn hidden_opacity(&self, dragging: bool, now: Instant) -> Option<(f32, bool)> {
         if self.mouse_over || dragging {
-            return (1., false);
+            return None;
         }
         let hide_from = [
             self.revealed_at.map(|t| t + SCROLLBAR_HIDE_TIMEOUT),
@@ -371,14 +398,14 @@ impl ScrollbarFade {
         .flatten()
         .max();
         let Some(hide_from) = hide_from else {
-            return (0., false);
+            return Some((0., false));
         };
-        let now = Instant::now();
         if now < hide_from {
-            return (1., true);
+            return None;
         }
         let t = (now - hide_from).as_secs_f32() / SCROLLBAR_FADE.as_secs_f32();
-        ((1. - t).max(0.), t < 1.)
+        // From wherever the fade-in got to.
+        Some((self.last.min(1. - t).max(0.), t < 1.))
     }
 }
 
@@ -672,21 +699,33 @@ mod tests {
     #[test]
     fn auto_scrollbars_fade() {
         let mut fade = ScrollbarFade::default();
-        // Never revealed: hidden.
+        // Hidden until the mouse comes or it scrolls.
         assert_eq!(fade.opacity(false), (0., false));
         fade.mouse_over = true;
+        // Monaco's 100ms fade-in.
+        let (opacity, animating) = fade.opacity(false);
+        assert!(opacity < 0.5 && animating);
+        fade.shown = Some((Instant::now() - Duration::from_millis(50), 0.));
+        let (opacity, animating) = fade.opacity(false);
+        assert!((0.4..0.9).contains(&opacity) && animating);
+        fade.shown = Some((Instant::now() - Duration::from_millis(150), 0.));
         assert_eq!(fade.opacity(false), (1., false));
         fade.mouse_over = false;
-        // Just scrolled: shown, then fading.
+        // Revealed by scrolling: shown, then fading out over 800ms.
         fade.revealed_at = Some(Instant::now());
-        assert_eq!(fade.opacity(false), (1., true));
+        assert_eq!(fade.opacity(false), (1., false));
         fade.revealed_at = Some(Instant::now() - Duration::from_millis(900));
         let (opacity, fading) = fade.opacity(false);
         assert!(opacity > 0. && opacity < 1. && fading);
+        // Shown again mid-fade: it fades in from there.
+        fade.mouse_over = true;
+        let (again, animating) = fade.opacity(false);
+        assert!(again >= opacity && again < 1. && animating);
+        fade.mouse_over = false;
         fade.revealed_at = Some(Instant::now() - Duration::from_millis(2000));
         assert_eq!(fade.opacity(false), (0., false));
-        // Dragging keeps it.
-        assert_eq!(fade.opacity(true), (1., false));
+        // Dragging shows it, fading in.
+        assert!(fade.opacity(true).1);
     }
 
     #[test]

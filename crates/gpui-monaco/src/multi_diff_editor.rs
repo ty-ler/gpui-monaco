@@ -1198,7 +1198,7 @@ impl MultiDiffEditor {
     /// The list's scrollbars (Monaco `SmoothScrollableElement`'s, `Auto`
     /// and without shadows).
     fn render_scrollbars(
-        &self,
+        &mut self,
         origin: Point<Pixels>,
         colors: &EditorColors,
         window: &mut Window,

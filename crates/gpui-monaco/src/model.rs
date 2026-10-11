@@ -1183,6 +1183,12 @@ impl TextModel {
         self.decorations.all(editor)
     }
 
+    /// A number that changes whenever the decorations change (added,
+    /// removed, changed or moved by an edit).
+    pub fn decorations_version(&self) -> u64 {
+        self.decorations.version()
+    }
+
     /// The decoration with `id`, if it still exists.
     pub fn decoration(&self, id: DecorationId) -> Option<&Decoration> {
         self.decorations.get(id)

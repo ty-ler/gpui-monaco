@@ -68,7 +68,7 @@ Issues are linked by number.
 |---|---|---|---|
 | Gutter: line numbers (on, off, relative, interval, custom function), glyph margin, line decorations, `selectOnLineNumbers` | view parts | ✅ | #203 |
 | Cursor styles (line, block, underline, thin variants, block outline), `mouseStyle`, `mouseMiddleClickAction` | options | ✅ | #203 |
-| Current-line highlight, scrollbars, overview ruler | view parts | ✅ | |
+| Current-line highlight, scrollbars, overview ruler, scroll shadow | view parts (`DecorationsOverviewRuler`, `OverviewZoneManager`, `ScrollDecorationViewPart`) | ✅ marks placed by Monaco's scroll-height formula (view zones, padding, scrolling beyond the last line), spanning their lines with a 6px minimum, merged per color and lane; 2px cursor marks in the multi-cursor colors; Monaco's lanes, border and background; the 6px top shadow; paged track clicks that keep dragging, rounded sliders, the 100ms fade-in | #256 |
 | Scrollbar and overview ruler options | `scrollbar`, `overviewRuler*` | ✅ | #88 |
 | Word wrap: off, on, column, bounded; wrapping indent | `wordWrap` | ✅ | |
 | Wrap for proportional fonts (`wrappingStrategy: advanced`), configurable break characters | `wordWrap*` | ✅ | #87 |

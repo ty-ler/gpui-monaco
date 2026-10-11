@@ -197,4 +197,4 @@ Lines are indented like the cursor's line unless `adjust_whitespace` is off. `se
   - Without symbols, it uses the folding ranges.
   - "Focus Editor Sticky Scroll" (command palette) puts the keyboard on the sticky lines. Use Up and Down, Enter to go to one, and Escape to return.
   - Shift over a sticky line shows the end of its scope; Shift+click goes there. The folding controls in the sticky gutter fold the scope.
-- **Scrollbars:** have an overview ruler showing the selection, find matches, diagnostics and decorations.
+- **Scrollbars:** have an overview ruler showing the cursors, find matches, diagnostics and decorations. As in Monaco, a mark sits where its lines are in the whole scrollable height (view zones, padding and scrolling beyond the last line included), so it lines up with the slider, spans its lines (at least 6px), and marks of a color in the same lane that touch are merged. Once scrolled down, a 6px `scrollbar.shadow` shadow runs along the top (`scrollbar.use_shadows`).

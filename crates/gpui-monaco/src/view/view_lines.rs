@@ -104,6 +104,15 @@ pub struct ViewLines {
     /// Sorted, disjoint hidden model row ranges.
     hidden: Vec<Range<u32>>,
     counts: PrefixSum,
+    /// Unique to this mapping: a new one with every change.
+    generation: u64,
+}
+
+/// The next [`ViewLines::generation`].
+static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_generation() -> u64 {
+    NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl ViewLines {
@@ -117,6 +126,7 @@ impl ViewLines {
             wrap: None,
             hidden: Vec::new(),
             counts: PrefixSum::default(),
+            generation: next_generation(),
         };
         this.rebuild_counts();
         this
@@ -125,6 +135,12 @@ impl ViewLines {
     /// The text version this mapping is for.
     pub fn version(&self) -> Version {
         self.version
+    }
+
+    /// Identifies this mapping: it changes with every edit, wrap and fold,
+    /// and no other mapping has it, so views can cache what they derive.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The text this mapping is for.
@@ -159,6 +175,7 @@ impl ViewLines {
     }
 
     fn rebuild_counts(&mut self) {
+        self.generation = next_generation();
         let mut counts: Vec<u32> = self
             .breaks
             .iter()
@@ -228,6 +245,7 @@ impl ViewLines {
 
     /// Catches up with `rope` at `version`, given the edits since our version.
     pub fn apply_edits(&mut self, rope: Rope, version: Version, patch: &Patch) {
+        self.generation = next_generation();
         let old = std::mem::replace(&mut self.rope, rope);
         self.version = version;
         // Row ranges (old rows, new rows) touched by each edit, merged.
