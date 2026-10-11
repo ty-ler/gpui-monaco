@@ -28,6 +28,8 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **Shift+Tab** with an inline edit that has an alternative action: run it instead of the edit (`editor.action.inlineSuggest.commitAlternativeAction`)
 - **Tab / Shift+Tab / Escape** in a snippet: next and previous tab stop, leave the snippet
 - **Ctrl+Space (or Cmd+I)** in the suggest widget: show or hide the details, or focus the first suggestion if none is (Monaco's `focusSuggestion`, see `suggest.selection_mode`)
+- **Ctrl+Alt+Space** in the suggest widget: move the focus to the details panel and back (Monaco's `toggleSuggestionFocus`); there, Up / Down and PageUp / PageDown scroll it and Cmd/Ctrl+C copies it
+- **Ctrl+Enter** in the find or replace input: insert a line break
 - **Cmd+/** in the suggest widget: explain mode, which shows how the focused suggestion was scored in the details (Monaco's `toggleExplainMode`)
 - **Shift+Enter / Shift+Tab** in the suggest widget: accept in the other insert mode
 - **Up / Down (or Cmd+Up / Cmd+Down, Ctrl+P / Ctrl+N), PageUp / PageDown** in the suggest widget: previous and next suggestion, by item or page

@@ -1,5 +1,7 @@
 //! The find/replace widget (Monaco's `findWidget`): an overlay widget whose
-//! inputs are single-line [`CodeEditor`]s.
+//! inputs are single-line [`CodeEditor`]s that grow with their lines
+//! (Monaco's `flexibleHeight` inputs: Ctrl+Enter and pasting insert line
+//! breaks).
 
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
@@ -8,7 +10,8 @@ use gpui::{
 };
 
 use crate::actions::{
-    FindHistoryNext, FindHistoryPrevious, Newline, Outdent, RemoveSecondaryCursors, Tab,
+    FindHistoryNext, FindHistoryPrevious, FindInputNewline, Newline, Outdent, Paste,
+    RemoveSecondaryCursors, Tab,
 };
 use crate::cursor::Selection;
 use crate::editor::CodeEditor;
@@ -45,6 +48,27 @@ pub struct FindWidget {
 const INPUT_WIDTH: f32 = 220.;
 /// Monaco's delay before a typed search string joins the history.
 const HISTORY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+/// Monaco's `flexibleMaxHeight` for the find and replace inputs; taller
+/// text scrolls.
+const INPUT_MAX_HEIGHT: f32 = 118.;
+
+/// An input's height for `text`: a row per line, up to Monaco's
+/// `flexibleMaxHeight`, plus the box's padding.
+pub(crate) fn input_height(text: &str, line_height: gpui::Pixels) -> gpui::Pixels {
+    let lines = text.split('\n').count().max(1) as f32;
+    (line_height * lines + px(4.)).min(px(INPUT_MAX_HEIGHT).max(line_height + px(4.)))
+}
+
+/// Where `text` inserted at `start` ends.
+fn end_after(start: text::PointUtf16, text: &str) -> text::PointUtf16 {
+    match text.rsplit_once('\n') {
+        Some((before, last)) => text::PointUtf16::new(
+            start.row + before.matches('\n').count() as u32 + 1,
+            last.encode_utf16().count() as u32,
+        ),
+        None => text::PointUtf16::new(start.row, start.column + text.encode_utf16().count() as u32),
+    }
+}
 
 impl Focusable for FindWidget {
     fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
@@ -241,6 +265,31 @@ impl FindWidget {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.set_inputs(options, replace_visible, cx);
+    }
+
+    /// Selects the find input's text without focusing it (Monaco
+    /// `_findInput.select()`).
+    pub(crate) fn select_find_input(&mut self, cx: &mut Context<Self>) {
+        self.find_input.update(cx, |input, cx| {
+            let end = input.model().read(cx).buffer().max_point_utf16();
+            input.set_selections(
+                &[Selection {
+                    anchor: text::PointUtf16::zero(),
+                    head: end,
+                }],
+                cx,
+            );
+        });
+    }
+
+    /// Shows `options` and the replace input's visibility.
+    pub(crate) fn set_inputs(
+        &mut self,
+        options: &FindOptions,
+        replace_visible: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.replace_visible = replace_visible;
         for (input, value) in [
             (&self.find_input, &options.query),
@@ -299,7 +348,9 @@ impl FindWidget {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.navigate_history(true, window, cx);
+        if !self.move_in_multiline_input(true, window, cx) {
+            self.navigate_history(true, window, cx);
+        }
     }
 
     fn on_history_next(
@@ -308,7 +359,110 @@ impl FindWidget {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.navigate_history(false, window, cx);
+        if !self.move_in_multiline_input(false, window, cx) {
+            self.navigate_history(false, window, cx);
+        }
+    }
+
+    /// The focused input, if one is.
+    fn focused_input(&self, window: &Window, cx: &gpui::App) -> Option<Entity<CodeEditor>> {
+        [&self.find_input, &self.replace_input]
+            .into_iter()
+            .find(|input| input.focus_handle(cx).is_focused(window))
+            .cloned()
+    }
+
+    /// Monaco `stopPropagationForMultiLineUpwards`/`Downwards`: in an input
+    /// with several lines, Up (unless at its very start) and Down (unless
+    /// at its very end) move the cursor, as in a textarea, instead of
+    /// walking the history. Returns whether it moved.
+    fn move_in_multiline_input(
+        &mut self,
+        up: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(input) = self.focused_input(window, cx) else {
+            return false;
+        };
+        input.update(cx, |input, cx| {
+            let rope = input.model().read(cx).buffer().rope().clone();
+            let max = rope.max_point_utf16();
+            if max.row == 0 {
+                return false;
+            }
+            let selection = input.selections()[0];
+            let target = if up {
+                let start = selection.start();
+                if start == text::PointUtf16::zero() {
+                    return false;
+                }
+                if start.row == 0 {
+                    text::PointUtf16::zero()
+                } else {
+                    let column = start.column.min(rope.line_len_utf16(start.row - 1));
+                    text::PointUtf16::new(start.row - 1, column)
+                }
+            } else {
+                let end = selection.end();
+                if end == max {
+                    return false;
+                }
+                if end.row == max.row {
+                    max
+                } else {
+                    let column = end.column.min(rope.line_len_utf16(end.row + 1));
+                    text::PointUtf16::new(end.row + 1, column)
+                }
+            };
+            input.set_selections(&[Selection::collapsed(target)], cx);
+            true
+        })
+    }
+
+    /// Monaco `InputBox.insertAtCursor`: replaces the input's selection
+    /// with `text`, the cursor after it.
+    fn insert_in_input(input: &Entity<CodeEditor>, text: &str, cx: &mut Context<Self>) {
+        input.update(cx, |input, cx| {
+            let selection = input.selections()[0];
+            let start = selection.start();
+            let end = end_after(start, text);
+            input.execute_edits(
+                vec![(start..selection.end(), text.to_string())],
+                Some(vec![Selection::collapsed(end)]),
+                cx,
+            );
+        });
+    }
+
+    /// Ctrl+Enter in an input inserts a line break (Monaco
+    /// `_onFindInputKeyDown`/`_onReplaceInputKeyDown`).
+    fn on_input_newline(
+        &mut self,
+        _: &FindInputNewline,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(input) = self.focused_input(window, cx) {
+            Self::insert_in_input(&input, "\n", cx);
+        }
+    }
+
+    /// Pasting text with line breaks keeps them, as Monaco's textarea
+    /// inputs do (single-line inputs turn them into spaces).
+    fn on_paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.focused_input(window, cx) else {
+            return;
+        };
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        if !text.contains(['\n', '\r']) {
+            return;
+        }
+        cx.stop_propagation();
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        Self::insert_in_input(&input, &text, cx);
     }
 
     fn on_enter(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
@@ -417,10 +571,12 @@ impl Render for FindWidget {
         // regex as an error on the input.
         let no_results = status.as_deref() == Some("No results");
         let input_width = self.input_width.min(max_width);
-        let input_box = |input: &Entity<CodeEditor>, error: bool| {
+        let find_height = input_height(&Self::input_text(&self.find_input, cx), line_height);
+        let replace_height = input_height(&Self::input_text(&self.replace_input, cx), line_height);
+        let input_box = |input: &Entity<CodeEditor>, height: gpui::Pixels, error: bool| {
             div()
                 .w(input_width)
-                .h(line_height + px(4.))
+                .h(height)
                 .px(px(2.))
                 .py(px(2.))
                 .bg(colors.input_background)
@@ -498,6 +654,8 @@ impl Render for FindWidget {
             .key_context("FindWidget")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_enter))
+            .on_action(cx.listener(Self::on_input_newline))
+            .capture_action(cx.listener(Self::on_paste))
             .on_action(cx.listener(Self::on_escape))
             .on_action(cx.listener(Self::on_tab))
             .on_action(cx.listener(Self::on_shift_tab))
@@ -535,7 +693,7 @@ impl Render for FindWidget {
                             cx.notify();
                         },
                     ))
-                    .child(input_box(&self.find_input, invalid))
+                    .child(input_box(&self.find_input, find_height, invalid))
                     .child(toggle(
                         "match-case",
                         "Aa",
@@ -590,7 +748,7 @@ impl Render for FindWidget {
                         .items_center()
                         .gap(px(4.))
                         .pl(px(18.))
-                        .child(input_box(&self.replace_input, false))
+                        .child(input_box(&self.replace_input, replace_height, false))
                         .child(toggle(
                             "preserve-case",
                             "AB",

@@ -51,7 +51,8 @@ Issues are linked by number.
 | Find/replace: case, word, regex, in selection, replace all | `find` | ✅ | |
 | Find model (Monaco's `FindModel`), preserve case, case escapes in replace, loop, seed and auto find in selection options | `find` | ✅ | #104 |
 | Find controller commands, history, extra space on top, widget width and states, remembered toggles | `find` | ✅ | #104 |
-| Find with arguments, go to match, `findOnType` | `find` | 🟡 no multi-line search inputs | #202 |
+| Find with arguments, go to match, `findOnType` | `find` | ✅ | #202 |
+| Multi-line search and replace inputs (Ctrl+Enter, growing inputs), global find clipboard | `findWidget`, `find.globalFindClipboard` | ✅ the find pasteboard on macOS, an app-wide find string elsewhere | #226 |
 | Bracket matching and jump | `bracketMatching` | ✅ `always`/`near`/`never`, overview ruler mark | #195 |
 
 ## View
@@ -121,7 +122,8 @@ Issues are linked by number.
 | Completion: resolve, tags, insert/replace modes, word suggestions, accept and selection options | `suggest` | ✅ | #103 |
 | Completion: tab completion, locality bonus, retrigger rules | `suggest` | ✅ | #103 |
 | Completion widget: details toggle, side docs, resizing, status bar, loading and empty messages | `suggest` | ✅ | #103 |
-| Completion: `selectionMode` and `focusSuggestion`, explain mode, reset size, `snippetsPreventQuickSuggestions`, every item kind | `suggest` | 🟡 no `quickSuggestions: 'inline'`/`'offWhenInlineCompletions'`, details focus or `shareSuggestSelections` | #202 |
+| Completion: `selectionMode` and `focusSuggestion`, explain mode, reset size, `snippetsPreventQuickSuggestions`, every item kind | `suggest` | 🟡 no `shareSuggestSelections` | #202 |
+| Completion: `quickSuggestions: 'inline'` (completion items as ghost text) and `'offWhenInlineCompletions'`, details focus (`toggleSuggestionFocus`), `suggestWidgetCopy` | `suggest`, `suggestInlineCompletions` | ✅ copying takes the whole details panel (there's no text selection in it); inline items skip word-based suggestions and eager resolving | #226 |
 | Hover | `hover` | ✅ content and gutter hovers, options, keyboard focus and scrolling, resizing, verbosity, copy button, long line warnings | #199 |
 | Signature help: overload cycling and arrows, `enabled`/`cycle` options, close and next/previous commands | `parameterHints` | ✅ | #200 |
 | Go to definition (link, F12) | `gotoSymbol` | ✅ | |

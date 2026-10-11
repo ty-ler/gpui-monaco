@@ -31,6 +31,23 @@ const MIN_WIDTH: f32 = 220.;
 const DETAILS_WIDTH: f32 = 330.;
 /// Monaco's `horizontalPadding` around the widgets.
 const HORIZONTAL_PADDING: f32 = 14.;
+/// Monaco `SuggestDetailsWidget.scrollDown`'s default step.
+const DETAILS_SCROLL_STEP: f32 = 8.;
+/// Monaco `SuggestDetailsWidget.pageDown`'s step.
+const DETAILS_PAGE_STEP: f32 = 80.;
+
+/// How the focused details panel scrolls (Monaco `SuggestDetailsWidget`'s
+/// `scrollUp`, `scrollDown`, `pageUp`, `pageDown`, `scrollTop` and
+/// `scrollBottom`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DetailsScroll {
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
+}
 
 /// The message shown while an explicit request is computing.
 pub const LOADING_MESSAGE: &str = "Loading...";
@@ -51,6 +68,9 @@ pub struct SuggestWidgetState {
     /// Monaco's `Frozen` state: nothing matches what was typed, so the
     /// last matches stay, without bold highlights.
     frozen: bool,
+    /// Monaco's `Details` state: the details panel has the focus
+    /// (`toggleSuggestionFocus`).
+    details_focused: bool,
 }
 
 impl SuggestWidgetState {
@@ -76,6 +96,7 @@ impl SuggestWidgetState {
             explanation: None,
             message: None,
             frozen: session.frozen,
+            details_focused: false,
         }
     }
 
@@ -87,6 +108,7 @@ impl SuggestWidgetState {
             explanation: None,
             message: Some(message),
             frozen: false,
+            details_focused: false,
         }
     }
 
@@ -94,6 +116,11 @@ impl SuggestWidgetState {
     /// its own.
     pub(crate) fn set_explanation(&mut self, explanation: Option<(SharedString, String)>) {
         self.explanation = explanation;
+    }
+
+    /// Marks the details panel as having the focus.
+    pub(crate) fn set_details_focused(&mut self, focused: bool) {
+        self.details_focused = focused;
     }
 
     /// The focused row's item.
@@ -159,6 +186,10 @@ pub struct SuggestWidget {
     metrics: SuggestWidgetMetrics,
     /// First visible row.
     scroll: usize,
+    /// The details panel's scroll position (Monaco's `_body.scrollTop`).
+    details_scroll: gpui::ScrollHandle,
+    /// The scroll position asked for, kept until layout can clamp it.
+    details_scroll_top: Pixels,
 }
 
 /// A short glyph and color per kind, standing in for Monaco's codicons.
@@ -293,6 +324,8 @@ impl SuggestWidget {
             options,
             metrics,
             scroll: 0,
+            details_scroll: gpui::ScrollHandle::new(),
+            details_scroll_top: px(0.),
         };
         this.keep_selected_visible(cx);
         this
@@ -304,6 +337,13 @@ impl SuggestWidget {
         metrics: SuggestWidgetMetrics,
         cx: &mut Context<Self>,
     ) {
+        // Monaco shows another item's details from the top.
+        if state.focused_item().map(|item| &item.label)
+            != self.state.focused_item().map(|item| &item.label)
+            || state.selected != self.state.selected
+        {
+            self.scroll_details(DetailsScroll::Top);
+        }
         self.state = state;
         self.metrics = metrics;
         self.keep_selected_visible(cx);
@@ -312,6 +352,54 @@ impl SuggestWidget {
 
     pub(crate) fn message(&self) -> Option<&'static str> {
         self.state.message
+    }
+
+    /// Scrolls the details panel (Monaco `SuggestDetailsWidget`'s scroll
+    /// methods), within its content once it's laid out.
+    pub(crate) fn scroll_details(&mut self, scroll: DetailsScroll) {
+        let max = self.details_scroll.max_offset().y;
+        let laid_out = self.details_scroll.bounds().size.height > px(0.);
+        // Where the panel is, after any wheel scrolling.
+        let current = if laid_out {
+            -self.details_scroll.offset().y
+        } else {
+            self.details_scroll_top
+        };
+        let top = match scroll {
+            DetailsScroll::Up => current - px(DETAILS_SCROLL_STEP),
+            DetailsScroll::Down => current + px(DETAILS_SCROLL_STEP),
+            DetailsScroll::PageUp => current - px(DETAILS_PAGE_STEP),
+            DetailsScroll::PageDown => current + px(DETAILS_PAGE_STEP),
+            DetailsScroll::Top => px(0.),
+            DetailsScroll::Bottom => {
+                if laid_out {
+                    max
+                } else {
+                    px(f32::MAX)
+                }
+            }
+        };
+        let top = if laid_out { top.min(max) } else { top };
+        self.details_scroll_top = top.max(px(0.));
+        self.details_scroll
+            .set_offset(gpui::point(px(0.), -self.details_scroll_top));
+    }
+
+    /// The details panel's scroll position.
+    pub(crate) fn details_scroll_top(&self) -> Pixels {
+        self.details_scroll_top
+    }
+
+    /// The details panel's text, for copying (Monaco `suggestWidgetCopy`
+    /// copies the selected text): the detail, then the docs' markdown.
+    pub(crate) fn details_text(&self) -> Option<String> {
+        let (detail, docs) = self.details_content()?;
+        let parts: Vec<String> = detail
+            .map(|d| d.to_string())
+            .into_iter()
+            .chain(docs.map(|d| d.0.to_string()))
+            .collect();
+        (!parts.is_empty()).then(|| parts.join("\n\n"))
     }
 
     fn status_bar_height(&self) -> Pixels {
@@ -600,11 +688,17 @@ impl SuggestWidget {
         Some(
             div()
                 .id("suggest-details")
+                .track_scroll(&self.details_scroll)
                 .w_full()
                 .relative()
                 .bg(colors.suggest_background)
                 .border_1()
-                .border_color(colors.suggest_border)
+                // Monaco outlines the focused details panel.
+                .border_color(if self.state.details_focused {
+                    colors.focus_border
+                } else {
+                    colors.suggest_border
+                })
                 .text_color(colors.suggest_foreground)
                 .overflow_y_scroll()
                 .child(

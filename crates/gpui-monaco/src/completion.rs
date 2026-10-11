@@ -33,6 +33,19 @@ struct Memories(SuggestMemories);
 
 impl gpui::Global for Memories {}
 
+/// The item the selection memories pick (`suggest_selection`) among
+/// `candidates` (Monaco `ISuggestMemoryService.select`).
+pub(crate) fn memory_select(
+    mode: crate::options::SuggestSelection,
+    context: &MemoryContext,
+    candidates: &[Candidate],
+    cx: &mut gpui::App,
+) -> usize {
+    cx.default_global::<Memories>()
+        .0
+        .select(mode, context, candidates)
+}
+
 /// Where a session's items insert: what `getOverwriteInfo` needs.
 #[derive(Clone, Copy)]
 struct InsertContext {
@@ -126,7 +139,33 @@ pub(crate) struct SuggestState {
     /// Monaco's explain mode (`toggleExplainMode`): the details panel
     /// shows how the focused item was scored. Off once the widget hides.
     explain_mode: bool,
+    /// Monaco's `State.Details`: the details panel has the focus
+    /// (`toggleSuggestionFocus`), so the keys scroll it. Off once the
+    /// widget hides.
+    pub(crate) details_focused: bool,
+    /// This editor's completion items as ghost text (`quick_suggestions`
+    /// `Inline`).
+    pub(crate) inline_provider:
+        Option<Arc<crate::suggest_inline_completions::SuggestInlineCompletions>>,
+    /// Monaco `_waitForInlineCompletions` (`OffWhenInlineCompletions`).
+    inline_wait: Option<InlineWait>,
 }
+
+/// A quick suggestion waiting for inline completions to settle before
+/// deciding whether to open (Monaco `_waitForInlineCompletionsAndTrigger`).
+struct InlineWait {
+    /// The text version and cursor when it started; the widget opens only
+    /// if neither changed.
+    version: text::Version,
+    position: PointUtf16,
+    /// Checks again whenever the editor changes.
+    _observer: gpui::Subscription,
+    /// Monaco gives up waiting after 750ms.
+    _timeout: Task<()>,
+}
+
+/// Monaco's wait for inline completions before a quick suggestion.
+const INLINE_COMPLETIONS_WAIT: std::time::Duration = std::time::Duration::from_millis(750);
 
 impl Session {
     fn insert_context(&self) -> InsertContext {
@@ -314,6 +353,7 @@ impl CodeEditor {
         self.suggest.quick_task = None;
         self.suggest.session = None;
         self.suggest.explain_mode = false;
+        self.suggest.details_focused = false;
         if let Some((_, id)) = self.suggest.widget.take() {
             self.remove_widget(id, cx);
         }
@@ -853,7 +893,103 @@ impl CodeEditor {
         if self.suggest.explain_mode {
             state.set_explanation(self.suggest_explanation());
         }
+        state.set_details_focused(self.suggest.details_focused);
         self.show_suggest_widget(state, anchor, cx);
+        // The focus goes back to the list when the details panel closes.
+        if self.suggest.details_focused && !self.is_suggestion_details_visible(cx) {
+            self.suggest.details_focused = false;
+            self.refresh_suggest_widget(cx);
+        }
+    }
+
+    /// Moves the focus from the suggest list to its details panel or back
+    /// (Monaco `toggleSuggestionFocus`, Ctrl+Alt+Space): while the details
+    /// panel has it, Up/Down and Page Up/Page Down scroll the panel and
+    /// Cmd/Ctrl+C copies its text. Opens the details panel if it's closed.
+    /// Returns whether the focus moved.
+    pub fn toggle_suggestion_focus(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.suggest.details_focused {
+            self.suggest.details_focused = false;
+            self.refresh_suggest_widget(cx);
+            return true;
+        }
+        // Monaco's `State.Open`: a focused item in a list that isn't frozen.
+        let open = self.is_suggest_visible()
+            && self
+                .suggest
+                .session
+                .as_ref()
+                .is_some_and(|s| s.focused && !s.frozen && !s.model.filtered().is_empty());
+        if !open {
+            return false;
+        }
+        if !self.is_suggestion_details_visible(cx) {
+            // Monaco `toggleDetails(true)`: shows them if the item has any
+            // (remembered for later sessions).
+            let expanded = crate::suggest_widget::details_expanded(cx);
+            cx.default_global::<SuggestUi>().details_expanded = true;
+            self.refresh_suggest_widget(cx);
+            if !self.is_suggestion_details_visible(cx) {
+                cx.default_global::<SuggestUi>().details_expanded = expanded;
+                return false;
+            }
+        }
+        self.suggest.details_focused = true;
+        self.refresh_suggest_widget(cx);
+        true
+    }
+
+    /// Whether the suggest widget's details panel has the focus (Monaco
+    /// `suggestWidgetDetailsFocused`).
+    pub fn is_suggestion_details_focused(&self) -> bool {
+        self.suggest.details_focused
+    }
+
+    /// Scrolls the focused details panel; false if it isn't focused.
+    pub(crate) fn scroll_suggestion_details(
+        &mut self,
+        scroll: crate::suggest_widget::DetailsScroll,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.suggest.details_focused {
+            return false;
+        }
+        let Some((widget, _)) = &self.suggest.widget else {
+            return false;
+        };
+        widget.update(cx, |widget, cx| {
+            widget.scroll_details(scroll);
+            cx.notify();
+        });
+        true
+    }
+
+    /// The details panel's scroll position, for tests.
+    #[doc(hidden)]
+    pub fn suggest_details_scroll_for_tests(&self, cx: &gpui::App) -> Option<gpui::Pixels> {
+        let (widget, _) = self.suggest.widget.as_ref()?;
+        Some(widget.read(cx).details_scroll_top())
+    }
+
+    /// Copies the focused details panel's text to the clipboard (Monaco
+    /// `suggestWidgetCopy`, Cmd/Ctrl+C while the details panel has the
+    /// focus). Monaco copies the text selected in the panel; there's no
+    /// selection here, so this copies the detail and the docs' markdown.
+    /// Returns whether it copied.
+    pub fn copy_suggestion_details(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.suggest.details_focused {
+            return false;
+        }
+        let Some(text) = self
+            .suggest
+            .widget
+            .as_ref()
+            .and_then(|(widget, _)| widget.read(cx).details_text())
+        else {
+            return false;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        true
     }
 
     /// The suggest widget's row height (`suggest.line_height`, or the
@@ -998,6 +1134,11 @@ impl CodeEditor {
         if self.options.read_only {
             return;
         }
+        // Typing goes to the text, so the focus is back in the list.
+        if self.suggest.details_focused {
+            self.suggest.details_focused = false;
+            self.refresh_suggest_widget(cx);
+        }
         // Typing triggers inline completions too.
         self.trigger_inline_completions(cx);
         let providers = completion_providers(cx, self.provider_target(cx));
@@ -1068,11 +1209,14 @@ impl CodeEditor {
 
     /// Monaco `SuggestModel._doTriggerQuickSuggest`.
     fn quick_suggest(&mut self, cx: &mut Context<Self>) {
+        use crate::options::QuickSuggestionsValue;
+        // Cancel any wait for inline completions from a previous cycle.
+        self.suggest.inline_wait = None;
         if self.suggest.session.is_some() || self.suggest.task.is_some() {
             return;
         }
         let quick = self.options.quick_suggestions;
-        if quick == crate::options::QuickSuggestions::OFF {
+        if quick.is_all_off() {
             return;
         }
         if self.options.suggest.snippets_prevent_quick_suggestions && self.in_snippet_mode() {
@@ -1081,16 +1225,89 @@ impl CodeEditor {
         if !self.should_auto_trigger(cx) {
             return;
         }
-        let head = self.cursors.primary().position;
-        let offset = self.snapshot.point_utf16_to_offset(head).saturating_sub(1);
-        let allowed = match self.model().read(cx).token_type_at(offset) {
-            StandardTokenType::Comment => quick.comments,
-            StandardTokenType::String => quick.strings,
-            _ => quick.other,
-        };
-        if allowed {
+        let mut wait_for_inline_completions = false;
+        if !quick.is_all_on() {
+            // The type of the token that triggered this.
+            let head = self.cursors.primary().position;
+            let offset = self.snapshot.point_utf16_to_offset(head).saturating_sub(1);
+            let token: StandardTokenType = self.model().read(cx).token_type_at(offset);
+            match quick.value_for(token) {
+                // `Inline` shows as ghost text instead
+                // (`suggest_inline_completions`).
+                QuickSuggestionsValue::Off | QuickSuggestionsValue::Inline => return,
+                QuickSuggestionsValue::OffWhenInlineCompletions => {
+                    wait_for_inline_completions = self.options.inline_suggest.enabled
+                        && !self.editor_inline_completions_providers(cx).is_empty();
+                }
+                QuickSuggestionsValue::On => {}
+            }
+        }
+        // Monaco `canShowQuickSuggest`: not while ghost text asks to keep
+        // the widget closed.
+        if self.inline_suppresses_suggestions(cx) {
+            return;
+        }
+        if wait_for_inline_completions {
+            self.quick_suggest_after_inline_completions(cx);
+        } else {
             self.request_suggestions(CompletionTrigger::Invoke, true, cx);
         }
+    }
+
+    /// Monaco `_waitForInlineCompletionsAndTrigger`: opens the suggest
+    /// widget once inline completions are done loading, unless one shows;
+    /// after 750ms it opens anyway and stops the inline completions.
+    fn quick_suggest_after_inline_completions(&mut self, cx: &mut Context<Self>) {
+        if self.inline_suggestion_visible(cx) {
+            // Inline completions are already showing.
+            return;
+        }
+        if !self.inline_completions_loading() {
+            self.request_suggestions(CompletionTrigger::Invoke, true, cx);
+            return;
+        }
+        let observer = cx.observe_self(|this, cx| {
+            if this.suggest.inline_wait.is_none() || this.inline_completions_loading() {
+                return;
+            }
+            let visible = this.inline_suggestion_visible(cx);
+            this.finish_inline_wait(!visible, cx);
+        });
+        let timeout = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(INLINE_COMPLETIONS_WAIT)
+                .await;
+            this.update(cx, |this, cx| {
+                if this.finish_inline_wait(true, cx) {
+                    this.stop_inline_completions_automatically(cx);
+                }
+            })
+            .ok();
+        });
+        self.suggest.inline_wait = Some(InlineWait {
+            version: self.model().read(cx).buffer().version(),
+            position: self.cursors.primary().position,
+            _observer: observer,
+            _timeout: timeout,
+        });
+    }
+
+    /// Ends the wait for inline completions, opening the suggest widget if
+    /// `trigger` and nothing changed meanwhile. Returns whether it was
+    /// waiting.
+    fn finish_inline_wait(&mut self, trigger: bool, cx: &mut Context<Self>) -> bool {
+        let Some(wait) = self.suggest.inline_wait.take() else {
+            return false;
+        };
+        if !trigger || self.suggest.session.is_some() || self.suggest.task.is_some() {
+            return true;
+        }
+        if self.model().read(cx).buffer().version() == wait.version
+            && self.cursors.primary().position == wait.position
+        {
+            self.request_suggestions(CompletionTrigger::Invoke, true, cx);
+        }
+        true
     }
 
     /// Monaco `SuggestModel._onNewContext`, after typing or deleting:
@@ -1306,6 +1523,16 @@ impl CodeEditor {
     /// Moves the selection by `delta` rows (Up/Down/Page). Returns whether
     /// the widget handled it.
     pub(crate) fn suggest_navigate(&mut self, delta: isize, cx: &mut Context<Self>) -> bool {
+        // Monaco's `State.Details`: the keys scroll the focused details.
+        if self.suggest.details_focused {
+            use crate::suggest_widget::DetailsScroll;
+            let scroll = if delta < 0 {
+                DetailsScroll::Up
+            } else {
+                DetailsScroll::Down
+            };
+            return self.scroll_suggestion_details(scroll, cx);
+        }
         let Some(session) = self.suggest.session.as_mut() else {
             return false;
         };
@@ -1334,6 +1561,24 @@ impl CodeEditor {
         true
     }
 
+    /// Moves the selection a page down or up (Monaco
+    /// `selectNextPageSuggestion`, `selectPrevPageSuggestion`); with the
+    /// details panel focused, pages it instead. Returns whether the widget
+    /// handled it.
+    pub(crate) fn suggest_navigate_page(&mut self, down: bool, cx: &mut Context<Self>) -> bool {
+        if self.suggest.details_focused {
+            use crate::suggest_widget::DetailsScroll;
+            let scroll = if down {
+                DetailsScroll::PageDown
+            } else {
+                DetailsScroll::PageUp
+            };
+            return self.scroll_suggestion_details(scroll, cx);
+        }
+        let page = self.suggest_page_size(cx) as isize;
+        self.suggest_navigate(if down { page } else { -page }, cx)
+    }
+
     pub(crate) fn select_suggestion(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(session) = self.suggest.session.as_mut() {
             session.selected = index;
@@ -1343,8 +1588,12 @@ impl CodeEditor {
         self.resolve_selected_suggestion(cx);
     }
 
-    /// Selects the first suggestion (Monaco `selectFirstSuggestion`).
+    /// Selects the first suggestion (Monaco `selectFirstSuggestion`); with
+    /// the details panel focused, scrolls it to the top.
     pub fn select_first_suggestion(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.scroll_suggestion_details(crate::suggest_widget::DetailsScroll::Top, cx) {
+            return true;
+        }
         if !self.is_suggest_visible() {
             return false;
         }
@@ -1352,8 +1601,12 @@ impl CodeEditor {
         true
     }
 
-    /// Selects the last suggestion (Monaco `selectLastSuggestion`).
+    /// Selects the last suggestion (Monaco `selectLastSuggestion`); with
+    /// the details panel focused, scrolls it to the bottom.
     pub fn select_last_suggestion(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.scroll_suggestion_details(crate::suggest_widget::DetailsScroll::Bottom, cx) {
+            return true;
+        }
         let Some(count) = self
             .suggest
             .session

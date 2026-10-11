@@ -47,7 +47,7 @@ use crate::options::InlineSuggestMode;
 use crate::providers::{
     Command, InlineCompletion, InlineCompletionContext, InlineCompletionEndOfLifeReason,
     InlineCompletionHint, InlineCompletionList, InlineCompletionTriggerKind,
-    InlineCompletionsProvider, Location, inline_completions_providers,
+    InlineCompletionsProvider, Location,
 };
 use crate::theme::TokenStyle;
 use crate::widgets::{ViewZone, WidgetId, ZoneHeight};
@@ -647,7 +647,7 @@ impl CodeEditor {
         {
             return;
         }
-        let providers = inline_completions_providers(cx, self.provider_target(cx));
+        let providers = self.editor_inline_completions_providers(cx);
         if providers.is_empty() {
             return;
         }
@@ -1843,6 +1843,17 @@ impl CodeEditor {
             Some(self.cursors.primary().position),
             length,
         )
+    }
+
+    /// Whether a request is in flight (Monaco's `status` is `loading`).
+    pub(crate) fn inline_completions_loading(&self) -> bool {
+        self.inline.task.is_some()
+    }
+
+    /// Monaco `stop('automatic')`: hides the ghost text without rejecting
+    /// it.
+    pub(crate) fn stop_inline_completions_automatically(&mut self, cx: &mut Context<Self>) {
+        self.stop_inline_completions(StopReason::Automatic, cx);
     }
 
     /// Whether ghost text shows (Monaco `inlineSuggestionVisible`).

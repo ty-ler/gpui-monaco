@@ -90,9 +90,9 @@ impl CompletionProvider for MyCompletions {
 }
 ```
 
-Completion is triggered by Ctrl+Space, by trigger characters (`suggest_on_trigger_characters`), or automatically after `quick_suggestions_delay` while typing a word. `quick_suggestions` turns that on separately for code, comments and strings. When no provider has items, the editor suggests words from open documents (`word_based_suggestions`).
+Completion is triggered by Ctrl+Space, by trigger characters (`suggest_on_trigger_characters`), or automatically after `quick_suggestions_delay` while typing a word. `quick_suggestions` turns that on separately for code, comments and strings, and can show the items as ghost text instead (`Inline`). By default, in code, the widget waits for inline completions and stays closed while ghost text shows (`OffWhenInlineCompletions`). When no provider has items, the editor suggests words from open documents (`word_based_suggestions`).
 
-The widget shows each item's `label_detail` right after the label and its `label_description` at the right. The focused item's `detail` also shows at the right. Ctrl+Space while the list is open toggles the details panel with the item's `detail` and `documentation`; it is collapsed by default, as in Monaco. Drag the list's right or bottom edge to resize it.
+The widget shows each item's `label_detail` right after the label and its `label_description` at the right. The focused item's `detail` also shows at the right. Ctrl+Space while the list is open toggles the details panel with the item's `detail` and `documentation`; it is collapsed by default, as in Monaco. Ctrl+Alt+Space moves the focus into the details panel, so the arrow and page keys scroll it and Cmd/Ctrl+C copies it, and back. Drag the list's right or bottom edge to resize it.
 
 With `tab_completion: On`, Tab at the end of a word inserts the best suggestion without showing the list. Tab and Shift+Tab then swap in the next or previous one, until the cursor moves.
 

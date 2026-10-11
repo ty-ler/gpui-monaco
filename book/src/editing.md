@@ -68,6 +68,8 @@ Cmd+F opens the find widget, and Cmd+Alt+F (Ctrl+H elsewhere) opens it with repl
   - Alt+Enter in the find input selects all matches.
   - F3 / Cmd+G (Shift for previous) opens find if needed, seeded from the cursor, and moves to the next match. Cmd/Ctrl+F3 searches for the selection. Cmd+E (macOS) uses the selection, even over several lines.
   - Up and Down in the inputs walk the search and replace history.
+  - Ctrl+Enter inserts a line break in the find and replace inputs (pasted line breaks stay too), so a search can span lines; the inputs grow with their lines, and Up and Down move between them before walking the history.
+  - With `options.find.global_find_clipboard` on, find shares its search string through the system's find pasteboard on macOS, and with the app's other editors elsewhere: opening find with nothing to seed from the selection takes it, every new search string is written to it, and focusing the editor while find is open picks up one written meanwhile.
   - Dragging the widget's left edge widens it. Toggles carry over to new editors.
 
 Regexes use the Rust `regex` crate. It runs in linear time but has no lookaround or backreferences; see [Differences from Monaco](differences.md).
