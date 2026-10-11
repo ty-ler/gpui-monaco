@@ -331,4 +331,38 @@ register_document_paste_edit_provider(cx, LanguageSelector::All, MyProvider);
 
 The hover also shows `hover_message` text from [decorations](decorations.md) and messages from [diagnostics](diagnostics.md) under the mouse, with no provider needed.
 
+Each part of the hover has a copy button, and the hover can be resized from its corner.
+
+## Hover verbosity
+
+A provider can offer more or less detail, like Monaco's `HoverVerbosityRequest`. Set `can_increase_verbosity` or `can_decrease_verbosity` on the `Hover`, and the part shows + and − controls. Clicking one, or running `editor.action.increaseHoverVerbosityLevel` / `decreaseHoverVerbosityLevel`, calls `provide_hover_with_context` with the change and the previous hover:
+
+```rust,ignore
+impl HoverProvider for MyHover {
+    fn provide_hover(&self, context: &ProviderContext, position: PointUtf16, cx: &mut App)
+        -> Task<anyhow::Result<Option<Hover>>> {
+        self.provide_hover_with_context(context, position, &HoverContext::default(), cx)
+    }
+
+    fn provide_hover_with_context(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        hover_context: &HoverContext,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Option<Hover>>> {
+        let level = hover_context
+            .verbosity_request
+            .as_ref()
+            .map_or(0, |request| request.verbosity_delta);
+        Task::ready(Ok(Some(Hover {
+            contents: vec![format!("detail level {level}").into()],
+            can_increase_verbosity: level < 2,
+            can_decrease_verbosity: level > 0,
+            ..Default::default()
+        })))
+    }
+}
+```
+
 The playground's `examples/playground/src/providers.rs` has small demo implementations of every trait.

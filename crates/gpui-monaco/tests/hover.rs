@@ -5,6 +5,7 @@ use std::time::Duration;
 use gpui::{
     App, AppContext as _, Entity, Focusable as _, Modifiers, TestAppContext, VisualTestContext, px,
 };
+use gpui_monaco::cursor::Selection;
 use gpui_monaco::options::{HoverEnabled, HoverOptions};
 use gpui_monaco::providers::*;
 use gpui_monaco::text::PointUtf16;
@@ -23,6 +24,7 @@ impl HoverProvider for LongHover {
         gpui::Task::ready(Ok(Some(Hover {
             contents: vec![text.into()],
             range: None,
+            ..Default::default()
         })))
     }
 }
@@ -242,4 +244,184 @@ fn glyph_margin_hovers(cx: &mut TestAppContext) {
     cx.simulate_mouse_move(gpui::point(px(4.), row.y), None, Modifiers::default());
     rest(cx, 400);
     assert!(visible(&editor, cx));
+}
+
+/// A hover whose detail goes from 0 to 2 (Monaco's verbosity levels),
+/// recording the requests' deltas.
+struct LevelHover(std::rc::Rc<std::cell::RefCell<Vec<i32>>>);
+impl HoverProvider for LevelHover {
+    fn provide_hover(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        cx: &mut App,
+    ) -> gpui::Task<anyhow::Result<Option<Hover>>> {
+        self.provide_hover_with_context(context, position, &HoverContext::default(), cx)
+    }
+
+    fn provide_hover_with_context(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        context: &HoverContext,
+        _: &mut App,
+    ) -> gpui::Task<anyhow::Result<Option<Hover>>> {
+        let level = match &context.verbosity_request {
+            Some(request) => {
+                self.0.borrow_mut().push(request.verbosity_delta);
+                let previous: i32 = request.previous_hover.contents[0]
+                    .0
+                    .trim_start_matches("level ")
+                    .parse()
+                    .unwrap();
+                (previous + request.verbosity_delta).clamp(0, 2)
+            }
+            None => 0,
+        };
+        gpui::Task::ready(Ok(Some(Hover {
+            contents: vec![format!("level {level}").into()],
+            range: None,
+            can_increase_verbosity: level < 2,
+            can_decrease_verbosity: level > 0,
+        })))
+    }
+}
+
+fn setup_with<'a>(
+    text: &str,
+    provider: impl HoverProvider + 'static,
+    cx: &'a mut TestAppContext,
+) -> (Entity<CodeEditor>, &'a mut VisualTestContext) {
+    cx.update(gpui_monaco::init);
+    cx.update(|cx| register_hover_provider(cx, LanguageSelector::All, provider));
+    let text = text.to_string();
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new(&text));
+        CodeEditor::new(model, window, cx)
+    });
+    cx.update(|window, cx| window.focus(&editor.read(cx).focus_handle(cx), cx));
+    cx.run_until_parked();
+    paint(cx);
+    (editor, cx)
+}
+
+fn parts(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<Vec<String>> {
+    editor.read_with(cx, |e, cx| {
+        e.hover_parts_for_tests(cx)
+            .into_iter()
+            .map(|part| part.into_iter().map(|c| c.to_string()).collect())
+            .collect()
+    })
+}
+
+fn trigger(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, id: &str) {
+    cx.update(|window, cx| {
+        editor
+            .update(cx, |e, cx| e.trigger(id, window, cx))
+            .unwrap()
+    });
+    rest(cx, 0);
+}
+
+#[gpui::test]
+fn hover_verbosity(cx: &mut TestAppContext) {
+    let deltas = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let (editor, cx) = setup_with("alpha beta\n", LevelHover(deltas.clone()), cx);
+    cx.dispatch_action(gpui_monaco::actions::ShowHover);
+    rest(cx, 0);
+    assert_eq!(parts(&editor, cx), [["level 0"]]);
+    // Can't decrease at level 0.
+    trigger(&editor, cx, "editor.action.decreaseHoverVerbosityLevel");
+    assert_eq!(parts(&editor, cx), [["level 0"]]);
+    trigger(&editor, cx, "editor.action.increaseHoverVerbosityLevel");
+    assert_eq!(parts(&editor, cx), [["level 1"]]);
+    trigger(&editor, cx, "editor.action.increaseHoverVerbosityLevel");
+    assert_eq!(parts(&editor, cx), [["level 2"]]);
+    // The provider says that's the most detail.
+    trigger(&editor, cx, "editor.action.increaseHoverVerbosityLevel");
+    assert_eq!(parts(&editor, cx), [["level 2"]]);
+    trigger(&editor, cx, "editor.action.decreaseHoverVerbosityLevel");
+    assert_eq!(parts(&editor, cx), [["level 1"]]);
+    assert_eq!(*deltas.borrow(), [1, 1, -1]);
+    assert!(visible(&editor, cx));
+}
+
+#[gpui::test]
+fn long_line_warnings(cx: &mut TestAppContext) {
+    // Monaco's defaults: rendering stops after 10,000 characters and
+    // tokenization skips lines of 20,000.
+    let text = format!("short\n{}\n", "x ".repeat(10_500));
+    let (editor, cx) = setup_with(&text, LongHover(1), cx);
+    let show_at = |cx: &mut VisualTestContext, column: u32| {
+        editor.update(cx, |e, cx| {
+            e.set_selections(&[Selection::collapsed(PointUtf16::new(1, column))], cx);
+            e.hide_hover(cx);
+        });
+        cx.dispatch_action(gpui_monaco::actions::ShowHover);
+        rest(cx, 0);
+    };
+    show_at(cx, 4);
+    let warning = parts(&editor, cx);
+    assert!(warning[0][0].starts_with("Tokenization is skipped for long lines"));
+    assert_eq!(warning[1], ["line 0\n\n"]);
+    show_at(cx, 10_002);
+    assert!(parts(&editor, cx)[0][0].starts_with("Rendering paused for long line"));
+    // Short lines don't warn.
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(PointUtf16::new(0, 1))], cx);
+        e.hide_hover(cx);
+    });
+    cx.dispatch_action(gpui_monaco::actions::ShowHover);
+    rest(cx, 0);
+    assert_eq!(parts(&editor, cx), [["line 0\n\n"]]);
+    // "Don't Show Again".
+    trigger(&editor, cx, "editor.action.hideLongLineWarningHover");
+    assert!(!editor.read_with(cx, |e, _| e.options().hover.show_long_line_warning));
+    show_at(cx, 4);
+    assert_eq!(parts(&editor, cx), [["line 0\n\n"]]);
+}
+
+#[gpui::test]
+fn copying_a_hover_part(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(HoverOptions::default(), 1, cx);
+    cx.dispatch_action(gpui_monaco::actions::ShowHover);
+    rest(cx, 0);
+    let card = editor
+        .read_with(cx, |e, cx| e.hover_card_bounds_for_tests(cx))
+        .unwrap();
+    // The copy button is at the part's top right.
+    let button = gpui::point(card.right() - px(14.), card.top() + px(12.));
+    cx.simulate_mouse_move(button, None, Modifiers::default());
+    cx.simulate_click(button, Modifiers::default());
+    rest(cx, 0);
+    let copied = cx.read_from_clipboard().and_then(|item| item.text());
+    assert_eq!(copied.as_deref(), Some("line 0\n\n"));
+}
+
+#[gpui::test]
+fn resizing_the_hover(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(HoverOptions::default(), 3, cx);
+    cx.dispatch_action(gpui_monaco::actions::ShowHover);
+    rest(cx, 0);
+    let bounds = |cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, cx| e.hover_card_bounds_for_tests(cx))
+            .unwrap()
+    };
+    let before = bounds(cx);
+    // Row 0 has no room above, so the card is below and its handle is at
+    // the bottom right.
+    let corner = gpui::point(before.right(), before.bottom());
+    cx.simulate_mouse_down(corner, gpui::MouseButton::Left, Modifiers::default());
+    paint(cx);
+    let to = gpui::point(corner.x + px(160.), corner.y + px(40.));
+    cx.simulate_mouse_move(to, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(to, gpui::MouseButton::Left, Modifiers::default());
+    paint(cx);
+    // Resizing keeps the hover even though the mouse left its word.
+    assert!(visible(&editor, cx));
+    let after = bounds(cx);
+    assert_eq!(after.size.width, before.size.width + px(160.));
+    assert_eq!(after.size.height, before.size.height + px(40.));
+    assert_eq!(after.origin, before.origin);
 }

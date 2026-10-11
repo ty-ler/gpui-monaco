@@ -270,6 +270,26 @@ pub struct Hover {
     /// The hovered range, used to keep the hover open while the mouse stays
     /// in it; defaults to the word under the mouse.
     pub range: Option<Range<PointUtf16>>,
+    /// Monaco `canIncreaseVerbosity`: the hover shows a `+` to ask for more.
+    pub can_increase_verbosity: bool,
+    /// Monaco `canDecreaseVerbosity`: the hover shows a `−` to ask for less.
+    pub can_decrease_verbosity: bool,
+}
+
+/// Monaco `HoverContext`: why the hover is asked for.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HoverContext {
+    /// Set when the user asked for more or less detail.
+    pub verbosity_request: Option<HoverVerbosityRequest>,
+}
+
+/// Monaco `HoverVerbosityRequest`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HoverVerbosityRequest {
+    /// How much more (positive) or less (negative) verbose to be.
+    pub verbosity_delta: i32,
+    /// The provider's previous hover at this position.
+    pub previous_hover: Hover,
 }
 
 /// Supplies hover cards (Monaco `HoverProvider`).
@@ -287,6 +307,21 @@ pub trait HoverProvider: 'static {
         position: PointUtf16,
         cx: &mut App,
     ) -> Task<anyhow::Result<Option<Hover>>>;
+
+    /// Like [`HoverProvider::provide_hover`], with Monaco's `HoverContext`:
+    /// asked again with a `verbosity_request` when the user clicks the
+    /// hover's `+` or `−` (see [`Hover::can_increase_verbosity`]). Defaults
+    /// to `provide_hover`.
+    fn provide_hover_with_context(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        hover_context: &HoverContext,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Option<Hover>>> {
+        let _ = hover_context;
+        self.provide_hover(context, position, cx)
+    }
 }
 
 // ----- definition ----------------------------------------------------------------

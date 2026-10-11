@@ -233,6 +233,8 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.pageDownHover", "code_editor::PageDownHover", "Page Down Hover", hover_visible),
     Builtin("editor.action.goToTopHover", "code_editor::GoToTopHover", "Go To Top Hover", hover_visible),
     Builtin("editor.action.goToBottomHover", "code_editor::GoToBottomHover", "Go To Bottom Hover", hover_visible),
+    Builtin("editor.action.increaseHoverVerbosityLevel", "code_editor::IncreaseHoverVerbosityLevel", "Increase Hover Verbosity Level", hover_visible),
+    Builtin("editor.action.decreaseHoverVerbosityLevel", "code_editor::DecreaseHoverVerbosityLevel", "Decrease Hover Verbosity Level", hover_visible),
     Builtin("editor.action.openLink", "code_editor::OpenLink", "Open Link", always),
     Builtin("editor.action.fontZoomIn", "code_editor::FontZoomIn", "Increase Editor Font Size", always),
     Builtin("editor.action.fontZoomOut", "code_editor::FontZoomOut", "Decrease Editor Font Size", always),
@@ -465,6 +467,7 @@ static COMMANDS: &[Command] = &[
     Command("closeReferenceSearch", "code_editor::ClosePeek"),
     Command("editor.action.clipboardCutAction", "code_editor::Cut"),
     Command("editor.action.clipboardCopyAction", "code_editor::Copy"),
+    Command("editor.action.hideLongLineWarningHover", "code_editor::HideLongLineWarningHover"),
 ];
 
 /// The GPUI action name for the unlabelled Monaco command `id`.
