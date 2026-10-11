@@ -853,3 +853,275 @@ fn word_based_suggestions_off_with_inline_suggestions(cx: &mut TestAppContext) {
     settle(cx);
     assert!(!visible(&editor, cx));
 }
+
+fn focused(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Option<String> {
+    editor.read_with(cx, |e, _| {
+        e.selected_suggestion()
+            .map(|(_, item)| item.label.to_string())
+    })
+}
+
+fn set_selection_mode(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+    mode: gpui_monaco::options::SuggestSelectionMode,
+) {
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.suggest.selection_mode = mode;
+        e.update_options(options, cx);
+    });
+}
+
+#[gpui::test]
+fn selection_mode_never_shows_without_focus(cx: &mut TestAppContext) {
+    use gpui_monaco::options::SuggestSelectionMode;
+    let (editor, cx) = setup(
+        "",
+        |o| o.suggest.selection_mode = SuggestSelectionMode::Never,
+        cx,
+    );
+    provide(cx, |_| {
+        ["print", "process"]
+            .into_iter()
+            .map(|label| CompletionItem::new(label, CompletionItemKind::Function))
+            .collect()
+    });
+    cx.simulate_input("p");
+    settle(cx);
+    assert!(visible(&editor, cx));
+    assert_eq!(focused(&editor, cx), None);
+    assert!(editor.read_with(cx, |e, _| e.is_suggestion_unfocused()));
+    // Enter isn't taken by the widget: it types a line break.
+    cx.simulate_keystrokes("enter");
+    assert_eq!(text(&editor, cx), "p\n");
+    assert!(!visible(&editor, cx));
+
+    // Typing more keeps it unfocused; Down focuses the first item.
+    cx.simulate_input("p");
+    settle(cx);
+    cx.simulate_input("r");
+    settle(cx);
+    assert_eq!(focused(&editor, cx), None);
+    cx.simulate_keystrokes("down");
+    assert_eq!(focused(&editor, cx).as_deref(), Some("print"));
+    cx.simulate_keystrokes("tab");
+    assert_eq!(text(&editor, cx), "p\nprint");
+
+    // Up from no focus goes to the last item.
+    cx.simulate_input(" p");
+    settle(cx);
+    cx.simulate_keystrokes("up");
+    assert_eq!(focused(&editor, cx).as_deref(), Some("process"));
+    cx.simulate_keystrokes("escape");
+
+    // Ctrl+Space focuses (Monaco `focusSuggestion`), then toggles details.
+    cx.simulate_input(" p");
+    settle(cx);
+    assert_eq!(focused(&editor, cx), None);
+    cx.simulate_keystrokes("ctrl-space");
+    assert_eq!(focused(&editor, cx).as_deref(), Some("print"));
+    cx.simulate_keystrokes("escape");
+
+    // `focusAndAcceptSuggestion` by id.
+    cx.simulate_input(" p");
+    settle(cx);
+    cx.update(|window, cx| {
+        editor.update(cx, |e, cx| {
+            e.trigger("focusAndAcceptSuggestion", window, cx)
+        })
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "p\nprint p p print");
+
+    // Explicit requests always focus.
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert_eq!(focused(&editor, cx).as_deref(), Some("print"));
+}
+
+#[gpui::test]
+fn selection_modes_for_trigger_characters(cx: &mut TestAppContext) {
+    use gpui_monaco::options::SuggestSelectionMode;
+    let (editor, cx) = setup("", |_| {}, cx);
+    cx.update(|_, cx| register_completion_provider(cx, LanguageSelector::All, Dotted));
+
+    // `WhenTriggerCharacter`: focused after `.`, not after typing a word.
+    set_selection_mode(&editor, cx, SuggestSelectionMode::WhenTriggerCharacter);
+    cx.simulate_input("a.");
+    settle(cx);
+    assert_eq!(focused(&editor, cx).as_deref(), Some("len"));
+    cx.simulate_keystrokes("escape");
+    cx.simulate_input(" l");
+    settle(cx);
+    assert!(visible(&editor, cx));
+    assert_eq!(focused(&editor, cx), None);
+    cx.simulate_keystrokes("escape");
+
+    // `WhenQuickSuggestion`: the other way round, until more is typed after
+    // the trigger character.
+    set_selection_mode(&editor, cx, SuggestSelectionMode::WhenQuickSuggestion);
+    cx.simulate_input(" b.");
+    settle(cx);
+    assert!(visible(&editor, cx));
+    assert_eq!(focused(&editor, cx), None);
+    cx.simulate_input("l");
+    settle(cx);
+    assert_eq!(focused(&editor, cx).as_deref(), Some("len"));
+    cx.simulate_keystrokes("escape");
+    cx.simulate_input(" l");
+    settle(cx);
+    assert_eq!(focused(&editor, cx).as_deref(), Some("len"));
+}
+
+#[gpui::test]
+fn snippets_prevent_quick_suggestions(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |_| {}, cx);
+    provide(cx, |_| {
+        vec![CompletionItem::new("print", CompletionItemKind::Function)]
+    });
+    let snippet = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        editor.update(cx, |e, cx| {
+            e.insert_snippet("${1:a} ${2:b}", Default::default(), cx)
+        });
+    };
+    // Off by default: quick suggestions open inside a snippet.
+    snippet(&editor, cx);
+    cx.simulate_input("p");
+    settle(cx);
+    assert!(visible(&editor, cx));
+    cx.simulate_keystrokes("escape escape");
+
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| m.set_value("", cx));
+        let mut options = e.options().clone();
+        options.suggest.snippets_prevent_quick_suggestions = true;
+        e.update_options(options, cx);
+    });
+    snippet(&editor, cx);
+    assert!(editor.read_with(cx, |e, _| e.in_snippet_mode()));
+    cx.simulate_input("p");
+    settle(cx);
+    assert!(!visible(&editor, cx));
+    // Ctrl+Space still works.
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert!(visible(&editor, cx));
+}
+
+struct Named;
+impl CompletionProvider for Named {
+    fn provide_completions(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        _: CompletionTrigger,
+        _: &mut App,
+    ) -> Task<anyhow::Result<CompletionList>> {
+        Task::ready(Ok(CompletionList {
+            items: vec![CompletionItem {
+                sort_text: Some("a".into()),
+                commit_characters: vec!['(', '.'],
+                ..CompletionItem::new("print", CompletionItemKind::Function)
+            }],
+            incomplete: false,
+        }))
+    }
+
+    fn debug_display_name(&self) -> gpui::SharedString {
+        "named".into()
+    }
+}
+
+#[gpui::test]
+fn explain_mode_shows_the_scoring(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    cx.update(|_, cx| register_completion_provider(cx, LanguageSelector::All, Named));
+    cx.simulate_input("pr");
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    let details =
+        |cx: &mut VisualTestContext| editor.read_with(cx, |e, cx| e.suggest_details_for_tests(cx));
+    // Nothing to expand without docs or detail.
+    assert_eq!(details(cx), None);
+    // Monaco `toggleExplainMode` (Cmd/Ctrl+/) opens the details with it.
+    cx.simulate_keystrokes("secondary-/");
+    let (detail, docs) = details(cx).expect("details show");
+    assert_eq!(detail.as_deref(), Some("Provider: named"));
+    let docs = docs.unwrap();
+    assert!(docs.starts_with("```empty\nscore: "), "{docs}");
+    assert!(docs.contains("\nprefix: pr\n"), "{docs}");
+    assert!(docs.contains("\nword: print\n"), "{docs}");
+    assert!(
+        docs.contains("\ndistance: 0 (localityBonus-setting)\n"),
+        "{docs}"
+    );
+    assert!(
+        docs.contains("\nindex: 0, based on sortText: \"a\"\n"),
+        "{docs}"
+    );
+    assert!(docs.contains("\ncommit_chars: (.\n"), "{docs}");
+    // The comment toggle didn't run.
+    assert_eq!(text(&editor, cx), "pr");
+    cx.simulate_keystrokes("secondary-/");
+    assert!(!editor.read_with(cx, |e, _| e.is_suggest_explain_mode()));
+    // Off again once the widget closes.
+    cx.simulate_keystrokes("secondary-/");
+    assert!(editor.read_with(cx, |e, _| e.is_suggest_explain_mode()));
+    cx.simulate_keystrokes("escape");
+    assert!(!editor.read_with(cx, |e, _| e.is_suggest_explain_mode()));
+}
+
+#[gpui::test]
+fn reset_suggest_size(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |_| {}, cx);
+    cx.update(|_, cx| {
+        CodeEditor::set_suggest_size_for_tests(gpui::size(gpui::px(300.), gpui::px(200.)), cx)
+    });
+    assert!(
+        cx.update(|_, cx| CodeEditor::suggest_size_for_tests(cx))
+            .is_some()
+    );
+    cx.update(|window, cx| {
+        editor.update(cx, |e, cx| {
+            e.run_action("editor.action.resetSuggestSize", window, cx)
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| CodeEditor::suggest_size_for_tests(cx)),
+        None
+    );
+}
+
+#[gpui::test]
+fn monaco_completion_kinds(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    provide(cx, |_| {
+        [
+            ("red", CompletionItemKind::Customcolor),
+            ("rob", CompletionItemKind::User),
+            ("r12", CompletionItemKind::Issue),
+            ("run", CompletionItemKind::Tool),
+        ]
+        .into_iter()
+        .map(|(label, kind)| CompletionItem::new(label, kind))
+        .collect()
+    });
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert_eq!(labels(&editor, cx).map(|l| l.len()), Some(4));
+    // Hidden like the other kinds (Monaco `showUsers: false` and the like).
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.suggest.hidden_kinds = vec![CompletionItemKind::User, CompletionItemKind::Issue];
+        e.update_options(options, cx);
+    });
+    cx.simulate_keystrokes("escape ctrl-space");
+    cx.run_until_parked();
+    assert_eq!(
+        labels(&editor, cx),
+        Some(vec!["red".to_string(), "run".to_string()])
+    );
+}

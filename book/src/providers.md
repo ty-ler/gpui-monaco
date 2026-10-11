@@ -81,7 +81,7 @@ The widget shows each item's `label_detail` right after the label and its `label
 
 With `tab_completion: On`, Tab at the end of a word inserts the best suggestion without showing the list. Tab and Shift+Tab then swap in the next or previous one, until the cursor moves.
 
-Which item is selected first follows `suggest_selection`: the best match, or the item you picked last (for the same prefix).
+Which item is selected first follows `suggest_selection`: the best match, or the item you picked last (for the same prefix). When the list opens by itself, `suggest.selection_mode` can leave it without a focused item (Monaco's `selectionMode`): Enter and Tab then type as usual, and the arrow keys or Ctrl+Space focus one. Cmd/Ctrl+/ shows how the focused item was scored, with the provider's `debug_display_name` (Monaco's explain mode), and "Reset Suggest Widget Size" forgets the resized size.
 
 Filtering and ranking use Monaco's `fuzzyScore`, and the editor re-filters as you type without asking the provider again. If you return `incomplete: true`, the editor asks again as the word grows.
 
@@ -101,6 +101,7 @@ The commands are Monaco's:
 | Command | Keys | Method |
 |---|---|---|
 | Go to Definition | F12, Cmd/Ctrl+click | `go_to_definition` |
+| Open Definition to the Side | Cmd/Ctrl+K F12, Cmd/Ctrl+Alt+click | `reveal_definition_aside` |
 | Peek Definition | Alt+F12 (Ctrl+Shift+F10 on Linux) | `peek(LocationKind::Definition)` |
 | Go to References | Shift+F12 | `go_to(LocationKind::References)` |
 | Go to Implementations | Cmd/Ctrl+F12 | `go_to(LocationKind::Implementation)` |
@@ -117,12 +118,16 @@ Results from every matching provider are merged, sorted by uri and position, and
 - **No results:** an inline message such as "No definition found for 'foo'".
 - **Already there:** if the only result is where the cursor is, the command's alternative runs instead. Definition, declaration and type definition fall back to references, so F12 on a definition shows its references.
 - **Stale results:** they're dropped if the text or the cursor changed in the meantime.
+- **To the side:** Open Definition to the Side emits `CodeEditorEvent::OpenLocationToSide(location)` for the first result, even in this model, so the host can open it in an editor beside this one. (Standalone Monaco has no side-by-side editors and opens it in place; `go_to_location` does that.)
+- **Cmd/Ctrl+click:** with `definition_link_opens_in_peek`, the definitions show in a peek view instead.
 
 The peek view (Monaco's references widget) opens under the cursor's line:
 
 - **Preview:** an editable preview of the selected result, with every match in that file highlighted.
 - **Results list:** grouped by file, with the match in each line highlighted.
-- **List keys:** Up and Down (or F4 and Shift+F4) move through results, Left and Right collapse and expand files, Enter goes to the result and Escape closes the view.
+- **List keys:** Up and Down (or F4 and Shift+F4, and F12) move through results, Left and Right collapse and expand files, Enter goes to the result and Escape closes the view.
+- **Focus:** the list has focus when it opens, or the preview with `peek_widget_default_focus: Editor`. Cmd/Ctrl+K F2 moves focus between them.
+- **Resizing:** drag the line between the preview and the list, or the view's bottom edge (between 5 and 35 lines). The next peek view, in any editor, keeps the size.
 - **Going to a result:** a result in this model moves the peek view there; one elsewhere closes it and emits `OpenLocation`. Double-clicking in the preview always closes it.
 
 To preview other documents, the peek view looks models up by uri with `model_for_uri`. That covers models shown in an editor, models you `register_model`, and whatever your `set_model_resolver` callback returns, for example a model read from disk. Results it can't resolve show "no preview available".
@@ -194,7 +199,7 @@ As in Monaco:
 | Auto Fix (`auto_fix`) | Cmd+Alt+. (Shift+Alt+. elsewhere) | preferred `quickfix` | if it's the only one |
 
 - **No actions:** with none available, a message says so, such as "No code actions available". If the action that would have been applied is disabled, its reason is shown instead.
-- **Your own commands:** `trigger_code_actions(filter, auto_apply, message, cx)`.
+- **Your own commands:** `trigger_code_actions(filter, auto_apply, message, cx)`, or Monaco's `editor.action.codeAction` command with its arguments: `kind` (every action with a kind, source actions included, by default), `apply` (`"ifSingle"` by default, `"first"` or `"never"`) and `preferred`. Run it with `trigger_with_payload`, or bind the `TriggerCodeAction` action with those fields.
 
 ## Inlay hints
 
@@ -225,7 +230,7 @@ A `DocumentSymbolProvider` returns a document's outline as nested `DocumentSymbo
 
 A `CodeLensProvider` puts clickable commands above lines, such as "3 references" or "Run test". `provide_code_lenses` can return lenses without a `command`; `resolve_code_lens` then fills them in when they scroll into view. Lenses on the same line show together, separated by `|`.
 
-Clicking a lens runs its command through [`register_command`](editing.md) handlers. If no handler is registered, the editor emits `CodeEditorEvent::ExecuteCommand` for the host. The `code_lens`, `code_lens_font_family` and `code_lens_font_size` options control them.
+Clicking a lens runs its command through [`register_command`](editing.md) handlers. If no handler is registered, the editor emits `CodeEditorEvent::ExecuteCommand` for the host. "Show CodeLens Commands for Current Line" (Monaco's `codelens.showLensesInCurrentLine`) lists the cursor line's commands in the quick input instead. The `code_lens`, `code_lens_font_family` and `code_lens_font_size` options control them.
 
 ## Linked editing
 

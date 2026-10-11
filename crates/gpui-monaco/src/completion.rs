@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use gpui::{AppContext as _, Context, Entity, Task};
+use gpui::{AppContext as _, Context, Entity, SharedString, Task};
 use text::PointUtf16;
 
 use crate::cursor::{EditOperation, EditOperationType, Selection, StandardTokenType};
@@ -87,10 +87,17 @@ pub(crate) struct Session {
     pub(crate) frozen: bool,
     pub(crate) model: CompletionModel,
     pub(crate) selected: usize,
+    /// Whether `selected` is focused (Monaco's list focus): off when
+    /// `suggest.selection_mode` opened the widget without a focused item,
+    /// until one is focused.
+    pub(crate) focused: bool,
     incomplete: bool,
     /// Opened by itself (typing, a trigger character), not Ctrl+Space
     /// (Monaco's `State.Auto`).
     auto: bool,
+    /// Requested because a trigger character was typed (Monaco's
+    /// `CompletionTriggerKind.TriggerCharacter`).
+    trigger_character: bool,
     /// The provider of each item; `None` for word-based suggestions.
     item_providers: Vec<Option<usize>>,
     providers: Vec<Arc<dyn CompletionProvider>>,
@@ -116,6 +123,9 @@ pub(crate) struct SuggestState {
     keep_alternatives: bool,
     /// Shows "Loading..." if an explicit request takes a while.
     loading_task: Option<Task<()>>,
+    /// Monaco's explain mode (`toggleExplainMode`): the details panel
+    /// shows how the focused item was scored. Off once the widget hides.
+    explain_mode: bool,
 }
 
 impl Session {
@@ -165,6 +175,34 @@ impl CodeEditor {
         widget.read(cx).message()
     }
 
+    /// The details panel's detail and docs (markdown), when it shows.
+    #[doc(hidden)]
+    pub fn suggest_details_for_tests(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<(Option<String>, Option<String>)> {
+        let (widget, _) = self.suggest.widget.as_ref()?;
+        let widget = widget.read(cx);
+        if !widget.details_shown(cx) {
+            return None;
+        }
+        let (detail, docs) = widget.details_content()?;
+        Some((detail.map(|d| d.to_string()), docs.map(|d| d.0.to_string())))
+    }
+
+    /// The size the suggest widget was resized to, if any.
+    #[doc(hidden)]
+    pub fn suggest_size_for_tests(cx: &gpui::App) -> Option<gpui::Size<gpui::Pixels>> {
+        cx.try_global::<SuggestUi>().and_then(|ui| ui.size)
+    }
+
+    /// Stores a resized size for the suggest widget, as dragging its edges
+    /// does.
+    #[doc(hidden)]
+    pub fn set_suggest_size_for_tests(size: gpui::Size<gpui::Pixels>, cx: &mut gpui::App) {
+        cx.default_global::<SuggestUi>().size = Some(size);
+    }
+
     /// Whether the suggest widget shows the selected item's details panel.
     pub fn is_suggestion_details_visible(&self, cx: &gpui::App) -> bool {
         self.suggest
@@ -177,7 +215,7 @@ impl CodeEditor {
     /// and insert (Monaco's `SuggestWidgetAdaptor` selected item), for the
     /// suggest preview.
     pub(crate) fn selected_suggestion_edit(&self) -> Option<(std::ops::Range<PointUtf16>, String)> {
-        let session = self.suggest.session.as_ref()?;
+        let session = self.suggest.session.as_ref().filter(|s| s.focused)?;
         let scored = session.model.filtered().get(session.selected)?;
         let item = &session.model.items()[scored.index];
         let head = self.cursors.primary().position;
@@ -196,9 +234,10 @@ impl CodeEditor {
         Some((PointUtf16::new(head.row, start)..head, text))
     }
 
-    /// The selected suggestion's label and its index in the list.
+    /// The focused suggestion and its index in the list; `None` while
+    /// none is focused (see `suggest.selection_mode`).
     pub fn selected_suggestion(&self) -> Option<(usize, CompletionItem)> {
-        let session = self.suggest.session.as_ref()?;
+        let session = self.suggest.session.as_ref().filter(|s| s.focused)?;
         let scored = session.model.filtered().get(session.selected)?;
         Some((
             session.selected,
@@ -274,6 +313,7 @@ impl CodeEditor {
         self.suggest.task = None;
         self.suggest.quick_task = None;
         self.suggest.session = None;
+        self.suggest.explain_mode = false;
         if let Some((_, id)) = self.suggest.widget.take() {
             self.remove_widget(id, cx);
         }
@@ -332,6 +372,7 @@ impl CodeEditor {
         if tasks.is_empty() && words.is_none() {
             return;
         }
+        let trigger_character = matches!(trigger, CompletionTrigger::TriggerCharacter(_));
         // Monaco: explicit requests show "Loading..." after 50ms.
         if !auto && self.suggest.accept_best.is_none() && self.suggest.session.is_none() {
             self.suggest.loading_task = Some(cx.spawn(async move |this, cx| {
@@ -403,7 +444,7 @@ impl CodeEditor {
                     providers,
                     incomplete,
                     (position, word_start, word_end),
-                    auto,
+                    (auto, trigger_character),
                     cx,
                 )
             })
@@ -472,7 +513,7 @@ impl CodeEditor {
         providers: Vec<Arc<dyn CompletionProvider>>,
         incomplete: bool,
         (position, word_start, word_end): (PointUtf16, u32, u32),
-        auto: bool,
+        (auto, trigger_character): (bool, bool),
         cx: &mut Context<Self>,
     ) {
         let head = self.cursors.primary().position;
@@ -516,8 +557,10 @@ impl CodeEditor {
             frozen: false,
             model,
             selected: 0,
+            focused: !self.suggest_no_focus(auto, trigger_character, false),
             incomplete,
             auto,
+            trigger_character,
             item_providers,
             providers,
             resolved,
@@ -549,7 +592,7 @@ impl CodeEditor {
             Vec::new(),
             false,
             (head, range.start.column, range.end.column),
-            false,
+            (false, false),
             cx,
         );
     }
@@ -807,7 +850,10 @@ impl CodeEditor {
             return;
         }
         let anchor = PointUtf16::new(session.position.row, session.word_start);
-        let state = SuggestWidgetState::from_session(session);
+        let mut state = SuggestWidgetState::from_session(session);
+        if self.suggest.explain_mode {
+            state.set_explanation(self.suggest_explanation());
+        }
         self.show_suggest_widget(state, anchor, cx);
     }
 
@@ -898,7 +944,7 @@ impl CodeEditor {
     /// Resolves the selected item if its provider can (Monaco resolves on
     /// focus): its docs, detail and edits replace the original's.
     fn resolve_selected_suggestion(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.suggest.session.as_mut() else {
+        let Some(session) = self.suggest.session.as_mut().filter(|s| s.focused) else {
             return;
         };
         let Some(index) = session
@@ -1031,6 +1077,9 @@ impl CodeEditor {
         if quick == crate::options::QuickSuggestions::OFF {
             return;
         }
+        if self.options.suggest.snippets_prevent_quick_suggestions && self.in_snippet_mode() {
+            return;
+        }
         if !self.should_auto_trigger(cx) {
             return;
         }
@@ -1061,7 +1110,7 @@ impl CodeEditor {
             self.hide_suggest(cx);
             return;
         }
-        let auto = session.auto;
+        let (auto, trigger_character) = (session.auto, session.trigger_character);
         let word_start = self.word_start_at(head);
         let on_word = word_start < head.column;
         if head.column < session.position.column {
@@ -1120,9 +1169,140 @@ impl CodeEditor {
         } else {
             session.frozen = false;
         }
+        let no_focus = self.suggest_no_focus(auto, trigger_character, true);
+        if let Some(session) = self.suggest.session.as_mut() {
+            session.focused = !no_focus;
+        }
         self.select_by_memory(cx);
         self.refresh_suggest_widget(cx);
         self.resolve_selected_suggestion(cx);
+    }
+
+    /// Monaco `SuggestController`'s `noFocus` for `suggest.selectionMode`:
+    /// whether a session that opened by itself shows without a focused
+    /// item. `refilter` is set when the list is filtered again after
+    /// typing.
+    fn suggest_no_focus(&self, auto: bool, trigger_character: bool, refilter: bool) -> bool {
+        use crate::options::SuggestSelectionMode;
+        if !auto {
+            return false;
+        }
+        match self.options.suggest.selection_mode {
+            SuggestSelectionMode::Always => false,
+            SuggestSelectionMode::Never => true,
+            SuggestSelectionMode::WhenTriggerCharacter => !trigger_character,
+            SuggestSelectionMode::WhenQuickSuggestion => trigger_character && !refilter,
+        }
+    }
+
+    /// Focuses the first suggestion if none is focused (Monaco
+    /// `focusSuggestion`, Ctrl+Space while suggestions show). Returns
+    /// whether it did.
+    pub fn focus_suggestion(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(session) = self.suggest.session.as_ref() else {
+            return false;
+        };
+        if session.focused || !self.is_suggest_visible() || session.model.filtered().is_empty() {
+            return false;
+        }
+        self.select_suggestion(0, cx);
+        true
+    }
+
+    /// Whether the suggest widget shows without a focused suggestion
+    /// (see `suggest.selection_mode`).
+    pub fn is_suggestion_unfocused(&self) -> bool {
+        self.is_suggest_visible()
+            && self
+                .suggest
+                .session
+                .as_ref()
+                .is_some_and(|session| !session.focused)
+    }
+
+    /// Toggles explain mode (Monaco `toggleExplainMode`, Cmd/Ctrl+/ while
+    /// suggestions show): the details panel shows how the focused
+    /// suggestion was scored and sorted. Returns whether a suggestion was
+    /// focused.
+    pub fn toggle_suggest_explain_mode(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.selected_suggestion().is_none() || !self.is_suggest_visible() {
+            return false;
+        }
+        self.suggest.explain_mode = !self.suggest.explain_mode;
+        // Monaco opens the details panel if it's closed.
+        if !self.is_suggestion_details_visible(cx) {
+            cx.default_global::<SuggestUi>().details_expanded = true;
+        }
+        self.refresh_suggest_widget(cx);
+        true
+    }
+
+    /// Whether explain mode is on (see
+    /// [`CodeEditor::toggle_suggest_explain_mode`]).
+    pub fn is_suggest_explain_mode(&self) -> bool {
+        self.suggest.explain_mode
+    }
+
+    /// Forgets the size the suggest widget was resized to (Monaco
+    /// `editor.action.resetSuggestSize`).
+    pub fn reset_suggest_size(&mut self, cx: &mut Context<Self>) {
+        if cx
+            .try_global::<SuggestUi>()
+            .is_some_and(|ui| ui.size.is_some())
+        {
+            cx.global_mut::<SuggestUi>().size = None;
+        }
+        if self.is_suggest_visible() {
+            self.refresh_suggest_widget(cx);
+        }
+    }
+
+    /// Monaco `SuggestDetailsWidget.renderItem` in explain mode: the
+    /// provider as the detail, and the focused item's scoring as a code
+    /// block.
+    fn suggest_explanation(&self) -> Option<(SharedString, String)> {
+        let session = self.suggest.session.as_ref().filter(|s| s.focused)?;
+        let scored = session.model.filtered().get(session.selected)?;
+        let item = &session.model.items()[scored.index];
+        let head = self.cursors.primary().position;
+        let start = item
+            .range
+            .as_ref()
+            .filter(|r| r.start.row == head.row)
+            .map_or(session.word_start, |r| r.start.column);
+        let prefix: String = self
+            .snapshot
+            .line(head.row)
+            .encode_utf16()
+            .skip(start as usize)
+            .take(head.column.saturating_sub(start) as usize)
+            .map(|u| char::from_u32(u as u32).unwrap_or('\u{fffd}'))
+            .collect();
+        let prefix = if prefix.is_empty() {
+            "(no prefix)".to_string()
+        } else {
+            prefix
+        };
+        let word = match &item.filter_text {
+            Some(filter) => format!("{filter} (filterText)"),
+            None => item.label.to_string(),
+        };
+        let based_on = match &item.sort_text {
+            Some(sort) => format!("sortText: \"{sort}\""),
+            None => "label".to_string(),
+        };
+        let commit: String = item.commit_characters.iter().collect();
+        let markdown = format!(
+            "```empty\nscore: {}\nprefix: {prefix}\nword: {word}\ndistance: {} (localityBonus-setting)\nindex: {}, based on {based_on}\ncommit_chars: {commit}\n```",
+            scored.score.score,
+            session.model.distance(scored.index),
+            scored.index,
+        );
+        let provider = match session.item_providers[scored.index] {
+            Some(ix) => session.providers[ix].debug_display_name(),
+            None => "wordbasedCompletions".into(),
+        };
+        Some((format!("Provider: {provider}").into(), markdown))
     }
 
     /// Moves the selection by `delta` rows (Up/Down/Page). Returns whether
@@ -1135,7 +1315,17 @@ impl CodeEditor {
         if count == 0 || self.suggest.widget.is_none() {
             return false;
         }
-        let selected = session.selected as isize + delta;
+        // Monaco's list moves from no focus as if from before the first
+        // row (forward) or from the first (back).
+        let current = if session.focused {
+            session.selected as isize
+        } else if delta > 0 {
+            -1
+        } else {
+            0
+        };
+        session.focused = true;
+        let selected = current + delta;
         session.selected = if delta.abs() == 1 {
             selected.rem_euclid(count as isize) as usize
         } else {
@@ -1149,6 +1339,7 @@ impl CodeEditor {
     pub(crate) fn select_suggestion(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(session) = self.suggest.session.as_mut() {
             session.selected = index;
+            session.focused = true;
         }
         self.refresh_suggest_widget(cx);
         self.resolve_selected_suggestion(cx);
@@ -1196,6 +1387,10 @@ impl CodeEditor {
     /// `accept_suggestion_on_enter` says not to (then Enter types a new
     /// line).
     pub(crate) fn accept_suggestion_on_enter(&mut self, cx: &mut Context<Self>) -> bool {
+        // Monaco's accept commands need a focused suggestion.
+        if self.selected_suggestion().is_none() {
+            return false;
+        }
         match self.options.accept_suggestion_on_enter {
             AcceptSuggestionOnEnter::Off => false,
             AcceptSuggestionOnEnter::On => self.accept_suggestion(cx),
@@ -1244,6 +1439,10 @@ impl CodeEditor {
     }
 
     fn accept_suggestion_with(&mut self, toggle: bool, cx: &mut Context<Self>) -> bool {
+        // Monaco's accept commands need a focused suggestion.
+        if self.suggest.session.as_ref().is_some_and(|s| !s.focused) {
+            return false;
+        }
         let Some(session) = self.suggest.session.take() else {
             return false;
         };
@@ -1508,7 +1707,7 @@ impl CodeEditor {
         if !self.options.accept_suggestion_on_commit_character {
             return false;
         }
-        let Some(session) = &self.suggest.session else {
+        let Some(session) = self.suggest.session.as_ref().filter(|s| s.focused) else {
             return false;
         };
         let Some(scored) = session.model.filtered().get(session.selected) else {

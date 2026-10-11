@@ -159,3 +159,52 @@ fn code_lens_option(cx: &mut TestAppContext) {
     });
     assert!(lenses(&editor, cx).is_empty());
 }
+
+#[gpui::test]
+fn show_lenses_in_current_line(cx: &mut TestAppContext) {
+    let (editor, cx, _) = setup("fn a() {}\nlet x;\n", cx);
+    let ran = Rc::new(RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        let ran = ran.clone();
+        register_command(cx, "test.references", move |args, _| {
+            ran.borrow_mut().push(args.to_vec())
+        });
+    });
+    lenses(&editor, cx);
+    let run = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            editor.update(cx, |e, cx| {
+                e.run_action("codelens.showLensesInCurrentLine", window, cx)
+            })
+        });
+        cx.run_until_parked();
+    };
+    // A line without lenses: nothing shows.
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                1, 0,
+            ))],
+            cx,
+        )
+    });
+    run(&editor, cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_quick_access_open()));
+    // The lens's line: its commands in the quick input; choosing runs one.
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                0, 3,
+            ))],
+            cx,
+        )
+    });
+    run(&editor, cx);
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.quick_access_rows_for_tests(cx)),
+        ["> 2 references"]
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(*ran.borrow(), vec![vec![serde_json::json!(0)]]);
+}

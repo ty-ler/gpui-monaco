@@ -671,6 +671,39 @@ impl CodeEditor {
         window.dispatch_action(action, cx);
         Ok(())
     }
+
+    /// [`CodeEditor::trigger`] with Monaco's `payload`: the arguments of
+    /// commands that take some, such as `editor.actions.findWithArgs`
+    /// ([`FindWithArgs`](crate::actions::FindWithArgs)) and
+    /// `editor.action.codeAction`
+    /// ([`TriggerCodeAction`](crate::actions::TriggerCodeAction)), as JSON.
+    /// Actions added with [`CodeEditor::add_action`] run without it. Fails
+    /// for unknown names and payloads the action can't be built from.
+    pub fn trigger_with_payload(
+        &mut self,
+        name: &str,
+        payload: serde_json::Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        if self.added_actions.iter().any(|a| a.id.as_ref() == name) {
+            self.run_action(name, window, cx);
+            return Ok(());
+        }
+        let name = match crate::editor_actions::action_name(name) {
+            Some((name, precondition)) => {
+                if precondition.is_some_and(|precondition| !precondition(self, cx)) {
+                    return Ok(());
+                }
+                name
+            }
+            None => name,
+        };
+        let action = cx.build_action(name, Some(payload))?;
+        window.focus(&self.focus_handle, cx);
+        window.dispatch_action(action, cx);
+        Ok(())
+    }
 }
 
 /// A set of decorations an editor owns, replaced as a whole (Monaco

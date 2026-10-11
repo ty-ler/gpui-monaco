@@ -109,10 +109,18 @@ pub enum CompletionItemKind {
     File,
     /// A reference.
     Reference,
+    /// A custom color (Monaco `Customcolor`).
+    Customcolor,
     /// A folder.
     Folder,
     /// A type parameter.
     TypeParameter,
+    /// A user (an account).
+    User,
+    /// An issue.
+    Issue,
+    /// A tool.
+    Tool,
     /// A snippet.
     Snippet,
 }
@@ -257,6 +265,12 @@ pub trait CompletionProvider: 'static {
         _cx: &mut App,
     ) -> Option<Task<anyhow::Result<CompletionItem>>> {
         None
+    }
+
+    /// A name for the provider in the suggest widget's explain mode
+    /// (Monaco `_debugDisplayName`); the type's name by default.
+    fn debug_display_name(&self) -> SharedString {
+        std::any::type_name::<Self>().into()
     }
 }
 

@@ -41,6 +41,11 @@ pub const NO_SUGGESTIONS_MESSAGE: &str = "No suggestions.";
 pub struct SuggestWidgetState {
     rows: Vec<(CompletionItem, Vec<Range<usize>>)>,
     selected: usize,
+    /// Whether `selected` is focused (`suggest.selection_mode` may show
+    /// the list without a focused row).
+    focused: bool,
+    /// Explain mode's detail and docs for the focused row.
+    explanation: Option<(SharedString, String)>,
     /// "Loading..." or "No suggestions." instead of rows.
     message: Option<&'static str>,
     /// Monaco's `Frozen` state: nothing matches what was typed, so the
@@ -67,6 +72,8 @@ impl SuggestWidgetState {
         Self {
             rows,
             selected: session.selected,
+            focused: session.focused,
+            explanation: None,
             message: None,
             frozen: session.frozen,
         }
@@ -76,9 +83,24 @@ impl SuggestWidgetState {
         Self {
             rows: Vec::new(),
             selected: 0,
+            focused: false,
+            explanation: None,
             message: Some(message),
             frozen: false,
         }
+    }
+
+    /// Shows explain mode's detail and docs for the focused row instead of
+    /// its own.
+    pub(crate) fn set_explanation(&mut self, explanation: Option<(SharedString, String)>) {
+        self.explanation = explanation;
+    }
+
+    /// The focused row's item.
+    fn focused_item(&self) -> Option<&CompletionItem> {
+        self.focused
+            .then(|| self.rows.get(self.selected).map(|(item, _)| item))
+            .flatten()
     }
 }
 
@@ -154,7 +176,10 @@ fn kind_icon(kind: CompletionItemKind) -> (&'static str, Hsla) {
         Keyword | Operator => ("⌘", gray),
         Snippet => ("{}", gray),
         File | Folder => ("▤", gray),
-        Event | Unit | Color | Text => ("ab", gray),
+        Event | Unit | Color | Customcolor | Text => ("ab", gray),
+        User => ("@", gray),
+        Issue => ("◎", gray),
+        Tool => ("⚒", gray),
     }
 }
 
@@ -335,7 +360,7 @@ impl SuggestWidget {
     fn render_row(&self, ix: usize, show_details: bool) -> impl IntoElement + use<> {
         let colors = &self.theme.colors;
         let (item, highlights) = &self.state.rows[ix];
-        let is_selected = ix == self.state.selected;
+        let is_selected = self.state.focused && ix == self.state.selected;
         let item_height = self.metrics.item_height;
         let label: SharedString = item.label.clone();
         // Monaco strikes deprecated items through, dimmed, without match
@@ -489,11 +514,8 @@ impl SuggestWidget {
     pub(crate) fn details_shown(&self, cx: &App) -> bool {
         self.state.message.is_none()
             && details_expanded(cx)
-            && self
-                .state
-                .rows
-                .get(self.state.selected)
-                .is_some_and(|(item, _)| can_expand(item))
+            && (self.state.explanation.is_some()
+                || self.state.focused_item().is_some_and(can_expand))
     }
 
     fn render_status_bar(&self, show_details: bool) -> impl IntoElement + use<> {
@@ -503,11 +525,7 @@ impl SuggestWidget {
             SuggestInsertMode::Insert => ("Insert", "Replace"),
             SuggestInsertMode::Replace => ("Replace", "Insert"),
         };
-        let focused = self
-            .state
-            .rows
-            .get(self.state.selected)
-            .map(|(item, _)| item);
+        let focused = self.state.focused_item();
         // Monaco shows the other mode only when the item's insert and replace
         // ranges differ.
         let has_alternative = focused.is_some_and(|item| {
@@ -544,27 +562,40 @@ impl SuggestWidget {
             .children(right)
     }
 
+    /// The details panel's detail and docs for the focused row: its own,
+    /// or explain mode's.
+    pub(crate) fn details_content(
+        &self,
+    ) -> Option<(
+        Option<SharedString>,
+        Option<crate::providers::MarkdownString>,
+    )> {
+        let item = self.state.focused_item()?;
+        Some(match &self.state.explanation {
+            Some((detail, docs)) => (Some(detail.clone()), Some(docs.clone().into())),
+            None => (
+                item.detail.clone().filter(|detail| *detail != item.label),
+                item.documentation.clone(),
+            ),
+        })
+    }
+
     fn render_details(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let colors = &self.theme.colors;
-        let (item, _) = self.state.rows.get(self.state.selected)?;
+        let (detail, docs) = self.details_content()?;
         let registry = crate::model::language_registry(cx);
-        let detail = item
-            .detail
-            .clone()
-            .filter(|detail| *detail != item.label)
-            .map(|detail| -> SharedString {
-                // Monaco caps the detail at 100000 characters.
-                if detail.len() > 100_000 {
-                    let mut end = 100_000;
-                    while !detail.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    format!("{}…", &detail[..end]).into()
-                } else {
-                    detail
+        let detail = detail.map(|detail| -> SharedString {
+            // Monaco caps the detail at 100000 characters.
+            if detail.len() > 100_000 {
+                let mut end = 100_000;
+                while !detail.is_char_boundary(end) {
+                    end -= 1;
                 }
-            });
-        let docs = item.documentation.clone();
+                format!("{}…", &detail[..end]).into()
+            } else {
+                detail
+            }
+        });
         let editor = self.editor.clone();
         Some(
             div()

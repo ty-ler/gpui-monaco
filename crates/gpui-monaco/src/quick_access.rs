@@ -57,6 +57,8 @@ pub(crate) enum QuickAction {
     Run(SharedString),
     /// Choose item `.0` of a [`CodeEditor::show_quick_pick`] list.
     Pick(usize),
+    /// Select find match `.0` (0-based), for "Go to Match...".
+    GoToMatch(usize),
 }
 
 /// What happens when a quick pick item is chosen.
@@ -111,6 +113,9 @@ pub(crate) struct QuickAccessState {
     action_keys: HashMap<SharedString, SharedString>,
     /// A [`CodeEditor::show_quick_pick`] list instead of the providers.
     pick: Option<(Vec<SharedString>, Option<PickHandler>)>,
+    /// Monaco's "Go to Match..." input box instead of the providers; the
+    /// view isn't restored when it closes.
+    go_to_match: bool,
 }
 
 /// The quick input: an input box and a list (an overlay widget at the top
@@ -347,6 +352,12 @@ impl QuickInput {
                 }
                 self.close(true, cx);
             }
+            QuickAction::GoToMatch(index) => {
+                if let Some(editor) = self.editor.upgrade() {
+                    editor.update(cx, |editor, cx| editor.find_go_to_match(index, cx));
+                }
+                self.close(true, cx);
+            }
             QuickAction::Pick(ix) => {
                 let editor = self.editor.clone();
                 window.defer(cx, move |window, cx| {
@@ -548,7 +559,12 @@ impl CodeEditor {
     /// `quickInputService.quickAccess.show(prefix)`): `":"` goes to a line,
     /// `"@"` to a symbol, `""` shows the help.
     pub fn open_quick_access(&mut self, value: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_quick_input(value, None, None, window, cx);
+        self.open_quick_input(value, None, None, false, window, cx);
+    }
+
+    /// Monaco's "Go to Match..." input box (`goToMatchFindAction`).
+    pub(crate) fn open_go_to_match(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_quick_input("", None, None, true, window, cx);
     }
 
     /// Shows `items` in the quick input and calls `on_pick` with the chosen
@@ -565,6 +581,7 @@ impl CodeEditor {
             "",
             title,
             Some((items, Some(Box::new(on_pick)))),
+            false,
             window,
             cx,
         );
@@ -575,6 +592,7 @@ impl CodeEditor {
         value: &str,
         title: Option<SharedString>,
         pick: Option<(Vec<SharedString>, Option<PickHandler>)>,
+        go_to_match: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -594,6 +612,7 @@ impl CodeEditor {
             _symbols_task: None,
             action_keys: self.action_keybindings(window, cx),
             pick,
+            go_to_match,
         });
         // The first rows come from here: the widget can't update this
         // editor while it's being updated.
@@ -638,7 +657,7 @@ impl CodeEditor {
                 model.delta_decorations(owner, &state.decorations, Vec::new(), cx)
             });
         }
-        if !accepted {
+        if !accepted && !state.go_to_match {
             self.restore_view_state(&state.view_state, cx);
         }
         self.refocus = true;
@@ -647,24 +666,35 @@ impl CodeEditor {
 
     /// Previews the active item: reveals it and highlights its lines.
     pub(crate) fn quick_access_preview(&mut self, action: &QuickAction, cx: &mut Context<Self>) {
-        let QuickAction::GoTo {
-            selection,
-            highlight,
-        } = action
-        else {
-            // Other items have nothing to preview.
-            let old = self
-                .quick
-                .as_mut()
-                .map(|q| std::mem::take(&mut q.decorations))
-                .unwrap_or_default();
-            if !old.is_empty() {
-                let owner = Some(cx.entity_id());
-                self.model().update(cx, |model, cx| {
-                    model.delta_decorations(owner, &old, Vec::new(), cx)
-                });
+        // Monaco selects the match while its number is typed, and
+        // highlights its line.
+        let go_to_match;
+        let (selection, highlight) = match action {
+            QuickAction::GoTo {
+                selection,
+                highlight,
+            } => (selection, highlight),
+            QuickAction::GoToMatch(index) => {
+                self.find_go_to_match(*index, cx);
+                let range = self.cursors.primary().selection().range();
+                go_to_match = (range.start, range);
+                (&go_to_match.0, &go_to_match.1)
             }
-            return;
+            _ => {
+                // Other items have nothing to preview.
+                let old = self
+                    .quick
+                    .as_mut()
+                    .map(|q| std::mem::take(&mut q.decorations))
+                    .unwrap_or_default();
+                if !old.is_empty() {
+                    let owner = Some(cx.entity_id());
+                    self.model().update(cx, |model, cx| {
+                        model.delta_decorations(owner, &old, Vec::new(), cx)
+                    });
+                }
+                return;
+            }
         };
         let rope = self.model().read(cx).buffer().rope().clone();
         let start = rope.point_utf16_to_offset(PointUtf16::new(highlight.start.row, 0));
@@ -693,8 +723,10 @@ impl CodeEditor {
         if let Some(quick) = self.quick.as_mut() {
             quick.decorations = ids;
         }
-        let point = *selection;
-        self.reveal_range(point..point, RevealType::Center, cx);
+        if let QuickAction::GoTo { .. } = action {
+            let point = *selection;
+            self.reveal_range(point..point, RevealType::Center, cx);
+        }
     }
 
     pub(crate) fn quick_access_go_to(&mut self, position: PointUtf16, cx: &mut Context<Self>) {
@@ -709,6 +741,9 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) -> (Vec<QuickRow>, Option<usize>) {
         let trimmed = value.trim();
+        if self.quick.as_ref().is_some_and(|state| state.go_to_match) {
+            return (vec![QuickRow::Item(self.go_to_match_item(value))], None);
+        }
         if let Some((items, _)) = self.quick.as_ref().and_then(|state| state.pick.as_ref()) {
             let rows: Vec<QuickRow> = items
                 .iter()
@@ -736,6 +771,24 @@ impl CodeEditor {
             (self.command_rows(rest.trim(), cx), None)
         } else {
             (help_rows(), None)
+        }
+    }
+
+    /// The "Go to Match..." input's message: Monaco's placeholder, or its
+    /// validation message for a number out of range.
+    fn go_to_match_item(&self, value: &str) -> QuickItem {
+        let count = self.find_matches_count();
+        let placeholder =
+            format!("Type a number to go to a specific match (between 1 and {count})");
+        if value.is_empty() {
+            return QuickItem::message(placeholder, QuickAction::None);
+        }
+        match self.find_match_index(value) {
+            Some(index) => QuickItem::message(placeholder, QuickAction::GoToMatch(index)),
+            None => QuickItem::message(
+                format!("Please type a number between 1 and {count}"),
+                QuickAction::None,
+            ),
         }
     }
 

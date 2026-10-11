@@ -415,3 +415,158 @@ fn results_after_the_cursor_moved_are_dropped(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(head(&editor, cx), p(3, 1));
 }
+
+fn events(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+) -> Rc<RefCell<Vec<CodeEditorEvent>>> {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let sink = events.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(editor, move |_, event: &CodeEditorEvent, _| {
+            sink.borrow_mut().push(event.clone())
+        })
+        .detach();
+    });
+    events
+}
+
+fn to_side(events: &Rc<RefCell<Vec<CodeEditorEvent>>>) -> Vec<Location> {
+    events
+        .borrow()
+        .iter()
+        .filter_map(|event| match event {
+            CodeEditorEvent::OpenLocationToSide(location) => Some(location.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn reveal_definition_aside_asks_the_host(cx: &mut TestAppContext) {
+    let fixed = Fixed {
+        definitions: vec![here(0, 3, 6)],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(fixed, cx);
+    let events = events(&editor, cx);
+    set_cursor(&editor, cx, p(2, 5));
+    // Monaco's Cmd/Ctrl+K F12: even a result in this model goes to the host,
+    // and the cursor stays.
+    cx.simulate_keystrokes("secondary-k f12");
+    cx.run_until_parked();
+    let sent = to_side(&events);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].range, p(0, 3)..p(0, 6));
+    assert_eq!(head(&editor, cx), p(2, 5));
+    // Monaco's alias for the command.
+    cx.update(|window, cx| {
+        editor.update(cx, |e, cx| {
+            e.trigger("editor.action.openDeclarationToTheSide", window, cx)
+        })
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(to_side(&events).len(), 2);
+}
+
+fn mouse_at(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+    at: PointUtf16,
+) -> gpui::Point<gpui::Pixels> {
+    let origin = editor
+        .read_with(cx, |e, _| e.scrolled_visible_position(at))
+        .expect("laid out");
+    gpui::point(origin.x + gpui::px(1.), origin.y + gpui::px(2.))
+}
+
+/// Cmd/Ctrl+hover, then Cmd/Ctrl+click (with `modifiers` added) at `at`.
+fn definition_click(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+    at: PointUtf16,
+    modifiers: gpui::Modifiers,
+) {
+    let position = mouse_at(editor, cx, at);
+    cx.simulate_mouse_move(position, None, modifiers);
+    cx.executor().advance_clock(Duration::from_millis(60));
+    cx.run_until_parked();
+    cx.simulate_click(position, modifiers);
+    draw(cx);
+}
+
+#[gpui::test]
+fn definition_links_open_in_peek_or_to_the_side(cx: &mut TestAppContext) {
+    let fixed = Fixed {
+        definitions: vec![here(0, 3, 6)],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(fixed, cx);
+    let events = events(&editor, cx);
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.definition_link_opens_in_peek = true;
+        e.update_options(options, cx);
+    });
+    draw(cx);
+    // Monaco `definitionLinkOpensInPeek`: even one result shows in a peek.
+    definition_click(&editor, cx, p(2, 5), gpui::Modifiers::secondary_key());
+    assert!(editor.read_with(cx, |e, _| e.is_peek_visible()));
+    assert_eq!(head(&editor, cx), p(2, 5));
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+
+    // With the side-by-side modifier (Alt, since Alt adds cursors), the
+    // host is asked to open it beside this editor.
+    let side = gpui::Modifiers {
+        alt: true,
+        ..gpui::Modifiers::secondary_key()
+    };
+    definition_click(&editor, cx, p(3, 5), side);
+    assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
+    assert_eq!(to_side(&events).len(), 1);
+}
+
+#[gpui::test]
+fn peek_focus_option_and_toggle(cx: &mut TestAppContext) {
+    let fixed = Fixed {
+        references: vec![here(0, 3, 6), here(2, 4, 7), here(3, 4, 7)],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(fixed, cx);
+    let preview_focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| editor.read(cx).is_peek_preview_focused(window, cx))
+    };
+    set_cursor(&editor, cx, p(2, 5));
+    cx.simulate_keystrokes("shift-f12");
+    draw(cx);
+    // The list has focus by default (`peekWidgetDefaultFocus: tree`).
+    assert!(!preview_focused(cx));
+    // Monaco `togglePeekWidgetFocus` (Cmd/Ctrl+K F2) goes back and forth.
+    cx.simulate_keystrokes("secondary-k f2");
+    draw(cx);
+    assert!(preview_focused(cx));
+    cx.simulate_keystrokes("secondary-k f2");
+    draw(cx);
+    assert!(!preview_focused(cx));
+    // F12 in the list is Monaco's other key for the next reference.
+    let selected =
+        |cx: &mut VisualTestContext| editor.read_with(cx, |e, cx| e.peek_results(cx)).unwrap().1;
+    assert_eq!(selected(cx), 1);
+    cx.simulate_keystrokes("f12");
+    draw(cx);
+    assert_eq!(selected(cx), 2);
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+
+    // `peekWidgetDefaultFocus: editor` focuses the preview.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.peek_widget_default_focus = gpui_monaco::options::PeekWidgetDefaultFocus::Editor;
+        e.update_options(options, cx);
+    });
+    cx.simulate_keystrokes("shift-f12");
+    draw(cx);
+    assert!(preview_focused(cx));
+}

@@ -20,6 +20,33 @@ use crate::providers::{
 };
 use crate::view::reveal::RevealType;
 
+/// How a navigation command shows its results (Monaco
+/// `SymbolNavigationActionConfig`, plus whether the alternative command may
+/// run).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Navigation {
+    /// Always show the results in a peek view.
+    pub open_in_peek: bool,
+    /// Open the result in an editor beside this one.
+    pub open_to_side: bool,
+    /// No message when nothing is found.
+    pub mute_message: bool,
+    /// Run `gotoLocation`'s alternative command when the only result is
+    /// at the cursor.
+    pub allow_alternative: bool,
+}
+
+impl Default for Navigation {
+    fn default() -> Self {
+        Self {
+            open_in_peek: false,
+            open_to_side: false,
+            mute_message: false,
+            allow_alternative: true,
+        }
+    }
+}
+
 /// Monaco highlights the target of a jump this long.
 const HIGHLIGHT_DURATION: Duration = Duration::from_millis(350);
 
@@ -133,25 +160,53 @@ impl CodeEditor {
     /// `goToReferences`): one result is selected; several are handled as
     /// `options.goto_location` says (a peek view by default).
     pub fn go_to(&mut self, kind: LocationKind, cx: &mut Context<Self>) {
-        self.navigate(kind, false, false, true, cx);
+        self.navigate(kind, Navigation::default(), cx);
+    }
+
+    /// Go to definition in an editor beside this one (Monaco
+    /// `editor.action.revealDefinitionAside`, Cmd/Ctrl+K F12): the result
+    /// goes to the host as [`CodeEditorEvent::OpenLocationToSide`], even
+    /// in this editor's model. (Standalone Monaco has no editor groups and
+    /// opens it in place; a host without one can do the same with
+    /// [`CodeEditor::go_to_location`].)
+    pub fn reveal_definition_aside(&mut self, cx: &mut Context<Self>) {
+        self.navigate(
+            LocationKind::Definition,
+            Navigation {
+                open_to_side: true,
+                ..Navigation::default()
+            },
+            cx,
+        );
     }
 
     /// Runs a navigation command and shows the results in a peek view, even
     /// a single one (Monaco's `peekDefinition`, `peekDeclaration`,
     /// `peekTypeDefinition`, `peekImplementation` and the references peek).
     pub fn peek(&mut self, kind: LocationKind, cx: &mut Context<Self>) {
-        self.navigate(kind, true, false, true, cx);
+        self.navigate(
+            kind,
+            Navigation {
+                open_in_peek: true,
+                ..Navigation::default()
+            },
+            cx,
+        );
     }
 
     /// Monaco `SymbolNavigationAction.run`.
     pub(crate) fn navigate(
         &mut self,
         kind: LocationKind,
-        open_in_peek: bool,
-        mute_message: bool,
-        allow_alternative: bool,
+        navigation: Navigation,
         cx: &mut Context<Self>,
     ) {
+        let Navigation {
+            open_in_peek,
+            open_to_side,
+            mute_message,
+            allow_alternative,
+        } = navigation;
         let position = self.cursors.primary().position;
         let tasks = self.request_locations(kind, position, cx);
         let state = self.navigation_state(cx);
@@ -191,9 +246,18 @@ impl CodeEditor {
                     }
                     // Already at the only result: run the alternative.
                     (1, Some(alternative)) if at_cursor && allow_alternative => {
-                        this.navigate(alternative, open_in_peek, mute_message, false, cx);
+                        this.navigate(
+                            alternative,
+                            Navigation {
+                                open_in_peek,
+                                mute_message,
+                                allow_alternative: false,
+                                open_to_side: false,
+                            },
+                            cx,
+                        );
                     }
-                    _ => this.on_locations(kind, locations, open_in_peek, cx),
+                    _ => this.on_locations(kind, locations, open_in_peek, open_to_side, cx),
                 }
             })
             .ok();
@@ -213,16 +277,25 @@ impl CodeEditor {
         kind: LocationKind,
         locations: Vec<Location>,
         open_in_peek: bool,
+        open_to_side: bool,
         cx: &mut Context<Self>,
     ) {
         let preference = self.options.goto_location.multiple(kind);
-        if open_in_peek || (preference == GoToLocation::Peek && locations.len() > 1) {
+        if !self.in_peek
+            && (open_in_peek || (preference == GoToLocation::Peek && locations.len() > 1))
+        {
             self.open_peek(kind, locations, None, cx);
             return;
         }
         let first = locations[0].clone();
         let peek = locations.len() > 1 && preference == GoToLocation::GotoAndPeek;
-        let opened_here = self.open_location(&first, !peek, cx);
+        let opened_here = if open_to_side {
+            // The peek view would belong to the other editor.
+            cx.emit(CodeEditorEvent::OpenLocationToSide(first.clone()));
+            false
+        } else {
+            self.open_location(&first, !peek, cx)
+        };
         if peek && opened_here {
             self.open_peek(kind, locations.clone(), Some(0), cx);
         }

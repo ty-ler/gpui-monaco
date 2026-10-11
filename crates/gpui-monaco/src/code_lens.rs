@@ -353,6 +353,37 @@ impl CodeEditor {
         }
     }
 
+    /// Lists the commands of the code lenses above the cursor's line in the
+    /// quick input and runs the chosen one (Monaco
+    /// `codelens.showLensesInCurrentLine`). Nothing shows when the line has
+    /// none.
+    pub fn show_lenses_in_current_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let row = self.cursors.primary().position.row;
+        let commands: Vec<Command> = self
+            .code_lens
+            .groups
+            .iter()
+            .filter(|group| group.row == row)
+            .flat_map(|group| group.items.iter())
+            .filter_map(|item| item.lens.command.clone())
+            .collect();
+        if commands.is_empty() {
+            return;
+        }
+        let labels = commands.iter().map(|c| c.title.clone()).collect();
+        self.show_quick_pick(
+            Some("Select a command".into()),
+            labels,
+            move |editor, ix, _, cx| {
+                if let Some(command) = commands.get(ix) {
+                    editor.run_code_lens(command, cx);
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
     /// The lenses shown, as (row, titles), for tests.
     #[doc(hidden)]
     pub fn code_lenses_for_tests(&self) -> Vec<(u32, Vec<Option<String>>)> {

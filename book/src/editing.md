@@ -28,7 +28,7 @@ Every feature here works out of the box. Each follows Monaco's behavior, which t
 - **Line operations:**
   - Move, copy and delete lines, insert a line above or below, indent and outdent.
   - Join lines, sort, reverse and delete duplicate lines.
-  - Trim trailing whitespace and reindent.
+  - Trim trailing whitespace, reindent, and insert a final new line ("Insert Final New Line").
 - **Indentation:**
   - Models detect their indentation from their text when created (`detect_indentation`).
   - The commands "Convert Indentation to Spaces"/"to Tabs", "Indent Using Spaces"/"Tabs", "Change Tab Display Size" (a 1–8 picker) and "Detect Indentation from Content" change it, as in Monaco.
@@ -62,7 +62,9 @@ Cmd+F opens the find widget, and Cmd+Alt+F (Ctrl+H elsewhere) opens it with repl
   - Enter and Shift+Enter move between matches.
   - In regex mode, Replace and Replace All expand `$1`, `$&` and `$$`, and `\u`, `\U`, `\l` and `\L` change the case of the next group (Monaco's replace patterns).
   - **Preserve case** (the `AB` toggle, Cmd+Alt+P / Alt+P) writes each replacement in the case of the text it replaces: `foo` → `bar`, `Foo` → `Bar`, `FOO` → `BAR`. Hyphenated and underscored words keep each part's case.
-  - Navigation wraps at the first and last match unless `options.find.loop_` is off. Typing the query jumps to matches unless `options.find.cursor_move_on_type` is off.
+  - Navigation wraps at the first and last match unless `options.find.loop_` is off. Typing the query jumps to matches unless `options.find.cursor_move_on_type` is off. With `options.find.find_on_type` off, typing doesn't search at all until Enter.
+  - "Go to Match..." (Monaco's `editor.action.goToMatchFindAction`) asks for a match number in the quick input; negative numbers count from the end.
+  - `find_with_args` (Monaco's `editor.actions.findWithArgs`) opens find with a search string, replace string and toggles.
   - Alt+Enter in the find input selects all matches.
   - F3 / Cmd+G (Shift for previous) opens find if needed, seeded from the cursor, and moves to the next match. Cmd/Ctrl+F3 searches for the selection. Cmd+E (macOS) uses the selection, even over several lines.
   - Up and Down in the inputs walk the search and replace history.

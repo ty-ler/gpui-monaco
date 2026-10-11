@@ -193,6 +193,11 @@ impl CompletionModel {
         }
     }
 
+    /// Item `index`'s word distance (0 without distances).
+    pub fn distance(&self, index: usize) -> u32 {
+        self.distances.get(index).copied().unwrap_or(0)
+    }
+
     /// Replaces item `index` with its resolved version (Monaco assigns the
     /// resolved fields onto the item); its filtering is unchanged.
     pub fn replace_item(&mut self, index: usize, item: CompletionItem) {

@@ -819,8 +819,97 @@ actions!(
         /// Formats the selections, or the cursor's line (Monaco
         /// `editor.action.formatSelection`).
         FormatSelection,
+        /// Focuses the first suggestion when none is (Monaco
+        /// `focusSuggestion`, see `suggest.selectionMode`).
+        FocusSuggestion,
+        /// Focuses the first suggestion and accepts it (Monaco
+        /// `focusAndAcceptSuggestion`).
+        FocusAndAcceptSuggestion,
+        /// Shows how the focused suggestion was scored in the details
+        /// panel (Monaco `toggleExplainMode`).
+        ToggleExplainMode,
+        /// Forgets the suggest widget's resized size (Monaco
+        /// `editor.action.resetSuggestSize`).
+        ResetSuggestSize,
+        /// Asks for a match number and selects that match (Monaco
+        /// `editor.action.goToMatchFindAction`).
+        GoToMatch,
+        /// Opens the definition in an editor beside this one (Monaco
+        /// `editor.action.revealDefinitionAside`): see
+        /// [`CodeEditorEvent::OpenLocationToSide`](crate::CodeEditorEvent::OpenLocationToSide).
+        RevealDefinitionAside,
+        /// Moves focus between the peek view's preview and its results
+        /// list (Monaco `togglePeekWidgetFocus`).
+        TogglePeekWidgetFocus,
+        /// Inserts a line break at the end of the document (Monaco
+        /// `editor.action.insertFinalNewLine`).
+        InsertFinalNewLine,
+        /// Lists the code lens commands of the cursor's line and runs the
+        /// chosen one (Monaco `codelens.showLensesInCurrentLine`).
+        ShowLensesInCurrentLine,
     ]
 );
+
+/// Opens the find widget with these search settings (Monaco
+/// `editor.actions.findWithArgs`, `IFindStartArguments`). Unset fields keep
+/// their current values. As in Monaco, an empty search string is still
+/// seeded from the selection (or the word at the cursor) first.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    Action,
+    gpui::private::schemars::JsonSchema,
+)]
+#[schemars(crate = "gpui::private::schemars")]
+#[serde(default, rename_all = "camelCase")]
+#[action(namespace = code_editor)]
+pub struct FindWithArgs {
+    /// The search string.
+    pub search_string: Option<String>,
+    /// The replace string; giving one shows the replace input.
+    pub replace_string: Option<String>,
+    /// Treat the search string as a regular expression.
+    pub is_regex: Option<bool>,
+    /// Match whole words only.
+    pub match_whole_word: Option<bool>,
+    /// Match case.
+    pub is_case_sensitive: Option<bool>,
+    /// Preserve case when replacing.
+    pub preserve_case: Option<bool>,
+    /// Search in the current selections.
+    pub find_in_selection: bool,
+}
+
+/// Asks for code actions at the selection (Monaco
+/// `editor.action.codeAction`, `CodeActionCommandArgs`).
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    Action,
+    gpui::private::schemars::JsonSchema,
+)]
+#[schemars(crate = "gpui::private::schemars")]
+#[serde(default)]
+#[action(namespace = code_editor)]
+pub struct TriggerCodeAction {
+    /// Only actions of this kind (and its sub-kinds), e.g. `"refactor"`;
+    /// unset for every action that has a kind.
+    pub kind: Option<String>,
+    /// When to apply an action without the menu: `"ifSingle"` (the
+    /// default) when it's the only one, `"first"` the first one, or
+    /// `"never"`. Case doesn't matter.
+    pub apply: Option<String>,
+    /// Only preferred actions.
+    pub preferred: bool,
+}
 
 /// Monaco's default keybindings for the current platform.
 pub fn default_key_bindings() -> Vec<KeyBinding> {
@@ -908,7 +997,11 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-space", TriggerSuggest, ctx),
         // Monaco's secondary keys (Alt+Esc only on macOS).
         KeyBinding::new("secondary-i", TriggerSuggest, ctx),
+        // Also Monaco `focusSuggestion` while no suggestion is focused.
         KeyBinding::new("ctrl-space", ToggleSuggestionDetails, SUGGEST),
+        KeyBinding::new("secondary-/", ToggleExplainMode, SUGGEST),
+        KeyBinding::new("secondary-k f12", RevealDefinitionAside, ctx),
+        KeyBinding::new("secondary-k f2", TogglePeekWidgetFocus, ctx),
         KeyBinding::new("alt-\\", TriggerInlineSuggest, ctx),
         KeyBinding::new("secondary-shift-f2", StartLinkedEditing, ctx),
         // Monaco binds Ctrl+G on every platform.
@@ -1271,6 +1364,9 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("right", PeekExpand, peek),
         KeyBinding::new("escape", ClosePeek, peek),
         KeyBinding::new("f4", GoToNextReference, peek),
+        // Monaco's secondary key (the editor keeps F12 for go to
+        // definition).
+        KeyBinding::new("f12", GoToNextReference, peek),
         KeyBinding::new("shift-f4", GoToPreviousReference, peek),
     ]);
     // Monaco's secondary keys for moving in the suggest list (first and last

@@ -16,12 +16,15 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **Cmd+Shift+, / Cmd+Shift+.:** replace the value at the cursor with the previous or next one (`1` → `2`, `true` → `false`)
 - **Ctrl+B / Ctrl+F / Ctrl+P / Ctrl+N, Ctrl+A / Ctrl+E (with Shift to select), Ctrl+H / Ctrl+D:** Monaco's Emacs-style keys
 - **F12:** go to definition
+- **Cmd+K F12:** open the definition to the side (`CodeEditorEvent::OpenLocationToSide` for the host)
+- **Cmd+K F2** with a peek view open: move focus between its preview and its results list
 - **Ctrl+Space (or Alt+Esc, Cmd+I):** trigger completion
 - **F1 / Ctrl+G / Cmd+Shift+O:** command palette, go to line, go to symbol
 - **Shift+F10:** context menu
 - **Tab / Cmd+Right / Alt+] / Alt+[ / Alt+\\** with ghost text: accept, accept a word, next, previous, ask explicitly
 - **Tab / Shift+Tab / Escape** in a snippet: next and previous tab stop, leave the snippet
-- **Ctrl+Space (or Cmd+I)** in the suggest widget: show or hide the details
+- **Ctrl+Space (or Cmd+I)** in the suggest widget: show or hide the details, or focus the first suggestion if none is (Monaco's `focusSuggestion`, see `suggest.selection_mode`)
+- **Cmd+/** in the suggest widget: explain mode, which shows how the focused suggestion was scored in the details (Monaco's `toggleExplainMode`)
 - **Shift+Enter / Shift+Tab** in the suggest widget: accept in the other insert mode
 - **Up / Down (or Cmd+Up / Cmd+Down, Ctrl+P / Ctrl+N), PageUp / PageDown** in the suggest widget: previous and next suggestion, by item or page
 - **Cmd+K Cmd+I** with a hover showing: focus it. Arrows scroll it, PageUp / PageDown (or Alt+Up / Alt+Down) page, Home / End (or Cmd+Up / Cmd+Down) go to the top and bottom, and Escape closes it
@@ -83,3 +86,22 @@ You can also drive the editor directly. `CodeEditor` exposes many commands as me
 - **Unlabelled commands** such as `"cursorDown"`, `"undo"`, `"deleteWordLeft"`, `"closeReferenceSearch"` or `"acceptAlternativeSelectedSuggestion"`.
 
 It falls back to GPUI action names (`"code_editor::CursorDown"`). `DiffEditor::trigger` also takes the diff editor's ids (`"diffEditor.revert"`, `"diffEditor.toggleCollapseUnchangedRegions"`, `"editor.action.accessibleDiffViewer.next"`, …) and passes any others to the modified editor.
+
+`trigger_with_payload(id, payload, window, cx)` passes Monaco's payload, as JSON, to commands that take arguments:
+
+```rust,ignore
+editor.trigger_with_payload(
+    "editor.actions.findWithArgs",
+    serde_json::json!({ "searchString": "todo", "isCaseSensitive": true }),
+    window,
+    cx,
+)?;
+editor.trigger_with_payload(
+    "editor.action.codeAction",
+    serde_json::json!({ "kind": "refactor.extract", "apply": "first" }),
+    window,
+    cx,
+)?;
+```
+
+The same arguments are the fields of the `FindWithArgs` and `TriggerCodeAction` actions, which can be bound to keys.

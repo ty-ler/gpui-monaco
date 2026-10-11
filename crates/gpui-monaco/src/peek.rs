@@ -9,9 +9,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, PathBuilder, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, canvas, div, point, px,
+    AppContext as _, ClickEvent, Context, DragMoveEvent, Entity, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, PathBuilder, Render, ScrollHandle,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, canvas,
+    div, point, px,
 };
 use text::PointUtf16;
 
@@ -30,10 +31,44 @@ use crate::widgets::{WidgetId, ZoneHeight};
 /// The key context of the results list.
 pub const PEEK_KEY_CONTEXT: &str = "PeekView";
 
-/// Monaco `LayoutData`: the preview takes this share of the width.
+/// Monaco `LayoutData`'s defaults: the preview's share of the width.
 const PREVIEW_RATIO: f32 = 0.7;
 /// Monaco `LayoutData.heightInLines`.
 const HEIGHT_IN_LINES: f32 = 18.;
+/// Monaco's split view minimums: the preview's and the list's width.
+const MIN_PREVIEW_WIDTH: f32 = 200.;
+const MIN_LIST_WIDTH: f32 = 100.;
+/// Monaco `ZoneWidget._getResizeBounds`: the height sash keeps the zone
+/// strictly between these many lines.
+const MIN_LINES: f32 = 5.;
+const MAX_LINES: f32 = 35.;
+
+/// Monaco's `peekViewLayout` storage: the last ratio and height, used by
+/// the next peek view in any editor.
+#[derive(Clone, Copy)]
+struct PeekLayout {
+    ratio: f32,
+    height_in_lines: f32,
+}
+
+impl Default for PeekLayout {
+    fn default() -> Self {
+        Self {
+            ratio: PREVIEW_RATIO,
+            height_in_lines: HEIGHT_IN_LINES,
+        }
+    }
+}
+
+impl gpui::Global for PeekLayout {}
+
+/// A peek view sash being dragged: between the preview and the list, or
+/// along the bottom (Monaco's split view and zone widget sashes).
+#[derive(Clone, Copy)]
+enum PeekSash {
+    Split,
+    Height,
+}
 
 #[derive(Default)]
 pub(crate) struct PeekState {
@@ -83,6 +118,11 @@ pub(crate) struct PeekView {
     colors: EditorColors,
     focus: FocusHandle,
     focus_pending: bool,
+    /// Monaco `peekWidgetDefaultFocus: editor`: focus the preview instead
+    /// of the list when it opens.
+    focus_preview: bool,
+    /// The preview's share of the width.
+    ratio: f32,
     scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -248,6 +288,10 @@ impl PeekView {
             options: preview_options,
             focus: cx.focus_handle(),
             focus_pending: true,
+            focus_preview: false,
+            ratio: cx
+                .try_global::<PeekLayout>()
+                .map_or(PREVIEW_RATIO, |layout| layout.ratio),
             scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
         }
@@ -570,7 +614,10 @@ impl Render for PeekView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_preview(window, cx);
         if std::mem::take(&mut self.focus_pending) {
-            window.focus(&self.focus, cx);
+            match self.preview.as_ref().filter(|_| self.focus_preview) {
+                Some(preview) => window.focus(&preview.read(cx).focus_handle.clone(), cx),
+                None => window.focus(&self.focus, cx),
+            }
         }
         let colors = self.colors.clone();
         let line_height = self.options.resolved_line_height();
@@ -596,9 +643,19 @@ impl Render for PeekView {
             .map(|(ix, row)| self.render_row(ix, row, cx))
             .collect();
         let preview = self.preview.clone();
+        let sash = |id: &'static str, sash: PeekSash| {
+            div()
+                .id(id)
+                .absolute()
+                .on_drag(sash, |_, _, _, cx| cx.new(|_| gpui::Empty))
+        };
         div()
             .size_full()
             .relative()
+            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<PeekSash>, _, cx| {
+                let sash = *event.drag(cx);
+                this.resize(sash, event, cx);
+            }))
             .child(
                 canvas(
                     |_, _, _| {},
@@ -675,13 +732,23 @@ impl Render for PeekView {
                         div()
                             .flex_1()
                             .min_h_0()
+                            .relative()
                             .flex()
                             .child(
                                 div()
                                     .h_full()
-                                    .w(gpui::relative(PREVIEW_RATIO))
+                                    .w(gpui::relative(self.ratio))
                                     .overflow_hidden()
                                     .children(preview),
+                            )
+                            .child(
+                                sash("peek-sash-split", PeekSash::Split)
+                                    .top_0()
+                                    .bottom_0()
+                                    .left(gpui::relative(self.ratio))
+                                    .ml(px(-2.))
+                                    .w(px(4.))
+                                    .cursor_col_resize(),
                             )
                             .child(
                                 div()
@@ -740,6 +807,61 @@ impl Render for PeekView {
                             ),
                     ),
             )
+            .child(
+                sash("peek-sash-height", PeekSash::Height)
+                    .left_0()
+                    .right_0()
+                    .bottom(px(-2.))
+                    .h(px(4.))
+                    .cursor_row_resize(),
+            )
+    }
+}
+
+impl PeekView {
+    /// Drags a sash (Monaco's split view between preview and list, and the
+    /// zone widget's height sash); the layout is kept for the next peek
+    /// view, like Monaco's `peekViewLayout`.
+    fn resize(&mut self, sash: PeekSash, event: &DragMoveEvent<PeekSash>, cx: &mut Context<Self>) {
+        let bounds = event.bounds;
+        let position = event.event.position;
+        let layout = cx.default_global::<PeekLayout>();
+        match sash {
+            PeekSash::Split => {
+                let width = bounds.size.width;
+                if width <= px(MIN_PREVIEW_WIDTH + MIN_LIST_WIDTH) {
+                    return;
+                }
+                let preview = (position.x - bounds.left())
+                    .clamp(px(MIN_PREVIEW_WIDTH), width - px(MIN_LIST_WIDTH));
+                self.ratio = preview / width;
+                layout.ratio = self.ratio;
+                cx.notify();
+            }
+            PeekSash::Height => {
+                let line_height = self.options.resolved_line_height();
+                let lines = ((position.y - bounds.top()) / line_height).round();
+                if lines > MIN_LINES && lines < MAX_LINES {
+                    layout.height_in_lines = lines;
+                    if let Some(editor) = self.editor.upgrade() {
+                        editor.update(cx, |editor, cx| editor.set_peek_height(lines, cx));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Focuses the preview if the list has focus, else the list (Monaco
+    /// `changeFocusBetweenPreviewAndReferences`).
+    fn toggle_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let preview_focused = self
+            .preview
+            .as_ref()
+            .is_some_and(|preview| preview.read(cx).focus_handle.contains_focused(window, cx));
+        match self.preview.as_ref().filter(|_| !preview_focused) {
+            Some(preview) => window.focus(&preview.read(cx).focus_handle.clone(), cx),
+            None => window.focus(&self.focus, cx),
+        }
     }
 }
 
@@ -767,19 +889,27 @@ impl CodeEditor {
         let model = self.model().clone();
         let theme = self.theme().clone();
         let options = self.options().clone();
+        let focus_preview = self.options.peek_widget_default_focus
+            == crate::options::PeekWidgetDefaultFocus::Editor;
         let view = cx.new(|cx| {
-            PeekView::new(
+            let mut view = PeekView::new(
                 &editor, model, theme, options, kind, anchor, locations, selected, cx,
-            )
+            );
+            view.focus_preview = focus_preview;
+            view
         });
-        // Monaco: 18 lines, at most 80% of the editor (at least 12 lines).
+        // Monaco: the last height (18 lines at first), at most 80% of the
+        // editor (at least 12 lines).
         let line_height = self.options.resolved_line_height();
-        let max_lines = self.layout.as_ref().map_or(HEIGHT_IN_LINES, |layout| {
+        let height = cx
+            .try_global::<PeekLayout>()
+            .map_or(HEIGHT_IN_LINES, |layout| layout.height_in_lines);
+        let max_lines = self.layout.as_ref().map_or(height, |layout| {
             (layout.text_bounds.size.height / line_height * 0.8).max(12.)
         });
         let id = self.add_zone(
             anchor.row + 1,
-            ZoneHeight::Lines(HEIGHT_IN_LINES.min(max_lines)),
+            ZoneHeight::Lines(height.min(max_lines)),
             view.clone().into(),
             true,
             cx,
@@ -797,6 +927,34 @@ impl CodeEditor {
     /// Whether a peek view is open.
     pub fn is_peek_visible(&self) -> bool {
         self.peek.view.is_some()
+    }
+
+    /// Sets the peek view's height in lines (its sash).
+    fn set_peek_height(&mut self, lines: f32, cx: &mut Context<Self>) {
+        if let Some(zone) = self.peek.zone {
+            self.set_view_zone_height(zone, ZoneHeight::Lines(lines), cx);
+        }
+    }
+
+    /// Moves focus between the peek view's preview and its results list
+    /// (Monaco `togglePeekWidgetFocus`, Cmd/Ctrl+K F2). Returns whether a
+    /// peek view was open; in a preview editor, it's the outer editor's.
+    pub fn toggle_peek_widget_focus(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(view) = self.peek.view.clone() else {
+            return false;
+        };
+        view.update(cx, |view, cx| view.toggle_focus(window, cx));
+        true
+    }
+
+    /// Whether the peek view's preview editor has focus.
+    pub fn is_peek_preview_focused(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.peek_preview(cx)
+            .is_some_and(|preview| preview.read(cx).focus_handle.contains_focused(window, cx))
     }
 
     /// The peek view's results, as (uri, range) with the selected index.
@@ -855,10 +1013,14 @@ impl CodeEditor {
     ) {
         let here = location.uri.is_none() || location.uri.as_ref() == self.model().read(cx).uri();
         if here && !close {
-            // Move the peek view to the result, keeping its list.
+            // Move the peek view to the result, keeping its list (Monaco
+            // focuses the list then).
             let start = location.range.start;
             self.set_selections(&[crate::cursor::Selection::collapsed(start)], cx);
             self.open_peek(kind, locations, Some(selected), cx);
+            if let Some(view) = &self.peek.view {
+                view.update(cx, |view, _| view.focus_preview = false);
+            }
             return;
         }
         self.close_peek(cx);

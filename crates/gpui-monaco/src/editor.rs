@@ -52,6 +52,10 @@ pub enum CodeEditorEvent {
     Blurred,
     /// Go to definition led to another model: the host should open it.
     OpenLocation(crate::providers::Location),
+    /// Monaco's "Open Definition to the Side" (`revealDefinitionAside`,
+    /// or Cmd/Ctrl+Alt+click on a symbol) found this location, in any
+    /// model: the host should open it in an editor beside this one.
+    OpenLocationToSide(crate::providers::Location),
     /// A link was followed (Cmd/Ctrl+click or `editor.action.openLink`):
     /// the host opens it. Relative `file://./` links are resolved against
     /// the model's URI.
@@ -1097,6 +1101,15 @@ impl CodeEditor {
         }
     }
 
+    /// Monaco's `hasSideBySideModifier` for Cmd/Ctrl+click on a symbol: Alt,
+    /// or Cmd/Ctrl when Alt adds cursors.
+    pub(crate) fn is_side_by_side_modifier(&self, modifiers: &gpui::Modifiers) -> bool {
+        match self.options.multi_cursor_modifier {
+            crate::options::MultiCursorModifier::Alt => modifiers.alt,
+            crate::options::MultiCursorModifier::CtrlCmd => modifiers.secondary(),
+        }
+    }
+
     pub(crate) fn cursors_changed(&mut self, autoscroll: bool, cx: &mut Context<Self>) {
         self.suggest_cursor_changed();
         self.write_selection_to_primary(cx);
@@ -1632,6 +1645,33 @@ impl CodeEditor {
         self.apply(operation, cx);
     }
 
+    /// Inserts a line break at the end of the document (Monaco
+    /// `editor.action.insertFinalNewLine`, which inserts one even when the
+    /// last line is empty). The primary selection stays where it is; other
+    /// cursors are dropped, as in Monaco.
+    pub fn insert_final_new_line(&mut self, cx: &mut Context<Self>) {
+        if self.options.read_only {
+            return;
+        }
+        let end = self.snapshot.rope().max_point_utf16();
+        let selection = self.cursors.primary().selection();
+        self.apply(
+            EditOperation {
+                // The model stores `\n`; `TextModel::text` joins lines with
+                // its line ending.
+                edits: vec![(end..end, "\n".to_string())],
+                selections_after: vec![selection],
+                kind: EditOperationType::Other,
+                push_stack_element_before: true,
+                push_stack_element_after: true,
+                auto_closed: Vec::new(),
+                follow_up: None,
+                auto_whitespace: Vec::new(),
+            },
+            cx,
+        );
+    }
+
     fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
         if self.options.single_line {
             cx.propagate();
@@ -1662,6 +1702,10 @@ impl CodeEditor {
             cursor::line_break_with_language(config, rope, cursors, lang)
         });
         self.apply(operation, cx);
+        // Monaco: typing on another line closes the suggestions.
+        if self.suggest.session.is_some() {
+            self.refilter_suggest(cx);
+        }
     }
 
     fn indent_lines(&mut self, _: &IndentLines, _: &mut Window, cx: &mut Context<Self>) {
@@ -2469,7 +2513,12 @@ impl CodeEditor {
         let position = self.position_for_point(event.position, window, cx);
         // Monaco: Cmd/Ctrl+click follows a link, else a definition.
         if self.is_definition_modifier(&event.modifiers)
-            && (self.follow_link_at(position, cx) || self.follow_definition_link(position, cx))
+            && (self.follow_link_at(position, cx)
+                || self.follow_definition_link(
+                    position,
+                    self.is_side_by_side_modifier(&event.modifiers),
+                    cx,
+                ))
         {
             return;
         }
@@ -3950,6 +3999,49 @@ impl Render for CodeEditor {
             .on_action(cx.listener(|this, _: &OrganizeImports, _, cx| this.organize_imports(cx)))
             .on_action(cx.listener(|this, _: &FixAll, _, cx| this.fix_all(cx)))
             .on_action(cx.listener(|this, _: &AutoFix, _, cx| this.auto_fix(cx)))
+            .on_action(cx.listener(|this, action: &TriggerCodeAction, _, cx| {
+                this.code_action_with_args(action, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusSuggestion, _, cx| {
+                this.focus_suggestion(cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusAndAcceptSuggestion, _, cx| {
+                if this.focus_suggestion(cx) {
+                    this.accept_suggestion(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleExplainMode, _, cx| {
+                this.toggle_suggest_explain_mode(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ResetSuggestSize, _, cx| this.reset_suggest_size(cx)))
+            .on_action(cx.listener(|this, action: &FindWithArgs, window, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.find_with_args(action, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoToMatch, window, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.go_to_match(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &RevealDefinitionAside, _, cx| {
+                this.reveal_definition_aside(cx)
+            }))
+            .on_action(cx.listener(|this, _: &TogglePeekWidgetFocus, window, cx| {
+                if !this.toggle_peek_widget_focus(window, cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(
+                cx.listener(|this, _: &InsertFinalNewLine, _, cx| this.insert_final_new_line(cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ShowLensesInCurrentLine, window, cx| {
+                    this.show_lenses_in_current_line(window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &GoToDeclaration, _, cx| {
                 this.go_to(LocationKind::Declaration, cx)
             }))
@@ -3997,6 +4089,11 @@ impl Render for CodeEditor {
                 this.format_selection(cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSuggestionDetails, _, cx| {
+                // Monaco `focusSuggestion` shares the keys while no
+                // suggestion is focused.
+                if this.focus_suggestion(cx) {
+                    return;
+                }
                 if this.selected_suggestion().is_some() {
                     this.toggle_suggestion_details(cx);
                 } else {
