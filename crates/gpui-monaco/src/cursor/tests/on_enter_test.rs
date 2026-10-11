@@ -18,7 +18,7 @@ fn with_support(config: LanguageConfiguration, f: impl FnOnce(&LanguageSupport))
 #[test]
 fn uses_brackets() {
     let config = LanguageConfiguration {
-        brackets: brackets(&[("(", ")"), ("begin", "end")]),
+        brackets: Some(brackets(&[("(", ")"), ("begin", "end")])),
         ..Default::default()
     };
     with_support(config, |support| {
@@ -83,14 +83,14 @@ fn check(
 #[test]
 fn issue_121125_on_enter_rules_with_global_modifier() {
     let config = LanguageConfiguration {
-        on_enter_rules: vec![on_enter(
+        on_enter_rules: Some(vec![on_enter(
             Pattern::new(r"^\s*\/{3}.*$", "gm"),
             None,
             None,
             IndentAction::Outdent,
             Some("/// "),
             None,
-        )],
+        )]),
         ..Default::default()
     };
     with_support(config, |s| {
@@ -118,7 +118,7 @@ fn issue_121125_on_enter_rules_with_global_modifier() {
 #[test]
 fn uses_reg_exp_rules() {
     let config = LanguageConfiguration {
-        on_enter_rules: javascript_on_enter_rules(),
+        on_enter_rules: Some(javascript_on_enter_rules()),
         ..Default::default()
     };
     with_support(config, |s| {
@@ -223,7 +223,7 @@ fn uses_reg_exp_rules() {
 #[test]
 fn issue_141816() {
     let config = LanguageConfiguration {
-        on_enter_rules: javascript_on_enter_rules(),
+        on_enter_rules: Some(javascript_on_enter_rules()),
         ..Default::default()
     };
     with_support(config, |s| {

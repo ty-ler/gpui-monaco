@@ -18,7 +18,7 @@ struct Tooltip {
 #[cfg(test)]
 thread_local! {
     /// The texts of tooltips rendered, for tests.
-    static RENDERED: std::cell::RefCell<Vec<SharedString>> = const { std::cell::RefCell::new(Vec::new()) };
+    pub(crate) static RENDERED: std::cell::RefCell<Vec<SharedString>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 impl Render for Tooltip {

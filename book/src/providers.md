@@ -53,7 +53,7 @@ let registration = register_hover_provider(
 // Later: unregister_provider(cx, registration);
 ```
 
-Besides `All` and a list of languages, `LanguageSelector::Filters` takes Monaco's `LanguageFilter`s. A filter sets any of a `language`, a uri `scheme` and a glob `pattern` for the path (each can be `*`). A model matches when every field that's set matches:
+Besides `All` and a list of languages (where `*` means any language), `LanguageSelector::Filters` takes Monaco's `LanguageFilter`s. A filter sets any of a `language`, a uri `scheme` and a glob `pattern` for the path (each can be `*`). A model matches when every field that's set matches:
 
 ```rust,ignore
 LanguageSelector::Filters(vec![LanguageFilter {
@@ -63,11 +63,15 @@ LanguageSelector::Filters(vec![LanguageFilter {
 }])
 ```
 
+### Which provider wins
+
+When several providers match a model, they're ranked as in Monaco's `LanguageFeatureRegistry`: by how well the selector matches (`LanguageSelector::score`, Monaco `languages.score`: 10 for an exact language, scheme or path, 5 for `*` or `All`), then the most recently registered first. So a provider for `rust` beats a `*` one whatever the order you registered them in, and registering a provider again for the same selector takes over from the older one. Every `*_providers` lookup returns them in that order. A filter with `exclusive: true` makes its provider the only one of its kind for the models it matches.
+
 Some providers can ask for new results without an edit, like Monaco's provider `onDidChange` events: `refresh_folding_ranges(cx)`, `refresh_code_lenses(cx)`, `refresh_inlay_hints(cx)` and `refresh_semantic_tokens(cx)`.
 
 `SignatureHelpProvider::provide_signature_help_with_context` gets Monaco's `SignatureHelpContext`: the trigger, whether hints are already showing or requested (`is_retrigger`), and the hints showing (`active_signature_help`). A `DocumentRangeFormattingProvider` can implement `provide_document_ranges_formatting_edits` to format every selection in one request.
 
-If several providers match a model, the editor queries all of them. Hover contents and definition locations are concatenated, completion lists are merged, and the first signature help result wins.
+If several providers match a model, the editor queries all of them, best first. Hover contents (in that order) and definition locations are concatenated, and the first signature help, document highlight and linked editing result wins. Completion providers are asked in groups of equal score, best first, and the first group with items wins (Monaco `provideSuggestionItems`): a language's own providers hide a `*` one when they answer.
 
 ## Completion
 
@@ -98,7 +102,7 @@ With `tab_completion: On`, Tab at the end of a word inserts the best suggestion 
 
 Which item is selected first follows `suggest_selection`: the best match, or the item you picked last (for the same prefix). When the list opens by itself, `suggest.selection_mode` can leave it without a focused item (Monaco's `selectionMode`): Enter and Tab then type as usual, and the arrow keys or Ctrl+Space focus one. Cmd/Ctrl+/ shows how the focused item was scored, with the provider's `debug_display_name` (Monaco's explain mode), and "Reset Suggest Widget Size" forgets the resized size.
 
-Filtering and ranking use Monaco's `fuzzyScore`, and the editor re-filters as you type without asking the provider again. If you return `incomplete: true`, the editor asks again as the word grows.
+Filtering and ranking use Monaco's `fuzzyScore`, and the editor re-filters as you type without asking the provider again. If you return `incomplete: true`, the editor asks again as the word grows: only the providers whose lists were incomplete are asked, and the others' items are kept. A trigger character asks only the providers that declare it, keeping the open list's items from the others, as Monaco does.
 
 On accept, the editor inserts `insert_text`, falling back to the label. It is expanded as a [snippet](editing.md#snippets) if `insert_text_is_snippet` is set, and its lines are indented like the cursor's line unless `keep_whitespace` is set. In insert mode it replaces `range` (by default the word before the cursor); in replace mode (`suggest.insert_mode`) it replaces `replace_range` (by default the whole word). Shift+Enter and Shift+Tab accept in the other mode. The editor applies any `additional_text_edits`, then runs the item's `command`. Typing a character in `commit_characters` accepts the item and inserts the character.
 
@@ -110,6 +114,7 @@ Definition, declaration, type definition, implementation and reference providers
 
 - **Same model:** `uri: None`, or the model's own uri.
 - **Another model:** its uri.
+- **Links:** set `target_selection_range` (the part to select, such as the name) and `origin_selection_range` (the symbol at the cursor the link starts from) to make it Monaco's `LocationLink`. Navigation selects and highlights the target selection range and peek lists it, while the definition hover shows the whole `range`; Cmd/Ctrl+hover underlines the origin range instead of the word.
 
 The commands are Monaco's:
 
@@ -178,7 +183,7 @@ Formatters return `TextEdit`s, which are `(Range<PointUtf16>, String)` pairs in 
 
 Both options are off by default, as in Monaco. You can also call `editor.format_document(cx)` and `editor.format_selection(cx)` directly.
 
-When several formatters match a model, the first registered one runs, as in the standalone Monaco editor. Format Document also offers the range formatters, formatting the whole text, unless a document formatter has the same `extension_id`. To choose differently, for example by asking the user, set a selector (Monaco `FormattingConflicts.setFormatterSelector`). It gets each formatter's `display_name` and `extension_id`, the model, why (`FormattingMode::Explicit` for commands, `Silent` for format on paste) and what (`FormattingKind::File` or `Selection`). It answers with a task resolving to the index to use, or `None` to not format:
+When several formatters match a model, the best-ranked one runs, as in the standalone Monaco editor. Format Document also offers the range formatters, formatting the whole text, unless a document formatter has the same `extension_id`. To choose differently, for example by asking the user, set a selector (Monaco `FormattingConflicts.setFormatterSelector`). It gets each formatter's `display_name` and `extension_id`, the model, why (`FormattingMode::Explicit` for commands, `Silent` for format on paste) and what (`FormattingKind::File` or `Selection`). It answers with a task resolving to the index to use, or `None` to not format:
 
 ```rust,ignore
 let selector = providers::set_formatter_selector(cx, |selection, cx| {
@@ -188,7 +193,7 @@ let selector = providers::set_formatter_selector(cx, |selection, cx| {
 // Later: selector.dispose(cx);
 ```
 
-The newest selector wins, and it's asked even when only one formatter matches, as in Monaco. On-type formatting always uses the first formatter.
+The newest selector wins, and it's asked even when only one formatter matches, as in Monaco. On-type formatting always uses the best-ranked formatter.
 
 ## Rename
 
@@ -198,12 +203,22 @@ F2 (`editor.rename(cx)`) renames the symbol at the cursor, as in Monaco:
 2. **Rename box:** a box under the symbol shows the name, selected. Enter accepts (`AcceptRenameInput`); Escape (`CancelRenameInput`), clicking elsewhere, or a text change cancels.
    - **Suggestions:** with a `NewSymbolNamesProvider` registered (`register_new_symbol_name_provider`), the box gets a ✨ button that asks every provider for names (`NewSymbolNameTriggerKind::Invoke`, or `request_rename_suggestions`). Providers whose `supports_automatic_new_symbol_names_trigger_kind` is true are asked as soon as the box opens (`Automatic`). New, distinct names are listed above the earlier ones, up to 7 at a time, with ✨ on `AIGenerated` ones. Down and Up (`FocusNextRenameSuggestion`, `FocusPreviousRenameSuggestion`) put a suggestion in the box, and the current name back past either end. Typing stops the request and edits the name instead. Clicking a suggestion renames to it. `rename_suggestions` lists them.
    - **Preview:** Cmd/Ctrl+Enter (`AcceptRenameInputWithPreview`) previews the edits when a preview handler is set (see below); the box then says "Enter to Rename, Cmd/Ctrl+Enter to Preview".
-3. **Edits:** `provide_rename_edits` returns a `WorkspaceEdit`, which is text edits by document uri (`None` for this one). Providers are asked in order until one answers; if none does, their reasons are shown inline.
-4. **Apply:** `editor.apply_workspace_edit(edit, cx)` applies the edits. This document gets one undo step and the cursors follow the edits. Other documents are found with `model_for_uri`. If one can't be found, nothing is applied and "Rename failed to apply edits" is shown.
+3. **Edits:** `provide_rename_edits` returns a `WorkspaceEdit`, which is text edits by document uri (`None` for this one). Providers are asked one at a time, best first, until one answers (resolving locations too); if none does, their reasons are shown inline.
+4. **Apply:** `editor.apply_workspace_edit(edit, cx)` applies the edits (a task, like Monaco's `IBulkEditService.apply`). This document gets one undo step and the cursors follow the edits. Other documents are found with `model_for_uri`. If one can't be found, or one changed since the version the edit gives for it, nothing is applied and "Rename failed to apply edits" is shown.
+
+### Workspace edits
+
+A `WorkspaceEdit` (Monaco's) holds:
+
+- **`edits`:** text edits by document uri (`None` for the document asked about).
+- **`snippet_edits`:** text edits whose text is a snippet (Monaco `insertAsSnippet`). A single one in the editor applying the edit starts a snippet session, together with the other edits as one undo step; the others insert their plain text.
+- **`file_edits`:** creating, renaming (or copying) and deleting files (`WorkspaceFileEdit`, Monaco `IWorkspaceFileEdit`). Standalone Monaco rejects them. Here they go, in order and before the text edits, to the handler you set with `set_workspace_file_edit_handler(cx, handler)`, which returns a task; without one, an edit with file operations fails.
+- **`versions`:** the `TextModel::version` each document had when the edit was computed (Monaco `versionId`). A document that changed since makes the whole edit fail, as standalone Monaco's "bad state - model changed in the meantime".
+- **`metadata`:** a label and `needs_confirmation` (Monaco `WorkspaceEditMetadata`). An edit that needs confirmation goes through the preview handler, if one is set, even on Enter, as in VS Code.
 
 ### Previewing edits
 
-Standalone Monaco applies a previewed rename or code action right away; VS Code shows them in its Refactor Preview panel first. `set_workspace_edit_preview_handler(cx, handler)` (Monaco's `IBulkEditService.setPreviewHandler`) lets your app do the same. The handler gets the `WorkspaceEdit` and a label (`Renaming 'foo' to 'bar'`, or the code action's title) and returns a task with the edits to apply, or `None` to cancel. It runs for Cmd/Ctrl+Enter in the rename box and the code action menu; Enter never previews. Disposing the returned `Disposable` removes it, and `has_workspace_edit_preview_handler` says whether one is set.
+Standalone Monaco applies a previewed rename or code action right away; VS Code shows them in its Refactor Preview panel first. `set_workspace_edit_preview_handler(cx, handler)` (Monaco's `IBulkEditService.setPreviewHandler`) lets your app do the same. The handler gets the `WorkspaceEdit` and a label (`Renaming 'foo' to 'bar'`, or the code action's title) and returns a task with the edits to apply, or `None` to cancel. It runs for Cmd/Ctrl+Enter in the rename box and the code action menu, and for edits that need confirmation; otherwise Enter doesn't preview. Disposing the returned `Disposable` removes it, and `has_workspace_edit_preview_handler` says whether one is set.
 
 ## Code actions
 
@@ -271,7 +286,7 @@ A `DocumentSymbolProvider` returns a document's outline as nested `DocumentSymbo
 
 ## Code lens
 
-A `CodeLensProvider` puts clickable commands above lines, such as "3 references" or "Run test". `provide_code_lenses` can return lenses without a `command`; `resolve_code_lens` then fills them in when they scroll into view. Lenses on the same line show together, separated by `|`.
+A `CodeLensProvider` puts clickable commands above lines, such as "3 references" or "Run test". `provide_code_lenses` can return lenses without a `command`; `resolve_code_lens` then fills them in when they scroll into view. Lenses on the same line show together, separated by `|`. A command's `tooltip` shows when hovering its lens (Monaco `Command.tooltip`).
 
 Clicking a lens runs its command through [`register_command`](editing.md) handlers. If no handler is registered, the editor emits `CodeEditorEvent::ExecuteCommand` for the host. "Show CodeLens Commands for Current Line" (Monaco's `codelens.showLensesInCurrentLine`) lists the cursor line's commands in the quick input instead. The `code_lens`, `code_lens_font_family` and `code_lens_font_size` options control them.
 
@@ -417,10 +432,12 @@ Monaco's `DocumentDropEditProvider` and `DocumentPasteEditProvider` decide how d
 - a title for the picker;
 - a hierarchical `kind`, such as `text.plain` or `uri.path.absolute`;
 - the text or snippet to insert;
-- additional edits;
+- additional edits in the same document, and `additional_edit`, a `WorkspaceEdit` applied after it (Monaco `additionalEdit`);
 - `yield_to`, the edits it should rank below.
 
 The editor has built-in providers for plain text, paths and HTML. When other providers handle a paste, the first edit is applied. If there are alternatives, a button (or Cmd/Ctrl+.) switches between them. "Paste As..." (`paste_as`) lists every edit.
+
+As in Monaco, the edit about to be applied is resolved first: `resolve_document_drop_edit` and `resolve_document_paste_edit` can fill in an edit's text or additional edit only for the one used. `provide_document_paste_edits_with_context` gets Monaco's `DocumentPasteContext`, with `only`, the kind "Paste As..." asks for. Providers can name themselves (`id`), and drop providers list their kinds (`provided_drop_edit_kinds`).
 
 A paste provider can also prepare data when text is copied or cut, as Monaco's `prepareDocumentPaste` does (with `paste_as.enabled` on). `prepare_document_paste` gets the copied ranges (whole lines for empty selections) and returns a `DataTransfer`, for example the imports the copied code needs; `copy_mime_types` names its MIME types. When that copy is pasted, in this editor or another, the paste waits for the data, adds it to the paste's `DataTransfer` (higher priority providers winning) and asks the providers that handle it. Text copied elsewhere, or before the latest copy, has no such data.
 

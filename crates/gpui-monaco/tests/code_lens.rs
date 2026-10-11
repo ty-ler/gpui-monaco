@@ -33,7 +33,9 @@ impl CodeLensProvider for Functions {
                     id: "test.references".into(),
                     title: "2 references".into(),
                     arguments: vec![serde_json::json!(row)],
+                    ..Default::default()
                 }),
+                ..Default::default()
             })
             .collect();
         Task::ready(Ok(lenses))
@@ -50,6 +52,7 @@ impl CodeLensProvider for Functions {
                 id: "test.unregistered".into(),
                 title: "Run test".into(),
                 arguments: Vec::new(),
+                ..Default::default()
             }),
             ..lens.clone()
         })))

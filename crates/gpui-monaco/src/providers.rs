@@ -13,11 +13,17 @@ use gpui::{App, Global, SharedString, Task};
 use text::{BufferSnapshot, PointUtf16};
 
 /// Which models a provider applies to (Monaco `LanguageSelector`).
+///
+/// Lookups rank the providers whose selector matches a model by
+/// [`score`](LanguageSelector::score), best first, and among equal scores
+/// the most recently registered first, as Monaco's
+/// `LanguageFeatureRegistry.ordered` does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LanguageSelector {
-    /// Every model, including ones without a language.
+    /// Every model, including ones without a language; scores like `*`.
     All,
-    /// Models whose language id is one of these.
+    /// Models whose language id is one of these; `*` matches any language
+    /// (Monaco's string selectors).
     Languages(Vec<SharedString>),
     /// Models any of these filters match (Monaco's `LanguageFilter`s).
     Filters(Vec<LanguageFilter>),
@@ -26,6 +32,9 @@ pub enum LanguageSelector {
 /// Selects models by language, uri scheme and path (Monaco
 /// `LanguageFilter`). Every field that's set must match, and at least one
 /// must be set.
+///
+/// Monaco's `hasAccessToAllModels` and `notebookType` don't apply: every
+/// model is available to providers, and there are no notebooks.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LanguageFilter {
     /// A language id, or `*` for any language.
@@ -34,13 +43,17 @@ pub struct LanguageFilter {
     pub scheme: Option<SharedString>,
     /// A glob for the uri's path, such as `**/*.test.ts`.
     pub pattern: Option<SharedString>,
+    /// When a provider whose filters are all exclusive matches a model,
+    /// it's the only one of its kind used for it (Monaco `exclusive`).
+    pub exclusive: bool,
 }
 
 impl LanguageFilter {
-    /// Monaco `score` for one filter: 0 when it doesn't match.
-    fn score(&self, target: &ProviderTarget) -> u32 {
+    /// Monaco `score` for one filter: 10 for an exact match, 5 for a `*`
+    /// match, 0 when it doesn't match. Empty fields count as unset.
+    pub fn score(&self, target: &ProviderTarget) -> u32 {
         let mut score = 0;
-        if let Some(scheme) = &self.scheme {
+        if let Some(scheme) = self.scheme.as_ref().filter(|s| !s.is_empty()) {
             let uri_scheme = target
                 .uri
                 .as_deref()
@@ -54,7 +67,7 @@ impl LanguageFilter {
                 return 0;
             }
         }
-        if let Some(language) = &self.language {
+        if let Some(language) = self.language.as_ref().filter(|l| !l.is_empty()) {
             if target.language_id.as_deref() == Some(language.as_ref()) {
                 score = 10;
             } else if language == "*" {
@@ -63,7 +76,7 @@ impl LanguageFilter {
                 return 0;
             }
         }
-        if let Some(pattern) = &self.pattern {
+        if let Some(pattern) = self.pattern.as_ref().filter(|p| !p.is_empty()) {
             let path = target.uri.as_deref().and_then(crate::languages::uri_path);
             if path.is_some_and(|path| {
                 path == pattern.as_ref() || syntax::glob_matches(pattern, &path)
@@ -111,8 +124,9 @@ impl LanguageSelector {
         Self::Languages(vec![id.into()])
     }
 
-    /// Whether a model with `language_id` is selected. Models without a language only
-    /// match [`LanguageSelector::All`].
+    /// Whether a model with `language_id` is selected. Models without a
+    /// language only match [`LanguageSelector::All`], `*`, and filters on
+    /// the scheme or path.
     pub fn matches(&self, language_id: Option<&str>) -> bool {
         self.matches_target(&language_id.into())
     }
@@ -120,15 +134,51 @@ impl LanguageSelector {
     /// Whether the model `target` describes is selected (Monaco `score`
     /// above 0).
     pub fn matches_target(&self, target: &ProviderTarget) -> bool {
+        self.score(target) > 0
+    }
+
+    /// How well the selector matches the model `target` describes (Monaco
+    /// `languages.score`): 10 for an exact language, scheme or path match,
+    /// 5 for a `*` match, 0 for none. A list scores its best entry.
+    pub fn score(&self, target: &ProviderTarget) -> u32 {
         match self {
-            Self::All => true,
-            Self::Languages(ids) => target
-                .language_id
-                .as_ref()
-                .is_some_and(|id| ids.iter().any(|l| l == id)),
-            Self::Filters(filters) => filters.iter().any(|filter| filter.score(target) > 0),
+            Self::All => 5,
+            Self::Languages(ids) => ids
+                .iter()
+                .map(|id| {
+                    if id == "*" {
+                        5
+                    } else if target.language_id.as_ref() == Some(id) {
+                        10
+                    } else {
+                        0
+                    }
+                })
+                .max()
+                .unwrap_or(0),
+            Self::Filters(filters) => filters
+                .iter()
+                .map(|filter| filter.score(target))
+                .max()
+                .unwrap_or(0),
         }
     }
+
+    /// Monaco `isExclusive`: every filter is exclusive.
+    fn is_exclusive(&self) -> bool {
+        match self {
+            Self::Filters(filters) => {
+                !filters.is_empty() && filters.iter().all(|filter| filter.exclusive)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Monaco `languages.score`: how well `selector` matches the model
+/// `target` describes; see [`LanguageSelector::score`].
+pub fn score(selector: &LanguageSelector, target: &ProviderTarget) -> u32 {
+    selector.score(target)
 }
 
 /// What a provider sees about the model it's asked about.
@@ -260,6 +310,10 @@ pub struct CompletionItem {
     pub tags: Vec<CompletionItemTag>,
     /// A command run after the item is inserted.
     pub command: Option<Command>,
+    /// Another command to run on acceptance (Monaco `action`): the ghost
+    /// text made from suggestions (`quick_suggestions` `Inline`) runs it
+    /// when there's no `command`.
+    pub action: Option<Command>,
     /// Data for [`CompletionProvider::resolve_completion_item`].
     pub data: Option<serde_json::Value>,
     /// Shown right after the label, dimmed, e.g. a signature (Monaco
@@ -434,14 +488,42 @@ pub trait HoverProvider: 'static {
 
 // ----- definition ----------------------------------------------------------------
 
-/// A location in a model (Monaco `Location`). `uri: None` means the same
+/// A location in a model (Monaco `Location`), or with the selection ranges
+/// set, a link to one (Monaco `LocationLink`). `uri: None` means the same
 /// model.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Location {
     /// The model's uri, or `None` for the model that was queried.
     pub uri: Option<SharedString>,
-    /// The target range (0-based rows, UTF-16 columns).
+    /// The target range (0-based rows, UTF-16 columns): the whole
+    /// definition for a link, shown in peek and the definition hover.
     pub range: Range<PointUtf16>,
+    /// The range of the symbol the link starts from, in the queried model
+    /// (Monaco `LocationLink.originSelectionRange`): Cmd/Ctrl+hover
+    /// underlines it instead of the word at the mouse.
+    pub origin_selection_range: Option<Range<PointUtf16>>,
+    /// The part of `range` to select and reveal when navigating, such as
+    /// the definition's name (Monaco `LocationLink.targetSelectionRange`);
+    /// `range` without one.
+    pub target_selection_range: Option<Range<PointUtf16>>,
+}
+
+impl Location {
+    /// A location of `range` in the model `uri` (`None`: the queried one).
+    pub fn new(uri: Option<SharedString>, range: Range<PointUtf16>) -> Self {
+        Self {
+            uri,
+            range,
+            ..Default::default()
+        }
+    }
+
+    /// The range navigation selects (Monaco `targetSelectionRange ?? range`).
+    pub fn selection_range(&self) -> Range<PointUtf16> {
+        self.target_selection_range
+            .clone()
+            .unwrap_or_else(|| self.range.clone())
+    }
 }
 
 /// Resolves go-to-definition targets (Monaco `DefinitionProvider`).
@@ -527,11 +609,118 @@ pub trait ReferenceProvider: 'static {
     ) -> Task<anyhow::Result<Vec<Location>>>;
 }
 
-/// Edits to one or more documents (Monaco `WorkspaceEdit` with text edits).
+/// Edits to one or more documents (Monaco `WorkspaceEdit`).
+///
+/// Applying one (rename, code actions) sends the [file
+/// operations](Self::file_edits) to the [file edit
+/// handler](crate::set_workspace_file_edit_handler) first, then edits the
+/// text of models found with [`model_for_uri`](crate::model_for_uri).
+/// Nothing is applied when a model can't be found, a
+/// [version](Self::versions) doesn't match, or there are file operations
+/// but no handler, as in standalone Monaco's bulk edit service.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WorkspaceEdit {
     /// Edits by document uri; `None` is the document the request was about.
     pub edits: Vec<(Option<SharedString>, Vec<TextEdit>)>,
+    /// Edits inserted as snippets (Monaco `IWorkspaceTextEdit` with
+    /// `insertAsSnippet`), applied with `edits`.
+    pub snippet_edits: Vec<WorkspaceSnippetEdit>,
+    /// Creating, renaming and deleting files (Monaco
+    /// `IWorkspaceFileEdit`), in order.
+    pub file_edits: Vec<WorkspaceFileEdit>,
+    /// The model versions the edits were computed for (Monaco
+    /// `IWorkspaceTextEdit.versionId`, against
+    /// [`TextModel::version`](crate::TextModel::version)); a model that
+    /// changed since makes applying fail.
+    pub versions: Vec<(Option<SharedString>, usize)>,
+    /// Describes the text edits (Monaco `WorkspaceEditMetadata`).
+    pub metadata: Option<WorkspaceEditMetadata>,
+}
+
+impl WorkspaceEdit {
+    /// Monaco's bulk edit service shows a preview before applying when an
+    /// edit's metadata asks for confirmation (and a [preview
+    /// handler](crate::set_workspace_edit_preview_handler) is set).
+    pub fn needs_confirmation(&self) -> bool {
+        self.metadata.as_ref().is_some_and(|m| m.needs_confirmation)
+            || self
+                .file_edits
+                .iter()
+                .any(|edit| edit.metadata.as_ref().is_some_and(|m| m.needs_confirmation))
+    }
+
+    /// Whether there's nothing to apply.
+    pub fn is_empty(&self) -> bool {
+        self.edits.iter().all(|(_, edits)| edits.is_empty())
+            && self.snippet_edits.is_empty()
+            && self.file_edits.is_empty()
+    }
+}
+
+/// A text edit whose text is a snippet (Monaco `IWorkspaceTextEdit` with
+/// `textEdit.insertAsSnippet`). In the editor applying it, a single one
+/// starts a snippet session; otherwise the snippet's plain text is
+/// inserted, as Monaco does for models without an editor.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WorkspaceSnippetEdit {
+    /// The document, `None` for the one the request was about.
+    pub uri: Option<SharedString>,
+    /// The range replaced.
+    pub range: Range<PointUtf16>,
+    /// The snippet (TextMate syntax).
+    pub snippet: String,
+    /// Insert the snippet's indentation as is (Monaco `keepWhitespace`).
+    pub keep_whitespace: bool,
+}
+
+/// Monaco `WorkspaceEditMetadata`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WorkspaceEditMetadata {
+    /// Ask before applying: the edit goes through the [preview
+    /// handler](crate::set_workspace_edit_preview_handler), if one is set.
+    pub needs_confirmation: bool,
+    /// A label for the change.
+    pub label: SharedString,
+    /// More about it.
+    pub description: Option<SharedString>,
+}
+
+/// A file operation in a [`WorkspaceEdit`] (Monaco `IWorkspaceFileEdit`):
+/// creating `new_uri`, deleting `old_uri`, or renaming (or copying)
+/// `old_uri` to `new_uri`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WorkspaceFileEdit {
+    /// The file renamed or deleted (Monaco `oldResource`).
+    pub old_uri: Option<SharedString>,
+    /// The file created, or the rename's target (Monaco `newResource`).
+    pub new_uri: Option<SharedString>,
+    /// How to do it.
+    pub options: WorkspaceFileEditOptions,
+    /// Describes it.
+    pub metadata: Option<WorkspaceEditMetadata>,
+}
+
+/// Monaco `WorkspaceFileEditOptions`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceFileEditOptions {
+    /// Replace an existing target.
+    pub overwrite: bool,
+    /// Don't fail if the file to delete or rename doesn't exist.
+    pub ignore_if_not_exists: bool,
+    /// Don't fail (or overwrite) if the target exists.
+    pub ignore_if_exists: bool,
+    /// Delete folders with their contents.
+    pub recursive: bool,
+    /// Copy rather than rename.
+    pub copy: bool,
+    /// The uri is a folder.
+    pub folder: bool,
+    /// Delete for good rather than to the trash.
+    pub skip_trash_bin: bool,
+    /// Don't delete files bigger than this many bytes (Monaco `maxSize`).
+    pub max_size: Option<u64>,
+    /// The new file's contents (Monaco `contents`).
+    pub contents: Option<String>,
 }
 
 /// What a rename replaces (Monaco `RenameLocation`).
@@ -695,14 +884,27 @@ impl From<&str> for CodeActionKind {
 
 /// A command to run (Monaco `Command`), executed with
 /// [`execute_command`](crate::execute_command).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Command {
     /// The registered command id.
     pub id: SharedString,
     /// Its title.
     pub title: SharedString,
+    /// Shown on hover, e.g. over a code lens (Monaco `tooltip`).
+    pub tooltip: Option<SharedString>,
     /// Its arguments.
     pub arguments: Vec<serde_json::Value>,
+}
+
+impl Command {
+    /// The command `id` titled `title`, without arguments.
+    pub fn new(id: impl Into<SharedString>, title: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            ..Default::default()
+        }
+    }
 }
 
 /// A change offered at a position (Monaco `CodeAction`): an edit, a
@@ -725,6 +927,10 @@ pub struct CodeAction {
     pub disabled: Option<SharedString>,
     /// Data for [`CodeActionProvider::resolve_code_action`].
     pub data: Option<serde_json::Value>,
+    /// Generated by AI (Monaco `isAI`).
+    pub is_ai: bool,
+    /// The ranges the action applies to (Monaco `ranges`).
+    pub ranges: Vec<Range<PointUtf16>>,
 }
 
 /// How code actions were asked for (Monaco `CodeActionTriggerType`).
@@ -765,6 +971,16 @@ pub trait CodeActionProvider: 'static {
     /// kind contains a returned action's. Empty by default.
     fn documentation(&self) -> Vec<(CodeActionKind, Command)> {
         Vec::new()
+    }
+
+    /// A name for the provider (Monaco `displayName`).
+    fn display_name(&self) -> Option<SharedString> {
+        None
+    }
+
+    /// Who provides it (Monaco `extensionId`).
+    fn extension_id(&self) -> Option<SharedString> {
+        None
     }
 
     /// The actions for `range`.
@@ -988,6 +1204,11 @@ pub trait InlayHintsProvider: 'static {
     ) -> Option<Task<anyhow::Result<InlayHint>>> {
         None
     }
+
+    /// A name for the provider (Monaco `displayName`).
+    fn display_name(&self) -> Option<SharedString> {
+        None
+    }
 }
 
 // ----- document symbols ----------------------------------------------------------
@@ -1077,6 +1298,8 @@ pub struct DocumentSymbol {
     pub selection_range: Range<PointUtf16>,
     /// Nested symbols.
     pub children: Vec<DocumentSymbol>,
+    /// The name of the symbol containing it (Monaco `containerName`).
+    pub container_name: Option<SharedString>,
 }
 
 /// Supplies a document's symbols (Monaco `DocumentSymbolProvider`), for go
@@ -1091,6 +1314,11 @@ pub trait DocumentSymbolProvider: 'static {
         context: &ProviderContext,
         cx: &mut App,
     ) -> Task<anyhow::Result<Vec<DocumentSymbol>>>;
+
+    /// A name for the provider (Monaco `displayName`).
+    fn display_name(&self) -> Option<SharedString> {
+        None
+    }
 }
 
 // ----- code lens -----------------------------------------------------------------
@@ -1102,6 +1330,8 @@ pub struct CodeLens {
     pub range: Range<PointUtf16>,
     /// What it shows and runs; `None` until resolved.
     pub command: Option<Command>,
+    /// Identifies the lens to its provider (Monaco `id`).
+    pub id: Option<SharedString>,
 }
 
 /// Supplies code lenses (Monaco `CodeLensProvider`): clickable commands
@@ -1745,8 +1975,8 @@ pub trait SignatureHelpProvider: 'static {
     /// column), or `None` to close parameter hints.
     ///
     /// Called on trigger characters, when explicitly requested, and on every edit
-    /// while parameter hints are shown. The first provider (in registration order)
-    /// returning a non-empty result wins; errors are ignored.
+    /// while parameter hints are shown. The first provider (best first, see
+    /// [`LanguageSelector`]) returning a non-empty result wins; errors are ignored.
     fn provide_signature_help(
         &self,
         context: &ProviderContext,
@@ -1902,8 +2132,8 @@ pub struct FormatterInfo {
 /// (Monaco `IFormattingEditProviderSelector`'s arguments).
 #[derive(Clone)]
 pub struct FormatterSelection {
-    /// The matching formatters, in the order they're tried (registration
-    /// order). For [`FormattingKind::File`], the document formatters, then
+    /// The matching formatters, in the order they're tried (best first, see
+    /// [`LanguageSelector`]). For [`FormattingKind::File`], the document formatters, then
     /// the range formatters (formatting the whole text) whose extension id
     /// no document formatter has.
     pub formatters: Vec<FormatterInfo>,
@@ -2127,8 +2357,12 @@ pub struct DocumentDropOrPasteEdit {
     pub handled_mime_type: Option<SharedString>,
     /// What it inserts at each selection (or the drop position).
     pub insert_text: EditInsertText,
-    /// Other edits, applied with it.
+    /// Other edits in this document, applied with it.
     pub additional_edits: Vec<TextEdit>,
+    /// Edits applied after it, possibly in other documents (Monaco
+    /// `additionalEdit`), as [`CodeEditor::apply_workspace_edit`](crate::CodeEditor::apply_workspace_edit)
+    /// does.
+    pub additional_edit: Option<WorkspaceEdit>,
     /// Edits it should rank below.
     pub yield_to: Vec<EditYieldTo>,
 }
@@ -2137,9 +2371,19 @@ pub struct DocumentDropOrPasteEdit {
 ///
 /// Register with [`register_document_drop_edit_provider`].
 pub trait DocumentDropEditProvider: 'static {
+    /// Identifies the provider (Monaco `id`).
+    fn id(&self) -> Option<SharedString> {
+        None
+    }
+
     /// The MIME types it handles (`None`: any).
     fn drop_mime_types(&self) -> Option<Vec<SharedString>> {
         None
+    }
+
+    /// The kinds of edits it returns (Monaco `providedDropEditKinds`).
+    fn provided_drop_edit_kinds(&self) -> Vec<SharedString> {
+        Vec::new()
     }
 
     /// The edits for dropping `data` at `position`.
@@ -2150,6 +2394,28 @@ pub trait DocumentDropEditProvider: 'static {
         data: &DataTransfer,
         cx: &mut App,
     ) -> Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>>;
+
+    /// Fills in an edit before it's applied (Monaco
+    /// `resolveDocumentDropEdit`), e.g. computing its `additional_edit`
+    /// only for the edit that's used. `None` (the default) applies it as
+    /// it is.
+    fn resolve_document_drop_edit(
+        &self,
+        _edit: &DocumentDropOrPasteEdit,
+        _cx: &mut App,
+    ) -> Option<Task<anyhow::Result<DocumentDropOrPasteEdit>>> {
+        None
+    }
+}
+
+/// What a paste edit request is for (Monaco `DocumentPasteContext`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocumentPasteContext {
+    /// Why it's asked for.
+    pub trigger_kind: DocumentPasteTriggerKind,
+    /// Only edits of this kind are wanted ("Paste As..." with a kind), if
+    /// set (Monaco `only`).
+    pub only: Option<SharedString>,
 }
 
 /// Why paste edits are asked for (Monaco `DocumentPasteTriggerKind`).
@@ -2165,6 +2431,11 @@ pub enum DocumentPasteTriggerKind {
 ///
 /// Register with [`register_document_paste_edit_provider`].
 pub trait DocumentPasteEditProvider: 'static {
+    /// Identifies the provider (Monaco `id`).
+    fn id(&self) -> Option<SharedString> {
+        None
+    }
+
     /// The MIME types it handles.
     fn paste_mime_types(&self) -> Vec<SharedString>;
 
@@ -2182,6 +2453,31 @@ pub trait DocumentPasteEditProvider: 'static {
         trigger: DocumentPasteTriggerKind,
         cx: &mut App,
     ) -> Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>>;
+
+    /// Like [`provide_document_paste_edits`](Self::provide_document_paste_edits),
+    /// with Monaco's whole `DocumentPasteContext`, including the kind
+    /// "Paste As..." asks for. Defaults to `provide_document_paste_edits`.
+    fn provide_document_paste_edits_with_context(
+        &self,
+        context: &ProviderContext,
+        ranges: &[Range<PointUtf16>],
+        data: &DataTransfer,
+        paste_context: &DocumentPasteContext,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>> {
+        self.provide_document_paste_edits(context, ranges, data, paste_context.trigger_kind, cx)
+    }
+
+    /// Fills in an edit before it's applied (Monaco
+    /// `resolveDocumentPasteEdit`). `None` (the default) applies it as it
+    /// is.
+    fn resolve_document_paste_edit(
+        &self,
+        _edit: &DocumentDropOrPasteEdit,
+        _cx: &mut App,
+    ) -> Option<Task<anyhow::Result<DocumentDropOrPasteEdit>>> {
+        None
+    }
 
     /// The MIME types [`prepare_document_paste`](Self::prepare_document_paste)
     /// adds at copy time (Monaco `copyMimeTypes`), so that pasting the text
@@ -2297,7 +2593,9 @@ macro_rules! register_fn {
 
 register_fn!(
     /// Registers a completion provider for the models `selector` matches (Monaco
-    /// `registerCompletionItemProvider`). Results from all matching providers are merged.
+    /// `registerCompletionItemProvider`). Providers are asked in groups of equal
+    /// [score](LanguageSelector::score), best first, and the first group with items
+    /// wins; the lists of that group's providers are merged.
     register_completion_provider,
     completion,
     CompletionProvider
@@ -2318,8 +2616,9 @@ register_fn!(
 );
 register_fn!(
     /// Registers a document highlight provider for the models `selector` matches
-    /// (Monaco `registerDocumentHighlightProvider`). The first non-empty result, in
-    /// registration order, is shown; with none, the word's textual occurrences are.
+    /// (Monaco `registerDocumentHighlightProvider`). The first non-empty result, best
+    /// first (see [`LanguageSelector`]), is shown; with none, the word's textual
+    /// occurrences are.
     register_document_highlight_provider,
     document_highlight,
     DocumentHighlightProvider
@@ -2327,8 +2626,8 @@ register_fn!(
 
 register_fn!(
     /// Registers a signature help provider for the models `selector` matches (Monaco
-    /// `registerSignatureHelpProvider`). The first non-empty result, in registration order,
-    /// is shown.
+    /// `registerSignatureHelpProvider`). The first non-empty result, best first (see
+    /// [`LanguageSelector`]), is shown.
     register_signature_help_provider,
     signature_help,
     SignatureHelpProvider
@@ -2380,7 +2679,7 @@ register_fn!(
 register_fn!(
     /// Registers a document semantic tokens provider for the models
     /// `selector` matches (Monaco `registerDocumentSemanticTokensProvider`).
-    /// The most recently registered one with tokens is used.
+    /// The best-ranked one (see [`LanguageSelector`]) with tokens is used.
     register_document_semantic_tokens_provider,
     semantic_tokens,
     DocumentSemanticTokensProvider
@@ -2418,7 +2717,7 @@ register_fn!(
 );
 register_fn!(
     /// Registers a link provider for the models `selector` matches (Monaco
-    /// `registerLinkProvider`). Later registrations win where links overlap.
+    /// `registerLinkProvider`). Better-ranked providers (see [`LanguageSelector`]) win where links overlap.
     register_link_provider,
     links,
     LinkProvider
@@ -2439,7 +2738,7 @@ register_fn!(
 );
 register_fn!(
     /// Registers a rename provider for the models `selector` matches (Monaco
-    /// `registerRenameProvider`). Providers are tried in registration order.
+    /// `registerRenameProvider`). Providers are tried best first (see [`LanguageSelector`]).
     register_rename_provider,
     rename,
     RenameProvider
@@ -2482,21 +2781,21 @@ register_fn!(
 );
 register_fn!(
     /// Registers a document formatter for the models `selector` matches (Monaco
-    /// `registerDocumentFormattingEditProvider`). The first one registered is used.
+    /// `registerDocumentFormattingEditProvider`). The best-ranked one is used.
     register_document_formatting_provider,
     document_formatting,
     DocumentFormattingProvider
 );
 register_fn!(
     /// Registers a range formatter for the models `selector` matches (Monaco
-    /// `registerDocumentRangeFormattingEditProvider`). The first one registered is used.
+    /// `registerDocumentRangeFormattingEditProvider`). The best-ranked one is used.
     register_document_range_formatting_provider,
     range_formatting,
     DocumentRangeFormattingProvider
 );
 register_fn!(
     /// Registers an on-type formatter for the models `selector` matches (Monaco
-    /// `registerOnTypeFormattingEditProvider`). The first one registered is used.
+    /// `registerOnTypeFormattingEditProvider`). The best-ranked one is used.
     register_on_type_formatting_provider,
     on_type_formatting,
     OnTypeFormattingProvider
@@ -2540,7 +2839,7 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
 }
 
 /// The registered drop edit providers whose selector matches
-/// `language_id`, newest first, then the built-in ones (Monaco's order).
+/// `target`, best first (see [`LanguageSelector`]), then the built-in ones.
 pub fn drop_edit_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2550,13 +2849,12 @@ pub fn drop_edit_providers(
         .try_global::<LanguageFeatures>()
         .map(|f| matching(&f.drop_edits, &target))
         .unwrap_or_default();
-    providers.reverse();
     providers.extend(crate::drop_paste::default_drop_providers());
     providers
 }
 
 /// The registered paste edit providers whose selector matches
-/// `language_id`, newest first, then the built-in ones (Monaco's order).
+/// `target`, best first (see [`LanguageSelector`]), then the built-in ones.
 pub fn paste_edit_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2566,21 +2864,61 @@ pub fn paste_edit_providers(
         .try_global::<LanguageFeatures>()
         .map(|f| matching(&f.paste_edits, &target))
         .unwrap_or_default();
-    providers.reverse();
     providers.extend(crate::drop_paste::default_paste_providers());
     providers
 }
 
-fn matching<T: ?Sized>(entries: &[Entry<T>], target: &ProviderTarget) -> Vec<Arc<T>> {
-    entries
+/// Monaco `LanguageFeatureRegistry._orderedForEach`: the entries matching
+/// `target` with their scores, by score (best first), then newest first
+/// (`_compareByScoreAndTime`). A matching exclusive selector leaves only
+/// its provider.
+fn ordered<'a, T: ?Sized>(
+    entries: &'a [Entry<T>],
+    target: &ProviderTarget,
+) -> Vec<(u32, &'a Entry<T>)> {
+    let mut scored: Vec<(u32, &Entry<T>)> = entries
         .iter()
-        .filter(|e| e.selector.matches_target(target))
-        .map(|e| e.provider.clone())
+        .map(|entry| (entry.selector.score(target), entry))
+        .filter(|(score, _)| *score > 0)
+        .collect();
+    // Monaco gives the first exclusive match the whole registry; entries
+    // are kept newest first here, so that's the newest one.
+    if let Some(exclusive) = scored
+        .iter()
+        .rev()
+        .find(|(_, entry)| entry.selector.is_exclusive())
+        .map(|(_, entry)| *entry)
+    {
+        return vec![(1000, exclusive)];
+    }
+    scored.sort_by(|(a_score, a), (b_score, b)| b_score.cmp(a_score).then(b.id.0.cmp(&a.id.0)));
+    scored
+}
+
+/// The providers of `entries` matching `target`, best first (Monaco
+/// `LanguageFeatureRegistry.ordered`).
+fn matching<T: ?Sized>(entries: &[Entry<T>], target: &ProviderTarget) -> Vec<Arc<T>> {
+    ordered(entries, target)
+        .into_iter()
+        .map(|(_, entry)| entry.provider.clone())
         .collect()
 }
 
-/// The registered completion providers whose selector matches `language_id`, in
-/// registration order.
+/// The providers of `entries` matching `target` in groups of equal score,
+/// best first (Monaco `LanguageFeatureRegistry.orderedGroups`).
+fn matching_groups<T: ?Sized>(entries: &[Entry<T>], target: &ProviderTarget) -> Vec<Vec<Arc<T>>> {
+    let mut groups: Vec<(u32, Vec<Arc<T>>)> = Vec::new();
+    for (score, entry) in ordered(entries, target) {
+        match groups.last_mut() {
+            Some((last, group)) if *last == score => group.push(entry.provider.clone()),
+            _ => groups.push((score, vec![entry.provider.clone()])),
+        }
+    }
+    groups.into_iter().map(|(_, group)| group).collect()
+}
+
+/// The registered completion providers whose selector matches `target`,
+/// best first: by [score](LanguageSelector::score), then newest first.
 pub fn completion_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2590,16 +2928,28 @@ pub fn completion_providers(
         .unwrap_or_default()
 }
 
-/// The registered hover providers whose selector matches `language_id`, in
-/// registration order.
+/// [`completion_providers`] in groups of equal score, best first (Monaco
+/// `orderedGroups`). The suggest widget asks one group at a time and stops
+/// at the first with items.
+pub fn completion_provider_groups(
+    cx: &App,
+    target: impl Into<ProviderTarget>,
+) -> Vec<Vec<Arc<dyn CompletionProvider>>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching_groups(&f.completion, &target.into()))
+        .unwrap_or_default()
+}
+
+/// The registered hover providers whose selector matches `target`,
+/// best first (see [`LanguageSelector`]).
 pub fn hover_providers(cx: &App, target: impl Into<ProviderTarget>) -> Vec<Arc<dyn HoverProvider>> {
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.hover, &target.into()))
         .unwrap_or_default()
 }
 
-/// The registered definition providers whose selector matches `language_id`, in
-/// registration order.
+/// The registered definition providers whose selector matches `target`,
+/// best first (see [`LanguageSelector`]).
 pub fn definition_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2609,8 +2959,8 @@ pub fn definition_providers(
         .unwrap_or_default()
 }
 
-/// The registered signature help providers whose selector matches `language_id`,
-/// in registration order.
+/// The registered signature help providers whose selector matches `target`,
+/// best first (see [`LanguageSelector`]).
 pub fn signature_help_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2621,7 +2971,7 @@ pub fn signature_help_providers(
 }
 
 /// The registered document highlight providers whose selector matches
-/// `language_id`, in registration order.
+/// `target`, best first (see [`LanguageSelector`]).
 pub fn document_highlight_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2631,8 +2981,8 @@ pub fn document_highlight_providers(
         .unwrap_or_default()
 }
 
-/// The registered document formatters whose selector matches `language_id`,
-/// in registration order.
+/// The registered document formatters whose selector matches `target`,
+/// best first (see [`LanguageSelector`]).
 pub fn document_formatting_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2642,8 +2992,8 @@ pub fn document_formatting_providers(
         .unwrap_or_default()
 }
 
-/// The registered range formatters whose selector matches `language_id`, in
-/// registration order.
+/// The registered range formatters whose selector matches `target`,
+/// best first (see [`LanguageSelector`]).
 pub fn document_range_formatting_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2653,8 +3003,8 @@ pub fn document_range_formatting_providers(
         .unwrap_or_default()
 }
 
-/// The registered on-type formatters whose selector matches `language_id`,
-/// in registration order.
+/// The registered on-type formatters whose selector matches `target`,
+/// best first (see [`LanguageSelector`]).
 pub fn on_type_formatting_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2664,8 +3014,8 @@ pub fn on_type_formatting_providers(
         .unwrap_or_default()
 }
 
-/// The registered declaration providers whose selector matches `language_id`, in
-/// registration order.
+/// The registered declaration providers whose selector matches `target`,
+/// best first (see [`LanguageSelector`]).
 pub fn declaration_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2675,8 +3025,8 @@ pub fn declaration_providers(
         .unwrap_or_default()
 }
 
-/// The registered type definition providers whose selector matches `language_id`, in
-/// registration order.
+/// The registered type definition providers whose selector matches `target`,
+/// best first (see [`LanguageSelector`]).
 pub fn type_definition_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2686,8 +3036,8 @@ pub fn type_definition_providers(
         .unwrap_or_default()
 }
 
-/// The registered implementation providers whose selector matches `language_id`, in
-/// registration order.
+/// The registered implementation providers whose selector matches `target`,
+/// best first (see [`LanguageSelector`]).
 pub fn implementation_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2697,8 +3047,8 @@ pub fn implementation_providers(
         .unwrap_or_default()
 }
 
-/// The registered reference providers whose selector matches `language_id`, in
-/// registration order.
+/// The registered reference providers whose selector matches `target`,
+/// best first (see [`LanguageSelector`]).
 pub fn reference_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2708,8 +3058,8 @@ pub fn reference_providers(
         .unwrap_or_default()
 }
 
-/// The registered rename providers whose selector matches `language_id`, in
-/// registration order.
+/// The registered rename providers whose selector matches `target`,
+/// best first (see [`LanguageSelector`]).
 pub fn rename_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2720,7 +3070,7 @@ pub fn rename_providers(
 }
 
 /// The registered rename suggestions providers whose selector matches
-/// `language_id`, in registration order.
+/// `target`, best first (see [`LanguageSelector`]).
 pub fn new_symbol_names_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2731,7 +3081,7 @@ pub fn new_symbol_names_providers(
 }
 
 /// The registered code action providers whose selector matches
-/// `language_id`, in registration order.
+/// `target`, best first (see [`LanguageSelector`]).
 pub fn code_action_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2742,7 +3092,7 @@ pub fn code_action_providers(
 }
 
 /// The registered document symbol providers whose selector matches
-/// `language_id`, in registration order.
+/// `target`, best first (see [`LanguageSelector`]).
 pub fn document_symbol_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2753,7 +3103,7 @@ pub fn document_symbol_providers(
 }
 
 /// The registered code lens providers whose selector matches
-/// `language_id`, in registration order.
+/// `target`, best first (see [`LanguageSelector`]).
 pub fn code_lens_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2764,7 +3114,7 @@ pub fn code_lens_providers(
 }
 
 /// The registered linked editing range providers whose selector matches
-/// `language_id`, in registration order.
+/// `target`, best first (see [`LanguageSelector`]).
 pub fn linked_editing_range_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2775,7 +3125,7 @@ pub fn linked_editing_range_providers(
 }
 
 /// The registered inline completions providers whose selector matches
-/// `language_id`, in registration order.
+/// `target`, best first (see [`LanguageSelector`]).
 pub fn inline_completions_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2786,7 +3136,7 @@ pub fn inline_completions_providers(
 }
 
 /// The registered document semantic tokens providers whose selector
-/// matches `language_id`, in registration order.
+/// matches `target`, best first (see [`LanguageSelector`]).
 pub fn document_semantic_tokens_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2797,7 +3147,7 @@ pub fn document_semantic_tokens_providers(
 }
 
 /// The registered range semantic tokens providers whose selector matches
-/// `language_id`, in registration order.
+/// `target`, best first (see [`LanguageSelector`]).
 pub fn document_range_semantic_tokens_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2807,8 +3157,8 @@ pub fn document_range_semantic_tokens_providers(
         .unwrap_or_default()
 }
 
-/// The registered color providers whose selector matches `language_id`, in
-/// registration order.
+/// The registered color providers whose selector matches `target`,
+/// best first (see [`LanguageSelector`]).
 pub fn color_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2818,8 +3168,8 @@ pub fn color_providers(
         .unwrap_or_default()
 }
 
-/// The registered link providers whose selector matches `language_id`, in
-/// registration order.
+/// The registered link providers whose selector matches `target`,
+/// best first (see [`LanguageSelector`]).
 pub fn link_providers(cx: &App, target: impl Into<ProviderTarget>) -> Vec<Arc<dyn LinkProvider>> {
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.links, &target.into()))
@@ -2827,7 +3177,7 @@ pub fn link_providers(cx: &App, target: impl Into<ProviderTarget>) -> Vec<Arc<dy
 }
 
 /// The registered inlay hints providers whose selector matches
-/// `language_id`, in registration order.
+/// `target`, best first (see [`LanguageSelector`]).
 pub fn inlay_hints_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2838,7 +3188,7 @@ pub fn inlay_hints_providers(
 }
 
 /// The registered folding range providers whose selector matches
-/// `language_id`, in registration order.
+/// `target`, best first (see [`LanguageSelector`]).
 pub fn folding_range_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2849,7 +3199,7 @@ pub fn folding_range_providers(
 }
 
 /// The registered selection range providers whose selector matches
-/// `language_id`, in registration order.
+/// `target`, best first (see [`LanguageSelector`]).
 pub fn selection_range_providers(
     cx: &App,
     target: impl Into<ProviderTarget>,
@@ -2872,5 +3222,119 @@ mod tests {
         assert!(extract.intersects(&refactor));
         assert!(!refactor.contains(&CodeActionKind::from("refactoring")));
         assert!(CodeActionKind::from("").contains(&refactor));
+    }
+
+    fn target(language: &str, uri: &str) -> ProviderTarget {
+        ProviderTarget {
+            language_id: Some(language.to_string().into()),
+            uri: Some(uri.to_string().into()),
+        }
+    }
+
+    fn languages(ids: &[&str]) -> LanguageSelector {
+        LanguageSelector::Languages(ids.iter().map(|id| id.to_string().into()).collect())
+    }
+
+    fn filter(
+        language: Option<&str>,
+        scheme: Option<&str>,
+        pattern: Option<&str>,
+    ) -> LanguageFilter {
+        LanguageFilter {
+            language: language.map(|s| s.to_string().into()),
+            scheme: scheme.map(|s| s.to_string().into()),
+            pattern: pattern.map(|s| s.to_string().into()),
+            exclusive: false,
+        }
+    }
+
+    fn filters(filters: Vec<LanguageFilter>) -> LanguageSelector {
+        LanguageSelector::Filters(filters)
+    }
+
+    /// Monaco `languageSelector.test.ts`.
+    #[test]
+    fn selector_scores_like_monaco() {
+        let model = target("farboo", "file:///testbed/file.fb");
+        // score, invalid selector
+        assert_eq!(filters(vec![filter(None, None, None)]).score(&model), 0);
+        assert_eq!(languages(&[""]).score(&model), 0);
+        // score, any language
+        assert_eq!(
+            filters(vec![filter(Some("*"), None, None)]).score(&model),
+            5
+        );
+        assert_eq!(languages(&["*"]).score(&model), 5);
+        assert_eq!(languages(&["*"]).score(&target("farboo", "foo:bar")), 5);
+        assert_eq!(
+            languages(&["farboo"]).score(&target("farboo", "foo:bar")),
+            10
+        );
+        // score, default schemes
+        let git = target("farboo", "git:foo/file.txt");
+        assert_eq!(
+            filters(vec![filter(Some("farboo"), Some(""), None)]).score(&git),
+            10
+        );
+        assert_eq!(
+            filters(vec![filter(Some("farboo"), Some("git"), None)]).score(&git),
+            10
+        );
+        assert_eq!(
+            filters(vec![filter(Some("farboo"), Some("*"), None)]).score(&git),
+            10
+        );
+        assert_eq!(filters(vec![filter(Some("*"), None, None)]).score(&git), 5);
+        assert_eq!(filters(vec![filter(None, Some("*"), None)]).score(&git), 5);
+        assert_eq!(
+            filters(vec![filter(None, Some("git"), None)]).score(&git),
+            10
+        );
+        // score, filter
+        assert_eq!(
+            filters(vec![filter(Some("farboo"), Some("http"), None)]).score(&model),
+            0
+        );
+        assert_eq!(
+            filters(vec![filter(None, None, Some("**/*.fb"))]).score(&model),
+            10
+        );
+        assert_eq!(
+            filters(vec![filter(None, Some("file"), Some("**/*.fb"))]).score(&model),
+            10
+        );
+        assert_eq!(
+            filters(vec![filter(None, None, Some("**/*.fb"))]).score(&target("farboo", "foo:bar")),
+            0
+        );
+        let js = target("javascript", "git:/my/file.js");
+        assert_eq!(languages(&["javascript"]).score(&js), 10);
+        assert_eq!(languages(&["fooLang"]).score(&js), 0);
+        assert_eq!(languages(&["fooLang", "*"]).score(&js), 5);
+        // score, max(filters)
+        let matching = filter(Some("farboo"), Some("file"), None);
+        let failing = filter(Some("farboo"), Some("http"), None);
+        assert_eq!(
+            filters(vec![matching.clone(), failing.clone()]).score(&model),
+            10
+        );
+        assert_eq!(filters(vec![failing.clone(), failing]).score(&model), 0);
+        assert_eq!(languages(&["farboo", "*"]).score(&model), 10);
+        assert_eq!(languages(&["*", "farboo"]).score(&model), 10);
+        // Document selector match - unexpected result value #60232
+        assert_eq!(
+            filters(vec![filter(
+                Some("json"),
+                Some("file"),
+                Some("**/*.interface.json")
+            )])
+            .score(&target(
+                "json",
+                "file:///C:/Users/zlhe/Desktop/test.interface.json"
+            )),
+            10
+        );
+        // `All` is `*`, and `score` is Monaco's `languages.score`.
+        assert_eq!(score(&LanguageSelector::All, &model), 5);
     }
 }

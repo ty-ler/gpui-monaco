@@ -21,7 +21,7 @@ use crate::options::{QuickSuggestions, QuickSuggestionsValue, SuggestSelection};
 use crate::providers::{
     CompletionItem, CompletionItemKind, CompletionProvider, CompletionTrigger, InlineCompletion,
     InlineCompletionContext, InlineCompletionList, InlineCompletionsProvider, ProviderContext,
-    ProviderTarget, completion_providers, inline_completions_providers,
+    ProviderTarget, completion_provider_groups, completion_providers, inline_completions_providers,
 };
 use crate::suggest::memory::{Candidate, MemoryContext};
 use crate::suggest::{
@@ -125,7 +125,7 @@ impl Results {
                     is_snippet: item.insert_text_is_snippet,
                     // The end plus what was typed since.
                     range: Some(start..PointUtf16::new(end.row, end.column + delta)),
-                    command: item.command.clone(),
+                    command: item.command.clone().or_else(|| item.action.clone()),
                     additional_text_edits: item.additional_text_edits.clone(),
                     ..Default::default()
                 }
@@ -250,7 +250,7 @@ impl InlineCompletionsProvider for SuggestInlineCompletions {
             language_id: context.language_id.clone(),
             uri: context.uri.clone(),
         };
-        let all_providers = completion_providers(cx, target);
+        let all_providers = completion_providers(cx, target.clone());
         // A word, or else a trigger character (word characters win over
         // trigger characters).
         let mut word = word_at(&line, position.column);
@@ -293,30 +293,36 @@ impl InlineCompletionsProvider for SuggestInlineCompletions {
                 ..Default::default()
             }));
         }
-        let (providers, kind) = match trigger {
-            Some((ch, providers)) => (providers, CompletionTrigger::TriggerCharacter(ch)),
-            None => (all_providers, CompletionTrigger::Invoke),
+        // Monaco `provideSuggestionItems`: provider groups best first, the
+        // first with items winning; a trigger character asks only the
+        // providers declaring it (`providerFilter`).
+        let (filter, kind) = match trigger {
+            Some((ch, providers)) => (Some(providers), CompletionTrigger::TriggerCharacter(ch)),
+            None => (None, CompletionTrigger::Invoke),
         };
-        let tasks: Vec<_> = providers
-            .iter()
-            .map(|provider| provider.provide_completions(context, position, kind.clone(), cx))
-            .collect();
+        // Monaco's kind filter (deprecated items stay).
+        let hidden_kinds = config.hidden_kinds.clone();
+        let request = crate::completion::provide_suggestion_items(
+            completion_provider_groups(cx, target),
+            crate::completion::SuggestRequestOptions {
+                filter,
+                reuse: Vec::new(),
+            },
+            context.clone(),
+            position,
+            kind,
+            move |item| !hidden_kinds.contains(&item.kind),
+            cx,
+        );
         let uri = context.uri.clone();
         let last = self.last.clone();
         cx.spawn(async move |cx| {
             let mut items: Vec<CompletionItem> = Vec::new();
             let mut incomplete = false;
-            for task in tasks {
-                match task.await {
-                    Ok(list) => {
-                        incomplete |= list.incomplete;
-                        items.extend(list.items);
-                    }
-                    Err(err) => log::warn!("completions failed: {err:#}"),
-                }
+            for list in request.await {
+                incomplete |= list.incomplete;
+                items.extend(list.items);
             }
-            // Monaco's kind filter (deprecated items stay).
-            items.retain(|item| !config.hidden_kinds.contains(&item.kind));
             let model = CompletionModel::new_with_options(
                 items,
                 position,

@@ -100,8 +100,8 @@ pub fn on_enter(
 /// Monaco's built-in `plaintext` configuration.
 pub fn plaintext() -> LanguageConfiguration {
     LanguageConfiguration {
-        brackets: brackets(&[("(", ")"), ("[", "]"), ("{", "}")]),
-        surrounding_pairs: vec![
+        brackets: Some(brackets(&[("(", ")"), ("[", "]"), ("{", "}")])),
+        surrounding_pairs: Some(vec![
             surround("{", "}"),
             surround("[", "]"),
             surround("(", ")"),
@@ -109,7 +109,7 @@ pub fn plaintext() -> LanguageConfiguration {
             surround("\"", "\""),
             surround("'", "'"),
             surround("`", "`"),
-        ],
+        ]),
         ..Default::default()
     }
 }
@@ -117,7 +117,7 @@ pub fn plaintext() -> LanguageConfiguration {
 /// `surroundingLanguage`.
 pub fn surrounding_language() -> LanguageConfiguration {
     LanguageConfiguration {
-        auto_closing_pairs: vec![pair("(", ")")],
+        auto_closing_pairs: Some(vec![pair("(", ")")]),
         ..Default::default()
     }
 }
@@ -125,7 +125,7 @@ pub fn surrounding_language() -> LanguageConfiguration {
 /// `emptyClosingSurroundLanguage`.
 pub fn empty_closing_surround_language() -> LanguageConfiguration {
     LanguageConfiguration {
-        surrounding_pairs: vec![surround("<", "")],
+        surrounding_pairs: Some(vec![surround("<", "")]),
         ..Default::default()
     }
 }
@@ -155,13 +155,13 @@ pub fn indent_rules_language() -> LanguageConfiguration {
 /// the brackets' auto-closing pairs.
 pub fn electric_char_language() -> LanguageConfiguration {
     LanguageConfiguration {
-        brackets: standard_brackets(),
-        auto_closing_pairs: vec![
+        brackets: Some(standard_brackets()),
+        auto_closing_pairs: Some(vec![
             pair("{", "}"),
             pair("[", "]"),
             pair("(", ")"),
             pair("/**", " */"),
-        ],
+        ]),
         ..Default::default()
     }
 }
@@ -187,12 +187,12 @@ fn auto_closing_pairs(with_begin: bool) -> Vec<AutoClosingPair> {
 /// `autoClosingLanguage`.
 pub fn auto_closing_language() -> LanguageConfiguration {
     LanguageConfiguration {
-        comments: Comments {
+        comments: Some(Comments {
             line_comment: None,
             line_comment_no_indent: false,
             block_comment: Some(("/*".into(), "*/".into())),
-        },
-        auto_closing_pairs: auto_closing_pairs(true),
+        }),
+        auto_closing_pairs: Some(auto_closing_pairs(true)),
         ..Default::default()
     }
 }
@@ -204,7 +204,7 @@ pub fn auto_closing_language_with_auto_close_before(chars: &str) -> LanguageConf
     pairs.push(pair("/**", " */"));
     LanguageConfiguration {
         auto_close_before: Some(chars.into()),
-        auto_closing_pairs: pairs,
+        auto_closing_pairs: Some(pairs),
         ..auto_closing_language()
     }
 }
@@ -212,7 +212,7 @@ pub fn auto_closing_language_with_auto_close_before(chars: &str) -> LanguageConf
 /// `setupOnEnterLanguage(indentAction)`.
 pub fn on_enter_language(indent: IndentAction) -> LanguageConfiguration {
     LanguageConfiguration {
-        on_enter_rules: vec![on_enter(re(".*"), None, None, indent, None, None)],
+        on_enter_rules: Some(vec![on_enter(re(".*"), None, None, indent, None, None)]),
         ..Default::default()
     }
 }
@@ -351,15 +351,15 @@ pub fn javascript_on_enter_rules() -> Vec<OnEnterRule> {
 /// `Language.TypeScript` of indentation.test.ts.
 pub fn typescript_test_language() -> LanguageConfiguration {
     LanguageConfiguration {
-        brackets: brackets(&[("${", "}"), ("{", "}"), ("[", "]"), ("(", ")")]),
-        comments: Comments {
+        brackets: Some(brackets(&[("${", "}"), ("{", "}"), ("[", "]"), ("(", ")")])),
+        comments: Some(Comments {
             line_comment: Some("//".into()),
             line_comment_no_indent: false,
             block_comment: Some(("/*".into(), "*/".into())),
-        },
-        auto_closing_pairs: javascript_auto_closing_pairs(),
+        }),
+        auto_closing_pairs: Some(javascript_auto_closing_pairs()),
         indentation_rules: Some(javascript_indentation_rules()),
-        on_enter_rules: javascript_on_enter_rules(),
+        on_enter_rules: Some(javascript_on_enter_rules()),
         ..Default::default()
     }
 }
@@ -367,7 +367,7 @@ pub fn typescript_test_language() -> LanguageConfiguration {
 /// `Language.Ruby` of indentation.test.ts.
 pub fn ruby_test_language() -> LanguageConfiguration {
     LanguageConfiguration {
-        brackets: standard_brackets(),
+        brackets: Some(standard_brackets()),
         indentation_rules: Some(rules(
             re(
                 r#"^\s*((begin|class|(private|protected)\s+def|def|else|elsif|ensure|for|if|module|rescue|unless|until|when|in|while|case)|([^#]*\sdo\b)|([^#]*=\s*(case|if|unless)))\b([^#\{;]|(\"|'|\/).*\4)*(#.*)?$"#,
@@ -383,7 +383,7 @@ pub fn ruby_test_language() -> LanguageConfiguration {
 /// `Language.PHP` of indentation.test.ts.
 pub fn php_test_language() -> LanguageConfiguration {
     LanguageConfiguration {
-        brackets: standard_brackets(),
+        brackets: Some(standard_brackets()),
         indentation_rules: Some(rules(
             re(
                 r"(\{(?!.*\}).*|\(|\[|((else(\s)?)?if|else|for(each)?|while|switch|case).*:)\s*((\/[/*].*|)?$|\?>)",
@@ -392,7 +392,7 @@ pub fn php_test_language() -> LanguageConfiguration {
                 r"^(.*\*\/)?\s*((\})|(\)+[;,])|(\]\)*[;,])|\b(else:)|\b((end(if|for(each)?|while|switch));))",
             ),
         )),
-        on_enter_rules: vec![
+        on_enter_rules: Some(vec![
             on_enter(
                 re(r"^\s*\/\*\*(?!\/)([^\*]|\*(?!\/))*$"),
                 Some(re(r"^\s*\*\/$")),
@@ -443,7 +443,7 @@ pub fn php_test_language() -> LanguageConfiguration {
                 None,
                 None,
             ),
-        ],
+        ]),
         ..Default::default()
     }
 }
@@ -451,7 +451,7 @@ pub fn php_test_language() -> LanguageConfiguration {
 /// `Language.VB` of indentation.test.ts.
 pub fn vb_test_language() -> LanguageConfiguration {
     LanguageConfiguration {
-        brackets: standard_brackets(),
+        brackets: Some(standard_brackets()),
         indentation_rules: Some(rules(
             re_i(
                 r"^\s*((If|ElseIf).*Then(?!.*End\s+If)\s*(('|REM).*)?|(Else|While|For|Do|Select\s+Case|Case|Sub|Function|Class|Module|Enum|Structure|Interface|Namespace|With|Try|Catch|Finally|SyncLock|Using|Property|Get|Set|AddHandler|RaiseEvent|RemoveHandler|Event|Operator)\b(?!.*\bEnd\s+(If|Sub|Function|Class|Module|Enum|Structure|Interface|Namespace|With|Select|Try|While|For|Property|Get|Set|SyncLock|Using|AddHandler|RaiseEvent|RemoveHandler|Event|Operator)\b).*(('|REM).*)?)$",
@@ -460,7 +460,7 @@ pub fn vb_test_language() -> LanguageConfiguration {
                 r"^\s*((End\s+(If|Sub|Function|Class|Module|Enum|Structure|Interface|Namespace|With|Select|Try|While|For|Property|Get|Set|SyncLock|Using|AddHandler|RaiseEvent|RemoveHandler|Event|Operator))|Else|ElseIf|Case|Catch|Finally|Loop|Next|Wend|Until)\b",
             ),
         )),
-        on_enter_rules: vec![on_enter(
+        on_enter_rules: Some(vec![on_enter(
             re_i(
                 r"^\s*((End\s+(If|Sub|Function|Class|Module|Enum|Structure|Interface|Namespace|With|Select|Try|While|For|Property|Get|Set|SyncLock|Using|AddHandler|RaiseEvent|RemoveHandler|Event|Operator))|Loop|Next|Wend|Until)\b.*$",
             ),
@@ -469,7 +469,7 @@ pub fn vb_test_language() -> LanguageConfiguration {
             IndentAction::None,
             None,
             None,
-        )],
+        )]),
         ..Default::default()
     }
 }

@@ -355,10 +355,87 @@ impl std::fmt::Debug for Language {
     }
 }
 
+/// Appends the entries of `new` that `list` doesn't have yet.
+fn merge_list(list: &mut Vec<String>, new: Vec<String>) {
+    for entry in new {
+        if !list.contains(&entry) {
+            list.push(entry);
+        }
+    }
+}
+
+impl Language {
+    /// Monaco `LanguagesRegistry._mergeLanguage`: `self` registered again
+    /// as `new`. File associations, aliases and MIME types are added to
+    /// the existing ones; the name, first-line pattern, grammar and
+    /// highlighter are `new`'s when it has them; configuration fields `new`
+    /// sets replace the existing ones.
+    fn merged(&self, new: Language) -> Language {
+        let mut merged = self.clone();
+        // Monaco names a language after its first alias: a registration
+        // without one keeps the name.
+        if new.name != new.id || merged.name == merged.id {
+            merged.name = new.name;
+        }
+        merge_list(&mut merged.aliases, new.aliases);
+        merge_list(&mut merged.extensions, new.extensions);
+        merge_list(&mut merged.file_names, new.file_names);
+        merge_list(&mut merged.filename_patterns, new.filename_patterns);
+        merge_list(&mut merged.mimetypes, new.mimetypes);
+        merged.first_line = new.first_line.or(merged.first_line);
+        merged.config = merged.config.combine(&new.config);
+        merged.grammar = new.grammar.or(merged.grammar);
+        merged.highlighter = new.highlighter.or(merged.highlighter);
+        merged.hidden = merged.hidden && new.hidden;
+        merged
+    }
+}
+
+/// Identifies a configuration added with
+/// [`LanguageRegistry::register_configuration`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ConfigurationRegistration(u64);
+
+/// A language's configurations (Monaco `ComposedLanguageConfiguration`):
+/// the one it was registered with, then the ones added at runtime, in
+/// order.
+#[derive(Default)]
+struct ConfigurationStack {
+    base: LanguageConfiguration,
+    registrations: Vec<(ConfigurationRegistration, LanguageConfiguration)>,
+}
+
+impl ConfigurationStack {
+    /// Monaco `combineLanguageConfigurations`: each field from the newest
+    /// configuration that sets it.
+    fn resolve(&self) -> LanguageConfiguration {
+        self.registrations
+            .iter()
+            .fold(self.base.clone(), |config, (_, newer)| {
+                config.combine(newer)
+            })
+    }
+}
+
+/// Languages met while tokenizing (see
+/// [`LanguageRegistry::take_encountered_languages`]).
+#[derive(Default)]
+struct Encountered {
+    seen: std::collections::HashSet<Arc<str>>,
+    pending: Vec<Arc<str>>,
+}
+
 /// All registered languages. Cheap to share behind an `Arc`.
 #[derive(Default)]
 pub struct LanguageRegistry {
     languages: RwLock<Vec<Arc<Language>>>,
+    /// Each language's configurations, by id.
+    configurations: RwLock<std::collections::HashMap<Arc<str>, ConfigurationStack>>,
+    next_configuration: std::sync::atomic::AtomicU64,
+    /// Highlighters set before their language was registered (Monaco's
+    /// tokenization registry doesn't need the language).
+    pending_highlighters: RwLock<std::collections::HashMap<Arc<str>, HighlighterFactory>>,
+    encountered: Mutex<Encountered>,
 }
 
 impl LanguageRegistry {
@@ -367,11 +444,52 @@ impl LanguageRegistry {
         Self::default()
     }
 
-    /// Registers `language`, replacing any language with the same id.
+    /// Registers `language` (Monaco `languages.register`). Registering an
+    /// id again merges into the existing language, as Monaco's
+    /// `LanguagesRegistry` does: its file associations, aliases and MIME
+    /// types are added, its grammar, highlighter and name replace the
+    /// existing ones only when it has them, and configuration fields it
+    /// sets replace those it was registered with (configurations added
+    /// with [`register_configuration`](Self::register_configuration) still
+    /// apply on top). A highlighter set with
+    /// [`set_highlighter`](Self::set_highlighter) before the language was
+    /// registered applies now.
     pub fn register(&self, language: Language) -> Arc<Language> {
-        let language = Arc::new(language);
         let mut languages = self.languages.write().unwrap_or_else(|e| e.into_inner());
-        languages.retain(|existing| existing.id != language.id);
+        let mut configurations = self
+            .configurations
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut language = match languages.iter().position(|l| l.id == language.id) {
+            Some(ix) => {
+                let existing = languages.remove(ix);
+                let stack = configurations.entry(existing.id.clone()).or_default();
+                stack.base = stack.base.combine(&language.config);
+                existing.merged(language)
+            }
+            None => {
+                configurations.insert(
+                    language.id.clone(),
+                    ConfigurationStack {
+                        base: language.config.clone(),
+                        registrations: Vec::new(),
+                    },
+                );
+                language
+            }
+        };
+        if let Some(stack) = configurations.get(&language.id) {
+            language.config = stack.resolve();
+        }
+        if let Some(highlighter) = self
+            .pending_highlighters
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&language.id)
+        {
+            language.highlighter = Some(highlighter);
+        }
+        let language = Arc::new(language);
         languages.push(language.clone());
         language
     }
@@ -488,11 +606,21 @@ impl LanguageRegistry {
     /// Replaces the [`Language::highlighter`] of the language `id` (e.g. a
     /// [`MonarchHighlighter`](crate::MonarchHighlighter) for Monaco
     /// `setMonarchTokensProvider`), `None` going back to its grammar.
-    /// Returns whether it's registered. Models pick it up when they next
-    /// resolve their language.
+    /// Returns whether it's registered; if it isn't, the highlighter is
+    /// kept for when it is (as Monaco's tokenization registry doesn't need
+    /// the language). Models pick it up when they next resolve their
+    /// language.
     pub fn set_highlighter(&self, id: &str, highlighter: Option<HighlighterFactory>) -> bool {
         let mut languages = self.languages.write().unwrap_or_else(|e| e.into_inner());
         let Some(slot) = languages.iter_mut().find(|language| &*language.id == id) else {
+            let mut pending = self
+                .pending_highlighters
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            match highlighter {
+                Some(highlighter) => pending.insert(id.into(), highlighter),
+                None => pending.remove(id),
+            };
             return false;
         };
         let mut language = (**slot).clone();
@@ -510,18 +638,96 @@ impl LanguageRegistry {
             .cloned()
     }
 
-    /// Replaces the configuration of the language `id` (Monaco
-    /// `setLanguageConfiguration`). Returns whether it's registered. Models
+    /// The highlighter set with [`set_highlighter`](Self::set_highlighter)
+    /// for `id` before it was registered, if any.
+    pub fn pending_highlighter(&self, id: &str) -> Option<HighlighterFactory> {
+        self.pending_highlighters
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+    }
+
+    /// Layers `config` over the configuration of the language `id` (Monaco
+    /// `LanguageConfigurationRegistry.register`, as
+    /// `setLanguageConfiguration` uses it): each field it sets replaces
+    /// the current one, and fields it leaves `None` keep theirs. Later
+    /// registrations win. Returns `None` if `id` isn't registered. Models
     /// pick it up when they next resolve their language.
-    pub fn set_configuration(&self, id: &str, config: LanguageConfiguration) -> bool {
+    pub fn register_configuration(
+        &self,
+        id: &str,
+        config: LanguageConfiguration,
+    ) -> Option<ConfigurationRegistration> {
+        use std::sync::atomic::Ordering;
+        let registration =
+            ConfigurationRegistration(self.next_configuration.fetch_add(1, Ordering::Relaxed) + 1);
+        self.update_configuration(id, |stack| stack.registrations.push((registration, config)))
+            .then_some(registration)
+    }
+
+    /// Removes a configuration added with
+    /// [`register_configuration`](Self::register_configuration), restoring
+    /// what it replaced unless a later one replaces it too. Returns whether
+    /// it was there.
+    pub fn unregister_configuration(
+        &self,
+        id: &str,
+        registration: ConfigurationRegistration,
+    ) -> bool {
+        let mut found = false;
+        self.update_configuration(id, |stack| {
+            let before = stack.registrations.len();
+            stack.registrations.retain(|(r, _)| *r != registration);
+            found = stack.registrations.len() != before;
+        });
+        found
+    }
+
+    fn update_configuration(&self, id: &str, update: impl FnOnce(&mut ConfigurationStack)) -> bool {
         let mut languages = self.languages.write().unwrap_or_else(|e| e.into_inner());
         let Some(slot) = languages.iter_mut().find(|language| &*language.id == id) else {
             return false;
         };
+        let mut configurations = self
+            .configurations
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let stack = configurations
+            .entry(slot.id.clone())
+            .or_insert_with(|| ConfigurationStack {
+                base: slot.config.clone(),
+                registrations: Vec::new(),
+            });
+        update(stack);
         let mut language = (**slot).clone();
-        language.config = config;
+        language.config = stack.resolve();
         *slot = Arc::new(language);
         true
+    }
+
+    /// Notes that the language `id` was met while tokenizing another, e.g.
+    /// by a Monarch grammar's `nextEmbedded` (Monaco
+    /// `requestBasicLanguageFeatures`). Each id is noted once.
+    pub fn note_language_encountered(&self, id: &str) {
+        let mut encountered = self.encountered.lock().unwrap_or_else(|e| e.into_inner());
+        if !encountered.seen.contains(id) {
+            let id: Arc<str> = id.into();
+            encountered.seen.insert(id.clone());
+            encountered.pending.push(id);
+        }
+    }
+
+    /// The languages [noted](Self::note_language_encountered) since the
+    /// last call.
+    pub fn take_encountered_languages(&self) -> Vec<Arc<str>> {
+        std::mem::take(
+            &mut self
+                .encountered
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pending,
+        )
     }
 }
 

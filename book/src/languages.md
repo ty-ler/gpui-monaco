@@ -47,12 +47,14 @@ Grammars and highlight queries come from the official tree-sitter crates. Editin
 The `language-configuration.json` keys behave as they do in VS Code:
 
 - `brackets`: bracket matching and bracket-based indentation.
-- `autoClosingPairs`, `autoCloseBefore` and `surroundingPairs`: auto-closing and auto-surround.
+- `autoClosingPairs`, `autoCloseBefore` and `surroundingPairs`: auto-closing and auto-surround. Without `autoClosingPairs` the brackets auto-close; an empty list closes nothing. The deprecated `__electricCharacterSupport.docComment` auto-closes too, as in Monaco.
 - `indentationRules` and `onEnterRules`: auto-indent on Enter, typing and paste.
 - `wordPattern`: word movement, double-click and completion words.
 - `folding.markers`: region markers, added to syntax folding ranges too.
 - `comments`: which tokens count as comments, for auto-close and quick suggestions.
 - `folding.markers` and `folding.offSide`: indentation-based folding with `#region` markers.
+
+Every key is optional (`None` in `LanguageConfiguration`), so a configuration can be layered over another: `combine` takes each field from the newer one when it sets it, as Monaco's `combineLanguageConfigurations`. Read the lists with the `brackets()`, `auto_closing_pairs()`, `surrounding_pairs()`, `on_enter_rules()` and `comments()` accessors.
 
 Patterns use the `fancy-regex` crate, so VS Code's lookaheads and backreferences work.
 
@@ -91,8 +93,9 @@ Among equal matches, the language registered last wins. `with_mimetypes` sets MI
 
 ### At runtime
 
-- `gpui_monaco::set_language_configuration(cx, "rust", config)` replaces a language's configuration (Monaco `setLanguageConfiguration`). Models of that language pick it up and emit `TextModelEvent::LanguageConfigurationChanged`.
-- `gpui_monaco::on_language(cx, "rust", |cx| …)` runs once, the first time a model uses the language (Monaco `onLanguage`), for example to register providers lazily.
+- `gpui_monaco::set_language_configuration(cx, "rust", config)` layers a configuration over a language's (Monaco `setLanguageConfiguration`): the fields it sets replace the language's, the others stay, and later ones win. Models of that language pick it up and emit `TextModelEvent::LanguageConfigurationChanged`. It fails for an unknown language, and disposing the returned `Disposable` removes it again.
+- `gpui_monaco::on_language(cx, "rust", |cx| …)` runs once, the first time a model uses the language (Monaco `onLanguage`), for example to register providers lazily. `on_language_encountered` (Monaco `onLanguageEncountered`) also runs when the language is met inside another, like a Monarch grammar's `nextEmbedded`: the place to set an embedded language's tokenizer lazily. Both return a `Disposable` that cancels them.
+- Registering a language whose id is already registered merges into it, as Monaco's `languages.register`: its extensions, file names, patterns, aliases and MIME types are added, and its grammar, highlighter, name and configuration fields replace the existing ones only where it has them.
 
 ### Highlighting rules
 
@@ -106,7 +109,7 @@ Parsing runs on a background thread and reparses incrementally after edits. Unti
 
 ### Monarch grammars
 
-Monaco's Monarch grammars work unchanged, as JSON with regexes as strings (each regex backslash doubled). `gpui_monaco::set_monarch_tokens_provider` (Monaco `setMonarchTokensProvider`) highlights a registered language with one, replacing its tree-sitter highlighting, and models of the language re-tokenize. `Language::with_monarch_grammar` does the same when building a language:
+Monaco's Monarch grammars work unchanged, as JSON with regexes as strings (each regex backslash doubled). `gpui_monaco::set_monarch_tokens_provider` (Monaco `setMonarchTokensProvider`) highlights a language with one, replacing its tree-sitter highlighting, and models of the language re-tokenize. As in Monaco, the language needn't be registered yet: the grammar applies once it is. `Language::with_monarch_grammar` does the same when building a language:
 
 ```rust,ignore
 use serde_json::json;
@@ -137,6 +140,33 @@ let provider = gpui_monaco::set_monarch_tokens_provider(cx, "mylang", &grammar)?
 Tokens get the language as a suffix (`keyword.mylang`), and themes match them as Monaco does: the longest Monaco rule (`keyword.mylang`, then `keyword`), then VS Code `tokenColors` matching the token as a scope. `colorize` and `tokenize` give Monarch languages' own tokens. Everything Monarch has is supported, including `cases`, groups, `@rematch`, `$S2`-style state substitutions and `nextEmbedded` (other Monarch languages in the registry, by id, name, alias or MIME type).
 
 Regexes are JavaScript sources run by `fancy-regex`, translated so `\d`, `\w`, `\s` and `.` keep their JavaScript meaning; lookaround and backreferences work. `\b` uses Unicode word characters, matching is by code point rather than UTF-16 code unit, and octal escapes aren't supported. A Monarch grammar tokenizes line by line, keeping each line's end state, and re-tokenizes after an edit until a line ends in the same state as before.
+
+### Tokens providers
+
+Monaco's "manual" tokenizers work too: implement `syntax::TokensProvider` (Monaco `TokensProvider`), which tokenizes one line at a time from the state the previous line ended in, and set it with `gpui_monaco::set_tokens_provider` (Monaco `setTokensProvider`). Each `Token` has a byte offset in the line (Monaco's `startIndex` counts UTF-16 units) and a Monaco token type that the theme matches like a Monarch token. Edits re-tokenize from the first changed line until a line ends in the same state as before, so make the state cheap to compare.
+
+```rust,ignore
+use gpui_monaco::syntax::{LineTokens, Token, TokensProvider};
+
+struct Comments;
+
+impl TokensProvider for Comments {
+    type State = bool; // inside a `/* */` comment
+
+    fn initial_state(&self) -> bool {
+        false
+    }
+
+    fn tokenize(&self, line: &str, in_comment: &bool) -> LineTokens<bool> {
+        // ...
+        LineTokens { tokens: vec![Token::new(0, "comment")], end_state: *in_comment }
+    }
+}
+
+let provider = gpui_monaco::set_tokens_provider(cx, "mylang", Comments)?;
+```
+
+`register_tokens_provider_factory` (Monaco `registerTokensProviderFactory`) creates the tokenizer when the language is first needed, by a model or as an embedded language, from a task resolving to a `LanguageTokenizer` (a tokens provider, any highlighter, or a Monarch grammar); that also covers Monaco's providers given as a promise. Like `set_monarch_tokens_provider`, both return a `Disposable` that restores the previous highlighting. Monaco's `EncodedTokensProvider`, which returns tokens with encoded color indices, has no equivalent.
 
 ### Custom highlighters
 

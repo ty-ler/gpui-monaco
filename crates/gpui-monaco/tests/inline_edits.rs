@@ -340,6 +340,7 @@ fn the_gutter_indicator_and_its_menu(cx: &mut TestAppContext) {
                 id: "test.learnMore".into(),
                 title: "Learn More".into(),
                 arguments: Vec::new(),
+                ..Default::default()
             });
         }
         items
@@ -348,6 +349,7 @@ fn the_gutter_indicator_and_its_menu(cx: &mut TestAppContext) {
         id: "test.explain".into(),
         title: "Explain".into(),
         arguments: Vec::new(),
+        ..Default::default()
     }];
     let events = provider.events.clone();
     let (editor, cx) = setup(DOC, provider, |_| {}, cx);
@@ -800,6 +802,7 @@ fn alternative_actions_run_with_shift_tab(cx: &mut TestAppContext) {
             id: "test.rename".into(),
             title: "Rename Symbol".into(),
             arguments: Vec::new(),
+            ..Default::default()
         },
         count: Some(3),
     });

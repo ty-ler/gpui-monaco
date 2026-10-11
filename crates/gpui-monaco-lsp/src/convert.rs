@@ -203,6 +203,7 @@ pub fn completion_item(item: lsp::CompletionItem) -> CompletionItem {
         },
         command: item.command.map(command),
         data,
+        ..Default::default()
     }
 }
 
@@ -321,10 +322,14 @@ fn parse_dollar(chars: &[char], i: &mut usize, out: &mut String) {
 }
 
 /// Definition results: `None` for locations in the queried document.
+/// `LocationLink`s keep their origin and target selection ranges (Monaco
+/// `LocationLink`).
 pub fn locations(response: lsp::GotoDefinitionResponse, queried: &str) -> Vec<Location> {
-    let location = |uri: lsp::Uri, target: lsp::Range| Location {
-        uri: (uri.as_str() != queried).then(|| uri.as_str().to_string().into()),
-        range: range(target),
+    let location = |uri: lsp::Uri, target: lsp::Range| {
+        Location::new(
+            (uri.as_str() != queried).then(|| uri.as_str().to_string().into()),
+            range(target),
+        )
     };
     match response {
         lsp::GotoDefinitionResponse::Scalar(l) => vec![location(l.uri, l.range)],
@@ -333,7 +338,11 @@ pub fn locations(response: lsp::GotoDefinitionResponse, queried: &str) -> Vec<Lo
         }
         lsp::GotoDefinitionResponse::Link(links) => links
             .into_iter()
-            .map(|l| location(l.target_uri, l.target_selection_range))
+            .map(|l| Location {
+                origin_selection_range: l.origin_selection_range.map(range),
+                target_selection_range: Some(range(l.target_selection_range)),
+                ..location(l.target_uri, l.target_range)
+            })
             .collect(),
     }
 }
@@ -421,42 +430,126 @@ pub fn marker(diagnostic: lsp::Diagnostic) -> Marker {
     }
 }
 
-/// A workspace edit's text edits, by document. File operations (create,
-/// rename, delete) aren't supported.
+/// A workspace edit: its text edits by document, its file operations
+/// (create, rename, delete, applied through
+/// [`set_workspace_file_edit_handler`](gpui_monaco::set_workspace_file_edit_handler)
+/// before the text edits), and whether a change annotation asks for
+/// confirmation (Monaco `WorkspaceEditMetadata.needsConfirmation`).
+/// Document versions aren't carried: they're the server's, not the
+/// models'.
 pub fn workspace_edit(edit: lsp::WorkspaceEdit) -> anyhow::Result<WorkspaceEdit> {
+    use gpui_monaco::providers::{
+        WorkspaceEditMetadata, WorkspaceFileEdit, WorkspaceFileEditOptions,
+    };
     let text_edits = |edits: Vec<lsp::TextEdit>| -> Vec<_> {
         edits
             .into_iter()
             .map(|edit| (range(edit.range), edit.new_text))
             .collect()
     };
+    let annotations = edit.change_annotations.unwrap_or_default();
+    let metadata = |id: Option<&lsp::ChangeAnnotationIdentifier>| {
+        let annotation = annotations.get(id?)?;
+        Some(WorkspaceEditMetadata {
+            needs_confirmation: annotation.needs_confirmation == Some(true),
+            label: annotation.label.clone().into(),
+            description: annotation.description.clone().map(Into::into),
+        })
+    };
+    let uri = |uri: &lsp::Uri| Some(SharedString::from(uri.as_str().to_string()));
     let mut result = WorkspaceEdit::default();
     if let Some(changes) = edit.document_changes {
-        let edits = match changes {
-            lsp::DocumentChanges::Edits(edits) => edits,
-            lsp::DocumentChanges::Operations(operations) => operations
-                .into_iter()
-                .map(|operation| match operation {
-                    lsp::DocumentChangeOperation::Edit(edit) => Ok(edit),
-                    lsp::DocumentChangeOperation::Op(_) => {
-                        Err(anyhow::anyhow!("file operations aren't supported"))
+        let mut edits = Vec::new();
+        match changes {
+            lsp::DocumentChanges::Edits(changes) => edits = changes,
+            lsp::DocumentChanges::Operations(operations) => {
+                for operation in operations {
+                    match operation {
+                        lsp::DocumentChangeOperation::Edit(edit) => edits.push(edit),
+                        lsp::DocumentChangeOperation::Op(op) => {
+                            result.file_edits.push(match op {
+                                lsp::ResourceOp::Create(create) => {
+                                    let options =
+                                        create.options.unwrap_or(lsp::CreateFileOptions {
+                                            overwrite: None,
+                                            ignore_if_exists: None,
+                                        });
+                                    WorkspaceFileEdit {
+                                        new_uri: uri(&create.uri),
+                                        options: WorkspaceFileEditOptions {
+                                            overwrite: options.overwrite == Some(true),
+                                            ignore_if_exists: options.ignore_if_exists
+                                                == Some(true),
+                                            ..Default::default()
+                                        },
+                                        metadata: metadata(create.annotation_id.as_ref()),
+                                        ..Default::default()
+                                    }
+                                }
+                                lsp::ResourceOp::Rename(rename) => {
+                                    let options =
+                                        rename.options.unwrap_or(lsp::RenameFileOptions {
+                                            overwrite: None,
+                                            ignore_if_exists: None,
+                                        });
+                                    WorkspaceFileEdit {
+                                        old_uri: uri(&rename.old_uri),
+                                        new_uri: uri(&rename.new_uri),
+                                        options: WorkspaceFileEditOptions {
+                                            overwrite: options.overwrite == Some(true),
+                                            ignore_if_exists: options.ignore_if_exists
+                                                == Some(true),
+                                            ..Default::default()
+                                        },
+                                        metadata: metadata(rename.annotation_id.as_ref()),
+                                    }
+                                }
+                                lsp::ResourceOp::Delete(delete) => {
+                                    let options =
+                                        delete.options.unwrap_or(lsp::DeleteFileOptions {
+                                            recursive: None,
+                                            ignore_if_not_exists: None,
+                                            annotation_id: None,
+                                        });
+                                    WorkspaceFileEdit {
+                                        old_uri: uri(&delete.uri),
+                                        options: WorkspaceFileEditOptions {
+                                            recursive: options.recursive == Some(true),
+                                            ignore_if_not_exists: options.ignore_if_not_exists
+                                                == Some(true),
+                                            ..Default::default()
+                                        },
+                                        metadata: metadata(options.annotation_id.as_ref()),
+                                        ..Default::default()
+                                    }
+                                }
+                            });
+                        }
                     }
-                })
-                .collect::<anyhow::Result<_>>()?,
-        };
+                }
+            }
+        }
         for edit in edits {
             let edits = edit
                 .edits
                 .into_iter()
                 .map(|edit| match edit {
                     lsp::OneOf::Left(edit) => edit,
-                    lsp::OneOf::Right(annotated) => annotated.text_edit,
+                    lsp::OneOf::Right(annotated) => {
+                        // Monaco shows a preview when any edit needs
+                        // confirmation.
+                        if let Some(annotation) = metadata(Some(&annotated.annotation_id))
+                            && (annotation.needs_confirmation || result.metadata.is_none())
+                        {
+                            result.metadata = Some(annotation);
+                        }
+                        annotated.text_edit
+                    }
                 })
                 .collect();
-            result.edits.push((
-                Some(edit.text_document.uri.as_str().to_string().into()),
-                text_edits(edits),
-            ));
+            result
+                .edits
+                .push((uri(&edit.text_document.uri), text_edits(edits)));
         }
     } else if let Some(changes) = edit.changes {
         for (uri, edits) in changes {
@@ -505,6 +598,7 @@ pub fn command(command: lsp::Command) -> Command {
         id: command.command.into(),
         title: command.title.into(),
         arguments: command.arguments.unwrap_or_default(),
+        ..Default::default()
     }
 }
 
@@ -535,6 +629,7 @@ pub fn code_action(action: lsp::CodeActionOrCommand) -> anyhow::Result<CodeActio
             is_preferred: action.is_preferred.unwrap_or(false),
             disabled: action.disabled.as_ref().map(|d| d.reason.clone().into()),
             data: Some(serde_json::to_value(&action)?),
+            ..Default::default()
         },
     })
 }
@@ -568,6 +663,7 @@ pub fn inlay_hint(hint: lsp::InlayHint, queried: &str) -> InlayHint {
                         uri: (location.uri.as_str() != queried)
                             .then(|| location.uri.as_str().to_string().into()),
                         range: range(location.range),
+                        ..Default::default()
                     }),
                     command: part.command.map(command),
                 })
@@ -649,6 +745,7 @@ pub fn document_symbols(
                 .into_iter()
                 .map(nested)
                 .collect(),
+            ..Default::default()
         }
     }
     match response {
@@ -664,6 +761,7 @@ pub fn document_symbols(
                     deprecated,
                     range: range(symbol.location.range),
                     selection_range: range(symbol.location.range),
+                    container_name: symbol.container_name.map(Into::into),
                     ..Default::default()
                 }
             })
@@ -816,5 +914,61 @@ mod tests {
             gpui_monaco::providers::SymbolKind::Field
         );
         assert!(symbols[0].children[0].deprecated);
+    }
+
+    /// `LocationLink`s keep their ranges (Monaco `LocationLink`).
+    #[test]
+    fn location_links() {
+        let response: lsp::GotoDefinitionResponse = serde_json::from_value(serde_json::json!([{
+            "originSelectionRange": { "start": { "line": 2, "character": 4 }, "end": { "line": 2, "character": 7 } },
+            "targetUri": "file:///lib.rs",
+            "targetRange": { "start": { "line": 0, "character": 0 }, "end": { "line": 3, "character": 1 } },
+            "targetSelectionRange": { "start": { "line": 0, "character": 3 }, "end": { "line": 0, "character": 6 } },
+        }]))
+        .unwrap();
+        let locations = locations(response, "file:///main.rs");
+        let p = PointUtf16::new;
+        assert_eq!(locations[0].uri.as_deref(), Some("file:///lib.rs"));
+        assert_eq!(locations[0].range, p(0, 0)..p(3, 1));
+        assert_eq!(locations[0].target_selection_range, Some(p(0, 3)..p(0, 6)));
+        assert_eq!(locations[0].origin_selection_range, Some(p(2, 4)..p(2, 7)));
+    }
+
+    /// File operations and change annotations become Monaco's
+    /// `IWorkspaceFileEdit`s and `needsConfirmation`.
+    #[test]
+    fn workspace_edits_with_file_operations() {
+        let edit: lsp::WorkspaceEdit = serde_json::from_value(serde_json::json!({
+            "documentChanges": [
+                { "kind": "rename", "oldUri": "file:///a.rs", "newUri": "file:///b.rs", "annotationId": "confirm" },
+                {
+                    "textDocument": { "uri": "file:///b.rs", "version": 1 },
+                    "edits": [{
+                        "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 1 } },
+                        "newText": "x",
+                    }],
+                },
+                { "kind": "delete", "uri": "file:///c.rs", "options": { "recursive": true } },
+            ],
+            "changeAnnotations": {
+                "confirm": { "label": "Rename b", "needsConfirmation": true },
+            },
+        }))
+        .unwrap();
+        let edit = workspace_edit(edit).unwrap();
+        assert_eq!(edit.file_edits.len(), 2);
+        assert_eq!(edit.file_edits[0].old_uri.as_deref(), Some("file:///a.rs"));
+        assert_eq!(edit.file_edits[0].new_uri.as_deref(), Some("file:///b.rs"));
+        assert!(edit.file_edits[1].options.recursive);
+        assert_eq!(edit.edits.len(), 1);
+        assert!(edit.needs_confirmation());
+        assert_eq!(
+            edit.file_edits[0]
+                .metadata
+                .as_ref()
+                .map(|m| m.label.to_string())
+                .as_deref(),
+            Some("Rename b")
+        );
     }
 }

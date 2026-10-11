@@ -8,8 +8,9 @@ use gpui::{
 use gpui_monaco::CodeEditor;
 use gpui_monaco::actions::{ChangePasteType, Paste};
 use gpui_monaco::providers::{
-    DataTransfer, DocumentDropOrPasteEdit, DocumentPasteEditProvider, DocumentPasteTriggerKind,
-    EditInsertText, LanguageSelector, ProviderContext, register_document_paste_edit_provider,
+    DataTransfer, DocumentDropOrPasteEdit, DocumentPasteContext, DocumentPasteEditProvider,
+    DocumentPasteTriggerKind, EditInsertText, LanguageSelector, ProviderContext, WorkspaceEdit,
+    register_document_paste_edit_provider,
 };
 use gpui_monaco::text::PointUtf16;
 
@@ -178,4 +179,96 @@ fn auto_indent_on_paste(cx: &mut TestAppContext) {
         text(&editor, cx),
         "function f() {\n    let x = 1;\n    let y = 2;\n}"
     );
+}
+
+/// Fills in its edits only when one is applied, and records the paste
+/// context it's asked with.
+struct Lazy(std::rc::Rc<std::cell::RefCell<Vec<Option<String>>>>);
+
+impl DocumentPasteEditProvider for Lazy {
+    fn paste_mime_types(&self) -> Vec<SharedString> {
+        vec!["text/plain".into()]
+    }
+
+    fn provided_paste_edit_kinds(&self) -> Vec<SharedString> {
+        vec!["text.lazy".into()]
+    }
+
+    fn provide_document_paste_edits(
+        &self,
+        _: &ProviderContext,
+        _: &[std::ops::Range<PointUtf16>],
+        _: &DataTransfer,
+        _: DocumentPasteTriggerKind,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>> {
+        unreachable!("asked with the context")
+    }
+
+    fn provide_document_paste_edits_with_context(
+        &self,
+        _: &ProviderContext,
+        _: &[std::ops::Range<PointUtf16>],
+        _: &DataTransfer,
+        paste_context: &DocumentPasteContext,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>> {
+        self.0
+            .borrow_mut()
+            .push(paste_context.only.as_ref().map(|only| only.to_string()));
+        Task::ready(Ok(vec![DocumentDropOrPasteEdit {
+            title: "Lazy".into(),
+            kind: Some("text.lazy".into()),
+            insert_text: EditInsertText::Text("unresolved".into()),
+            ..Default::default()
+        }]))
+    }
+
+    fn resolve_document_paste_edit(
+        &self,
+        edit: &DocumentDropOrPasteEdit,
+        _: &mut App,
+    ) -> Option<Task<anyhow::Result<DocumentDropOrPasteEdit>>> {
+        Some(Task::ready(Ok(DocumentDropOrPasteEdit {
+            insert_text: EditInsertText::Text("resolved".into()),
+            // Monaco `additionalEdit`: a workspace edit applied after it.
+            additional_edit: Some(WorkspaceEdit {
+                edits: vec![(
+                    None,
+                    vec![(
+                        PointUtf16::new(0, 0)..PointUtf16::new(0, 0),
+                        "// pasted\n".into(),
+                    )],
+                )],
+                ..Default::default()
+            }),
+            ..edit.clone()
+        })))
+    }
+}
+
+/// Monaco `resolveDocumentPasteEdit` and `DocumentPasteContext.only`: the
+/// edit applied is resolved first, and "Paste As..." with a kind says
+/// which it wants.
+#[gpui::test]
+fn paste_edits_are_resolved_before_applying(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", cx);
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let provider = Lazy(asked.clone());
+    cx.update(|_, cx| {
+        register_document_paste_edit_provider(cx, LanguageSelector::All, provider);
+    });
+    cx.write_to_clipboard(ClipboardItem::new_string("hi".into()));
+    cx.dispatch_action(Paste);
+    paint(cx);
+    assert_eq!(text(&editor, cx), "// pasted\nresolved");
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| m.set_value("", cx))
+    });
+    editor.update_in(cx, |e, window, cx| {
+        e.paste_as(Some("text.lazy".into()), window, cx)
+    });
+    paint(cx);
+    assert_eq!(text(&editor, cx), "// pasted\nresolved");
+    assert_eq!(*asked.borrow(), [None, Some("text.lazy".to_string())]);
 }

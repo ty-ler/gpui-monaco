@@ -10,6 +10,7 @@ use std::rc::Rc;
 use gpui::{App, AppContext as _, Entity, Focusable, Task, TestAppContext, VisualTestContext};
 use gpui_monaco::cursor::Selection;
 use gpui_monaco::providers::*;
+use gpui_monaco::syntax::{Comments, Language, LanguageConfiguration};
 use gpui_monaco::text::PointUtf16;
 use gpui_monaco::{CodeEditor, TextModel, TextModelEvent};
 
@@ -57,7 +58,15 @@ fn on_language_runs_once_for_the_first_model(cx: &mut TestAppContext) {
     init(cx);
     let calls = Rc::new(Cell::new(0));
     let counter = calls.clone();
-    cx.update(|cx| gpui_monaco::on_language(cx, "rust", move |_| counter.set(counter.get() + 1)));
+    let _callback = cx
+        .update(|cx| gpui_monaco::on_language(cx, "rust", move |_| counter.set(counter.get() + 1)));
+    // A disposed callback doesn't run (Monaco's `onLanguage` returns an
+    // `IDisposable`).
+    let cancelled = calls.clone();
+    let disposable = cx.update(|cx| {
+        gpui_monaco::on_language(cx, "rust", move |_| cancelled.set(cancelled.get() + 100))
+    });
+    cx.update(|cx| disposable.dispose(cx));
     let first = cx.new(|_| TextModel::new("").with_language("rust"));
     language_of(&first, cx);
     cx.run_until_parked();
@@ -68,8 +77,26 @@ fn on_language_runs_once_for_the_first_model(cx: &mut TestAppContext) {
     assert_eq!(calls.get(), 1);
     // As in Monaco, a language already used doesn't call back.
     let late = calls.clone();
-    cx.update(|cx| gpui_monaco::on_language(cx, "rust", move |_| late.set(late.get() + 10)));
+    let _late =
+        cx.update(|cx| gpui_monaco::on_language(cx, "rust", move |_| late.set(late.get() + 10)));
     cx.run_until_parked();
+    assert_eq!(calls.get(), 1);
+}
+
+/// Monaco `onLanguageEncountered` fires for a model's language too, once.
+#[gpui::test]
+fn on_language_encountered_runs_once(cx: &mut TestAppContext) {
+    init(cx);
+    let calls = Rc::new(Cell::new(0));
+    let counter = calls.clone();
+    let _callback = cx.update(|cx| {
+        gpui_monaco::on_language_encountered(cx, "css", move |_| counter.set(counter.get() + 1))
+    });
+    for _ in 0..2 {
+        let model = cx.new(|_| TextModel::new("").with_language("css"));
+        language_of(&model, cx);
+        cx.run_until_parked();
+    }
     assert_eq!(calls.get(), 1);
 }
 
@@ -87,22 +114,83 @@ fn set_language_configuration_at_runtime(cx: &mut TestAppContext) {
             }
         })
     });
-    let mut config = model.read_with(cx, |m, _| m.language().unwrap().config.clone());
-    config.brackets = vec![("<".into(), ">".into())];
-    assert!(cx.update(|cx| gpui_monaco::set_language_configuration(cx, "rust", config)));
+    let original = model.read_with(cx, |m, _| m.language().unwrap().config.clone());
+    // A partial configuration only replaces what it sets (Monaco
+    // `combineLanguageConfigurations`).
+    let config = LanguageConfiguration {
+        brackets: Some(vec![("<".into(), ">".into())]),
+        ..Default::default()
+    };
+    let disposable = cx
+        .update(|cx| gpui_monaco::set_language_configuration(cx, "rust", config))
+        .unwrap();
     cx.run_until_parked();
     assert_eq!(events.borrow().len(), 1);
     model.read_with(cx, |m, _| {
+        let config = &m.language().unwrap().config;
+        assert_eq!(config.brackets(), [("<".to_string(), ">".to_string())]);
+        assert_eq!(config.comments().line_comment.as_deref(), Some("//"));
         assert_eq!(
-            m.language().unwrap().config.brackets,
-            vec![("<".to_string(), ">".to_string())]
+            config.auto_closing_pairs().len(),
+            original.auto_closing_pairs().len()
         );
     });
-    assert!(!cx.update(|cx| gpui_monaco::set_language_configuration(
-        cx,
-        "nope",
-        Default::default()
-    )));
+    // A later one wins for the fields it sets.
+    let comments = LanguageConfiguration {
+        comments: Some(Comments {
+            line_comment: Some("#".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let later = cx
+        .update(|cx| gpui_monaco::set_language_configuration(cx, "rust", comments))
+        .unwrap();
+    model.read_with(cx, |m, _| {
+        let config = &m.language().unwrap().config;
+        assert_eq!(config.comments().line_comment.as_deref(), Some("#"));
+        assert_eq!(config.brackets(), [("<".to_string(), ">".to_string())]);
+    });
+    // Disposing restores what each covered.
+    cx.update(|cx| disposable.dispose(cx));
+    cx.run_until_parked();
+    model.read_with(cx, |m, _| {
+        let config = &m.language().unwrap().config;
+        assert_eq!(config.brackets(), original.brackets());
+        assert_eq!(config.comments().line_comment.as_deref(), Some("#"));
+    });
+    cx.update(|cx| later.dispose(cx));
+    model.read_with(cx, |m, _| {
+        let config = &m.language().unwrap().config;
+        assert_eq!(config.comments().line_comment.as_deref(), Some("//"));
+    });
+    assert_eq!(events.borrow().len(), 4);
+    let unknown = cx.update(|cx| {
+        gpui_monaco::set_language_configuration(cx, "nope", Default::default()).map(|_| ())
+    });
+    assert!(unknown.is_err());
+}
+
+/// Monaco `languages.register` with an existing id merges into it: the
+/// grammar and configuration stay, and the new extensions are added.
+#[gpui::test]
+fn registering_a_language_again_keeps_it(cx: &mut TestAppContext) {
+    init(cx);
+    let registry = cx.update(|cx| gpui_monaco::language_registry(cx));
+    registry.register(Language::new("rust", "rust").with_extensions(&["rsx"]));
+    let model = cx.new(|_| TextModel::new("fn main() {}").with_uri("file:///a.rsx"));
+    assert_eq!(language_of(&model, cx).as_deref(), Some("rust"));
+    cx.run_until_parked();
+    model.read_with(cx, |m, _| {
+        let language = m.language().unwrap();
+        assert_eq!(&*language.name, "Rust");
+        assert!(language.grammar.is_some());
+        assert_eq!(
+            language.config.comments().line_comment.as_deref(),
+            Some("//")
+        );
+        assert!(m.highlight_name_at(0).is_some());
+    });
 }
 
 struct Hovers;
@@ -125,6 +213,7 @@ fn language_filters_match_scheme_and_pattern(cx: &mut TestAppContext) {
             language: language.map(|s| s.to_string().into()),
             scheme: scheme.map(|s| s.to_string().into()),
             pattern: pattern.map(|s| s.to_string().into()),
+            ..Default::default()
         }])
     };
     let test_file = cx.new(|_| {

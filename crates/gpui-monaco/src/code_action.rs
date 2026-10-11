@@ -1388,6 +1388,7 @@ mod tests {
             id: id.to_string().into(),
             title: id.to_string().into(),
             arguments: Vec::new(),
+            ..Default::default()
         };
         let docs = vec![
             (CodeActionKind::from("refactor"), command("refactor")),
@@ -1432,6 +1433,7 @@ mod tests {
                 None,
                 vec![(PointUtf16::zero()..PointUtf16::zero(), "x".into())],
             )],
+            ..Default::default()
         });
         assert!(can_preview(&with_edit));
     }

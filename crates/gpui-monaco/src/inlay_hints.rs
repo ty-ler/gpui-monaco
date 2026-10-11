@@ -203,8 +203,10 @@ impl CodeEditor {
             );
         let model = self.model().read(cx);
         let context = model.provider_context();
+        // Monaco `InlayHintsFragments.create` asks `ordered(model).reverse()`.
         inlay_hints_providers(cx, self.provider_target(cx))
             .into_iter()
+            .rev()
             .map(|provider| {
                 let task = provider.provide_inlay_hints(&context, range.clone(), cx);
                 (provider, task)

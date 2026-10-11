@@ -124,7 +124,7 @@ impl CodeEditor {
         let model = self.model().read(cx);
         let Some(start) = model
             .language()
-            .and_then(|language| language.config.comments.block_comment.clone())
+            .and_then(|language| language.config.comments().block_comment.clone())
             .map(|(start, _)| start)
         else {
             return;

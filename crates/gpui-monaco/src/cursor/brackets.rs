@@ -50,7 +50,7 @@ impl Brackets {
     /// language has none.
     pub(crate) fn configured(config: &LanguageConfiguration) -> Option<Self> {
         let pairs: Vec<(Vec<u16>, Vec<u16>)> = config
-            .brackets
+            .brackets()
             .iter()
             .filter(|(open, close)| !open.is_empty() && !close.is_empty())
             .map(|(open, close)| {

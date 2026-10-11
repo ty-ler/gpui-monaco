@@ -263,7 +263,8 @@ impl PeekView {
             if ix == selected {
                 selected_pos = (group, groups[group].ranges.len());
             }
-            groups[group].ranges.push(location.range);
+            // Monaco `OneReference.range`: a link's target selection range.
+            groups[group].ranges.push(location.selection_range());
         }
         let mut preview_theme = (*theme).clone();
         preview_theme.colors.background = theme.colors.peek_view_editor_background;
@@ -341,6 +342,7 @@ impl PeekView {
         Location {
             uri: self.groups[g].uri.clone(),
             range: self.groups[g].range(r, cx),
+            ..Default::default()
         }
     }
 
@@ -496,6 +498,7 @@ impl PeekView {
             .map(|(g, r)| Location {
                 uri: self.groups[g].uri.clone(),
                 range: self.groups[g].range(r, cx),
+                ..Default::default()
             })
             .collect();
         let results = (self.kind, locations, selected);
@@ -1002,6 +1005,7 @@ impl CodeEditor {
             .map(|(g, r)| Location {
                 uri: view.groups[g].uri.clone(),
                 range: view.groups[g].range(r, cx),
+                ..Default::default()
             })
             .collect();
         Some((locations, selected))
@@ -1106,6 +1110,7 @@ mod tests {
         let at = |uri: &str, row: u32| Location {
             uri: Some(uri.to_string().into()),
             range: PointUtf16::new(row, 0)..PointUtf16::new(row, 1),
+            ..Default::default()
         };
         let locations = [
             at("file:///a.rs", 10),

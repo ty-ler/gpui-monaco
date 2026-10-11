@@ -102,12 +102,12 @@ fn bundled_languages_highlight_samples() {
 fn configurations_load() {
     let registry = gpui_monaco_languages::registry();
     let rust = registry.language_for_id("rust").unwrap();
-    assert_eq!(rust.config.comments.line_comment.as_deref(), Some("//"));
-    assert!(!rust.config.auto_closing_pairs.is_empty());
+    assert_eq!(rust.config.comments().line_comment.as_deref(), Some("//"));
+    assert!(!rust.config.auto_closing_pairs().is_empty());
     let ts = registry.language_for_name("ts").unwrap();
     assert!(
         ts.config
-            .on_enter_rules
+            .on_enter_rules()
             .iter()
             .all(|rule| rule.before_text.regex().is_some())
     );
@@ -133,7 +133,7 @@ fn html_enter_between_tags_matches() {
     // translation.
     let registry = gpui_monaco_languages::registry();
     let html = registry.language_for_id("html").unwrap();
-    let rule = &html.config.on_enter_rules[0];
+    let rule = &html.config.on_enter_rules()[0];
     assert!(rule.before_text.is_match("<my-tag class=\"a\">"));
     assert!(!rule.before_text.is_match("<br>"));
     assert!(rule.after_text.as_ref().unwrap().is_match("</my-tag>"));

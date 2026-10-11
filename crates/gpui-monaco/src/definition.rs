@@ -136,6 +136,26 @@ pub(crate) fn markdown_code_block(language: &str, code: &str) -> String {
     format!("\n{fence}{language}\n{code}\n{fence}\n")
 }
 
+/// Monaco `startFindDefinition`'s link range: the first result's
+/// `originSelectionRange`, else the word, grown to cover every result's
+/// origin range when there are several.
+fn link_range(word: Range<PointUtf16>, locations: &[Location]) -> Range<PointUtf16> {
+    let mut range = locations
+        .first()
+        .and_then(|location| location.origin_selection_range.clone())
+        .unwrap_or(word);
+    if locations.len() > 1 {
+        for origin in locations
+            .iter()
+            .filter_map(|location| location.origin_selection_range.as_ref())
+        {
+            range.start = range.start.min(origin.start);
+            range.end = range.end.max(origin.end);
+        }
+    }
+    range
+}
+
 impl CodeEditor {
     fn request_definitions(
         &mut self,
@@ -213,7 +233,8 @@ impl CodeEditor {
                 if let Some(word) = word
                     && !locations.is_empty()
                 {
-                    this.set_definition_link(word, locations, from_keyboard, cx);
+                    let range = link_range(word, &locations);
+                    this.set_definition_link(range, locations, from_keyboard, cx);
                 }
                 // Monaco `ShowDefinitionPreviewHoverAction`: then the hover.
                 if from_keyboard {

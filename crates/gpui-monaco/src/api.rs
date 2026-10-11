@@ -350,7 +350,7 @@ impl TextModel {
         let pairs = config
             .colorized_bracket_pairs
             .clone()
-            .unwrap_or_else(|| config.brackets.clone());
+            .unwrap_or_else(|| config.brackets().to_vec());
         let rope = self.buffer().rope();
         let skip = self.string_and_comment_ranges(0..rope.len());
         let (_, pairs) =

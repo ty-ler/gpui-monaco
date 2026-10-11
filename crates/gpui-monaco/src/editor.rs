@@ -2468,7 +2468,7 @@ impl CodeEditor {
         let comments_at = |p: PointUtf16| {
             model
                 .language_at(rope.point_utf16_to_offset(p))
-                .map(|language| language.config.comments.clone())
+                .map(|language| language.config.comments().clone())
         };
         let operation = match kind {
             Some(kind) => {

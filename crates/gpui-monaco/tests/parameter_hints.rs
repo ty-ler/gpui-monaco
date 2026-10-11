@@ -287,9 +287,10 @@ impl SignatureHelpProvider for Fixed {
 #[gpui::test]
 fn the_first_provider_with_a_result_wins(cx: &mut TestAppContext) {
     cx.update(|cx| {
-        register_signature_help_provider(cx, LanguageSelector::All, Fixed(None));
-        register_signature_help_provider(cx, LanguageSelector::All, Fixed(Some("second")));
+        // Equal scores are tried newest first (Monaco `ordered`).
         register_signature_help_provider(cx, LanguageSelector::All, Fixed(Some("third")));
+        register_signature_help_provider(cx, LanguageSelector::All, Fixed(Some("second")));
+        register_signature_help_provider(cx, LanguageSelector::All, Fixed(None));
     });
     let (editor, cx) = setup("", cx);
     cx.simulate_input("(");

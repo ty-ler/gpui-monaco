@@ -890,6 +890,7 @@ impl CodeEditor {
                 id: id.to_string().into(),
                 title: SharedString::default(),
                 arguments: args.into_iter().collect(),
+                ..Default::default()
             };
             return crate::commands::execute_command(cx, &command).is_ok();
         }

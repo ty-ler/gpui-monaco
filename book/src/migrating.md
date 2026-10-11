@@ -145,7 +145,7 @@ Monaco's global `monaco.editor.on…` events are free functions returning a gpui
 
 ## Language features
 
-Monaco's `monaco.languages.register…Provider(selector, provider)` functions become `providers::register_…_provider(cx, LanguageSelector, provider)`, where each provider is a Rust trait. `providers::unregister_provider(cx, registration)` replaces `IDisposable.dispose()`.
+Monaco's `monaco.languages.register…Provider(selector, provider)` functions become `providers::register_…_provider(cx, LanguageSelector, provider)`, where each provider is a Rust trait. `providers::unregister_provider(cx, registration)` replaces `IDisposable.dispose()`. Matching providers are ranked as in Monaco: by selector score, then newest first.
 
 | Monaco | gpui-monaco trait |
 |---|---|
@@ -169,14 +169,18 @@ Monaco's `monaco.languages.register…Provider(selector, provider)` functions be
 | `registerColorProvider` | `DocumentColorProvider` |
 | `registerDocumentSemanticTokensProvider`, `…RangeSemanticTokens…` | `DocumentSemanticTokensProvider`, `DocumentRangeSemanticTokensProvider` |
 | `registerDocumentDropEditProvider`, `registerDocumentPasteEditProvider` | `DocumentDropEditProvider`, `DocumentPasteEditProvider` |
-| `setLanguageConfiguration` | the language's configuration in the `LanguageRegistry` (`gpui-monaco-languages` reads Monaco's JSON), or at runtime `set_language_configuration(cx, id, config)` |
-| `register({ id, extensions, filenames, filenamePatterns, firstLine, mimetypes })` | `Language::new(id, name)` with `with_extensions`, `with_file_names`, `with_filename_patterns`, `with_first_line` and `with_mimetypes` |
-| `onLanguage(id, callback)` | `on_language(cx, id, callback)` |
-| `LanguageFilter { language, scheme, pattern }` | `LanguageSelector::Filters(vec![LanguageFilter { … }])` |
+| `setLanguageConfiguration` | the language's configuration in the `LanguageRegistry` (`gpui-monaco-languages` reads Monaco's JSON), or at runtime `set_language_configuration(cx, id, config)`, which layers it over the language's and returns a `Disposable` |
+| `register({ id, extensions, filenames, filenamePatterns, firstLine, mimetypes })` | `Language::new(id, name)` with `with_extensions`, `with_file_names`, `with_filename_patterns`, `with_first_line` and `with_mimetypes`; registering an id again merges into it, as in Monaco |
+| `onLanguage(id, callback)`, `onLanguageEncountered(id, callback)` | `on_language(cx, id, callback)`, `on_language_encountered(cx, id, callback)`, returning a `Disposable` |
+| `LanguageFilter { language, scheme, pattern, exclusive }`, `'*'` | `LanguageSelector::Filters(vec![LanguageFilter { … }])`, `LanguageSelector::All` or `Languages(vec!["*".into()])` |
+| `languages.score(selector, uri, languageId)` | `selector.score(&target)` or `providers::score` |
 | `FormattingConflicts.setFormatterSelector` (not public in Monaco's API) | `set_formatter_selector(cx, …)` |
 | `setMonarchTokensProvider` | `set_monarch_tokens_provider(cx, id, &grammar)` with the grammar as JSON, or `Language::with_monarch_grammar`; a tree-sitter grammar with highlight queries also works (see [Languages](languages.md#monarch-grammars)) |
+| `setTokensProvider`, `registerTokensProviderFactory` | `set_tokens_provider(cx, id, provider)` with a `syntax::TokensProvider`, `register_tokens_provider_factory(cx, id, factory)` |
+| `Location`, `LocationLink` | `Location`, with `origin_selection_range` and `target_selection_range` for a link |
+| `WorkspaceEdit` (text, file and snippet edits, `versionId`, `metadata`) | `WorkspaceEdit` with `edits`, `file_edits` (applied by `set_workspace_file_edit_handler`), `snippet_edits`, `versions` and `metadata` |
 | `editor.remeasureFonts` | `remeasure_fonts(cx)`, a no-op: GPUI measures text every frame |
-| `editor.setColorMap`, `languages.getEncodedLanguageId` | none: there are no encoded tokens; themes resolve token names |
+| `editor.setColorMap`, `languages.getEncodedLanguageId`, `EncodedTokensProvider` | none: there are no encoded tokens; themes resolve token names |
 
 The `gpui-monaco-lsp` bridge registers these providers from a language server (see [Language servers](lsp.md)).
 

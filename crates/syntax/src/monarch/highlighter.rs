@@ -177,6 +177,9 @@ impl EmbeddedLanguages for RegistryLanguages<'_> {
         if let Some(cached) = self.tokenizers.borrow().get(language_id) {
             return cached.clone();
         }
+        // Monaco's lexer requests basic features for embedded languages
+        // (`onLanguageEncountered`).
+        registry.note_language_encountered(language_id);
         let tokenizer = registry
             .language_for_id(language_id)
             .and_then(|language| MonarchHighlighter::tokenizer_of(&language, registry));

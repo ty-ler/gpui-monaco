@@ -37,7 +37,7 @@ fn ab() -> Vec<(String, String)> {
 #[test]
 fn only_auto_closing_pairs() {
     let config = LanguageConfiguration {
-        auto_closing_pairs: vec![pair("a", "b")],
+        auto_closing_pairs: Some(vec![pair("a", "b")]),
         ..Default::default()
     };
     assert_eq!(pairs_of(config), (ab(), ab()));
@@ -51,7 +51,7 @@ fn only_empty_auto_closing_pairs() {
 #[test]
 fn only_brackets() {
     let config = LanguageConfiguration {
-        brackets: brackets(&[("a", "b")]),
+        brackets: Some(brackets(&[("a", "b")])),
         ..Default::default()
     };
     assert_eq!(pairs_of(config), (ab(), ab()));
@@ -60,7 +60,7 @@ fn only_brackets() {
 #[test]
 fn only_surrounding_pairs() {
     let config = LanguageConfiguration {
-        surrounding_pairs: vec![surround("a", "b")],
+        surrounding_pairs: Some(vec![surround("a", "b")]),
         ..Default::default()
     };
     assert_eq!(pairs_of(config), (vec![], ab()));
@@ -85,11 +85,11 @@ fn should_auto_close(tokens: &[(&str, StandardTokenType)], column: u32, plain: b
             .unwrap_or_default()
     };
     let config = LanguageConfiguration {
-        auto_closing_pairs: vec![if plain {
+        auto_closing_pairs: Some(vec![if plain {
             pair("{", "}")
         } else {
             pair_not_in("{", "}", &[NotIn::String, NotIn::Comment])
-        }],
+        }]),
         ..Default::default()
     };
     let ctx = LanguageContext::new(&config, &at);
@@ -169,7 +169,7 @@ fn should_auto_close_pair_in_interesting_line_3() {
 
 fn electric(line: &str, character: &str, offset: u32) -> Option<String> {
     let config = LanguageConfiguration {
-        brackets: brackets(&[("{", "}"), ("(", ")")]),
+        brackets: Some(brackets(&[("{", "}"), ("(", ")")])),
         ..Default::default()
     };
     let ctx = LanguageContext::untokenized(&config);
@@ -181,7 +181,7 @@ fn electric(line: &str, character: &str, offset: u32) -> Option<String> {
 #[test]
 fn get_electric_characters_uses_all_sources_and_dedups() {
     let config = LanguageConfiguration {
-        brackets: brackets(&[("{", "}"), ("(", ")")]),
+        brackets: Some(brackets(&[("{", "}"), ("(", ")")])),
         ..Default::default()
     };
     let ctx = LanguageContext::untokenized(&config);

@@ -6,45 +6,142 @@
 
 use serde::Deserialize;
 
-/// A parsed `language-configuration.json`. Unknown keys are ignored and missing
-/// ones default to empty.
+/// A parsed `language-configuration.json` (Monaco `LanguageConfiguration`).
+/// Unknown keys are ignored. Every field is optional, as in Monaco: `None`
+/// is "not set", so a configuration can be layered over another with
+/// [`LanguageConfiguration::combine`], and an explicit empty list (such as
+/// `"autoClosingPairs": []`) differs from a missing one.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LanguageConfiguration {
-    /// `comments`: line and block comment tokens.
+    /// `comments`: line and block comment tokens; see
+    /// [`LanguageConfiguration::comments`].
     #[serde(default)]
-    pub comments: Comments,
-    /// `brackets`: open/close pairs used for bracket matching and indentation.
+    pub comments: Option<Comments>,
+    /// `brackets`: open/close pairs used for bracket matching and
+    /// indentation; see [`LanguageConfiguration::brackets`].
     #[serde(default)]
-    pub brackets: Vec<(String, String)>,
+    pub brackets: Option<Vec<(String, String)>>,
     /// `colorizedBracketPairs`: the pairs bracket pair colorization uses;
     /// `None` means [`LanguageConfiguration::brackets`].
     #[serde(default)]
     pub colorized_bracket_pairs: Option<Vec<(String, String)>>,
-    /// `autoClosingPairs`: pairs closed automatically when the open text is typed.
+    /// `autoClosingPairs`: pairs closed automatically when the open text is
+    /// typed. `None` uses the brackets; an empty list closes nothing.
     #[serde(default)]
-    pub auto_closing_pairs: Vec<AutoClosingPair>,
+    pub auto_closing_pairs: Option<Vec<AutoClosingPair>>,
     /// Characters before which auto-closing happens (Monaco `autoCloseBefore`).
     #[serde(default)]
     pub auto_close_before: Option<String>,
-    /// `surroundingPairs`: pairs that wrap the selection when the open text is typed.
+    /// `surroundingPairs`: pairs that wrap the selection when the open text
+    /// is typed. `None` uses the auto-closing pairs.
     #[serde(default)]
-    pub surrounding_pairs: Vec<SurroundingPair>,
+    pub surrounding_pairs: Option<Vec<SurroundingPair>>,
     /// `wordPattern`: what counts as a word, for word navigation and selection.
     #[serde(default)]
     pub word_pattern: Option<Pattern>,
     /// `indentationRules`: how typing and Enter adjust indentation.
     #[serde(default)]
     pub indentation_rules: Option<IndentationRules>,
-    /// `onEnterRules`: special Enter handling, such as continuing doc comments.
+    /// `onEnterRules`: special Enter handling, such as continuing doc
+    /// comments; see [`LanguageConfiguration::on_enter_rules`].
     #[serde(default)]
-    pub on_enter_rules: Vec<OnEnterRule>,
+    pub on_enter_rules: Option<Vec<OnEnterRule>>,
     /// `folding`: indentation-based folding settings and region markers.
     #[serde(default)]
     pub folding: Option<Folding>,
+    /// Monaco's deprecated `__electricCharacterSupport`: its `docComment`
+    /// is auto-closed like an auto-closing pair.
+    #[serde(default, rename = "__electricCharacterSupport")]
+    pub electric_character_support: Option<ElectricCharacterSupport>,
 }
 
+/// Monaco's deprecated `__electricCharacterSupport`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElectricCharacterSupport {
+    /// A doc comment's delimiters (Monaco `IDocComment`), such as `/**` and
+    /// ` */`.
+    #[serde(default)]
+    pub doc_comment: Option<DocComment>,
+}
+
+/// Monaco `IDocComment`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct DocComment {
+    /// The text that opens it, e.g. `/**`.
+    pub open: String,
+    /// The text that closes it, e.g. ` */`.
+    #[serde(default)]
+    pub close: Option<String>,
+}
+
+/// The comments of a configuration without `comments`.
+static NO_COMMENTS: Comments = Comments {
+    line_comment: None,
+    line_comment_no_indent: false,
+    block_comment: None,
+};
+
 impl LanguageConfiguration {
+    /// [`comments`](Self::comments), or none.
+    pub fn comments(&self) -> &Comments {
+        self.comments.as_ref().unwrap_or(&NO_COMMENTS)
+    }
+
+    /// [`brackets`](Self::brackets), or none.
+    pub fn brackets(&self) -> &[(String, String)] {
+        self.brackets.as_deref().unwrap_or_default()
+    }
+
+    /// [`auto_closing_pairs`](Self::auto_closing_pairs) as given, or none.
+    pub fn auto_closing_pairs(&self) -> &[AutoClosingPair] {
+        self.auto_closing_pairs.as_deref().unwrap_or_default()
+    }
+
+    /// [`surrounding_pairs`](Self::surrounding_pairs) as given, or none.
+    pub fn surrounding_pairs(&self) -> &[SurroundingPair] {
+        self.surrounding_pairs.as_deref().unwrap_or_default()
+    }
+
+    /// [`on_enter_rules`](Self::on_enter_rules), or none.
+    pub fn on_enter_rules(&self) -> &[OnEnterRule] {
+        self.on_enter_rules.as_deref().unwrap_or_default()
+    }
+
+    /// `self` with every field `newer` sets taken from it (Monaco
+    /// `combineLanguageConfigurations`, which takes each field from the
+    /// newest configuration defining it). An empty `autoCloseBefore`
+    /// counts as unset, as in Monaco.
+    pub fn combine(&self, newer: &LanguageConfiguration) -> LanguageConfiguration {
+        fn pick<T: Clone>(newer: &Option<T>, older: &Option<T>) -> Option<T> {
+            newer.clone().or_else(|| older.clone())
+        }
+        LanguageConfiguration {
+            comments: pick(&newer.comments, &self.comments),
+            brackets: pick(&newer.brackets, &self.brackets),
+            colorized_bracket_pairs: pick(
+                &newer.colorized_bracket_pairs,
+                &self.colorized_bracket_pairs,
+            ),
+            auto_closing_pairs: pick(&newer.auto_closing_pairs, &self.auto_closing_pairs),
+            auto_close_before: newer
+                .auto_close_before
+                .clone()
+                .filter(|before| !before.is_empty())
+                .or_else(|| self.auto_close_before.clone()),
+            surrounding_pairs: pick(&newer.surrounding_pairs, &self.surrounding_pairs),
+            word_pattern: pick(&newer.word_pattern, &self.word_pattern),
+            indentation_rules: pick(&newer.indentation_rules, &self.indentation_rules),
+            on_enter_rules: pick(&newer.on_enter_rules, &self.on_enter_rules),
+            folding: pick(&newer.folding, &self.folding),
+            electric_character_support: pick(
+                &newer.electric_character_support,
+                &self.electric_character_support,
+            ),
+        }
+    }
+
     /// Every regex in the configuration, named by its JSON key (e.g. to
     /// report ones that didn't compile, see [`Pattern::error`]).
     pub fn patterns(&self) -> Vec<(&'static str, &Pattern)> {
@@ -62,7 +159,7 @@ impl LanguageConfiguration {
                 patterns.push(("unIndentedLinePattern", p));
             }
         }
-        for rule in &self.on_enter_rules {
+        for rule in self.on_enter_rules() {
             patterns.push(("onEnterRules.beforeText", &rule.before_text));
             if let Some(p) = &rule.after_text {
                 patterns.push(("onEnterRules.afterText", p));
@@ -591,22 +688,65 @@ mod tests {
             ],
         }"#;
         let config = LanguageConfiguration::from_json(json).unwrap();
-        assert_eq!(config.comments.line_comment.as_deref(), Some("//"));
-        assert_eq!(config.brackets.len(), 2);
+        assert_eq!(config.comments().line_comment.as_deref(), Some("//"));
+        assert_eq!(config.brackets().len(), 2);
         assert_eq!(
-            config.auto_closing_pairs[2].not_in,
+            config.auto_closing_pairs()[2].not_in,
             vec![NotIn::String, NotIn::Comment]
         );
-        assert_eq!(config.surrounding_pairs[1].open, "'");
-        let rules = config.indentation_rules.unwrap();
+        assert_eq!(config.surrounding_pairs()[1].open, "'");
+        let rules = config.indentation_rules.clone().unwrap();
         assert!(rules.increase_indent_pattern.is_match("fn main() {"));
         assert!(rules.decrease_indent_pattern.is_match("    }"));
         // Lookahead from a real VS Code rule compiles.
-        assert!(config.on_enter_rules[0].before_text.is_match("  /** docs"));
         assert!(
-            !config.on_enter_rules[0]
+            config.on_enter_rules()[0]
+                .before_text
+                .is_match("  /** docs")
+        );
+        assert!(
+            !config.on_enter_rules()[0]
                 .before_text
                 .is_match("  /** docs */")
         );
+    }
+
+    #[test]
+    fn missing_and_empty_fields_differ() {
+        let config = LanguageConfiguration::from_json(
+            r#"{
+                "autoClosingPairs": [],
+                "__electricCharacterSupport": { "docComment": { "open": "/**", "close": " */" } }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(config.auto_closing_pairs.as_deref(), Some(&[][..]));
+        assert!(config.brackets.is_none() && config.comments.is_none());
+        assert_eq!(
+            config
+                .electric_character_support
+                .and_then(|support| support.doc_comment),
+            Some(DocComment {
+                open: "/**".into(),
+                close: Some(" */".into()),
+            })
+        );
+    }
+
+    /// Monaco `combineLanguageConfigurations`.
+    #[test]
+    fn combining_takes_the_newest_field() {
+        let base = LanguageConfiguration::from_json(
+            r##"{ "brackets": [["(", ")"]], "comments": { "lineComment": "#" }, "autoCloseBefore": ";" }"##,
+        )
+        .unwrap();
+        let newer = LanguageConfiguration::from_json(
+            r#"{ "comments": { "lineComment": "//" }, "autoCloseBefore": "" }"#,
+        )
+        .unwrap();
+        let combined = base.combine(&newer);
+        assert_eq!(combined.comments().line_comment.as_deref(), Some("//"));
+        assert_eq!(combined.brackets(), [("(".to_string(), ")".to_string())]);
+        assert_eq!(combined.auto_close_before.as_deref(), Some(";"));
     }
 }
