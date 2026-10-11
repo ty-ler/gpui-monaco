@@ -122,6 +122,9 @@ pub(crate) struct TextMetrics {
     pub em_width: Pixels,
     /// A space's width: wrapped lines' indentation.
     pub space_width: Pixels,
+    /// The widest digit's width (Monaco `maxDigitWidth`), for the line
+    /// numbers' width.
+    pub max_digit_width: Pixels,
     /// Show control characters as their Unicode control pictures.
     pub render_control_characters: bool,
     /// Monaco `effectiveFullwidthCharacterWidth: 'twoCells'`: the cell
@@ -151,6 +154,16 @@ impl TextMetrics {
         };
         let em_width = width("m");
         let space_width = width(" ");
+        // Monaco `FontInfo.maxDigitWidth`: the widest of the digits.
+        let digits = window.text_system().shape_line(
+            "0123456789".into(),
+            font_size,
+            &[run(10, &font, gpui::black())],
+            None,
+        );
+        let max_digit_width = (0..10)
+            .map(|i| digits.x_for_index(i + 1) - digits.x_for_index(i))
+            .fold(px(0.), Pixels::max);
         // Monaco `FontInfo.isMonospace`: the typical characters are equally
         // wide.
         let two_cells = options.fullwidth_character_width
@@ -165,6 +178,7 @@ impl TextMetrics {
             line_height: options.resolved_line_height(),
             em_width,
             space_width,
+            max_digit_width,
             render_control_characters: options.render_control_characters,
             full_width_cell: two_cells.then_some(space_width * 2.),
         }
@@ -930,6 +944,84 @@ pub(crate) fn row_segment(view_lines: &ViewLines, view_line: u32) -> RowSegment 
     }
 }
 
+/// Row `row`'s inline decorations (Monaco `LineDecoration`s): the bracket
+/// pair colors and decoration text styles over the syntax colors, in
+/// row-relative bytes, and the injected text before and after decorated
+/// ranges, by column. `line_range` is the row's byte range.
+pub(crate) fn decoration_styles_and_injections(
+    row: u32,
+    line_range: Range<usize>,
+    bracket_colors: &[(Range<usize>, Hsla)],
+    decoration_points: &[(PointUtf16, PointUtf16, &crate::decorations::Decoration)],
+    options: &EditorOptions,
+    colors: &EditorColors,
+) -> (Vec<(Range<usize>, TokenStyle)>, Vec<Injection>) {
+    let mut decoration_styles: Vec<(Range<usize>, TokenStyle)> = bracket_colors
+        .iter()
+        .filter(|(range, _)| line_range.start <= range.start && range.end <= line_range.end)
+        .map(|(range, color)| {
+            (
+                range.start - line_range.start..range.end - line_range.start,
+                TokenStyle {
+                    foreground: Some(*color),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    let mut injections = Vec::new();
+    for (start, end, decoration) in decoration_points {
+        if start.row > row || end.row < row {
+            continue;
+        }
+        let decoration_options = &decoration.options;
+        // Monaco's tag classes, when the editor shows them.
+        let tag_style = TokenStyle {
+            opacity: (decoration_options.unnecessary && options.show_unused)
+                .then_some(colors.unnecessary_code_opacity.a),
+            strikethrough: decoration_options.deprecated && options.show_deprecated,
+            ..Default::default()
+        };
+        let style = match (decoration_options.text, tag_style == TokenStyle::default()) {
+            (Some(style), true) => Some(style),
+            (Some(style), false) => Some(TokenStyle {
+                opacity: tag_style.opacity,
+                strikethrough: style.strikethrough || tag_style.strikethrough,
+                ..style
+            }),
+            (None, false) => Some(tag_style),
+            (None, true) => None,
+        };
+        if let Some(style) = style {
+            let from = if start.row == row {
+                decoration.range.start - line_range.start
+            } else {
+                0
+            };
+            let to = if end.row == row {
+                decoration.range.end - line_range.start
+            } else {
+                line_range.len()
+            };
+            if to > from {
+                decoration_styles.push((from..to, style));
+            }
+        }
+        if let Some(before) = &decoration_options.before
+            && start.row == row
+        {
+            injections.push((start.column, false, before.clone(), Some(decoration.id)));
+        }
+        if let Some(after) = &decoration_options.after
+            && end.row == row
+        {
+            injections.push((end.column, true, after.clone(), Some(decoration.id)));
+        }
+    }
+    injections.sort_by_key(|(column, _, _, _)| *column);
+    (decoration_styles, injections)
+}
+
 /// Highlight spans for byte `range` of the current text, using the model's
 /// latest (possibly older) syntax state mapped through the edits since.
 pub(crate) fn current_highlights(
@@ -1092,13 +1184,76 @@ pub(crate) struct FoldControl {
 /// A sticky scroll line, for hit testing.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StickyLine {
-    /// The last row the scope keeps the header for.
+    /// The row after the scope (Monaco's `endLineNumbers`), which Shift
+    /// shows and Shift+click reveals.
     pub end_row: u32,
     /// The row shown (the scope's end with Shift held over it).
     pub row: u32,
+    /// Where it shows, clipped to the widget.
     pub bounds: Bounds<Pixels>,
     /// Its folding control.
     pub fold: Option<FoldControl>,
+    /// The x its text starts at (it follows the horizontal scroll with
+    /// `stickyScroll.scrollWithEditor`).
+    pub origin_x: Pixels,
+}
+
+/// Something to draw in the glyph margin (Monaco `GlyphRenderRequest`): a
+/// decoration's glyph or a glyph margin widget (by index).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GlyphRequest {
+    pub view_line: u32,
+    pub lane_index: usize,
+    pub z_index: i32,
+    pub glyph: Option<(SharedString, Hsla)>,
+    pub widget: Option<usize>,
+}
+
+/// Monaco `GlyphMarginWidgets._collectSortedGlyphRenderRequests` and
+/// `prepareRender`: per view line and lane, the request with the highest
+/// z-index wins, a widget before a decoration, then the first glyph.
+pub(crate) fn resolve_glyph_requests(mut requests: Vec<GlyphRequest>) -> Vec<GlyphRequest> {
+    requests.sort_by(|a, b| {
+        (a.view_line, a.lane_index)
+            .cmp(&(b.view_line, b.lane_index))
+            .then(b.z_index.cmp(&a.z_index))
+            .then(b.widget.is_some().cmp(&a.widget.is_some()))
+            .then_with(|| {
+                let text = |r: &GlyphRequest| r.glyph.as_ref().map(|(text, _)| text.clone());
+                text(a).cmp(&text(b))
+            })
+    });
+    requests.dedup_by(|b, a| a.view_line == b.view_line && a.lane_index == b.lane_index);
+    requests
+}
+
+/// Whether view line `line` shows part of `start..end` (inclusive): Monaco
+/// converts a decoration's range to view lines, so a glyph shows on every
+/// line of its range, wrapped segments included, but not on a wrapped
+/// line's later segments for a range that ends before them.
+pub(crate) fn segment_intersects(line: &LineLayout, start: PointUtf16, end: PointUtf16) -> bool {
+    if line.row < start.row || line.row > end.row {
+        return false;
+    }
+    if line.row == end.row && line.columns.start > 0 && line.columns.start >= end.column {
+        return false;
+    }
+    !(line.row == start.row && line.columns.end < start.column)
+}
+
+/// One box of the current line highlight (Monaco
+/// `CurrentLineHighlightOverlay` in the text area and
+/// `CurrentLineMarginHighlightOverlay` in the gutter).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LineHighlight {
+    /// The view line.
+    pub view_line: u32,
+    /// The gutter's box, not the text area's.
+    pub margin: bool,
+    pub bounds: Bounds<Pixels>,
+    pub background: Option<Hsla>,
+    /// The border's color and widths (on the cursor's own view line).
+    pub border: Option<(Hsla, Edges<Pixels>)>,
 }
 
 /// Vertical positions with view zones: zone `i` sits after view line
@@ -1285,8 +1440,11 @@ pub(crate) struct EditorLayout {
     pub minimap: Option<MinimapLayout>,
     /// What the minimap draws.
     pub minimap_paint: Option<std::sync::Arc<crate::minimap::MinimapPaint>>,
-    /// Sticky scroll lines.
+    /// Sticky scroll lines, topmost first (earlier lines draw over the
+    /// pushed last one).
     pub sticky_lines: Vec<StickyLine>,
+    /// The sticky lines' shaped text, for clicks.
+    pub sticky_layouts: Vec<LineLayout>,
     pub vertical_scrollbar: Option<ScrollbarLayout>,
     pub horizontal_scrollbar: Option<ScrollbarLayout>,
     /// The line number labels drawn, by row (for tests).
@@ -1296,9 +1454,38 @@ pub(crate) struct EditorLayout {
     /// The rows and left edges of the `wordWrapIndicator` glyphs drawn (for
     /// tests).
     pub wrap_indicators: Vec<(u32, Pixels)>,
+    /// The current line highlight's boxes.
+    pub line_highlights: Vec<LineHighlight>,
+    /// The line numbers' rows, left edges and colors (for tests).
+    pub line_number_styles: Vec<(u32, Pixels, Hsla)>,
+    /// The glyph margin's glyphs and widgets drawn, as (view line, lane
+    /// index) (for tests).
+    pub glyphs_drawn: Vec<(u32, usize)>,
 }
 
 impl EditorLayout {
+    /// The sticky line at `position`: the topmost, as the pushed last line
+    /// slides under the others.
+    pub fn sticky_line_at(&self, position: gpui::Point<Pixels>) -> Option<usize> {
+        self.sticky_lines
+            .iter()
+            .position(|line| line.bounds.contains(&position))
+    }
+
+    /// The text position on sticky line `ix` under `position`, if it's over
+    /// the line's text area (Monaco `getEditorPositionFromNode`).
+    pub fn sticky_position(&self, ix: usize, position: gpui::Point<Pixels>) -> Option<PointUtf16> {
+        let line = self.sticky_lines.get(ix)?;
+        let text = self.sticky_layouts.get(ix)?;
+        if position.x < self.text_bounds.left() || !line.bounds.contains(&position) {
+            return None;
+        }
+        Some(PointUtf16::new(
+            line.row,
+            text.column_for_x(position.x - line.origin_x),
+        ))
+    }
+
     /// Visible view lines that fit fully, for page up/down.
     pub fn page_rows(&self) -> u32 {
         ((self.text_bounds.size.height / self.metrics.line_height).floor() as u32).max(1)
@@ -1410,16 +1597,17 @@ fn opposite(color: Hsla) -> Hsla {
 pub struct PrepaintState {
     layout: EditorLayout,
     selections: Vec<Selection>,
-    /// View lines with a cursor (for the current line highlight).
-    cursor_view_lines: Vec<u32>,
     cursors: Vec<CursorPaint>,
     /// Monaco `block-outline`: the cursors are outlined, not filled.
     cursor_outline: bool,
+    /// The line numbers: top, text, left.
     gutter_numbers: Vec<(Pixels, ShapedLine, Pixels)>,
     /// (x after the text, top) of rows whose region is collapsed.
     fold_placeholders: Vec<(Pixels, Pixels)>,
     fold_highlights: Vec<Bounds<Pixels>>,
-    show_fold_controls: bool,
+    /// The expanded regions' folding controls' opacity (collapsed ones always
+    /// show).
+    fold_controls_opacity: f32,
     decoration_quads: Vec<(Bounds<Pixels>, Option<Hsla>, Option<Hsla>)>,
     /// Block decorations' boxes, colors and border widths.
     block_borders: Vec<(Bounds<Pixels>, Hsla, Pixels)>,
@@ -1447,10 +1635,13 @@ pub struct PrepaintState {
     /// Replaced minimap images to free.
     minimap_stale: Vec<std::sync::Arc<gpui::RenderImage>>,
     sticky: Vec<(usize, Pixels, LineLayout, Option<ShapedLine>)>,
+    /// The sticky scroll widget's height (Monaco `_setHeight`).
+    sticky_height: Pixels,
     /// The keyboard-focused and hovered sticky lines.
     sticky_focused: Option<usize>,
     sticky_hovered: Option<usize>,
-    sticky_scroll_with_editor: bool,
+    /// Every sticky folding control shows, not just the collapsed ones.
+    sticky_show_fold_controls: bool,
     numbers_right: Pixels,
     zone_elements: Vec<gpui::AnyElement>,
     full_width_zone_elements: Vec<gpui::AnyElement>,
@@ -1458,6 +1649,8 @@ pub struct PrepaintState {
     content_elements: Vec<gpui::AnyElement>,
     /// Glyph margin widgets, painted in the gutter under the sticky scroll.
     glyph_elements: Vec<gpui::AnyElement>,
+    /// The hovered folding control's tooltip.
+    fold_tooltip: Option<gpui::AnyElement>,
     /// Overlay widgets, painted last, clipped to the editor.
     overlay_elements: Vec<gpui::AnyElement>,
     /// The editor's own hitbox (see `EditorElement::prepaint`).
@@ -1824,6 +2017,40 @@ impl Element for EditorElement {
                 }
             }
         }
+        // Monaco's `linesDecorationsTooltip` on the folding control under
+        // the mouse.
+        let mouse = window.mouse_position();
+        if let Some(control) = state
+            .layout
+            .fold_controls
+            .iter()
+            .find(|control| control.bounds.contains(&mouse))
+            .copied()
+            .filter(|_| state.layout.bounds.contains(&mouse))
+        {
+            let text = if control.collapsed {
+                "Click to expand the range."
+            } else {
+                "Click to collapse the range."
+            };
+            use gpui::{InteractiveElement as _, StatefulInteractiveElement as _, Styled as _};
+            let mut element = gpui::div()
+                .id(("folding-control", control.row as usize))
+                .w(control.bounds.size.width)
+                .h(control.bounds.size.height)
+                .tooltip(crate::tooltip::tooltip(text, &state.colors))
+                .into_any_element();
+            element.layout_as_root(
+                size(
+                    AvailableSpace::Definite(control.bounds.size.width),
+                    AvailableSpace::Definite(control.bounds.size.height),
+                ),
+                window,
+                cx,
+            );
+            element.prepaint_at(control.bounds.origin, window, cx);
+            state.fold_tooltip = Some(element);
+        }
         state.cursor_areas = cursor_areas;
         state.widgets_keeping_focus = widgets
             .bounds
@@ -1910,6 +2137,52 @@ impl Element for EditorElement {
     }
 }
 
+/// Monaco `View._computeGlyphMarginLanes`: the lanes the glyph decorations
+/// and glyph margin widgets use, line by line. Without any picking a lane
+/// it's the one center lane, without looking at the decorations.
+fn glyph_margin_lanes(
+    editor: &CodeEditor,
+    cx: &gpui::Context<CodeEditor>,
+) -> crate::view::glyph_lanes::GlyphMarginLanesModel {
+    use crate::decorations::GlyphMarginLane;
+    let mut lanes = crate::view::glyph_lanes::GlyphMarginLanesModel::default();
+    let model = editor.model().read(cx);
+    let set = model.decoration_set();
+    let widgets_pick_lanes = editor
+        .widgets
+        .glyphs
+        .iter()
+        .any(|widget| widget.lane != GlyphMarginLane::Center);
+    if !set.has_glyph_lanes() && !widgets_pick_lanes {
+        return lanes;
+    }
+    let buffer = model.buffer();
+    let editor_id = cx.entity_id();
+    let mut glyphs: Vec<(u32, u32, GlyphMarginLane, bool)> = set
+        .iter()
+        .filter(|d| d.options.glyph.is_some() && d.owner.is_none_or(|o| o == editor_id))
+        .map(|d| {
+            let options = d.options.glyph_margin.unwrap_or_default();
+            (
+                buffer.offset_to_point(d.range.start).row,
+                buffer.offset_to_point(d.range.end).row,
+                options.position,
+                options.persist_lane,
+            )
+        })
+        .collect();
+    glyphs.extend(editor.widgets.glyphs.iter().map(|widget| {
+        let row = buffer.offset_to_point(buffer.resolve(&widget.anchor)).row;
+        (row, row, widget.lane, false)
+    }));
+    glyphs.sort_by_key(|(start, end, _, _)| (*start, *end));
+    lanes.reset(glyphs.iter().map(|g| g.1).max().unwrap_or(0));
+    for (start, end, lane, persist) in glyphs {
+        lanes.push(lane, start..=end, persist);
+    }
+    lanes
+}
+
 fn prepaint_editor(
     editor: &mut CodeEditor,
     bounds: Bounds<Pixels>,
@@ -1933,6 +2206,7 @@ fn prepaint_editor(
     // is [glyph margin][line numbers][line decorations + folding], then
     // the minimap's share, and where lines wrap.
     let f64_of = |pixels: Pixels| f64::from(f32::from(pixels));
+    let glyph_lanes = glyph_margin_lanes(editor, cx);
     let mut layout_info = crate::layout_info::compute_layout(
         &options,
         &crate::layout_info::LayoutEnv {
@@ -1941,10 +2215,10 @@ fn prepaint_editor(
             line_height: f64_of(line_height),
             line_numbers_digit_count: line_count.to_string().len() as u32,
             typical_halfwidth_character_width: f64_of(metrics.em_width),
-            max_digit_width: f64_of(metrics.em_width),
+            max_digit_width: f64_of(metrics.max_digit_width),
             pixel_ratio: f64::from(window.scale_factor()),
             view_line_count: editor.view_lines.line_count().max(1),
-            glyph_margin_decoration_lane_count: 1,
+            glyph_margin_decoration_lane_count: glyph_lanes.required_lanes() as u32,
             is_dominated_by_long_lines: editor.screen_reader.dominated_by_long_lines,
             screen_reader,
         },
@@ -2437,69 +2711,14 @@ fn prepaint_editor(
             });
         // Decoration text styles override syntax colors; injected text goes
         // before/after decorated ranges.
-        let mut decoration_styles: Vec<(Range<usize>, TokenStyle)> = bracket_colors
-            .iter()
-            .filter(|(range, _)| line_range.start <= range.start && range.end <= line_range.end)
-            .map(|(range, color)| {
-                (
-                    range.start - line_range.start..range.end - line_range.start,
-                    TokenStyle {
-                        foreground: Some(*color),
-                        ..Default::default()
-                    },
-                )
-            })
-            .collect();
-        let mut injections = Vec::new();
-        for (start, end, decoration) in &decoration_points {
-            if start.row > segment.row || end.row < segment.row {
-                continue;
-            }
-            let options = &decoration.options;
-            // Monaco's tag classes, when the editor shows them.
-            let tag_style = TokenStyle {
-                opacity: (options.unnecessary && editor.options.show_unused)
-                    .then_some(colors.unnecessary_code_opacity.a),
-                strikethrough: options.deprecated && editor.options.show_deprecated,
-                ..Default::default()
-            };
-            let style = match (options.text, tag_style == TokenStyle::default()) {
-                (Some(style), true) => Some(style),
-                (Some(style), false) => Some(TokenStyle {
-                    opacity: tag_style.opacity,
-                    strikethrough: style.strikethrough || tag_style.strikethrough,
-                    ..style
-                }),
-                (None, false) => Some(tag_style),
-                (None, true) => None,
-            };
-            if let Some(style) = style {
-                let from = if start.row == segment.row {
-                    decoration.range.start - line_range.start
-                } else {
-                    0
-                };
-                let to = if end.row == segment.row {
-                    decoration.range.end - line_range.start
-                } else {
-                    line_range.len()
-                };
-                if to > from {
-                    decoration_styles.push((from..to, style));
-                }
-            }
-            if let Some(before) = &options.before
-                && start.row == segment.row
-            {
-                injections.push((start.column, false, before.clone(), Some(decoration.id)));
-            }
-            if let Some(after) = &options.after
-                && end.row == segment.row
-            {
-                injections.push((end.column, true, after.clone(), Some(decoration.id)));
-            }
-        }
-        injections.sort_by_key(|(column, _, _, _)| *column);
+        let (decoration_styles, mut injections) = decoration_styles_and_injections(
+            segment.row,
+            line_range.clone(),
+            &bracket_colors,
+            &decoration_points,
+            &editor.options,
+            &colors,
+        );
         // Monaco's `mtkoverflow`: "Show more (1.9 MB)" where it stops.
         if segment.overflow > 0 {
             injections.retain(|(column, _, _, _)| *column <= segment.columns.end);
@@ -2726,7 +2945,11 @@ fn prepaint_editor(
         let model = editor.model().clone();
         let buffer = model.read(cx).buffer();
         let collapsed = editor.folds.collapsed_rows(buffer);
-        let left = bounds.left() + glyph_width + numbers_width + line_decorations_width;
+        // Monaco draws the control as a line decoration (`.cldr`): the
+        // whole line decorations column, its codicon centered, with
+        // `folding.css`'s 2px left margin.
+        let left = bounds.left() + glyph_width + numbers_width + px(2.);
+        let control_width = line_decorations_width + folding_width;
         // Monaco `showFoldingControls: never` has no controls, collapsed
         // regions' included.
         for line in lines
@@ -2739,7 +2962,7 @@ fn prepaint_editor(
             if is_collapsed || editor.folds.range_starting_at(line.row).is_some() {
                 fold_controls.push(FoldControl {
                     row: line.row,
-                    bounds: Bounds::new(point(left, top), size(folding_width, height)),
+                    bounds: Bounds::new(point(left, top), size(control_width, height)),
                     collapsed: is_collapsed,
                 });
             }
@@ -2749,14 +2972,14 @@ fn prepaint_editor(
                 // Centered on taller lines, with the text.
                 let top = bounds.top() + zones.line_y(line.view_line, line_height) - scroll_top
                     + (zones.height(line.view_line, line_height) - line_height) / 2.;
-                let x = text_bounds.left() - scroll_left + line.width() + metrics.em_width / 2.;
+                // Monaco `.inline-folded:after`: "⋯" after the text, with
+                // a 0.2em margin each side.
+                let margin = metrics.font_size * 0.2;
+                let x = text_bounds.left() - scroll_left + line.width() + margin;
                 fold_placeholders.push((x, top));
                 fold_placeholder_bounds.push((
                     line.row,
-                    Bounds::new(
-                        point(x, top + line_height * 0.15),
-                        size(metrics.em_width * 2., line_height * 0.7),
-                    ),
+                    Bounds::new(point(x, top), size(metrics.em_width, line_height)),
                 ));
             }
         }
@@ -2776,10 +2999,18 @@ fn prepaint_editor(
             }
         }
     }
-    let show_fold_controls = match options.show_folding_controls {
-        ShowFoldingControls::Always => true,
-        ShowFoldingControls::Mouseover => editor.gutter_hovered,
-        ShowFoldingControls::Never => false,
+    // Monaco `folding.css`: the expanded regions' controls show with
+    // `always`, else fade in over 0.5s while the mouse is over the gutter.
+    let fold_controls_opacity = match options.show_folding_controls {
+        ShowFoldingControls::Always => 1.,
+        ShowFoldingControls::Mouseover => {
+            let (opacity, fading) = editor.animation.folding.update(editor.gutter_hovered);
+            if fading {
+                window.request_animation_frame();
+            }
+            opacity
+        }
+        ShowFoldingControls::Never => 0.,
     };
 
     // Monaco `ScrollDecorationViewPart`, with `scrollbar.useShadows`: a
@@ -2826,11 +3057,15 @@ fn prepaint_editor(
         minimap: None,
         minimap_paint: None,
         sticky_lines: Vec::new(),
+        sticky_layouts: Vec::new(),
         vertical_scrollbar,
         horizontal_scrollbar,
         line_number_labels: Vec::new(),
         cursors: (Vec::new(), false),
         wrap_indicators: Vec::new(),
+        line_highlights: Vec::new(),
+        line_number_styles: Vec::new(),
+        glyphs_drawn: Vec::new(),
     };
 
     // Minimap (Monaco `Minimap`), sized per `minimap.size`
@@ -2883,61 +3118,133 @@ fn prepaint_editor(
     // Sticky scroll: headers of the fold ranges enclosing the top of the
     // viewport (Monaco `stickyScroll`; see `sticky_model`).
     let mut sticky_shaped: Vec<(usize, Pixels, LineLayout, Option<ShapedLine>)> = Vec::new();
+    let mut sticky_height = px(0.);
     // Monaco: no sticky scroll for models too large to tokenize.
     if options.sticky_scroll.enabled && !options.single_line && !too_large && scroll_top > px(0.) {
-        let max = options.sticky_scroll.max_line_count as usize;
-        let mut sticky_rows: Vec<(u32, u32)> = Vec::new();
-        while sticky_rows.len() < max {
-            let probe_y = scroll_top + line_height * sticky_rows.len() as f32;
-            let probe_row = view_lines
-                .view_line(zones.line_at(probe_y, line_height, view_line_count))
-                .row;
-            // The outermost range enclosing the probe below the last header.
-            let next =
-                editor
-                    .sticky_ranges_enclosing(probe_row)
-                    .into_iter()
-                    .find(|(start_row, _)| {
-                        sticky_rows
-                            .last()
-                            .is_none_or(|(start, _)| *start < *start_row)
-                    });
-            match next {
-                Some(range) => sticky_rows.push(range),
-                None => break,
-            }
-        }
+        let elements = editor.sticky_elements();
+        let first_row = view_lines
+            .view_line(zones.line_at(scroll_top, line_height, view_line_count))
+            .row;
+        let last_row = view_lines
+            .view_line(zones.line_at(scroll_top + viewport_height, line_height, view_line_count))
+            .row;
+        let line_count = snapshot.line_count();
+        let lh = f32::from(line_height);
+        let candidates = crate::sticky_model::candidates_intersecting(
+            &elements,
+            (first_row, last_row),
+            view_lines.hidden(),
+            line_count,
+            &|_| lh,
+        );
+        // Monaco `getTopForLineNumber` and `getBottomForLineNumber`: a
+        // hidden row is where the line it's folded into ends.
+        let view_line_count = view_lines.line_count();
+        let top_of = |row: u32| {
+            let line = view_lines.first_view_line_of_row(row);
+            let line = if view_lines.is_row_hidden(row) {
+                line.saturating_sub(1)
+            } else {
+                line.min(view_line_count.saturating_sub(1))
+            };
+            f32::from(zones.line_y(line, line_height))
+        };
+        let bottom_of = |row: u32| {
+            let line = view_lines.first_view_line_of_row(row + 1).saturating_sub(1);
+            f32::from(zones.line_y(line, line_height) + zones.height(line, line_height))
+        };
+        let state = crate::sticky_model::find_scroll_widget_state(
+            &candidates,
+            crate::sticky_model::max_sticky_lines(
+                f32::from(viewport_height),
+                lh,
+                options.sticky_scroll.max_line_count,
+            ),
+            f32::from(scroll_top),
+            &top_of,
+            &bottom_of,
+        );
         let collapsed_rows = editor
             .folds
             .collapsed_rows(editor.model().read(cx).buffer());
-        for (ix, (start_row, end_row)) in sticky_rows.iter().enumerate() {
+        let editor_id = cx.entity_id();
+        let show_validation = editor.shows_validation_decorations();
+        let count = state.start_rows.len();
+        // Monaco's sticky widget clips its lines to its height, which the
+        // pushed last line shrinks (`_renderRootNode`).
+        sticky_height = line_height * count as f32 + px(state.last_line_relative_position);
+        for (ix, start_row) in state.start_rows.iter().enumerate() {
             // Monaco: Shift over a sticky line shows the scope's end.
-            let row = if editor.sticky.show_end == Some(ix) {
-                &(end_row + 1).min(snapshot.max_point_utf16().row)
-            } else {
-                start_row
+            let row = match editor.sticky.show_end {
+                Some(end) if end == ix => state.end_rows[ix],
+                _ => *start_row,
             };
-            let mut top = line_height * ix as f32;
-            // The last header slides up as its range scrolls out.
-            let end_line = view_lines.first_view_line_of_row(end_row + 1).max(1) - 1;
-            let end_bottom = zones.line_y(end_line, line_height) + line_height - scroll_top;
-            if ix + 1 == sticky_rows.len() {
-                top = top.min(end_bottom - line_height);
+            if row >= line_count {
+                continue;
             }
-            let segment = row_segment(&view_lines, view_lines.first_view_line_of_row(*row));
-            let line_range = snapshot.line_range(*row);
-            let row_highlights: Vec<(Range<usize>, TokenStyle)> = {
-                let model = editor.model().read(cx);
-                current_highlights(model, &theme, line_range.clone())
+            let collapsed = collapsed_rows.iter().any(|(start, _)| *start == row);
+            // Monaco `_updatePosition`: the last line slides up under the
+            // ones above as its scope scrolls out (a collapsed one a pixel
+            // less).
+            let top = if ix + 1 == count {
+                line_height * ix as f32
+                    + px(state.last_line_relative_position)
+                    + if collapsed { px(1.) } else { px(0.) }
+            } else {
+                line_height * ix as f32
+            };
+            let segment = row_segment(&view_lines, view_lines.first_view_line_of_row(row));
+            let line_range = snapshot.line_range(row);
+            // Monaco renders sticky lines with their inline decorations and
+            // injected text (`RenderedStickyLine`), so they line up with the
+            // real lines.
+            let (row_highlights, injections) = {
+                let row_highlights: Vec<(Range<usize>, TokenStyle)> = {
+                    let model = editor.model().read(cx);
+                    current_highlights(model, &theme, line_range.clone())
+                        .into_iter()
+                        .map(|(range, style)| {
+                            (
+                                range.start.max(line_range.start) - line_range.start
+                                    ..range.end.min(line_range.end) - line_range.start,
+                                style,
+                            )
+                        })
+                        .collect()
+                };
+                let row_decorations: Vec<_> = editor
+                    .model()
+                    .update(cx, |model, _| {
+                        model.decorations_in_range(line_range.clone(), Some(editor_id))
+                    })
                     .into_iter()
-                    .map(|(range, style)| {
+                    .filter(|d| show_validation || !d.options.validation)
+                    .collect();
+                let points: Vec<_> = row_decorations
+                    .iter()
+                    .map(|d| {
                         (
-                            range.start.max(line_range.start) - line_range.start
-                                ..range.end.min(line_range.end) - line_range.start,
-                            style,
+                            snapshot.offset_to_point_utf16(d.range.start),
+                            snapshot.offset_to_point_utf16(d.range.end),
+                            d,
                         )
                     })
-                    .collect()
+                    .collect();
+                let brackets = editor.bracket_colors_in(line_range.clone(), cx);
+                let (styles, injections) = decoration_styles_and_injections(
+                    row,
+                    line_range.clone(),
+                    &brackets,
+                    &points,
+                    &editor.options,
+                    &colors,
+                );
+                let row_highlights = if styles.is_empty() {
+                    row_highlights
+                } else {
+                    overlay_styles(&row_highlights, &styles)
+                };
+                (row_highlights, injections)
             };
             let shaped = layout_segment(
                 &snapshot,
@@ -2946,7 +3253,7 @@ fn prepaint_editor(
                 &metrics,
                 colors.foreground,
                 &row_highlights,
-                &[],
+                &injections,
                 None,
                 window,
             );
@@ -2955,7 +3262,7 @@ fn prepaint_editor(
             let label = match &options.line_numbers {
                 LineNumbers::On => Some((row + 1).to_string()),
                 LineNumbers::Interval if (row + 1) % 10 == 0 => Some((row + 1).to_string()),
-                LineNumbers::Relative => Some(primary.row.abs_diff(*row).to_string()),
+                LineNumbers::Relative => Some(primary.row.abs_diff(row).to_string()),
                 _ => None,
             };
             let number = label.map(|label| {
@@ -2966,29 +3273,64 @@ fn prepaint_editor(
                     None,
                 )
             });
-            let fold = (folding_width > px(0.)
-                && editor.folds.range_starting_at(*start_row).is_some())
-            .then(|| FoldControl {
-                row: *start_row,
-                bounds: Bounds::new(
-                    point(
-                        bounds.left() + glyph_width + numbers_width + line_decorations_width,
-                        bounds.top() + top,
+            // Monaco `_renderFoldingIconForLine`: with folding on and
+            // `showFoldingControls` not `never`, on a folding range's
+            // header, 26px wide after the line numbers (with a 2px margin).
+            let fold = (folding_width > px(0.) && editor.folds.range_starting_at(row).is_some())
+                .then(|| FoldControl {
+                    row,
+                    bounds: Bounds::new(
+                        point(
+                            bounds.left() + glyph_width + numbers_width + px(2.),
+                            bounds.top() + top,
+                        ),
+                        size(px(26.), line_height),
                     ),
-                    size(folding_width, line_height),
+                    collapsed,
+                });
+            // The pushed last line only shows above the widget's bottom.
+            let line_bounds = Bounds::new(
+                point(bounds.left(), bounds.top() + top),
+                size(gutter_width + text_width, line_height),
+            );
+            let line_bounds = Bounds::from_corners(
+                line_bounds.origin,
+                point(
+                    line_bounds.right(),
+                    line_bounds.bottom().min(bounds.top() + sticky_height),
                 ),
-                collapsed: collapsed_rows.iter().any(|(start, _)| start == start_row),
-            });
+            );
             layout.sticky_lines.push(StickyLine {
-                end_row: *end_row,
-                row: *row,
-                bounds: Bounds::new(
-                    point(bounds.left(), bounds.top() + top),
-                    size(gutter_width + text_width, line_height),
-                ),
+                end_row: state.end_rows[ix],
+                row,
+                bounds: line_bounds,
                 fold,
+                origin_x: if options.sticky_scroll.scroll_with_editor {
+                    layout.text_origin_x()
+                } else {
+                    text_bounds.left()
+                },
             });
+            layout.sticky_layouts.push(shaped.clone());
             sticky_shaped.push((ix, top, shaped, number));
+        }
+        // Monaco keeps the focused sticky line focused while it shows, else
+        // focuses the last one (`_renderStickyScroll`).
+        if let Some(focused) = editor.sticky.focused {
+            let focused_row = editor
+                .layout
+                .as_ref()
+                .and_then(|l| l.sticky_lines.get(focused))
+                .map(|line| line.row);
+            editor.sticky.focused = if layout.sticky_lines.is_empty() {
+                None
+            } else {
+                Some(
+                    focused_row
+                        .and_then(|row| layout.sticky_lines.iter().position(|l| l.row == row))
+                        .unwrap_or(layout.sticky_lines.len() - 1),
+                )
+            };
         }
     }
     let numbers_right = bounds.left() + glyph_width + numbers_width;
@@ -3057,6 +3399,7 @@ fn prepaint_editor(
     let mut margin_backgrounds: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
     let options_line_decorations_width = line_decorations_width;
     let mut glyphs: Vec<(gpui::Point<Pixels>, ShapedLine)> = Vec::new();
+    let mut glyph_requests: Vec<GlyphRequest> = Vec::new();
     let mut line_number_colors: Vec<(u32, Hsla)> = Vec::new();
     let origin_x = layout.text_origin_x();
     for (start, end, decoration) in &decoration_points {
@@ -3169,25 +3512,24 @@ fn prepaint_editor(
                 let x = bounds.left() + glyph_width + numbers_width + (area - shaped.width) / 2.;
                 glyphs.push((point(x, text_top), shaped));
             }
-            if line.columns.start == 0 {
-                if let Some(color) = options.line_number_color {
-                    line_number_colors.push((line.row, color));
-                }
-                if let Some((glyph, color)) = &options.glyph
-                    && line.row == start.row
-                    && options.glyph.is_some()
-                {
-                    let (glyph, font) = crate::codicons::decoration_text(glyph, cx);
-                    let font = font.unwrap_or_else(|| metrics.font.clone());
-                    let shaped = window.text_system().shape_line(
-                        glyph.clone(),
-                        metrics.font_size,
-                        &[run(glyph.len(), &font, *color)],
-                        None,
-                    );
-                    let x = bounds.left() + (glyph_width - shaped.width) / 2.;
-                    glyphs.push((point(x, text_top), shaped));
-                }
+            if line.columns.start == 0
+                && let Some(color) = options.line_number_color
+            {
+                line_number_colors.push((line.row, color));
+            }
+            // Monaco `_collectDecorationBasedGlyphRenderRequest`: on every
+            // view line of the range.
+            if let Some((glyph, color)) = &options.glyph
+                && segment_intersects(line, *start, *end)
+            {
+                let lane = options.glyph_margin.unwrap_or_default().position;
+                glyph_requests.push(GlyphRequest {
+                    view_line: line.view_line,
+                    lane_index: glyph_lanes.lane_index(line.row, lane),
+                    z_index: options.z_index,
+                    glyph: Some((glyph.clone(), *color)),
+                    widget: None,
+                });
             }
         }
     }
@@ -3839,11 +4181,12 @@ fn prepaint_editor(
         let right = bounds.left() + glyph_width + numbers_width;
         for line in layout.lines.iter().filter(|line| line.columns.start == 0) {
             let row = line.row;
-            let is_active = selections.iter().any(|s| s.head.row == row);
-            // Monaco `renderFinalNewline`: the empty line after a final
-            // newline.
+            // Monaco `LineNumbersOverlay`: only the primary cursor's line is
+            // active.
+            let is_active = row == primary.row;
+            // Monaco `renderFinalNewline`: the last view line, when empty.
             let is_final_newline =
-                row > 0 && row + 1 == snapshot.line_count() && snapshot.line_len(row) == 0;
+                line.view_line + 1 == view_line_count && snapshot.line_len(row) == 0;
             if is_final_newline
                 && options.render_final_newline == crate::options::RenderFinalNewline::Off
             {
@@ -3872,10 +4215,14 @@ fn prepaint_editor(
                 } else {
                     colors.line_number
                 });
+            // Monaco's `dimmed-line-number`: `editorLineNumber.dimmedForeground`,
+            // else the line number color at 40%, over the active color.
             let color = if is_final_newline
                 && options.render_final_newline == crate::options::RenderFinalNewline::Dimmed
             {
-                color.opacity(0.4)
+                colors
+                    .line_number_dimmed
+                    .unwrap_or(colors.line_number.opacity(0.4))
             } else {
                 color
             };
@@ -3885,7 +4232,15 @@ fn prepaint_editor(
                 &[run(label.len(), &metrics.font, color)],
                 None,
             );
-            gutter_numbers.push((layout.text_top(line.view_line), shaped, right));
+            // Right-aligned, but for the relative mode's current line
+            // (`.relative-current-line-number`).
+            let x = if options.line_numbers == LineNumbers::Relative && is_active {
+                right - numbers_width
+            } else {
+                right - shaped.width
+            };
+            layout.line_number_styles.push((row, x, color));
+            gutter_numbers.push((layout.text_top(line.view_line), shaped, x));
             layout.line_number_labels.push((row, label));
         }
     }
@@ -3936,26 +4291,60 @@ fn prepaint_editor(
         let buffer = model.read(cx).buffer();
         // Monaco glyph margin widgets: on their line's first view line.
         let glyph_width = layout.glyph_margin_width;
-        for widget in &editor.widgets.glyphs {
-            if glyph_width <= px(0.) {
-                break;
+        if glyph_width > px(0.) {
+            for (ix, widget) in editor.widgets.glyphs.iter().enumerate() {
+                let row = buffer.offset_to_point(buffer.resolve(&widget.anchor)).row;
+                let Some(line) = layout
+                    .lines
+                    .iter()
+                    .find(|line| line.row == row && line.columns.start == 0)
+                else {
+                    continue;
+                };
+                glyph_requests.push(GlyphRequest {
+                    view_line: line.view_line,
+                    lane_index: glyph_lanes.lane_index(row, widget.lane),
+                    z_index: widget.z_index,
+                    glyph: None,
+                    widget: Some(ix),
+                });
             }
-            let row = buffer.offset_to_point(buffer.resolve(&widget.anchor)).row;
-            let Some(line) = layout
-                .lines
-                .iter()
-                .find(|line| line.row == row && line.columns.start == 0)
-            else {
+        }
+        // Monaco `GlyphMarginWidgets.prepareRender`: one glyph per line and
+        // lane, the highest z-index's, widgets first; a lane is a line
+        // height wide.
+        let lane_width = (glyph_width / glyph_lanes.required_lanes() as f32).round();
+        let mut glyphs_drawn = Vec::new();
+        for request in resolve_glyph_requests(glyph_requests) {
+            let Some(line) = layout.view_line(request.view_line) else {
                 continue;
             };
-            embedded.push(Embedded::Glyph {
-                view: widget.view.clone(),
-                bounds: Bounds::new(
-                    point(layout.bounds.left(), layout.line_top(line.view_line)),
-                    size(glyph_width, layout.line_height_of(line.view_line)),
-                ),
-            });
+            let left = layout.bounds.left() + line_height * request.lane_index as f32;
+            glyphs_drawn.push((request.view_line, request.lane_index));
+            match (request.widget, request.glyph) {
+                (Some(ix), _) => embedded.push(Embedded::Glyph {
+                    view: editor.widgets.glyphs[ix].view.clone(),
+                    bounds: Bounds::new(
+                        point(left, layout.line_top(line.view_line)),
+                        size(lane_width, layout.line_height_of(line.view_line)),
+                    ),
+                }),
+                (None, Some((glyph, color))) => {
+                    let (glyph, font) = crate::codicons::decoration_text(&glyph, cx);
+                    let font = font.unwrap_or_else(|| metrics.font.clone());
+                    let shaped = window.text_system().shape_line(
+                        glyph.clone(),
+                        metrics.font_size,
+                        &[run(glyph.len(), &font, color)],
+                        None,
+                    );
+                    let x = left + (lane_width - shaped.width) / 2.;
+                    glyphs.push((point(x, layout.text_top(line.view_line)), shaped));
+                }
+                (None, None) => {}
+            }
         }
+        layout.glyphs_drawn = glyphs_drawn;
         for widget in &editor.widgets.content {
             let position = buffer.offset_to_point_utf16(buffer.resolve(&widget.anchor));
             let Some(line) = layout.line_for_point(position) else {
@@ -4023,6 +4412,15 @@ fn prepaint_editor(
         ))
     });
     let focused = editor.focus_handle.is_focused(window);
+    layout.line_highlights = current_line_highlights(
+        &layout,
+        &options,
+        &colors,
+        editor.theme.high_contrast,
+        &selections,
+        &cursor_view_lines,
+        focused,
+    );
     layout.cursors = (
         cursors.iter().map(|cursor| cursor.bounds).collect(),
         cursor_style == CursorStyle::BlockOutline,
@@ -4032,13 +4430,12 @@ fn prepaint_editor(
     PrepaintState {
         layout,
         selections,
-        cursor_view_lines,
         cursors,
         cursor_outline: cursor_style == CursorStyle::BlockOutline,
         gutter_numbers,
         fold_placeholders,
         fold_highlights,
-        show_fold_controls,
+        fold_controls_opacity,
         decoration_quads,
         block_borders,
         decoration_underlines,
@@ -4056,14 +4453,20 @@ fn prepaint_editor(
         dnd_target,
         minimap_stale: std::mem::take(&mut editor.minimap_cache.stale),
         sticky: sticky_shaped,
+        sticky_height,
         sticky_focused: editor.sticky.focused,
         sticky_hovered: editor.sticky.hovered,
-        sticky_scroll_with_editor: options.sticky_scroll.scroll_with_editor,
+        // Monaco: hovering the sticky gutter shows every folding control
+        // there with `mouseover`; else the collapsed ones (and all with
+        // `always`).
+        sticky_show_fold_controls: editor.sticky.gutter_hovered
+            || options.show_folding_controls == ShowFoldingControls::Always,
         numbers_right,
         zone_elements: Vec::new(),
         full_width_zone_elements: Vec::new(),
         content_elements: Vec::new(),
         glyph_elements: Vec::new(),
+        fold_tooltip: None,
         overlay_elements: Vec::new(),
         hitbox: None,
         cursor_areas: Vec::new(),
@@ -4089,6 +4492,7 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
     let mut full_width_zone_elements = std::mem::take(&mut state.full_width_zone_elements);
     let mut content_elements = std::mem::take(&mut state.content_elements);
     let mut glyph_elements = std::mem::take(&mut state.glyph_elements);
+    let mut fold_tooltip = state.fold_tooltip.take();
     let mut overlay_elements = std::mem::take(&mut state.overlay_elements);
     let state = &*state;
     let layout = &state.layout;
@@ -4100,61 +4504,8 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
     let gutter = Bounds::new(bounds.origin, size(layout.gutter_width, bounds.size.height));
     window.paint_quad(fill(gutter, colors.gutter_background));
 
-    let has_selection = state.selections.iter().any(|s| !s.is_empty());
-    let highlight_line = matches!(
-        state.options.render_line_highlight,
-        RenderLineHighlight::Line | RenderLineHighlight::All
-    );
-    let highlight_gutter = matches!(
-        state.options.render_line_highlight,
-        RenderLineHighlight::Gutter | RenderLineHighlight::All
-    );
-
     window.with_content_mask(Some(ContentMask { bounds }), |window| {
-        // Current line highlight (Monaco only draws it without a selection).
-        if !has_selection
-            && (highlight_line || highlight_gutter)
-            && (state.focused || !state.options.render_line_highlight_only_when_focus)
-        {
-            let top = layout.line_top(state.cursor_view_lines[0]);
-            let left = if highlight_gutter {
-                bounds.left()
-            } else {
-                layout.text_bounds.left()
-            };
-            let line_bounds = Bounds::new(
-                point(left, top),
-                size(
-                    layout.text_bounds.right() - left,
-                    layout.line_height_of(state.cursor_view_lines[0]),
-                ),
-            );
-            // Monaco `editor.inactiveLineHighlightBackground` when unfocused.
-            let background = if state.focused {
-                colors.line_highlight_background
-            } else {
-                colors.inactive_line_highlight_background
-            };
-            if let Some(background) = background {
-                window.paint_quad(fill(line_bounds, background));
-            }
-            if let Some(border) = colors.line_highlight_border {
-                // 1px in high contrast themes, which have a contrast border.
-                let width = if colors.contrast_border.is_some() {
-                    px(1.)
-                } else {
-                    px(2.)
-                };
-                window.paint_quad(quad(
-                    line_bounds,
-                    Corners::default(),
-                    gpui::transparent_black(),
-                    Edges::all(width),
-                    border,
-                    BorderStyle::Solid,
-                ));
-            }
-        }
+        paint_current_line_highlight(state, window);
         for (bounds, color) in &state.margin_backgrounds {
             window.paint_quad(fill(*bounds, *color));
         }
@@ -4164,8 +4515,8 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
         }
 
         // Gutter numbers.
-        for (top, shaped, right) in &state.gutter_numbers {
-            let origin = point(*right - shaped.width, *top);
+        for (top, shaped, x) in &state.gutter_numbers {
+            let origin = point(*x, *top);
             shaped
                 .paint(origin, line_height, TextAlign::Left, None, window, cx)
                 .ok();
@@ -4186,13 +4537,20 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
             paint_lightbulb(bulb, color, icon, window, cx);
         }
 
-        // Fold controls: always for collapsed regions, otherwise per option.
+        // Fold controls (`editorGutter.foldingControlForeground`, 140% of
+        // the font size): always for collapsed regions, otherwise per
+        // option.
         for control in &layout.fold_controls {
-            if control.collapsed || state.show_fold_controls {
+            let opacity = if control.collapsed {
+                1.
+            } else {
+                state.fold_controls_opacity
+            };
+            if opacity > 0. {
                 paint_chevron(
                     control,
-                    colors.folding_control_foreground,
-                    layout.metrics.font_size,
+                    colors.folding_control_foreground.opacity(opacity),
+                    layout.metrics.font_size * 1.4,
                     window,
                     cx,
                 );
@@ -4374,7 +4732,7 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
 
                 // Folded region placeholder ("⋯").
                 for (x, top) in &state.fold_placeholders {
-                    paint_fold_placeholder(*x, *top, layout, colors, window);
+                    paint_fold_placeholder(*x, *top, layout, colors, window, cx);
                 }
 
                 if let Some(target) = state.dnd_target {
@@ -4439,6 +4797,9 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
             for element in &mut glyph_elements {
                 element.paint(window, cx);
             }
+            if let Some(element) = &mut fold_tooltip {
+                element.paint(window, cx);
+            }
         });
 
         // Monaco's view parts in order: the scrollbars with the overview
@@ -4494,42 +4855,71 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
             );
         }
 
-        if !state.sticky.is_empty() {
+        if !state.sticky.is_empty() && state.sticky_height > px(0.) {
             let background = colors.sticky_scroll_background.unwrap_or(colors.background);
-            let height = state
-                .sticky
-                .iter()
-                .map(|(_, top, _, _)| *top + line_height)
-                .fold(px(0.), |a, b| a.max(b));
+            let gutter_background = colors.sticky_scroll_gutter_background.unwrap_or(background);
             let area = Bounds::new(
                 bounds.origin,
-                size(layout.text_bounds.right() - bounds.left(), height),
+                size(
+                    layout.text_bounds.right() - bounds.left(),
+                    state.sticky_height,
+                ),
             );
-            // Monaco `stickyScroll.scrollWithEditor`: the lines follow the
-            // horizontal scroll.
-            let origin_x = if state.sticky_scroll_with_editor {
-                layout.text_origin_x()
-            } else {
-                layout.text_bounds.left()
-            };
-            window.with_content_mask(Some(ContentMask { bounds: area }), |window| {
-                window.paint_quad(fill(area, background));
-                // `editorStickyScrollGutter.background`.
-                if let Some(gutter) = colors.sticky_scroll_gutter_background {
+            // Monaco `stickyScroll.css`: `box-shadow: editorStickyScroll.shadow
+            // 0 4px 2px -2px` under the widget, then a 1px
+            // `editorStickyScroll.border` bottom border.
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                if colors.sticky_scroll_shadow.a > 0. {
+                    window.paint_drop_shadows(
+                        area,
+                        Corners::default(),
+                        &[gpui::BoxShadow {
+                            color: colors.sticky_scroll_shadow,
+                            offset: point(px(0.), px(4.)),
+                            blur_radius: px(2.),
+                            spread_radius: px(-2.),
+                            inset: false,
+                        }],
+                    );
+                }
+                if let Some(border) = colors.sticky_scroll_border {
                     window.paint_quad(fill(
                         Bounds::new(
-                            area.origin,
-                            size(layout.text_bounds.left() - area.left(), area.size.height),
+                            point(area.left(), area.bottom()),
+                            size(area.size.width, px(1.)),
                         ),
-                        gutter,
+                        border,
                     ));
                 }
-                for (ix, top, line, number) in &state.sticky {
+            });
+            window.with_content_mask(Some(ContentMask { bounds: area }), |window| {
+                // Monaco's last line has z-index 0 under the others' 1, and
+                // every line is opaque, so a pushed last line slides under
+                // its parent instead of drawing over it.
+                let order = state
+                    .sticky
+                    .len()
+                    .checked_sub(1)
+                    .into_iter()
+                    .chain(0..state.sticky.len().saturating_sub(1));
+                for k in order {
+                    let (ix, top, line, number) = &state.sticky[k];
                     let y = bounds.top() + *top;
+                    // `editorStickyScrollGutter.background` behind the
+                    // number, `editorStickyScroll.background` behind the
+                    // text.
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(area.left(), y),
+                            size(layout.text_bounds.left() - area.left(), line_height),
+                        ),
+                        gutter_background,
+                    ));
                     let content = Bounds::new(
                         point(layout.text_bounds.left(), y),
                         size(layout.text_bounds.size.width, line_height),
                     );
+                    window.paint_quad(fill(content, background));
                     // Hovered and keyboard-focused lines (Monaco
                     // `editorStickyScrollHover.background`, focus outline).
                     let focused = state.sticky_focused == Some(*ix);
@@ -4566,6 +4956,10 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                             ),
                         }),
                         |window| {
+                            let origin_x = layout
+                                .sticky_lines
+                                .get(k)
+                                .map_or(layout.text_bounds.left(), |l| l.origin_x);
                             line.shaped
                                 .paint(
                                     point(origin_x + line.indent_x, y),
@@ -4578,30 +4972,19 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                                 .ok();
                         },
                     );
-                }
-                // Folding controls (Monaco shows them as in the gutter).
-                for sticky in &layout.sticky_lines {
-                    if let Some(control) = &sticky.fold
-                        && (control.collapsed || state.show_fold_controls)
+                    // Its folding control (Monaco `StickyFoldingIcon`): the
+                    // codicon at its 16px.
+                    if let Some(control) = layout.sticky_lines.get(k).and_then(|l| l.fold.as_ref())
+                        && (control.collapsed || state.sticky_show_fold_controls)
                     {
                         paint_chevron(
                             control,
                             colors.folding_control_foreground,
-                            layout.metrics.font_size,
+                            px(16.),
                             window,
                             cx,
                         );
                     }
-                }
-                let shadow = Bounds::new(
-                    point(area.left(), area.bottom() - px(1.)),
-                    size(area.size.width, px(1.)),
-                );
-                // `editorStickyScroll.shadow`, or the high contrast
-                // `editorStickyScroll.border`.
-                window.paint_quad(fill(shadow, colors.sticky_scroll_shadow.opacity(0.6)));
-                if let Some(border) = colors.sticky_scroll_border {
-                    window.paint_quad(fill(shadow, border));
                 }
             });
         }
@@ -4865,54 +5248,199 @@ pub(crate) fn paint_lightbulb(
     window.paint_quad(fill(base, color));
 }
 
+/// Monaco's current line highlight (`AbstractLineHighlightOverlay`), as
+/// boxes: every cursor's view line, and with viewport wrapping every view
+/// line of its model line, gets a gutter box (`renderLineHighlight`
+/// `gutter` or `all`, selection or not) and a text area box (`line` or
+/// `all`, only while every selection is empty). The cursor's own view
+/// line also gets the border (`current-line-exact`), 1px in high contrast
+/// themes; the gutter box has none while the focused editor's
+/// `editor.lineHighlightBackground` fills it, and none on its right in
+/// `all` mode (`current-line-margin-both`). Unfocused, the boxes take
+/// `editor.inactiveLineHighlightBackground`.
+fn current_line_highlights(
+    layout: &EditorLayout,
+    options: &EditorOptions,
+    colors: &EditorColors,
+    high_contrast: bool,
+    selections: &[Selection],
+    cursor_view_lines: &[u32],
+    focused: bool,
+) -> Vec<LineHighlight> {
+    let mode = options.render_line_highlight;
+    let shown = !options.render_line_highlight_only_when_focus || focused;
+    let in_margin = matches!(mode, RenderLineHighlight::Gutter | RenderLineHighlight::All) && shown;
+    let in_content = matches!(mode, RenderLineHighlight::Line | RenderLineHighlight::All)
+        && selections.iter().all(|s| s.is_empty())
+        && shown;
+    if !in_margin && !in_content {
+        return Vec::new();
+    }
+    let mut exact: Vec<u32> = cursor_view_lines.to_vec();
+    exact.sort_unstable();
+    exact.dedup();
+    // Monaco `_wordWrap` is `isViewportWrapping`: the cursor's whole model
+    // line is highlighted.
+    let wrapped_rows: Vec<u32> = if layout.layout_info.is_viewport_wrapping {
+        let mut rows: Vec<u32> = exact
+            .iter()
+            .filter_map(|line| layout.view_line(*line).map(|l| l.row))
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        rows
+    } else {
+        Vec::new()
+    };
+    let background = if focused {
+        colors.line_highlight_background
+    } else {
+        colors.inactive_line_highlight_background
+    };
+    let border_width = if high_contrast { px(1.) } else { px(2.) };
+    let bounds = layout.bounds;
+    let text = layout.text_bounds;
+    // `max(scrollWidth, contentWidth)` from the content's start.
+    let content_width = layout.content_width.max(layout.layout_info.content_width);
+    let mut boxes = Vec::new();
+    for line in &layout.lines {
+        let is_exact = exact.binary_search(&line.view_line).is_ok();
+        if !is_exact && wrapped_rows.binary_search(&line.row).is_err() {
+            continue;
+        }
+        let top = layout.line_top(line.view_line);
+        let height = layout.line_height_of(line.view_line);
+        let border = line_highlight_border(is_exact, colors, border_width);
+        if in_margin {
+            let margin_border = border
+                .filter(|_| !(focused && colors.line_highlight_background.is_some()))
+                .map(|(color, edges)| {
+                    let right = if in_content { px(0.) } else { edges.right };
+                    (color, Edges { right, ..edges })
+                });
+            boxes.push(LineHighlight {
+                view_line: line.view_line,
+                margin: true,
+                bounds: Bounds::new(
+                    point(bounds.left(), top),
+                    size(text.left() - bounds.left(), height),
+                ),
+                background,
+                border: margin_border,
+            });
+        }
+        if in_content {
+            boxes.push(LineHighlight {
+                view_line: line.view_line,
+                margin: false,
+                bounds: Bounds::new(
+                    point(layout.text_origin_x(), top),
+                    size(content_width, height),
+                ),
+                background,
+                border,
+            });
+        }
+    }
+    boxes
+}
+
+/// The current line highlight's border on the cursor's own view line.
+fn line_highlight_border(
+    exact: bool,
+    colors: &EditorColors,
+    width: Pixels,
+) -> Option<(Hsla, Edges<Pixels>)> {
+    colors
+        .line_highlight_border
+        .filter(|_| exact)
+        .map(|color| (color, Edges::all(width)))
+}
+
+/// Paints [`current_line_highlights`], the text area's boxes clipped to it
+/// (the vertical scrollbar included, as Monaco's run under it).
+fn paint_current_line_highlight(state: &PrepaintState, window: &mut Window) {
+    let layout = &state.layout;
+    if layout.line_highlights.is_empty() {
+        return;
+    }
+    let text = layout.text_bounds;
+    let content_right = (text.left() + layout.layout_info.content_width).min(layout.bounds.right());
+    let content_mask = Bounds::from_corners(
+        point(text.left(), layout.bounds.top()),
+        point(content_right.max(text.right()), layout.bounds.bottom()),
+    );
+    for highlight in &layout.line_highlights {
+        let paint = |window: &mut Window| {
+            if let Some(background) = highlight.background {
+                window.paint_quad(fill(highlight.bounds, background));
+            }
+            if let Some((color, edges)) = highlight.border {
+                window.paint_quad(quad(
+                    highlight.bounds,
+                    Corners::default(),
+                    gpui::transparent_black(),
+                    edges,
+                    color,
+                    BorderStyle::Solid,
+                ));
+            }
+        };
+        if highlight.margin {
+            paint(window);
+        } else {
+            window.with_content_mask(
+                Some(ContentMask {
+                    bounds: content_mask,
+                }),
+                paint,
+            );
+        }
+    }
+}
+
+/// Monaco's folded-region placeholder (`.inline-folded:after` in
+/// `folding.css`): a plain "⋯" (U+22EF) in the editor font, in
+/// `editor.foldPlaceholderForeground` (unset in high contrast themes,
+/// where it takes the text color).
 fn paint_fold_placeholder(
     x: Pixels,
     top: Pixels,
     layout: &EditorLayout,
     colors: &EditorColors,
     window: &mut Window,
+    cx: &mut App,
 ) {
-    let line_height = layout.metrics.line_height;
-    let width = layout.metrics.em_width * 2.;
-    let box_bounds = Bounds::new(
-        point(x, top + line_height * 0.15),
-        size(width, line_height * 0.7),
+    const ELLIPSIS: &str = "\u{22EF}";
+    let color = colors
+        .fold_placeholder_foreground
+        .unwrap_or(colors.foreground);
+    let shaped = window.text_system().shape_line(
+        ELLIPSIS.into(),
+        layout.metrics.font_size,
+        &[run(ELLIPSIS.len(), &layout.metrics.font, color)],
+        None,
     );
-    window.paint_quad(quad(
-        box_bounds,
-        Corners::all(px(3.)),
-        colors.selection_background.opacity(0.4),
-        Edges::default(),
-        gpui::transparent_black(),
-        BorderStyle::Solid,
-    ));
-    let dot = px(2.);
-    for i in 0..3 {
-        let x = box_bounds.left() + width * (0.25 + 0.25 * i as f32) - dot / 2.;
-        let y = box_bounds.center().y - dot / 2.;
-        window.paint_quad(quad(
-            Bounds::new(point(x, y), size(dot, dot)),
-            Corners::all(dot / 2.),
-            // `editor.foldPlaceholderForeground` (none in high contrast:
-            // the text color).
-            colors
-                .fold_placeholder_foreground
-                .unwrap_or(colors.foreground.opacity(0.7)),
-            Edges::default(),
-            gpui::transparent_black(),
-            BorderStyle::Solid,
-        ));
-    }
+    shaped
+        .paint(
+            point(x, top),
+            layout.metrics.line_height,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        )
+        .ok();
 }
 
 /// A folding control (Monaco `foldingDecorations.ts`): the `chevron-down`
-/// codicon when expanded and `chevron-right` when collapsed, at 140% of the
-/// editor font size (`folding.css`); without the codicon font, a drawn
+/// codicon when expanded and `chevron-right` when collapsed, `icon_size`
+/// big and centered (`folding.css`); without the codicon font, a drawn
 /// chevron.
 fn paint_chevron(
     control: &FoldControl,
     color: Hsla,
-    font_size: Pixels,
+    icon_size: Pixels,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -4921,7 +5449,7 @@ fn paint_chevron(
     } else {
         crate::codicons::Codicon::ChevronDown
     };
-    let icon_size = (font_size * 1.4).min(control.bounds.size.height);
+    let icon_size = icon_size.min(control.bounds.size.height);
     if let Some(shaped) = crate::codicons::shape_icon(icon, icon_size, color, window, cx) {
         paint_icon(shaped, control.bounds, icon_size, window, cx);
         return;
@@ -5432,5 +5960,48 @@ impl WidgetHits {
             .iter()
             .map(|(bounds, _, _, _)| *bounds)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod fold_control_tests {
+    use gpui::TestAppContext;
+
+    use crate::CodeEditor;
+    use crate::options::ShowFoldingControls;
+
+    /// Monaco's `linesDecorationsTooltip` on the folding controls.
+    #[gpui::test]
+    fn folding_controls_have_tooltips(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (editor, cx) = cx.add_window_view(|window, cx| {
+            let mut editor = CodeEditor::with_text("a {\n    b\n    c\n}\n", window, cx);
+            let mut options = editor.options().clone();
+            options.show_folding_controls = ShowFoldingControls::Always;
+            editor.update_options(options, cx);
+            editor
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let control = editor.read_with(cx, |e, _| e.fold_controls_for_tests()[0].1);
+        cx.simulate_mouse_move(control.center(), None, gpui::Modifiers::none());
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        cx.simulate_mouse_move(
+            control.center() + gpui::point(gpui::px(1.), gpui::px(0.)),
+            None,
+            gpui::Modifiers::none(),
+        );
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(crate::tooltip::RENDERED.with(|r| {
+            r.borrow()
+                .iter()
+                .any(|text| text == "Click to collapse the range.")
+        }));
     }
 }

@@ -8,7 +8,9 @@ use gpui::{
     App, AppContext as _, Bounds, Context, Entity, Focusable, PathPromptOptions, SharedString,
     Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
-use gpui_monaco::options::{LineNumbers, RenderWhitespace, Ruler, WordWrap};
+use gpui_monaco::options::{
+    LineNumbers, RenderLineHighlight, RenderWhitespace, Ruler, ShowFoldingControls, WordWrap,
+};
 use gpui_monaco::text::LineEnding;
 use gpui_monaco::{
     CodeEditor, CodeEditorEvent, DecorationId, DecorationOptions, EditorColors, EditorOptions,
@@ -226,6 +228,21 @@ impl Playground {
             }
             if std::env::var_os("PLAYGROUND_LIGATURES").is_some() {
                 options.font_ligatures = gpui_monaco::options::FontLigatures::On;
+            }
+            // `PLAYGROUND_LINE_HIGHLIGHT=none|gutter|line|all` and
+            // `PLAYGROUND_FOLDING_CONTROLS=always|never|mouseover`.
+            match std::env::var("PLAYGROUND_LINE_HIGHLIGHT").as_deref() {
+                Ok("none") => options.render_line_highlight = RenderLineHighlight::None,
+                Ok("gutter") => options.render_line_highlight = RenderLineHighlight::Gutter,
+                Ok("line") => options.render_line_highlight = RenderLineHighlight::Line,
+                Ok("all") => options.render_line_highlight = RenderLineHighlight::All,
+                _ => {}
+            }
+            match std::env::var("PLAYGROUND_FOLDING_CONTROLS").as_deref() {
+                Ok("always") => options.show_folding_controls = ShowFoldingControls::Always,
+                Ok("never") => options.show_folding_controls = ShowFoldingControls::Never,
+                Ok("mouseover") => options.show_folding_controls = ShowFoldingControls::Mouseover,
+                _ => {}
             }
             editor.update_options(options, cx);
         });
@@ -835,7 +852,8 @@ fn add_demo_widgets(editor: &Entity<CodeEditor>, cx: &mut App) {
 fn add_demo_decorations(editor: &Entity<CodeEditor>, cx: &mut App) {
     use gpui::{hsla, rgb};
     use gpui_monaco::{
-        DecorationOptions, DecorationUnderline, InjectedText, OverviewRulerLane, TokenStyle,
+        DecorationOptions, DecorationUnderline, GlyphMarginLane, GlyphMarginOptions, InjectedText,
+        OverviewRulerLane, TokenStyle,
     };
     let model = editor.read(cx).model().clone();
     model.update(cx, |model, cx| {
@@ -894,6 +912,30 @@ fn add_demo_decorations(editor: &Entity<CodeEditor>, cx: &mut App) {
                             background: Some(hsla(0., 0., 0.5, 0.15)),
                             swatch: None,
                             ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ),
+                // Glyph margin lanes (Monaco `glyphMargin.position`): a
+                // range in the left lane, a line in the right one.
+                (
+                    find("impl Edit {").start..find("fn delta").end,
+                    DecorationOptions {
+                        glyph: Some(("◆".into(), rgb(0x3794ff).into())),
+                        glyph_margin: Some(GlyphMarginOptions {
+                            position: GlyphMarginLane::Left,
+                            persist_lane: false,
+                        }),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    find("pub fn new_len"),
+                    DecorationOptions {
+                        glyph: Some(("●".into(), warning)),
+                        glyph_margin: Some(GlyphMarginOptions {
+                            position: GlyphMarginLane::Right,
+                            persist_lane: false,
                         }),
                         ..Default::default()
                     },

@@ -1,10 +1,15 @@
 //! Sticky scroll's model (Monaco `StickyModelProvider`): the scopes whose
 //! header lines stick to the top. Per `stickyScroll.defaultModel` it comes
 //! from the document symbols (outline), the folding ranges, or indentation,
-//! each falling back to the next when it has nothing.
+//! each falling back to the next when it has nothing, whether `folding` is
+//! on or not. Which of its scopes stick, and where, is Monaco's
+//! `StickyLineCandidateProvider` and `StickyScrollController`
+//! ([`candidates_intersecting`], [`find_scroll_widget_state`]).
 //!
-//! Ports `stickyScrollModelProvider.ts` (MIT).
+//! Ports `stickyScrollModelProvider.ts`, `stickyScrollProvider.ts` and
+//! `stickyScrollController.ts` (MIT).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Context, Task};
@@ -12,10 +17,10 @@ use gpui::{Context, Task};
 use text::PointUtf16;
 
 use crate::cursor::Selection;
-use crate::editor::CodeEditor;
+use crate::editor::{CodeEditor, collect_provided_folding_ranges};
 use crate::options::StickyScrollModel;
-use crate::providers::{DocumentSymbol, document_symbol_providers};
-use crate::view::folding::{FoldRange, compute_indent_ranges};
+use crate::providers::{DocumentSymbol, document_symbol_providers, folding_range_providers};
+use crate::view::folding::FoldRange;
 use crate::view::reveal::RevealType;
 
 /// Monaco's `Delayer` before recomputing after an edit.
@@ -31,13 +36,15 @@ pub(crate) struct StickyElement {
 }
 
 /// What the model was computed for: the text, the parsed text (for the
-/// tags query), the model kind, the language and the symbol providers.
+/// tags query), the model kind, the language, the symbol and folding range
+/// providers, and whether folding is on.
 type StickyKey = (
     text::Version,
     Option<text::Version>,
     StickyScrollModel,
     Option<String>,
-    usize,
+    (usize, usize),
+    bool,
 );
 
 #[derive(Default)]
@@ -45,14 +52,23 @@ pub(crate) struct StickyModelState {
     key: Option<StickyKey>,
     pending: Option<StickyKey>,
     task: Option<Task<()>>,
-    /// The scopes, or `None` to use the folding ranges.
-    elements: Option<Vec<StickyElement>>,
+    /// The scopes, or `None` to use the editor's folding ranges.
+    elements: Option<Arc<Vec<StickyElement>>>,
+    /// The folding ranges as scopes, and what they were converted from.
+    #[allow(clippy::type_complexity)]
+    fold_elements: Option<((Option<text::Version>, usize), Arc<Vec<StickyElement>>)>,
     /// The keyboard-focused sticky line (Monaco `focusStickyScroll`).
     pub focused: Option<usize>,
     /// The sticky line under the mouse.
     pub hovered: Option<usize>,
+    /// The mouse is over the sticky lines' gutter, which shows their
+    /// folding controls with `showFoldingControls: mouseover` (Monaco
+    /// `_isOnGlyphMargin`).
+    pub gutter_hovered: bool,
     /// The line showing its scope's end while Shift is held over it.
     pub show_end: Option<usize>,
+    /// The sticky line a mouse button went down on, for the click.
+    pressed: Option<(usize, gpui::MouseButton)>,
 }
 
 /// Monaco's comparator: by start, longer first.
@@ -152,18 +168,160 @@ pub(crate) fn enclosing(elements: &[StickyElement], row: u32) -> Vec<(u32, u32)>
     }
 }
 
-impl CodeEditor {
-    /// The sticky headers' scopes enclosing `row`, outermost first.
-    pub(crate) fn sticky_ranges_enclosing(&self, row: u32) -> Vec<(u32, u32)> {
-        match &self.sticky.elements {
-            Some(elements) => enclosing(elements, row),
-            None => self
-                .folds
-                .ranges_enclosing(row)
-                .into_iter()
-                .map(|range| (range.start_row, range.end_row))
-                .collect(),
+/// A sticky line candidate (Monaco `StickyLineCandidate`): a scope's
+/// header row and the last row it keeps the header for, where it's drawn
+/// in the widget (the heights of the headers above it) and its height.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct StickyLineCandidate {
+    pub start: u32,
+    pub end: u32,
+    pub top: f32,
+    pub height: f32,
+}
+
+/// Monaco `StickyLineCandidateProvider.getCandidateStickyLinesIntersecting`:
+/// the scopes whose header could stick while rows `visible` (inclusive)
+/// show, outermost first, each placed below the headers of the scopes
+/// around it. Candidates inside a hidden area (`hidden`, row ranges) are
+/// dropped (`filterHiddenRanges`). `line_count` is the model's.
+pub(crate) fn candidates_intersecting(
+    elements: &[StickyElement],
+    visible: (u32, u32),
+    hidden: &[std::ops::Range<u32>],
+    line_count: u32,
+    height_of: &dyn Fn(u32) -> f32,
+) -> Vec<StickyLineCandidate> {
+    struct Walk<'a> {
+        range: (u32, u32),
+        line_count: u32,
+        height_of: &'a dyn Fn(u32) -> f32,
+        result: Vec<StickyLineCandidate>,
+    }
+    // Monaco's line numbers are 1-based and its scopes end a line past the
+    // candidate, so this works in Monaco's numbers: a scope is
+    // `start + 1 ..= end + 2`.
+    fn collect(walk: &mut Walk, children: &[StickyElement], top: f32, last_start: Option<u32>) {
+        if children.is_empty() {
+            return;
         }
+        // `binarySearch` then `updateIndex`: the last child starting at or
+        // before the line, else the first.
+        let bound = |line: u32| {
+            children
+                .partition_point(|c| c.start < line)
+                .saturating_sub(1)
+        };
+        let (lower, upper) = (bound(walk.range.0), bound(walk.range.1));
+        let mut last_line = last_start;
+        for child in &children[lower..=upper] {
+            let start_line = child.start + 1;
+            let end_line = child.end + 2;
+            if end_line > start_line + 1
+                && walk.range.0 <= end_line + 1
+                && start_line <= walk.range.1 + 1
+                && last_line != Some(start_line)
+                // `textModel.isValidRange`.
+                && end_line <= walk.line_count
+            {
+                last_line = Some(start_line);
+                let height = (walk.height_of)(child.start);
+                walk.result.push(StickyLineCandidate {
+                    start: child.start,
+                    end: child.end,
+                    top,
+                    height,
+                });
+                collect(walk, &child.children, top + height, Some(start_line));
+            }
+        }
+    }
+    let mut walk = Walk {
+        range: (visible.0 + 1, visible.1 + 1),
+        line_count,
+        height_of,
+        result: Vec::new(),
+    };
+    collect(&mut walk, elements, 0., None);
+    let mut result = walk.result;
+    result.retain(|candidate| {
+        !hidden
+            .iter()
+            .any(|hidden| candidate.start >= hidden.start && candidate.end <= hidden.end)
+    });
+    result
+}
+
+/// What the sticky scroll widget shows (Monaco `StickyScrollWidgetState`):
+/// the header rows, the rows after their scopes (shown with Shift held),
+/// and how far the last line is pushed up as its scope scrolls out (0 or
+/// negative).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct StickyWidgetState {
+    pub start_rows: Vec<u32>,
+    pub end_rows: Vec<u32>,
+    pub last_line_relative_position: f32,
+}
+
+/// Monaco `StickyScrollController.findScrollWidgetState`: the candidates
+/// whose header has scrolled above where it would stick while their scope
+/// still shows there, at most `max_lines` of them. `top_of` and
+/// `bottom_of` are a row's top and bottom in the content (Monaco
+/// `getTopForLineNumber` and `getBottomForLineNumber`).
+pub(crate) fn find_scroll_widget_state(
+    candidates: &[StickyLineCandidate],
+    max_lines: usize,
+    scroll_top: f32,
+    top_of: &dyn Fn(u32) -> f32,
+    bottom_of: &dyn Fn(u32) -> f32,
+) -> StickyWidgetState {
+    let mut state = StickyWidgetState::default();
+    for candidate in candidates {
+        let top_of_element = candidate.top;
+        let bottom_of_element = top_of_element + candidate.height;
+        let top_of_beginning_line = top_of(candidate.start) - scroll_top;
+        let bottom_of_end_line = bottom_of(candidate.end) - scroll_top;
+        if top_of_element > top_of_beginning_line && top_of_element <= bottom_of_end_line {
+            state.start_rows.push(candidate.start);
+            state.end_rows.push(candidate.end + 1);
+            if bottom_of_element > bottom_of_end_line {
+                state.last_line_relative_position = bottom_of_end_line - bottom_of_element;
+            }
+        }
+        if state.start_rows.len() == max_lines {
+            break;
+        }
+    }
+    state
+}
+
+/// Monaco's cap on the sticky lines: a quarter of the editor's height
+/// (`_onDidResize`), and `stickyScroll.maxLineCount`.
+pub(crate) fn max_sticky_lines(height: f32, line_height: f32, max_line_count: u32) -> usize {
+    let theoretical_lines = height / line_height.max(1.);
+    ((theoretical_lines * 0.25).round().max(0.) as usize).min(max_line_count as usize)
+}
+
+impl CodeEditor {
+    /// The sticky scroll model: the computed one, else the folding ranges
+    /// (Monaco's folding provider model), converted once per change.
+    pub(crate) fn sticky_elements(&mut self) -> Arc<Vec<StickyElement>> {
+        if let Some(elements) = &self.sticky.elements {
+            return elements.clone();
+        }
+        let key = (self.folds.ranges_version(), self.folds.ranges().len());
+        if let Some((cached, elements)) = &self.sticky.fold_elements
+            && *cached == key
+        {
+            return elements.clone();
+        }
+        let elements = Arc::new(from_fold_ranges(self.folds.ranges()));
+        self.sticky.fold_elements = Some((key, elements.clone()));
+        elements
+    }
+
+    /// The sticky headers' scopes enclosing `row`, outermost first.
+    pub(crate) fn sticky_ranges_enclosing(&mut self, row: u32) -> Vec<(u32, u32)> {
+        enclosing(&self.sticky_elements(), row)
     }
 
     /// Recomputes the model when the text or the providers changed: right
@@ -179,7 +337,10 @@ impl CodeEditor {
         }
         let model = self.model().read(cx);
         let language = model.language_id().map(|l| l.to_string());
-        let providers = document_symbol_providers(cx, self.provider_target(cx)).len();
+        let providers = (
+            document_symbol_providers(cx, self.provider_target(cx)).len(),
+            folding_range_providers(cx, self.provider_target(cx)).len(),
+        );
         let parsed = model.syntax_snapshot().map(|syntax| syntax.text.version());
         let key: StickyKey = (
             model.buffer().version(),
@@ -187,6 +348,7 @@ impl CodeEditor {
             options.default_model,
             language,
             providers,
+            self.options.folding,
         );
         if self.sticky.key.as_ref() == Some(&key) || self.sticky.pending.as_ref() == Some(&key) {
             return;
@@ -200,6 +362,7 @@ impl CodeEditor {
         };
         self.sticky.pending = Some(key.clone());
         let default_model = key.2;
+        let folding = key.5;
         self.sticky.task = Some(cx.spawn(async move |this, cx| {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
@@ -212,21 +375,33 @@ impl CodeEditor {
                 let symbols = symbols.await;
                 // Monaco: an empty outline isn't a model.
                 if !symbols.is_empty() {
-                    elements = Some(from_symbols(&symbols));
+                    elements = Some(Arc::new(from_symbols(&symbols)));
                 }
             }
-            if elements.is_none() && default_model == StickyScrollModel::Indentation {
-                let Ok((rope, tab_size)) = this.update(cx, |this, cx| {
-                    let model = this.model().read(cx);
-                    (model.buffer().rope().clone(), model.options().tab_size)
-                }) else {
+            // Monaco's folding provider model, then the indentation model
+            // (`IndentRangeProvider`, with the language's `offSide` and
+            // markers). With folding on, the editor's folding ranges are
+            // those (`None` here); with it off, sticky scroll computes its
+            // own.
+            let indentation = default_model == StickyScrollModel::Indentation;
+            if elements.is_none() && (indentation || !folding) {
+                let strategy = if indentation {
+                    crate::options::FoldingStrategy::Indentation
+                } else {
+                    crate::options::FoldingStrategy::Auto
+                };
+                let Ok((snapshot, _, providers, compute)) =
+                    this.update(cx, |this, cx| this.fold_inputs(strategy, cx))
+                else {
                     return;
                 };
-                let ranges = cx
+                let provided =
+                    collect_provided_folding_ranges(providers, snapshot.rope().line_count()).await;
+                let (ranges, _) = cx
                     .background_executor()
-                    .spawn(async move { compute_indent_ranges(&rope, tab_size, false, None) })
+                    .spawn(async move { compute(provided) })
                     .await;
-                elements = Some(from_fold_ranges(&ranges));
+                elements = Some(Arc::new(from_fold_ranges(&ranges)));
             }
             this.update(cx, |this, cx| {
                 this.sticky.pending = None;
@@ -251,64 +426,119 @@ impl CodeEditor {
 
 impl CodeEditor {
     /// Scrolls so sticky line `ix`'s row sits where it's shown and moves
-    /// the cursor there (Monaco `_revealPosition` from a sticky line).
-    fn reveal_sticky_row(&mut self, row: u32, ix: usize, cx: &mut Context<Self>) {
+    /// the cursor to `position` on it (Monaco `_revealPosition` from a
+    /// sticky line).
+    fn reveal_sticky_row(&mut self, position: PointUtf16, ix: usize, cx: &mut Context<Self>) {
         let Some(layout) = self.layout.clone() else {
             return;
         };
-        let line = self.view_lines.first_view_line_of_row(row);
+        let line = self.view_lines.first_view_line_of_row(position.row);
         let line_height = layout.metrics.line_height;
         self.scroll_top =
             (layout.zones.line_y(line, line_height) - line_height * ix as f32).max(gpui::px(0.));
         self.sticky.focused = None;
-        self.set_selections(&[Selection::collapsed(PointUtf16::new(row, 0))], cx);
+        self.set_selections(&[Selection::collapsed(position)], cx);
         self.autoscroll_requested = false;
         cx.notify();
     }
 
-    /// A click on sticky line `ix` (Monaco's sticky scroll click handler):
-    /// the folding control folds, Shift reveals the scope's end, otherwise
-    /// it goes to the line.
+    /// A mouse down on sticky line `ix`: Monaco acts on the click, so this
+    /// waits for the mouse up on the same line ([`Self::sticky_mouse_up`]).
+    pub(crate) fn sticky_mouse_down(&mut self, ix: usize, event: &gpui::MouseDownEvent) {
+        self.sticky.pressed = Some((ix, event.button));
+    }
+
+    /// The mouse up after [`Self::sticky_mouse_down`]: a click if it's on
+    /// the same line.
+    pub(crate) fn sticky_mouse_up(
+        &mut self,
+        position: gpui::Point<gpui::Pixels>,
+        button: gpui::MouseButton,
+        modifiers: gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((ix, pressed)) = self.sticky.pressed.take() else {
+            return;
+        };
+        if pressed == button
+            && self
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.sticky_line_at(position))
+                == Some(ix)
+        {
+            self.sticky_click(ix, position, button, modifiers, cx);
+        }
+    }
+
+    /// A click on sticky line `ix` (Monaco's sticky scroll click handler
+    /// and go-to-definition gesture): Cmd/Ctrl follows the definition link
+    /// under the mouse, Shift reveals the row after the scope, the folding
+    /// control folds or unfolds without moving the cursor, otherwise the
+    /// cursor goes to the clicked column.
     pub(crate) fn sticky_click(
         &mut self,
         ix: usize,
-        event: &gpui::MouseDownEvent,
+        position: gpui::Point<gpui::Pixels>,
+        button: gpui::MouseButton,
+        modifiers: gpui::Modifiers,
         cx: &mut Context<Self>,
     ) {
-        let Some(line) = self
-            .layout
-            .as_ref()
-            .and_then(|l| l.sticky_lines.get(ix).copied())
-        else {
+        let Some(layout) = self.layout.clone() else {
             return;
         };
-        let modifiers = event.modifiers;
+        let Some(line) = layout.sticky_lines.get(ix).copied() else {
+            return;
+        };
+        if button != gpui::MouseButton::Left {
+            return;
+        }
+        let text_position = layout.sticky_position(ix, position);
+        if self.is_definition_modifier(&modifiers) {
+            if let Some(text_position) = text_position {
+                self.sticky.focused = None;
+                let side = self.is_side_by_side_modifier(&modifiers);
+                self.follow_definition_link(text_position, side, cx);
+            }
+            return;
+        }
         if modifiers.control || modifiers.alt || modifiers.platform {
             return;
         }
-        if event.button != gpui::MouseButton::Left {
-            return;
-        }
         if modifiers.shift {
-            // The scope's last line, centered if outside the viewport.
-            let end = PointUtf16::new(
-                (line.end_row + 1).min(self.snapshot.max_point_utf16().row),
-                0,
-            );
+            // The row after the scope, centered if outside the viewport.
+            let end = PointUtf16::new(line.end_row.min(self.snapshot.max_point_utf16().row), 0);
             self.sticky.focused = None;
             self.reveal_range(end..end, RevealType::CenterIfOutsideViewport, cx);
             self.set_selections(&[Selection::collapsed(end)], cx);
             return;
         }
         if let Some(control) = line.fold
-            && control.bounds.contains(&event.position)
+            && control.bounds.contains(&position)
         {
-            self.click_fold(control.row, true, false, false, cx);
-            // Keep the header where it was.
-            self.reveal_sticky_row(control.row, ix, cx);
+            self.toggle_sticky_fold(control.row, ix, cx);
             return;
         }
-        self.reveal_sticky_row(line.row, ix, cx);
+        let target = text_position.unwrap_or(PointUtf16::new(line.row, 0));
+        self.reveal_sticky_row(target, ix, cx);
+    }
+
+    /// Monaco `_toggleFoldingRegionForLine`: folds or unfolds the region,
+    /// keeping its header where it shows (`scrollTop = top(header) -
+    /// lineHeight * index + 1`), without touching the cursor.
+    fn toggle_sticky_fold(&mut self, row: u32, ix: usize, cx: &mut Context<Self>) {
+        let Some(layout) = self.layout.clone() else {
+            return;
+        };
+        self.click_fold(row, true, false, false, cx);
+        let line = self.view_lines.first_view_line_of_row(row);
+        let line_height = layout.metrics.line_height;
+        self.scroll_top = (layout.zones.line_y(line, line_height) - line_height * ix as f32
+            + gpui::px(1.))
+        .max(gpui::px(0.));
+        self.autoscroll_requested = false;
+        self.emit_scroll_changed(cx);
+        cx.notify();
     }
 
     /// Tracks the sticky line under the mouse; with Shift held it shows its
@@ -319,26 +549,34 @@ impl CodeEditor {
         shift: bool,
         cx: &mut Context<Self>,
     ) {
-        let hovered = match position {
-            Some(position) => self.layout.as_ref().and_then(|layout| {
-                layout.sticky_lines.iter().position(|line| {
-                    line.bounds.contains(&position) && position.x >= layout.text_bounds.left()
-                })
+        let (hovered, gutter_hovered) = match position {
+            Some(position) => self.layout.as_ref().map_or((None, false), |layout| {
+                let line = layout.sticky_line_at(position);
+                let in_text = position.x >= layout.text_bounds.left();
+                (line.filter(|_| in_text), line.is_some() && !in_text)
             }),
-            None => self.sticky.hovered,
+            None => (self.sticky.hovered, self.sticky.gutter_hovered),
         };
         let show_end = hovered.filter(|_| shift);
-        if hovered != self.sticky.hovered || show_end != self.sticky.show_end {
+        if hovered != self.sticky.hovered
+            || show_end != self.sticky.show_end
+            || gutter_hovered != self.sticky.gutter_hovered
+        {
             self.sticky.hovered = hovered;
             self.sticky.show_end = show_end;
+            self.sticky.gutter_hovered = gutter_hovered;
             cx.notify();
         }
     }
 
     pub(crate) fn sticky_mouse_leave(&mut self, cx: &mut Context<Self>) {
-        if self.sticky.hovered.is_some() || self.sticky.show_end.is_some() {
+        if self.sticky.hovered.is_some()
+            || self.sticky.show_end.is_some()
+            || self.sticky.gutter_hovered
+        {
             self.sticky.hovered = None;
             self.sticky.show_end = None;
+            self.sticky.gutter_hovered = false;
             cx.notify();
         }
     }
@@ -386,7 +624,7 @@ impl CodeEditor {
             .as_ref()
             .and_then(|l| l.sticky_lines.get(ix).copied())
         {
-            self.reveal_sticky_row(line.row, ix, cx);
+            self.reveal_sticky_row(PointUtf16::new(line.row, 0), ix, cx);
         }
     }
 
@@ -478,5 +716,159 @@ mod tests {
             from_fold_ranges(&[range(0, 9, None), range(2, 4, Some(0)), range(12, 14, None)]);
         assert_eq!(enclosing(&elements, 3), vec![(0, 9), (2, 4)]);
         assert_eq!(enclosing(&elements, 13), vec![(12, 14)]);
+    }
+
+    // ----- ported from Monaco's `stickyScroll.test.ts` (0-based rows) -----
+
+    const LINE_HEIGHT: f32 = 19.;
+
+    /// `documentSymbolProviderForTestModel`, for its 14-line text.
+    fn test_model_symbols() -> Vec<DocumentSymbol> {
+        vec![
+            symbol("foo", 0, (0, 2), vec![]),
+            symbol(
+                "TestClass",
+                6,
+                (3, 11),
+                vec![symbol(
+                    "functionOfClass",
+                    8,
+                    (7, 11),
+                    vec![symbol("function1", 9, (9, 10), vec![])],
+                )],
+            ),
+            symbol(
+                "bar",
+                12,
+                (12, 13),
+                vec![symbol("insideBar", 12, (12, 12), vec![])],
+            ),
+        ]
+    }
+
+    /// Monaco's `findScrollWidgetState` in a 500px editor with rows
+    /// `hidden`, at `scroll_top`.
+    fn start_rows_at(
+        elements: &[StickyElement],
+        line_count: u32,
+        hidden: &[std::ops::Range<u32>],
+        scroll_top: f32,
+    ) -> Vec<u32> {
+        let visible_rows: Vec<u32> = (0..line_count)
+            .filter(|row| !hidden.iter().any(|h| h.contains(row)))
+            .collect();
+        // A hidden row is where the visible row above it is.
+        let view_line = |row: u32| visible_rows.iter().rposition(|r| *r <= row).unwrap_or(0) as f32;
+        let first = visible_rows[((scroll_top / LINE_HEIGHT) as usize).min(visible_rows.len() - 1)];
+        let candidates = candidates_intersecting(
+            elements,
+            (first, line_count - 1),
+            hidden,
+            line_count,
+            &|_| LINE_HEIGHT,
+        );
+        find_scroll_widget_state(
+            &candidates,
+            max_sticky_lines(500., LINE_HEIGHT, 5),
+            scroll_top,
+            &|row| view_line(row) * LINE_HEIGHT,
+            &|row| (view_line(row) + 1.) * LINE_HEIGHT,
+        )
+        .start_rows
+    }
+
+    #[test]
+    fn get_candidate_sticky_lines_intersecting() {
+        let elements = from_symbols(&test_model_symbols());
+        let candidate = |start, end, top| StickyLineCandidate {
+            start,
+            end,
+            top,
+            height: LINE_HEIGHT,
+        };
+        let at = |visible| candidates_intersecting(&elements, visible, &[], 14, &|_| LINE_HEIGHT);
+        assert_eq!(at((0, 3)), vec![candidate(0, 1, 0.)]);
+        assert_eq!(
+            at((7, 9)),
+            vec![candidate(6, 10, 0.), candidate(8, 10, LINE_HEIGHT)]
+        );
+        assert_eq!(
+            at((9, 12)),
+            vec![candidate(6, 10, 0.), candidate(8, 10, LINE_HEIGHT)]
+        );
+    }
+
+    #[test]
+    fn issue_157180_render_the_line_of_the_scope_definition() {
+        let elements = from_symbols(&test_model_symbols());
+        let at = |lines: f32| start_rows_at(&elements, 14, &[], lines * LINE_HEIGHT + 1.);
+        assert_eq!(at(0.), vec![0]);
+        assert_eq!(at(1.), vec![0]);
+        assert_eq!(at(4.), Vec::<u32>::new());
+        assert_eq!(at(8.), vec![6, 8]);
+        assert_eq!(at(9.), vec![6, 8]);
+        // The inner scope ended above where its header would stick, so it
+        // isn't shown at all (it used to be drawn over the outer one).
+        assert_eq!(at(10.), vec![6]);
+    }
+
+    #[test]
+    fn issue_156268_no_sticky_lines_in_a_folded_region() {
+        let elements = from_symbols(&test_model_symbols());
+        let hidden = [1..2, 9..11];
+        let at = |lines: f32| start_rows_at(&elements, 14, &hidden, lines * LINE_HEIGHT + 1.);
+        assert_eq!(at(0.), vec![0]);
+        assert_eq!(at(1.), Vec::<u32>::new());
+        assert_eq!(at(6.), vec![6, 8]);
+        assert_eq!(at(7.), vec![6]);
+        assert_eq!(at(10.), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn issue_159271_child_scope_starting_on_the_parent_line() {
+        let symbols = vec![symbol(
+            "TestClass",
+            0,
+            (0, 4),
+            vec![symbol(
+                "foo",
+                0,
+                (0, 3),
+                vec![symbol("bar", 1, (1, 3), vec![])],
+            )],
+        )];
+        let elements = from_symbols(&symbols);
+        let at = |lines: f32| start_rows_at(&elements, 6, &[], lines * LINE_HEIGHT + 1.);
+        assert_eq!(at(0.), vec![0, 1]);
+        assert_eq!(at(1.), vec![0, 1]);
+        assert_eq!(at(2.), vec![0]);
+        assert_eq!(at(3.), vec![0]);
+        assert_eq!(at(4.), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn the_last_line_is_pushed_up_as_its_scope_scrolls_out() {
+        let elements = from_symbols(&test_model_symbols());
+        let candidates = candidates_intersecting(&elements, (9, 13), &[], 14, &|_| LINE_HEIGHT);
+        // `functionOfClass` ends on row 10: at 9 lines + 14px, 24px of it
+        // is left, so its header (second, 19px down) goes 14px up.
+        let state = find_scroll_widget_state(
+            &candidates,
+            5,
+            9. * LINE_HEIGHT + 14.,
+            &|row| row as f32 * LINE_HEIGHT,
+            &|row| (row + 1) as f32 * LINE_HEIGHT,
+        );
+        assert_eq!(state.start_rows, vec![6, 8]);
+        assert_eq!(state.end_rows, vec![11, 11]);
+        assert_eq!(state.last_line_relative_position, -14.);
+    }
+
+    #[test]
+    fn sticky_lines_take_at_most_a_quarter_of_the_height() {
+        assert_eq!(max_sticky_lines(500., 19., 5), 5);
+        assert_eq!(max_sticky_lines(200., 20., 5), 3);
+        assert_eq!(max_sticky_lines(100., 20., 5), 1);
+        assert_eq!(max_sticky_lines(30., 20., 5), 0);
     }
 }

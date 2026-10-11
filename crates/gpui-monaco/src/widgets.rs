@@ -243,9 +243,26 @@ pub struct OverlayWidget {
 pub struct GlyphMarginWidget {
     /// The 0-based line; it follows edits.
     pub row: u32,
-    /// The view to render, laid out at the glyph margin's width and the
+    /// The view to render, laid out a lane wide (the line height) and the
     /// line's height.
     pub view: AnyView,
+    /// Its glyph margin lane (Monaco `IGlyphMarginWidgetPosition.lane`).
+    pub lane: crate::decorations::GlyphMarginLane,
+    /// Where widgets and glyph decorations share a lane, the highest shows,
+    /// widgets before decorations on a tie (Monaco `zIndex`).
+    pub z_index: i32,
+}
+
+impl GlyphMarginWidget {
+    /// A widget in the center lane at z-index 0.
+    pub fn new(row: u32, view: impl Into<AnyView>) -> Self {
+        Self {
+            row,
+            view: view.into(),
+            lane: Default::default(),
+            z_index: 0,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -254,6 +271,8 @@ pub(crate) struct GlyphWidgetState {
     /// The line's start.
     pub anchor: Anchor,
     pub view: AnyView,
+    pub lane: crate::decorations::GlyphMarginLane,
+    pub z_index: i32,
 }
 
 /// Stored view zone: `after_line` tracked with an anchor.

@@ -1245,13 +1245,9 @@ impl CodeEditor {
             .as_ref()
             .map_or(px(0.), |layout| layout.bounds.size.height);
         let id = match placement {
-            IndicatorPlacement::Docked(row) => self.add_glyph_margin_widget(
-                GlyphMarginWidget {
-                    row,
-                    view: indicator.into(),
-                },
-                cx,
-            ),
+            IndicatorPlacement::Docked(row) => {
+                self.add_glyph_margin_widget(GlyphMarginWidget::new(row, indicator), cx)
+            }
             IndicatorPlacement::Above => self.add_overlay_widget(
                 OverlayWidget {
                     position: OverlayPosition::Custom(point(px(1.), px(2.))),

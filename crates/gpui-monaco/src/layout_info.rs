@@ -100,8 +100,8 @@ pub struct LayoutInfo {
     /// The glyph margin's width (0 when `glyph_margin` is off).
     pub glyph_margin_width: Pixels,
     /// The glyph margin's decoration lanes (Monaco
-    /// `glyphMarginDecorationLaneCount`): there's one, since glyph margin
-    /// decorations have no lanes here.
+    /// `glyphMarginDecorationLaneCount`): the most lanes glyph decorations
+    /// and glyph margin widgets use on one line, at least one.
     pub glyph_margin_decoration_lane_count: u32,
     /// The line numbers' left edge.
     pub line_numbers_left: Pixels,

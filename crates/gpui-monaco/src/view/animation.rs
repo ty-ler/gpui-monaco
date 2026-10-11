@@ -168,6 +168,8 @@ pub(crate) struct ViewAnimation {
     pub minimap: MinimapFade,
     /// The minimap slider's fade (`minimap.showSlider: mouseover`).
     pub minimap_slider: SliderFade,
+    /// The gutter's folding controls.
+    pub folding: FoldingFade,
     /// Inertial scrolling (`inertialScroll`).
     pub inertial: InertialScroll,
 }
@@ -186,6 +188,7 @@ impl Default for ViewAnimation {
             scrollbars: ScrollbarFade::default(),
             minimap: MinimapFade::default(),
             minimap_slider: SliderFade::default(),
+            folding: FoldingFade::default(),
             inertial: InertialScroll::default(),
         }
     }
@@ -509,6 +512,45 @@ impl SliderFade {
         };
         let t = ((now - changed_at).as_secs_f32() / SLIDER_FADE.as_secs_f32()).min(1.);
         self.from + (target - self.from) * t
+    }
+}
+
+/// Monaco `folding.css`: with `showFoldingControls: mouseover`, the
+/// expanded regions' folding controls fade in and out with the mouse over
+/// the gutter (`transition: opacity 0.5s`).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct FoldingFade {
+    shown: bool,
+    changed_at: Option<Instant>,
+    /// The opacity the current transition started from.
+    from: f32,
+}
+
+/// The folding controls' `transition: opacity 0.5s`.
+const FOLDING_FADE: Duration = Duration::from_millis(500);
+
+impl FoldingFade {
+    /// (opacity, whether it's still changing) for the controls being shown
+    /// or not.
+    pub fn update(&mut self, shown: bool) -> (f32, bool) {
+        let now = Instant::now();
+        if shown != self.shown {
+            self.from = self.opacity(now);
+            self.shown = shown;
+            self.changed_at = Some(now);
+        }
+        let opacity = self.opacity(now);
+        let target = if self.shown { 1. } else { 0. };
+        (opacity, opacity != target)
+    }
+
+    fn opacity(&self, now: Instant) -> f32 {
+        let target = if self.shown { 1. } else { 0. };
+        let Some(changed_at) = self.changed_at else {
+            return target;
+        };
+        let t = ((now - changed_at).as_secs_f32() / FOLDING_FADE.as_secs_f32()).min(1.);
+        self.from + (target - self.from) * ease(t)
     }
 }
 

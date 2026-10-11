@@ -89,7 +89,7 @@ Fold ranges come from these sources, in order (Monaco's `foldingStrategy: auto`)
 
 `folding_strategy: Indentation` uses only the last source. Provider and syntax ranges are capped at `folding_maximum_regions` (5000); the most deeply nested are dropped first, as in Monaco. Recomputing waits for a 200ms pause in edits. `editor.folding_ranges()` and `editor.collapsed_folds(cx)` read the current state.
 
-- **Gutter:** chevrons show on hover, or always with `show_folding_controls: Always`.
+- **Gutter:** chevrons fade in on hover, or show always with `show_folding_controls: Always`; `Never` drops the column. A folded region ends with a grey "⋯"; click it to unfold.
   - Shift-click (or middle-click) a chevron to toggle the region with everything inside it.
   - Alt-click it to fold the regions around it instead (or unfold them if any are folded).
 - **Placeholder:** a collapsed region shows `⋯` after its first line. Clicking it unfolds the region, and so does clicking after the end of the line with `unfold_on_click_after_end_of_line`. With `folding_highlight` (the default), the line gets the `editor.foldBackground` color.
@@ -192,9 +192,9 @@ Lines are indented like the cursor's line unless `adjust_whitespace` is off. `se
 - **Drag and drop:** drag the selection to move it, or hold Alt (Ctrl on Windows and Linux) to copy it. Double-click just inside brackets or quotes to select their content.
 - **Unicode highlighting:** ambiguous and invisible characters get a warning border. Hover one to learn why, or to stop highlighting it.
 - **Minimap:** draws each character from Monaco's own minimap glyphs (or blocks with `render_characters` off), in its token color. The slider follows Monaco's `MinimapLayout`, so the end of a long file shows at the bottom and the slider follows the pointer when dragged. Clicking elsewhere centers the clicked line (`minimap.size: Proportional`) or moves the slider there (`Fill` and `Fit`). It shows the selections (`minimap.selectionHighlight`), find matches, occurrences, errors, warnings and infos, and decorations with `minimap` options. `// #region Name` and `// MARK: - Name` comments, and decorations with a section header, become section headers in it.
-- **Sticky scroll:** pins up to `max_line_count` enclosing scope headers to the top. Clicking a header jumps to it.
-  - The scopes come from `default_model`: the document symbols by default (Monaco's outline model), then the folding ranges or indentation.
-  - Without symbols, it uses the folding ranges.
+- **Sticky scroll:** pins up to `max_line_count` enclosing scope headers to the top, and at most a quarter of the editor's height. As a scope scrolls out, its header slides up under the one above. Clicking a header jumps to the clicked column; Cmd/Ctrl+click goes to the definition of the word under the mouse.
+  - The scopes come from `default_model`: the document symbols by default (Monaco's outline model), then the folding ranges or indentation. This doesn't need `folding` on.
+  - Without symbols, it uses the folding ranges. The indentation model follows the language's `offSide` setting.
   - "Focus Editor Sticky Scroll" (command palette) puts the keyboard on the sticky lines. Use Up and Down, Enter to go to one, and Escape to return.
-  - Shift over a sticky line shows the end of its scope; Shift+click goes there. The folding controls in the sticky gutter fold the scope.
+  - Shift over a sticky line shows the end of its scope; Shift+click goes there. The folding controls in the sticky gutter fold the scope without moving the cursor; with `show_folding_controls: Never` there are none.
 - **Scrollbars:** have an overview ruler showing the cursors, find matches, diagnostics and decorations. As in Monaco, a mark sits where its lines are in the whole scrollable height (view zones, padding and scrolling beyond the last line included), so it lines up with the slider, spans its lines (at least 6px), and marks of a color in the same lane that touch are merged. Once scrolled down, a 6px `scrollbar.shadow` shadow runs along the top (`scrollbar.use_shadows`).

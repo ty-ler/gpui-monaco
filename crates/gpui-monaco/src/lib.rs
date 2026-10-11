@@ -142,8 +142,9 @@ pub use bulk_edit::{
 pub use commands::{add_command, execute_command, register_command, unregister_command};
 pub use context_keys::{ContextKey, ContextKeyValue};
 pub use decorations::{
-    BlockDecoration, DecorationId, DecorationOptions, DecorationUnderline, InjectedText,
-    LeftBorder, MinimapDecoration, MinimapPosition, MinimapSectionHeaderStyle, OverviewRulerLane,
+    BlockDecoration, DecorationId, DecorationOptions, DecorationUnderline, GlyphMarginLane,
+    GlyphMarginOptions, InjectedText, LeftBorder, MinimapDecoration, MinimapPosition,
+    MinimapSectionHeaderStyle, OverviewRulerLane,
 };
 #[doc(hidden)]
 pub use editor::OverviewRulerForTests;

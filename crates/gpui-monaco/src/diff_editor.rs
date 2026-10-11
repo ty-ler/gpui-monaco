@@ -2867,10 +2867,7 @@ impl DiffEditor {
                 });
                 ids.push(editor.update(cx, |editor, cx| {
                     editor.add_glyph_margin_widget(
-                        crate::widgets::GlyphMarginWidget {
-                            row: line as u32 - 1,
-                            view: view.into(),
-                        },
+                        crate::widgets::GlyphMarginWidget::new(line as u32 - 1, view),
                         cx,
                     )
                 }));
@@ -4616,13 +4613,8 @@ impl DiffEditor {
                 colors: colors.clone(),
             });
             ids.push(self.modified.update(cx, |editor, cx| {
-                editor.add_glyph_margin_widget(
-                    crate::widgets::GlyphMarginWidget {
-                        row,
-                        view: view.into(),
-                    },
-                    cx,
-                )
+                editor
+                    .add_glyph_margin_widget(crate::widgets::GlyphMarginWidget::new(row, view), cx)
             }));
         }
         self.revert_arrows = ids;

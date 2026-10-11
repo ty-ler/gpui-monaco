@@ -82,15 +82,22 @@ Widgets get their own clicks: the editor doesn't take focus, move the cursor, op
 
 ## Glyph margin widgets
 
-A glyph margin widget (Monaco `IGlyphMarginWidget`) sits in the glyph margin beside a line, such as a breakpoint or a revert button. It follows its line through edits, gets the margin's width and the line's height, and receives its own clicks.
+A glyph margin widget (Monaco `IGlyphMarginWidget`) sits in the glyph margin beside a line, such as a breakpoint or a revert button. It follows its line through edits, gets a lane's width (the line height) and the line's height, and receives its own clicks.
 
 ```rust,ignore
-use gpui_monaco::GlyphMarginWidget;
+use gpui_monaco::{GlyphMarginLane, GlyphMarginWidget};
 
 editor.update(cx, |editor, cx| {
-    editor.add_glyph_margin_widget(GlyphMarginWidget { row: 41, view: breakpoint.into() }, cx)
+    editor.add_glyph_margin_widget(GlyphMarginWidget::new(41, breakpoint), cx);
+    // In the left lane, over glyph decorations there.
+    editor.add_glyph_margin_widget(
+        GlyphMarginWidget { lane: GlyphMarginLane::Left, z_index: 10, ..GlyphMarginWidget::new(41, marker) },
+        cx,
+    )
 });
 ```
+
+As in Monaco, the glyph margin has a lane per position (`Left`, `Center`, `Right`) in use on some line, each a line height wide. Where widgets and glyph decorations share a line and a lane, the one with the highest `z_index` shows, a widget before a decoration on a tie.
 
 ## Removing widgets and their state
 
