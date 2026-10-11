@@ -550,6 +550,7 @@ impl InlineCompletionsProvider for DemoInlineCompletions {
         Task::ready(Ok(InlineCompletionList {
             items,
             suppress_suggestions: None,
+            commands: Vec::new(),
         }))
     }
 }

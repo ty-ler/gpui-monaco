@@ -833,6 +833,7 @@ fn word_based_suggestions_off_with_inline_suggestions(cx: &mut TestAppContext) {
             Task::ready(Ok(InlineCompletionList {
                 items: Vec::new(),
                 suppress_suggestions: None,
+                commands: Vec::new(),
             }))
         }
     }

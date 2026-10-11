@@ -56,7 +56,7 @@ fn split_lines(text: &str) -> Vec<&str> {
 
 /// The highlights of `text` (byte ranges and their captures) in
 /// `language_id`, if it's registered with a grammar.
-fn capture_spans(
+pub(crate) fn capture_spans(
     text: &str,
     language_id: &str,
     registry: &LanguageRegistry,

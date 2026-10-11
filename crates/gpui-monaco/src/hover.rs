@@ -150,6 +150,9 @@ pub struct HoverWidget {
     /// An inlay hint label part's command, offered as a link with the
     /// keys that run it (Monaco's "Execute Command").
     command: Option<(crate::providers::Command, String)>,
+    /// The inline suggestion toolbar, over ghost text with
+    /// `show_toolbar: OnHover` (Monaco `InlineCompletionsHoverParticipant`).
+    inline_toolbar: Option<Entity<crate::inline_completions::toolbar::InlineToolbar>>,
     style: MarkdownStyle,
     theme: Arc<crate::Theme>,
     focus_handle: FocusHandle,
@@ -276,6 +279,12 @@ impl Render for HoverWidget {
                 .collect::<Vec<_>>()
                 .join("\n");
             sections.push(self.copy_row(("markdown-row", ix), row, copy, cx));
+        }
+        if let Some(toolbar) = &self.inline_toolbar {
+            if !sections.is_empty() {
+                sections.push(div().h(px(1.)).bg(colors.widget_border).into_any_element());
+            }
+            sections.push(toolbar.clone().into_any_element());
         }
         if let Some((command, keys)) = &self.command {
             if !sections.is_empty() {
@@ -885,6 +894,50 @@ impl CodeEditor {
         });
     }
 
+    /// Monaco `InlineCompletionsHoverParticipant.computeSync`: with
+    /// `show_toolbar: OnHover`, the toolbar when `position` is where ghost
+    /// text is inserted; it asks explicitly for all completions.
+    fn inline_toolbar_hover(
+        &mut self,
+        position: PointUtf16,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<crate::inline_completions::toolbar::InlineToolbar>> {
+        use crate::options::InlineSuggestShowToolbar;
+        if self.options.inline_suggest.show_toolbar != InlineSuggestShowToolbar::OnHover
+            || !self.inline_ghost_text_at(position, cx)
+        {
+            return None;
+        }
+        self.trigger_inline_suggest(cx);
+        let editor = cx.entity();
+        let theme = self.theme.clone();
+        Some(cx.new(|cx| {
+            crate::inline_completions::toolbar::InlineToolbar::new(&editor, theme, false, cx)
+        }))
+    }
+
+    fn set_hover_inline_toolbar(
+        &mut self,
+        toolbar: Option<Entity<crate::inline_completions::toolbar::InlineToolbar>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((widget, _)) = &self.hover.widget {
+            widget.update(cx, |widget, cx| {
+                widget.inline_toolbar = toolbar;
+                cx.notify();
+            });
+        }
+    }
+
+    /// Whether the visible hover has the inline suggestion toolbar.
+    #[doc(hidden)]
+    pub fn hover_has_inline_toolbar_for_tests(&self, cx: &gpui::App) -> bool {
+        self.hover
+            .widget
+            .as_ref()
+            .is_some_and(|(widget, _)| widget.read(cx).inline_toolbar.is_some())
+    }
+
     /// Whether the hover card is being resized (Monaco `isResizing`).
     fn is_hover_resizing(&self, cx: &gpui::App) -> bool {
         self.hover
@@ -985,13 +1038,16 @@ impl CodeEditor {
             }
             this.update(cx, |this, cx| {
                 let unicode = this.unicode_hovers_at(position, cx);
+                let toolbar = this.inline_toolbar_hover(position, cx);
                 if !parts.is_empty()
                     || !markers.is_empty()
                     || picker.is_some()
                     || !unicode.is_empty()
+                    || toolbar.is_some()
                 {
                     let range = hover_range.unwrap_or(range);
                     this.show_hover(range, markers, parts, picker, unicode, cx);
+                    this.set_hover_inline_toolbar(toolbar, cx);
                 }
             })
             .ok();
@@ -1169,12 +1225,18 @@ impl CodeEditor {
             }
             this.update(cx, |this, cx| {
                 let unicode = this.unicode_hovers_at(position, cx);
-                if parts.is_empty() && markers.is_empty() && picker.is_none() && unicode.is_empty()
+                let toolbar = this.inline_toolbar_hover(position, cx);
+                if parts.is_empty()
+                    && markers.is_empty()
+                    && picker.is_none()
+                    && unicode.is_empty()
+                    && toolbar.is_none()
                 {
                     return;
                 }
                 let range = hover_range.unwrap_or(range);
                 this.show_hover(range, markers, parts, picker, unicode, cx);
+                this.set_hover_inline_toolbar(toolbar, cx);
             })
             .ok();
         }));
@@ -1443,6 +1505,7 @@ impl CodeEditor {
             color_picker,
             unicode,
             command: None,
+            inline_toolbar: None,
             style,
             theme,
             focus_handle: cx.focus_handle(),

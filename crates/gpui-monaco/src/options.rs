@@ -598,6 +598,19 @@ pub enum WordBasedSuggestions {
     AllDocuments,
 }
 
+/// When the inline suggestion toolbar shows (Monaco
+/// `inlineSuggest.showToolbar`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InlineSuggestShowToolbar {
+    /// Whenever an inline suggestion shows.
+    Always,
+    /// While the mouse is over an inline suggestion (the default).
+    #[default]
+    OnHover,
+    /// Never.
+    Never,
+}
+
 /// How ghost text relates to the text at the cursor (Monaco
 /// `inlineSuggest.mode`, also `suggest.previewMode`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -627,6 +640,14 @@ pub struct InlineSuggestOptions {
     pub min_show_delay: std::time::Duration,
     /// `suppressInSnippetMode`: no ghost text inside a snippet (on).
     pub suppress_in_snippet_mode: bool,
+    /// `showToolbar`: when the toolbar with previous/next and accept shows
+    /// (`OnHover`).
+    pub show_toolbar: InlineSuggestShowToolbar,
+    /// `syntaxHighlightingEnabled`: color ghost text like code (on).
+    pub syntax_highlighting_enabled: bool,
+    /// `fontFamily`: the ghost text's font; `None` is the editor's
+    /// (Monaco `'default'`).
+    pub font_family: Option<SharedString>,
 }
 
 impl Default for InlineSuggestOptions {
@@ -638,6 +659,9 @@ impl Default for InlineSuggestOptions {
             keep_on_blur: false,
             min_show_delay: std::time::Duration::ZERO,
             suppress_in_snippet_mode: true,
+            show_toolbar: InlineSuggestShowToolbar::OnHover,
+            syntax_highlighting_enabled: true,
+            font_family: None,
         }
     }
 }

@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Inline completions toolbar, options and provider hooks (#201):**
+  - **Toolbar:** Monaco's inline suggestion toolbar. It has previous and next buttons with the "1/3" count, Accept (Tab) and Accept Word (Cmd/Ctrl+Right), and a "⋯" menu with Accept Line, Always Show Toolbar and the list's commands. `inline_suggest.show_toolbar` chooses whether it shows in the hover over ghost text (`OnHover`, the default), above the ghost text (`Always`) or not at all (`Never`). Showing it asks explicitly so the count is known. The new `editor.action.inlineSuggest.toggleAlwaysShowToolbar` toggles `Always`.
+  - **Options:** `inline_suggest.syntax_highlighting_enabled` (on) colors ghost text like code, at 70% opacity. Monaco tokenizes from the line's state; here the line with the ghost text, plus the extra lines, is parsed on its own. `inline_suggest.font_family` sets the ghost text's font.
+  - **Provider hooks:**
+    - `handle_end_of_lifetime` gets an `InlineCompletionEndOfLifeReason` once per item. Accepting gives `Accepted`. Escape or hide gives `Rejected`, but only if the item showed. Anything else, including being replaced by a newer equal item (`superseded_by`), gives `Ignored`.
+    - `handle_rejection` is called on rejection.
+    - `group_id` and `yields_to_group_ids` make a provider wait for the groups it yields to, and skip it when one of them has a visible completion. Cycles are dropped, as in Monaco.
+  - **Commands:** `InlineCompletionList::commands` adds entries to the toolbar menu. **Breaking:** `InlineCompletionList` literals need the new field, or `..Default::default()`.
 - **Hover options and keyboard focus (#199):**
   - **Options:** `EditorOptions::hover` (Monaco `hover`): `enabled` (`On`, `Off`, `OnKeyboardModifier`), `delay`, `sticky`, `hiding_delay` and `above`. Mouse moves follow Monaco's `ContentHoverController`: a sticky hover waits `hiding_delay` for the mouse to reach it, and a non-sticky one hides when the mouse moves onto it.
   - **Keyboard:** Show or Focus Hover focuses a visible hover. The new hover actions (`hideHover` and the scroll, page and top/bottom actions) are bound to Monaco's keys while it has focus, and Escape returns to the editor.

@@ -120,7 +120,7 @@ Issues are linked by number.
 | Color picker (hover and standalone) | `colorPicker` | ✅ | #97 |
 | Links | `links` | ✅ | #93 |
 | Semantic tokens | `semanticTokens` | ✅ | #98 |
-| Inline completions (ghost text) | `inlineCompletions` | 🟡 ghost text; hover toolbar, inline edits and some commands to come | #99, #201 |
+| Inline completions (ghost text) | `inlineCompletions` | 🟡 ghost text, toolbar (hover or always), commands, options, lifetime hooks and provider groups; inline edits (next-edit suggestions) to come | #99, #201 |
 | Document symbols | `documentSymbols` | ✅ | #100 |
 | Selection ranges | `smartSelect` | ✅ | #82 |
 | Folding ranges | `folding` | ✅ | #102 |

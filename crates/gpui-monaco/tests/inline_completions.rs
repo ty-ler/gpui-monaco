@@ -50,6 +50,7 @@ impl InlineCompletionsProvider for Lines {
         Task::ready(Ok(InlineCompletionList {
             items,
             suppress_suggestions: None,
+            commands: Vec::new(),
         }))
     }
 }
@@ -211,6 +212,7 @@ impl InlineCompletionsProvider for Body {
                 ..Default::default()
             }],
             suppress_suggestions: None,
+            commands: Vec::new(),
         }))
     }
 }
@@ -278,4 +280,293 @@ fn suggest_preview(cx: &mut TestAppContext) {
         e.update_options(options, cx);
     });
     assert_eq!(ghost(&editor, cx), Some(vec![(2, "int".into())]));
+}
+
+/// Records what Monaco reports to a provider about its items.
+#[derive(Clone, Default)]
+struct Recorder {
+    group: Option<&'static str>,
+    yields_to: Vec<&'static str>,
+    text: &'static str,
+    asked: Rc<RefCell<usize>>,
+    events: Rc<RefCell<Vec<String>>>,
+}
+
+impl InlineCompletionsProvider for Recorder {
+    fn provide_inline_completions(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        _: InlineCompletionContext,
+        _: &mut App,
+    ) -> Task<anyhow::Result<InlineCompletionList>> {
+        *self.asked.borrow_mut() += 1;
+        let line = context.snapshot.line(position.row);
+        let items = (!self.text.is_empty() && self.text.starts_with(line.trim_end()))
+            .then(|| InlineCompletion {
+                insert_text: self.text.into(),
+                range: Some(PointUtf16::new(position.row, 0)..position),
+                ..Default::default()
+            })
+            .into_iter()
+            .collect();
+        Task::ready(Ok(InlineCompletionList {
+            items,
+            ..Default::default()
+        }))
+    }
+
+    fn handle_rejection(&self, item: &InlineCompletion) {
+        self.events
+            .borrow_mut()
+            .push(format!("rejection {}", item.insert_text));
+    }
+
+    fn handle_end_of_lifetime(
+        &self,
+        item: &InlineCompletion,
+        reason: &InlineCompletionEndOfLifeReason,
+    ) {
+        let reason = match reason {
+            InlineCompletionEndOfLifeReason::Accepted => "accepted".to_string(),
+            InlineCompletionEndOfLifeReason::Rejected => "rejected".to_string(),
+            InlineCompletionEndOfLifeReason::Ignored { superseded_by, .. } => format!(
+                "ignored{}",
+                if superseded_by.is_some() {
+                    " superseded"
+                } else {
+                    ""
+                }
+            ),
+        };
+        self.events
+            .borrow_mut()
+            .push(format!("{reason} {}", item.insert_text));
+    }
+
+    fn group_id(&self) -> Option<gpui::SharedString> {
+        self.group.map(Into::into)
+    }
+
+    fn yields_to_group_ids(&self) -> Vec<gpui::SharedString> {
+        self.yields_to.iter().map(|&g| g.into()).collect()
+    }
+}
+
+fn setup_with(
+    providers: Vec<Recorder>,
+    configure: impl FnOnce(&mut gpui_monaco::options::EditorOptions),
+    cx: &mut TestAppContext,
+) -> (Entity<CodeEditor>, &mut VisualTestContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        for provider in providers {
+            register_inline_completions_provider(cx, LanguageSelector::All, provider);
+        }
+    });
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new(""));
+        let mut editor = CodeEditor::new(model, window, cx);
+        let mut options = editor.options().clone();
+        options.quick_suggestions = gpui_monaco::options::QuickSuggestions::OFF;
+        options.word_based_suggestions = gpui_monaco::options::WordBasedSuggestions::Off;
+        configure(&mut options);
+        editor.update_options(options, cx);
+        editor
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    cx.run_until_parked();
+    (editor, cx)
+}
+
+/// Settles and draws, so ghost text renders (and counts as shown).
+fn draw(cx: &mut VisualTestContext) {
+    settle(cx);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn end_of_lifetime_reasons(cx: &mut TestAppContext) {
+    let provider = Recorder {
+        text: "hello world",
+        ..Default::default()
+    };
+    let events = provider.events.clone();
+    let (editor, cx) = setup_with(vec![provider], |_| {}, cx);
+    cx.simulate_input("he");
+    draw(cx);
+    assert!(ghost(&editor, cx).is_some());
+    // Typing more asks again: the old item is superseded by the same one.
+    cx.simulate_input("l");
+    draw(cx);
+    assert_eq!(*events.borrow(), ["ignored superseded hello world"]);
+    events.borrow_mut().clear();
+    // Escape rejects the shown completion.
+    cx.simulate_keystrokes("escape");
+    assert_eq!(
+        *events.borrow(),
+        ["rejection hello world", "rejected hello world"]
+    );
+    events.borrow_mut().clear();
+    cx.simulate_input("l");
+    draw(cx);
+    cx.simulate_keystrokes("tab");
+    assert_eq!(text(&editor, cx), "hello world");
+    assert_eq!(events.borrow()[0], "accepted hello world");
+}
+
+#[gpui::test]
+fn providers_yield_to_groups(cx: &mut TestAppContext) {
+    let first = Recorder {
+        group: Some("first"),
+        text: "alpha",
+        ..Default::default()
+    };
+    let second = Recorder {
+        yields_to: vec!["first"],
+        text: "another",
+        ..Default::default()
+    };
+    let (first_asked, second_asked) = (first.asked.clone(), second.asked.clone());
+    let (editor, cx) = setup_with(vec![first, second], |_| {}, cx);
+    // "al": the first group has a visible completion, so the second isn't
+    // asked.
+    cx.simulate_input("al");
+    settle(cx);
+    assert_eq!(ghost(&editor, cx), Some(vec![(2, "pha".into())]));
+    assert!(*first_asked.borrow() > 0);
+    assert_eq!(*second_asked.borrow(), 0);
+    // "an": nothing from the first group, so the second is asked.
+    cx.simulate_keystrokes("escape backspace");
+    cx.simulate_input("n");
+    settle(cx);
+    assert!(*second_asked.borrow() > 0);
+    assert_eq!(ghost(&editor, cx), Some(vec![(2, "other".into())]));
+}
+
+#[gpui::test]
+fn the_always_shown_toolbar(cx: &mut TestAppContext) {
+    use gpui_monaco::options::InlineSuggestShowToolbar;
+    let (editor, cx, requests) = setup(vec!["println!(\"hi\");", "print!(\"hi\");"], cx);
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.inline_suggest.show_toolbar = InlineSuggestShowToolbar::Always;
+        e.update_options(options, cx);
+    });
+    cx.simulate_input("pri");
+    draw(cx);
+    // The toolbar shows at the ghost text and asks for all completions.
+    let at = |cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, _| e.inline_toolbar_position_for_tests())
+    };
+    assert_eq!(at(cx), Some(PointUtf16::new(0, 3)));
+    assert!(
+        requests
+            .borrow()
+            .contains(&InlineCompletionTriggerKind::Explicit)
+    );
+    draw(cx);
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.inline_suggestion_index(cx)),
+        Some((0, 2))
+    );
+    // Typing on keeps it where it first showed on the line.
+    cx.simulate_input("n");
+    draw(cx);
+    assert_eq!(at(cx), Some(PointUtf16::new(0, 3)));
+    // Always Show Toolbar off: it goes.
+    cx.update(|window, cx| {
+        editor
+            .update(cx, |e, cx| {
+                e.trigger(
+                    "editor.action.inlineSuggest.toggleAlwaysShowToolbar",
+                    window,
+                    cx,
+                )
+            })
+            .unwrap()
+    });
+    draw(cx);
+    assert_eq!(at(cx), None);
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.options().inline_suggest.show_toolbar),
+        InlineSuggestShowToolbar::OnHover
+    );
+}
+
+#[gpui::test]
+fn the_toolbar_in_the_hover(cx: &mut TestAppContext) {
+    let (editor, cx, _) = setup(vec!["println!(\"hi\");"], cx);
+    cx.simulate_input("pri");
+    draw(cx);
+    // The cursor is where the ghost text starts, so the hover there has the
+    // toolbar.
+    cx.dispatch_action(gpui_monaco::actions::ShowHover);
+    draw(cx);
+    assert!(editor.read_with(cx, |e, cx| e.hover_has_inline_toolbar_for_tests(cx)));
+    assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));
+}
+
+#[gpui::test]
+fn syntax_highlighted_ghost_text(cx: &mut TestAppContext) {
+    let provider = Recorder {
+        text: "let x = 42;",
+        ..Default::default()
+    };
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
+        register_inline_completions_provider(cx, LanguageSelector::All, provider);
+    });
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new("").with_language("rust"));
+        CodeEditor::new(model, window, cx)
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    cx.simulate_input("le");
+    draw(cx);
+    // The ghost text's pieces, each as its own injected text.
+    let pieces = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        editor.update(cx, |e, cx| {
+            let id = cx.entity_id();
+            e.model().update(cx, |model, _| {
+                model
+                    .all_decorations(Some(id))
+                    .into_iter()
+                    .filter_map(|d| d.options.after.clone())
+                    .map(|after| (after.content.to_string(), after.style))
+                    .collect::<Vec<_>>()
+            })
+        })
+    };
+    let highlighted = pieces(&editor, cx);
+    let text: String = highlighted.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(text, "t x = 42;");
+    assert!(highlighted.len() > 1, "{highlighted:?}");
+    assert!(
+        highlighted
+            .iter()
+            .all(|(_, s)| s.italic && s.opacity == Some(0.7))
+    );
+    // The keyword and the punctuation are colored differently.
+    let color = |piece: &str| {
+        highlighted
+            .iter()
+            .find(|(t, _)| t == piece)
+            .map(|(_, s)| s.foreground)
+    };
+    assert_ne!(color("t"), color(";"), "{highlighted:?}");
+    // Off: one plain piece in the ghost text color.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.inline_suggest.syntax_highlighting_enabled = false;
+        e.update_options(options, cx);
+        e.hide_inline_suggestion(cx);
+    });
+    cx.simulate_input("t");
+    draw(cx);
+    let plain = pieces(&editor, cx);
+    assert_eq!(plain.len(), 1, "{plain:?}");
+    assert_eq!(plain[0].0, " x = 42;");
 }
