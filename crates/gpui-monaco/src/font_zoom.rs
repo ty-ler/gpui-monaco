@@ -43,13 +43,17 @@ pub fn set_editor_zoom_level(level: f32, cx: &mut App) {
 pub fn remeasure_fonts(_cx: &mut App) {}
 
 /// Monaco `BareFontInfo._create`: the font size and line height grow by
-/// 10% per zoom level.
+/// 10% per zoom level, after [`EditorOptions::validated`].
+///
+/// Unlike Monaco, a zoomed out line height stays at least 8px: the zoomed
+/// options keep it in `line_height`, where smaller values multiply the font
+/// size.
 pub(crate) fn zoomed_options(options: &EditorOptions, level: f32) -> EditorOptions {
-    let mut zoomed = options.clone();
+    let mut zoomed = options.validated();
     if level != 0. {
         let multiplier = 1. + level * 0.1;
-        zoomed.line_height = Some(options.resolved_line_height() * multiplier);
-        zoomed.font_size = options.font_size * multiplier;
+        zoomed.line_height = Some((zoomed.resolved_line_height() * multiplier).max(px(8.)));
+        zoomed.font_size *= multiplier;
     }
     zoomed
 }

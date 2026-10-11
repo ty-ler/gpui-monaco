@@ -668,3 +668,39 @@ fn the_definition_preview_hover_action_shows_it_at_the_cursor(cx: &mut TestAppCo
             .is_empty()
     );
 }
+
+#[gpui::test]
+fn stable_peek_keeps_the_peek_view_open_on_escape(cx: &mut TestAppContext) {
+    let fixed = Fixed {
+        references: vec![here(0, 3, 6), here(2, 4, 7), here(3, 4, 7)],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(fixed, cx);
+    // Monaco `stablePeek`: Escape doesn't close peek views.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.stable_peek = true;
+        e.update_options(options, cx);
+    });
+    set_cursor(&editor, cx, p(2, 5));
+    cx.simulate_keystrokes("shift-f12");
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_peek_visible()));
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_peek_visible()));
+    // From the editor too.
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_peek_visible()));
+    // Without it, Escape closes them.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.stable_peek = false;
+        e.update_options(options, cx);
+    });
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
+}

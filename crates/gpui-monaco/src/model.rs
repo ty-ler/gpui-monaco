@@ -123,12 +123,22 @@ struct Syntax {
 }
 
 /// Per-model options (Monaco `ITextModelUpdateOptions`).
+///
+/// [`TextModel`] keeps them [validated](Self::validated), as Monaco's
+/// `TextModelResolvedOptions` does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelOptions {
-    /// Monaco `tabSize`: columns per tab character (default 4).
+    /// Monaco `tabSize`: columns per tab character (default 4, at least 1).
     pub tab_size: u32,
-    /// Monaco `indentSize`: columns per indentation level (default 4).
+    /// Monaco `indentSize`: columns per indentation level (default 4, at
+    /// least 1). With [`indent_size_is_tab_size`](Self::indent_size_is_tab_size)
+    /// it's `tab_size`.
     pub indent_size: u32,
+    /// Monaco `indentSize: 'tabSize'`: the indentation size follows
+    /// `tab_size`, so changing the tab size changes it too (default
+    /// `false`). A model created with `detect_indentation` starts with it on,
+    /// as in Monaco.
+    pub indent_size_is_tab_size: bool,
     /// Monaco `insertSpaces`: indent with spaces instead of tabs (default `true`).
     pub insert_spaces: bool,
     /// Monaco `maxTokenizationLineLength`: longer lines aren't highlighted,
@@ -150,8 +160,27 @@ pub struct ModelOptions {
     /// options count (see [`TextModel::is_too_large_for_tokenization`]).
     pub large_file_optimizations: bool,
     /// Monaco `defaultEOL`: the line ending of text without line breaks,
-    /// when the model is created or its value set (default LF).
+    /// when the model is created or its value set (default CRLF on Windows
+    /// and LF elsewhere, as Monaco's model service creates models).
     pub default_eol: LineEnding,
+}
+
+impl ModelOptions {
+    /// The options as Monaco's `TextModelResolvedOptions` resolves them:
+    /// `tab_size` and `indent_size` are at least 1, and
+    /// `indent_size_is_tab_size` makes `indent_size` the tab size.
+    pub fn validated(&self) -> Self {
+        let tab_size = self.tab_size.max(1);
+        Self {
+            tab_size,
+            indent_size: if self.indent_size_is_tab_size {
+                tab_size
+            } else {
+                self.indent_size.max(1)
+            },
+            ..self.clone()
+        }
+    }
 }
 
 impl Default for ModelOptions {
@@ -159,12 +188,18 @@ impl Default for ModelOptions {
         Self {
             tab_size: 4,
             indent_size: 4,
+            indent_size_is_tab_size: false,
             insert_spaces: true,
             max_tokenization_line_length: 20_000,
             detect_indentation: true,
             trim_auto_whitespace: true,
             large_file_optimizations: true,
-            default_eol: LineEnding::Lf,
+            // Monaco `DEFAULT_EOL` in `modelService.ts`.
+            default_eol: if cfg!(windows) {
+                LineEnding::Crlf
+            } else {
+                LineEnding::Lf
+            },
         }
     }
 }
@@ -315,7 +350,7 @@ impl TextModel {
     /// here, once, whether the model is too large to tokenize, and
     /// `default_eol` is the line ending when the text has no line breaks.
     pub fn with_options(mut self, options: ModelOptions) -> Self {
-        self.options = options;
+        self.options = options.validated();
         let rope = self.buffer.rope();
         self.too_large_for_tokenization = self.options.large_file_optimizations
             && (rope.len_utf16().0 > LARGE_FILE_SIZE_THRESHOLD
@@ -331,7 +366,9 @@ impl TextModel {
             );
             self.options.insert_spaces = guessed.insert_spaces;
             self.options.tab_size = guessed.tab_size;
-            self.options.indent_size = guessed.tab_size;
+            // Monaco: `indentSize: 'tabSize'`.
+            self.options.indent_size_is_tab_size = true;
+            self.options = self.options.validated();
         }
         self
     }
@@ -351,6 +388,7 @@ impl TextModel {
             tab_size: guessed.tab_size,
             // Monaco: "guess indentSize independent of tabSize" is a TODO.
             indent_size: guessed.tab_size,
+            indent_size_is_tab_size: false,
             ..self.options.clone()
         };
         self.update_options(options, cx);
@@ -510,9 +548,10 @@ impl TextModel {
         &self.options
     }
 
-    /// Replaces the options, emitting [`TextModelEvent::OptionsChanged`] if they
-    /// differ.
+    /// Replaces the options, [validated](ModelOptions::validated), emitting
+    /// [`TextModelEvent::OptionsChanged`] if they differ.
     pub fn update_options(&mut self, options: ModelOptions, cx: &mut Context<Self>) {
+        let options = options.validated();
         if self.options != options {
             self.options = options;
             cx.emit(TextModelEvent::OptionsChanged);

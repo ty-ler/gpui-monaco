@@ -16,14 +16,12 @@ use crate::cursor::Selection;
 use crate::decorations::{DecorationId, InjectedText};
 use crate::editor::CodeEditor;
 use crate::options::{
-    CursorStyle, EditorOptions, LineNumbers, RenderLineHighlight, ShowFoldingControls, WordWrap,
+    CursorStyle, EditorOptions, LineNumbers, RenderLineHighlight, ShowFoldingControls,
 };
 use crate::theme::{EditorColors, Theme, TokenStyle};
 use crate::view::view_lines::{ViewLine, ViewLines, WrapSettings, utf16_to_byte};
 use crate::widgets::{ContentWidgetPreference, OverlayPosition};
 
-/// Width of the glyph margin when enabled (Monaco `glyphMarginWidth`).
-const GLYPH_MARGIN_WIDTH: f32 = 18.;
 /// Minimum scrollbar slider length.
 const MIN_SLIDER: f32 = 20.;
 
@@ -899,6 +897,9 @@ pub(crate) struct MinimapCache {
     /// are drawn (a frame-stale minimap is invisible, ~3ms per keystroke on
     /// the main thread is not).
     pending: Option<(MinimapKey, std::sync::Arc<gpui::Task<()>>)>,
+    /// What the layout remembers between frames (Monaco
+    /// `ComputeOptionsMemory`).
+    pub layout_memory: crate::layout_info::LayoutMemory,
 }
 
 /// (text, parsed text, first line, last line, theme, wrap column, render
@@ -1704,35 +1705,48 @@ fn prepaint_editor(
     let tab_size = editor.cursor_config(cx).tab_size;
     let line_count = editor.snapshot.line_count();
 
-    // Gutter: [glyph margin][line numbers][line decorations + folding].
-    let digits = line_count.to_string().len() as u32;
-    let number_chars = digits.max(options.line_numbers_min_chars);
-    let numbers_width = if options.line_numbers == LineNumbers::Off {
-        px(0.)
-    } else {
-        metrics.em_width * number_chars as f32
-    };
-    let glyph_width = if options.glyph_margin {
-        px(GLYPH_MARGIN_WIDTH)
-    } else {
-        px(0.)
-    };
-    let folding_width = if options.folding {
-        line_height.min(px(18.))
-    } else {
-        px(0.)
-    };
-    let gutter_width =
-        (glyph_width + numbers_width + options.line_decorations_width + folding_width).round();
+    // Monaco `accessibilitySupport`: optimized for a screen reader, a model
+    // dominated by long lines wraps at the viewport, measured and without
+    // continuation indent, so the wrapping matches the screen reader's.
+    let screen_reader = editor.screen_reader_optimized(window);
+    // Monaco `EditorLayoutInfoComputer.computeLayout`, from the view lines
+    // as they are before this frame's update, as Monaco's are: the gutter
+    // is [glyph margin][line numbers][line decorations + folding], then
+    // the minimap's share, and where lines wrap.
+    let f64_of = |pixels: Pixels| f64::from(f32::from(pixels));
+    let mut layout_info = crate::layout_info::compute_layout(
+        &options,
+        &crate::layout_info::LayoutEnv {
+            outer_width: f64_of(bounds.size.width),
+            outer_height: f64_of(bounds.size.height),
+            line_height: f64_of(line_height),
+            line_numbers_digit_count: line_count.to_string().len() as u32,
+            typical_halfwidth_character_width: f64_of(metrics.em_width),
+            max_digit_width: f64_of(metrics.em_width),
+            pixel_ratio: f64::from(window.scale_factor()),
+            view_line_count: editor.view_lines.line_count().max(1),
+            glyph_margin_decoration_lane_count: 1,
+            is_dominated_by_long_lines: editor.screen_reader.dominated_by_long_lines,
+            screen_reader,
+        },
+        &mut editor.minimap_cache.layout_memory,
+    );
+    let numbers_width = layout_info.line_numbers_width;
+    let glyph_width = layout_info.glyph_margin_width;
+    // The folding controls are the line decorations' last 16px.
+    let folding_width =
+        if options.folding && options.show_folding_controls != ShowFoldingControls::Never {
+            px(16.)
+        } else {
+            px(0.)
+        };
+    let line_decorations_width = layout_info.decorations_width - folding_width;
+    let gutter_width = layout_info.content_left - layout_info.glyph_margin_left;
 
     let vbar = options.vertical_scrollbar_size;
     let hbar = options.horizontal_scrollbar_size;
     let viewport_height = bounds.size.height;
-    let minimap_width = if options.minimap.enabled && !options.single_line {
-        px(options.minimap.max_column as f32 * options.minimap.scale).min(bounds.size.width / 4.)
-    } else {
-        px(0.)
-    };
+    let minimap_width = layout_info.minimap.minimap_width;
     // Monaco `minimap.side: left`: the minimap comes before the gutter.
     let full_bounds = bounds;
     let minimap_left = options.minimap.side == crate::options::MinimapSide::Left;
@@ -1744,18 +1758,20 @@ fn prepaint_editor(
     } else {
         bounds
     };
-    let text_width =
-        bounds.size.width - gutter_width - vbar - if minimap_left { px(0.) } else { minimap_width };
+    let text_width = (bounds.size.width
+        - gutter_width
+        - vbar
+        - if minimap_left { px(0.) } else { minimap_width })
+    .max(px(0.));
 
     // Bring the view lines up to date: edits, wrapping, folds. Monaco
     // doesn't wrap models too large to tokenize (`IdentityLinesCollection`).
     let too_large = editor.model().read(cx).is_too_large_for_tokenization();
-    // Monaco `accessibilitySupport`: optimized for a screen reader, a model
-    // dominated by long lines wraps at the viewport, measured and without
-    // continuation indent, so the wrapping matches the screen reader's.
-    let screen_reader = editor.screen_reader_optimized(window);
-    let (word_wrap, wrap_minified) =
-        options.wrap_mode(screen_reader, editor.screen_reader.dominated_by_long_lines);
+    if too_large {
+        layout_info.is_word_wrap_minified = false;
+        layout_info.is_viewport_wrapping = false;
+        layout_info.wrapping_column = None;
+    }
     let wrapping_strategy = if screen_reader {
         crate::options::WrappingStrategy::Advanced
     } else {
@@ -1766,23 +1782,7 @@ fn prepaint_editor(
     } else {
         options.wrapping_indent
     };
-    let wrap_column = {
-        let viewport_columns = ((text_width - metrics.em_width) / metrics.em_width)
-            .floor()
-            .max(1.) as u32;
-        // Monaco leaves the rightmost column for the `wordWrapIndicator`,
-        // so it overlaps neither the text nor the scrollbar.
-        let wrapping_columns = viewport_columns
-            .saturating_sub(options.word_wrap_indicator as u32)
-            .max(1);
-        match word_wrap {
-            _ if too_large => None,
-            WordWrap::Off => None,
-            WordWrap::On => Some(wrapping_columns),
-            WordWrap::WordWrapColumn => Some(options.word_wrap_column.max(1)),
-            WordWrap::Bounded => Some(wrapping_columns.min(options.word_wrap_column.max(1))),
-        }
-    };
+    let wrap_column = layout_info.wrapping_column;
     let measure = (wrap_column.is_some()
         && wrapping_strategy == crate::options::WrappingStrategy::Advanced)
         .then(|| {
@@ -2479,8 +2479,13 @@ fn prepaint_editor(
         let model = editor.model().clone();
         let buffer = model.read(cx).buffer();
         let collapsed = editor.folds.collapsed_rows(buffer);
-        let left = bounds.left() + glyph_width + numbers_width + options.line_decorations_width;
-        for line in lines.iter().filter(|line| line.columns.start == 0) {
+        let left = bounds.left() + glyph_width + numbers_width + line_decorations_width;
+        // Monaco `showFoldingControls: never` has no controls, collapsed
+        // regions' included.
+        for line in lines
+            .iter()
+            .filter(|line| line.columns.start == 0 && folding_width > px(0.))
+        {
             let top = bounds.top() + zones.line_y(line.view_line, line_height) - scroll_top;
             let height = zones.height(line.view_line, line_height);
             let is_collapsed = collapsed.iter().any(|(start, _)| *start == line.row);
@@ -2530,40 +2535,6 @@ fn prepaint_editor(
         ShowFoldingControls::Never => false,
     };
 
-    // Monaco `EditorLayoutInfoComputer.computeLayout`, from what's drawn.
-    let gutter_left = bounds.left() - full_bounds.left();
-    let arrow = if options.scrollbar.vertical_has_arrows {
-        options.scrollbar.arrow_size
-    } else {
-        px(0.)
-    };
-    let layout_info = crate::layout_info::LayoutInfo {
-        width: full_bounds.size.width,
-        height: full_bounds.size.height,
-        glyph_margin_left: gutter_left,
-        glyph_margin_width: glyph_width,
-        glyph_margin_decoration_lane_count: 1,
-        line_numbers_left: gutter_left + glyph_width,
-        line_numbers_width: numbers_width,
-        decorations_left: gutter_left + glyph_width + numbers_width,
-        decorations_width: (gutter_width - glyph_width - numbers_width).max(px(0.)),
-        content_left: gutter_left + gutter_width,
-        content_width: text_width + vbar,
-        minimap: Default::default(),
-        // Leaving 2px for the cursor after the last character.
-        viewport_column: (((text_width - px(2.)) / metrics.em_width).floor() as u32).max(1),
-        is_word_wrap_minified: !too_large && wrap_minified,
-        is_viewport_wrapping: !too_large && matches!(word_wrap, WordWrap::On | WordWrap::Bounded),
-        wrapping_column: wrap_column,
-        vertical_scrollbar_width: vbar,
-        horizontal_scrollbar_height: hbar,
-        overview_ruler: crate::layout_info::OverviewRulerPosition {
-            width: vbar,
-            height: full_bounds.size.height - arrow * 2.,
-            top: arrow,
-            right: px(0.),
-        },
-    };
     let mut layout = EditorLayout {
         bounds,
         gutter_width,
@@ -2600,61 +2571,45 @@ fn prepaint_editor(
     let mut minimap_image = None;
     let mut section_headers = Vec::new();
     if minimap_width > px(0.) {
-        use crate::options::MinimapSize;
         let pixel_ratio = window.scale_factor();
         let minimap_options = &options.minimap;
-        let base = if minimap_options.render_characters {
-            2.
-        } else {
-            3.
-        };
-        let mut scale = if pixel_ratio >= 2. {
-            (minimap_options.scale * 2.).round()
-        } else {
-            minimap_options.scale
-        };
+        // Monaco `EditorMinimapLayoutInfo`, from `compute_layout`.
+        let minimap_layout = layout.layout_info.minimap;
+        let scale = minimap_layout.minimap_scale;
         // Device pixels per minimap line.
-        let mut line_px = base * scale;
-        let mut fills = false;
-        let mut sample_ratio = 1.;
-        if minimap_options.size != MinimapSize::Proportional {
-            let height = f32::from(viewport_height);
-            let lh = f32::from(line_height);
-            let typical = height / lh;
-            let before = (f32::from(options.padding.top) / lh).floor();
-            let mut after = (f32::from(options.padding.bottom) / lh).floor();
-            if options.scroll_beyond_last_line {
-                after = after.max(typical - 1.);
-            }
-            let count = view_line_count.max(1) as f32;
-            let desired = (before + count + after) / (pixel_ratio * height);
-            let minimap_lines = (count / desired).floor().max(1.);
-            let ratio = count / minimap_lines;
-            if ratio > 1. {
-                // More lines than pixels: one pixel per sampled line.
-                fills = true;
-                sample_ratio = ratio;
-                scale = 1.;
-                line_px = 1.;
-            } else {
-                let fit_becomes_fill = minimap_options.size == MinimapSize::Fit
-                    && ((before + count + after) * line_px).ceil() > pixel_ratio * height;
-                if minimap_options.size == MinimapSize::Fill || fit_becomes_fill {
-                    fills = true;
-                    let max_scale = scale + 1.;
-                    line_px = (lh * pixel_ratio).min((1. / desired).floor().max(1.));
-                    scale = max_scale.min((line_px / base).floor().max(1.));
-                }
-            }
-        }
+        let line_px = minimap_layout.minimap_line_height;
+        let fills = minimap_layout.minimap_height_is_editor_height;
+        // More lines than pixels: one pixel per sampled line (Monaco
+        // `MinimapLayout`'s sampling ratio).
+        let sample_ratio = if minimap_layout.minimap_is_sampling {
+            let contained = crate::layout_info::contained_minimap_line_count(
+                view_line_count,
+                options.scroll_beyond_last_line,
+                f64::from(f32::from(options.padding.top)),
+                f64::from(f32::from(options.padding.bottom)),
+                f64::from(f32::from(viewport_height)),
+                f64::from(f32::from(line_height)),
+                f64::from(pixel_ratio),
+            );
+            (f64::from(view_line_count) / contained.minimap_line_count.max(1.)).max(1.) as f32
+        } else {
+            1.
+        };
         let mline = px(line_px / pixel_ratio);
-        let char_width = if pixel_ratio >= 2. { scale / 2. } else { scale };
+        // Monaco draws `minimap.size: Fill` scaled up past the configured
+        // scale into a wider canvas, squeezed into the minimap's width.
+        let inner_width = minimap_layout.minimap_canvas_inner_width;
+        let width_multiplier = if minimap_width > px(0.) {
+            (inner_width as f32 / (f32::from(minimap_width) * pixel_ratio).floor().max(1.)).max(1.)
+        } else {
+            1.
+        };
         let render = MinimapRender {
             char_width: scale,
             line_height: line_px,
             characters: minimap_options.render_characters,
-            max_column: (f32::from(minimap_width) / char_width.max(0.1)) as usize,
-            width: (f32::from(minimap_width) * pixel_ratio).ceil() as u32,
+            max_column: (inner_width as f32 / scale.max(0.1)) as usize,
+            width: inner_width,
         };
         let minimap_bounds = Bounds::new(
             if minimap_left {
@@ -2664,24 +2619,6 @@ fn prepaint_editor(
             },
             size(minimap_width, viewport_height),
         );
-        // Monaco `EditorMinimapLayoutInfo`.
-        layout.layout_info.minimap = crate::layout_info::MinimapLayoutInfo {
-            render_minimap: if minimap_options.render_characters {
-                crate::layout_info::RenderMinimap::Text
-            } else {
-                crate::layout_info::RenderMinimap::Blocks
-            },
-            minimap_left: minimap_bounds.left() - full_bounds.left(),
-            minimap_width,
-            minimap_height_is_editor_height: fills,
-            minimap_is_sampling: sample_ratio > 1.,
-            minimap_scale: scale,
-            minimap_line_height: line_px,
-            minimap_canvas_inner_width: render.width,
-            minimap_canvas_inner_height: (f32::from(viewport_height) * pixel_ratio).floor() as u32,
-            minimap_canvas_outer_width: minimap_width,
-            minimap_canvas_outer_height: viewport_height,
-        };
         // Minimap lines, and the view line each shows.
         let minimap_line_count = (view_line_count as f32 / sample_ratio).ceil().max(1.) as u32;
         let total = mline * minimap_line_count as f32;
@@ -2737,12 +2674,14 @@ fn prepaint_editor(
             if cache.key.is_none() {
                 // Nothing to show yet: build the first one now.
                 let stale = std::mem::take(&mut editor.minimap_cache.stale);
+                let layout_memory = std::mem::take(&mut editor.minimap_cache.layout_memory);
                 editor.minimap_cache = MinimapCache {
                     key: Some(key),
                     first,
                     image: build(),
                     stale,
                     pending: None,
+                    layout_memory,
                 };
             } else {
                 let task = cx.spawn(async move |this, cx| {
@@ -2771,7 +2710,10 @@ fn prepaint_editor(
                 image,
                 Bounds::new(
                     point(minimap_bounds.left(), origin_y),
-                    size(px(w as f32 / pixel_ratio), px(h as f32 / pixel_ratio)),
+                    size(
+                        px(w as f32 / pixel_ratio / width_multiplier),
+                        px(h as f32 / pixel_ratio),
+                    ),
                 ),
             )
         });
@@ -2945,21 +2887,19 @@ fn prepaint_editor(
                     None,
                 )
             });
-            let fold = (options.folding && editor.folds.range_starting_at(*start_row).is_some())
-                .then(|| FoldControl {
-                    row: *start_row,
-                    bounds: Bounds::new(
-                        point(
-                            bounds.left()
-                                + glyph_width
-                                + numbers_width
-                                + options.line_decorations_width,
-                            bounds.top() + top,
-                        ),
-                        size(folding_width, line_height),
+            let fold = (folding_width > px(0.)
+                && editor.folds.range_starting_at(*start_row).is_some())
+            .then(|| FoldControl {
+                row: *start_row,
+                bounds: Bounds::new(
+                    point(
+                        bounds.left() + glyph_width + numbers_width + line_decorations_width,
+                        bounds.top() + top,
                     ),
-                    collapsed: collapsed_rows.iter().any(|(start, _)| start == start_row),
-                });
+                    size(folding_width, line_height),
+                ),
+                collapsed: collapsed_rows.iter().any(|(start, _)| start == start_row),
+            });
             layout.sticky_lines.push(StickyLine {
                 end_row: *end_row,
                 row: *row,
@@ -3015,7 +2955,7 @@ fn prepaint_editor(
     let mut decoration_underlines: Vec<(gpui::Point<Pixels>, Pixels, UnderlineStyle)> = Vec::new();
     let mut gutter_bars: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
     let mut margin_backgrounds: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
-    let options_line_decorations_width = options.line_decorations_width;
+    let options_line_decorations_width = line_decorations_width;
     let mut glyphs: Vec<(gpui::Point<Pixels>, ShapedLine)> = Vec::new();
     let mut line_number_colors: Vec<(u32, Hsla)> = Vec::new();
     let origin_x = layout.text_origin_x();
@@ -3300,7 +3240,10 @@ fn prepaint_editor(
             let bounds = match style {
                 CursorStyle::Line => Bounds::new(
                     point(x, line_y),
-                    size(options.cursor_width, line_cursor_height),
+                    size(
+                        options.line_cursor_width(metrics.em_width),
+                        line_cursor_height,
+                    ),
                 ),
                 CursorStyle::LineThin => {
                     Bounds::new(point(x, line_y), size(px(1.), line_cursor_height))

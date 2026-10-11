@@ -195,9 +195,11 @@ pub struct MinimapOptions {
     /// Whether the minimap is shown (Monaco `minimap.enabled`, default `true`). Never shown
     /// for [`EditorOptions::single_line`] editors.
     pub enabled: bool,
-    /// Columns rendered (Monaco `minimap.maxColumn`).
+    /// Columns rendered (Monaco `minimap.maxColumn`, default 120, 1 to
+    /// 10 000).
     pub max_column: u32,
-    /// 1 or 2: pixels per character column and half the line height.
+    /// Monaco `minimap.scale`: 1, 2 or 3 (default 1), the pixels per
+    /// character column and half the line height; fractions are truncated.
     pub scale: f32,
     /// Monaco `minimap.showSlider`: `true` always, `false` on mouse over.
     pub always_show_slider: bool,
@@ -217,10 +219,10 @@ pub struct MinimapOptions {
     /// Monaco `minimap.markSectionHeaderRegex`, with `label` and
     /// `separator` groups.
     pub mark_section_header_regex: SharedString,
-    /// Monaco `minimap.sectionHeaderFontSize` (default 9).
+    /// Monaco `minimap.sectionHeaderFontSize` (default 9, 4 to 32).
     pub section_header_font_size: f32,
-    /// Monaco `minimap.sectionHeaderLetterSpacing` (default 1). Not applied:
-    /// GPUI text has no letter spacing.
+    /// Monaco `minimap.sectionHeaderLetterSpacing` (default 1, 0 to 5). Not
+    /// applied: GPUI text has no letter spacing.
     pub section_header_letter_spacing: f32,
     /// Monaco `minimap.autohide`: hide the minimap until the mouse is over
     /// it or the editor scrolls (default never).
@@ -311,12 +313,12 @@ pub struct ScrollbarOptions {
     pub vertical_has_arrows: bool,
     /// Monaco `scrollbar.horizontalHasArrows` (default `false`).
     pub horizontal_has_arrows: bool,
-    /// Monaco `scrollbar.arrowSize` (default 11px).
+    /// Monaco `scrollbar.arrowSize` (default 11px, 0 to 1000).
     pub arrow_size: Pixels,
-    /// Monaco `scrollbar.verticalSliderSize`: the slider's thickness;
-    /// `None` fills the scrollbar.
+    /// Monaco `scrollbar.verticalSliderSize`: the slider's thickness (0 to
+    /// 1000px); `None` fills the scrollbar.
     pub vertical_slider_size: Option<Pixels>,
-    /// Monaco `scrollbar.horizontalSliderSize`.
+    /// Monaco `scrollbar.horizontalSliderSize` (0 to 1000px).
     pub horizontal_slider_size: Option<Pixels>,
     /// Monaco `scrollbar.handleMouseWheel` (default `true`).
     pub handle_mouse_wheel: bool,
@@ -390,13 +392,85 @@ pub enum CursorSurroundingLinesStyle {
     All,
 }
 
-/// Monaco `padding`.
+/// Monaco `padding`. Each is a whole number of pixels, 0 to 1000.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EditorPadding {
     /// Above the first line.
     pub top: Pixels,
     /// Below the last line.
     pub bottom: Pixels,
+}
+
+/// Monaco `lineDecorationsWidth`: the space between the line numbers and
+/// the text, in pixels or (Monaco's `"Nch"` strings) characters. The
+/// folding controls add 16px to it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LineDecorationsWidth {
+    /// A whole number of pixels, 0 to 1000 (Monaco's number form).
+    Pixels(Pixels),
+    /// A multiple of the typical character width (Monaco's `"1.5ch"`
+    /// form), giving a whole number of pixels, 0 to 1000.
+    Chars(f32),
+}
+
+impl Default for LineDecorationsWidth {
+    /// Monaco's 10px.
+    fn default() -> Self {
+        Self::Pixels(px(10.))
+    }
+}
+
+impl From<Pixels> for LineDecorationsWidth {
+    fn from(width: Pixels) -> Self {
+        Self::Pixels(width)
+    }
+}
+
+impl LineDecorationsWidth {
+    /// The width in pixels for a typical character width (Monaco
+    /// `EditorLineDecorationsWidth.validate` and `compute`): truncated to a
+    /// whole number of pixels and clamped to 0–1000; invalid values give
+    /// 10px.
+    pub fn resolve(self, typical_halfwidth_character_width: Pixels) -> Pixels {
+        let pixels = match self {
+            Self::Pixels(width) => f32::from(width),
+            Self::Chars(chars) if chars.is_finite() && chars >= 0. => {
+                chars * f32::from(typical_halfwidth_character_width)
+            }
+            Self::Chars(_) => 10.,
+        };
+        px(clamped_int(pixels, 10., 0., 1000.))
+    }
+}
+
+/// Monaco `clampedInt`: `value` truncated and clamped, or `default` for
+/// NaN.
+fn clamped_int(value: f32, default: f32, min: f32, max: f32) -> f32 {
+    if value.is_nan() {
+        default
+    } else {
+        value.clamp(min, max).trunc()
+    }
+}
+
+/// [`clamped_int`] for pixels.
+fn clamped_px(value: Pixels, default: f32, min: f32, max: f32) -> Pixels {
+    px(clamped_int(f32::from(value), default, min, max))
+}
+
+/// [`clamped_int`] for durations, in milliseconds.
+fn clamped_millis(value: std::time::Duration, min: u64, max: u64) -> std::time::Duration {
+    let millis = u64::try_from(value.as_millis()).unwrap_or(u64::MAX);
+    std::time::Duration::from_millis(millis.clamp(min, max))
+}
+
+/// Monaco `EditorFloatOption.float` then `clamp`: `default` for NaN.
+fn clamped_float(value: f32, default: f32, min: f32, max: f32) -> f32 {
+    if value.is_nan() {
+        default
+    } else {
+        value.clamp(min, max)
+    }
 }
 
 /// Monaco `find` options.
@@ -485,7 +559,8 @@ pub enum AutoFindInSelection {
 pub struct StickyScrollOptions {
     /// Whether sticky scroll is on (Monaco `stickyScroll.enabled`, default `true`).
     pub enabled: bool,
-    /// Most header lines pinned at once (Monaco `stickyScroll.maxLineCount`, default 5).
+    /// Most header lines pinned at once (Monaco `stickyScroll.maxLineCount`,
+    /// default 5, 1 to 20).
     pub max_line_count: u32,
     /// Where the scopes come from (Monaco `stickyScroll.defaultModel`,
     /// default outline).
@@ -540,19 +615,19 @@ pub enum RenderWhitespace {
 /// (Monaco `renderFinalNewline`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RenderFinalNewline {
-    /// Numbered like any line (the default).
+    /// Numbered like any line (the default, except on Linux).
     #[default]
     On,
     /// No line number.
     Off,
-    /// A dimmed line number.
+    /// A dimmed line number (the default on Linux, as in Monaco).
     Dimmed,
 }
 
 /// A vertical ruler (Monaco `IRulerOption`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Ruler {
-    /// The visible column it's drawn at.
+    /// The visible column it's drawn at (at most 10 000).
     pub column: u32,
     /// Its color; `None` uses the theme's `editorRuler.foreground`.
     pub color: Option<gpui::Hsla>,
@@ -665,12 +740,14 @@ pub enum HoverEnabled {
 pub struct HoverOptions {
     /// When the mouse shows hovers (default `On`).
     pub enabled: HoverEnabled,
-    /// How long the mouse rests before the hover shows (default 300ms).
+    /// How long the mouse rests before the hover shows (default 300ms, at
+    /// most 10s).
     pub delay: std::time::Duration,
     /// The hover stays while the mouse moves over it (default `true`).
     pub sticky: bool,
     /// With `sticky`, how long the hover waits before reacting to the
-    /// mouse leaving its word, so the mouse can reach it (default 300ms).
+    /// mouse leaving its word, so the mouse can reach it (default 300ms, at
+    /// most 10 minutes).
     pub hiding_delay: std::time::Duration,
     /// Prefer showing the hover above the line (default `true`).
     pub above: bool,
@@ -878,7 +955,8 @@ pub struct InlineSuggestOptions {
     pub suppress_suggestions: bool,
     /// `keepOnBlur`: keep ghost text when the editor loses focus (off).
     pub keep_on_blur: bool,
-    /// `minShowDelay`: show results no sooner than this after the request.
+    /// `minShowDelay`: show results no sooner than this after the request
+    /// (0, at most 10s).
     pub min_show_delay: std::time::Duration,
     /// `suppressInSnippetMode`: no ghost text inside a snippet (on).
     pub suppress_in_snippet_mode: bool,
@@ -1047,9 +1125,11 @@ pub struct SuggestOptions {
     /// `localityBonus`: among equal matches, prefer words used in the
     /// innermost bracket block around the cursor.
     pub locality_bonus: bool,
-    /// `fontSize`: the widget's font size; 0 uses the editor's.
+    /// `fontSize`: the widget's font size, a whole number up to 1000; 0
+    /// uses the editor's.
     pub font_size: f32,
-    /// `lineHeight`: the widget's row height; 0 uses the editor's.
+    /// `lineHeight`: the widget's row height, a whole number up to 1000; 0
+    /// uses the editor's.
     pub line_height: f32,
     /// `showIcons`: kind icons next to labels.
     pub show_icons: bool,
@@ -1152,8 +1232,8 @@ pub struct InlayHintsOptions {
     /// `maximumLength`: hint text per line, beyond which it's cut with
     /// `…`; 0 for no limit.
     pub maximum_length: usize,
-    /// `fontSize`: the hints' font size; 0, under 5 or above the editor's
-    /// uses the editor's.
+    /// `fontSize`: the hints' font size, a whole number up to 100; 0, under
+    /// 5 or above the editor's uses the editor's.
     pub font_size: f32,
     /// `fontFamily`: the hints' font; `None` uses the editor's.
     pub font_family: Option<SharedString>,
@@ -1272,6 +1352,9 @@ pub struct GotoLocationOptions {
     pub alternative_implementation_command: Option<LocationKind>,
     /// `alternativeReferenceCommand` (none by default).
     pub alternative_reference_command: Option<LocationKind>,
+    /// `alternativeTestsCommand` (none by default): like `multiple_tests`,
+    /// for a host's go to test commands.
+    pub alternative_tests_command: Option<LocationKind>,
 }
 
 impl Default for GotoLocationOptions {
@@ -1288,11 +1371,27 @@ impl Default for GotoLocationOptions {
             alternative_declaration_command: Some(LocationKind::References),
             alternative_implementation_command: None,
             alternative_reference_command: None,
+            alternative_tests_command: None,
         }
     }
 }
 
 impl GotoLocationOptions {
+    /// Every command does `multiple` with several results (the deprecated
+    /// Monaco `gotoLocation.multiple`, which VS Code migrates to each
+    /// `multiple*` setting; Monaco's editor itself ignores it).
+    pub fn with_multiple(multiple: GoToLocation) -> Self {
+        Self {
+            multiple_definitions: multiple,
+            multiple_type_definitions: multiple,
+            multiple_declarations: multiple,
+            multiple_implementations: multiple,
+            multiple_references: multiple,
+            multiple_tests: multiple,
+            ..Self::default()
+        }
+    }
+
     /// What `kind` does with several results.
     pub fn multiple(&self, kind: LocationKind) -> GoToLocation {
         match kind {
@@ -1532,38 +1631,48 @@ pub struct EditorOptions {
     /// Monaco `fontFamily`. Defaults to Menlo on macOS, Consolas on Windows and
     /// Droid Sans Mono elsewhere.
     pub font_family: SharedString,
-    /// Monaco `fontSize`. Defaults to 12px on macOS and 14px elsewhere.
+    /// Monaco `fontSize`. Defaults to 12px on macOS and 14px elsewhere;
+    /// clamped to 6–100px, and 0 means the default.
     pub font_size: Pixels,
-    /// `None` computes it from the font size like Monaco
-    /// (`GOLDEN_LINE_HEIGHT_RATIO`, 1.5 on macOS and 1.35 elsewhere).
+    /// Monaco `lineHeight`. `None` (or 0) computes it from the font size
+    /// like Monaco (`GOLDEN_LINE_HEIGHT_RATIO`, 1.5 on macOS and 1.35
+    /// elsewhere). Values are clamped to 0–150; below 8 they multiply the
+    /// font size. The result is rounded, and at least 8px (see
+    /// [`resolved_line_height`](Self::resolved_line_height)).
     pub line_height: Option<Pixels>,
-    /// Monaco `fontWeight` (default normal). Bold tokens stay bold.
+    /// Monaco `fontWeight` (default normal), clamped to 1–1000. Bold tokens
+    /// stay bold.
     pub font_weight: FontWeight,
     /// Monaco `fontLigatures` (default off).
     pub font_ligatures: FontLigatures,
     /// Monaco `lineNumbers`.
     pub line_numbers: LineNumbers,
     /// Monaco `lineNumbersMinChars`: the number column is at least this many digits
-    /// wide (default 5).
+    /// wide (default 5, 1 to 300).
     pub line_numbers_min_chars: u32,
-    /// Monaco `lineDecorationsWidth`: space between line numbers and text.
-    pub line_decorations_width: Pixels,
-    /// Monaco `glyphMargin`: show the gutter column for glyph decorations (default
-    /// `true`).
+    /// Monaco `lineDecorationsWidth`: space between line numbers and text
+    /// (default 10px). With [`folding`](Self::folding) on and
+    /// [`show_folding_controls`](Self::show_folding_controls) not `Never`,
+    /// the folding controls add 16px.
+    pub line_decorations_width: LineDecorationsWidth,
+    /// Monaco `glyphMargin`: show the gutter column for glyph decorations,
+    /// a line height wide (default `true`).
     pub glyph_margin: bool,
     /// Monaco `renderLineHighlight`.
     pub render_line_highlight: RenderLineHighlight,
     /// Monaco `cursorStyle`.
     pub cursor_style: CursorStyle,
-    /// Monaco `cursorWidth`: width of the [`CursorStyle::Line`] cursor (default 2px).
+    /// Monaco `cursorWidth`: width of the [`CursorStyle::Line`] cursor, a
+    /// whole number of pixels; 0 (the default) draws it 2px wide, and it's
+    /// at most a typical character wide.
     pub cursor_width: Pixels,
     /// Monaco `cursorBlinking`: how the cursor blinks (default blink).
     pub cursor_blinking: CursorBlinking,
     /// Monaco `cursorSmoothCaretAnimation`: animate cursor moves (default
     /// off).
     pub cursor_smooth_caret_animation: CursorSmoothCaretAnimation,
-    /// Monaco `cursorHeight`: the line cursor's height, at most the line
-    /// height; 0 for the line height (default 0).
+    /// Monaco `cursorHeight`: the line cursor's height, a whole number of
+    /// pixels, at most the line height; 0 for the line height (default 0).
     pub cursor_height: Pixels,
     /// Monaco `cursorSurroundingLines`: lines kept visible above and below
     /// the cursor when it moves (default 0).
@@ -1578,10 +1687,10 @@ pub struct EditorOptions {
     /// line (default 4).
     pub scroll_beyond_last_column: u32,
     /// Monaco `revealHorizontalRightPadding`: space kept right of a revealed
-    /// position (default 15px).
+    /// position (default 15px, 0 to 1000).
     pub reveal_horizontal_right_padding: Pixels,
     /// Monaco `fastScrollSensitivity`: wheel speed with Alt held (default
-    /// 5).
+    /// 5; 0 or less means 5).
     pub fast_scroll_sensitivity: f32,
     /// Monaco `scrollPredominantAxis`: a diagonal wheel or trackpad scroll
     /// moves along its main axis only (default `true`).
@@ -1593,7 +1702,8 @@ pub struct EditorOptions {
     /// Monaco `scrollOnMiddleClick`: a middle click starts scrolling toward
     /// the mouse until the next click (default `false`).
     pub scroll_on_middle_click: bool,
-    /// Monaco `padding`: space above the first line and below the last.
+    /// Monaco `padding`: space above the first line and below the last
+    /// (each 0 to 1000px).
     pub padding: EditorPadding,
     /// Monaco `roundedSelection`: selections have rounded corners (default
     /// `true`).
@@ -1652,14 +1762,16 @@ pub struct EditorOptions {
     /// `word_separators` alone). Needs the `word-segmenter` cargo feature (on
     /// by default); without it this has no effect.
     pub word_segmenter_locales: Vec<SharedString>,
-    /// Monaco `scrollbar.verticalScrollbarSize` (default 14px; 0 hides it).
+    /// Monaco `scrollbar.verticalScrollbarSize` (default 14px, 0 to 1000; 0
+    /// hides it).
     pub vertical_scrollbar_size: Pixels,
-    /// Monaco `scrollbar.horizontalScrollbarSize` (default 12px; 0 hides it).
+    /// Monaco `scrollbar.horizontalScrollbarSize` (default 12px, 0 to 1000;
+    /// 0 hides it).
     pub horizontal_scrollbar_size: Pixels,
     /// The rest of Monaco `scrollbar`.
     pub scrollbar: ScrollbarOptions,
     /// Monaco `overviewRulerLanes`: lanes in the overview ruler, 0 to hide
-    /// its marks (default 3).
+    /// its marks (default 3, at most 3).
     pub overview_ruler_lanes: u32,
     /// Monaco `overviewRulerBorder`: a border on its left (default
     /// `true`).
@@ -1667,7 +1779,7 @@ pub struct EditorOptions {
     /// Monaco `hideCursorInOverviewRuler` (default `false`).
     pub hide_cursor_in_overview_ruler: bool,
     /// Pixels scrolled per wheel "line" step is the line height; this scales it
-    /// (Monaco `mouseWheelScrollSensitivity`).
+    /// (Monaco `mouseWheelScrollSensitivity`, default 1; 0 means 1).
     pub mouse_wheel_scroll_sensitivity: f32,
     /// Monaco `mouseWheelZoom`: the wheel zooms the font while Cmd (macOS)
     /// or Ctrl is held (default `false`). See
@@ -1698,7 +1810,7 @@ pub struct EditorOptions {
     /// soft-wrapped line, which then wraps a column earlier to leave room
     /// for it (default `false`). Only while wrapping.
     pub word_wrap_indicator: bool,
-    /// Monaco `wordWrapColumn`, in characters (default 80); used by
+    /// Monaco `wordWrapColumn`, in characters (default 80, at least 1); used by
     /// [`WordWrap::WordWrapColumn`] and [`WordWrap::Bounded`].
     pub word_wrap_column: u32,
     /// Monaco `wordWrapBreakBeforeCharacters`: wrapping may break before
@@ -1728,7 +1840,8 @@ pub struct EditorOptions {
     /// Monaco `foldingStrategy`.
     pub folding_strategy: FoldingStrategy,
     /// Monaco `foldingMaximumRegions`: provider and syntax ranges beyond
-    /// this many are dropped, the most deeply nested first.
+    /// this many are dropped, the most deeply nested first (default 5000,
+    /// 10 to 65 000).
     pub folding_maximum_regions: usize,
     /// Monaco `foldingHighlight`: shade collapsed regions' first lines.
     pub folding_highlight: bool,
@@ -1826,8 +1939,9 @@ pub struct EditorOptions {
     /// of taking the first one; the textual highlights are only used when
     /// no other provider matches (default `false`).
     pub occurrences_highlight_from_all_providers: bool,
-    /// Monaco `occurrencesHighlightDelay`: how long the cursor rests before
-    /// occurrences are highlighted (default 250ms).
+    /// Monaco `occurrencesHighlightDelay`: occurrences are highlighted no
+    /// sooner than this after the cursor moves (default 0, at most 2s).
+    /// Like Monaco, they're computed 50ms after the cursor last moved.
     pub occurrences_highlight_delay: std::time::Duration,
     /// Monaco `selectionHighlight`: highlight other occurrences of the
     /// selected text (default `true`).
@@ -1862,7 +1976,8 @@ pub struct EditorOptions {
     pub code_lens: bool,
     /// Monaco `codeLensFontFamily`; `None` uses the editor's.
     pub code_lens_font_family: Option<SharedString>,
-    /// Monaco `codeLensFontSize`; 0 (or under 5) uses 90% of the editor's.
+    /// Monaco `codeLensFontSize` (a whole number, at most 100); 0 (or under
+    /// 5) uses 90% of the editor's.
     pub code_lens_font_size: f32,
     /// Monaco `linkedEditing`: edit linked ranges (like HTML tag pairs)
     /// together (off).
@@ -1877,7 +1992,8 @@ pub struct EditorOptions {
     /// Monaco `colorDecorators`: a swatch before each color in the text,
     /// which opens the color picker.
     pub color_decorators: bool,
-    /// Monaco `colorDecoratorsLimit`: at most this many swatches (500).
+    /// Monaco `colorDecoratorsLimit`: at most this many swatches (500, 1 to
+    /// 1 000 000).
     pub color_decorators_limit: usize,
     /// Monaco `colorDecoratorsActivatedOn`: what opens the picker from a
     /// swatch.
@@ -1892,7 +2008,8 @@ pub struct EditorOptions {
     pub show_deprecated: bool,
     /// Monaco `renderValidationDecorations`: when diagnostics are drawn.
     pub render_validation_decorations: RenderValidationDecorations,
-    /// Monaco `multiCursorLimit`: the most cursors at once (default 10000).
+    /// Monaco `multiCursorLimit`: the most cursors at once (default 10000,
+    /// 1 to 100 000).
     pub multi_cursor_limit: usize,
     /// Monaco `multiCursorMergeOverlapping`: merge overlapping selections
     /// (default `true`).
@@ -1919,7 +2036,7 @@ pub struct EditorOptions {
     /// Monaco `ariaRequired`: report the editor as a required input.
     pub aria_required: bool,
     /// Monaco `accessibilityPageSize`: how many lines a screen reader can
-    /// read at once around the selection (default 500).
+    /// read at once around the selection (default 500, at least 1).
     pub accessibility_page_size: u32,
     /// Monaco `accessibilitySupport`: run optimized for screen readers
     /// (default auto: while assistive technology is connected). Optimized,
@@ -1934,6 +2051,16 @@ pub struct EditorOptions {
     /// Monaco `tabFocusMode`: Tab moves focus instead of inserting a tab
     /// (also on for every editor with [`set_tab_focus_mode`](crate::set_tab_focus_mode)).
     pub tab_focus_mode: bool,
+    /// Monaco `tabIndex`: the editor's place in the window's Tab order
+    /// (GPUI's `FocusHandle::tab_index`, default 0); -1 takes it out of the
+    /// Tab order, like a DOM `tabindex` of -1.
+    pub tab_index: i32,
+    /// Monaco `stablePeek`: Escape doesn't close peek views, and a double
+    /// click in their preview doesn't open the result (default `false`).
+    pub stable_peek: bool,
+    /// Monaco `accessibilityHelpUrl`: the link the accessibility help
+    /// opens. Stored only: there's no accessibility help (Alt+F1) here yet.
+    pub accessibility_help_url: Option<SharedString>,
 }
 
 impl Default for EditorOptions {
@@ -1956,11 +2083,11 @@ impl Default for EditorOptions {
             font_ligatures: FontLigatures::Off,
             line_numbers: LineNumbers::On,
             line_numbers_min_chars: 5,
-            line_decorations_width: px(10.),
+            line_decorations_width: LineDecorationsWidth::default(),
             glyph_margin: true,
             render_line_highlight: RenderLineHighlight::Line,
             cursor_style: CursorStyle::Line,
-            cursor_width: px(2.),
+            cursor_width: px(0.),
             cursor_blinking: CursorBlinking::Blink,
             cursor_smooth_caret_animation: CursorSmoothCaretAnimation::Off,
             cursor_height: px(0.),
@@ -2030,6 +2157,9 @@ impl Default for EditorOptions {
             aria_required: false,
             accessibility_page_size: 500,
             tab_focus_mode: false,
+            tab_index: 0,
+            stable_peek: false,
+            accessibility_help_url: None,
             accessibility_support: AccessibilitySupport::Auto,
             screen_reader_announce_inline_suggestion: true,
             auto_closing_brackets: Default::default(),
@@ -2067,12 +2197,17 @@ impl Default for EditorOptions {
             bracket_pair_colorization: BracketPairColorizationOptions::default(),
             render_whitespace: RenderWhitespace::Selection,
             render_control_characters: true,
-            render_final_newline: RenderFinalNewline::On,
+            // Monaco: dimmed on Linux.
+            render_final_newline: if cfg!(target_os = "linux") {
+                RenderFinalNewline::Dimmed
+            } else {
+                RenderFinalNewline::On
+            },
             guides: GuideOptions::default(),
             rulers: Vec::new(),
             occurrences_highlight: OccurrencesHighlight::SingleFile,
             occurrences_highlight_from_all_providers: false,
-            occurrences_highlight_delay: std::time::Duration::from_millis(250),
+            occurrences_highlight_delay: std::time::Duration::ZERO,
             selection_highlight: true,
             selection_highlight_max_length: 200,
             selection_highlight_multiline: false,
@@ -2118,7 +2253,7 @@ impl EditorOptions {
             scroll_beyond_last_line: false,
             vertical_scrollbar_size: px(0.),
             horizontal_scrollbar_size: px(0.),
-            line_decorations_width: px(2.),
+            line_decorations_width: px(2.).into(),
             single_line: true,
             minimap: MinimapOptions {
                 enabled: false,
@@ -2172,12 +2307,489 @@ impl EditorOptions {
         (self.effective_word_wrap(), false)
     }
 
-    /// The line height in pixels: [`line_height`](Self::line_height), or the font size
-    /// times 1.5 on macOS and 1.35 elsewhere, rounded.
+    /// The font size Monaco's `EditorFontSize.validate` gives
+    /// [`font_size`](Self::font_size): clamped to 6–100px, with 0 (or NaN)
+    /// meaning the platform default.
+    pub fn resolved_font_size(&self) -> Pixels {
+        let size = f32::from(self.font_size);
+        if size == 0. || size.is_nan() {
+            Self::default().font_size
+        } else {
+            px(size.clamp(6., 100.))
+        }
+    }
+
+    /// The line height in pixels, as Monaco's `BareFontInfo._create` finds
+    /// it: [`line_height`](Self::line_height) clamped to 0–150, where `None`
+    /// or 0 is the font size times 1.5 on macOS and 1.35 elsewhere and a
+    /// value below 8 multiplies the font size; rounded, and at least 8.
     pub fn resolved_line_height(&self) -> Pixels {
-        self.line_height.unwrap_or_else(|| {
+        /// Monaco `MINIMUM_LINE_HEIGHT`.
+        const MINIMUM_LINE_HEIGHT: f32 = 8.;
+        let font_size = f32::from(self.resolved_font_size());
+        let line_height = self
+            .line_height
+            .map_or(0., |height| clamped_float(f32::from(height), 0., 0., 150.));
+        let line_height = if line_height == 0. {
             let ratio = if cfg!(target_os = "macos") { 1.5 } else { 1.35 };
-            px((f32::from(self.font_size) * ratio).round())
-        })
+            font_size * ratio
+        } else if line_height < MINIMUM_LINE_HEIGHT {
+            line_height * font_size
+        } else {
+            line_height
+        };
+        px(line_height.round().max(MINIMUM_LINE_HEIGHT))
+    }
+
+    /// The options as Monaco's `validate` methods leave them: numbers are
+    /// clamped to their limits (whole numbers truncated, as Monaco's
+    /// `clampedInt` does), and the sentinel values Monaco gives a meaning
+    /// are replaced by it. [`CodeEditor`](crate::CodeEditor) renders with
+    /// these, while [`CodeEditor::options`](crate::CodeEditor::options)
+    /// returns the options as they were set.
+    ///
+    /// - `font_size`: 6–100px, 0 for the default
+    ///   ([`resolved_font_size`](Self::resolved_font_size)); `line_height`:
+    ///   0–150, `None` for 0 ([`resolved_line_height`](Self::resolved_line_height)
+    ///   applies the rest); `font_weight`: 1–1000.
+    /// - `line_numbers_min_chars`: 1–300; `line_decorations_width`,
+    ///   `reveal_horizontal_right_padding`, `padding`, the scrollbar sizes,
+    ///   `arrow_size` and slider sizes: 0–1000px; `overview_ruler_lanes`:
+    ///   0–3; `cursor_width` and `cursor_height`: whole pixels, at least 0.
+    /// - `fast_scroll_sensitivity`: 5 when 0 or less;
+    ///   `mouse_wheel_scroll_sensitivity`: 1 when 0.
+    /// - `word_wrap_column`, `multi_cursor_limit` (to 100 000),
+    ///   `accessibility_page_size`: at least 1; `folding_maximum_regions`:
+    ///   10–65 000; `color_decorators_limit`: 1–1 000 000;
+    ///   `code_lens_font_size`, `inlay_hints.font_size`: 0–100;
+    ///   `suggest.font_size` and `suggest.line_height`: 0–1000; ruler
+    ///   columns: 0–10 000; `tab_index`: at least -1.
+    /// - `occurrences_highlight_delay`: at most 2s; `hover.delay`: 10s;
+    ///   `hover.hiding_delay`: 10 minutes; `inline_suggest.min_show_delay`:
+    ///   10s; `inline_suggest.edits.long_distance_hint_context_line_count`:
+    ///   0–10.
+    /// - `minimap.scale`: 1–3; `minimap.max_column`: 1–10 000;
+    ///   `minimap.section_header_font_size`: 4–32 (9 for NaN);
+    ///   `minimap.section_header_letter_spacing`: 0–5;
+    ///   `sticky_scroll.max_line_count`: 1–20.
+    pub fn validated(&self) -> Self {
+        let mut options = self.clone();
+        options.font_size = self.resolved_font_size();
+        options.line_height = self
+            .line_height
+            .map(|height| px(clamped_float(f32::from(height), 0., 0., 150.)))
+            .filter(|height| *height != px(0.));
+        options.font_weight = FontWeight(clamped_int(self.font_weight.0, 400., 1., 1000.));
+        options.line_numbers_min_chars = self.line_numbers_min_chars.clamp(1, 300);
+        options.line_decorations_width = match self.line_decorations_width {
+            LineDecorationsWidth::Pixels(width) => {
+                LineDecorationsWidth::Pixels(clamped_px(width, 10., 0., 1000.))
+            }
+            LineDecorationsWidth::Chars(chars) if chars.is_finite() && chars >= 0. => {
+                LineDecorationsWidth::Chars(chars)
+            }
+            LineDecorationsWidth::Chars(_) => LineDecorationsWidth::default(),
+        };
+        /// Monaco `Constants.MAX_SAFE_SMALL_INTEGER`.
+        const MAX_SAFE_SMALL_INTEGER: f32 = 1_073_741_823.;
+        options.cursor_width = clamped_px(self.cursor_width, 0., 0., MAX_SAFE_SMALL_INTEGER);
+        options.cursor_height = clamped_px(self.cursor_height, 0., 0., MAX_SAFE_SMALL_INTEGER);
+        options.reveal_horizontal_right_padding =
+            clamped_px(self.reveal_horizontal_right_padding, 15., 0., 1000.);
+        // Monaco `x => (x <= 0 ? 5 : x)` and `x => (x === 0 ? 1 : x)`.
+        if self.fast_scroll_sensitivity.is_nan() || self.fast_scroll_sensitivity <= 0. {
+            options.fast_scroll_sensitivity = 5.;
+        }
+        if self.mouse_wheel_scroll_sensitivity.is_nan() || self.mouse_wheel_scroll_sensitivity == 0.
+        {
+            options.mouse_wheel_scroll_sensitivity = 1.;
+        }
+        options.padding = EditorPadding {
+            top: clamped_px(self.padding.top, 0., 0., 1000.),
+            bottom: clamped_px(self.padding.bottom, 0., 0., 1000.),
+        };
+        options.vertical_scrollbar_size = clamped_px(self.vertical_scrollbar_size, 14., 0., 1000.);
+        options.horizontal_scrollbar_size =
+            clamped_px(self.horizontal_scrollbar_size, 12., 0., 1000.);
+        options.scrollbar.arrow_size = clamped_px(self.scrollbar.arrow_size, 11., 0., 1000.);
+        options.scrollbar.vertical_slider_size = self
+            .scrollbar
+            .vertical_slider_size
+            .map(|size| clamped_px(size, f32::from(options.vertical_scrollbar_size), 0., 1000.));
+        options.scrollbar.horizontal_slider_size =
+            self.scrollbar.horizontal_slider_size.map(|size| {
+                clamped_px(
+                    size,
+                    f32::from(options.horizontal_scrollbar_size),
+                    0.,
+                    1000.,
+                )
+            });
+        options.overview_ruler_lanes = self.overview_ruler_lanes.min(3);
+        options.word_wrap_column = self.word_wrap_column.max(1);
+        options.folding_maximum_regions = self.folding_maximum_regions.clamp(10, 65_000);
+        options.color_decorators_limit = self.color_decorators_limit.clamp(1, 1_000_000);
+        options.code_lens_font_size = clamped_int(self.code_lens_font_size, 0., 0., 100.);
+        options.multi_cursor_limit = self.multi_cursor_limit.clamp(1, 100_000);
+        options.accessibility_page_size = self.accessibility_page_size.max(1);
+        options.tab_index = self.tab_index.max(-1);
+        for ruler in &mut options.rulers {
+            ruler.column = ruler.column.min(10_000);
+        }
+        options.occurrences_highlight_delay =
+            clamped_millis(self.occurrences_highlight_delay, 0, 2000);
+        options.hover.delay = clamped_millis(self.hover.delay, 0, 10_000);
+        options.hover.hiding_delay = clamped_millis(self.hover.hiding_delay, 0, 600_000);
+        options.inline_suggest.min_show_delay =
+            clamped_millis(self.inline_suggest.min_show_delay, 0, 10_000);
+        options
+            .inline_suggest
+            .edits
+            .long_distance_hint_context_line_count = self
+            .inline_suggest
+            .edits
+            .long_distance_hint_context_line_count
+            .min(10);
+        options.suggest.font_size = clamped_int(self.suggest.font_size, 0., 0., 1000.);
+        options.suggest.line_height = clamped_int(self.suggest.line_height, 0., 0., 1000.);
+        options.inlay_hints.font_size = clamped_int(self.inlay_hints.font_size, 0., 0., 100.);
+        let minimap = &mut options.minimap;
+        // Monaco validates the scale with a default of 1.
+        minimap.scale = clamped_int(self.minimap.scale, 1., 1., 3.);
+        minimap.max_column = self.minimap.max_column.clamp(1, 10_000);
+        minimap.section_header_font_size =
+            clamped_float(self.minimap.section_header_font_size, 9., 4., 32.);
+        minimap.section_header_letter_spacing =
+            clamped_float(self.minimap.section_header_letter_spacing, 1., 0., 5.);
+        options.sticky_scroll.max_line_count = self.sticky_scroll.max_line_count.clamp(1, 20);
+        options
+    }
+
+    /// The line cursor's width (Monaco `ViewCursor`): `cursor_width`, at
+    /// most `typical_halfwidth_character_width` wide, with 0 drawn 2px
+    /// wide.
+    pub(crate) fn line_cursor_width(&self, typical_halfwidth_character_width: Pixels) -> Pixels {
+        let width = self.cursor_width.min(typical_halfwidth_character_width);
+        if width > px(0.) { width } else { px(2.) }
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn validated(change: impl FnOnce(&mut EditorOptions)) -> EditorOptions {
+        let mut options = EditorOptions::default();
+        change(&mut options);
+        options.validated()
+    }
+
+    #[test]
+    fn defaults_are_valid() {
+        assert_eq!(
+            EditorOptions::default().validated(),
+            EditorOptions::default()
+        );
+        let single_line = EditorOptions::single_line_input();
+        assert_eq!(single_line.validated(), single_line);
+    }
+
+    #[test]
+    fn monaco_defaults() {
+        let options = EditorOptions::default();
+        assert_eq!(options.occurrences_highlight_delay, Duration::ZERO);
+        assert_eq!(options.cursor_width, px(0.));
+        assert_eq!(options.tab_index, 0);
+        assert!(!options.stable_peek);
+        assert_eq!(options.accessibility_help_url, None);
+        assert_eq!(
+            options.render_final_newline,
+            if cfg!(target_os = "linux") {
+                RenderFinalNewline::Dimmed
+            } else {
+                RenderFinalNewline::On
+            }
+        );
+    }
+
+    #[test]
+    fn font_size() {
+        // Monaco `EditorFontSize.validate`: 0 is the default, else 6–100.
+        let default = EditorOptions::default().font_size;
+        assert_eq!(validated(|o| o.font_size = px(0.)).font_size, default);
+        assert_eq!(validated(|o| o.font_size = px(f32::NAN)).font_size, default);
+        assert_eq!(validated(|o| o.font_size = px(2.)).font_size, px(6.));
+        assert_eq!(validated(|o| o.font_size = px(500.)).font_size, px(100.));
+        assert_eq!(validated(|o| o.font_size = px(13.5)).font_size, px(13.5));
+        assert_eq!(
+            validated(|o| o.font_weight = FontWeight(0.)).font_weight,
+            FontWeight(1.)
+        );
+        assert_eq!(
+            validated(|o| o.font_weight = FontWeight(5000.)).font_weight,
+            FontWeight(1000.)
+        );
+    }
+
+    #[test]
+    fn line_height() {
+        let line_height = |font_size: f32, line_height: Option<f32>| {
+            EditorOptions {
+                font_size: px(font_size),
+                line_height: line_height.map(px),
+                ..EditorOptions::default()
+            }
+            .resolved_line_height()
+        };
+        let golden: f32 = if cfg!(target_os = "macos") { 1.5 } else { 1.35 };
+        // `None` or 0: the golden ratio, rounded.
+        assert_eq!(line_height(14., None), px((14. * golden).round()));
+        assert_eq!(line_height(14., Some(0.)), px((14. * golden).round()));
+        // Under 8: a multiple of the font size.
+        assert_eq!(line_height(10., Some(1.5)), px(15.));
+        assert_eq!(line_height(10., Some(2.)), px(20.));
+        // 8 or more: pixels, rounded, at most 150.
+        assert_eq!(line_height(10., Some(8.)), px(8.));
+        assert_eq!(line_height(10., Some(22.4)), px(22.));
+        assert_eq!(line_height(10., Some(500.)), px(150.));
+        // At least 8.
+        assert_eq!(line_height(6., Some(1.)), px(8.));
+        assert_eq!(line_height(10., Some(-3.)), px((10. * golden).round()));
+        // The font size is validated first.
+        assert_eq!(line_height(0., Some(2.)), {
+            let default = f32::from(EditorOptions::default().font_size);
+            px((default * 2.).round())
+        });
+        // Validation clamps and drops the 0 sentinel.
+        assert_eq!(
+            validated(|o| o.line_height = Some(px(0.))).line_height,
+            None
+        );
+        assert_eq!(
+            validated(|o| o.line_height = Some(px(200.))).line_height,
+            Some(px(150.))
+        );
+        assert_eq!(
+            validated(|o| o.line_height = Some(px(1.5))).line_height,
+            Some(px(1.5))
+        );
+    }
+
+    #[test]
+    fn gutter_and_scrollbars() {
+        assert_eq!(
+            validated(|o| o.line_numbers_min_chars = 0).line_numbers_min_chars,
+            1
+        );
+        assert_eq!(
+            validated(|o| o.line_numbers_min_chars = 1000).line_numbers_min_chars,
+            300
+        );
+        assert_eq!(
+            validated(|o| o.line_decorations_width = px(-5.).into()).line_decorations_width,
+            LineDecorationsWidth::Pixels(px(0.))
+        );
+        assert_eq!(
+            validated(|o| o.line_decorations_width = px(10.7).into()).line_decorations_width,
+            LineDecorationsWidth::Pixels(px(10.))
+        );
+        assert_eq!(
+            validated(|o| o.line_decorations_width = LineDecorationsWidth::Chars(-1.))
+                .line_decorations_width,
+            LineDecorationsWidth::Pixels(px(10.))
+        );
+        assert_eq!(
+            LineDecorationsWidth::Chars(2.5).resolve(px(7.)),
+            px(17.),
+            "2.5ch of 7px characters, truncated"
+        );
+        assert_eq!(
+            LineDecorationsWidth::Chars(f32::NAN).resolve(px(7.)),
+            px(10.)
+        );
+        let options = validated(|o| {
+            o.vertical_scrollbar_size = px(-1.);
+            o.horizontal_scrollbar_size = px(5000.);
+            o.scrollbar.arrow_size = px(2000.);
+            o.scrollbar.vertical_slider_size = Some(px(-3.));
+            o.scrollbar.horizontal_slider_size = Some(px(4.5));
+            o.overview_ruler_lanes = 7;
+            o.padding = EditorPadding {
+                top: px(-10.),
+                bottom: px(5000.),
+            };
+            o.reveal_horizontal_right_padding = px(2000.);
+        });
+        assert_eq!(options.vertical_scrollbar_size, px(0.));
+        assert_eq!(options.horizontal_scrollbar_size, px(1000.));
+        assert_eq!(options.scrollbar.arrow_size, px(1000.));
+        assert_eq!(options.scrollbar.vertical_slider_size, Some(px(0.)));
+        assert_eq!(options.scrollbar.horizontal_slider_size, Some(px(4.)));
+        assert_eq!(options.overview_ruler_lanes, 3);
+        assert_eq!(options.padding.top, px(0.));
+        assert_eq!(options.padding.bottom, px(1000.));
+        assert_eq!(options.reveal_horizontal_right_padding, px(1000.));
+    }
+
+    #[test]
+    fn cursor() {
+        let options = validated(|o| {
+            o.cursor_width = px(-2.);
+            o.cursor_height = px(3.7);
+        });
+        assert_eq!(options.cursor_width, px(0.));
+        assert_eq!(options.cursor_height, px(3.));
+        // Monaco `ViewCursor`: 0 draws 2px, and at most a character wide.
+        let width = |width: f32| {
+            EditorOptions {
+                cursor_width: px(width),
+                ..EditorOptions::default()
+            }
+            .line_cursor_width(px(7.))
+        };
+        assert_eq!(width(0.), px(2.));
+        assert_eq!(width(1.), px(1.));
+        assert_eq!(width(3.), px(3.));
+        assert_eq!(width(50.), px(7.));
+    }
+
+    #[test]
+    fn scrolling_sensitivities() {
+        // Monaco `fastScrollSensitivity`: 0 or less is 5.
+        for value in [0., -1., f32::NAN] {
+            assert_eq!(
+                validated(|o| o.fast_scroll_sensitivity = value).fast_scroll_sensitivity,
+                5.
+            );
+        }
+        assert_eq!(
+            validated(|o| o.fast_scroll_sensitivity = 2.5).fast_scroll_sensitivity,
+            2.5
+        );
+        // Monaco `mouseWheelScrollSensitivity`: 0 is 1; negative values stay.
+        assert_eq!(
+            validated(|o| o.mouse_wheel_scroll_sensitivity = 0.).mouse_wheel_scroll_sensitivity,
+            1.
+        );
+        assert_eq!(
+            validated(|o| o.mouse_wheel_scroll_sensitivity = -1.).mouse_wheel_scroll_sensitivity,
+            -1.
+        );
+    }
+
+    #[test]
+    fn limits() {
+        let options = validated(|o| {
+            o.word_wrap_column = 0;
+            o.folding_maximum_regions = 1;
+            o.color_decorators_limit = 0;
+            o.code_lens_font_size = 300.7;
+            o.multi_cursor_limit = 0;
+            o.accessibility_page_size = 0;
+            o.tab_index = -20;
+            o.rulers = vec![Ruler {
+                column: 50_000,
+                color: None,
+            }];
+            o.suggest.font_size = 2000.;
+            o.suggest.line_height = 12.5;
+            o.inlay_hints.font_size = 200.;
+        });
+        assert_eq!(options.word_wrap_column, 1);
+        assert_eq!(options.folding_maximum_regions, 10);
+        assert_eq!(options.color_decorators_limit, 1);
+        assert_eq!(options.code_lens_font_size, 100.);
+        assert_eq!(options.multi_cursor_limit, 1);
+        assert_eq!(options.accessibility_page_size, 1);
+        assert_eq!(options.tab_index, -1);
+        assert_eq!(options.rulers[0].column, 10_000);
+        assert_eq!(options.suggest.font_size, 1000.);
+        assert_eq!(options.suggest.line_height, 12.);
+        assert_eq!(options.inlay_hints.font_size, 100.);
+        let options = validated(|o| {
+            o.folding_maximum_regions = 1_000_000;
+            o.color_decorators_limit = usize::MAX;
+            o.multi_cursor_limit = 1_000_000;
+        });
+        assert_eq!(options.folding_maximum_regions, 65_000);
+        assert_eq!(options.color_decorators_limit, 1_000_000);
+        assert_eq!(options.multi_cursor_limit, 100_000);
+    }
+
+    #[test]
+    fn delays() {
+        let options = validated(|o| {
+            o.occurrences_highlight_delay = Duration::from_secs(10);
+            o.hover.delay = Duration::from_secs(60);
+            o.hover.hiding_delay = Duration::from_secs(3600);
+            o.inline_suggest.min_show_delay = Duration::from_secs(60);
+            o.inline_suggest.edits.long_distance_hint_context_line_count = 50;
+        });
+        assert_eq!(
+            options.occurrences_highlight_delay,
+            Duration::from_millis(2000)
+        );
+        assert_eq!(options.hover.delay, Duration::from_millis(10_000));
+        assert_eq!(options.hover.hiding_delay, Duration::from_millis(600_000));
+        assert_eq!(
+            options.inline_suggest.min_show_delay,
+            Duration::from_millis(10_000)
+        );
+        assert_eq!(
+            options
+                .inline_suggest
+                .edits
+                .long_distance_hint_context_line_count,
+            10
+        );
+    }
+
+    #[test]
+    fn minimap_and_sticky_scroll() {
+        let options = validated(|o| {
+            o.minimap.scale = 0.;
+            o.minimap.max_column = 0;
+            o.minimap.section_header_font_size = 100.;
+            o.minimap.section_header_letter_spacing = -1.;
+            o.sticky_scroll.max_line_count = 0;
+        });
+        assert_eq!(options.minimap.scale, 1.);
+        assert_eq!(options.minimap.max_column, 1);
+        assert_eq!(options.minimap.section_header_font_size, 32.);
+        assert_eq!(options.minimap.section_header_letter_spacing, 0.);
+        assert_eq!(options.sticky_scroll.max_line_count, 1);
+        let options = validated(|o| {
+            o.minimap.scale = 2.7;
+            o.minimap.max_column = 20_000;
+            o.minimap.section_header_font_size = f32::NAN;
+            o.sticky_scroll.max_line_count = 100;
+        });
+        assert_eq!(options.minimap.scale, 2.);
+        assert_eq!(options.minimap.max_column, 10_000);
+        assert_eq!(options.minimap.section_header_font_size, 9.);
+        assert_eq!(options.sticky_scroll.max_line_count, 20);
+        assert_eq!(validated(|o| o.minimap.scale = 9.).minimap.scale, 3.);
+        assert_eq!(validated(|o| o.minimap.scale = f32::NAN).minimap.scale, 1.);
+    }
+
+    #[test]
+    fn goto_location_multiple() {
+        let options = GotoLocationOptions::with_multiple(GoToLocation::Goto);
+        for kind in [
+            LocationKind::Definition,
+            LocationKind::Declaration,
+            LocationKind::TypeDefinition,
+            LocationKind::Implementation,
+            LocationKind::References,
+        ] {
+            assert_eq!(options.multiple(kind), GoToLocation::Goto);
+        }
+        assert_eq!(options.multiple_tests, GoToLocation::Goto);
+        assert_eq!(
+            options.alternative_definition_command,
+            Some(LocationKind::References)
+        );
+        assert_eq!(options.alternative_tests_command, None);
     }
 }

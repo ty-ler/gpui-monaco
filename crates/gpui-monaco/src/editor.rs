@@ -897,20 +897,33 @@ impl CodeEditor {
         cx.notify();
     }
 
-    /// The editor options.
+    /// The editor options, as set (Monaco `getRawOptions`); the editor uses
+    /// them [validated](EditorOptions::validated) and zoomed.
     #[expect(
         clippy::misnamed_getters,
-        reason = "`options` holds the zoomed values; hosts get theirs back"
+        reason = "`options` holds the validated, zoomed values; hosts get theirs back"
     )]
     pub fn options(&self) -> &EditorOptions {
         &self.user_options
     }
 
     /// Replaces the editor options (Monaco `updateOptions`, but with a full set).
+    ///
+    /// The editor uses them [validated](EditorOptions::validated) as
+    /// Monaco does; [`options`](Self::options) returns them as given.
     pub fn update_options(&mut self, options: EditorOptions, cx: &mut Context<Self>) {
         let old_from_all_providers = self.options.occurrences_highlight_from_all_providers;
         let zoomed = crate::font_zoom::zoomed_options(&options, self.zoom_level(cx));
         let old = std::mem::replace(&mut self.options, zoomed);
+        // Monaco `tabIndex`.
+        if old.tab_index != self.options.tab_index {
+            let tab_index = self.options.tab_index;
+            self.focus_handle = self
+                .focus_handle
+                .clone()
+                .tab_index(tab_index as isize)
+                .tab_stop(tab_index >= 0);
+        }
         // Monaco `onDidChangeConfiguration` fires when an option changed.
         let change = (old != self.options).then(|| {
             CodeEditorEvent::ConfigurationChanged(ConfigurationChange::new(
@@ -2075,8 +2088,9 @@ impl CodeEditor {
             self.close_message(cx);
             return;
         }
-        // Monaco's `closeReferenceSearch` outranks closing find.
-        if self.close_peek(cx) {
+        // Monaco's `closeReferenceSearch` outranks closing find; its
+        // Escape keybinding is off with `stablePeek`.
+        if !self.options.stable_peek && self.close_peek(cx) {
             return;
         }
         if self.cancel_symbol_navigation(cx) {

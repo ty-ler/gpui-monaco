@@ -66,6 +66,11 @@ pub use font_zoom::{editor_zoom_level, remeasure_fonts, set_editor_zoom_level};
 mod format;
 mod geometry;
 mod goto;
+mod high_contrast;
+pub use high_contrast::{
+    auto_detect_high_contrast, os_high_contrast, set_auto_detect_high_contrast,
+    set_os_high_contrast,
+};
 mod hover;
 mod inlay_hints;
 mod inline_completions;

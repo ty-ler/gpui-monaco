@@ -74,6 +74,9 @@ Issues are linked by number.
 | Word wrap indicator | `wordWrapIndicator` | ✅ | #228 |
 | Horizontal scrollbar left out of the content height | `scrollbar.ignoreHorizontalScrollbarInContentHeight` | ✅ | #228 |
 | Large file optimizations, default line ending | `largeFileOptimizations`, `defaultEOL` | ✅ | #203 |
+| Option validation: clamps and sentinel values (`fontSize` 0, `lineHeight` 0 and multipliers, sensitivities, minimap, sticky scroll, folding and color limits, delays, …), `tabSize`/`indentSize` at least 1, `indentSize: 'tabSize'` | each option's `validate`, `TextModelResolvedOptions` | ✅ the editor renders with `EditorOptions::validated`, `options()` returns the options as set | #262 |
+| Layout widths: a line-height glyph margin, 16px folding column (none with `showFoldingControls: never`), the minimap's proportional share and `fill`/`fit` sizing, `lineDecorationsWidth` in characters | `EditorLayoutInfoComputer.computeLayout` | ✅ one glyph margin lane (no lane decorations); the widest digit is the typical character width | #262 |
+| Platform defaults, `cursorWidth` 0 and its cap | `renderFinalNewline` (dimmed on Linux), `defaultEOL` (CRLF on Windows), `cursorWidth` | ✅ | #262 |
 | Inertial scrolling, two-cell full-width characters | `inertialScroll`, `fullwidthCharacterWidth` | ✅ ghost text and the inline diff's deleted lines keep the font's width | #203, #228 |
 | Folding: indentation and markers, gutter chevrons | `folding` | ✅ | |
 | Syntax and provider folding (`foldingStrategy`, `foldingMaximumRegions`) | `folding` | ✅ | #102 |
@@ -146,7 +149,7 @@ Issues are linked by number.
 | `goToLocations`/`peekLocations` API commands (and `showReferences`), `gotoLocation.multipleTests` | `gotoSymbol` | ✅ | #227 |
 | Diagnostics: squiggles, ruler, hover, F8 | `gotoError` | ✅ | |
 | Diagnostic tags (unused, deprecated), related information | `gotoError` | ✅ | #90 |
-| Document highlights | `wordHighlighter` | ✅ | #83 |
+| Document highlights | `wordHighlighter` | ✅ 50ms after the cursor rests, then `occurrencesHighlightDelay` (0) from the move | #83, #262 |
 | Formatting: document, range, on type, on paste | `format` | ✅ | #94 |
 | Choosing between formatters (`FormattingConflicts.setFormatterSelector`, `displayName`) | `format` | ✅ the first by default, as standalone Monaco; no built-in picker (`formatDocument.multiple` is VS Code workbench) | #229 |
 | Rename | `rename` | ✅ | #56 |
@@ -174,6 +177,7 @@ Issues are linked by number.
 |---|---|---|
 | Diff editor, multi-diff editor | ✅ `DiffEditor` (side by side or inline, hidden unchanged regions, revert buttons, moved blocks, the accessible diff viewer, legacy and advanced algorithms, `compactMode`, `diffWordWrap`, `maxFileSize`, `diffCodeLens`, `accessibilityVerbose`, `experimental.showEmptyDecorations` and `useTrueInlineView`, switch side, view state, `revealFirstDiff`) and `MultiDiffEditor`; smaller gaps in #181 | #52, #181, #203, #228 |
 | Screen readers, tab focus mode, ARIA options, `accessibilitySupport`, `screenReaderAnnounceInlineSuggestion` | ✅ announcements are AccessKit live regions; no accessibility signals (sounds) for inline suggestions | #53, #228 |
+| Standalone options: `stablePeek`, `autoDetectHighContrast`, `accessibilityHelpUrl`, `tabIndex` | ✅ GPUI doesn't report the OS's high contrast mode, so hosts report it (`set_os_high_contrast`); `accessibilityHelpUrl` is stored only, as there's no accessibility help yet | #262 |
 | wasm / web | 🟡 compiles for `wasm32-unknown-unknown`; browser runner pending | #58 |
 | crates.io release | ❌ | #57 |
 | Monaco migration notes | ✅ (book: Migrating from Monaco) | #60 |

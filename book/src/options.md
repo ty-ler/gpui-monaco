@@ -14,14 +14,14 @@ editor.update(cx, |editor, cx| {
 
 | Field | Monaco option | Notes |
 |---|---|---|
-| `font_family`, `font_size`, `line_height` | `fontFamily`, `fontSize`, `lineHeight` | `line_height: None` derives it from the font size, as Monaco does |
-| `font_weight`, `font_ligatures` | `fontWeight`, `fontLigatures` | ligatures are `Off` (default), `On`, or CSS `font-feature-settings` |
+| `font_family`, `font_size`, `line_height` | `fontFamily`, `fontSize`, `lineHeight` | `line_height: None` derives it from the font size, as Monaco does; see [Validation](#validation) |
+| `font_weight`, `font_ligatures` | `fontWeight`, `fontLigatures` | weights 1–1000; ligatures are `Off` (default), `On`, or CSS `font-feature-settings` |
 | `mouse_wheel_zoom` | `mouseWheelZoom` | Cmd+wheel (Ctrl elsewhere) zooms every editor's font; see `set_editor_zoom_level` |
 | `line_numbers` | `lineNumbers` | `On`, `Off`, `Relative`, `Interval` (every 10th, the current and the last line), or `LineNumbers::custom(\|n\| …)` for Monaco's function: a label per 1-based line, empty for none |
 | `select_on_line_numbers` | `selectOnLineNumbers` | clicking a line number selects the line (on); other gutter clicks never select |
-| `line_numbers_min_chars`, `line_decorations_width`, `glyph_margin` | same names | gutter layout |
+| `line_numbers_min_chars`, `line_decorations_width`, `glyph_margin` | same names | gutter layout (see [Layout](#layout)); `line_decorations_width` takes pixels (`px(10.).into()`) or `LineDecorationsWidth::Chars(1.5)` for Monaco's `"1.5ch"` |
 | `render_line_highlight` | `renderLineHighlight` | `None`, `Gutter`, `Line`, `All` |
-| `cursor_style`, `cursor_width`, `cursor_height` | `cursorStyle`, `cursorWidth`, `cursorHeight` | `Line`, `Block`, `Underline`, `LineThin`, `BlockOutline`, `UnderlineThin`; `cursor_height` 0 is the line height |
+| `cursor_style`, `cursor_width`, `cursor_height` | `cursorStyle`, `cursorWidth`, `cursorHeight` | `Line`, `Block`, `Underline`, `LineThin`, `BlockOutline`, `UnderlineThin`; `cursor_width` 0 (the default) draws 2px and it's at most a character wide; `cursor_height` 0 is the line height |
 | `mouse_style` | `mouseStyle` | the mouse cursor over the text: `Text` (I-beam), `Default` (arrow) or `Copy` |
 | `mouse_middle_click_action` | `mouseMiddleClickAction` | `Default`, `OpenLink` (a middle click opens a link) or `CtrlLeftClick` (it acts like Cmd/Ctrl+click) |
 | `cursor_blinking` | `cursorBlinking` | `Blink`, `Smooth`, `Phase`, `Expand`, `Solid` (read-only editors don't blink) |
@@ -46,6 +46,9 @@ editor.update(cx, |editor, cx| {
 | `accessibility_support` | `accessibilitySupport` | `Auto` (optimized while assistive technology is connected), `On` or `Off`. Optimized, wrapping is measured without continuation indent, and a model mostly made of lines of 10 000+ characters wraps at the viewport (unless `word_wrap_override1` is set); a diff editor stays side by side when narrow. `Off` gives the screen reader no text, only "The editor is not accessible at this time." |
 | `screen_reader_announce_inline_suggestion` | `screenReaderAnnounceInlineSuggestion` | screen readers announce new ghost text, or where a next edit suggestion is (on); `CodeEditor::announce` announces anything |
 | `tab_focus_mode` | `tabFocusMode` | Tab moves focus instead of indenting; `set_tab_focus_mode` (Ctrl+M) turns it on for every editor |
+| `tab_index` | `tabIndex` | the editor's place in the window's Tab order (0); -1 takes it out |
+| `stable_peek` | `stablePeek` | Escape doesn't close peek views and double clicks in their preview don't open the result (off) |
+| `accessibility_help_url` | `accessibilityHelpUrl` | stored only: there's no accessibility help (Alt+F1) yet |
 | `drop_into_editor`, `paste_as` | `dropIntoEditor`, `pasteAs` | `enabled` and when to show the button that switches edits |
 | `unusual_line_terminators` | `unusualLineTerminators` | `Prompt` (default), `Auto` or `Off` for LS and PS characters |
 | `word_separators` | `wordSeparators` | used by word movement and whole-word find |
@@ -98,7 +101,7 @@ editor.update(cx, |editor, cx| {
 | `folding_imports_by_default` | `foldingImportsByDefault` | collapse import ranges at first (off) |
 | `smart_select` | `smartSelect` | expand selection over leading/trailing whitespace lines and word parts (both on) |
 | `lightbulb` | `lightbulb.enabled` | when the code action lightbulb asks for actions: `Off`, `OnCode` (default) or `On` |
-| `goto_location` | `gotoLocation` | what go to definition, references and the other navigation commands do with several results, and their alternative commands |
+| `goto_location` | `gotoLocation` | what go to definition, references and the other navigation commands do with several results, and their alternative commands. `multiple_tests` and `alternative_tests_command` are for a host's go to test commands. Monaco's deprecated `multiple` is `GotoLocationOptions::with_multiple`, which sets every `multiple_*` |
 | `peek_widget_default_focus` | `peekWidgetDefaultFocus` | what a new peek view focuses: `Tree` (the results list, default) or `Editor` (the preview) |
 | `definition_link_opens_in_peek` | `definitionLinkOpensInPeek` | Cmd/Ctrl+click on a symbol shows its definitions in a peek view (off) |
 | `find` | `find.*` | `cursor_move_on_type` (on), `seed_search_string_from_selection`, `auto_find_in_selection`, `add_extra_space_on_top` (on), `loop_` (on), `history` and `replace_history` (on), `close_on_result` (off), `find_on_type` (search while typing; when off, Enter searches; on), `global_find_clipboard` (share the search string through the find pasteboard on macOS, or between the app's editors; off) |
@@ -113,10 +116,10 @@ editor.update(cx, |editor, cx| {
 | `column_selection` | `columnSelection` | mouse drags and Shift+arrows make column selections |
 | `overtype_cursor_style`, `overtype_on_paste` | `overtypeCursorStyle`, `overtypeOnPaste` | overtype mode (Insert) |
 | `comments` | `comments` | `insert_space`, `ignore_empty_lines` |
-| `render_whitespace`, `render_control_characters`, `render_final_newline` | same names | `·` and `→` for whitespace; `␇` for control characters |
+| `render_whitespace`, `render_control_characters`, `render_final_newline` | same names | `·` and `→` for whitespace; `␇` for control characters; the final newline's line number is `Dimmed` by default on Linux and `On` elsewhere, as in Monaco |
 | `guides`, `rulers` | `guides`, `rulers` | indent guides (with the active one highlighted: `highlight_active_indentation` is `On`, `Off` or `Always`, which also highlights it on lines with bracket pair guides), bracket pair guides (`bracket_pairs`: off, active or on, plus horizontal ones) and vertical rulers |
 | `bracket_pair_colorization` | `bracketPairColorization` | `enabled`: color brackets by nesting level (on); `independent_color_pool_per_bracket_type`: each bracket kind counts its own nesting (off) |
-| `occurrences_highlight`, `occurrences_highlight_delay` | `occurrencesHighlight`, `occurrencesHighlightDelay` | `Off`, `SingleFile` (default) or `MultiFile`, which like `SingleFile` highlights in this editor only (editors don't share highlights) |
+| `occurrences_highlight`, `occurrences_highlight_delay` | `occurrencesHighlight`, `occurrencesHighlightDelay` | `Off`, `SingleFile` (default) or `MultiFile`, which like `SingleFile` highlights in this editor only (editors don't share highlights). Highlights are computed 50ms after the cursor rests and shown no sooner than the delay (0) after it moved |
 | `occurrences_highlight_from_all_providers` | `occurrencesHighlightFromAllProviders` | ask every document highlight provider at once and merge their answers (off: the first provider that answers wins, and an empty answer counts); the textual occurrences are only used when no provider is registered |
 | `selection_highlight`, `selection_highlight_max_length`, `selection_highlight_multiline` | same names | highlight other occurrences of the selection |
 | `selected_text_match_mode` | `selectedTextMatchMode` | how Cmd/Ctrl+D, select all occurrences and selection highlights match selected text: `FindOptions` (the find widget's options while it's open), `CaseSensitive` or `CaseInsensitive` |
@@ -124,13 +127,57 @@ editor.update(cx, |editor, cx| {
 
 Model-level settings live in `ModelOptions` (Monaco `ITextModelUpdateOptions`), set with `model.update_options(…)`:
 
-- `tab_size`
-- `indent_size`
+- `tab_size` (at least 1)
+- `indent_size` (at least 1)
+- `indent_size_is_tab_size` (Monaco `indentSize: 'tabSize'`, off by default): `indent_size` follows `tab_size`. Models created with `detect_indentation` start with it on, as Monaco's do.
 - `insert_spaces`
 - `max_tokenization_line_length` (Monaco `maxTokenizationLineLength`, default 20 000): longer lines aren't highlighted
 - `detect_indentation` (Monaco `detectIndentation`, default on): when the model is created, `tab_size`, `indent_size` and `insert_spaces` are guessed from its text, with the given values as the fallback. Pass creation options with `TextModel::new(text).with_options(…)`. `model.detect_indentation(…)` and the "Detect Indentation from Content" command guess again later.
 - `trim_auto_whitespace` (Monaco `trimAutoWhitespace`, default on): indentation that Enter or Tab inserted is removed by the next edit if the line is still blank
 - `large_file_optimizations` (Monaco `largeFileOptimizations`, default on): a model created with more than 20M characters or 300K lines is never tokenized, and has no folding, sticky scroll, code lenses, occurrence or selection highlights, or wrapping (`TextModel::is_too_large_for_tokenization`). Only the creation options count.
-- `default_eol` (Monaco `defaultEOL`, default LF): the line ending of text without line breaks, when the model is created (`with_options`) or its value set
+- `default_eol` (Monaco `defaultEOL`, default CRLF on Windows and LF elsewhere): the line ending of text without line breaks, when the model is created (`with_options`) or its value set
 
 Changing options takes effect on the next frame. Wrapping, folding and the minimap update incrementally.
+
+## Validation
+
+Like Monaco's `validate` methods, the editor clamps options to their limits and gives Monaco's sentinel values their meaning: it renders with `options.validated()`, while `editor.options()` returns the options as they were set (Monaco's `getRawOptions`). Whole-number options are truncated, as Monaco's `clampedInt` does. In particular:
+
+- `font_size` is 6–100px, and 0 means the platform default (`resolved_font_size`).
+- `line_height` is clamped to 0–150. `None` or 0 computes it from the font size (1.5× on macOS, 1.35× elsewhere), a value below 8 multiplies the font size (`Some(px(1.5))` is 1.5 lines), and the result is rounded and at least 8px (`resolved_line_height`).
+- `fast_scroll_sensitivity` of 0 or less is 5; `mouse_wheel_scroll_sensitivity` of 0 is 1.
+- `line_numbers_min_chars` is 1–300; `line_decorations_width`, `padding`, `reveal_horizontal_right_padding` and the scrollbar sizes 0–1000px; `overview_ruler_lanes` 0–3; `word_wrap_column`, `multi_cursor_limit` (to 100 000) and `accessibility_page_size` at least 1; `folding_maximum_regions` 10–65 000; `color_decorators_limit` 1–1 000 000; `code_lens_font_size` and `inlay_hints.font_size` 0–100; `suggest.font_size` and `suggest.line_height` 0–1000; ruler columns at most 10 000.
+- `minimap.scale` is 1, 2 or 3; `minimap.max_column` 1–10 000; `minimap.section_header_font_size` 4–32; `sticky_scroll.max_line_count` 1–20.
+- `occurrences_highlight_delay` is at most 2s, `hover.delay` 10s, `hover.hiding_delay` 10 minutes and `inline_suggest.min_show_delay` 10s.
+
+`ModelOptions::validated` (applied by `TextModel`) keeps `tab_size` and `indent_size` at least 1.
+
+## Layout
+
+The gutter and minimap widths follow Monaco's `EditorLayoutInfoComputer.computeLayout`, and `editor.layout_info()` reports them:
+
+- the glyph margin is a line height wide;
+- the line numbers are the widest digit times the last line number's digits, at least `line_numbers_min_chars`;
+- the line decorations are `line_decorations_width` (pixels, or `LineDecorationsWidth::Chars(n)` for Monaco's `"Nch"`), plus 16px for the folding controls unless `show_folding_controls` is `Never`;
+- the minimap takes the share of the rest that shows about the columns the text area does (its characters are `scale` pixels wide, plus an 8px gutter), at most `max_column` characters. `minimap.size: Fill` and `Fit` scale it to the editor's height, drawing larger scales into the same width.
+
+## Global options
+
+Some of Monaco's `IGlobalEditorOptions` apply to every editor, so they're free functions:
+
+- `autoDetectHighContrast` is `set_auto_detect_high_contrast` (on by default). Monaco reads the OS's high contrast mode from the browser; GPUI doesn't report it, so the host calls `set_os_high_contrast(cx, true)` when the OS is in high contrast mode (for example from the platform's accessibility settings). Editors then switch to `hc-black` or `hc-light`, keeping dark or light, and back to `vs-dark` or `vs` when it's off.
+- `tabFocusMode` is also `set_tab_focus_mode`.
+
+## Differences in shape
+
+Some options are shaped differently from Monaco's:
+
+- `suggest.show*` (27 booleans) are `SuggestOptions::hidden_kinds`, a list of the `CompletionItemKind`s to hide. Monaco's `showColors: false` hides both `Color` and `Customcolor`, so list both.
+- Monaco's top-level `suggestFontSize` and `suggestLineHeight` are `suggest.font_size` and `suggest.line_height`.
+- `scrollbar.verticalScrollbarSize` and `scrollbar.horizontalScrollbarSize` are the top-level `vertical_scrollbar_size` and `horizontal_scrollbar_size`.
+- The model-level `bracketPairColorizationOptions` is `EditorOptions::bracket_pair_colorization`.
+- `lineNumbers` takes `LineNumbers::custom(…)` for Monaco's function form, and `lineDecorationsWidth` `LineDecorationsWidth::Chars` for its `"Nch"` form.
+- `gotoLocation.multiple` (deprecated) is `GotoLocationOptions::with_multiple`.
+- Sizes are `Pixels` and delays `Duration`s.
+
+These Monaco options have no field because they'd change nothing here: `renameOnType` (a deprecated alias of `linked_editing`), `inDiffEditor` (an internal context key), `disableMonospaceOptimizations`, `renderRichScreenReaderContent`, `experimentalWhitespaceRendering`, `experimentalGpuAcceleration` and `allowOverflow` (DOM rendering choices), and `allowVariableFonts` and `allowVariableFontsInAccessibilityMode` (only injected text carries its own font here). `letterSpacing` and `fontVariations` wait on GPUI text support (#232, #233).

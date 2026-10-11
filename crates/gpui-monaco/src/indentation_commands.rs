@@ -133,8 +133,11 @@ impl CodeEditor {
                 editor.model().clone().update(cx, |model, cx| {
                     let mut options = model.options().clone();
                     options.tab_size = size;
+                    // `changeTabDisplaySize` keeps the indent size, which
+                    // may follow the tab size.
                     if let Some(insert_spaces) = insert_spaces {
                         options.indent_size = size;
+                        options.indent_size_is_tab_size = false;
                         options.insert_spaces = insert_spaces;
                     }
                     model.update_options(options, cx);
