@@ -1,17 +1,21 @@
 //! The suggest widget (Monaco's `suggestWidget`, `suggestWidgetRenderer`,
 //! `suggestWidgetDetails` and `suggestWidgetStatus`): the completion list
-//! with match highlights, kind icons and label details, the "Loading..."
-//! and "No suggestions." messages, the details panel (toggled with
-//! Ctrl+Space, beside the list when it fits, else below it), the status bar
-//! and resizing.
+//! with match highlights, kind icons and label details, its scrollbar, the
+//! "Loading..." and "No suggestions." messages, the details panel (toggled
+//! with Ctrl+Space, east or west of the list when it fits, else above or
+//! below it), the clickable status bar, and resizing both.
 
+use std::cell::Cell;
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
-    App, AppContext as _, Context, DragMoveEvent, FontWeight, Global, HighlightStyle, Hsla,
+    App, AppContext as _, Bounds, Context, DragMoveEvent, FontWeight, Global, HighlightStyle, Hsla,
     InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString,
-    Size, StatefulInteractiveElement, Styled, StyledText, WeakEntity, Window, div, px, rgb, size,
+    Size, StatefulInteractiveElement, Styled, StyledText, Task, WeakEntity, Window, div, point, px,
+    rgb, size,
 };
 
 use crate::codicons::{Codicon, icon as codicon};
@@ -21,6 +25,7 @@ use crate::markdown::{MarkdownStyle, render_documentation};
 use crate::options::{SuggestInsertMode, SuggestOptions};
 use crate::providers::{CompletionItem, CompletionItemKind, CompletionItemTag};
 use crate::theme::{EditorColors, Theme};
+use crate::widgets::{ContentWidgetPreference, OverflowRoom, WidgetAnchor};
 
 /// Rows shown at the default height (hardcoded in Monaco).
 const DEFAULT_ROWS: f32 = 12.;
@@ -28,14 +33,28 @@ const DEFAULT_ROWS: f32 = 12.;
 const DEFAULT_WIDTH: f32 = 430.;
 /// Monaco's minimum widget width.
 const MIN_WIDTH: f32 = 220.;
-/// The details panel's default width.
+/// The details panel's default width (Monaco `SuggestDetailsWidget._size`).
 const DETAILS_WIDTH: f32 = 330.;
+/// The widgets' border (Monaco's `borderWidth`).
+const BORDER: f32 = 1.;
 /// Monaco's `horizontalPadding` around the widgets.
 const HORIZONTAL_PADDING: f32 = 14.;
+/// Monaco's `verticalPadding` above and below the widgets.
+const VERTICAL_PADDING: f32 = 22.;
 /// Monaco `SuggestDetailsWidget.scrollDown`'s default step.
 const DETAILS_SCROLL_STEP: f32 = 8.;
 /// Monaco `SuggestDetailsWidget.pageDown`'s step.
 const DETAILS_PAGE_STEP: f32 = 80.;
+/// Monaco's list and details scrollbars (`verticalScrollbarSize`).
+const SCROLLBAR_WIDTH: f32 = 10.;
+/// Monaco `ScrollbarState`'s `MINIMUM_SLIDER_SIZE`.
+const MIN_SLIDER: f32 = 20.;
+/// How long Monaco's `ScrollbarVisibility.Auto` scrollbars stay after
+/// scrolling (`HIDE_TIMEOUT`).
+const SCROLLBAR_HIDE: Duration = Duration::from_millis(500);
+/// Measuring the details panel's content may take a few frames when its
+/// placement changes its width; give up after this many.
+const MAX_DETAILS_MEASURES: u8 = 4;
 
 /// How the focused details panel scrolls (Monaco `SuggestDetailsWidget`'s
 /// `scrollUp`, `scrollDown`, `pageUp`, `pageDown`, `scrollTop` and
@@ -72,6 +91,9 @@ pub struct SuggestWidgetState {
     /// Monaco's `Details` state: the details panel has the focus
     /// (`toggleSuggestionFocus`).
     details_focused: bool,
+    /// The completion model shown (a new one per request), for what's
+    /// measured once per model (`fitWidthToDetails`).
+    model_id: u64,
 }
 
 impl SuggestWidgetState {
@@ -98,6 +120,7 @@ impl SuggestWidgetState {
             message: None,
             frozen: session.frozen,
             details_focused: false,
+            model_id: session.id,
         }
     }
 
@@ -110,6 +133,7 @@ impl SuggestWidgetState {
             message: Some(message),
             frozen: false,
             details_focused: false,
+            model_id: 0,
         }
     }
 
@@ -159,21 +183,361 @@ pub(crate) fn can_expand(item: &CompletionItem) -> bool {
             .is_some_and(|detail| *detail != item.label)
 }
 
+/// Monaco `CompletionItemKinds.toLabel`: the kind as screen readers read
+/// it.
+fn kind_label(kind: CompletionItemKind) -> &'static str {
+    use CompletionItemKind::*;
+    match kind {
+        Method => "Method",
+        Function => "Function",
+        Constructor => "Constructor",
+        Field => "Field",
+        Variable => "Variable",
+        Class => "Class",
+        Struct => "Struct",
+        Interface => "Interface",
+        Module => "Module",
+        Property => "Property",
+        Event => "Event",
+        Operator => "Operator",
+        Unit => "Unit",
+        Value => "Value",
+        Constant => "Constant",
+        Enum => "Enum",
+        EnumMember => "Enum Member",
+        Keyword => "Keyword",
+        Text => "Text",
+        Color => "Color",
+        File => "File",
+        Reference => "Reference",
+        Customcolor => "Custom Color",
+        Folder => "Folder",
+        TypeParameter => "Type Parameter",
+        User => "User",
+        Issue => "Issue",
+        Tool => "Tool",
+        Snippet => "Snippet",
+    }
+}
+
+/// Monaco's suggest list `getAriaLabel`: what screen readers read for a
+/// focused suggestion, with its docs while the details panel shows them.
+pub(crate) fn aria_label(item: &CompletionItem, details: bool) -> String {
+    let kind = kind_label(item.kind);
+    let label = &item.label;
+    let mut text = match (&item.label_detail, &item.label_description) {
+        (Some(detail), Some(description)) => format!("{label} {detail}, {description}, {kind}"),
+        (Some(detail), None) => format!("{label} {detail}, {kind}"),
+        (None, Some(description)) => format!("{label}, {description}, {kind}"),
+        (None, None) => format!("{label}, {kind}"),
+    };
+    if details {
+        let detail = item.detail.as_deref().unwrap_or("");
+        let docs = item.documentation.as_ref().map_or("", |d| d.as_str());
+        text = format!("{text}, docs: {detail}{docs}");
+    }
+    text
+}
+
 /// Sizes that depend on the editor.
 pub(crate) struct SuggestWidgetMetrics {
     /// Row height (`suggest.line_height`, or the editor's).
     pub(crate) item_height: Pixels,
     /// `suggest.font_size`, or the editor's.
     pub(crate) font_size: Pixels,
-    /// Room right of the widget's left edge, for placing details beside it.
-    pub(crate) available_width: Option<Pixels>,
+    /// The height of the line the list is anchored to.
+    pub(crate) line_height: Pixels,
+    /// The editor's width, which `suggest.fit_width_to_details` doesn't
+    /// widen the list past.
+    pub(crate) editor_width: Option<Pixels>,
 }
 
-/// A resize sash being dragged.
-#[derive(Clone, Copy)]
+/// A resize sash being dragged: the list's (Monaco's `ResizableHTMLElement`
+/// around the list) or the details panel's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Sash {
+    North,
     East,
     South,
+    DetailsNorth,
+    DetailsEast,
+    DetailsSouth,
+    DetailsWest,
+}
+
+/// Which scrollbar a slider drag moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScrollbarTarget {
+    List,
+    Details,
+}
+
+/// A scrollbar slider being dragged, and where in the slider it was
+/// grabbed.
+#[derive(Clone)]
+struct SliderDrag {
+    target: ScrollbarTarget,
+    grab: Rc<Cell<Pixels>>,
+}
+
+/// The list's size and side (Monaco `SuggestWidget._layout`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ListLayout {
+    /// Inside the border.
+    pub(crate) size: Size<Pixels>,
+    /// Above or below the cursor line.
+    pub(crate) side: ContentWidgetPreference,
+}
+
+/// What [`layout_list`] works from.
+pub(crate) struct ListLayoutInput {
+    /// The size the user resized the list to, or the default (inside the
+    /// border).
+    pub(crate) wanted: Size<Pixels>,
+    /// Whether `wanted` is a resized size.
+    pub(crate) resized: bool,
+    /// With `suggest.fit_width_to_details`, the width the widest
+    /// suggestion and its inline details need.
+    pub(crate) fit_width: Option<Pixels>,
+    /// The editor's width.
+    pub(crate) editor_width: Option<Pixels>,
+    /// The suggestions listed.
+    pub(crate) rows: usize,
+    pub(crate) item_height: Pixels,
+    pub(crate) status_height: Pixels,
+    /// The room around the cursor line in the window.
+    pub(crate) room: Option<OverflowRoom>,
+    /// The side chosen when the session showed its list (Monaco keeps it
+    /// while typing).
+    pub(crate) locked: Option<ContentWidgetPreference>,
+}
+
+/// Monaco `SuggestWidget._layout` for a list of suggestions:
+/// - The width is the wanted one (wider with `fitWidthToDetails` until the
+///   list is resized), at least 220px and capped to the window.
+/// - The height is the wanted one, at most every row and at least one, and
+///   capped to the room on the side it goes. Like Monaco's `_cappedHeight`,
+///   the wanted height comes back when more rows match again.
+/// - The list goes above the cursor when it doesn't fit below and there's
+///   more room above. That side is kept while the session lasts (unless a
+///   row no longer fits there), so the list doesn't flip as it shrinks and
+///   grows while typing.
+/// - Whole rows show.
+pub(crate) fn layout_list(input: &ListLayoutInput) -> ListLayout {
+    let border = px(2. * BORDER);
+    let item = input.item_height;
+    let full = input.status_height + item * input.rows.max(1) as f32;
+    let min = item + input.status_height;
+    let (above, below, max_width) = match input.room {
+        Some(room) => {
+            let window_width = room.width + crate::widgets::OVERFLOW_HORIZONTAL_PADDING * 2.;
+            (
+                room.above - border,
+                room.below - border,
+                window_width - border - px(2. * HORIZONTAL_PADDING),
+            )
+        }
+        None => (full, full, px(f32::MAX)),
+    };
+    let mut width = input.wanted.width.min(max_width);
+    if let Some(fit) = input.fit_width.filter(|_| !input.resized) {
+        let cap = max_width.min(input.editor_width.unwrap_or(max_width));
+        width = width.max(fit.min(cap));
+    }
+    let width = width.max(px(MIN_WIDTH));
+    let max_below = below.min(full);
+    let max_above = above.min(full);
+    let height = input
+        .wanted
+        .height
+        .max(min)
+        .min(max_above.max(max_below).min(full));
+    let room_on = |side| match side {
+        ContentWidgetPreference::Above => max_above,
+        _ => max_below,
+    };
+    let side = match input.locked {
+        Some(side) if room_on(side) >= min => side,
+        _ if height > max_below && max_above > max_below => ContentWidgetPreference::Above,
+        _ => ContentWidgetPreference::Below,
+    };
+    let height = height.min(room_on(side));
+    let rows = ((height - input.status_height) / item).floor().max(1.);
+    ListLayout {
+        size: size(width, input.status_height + item * rows),
+        side,
+    }
+}
+
+/// Where the details panel goes around the list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DetailsSide {
+    East,
+    West,
+    South,
+    North,
+}
+
+/// The details panel's place (Monaco `SuggestDetailsOverlay._placeAtAnchor`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DetailsLayout {
+    /// Its border box, in the coordinates of `anchor`.
+    pub(crate) bounds: Bounds<Pixels>,
+    pub(crate) side: DetailsSide,
+    /// The edges it can be resized from: north, east, south, west.
+    pub(crate) sashes: [bool; 4],
+}
+
+/// Monaco `SuggestDetailsOverlay._placeAtAnchor`: places a details panel of
+/// `wanted` size around the list's border box `anchor` in a window of
+/// `window` size. East, then west, then below the list (above it when the
+/// list is above the cursor), whichever fits first, else the least bad;
+/// aligned with the list's top, or its bottom when there's no room
+/// below, and capped to the room there.
+pub(crate) fn place_details(
+    anchor: Bounds<Pixels>,
+    window: Size<Pixels>,
+    wanted: Size<Pixels>,
+    line_height: Pixels,
+    prefer_align_at_top: bool,
+) -> DetailsLayout {
+    struct Placement {
+        side: DetailsSide,
+        top: Pixels,
+        left: Pixels,
+        fit: Pixels,
+        max_top: Size<Pixels>,
+        max_bottom: Size<Pixels>,
+        min: Size<Pixels>,
+    }
+    let border = px(BORDER);
+    let border2 = px(2. * BORDER);
+    let horizontal = px(HORIZONTAL_PADDING);
+    let vertical = px(VERTICAL_PADDING);
+    let default_min = size(px(220.), line_height * 2.);
+    let beside = |side: DetailsSide, width: Pixels, left: Pixels| {
+        let max_top = size(width, window.height - anchor.top() - border2 - vertical);
+        let max_bottom = size(width, anchor.bottom() - border2 - vertical);
+        Placement {
+            side,
+            top: anchor.top(),
+            left,
+            fit: width - wanted.width,
+            max_top,
+            max_bottom,
+            min: size(width.min(default_min.width), default_min.height),
+        }
+    };
+    let east_width = window.width - (anchor.right() + border + horizontal);
+    let east = beside(DetailsSide::East, east_width, anchor.right() - border);
+    let west_width = anchor.left() - border - horizontal;
+    let west = beside(
+        DetailsSide::West,
+        west_width,
+        horizontal.max(anchor.left() - wanted.width - border),
+    );
+    let vertical_placement = if prefer_align_at_top {
+        let max = size(
+            anchor.size.width - border2,
+            window.height - anchor.bottom() - vertical,
+        );
+        Placement {
+            side: DetailsSide::South,
+            top: anchor.bottom() - border,
+            left: anchor.left(),
+            fit: max.height - wanted.height,
+            max_top: max,
+            max_bottom: max,
+            min: size(max.width, default_min.height),
+        }
+    } else {
+        let max = size(anchor.size.width - border2, anchor.top() - vertical);
+        Placement {
+            side: DetailsSide::North,
+            top: vertical.max(anchor.top() - wanted.height),
+            left: anchor.left(),
+            fit: max.height - wanted.height,
+            max_top: max,
+            max_bottom: max,
+            min: size(max.width, default_min.height),
+        }
+    };
+    let placements = [east, west, vertical_placement];
+    let placement = match placements.iter().position(|p| p.fit >= px(0.)) {
+        Some(ix) => &placements[ix],
+        // The least bad: the first with the largest fit.
+        None => placements
+            .iter()
+            .rev()
+            .max_by(|a, b| {
+                a.fit
+                    .partial_cmp(&b.fit)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .expect("three placements"),
+    };
+    let height = wanted
+        .height
+        .min(placement.max_top.height.max(placement.max_bottom.height));
+    let (align_at_top, max) = if prefer_align_at_top {
+        if height <= placement.max_top.height {
+            (true, placement.max_top)
+        } else {
+            (false, placement.max_bottom)
+        }
+    } else if height <= placement.max_bottom.height {
+        (false, placement.max_bottom)
+    } else {
+        (true, placement.max_top)
+    };
+    let mut top = placement.top;
+    if placement.side == DetailsSide::North {
+        top = anchor.top() - height + border;
+    } else if !align_at_top && height > anchor.size.height {
+        top = anchor.bottom() - border2 - height;
+    }
+    // `ResizableHTMLElement.layout`: within the maximum, then at least the
+    // minimum.
+    let width = wanted.width.min(max.width).max(placement.min.width);
+    let height = height.min(max.height).max(placement.min.height);
+    let sashes = if placement.side == DetailsSide::North {
+        [true, false, false, true]
+    } else {
+        let east = placement.side == DetailsSide::East;
+        [!align_at_top, east, align_at_top, !east]
+    };
+    DetailsLayout {
+        bounds: Bounds::new(point(placement.left, top), size(width, height)),
+        side: placement.side,
+        sashes,
+    }
+}
+
+/// Monaco `ScrollbarState`: a slider's offset and length along a track as
+/// long as the visible part, or `None` when everything is visible.
+fn slider(visible: Pixels, content: Pixels, position: Pixels) -> Option<(Pixels, Pixels)> {
+    if content <= visible || visible <= px(0.) {
+        return None;
+    }
+    let length = (visible * (visible / content))
+        .floor()
+        .max(px(MIN_SLIDER))
+        .min(visible);
+    let ratio = (visible - length) / (content - visible);
+    Some((position * ratio, length))
+}
+
+/// The scroll position putting a slider's top at `slider_top` (the inverse
+/// of [`slider`]).
+fn slider_position(visible: Pixels, content: Pixels, slider_top: Pixels) -> Pixels {
+    let Some((_, length)) = slider(visible, content, px(0.)) else {
+        return px(0.);
+    };
+    let ratio = (visible - length) / (content - visible);
+    if ratio <= 0. {
+        return px(0.);
+    }
+    (slider_top / ratio).clamp(px(0.), content - visible)
 }
 
 /// The completion list, shown below or above the cursor while suggestions are
@@ -195,6 +559,31 @@ pub struct SuggestWidget {
     pub(crate) room: crate::widgets::OverflowRoomCell,
     /// Wheel movement not yet a whole row.
     wheel_remainder: Pixels,
+    /// The side of the cursor line the list went on when it first showed
+    /// suggestions; kept while it lives (one session), so it doesn't flip
+    /// while typing.
+    side: Option<ContentWidgetPreference>,
+    /// `suggest.fit_width_to_details`' measured width, for a completion
+    /// model (Monaco caches it per model).
+    fit_width: Option<(u64, Pixels)>,
+    /// The size the details panel was resized to (Monaco
+    /// `SuggestDetailsOverlay._userSize`, kept while the session lasts).
+    details_size: Option<Size<Pixels>>,
+    /// The details panel's content height, measured when it was last
+    /// painted.
+    details_content: Rc<Cell<Option<Pixels>>>,
+    /// Measurements since the content last changed.
+    details_measures: Rc<Cell<u8>>,
+    /// Where the rows were last painted, for clicks on the scrollbar.
+    rows_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Monaco's `ScrollbarVisibility.Auto`: the scrollbars show for a
+    /// while after scrolling (and while the mouse is over them).
+    scrollbars_revealed: bool,
+    hide_scrollbars: Option<Task<()>>,
+    /// The scrollbar whose slider is being dragged.
+    slider_drag: Option<ScrollbarTarget>,
+    /// The details panel's last place, for tests.
+    details_layout: Option<DetailsLayout>,
 }
 
 /// The kind's codicon (Monaco `CompletionItemKinds.toIcon`), in the
@@ -318,6 +707,16 @@ impl SuggestWidget {
             details_scroll_top: px(0.),
             room: Default::default(),
             wheel_remainder: px(0.),
+            side: None,
+            fit_width: None,
+            details_size: None,
+            details_content: Default::default(),
+            details_measures: Default::default(),
+            rows_bounds: Default::default(),
+            scrollbars_revealed: false,
+            hide_scrollbars: None,
+            slider_drag: None,
+            details_layout: None,
         };
         this.keep_selected_visible(cx);
         this
@@ -336,14 +735,31 @@ impl SuggestWidget {
         {
             self.scroll_details(DetailsScroll::Top);
         }
+        // The details panel's content may have changed: measure it again.
+        self.details_measures.set(0);
         self.state = state;
         self.metrics = metrics;
+        let scroll = self.scroll;
         self.keep_selected_visible(cx);
+        if self.scroll != scroll {
+            self.reveal_scrollbars(cx);
+        }
         cx.notify();
     }
 
     pub(crate) fn message(&self) -> Option<&'static str> {
         self.state.message
+    }
+
+    /// What screen readers read for the widget: its message, or the focused
+    /// suggestion's [`aria_label`] (with docs when `resolved` and the details
+    /// panel shows).
+    pub(crate) fn announcement(&self, resolved: bool, cx: &App) -> Option<String> {
+        if let Some(message) = self.state.message {
+            return Some(message.to_string());
+        }
+        let item = self.state.focused_item()?;
+        Some(aria_label(item, resolved && self.details_shown(cx)))
     }
 
     /// Scrolls the details panel (Monaco `SuggestDetailsWidget`'s scroll
@@ -372,9 +788,13 @@ impl SuggestWidget {
             }
         };
         let top = if laid_out { top.min(max) } else { top };
+        self.set_details_scroll_top(top);
+    }
+
+    fn set_details_scroll_top(&mut self, top: Pixels) {
         self.details_scroll_top = top.max(px(0.));
         self.details_scroll
-            .set_offset(gpui::point(px(0.), -self.details_scroll_top));
+            .set_offset(point(px(0.), -self.details_scroll_top));
     }
 
     /// The details panel's scroll position.
@@ -402,27 +822,92 @@ impl SuggestWidget {
         }
     }
 
-    /// The list's size: the resized one, or Monaco's default of 12 rows,
-    /// shrunk to the rows there are and to the room above or below the
-    /// cursor in the window (Monaco `_layout`'s `maxHeightAbove` and
-    /// `maxHeightBelow`).
-    fn list_size(&self, cx: &App) -> Size<Pixels> {
+    /// The list's size and side (see [`layout_list`]): the resized size or
+    /// Monaco's default of 12 rows, fitted to the room in the window.
+    fn list_layout(&self, cx: &App) -> ListLayout {
         let item_height = self.metrics.item_height;
         let status = self.status_bar_height();
         let stored = cx.try_global::<SuggestUi>().and_then(|ui| ui.size);
         let default = size(px(DEFAULT_WIDTH), status + item_height * DEFAULT_ROWS);
-        let wanted = stored.unwrap_or(default);
-        let full = status + item_height * self.state.rows.len().max(1) as f32;
-        let min = status + item_height;
-        // Whole rows, less the border.
-        let room = self.room.get().map_or(full, |room| {
-            let rows = ((room.max_height() - status - px(2.)) / item_height).floor();
-            status + item_height * rows.max(1.)
-        });
-        size(
-            wanted.width.max(px(MIN_WIDTH)),
-            wanted.height.min(full).min(room).max(min),
-        )
+        layout_list(&ListLayoutInput {
+            wanted: stored.unwrap_or(default),
+            resized: stored.is_some(),
+            fit_width: self
+                .fit_width
+                .filter(|(model, _)| *model == self.state.model_id)
+                .map(|(_, width)| width),
+            editor_width: self.metrics.editor_width,
+            rows: self.state.rows.len(),
+            item_height,
+            status_height: status,
+            room: self.room.get(),
+            locked: self.side,
+        })
+    }
+
+    /// The list's size: its border box's width, and the height of its rows
+    /// and status bar.
+    pub(crate) fn list_size(&self, cx: &App) -> Size<Pixels> {
+        self.list_layout(cx).size
+    }
+
+    /// Which side of the cursor line the list is on.
+    pub(crate) fn list_side(&self, cx: &App) -> ContentWidgetPreference {
+        self.list_layout(cx).side
+    }
+
+    /// Where the rows and the details panel's content were last painted.
+    pub(crate) fn painted_bounds(
+        &self,
+        cx: &App,
+    ) -> Option<(Bounds<Pixels>, Option<Bounds<Pixels>>)> {
+        let rows = self.rows_bounds.get()?;
+        let details = self
+            .details_shown(cx)
+            .then(|| self.details_scroll.bounds())
+            .filter(|bounds| bounds.size.height > px(0.));
+        Some((rows, details))
+    }
+
+    /// Where the details panel was last placed: its side and its border
+    /// box relative to the list's.
+    pub(crate) fn details_placement(&self) -> Option<(DetailsSide, Bounds<Pixels>)> {
+        self.details_layout
+            .map(|layout| (layout.side, layout.bounds))
+    }
+
+    /// Monaco `SuggestWidget._measureContentWidth` (for
+    /// `fitWidthToDetails`): the widest label with its inline details in the
+    /// suggest font, and the row's icon, read-more button, gaps, padding
+    /// and scrollbar.
+    fn measure_fit_width(&self, window: &mut Window) -> Pixels {
+        let font = gpui::font(self.style.code_font.clone());
+        let font_size = self.metrics.font_size;
+        let mut widest = px(0.);
+        for (item, _) in &self.state.rows {
+            let mut text = item.label.to_string();
+            if item.label_detail.is_some() || item.label_description.is_some() {
+                text.push_str(item.label_detail.as_deref().unwrap_or(""));
+                text.push_str(item.label_description.as_deref().unwrap_or(""));
+            } else {
+                text.push_str(item.detail.as_deref().unwrap_or(""));
+            }
+            let text = text.replace(['\n', '\r'], " ");
+            let run = gpui::TextRun {
+                len: text.len(),
+                font: font.clone(),
+                color: gpui::black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let width = window
+                .text_system()
+                .shape_line(text.into(), font_size, &[run], None)
+                .width;
+            widest = widest.max(width);
+        }
+        widest + self.metrics.item_height * 2. + px(2. * HORIZONTAL_PADDING + 20.)
     }
 
     /// Monaco's list consumes the wheel (`alwaysConsumeMouseWheel`) and
@@ -437,28 +922,161 @@ impl SuggestWidget {
         let scroll = (self.scroll as f32 - rows).clamp(0., max as f32) as usize;
         if scroll != self.scroll {
             self.scroll = scroll;
+            self.reveal_scrollbars(cx);
             cx.notify();
         }
     }
 
-    /// Monaco's list scrollbar: a slider while not every row fits.
-    fn render_scrollbar(&self, visible: usize) -> Option<impl IntoElement + use<>> {
-        let count = self.state.rows.len();
-        if count <= visible {
-            return None;
+    /// Shows the scrollbars for a while (Monaco `ScrollableElement._reveal`
+    /// on scrolling, then hiding after `HIDE_TIMEOUT`).
+    fn reveal_scrollbars(&mut self, cx: &mut Context<Self>) {
+        self.scrollbars_revealed = true;
+        self.hide_scrollbars = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SCROLLBAR_HIDE).await;
+            this.update(cx, |this, cx| {
+                this.scrollbars_revealed = false;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Whether the scrollbars show without the mouse over them.
+    pub(crate) fn scrollbars_revealed(&self) -> bool {
+        self.scrollbars_revealed || self.slider_drag.is_some()
+    }
+
+    /// Scrolls the list to put the slider's top at `slider_top` along a
+    /// track `visible` tall.
+    fn scroll_list_to_slider(&mut self, slider_top: Pixels, cx: &mut Context<Self>) {
+        let item_height = self.metrics.item_height;
+        let visible_rows = self.visible_rows(cx);
+        let visible = item_height * visible_rows as f32;
+        let content = item_height * self.state.rows.len() as f32;
+        let position = slider_position(visible, content, slider_top);
+        let max = self.state.rows.len().saturating_sub(visible_rows);
+        let scroll = ((position / item_height).round() as usize).min(max);
+        if scroll != self.scroll {
+            self.scroll = scroll;
+            cx.notify();
         }
-        let height = self.metrics.item_height * visible as f32;
-        let thumb = (height * (visible as f32 / count as f32)).max(px(10.));
-        let top = (height - thumb) * (self.scroll as f32 / (count - visible) as f32);
+        self.reveal_scrollbars(cx);
+    }
+
+    /// Scrolls the details panel to put its slider's top at `slider_top`.
+    fn scroll_details_to_slider(&mut self, slider_top: Pixels, cx: &mut Context<Self>) {
+        let visible = self.details_scroll.bounds().size.height;
+        let content = visible + self.details_scroll.max_offset().y;
+        let position = slider_position(visible, content, slider_top);
+        self.set_details_scroll_top(position);
+        self.reveal_scrollbars(cx);
+        cx.notify();
+    }
+
+    /// A Monaco scrollbar along a track `visible` tall at the right edge:
+    /// a slider in `scrollbarSlider.background` (`.hoverBackground` under
+    /// the mouse, `.activeBackground` while dragged) that can be dragged,
+    /// and a track that scrolls to where it's clicked. Like Monaco's
+    /// `ScrollbarVisibility.Auto`, it shows while the mouse is over `group`
+    /// or for a while after scrolling.
+    fn render_scrollbar(
+        &self,
+        target: ScrollbarTarget,
+        group: &'static str,
+        visible: Pixels,
+        content: Pixels,
+        position: Pixels,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let (top, length) = slider(visible, content, position)?;
+        let colors = &self.theme.colors;
+        let dragging = self.slider_drag == Some(target);
+        let grab = Rc::new(Cell::new(px(0.)));
+        let (track_id, slider_id) = match target {
+            ScrollbarTarget::List => ("suggest-scrollbar", "suggest-slider"),
+            ScrollbarTarget::Details => ("suggest-details-scrollbar", "suggest-details-slider"),
+        };
+        let shown = self.scrollbars_revealed();
         Some(
             div()
+                .id(track_id)
                 .absolute()
+                .top_0()
                 .right_0()
-                .top(top)
-                .w(px(10.))
-                .h(thumb)
-                .bg(self.theme.colors.scrollbar_slider),
+                .w(px(SCROLLBAR_WIDTH))
+                .h(visible)
+                .when(!shown, |this| {
+                    this.invisible().group_hover(group, |style| style.visible())
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        // Monaco centers the slider where the track is
+                        // clicked.
+                        let track_top = match target {
+                            ScrollbarTarget::List => this.rows_bounds.get().map(|b| b.top()),
+                            ScrollbarTarget::Details => Some(this.details_scroll.bounds().top()),
+                        };
+                        if let Some(track_top) = track_top {
+                            let slider_top = event.position.y - track_top - length / 2.;
+                            match target {
+                                ScrollbarTarget::List => this.scroll_list_to_slider(slider_top, cx),
+                                ScrollbarTarget::Details => {
+                                    this.scroll_details_to_slider(slider_top, cx)
+                                }
+                            }
+                        }
+                    }),
+                )
+                .child(
+                    div()
+                        .id(slider_id)
+                        .absolute()
+                        .left_0()
+                        .top(top)
+                        .w_full()
+                        .h(length)
+                        .block_mouse_except_scroll()
+                        .bg(if dragging {
+                            colors.scrollbar_slider_active
+                        } else {
+                            colors.scrollbar_slider
+                        })
+                        .when(!dragging, |this| {
+                            let hover = colors.scrollbar_slider_hover;
+                            this.hover(move |style| style.bg(hover))
+                        })
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_drag(
+                            SliderDrag {
+                                target,
+                                grab: grab.clone(),
+                            },
+                            move |drag, offset, _, cx| {
+                                drag.grab.set(offset.y);
+                                cx.new(|_| gpui::Empty)
+                            },
+                        ),
+                ),
         )
+    }
+
+    /// Moves a scrollbar's slider as it's dragged; `track` is where its
+    /// track starts.
+    fn drag_slider(
+        &mut self,
+        event: &DragMoveEvent<SliderDrag>,
+        track: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let drag = event.drag(cx).clone();
+        self.slider_drag = Some(drag.target);
+        let slider_top = event.event.position.y - track - drag.grab.get();
+        match drag.target {
+            ScrollbarTarget::List => self.scroll_list_to_slider(slider_top, cx),
+            ScrollbarTarget::Details => self.scroll_details_to_slider(slider_top, cx),
+        }
     }
 
     /// The first row shown.
@@ -525,6 +1143,9 @@ impl SuggestWidget {
                 })
                 .collect()
         };
+        // Monaco's `string-label` rows: a plain label, whose detail shows on
+        // the right of the focused row only.
+        let string_label = item.label_detail.is_none() && item.label_description.is_none();
         // The right side: a label description on every row, or the detail
         // on the focused row while the details panel is closed.
         let right_text = match &item.label_description {
@@ -538,6 +1159,9 @@ impl SuggestWidget {
         .filter(|_| self.options.show_inline_details);
         let read_more =
             is_selected && !show_details && !self.options.show_status_bar && can_expand(item);
+        // `.fit-width-to-details`: the label keeps its width and the right
+        // side gives way.
+        let fit = self.options.fit_width_to_details;
         let icon = self.options.show_icons.then(|| {
             let mut icon = div()
                 .w(item_height)
@@ -604,25 +1228,46 @@ impl SuggestWidget {
             })
             .children(icon)
             .child(
+                // `.left`: the label, then its `.signature-label`, cut off
+                // with an ellipsis.
                 div()
                     .flex_1()
                     .min_w_0()
+                    .when(fit, |this| this.flex_shrink_0())
                     .flex()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .when(deprecated, |this| this.opacity(0.66))
-                    .child(StyledText::new(label).with_highlights(label_highlights))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .when(!string_label, |this| this.flex_shrink_0().max_w_full())
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(StyledText::new(label).with_highlights(label_highlights)),
+                    )
                     .when_some(item.label_detail.clone(), |this, detail| {
-                        this.child(div().opacity(0.6).child(detail))
+                        this.child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .opacity(0.6)
+                                .child(detail),
+                        )
                     }),
             )
             .when_some(right_text, |this, text| {
+                // `.details-label`: 85% of the font, cut off with an
+                // ellipsis.
                 this.child(
                     div()
+                        .min_w_0()
                         .flex_shrink(4.)
-                        .max_w(gpui::relative(0.7))
+                        .when(!fit, |this| this.max_w(gpui::relative(0.7)))
                         .overflow_hidden()
                         .whitespace_nowrap()
+                        .text_ellipsis()
                         .ml(self.metrics.font_size * 0.85 * 1.1)
                         .text_size(self.metrics.font_size * 0.85)
                         .when(!is_selected, |this| this.opacity(0.7))
@@ -663,48 +1308,117 @@ impl SuggestWidget {
                 || self.state.focused_item().is_some_and(can_expand))
     }
 
-    fn render_status_bar(&self, show_details: bool) -> impl IntoElement + use<> {
-        let colors = &self.theme.colors;
+    /// The status bar's actions (Monaco's `suggestWidgetStatusbarMenu`), as
+    /// (label, keybinding label, what clicking does), left then right.
+    fn status_bar_actions(&self, show_details: bool) -> [Vec<StatusAction>; 2] {
         let mac = cfg!(target_os = "macos");
         let (primary, alternative) = match self.options.insert_mode {
             SuggestInsertMode::Insert => ("Insert", "Replace"),
             SuggestInsertMode::Replace => ("Replace", "Insert"),
         };
-        let focused = self.state.focused_item();
-        // Monaco shows the other mode only when the item's insert and replace
-        // ranges differ.
-        let has_alternative = focused.is_some_and(|item| {
-            item.replace_range
-                .as_ref()
-                .is_some_and(|replace| item.range.as_ref() != Some(replace))
-        });
-        let mut left = format!("{primary} ({})", if mac { "⏎" } else { "Enter" });
-        if has_alternative {
-            left.push_str(&format!(
-                ", {alternative} ({})",
-                if mac { "⇧⏎" } else { "Shift+Enter" }
-            ));
-        }
-        let right = focused.filter(|item| can_expand(item)).map(|_| {
-            let key = if mac { "⌃Space" } else { "Ctrl+Space" };
-            if show_details {
-                format!("Show Less ({key})")
-            } else {
-                format!("Show More ({key})")
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        match self.state.focused_item() {
+            // `selectNextSuggestion`'s "Select", while nothing is focused.
+            None => left.push(StatusAction {
+                label: "Select",
+                key: if mac { "↓" } else { "DownArrow" },
+                run: StatusCommand::Select,
+            }),
+            Some(item) => {
+                left.push(StatusAction {
+                    label: primary,
+                    key: if mac { "⏎" } else { "Enter" },
+                    run: StatusCommand::Accept,
+                });
+                // Monaco shows the other mode only when the item's insert
+                // and replace ranges differ.
+                if item
+                    .replace_range
+                    .as_ref()
+                    .is_some_and(|replace| item.range.as_ref() != Some(replace))
+                {
+                    left.push(StatusAction {
+                        label: alternative,
+                        key: if mac { "⇧⏎" } else { "Shift+Enter" },
+                        run: StatusCommand::AcceptAlternative,
+                    });
+                }
+                if can_expand(item) {
+                    right.push(StatusAction {
+                        label: if show_details {
+                            "Show Less"
+                        } else {
+                            "Show More"
+                        },
+                        key: if mac { "⌃Space" } else { "Ctrl+Space" },
+                        run: StatusCommand::ToggleDetails,
+                    });
+                }
             }
-        });
+        }
+        [left, right]
+    }
+
+    /// The status bar text, for tests: the left actions, then the right.
+    pub(crate) fn status_bar_text(&self, cx: &App) -> Option<(String, String)> {
+        if !self.options.show_status_bar || self.state.message.is_some() {
+            return None;
+        }
+        let [left, right] = self.status_bar_actions(self.details_shown(cx));
+        let join = |actions: Vec<StatusAction>| {
+            actions
+                .iter()
+                .map(|a| format!("{} ({})", a.label, a.key))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        Some((join(left), join(right)))
+    }
+
+    /// Monaco `SuggestWidgetStatus`: the status bar's action bars, whose
+    /// text-only actions run their commands when clicked.
+    fn render_status_bar(&self, show_details: bool) -> impl IntoElement + use<> {
+        let colors = &self.theme.colors;
+        let [left, right] = self.status_bar_actions(show_details);
+        let editor = self.editor.clone();
+        let group = move |name: &'static str, actions: Vec<StatusAction>| {
+            let count = actions.len();
+            div().flex().overflow_hidden().whitespace_nowrap().children(
+                actions.into_iter().enumerate().map(|(ix, action)| {
+                    let editor = editor.clone();
+                    // `.action-item:not(:last-of-type) .action-label::after
+                    // { content: ', ' }`.
+                    let separator = if ix + 1 < count { ", " } else { "" };
+                    div()
+                        .id((name, ix))
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            cx.stop_propagation();
+                            if let Some(editor) = editor.upgrade() {
+                                editor.update(cx, |editor, cx| action.run.run(editor, cx));
+                            }
+                        })
+                        .child(format!("{} ({}){separator}", action.label, action.key))
+                }),
+            )
+        };
         div()
+            .id("suggest-status-bar")
+            .flex_none()
             .h(self.metrics.item_height)
             .px(px(4.))
             .flex()
             .items_center()
             .justify_between()
+            .overflow_hidden()
             .border_t_1()
             .border_color(colors.suggest_border)
             .text_size(self.metrics.font_size * 0.8)
             .text_color(colors.suggest_status_foreground)
-            .child(left)
-            .children(right)
+            // `.left { padding-right: 8px }`.
+            .child(group("suggest-status-left", left).pr(px(8.)))
+            .child(group("suggest-status-right", right))
     }
 
     /// The details panel's detail and docs for the focused row: its own,
@@ -728,7 +1442,10 @@ impl SuggestWidget {
         })
     }
 
-    fn render_details(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+    /// Monaco `SuggestDetailsWidget`: the detail (the type) in the editor
+    /// font, and the docs below it, scrolling inside the panel, with a close
+    /// button.
+    fn render_details_body(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let colors = &self.theme.colors;
         let (detail, docs) = self.details_content()?;
         // Monaco `SuggestDetailsWidget`: the suggest font size, and its line
@@ -751,30 +1468,19 @@ impl SuggestWidget {
                 detail
             }
         });
+        let has_detail = detail.is_some();
         let editor = self.editor.clone();
         Some(
             div()
-                .id("suggest-details")
-                .track_scroll(&self.details_scroll)
-                .w_full()
                 .relative()
-                // `.suggest-details { border-radius: var(--vscode-cornerRadius-large) }`.
-                .rounded(crate::widgets::card::CORNER_RADIUS)
-                .bg(colors.suggest_background)
-                .border_1()
-                // Monaco outlines the focused details panel.
-                .border_color(if self.state.details_focused {
-                    colors.focus_border
-                } else {
-                    colors.suggest_border
-                })
-                .text_color(colors.suggest_foreground)
-                .overflow_y_scroll()
+                .w_full()
+                .flex_none()
                 .child(
                     div()
                         .id("suggest-details-close")
                         .absolute()
-                        .top(px(2.))
+                        // `.codicon-close { top: 6px; right: 2px }`.
+                        .top(px(6.))
                         .right(px(2.))
                         .cursor_pointer()
                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
@@ -789,53 +1495,168 @@ impl SuggestWidget {
                         .child(codicon(Codicon::Close).size(px(14.))),
                 )
                 .when_some(detail, |this, detail| {
+                    // `.header > .type`: the editor font, dimmed. Monaco wraps
+                    // it (`auto-wrap`) unless a line after the first is
+                    // indented; then each line stays on one line, cut off
+                    // with an ellipsis.
+                    let indented = detail
+                        .split('\n')
+                        .skip(1)
+                        .any(|line| line.starts_with(char::is_whitespace));
                     this.child(
                         div()
+                            .font_family(self.style.code_font.clone())
                             .opacity(0.7)
                             .pt(px(4.))
                             .pb(px(if docs.is_some() { 12. } else { 4. }))
                             .pl(px(5.))
                             .mr(px(24.))
-                            .child(detail),
+                            .overflow_hidden()
+                            .when(indented, |this| this.whitespace_nowrap().text_ellipsis())
+                            .child(detail.replace('\r', "")),
                     )
                 })
                 .when_some(docs, |this, docs| {
-                    this.child(div().px(px(5.)).py(px(4.)).child(render_documentation(
-                        &docs,
-                        &style,
-                        &self.theme,
-                        cx,
-                    )))
+                    // `.docs { padding: 4px 5px }`; beside the close button
+                    // when there's no type (`.no-type .docs`).
+                    this.child(
+                        div()
+                            .px(px(5.))
+                            .py(px(4.))
+                            .when(!has_detail, |this| this.mr(px(24.)))
+                            .child(render_documentation(&docs, &style, &self.theme, cx)),
+                    )
                 }),
         )
     }
 
-    /// Resizes the list as a sash is dragged (Monaco persists the size).
+    /// Resizes the list or the details panel as a sash is dragged. The
+    /// list's size is kept for later sessions (Monaco's `suggestWidget.size`,
+    /// each edge changing only its own dimension); the details panel's for
+    /// this session.
     fn resize(&mut self, sash: Sash, event: &DragMoveEvent<Sash>, cx: &mut Context<Self>) {
         let bounds = event.bounds;
         let position = event.event.position;
-        let current = self.list_size(cx);
-        let size = match sash {
-            Sash::East => size(
-                (position.x - bounds.left()).max(px(MIN_WIDTH)),
-                current.height,
-            ),
-            Sash::South => size(
-                current.width,
-                (position.y - bounds.top())
-                    .max(self.metrics.item_height + self.status_bar_height()),
-            ),
-        };
-        cx.default_global::<SuggestUi>().size = Some(size);
-        self.keep_selected_visible(cx);
+        let border = px(2. * BORDER);
+        match sash {
+            Sash::North | Sash::East | Sash::South => {
+                let item_height = self.metrics.item_height;
+                let status = self.status_bar_height();
+                let stored = cx.try_global::<SuggestUi>().and_then(|ui| ui.size);
+                let wanted = stored.unwrap_or_else(|| {
+                    size(px(DEFAULT_WIDTH), status + item_height * DEFAULT_ROWS)
+                });
+                let size = match sash {
+                    Sash::East => size(
+                        (position.x - bounds.left()).max(px(MIN_WIDTH)),
+                        wanted.height,
+                    ),
+                    Sash::South => size(
+                        wanted.width,
+                        (position.y - bounds.top() - border).max(item_height + status),
+                    ),
+                    _ => size(
+                        wanted.width,
+                        (bounds.bottom() - position.y - border).max(item_height + status),
+                    ),
+                };
+                cx.default_global::<SuggestUi>().size = Some(size);
+                self.keep_selected_visible(cx);
+            }
+            _ => {
+                let current = bounds.size;
+                self.details_size = Some(match sash {
+                    Sash::DetailsEast => size(position.x - bounds.left(), current.height),
+                    Sash::DetailsWest => size(bounds.right() - position.x, current.height),
+                    Sash::DetailsSouth => size(current.width, position.y - bounds.top()),
+                    _ => size(current.width, bounds.bottom() - position.y),
+                });
+            }
+        }
         cx.notify();
     }
 }
 
+/// A command in the suggest status bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatusCommand {
+    /// `selectNextSuggestion`.
+    Select,
+    /// `acceptSelectedSuggestion`.
+    Accept,
+    /// `acceptAlternativeSelectedSuggestion`.
+    AcceptAlternative,
+    /// `toggleSuggestionDetails`.
+    ToggleDetails,
+}
+
+impl StatusCommand {
+    fn run(self, editor: &mut CodeEditor, cx: &mut Context<CodeEditor>) {
+        match self {
+            StatusCommand::Select => {
+                editor.suggest_navigate(1, cx);
+            }
+            StatusCommand::Accept => {
+                editor.accept_suggestion(cx);
+            }
+            StatusCommand::AcceptAlternative => {
+                editor.accept_alternative_suggestion(cx);
+            }
+            StatusCommand::ToggleDetails => editor.toggle_suggestion_details(cx),
+        }
+    }
+}
+
+/// An action in the suggest status bar (Monaco's
+/// `TextOnlyMenuEntryActionViewItem`: "Title (keybinding)").
+struct StatusAction {
+    label: &'static str,
+    key: &'static str,
+    run: StatusCommand,
+}
+
+/// A 4px resize handle along an edge (Monaco's `Sash`).
+fn sash(id: &'static str, sash: Sash) -> gpui::Stateful<gpui::Div> {
+    let handle = div()
+        .id(id)
+        .absolute()
+        .on_drag(sash, |_, _, _, cx| cx.new(|_| gpui::Empty));
+    match sash {
+        Sash::North | Sash::DetailsNorth => handle
+            .top(px(-2.))
+            .left_0()
+            .right_0()
+            .h(px(4.))
+            .cursor_row_resize(),
+        Sash::South | Sash::DetailsSouth => handle
+            .bottom(px(-2.))
+            .left_0()
+            .right_0()
+            .h(px(4.))
+            .cursor_row_resize(),
+        Sash::East | Sash::DetailsEast => handle
+            .right(px(-2.))
+            .top_0()
+            .bottom_0()
+            .w(px(4.))
+            .cursor_col_resize(),
+        Sash::DetailsWest => handle
+            .left(px(-2.))
+            .top_0()
+            .bottom_0()
+            .w(px(4.))
+            .cursor_col_resize(),
+    }
+}
+
 impl Render for SuggestWidget {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !cx.has_active_drag() {
+            self.slider_drag = None;
+        }
         let colors = self.theme.colors.clone();
         let item_height = self.metrics.item_height;
+        let border2 = px(2. * BORDER);
         // `suggest.css`: `border-radius: var(--vscode-cornerRadius-large)` and
         // `box-shadow: 0 2px 8px var(--vscode-widget-shadow)`.
         let base = div()
@@ -846,38 +1667,61 @@ impl Render for SuggestWidget {
             .border_color(colors.suggest_border)
             .text_color(colors.suggest_foreground)
             .text_size(self.metrics.font_size)
-            .line_height(item_height)
-            .font_family(self.style.code_font.clone());
+            .line_height(item_height);
         if let Some(message) = self.state.message {
-            // Monaco: half the default width, one row.
-            return div().child(
-                base.w(px(DEFAULT_WIDTH / 2.))
-                    .h(item_height + px(2.))
-                    .pl(px(22.))
-                    .flex()
-                    .items_center()
-                    .child(message),
-            );
+            // Monaco: half the default width, one row, always below.
+            let message_size = size(px(DEFAULT_WIDTH / 2.), item_height + border2);
+            self.room.set_anchor(Some(WidgetAnchor {
+                preference: ContentWidgetPreference::Below,
+                anchor_box: Bounds::new(point(px(0.), px(0.)), message_size),
+            }));
+            self.details_layout = None;
+            return div()
+                .child(
+                    base.w(message_size.width)
+                        .h(message_size.height)
+                        .pl(px(22.))
+                        .flex()
+                        .items_center()
+                        .child(message),
+                )
+                .into_any_element();
         }
-        let list_size = self.list_size(cx);
+        if self.options.fit_width_to_details
+            && self
+                .fit_width
+                .is_none_or(|(model, _)| model != self.state.model_id)
+        {
+            self.fit_width = Some((self.state.model_id, self.measure_fit_width(window)));
+        }
+        let layout = self.list_layout(cx);
+        self.side = Some(layout.side);
+        let list_outer = size(layout.size.width, layout.size.height + border2);
         let visible = self.visible_rows(cx);
+        let count = self.state.rows.len();
+        self.scroll = self.scroll.min(count.saturating_sub(visible));
         let show_details = self.details_shown(cx);
-        let end = (self.scroll + visible).min(self.state.rows.len());
+        let end = (self.scroll + visible).min(count);
         let rows: Vec<_> = (self.scroll..end)
             .map(|ix| self.render_row(ix, show_details).into_any_element())
             .collect();
-        let sash = |id: &'static str, sash: Sash| {
-            div()
-                .id(id)
-                .absolute()
-                .on_drag(sash, |_, _, _, cx| cx.new(|_| gpui::Empty))
-        };
+        let list_scrollbar = self.render_scrollbar(
+            ScrollbarTarget::List,
+            "suggest-list",
+            item_height * visible as f32,
+            item_height * count as f32,
+            item_height * self.scroll as f32,
+            cx,
+        );
+        let rows_bounds = self.rows_bounds.clone();
         let list = base
+            // The rows' bounds, for clicks on the scrollbar's track.
+            .on_children_prepainted(move |bounds, _, _| rows_bounds.set(bounds.first().copied()))
             .id("suggest-list")
-            .relative()
+            .group("suggest-list")
             .flex_none()
-            .w(list_size.width)
-            .h(list_size.height + px(2.))
+            .w(list_outer.width)
+            .h(list_outer.height)
             .flex()
             .flex_col()
             .child(
@@ -886,68 +1730,223 @@ impl Render for SuggestWidget {
                     .relative()
                     .flex_1()
                     .overflow_hidden()
+                    // The rows use the editor's font (`ItemRenderer`'s
+                    // `configureFont`).
+                    .font_family(self.style.code_font.clone())
                     .on_scroll_wheel(cx.listener(|this, event, _, cx| this.scroll_wheel(event, cx)))
+                    .on_drag_move(
+                        cx.listener(|this, event: &DragMoveEvent<SliderDrag>, _, cx| {
+                            if event.drag(cx).target == ScrollbarTarget::List {
+                                let top = event.bounds.top();
+                                this.drag_slider(event, top, cx);
+                            }
+                        }),
+                    )
                     .children(rows)
-                    .children(self.render_scrollbar(visible)),
+                    .children(list_scrollbar),
             )
             .when(self.options.show_status_bar, |this| {
                 this.child(self.render_status_bar(show_details))
             })
-            .child(
-                sash("suggest-sash-east", Sash::East)
-                    .top_0()
-                    .bottom_0()
-                    .right(px(-2.))
-                    .w(px(4.))
-                    .cursor_col_resize(),
-            )
-            .child(
-                sash("suggest-sash-south", Sash::South)
-                    .left_0()
-                    .right_0()
-                    .bottom(px(-2.))
-                    .h(px(4.))
-                    .cursor_row_resize(),
-            )
+            // Monaco enables the (north, east) sashes above the cursor and
+            // (east, south) below it.
+            .child(sash("suggest-sash-east", Sash::East))
+            .child(match layout.side {
+                ContentWidgetPreference::Above => sash("suggest-sash-north", Sash::North),
+                _ => sash("suggest-sash-south", Sash::South),
+            })
             .on_drag_move(cx.listener(|this, event: &DragMoveEvent<Sash>, _, cx| {
                 let sash = *event.drag(cx);
-                this.resize(sash, event, cx);
+                if matches!(sash, Sash::North | Sash::East | Sash::South) {
+                    this.resize(sash, event, cx);
+                }
             }));
-        // Monaco places the details east of the list, else west, else
-        // below; here east when it fits, else below.
-        let details = show_details.then(|| self.render_details(cx)).flatten();
-        // The room right of the cursor in the window, as the list may
-        // overflow the editor.
-        let available = self
-            .room
-            .get()
-            .map(|room| room.right)
-            .or(self.metrics.available_width);
-        let beside = available.is_none_or(|available| {
-            list_size.width + px(DETAILS_WIDTH + HORIZONTAL_PADDING) <= available
+        let list_rect = Bounds::new(point(px(0.), px(0.)), list_outer);
+        let details = show_details
+            .then(|| self.render_details_body(cx))
+            .flatten()
+            .map(|body| {
+                let placement = self.place_details(list_outer, layout.side);
+                (body.into_any_element(), placement)
+            });
+        self.details_layout = details.as_ref().map(|(_, placement)| *placement);
+        let root = match &details {
+            Some((_, placement)) => list_rect.union(&placement.bounds),
+            None => list_rect,
+        };
+        let list_origin = list_rect.origin - root.origin;
+        self.room.set_anchor(Some(WidgetAnchor {
+            preference: layout.side,
+            anchor_box: Bounds::new(list_origin, list_outer),
+        }));
+        let details = details.map(|(body, placement)| {
+            self.render_details(body, placement, placement.bounds.origin - root.origin, cx)
         });
         div()
-            .flex()
-            .when(!beside, |this| this.flex_col())
-            .items_start()
-            .child(list)
-            .when_some(details, |this, details| {
-                this.child(if beside {
-                    div()
-                        .w(px(DETAILS_WIDTH))
-                        .max_h(list_size.height + px(2.))
-                        .ml(px(-1.))
-                        .flex()
-                        .child(details)
-                } else {
-                    div()
-                        .w(list_size.width)
-                        .max_h(list_size.height + px(2.))
-                        .mt(px(-1.))
-                        .flex()
-                        .child(details)
-                })
+            .relative()
+            .w(root.size.width)
+            .h(root.size.height)
+            .child(list.absolute().left(list_origin.x).top(list_origin.y))
+            .children(details)
+            .into_any_element()
+    }
+}
+
+impl SuggestWidget {
+    /// Places the details panel around a list of border box size `list`
+    /// on `side` of the cursor line (see [`place_details`]), relative to the
+    /// list's top left: at its measured size, or the size it was resized
+    /// to.
+    fn place_details(&self, list: Size<Pixels>, side: ContentWidgetPreference) -> DetailsLayout {
+        let border2 = px(2. * BORDER);
+        let content = self
+            .details_content
+            .get()
+            .map_or(list.height, |height| height + border2);
+        let wanted = self
+            .details_size
+            .unwrap_or_else(|| size(px(DETAILS_WIDTH), content));
+        let Some(room) = self.room.get() else {
+            // Not laid out in a window yet: east, as tall as the list.
+            return DetailsLayout {
+                bounds: Bounds::new(
+                    point(list.width - px(BORDER), px(0.)),
+                    size(wanted.width, list.height),
+                ),
+                side: DetailsSide::East,
+                sashes: [false, true, true, false],
+            };
+        };
+        // The window, the list's place in it and the line, from the room
+        // the editor published (as the element places the list).
+        let horizontal = crate::widgets::OVERFLOW_HORIZONTAL_PADDING;
+        let vertical = crate::widgets::OVERFLOW_VERTICAL_PADDING;
+        let window_width = room.width + horizontal * 2.;
+        let anchor_x = window_width - horizontal - room.right;
+        let line_top = room.above + vertical;
+        let line_height = self.metrics.line_height;
+        let window_height = line_top + line_height + room.below + vertical;
+        let list_x = anchor_x
+            .min(window_width - horizontal - list.width)
+            .max(horizontal);
+        let list_y = match side {
+            ContentWidgetPreference::Above => line_top - list.height,
+            _ => line_top + line_height,
+        };
+        let anchor = Bounds::new(point(list_x, list_y), list);
+        let mut placement = place_details(
+            anchor,
+            size(window_width, window_height),
+            wanted,
+            self.metrics.item_height,
+            side != ContentWidgetPreference::Above,
+        );
+        placement.bounds.origin -= anchor.origin;
+        placement
+    }
+
+    /// The details panel at `origin` in the widget, `placement.bounds` in
+    /// size, with its scrollbar and the sashes its placement enables.
+    fn render_details(
+        &self,
+        body: gpui::AnyElement,
+        placement: DetailsLayout,
+        origin: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let colors = &self.theme.colors;
+        let visible = self.details_scroll.bounds().size.height;
+        let scrollbar = self.render_scrollbar(
+            ScrollbarTarget::Details,
+            "suggest-details",
+            visible,
+            visible + self.details_scroll.max_offset().y,
+            -self.details_scroll.offset().y,
+            cx,
+        );
+        let content = self.details_content.clone();
+        let measures = self.details_measures.clone();
+        let handle = self.details_scroll.clone();
+        let entity = cx.entity_id();
+        let [north, east, south, west] = placement.sashes;
+        div()
+            .id("suggest-details")
+            .group("suggest-details")
+            .absolute()
+            .left(origin.x)
+            .top(origin.y)
+            .w(placement.bounds.size.width)
+            .h(placement.bounds.size.height)
+            // `.suggest-details { border-radius: var(--vscode-cornerRadius-large) }`.
+            .rounded(crate::widgets::card::CORNER_RADIUS)
+            .bg(colors.suggest_background)
+            .border_1()
+            // Monaco outlines the focused details panel.
+            .border_color(if self.state.details_focused {
+                colors.focus_border
+            } else {
+                colors.suggest_border
             })
+            .text_color(colors.suggest_foreground)
+            .text_size(self.metrics.font_size)
+            .line_height(self.metrics.item_height)
+            .child(
+                div()
+                    // Measures the content, which sizes the panel next frame
+                    // (Monaco lays the panel out at its content's height).
+                    // (A scroll container reports its children through its
+                    // handle.)
+                    .on_children_prepainted(move |_, _, cx| {
+                        let Some(height) = handle.bounds_for_item(0).map(|b| b.size.height) else {
+                            return;
+                        };
+                        let changed = content
+                            .get()
+                            .is_none_or(|last| (last - height).abs() > px(0.5));
+                        if changed && measures.get() < MAX_DETAILS_MEASURES {
+                            measures.set(measures.get() + 1);
+                            content.set(Some(height));
+                            cx.notify(entity);
+                        }
+                    })
+                    .id("suggest-details-body")
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.details_scroll)
+                    .child(body),
+            )
+            .children(scrollbar)
+            .when(north, |this| {
+                this.child(sash("suggest-details-sash-north", Sash::DetailsNorth))
+            })
+            .when(east, |this| {
+                this.child(sash("suggest-details-sash-east", Sash::DetailsEast))
+            })
+            .when(south, |this| {
+                this.child(sash("suggest-details-sash-south", Sash::DetailsSouth))
+            })
+            .when(west, |this| {
+                this.child(sash("suggest-details-sash-west", Sash::DetailsWest))
+            })
+            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<Sash>, _, cx| {
+                let sash = *event.drag(cx);
+                if matches!(
+                    sash,
+                    Sash::DetailsNorth | Sash::DetailsEast | Sash::DetailsSouth | Sash::DetailsWest
+                ) {
+                    this.resize(sash, event, cx);
+                }
+            }))
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<SliderDrag>, _, cx| {
+                    if event.drag(cx).target == ScrollbarTarget::Details {
+                        let top = event.bounds.top() + px(BORDER);
+                        this.drag_slider(event, top, cx);
+                    }
+                }),
+            )
     }
 }
 
@@ -989,5 +1988,191 @@ mod tests {
         assert!(completion_item_color(&item("red", None, Some("a #ff0000 b"))).is_none());
         // Not exactly a color.
         assert!(completion_item_color(&item("#ff0000 x", None, None)).is_none());
+    }
+
+    /// A room of `above` and `below` pixels in a 1000px-wide window.
+    fn room(above: f32, below: f32) -> OverflowRoom {
+        OverflowRoom {
+            above: px(above),
+            below: px(below),
+            width: px(970.),
+            right: px(500.),
+        }
+    }
+
+    /// 20px rows, the default size, no status bar.
+    fn input(rows: usize, room: OverflowRoom) -> ListLayoutInput {
+        ListLayoutInput {
+            wanted: size(px(DEFAULT_WIDTH), px(240.)),
+            resized: false,
+            fit_width: None,
+            editor_width: Some(px(800.)),
+            rows,
+            item_height: px(20.),
+            status_height: px(0.),
+            room: Some(room),
+            locked: None,
+        }
+    }
+
+    /// Monaco `SuggestWidget._layout`.
+    #[test]
+    fn list_layout_uses_the_room_above_and_below() {
+        use ContentWidgetPreference::{Above, Below};
+        // Room below: 12 rows below.
+        let layout = layout_list(&input(50, room(100., 600.)));
+        assert_eq!(layout.side, Below);
+        assert_eq!(layout.size, size(px(DEFAULT_WIDTH), px(240.)));
+        // Not enough below and more above: above, at the wanted height.
+        let layout = layout_list(&input(50, room(600., 100.)));
+        assert_eq!(layout.side, Above);
+        assert_eq!(layout.size.height, px(240.));
+        // Little room either way: the bigger side, capped to whole rows.
+        let layout = layout_list(&input(50, room(150., 90.)));
+        assert_eq!(layout.side, Above);
+        assert_eq!(layout.size.height, px(140.));
+        // Few rows fit below even with more room above.
+        let layout = layout_list(&input(3, room(600., 100.)));
+        assert_eq!(layout.side, Below);
+        assert_eq!(layout.size.height, px(60.));
+        // At least one row and 220px.
+        let mut tiny = input(0, room(10., 10.));
+        tiny.wanted.width = px(100.);
+        let layout = layout_list(&tiny);
+        assert_eq!(layout.size, size(px(MIN_WIDTH), px(20.)));
+        // The width is capped to the window, less Monaco's padding.
+        let mut wide = input(5, room(100., 600.));
+        wide.wanted.width = px(2000.);
+        assert_eq!(layout_list(&wide).size.width, px(1000. - 2. - 28.));
+    }
+
+    /// Monaco keeps the side while typing: the list shrinking or growing
+    /// doesn't flip it.
+    #[test]
+    fn list_layout_keeps_its_side_while_typing() {
+        use ContentWidgetPreference::{Above, Below};
+        // 50 rows don't fit below: above.
+        let first = layout_list(&input(50, room(600., 100.)));
+        assert_eq!(first.side, Above);
+        // Typing leaves 3 rows, which would fit below: still above.
+        let mut fewer = input(3, room(600., 100.));
+        fewer.locked = Some(first.side);
+        let layout = layout_list(&fewer);
+        assert_eq!(layout.side, Above);
+        assert_eq!(layout.size.height, px(60.));
+        // And growing back restores the wanted height (`_cappedHeight`).
+        let mut more = input(50, room(600., 100.));
+        more.locked = Some(Above);
+        assert_eq!(layout_list(&more).size.height, px(240.));
+        // Below stays below even when more rows would fit above, capped to
+        // the room below.
+        let mut below = input(50, room(600., 100.));
+        below.locked = Some(Below);
+        let layout = layout_list(&below);
+        assert_eq!(layout.side, Below);
+        assert_eq!(layout.size.height, px(80.));
+        // Unless not even a row fits there anymore.
+        let mut gone = input(50, room(600., 10.));
+        gone.locked = Some(Below);
+        assert_eq!(layout_list(&gone).side, Above);
+    }
+
+    /// `suggest.fitWidthToDetails`.
+    #[test]
+    fn list_layout_fits_the_width_to_details() {
+        let mut fit = input(5, room(100., 600.));
+        fit.fit_width = Some(px(600.));
+        assert_eq!(layout_list(&fit).size.width, px(600.));
+        // Capped to the editor.
+        fit.fit_width = Some(px(900.));
+        assert_eq!(layout_list(&fit).size.width, px(800.));
+        // Never narrower than wanted.
+        fit.fit_width = Some(px(100.));
+        assert_eq!(layout_list(&fit).size.width, px(DEFAULT_WIDTH));
+        // A resized list keeps its size.
+        fit.fit_width = Some(px(600.));
+        fit.resized = true;
+        assert_eq!(layout_list(&fit).size.width, px(DEFAULT_WIDTH));
+    }
+
+    /// Monaco `SuggestDetailsOverlay._placeAtAnchor`.
+    #[test]
+    fn details_go_east_then_west_then_below() {
+        let window = size(px(1000.), px(800.));
+        let wanted = size(px(330.), px(100.));
+        let line = px(20.);
+        let at = |x: f32, y: f32| Bounds::new(point(px(x), px(y)), size(px(430.), px(242.)));
+        // Room on the right: east, aligned with the list's top, overlapping
+        // its border.
+        let east = place_details(at(100., 100.), window, wanted, line, true);
+        assert_eq!(east.side, DetailsSide::East);
+        assert_eq!(east.bounds.origin, point(px(529.), px(100.)));
+        assert_eq!(east.bounds.size, wanted);
+        assert_eq!(east.sashes, [false, true, true, false]);
+        // No room on the right: west, its right edge against the list.
+        let west = place_details(at(500., 100.), window, wanted, line, true);
+        assert_eq!(west.side, DetailsSide::West);
+        assert_eq!(west.bounds.right(), px(499.));
+        assert_eq!(west.sashes, [false, false, true, true]);
+        // Neither: below the list (above it when the list is above the
+        // cursor), as wide as the list.
+        let narrow = size(px(700.), px(800.));
+        let south = place_details(at(140., 100.), narrow, wanted, line, true);
+        assert_eq!(south.side, DetailsSide::South);
+        assert_eq!(south.bounds.origin, point(px(140.), px(341.)));
+        assert_eq!(south.bounds.size.width, px(428.));
+        let north = place_details(at(140., 400.), narrow, wanted, line, false);
+        assert_eq!(north.side, DetailsSide::North);
+        assert_eq!(north.bounds.bottom(), px(401.));
+        assert_eq!(north.sashes, [true, false, false, true]);
+        // Too tall for the room below the list's top: aligned with its
+        // bottom instead, capped to the room above that.
+        let tall = size(px(330.), px(760.));
+        let up = place_details(at(100., 500.), window, tall, line, true);
+        assert_eq!(up.side, DetailsSide::East);
+        assert_eq!(up.bounds.bottom(), px(740.));
+        assert_eq!(up.bounds.size.height, px(718.));
+        assert_eq!(up.sashes, [true, true, false, false]);
+    }
+
+    /// Monaco `ScrollbarState`.
+    #[test]
+    fn scrollbar_sliders() {
+        // Everything visible: no slider.
+        assert_eq!(slider(px(100.), px(100.), px(0.)), None);
+        // A quarter visible: a quarter-length slider, moving along the rest.
+        assert_eq!(slider(px(100.), px(400.), px(0.)), Some((px(0.), px(25.))));
+        assert_eq!(
+            slider(px(100.), px(400.), px(300.)),
+            Some((px(75.), px(25.)))
+        );
+        // At least 20px long.
+        assert_eq!(
+            slider(px(100.), px(10000.), px(0.)),
+            Some((px(0.), px(20.)))
+        );
+        // Back from the slider to the scroll position, clamped.
+        assert_eq!(slider_position(px(100.), px(400.), px(75.)), px(300.));
+        assert_eq!(slider_position(px(100.), px(400.), px(500.)), px(300.));
+        assert_eq!(slider_position(px(100.), px(400.), px(-5.)), px(0.));
+    }
+
+    /// Monaco's suggest list `getAriaLabel`.
+    #[test]
+    fn aria_labels() {
+        let mut item = CompletionItem::new("push", CompletionItemKind::Method);
+        assert_eq!(aria_label(&item, false), "push, Method");
+        item.label_detail = Some("(value)".into());
+        assert_eq!(aria_label(&item, false), "push (value), Method");
+        item.label_description = Some("Vec".into());
+        assert_eq!(aria_label(&item, false), "push (value), Vec, Method");
+        item.label_detail = None;
+        assert_eq!(aria_label(&item, false), "push, Vec, Method");
+        item.detail = Some("fn(T)".into());
+        item.documentation = Some("Appends.".to_string().into());
+        assert_eq!(
+            aria_label(&item, true),
+            "push, Vec, Method, docs: fn(T)Appends."
+        );
     }
 }

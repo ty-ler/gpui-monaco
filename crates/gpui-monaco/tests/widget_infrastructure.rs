@@ -206,6 +206,10 @@ impl InlineCompletionsProvider for Ghost {
 /// Signature help with a long documentation.
 struct Signature;
 impl SignatureHelpProvider for Signature {
+    fn trigger_characters(&self) -> Vec<char> {
+        vec!['(', ',']
+    }
+
     fn provide_signature_help(
         &self,
         _: &ProviderContext,

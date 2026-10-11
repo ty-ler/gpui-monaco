@@ -633,6 +633,9 @@ pub struct CodeEditor {
     /// This editor is an input in one of the editor's widgets (see
     /// [`CodeEditor::new_widget_input`]).
     pub(crate) widget_input: bool,
+    /// The window the editor was created in, for its per-window suggestion
+    /// memories (see `suggest.share_suggest_selections`).
+    pub(crate) window_id: Option<gpui::WindowId>,
     /// Take focus on the next render (after closing a peek view).
     pub(crate) refocus: bool,
     /// A running format document, selection or paste request.
@@ -793,6 +796,7 @@ impl CodeEditor {
         });
         let snapshot = model.read(cx).snapshot();
         Self {
+            window_id: Some(window.window_handle().window_id()),
             shared_model: std::rc::Rc::new(std::cell::RefCell::new(model.downgrade())),
             model,
             snapshot: snapshot.clone(),
@@ -2319,11 +2323,12 @@ impl CodeEditor {
         self.inline_selections_changed(&change, cx);
         self.linked_editing_cursor_changed(cx);
         // Monaco `ParameterHintsModel.onCursorChange`: clicks close parameter
-        // hints, other changes re-query them while they're shown.
+        // hints, other changes re-query them (after the delay) while they're
+        // shown or asked for.
         if change.source == CursorChangeSource::Mouse {
             self.hide_signature_help(cx);
-        } else if self.is_signature_help_visible() {
-            self.trigger_signature_help(crate::providers::SignatureHelpTrigger::ContentChange, cx);
+        } else if self.is_signature_help_triggered() {
+            self.schedule_signature_help(crate::providers::SignatureHelpTrigger::ContentChange, cx);
         }
         self.color_picker_cursor_changed(cx);
         self.find_cursor_changed(change.reason, cx);
@@ -2560,18 +2565,20 @@ impl CodeEditor {
         }
         if !select && self.is_suggest_visible() {
             let handled = match command {
-                MoveCommand::Up => Some(self.suggest_navigate(-1, cx)),
-                MoveCommand::Down => Some(self.suggest_navigate(1, cx)),
-                MoveCommand::PageUp => Some(self.suggest_navigate_page(false, cx)),
-                MoveCommand::PageDown => Some(self.suggest_navigate_page(true, cx)),
-                _ => None,
+                MoveCommand::Up => self.suggest_navigate(-1, cx),
+                MoveCommand::Down => self.suggest_navigate(1, cx),
+                MoveCommand::PageUp => self.suggest_navigate_page(false, cx),
+                MoveCommand::PageDown => self.suggest_navigate_page(true, cx),
+                _ => false,
             };
-            match handled {
-                Some(true) => return,
-                Some(false) => {}
-                None => self.hide_suggest(cx),
+            if handled {
+                return;
             }
         }
+        // Monaco `SuggestModel._onCursorChange`: an explicit keyboard move
+        // refilters at the new position (closing once the cursor leaves the
+        // word or the line); a selection closes the widget.
+        let suggest_active = self.suggest.session.is_some() || self.is_suggest_visible();
         let config = self.cursor_config(cx);
         let page = self.page_lines();
         let before = self.cursors.selections();
@@ -2718,6 +2725,13 @@ impl CodeEditor {
         }
         self.next_selection_change.reason = CursorChangeReason::Explicit;
         self.cursors_changed(true, cx);
+        if suggest_active {
+            if self.cursors.primary().selection().is_empty() {
+                self.refilter_suggest(cx);
+            } else {
+                self.hide_suggest(cx);
+            }
+        }
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
@@ -3023,8 +3037,8 @@ impl CodeEditor {
         if self.suggest.session.is_some() {
             self.refilter_suggest(cx);
         }
-        if self.is_signature_help_visible() {
-            self.trigger_signature_help(crate::providers::SignatureHelpTrigger::ContentChange, cx);
+        if self.is_signature_help_triggered() {
+            self.schedule_signature_help(crate::providers::SignatureHelpTrigger::ContentChange, cx);
         }
     }
 
@@ -5389,6 +5403,15 @@ impl Render for CodeEditor {
         }
         if self.is_suggest_visible() {
             key_context.add("suggest_widget_visible");
+            // Monaco's `suggestWidgetMultipleSuggestions` and
+            // `suggestWidgetHasFocusedSuggestion`, for the list keys'
+            // precondition.
+            if self.suggest_item_count() > 1 {
+                key_context.add("suggest_widget_multiple_suggestions");
+            }
+            if self.has_focused_suggestion() {
+                key_context.add("suggest_widget_has_focused_suggestion");
+            }
             if self.is_suggestion_details_focused() {
                 key_context.add("suggest_widget_details_focused");
             }

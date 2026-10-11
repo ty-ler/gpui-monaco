@@ -1130,11 +1130,14 @@ fn monaco_completion_kinds(cx: &mut TestAppContext) {
 #[gpui::test]
 fn toggle_suggestion_focus_scrolls_and_copies_the_details(cx: &mut TestAppContext) {
     let (editor, cx) = setup("", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
-    provide(cx, |_| {
+    // Longer than the panel can be, so it scrolls.
+    let docs = format!("Prints.{}", "\n\nMore.".repeat(100));
+    let item_docs = docs.clone();
+    provide(cx, move |_| {
         vec![
             CompletionItem {
                 detail: Some("fn print()".into()),
-                documentation: Some("Prints.".into()),
+                documentation: Some(item_docs.clone().into()),
                 ..CompletionItem::new("print", CompletionItemKind::Function)
             },
             CompletionItem::new("process", CompletionItemKind::Function),
@@ -1169,7 +1172,7 @@ fn toggle_suggestion_focus_scrolls_and_copies_the_details(cx: &mut TestAppContex
         cx.update(|_, cx| cx.read_from_clipboard())
             .and_then(|item| item.text())
             .as_deref(),
-        Some("fn print()\n\nPrints.")
+        Some(format!("fn print()\n\n{docs}").as_str())
     );
     assert_eq!(text(&editor, cx), "");
     // Back to the list.
@@ -1621,4 +1624,240 @@ fn a_new_word_keeps_the_items_providers_gave(cx: &mut TestAppContext) {
     settle(cx);
     assert_eq!(sorted_labels(&editor, cx), ["Z aaa", "aaa"]);
     assert_eq!((count_a.get(), count_b.get()), (1, 2));
+}
+
+fn foo_items(_: PointUtf16) -> Vec<CompletionItem> {
+    ["foo", "foobar", "fizz"]
+        .into_iter()
+        .map(|label| CompletionItem::new(label, CompletionItemKind::Variable))
+        .collect()
+}
+
+fn cursor(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> PointUtf16 {
+    editor.read_with(cx, |e, _| e.selections()[0].head)
+}
+
+/// Monaco `SuggestModel._onCursorChange`: Left and Right are explicit
+/// keyboard moves, so the list refilters at the new position (asking again
+/// left of where it was requested) and closes only once the cursor leaves
+/// the word. A selection closes it.
+#[gpui::test]
+fn left_and_right_refilter_in_the_word(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |_| {}, cx);
+    provide(cx, foo_items);
+    cx.simulate_input("foob");
+    settle(cx);
+    assert_eq!(labels(&editor, cx), Some(vec!["foobar".to_string()]));
+    // Left of the request: asked again for `foo`.
+    cx.simulate_keystrokes("left");
+    settle(cx);
+    assert!(visible(&editor, cx));
+    assert_eq!(
+        labels(&editor, cx),
+        Some(vec!["foo".to_string(), "foobar".to_string()])
+    );
+    // Right: refiltered for `foob`.
+    cx.simulate_keystrokes("right");
+    settle(cx);
+    assert_eq!(labels(&editor, cx), Some(vec!["foobar".to_string()]));
+    assert_eq!(cursor(&editor, cx), PointUtf16::new(0, 4));
+    // Out of the word: closed.
+    cx.simulate_keystrokes("home");
+    settle(cx);
+    assert!(!visible(&editor, cx));
+    // A selection closes it.
+    cx.simulate_keystrokes("end ctrl-space");
+    settle(cx);
+    assert!(visible(&editor, cx));
+    cx.simulate_keystrokes("shift-left");
+    assert!(!visible(&editor, cx));
+}
+
+/// Monaco's list keys need several suggestions or none focused
+/// (`suggestWidgetMultipleSuggestions || !suggestWidgetHasFocusedSuggestion`):
+/// with a single focused one, Up and Down move the cursor, which closes
+/// the list.
+#[gpui::test]
+fn up_and_down_with_one_focused_suggestion_move_the_cursor(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("one\nfi\nthree", |_| {}, cx);
+    provide(cx, foo_items);
+    move_to(&editor, cx, 1, 2);
+    cx.simulate_keystrokes("ctrl-space");
+    settle(cx);
+    assert_eq!(labels(&editor, cx), Some(vec!["fizz".to_string()]));
+    cx.simulate_keystrokes("down");
+    assert!(!visible(&editor, cx));
+    assert_eq!(cursor(&editor, cx).row, 2);
+    move_to(&editor, cx, 1, 2);
+    cx.simulate_keystrokes("ctrl-space");
+    settle(cx);
+    cx.simulate_keystrokes("up");
+    assert!(!visible(&editor, cx));
+    assert_eq!(cursor(&editor, cx).row, 0);
+    // The secondary keys fall through too (Cmd/Ctrl+Down is
+    // `cursorBottom`).
+    move_to(&editor, cx, 1, 2);
+    cx.simulate_keystrokes("ctrl-space");
+    settle(cx);
+    cx.simulate_keystrokes("secondary-down");
+    assert!(!visible(&editor, cx));
+    assert_eq!(cursor(&editor, cx).row, 2);
+    // With several suggestions the keys move in the list.
+    move_to(&editor, cx, 1, 1);
+    cx.simulate_keystrokes("ctrl-space");
+    settle(cx);
+    assert_eq!(labels(&editor, cx).map(|l| l.len()), Some(3));
+    cx.simulate_keystrokes("down");
+    assert!(visible(&editor, cx));
+    assert_eq!(cursor(&editor, cx), PointUtf16::new(1, 1));
+}
+
+/// A single suggestion shown without focus (`selection_mode: Never`): Down
+/// focuses it, as Monaco's precondition allows.
+#[gpui::test]
+fn down_focuses_a_single_unfocused_suggestion(cx: &mut TestAppContext) {
+    use gpui_monaco::options::SuggestSelectionMode;
+    let (editor, cx) = setup("", |_| {}, cx);
+    set_selection_mode(&editor, cx, SuggestSelectionMode::Never);
+    provide(cx, foo_items);
+    cx.simulate_input("fi");
+    settle(cx);
+    assert_eq!(labels(&editor, cx), Some(vec!["fizz".to_string()]));
+    assert_eq!(focused(&editor, cx), None);
+    cx.simulate_keystrokes("down");
+    assert_eq!(focused(&editor, cx).as_deref(), Some("fizz"));
+    assert!(visible(&editor, cx));
+}
+
+/// Monaco's status bar menu (`suggestWidgetStatusbarMenu`): "Select" while
+/// nothing is focused; Insert, and Replace when the item's ranges differ,
+/// on the left; Show More / Show Less on the right.
+#[gpui::test]
+fn status_bar_actions(cx: &mut TestAppContext) {
+    use gpui_monaco::options::SuggestSelectionMode;
+    let (editor, cx) = setup("abc", |o| o.suggest.show_status_bar = true, cx);
+    provide(cx, |p| {
+        vec![CompletionItem {
+            documentation: Some("Docs.".to_string().into()),
+            ..ranged("aaa", 0, 3, p)
+        }]
+    });
+    move_to(&editor, cx, 0, 1);
+    cx.simulate_keystrokes("ctrl-space");
+    settle(cx);
+    let status = |cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, cx| e.suggest_status_bar_for_tests(cx))
+            .unwrap()
+    };
+    let mac = cfg!(target_os = "macos");
+    let (enter, shift_enter, space) = if mac {
+        ("⏎", "⇧⏎", "⌃Space")
+    } else {
+        ("Enter", "Shift+Enter", "Ctrl+Space")
+    };
+    assert_eq!(
+        status(cx),
+        (
+            format!("Insert ({enter}), Replace ({shift_enter})"),
+            format!("Show More ({space})")
+        )
+    );
+    cx.simulate_keystrokes("ctrl-space");
+    assert_eq!(status(cx).1, format!("Show Less ({space})"));
+    cx.simulate_keystrokes("escape");
+    // Nothing focused: "Select".
+    set_selection_mode(&editor, cx, SuggestSelectionMode::Never);
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| m.set_value("", cx))
+    });
+    cx.simulate_input("a");
+    settle(cx);
+    let down = if mac { "↓" } else { "DownArrow" };
+    assert_eq!(status(cx), (format!("Select ({down})"), String::new()));
+}
+
+/// `suggest.shareSuggestSelections`: each window remembers its own
+/// selections (Monaco's workspace storage) unless they're shared (its
+/// profile storage).
+#[gpui::test]
+fn suggestion_memories_per_window_unless_shared(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let open = |share: bool, cx: &mut TestAppContext| {
+        let window = cx.add_window(|window, cx| {
+            let model = cx.new(|_| TextModel::new("").with_language("demo"));
+            let mut editor = CodeEditor::new(model, window, cx);
+            let mut options = editor.options().clone();
+            options.suggest_selection = SuggestSelection::RecentlyUsedByPrefix;
+            options.suggest.share_suggest_selections = share;
+            editor.update_options(options, cx);
+            editor
+        });
+        let editor = window.root(cx).unwrap();
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+        vcx.run_until_parked();
+        (editor, vcx)
+    };
+    cx.update(|cx| {
+        register_completion_provider(
+            cx,
+            LanguageSelector::All,
+            Items(|_: PointUtf16| {
+                ["aaa", "abb"]
+                    .into_iter()
+                    .map(|label| CompletionItem::new(label, CompletionItemKind::Variable))
+                    .collect()
+            }),
+        )
+    });
+    // Accepts `abb` after `a` in a window, then asks after `a` in another.
+    let remembered = |share: bool, cx: &mut TestAppContext| {
+        let (first, mut first_cx) = open(share, cx);
+        first_cx.simulate_input("a");
+        settle(&mut first_cx);
+        first_cx.simulate_keystrokes("down enter");
+        assert_eq!(text(&first, &mut first_cx), "abb");
+        let (second, mut second_cx) = open(share, cx);
+        second_cx.simulate_input("a");
+        settle(&mut second_cx);
+        focused(&second, &mut second_cx)
+    };
+    assert_eq!(remembered(false, cx).as_deref(), Some("aaa"));
+    assert_eq!(remembered(true, cx).as_deref(), Some("abb"));
+}
+
+/// Screen readers read the focused suggestion (Monaco's list aria label),
+/// and the list's messages.
+#[gpui::test]
+fn screen_readers_hear_the_focused_suggestion(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "",
+        |o| o.word_based_suggestions = WordBasedSuggestions::Off,
+        cx,
+    );
+    // Items for the first word only.
+    provide(cx, |p| {
+        if p.column > 1 {
+            Vec::new()
+        } else {
+            foo_items(p)
+        }
+    });
+    let heard = |cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, _| {
+            e.last_announcement_for_tests().map(|m| m.to_string())
+        })
+    };
+    cx.simulate_input("f");
+    settle(cx);
+    assert_eq!(heard(cx).as_deref(), Some("fizz, Variable"));
+    cx.simulate_keystrokes("down");
+    assert_eq!(heard(cx).as_deref(), Some("foo, Variable"));
+    cx.simulate_keystrokes("escape");
+    // An explicit request with nothing: "No suggestions.".
+    cx.simulate_input(" ");
+    cx.simulate_keystrokes("ctrl-space");
+    settle(cx);
+    assert_eq!(heard(cx).as_deref(), Some("No suggestions."));
 }

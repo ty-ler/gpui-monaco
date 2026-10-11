@@ -269,6 +269,10 @@ fn draw(cx: &mut VisualTestContext) {
 /// Records each request's context, answering with one signature.
 struct Signatures(Rc<RefCell<Vec<SignatureHelpContext>>>);
 impl SignatureHelpProvider for Signatures {
+    fn trigger_characters(&self) -> Vec<char> {
+        vec!['(', ',']
+    }
+
     fn provide_signature_help(
         &self,
         _: &ProviderContext,
@@ -309,9 +313,13 @@ fn signature_help_context_on_retrigger(cx: &mut TestAppContext) {
     let provider = Signatures(contexts.clone());
     cx.update(|cx| register_signature_help_provider(cx, LanguageSelector::All, provider));
     let (_editor, cx) = editor_with("", cx);
+    // Monaco asks 120ms after typing.
+    let delay = std::time::Duration::from_millis(120);
     cx.simulate_input("(");
+    cx.executor().advance_clock(delay);
     cx.run_until_parked();
     cx.simulate_input("(");
+    cx.executor().advance_clock(delay);
     cx.run_until_parked();
     // Typing also re-queries as a content change while hints show; the
     // trigger character requests are what Monaco's test checks.

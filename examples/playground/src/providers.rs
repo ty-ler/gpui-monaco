@@ -81,6 +81,10 @@ impl HoverProvider for DemoHover {
 
 struct DemoSignatures;
 impl SignatureHelpProvider for DemoSignatures {
+    fn trigger_characters(&self) -> Vec<char> {
+        vec!['(', ',']
+    }
+
     fn provide_signature_help(
         &self,
         context: &ProviderContext,

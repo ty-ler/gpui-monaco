@@ -9,6 +9,15 @@ use gpui_monaco::providers::*;
 use gpui_monaco::text::PointUtf16;
 use gpui_monaco::{CodeEditor, CodeEditorEvent, HOVER_DELAY, Marker, MarkerSeverity, TextModel};
 
+/// Lets a parameter hints request through (Monaco asks 120ms after typing,
+/// cursor moves and edits).
+fn settle_hints(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(120));
+    cx.run_until_parked();
+}
+
 fn setup<'a>(
     text: &str,
     cx: &'a mut TestAppContext,
@@ -204,6 +213,10 @@ fn go_to_definition_same_model_and_other_model(cx: &mut TestAppContext) {
 
 struct Signatures;
 impl SignatureHelpProvider for Signatures {
+    fn trigger_characters(&self) -> Vec<char> {
+        vec!['(', ',']
+    }
+
     fn provide_signature_help(
         &self,
         context: &ProviderContext,
@@ -246,16 +259,16 @@ fn signature_help_opens_on_trigger_and_closes(cx: &mut TestAppContext) {
     cx.update(|cx| register_signature_help_provider(cx, LanguageSelector::All, Signatures));
     let (editor, cx) = setup("", cx);
     cx.simulate_input("add(");
-    cx.run_until_parked();
+    settle_hints(cx);
     assert!(editor.read_with(cx, |e, _| e.is_signature_help_visible()));
     cx.simulate_input("1, 2)");
-    cx.run_until_parked();
+    settle_hints(cx);
     assert!(
         !editor.read_with(cx, |e, _| e.is_signature_help_visible()),
         "closes once the provider returns nothing"
     );
     cx.simulate_input("; add(");
-    cx.run_until_parked();
+    settle_hints(cx);
     assert!(editor.read_with(cx, |e, _| e.is_signature_help_visible()));
     cx.simulate_keystrokes("escape");
     assert!(!editor.read_with(cx, |e, _| e.is_signature_help_visible()));
@@ -266,15 +279,15 @@ fn signature_help_follows_cursor_moves(cx: &mut TestAppContext) {
     cx.update(|cx| register_signature_help_provider(cx, LanguageSelector::All, Signatures));
     let (editor, cx) = setup("", cx);
     cx.simulate_input("add(1, 2");
-    cx.run_until_parked();
+    settle_hints(cx);
     assert!(editor.read_with(cx, |e, _| e.is_signature_help_visible()));
     // Moving within the call re-queries and keeps it open.
     cx.simulate_keystrokes("left left");
-    cx.run_until_parked();
+    settle_hints(cx);
     assert!(editor.read_with(cx, |e, _| e.is_signature_help_visible()));
     // Moving out of the call re-queries, and the provider has nothing.
     cx.simulate_keystrokes("home");
-    cx.run_until_parked();
+    settle_hints(cx);
     assert!(!editor.read_with(cx, |e, _| e.is_signature_help_visible()));
 }
 

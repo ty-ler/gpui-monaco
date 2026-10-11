@@ -1933,22 +1933,29 @@ impl Element for EditorElement {
                         window,
                         cx,
                     );
+                    // The part placed against the line: the whole widget, or
+                    // the box it asked for (the suggest list, with its
+                    // details around it), on the side it asked for.
+                    let (preference, anchor_box) = match room.anchor() {
+                        Some(asked) => (vec![asked.preference], asked.anchor_box),
+                        None => (preference, Bounds::new(point(px(0.), px(0.)), measured)),
+                    };
                     // `_layoutHorizontalSegmentInPage`.
                     let min_x = (viewport.left() + crate::widgets::OVERFLOW_HORIZONTAL_PADDING)
-                        .max(bounds.left() - measured.width);
-                    let max_x = (bounds.right() + measured.width)
+                        .max(bounds.left() - anchor_box.size.width);
+                    let max_x = (bounds.right() + anchor_box.size.width)
                         .min(viewport.right() - crate::widgets::OVERFLOW_HORIZONTAL_PADDING);
-                    let x = anchor.x.min(max_x - measured.width).max(min_x);
+                    let x = anchor.x.min(max_x - anchor_box.size.width).max(min_x);
                     let Some(y) = crate::widgets::place_content_widget(
                         &preference,
                         anchor.y,
                         line_height,
-                        measured.height,
+                        anchor_box.size.height,
                         top..bottom,
                     ) else {
                         continue;
                     };
-                    let origin = point(x, y);
+                    let origin = point(x, y) - anchor_box.origin;
                     widgets.push_overflowing(
                         Bounds::new(origin, measured).intersect(&viewport),
                         crate::mouse_target::EmbeddedKind::ContentWidget,

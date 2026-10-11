@@ -13,6 +13,13 @@ pub const KEY_CONTEXT: &str = "CodeEditor";
 /// The editor while the suggest widget is open (Monaco's
 /// `suggestWidgetVisible`).
 const SUGGEST: Option<&str> = Some("CodeEditor && suggest_widget_visible");
+/// While the suggest list's keys move in it (Monaco's `selectNextSuggestion`
+/// precondition: `suggestWidgetMultipleSuggestions ||
+/// !suggestWidgetHasFocusedSuggestion`); with a single focused suggestion
+/// they move the cursor instead.
+const SUGGEST_NAVIGABLE: Option<&str> = Some(
+    "CodeEditor && suggest_widget_visible && (suggest_widget_multiple_suggestions || !suggest_widget_has_focused_suggestion)",
+);
 /// While the suggest widget's details panel has the focus (Monaco's
 /// `suggestWidgetDetailsFocused`).
 const SUGGEST_DETAILS_FOCUSED: Option<&str> = Some("CodeEditor && suggest_widget_details_focused");
@@ -2134,15 +2141,23 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
     // have none). Bound last: they share the editor's context depth, where
     // later bindings win, and must beat Cmd/Ctrl+Up/Down and Ctrl+N/P.
     bindings.extend([
-        KeyBinding::new("secondary-down", SelectNextSuggestion, SUGGEST),
-        KeyBinding::new("secondary-up", SelectPreviousSuggestion, SUGGEST),
-        KeyBinding::new("secondary-pagedown", SelectNextPageSuggestion, SUGGEST),
-        KeyBinding::new("secondary-pageup", SelectPreviousPageSuggestion, SUGGEST),
+        KeyBinding::new("secondary-down", SelectNextSuggestion, SUGGEST_NAVIGABLE),
+        KeyBinding::new("secondary-up", SelectPreviousSuggestion, SUGGEST_NAVIGABLE),
+        KeyBinding::new(
+            "secondary-pagedown",
+            SelectNextPageSuggestion,
+            SUGGEST_NAVIGABLE,
+        ),
+        KeyBinding::new(
+            "secondary-pageup",
+            SelectPreviousPageSuggestion,
+            SUGGEST_NAVIGABLE,
+        ),
     ]);
     if cfg!(target_os = "macos") {
         bindings.extend([
-            KeyBinding::new("ctrl-n", SelectNextSuggestion, SUGGEST),
-            KeyBinding::new("ctrl-p", SelectPreviousSuggestion, SUGGEST),
+            KeyBinding::new("ctrl-n", SelectNextSuggestion, SUGGEST_NAVIGABLE),
+            KeyBinding::new("ctrl-p", SelectPreviousSuggestion, SUGGEST_NAVIGABLE),
         ]);
     }
     // Parameter hints (Monaco weighs them above the editor's own keys, such

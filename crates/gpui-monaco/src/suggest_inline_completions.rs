@@ -37,6 +37,8 @@ struct Config {
     hidden_kinds: Vec<CompletionItemKind>,
     model_options: CompletionModelOptions,
     selection: SuggestSelection,
+    /// Whose selection memories pick the first item.
+    memory: crate::completion::MemoryScope,
 }
 
 /// Monaco `InlineCompletionResults`: a request's completion model, refiltered
@@ -70,6 +72,7 @@ impl Results {
         language: &str,
         line: &str,
         selection: SuggestSelection,
+        memory: crate::completion::MemoryScope,
         cx: &mut App,
     ) -> Vec<InlineCompletion> {
         let delta = self.model.line_context().character_count_delta as u32;
@@ -101,8 +104,9 @@ impl Results {
             column,
             word_until: &word_until,
         };
-        let selected = crate::completion::memory_select(selection, &context, &candidates, cx)
-            .min(filtered.len());
+        let selected =
+            crate::completion::memory_select(memory, selection, &context, &candidates, cx)
+                .min(filtered.len());
         filtered[selected..]
             .iter()
             .chain(&filtered[..selected])
@@ -287,7 +291,7 @@ impl InlineCompletionsProvider for SuggestInlineCompletions {
                 leading_line_content: leading,
                 character_count_delta: delta as usize,
             });
-            let items = results.items(&language, &line, config.selection, cx);
+            let items = results.items(&language, &line, config.selection, config.memory, cx);
             return Task::ready(Ok(InlineCompletionList {
                 items,
                 ..Default::default()
@@ -340,7 +344,8 @@ impl InlineCompletionsProvider for SuggestInlineCompletions {
                 model,
                 incomplete,
             };
-            let items = cx.update(|cx| results.items(&language, &line, config.selection, cx));
+            let items = cx
+                .update(|cx| results.items(&language, &line, config.selection, config.memory, cx));
             if let Ok(mut last) = last.lock() {
                 *last = Some(results);
             }
@@ -382,6 +387,7 @@ impl CodeEditor {
                 },
             },
             selection: self.options.suggest_selection,
+            memory: self.memory_scope(),
         };
         let provider = self
             .suggest
