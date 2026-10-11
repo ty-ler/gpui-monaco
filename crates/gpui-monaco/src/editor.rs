@@ -466,7 +466,10 @@ impl CodeEditor {
                     if focus.is_focused(window) {
                         let keystroke = event.keystroke.clone();
                         editor
-                            .update(cx, |_, cx| cx.emit(CodeEditorEvent::KeyDown(keystroke)))
+                            .update(cx, |this, cx| {
+                                this.dismiss_keyboard_definition_link(cx);
+                                cx.emit(CodeEditorEvent::KeyDown(keystroke))
+                            })
                             .ok();
                     }
                 })
@@ -1453,6 +1456,7 @@ impl CodeEditor {
         self.close_message(cx);
         self.check_symbol_navigation(cx);
         self.check_rename(cx);
+        self.dismiss_keyboard_definition_link(cx);
         self.smart_select_cursor_changed();
         self.schedule_auto_code_actions(cx);
         self.update_bracket_highlights(cx);
@@ -4344,6 +4348,9 @@ impl Render for CodeEditor {
                 cx.listener(|this, _: &ShowHover, window, cx| this.show_or_focus_hover(window, cx)),
             )
             .on_action(cx.listener(|this, _: &HideHover, _, cx| this.hide_hover(cx)))
+            .on_action(cx.listener(|this, _: &ShowDefinitionPreviewHover, _, cx| {
+                this.show_definition_preview_hover(cx)
+            }))
             .on_action(cx.listener(|this, _: &IncreaseHoverVerbosityLevel, _, cx| {
                 this.update_hover_verbosity_level(true, None, cx)
             }))

@@ -18,6 +18,8 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **F12:** go to definition
 - **Cmd+K F12:** open the definition to the side (`CodeEditorEvent::OpenLocationToSide` for the host)
 - **Cmd+K F2** with a peek view open: move focus between its preview and its results list
+- **Enter / Cmd+Enter / Escape** in the rename box: rename, rename with a preview, cancel; **Up / Down** pick a suggested name
+- **Enter / Cmd+Enter** in the code action menu: apply, apply with a preview
 - **Ctrl+Space (or Alt+Esc, Cmd+I):** trigger completion
 - **F1 / Ctrl+G / Cmd+Shift+O:** command palette, go to line, go to symbol
 - **Shift+F10:** context menu

@@ -253,6 +253,7 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.wordHighlight.trigger", "code_editor::WordHighlightTrigger", "Trigger Symbol Highlight", always),
     Builtin("editor.action.showHover", "code_editor::ShowHover", "Show or Focus Hover", always),
     Builtin("editor.action.hideHover", "code_editor::HideHover", "Hide Hover", always),
+    Builtin("editor.action.showDefinitionPreviewHover", "code_editor::ShowDefinitionPreviewHover", "Show Definition Preview Hover", always),
     Builtin("editor.action.scrollUpHover", "code_editor::ScrollUpHover", "Scroll Up Hover", hover_visible),
     Builtin("editor.action.scrollDownHover", "code_editor::ScrollDownHover", "Scroll Down Hover", hover_visible),
     Builtin("editor.action.scrollLeftHover", "code_editor::ScrollLeftHover", "Scroll Left Hover", hover_visible),

@@ -382,3 +382,232 @@ fn the_code_action_command_takes_arguments(cx: &mut TestAppContext) {
     assert!(!menu(cx));
     assert!(editor.read_with(cx, |e, _| e.is_message_visible()));
 }
+
+/// Offers actions with documentation (Monaco
+/// `CodeActionProviderMetadata.documentation`).
+#[derive(Clone, Default)]
+struct Documented(Actions);
+
+impl CodeActionProvider for Documented {
+    fn provide_code_actions(
+        &self,
+        context: &ProviderContext,
+        range: Range<PointUtf16>,
+        action_context: &CodeActionContext,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<CodeAction>>> {
+        self.0
+            .provide_code_actions(context, range, action_context, cx)
+    }
+
+    fn documentation(&self) -> Vec<(CodeActionKind, Command)> {
+        let command = |id: &str, title: &str| Command {
+            id: id.to_string().into(),
+            title: title.to_string().into(),
+            arguments: Vec::new(),
+        };
+        vec![
+            (
+                "refactor".into(),
+                command("docs.refactor", "Learn more about refactorings"),
+            ),
+            (
+                "refactor.extract".into(),
+                command("docs.extract", "Learn more about extracting"),
+            ),
+            (
+                "quickfix".into(),
+                command("docs.quickfix", "Learn more about fixes"),
+            ),
+        ]
+    }
+}
+
+fn bar(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<String> {
+    editor.read_with(cx, |e, cx| {
+        e.code_action_menu_bar_actions(cx)
+            .into_iter()
+            .map(|label| label.to_string())
+            .collect()
+    })
+}
+
+fn rows(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<String> {
+    editor.read_with(cx, |e, cx| e.code_action_menu_rows(cx))
+}
+
+fn click_bar(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, label: &str) {
+    assert!(editor.update(cx, |e, cx| e.run_code_action_menu_bar_action(label, cx)));
+    draw(cx);
+}
+
+#[gpui::test]
+fn show_disabled_lists_disabled_actions_until_hidden(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: vec![
+            CodeAction {
+                edit: Some(replace(p(0, 4)..p(0, 5), "z")),
+                ..action("Extract constant", "refactor.extract")
+            },
+            CodeAction {
+                disabled: Some("Select a variable".into()),
+                ..action("Inline variable", "refactor.inline")
+            },
+        ],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    editor.update(cx, |e, cx| e.refactor(cx));
+    draw(cx);
+    assert_eq!(rows(&editor, cx), ["# Extract", "Extract constant"]);
+    assert_eq!(bar(&editor, cx), ["Show Disabled"]);
+    click_bar(&editor, cx, "Show Disabled");
+    assert_eq!(
+        rows(&editor, cx),
+        [
+            "# Extract",
+            "Extract constant",
+            "# Inline",
+            "Inline variable"
+        ]
+    );
+    assert_eq!(bar(&editor, cx), ["Hide Disabled"]);
+    // The menu still has focus, and disabled actions are skipped.
+    cx.simulate_keystrokes("down down enter");
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_code_action_menu_visible()));
+    assert_eq!(text(&editor, cx), "let z = 1;\nlet y = 2;\n");
+
+    // Monaco keeps the choice for the next menu.
+    editor.update(cx, |e, cx| e.refactor(cx));
+    draw(cx);
+    assert_eq!(rows(&editor, cx).len(), 4);
+    click_bar(&editor, cx, "Hide Disabled");
+    assert_eq!(rows(&editor, cx).len(), 2);
+    assert_eq!(bar(&editor, cx), ["Show Disabled"]);
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+
+    // Quick fix never lists disabled actions, so it has no toggle.
+    editor.update(cx, |e, cx| e.quick_fix(cx));
+    draw(cx);
+    assert_eq!(rows(&editor, cx), ["# Extract", "Extract constant"]);
+    assert!(bar(&editor, cx).is_empty());
+}
+
+#[gpui::test]
+fn documentation_is_offered_in_the_action_bar(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let ran = Rc::new(RefCell::new(Vec::new()));
+    let log = ran.clone();
+    let provider = Documented(Actions {
+        actions: vec![
+            action("Extract constant", "refactor.extract"),
+            action("Add missing import", "quickfix"),
+        ],
+        ..Default::default()
+    });
+    cx.update(|cx| {
+        register_code_action_provider(cx, LanguageSelector::All, provider);
+        gpui_monaco::register_command(cx, "docs.refactor", move |_, _| {
+            log.borrow_mut().push("docs.refactor");
+        });
+    });
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new(TEXT));
+        CodeEditor::new(model, window, cx)
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    draw(cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    // Asked for refactorings: the entry for `refactor` itself, not the
+    // more specific one.
+    editor.update(cx, |e, cx| e.refactor(cx));
+    draw(cx);
+    assert_eq!(bar(&editor, cx), ["Learn more about refactorings"]);
+    click_bar(&editor, cx, "Learn more about refactorings");
+    assert_eq!(*ran.borrow(), ["docs.refactor"]);
+    assert!(!editor.read_with(cx, |e, _| e.is_code_action_menu_visible()));
+
+    // Otherwise the first entry matching an action's kind.
+    editor.update(cx, |e, cx| e.quick_fix(cx));
+    draw(cx);
+    assert_eq!(bar(&editor, cx), ["Learn more about refactorings"]);
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+
+    // The lightbulb's menu has no action bar.
+    cx.executor().advance_clock(Duration::from_millis(300));
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_lightbulb_visible()));
+    editor.update(cx, |e, cx| e.show_lightbulb_menu_for_tests(cx));
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_code_action_menu_visible()));
+    assert!(bar(&editor, cx).is_empty());
+}
+
+#[gpui::test]
+fn previewing_an_action_goes_through_the_preview_handler(cx: &mut TestAppContext) {
+    let ran = Rc::new(RefCell::new(0));
+    let count = ran.clone();
+    let provider = Actions {
+        actions: vec![CodeAction {
+            edit: Some(replace(p(0, 4)..p(0, 5), "renamed")),
+            command: Some(Command {
+                id: "test.after".into(),
+                title: "After".into(),
+                arguments: Vec::new(),
+            }),
+            ..action("Extract to function", "refactor.extract")
+        }],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    cx.update(|_, cx| {
+        gpui_monaco::register_command(cx, "test.after", move |_, _| *count.borrow_mut() += 1)
+    });
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    // The handler cancels the first preview: nothing is applied and the
+    // command doesn't run.
+    let previews = Rc::new(RefCell::new(Vec::new()));
+    let seen = previews.clone();
+    let handler = cx.update(|_, cx| {
+        gpui_monaco::set_workspace_edit_preview_handler(cx, move |edit, label, _| {
+            let first = seen.borrow().is_empty();
+            seen.borrow_mut().push(label.to_string());
+            Task::ready(Ok((!first).then_some(edit)))
+        })
+    });
+    editor.update(cx, |e, cx| e.refactor(cx));
+    draw(cx);
+    cx.simulate_keystrokes("secondary-enter");
+    draw(cx);
+    assert_eq!(*previews.borrow(), ["Extract to function"]);
+    assert_eq!(text(&editor, cx), TEXT);
+    assert_eq!(*ran.borrow(), 0);
+    // The second is accepted.
+    editor.update(cx, |e, cx| e.refactor(cx));
+    draw(cx);
+    cx.simulate_keystrokes("secondary-enter");
+    draw(cx);
+    assert_eq!(previews.borrow().len(), 2);
+    assert_eq!(text(&editor, cx), "let renamed = 1;\nlet y = 2;\n");
+    assert_eq!(*ran.borrow(), 1);
+    // Enter applies without a preview.
+    editor.update(cx, |e, cx| e.undo(cx));
+    editor.update(cx, |e, cx| e.refactor(cx));
+    draw(cx);
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert_eq!(previews.borrow().len(), 2);
+    assert_eq!(text(&editor, cx), "let renamed = 1;\nlet y = 2;\n");
+    cx.update(|_, cx| handler.dispose(cx));
+    assert!(cx.update(|_, cx| !gpui_monaco::has_workspace_edit_preview_handler(cx)));
+}

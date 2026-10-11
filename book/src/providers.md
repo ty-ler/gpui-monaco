@@ -6,12 +6,13 @@ gpui-monaco has no language server or other language intelligence built in. Your
 |---|---|---|
 | `CompletionProvider` | `CompletionItemProvider` | suggest widget: fuzzy filtering, kind icons, details and docs |
 | `HoverProvider` | `HoverProvider` | markdown hover on mouse rest |
-| `DefinitionProvider` | `DefinitionProvider` | Cmd/Ctrl+hover link, Cmd/Ctrl+click, F12 and Alt+F12 (peek) |
+| `DefinitionProvider` | `DefinitionProvider` | Cmd/Ctrl+hover link with the definition's code in a hover, Cmd/Ctrl+click, F12 and Alt+F12 (peek) |
 | `ReferenceProvider` | `ReferenceProvider` | Shift+F12 (references in a peek view) |
 | `DeclarationProvider` | `DeclarationProvider` | go to and peek declaration |
 | `TypeDefinitionProvider` | `TypeDefinitionProvider` | go to and peek type definition |
 | `ImplementationProvider` | `ImplementationProvider` | Cmd/Ctrl+F12 and Cmd/Ctrl+Shift+F12 (peek) |
 | `RenameProvider` | `RenameProvider` | F2 (rename box) |
+| `NewSymbolNamesProvider` | `NewSymbolNamesProvider` | suggested names in the rename box |
 | `SelectionRangeProvider` | `SelectionRangeProvider` | expand and shrink selection |
 | `FoldingRangeProvider` | `FoldingRangeProvider` | folding ranges, with kinds (comment, imports, region) |
 | `InlayHintsProvider` | `InlayHintsProvider` | inline type and parameter hints |
@@ -134,6 +135,7 @@ Results from every matching provider are merged, sorted by uri and position, and
 - **Stale results:** they're dropped if the text or the cursor changed in the meantime.
 - **To the side:** Open Definition to the Side emits `CodeEditorEvent::OpenLocationToSide(location)` for the first result, even in this model, so the host can open it in an editor beside this one. (Standalone Monaco has no side-by-side editors and opens it in place; `go_to_location` does that.)
 - **Cmd/Ctrl+click:** with `definition_link_opens_in_peek`, the definitions show in a peek view instead.
+- **Definition preview:** resting the mouse on a Cmd/Ctrl+hover link shows the definition's code in the hover, in the target model's language (Monaco's `goToDefinitionAtPosition`). It's the location's range, or for 8 lines or more the lines up to the next one indented like the first, without their common indentation. Several definitions say "Click to show N definitions." Locations in other models need `model_for_uri` to find them. Show Definition Preview Hover (`editor.action.showDefinitionPreviewHover`, `show_definition_preview_hover`, unbound) shows the same at the cursor until it moves or a key is pressed.
 
 The peek view (Monaco's references widget) opens under the cursor's line:
 
@@ -174,9 +176,15 @@ Both options are off by default, as in Monaco. You can also call `editor.format_
 F2 (`editor.rename(cx)`) renames the symbol at the cursor, as in Monaco:
 
 1. **Resolve:** providers that implement `resolve_rename_location` say what to rename and its current name; an error's message explains why it can't be renamed. Without one, the word at the cursor is used.
-2. **Rename box:** a box under the symbol shows the name, selected. Enter accepts; Escape, clicking elsewhere, or a text change cancels.
+2. **Rename box:** a box under the symbol shows the name, selected. Enter accepts (`AcceptRenameInput`); Escape (`CancelRenameInput`), clicking elsewhere, or a text change cancels.
+   - **Suggestions:** with a `NewSymbolNamesProvider` registered (`register_new_symbol_name_provider`), the box gets a ✨ button that asks every provider for names (`NewSymbolNameTriggerKind::Invoke`, or `request_rename_suggestions`). Providers whose `supports_automatic_new_symbol_names_trigger_kind` is true are asked as soon as the box opens (`Automatic`). New, distinct names are listed above the earlier ones, up to 7 at a time, with ✨ on `AIGenerated` ones. Down and Up (`FocusNextRenameSuggestion`, `FocusPreviousRenameSuggestion`) put a suggestion in the box, and the current name back past either end. Typing stops the request and edits the name instead. Clicking a suggestion renames to it. `rename_suggestions` lists them.
+   - **Preview:** Cmd/Ctrl+Enter (`AcceptRenameInputWithPreview`) previews the edits when a preview handler is set (see below); the box then says "Enter to Rename, Cmd/Ctrl+Enter to Preview".
 3. **Edits:** `provide_rename_edits` returns a `WorkspaceEdit`, which is text edits by document uri (`None` for this one). Providers are asked in order until one answers; if none does, their reasons are shown inline.
 4. **Apply:** `editor.apply_workspace_edit(edit, cx)` applies the edits. This document gets one undo step and the cursors follow the edits. Other documents are found with `model_for_uri`. If one can't be found, nothing is applied and "Rename failed to apply edits" is shown.
+
+### Previewing edits
+
+Standalone Monaco applies a previewed rename or code action right away; VS Code shows them in its Refactor Preview panel first. `set_workspace_edit_preview_handler(cx, handler)` (Monaco's `IBulkEditService.setPreviewHandler`) lets your app do the same. The handler gets the `WorkspaceEdit` and a label (`Renaming 'foo' to 'bar'`, or the code action's title) and returns a task with the edits to apply, or `None` to cancel. It runs for Cmd/Ctrl+Enter in the rename box and the code action menu; Enter never previews. Disposing the returned `Disposable` removes it, and `has_workspace_edit_preview_handler` says whether one is set.
 
 ## Code actions
 
@@ -192,6 +200,7 @@ It returns `CodeAction`s:
 - `edit` (a `WorkspaceEdit`) and/or `command`. The edit is applied first, then the command runs through `execute_command`. Register commands with `register_command`.
 - `diagnostics`, `is_preferred`, and `disabled` (a reason).
 - **Lazy edits:** leave `edit` out and implement `resolve_code_action` to compute it on apply. `provided_kinds` lets commands skip providers that can't help.
+- **Documentation:** `documentation` returns `(kind, Command)` pairs (Monaco `CodeActionProviderMetadata.documentation`). The menu's action bar links to the one whose kind best matches what a command asked for (`refactor` for Refactor), or else the first whose kind contains a returned action's. Clicking it runs the command through `execute_command`, or emits `CodeEditorEvent::ExecuteCommand` if none is registered.
 
 As in Monaco:
 
@@ -199,8 +208,9 @@ As in Monaco:
 - **Menu:**
   - Actions are grouped under headers: Quick Fix, Extract, Inline, Rewrite, Move, Surround With, Source Action and More Actions.
   - Fixes for diagnostics come first, then preferred actions.
-  - Up/Down, Enter and Escape work, and hovering focuses.
+  - Up/Down, Enter and Escape work, and hovering focuses. Cmd/Ctrl+Enter (`CodeActionMenuPreview`, Monaco `previewSelectedCodeAction`) applies through the [preview handler](#previewing-edits); if it cancels, the action's command doesn't run either. Rows' tooltips say "Enter to Apply" (and "Cmd/Ctrl+Enter to Preview" for refactorings, source actions and actions with edits), or why the action is disabled.
   - The focused action's diagnostics are highlighted.
+  - **Action bar:** below the list, the providers' documentation links and, for commands asking for a kind (Refactor, Source Action, …) when some actions are disabled, **Show Disabled** / **Hide Disabled**. Disabled actions are listed greyed out and can't be applied; the choice is kept for the next menu. The lightbulb's menu has no action bar. `code_action_menu_bar_actions` and `run_code_action_menu_bar_action` read and click it.
 - **Commands:**
 
 | Command | Keys | Asks for | Applies without the menu |

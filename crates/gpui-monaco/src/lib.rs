@@ -17,6 +17,7 @@ pub mod actions;
 mod api;
 mod bracket_colors;
 mod bracket_matching;
+mod bulk_edit;
 pub mod code_action;
 mod code_lens;
 pub mod color;
@@ -102,6 +103,7 @@ pub mod widgets;
 pub use api::{
     BracketPairInfo, CursorStateComputer, DecorationsCollection, FindMatch, WordAtPosition,
 };
+pub use bulk_edit::{has_workspace_edit_preview_handler, set_workspace_edit_preview_handler};
 pub use commands::{add_command, execute_command, register_command, unregister_command};
 pub use decorations::{
     BlockDecoration, DecorationId, DecorationOptions, DecorationUnderline, InjectedText,

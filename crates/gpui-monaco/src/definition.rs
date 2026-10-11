@@ -1,13 +1,16 @@
 //! Go to definition (Monaco's `contrib/gotoSymbol`): Cmd/Ctrl+hover shows a
-//! link on symbols the providers resolve, Cmd/Ctrl+click and F12 jump.
-//! Locations in other models are reported with
-//! [`CodeEditorEvent::OpenLocation`](crate::CodeEditorEvent) for the host to
-//! open.
+//! link on symbols the providers resolve, with the definition's code in a
+//! hover, and Cmd/Ctrl+click and F12 jump. Locations in other models are
+//! reported with [`CodeEditorEvent::OpenLocation`](crate::CodeEditorEvent)
+//! for the host to open.
+//!
+//! The link and its hover port Monaco's `goToDefinitionAtPosition.ts`
+//! (MIT).
 
 use std::ops::Range;
 use std::time::Duration;
 
-use gpui::{Context, Task};
+use gpui::{Context, SharedString, Task};
 use text::PointUtf16;
 
 use crate::cursor::{self, Selection};
@@ -16,6 +19,9 @@ use crate::editor::{CodeEditor, CodeEditorEvent};
 use crate::providers::{Location, definition_providers};
 use crate::theme::TokenStyle;
 
+/// Monaco `GotoDefinitionAtPositionEditorContribution.MAX_SOURCE_PREVIEW_LINES`.
+const MAX_SOURCE_PREVIEW_LINES: u32 = 8;
+
 #[derive(Default)]
 pub(crate) struct DefinitionLink {
     task: Option<Task<()>>,
@@ -23,6 +29,111 @@ pub(crate) struct DefinitionLink {
     pub link: Option<(Range<PointUtf16>, Vec<Location>)>,
     decorations: Vec<DecorationId>,
     pending: Option<PointUtf16>,
+    /// Shown from the keyboard (Monaco `startFindDefinitionFromCursor`):
+    /// the next cursor move or key press removes it.
+    from_keyboard: bool,
+}
+
+/// Monaco `getLineFirstNonWhitespaceColumn`: 1-based, 0 for a blank line.
+fn first_non_whitespace_column(line: &str) -> usize {
+    line.chars()
+        .position(|c| !c.is_whitespace())
+        .map_or(0, |ix| ix + 1)
+}
+
+/// The UTF-16 column `column` of `line` as a byte offset, clamped.
+fn utf16_to_byte(line: &str, column: u32) -> usize {
+    let mut units = 0;
+    for (ix, c) in line.char_indices() {
+        if units >= column {
+            return ix;
+        }
+        units += c.len_utf16() as u32;
+    }
+    line.len()
+}
+
+/// Removes exactly `count` leading whitespace characters from `line` if it
+/// has that many (Monaco's `^\s{n}` replacement).
+fn strip_indentation(line: &str, count: usize) -> &str {
+    let mut chars = line.char_indices();
+    for _ in 0..count {
+        match chars.next() {
+            Some((_, c)) if c.is_whitespace() => {}
+            _ => return line,
+        }
+    }
+    chars.next().map_or("", |(ix, _)| &line[ix..])
+}
+
+/// The code shown in a definition's hover (Monaco
+/// `GotoDefinitionAtPositionEditorContribution.getPreviewValue`): the
+/// definition's range, or for ranges of 8 lines or more the lines up to the
+/// next one indented like the first, with their common indentation
+/// removed. `None` if `range` starts outside `lines`.
+pub(crate) fn definition_preview(lines: &[&str], range: &Range<PointUtf16>) -> Option<String> {
+    let line_count = lines.len() as u32;
+    let start = range.start.row;
+    if start >= line_count {
+        return None;
+    }
+    let indent = |row: u32| first_non_whitespace_column(lines[row as usize]);
+    let mut preview = range.clone();
+    if range.end.row.saturating_sub(start) >= MAX_SOURCE_PREVIEW_LINES {
+        // Monaco `getPreviewRangeBasedOnIndentation`, in 0-based rows.
+        let start_indent = indent(start);
+        let max_row = line_count.min(start + 1 + MAX_SOURCE_PREVIEW_LINES) - 1;
+        let mut end = start + 1;
+        while end < max_row && indent(end) != start_indent {
+            end += 1;
+        }
+        preview = PointUtf16::new(start, 0)..PointUtf16::new(end + 1, 0);
+    }
+    // Monaco `validateRange`.
+    let clamp = |point: PointUtf16| {
+        if point.row >= line_count {
+            let last = line_count - 1;
+            PointUtf16::new(last, lines[last as usize].encode_utf16().count() as u32)
+        } else {
+            point
+        }
+    };
+    let preview = clamp(preview.start)..clamp(preview.end);
+    // Monaco `stripIndentationFromPreviewRange`: the smallest indentation
+    // of the first line and the lines after it, but not the last.
+    let mut min_indent = indent(start);
+    for row in start + 1..preview.end.row {
+        min_indent = min_indent.min(indent(row));
+    }
+    let strip = min_indent.saturating_sub(1);
+    let mut text = Vec::new();
+    for row in preview.start.row..=preview.end.row {
+        let line = lines[row as usize];
+        let from = if row == preview.start.row {
+            utf16_to_byte(line, preview.start.column)
+        } else {
+            0
+        };
+        let to = if row == preview.end.row {
+            utf16_to_byte(line, preview.end.column)
+        } else {
+            line.len()
+        };
+        text.push(strip_indentation(&line[from.min(to)..to], strip));
+    }
+    Some(text.join("\n").trim().to_string())
+}
+
+/// Monaco `MarkdownString.appendCodeblock`: `code` in a fence longer than
+/// any it contains.
+pub(crate) fn markdown_code_block(language: &str, code: &str) -> String {
+    let longest = code
+        .lines()
+        .map(|line| line.chars().take_while(|c| *c == '`').count())
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(if longest >= 3 { longest + 1 } else { 3 });
+    format!("\n{fence}{language}\n{code}\n{fence}\n")
 }
 
 impl CodeEditor {
@@ -59,42 +170,118 @@ impl CodeEditor {
         if self.definition.pending == Some(position) {
             return;
         }
+        self.start_find_definition(position, false, cx);
+    }
+
+    /// Monaco `startFindDefinition`: asks the providers for the definition
+    /// of the word at `position` and links it, with the definition's code
+    /// as its hover. From the keyboard, the hover is shown at the cursor
+    /// afterwards.
+    fn start_find_definition(
+        &mut self,
+        position: PointUtf16,
+        from_keyboard: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.clear_definition_link(cx);
         self.definition.pending = Some(position);
         let config = self.cursor_config(cx);
-        let Some(word) = cursor::word_at(&config, self.snapshot.rope(), position) else {
+        let word = cursor::word_at(&config, self.snapshot.rope(), position);
+        if word.is_none() && !from_keyboard {
             return;
-        };
+        }
         self.definition.task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(50))
-                .await;
-            let Ok(tasks) = this.update(cx, |this, cx| this.request_definitions(position, cx))
-            else {
-                return;
-            };
             let mut locations = Vec::new();
-            for task in tasks {
-                if let Ok(found) = task.await {
-                    locations.extend(found);
+            if word.is_some() {
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
+                let Ok(tasks) = this.update(cx, |this, cx| this.request_definitions(position, cx))
+                else {
+                    return;
+                };
+                for task in tasks {
+                    if let Ok(found) = task.await {
+                        locations.extend(found);
+                    }
                 }
             }
             this.update(cx, |this, cx| {
-                if locations.is_empty() || this.definition.pending != Some(position) {
+                if this.definition.pending != Some(position) {
                     return;
                 }
-                this.set_definition_link(word, locations, cx);
+                if let Some(word) = word
+                    && !locations.is_empty()
+                {
+                    this.set_definition_link(word, locations, from_keyboard, cx);
+                }
+                // Monaco `ShowDefinitionPreviewHoverAction`: then the hover.
+                if from_keyboard {
+                    this.show_hover_at_cursor(cx);
+                }
             })
             .ok();
         }));
+    }
+
+    /// Shows the definition preview hover for the symbol at the cursor
+    /// (Monaco `editor.action.showDefinitionPreviewHover`): the link and
+    /// hover Cmd/Ctrl+hover shows, until the cursor moves or a key is
+    /// pressed.
+    pub fn show_definition_preview_hover(&mut self, cx: &mut Context<Self>) {
+        let position = self.cursors.primary().position;
+        self.start_find_definition(position, true, cx);
+    }
+
+    /// The cursor moved or a key was pressed: a link shown from the
+    /// keyboard goes away (Monaco `startFindDefinitionFromCursor`'s
+    /// listeners).
+    pub(crate) fn dismiss_keyboard_definition_link(&mut self, cx: &mut Context<Self>) {
+        if self.definition.from_keyboard && self.definition.link.is_some() {
+            self.clear_definition_link(cx);
+        }
+    }
+
+    /// The link's hover (Monaco `startFindDefinition`): a count for several
+    /// results, the definition's code for one in a model that can be
+    /// found.
+    fn definition_hover_message(
+        &self,
+        locations: &[Location],
+        cx: &mut Context<Self>,
+    ) -> Option<SharedString> {
+        if locations.len() > 1 {
+            return Some(format!("Click to show {} definitions.", locations.len()).into());
+        }
+        let location = locations.first()?;
+        let model = match &location.uri {
+            Some(uri) if Some(uri) != self.model().read(cx).uri() => {
+                crate::model::model_for_uri(cx, uri)?
+            }
+            _ => self.model().clone(),
+        };
+        let model = model.read(cx);
+        let text = model.text();
+        let lines: Vec<&str> = text
+            .split('\n')
+            .map(|line| line.trim_end_matches('\r'))
+            .collect();
+        let preview = definition_preview(&lines, &location.range)?;
+        let language = model
+            .language_id()
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+        Some(markdown_code_block(&language, &preview).into())
     }
 
     fn set_definition_link(
         &mut self,
         range: Range<PointUtf16>,
         locations: Vec<Location>,
+        from_keyboard: bool,
         cx: &mut Context<Self>,
     ) {
+        let hover_message = self.definition_hover_message(&locations, cx);
         let rope = self.snapshot.rope();
         let bytes = rope.point_utf16_to_offset(range.start)..rope.point_utf16_to_offset(range.end);
         let link = self.theme.colors.input_option_active_border;
@@ -115,6 +302,7 @@ impl CodeEditor {
                             foreground: Some(link),
                             ..Default::default()
                         }),
+                        hover_message,
                         ..Default::default()
                     },
                 )],
@@ -122,6 +310,7 @@ impl CodeEditor {
             )
         });
         self.definition.link = Some((range, locations));
+        self.definition.from_keyboard = from_keyboard;
         cx.notify();
     }
 
@@ -129,6 +318,7 @@ impl CodeEditor {
         self.definition.task = None;
         self.definition.pending = None;
         self.definition.link = None;
+        self.definition.from_keyboard = false;
         let old = std::mem::take(&mut self.definition.decorations);
         if !old.is_empty() {
             self.model().update(cx, |model, cx| {
@@ -200,5 +390,61 @@ impl CodeEditor {
     /// `editor.action.revealDefinition`).
     pub fn go_to_definition(&mut self, cx: &mut Context<Self>) {
         self.go_to(crate::options::LocationKind::Definition, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn range(start: (u32, u32), end: (u32, u32)) -> Range<PointUtf16> {
+        PointUtf16::new(start.0, start.1)..PointUtf16::new(end.0, end.1)
+    }
+
+    #[test]
+    fn short_ranges_are_shown_whole_without_common_indentation() {
+        let lines = [
+            "impl A {",
+            "    fn add(a: i32) {",
+            "        a",
+            "    }",
+            "}",
+        ];
+        assert_eq!(
+            definition_preview(&lines, &range((1, 4), (3, 5))).as_deref(),
+            Some("fn add(a: i32) {\n    a\n}")
+        );
+        // Just the name, as a provider giving the identifier's range.
+        assert_eq!(
+            definition_preview(&lines, &range((1, 7), (1, 10))).as_deref(),
+            Some("add")
+        );
+        // Outside the model: nothing.
+        assert_eq!(definition_preview(&lines, &range((9, 0), (9, 1))), None);
+    }
+
+    #[test]
+    fn long_ranges_stop_at_the_next_line_indented_alike() {
+        let mut lines = vec!["fn long() {"];
+        lines.extend(std::iter::repeat_n("    x;", 12));
+        lines.push("}");
+        // Ten lines or more: up to 8 lines after the start, here all
+        // indented differently from the first.
+        let preview = definition_preview(&lines, &range((0, 0), (13, 1))).unwrap();
+        assert_eq!(preview.lines().count(), 9);
+        let lines = [
+            "fn a() {", "    1", "}", "fn b() {", "}", "", "", "", "", "",
+        ];
+        let preview = definition_preview(&lines, &range((0, 0), (9, 0))).unwrap();
+        assert_eq!(preview, "fn a() {\n    1\n}");
+    }
+
+    #[test]
+    fn code_blocks_use_a_longer_fence_than_the_code() {
+        assert_eq!(markdown_code_block("rust", "a"), "\n```rust\na\n```\n");
+        assert_eq!(
+            markdown_code_block("", "````\nx"),
+            "\n`````\n````\nx\n`````\n"
+        );
     }
 }

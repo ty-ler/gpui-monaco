@@ -570,3 +570,101 @@ fn peek_focus_option_and_toggle(cx: &mut TestAppContext) {
     draw(cx);
     assert!(preview_focused(cx));
 }
+
+/// Cmd/Ctrl+hover at `at` until the hover shows; its markdown.
+fn definition_hover(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+    at: PointUtf16,
+) -> Vec<String> {
+    let position = mouse_at(editor, cx, at);
+    cx.simulate_mouse_move(position, None, gpui::Modifiers::secondary_key());
+    cx.executor().advance_clock(Duration::from_millis(60));
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(400));
+    draw(cx);
+    editor.read_with(cx, |e, cx| e.hover_contents_for_tests(cx))
+}
+
+#[gpui::test]
+fn definition_links_show_the_definition_in_a_hover(cx: &mut TestAppContext) {
+    let fixed = Fixed {
+        definitions: vec![here(0, 0, 17)],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(fixed, cx);
+    // Monaco's `goto-definition-link` hover: the definition's code.
+    assert_eq!(
+        definition_hover(&editor, cx, p(2, 5)),
+        ["\n```\nfn add(a: i32) {}\n```\n"]
+    );
+}
+
+#[gpui::test]
+fn several_definitions_say_how_many(cx: &mut TestAppContext) {
+    let fixed = Fixed {
+        definitions: vec![here(0, 3, 6), here(1, 3, 7)],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(fixed, cx);
+    assert_eq!(
+        definition_hover(&editor, cx, p(3, 5)),
+        ["Click to show 2 definitions."]
+    );
+}
+
+#[gpui::test]
+fn definitions_in_other_models_are_previewed(cx: &mut TestAppContext) {
+    let uri = "file:///src/lib.rs";
+    let fixed = Fixed {
+        definitions: vec![Location {
+            uri: Some(uri.into()),
+            range: p(1, 0)..p(4, 1),
+        }],
+        ..Default::default()
+    };
+    let lib = cx.new(|_| {
+        TextModel::new("// lib\n    pub fn add() {\n        1\n    }\n}\n")
+            .with_uri(uri)
+            .with_language("rust")
+    });
+    cx.update(|cx| gpui_monaco::register_model(cx, &lib));
+    let (editor, cx) = setup(fixed, cx);
+    // In that model's language, without the common indentation.
+    assert_eq!(
+        definition_hover(&editor, cx, p(2, 5)),
+        ["\n```rust\npub fn add() {\n    1\n}\n}\n```\n"]
+    );
+}
+
+#[gpui::test]
+fn the_definition_preview_hover_action_shows_it_at_the_cursor(cx: &mut TestAppContext) {
+    let fixed = Fixed {
+        definitions: vec![here(0, 0, 17)],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(fixed, cx);
+    set_cursor(&editor, cx, p(2, 5));
+    cx.update(|window, cx| {
+        editor.update(cx, |e, cx| {
+            e.trigger("editor.action.showDefinitionPreviewHover", window, cx)
+        })
+    })
+    .unwrap();
+    cx.executor().advance_clock(Duration::from_millis(60));
+    draw(cx);
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.hover_contents_for_tests(cx)),
+        ["\n```\nfn add(a: i32) {}\n```\n"]
+    );
+    // Moving the cursor removes the link: the hover has nothing to show
+    // there anymore.
+    set_cursor(&editor, cx, p(2, 6));
+    editor.update(cx, |e, cx| e.show_hover_at_cursor(cx));
+    draw(cx);
+    assert!(
+        editor
+            .read_with(cx, |e, cx| e.hover_contents_for_tests(cx))
+            .is_empty()
+    );
+}

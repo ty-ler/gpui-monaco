@@ -246,3 +246,193 @@ fn providers_pass_on_and_unknown_documents_fail(cx: &mut TestAppContext) {
     assert_eq!(lib.read_with(cx, |m, _| m.text()), "pub fn foo() {}");
     assert!(editor.read_with(cx, |e, _| e.is_message_visible()));
 }
+
+/// Suggests fixed names (Monaco `NewSymbolNamesProvider`).
+#[derive(Clone, Default)]
+struct Suggest {
+    names: Vec<&'static str>,
+    automatic: bool,
+    /// The trigger kinds asked with.
+    log: Rc<RefCell<Vec<NewSymbolNameTriggerKind>>>,
+}
+
+impl NewSymbolNamesProvider for Suggest {
+    fn supports_automatic_new_symbol_names_trigger_kind(&self) -> bool {
+        self.automatic
+    }
+
+    fn provide_new_symbol_names(
+        &self,
+        _: &ProviderContext,
+        range: std::ops::Range<PointUtf16>,
+        trigger: NewSymbolNameTriggerKind,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<NewSymbolName>>> {
+        // Asked about the symbol's range.
+        assert_eq!(range, p(2, 4)..p(2, 7));
+        self.log.borrow_mut().push(trigger);
+        Task::ready(Ok(self
+            .names
+            .iter()
+            .map(|n| NewSymbolName::new(*n))
+            .collect()))
+    }
+}
+
+fn suggest(suggest: Suggest) -> Register {
+    Box::new(move |cx| {
+        register_new_symbol_name_provider(cx, LanguageSelector::All, suggest.clone());
+    })
+}
+
+fn input(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> (String, Option<usize>) {
+    editor
+        .read_with(cx, |e, cx| e.rename_input_for_tests(cx))
+        .unwrap()
+}
+
+#[gpui::test]
+fn suggestions_are_listed_and_picked_with_up_and_down(cx: &mut TestAppContext) {
+    let provider = Words::default();
+    let log = provider.log.clone();
+    let names = Suggest {
+        // The current name, blanks and repeats are dropped.
+        names: vec!["fooBar", "foo", " ", "baz", "fooBar"],
+        automatic: true,
+        ..Default::default()
+    };
+    let asked = names.log.clone();
+    let (editor, _lib, cx) = setup(vec![words(provider), suggest(names)], cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(2, 5))], cx)
+    });
+    cx.simulate_keystrokes("f2");
+    draw(cx);
+    // Asked as soon as the box opened.
+    assert_eq!(*asked.borrow(), [NewSymbolNameTriggerKind::Automatic]);
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.rename_suggestions(cx)),
+        ["fooBar", "baz"]
+    );
+    // The button shows; the preview label doesn't without a handler.
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.rename_box_extras_for_tests(cx)),
+        Some((false, true))
+    );
+    // Monaco `focusNextRenameSuggestion`: the box shows the focused one,
+    // and the current name again past the last.
+    cx.simulate_keystrokes("down");
+    draw(cx);
+    assert_eq!(input(&editor, cx), ("fooBar".into(), Some(0)));
+    cx.simulate_keystrokes("down");
+    draw(cx);
+    assert_eq!(input(&editor, cx), ("baz".into(), Some(1)));
+    cx.simulate_keystrokes("down");
+    draw(cx);
+    assert_eq!(input(&editor, cx), ("foo".into(), None));
+    cx.simulate_keystrokes("up");
+    draw(cx);
+    assert_eq!(input(&editor, cx), ("baz".into(), Some(1)));
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert_eq!(*log.borrow(), ["baz"]);
+    assert_eq!(text(&editor, cx), "fn baz() {}\nfn main() {\n    baz();\n}");
+}
+
+#[gpui::test]
+fn typing_unfocuses_suggestions_and_the_button_asks_again(cx: &mut TestAppContext) {
+    let provider = Words::default();
+    let log = provider.log.clone();
+    let names = Suggest {
+        names: vec!["qux"],
+        automatic: false,
+        ..Default::default()
+    };
+    let asked = names.log.clone();
+    let (editor, _lib, cx) = setup(vec![words(provider), suggest(names)], cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(2, 5))], cx)
+    });
+    cx.simulate_keystrokes("f2");
+    draw(cx);
+    // Not automatic: nothing until the button is clicked.
+    assert!(asked.borrow().is_empty());
+    assert!(
+        editor
+            .read_with(cx, |e, cx| e.rename_suggestions(cx))
+            .is_empty()
+    );
+    // With no suggestions, Down puts the current name back.
+    cx.simulate_input("x");
+    cx.simulate_keystrokes("down");
+    draw(cx);
+    assert_eq!(input(&editor, cx), ("foo".into(), None));
+    editor.update(cx, |e, cx| e.request_rename_suggestions(cx));
+    draw(cx);
+    assert_eq!(*asked.borrow(), [NewSymbolNameTriggerKind::Invoke]);
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.rename_suggestions(cx)),
+        ["qux"]
+    );
+    cx.simulate_keystrokes("down");
+    draw(cx);
+    assert_eq!(input(&editor, cx), ("qux".into(), Some(0)));
+    // Typing edits the name instead of picking the suggestion.
+    cx.simulate_input("2");
+    draw(cx);
+    assert_eq!(input(&editor, cx), ("qux2".into(), None));
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert_eq!(*log.borrow(), ["qux2"]);
+}
+
+#[gpui::test]
+fn previews_go_through_the_preview_handler(cx: &mut TestAppContext) {
+    let provider = Words::default();
+    let (editor, lib, cx) = setup(vec![words(provider)], cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    // Without a handler, Cmd/Ctrl+Enter just renames.
+    cx.simulate_keystrokes("f2");
+    draw(cx);
+    cx.simulate_input("bar");
+    cx.simulate_keystrokes("secondary-enter");
+    draw(cx);
+    assert_eq!(text(&editor, cx), "fn bar() {}\nfn main() {\n    bar();\n}");
+    assert_eq!(lib.read_with(cx, |m, _| m.text()), "pub fn bar() {}");
+
+    // The handler sees the edit and its label, and here keeps only this
+    // document's edits.
+    let previews = Rc::new(RefCell::new(Vec::new()));
+    let seen = previews.clone();
+    let handler = cx.update(|_, cx| {
+        gpui_monaco::set_workspace_edit_preview_handler(cx, move |mut edit, label, _| {
+            seen.borrow_mut().push(label.to_string());
+            edit.edits.retain(|(uri, _)| uri.is_none());
+            Task::ready(Ok(Some(edit)))
+        })
+    });
+    cx.simulate_keystrokes("f2");
+    draw(cx);
+    // The label says how to preview.
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.rename_box_extras_for_tests(cx)),
+        Some((true, false))
+    );
+    cx.simulate_input("baz");
+    cx.simulate_keystrokes("secondary-enter");
+    draw(cx);
+    assert_eq!(*previews.borrow(), ["Renaming 'bar' to 'baz'"]);
+    assert_eq!(text(&editor, cx), "fn baz() {}\nfn main() {\n    baz();\n}");
+    assert_eq!(lib.read_with(cx, |m, _| m.text()), "pub fn bar() {}");
+    // Enter doesn't preview.
+    cx.simulate_keystrokes("f2");
+    draw(cx);
+    cx.simulate_input("qux");
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert_eq!(previews.borrow().len(), 1);
+    assert_eq!(text(&editor, cx), "fn qux() {}\nfn main() {\n    qux();\n}");
+    cx.update(|_, cx| handler.dispose(cx));
+}
