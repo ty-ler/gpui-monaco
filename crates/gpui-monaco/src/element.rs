@@ -860,6 +860,14 @@ impl ZoneLayout {
         self.heights_before.get(count).copied().unwrap_or_default()
     }
 
+    /// Total height of the zones right after view line `after` (-1: above
+    /// the first line).
+    pub fn heights_after(&self, after: i64) -> Pixels {
+        let start = self.zones.partition_point(|(a, _)| *a < after);
+        let end = self.zones.partition_point(|(a, _)| *a <= after);
+        self.heights_before[end] - self.heights_before[start]
+    }
+
     /// Content y of the top of view line `line`.
     pub fn line_y(&self, line: u32, line_height: Pixels) -> Pixels {
         let taller = self.lines.partition_point(|(l, _)| *l < line);
@@ -937,6 +945,11 @@ pub(crate) struct EditorLayout {
     /// The lines' and view zones' height, without scrolling beyond the
     /// last line (Monaco `getContentHeight`).
     pub content_height: Pixels,
+    /// The content's width, the vertical scrollbar included (Monaco
+    /// `getContentWidth`).
+    pub content_width: Pixels,
+    /// Monaco `EditorLayoutInfo`.
+    pub layout_info: crate::layout_info::LayoutInfo,
     pub lines: Vec<LineLayout>,
     pub fold_controls: Vec<FoldControl>,
     /// The `⋯` after each collapsed line, with its row, for clicks.
@@ -1488,29 +1501,90 @@ fn prepaint_editor(
         editor.scroll_top = zones.line_y(primary_view_line, line_height) - offset;
         editor.autoscroll_requested = false;
     }
-    if let Some((range, reveal)) = editor.pending_reveal.take() {
-        // Monaco `revealRange`: the box of the range's lines.
-        let start = view_lines.to_view(range.start, false).0;
-        let end = view_lines.to_view(range.end, false).0.max(start);
-        let surrounding = if options.sticky_scroll.enabled {
-            options.sticky_scroll.max_line_count as f32
-        } else {
-            0.
+    // Monaco `restoreViewState`: back to the first visible position.
+    if let Some((position, delta_top)) = editor.pending_scroll_anchor.take() {
+        let position = view_lines
+            .rope()
+            .clip_point_utf16(position, text::Bias::Left);
+        let line = view_lines.to_view(position, false).0;
+        editor.scroll_top = zones.line_y(line, line_height) - delta_top;
+    }
+    if let Some(request) = editor.pending_reveal.take() {
+        // Monaco `_computeScrollTopToRevealRange`: the box of the range's
+        // lines, or of every cursor's.
+        let start = request
+            .ranges
+            .iter()
+            .map(|range| view_lines.to_view(range.start, false).0)
+            .min()
+            .unwrap_or(0);
+        let end = request
+            .ranges
+            .iter()
+            .map(|range| view_lines.to_view(range.end, false).0)
+            .max()
+            .unwrap_or(0)
+            .max(start);
+        let surrounding =
+            (options.cursor_surrounding_lines as f32).max(if options.sticky_scroll.enabled {
+                options.sticky_scroll.max_line_count as f32
+            } else {
+                0.
+            });
+        let reveal_request = crate::view::reveal::RevealRequest {
+            viewport_top: f32::from(editor.scroll_top),
+            viewport_height: f32::from(text_height),
+            box_start: f32::from(zones.line_y(start, line_height)),
+            box_end: f32::from(zones.line_y(end, line_height) + zones.height(end, line_height)),
+            line_height: f32::from(line_height),
+            surrounding_lines: surrounding,
+            mouse: request.minimal
+                && options.cursor_surrounding_lines_style
+                    == crate::options::CursorSurroundingLinesStyle::Default,
+            minimal: request.minimal,
         };
-        let top = crate::view::reveal::scroll_top_to_reveal(
-            crate::view::reveal::RevealRequest {
-                viewport_top: f32::from(editor.scroll_top),
-                viewport_height: f32::from(text_height),
-                box_start: f32::from(zones.line_y(start, line_height)),
-                box_end: f32::from(zones.line_y(end, line_height) + zones.height(end, line_height)),
-                line_height: f32::from(line_height),
-                surrounding_lines: surrounding,
-                mouse: false,
-            },
-            reveal,
-        );
-        editor.scroll_top = px(top);
-        editor.pending_reveal_x = Some(range.start);
+        let top = if request.cursors {
+            crate::view::reveal::scroll_top_to_reveal_cursors(reveal_request, request.reveal)
+        } else {
+            Some(crate::view::reveal::scroll_top_to_reveal(
+                reveal_request,
+                request.reveal,
+            ))
+        };
+        // Monaco aborts revealing cursors that don't fit, horizontally too.
+        if let Some(top) = top {
+            let top = px(top).clamp(px(0.), max_scroll_top);
+            // Monaco `onRevealRangeRequest`: a line or less jumps.
+            let current = editor
+                .animation
+                .animated_scroll_position()
+                .map_or(editor.scroll_top, |position| position.y);
+            let scroll_type = if (current - top).abs() <= line_height {
+                crate::view::reveal::ScrollType::Immediate
+            } else {
+                request.scroll_type
+            };
+            editor.apply_scroll_type(scroll_type);
+            editor.scroll_top = top;
+            editor.pending_reveal_x = None;
+            if request.horizontal {
+                let multi_line = !request.cursors
+                    && request
+                        .ranges
+                        .first()
+                        .is_some_and(|range| range.start.row != range.end.row);
+                if multi_line {
+                    // Two or more lines: scroll to the start of the lines.
+                    editor.scroll_left = px(0.);
+                } else {
+                    editor.pending_reveal_x = Some(crate::editor::HorizontalReveal {
+                        ranges: request.ranges,
+                        cursors: request.cursors,
+                        minimal: request.minimal,
+                    });
+                }
+            }
+        }
     }
     if editor.autoscroll_requested {
         // Monaco's primary cursor reveal: `cursorSurroundingLines` (or the
@@ -1534,6 +1608,7 @@ fn prepaint_editor(
                 line_height: f32::from(line_height),
                 surrounding_lines: if mouse { 0. } else { surrounding },
                 mouse,
+                minimal: false,
             },
             crate::view::reveal::RevealType::Simple,
         ));
@@ -1816,18 +1891,16 @@ fn prepaint_editor(
         }
         editor.autoscroll_requested = false;
     }
-    if let Some(position) = editor.pending_reveal_x.take()
-        && let Some(x) = lines
-            .iter()
-            .find(|line| line.contains(position))
-            .map(|line| line.x_for_column(position.column))
+    if let Some(request) = editor.pending_reveal_x.take()
+        && let Some(left) = scroll_left_to_reveal(
+            &request,
+            &lines,
+            editor.scroll_left,
+            text_width,
+            options.reveal_horizontal_right_padding,
+        )
     {
-        let (left_pad, right_pad) = (px(30.), options.reveal_horizontal_right_padding);
-        if x - left_pad < editor.scroll_left {
-            editor.scroll_left = (x - left_pad).max(px(0.));
-        } else if x + right_pad > editor.scroll_left + text_width {
-            editor.scroll_left = x + right_pad - text_width;
-        }
+        editor.scroll_left = left;
     }
     editor.scroll_left = editor.scroll_left.clamp(px(0.), max_scroll_left);
     let scroll_left = editor.scroll_left;
@@ -1997,6 +2070,44 @@ fn prepaint_editor(
         ShowFoldingControls::Never => false,
     };
 
+    // Monaco `EditorLayoutInfoComputer.computeLayout`, from what's drawn.
+    let gutter_left = bounds.left() - full_bounds.left();
+    let arrow = if options.scrollbar.vertical_has_arrows {
+        options.scrollbar.arrow_size
+    } else {
+        px(0.)
+    };
+    let layout_info = crate::layout_info::LayoutInfo {
+        width: full_bounds.size.width,
+        height: full_bounds.size.height,
+        glyph_margin_left: gutter_left,
+        glyph_margin_width: glyph_width,
+        glyph_margin_decoration_lane_count: 1,
+        line_numbers_left: gutter_left + glyph_width,
+        line_numbers_width: numbers_width,
+        decorations_left: gutter_left + glyph_width + numbers_width,
+        decorations_width: (gutter_width - glyph_width - numbers_width).max(px(0.)),
+        content_left: gutter_left + gutter_width,
+        content_width: text_width + vbar,
+        minimap: Default::default(),
+        // Leaving 2px for the cursor after the last character.
+        viewport_column: (((text_width - px(2.)) / metrics.em_width).floor() as u32).max(1),
+        is_word_wrap_minified: false,
+        is_viewport_wrapping: !too_large
+            && matches!(
+                options.effective_word_wrap(),
+                WordWrap::On | WordWrap::Bounded
+            ),
+        wrapping_column: wrap_column,
+        vertical_scrollbar_width: vbar,
+        horizontal_scrollbar_height: hbar,
+        overview_ruler: crate::layout_info::OverviewRulerPosition {
+            width: vbar,
+            height: full_bounds.size.height - arrow * 2.,
+            top: arrow,
+            right: px(0.),
+        },
+    };
     let mut layout = EditorLayout {
         bounds,
         gutter_width,
@@ -2008,6 +2119,9 @@ fn prepaint_editor(
         scroll_left,
         max_scroll: point(max_scroll_left, max_scroll_top),
         content_height: lines_height,
+        // Monaco counts the vertical scrollbar in (`_computeContentWidth`).
+        content_width: content_width + vbar,
+        layout_info,
         lines,
         fold_controls,
         fold_placeholders: fold_placeholder_bounds,
@@ -2092,6 +2206,24 @@ fn prepaint_editor(
             },
             size(minimap_width, viewport_height),
         );
+        // Monaco `EditorMinimapLayoutInfo`.
+        layout.layout_info.minimap = crate::layout_info::MinimapLayoutInfo {
+            render_minimap: if minimap_options.render_characters {
+                crate::layout_info::RenderMinimap::Text
+            } else {
+                crate::layout_info::RenderMinimap::Blocks
+            },
+            minimap_left: minimap_bounds.left() - full_bounds.left(),
+            minimap_width,
+            minimap_height_is_editor_height: fills,
+            minimap_is_sampling: sample_ratio > 1.,
+            minimap_scale: scale,
+            minimap_line_height: line_px,
+            minimap_canvas_inner_width: render.width,
+            minimap_canvas_inner_height: (f32::from(viewport_height) * pixel_ratio).floor() as u32,
+            minimap_canvas_outer_width: minimap_width,
+            minimap_canvas_outer_height: viewport_height,
+        };
         // Minimap lines, and the view line each shows.
         let minimap_line_count = (view_line_count as f32 / sample_ratio).ceil().max(1.) as u32;
         let total = mline * minimap_line_count as f32;
@@ -3127,6 +3259,7 @@ fn prepaint_editor(
         cursor_style == CursorStyle::BlockOutline,
     );
     editor.layout = Some(layout.clone());
+    editor.report_layout(cx);
     PrepaintState {
         layout,
         selections,
@@ -3688,6 +3821,52 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
             }
         }
     });
+}
+
+/// Monaco `ViewLines._computeScrollLeftToReveal`: the scroll left showing
+/// the request's ranges on the laid-out `lines`, or `None` when one isn't
+/// laid out, or cursors span lines or don't fit.
+fn scroll_left_to_reveal(
+    request: &crate::editor::HorizontalReveal,
+    lines: &[LineLayout],
+    scroll_left: Pixels,
+    viewport_width: Pixels,
+    right_padding: Pixels,
+) -> Option<Pixels> {
+    // Monaco `ViewLines.HORIZONTAL_EXTRA_PX`.
+    const HORIZONTAL_EXTRA_PX: Pixels = px(30.);
+    let x_of = |point: PointUtf16| {
+        lines
+            .iter()
+            .find(|line| line.contains(point))
+            .map(|line| line.x_for_column(point.column))
+    };
+    let mut box_start = Pixels::MAX;
+    let mut box_end = px(0.);
+    for range in &request.ranges {
+        if request.cursors && range.start.row != range.end.row {
+            return None;
+        }
+        let start = x_of(range.start)?;
+        let end = x_of(range.end).unwrap_or(start);
+        box_start = box_start.min(start.min(end)).round();
+        box_end = box_end.max(start.max(end)).round();
+    }
+    if !request.minimal {
+        box_start = (box_start - HORIZONTAL_EXTRA_PX).max(px(0.));
+        box_end += right_padding;
+    }
+    if request.cursors && box_end - box_start > viewport_width {
+        return None;
+    }
+    Some(px(crate::view::reveal::minimum_scrolling(
+        f32::from(scroll_left),
+        f32::from(scroll_left + viewport_width),
+        f32::from(box_start),
+        f32::from(box_end),
+        false,
+        false,
+    )))
 }
 
 /// The x and width of an overview ruler `lane` with `lanes` lanes (Monaco

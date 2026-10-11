@@ -9,10 +9,10 @@ use text::{Bias, PointUtf16};
 
 use crate::cursor::{self, EditOperation, Selection};
 use crate::decorations::{DecorationId, DecorationOptions};
-use crate::editor::CodeEditor;
+use crate::editor::{CodeEditor, PendingReveal};
 use crate::model::TextModel;
 use crate::search::{self, SearchParams};
-use crate::view::reveal::RevealType;
+use crate::view::reveal::{RevealType, ScrollType};
 
 /// A word and where it is (Monaco `IWordAtPosition`, with a range).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -540,38 +540,152 @@ impl CodeEditor {
     }
 }
 
+/// Monaco's `ICodeEditor` reveal methods. They take effect on the next
+/// frame and scroll smoothly (Monaco's default `ScrollType.Smooth`); the
+/// `*_with_scroll_type` variants take a [`ScrollType`].
 impl CodeEditor {
-    /// Scrolls so `range` shows (Monaco `revealRange` and friends). Takes
-    /// effect on the next frame.
+    fn request_reveal(&mut self, request: PendingReveal, cx: &mut Context<Self>) {
+        self.pending_reveal = Some(request);
+        self.autoscroll_requested = false;
+        cx.notify();
+    }
+
+    /// Scrolls so `range` shows, horizontally too (Monaco `revealRange`
+    /// and friends, which `reveal` picks). A range over several lines
+    /// scrolls horizontally to the start, as in Monaco.
     pub fn reveal_range(
         &mut self,
         range: Range<PointUtf16>,
         reveal: RevealType,
         cx: &mut Context<Self>,
     ) {
-        self.pending_reveal = Some((range, reveal));
-        self.autoscroll_requested = false;
-        self.animation.smooth_scroll_requested = true;
-        cx.notify();
+        self.reveal_range_with_scroll_type(range, reveal, ScrollType::Smooth, cx);
+    }
+
+    /// [`CodeEditor::reveal_range`] with a [`ScrollType`] (Monaco
+    /// `revealRange*(range, scrollType)`, `revealPosition*(position,
+    /// scrollType)` with an empty range).
+    pub fn reveal_range_with_scroll_type(
+        &mut self,
+        range: Range<PointUtf16>,
+        reveal: RevealType,
+        scroll_type: ScrollType,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_reveal(
+            PendingReveal {
+                ranges: vec![range],
+                cursors: false,
+                reveal,
+                horizontal: true,
+                minimal: false,
+                scroll_type,
+            },
+            cx,
+        );
+    }
+
+    /// Scrolls vertically so rows `start_row..=end_row` show, leaving the
+    /// horizontal scroll alone (Monaco `revealLines*(start, end,
+    /// scrollType)` and `revealLine*`).
+    pub fn reveal_lines_with_scroll_type(
+        &mut self,
+        start_row: u32,
+        end_row: u32,
+        reveal: RevealType,
+        scroll_type: ScrollType,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_reveal(
+            PendingReveal {
+                ranges: vec![PointUtf16::new(start_row, 0)..PointUtf16::new(end_row, 0)],
+                cursors: false,
+                reveal,
+                horizontal: false,
+                minimal: false,
+                scroll_type,
+            },
+            cx,
+        );
     }
 
     /// Scrolls minimally so `row` shows (Monaco `revealLine`).
     pub fn reveal_line(&mut self, row: u32, cx: &mut Context<Self>) {
-        let p = PointUtf16::new(row, 0);
-        self.reveal_range(p..p, RevealType::Simple, cx);
+        self.reveal_lines_with_scroll_type(row, row, RevealType::Simple, ScrollType::Smooth, cx);
     }
 
     /// Centers `row` (Monaco `revealLineInCenter`).
     pub fn reveal_line_in_center(&mut self, row: u32, cx: &mut Context<Self>) {
-        let p = PointUtf16::new(row, 0);
-        self.reveal_range(p..p, RevealType::Center, cx);
+        self.reveal_lines_with_scroll_type(row, row, RevealType::Center, ScrollType::Smooth, cx);
     }
 
     /// Centers `row` unless it's visible (Monaco
     /// `revealLineInCenterIfOutsideViewport`).
     pub fn reveal_line_in_center_if_outside_viewport(&mut self, row: u32, cx: &mut Context<Self>) {
-        let p = PointUtf16::new(row, 0);
-        self.reveal_range(p..p, RevealType::CenterIfOutsideViewport, cx);
+        self.reveal_lines_with_scroll_type(
+            row,
+            row,
+            RevealType::CenterIfOutsideViewport,
+            ScrollType::Smooth,
+            cx,
+        );
+    }
+
+    /// Puts `row` near the top (Monaco `revealLineNearTop`).
+    pub fn reveal_line_near_top(&mut self, row: u32, cx: &mut Context<Self>) {
+        self.reveal_lines_with_scroll_type(row, row, RevealType::NearTop, ScrollType::Smooth, cx);
+    }
+
+    /// Scrolls minimally so rows `start_row..=end_row` show (Monaco
+    /// `revealLines`).
+    pub fn reveal_lines(&mut self, start_row: u32, end_row: u32, cx: &mut Context<Self>) {
+        self.reveal_lines_with_scroll_type(
+            start_row,
+            end_row,
+            RevealType::Simple,
+            ScrollType::Smooth,
+            cx,
+        );
+    }
+
+    /// Centers rows `start_row..=end_row` (Monaco `revealLinesInCenter`).
+    pub fn reveal_lines_in_center(&mut self, start_row: u32, end_row: u32, cx: &mut Context<Self>) {
+        self.reveal_lines_with_scroll_type(
+            start_row,
+            end_row,
+            RevealType::Center,
+            ScrollType::Smooth,
+            cx,
+        );
+    }
+
+    /// Centers rows `start_row..=end_row` unless they're visible (Monaco
+    /// `revealLinesInCenterIfOutsideViewport`).
+    pub fn reveal_lines_in_center_if_outside_viewport(
+        &mut self,
+        start_row: u32,
+        end_row: u32,
+        cx: &mut Context<Self>,
+    ) {
+        self.reveal_lines_with_scroll_type(
+            start_row,
+            end_row,
+            RevealType::CenterIfOutsideViewport,
+            ScrollType::Smooth,
+            cx,
+        );
+    }
+
+    /// Puts rows `start_row..=end_row` near the top (Monaco
+    /// `revealLinesNearTop`).
+    pub fn reveal_lines_near_top(&mut self, start_row: u32, end_row: u32, cx: &mut Context<Self>) {
+        self.reveal_lines_with_scroll_type(
+            start_row,
+            end_row,
+            RevealType::NearTop,
+            ScrollType::Smooth,
+            cx,
+        );
     }
 
     /// Scrolls minimally so `position` shows, horizontally too (Monaco
@@ -585,9 +699,34 @@ impl CodeEditor {
         self.reveal_range(position..position, RevealType::Center, cx);
     }
 
+    /// Centers `position` unless it's visible (Monaco
+    /// `revealPositionInCenterIfOutsideViewport`).
+    pub fn reveal_position_in_center_if_outside_viewport(
+        &mut self,
+        position: PointUtf16,
+        cx: &mut Context<Self>,
+    ) {
+        self.reveal_range(position..position, RevealType::CenterIfOutsideViewport, cx);
+    }
+
+    /// Puts `position` near the top (Monaco `revealPositionNearTop`).
+    pub fn reveal_position_near_top(&mut self, position: PointUtf16, cx: &mut Context<Self>) {
+        self.reveal_range(position..position, RevealType::NearTop, cx);
+    }
+
     /// Centers `range` (Monaco `revealRangeInCenter`).
     pub fn reveal_range_in_center(&mut self, range: Range<PointUtf16>, cx: &mut Context<Self>) {
         self.reveal_range(range, RevealType::Center, cx);
+    }
+
+    /// Centers `range` unless it's visible (Monaco
+    /// `revealRangeInCenterIfOutsideViewport`).
+    pub fn reveal_range_in_center_if_outside_viewport(
+        &mut self,
+        range: Range<PointUtf16>,
+        cx: &mut Context<Self>,
+    ) {
+        self.reveal_range(range, RevealType::CenterIfOutsideViewport, cx);
     }
 
     /// Puts `range` at the top (Monaco `revealRangeAtTop`).
@@ -598,6 +737,47 @@ impl CodeEditor {
     /// Puts `range` near the top (Monaco `revealRangeNearTop`).
     pub fn reveal_range_near_top(&mut self, range: Range<PointUtf16>, cx: &mut Context<Self>) {
         self.reveal_range(range, RevealType::NearTop, cx);
+    }
+
+    /// Puts `range` near the top unless it's visible (Monaco
+    /// `revealRangeNearTopIfOutsideViewport`).
+    pub fn reveal_range_near_top_if_outside_viewport(
+        &mut self,
+        range: Range<PointUtf16>,
+        cx: &mut Context<Self>,
+    ) {
+        self.reveal_range(range, RevealType::NearTopIfOutsideViewport, cx);
+    }
+
+    /// Scrolls so every cursor shows (Monaco `revealAllCursors`): a single
+    /// cursor's position, or the lines from the first selection to the last
+    /// (not at all when they don't fit). `reveal_horizontal` also scrolls
+    /// horizontally to the cursors on their lines; `minimal_reveal` keeps
+    /// no context lines around them.
+    pub fn reveal_all_cursors(
+        &mut self,
+        reveal_horizontal: bool,
+        minimal_reveal: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let selections = self.cursors.selections();
+        let cursors = selections.len() > 1;
+        let ranges = if cursors {
+            selections.iter().map(|s| s.start()..s.end()).collect()
+        } else {
+            vec![selections[0].head..selections[0].head]
+        };
+        self.request_reveal(
+            PendingReveal {
+                ranges,
+                cursors,
+                reveal: RevealType::Simple,
+                horizontal: reveal_horizontal,
+                minimal: minimal_reveal,
+                scroll_type: ScrollType::Smooth,
+            },
+            cx,
+        );
     }
 
     /// The model ranges on screen, split around folded regions (Monaco
@@ -623,6 +803,12 @@ impl CodeEditor {
     /// Whether the editor has keyboard focus (Monaco `hasTextFocus`).
     pub fn has_text_focus(&self, window: &Window) -> bool {
         self.focus_handle.is_focused(window)
+    }
+
+    /// Whether the editor or a widget in it, such as the find widget, has
+    /// keyboard focus (Monaco `hasWidgetFocus`).
+    pub fn has_widget_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus_handle.contains_focused(window, cx)
     }
 
     /// Applies `edits` (in current coordinates) as one undo step, then sets

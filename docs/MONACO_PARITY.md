@@ -100,6 +100,8 @@ Issues are linked by number.
 | Go to line, quick outline (quick input) | `quickAccess` | ✅ | #100 |
 | Command palette, `addAction` | `quickAccess` | ✅ | #100 |
 | Reveal APIs, `executeEdits`, mouse hit-test events, word and position helpers, content-change details, cursor change reasons, decorations collections | editor API | ✅ | #105 |
+| Editor events: model, language, configuration, layout and content size changes, typing, clipboard, key, wheel and drag events, widget focus | `ICodeEditor.on*` | ✅ no composition, hidden-area, view-zone or begin/end update events; listeners can't change clipboard data or cancel keys | #205 |
+| Geometry and scrolling: `getLayoutInfo`, line and column offsets, `getWidthOfLine`, content and scroll sizes, `ScrollType`, `revealAllCursors`, view state with folding and the first visible line | `ICodeEditor` | ✅ answered from the last frame (`None` before it) | #205 |
 | Model helpers: lines, `modifyPosition`, find next/previous/scoped with captures, `applyEdits` undo edits, `pushEditOperations` with a cursor computer, `popStackElement`, alternative version id, bracket pairs and guides | `ITextModel` | ✅ | #206 |
 | Language extras: `register` file associations (patterns, first line, mimetypes), `onLanguage`, runtime `setLanguageConfiguration`, `LanguageFilter` scheme and pattern, `SignatureHelpContext`, folding and code lens `onDidChange`, multi-range formatting | `monaco.languages` | ✅ | #206 |
 | Custom highlighter | tokenization support | ✅ (`Language::with_highlighter`) | |

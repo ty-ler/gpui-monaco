@@ -189,7 +189,7 @@ fn read_only_ignores_input(cx: &mut TestAppContext) {
 fn view_state_round_trip(cx: &mut TestAppContext) {
     let (editor, cx) = editor_with_text("a\nb\nc", cx);
     cx.simulate_keystrokes("down shift-down");
-    let state = editor.read_with(cx, |e, _| e.save_view_state());
+    let state = editor.read_with(cx, |e, cx| e.save_view_state(cx));
     cx.simulate_keystrokes("secondary-up");
     assert_eq!(heads(&editor, cx), vec![(1, 1)]);
     editor.update(cx, |e, cx| e.restore_view_state(&state, cx));

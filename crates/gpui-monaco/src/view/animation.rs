@@ -146,6 +146,17 @@ impl ViewAnimation {
         self.scroll = None;
     }
 
+    /// Where a running smooth scroll is now, if one is running.
+    pub fn animated_scroll_position(&self) -> Option<Point<Pixels>> {
+        self.current_scroll(Instant::now())
+    }
+
+    /// A smooth scroll is running or about to start (Monaco
+    /// `hasPendingScrollAnimation`).
+    pub fn is_scrolling(&self) -> bool {
+        self.scroll.is_some() || self.smooth_scroll_requested
+    }
+
     /// The scroll position to show for `target`, animating there when
     /// smooth scrolling was requested; `true` while animating.
     pub fn scroll_position(
