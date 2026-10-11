@@ -21,7 +21,7 @@ use crate::suggest::{CompletionModel, CompletionModelOptions, LineContext};
 use crate::suggest_widget::{
     LOADING_MESSAGE, SuggestUi, SuggestWidget, SuggestWidgetMetrics, SuggestWidgetState,
 };
-use crate::widgets::{ContentWidget, ContentWidgetPreference, WidgetId};
+use crate::widgets::{ContentWidgetPreference, WidgetId};
 
 /// Monaco stops collecting document words past this many.
 const MAX_WORDS: usize = 10_000;
@@ -229,6 +229,15 @@ impl CodeEditor {
         Some((detail.map(|d| d.to_string()), docs.map(|d| d.0.to_string())))
     }
 
+    /// The suggest list's first visible row and how many rows show, for
+    /// tests.
+    #[doc(hidden)]
+    pub fn suggest_rows_shown_for_tests(&self, cx: &gpui::App) -> Option<(usize, usize)> {
+        let (widget, _) = self.suggest.widget.as_ref()?;
+        let widget = widget.read(cx);
+        Some((widget.first_visible_row(), widget.visible_rows(cx)))
+    }
+
     /// The size the suggest widget was resized to, if any.
     #[doc(hidden)]
     pub fn suggest_size_for_tests(cx: &gpui::App) -> Option<gpui::Size<gpui::Pixels>> {
@@ -372,7 +381,8 @@ impl CodeEditor {
         auto: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.options.read_only {
+        // Widget inputs are plain inputs in Monaco.
+        if self.options.read_only || self.widget_input {
             return;
         }
         let position = self.cursors.primary().position;
@@ -1042,17 +1052,17 @@ impl CodeEditor {
                 let widget = cx.new(|cx| {
                     SuggestWidget::new(editor, state, theme, style, options, metrics, cx)
                 });
-                let id = self.add_content_widget(
-                    ContentWidget {
-                        position: anchor,
-                        preference: vec![
-                            ContentWidgetPreference::Below,
-                            ContentWidgetPreference::Above,
-                        ],
-                        view: widget.clone().into(),
-                    },
+                let (id, room) = self.add_overflow_content_widget(
+                    anchor,
+                    vec![
+                        ContentWidgetPreference::Below,
+                        ContentWidgetPreference::Above,
+                    ],
+                    widget.clone().into(),
+                    crate::widgets::layer::SUGGEST,
                     cx,
                 );
+                widget.update(cx, |widget, _| widget.room = room);
                 self.suggest.widget = Some((widget, id));
             }
         }

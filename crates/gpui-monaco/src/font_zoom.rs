@@ -122,7 +122,7 @@ impl CodeEditor {
 
     /// Re-applies the zoom after it changes.
     pub(crate) fn on_zoom_changed(&mut self, cx: &mut Context<Self>) {
-        let level = editor_zoom_level(cx);
+        let level = self.zoom_level(cx);
         if self.options.font_size != zoomed_options(self.options(), level).font_size {
             self.update_options(self.options().clone(), cx);
         }

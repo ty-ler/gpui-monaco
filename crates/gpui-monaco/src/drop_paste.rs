@@ -723,9 +723,12 @@ impl CodeEditor {
                     ContentWidgetPreference::Above,
                 ],
                 view: view.into(),
+                allow_editor_overflow: true,
             },
             cx,
         );
+        self.widgets
+            .set_layer(widget, crate::widgets::layer::WIDGET);
         self.drop_paste.post_edit = Some(PostEdit {
             kind,
             edits,

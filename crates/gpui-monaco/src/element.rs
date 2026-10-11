@@ -3,10 +3,12 @@
 use std::ops::Range;
 
 use gpui::{
-    App, AvailableSpace, BorderStyle, Bounds, ContentMask, Corners, Edges, Element, ElementId,
-    ElementInputHandler, Entity, Font, FontStyle, FontWeight, GlobalElementId, Hsla,
-    InspectorElementId, IntoElement, LayoutId, PathBuilder, Pixels, ShapedLine, SharedString, Size,
-    Style, TextAlign, TextRun, UnderlineStyle, Window, fill, font, point, px, quad, relative, size,
+    App, AvailableSpace, BorderStyle, Bounds, ContentMask, Corners, CursorStyle as MouseCursor,
+    DispatchPhase, Edges, Element, ElementId, ElementInputHandler, Entity, Font, FontStyle,
+    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
+    InteractiveElement as _, IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent,
+    ParentElement as _, PathBuilder, Pixels, ShapedLine, SharedString, Size, Style, Styled as _,
+    TextAlign, TextRun, UnderlineStyle, Window, fill, font, point, px, quad, relative, size,
 };
 use text::{PointUtf16, Rope};
 
@@ -1097,10 +1099,14 @@ pub(crate) struct EditorLayout {
     /// The `⋯` after each collapsed line, with its row, for clicks.
     pub fold_placeholders: Vec<(u32, Bounds<Pixels>)>,
     pub zones: ZoneLayout,
-    /// Bounds of embedded views; the editor ignores clicks inside them.
+    /// The visible bounds of embedded views; the editor ignores clicks
+    /// inside them.
     pub widget_bounds: Vec<Bounds<Pixels>>,
     /// What each of `widget_bounds` is.
     pub widget_kinds: Vec<crate::mouse_target::EmbeddedKind>,
+    /// Whether the wheel over each of `widget_bounds` leaves the editor
+    /// alone (overlay and overflowing widgets, zone widgets).
+    pub widget_captures_wheel: Vec<bool>,
     /// The code action lightbulb, for clicks.
     pub lightbulb: Option<Bounds<Pixels>>,
     pub minimap: Option<MinimapLayout>,
@@ -1236,7 +1242,22 @@ pub struct PrepaintState {
     numbers_right: Pixels,
     zone_elements: Vec<gpui::AnyElement>,
     full_width_zone_elements: Vec<gpui::AnyElement>,
-    widget_elements: Vec<gpui::AnyElement>,
+    /// Content widgets, painted in the text area under the sticky scroll.
+    content_elements: Vec<gpui::AnyElement>,
+    /// Glyph margin widgets, painted in the gutter under the sticky scroll.
+    glyph_elements: Vec<gpui::AnyElement>,
+    /// Overlay widgets, painted last, clipped to the editor.
+    overlay_elements: Vec<gpui::AnyElement>,
+    /// The editor's own hitbox (see `EditorElement::prepaint`).
+    hitbox: Option<Hitbox>,
+    /// Pointers over parts of the editor other than the text.
+    cursor_areas: Vec<(MouseCursor, Hitbox)>,
+    /// Whether to set `cursor_areas` (not while dragging).
+    cursor_areas_enabled: bool,
+    /// Where the overflowing widgets are, in window coordinates.
+    overflow_bounds: Vec<Bounds<Pixels>>,
+    /// Widgets whose clicks don't focus the editor (see `paint`).
+    widgets_keeping_focus: Vec<Bounds<Pixels>>,
     colors: EditorColors,
     options: EditorOptions,
     focused: bool,
@@ -1288,14 +1309,83 @@ impl Element for EditorElement {
         let mut state = self
             .editor
             .update(cx, |editor, cx| prepaint_editor(editor, bounds, window, cx));
-        let mut widget_bounds = Vec::new();
-        let mut widget_kinds = Vec::new();
+        // The editor's own hitbox: the mouse is over the editor itself, not
+        // something painted above it (an overflowing widget, a host popup).
+        state.hitbox = Some(window.insert_hitbox(bounds, HitboxBehavior::Normal));
+        // Monaco's pointer: the I-beam over the text only; the arrow over
+        // the gutter, scrollbars, minimap and widgets, a hand over folding
+        // controls. Not while dragging, which keeps its own pointer.
+        let mut cursor_areas = Vec::new();
+        if state.cursor_areas_enabled {
+            let layout = &state.layout;
+            let gutter = Bounds::from_corners(
+                layout.bounds.origin,
+                point(layout.text_bounds.left(), layout.bounds.bottom()),
+            );
+            let mut arrows = vec![gutter];
+            arrows.extend(
+                [layout.vertical_scrollbar, layout.horizontal_scrollbar]
+                    .into_iter()
+                    .flatten()
+                    .map(|bar| bar.bar),
+            );
+            arrows.extend(layout.minimap.map(|minimap| minimap.bounds));
+            let hands: Vec<_> = layout
+                .fold_controls
+                .iter()
+                .map(|control| control.bounds)
+                .chain(layout.fold_placeholders.iter().map(|(_, bounds)| *bounds))
+                .collect();
+            for area in arrows {
+                cursor_areas.push((
+                    MouseCursor::Arrow,
+                    window.insert_hitbox(area, HitboxBehavior::Normal),
+                ));
+            }
+            for area in hands {
+                cursor_areas.push((
+                    MouseCursor::PointingHand,
+                    window.insert_hitbox(area, HitboxBehavior::Normal),
+                ));
+            }
+        }
+        let text = state.layout.text_bounds;
+        let editor_area = state.layout.bounds;
+        // Monaco: zones and content widgets are in the scrollable text area,
+        // under the sticky scroll and the scrollbars, so those get the
+        // clicks there; parts scrolled out of the editor take none. GPUI
+        // clips hit tests to the content mask a hitbox was recorded with.
+        let sticky_bottom = state
+            .layout
+            .sticky_lines
+            .iter()
+            .map(|line| line.bounds.bottom())
+            .fold(text.top(), Pixels::max)
+            .min(text.bottom());
+        let below_sticky = |area: Bounds<Pixels>| {
+            Bounds::from_corners(
+                point(area.left(), area.top().max(sticky_bottom)),
+                area.bottom_right(),
+            )
+        };
+        let text_hits = below_sticky(text);
+        let full_width_hits = below_sticky(Bounds::from_corners(
+            point(editor_area.left(), text.top()),
+            text.bottom_right(),
+        ));
+        let gutter_hits = below_sticky(Bounds::from_corners(
+            point(editor_area.left(), text.top()),
+            point(text.left(), text.bottom()),
+        ));
+        let viewport = Bounds::new(gpui::Point::default(), window.viewport_size());
+        let mut widgets = WidgetHits::default();
         for embedded in std::mem::take(&mut state.embedded) {
             match embedded {
                 Embedded::Zone {
                     view,
                     bounds: zone,
                     full_width,
+                    captures_wheel,
                 } => {
                     let mut element = view.into_any_element();
                     element.layout_as_root(
@@ -1306,9 +1396,28 @@ impl Element for EditorElement {
                         window,
                         cx,
                     );
-                    element.prepaint_at(zone.origin, window, cx);
-                    widget_bounds.push(zone);
-                    widget_kinds.push(crate::mouse_target::EmbeddedKind::ViewZone);
+                    let clip = if full_width {
+                        full_width_hits
+                    } else {
+                        text_hits
+                    };
+                    // Zone widgets (peek) take the arrow; plain zones are
+                    // part of the text.
+                    let visible = zone.intersect(&clip);
+                    if captures_wheel && !visible.is_empty() {
+                        cursor_areas.push((
+                            MouseCursor::Arrow,
+                            window.insert_hitbox(visible, HitboxBehavior::Normal),
+                        ));
+                    }
+                    window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                        element.prepaint_at(zone.origin, window, cx)
+                    });
+                    widgets.push(
+                        visible,
+                        crate::mouse_target::EmbeddedKind::ViewZone,
+                        captures_wheel,
+                    );
                     if full_width {
                         state.full_width_zone_elements.push(element);
                     } else {
@@ -1320,6 +1429,56 @@ impl Element for EditorElement {
                     anchor,
                     line_height,
                     preference,
+                    overflow: Some((layer, room)),
+                } => {
+                    // Monaco `_layoutBoxInPage`: placed in the window, with
+                    // some clearance, and told the room there is.
+                    let top = viewport.top() + crate::widgets::OVERFLOW_VERTICAL_PADDING;
+                    let bottom = viewport.bottom() - crate::widgets::OVERFLOW_VERTICAL_PADDING;
+                    room.set(crate::widgets::OverflowRoom {
+                        above: anchor.y - top,
+                        below: bottom - (anchor.y + line_height),
+                        width: viewport.size.width
+                            - crate::widgets::OVERFLOW_HORIZONTAL_PADDING * 2.,
+                        right: viewport.right()
+                            - crate::widgets::OVERFLOW_HORIZONTAL_PADDING
+                            - anchor.x,
+                    });
+                    let mut element = overflowing(view);
+                    let measured = element.layout_as_root(
+                        size(AvailableSpace::MinContent, AvailableSpace::MinContent),
+                        window,
+                        cx,
+                    );
+                    // `_layoutHorizontalSegmentInPage`.
+                    let min_x = (viewport.left() + crate::widgets::OVERFLOW_HORIZONTAL_PADDING)
+                        .max(bounds.left() - measured.width);
+                    let max_x = (bounds.right() + measured.width)
+                        .min(viewport.right() - crate::widgets::OVERFLOW_HORIZONTAL_PADDING);
+                    let x = anchor.x.min(max_x - measured.width).max(min_x);
+                    let Some(y) = crate::widgets::place_content_widget(
+                        &preference,
+                        anchor.y,
+                        line_height,
+                        measured.height,
+                        top..bottom,
+                    ) else {
+                        continue;
+                    };
+                    let origin = point(x, y);
+                    widgets.push_overflowing(
+                        Bounds::new(origin, measured).intersect(&viewport),
+                        crate::mouse_target::EmbeddedKind::ContentWidget,
+                        layer,
+                    );
+                    window.defer_draw(element, origin, OVERFLOW_PRIORITY + layer, None);
+                }
+                Embedded::Content {
+                    view,
+                    anchor,
+                    line_height,
+                    preference,
+                    overflow: None,
                 } => {
                     let mut element = view.into_any_element();
                     let measured = element.layout_as_root(
@@ -1327,23 +1486,33 @@ impl Element for EditorElement {
                         window,
                         cx,
                     );
-                    let x = anchor
-                        .x
-                        .min(bounds.right() - measured.width)
-                        .max(bounds.left());
+                    // Monaco `_layoutBoxInViewport`: kept in the text area.
+                    let x = anchor.x.min(text.right() - measured.width).max(text.left());
                     let Some(y) = crate::widgets::place_content_widget(
                         &preference,
                         anchor.y,
                         line_height,
                         measured.height,
-                        bounds.top()..bounds.bottom(),
+                        text.top()..text.bottom(),
                     ) else {
                         continue;
                     };
-                    element.prepaint_at(point(x, y), window, cx);
-                    widget_bounds.push(Bounds::new(point(x, y), measured));
-                    widget_kinds.push(crate::mouse_target::EmbeddedKind::ContentWidget);
-                    state.widget_elements.push(element);
+                    let visible = Bounds::new(point(x, y), measured).intersect(&text_hits);
+                    if !visible.is_empty() {
+                        cursor_areas.push((
+                            MouseCursor::Arrow,
+                            window.insert_hitbox(visible, HitboxBehavior::Normal),
+                        ));
+                    }
+                    window.with_content_mask(Some(ContentMask { bounds: text_hits }), |window| {
+                        element.prepaint_at(point(x, y), window, cx)
+                    });
+                    widgets.push(
+                        visible,
+                        crate::mouse_target::EmbeddedKind::ContentWidget,
+                        false,
+                    );
+                    state.content_elements.push(element);
                 }
                 Embedded::Glyph {
                     view,
@@ -1358,20 +1527,34 @@ impl Element for EditorElement {
                         window,
                         cx,
                     );
-                    element.prepaint_at(glyph.origin, window, cx);
-                    widget_bounds.push(glyph);
-                    widget_kinds.push(crate::mouse_target::EmbeddedKind::GlyphMarginWidget);
-                    state.widget_elements.push(element);
+                    window.with_content_mask(
+                        Some(ContentMask {
+                            bounds: gutter_hits,
+                        }),
+                        |window| element.prepaint_at(glyph.origin, window, cx),
+                    );
+                    widgets.push(
+                        glyph.intersect(&gutter_hits),
+                        crate::mouse_target::EmbeddedKind::GlyphMarginWidget,
+                        false,
+                    );
+                    state.glyph_elements.push(element);
                 }
-                Embedded::Overlay { view, position } => {
-                    let mut element = view.into_any_element();
+                Embedded::Overlay {
+                    view,
+                    position,
+                    overflow,
+                } => {
+                    let mut element = match overflow {
+                        Some(_) => overflowing(view),
+                        None => view.into_any_element(),
+                    };
                     let measured = element.layout_as_root(
                         size(AvailableSpace::MinContent, AvailableSpace::MinContent),
                         window,
                         cx,
                     );
-                    let text = state.layout.text_bounds;
-                    let origin = match position {
+                    let mut origin = match position {
                         OverlayPosition::TopRight => {
                             point(text.right() - measured.width, bounds.top())
                         }
@@ -1385,21 +1568,67 @@ impl Element for EditorElement {
                         ),
                         OverlayPosition::Custom(offset) => bounds.origin + offset,
                     };
-                    element.prepaint_at(origin, window, cx);
-                    widget_bounds.push(Bounds::new(origin, measured));
-                    widget_kinds.push(crate::mouse_target::EmbeddedKind::OverlayWidget);
-                    state.widget_elements.push(element);
+                    if let Some(layer) = overflow {
+                        // Kept inside the window.
+                        origin.x = origin
+                            .x
+                            .min(viewport.right() - measured.width)
+                            .max(viewport.left());
+                        origin.y = origin
+                            .y
+                            .min(viewport.bottom() - measured.height)
+                            .max(viewport.top());
+                        widgets.push_overflowing(
+                            Bounds::new(origin, measured).intersect(&viewport),
+                            crate::mouse_target::EmbeddedKind::OverlayWidget,
+                            layer,
+                        );
+                        window.defer_draw(element, origin, OVERFLOW_PRIORITY + layer, None);
+                        continue;
+                    }
+                    let visible = Bounds::new(origin, measured).intersect(&bounds);
+                    if !visible.is_empty() {
+                        cursor_areas.push((
+                            MouseCursor::Arrow,
+                            window.insert_hitbox(visible, HitboxBehavior::Normal),
+                        ));
+                    }
+                    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                        element.prepaint_at(origin, window, cx)
+                    });
+                    widgets.push(
+                        visible,
+                        crate::mouse_target::EmbeddedKind::OverlayWidget,
+                        true,
+                    );
+                    state.overlay_elements.push(element);
                 }
             }
         }
-        if !widget_bounds.is_empty() {
-            self.editor.update(cx, |editor, _| {
-                if let Some(layout) = editor.layout.as_mut() {
-                    layout.widget_bounds = widget_bounds;
-                    layout.widget_kinds = widget_kinds;
+        state.cursor_areas = cursor_areas;
+        state.widgets_keeping_focus = widgets
+            .bounds
+            .iter()
+            .zip(&widgets.kinds)
+            .zip(&widgets.captures_wheel)
+            .filter(|((_, kind), captures)| {
+                use crate::mouse_target::EmbeddedKind;
+                match kind {
+                    EmbeddedKind::ContentWidget | EmbeddedKind::OverlayWidget => true,
+                    EmbeddedKind::ViewZone => **captures,
+                    EmbeddedKind::GlyphMarginWidget => false,
                 }
-            });
-        }
+            })
+            .map(|((bounds, _), _)| *bounds)
+            .collect();
+        state.overflow_bounds = widgets.finish();
+        self.editor.update(cx, |editor, _| {
+            if let Some(layout) = editor.layout.as_mut() {
+                layout.widget_bounds = widgets.bounds;
+                layout.widget_kinds = widgets.kinds;
+                layout.widget_captures_wheel = widgets.captures_wheel;
+            }
+        });
         state
     }
 
@@ -1419,6 +1648,44 @@ impl Element for EditorElement {
             ElementInputHandler::new(bounds, self.editor.clone()),
             cx,
         );
+        // Mouse moves: over the editor (as a `div`'s `on_mouse_move`), over
+        // its overflowing widgets (which block the editor's hitbox but are
+        // still the editor's, as for the hover's mouse tracking), and
+        // anywhere in the window while a drag that started in the editor
+        // goes on (Monaco's `GlobalPointerMoveMonitor`). Registered before
+        // the widgets paint, so their listeners run first.
+        if let Some(hitbox) = state.hitbox.clone() {
+            let editor = self.editor.clone();
+            let overflow = state.overflow_bounds.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                let over_overflow = overflow.iter().any(|b| b.contains(&event.position));
+                editor.update(cx, |editor, cx| {
+                    if hitbox.is_hovered(window) || over_overflow || editor.is_mouse_dragging() {
+                        editor.editor_mouse_move(event, window, cx);
+                    }
+                });
+            });
+        }
+        // GPUI focuses a focusable element under any mouse down; Monaco
+        // doesn't focus the editor for clicks (of any button) on its
+        // widgets, which keep focus themselves. Registered after the
+        // editor's root, so it runs first.
+        let keep_focus = std::mem::take(&mut state.widgets_keeping_focus);
+        if !keep_focus.is_empty() {
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, window, _| {
+                if phase == DispatchPhase::Bubble
+                    && keep_focus.iter().any(|b| b.contains(&event.position))
+                {
+                    window.prevent_default();
+                }
+            });
+        }
+        for (cursor, hitbox) in &state.cursor_areas {
+            window.set_cursor_style(*cursor, hitbox);
+        }
         paint_editor(state, window, cx);
     }
 }
@@ -1541,7 +1808,8 @@ fn prepaint_editor(
     let snapshot = editor.snapshot.clone();
 
     // View zones: after the last view line of their row; hidden in folds.
-    let mut zone_specs: Vec<(i64, Pixels, gpui::AnyView, bool)> = Vec::new();
+    // (after view line, height, view, (full width, captures the wheel)).
+    let mut zone_specs: Vec<(i64, Pixels, gpui::AnyView, (bool, bool))> = Vec::new();
     {
         let model = editor.model().clone();
         let buffer = model.read(cx).buffer();
@@ -1605,7 +1873,12 @@ fn prepaint_editor(
                 crate::widgets::ZoneHeight::Lines(lines) => line_height * lines,
                 crate::widgets::ZoneHeight::Pixels(height) => height,
             };
-            zone_specs.push((after, height, zone.view.clone(), zone.full_width));
+            zone_specs.push((
+                after,
+                height,
+                zone.view.clone(),
+                (zone.full_width, zone.captures_wheel),
+            ));
         }
         editor.widgets.zone_rows = Some((key, rows));
     }
@@ -2311,6 +2584,7 @@ fn prepaint_editor(
         zones: zones.clone(),
         widget_bounds: Vec::new(),
         widget_kinds: Vec::new(),
+        widget_captures_wheel: Vec::new(),
         lightbulb: None,
         minimap: None,
         sticky_lines: Vec::new(),
@@ -3374,7 +3648,7 @@ fn prepaint_editor(
             ix = group_end;
             continue;
         }
-        for (_, height, view, full_width) in &zone_specs[ix..group_end] {
+        for (_, height, view, (full_width, captures_wheel)) in &zone_specs[ix..group_end] {
             let left = if *full_width {
                 layout.bounds.left()
             } else {
@@ -3387,6 +3661,7 @@ fn prepaint_editor(
                     size(text_bounds.left() + text_width - left, *height),
                 ),
                 full_width: *full_width,
+                captures_wheel: *captures_wheel,
             });
             top += *height;
         }
@@ -3428,6 +3703,9 @@ fn prepaint_editor(
                 anchor: point(x, layout.line_top(line.view_line)),
                 line_height: layout.line_height_of(line.view_line),
                 preference: widget.preference.clone(),
+                overflow: widget
+                    .allow_overflow
+                    .then(|| (widget.layer, widget.room.clone())),
             });
         }
     }
@@ -3435,6 +3713,7 @@ fn prepaint_editor(
         embedded.push(Embedded::Overlay {
             view: widget.view.clone(),
             position: widget.position,
+            overflow: widget.allow_overflow.then_some(widget.layer),
         });
     }
 
@@ -3521,7 +3800,14 @@ fn prepaint_editor(
         numbers_right,
         zone_elements: Vec::new(),
         full_width_zone_elements: Vec::new(),
-        widget_elements: Vec::new(),
+        content_elements: Vec::new(),
+        glyph_elements: Vec::new(),
+        overlay_elements: Vec::new(),
+        hitbox: None,
+        cursor_areas: Vec::new(),
+        cursor_areas_enabled: !editor.is_mouse_dragging(),
+        overflow_bounds: Vec::new(),
+        widgets_keeping_focus: Vec::new(),
         colors,
         options,
         focused,
@@ -3537,7 +3823,9 @@ fn prepaint_editor(
 fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
     let mut zone_elements = std::mem::take(&mut state.zone_elements);
     let mut full_width_zone_elements = std::mem::take(&mut state.full_width_zone_elements);
-    let mut widget_elements = std::mem::take(&mut state.widget_elements);
+    let mut content_elements = std::mem::take(&mut state.content_elements);
+    let mut glyph_elements = std::mem::take(&mut state.glyph_elements);
+    let mut overlay_elements = std::mem::take(&mut state.overlay_elements);
     let state = &*state;
     let layout = &state.layout;
     let colors = &state.colors;
@@ -3832,6 +4120,25 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
             },
         );
 
+        // Content and glyph margin widgets: in the text area and the
+        // gutter, under the sticky scroll (Monaco's `linesContent` and
+        // margin).
+        let text = layout.text_bounds;
+        window.with_content_mask(Some(ContentMask { bounds: text }), |window| {
+            for element in &mut content_elements {
+                element.paint(window, cx);
+            }
+        });
+        let gutter = Bounds::from_corners(
+            point(bounds.left(), text.top()),
+            point(text.left(), text.bottom()),
+        );
+        window.with_content_mask(Some(ContentMask { bounds: gutter }), |window| {
+            for element in &mut glyph_elements {
+                element.paint(window, cx);
+            }
+        });
+
         if !state.sticky.is_empty() {
             let background = colors.sticky_scroll_background.unwrap_or(colors.background);
             let height = state
@@ -3923,7 +4230,9 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
             });
         }
 
-        for element in &mut widget_elements {
+        // Overlay widgets, above everything in the editor. Overflowing
+        // widgets are deferred draws, above the rest of the window too.
+        for element in &mut overlay_elements {
             element.paint(window, cx);
         }
 
@@ -4432,6 +4741,7 @@ pub(crate) enum Embedded {
         bounds: Bounds<Pixels>,
         /// Painted over the gutter, outside the text area's clip.
         full_width: bool,
+        captures_wheel: bool,
     },
     Content {
         view: gpui::AnyView,
@@ -4440,15 +4750,89 @@ pub(crate) enum Embedded {
         /// The line's height.
         line_height: Pixels,
         preference: Vec<ContentWidgetPreference>,
+        /// When it overflows the editor: its layer and room.
+        overflow: Option<(usize, crate::widgets::OverflowRoomCell)>,
     },
     Overlay {
         view: gpui::AnyView,
         position: OverlayPosition,
+        /// When it overflows the editor: its layer.
+        overflow: Option<usize>,
     },
     Glyph {
         view: gpui::AnyView,
         bounds: Bounds<Pixels>,
     },
+}
+
+/// Where overflowing widgets paint among GPUI's deferred draws: above
+/// GPUI's usual popovers (priority 1), then by their layer.
+const OVERFLOW_PRIORITY: usize = 2;
+
+/// An overflowing widget, wrapped to block the mouse from what's under it
+/// (Monaco's overflow widgets are outside the editor's scrollable element,
+/// so neither the editor nor the page under them gets their wheel or
+/// clicks), with the arrow pointer.
+fn overflowing(view: gpui::AnyView) -> gpui::AnyElement {
+    gpui::div()
+        .occlude()
+        .cursor(MouseCursor::Arrow)
+        .child(view)
+        .into_any_element()
+}
+
+/// The visible parts of the embedded views, for the editor's hit testing,
+/// bottom-most first.
+#[derive(Default)]
+struct WidgetHits {
+    bounds: Vec<Bounds<Pixels>>,
+    kinds: Vec<crate::mouse_target::EmbeddedKind>,
+    captures_wheel: Vec<bool>,
+    /// The overflowing widgets and their layers; above the rest.
+    overflowing: Vec<(Bounds<Pixels>, crate::mouse_target::EmbeddedKind, usize)>,
+}
+
+impl WidgetHits {
+    fn push(
+        &mut self,
+        visible: Bounds<Pixels>,
+        kind: crate::mouse_target::EmbeddedKind,
+        captures_wheel: bool,
+    ) {
+        if visible.is_empty() {
+            return;
+        }
+        self.bounds.push(visible);
+        self.kinds.push(kind);
+        self.captures_wheel.push(captures_wheel);
+    }
+
+    /// An overflowing content or overlay widget, painted at `layer`.
+    fn push_overflowing(
+        &mut self,
+        visible: Bounds<Pixels>,
+        kind: crate::mouse_target::EmbeddedKind,
+        layer: usize,
+    ) {
+        if !visible.is_empty() {
+            self.overflowing.push((visible, kind, layer));
+        }
+    }
+
+    /// Puts the overflowing widgets last, in paint order; returns their
+    /// bounds.
+    fn finish(&mut self) -> Vec<Bounds<Pixels>> {
+        self.overflowing.sort_by_key(|(_, _, layer)| *layer);
+        for (bounds, kind, _) in &self.overflowing {
+            self.bounds.push(*bounds);
+            self.kinds.push(*kind);
+            self.captures_wheel.push(true);
+        }
+        self.overflowing
+            .iter()
+            .map(|(bounds, _, _)| *bounds)
+            .collect()
+    }
 }
 
 /// Minimap blocks for view lines `lines`, relative to the first one.

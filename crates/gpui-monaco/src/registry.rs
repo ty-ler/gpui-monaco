@@ -84,6 +84,10 @@ struct Registry {
     /// Whether models are observed as they're created.
     observing_models: bool,
     editors: Vec<WeakEntity<CodeEditor>>,
+    /// The editor's own editors (Monaco `isSimpleWidget`: the find, replace,
+    /// rename and quick input fields): not listed or announced, but they
+    /// follow global changes such as the theme.
+    internal_editors: Vec<WeakEntity<CodeEditor>>,
     diff_editors: Vec<WeakEntity<DiffEditor>>,
     models: Vec<WeakEntity<TextModel>>,
     editor_created: Emitter<EditorListener>,
@@ -105,7 +109,12 @@ pub(crate) fn ensure(cx: &mut App) {
         return;
     }
     registry.observing_models = true;
-    cx.observe_new::<TextModel>(|_, _, cx| {
+    cx.observe_new::<TextModel>(|model: &mut TextModel, _, cx| {
+        // The editor's own models (widget inputs, placeholders) aren't
+        // listed (Monaco's are DOM inputs, not models).
+        if model.is_internal() {
+            return;
+        }
         let model = cx.entity();
         track_model(&model, cx);
     })
@@ -154,11 +163,17 @@ fn will_dispose_model(id: EntityId, model: &mut TextModel, cx: &mut App) {
 }
 
 /// Adds the editor being built to the registry and announces it once it
-/// exists (Monaco `ICodeEditorService.addCodeEditor`).
-pub(crate) fn track_editor(cx: &mut Context<CodeEditor>) {
+/// exists (Monaco `ICodeEditorService.addCodeEditor`). An `internal` one
+/// (Monaco `isSimpleWidget`) is only kept for [`update_editors`].
+pub(crate) fn track_editor(internal: bool, cx: &mut Context<CodeEditor>) {
     ensure(cx);
     let editor = cx.weak_entity();
     let registry = cx.global_mut::<Registry>();
+    if internal {
+        registry.internal_editors.retain(|e| e.upgrade().is_some());
+        registry.internal_editors.push(editor);
+        return;
+    }
     registry.editors.retain(|e| e.upgrade().is_some());
     registry.editors.push(editor.clone());
     cx.defer(move |cx| {
@@ -234,7 +249,8 @@ pub(crate) fn markers_changed(uri: SharedString, cx: &mut App) {
 }
 
 /// Every live code editor, in creation order (Monaco `editor.getEditors`),
-/// including the two inside each diff editor.
+/// including the two inside each diff editor, but not the editors' own
+/// inputs (find, replace, rename, quick input).
 pub fn editors(cx: &App) -> Vec<Entity<CodeEditor>> {
     cx.try_global::<Registry>()
         .map(|r| r.editors.iter().filter_map(WeakEntity::upgrade).collect())
@@ -387,12 +403,22 @@ impl std::fmt::Debug for Disposable {
     }
 }
 
-/// Runs `f` on every live editor (e.g. to apply a global theme).
+/// Runs `f` on every live editor (e.g. to apply a global theme), the
+/// editor's own internal ones too.
 pub(crate) fn update_editors(
     cx: &mut App,
     mut f: impl FnMut(&mut CodeEditor, &mut Context<CodeEditor>),
 ) {
-    for editor in editors(cx) {
+    let internal: Vec<_> = cx
+        .try_global::<Registry>()
+        .map(|r| {
+            r.internal_editors
+                .iter()
+                .filter_map(WeakEntity::upgrade)
+                .collect()
+        })
+        .unwrap_or_default();
+    for editor in editors(cx).into_iter().chain(internal) {
         editor.update(cx, |editor, cx| f(editor, cx));
     }
 }

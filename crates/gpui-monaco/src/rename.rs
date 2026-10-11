@@ -25,7 +25,6 @@ use crate::actions::{
 use crate::cursor::Selection;
 use crate::editor::{CodeEditor, CodeEditorEvent};
 use crate::model::{TextModelEvent, model_for_uri};
-use crate::options::EditorOptions;
 use crate::providers::{
     NewSymbolName, NewSymbolNameTag, NewSymbolNameTriggerKind, RenameLocation, TextEdit,
     WorkspaceEdit, new_symbol_names_providers, rename_providers,
@@ -93,10 +92,20 @@ impl RenameInput {
         let name = self.name.clone();
         let theme = self.theme.clone();
         let selection = self.selection.clone();
+        // Monaco's rename input uses the editor's font (`applyFontInfo`),
+        // unlike the other widget inputs.
+        let font = self.editor.upgrade().map(|editor| {
+            let options = &editor.read(cx).options;
+            (options.font_family.clone(), options.font_size)
+        });
         let input = cx.new(|cx| {
-            let mut editor = CodeEditor::with_text(&name, window, cx);
-            editor.update_options(EditorOptions::single_line_input(), cx);
-            editor.set_theme(theme, cx);
+            let mut editor = CodeEditor::new_widget_input(&name, theme, window, cx);
+            if let Some((family, size)) = font {
+                let mut options = editor.options().clone();
+                options.font_family = family;
+                options.font_size = size;
+                editor.update_options(options, cx);
+            }
             editor.set_selections(
                 &[Selection::new(
                     PointUtf16::new(0, selection.start),
@@ -532,9 +541,12 @@ impl CodeEditor {
                     ContentWidgetPreference::Above,
                 ],
                 view: view.clone().into(),
+                allow_editor_overflow: true,
             },
             cx,
         );
+        self.widgets
+            .set_layer(widget, crate::widgets::layer::WIDGET);
         self.rename.session = Some(Session {
             widget,
             view,

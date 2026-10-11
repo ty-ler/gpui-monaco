@@ -807,9 +807,11 @@ impl CodeEditor {
                             ContentWidgetPreference::Below,
                         ],
                         view: widget.clone().into(),
+                        allow_editor_overflow: true,
                     },
                     cx,
                 );
+                this.widgets.set_layer(id, crate::widgets::layer::WIDGET);
                 this.color_picker.standalone = Some((widget, id));
                 window.focus(&focus, cx);
                 // Monaco hides it when it loses focus.

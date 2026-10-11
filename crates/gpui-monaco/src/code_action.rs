@@ -31,7 +31,7 @@ use crate::providers::{
     code_action_providers,
 };
 use crate::theme::EditorColors;
-use crate::widgets::{ContentWidget, ContentWidgetPreference, WidgetId};
+use crate::widgets::{ContentWidgetPreference, WidgetId};
 
 /// The key context of the code action menu.
 pub const CODE_ACTION_MENU_KEY_CONTEXT: &str = "CodeActionMenu";
@@ -436,6 +436,9 @@ pub(crate) struct CodeActionMenu {
     font_size: gpui::Pixels,
     focus: FocusHandle,
     focus_pending: bool,
+    /// The room it has in the window (it overflows the editor, as Monaco's
+    /// action list is in the context view).
+    room: crate::widgets::OverflowRoomCell,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -622,8 +625,9 @@ impl Render for CodeActionMenu {
             }))
             .on_action(cx.listener(|this, _: &CodeActionMenuHide, _, cx| this.hide(cx)))
             .min_w(px(200.))
-            .max_w(px(500.))
-            .max_h(px(400.))
+            .max_w(self.room.cap_width(px(500.), px(200.)))
+            // Capped to the room in the window, so the list scrolls.
+            .max_h(self.room.cap_height(px(400.), px(32.)))
             .overflow_y_scroll()
             .p(px(4.))
             .flex()
@@ -1094,23 +1098,24 @@ impl CodeEditor {
                 font_size,
                 focus: cx.focus_handle(),
                 focus_pending: true,
+                room: Default::default(),
                 _subscriptions: Vec::new(),
             };
             // The first actionable row.
             menu.focused = (0..menu.rows.len()).find(|row| menu.focusable(*row));
             menu
         });
-        let id = self.add_content_widget(
-            ContentWidget {
-                position,
-                preference: vec![
-                    ContentWidgetPreference::Below,
-                    ContentWidgetPreference::Above,
-                ],
-                view: menu.clone().into(),
-            },
+        let (id, room) = self.add_overflow_content_widget(
+            position,
+            vec![
+                ContentWidgetPreference::Below,
+                ContentWidgetPreference::Above,
+            ],
+            menu.clone().into(),
+            crate::widgets::layer::MENU,
             cx,
         );
+        menu.update(cx, |menu, _| menu.room = room);
         self.code_actions.menu = Some((id, menu));
     }
 

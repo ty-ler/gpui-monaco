@@ -807,6 +807,7 @@ fn add_demo_widgets(editor: &Entity<CodeEditor>, cx: &mut App) {
                     ContentWidgetPreference::Below,
                 ],
                 view: content.into(),
+                allow_editor_overflow: false,
             },
             cx,
         );
@@ -814,6 +815,7 @@ fn add_demo_widgets(editor: &Entity<CodeEditor>, cx: &mut App) {
             OverlayWidget {
                 position: OverlayPosition::TopRight,
                 view: overlay.into(),
+                allow_editor_overflow: false,
             },
             cx,
         );

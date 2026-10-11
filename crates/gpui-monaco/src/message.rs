@@ -118,9 +118,11 @@ impl CodeEditor {
                     ContentWidgetPreference::Below,
                 ],
                 view: view.into(),
+                allow_editor_overflow: true,
             },
             cx,
         );
+        self.widgets.set_layer(id, crate::widgets::layer::MESSAGE);
         self.message = InlineMessage {
             widget: Some(id),
             row: position.row,

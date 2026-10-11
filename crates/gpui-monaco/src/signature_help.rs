@@ -8,8 +8,8 @@
 
 use gpui::{
     AppContext as _, Context, Entity, FontWeight, HighlightStyle, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement, Render, Styled, StyledText, Task, UnderlineStyle,
-    WeakEntity, Window, div, px,
+    IntoElement, MouseButton, ParentElement, Render, StatefulInteractiveElement as _, Styled,
+    StyledText, Task, UnderlineStyle, WeakEntity, Window, div, px,
 };
 use text::PointUtf16;
 
@@ -18,7 +18,7 @@ use crate::markdown::{MarkdownStyle, render_markdown};
 use crate::providers::{
     ParameterLabel, SignatureHelp, SignatureHelpTrigger, signature_help_providers,
 };
-use crate::widgets::{ContentWidget, ContentWidgetPreference, WidgetId};
+use crate::widgets::{ContentWidgetPreference, WidgetId};
 
 #[derive(Default)]
 pub(crate) struct SignatureHelpState {
@@ -35,6 +35,11 @@ pub struct SignatureHelpWidget {
     editor: WeakEntity<CodeEditor>,
     style: MarkdownStyle,
     theme: std::sync::Arc<crate::Theme>,
+    /// Monaco `updateMaxHeight`: a quarter of the editor's height, at least
+    /// 250px.
+    max_height: gpui::Pixels,
+    /// The room it has in the window (it overflows the editor).
+    room: crate::widgets::OverflowRoomCell,
 }
 
 impl SignatureHelpWidget {
@@ -148,6 +153,9 @@ impl Render for SignatureHelpWidget {
             .get(active)
             .and_then(|p| p.documentation.clone());
         let body = div()
+            .id("parameter-hints-body")
+            // Monaco's body is a scrollable element.
+            .overflow_y_scroll()
             .flex_1()
             .min_w_0()
             .flex()
@@ -166,7 +174,10 @@ impl Render for SignatureHelpWidget {
                 this.child(render_markdown(&doc.0, &self.style, &self.theme, &registry))
             });
         div()
-            .max_w(px(500.))
+            // Monaco `.phwrapper { max-width: 440px }`, and `updateMaxHeight`
+            // capped to the room in the window.
+            .max_w(self.room.cap_width(px(440.), px(100.)))
+            .max_h(self.room.cap_height(self.max_height, px(24.)))
             .flex()
             .bg(colors.widget_background)
             .border_1()
@@ -259,6 +270,10 @@ impl CodeEditor {
         trigger: SignatureHelpTrigger,
         cx: &mut Context<Self>,
     ) {
+        // Widget inputs are plain inputs in Monaco.
+        if self.widget_input {
+            return;
+        }
         let position = self.cursors.primary().position;
         let model = self.model().read(cx);
         let context = model.provider_context();
@@ -319,23 +334,26 @@ impl CodeEditor {
         let style = self.markdown_style();
         let theme = self.theme.clone();
         let editor = cx.entity().downgrade();
+        let max_height = (self.layout_size().unwrap_or_default().height / 4.).max(px(250.));
         let widget = cx.new(|_| SignatureHelpWidget {
             help,
             editor,
             style,
             theme,
+            max_height,
+            room: Default::default(),
         });
-        let id = self.add_content_widget(
-            ContentWidget {
-                position,
-                preference: vec![
-                    ContentWidgetPreference::Above,
-                    ContentWidgetPreference::Below,
-                ],
-                view: widget.clone().into(),
-            },
+        let (id, room) = self.add_overflow_content_widget(
+            position,
+            vec![
+                ContentWidgetPreference::Above,
+                ContentWidgetPreference::Below,
+            ],
+            widget.clone().into(),
+            crate::widgets::layer::PARAMETER_HINTS,
             cx,
         );
+        widget.update(cx, |widget, _| widget.room = room);
         self.signature_help.widget = Some((widget, id));
         cx.notify();
     }

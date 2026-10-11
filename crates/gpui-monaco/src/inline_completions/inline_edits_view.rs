@@ -1252,6 +1252,7 @@ impl CodeEditor {
                 OverlayWidget {
                     position: OverlayPosition::Custom(point(px(1.), px(2.))),
                     view: indicator.into(),
+                    allow_editor_overflow: false,
                 },
                 cx,
             ),
@@ -1262,6 +1263,7 @@ impl CodeEditor {
                         (height - line_height - px(2.)).max(px(0.)),
                     )),
                     view: indicator.into(),
+                    allow_editor_overflow: false,
                 },
                 cx,
             ),
@@ -1378,6 +1380,7 @@ impl CodeEditor {
                 position: at,
                 preference: vec![ContentWidgetPreference::Exact],
                 view: view.into(),
+                allow_editor_overflow: false,
             },
             cx,
         );
@@ -1506,6 +1509,7 @@ impl CodeEditor {
                 position,
                 preference: vec![preference],
                 view: view.into(),
+                allow_editor_overflow: false,
             },
             cx,
         );
@@ -1787,6 +1791,7 @@ impl CodeEditor {
                             position: range.start,
                             preference: vec![ContentWidgetPreference::Below],
                             view: view.into(),
+                            allow_editor_overflow: false,
                         },
                         cx,
                     ));
@@ -1825,6 +1830,7 @@ impl CodeEditor {
                         position: PointUtf16::new(anchor_row, 0),
                         preference: vec![ContentWidgetPreference::Below],
                         view: view.into(),
+                        allow_editor_overflow: false,
                     },
                     cx,
                 ));
@@ -1883,6 +1889,7 @@ impl CodeEditor {
                         position: PointUtf16::new(start_row, rope.line_len_utf16(start_row)),
                         preference: vec![ContentWidgetPreference::Exact],
                         view: view.into(),
+                        allow_editor_overflow: false,
                     },
                     cx,
                 ));
@@ -1998,6 +2005,7 @@ impl CodeEditor {
                         position: start,
                         preference: vec![ContentWidgetPreference::Exact],
                         view: view.into(),
+                        allow_editor_overflow: false,
                     },
                     cx,
                 ));

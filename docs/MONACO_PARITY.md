@@ -101,10 +101,10 @@ Issues are linked by number.
 | Feature | Monaco | Status | Issue |
 |---|---|---|---|
 | Decorations: background, underline, glyph, gutter bar, before/after text, overview ruler, hover message, stickiness, owner | `deltaDecorations` | ✅ | |
-| View zones, content widgets, overlay widgets | widget API | ✅ | |
+| View zones, content widgets, overlay widgets, `allowEditorOverflow`; widgets keep their wheel, clicks and focus, clipped to the text area | widget API | ✅ overflowing widgets are GPUI deferred draws above the whole window | #245 |
 | Custom commands and keybindings | `addAction`, `addCommand` | ✅ (GPUI actions) | |
 | Global commands, actions and removable keybinding rules | `editor.addCommand`, `addEditorAction`, `addKeybindingRule(s)` | ✅ (`Disposable`; GPUI keystrokes and key contexts) | #204 |
-| Editor, diff editor and model registries and events | `getEditors`, `getDiffEditors`, `onDidCreateEditor`, `onDidCreateDiffEditor`, `getModels`, `onDidCreateModel`, `onWillDisposeModel`, `onDidChangeModelLanguage` | ✅ | #204 |
+| Editor, diff editor and model registries and events | `getEditors`, `getDiffEditors`, `onDidCreateEditor`, `onDidCreateDiffEditor`, `getModels`, `onDidCreateModel`, `onWillDisposeModel`, `onDidChangeModelLanguage` | ✅ widget inputs and placeholder models are left out (Monaco `isSimpleWidget`) | #204, #245 |
 | Markers across models | `getModelMarkers`, `removeAllMarkers`, `onDidChangeMarkers` | ✅ markers live in their model, so none for uris without one | #204 |
 | Context menu, with host items | `contextmenu` | ✅ | #91 |
 | Go to line, quick outline (quick input) | `quickAccess` | ✅ | #100 |

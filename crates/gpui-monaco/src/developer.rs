@@ -347,9 +347,11 @@ impl CodeEditor {
                     ContentWidgetPreference::Above,
                 ],
                 view: view.into(),
+                allow_editor_overflow: true,
             },
             cx,
         );
+        self.widgets.set_layer(id, crate::widgets::layer::WIDGET);
         self.inspect_tokens = InspectTokensState {
             widget: Some(id),
             inspection: Some(inspection),

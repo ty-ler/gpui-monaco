@@ -18,7 +18,6 @@ use crate::editor::CodeEditor;
 use crate::find::FindHistory;
 use crate::find::FindOptions;
 use crate::model::TextModelEvent;
-use crate::options::EditorOptions;
 use crate::theme::EditorColors;
 
 /// The find and replace widget, shown as an overlay at the top right of the
@@ -82,12 +81,11 @@ fn input(
     theme: Option<std::sync::Arc<crate::Theme>>,
 ) -> Entity<CodeEditor> {
     cx.new(|cx| {
-        let mut editor = CodeEditor::with_text("", window, cx);
-        editor.update_options(EditorOptions::single_line_input(), cx);
-        if let Some(theme) = theme {
-            editor.set_theme(theme, cx);
-        }
-        editor
+        let theme = theme.unwrap_or_else(|| {
+            crate::theme::global_theme(cx)
+                .unwrap_or_else(|| std::sync::Arc::new(crate::Theme::vs_dark()))
+        });
+        CodeEditor::new_widget_input("", theme, window, cx)
     })
 }
 

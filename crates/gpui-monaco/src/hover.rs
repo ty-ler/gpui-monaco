@@ -28,7 +28,7 @@ use crate::options::{HoverEnabled, MultiCursorModifier};
 use crate::providers::{
     Hover, HoverContext, HoverProvider, HoverVerbosityRequest, MarkdownString, hover_providers,
 };
-use crate::widgets::{ContentWidget, ContentWidgetPreference, WidgetId};
+use crate::widgets::{ContentWidgetPreference, WidgetId};
 
 /// Monaco's default `hover.delay`.
 pub const HOVER_DELAY: Duration = Duration::from_millis(300);
@@ -161,6 +161,8 @@ pub struct HoverWidget {
     line_height: Pixels,
     /// Where the card was painted, so the editor knows the mouse is on it.
     bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The room it has in the window (it overflows the editor).
+    room: crate::widgets::OverflowRoomCell,
 }
 
 impl Focusable for HoverWidget {
@@ -321,9 +323,13 @@ impl Render for HoverWidget {
         // Monaco `ResizableContentWidget`: the card is resizable; once
         // resized it keeps that size, else it fits its content up to the
         // maximum.
+        // Monaco `_findMaximumRenderingHeight`: no taller than the room
+        // above or below the line in the window.
         let card = match self.size {
             Some(size) => div().w(size.width).h(size.height),
-            None => div().max_w(self.max_size.width).max_h(self.max_size.height),
+            None => div()
+                .max_w(self.room.cap_width(self.max_size.width, px(100.)))
+                .max_h(self.room.cap_height(self.max_size.height, line * 2.)),
         };
         let card = card
             .id("hover-card")
@@ -1005,6 +1011,10 @@ impl CodeEditor {
     /// Shows the hover for the cursor position right away (Monaco
     /// `editor.action.showHover`, Cmd/Ctrl+K Cmd/Ctrl+I).
     pub fn show_hover_at_cursor(&mut self, cx: &mut Context<Self>) {
+        // Widget inputs are plain inputs in Monaco.
+        if self.widget_input {
+            return;
+        }
         let position = self.cursors.primary().position;
         self.hide_hover(cx);
         self.hover.from_keyboard = true;
@@ -1510,6 +1520,7 @@ impl CodeEditor {
             scroll: ScrollHandle::new(),
             line_height,
             bounds: Default::default(),
+            room: Default::default(),
         });
         // Monaco `hover.above`: the preferred side first.
         let preference = if self.options.hover.above {
@@ -1523,14 +1534,14 @@ impl CodeEditor {
                 ContentWidgetPreference::Above,
             ]
         };
-        let id = self.add_content_widget(
-            ContentWidget {
-                position: range.start,
-                preference,
-                view: widget.clone().into(),
-            },
+        let (id, room) = self.add_overflow_content_widget(
+            range.start,
+            preference,
+            widget.clone().into(),
+            crate::widgets::layer::HOVER,
             cx,
         );
+        widget.update(cx, |widget, _| widget.room = room);
         self.hover.range = Some(range);
         self.hover.widget = Some((widget, id));
     }

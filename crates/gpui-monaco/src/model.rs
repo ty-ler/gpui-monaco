@@ -55,6 +55,9 @@ impl Global for Models {}
 /// language server talks about) yourself. It also adds `model` to
 /// [`models`](crate::models) if it was created before [`crate::init`].
 pub fn register_model(cx: &mut App, model: &gpui::Entity<TextModel>) {
+    if model.read(cx).is_internal() {
+        return;
+    }
     crate::registry::track_model(model, cx);
     if let Some(uri) = model.read(cx).uri().cloned() {
         let models = cx.default_global::<Models>();
@@ -254,6 +257,8 @@ pub struct TextModel {
     too_large_for_tokenization: bool,
     /// How many editors show it (Monaco `_attachedEditorCount`).
     attached_editors: usize,
+    /// Made for the editor's own use; not in the global registry.
+    internal: bool,
 }
 
 /// Monaco `TextModel.LARGE_FILE_SIZE_THRESHOLD`, in characters.
@@ -282,8 +287,24 @@ impl TextModel {
             auto_whitespace: AutoWhitespaceLines::default(),
             too_large_for_tokenization: false,
             attached_editors: 0,
+            internal: false,
         }
         .with_options(ModelOptions::default())
+    }
+
+    /// A model for the editor's own use (a widget's input, a placeholder):
+    /// left out of [`crate::models`] and [`crate::on_did_create_model`], as
+    /// Monaco's widget inputs aren't models at all.
+    pub(crate) fn new_internal(text: &str) -> Self {
+        Self {
+            internal: true,
+            ..Self::new(text)
+        }
+    }
+
+    /// Whether the editor made this model for its own use.
+    pub(crate) fn is_internal(&self) -> bool {
+        self.internal
     }
 
     /// Sets the creation options (Monaco `createModel`'s options): with
