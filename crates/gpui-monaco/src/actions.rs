@@ -52,6 +52,20 @@ pub struct RunAction {
     pub id: String,
 }
 
+/// Runs command `id` in the focused editor (what
+/// [`crate::add_keybinding_rules`] binds, Monaco's keybinding `command` and
+/// `commandArgs`): an editor action, a Monaco command such as
+/// `"cursorDown"`, a command from [`crate::add_command`] (given `args`), or
+/// a GPUI action name.
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = code_editor, no_json)]
+pub struct RunCommand {
+    /// The command's id.
+    pub id: String,
+    /// The argument for a registered command.
+    pub args: Option<serde_json::Value>,
+}
+
 actions!(
     code_editor,
     [

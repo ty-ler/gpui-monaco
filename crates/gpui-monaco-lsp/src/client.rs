@@ -252,7 +252,7 @@ impl LspClient {
                 let uri = uri.clone();
                 move |this, model, event: &TextModelEvent, cx| match event {
                     TextModelEvent::Edited { .. } => this.sync(&uri, cx),
-                    TextModelEvent::LanguageChanged => this.reopen(&uri, &model, cx),
+                    TextModelEvent::LanguageChanged { .. } => this.reopen(&uri, &model, cx),
                     _ => {}
                 }
             }),

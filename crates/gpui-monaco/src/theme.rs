@@ -1913,6 +1913,100 @@ pub fn textmate_scopes_for_capture(capture: &str) -> &'static [&'static str] {
 /// A shared theme handle.
 pub type ThemeRef = Arc<Theme>;
 
+/// Themes by name (Monaco `StandaloneThemeService._knownThemes`), starting
+/// with the built-in ones, and the one [`set_theme`] chose.
+struct Themes {
+    known: HashMap<String, Arc<Theme>>,
+    current: Option<Arc<Theme>>,
+}
+
+impl Default for Themes {
+    fn default() -> Self {
+        let known = [
+            Theme::vs(),
+            Theme::vs_dark(),
+            Theme::hc_black(),
+            Theme::hc_light(),
+        ]
+        .into_iter()
+        .map(|theme| (theme.name.clone(), Arc::new(theme)))
+        .collect();
+        Self {
+            known,
+            current: None,
+        }
+    }
+}
+
+impl gpui::Global for Themes {}
+
+/// Defines or replaces the theme named `theme.name` (Monaco
+/// `editor.defineTheme`), e.g. one made with [`Theme::define`] or
+/// [`Theme::from_vscode_json`], for [`set_theme`]. If it's the current
+/// theme, every editor switches to the new version. Fails, like Monaco, for
+/// names with characters other than ASCII letters, digits and `-`.
+pub fn define_theme(cx: &mut gpui::App, theme: Theme) -> anyhow::Result<()> {
+    let valid = !theme.name.is_empty()
+        && theme
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if !valid {
+        anyhow::bail!("Illegal theme name!");
+    }
+    let name = theme.name.clone();
+    let themes = cx.default_global::<Themes>();
+    themes.known.insert(name.clone(), Arc::new(theme));
+    // Monaco refreshes the current theme.
+    if themes.current.as_ref().is_some_and(|t| t.name == name) {
+        set_theme(cx, &name);
+    }
+    Ok(())
+}
+
+/// Switches every editor (including those in diff editors), and those
+/// created later, to the theme named `name` (Monaco `editor.setTheme`);
+/// an unknown name gets `vs`, as in Monaco. Don't call it from inside an
+/// editor's update.
+pub fn set_theme(cx: &mut gpui::App, name: &str) {
+    let themes = cx.default_global::<Themes>();
+    let Some(theme) = themes
+        .known
+        .get(name)
+        .or_else(|| themes.known.get("vs"))
+        .cloned()
+    else {
+        return;
+    };
+    if themes
+        .current
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, &theme))
+    {
+        return;
+    }
+    themes.current = Some(theme.clone());
+    crate::registry::update_editors(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
+    // Diff editors draw some chrome in their editors' colors.
+    for diff_editor in crate::registry::diff_editors(cx) {
+        diff_editor.update(cx, |_, cx| cx.notify());
+    }
+}
+
+/// The theme defined (or built in) with `name`: `vs`, `vs-dark`,
+/// `hc-black`, `hc-light`, or one from [`define_theme`].
+pub fn theme_named(cx: &gpui::App, name: &str) -> Option<Arc<Theme>> {
+    match cx.try_global::<Themes>() {
+        Some(themes) => themes.known.get(name).cloned(),
+        None => Themes::default().known.get(name).cloned(),
+    }
+}
+
+/// The theme chosen with [`set_theme`], which new editors start with.
+pub fn global_theme(cx: &gpui::App) -> Option<Arc<Theme>> {
+    cx.try_global::<Themes>()?.current.clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
