@@ -7,7 +7,7 @@ use text::PointUtf16;
 
 use crate::cursor::Selection;
 use crate::decorations::{DecorationId, DecorationOptions};
-use crate::editor::{CodeEditor, CodeEditorEvent};
+use crate::editor::CodeEditor;
 
 /// Monaco keeps this many cursor states.
 const MAX_CURSOR_UNDO: usize = 50;
@@ -100,7 +100,7 @@ impl CodeEditor {
         self.autoscroll_requested = false;
         self.scroll_top = element.scroll_top;
         self.scroll_left = element.scroll_left;
-        cx.emit(CodeEditorEvent::ScrollChanged);
+        self.emit_scroll_changed(cx);
     }
 
     /// Goes back to the previous cursor state (Monaco `cursorUndo`, Cmd+U).
@@ -212,7 +212,7 @@ impl CodeEditor {
     pub fn scroll_by(&mut self, delta_y: Pixels, delta_x: Pixels, cx: &mut Context<Self>) {
         self.scroll_top = (self.scroll_top + delta_y).max(px(0.));
         self.scroll_left = (self.scroll_left + delta_x).max(px(0.));
-        cx.emit(CodeEditorEvent::ScrollChanged);
+        self.emit_scroll_changed(cx);
         cx.notify();
     }
 
@@ -232,7 +232,7 @@ impl CodeEditor {
     pub fn scroll_to_edge(&mut self, bottom: bool, cx: &mut Context<Self>) {
         // Clamped to the content on the next frame.
         self.scroll_top = if bottom { px(1e9) } else { px(0.) };
-        cx.emit(CodeEditorEvent::ScrollChanged);
+        self.emit_scroll_changed(cx);
         cx.notify();
     }
 }

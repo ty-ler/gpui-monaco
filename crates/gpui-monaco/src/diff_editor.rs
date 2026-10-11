@@ -1335,7 +1335,7 @@ impl DiffEditor {
             cx.subscribe(
                 &self.original,
                 |this, _, event: &CodeEditorEvent, cx| match event {
-                    CodeEditorEvent::ScrollChanged => this.sync_scroll(true, cx),
+                    CodeEditorEvent::ScrollChanged(_) => this.sync_scroll(true, cx),
                     CodeEditorEvent::SelectionsChanged(_) => {
                         this.ensure_selections_visible(true, cx);
                         this.update_active_move(true, cx);
@@ -1346,7 +1346,7 @@ impl DiffEditor {
             cx.subscribe(
                 &self.modified,
                 |this, _, event: &CodeEditorEvent, cx| match event {
-                    CodeEditorEvent::ScrollChanged => {
+                    CodeEditorEvent::ScrollChanged(_) => {
                         this.sync_scroll(false, cx);
                         // The gutter menu follows the modified editor.
                         cx.notify();
@@ -2319,10 +2319,10 @@ impl DiffEditor {
             .filter(|r| !r.is_empty())
             .collect();
         self.original.update(cx, |editor, cx| {
-            editor.set_hidden_areas(original_hidden, cx)
+            editor.set_hidden_areas_from("diffEditor", original_hidden, cx)
         });
         self.modified.update(cx, |editor, cx| {
-            editor.set_hidden_areas(modified_hidden, cx)
+            editor.set_hidden_areas_from("diffEditor", modified_hidden, cx)
         });
 
         let (old_original, old_modified) = std::mem::take(&mut self.unchanged_zones);

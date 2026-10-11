@@ -13,8 +13,14 @@ use text::{Patch, Stickiness};
 use crate::theme::TokenStyle;
 
 /// Identifies a decoration returned by `TextModel::delta_decorations`.
+/// Ids are unique across models, as Monaco's are, so an id from another
+/// model (e.g. one an editor showed before `set_model`) never names an
+/// unrelated decoration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DecorationId(pub u64);
+
+/// The next [`DecorationId`], across models.
+static NEXT_DECORATION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Underline drawn under the decorated text (Monaco uses CSS for squiggles).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -173,7 +179,6 @@ pub struct Decoration {
 #[derive(Clone, Debug, Default)]
 pub struct DecorationSet {
     decorations: Vec<Decoration>,
-    next_id: u64,
     /// Length of the longest decoration, to bound range queries.
     max_len: usize,
     sorted: bool,
@@ -202,8 +207,8 @@ impl DecorationSet {
         }
         let mut ids = Vec::new();
         for (range, options) in new {
-            self.next_id += 1;
-            let id = DecorationId(self.next_id);
+            let id =
+                DecorationId(NEXT_DECORATION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
             let range = range.start.min(range.end)..range.end.max(range.start);
             self.max_len = self.max_len.max(range.len());
             self.decorations.push(Decoration {
@@ -230,10 +235,46 @@ impl DecorationSet {
         }
     }
 
-    /// Removes every decoration.
-    pub fn clear(&mut self) {
+    /// Removes every decoration, returning what they affected, or `None`
+    /// when there were none.
+    pub fn clear(&mut self) -> Option<crate::events::DecorationsChange> {
+        if self.decorations.is_empty() {
+            return None;
+        }
+        let change = self
+            .decorations
+            .iter()
+            .fold(crate::events::DecorationsChange::default(), |change, d| {
+                change.with(&d.options)
+            });
         self.decorations.clear();
         self.max_len = 0;
+        Some(change)
+    }
+
+    /// Removes the decorations `owner` owns (Monaco
+    /// `removeAllDecorationsWithOwnerId`), returning what they affected, or
+    /// `None` when there were none.
+    pub fn remove_owned_by(&mut self, owner: EntityId) -> Option<crate::events::DecorationsChange> {
+        let mut change = None;
+        self.decorations.retain(|d| {
+            if d.owner == Some(owner) {
+                change = Some(
+                    change
+                        .unwrap_or(crate::events::DecorationsChange::default())
+                        .with(&d.options),
+                );
+                false
+            } else {
+                true
+            }
+        });
+        change
+    }
+
+    /// Every decoration, in no particular order.
+    pub fn iter(&self) -> impl Iterator<Item = &Decoration> {
+        self.decorations.iter()
     }
 
     /// The decoration with `id`, if it still exists.
@@ -266,6 +307,32 @@ impl DecorationSet {
         }
         self.max_len = max_len;
         self.sorted = false;
+    }
+
+    /// [`DecorationSet::apply_patch`], except that decoration edges inside
+    /// or at the edges of one of the `force` ranges (old byte ranges of
+    /// the patch's edits) move past that edit's new text (Monaco
+    /// `forceMoveMarkers`).
+    pub fn apply_patch_forcing(&mut self, patch: &Patch, force: &[Range<usize>]) {
+        if force.is_empty() {
+            return self.apply_patch(patch);
+        }
+        let forced = |offset: usize| {
+            force
+                .iter()
+                .find(|range| range.start <= offset && offset <= range.end)
+                .map(|range| patch.transform_offset(range.end, text::Bias::Right))
+        };
+        let old: Vec<Range<usize>> = self.decorations.iter().map(|d| d.range.clone()).collect();
+        self.apply_patch(patch);
+        let mut max_len = 0;
+        for (decoration, old) in self.decorations.iter_mut().zip(old) {
+            let start = forced(old.start).unwrap_or(decoration.range.start);
+            let end = forced(old.end).unwrap_or(decoration.range.end).max(start);
+            decoration.range = start..end;
+            max_len = max_len.max(end - start);
+        }
+        self.max_len = max_len;
     }
 
     /// Decorations intersecting `range` (inclusive of touching empty ones)
@@ -341,6 +408,41 @@ mod tests {
         assert_eq!(set.in_range(12..12, None).len(), 2);
         set.delta(None, &ids[..1], []);
         assert_eq!(set.len(), 1);
+    }
+
+    /// Monaco `nodeAcceptEdit` with `forceMoveMarkers`: edges inside or at
+    /// the edges of the edit move past its text, whatever the stickiness.
+    #[test]
+    fn forced_edits_move_decorations_past_their_text() {
+        let mut buffer = Buffer::new("hello world");
+        let mut set = DecorationSet::default();
+        let never_grows = || DecorationOptions {
+            stickiness: Stickiness::NeverGrowsWhenTypingAtEdges,
+            ..Default::default()
+        };
+        let ids = set.delta(None, &[], [(0..5, never_grows()), (6..11, never_grows())]);
+        let patch = buffer.edit([(5..6, "__")]).unwrap();
+        set.apply_patch_forcing(&patch, std::slice::from_ref(&(5..6)));
+        assert_eq!(set.get(ids[0]).unwrap().range, 0..7);
+        assert_eq!(set.get(ids[1]).unwrap().range, 7..12);
+        // Not forced: they keep to their text.
+        let patch = buffer.edit([(7..7, "+")]).unwrap();
+        set.apply_patch_forcing(&patch, &[]);
+        assert_eq!(set.get(ids[1]).unwrap().range, 8..13);
+    }
+
+    /// Ids are unique across models (Monaco's are global), so one from
+    /// another model never names an unrelated decoration.
+    #[test]
+    fn ids_are_unique_across_sets() {
+        let mut a = DecorationSet::default();
+        let mut b = DecorationSet::default();
+        let first = a.delta(None, &[], [(0..1, DecorationOptions::default())]);
+        let second = b.delta(None, &[], [(0..1, DecorationOptions::default())]);
+        assert_ne!(first, second);
+        assert!(b.get(first[0]).is_none());
+        assert!(a.clear().is_some());
+        assert!(a.clear().is_none());
     }
 
     #[test]

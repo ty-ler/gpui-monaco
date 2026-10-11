@@ -229,6 +229,13 @@ impl History {
     }
 }
 
+/// The undo group that joins whatever undo step is still open, whatever its
+/// group (Monaco's `pushEditOperations`, which appends to the open stack
+/// element): pass it to [`Buffer::edit_grouped`]. A step it starts is
+/// joined by later edits with this group until
+/// [`Buffer::push_stack_element`].
+pub const JOIN_OPEN_UNDO_STEP: u64 = u64::MAX;
+
 /// A versioned text buffer.
 ///
 /// Text is stored with `\n` line breaks; [`Buffer::line_ending`] is applied by
@@ -311,29 +318,53 @@ impl Buffer {
         self.line_ending
     }
 
-    /// Changes the line ending used by [`Buffer::text`] (Monaco `setEOL`).
-    /// The stored text and offsets are unaffected, and it isn't an undo
-    /// step; see [`Buffer::push_line_ending`].
+    /// Changes the line ending used by [`Buffer::text`] without a new
+    /// version, e.g. while setting up a buffer. [`Buffer::set_eol`] is
+    /// Monaco's `setEOL`, which is a new version.
     pub fn set_line_ending(&mut self, line_ending: LineEnding) {
         self.line_ending = line_ending;
     }
 
+    /// Changes the line ending used by [`Buffer::text`] (Monaco `setEOL`),
+    /// returning whether it changed. Like Monaco's, a change is a new
+    /// version (with an empty patch: the stored text and offsets are the
+    /// same), but not an undo step; see [`Buffer::push_line_ending`].
+    pub fn set_eol(&mut self, line_ending: LineEnding) -> bool {
+        if self.line_ending == line_ending {
+            return false;
+        }
+        self.line_ending = line_ending;
+        self.bump_version();
+        true
+    }
+
+    /// A new version with no edits (Monaco `_increaseVersionId`), e.g. for a
+    /// line ending change.
+    fn bump_version(&mut self) {
+        self.patches.push(Patch::default());
+        self.alternative_version = self.version();
+    }
+
     /// Changes the line ending as an undo step (Monaco `pushEOL`): it joins
     /// the open transaction or the last step if it's still open (not ended
-    /// by [`Buffer::push_stack_element`]), or else becomes its own step. Undoing it restores the previous line ending. Returns
-    /// whether the line ending changed. The version doesn't change, since
-    /// the stored text and offsets don't.
+    /// by [`Buffer::push_stack_element`]), or else becomes its own step.
+    /// Undoing it restores the previous line ending. Returns whether the
+    /// line ending changed. As with [`Buffer::set_eol`], a change is a new
+    /// version with an empty patch.
     pub fn push_line_ending(&mut self, line_ending: LineEnding) -> bool {
         let before = self.line_ending;
         if before == line_ending {
             return false;
         }
-        self.line_ending = line_ending;
         let version = self.alternative_version;
+        self.line_ending = line_ending;
+        self.bump_version();
+        let after_version = self.alternative_version;
         let history = &mut self.history;
         history.redo.clear();
         if let Some(open) = history.open.as_mut() {
             open.after_line_ending = line_ending;
+            open.after_version = after_version;
             return true;
         }
         // Monaco appends to the open stack element, whatever its group.
@@ -341,6 +372,7 @@ impl Buffer {
             && !last.sealed
         {
             last.after_line_ending = line_ending;
+            last.after_version = after_version;
             return true;
         }
         if let Some(last) = history.undo.last_mut() {
@@ -348,14 +380,23 @@ impl Buffer {
         }
         let mut transaction = history.new_transaction(None, None, version, before);
         transaction.after_line_ending = line_ending;
+        transaction.after_version = after_version;
         transaction.sealed = true;
         history.undo.push(transaction);
         true
     }
 
-    /// Whether the original text started with a UTF-8 BOM.
+    /// Whether the text started with a UTF-8 BOM (Monaco's text buffer
+    /// `getBOM`).
     pub fn has_bom(&self) -> bool {
         self.has_bom
+    }
+
+    /// Sets whether the text starts with a BOM, which
+    /// [`Buffer::file_text`] restores (Monaco's `setValue` detects it from
+    /// the new text).
+    pub fn set_has_bom(&mut self, has_bom: bool) {
+        self.has_bom = has_bom;
     }
 
     /// The text with the buffer's line ending and without a BOM (Monaco's
@@ -520,7 +561,9 @@ impl Buffer {
         }
         if let Some(last) = history.undo.last_mut()
             && !last.sealed
-            && (last.reopened || group.is_some_and(|group| last.group == Some(group)))
+            && (last.reopened
+                || group
+                    .is_some_and(|group| group == JOIN_OPEN_UNDO_STEP || last.group == Some(group)))
         {
             last.batches.push(batch);
             last.after_version = after_version;
@@ -682,8 +725,12 @@ impl Buffer {
         }
         transaction.sealed = true;
         transaction.reopened = false;
-        // Monaco `_applyUndo` sets the step's `beforeEOL`.
-        self.line_ending = transaction.before_line_ending;
+        // Monaco `_applyUndo` sets the step's `beforeEOL` (`setEOL`, a new
+        // version when it changes).
+        if self.line_ending != transaction.before_line_ending {
+            self.line_ending = transaction.before_line_ending;
+            self.bump_version();
+        }
         self.alternative_version = transaction.before_version;
         let outcome = UndoOutcome {
             transaction_id: transaction.id,
@@ -706,7 +753,10 @@ impl Buffer {
             let (step, _) = self.apply(forward);
             patch = patch.compose(&step);
         }
-        self.line_ending = transaction.after_line_ending;
+        if self.line_ending != transaction.after_line_ending {
+            self.line_ending = transaction.after_line_ending;
+            self.bump_version();
+        }
         self.alternative_version = transaction.after_version;
         let outcome = UndoOutcome {
             transaction_id: transaction.id,
@@ -1005,6 +1055,44 @@ mod tests {
         assert_eq!(buffer.alternative_version(), typed_alt);
     }
 
+    /// Monaco `setEOL`: a new version (and alternative version) with
+    /// nothing to transform, but not an undo step.
+    #[test]
+    fn set_eol_is_a_new_version() {
+        let mut buffer = Buffer::new("a\nb");
+        let version = buffer.version();
+        assert!(buffer.set_eol(LineEnding::Crlf));
+        assert!(!buffer.set_eol(LineEnding::Crlf));
+        assert_eq!(buffer.version(), version + 1);
+        assert_eq!(buffer.alternative_version(), version + 1);
+        assert!(buffer.edits_since(version).is_empty());
+        assert!(!buffer.can_undo());
+        assert_eq!(buffer.text(), "a\r\nb");
+    }
+
+    /// Edits with `JOIN_OPEN_UNDO_STEP` join whatever step is open, as
+    /// Monaco's `pushEditOperations` appends to the open stack element.
+    #[test]
+    fn join_open_undo_step() {
+        let mut buffer = Buffer::new("");
+        buffer.edit_grouped([(0..0, "a")], 1).unwrap();
+        buffer
+            .edit_grouped([(1..1, "b")], JOIN_OPEN_UNDO_STEP)
+            .unwrap();
+        buffer
+            .edit_grouped([(2..2, "c")], JOIN_OPEN_UNDO_STEP)
+            .unwrap();
+        buffer.undo().unwrap();
+        assert_eq!(buffer.text(), "");
+        buffer.edit([(0..0, "x")]).unwrap();
+        // A sealed step isn't joined.
+        buffer
+            .edit_grouped([(1..1, "y")], JOIN_OPEN_UNDO_STEP)
+            .unwrap();
+        buffer.undo().unwrap();
+        assert_eq!(buffer.text(), "x");
+    }
+
     /// Monaco `popStackElement`: the next edits join the last undo step.
     #[test]
     fn pop_stack_element_reopens_the_last_step() {
@@ -1034,7 +1122,9 @@ mod tests {
         assert!(buffer.push_line_ending(LineEnding::Crlf));
         assert!(!buffer.push_line_ending(LineEnding::Crlf));
         assert_eq!(buffer.text(), "xa\r\nb");
-        assert_eq!(buffer.version(), version);
+        // Monaco: a new version, with nothing to transform.
+        assert_eq!(buffer.version(), version + 1);
+        assert!(buffer.edits_since(version).is_empty());
         // Its own step: undo restores LF and keeps the edit.
         let outcome = buffer.undo().unwrap();
         assert!(outcome.patch.is_empty());

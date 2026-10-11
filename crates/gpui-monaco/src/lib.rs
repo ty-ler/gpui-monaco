@@ -88,6 +88,7 @@ pub mod mouse_target;
 mod multi_cursor;
 mod navigation_history;
 mod occurrences;
+mod openers;
 pub mod options;
 pub mod outline;
 mod peek;
@@ -118,7 +119,8 @@ pub mod view;
 pub mod widgets;
 
 pub use api::{
-    BracketPairInfo, CursorStateComputer, DecorationsCollection, FindMatch, WordAtPosition,
+    BracketPairInfo, CursorStateComputer, DecorationsCollection, EndCursorState,
+    EndOfLinePreference, FindMatch, ModelDecoration, SingleEditOperation, WordAtPosition,
 };
 pub use bulk_edit::{
     has_workspace_edit_preview_handler, set_workspace_edit_preview_handler,
@@ -137,7 +139,8 @@ pub use editor_actions::{
 pub use element::EditorElement;
 pub use events::{
     ClipboardCopyEvent, ClipboardPasteEvent, ConfigurationChange, ContentChange, ContentSizeChange,
-    CursorChangeReason, CursorChangeSource, ModelChange, MouseWheelEvent, PasteEvent,
+    CursorChangeReason, CursorChangeSource, CursorPositionChange, DecorationsChange, ModelChange,
+    ModelContentChange, ModelOptionsChange, MouseWheelEvent, PasteEvent, ScrollEvent,
     SelectionChange,
 };
 pub use find::{FindOptions, MATCHES_LIMIT};
@@ -158,7 +161,8 @@ pub use model::{
     EditKind, ModelOptions, SyntaxSnapshot, TextModel, TextModelEvent, language_registry,
     model_for_uri, register_model, set_language_registry, set_model_resolver,
 };
-pub use mouse_target::{EditorMouseEvent, MouseTarget, MouseTargetKind};
+pub use mouse_target::{EditorMouseEvent, MouseTarget, MouseTargetDetail, MouseTargetKind};
+pub use openers::{register_editor_opener, register_link_opener};
 pub use options::EditorOptions;
 pub use registry::{
     Disposable, diff_editors, editors, models, on_did_change_markers, on_did_change_model_language,

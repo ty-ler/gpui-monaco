@@ -23,8 +23,9 @@ use crate::cursor::{
 use crate::element::{EditorElement, EditorLayout, layout_segment, row_segment};
 use crate::events::{
     ClipboardCopyEvent, ClipboardPasteEvent, ConfigurationChange, ContentSizeChange,
-    CursorChangeReason, CursorChangeSource, ModelChange, MouseWheelEvent, PasteEvent,
-    SelectionChange,
+    CursorChangeCause, CursorChangeReason, CursorChangeSource, CursorPositionChange,
+    DecorationsChange, ModelChange, ModelContentChange, ModelOptionsChange, MouseWheelEvent,
+    PasteEvent, ScrollEvent, SelectionChange,
 };
 use crate::model::{EditKind, TextModel, TextModelEvent, metadata};
 use crate::options::EditorOptions;
@@ -43,10 +44,36 @@ use crate::widgets::{
 #[derive(Clone, Debug, PartialEq)]
 pub enum CodeEditorEvent {
     /// The cursors or selections changed, and why (Monaco
-    /// `onDidChangeCursorSelection`).
+    /// `onDidChangeCursorSelection`). Only reported when they changed.
     SelectionsChanged(SelectionChange),
-    /// The scroll position changed (Monaco `onDidScrollChange`).
-    ScrollChanged,
+    /// The cursors or selections changed (Monaco
+    /// `onDidChangeCursorPosition`), reported right before
+    /// [`CodeEditorEvent::SelectionsChanged`], as Monaco does.
+    CursorPositionChanged(CursorPositionChange),
+    /// The scroll position or the scrollable size changed (Monaco
+    /// `onDidScrollChange`). Only reported when something changed, so two
+    /// editors can sync their scroll positions both ways.
+    ScrollChanged(ScrollEvent),
+    /// The model's text or line ending changed (Monaco's editor-level
+    /// `onDidChangeModelContent`), forwarding
+    /// [`TextModelEvent::Edited`] for whichever model the editor shows.
+    ModelContentChanged(ModelContentChange),
+    /// The model's decorations changed (Monaco's editor-level
+    /// `onDidChangeModelDecorations`), forwarding
+    /// [`TextModelEvent::DecorationsChanged`].
+    ModelDecorationsChanged(DecorationsChange),
+    /// The model's options changed (Monaco's editor-level
+    /// `onDidChangeModelOptions`), forwarding
+    /// [`TextModelEvent::OptionsChanged`].
+    ModelOptionsChanged(ModelOptionsChange),
+    /// New syntax highlighting is available for the model (Monaco's
+    /// editor-level `onDidChangeModelTokens`, without the line ranges),
+    /// forwarding [`TextModelEvent::SyntaxUpdated`].
+    ModelTokensChanged,
+    /// The model's language configuration changed (Monaco's editor-level
+    /// `onDidChangeModelLanguageConfiguration`), forwarding
+    /// [`TextModelEvent::LanguageConfigurationChanged`].
+    ModelLanguageConfigurationChanged,
     /// An edit was refused because the editor is read-only (Monaco
     /// `onDidAttemptReadOnlyEdit`).
     ReadOnlyEditAttempt,
@@ -55,14 +82,18 @@ pub enum CodeEditorEvent {
     /// The editor lost focus (Monaco `onDidBlurEditorText`).
     Blurred,
     /// Go to definition led to another model: the host should open it.
+    /// Not emitted when an opener from
+    /// [`register_editor_opener`](crate::register_editor_opener) opened it.
     OpenLocation(crate::providers::Location),
     /// Monaco's "Open Definition to the Side" (`revealDefinitionAside`,
     /// or Cmd/Ctrl+Alt+click on a symbol) found this location, in any
-    /// model: the host should open it in an editor beside this one.
+    /// model: the host should open it in an editor beside this one. Not
+    /// emitted when an editor opener opened it.
     OpenLocationToSide(crate::providers::Location),
     /// A link was followed (Cmd/Ctrl+click or `editor.action.openLink`):
     /// the host opens it. Relative `file://./` links are resolved against
-    /// the model's URI.
+    /// the model's URI. Not emitted when an opener from
+    /// [`register_link_opener`](crate::register_link_opener) opened it.
     OpenLink(gpui::SharedString),
     /// A command no handler is registered for was run (e.g. by clicking a
     /// code lens): the host runs it.
@@ -337,6 +368,9 @@ fn undo_group(kind: EditOperationType) -> Option<u64> {
 /// A Monaco-like code editor view over a [`TextModel`].
 pub struct CodeEditor {
     model: Entity<TextModel>,
+    /// `model`, for decorations collections, which may need it while the
+    /// editor is being updated.
+    pub(crate) shared_model: crate::api::SharedModel,
     pub(crate) snapshot: BufferSnapshot,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) cursors: CursorCollection,
@@ -428,8 +462,9 @@ pub struct CodeEditor {
     fold_task: Option<Task<()>>,
     /// The editor has focus (Monaco `hasWidgetFocus`, for bracket matching).
     pub(crate) has_focus: bool,
-    /// Rows hidden by [`CodeEditor::set_hidden_areas`], besides folds.
-    hidden_areas: Vec<Range<u32>>,
+    /// Rows hidden by [`CodeEditor::set_hidden_areas`], besides folds, by
+    /// source (Monaco keeps them per source).
+    hidden_areas: Vec<(Option<gpui::SharedString>, Vec<Range<u32>>)>,
     /// The version `fold_task` was started for.
     fold_requested: Option<text::Version>,
     /// The `refresh_folding_ranges` count the ranges were computed at.
@@ -450,8 +485,17 @@ pub struct CodeEditor {
     /// Nesting of [`CodeEditor::begin_update`] (Monaco `_updateCounter`).
     update_depth: usize,
     pub(crate) prev_edit_kind: Option<EditOperationType>,
+    /// The undo group the next edit uses instead of its kind's (Monaco
+    /// `executeEdits` joins the open step).
+    pub(crate) edit_group: Option<u64>,
     /// The reason and source the next `SelectionsChanged` reports.
-    pub(crate) next_selection_change: SelectionChange,
+    pub(crate) next_selection_change: CursorChangeCause,
+    /// The selections and model version last reported (Monaco's cursor
+    /// state, which events are only fired for when it changes).
+    last_cursor_state: Option<(Vec<Selection>, text::Version)>,
+    /// The scroll state last reported with `ScrollChanged`: top, left,
+    /// width, height.
+    last_scroll_state: Option<[Pixels; 4]>,
     /// The inline message, if one is showing.
     pub(crate) message: crate::message::InlineMessage,
     /// Navigation commands in flight and the jump highlight.
@@ -636,6 +680,7 @@ impl CodeEditor {
         });
         let snapshot = model.read(cx).snapshot();
         Self {
+            shared_model: std::rc::Rc::new(std::cell::RefCell::new(model.downgrade())),
             model,
             snapshot: snapshot.clone(),
             focus_handle,
@@ -668,7 +713,10 @@ impl CodeEditor {
             marked_range: None,
             update_depth: 0,
             prev_edit_kind: None,
-            next_selection_change: SelectionChange::default(),
+            edit_group: None,
+            next_selection_change: CursorChangeCause::default(),
+            last_cursor_state: None,
+            last_scroll_state: None,
             message: Default::default(),
             goto: Default::default(),
             peek: Default::default(),
@@ -802,6 +850,12 @@ impl CodeEditor {
                 model.delta_decorations(None, &brackets, Vec::new(), cx)
             });
         }
+        // Monaco `_postDetachModelCleanup`: the decorations this editor owns
+        // go with it.
+        let owner = cx.entity_id();
+        self.model.update(cx, |model, cx| {
+            model.remove_all_decorations_with_owner(owner, cx)
+        });
         self.minimap_cache = Default::default();
         self.cancel_selection_anchor(cx);
         self.reset_navigation_history();
@@ -828,6 +882,7 @@ impl CodeEditor {
         self.hidden_areas.clear();
         self.fold_computing = false;
         self.fold_rerun = false;
+        *self.shared_model.borrow_mut() = model.downgrade();
         self.model = model;
         self.cursors = CursorCollection::new(SingleCursorState::from_position(PointUtf16::zero()));
         self.cursors
@@ -841,11 +896,16 @@ impl CodeEditor {
         self.prev_edit_kind = None;
         self.record_cursor_change();
         self.reattach_find_model(cx);
-        cx.emit(CodeEditorEvent::SelectionsChanged(SelectionChange {
-            reason: CursorChangeReason::ContentFlush,
-            source: CursorChangeSource::Model,
-        }));
-        cx.emit(CodeEditorEvent::ScrollChanged);
+        // A new cursor for the new model: reported whatever it was before.
+        self.last_cursor_state = None;
+        self.emit_cursor_events(
+            CursorChangeCause {
+                reason: CursorChangeReason::ContentFlush,
+                source: CursorChangeSource::Model,
+            },
+            cx,
+        );
+        self.emit_scroll_changed(cx);
         cx.emit(CodeEditorEvent::ModelChanged(change));
         cx.notify();
     }
@@ -896,11 +956,14 @@ impl CodeEditor {
         self.pending_reveal = None;
         self.pending_reveal_x = None;
         self.autoscroll_requested = false;
-        cx.emit(CodeEditorEvent::SelectionsChanged(SelectionChange {
-            reason: CursorChangeReason::NotSet,
-            source: CursorChangeSource::RestoreState,
-        }));
-        cx.emit(CodeEditorEvent::ScrollChanged);
+        self.emit_cursor_events(
+            CursorChangeCause {
+                reason: CursorChangeReason::NotSet,
+                source: CursorChangeSource::RestoreState,
+            },
+            cx,
+        );
+        self.emit_scroll_changed(cx);
         cx.notify();
     }
 
@@ -1086,8 +1149,39 @@ impl CodeEditor {
         self.scroll_left = position.x;
         self.scroll_top = position.y;
         self.clamp_scroll();
-        cx.emit(CodeEditorEvent::ScrollChanged);
+        self.emit_scroll_changed(cx);
         cx.notify();
+    }
+
+    /// Reports the scroll position and scrollable size with
+    /// [`CodeEditorEvent::ScrollChanged`] if they changed since the last
+    /// report (Monaco's `Scrollable` only fires when its state changed).
+    pub(crate) fn emit_scroll_changed(&mut self, cx: &mut Context<Self>) {
+        let state = [
+            self.scroll_top,
+            self.scroll_left,
+            self.scroll_width().unwrap_or_default(),
+            self.scroll_height().unwrap_or_default(),
+        ];
+        let old = self.last_scroll_state.replace(state);
+        let changed = |i: usize| old.is_none_or(|old| old[i] != state[i]);
+        let event = ScrollEvent {
+            scroll_top: state[0],
+            scroll_left: state[1],
+            scroll_width: state[2],
+            scroll_height: state[3],
+            scroll_top_changed: changed(0),
+            scroll_left_changed: changed(1),
+            scroll_width_changed: changed(2),
+            scroll_height_changed: changed(3),
+        };
+        if event.scroll_top_changed
+            || event.scroll_left_changed
+            || event.scroll_width_changed
+            || event.scroll_height_changed
+        {
+            cx.emit(CodeEditorEvent::ScrollChanged(event));
+        }
     }
 
     /// Makes the next scroll change animate or jump.
@@ -1104,8 +1198,12 @@ impl CodeEditor {
     }
 
     /// The height of the lines and view zones as of the last layout
-    /// (Monaco `getContentHeight`), not counting `scroll_beyond_last_line`
-    /// (Monaco adds it; see [`CodeEditor::scroll_height`]).
+    /// (Monaco `getContentHeight`). Unlike Monaco's, it leaves out what
+    /// Monaco adds to the lines' height: with `scroll_beyond_last_line`,
+    /// the editor's height less a line and `padding.bottom`; without it,
+    /// the horizontal scrollbar's height when that shows. The scrollable
+    /// height, with the `scroll_beyond_last_line` room, is
+    /// [`CodeEditor::scroll_height`].
     pub fn content_height(&self) -> Option<Pixels> {
         self.layout.as_ref().map(|layout| layout.content_height)
     }
@@ -1135,18 +1233,56 @@ impl CodeEditor {
         self.scroll_left = self.scroll_left.clamp(px(0.), max.x);
     }
 
-    /// Hides whole rows besides folds (Monaco `setHiddenAreas`): each range
-    /// is 0-based rows, end exclusive. Replaces the previous areas.
+    /// Hides whole rows besides folds (Monaco `setHiddenAreas` without a
+    /// source): each range is 0-based rows, end exclusive. Replaces the
+    /// areas set before without a source; see
+    /// [`CodeEditor::set_hidden_areas_from`].
     pub fn set_hidden_areas(&mut self, areas: Vec<Range<u32>>, cx: &mut Context<Self>) {
-        if self.hidden_areas != areas {
-            self.hidden_areas = areas;
-            cx.notify();
-        }
+        self.set_hidden_areas_inner(None, areas, cx);
     }
 
-    /// The rows hidden by [`CodeEditor::set_hidden_areas`].
-    pub fn hidden_areas(&self) -> &[Range<u32>] {
-        &self.hidden_areas
+    /// Hides whole rows for `source` (Monaco `setHiddenAreas(ranges,
+    /// source)`): each source's areas replace only that source's, and the
+    /// rows hidden are the union of every source's. The diff editor hides
+    /// its unchanged regions as the source `"diffEditor"`.
+    pub fn set_hidden_areas_from(
+        &mut self,
+        source: impl Into<gpui::SharedString>,
+        areas: Vec<Range<u32>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_hidden_areas_inner(Some(source.into()), areas, cx);
+    }
+
+    fn set_hidden_areas_inner(
+        &mut self,
+        source: Option<gpui::SharedString>,
+        areas: Vec<Range<u32>>,
+        cx: &mut Context<Self>,
+    ) {
+        let index = self.hidden_areas.iter().position(|(s, _)| *s == source);
+        match index {
+            Some(index) if self.hidden_areas[index].1 == areas => return,
+            Some(index) if areas.is_empty() => {
+                self.hidden_areas.remove(index);
+            }
+            Some(index) => self.hidden_areas[index].1 = areas,
+            None if areas.is_empty() => return,
+            None => self.hidden_areas.push((source, areas)),
+        }
+        cx.notify();
+    }
+
+    /// The rows hidden by [`CodeEditor::set_hidden_areas`] and
+    /// [`CodeEditor::set_hidden_areas_from`], of every source, sorted and
+    /// merged.
+    pub fn hidden_areas(&self) -> Vec<Range<u32>> {
+        normalize_hidden(
+            self.hidden_areas
+                .iter()
+                .flat_map(|(_, areas)| areas.iter().cloned())
+                .collect(),
+        )
     }
 
     /// Inserts a host view between lines (Monaco `changeViewZones` +
@@ -1341,7 +1477,9 @@ impl CodeEditor {
     }
 
     /// Window position of the top-left of `point`'s character, if it's laid
-    /// out (Monaco `getScrolledVisiblePosition`).
+    /// out. Monaco's `getScrolledVisiblePosition` is relative to the editor
+    /// and has the line's height:
+    /// [`CodeEditor::scrolled_visible_position_in_editor`].
     pub fn scrolled_visible_position(&self, point: PointUtf16) -> Option<Point<Pixels>> {
         let layout = self.layout.as_ref()?;
         let line = layout.line_for_point(point)?;
@@ -1555,8 +1693,22 @@ impl CodeEditor {
                 kind,
                 restore,
                 changes,
+                version,
+                eol,
+                is_eol_change,
                 ..
             } => {
+                // Monaco's view model forwards the content change before
+                // the cursors react to it.
+                cx.emit(CodeEditorEvent::ModelContentChanged(ModelContentChange {
+                    changes: changes.clone(),
+                    eol: *eol,
+                    version_id: *version,
+                    is_undoing: *kind == EditKind::Undo,
+                    is_redoing: *kind == EditKind::Redo,
+                    is_flush: *kind == EditKind::SetValue,
+                    is_eol_change: *is_eol_change,
+                }));
                 let own = *source == Some(cx.entity_id());
                 // Monaco skips undoing.
                 if *kind != EditKind::Undo
@@ -1619,7 +1771,7 @@ impl CodeEditor {
                     self.occurrences_after_edit(cx);
                 }
                 if !own || matches!(kind, EditKind::Undo | EditKind::Redo) {
-                    self.next_selection_change = SelectionChange {
+                    self.next_selection_change = CursorChangeCause {
                         reason: match kind {
                             EditKind::Undo => CursorChangeReason::Undo,
                             EditKind::Redo => CursorChangeReason::Redo,
@@ -1644,6 +1796,7 @@ impl CodeEditor {
                 {
                     self.compute_fold_ranges(cx);
                 }
+                cx.emit(CodeEditorEvent::ModelTokensChanged);
                 cx.notify();
             }
             TextModelEvent::LanguageChanged {
@@ -1668,11 +1821,18 @@ impl CodeEditor {
             TextModelEvent::LanguageConfigurationChanged => {
                 // Brackets may have changed: find the pairs again.
                 self.bracket_colors = Default::default();
+                cx.emit(CodeEditorEvent::ModelLanguageConfigurationChanged);
                 cx.notify();
             }
-            TextModelEvent::OptionsChanged
-            | TextModelEvent::LineEndingChanged
-            | TextModelEvent::DecorationsChanged => cx.notify(),
+            TextModelEvent::OptionsChanged(change) => {
+                cx.emit(CodeEditorEvent::ModelOptionsChanged(*change));
+                cx.notify();
+            }
+            TextModelEvent::DecorationsChanged(change) => {
+                cx.emit(CodeEditorEvent::ModelDecorationsChanged(*change));
+                cx.notify();
+            }
+            TextModelEvent::LineEndingChanged => cx.notify(),
             TextModelEvent::AttachedChanged => {}
         }
     }
@@ -1736,7 +1896,7 @@ impl CodeEditor {
             .map(|s| s.start().row..=s.end().row)
             .collect();
         let source = cx.entity_id();
-        let group = undo_group(operation.kind);
+        let group = self.edit_group.or(undo_group(operation.kind));
         let selections_after = &mut operation.selections_after;
         let result = self.model.update(cx, |model, cx| {
             if operation.push_stack_element_before {
@@ -1805,9 +1965,6 @@ impl CodeEditor {
     }
 
     pub(crate) fn cursors_changed(&mut self, autoscroll: bool, cx: &mut Context<Self>) {
-        self.suggest_cursor_changed();
-        self.write_selection_to_primary(cx);
-        self.snippet_selections_changed(cx);
         // Monaco `multiCursorLimit`: extra cursors are dropped.
         let limit = self.options.multi_cursor_limit.max(1);
         if self.cursors.all().len() > limit {
@@ -1824,6 +1981,28 @@ impl CodeEditor {
         {
             self.cursor_views = None;
         }
+        // Monaco `_emitStateChangedIfNecessary`: nothing happens when the
+        // cursor state (the selections and the model version) is the same.
+        if self
+            .last_cursor_state
+            .as_ref()
+            .is_some_and(|(selections, version)| {
+                *version == self.snapshot.version() && *selections == self.cursors.selections()
+            })
+        {
+            let cause = std::mem::take(&mut self.next_selection_change);
+            // Keyboard and mouse moves still reveal the cursor, as
+            // Monaco's commands do; the API's don't.
+            if autoscroll && cause.source != CursorChangeSource::Api {
+                self.autoscroll_requested = true;
+                self.autoscroll_from_mouse = cause.source == CursorChangeSource::Mouse;
+                cx.notify();
+            }
+            return;
+        }
+        self.suggest_cursor_changed();
+        self.write_selection_to_primary(cx);
+        self.snippet_selections_changed(cx);
         if autoscroll {
             self.autoscroll_requested = true;
             self.autoscroll_from_mouse =
@@ -1863,8 +2042,45 @@ impl CodeEditor {
                 && change.reason != CursorChangeReason::Explicit);
         // The cursor moving means the keyboard is back in the text.
         self.sticky.focused = None;
-        cx.emit(CodeEditorEvent::SelectionsChanged(change));
+        self.emit_cursor_events(change, cx);
         cx.notify();
+    }
+
+    /// Records the cursor state and, when the selections differ from the
+    /// last ones reported, emits [`CodeEditorEvent::CursorPositionChanged`]
+    /// and [`CodeEditorEvent::SelectionsChanged`] (Monaco's outgoing
+    /// `CursorStateChangedEvent`, fired only when a cursor's model state
+    /// changed).
+    pub(crate) fn emit_cursor_events(&mut self, cause: CursorChangeCause, cx: &mut Context<Self>) {
+        let selections = self.cursors.selections();
+        let version = self.snapshot.version();
+        let old = self
+            .last_cursor_state
+            .replace((selections.clone(), version));
+        if old.as_ref().is_some_and(|(old, _)| *old == selections) {
+            return;
+        }
+        let (old_selections, old_model_version_id) = match old {
+            Some((selections, version)) => (Some(selections), version),
+            None => (None, 0),
+        };
+        cx.emit(CodeEditorEvent::CursorPositionChanged(
+            CursorPositionChange {
+                position: selections[0].head,
+                secondary_positions: selections[1..].iter().map(|s| s.head).collect(),
+                reason: cause.reason,
+                source: cause.source,
+            },
+        ));
+        cx.emit(CodeEditorEvent::SelectionsChanged(SelectionChange {
+            reason: cause.reason,
+            source: cause.source,
+            selection: selections[0],
+            secondary_selections: selections[1..].to_vec(),
+            old_selections,
+            model_version_id: version,
+            old_model_version_id,
+        }));
     }
 
     /// Monaco `_getCursorBlinking`: read-only editors don't blink.
@@ -2842,7 +3058,7 @@ impl CodeEditor {
         self.next_selection_change.reason = CursorChangeReason::Paste;
         self.paste_clipboard_item(item, cx);
         // Nothing may have changed.
-        self.next_selection_change = SelectionChange::default();
+        self.next_selection_change = CursorChangeCause::default();
         if self.snapshot.version() != version {
             // Monaco `onDidPaste`: from the primary selection's start before
             // to its start after.
@@ -2999,6 +3215,7 @@ impl CodeEditor {
         hidden.extend(
             self.hidden_areas
                 .iter()
+                .flat_map(|(_, areas)| areas)
                 .map(|r| r.start.min(row_count)..r.end.min(row_count)),
         );
         let hidden = normalize_hidden(hidden);
@@ -3332,7 +3549,7 @@ impl CodeEditor {
         // middle click is a click, and the platform pastes the primary
         // selection there; otherwise it column-selects.
         if self.selection_clipboard_on() {
-            self.next_selection_change = SelectionChange {
+            self.next_selection_change = CursorChangeCause {
                 reason: CursorChangeReason::Explicit,
                 source: CursorChangeSource::Mouse,
             };
@@ -3428,13 +3645,13 @@ impl CodeEditor {
             window,
             cx,
         );
-        cx.emit(CodeEditorEvent::MouseDown(mouse));
+        cx.emit(CodeEditorEvent::MouseDown(mouse.clone()));
         if over_widget {
             cx.emit(CodeEditorEvent::ContextMenu(mouse));
             return;
         }
         self.long_lines_mouse_down(&mouse, cx);
-        cx.emit(CodeEditorEvent::ContextMenu(mouse));
+        cx.emit(CodeEditorEvent::ContextMenu(mouse.clone()));
         // Monaco: only over text, and not on widgets.
         use crate::mouse_target::MouseTargetKind;
         if matches!(
@@ -3462,7 +3679,7 @@ impl CodeEditor {
             window,
             cx,
         );
-        cx.emit(CodeEditorEvent::MouseDown(mouse));
+        cx.emit(CodeEditorEvent::MouseDown(mouse.clone()));
         self.long_lines_mouse_down(&mouse, cx);
         // Embedded views (zones and widgets) handle their own clicks and
         // focus.
@@ -3498,7 +3715,7 @@ impl CodeEditor {
             } else {
                 self.minimap_drag = Some(event.position.y - minimap.slider.top());
             }
-            cx.emit(CodeEditorEvent::ScrollChanged);
+            self.emit_scroll_changed(cx);
             cx.notify();
             return;
         }
@@ -3546,7 +3763,7 @@ impl CodeEditor {
                     self.scroll_left += delta;
                 }
                 self.clamp_scroll();
-                cx.emit(CodeEditorEvent::ScrollChanged);
+                self.emit_scroll_changed(cx);
                 cx.notify();
                 return;
             }
@@ -3689,7 +3906,7 @@ impl CodeEditor {
                 origin: Selection::collapsed(position),
                 cursor_index: 0,
             });
-            self.next_selection_change = SelectionChange {
+            self.next_selection_change = CursorChangeCause {
                 reason: CursorChangeReason::Explicit,
                 source: CursorChangeSource::Mouse,
             };
@@ -3726,7 +3943,7 @@ impl CodeEditor {
         }
         self.prev_edit_kind = None;
         self.model.update(cx, |model, _| model.push_stack_element());
-        self.next_selection_change = SelectionChange {
+        self.next_selection_change = CursorChangeCause {
             reason: CursorChangeReason::Explicit,
             source: CursorChangeSource::Mouse,
         };
@@ -3886,7 +4103,7 @@ impl CodeEditor {
                 if let Some(minimap) = self.layout.as_ref().and_then(|layout| layout.minimap) {
                     let slider_top = event.position.y - grab - minimap.bounds.top();
                     self.scroll_top = (slider_top * minimap.drag_ratio).max(px(0.));
-                    cx.emit(CodeEditorEvent::ScrollChanged);
+                    self.emit_scroll_changed(cx);
                     cx.notify();
                 }
                 return;
@@ -4028,7 +4245,7 @@ impl CodeEditor {
                 visible_column,
                 true,
             );
-            self.next_selection_change = SelectionChange {
+            self.next_selection_change = CursorChangeCause {
                 reason: CursorChangeReason::Explicit,
                 source: CursorChangeSource::Mouse,
             };
@@ -4079,7 +4296,7 @@ impl CodeEditor {
         if mode == MouseSelectMode::Character {
             self.keep_mouse_on_wrapped_line(index, mouse);
         }
-        self.next_selection_change = SelectionChange {
+        self.next_selection_change = CursorChangeCause {
             reason: CursorChangeReason::Explicit,
             source: CursorChangeSource::Mouse,
         };
@@ -4223,7 +4440,7 @@ impl CodeEditor {
         };
         self.clamp_scroll();
         if before != (self.scroll_top, self.scroll_left) {
-            cx.emit(CodeEditorEvent::ScrollChanged);
+            self.emit_scroll_changed(cx);
         }
         self.extend_mouse_selection(position, mouse, cx);
         cx.notify();
@@ -4287,7 +4504,7 @@ impl CodeEditor {
                 this.scroll_left += step;
             }
             this.clamp_scroll();
-            cx.emit(CodeEditorEvent::ScrollChanged);
+            this.emit_scroll_changed(cx);
             cx.notify();
         };
         scroll(self, cx);
@@ -4324,7 +4541,7 @@ impl CodeEditor {
                 }
             }
         }
-        cx.emit(CodeEditorEvent::ScrollChanged);
+        self.emit_scroll_changed(cx);
         cx.notify();
     }
 
@@ -4406,7 +4623,7 @@ impl CodeEditor {
         if self.options.inertial_scroll && self.animation.inertial.on_wheel(delta) {
             self.run_inertial_scroll(cx);
         }
-        cx.emit(CodeEditorEvent::ScrollChanged);
+        self.emit_scroll_changed(cx);
         cx.notify();
         // Monaco `alwaysConsumeMouseWheel: false` lets the parent scroll
         // once the editor can't.
@@ -4448,7 +4665,7 @@ impl CodeEditor {
         self.scroll_left -= delta.x;
         self.clamp_scroll();
         if before != (self.scroll_top, self.scroll_left) {
-            cx.emit(CodeEditorEvent::ScrollChanged);
+            self.emit_scroll_changed(cx);
             cx.notify();
         }
         self.animation.inertial.is_moving()

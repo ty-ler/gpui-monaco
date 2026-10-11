@@ -53,6 +53,7 @@ pub use brackets::matching_bracket;
 pub use collection::{CursorCollection, SelectionStartKind, SingleCursorState};
 pub use column::{ColumnSelectCommand, ColumnSelectData, column_select, column_select_to};
 pub use comment::{CommentOptions, CommentsAt, LineCommentType, block_comment, line_comment};
+pub(crate) use edit::execute_edits_forcing;
 pub use edit::{EditOperation, EditOperationType};
 pub use in_place_replace::in_place_replace;
 pub use language::{LanguageContext, StandardTokenType};
@@ -81,6 +82,7 @@ pub use typing::{
     delete_right, delete_word, delete_word_left, delete_word_part, delete_word_right, line_break,
     outdent, paste, tab, type_text,
 };
+pub(crate) use word::word_at_position;
 pub use word::{WordNavigationType, move_word, word_at};
 
 /// Monaco's `USUAL_WORD_SEPARATORS`.
@@ -346,7 +348,7 @@ impl CursorModel for text::Buffer {
 
 /// A selection: `anchor` is where it started (Monaco's selection start) and
 /// `head` is the cursor position.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Selection {
     /// Where the selection started; stays fixed while extending.
     pub anchor: Position,

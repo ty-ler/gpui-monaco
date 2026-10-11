@@ -468,6 +468,9 @@ fn moved_blocks(cx: &mut TestAppContext) {
     let original_editor = diff.read_with(cx, |d, _| d.original_editor().clone());
     diff.update(cx, |d, cx| d.set_move_to_compare(Some(0), cx));
     paint(cx);
+    // (Scrolling to where it is reports nothing, as in Monaco: move first.)
+    original_editor.update(cx, |e, cx| e.set_scroll_position(point(px(0.), px(1.)), cx));
+    paint(cx);
     original_editor.update(cx, |e, cx| e.set_scroll_position(point(px(0.), px(0.)), cx));
     paint(cx);
     let (original_top, modified_top) = (

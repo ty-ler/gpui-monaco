@@ -42,7 +42,7 @@ fn draw(cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-/// Records the editor's events, except selection and scroll changes and
+/// changes, and mouse moves.
 /// mouse moves.
 fn record(
     editor: &Entity<CodeEditor>,
@@ -55,7 +55,11 @@ fn record(
             if !matches!(
                 event,
                 CodeEditorEvent::SelectionsChanged(_)
-                    | CodeEditorEvent::ScrollChanged
+                    | CodeEditorEvent::CursorPositionChanged(_)
+                    | CodeEditorEvent::ScrollChanged(_)
+                    | CodeEditorEvent::ModelContentChanged(_)
+                    | CodeEditorEvent::ModelDecorationsChanged(_)
+                    | CodeEditorEvent::ModelTokensChanged
                     | CodeEditorEvent::MouseMove(_)
             ) {
                 sink.borrow_mut().push(event.clone());

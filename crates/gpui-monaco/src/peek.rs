@@ -1068,7 +1068,7 @@ impl CodeEditor {
             self.set_selections(&[crate::cursor::Selection::collapsed(start)], cx);
             self.reveal_range(location.range, RevealType::Center, cx);
         } else {
-            cx.emit(CodeEditorEvent::OpenLocation(location));
+            self.open_location_with_openers(location, false, cx);
         }
     }
 }

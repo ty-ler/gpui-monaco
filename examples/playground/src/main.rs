@@ -273,9 +273,12 @@ impl Playground {
         }
         window.focus(&editor.focus_handle(cx), cx);
         if std::env::var_os("PLAYGROUND_DEBUG").is_some() {
-            cx.subscribe(&editor, |_, editor, event: &CodeEditorEvent, cx| {
-                if matches!(event, CodeEditorEvent::SelectionsChanged(_)) {
-                    eprintln!("selections: {:?}", editor.read(cx).selections());
+            cx.subscribe(&editor, |_, _, event: &CodeEditorEvent, _| {
+                if let CodeEditorEvent::SelectionsChanged(change) = event {
+                    eprintln!(
+                        "selections ({:?}, {:?}): {:?} {:?}",
+                        change.reason, change.source, change.selection, change.secondary_selections
+                    );
                 }
             })
             .detach();
@@ -288,13 +291,16 @@ impl Playground {
             {
                 this.toggle_breakpoint(&editor, position.row, cx);
             }
-            // The editor asks the host to open links (Cmd/Ctrl+click).
-            if let CodeEditorEvent::OpenLink(url) = event {
-                cx.open_url(url);
-            }
             cx.notify();
         })
         .detach();
+        // Links followed in any editor (Cmd/Ctrl+click), the ones in peek
+        // views included (Monaco `registerLinkOpener`). Dropping the
+        // `Disposable` keeps the opener.
+        let _link_opener = gpui_monaco::register_link_opener(cx, |url, cx| {
+            cx.open_url(url);
+            true
+        });
         let languages = gpui_monaco::language_registry(cx)
             .languages()
             .iter()
@@ -321,15 +327,13 @@ impl Playground {
             });
             return;
         }
-        let offset = model
-            .read(cx)
-            .offset_at(gpui_monaco::text::PointUtf16::new(row, 0));
+        let start = gpui_monaco::text::PointUtf16::new(row, 0);
         let ids = model.update(cx, |model, cx| {
-            model.delta_decorations(
+            model.delta_decorations_at(
                 None,
                 &[],
                 vec![(
-                    offset..offset,
+                    start..start,
                     DecorationOptions {
                         is_whole_line: true,
                         glyph: Some(("●".into(), gpui::rgb(0xe51400).into())),

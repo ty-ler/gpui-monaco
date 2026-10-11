@@ -3,10 +3,13 @@
 //! `onMouseMove`, `onMouseLeave`, `onContextMenu`), e.g. to toggle
 //! breakpoints in the glyph margin.
 
-use gpui::{App, Modifiers, MouseButton, Pixels, Point, Window};
+use std::ops::Range;
+
+use gpui::{App, EntityId, Modifiers, MouseButton, Pixels, Point, Window, px};
 use text::PointUtf16;
 
 use crate::editor::CodeEditor;
+use crate::widgets::WidgetId;
 
 /// What an embedded view's bounds belong to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,7 +27,8 @@ pub enum EmbeddedKind {
 /// The part of the editor under the mouse (Monaco `MouseTargetType`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MouseTargetKind {
-    /// The glyph margin, where breakpoint-style glyphs go.
+    /// The glyph margin, where breakpoint-style glyphs go, glyph margin
+    /// widgets included.
     GutterGlyphMargin,
     /// The line numbers.
     GutterLineNumbers,
@@ -58,20 +62,79 @@ pub enum MouseTargetKind {
     Unknown,
 }
 
+/// More about what the mouse is over (Monaco's `IMouseTarget` variants'
+/// `detail`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum MouseTargetDetail {
+    /// Nothing more.
+    #[default]
+    None,
+    /// The gutter (Monaco `IMouseTargetMarginData`).
+    Margin {
+        /// Below the last line (Monaco `isAfterLines`).
+        is_after_lines: bool,
+        /// Where the glyph margin starts, from the editor's left (Monaco
+        /// `glyphMarginLeft`).
+        glyph_margin_left: Pixels,
+        /// The glyph margin's width (Monaco `glyphMarginWidth`).
+        glyph_margin_width: Pixels,
+        /// Over the glyph margin, its lane, from 1 (Monaco
+        /// `glyphMarginLane`); there's one lane.
+        glyph_margin_lane: Option<u32>,
+        /// The line numbers' width (Monaco `lineNumbersWidth`).
+        line_numbers_width: Pixels,
+        /// The mouse from the editor's left (Monaco `offsetX`).
+        offset_x: Pixels,
+        /// The glyph margin widget under the mouse, if any.
+        widget: Option<WidgetId>,
+    },
+    /// A view zone (Monaco `IMouseTargetViewZoneData`).
+    ViewZone {
+        /// The zone, when it's known (Monaco `viewZoneId`); the editor's own
+        /// zones (peek views, code lenses) have ids too.
+        id: Option<WidgetId>,
+        /// The line the zone is after, 1-based, 0 above the first line
+        /// (Monaco `afterLineNumber`, as [`ViewZone::after_line`](crate::ViewZone)).
+        after_line: Option<u32>,
+    },
+    /// A content widget (Monaco `IMouseTargetContentWidget.detail`).
+    ContentWidget(WidgetId),
+    /// An overlay widget (Monaco `IMouseTargetOverlayWidget.detail`).
+    OverlayWidget(WidgetId),
+    /// Empty content (Monaco `IMouseTargetContentEmptyData`).
+    ContentEmpty {
+        /// Below the last line (Monaco `isAfterLines`).
+        is_after_lines: bool,
+        /// How far right of the line's end the mouse is (Monaco
+        /// `horizontalDistanceToText`).
+        horizontal_distance_to_text: Option<Pixels>,
+    },
+}
+
 /// What the mouse is over (Monaco `IMouseTarget`).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MouseTarget {
-    /// The kind of target.
+    /// The kind of target (Monaco `type`).
     pub kind: MouseTargetKind,
     /// The text position: the nearest one in text, the line start in the
-    /// gutter, the header's row in sticky scroll; `None` elsewhere.
+    /// gutter, the header's row in sticky scroll; `None` elsewhere (Monaco
+    /// `position`).
     pub position: Option<PointUtf16>,
     /// The mouse position in window coordinates.
     pub point: Point<Pixels>,
+    /// The text range the target covers (Monaco `range`): the position in
+    /// the text, the whole line in the gutter.
+    pub range: Option<Range<PointUtf16>>,
+    /// The column under the mouse counted in the font's typical character
+    /// width, even past a line's end (Monaco `mouseColumn`, 0-based here);
+    /// 0 left of the text.
+    pub mouse_column: u32,
+    /// More about the target (Monaco `detail`).
+    pub detail: MouseTargetDetail,
 }
 
 /// A mouse event over the editor (Monaco `IEditorMouseEvent`).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct EditorMouseEvent {
     /// What the mouse is over.
     pub target: MouseTarget,
@@ -84,50 +147,140 @@ pub struct EditorMouseEvent {
 }
 
 impl CodeEditor {
+    /// The widget whose view is `view`, of the kind `kind` hit.
+    fn widget_for_view(&self, kind: EmbeddedKind, view: EntityId) -> Option<WidgetId> {
+        let widgets = &self.widgets;
+        match kind {
+            EmbeddedKind::ViewZone => widgets
+                .zones
+                .iter()
+                .find(|w| w.view.entity_id() == view)
+                .map(|w| w.id),
+            EmbeddedKind::ContentWidget => widgets
+                .content
+                .iter()
+                .find(|w| w.view.entity_id() == view)
+                .map(|w| w.id),
+            EmbeddedKind::OverlayWidget => widgets
+                .overlays
+                .iter()
+                .find(|w| w.view.entity_id() == view)
+                .map(|w| w.id),
+            EmbeddedKind::GlyphMarginWidget => widgets
+                .glyphs
+                .iter()
+                .find(|w| w.view.entity_id() == view)
+                .map(|w| w.id),
+        }
+    }
+
+    /// The line view zone `id` is after (Monaco `afterLineNumber`).
+    fn zone_after_line(&self, id: WidgetId, cx: &App) -> Option<u32> {
+        let zone = self.widgets.zones.iter().find(|z| z.id == id)?;
+        let buffer = self.model().read(cx).buffer();
+        Some(match &zone.anchor {
+            Some(anchor) => buffer.offset_to_point(buffer.resolve(anchor)).row + 1,
+            None => 0,
+        })
+    }
+
     /// What's under `point` (window coordinates) as of the last frame
     /// (Monaco's mouse target).
     pub fn mouse_target(&self, point: Point<Pixels>, window: &mut Window, cx: &App) -> MouseTarget {
-        let target = |kind, position| MouseTarget {
+        let unknown = MouseTarget {
+            kind: MouseTargetKind::Unknown,
+            position: None,
+            point,
+            range: None,
+            mouse_column: 0,
+            detail: MouseTargetDetail::None,
+        };
+        let Some(layout) = self.layout.as_ref() else {
+            return unknown;
+        };
+        if !layout.bounds.contains(&point) {
+            return unknown;
+        }
+        // Monaco `_getMouseColumn`, from the typical character width.
+        let relative_x = point.x - layout.text_origin_x();
+        let mouse_column = if relative_x < px(0.) || layout.metrics.em_width <= px(0.) {
+            0
+        } else {
+            (relative_x / layout.metrics.em_width).round() as u32
+        };
+        let target = |kind, position: Option<PointUtf16>, detail| MouseTarget {
             kind,
             position,
             point,
+            range: position.map(|p| p..p),
+            mouse_column,
+            detail,
         };
-        let Some(layout) = self.layout.as_ref() else {
-            return target(MouseTargetKind::Unknown, None);
+        let margin = |is_after_lines, widget| MouseTargetDetail::Margin {
+            is_after_lines,
+            glyph_margin_left: px(0.),
+            glyph_margin_width: layout.glyph_margin_width,
+            glyph_margin_lane: (point.x - layout.bounds.left() < layout.glyph_margin_width)
+                .then_some(1),
+            line_numbers_width: layout.line_numbers_width,
+            offset_x: point.x - layout.bounds.left(),
+            widget,
         };
-        if !layout.bounds.contains(&point) {
-            return target(MouseTargetKind::Unknown, None);
-        }
         // Widgets first, top-most (last painted) first.
-        for (bounds, kind) in layout.widget_bounds.iter().zip(&layout.widget_kinds).rev() {
+        let hits = layout
+            .widget_bounds
+            .iter()
+            .zip(&layout.widget_kinds)
+            .zip(&layout.widget_views)
+            .rev();
+        for ((bounds, kind), view) in hits.clone() {
             if !bounds.contains(&point) {
                 continue;
             }
-            let kind = match kind {
-                EmbeddedKind::ContentWidget => MouseTargetKind::ContentWidget,
-                EmbeddedKind::OverlayWidget => MouseTargetKind::OverlayWidget,
-                EmbeddedKind::ViewZone => MouseTargetKind::ContentViewZone,
-                EmbeddedKind::GlyphMarginWidget => MouseTargetKind::GutterGlyphMargin,
+            let id = self.widget_for_view(*kind, *view);
+            let (kind, detail) = match kind {
+                EmbeddedKind::ContentWidget => (
+                    MouseTargetKind::ContentWidget,
+                    id.map_or(MouseTargetDetail::None, MouseTargetDetail::ContentWidget),
+                ),
+                EmbeddedKind::OverlayWidget => (
+                    MouseTargetKind::OverlayWidget,
+                    id.map_or(MouseTargetDetail::None, MouseTargetDetail::OverlayWidget),
+                ),
+                EmbeddedKind::ViewZone => (
+                    MouseTargetKind::ContentViewZone,
+                    MouseTargetDetail::ViewZone {
+                        id,
+                        after_line: id.and_then(|id| self.zone_after_line(id, cx)),
+                    },
+                ),
+                EmbeddedKind::GlyphMarginWidget => {
+                    (MouseTargetKind::GutterGlyphMargin, margin(false, id))
+                }
             };
-            return target(kind, None);
+            return target(kind, None, detail);
         }
         if layout
             .minimap
             .is_some_and(|m| m.interactive && m.bounds.contains(&point))
         {
-            return target(MouseTargetKind::Minimap, None);
+            return target(MouseTargetKind::Minimap, None, MouseTargetDetail::None);
         }
         if layout
             .vertical_scrollbar
             .is_some_and(|s| s.bar.contains(&point))
         {
-            return target(MouseTargetKind::OverviewRuler, None);
+            return target(
+                MouseTargetKind::OverviewRuler,
+                None,
+                MouseTargetDetail::None,
+            );
         }
         if layout
             .horizontal_scrollbar
             .is_some_and(|s| s.bar.contains(&point))
         {
-            return target(MouseTargetKind::Scrollbar, None);
+            return target(MouseTargetKind::Scrollbar, None, MouseTargetDetail::None);
         }
         if let Some(line) = layout
             .sticky_lines
@@ -137,6 +290,7 @@ impl CodeEditor {
             return target(
                 MouseTargetKind::StickyScroll,
                 Some(PointUtf16::new(line.row, 0)),
+                MouseTargetDetail::None,
             );
         }
         let line = layout.lines.iter().find(|line| {
@@ -149,15 +303,40 @@ impl CodeEditor {
             let below = layout.lines.last().is_some_and(|last| {
                 point.y >= layout.line_top(last.view_line) + layout.line_height_of(last.view_line)
             });
-            let kind = match (below, in_gutter) {
-                (true, _) => MouseTargetKind::ContentEmpty { after_lines: true },
-                (false, true) => MouseTargetKind::GutterViewZone,
-                (false, false) => MouseTargetKind::ContentViewZone,
+            let position = below.then(|| self.position_for_point(point, window, cx));
+            if below {
+                let detail = if in_gutter {
+                    margin(true, None)
+                } else {
+                    MouseTargetDetail::ContentEmpty {
+                        is_after_lines: true,
+                        horizontal_distance_to_text: None,
+                    }
+                };
+                return target(
+                    MouseTargetKind::ContentEmpty { after_lines: true },
+                    position,
+                    detail,
+                );
+            }
+            // The zone at this height, gutter side included.
+            let id = hits
+                .filter(|((bounds, kind), _)| {
+                    **kind == EmbeddedKind::ViewZone
+                        && bounds.top() <= point.y
+                        && point.y < bounds.bottom()
+                })
+                .find_map(|((_, kind), view)| self.widget_for_view(*kind, *view));
+            let detail = MouseTargetDetail::ViewZone {
+                id,
+                after_line: id.and_then(|id| self.zone_after_line(id, cx)),
             };
-            return target(
-                kind,
-                below.then(|| self.position_for_point(point, window, cx)),
-            );
+            let kind = if in_gutter {
+                MouseTargetKind::GutterViewZone
+            } else {
+                MouseTargetKind::ContentViewZone
+            };
+            return target(kind, None, detail);
         };
         if in_gutter {
             let x = point.x - layout.bounds.left();
@@ -168,15 +347,30 @@ impl CodeEditor {
             } else {
                 MouseTargetKind::GutterLineDecorations
             };
-            return target(kind, Some(PointUtf16::new(line.row, line.columns.start)));
+            let start = PointUtf16::new(line.row, line.columns.start);
+            let mut target = target(kind, Some(start), margin(false, None));
+            // Monaco: the whole line.
+            let end = self.model().read(cx).line_len_utf16(line.row);
+            target.range = Some(PointUtf16::new(line.row, 0)..PointUtf16::new(line.row, end));
+            return target;
         }
         let position = self.position_for_point(point, window, cx);
         let end_x = layout.text_origin_x() + line.width();
-        let kind = if point.x > end_x {
-            MouseTargetKind::ContentEmpty { after_lines: false }
+        if point.x > end_x {
+            target(
+                MouseTargetKind::ContentEmpty { after_lines: false },
+                Some(position),
+                MouseTargetDetail::ContentEmpty {
+                    is_after_lines: false,
+                    horizontal_distance_to_text: Some(point.x - end_x),
+                },
+            )
         } else {
-            MouseTargetKind::ContentText
-        };
-        target(kind, Some(position))
+            target(
+                MouseTargetKind::ContentText,
+                Some(position),
+                MouseTargetDetail::None,
+            )
+        }
     }
 }

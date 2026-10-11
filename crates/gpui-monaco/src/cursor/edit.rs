@@ -833,23 +833,38 @@ pub(crate) fn execute_commands(
 pub(crate) fn execute_edits(
     model: &dyn CursorModel,
     selections_before: &[Selection],
-    mut edits: Vec<(Range<Position>, String)>,
+    edits: Vec<(Range<Position>, String)>,
     end_state: Option<Vec<Selection>>,
 ) -> EditOperation {
-    edits.retain(|(range, text)| range.start != range.end || !text.is_empty());
+    let edits = edits
+        .into_iter()
+        .map(|(range, text)| (range, text, false))
+        .collect();
+    execute_edits_forcing(model, selections_before, edits, end_state)
+}
+
+/// [`execute_edits`] where each edit says whether it forces the cursors at
+/// its edges to move after its text (Monaco `forceMoveMarkers`).
+pub(crate) fn execute_edits_forcing(
+    model: &dyn CursorModel,
+    selections_before: &[Selection],
+    mut edits: Vec<(Range<Position>, String, bool)>,
+    end_state: Option<Vec<Selection>>,
+) -> EditOperation {
+    edits.retain(|(range, text, _)| range.start != range.end || !text.is_empty());
     edits.sort_by(|a, b| cmp_using_ends(&a.0, &b.0));
     let selections_after = match end_state {
         Some(selections) if !selections.is_empty() => selections,
         _ => {
             let applied: Vec<AppliedOp> = edits
                 .iter()
-                .map(|(range, text)| AppliedOp {
+                .map(|(range, text, force)| AppliedOp {
                     start: range.start,
                     end: range.end,
                     text,
                     deleting: offset_between(model, range.start, range.end),
                     inserting: text.encode_utf16().count() as u64,
-                    force_move_markers: false,
+                    force_move_markers: *force,
                 })
                 .collect();
             selections_before
@@ -871,7 +886,10 @@ pub(crate) fn execute_edits(
         }
     };
     EditOperation {
-        edits,
+        edits: edits
+            .into_iter()
+            .map(|(range, text, _)| (range, text))
+            .collect(),
         selections_after,
         kind: EditOperationType::Other,
         push_stack_element_before: true,

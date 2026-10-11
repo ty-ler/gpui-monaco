@@ -420,9 +420,16 @@ impl LspClient {
         if current.version() == document.snapshot.version() {
             return;
         }
+        let patch = model.buffer().edits_since(document.snapshot.version());
+        // A line ending change is a new version with the same text: the
+        // server's copy has `\n` line breaks either way.
+        if patch.is_empty() {
+            document.snapshot = current;
+            return;
+        }
         let changes = if kind == lsp::TextDocumentSyncKind::INCREMENTAL {
-            let patch = model.buffer().edits_since(document.snapshot.version());
-            content_changes(document.snapshot.rope(), current.rope(), &patch)
+            let eol = document.snapshot.line_ending();
+            content_changes(document.snapshot.rope(), current.rope(), &patch, eol)
                 .into_iter()
                 .map(|change| lsp::TextDocumentContentChangeEvent {
                     range: Some(convert::lsp_range(&change.range)),

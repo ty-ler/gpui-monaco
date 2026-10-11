@@ -15,7 +15,7 @@ use text::PointUtf16;
 
 use crate::cursor::{self, Selection};
 use crate::decorations::{DecorationId, DecorationOptions, DecorationUnderline};
-use crate::editor::{CodeEditor, CodeEditorEvent};
+use crate::editor::CodeEditor;
 use crate::providers::{Location, definition_providers};
 use crate::theme::TokenStyle;
 
@@ -403,7 +403,7 @@ impl CodeEditor {
                 cx,
             );
         } else {
-            cx.emit(CodeEditorEvent::OpenLocation(location));
+            self.open_location_with_openers(location, false, cx);
         }
     }
 
