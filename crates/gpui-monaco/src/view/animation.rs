@@ -55,7 +55,7 @@ fn ease(x: f32) -> f32 {
 }
 
 /// Monaco `easeOutCubic`.
-fn ease_out_cubic(x: f32) -> f32 {
+pub(crate) fn ease_out_cubic(x: f32) -> f32 {
     1. - (1. - x.clamp(0., 1.)).powi(3)
 }
 

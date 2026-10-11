@@ -5,4 +5,5 @@ pub(crate) mod controller;
 pub(crate) mod ghost_text;
 pub(crate) mod inline_edits;
 pub(crate) mod inline_edits_view;
+pub(crate) mod long_distance_hint;
 pub mod toolbar;

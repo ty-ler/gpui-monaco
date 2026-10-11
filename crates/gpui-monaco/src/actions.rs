@@ -759,6 +759,10 @@ actions!(
         AcceptInlineSuggestion,
         /// Jumps to the inline edit (Monaco `editor.action.inlineSuggest.jump`).
         JumpToNextInlineEdit,
+        /// Runs the inline edit's alternative action instead of its edit
+        /// (Monaco `editor.action.inlineSuggest.commitAlternativeAction`,
+        /// Shift+Tab).
+        AcceptInlineSuggestionAlternativeAction,
         /// Switches inline edits between showing collapsed and expanded
         /// (Monaco `editor.action.inlineSuggest.toggleShowCollapsed`).
         ToggleInlineSuggestionShowCollapsed,

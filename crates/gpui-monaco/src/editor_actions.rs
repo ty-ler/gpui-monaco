@@ -141,6 +141,11 @@ fn inline_edit_visible(editor: &CodeEditor, cx: &App) -> bool {
     editor.inline_edit_visible(cx)
 }
 
+/// Monaco `inlineSuggestionAlternativeActionVisible && inlineEditIsVisible`.
+fn inline_alternative_action_visible(editor: &CodeEditor, cx: &App) -> bool {
+    editor.inline_suggestion_alternative_action_visible(cx)
+}
+
 /// Monaco `inlineSuggestionVisible || inlineEditIsVisible`.
 fn inline_or_edit_visible(editor: &CodeEditor, cx: &App) -> bool {
     inline_visible(editor, cx) || inline_edit_visible(editor, cx)
@@ -391,6 +396,7 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.inlineSuggest.showPrevious", "code_editor::ShowPreviousInlineSuggestion", "Show Previous Inline Suggestion", inline_visible_writable),
     Builtin("editor.action.inlineSuggest.commit", "code_editor::AcceptInlineSuggestion", "Accept Inline Suggestion", inline_or_edit_visible),
     Builtin("editor.action.inlineSuggest.jump", "code_editor::JumpToNextInlineEdit", "Jump to next inline edit", inline_edit_visible),
+    Builtin("editor.action.inlineSuggest.commitAlternativeAction", "code_editor::AcceptInlineSuggestionAlternativeAction", "Accept Inline Suggestion Alternative Action", inline_alternative_action_visible),
     Builtin("editor.action.inlineSuggest.toggleShowCollapsed", "code_editor::ToggleInlineSuggestionShowCollapsed", "Toggle Inline Suggestions Show Collapsed", always),
     Builtin("editor.action.inlineSuggest.acceptNextWord", "code_editor::AcceptNextInlineWord", "Accept Next Word Of Inline Suggestion", inline_visible_writable),
     Builtin("editor.action.inlineSuggest.acceptNextLine", "code_editor::AcceptNextInlineLine", "Accept Next Line Of Inline Suggestion", inline_visible_writable),

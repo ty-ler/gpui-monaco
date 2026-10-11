@@ -327,6 +327,19 @@ A pill in the gutter marks it, or points up or down while it's scrolled away. Ta
 
 `show_range` limits where any item shows: only while the cursor is in that range. Providers see in `InlineCompletionContext::include_inline_edits` whether inline edits are wanted (`inline_suggest.edits.enabled`).
 
+While an inline edit is scrolled away, a box near the cursor previews its line (with `inline_suggest.edits.long_distance_hint_context_line_count` lines around it) and says "Tab to jump"; clicking it jumps too. `show_long_distance_hint` turns it off. The pill beside the edit shows its line number, like the line numbers it covers, and pulses while you hover the edit. Accepted text fades out over a second, unless `App::reduce_motion` is set.
+
+Other kinds of items are inline edits too:
+- `jump_to_position` suggests moving the cursor rather than editing: a "Tab to jump" label marks the place, and jumping there accepts it.
+- `hint` shows `content` at its `range` instead of the diff (as code or as a plain label, per its `style`). Tab jumps to the hint, then accepts the edit, leaving the cursor where it is.
+- `uri` names another model the edit applies to. The editor diffs it against that model (found with `model_for_uri`, or your model resolver) and shows the long-distance hint, with the file's name and "Tab to open". Tab, or accepting, emits `CodeEditorEvent::OpenLocation` for you to open or focus an editor for that model, and moves the edit there: right away if one is open, else when its editor first shows. Accept it there as usual.
+
+An `alternative_action` is a second way to take an inline edit, like VS Code's "Rename" for a changed symbol. The edit shows as a word replacement with the action's label beside it; Shift+Tab, clicking the label or the gutter menu's entry runs its command instead of the edit (`editor.action.inlineSuggest.commitAlternativeAction`), and `handle_end_of_lifetime` gets `Accepted { alternative_action: true }`.
+
+With `show_inline_edit_menu`, ghost text gets the gutter pill and menu as well.
+
+Undo and redo work as in Monaco: undoing an inline edit you just accepted doesn't ask for it again; undoing back to where one showed asks only for inline edits (`include_inline_completions` is false), to show it again; and undo, redo and accepting a word keep the completion that was showing. Accepting asks again even when the text didn't change.
+
 ## Semantic tokens
 
 A `DocumentSemanticTokensProvider` colors identifiers by meaning, such as parameters, read-only variables and macros. It works as in LSP: a legend of token types and modifiers, plus five numbers per token. It can return all tokens, or edits against the result it returned last (`last_result_id`). A `DocumentRangeSemanticTokensProvider` colors the visible lines until a full result arrives.
