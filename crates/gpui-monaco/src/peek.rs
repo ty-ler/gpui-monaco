@@ -267,7 +267,16 @@ impl PeekView {
         }
         let mut preview_theme = (*theme).clone();
         preview_theme.colors.background = theme.colors.peek_view_editor_background;
-        preview_theme.colors.gutter_background = theme.colors.peek_view_editor_background;
+        // Monaco `peekViewEditorGutter.background` and the sticky scroll's
+        // `peekViewEditorStickyScroll*.background`.
+        preview_theme.colors.gutter_background = theme.colors.peek_view_editor_gutter_background;
+        preview_theme.colors.sticky_scroll_background =
+            Some(theme.colors.peek_view_editor_sticky_scroll_background);
+        preview_theme.colors.sticky_scroll_gutter_background = Some(
+            theme
+                .colors
+                .peek_view_editor_sticky_scroll_gutter_background,
+        );
         let mut preview_options = options.clone();
         preview_options.minimap.enabled = false;
         preview_options.sticky_scroll.enabled = false;
@@ -356,6 +365,7 @@ impl PeekView {
         let owner = preview.entity_id();
         let highlight = DecorationOptions {
             background: Some(self.colors.peek_view_editor_match_highlight_background),
+            border: self.colors.peek_view_editor_match_highlight_border,
             ..Default::default()
         };
         for group in &mut self.groups {

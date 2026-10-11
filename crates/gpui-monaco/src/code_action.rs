@@ -583,8 +583,14 @@ impl Render for CodeActionMenu {
                         .px(px(8.))
                         .py(px(2.))
                         .rounded(px(3.))
+                        // Monaco `editorActionList.focus*`; high contrast
+                        // outlines the row instead.
                         .when(focused, |row| {
-                            row.bg(colors.peek_view_result_selection_background)
+                            colors.focused_list_row(
+                                row,
+                                colors.action_list_focus_background,
+                                colors.action_list_focus_foreground,
+                            )
                         })
                         .when(disabled, |row| row.opacity(0.5))
                         .child(div().text_color(colors.lightbulb_foreground).child("💡"))
@@ -632,12 +638,12 @@ impl Render for CodeActionMenu {
             .p(px(4.))
             .flex()
             .flex_col()
-            .bg(colors.widget_background)
+            .bg(colors.action_list_background)
             .border_1()
             .border_color(colors.widget_border)
             .rounded(px(4.))
             .text_size(self.font_size)
-            .text_color(colors.widget_foreground)
+            .text_color(colors.action_list_foreground)
             .children(rows)
             .when(!self.bar.is_empty(), |menu| {
                 // Monaco's action bar: links under the list.
@@ -1187,6 +1193,7 @@ impl CodeEditor {
             return;
         }
         let background = self.theme.colors.find_match_highlight_background;
+        let border = self.theme.colors.find_match_highlight_border;
         let decorations = ranges
             .into_iter()
             .map(|range| {
@@ -1194,6 +1201,7 @@ impl CodeEditor {
                     range,
                     DecorationOptions {
                         background: Some(background),
+                        border,
                         ..Default::default()
                     },
                 )

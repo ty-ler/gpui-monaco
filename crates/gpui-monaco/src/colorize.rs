@@ -256,8 +256,13 @@ pub struct ColorizedLine {
     pub highlights: Vec<(Range<usize>, HighlightStyle)>,
 }
 
-fn token_style(theme: &Theme, capture: syntax::HighlightId) -> HighlightStyle {
-    let token = theme.style_for(capture);
+/// A capture's style in `language`, whose language-specific rules apply.
+fn token_style(
+    theme: &Theme,
+    capture: syntax::HighlightId,
+    language: Option<&str>,
+) -> HighlightStyle {
+    let token = theme.style_for_language(capture, language);
     HighlightStyle {
         color: token.foreground,
         font_weight: token.bold.then_some(FontWeight::BOLD),
@@ -277,7 +282,7 @@ pub fn colorize_highlights(
     capture_spans(text, language_id, registry)
         .unwrap_or_default()
         .into_iter()
-        .map(|(range, capture)| (range, token_style(theme, capture)))
+        .map(|(range, capture)| (range, token_style(theme, capture, Some(language_id))))
         .collect()
 }
 
@@ -378,7 +383,9 @@ pub fn colorize_model_line(
         .map(|(range, capture)| {
             let start = range.start.max(line_start) - line_start;
             let end = range.end.min(line_end) - line_start;
-            (map[start]..map[end], token_style(theme, capture))
+            let language = model.language_at(range.start);
+            let language = language.as_ref().map(|language| &*language.id);
+            (map[start]..map[end], token_style(theme, capture, language))
         })
         .filter(|(range, _)| !range.is_empty())
         .collect();

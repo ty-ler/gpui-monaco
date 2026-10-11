@@ -8,7 +8,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, Entity, Hsla, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement, PathBuilder, Pixels, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, canvas, div, point, px, rgb,
+    StatefulInteractiveElement as _, Styled, Window, canvas, div, point, px, rgb, rgba,
 };
 use text::PointUtf16;
 
@@ -89,13 +89,15 @@ fn basename(uri: &str) -> String {
 }
 
 impl MarkerSeverity {
-    /// Monaco's default `editorError/Warning/Info.foreground` colors.
+    /// Monaco's `vs-dark` `editorError/Warning/Info/Hint.foreground`. The
+    /// editor draws markers in its theme's colors instead
+    /// ([`EditorColors::marker_color`](crate::EditorColors::marker_color)).
     pub fn color(self) -> Hsla {
         match self {
             MarkerSeverity::Error => rgb(0xf14c4c).into(),
             MarkerSeverity::Warning => rgb(0xcca700).into(),
-            MarkerSeverity::Info => rgb(0x3794ff).into(),
-            MarkerSeverity::Hint => rgb(0xeeeeee).into(),
+            MarkerSeverity::Info => rgb(0x59a4f9).into(),
+            MarkerSeverity::Hint => rgba(0xeeeeeeb3).into(),
         }
     }
 }
@@ -215,11 +217,13 @@ impl TextModel {
                     start..end,
                     DecorationOptions {
                         underline,
-                        overview_ruler: (marker.severity >= MarkerSeverity::Warning)
+                        // Monaco marks infos too.
+                        overview_ruler: (marker.severity >= MarkerSeverity::Info)
                             .then_some((color, OverviewRulerLane::Right)),
                         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
                         z_index: 10 + marker.severity as i32,
                         validation: true,
+                        severity: Some(marker.severity),
                         // Monaco: deprecated wins over unnecessary.
                         unnecessary: marker.has_tag(MarkerTag::Unnecessary)
                             && !marker.has_tag(MarkerTag::Deprecated),
@@ -447,7 +451,7 @@ impl MarkerZone {
             .rounded(px(3.))
             .cursor_pointer()
             .text_color(self.colors.peek_view_title_foreground)
-            .hover(|style| style.bg(self.colors.scrollbar_slider_hover))
+            .hover(|style| self.colors.toolbar_hover(style))
             .tooltip(crate::tooltip::tooltip(label, &self.colors))
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 cx.stop_propagation();
@@ -463,10 +467,10 @@ impl MarkerZone {
 impl Render for MarkerZone {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors.clone();
-        let frame = self.marker.severity.color();
-        // Monaco `editorMarkerNavigation*.headerBackground`: the frame color
-        // at 10%.
-        let header_background = Hsla { a: 0.1, ..frame };
+        // Monaco `editorMarkerNavigation{Error,Warning,Info}.background` and
+        // `.headerBackground`.
+        let (frame, header_background) = colors.marker_navigation_colors(self.marker.severity);
+        let icon = colors.marker_color(self.marker.severity);
         let line_height = self.line_height;
         // Monaco: the arrow is a third of a line tall, under the marker.
         let arrow_height = (line_height / 3.).round();
@@ -558,7 +562,7 @@ impl Render for MarkerZone {
             .text_size(px(13.))
             .child(
                 div()
-                    .text_color(frame)
+                    .text_color(icon)
                     .child(Self::severity_glyph(self.marker.severity)),
             )
             .when(!title.is_empty(), |this| {
@@ -600,7 +604,7 @@ impl Render for MarkerZone {
             .min_h_0()
             .overflow_scroll()
             .track_scroll(&self.scroll)
-            .bg(colors.background)
+            .bg(colors.marker_navigation_background)
             .text_color(colors.foreground)
             .font_family(self.font_family.clone())
             .text_size(self.font_size)

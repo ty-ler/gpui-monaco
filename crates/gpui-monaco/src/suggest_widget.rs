@@ -570,6 +570,12 @@ impl SuggestWidget {
                 );
             } else {
                 let (glyph, glyph_color) = kind_icon(item.kind, &self.theme.colors);
+                // `editorSuggestWidget.selectedIconForeground` on the
+                // focused row.
+                let glyph_color = match self.theme.colors.suggest_selected_icon_foreground {
+                    Some(color) if is_selected => Some(color),
+                    _ => glyph_color,
+                };
                 if let Some(glyph_color) = glyph_color {
                     icon = icon.text_color(glyph_color);
                 }
@@ -589,8 +595,14 @@ impl SuggestWidget {
             .items_center()
             .overflow_hidden()
             .when(is_selected, |this| {
-                this.bg(colors.suggest_selected_background)
-                    .text_color(colors.suggest_selected_foreground)
+                let this = this
+                    .bg(colors.suggest_selected_background)
+                    .text_color(colors.suggest_selected_foreground);
+                // `editorSuggestWidget.focusOutline` (high contrast).
+                match colors.suggest_focus_outline {
+                    Some(outline) => this.border_1().border_color(outline),
+                    None => this,
+                }
             })
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
@@ -701,7 +713,7 @@ impl SuggestWidget {
             .border_t_1()
             .border_color(colors.suggest_border)
             .text_size(self.metrics.font_size * 0.8)
-            .text_color(colors.suggest_foreground.opacity(0.5))
+            .text_color(colors.suggest_status_foreground)
             .child(left)
             .children(right)
     }

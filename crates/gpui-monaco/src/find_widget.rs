@@ -519,6 +519,11 @@ fn toggle(
         })
         .when(active, |this| {
             this.bg(colors.input_option_active_background)
+                .text_color(colors.input_option_active_foreground)
+        })
+        .when(!active, |this| {
+            let hover = colors.input_option_hover_background;
+            this.hover(move |style| style.bg(hover))
         })
         .cursor_pointer()
         .child(label)
@@ -529,6 +534,7 @@ fn toggle(
 fn button(
     id: &'static str,
     label: &'static str,
+    colors: &EditorColors,
     cx: &mut Context<FindWidget>,
     on_click: impl Fn(&mut FindWidget, &mut Window, &mut Context<FindWidget>) + 'static,
 ) -> impl IntoElement {
@@ -537,7 +543,7 @@ fn button(
         .px(px(4.))
         .rounded(px(3.))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::hsla(0., 0., 0.5, 0.2)))
+        .hover(|style| colors.toolbar_hover(style))
         .child(label)
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
@@ -580,7 +586,7 @@ impl Render for FindWidget {
                 .bg(colors.input_background)
                 .border_1()
                 .border_color(if error {
-                    gpui::red().opacity(0.6)
+                    colors.input_validation_error_border
                 } else {
                     gpui::transparent_black()
                 })
@@ -681,6 +687,7 @@ impl Render for FindWidget {
                     .child(button(
                         "toggle-replace",
                         if self.replace_visible { "▾" } else { "▸" },
+                        &colors,
                         cx,
                         |this, _, cx| {
                             this.replace_visible = !this.replace_visible;
@@ -719,10 +726,10 @@ impl Render for FindWidget {
                             })
                             .child(status_label),
                     )
-                    .child(button("previous", "↑", cx, |this, _, cx| {
+                    .child(button("previous", "↑", &colors, cx, |this, _, cx| {
                         this.with_editor(cx, |editor, cx| editor.find_previous(cx))
                     }))
-                    .child(button("next", "↓", cx, |this, _, cx| {
+                    .child(button("next", "↓", &colors, cx, |this, _, cx| {
                         this.with_editor(cx, |editor, cx| editor.find_next(cx))
                     }))
                     .child(toggle(
@@ -733,7 +740,7 @@ impl Render for FindWidget {
                         cx,
                         |o| o.in_selection = !o.in_selection,
                     ))
-                    .child(button("close", "×", cx, |this, window, cx| {
+                    .child(button("close", "×", &colors, cx, |this, window, cx| {
                         if let Some(editor) = this.editor.upgrade() {
                             editor.update(cx, |editor, cx| editor.close_find(window, cx));
                         }
@@ -755,10 +762,10 @@ impl Render for FindWidget {
                             cx,
                             |o| o.preserve_case = !o.preserve_case,
                         ))
-                        .child(button("replace", "Replace", cx, |this, _, cx| {
+                        .child(button("replace", "Replace", &colors, cx, |this, _, cx| {
                             this.with_editor(cx, |editor, cx| editor.replace_one(cx))
                         }))
-                        .child(button("replace-all", "All", cx, |this, _, cx| {
+                        .child(button("replace-all", "All", &colors, cx, |this, _, cx| {
                             this.with_editor(cx, |editor, cx| editor.replace_all(cx))
                         })),
                 )

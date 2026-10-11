@@ -106,6 +106,11 @@ pub struct DecorationOptions {
     /// A diagnostic's decoration (Monaco `isForValidation`), hidden as the
     /// editor's `render_validation_decorations` says.
     pub validation: bool,
+    /// A marker of this severity (Monaco's `squiggly-error` and similar
+    /// class names): the squiggle, background and overview ruler mark take
+    /// the editor theme's `editorError.*`, `editorWarning.*` or
+    /// `editorInfo.*` colors instead of `underline`'s and `overview_ruler`'s.
+    pub severity: Option<crate::MarkerSeverity>,
     /// Unnecessary (e.g. unused) code, faded when the editor's
     /// `show_unused` is on (Monaco `squiggly-inline-unnecessary`).
     pub unnecessary: bool,

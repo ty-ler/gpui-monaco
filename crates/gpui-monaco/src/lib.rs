@@ -164,8 +164,8 @@ pub use suggest_widget::SuggestWidget;
 pub use syntax;
 pub use text;
 pub use theme::{
-    EditorColors, InlineEditColors, SymbolIconColors, Theme, ThemeKind, TokenStyle, define_theme,
-    global_theme, set_theme, theme_named,
+    EditorColors, InlineEditColors, SymbolIconColors, Theme, ThemeKind, TokenFontStyle, TokenStyle,
+    define_theme, global_theme, set_theme, theme_named,
 };
 pub use view::reveal::{RevealType, ScrollType};
 pub use widgets::{

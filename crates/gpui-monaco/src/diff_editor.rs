@@ -3478,13 +3478,20 @@ fn diff_decorations(
                 .render_indicators
                 .then(|| (SharedString::from(sign), colors.foreground)),
             overview_ruler: options.render_overview_ruler.then(|| {
-                let color = if inserted {
-                    colors.diff_inserted_text_background
+                // `diffEditorOverview.*Foreground` if the theme sets them.
+                let (overview, color) = if inserted {
+                    (
+                        colors.diff_overview_inserted,
+                        colors.diff_inserted_text_background,
+                    )
                 } else {
-                    colors.diff_removed_text_background
+                    (
+                        colors.diff_overview_removed,
+                        colors.diff_removed_text_background,
+                    )
                 };
                 (
-                    color.opacity(1.0f32.min(color.a * 3.)),
+                    overview.unwrap_or(color.opacity(1.0f32.min(color.a * 3.))),
                     OverviewRulerLane::Full,
                 )
             }),

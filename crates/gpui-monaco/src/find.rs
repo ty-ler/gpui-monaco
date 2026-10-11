@@ -255,6 +255,15 @@ impl FindState {
 fn match_options(colors: &crate::theme::EditorColors, overview: bool) -> DecorationOptions {
     DecorationOptions {
         background: Some(colors.find_match_highlight_background),
+        // High contrast outlines matches; `findMatch*Foreground` recolors
+        // their text.
+        border: colors.find_match_highlight_border,
+        text: colors
+            .find_match_highlight_foreground
+            .map(|foreground| crate::theme::TokenStyle {
+                foreground: Some(foreground),
+                ..Default::default()
+            }),
         overview_ruler: overview.then_some((colors.find_match_overview, OverviewRulerLane::Center)),
         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
         z_index: 10,
@@ -265,6 +274,13 @@ fn match_options(colors: &crate::theme::EditorColors, overview: bool) -> Decorat
 fn current_match_options(colors: &crate::theme::EditorColors) -> DecorationOptions {
     DecorationOptions {
         background: Some(colors.find_match_background),
+        border: colors.find_match_border,
+        text: colors
+            .find_match_foreground
+            .map(|foreground| crate::theme::TokenStyle {
+                foreground: Some(foreground),
+                ..Default::default()
+            }),
         overview_ruler: Some((colors.find_match_overview, OverviewRulerLane::Center)),
         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
         z_index: 13,
@@ -759,6 +775,7 @@ impl CodeEditor {
                     offsets(scope),
                     DecorationOptions {
                         background: Some(colors.find_range_highlight_background),
+                        border: colors.find_range_highlight_border,
                         is_whole_line: true,
                         ..Default::default()
                     },
@@ -850,6 +867,7 @@ impl CodeEditor {
                         r,
                         DecorationOptions {
                             background: Some(colors.range_highlight_background),
+                            border: colors.range_highlight_border,
                             is_whole_line: true,
                             stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
                             ..Default::default()
