@@ -92,6 +92,7 @@ editor.update(cx, |editor, cx| {
 | `use_tab_stops` | `useTabStops` | Backspace in indentation deletes to the previous indent stop (on) |
 | `trim_whitespace_on_delete` | `trimWhitespaceOnDelete` | deleting a line break also deletes the next line's leading whitespace (off) |
 | `multi_cursor_modifier`, `multi_cursor_paste`, `multi_cursor_limit`, `multi_cursor_merge_overlapping` | `multiCursorModifier`, … | Alt or Cmd/Ctrl to add cursors; spread or full paste |
+| `hover` (`enabled`, `delay`, `sticky`, `hiding_delay`, `above`) | `hover` | when the mouse shows hovers (`On`, `Off`, or `OnKeyboardModifier`: while the modifier opposite `multi_cursor_modifier` is held), after how long, whether it stays while the mouse moves onto it, how long it waits for the mouse, and which side it prefers |
 | `column_selection` | `columnSelection` | mouse drags and Shift+arrows make column selections |
 | `overtype_cursor_style`, `overtype_on_paste` | `overtypeCursorStyle`, `overtypeOnPaste` | overtype mode (Insert) |
 | `comments` | `comments` | `insert_space`, `ignore_empty_lines` |

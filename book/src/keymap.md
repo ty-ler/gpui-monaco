@@ -24,6 +24,7 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **Ctrl+Space (or Cmd+I)** in the suggest widget: show or hide the details
 - **Shift+Enter / Shift+Tab** in the suggest widget: accept in the other insert mode
 - **Up / Down (or Cmd+Up / Cmd+Down, Ctrl+P / Ctrl+N), PageUp / PageDown** in the suggest widget: previous and next suggestion, by item or page
+- **Cmd+K Cmd+I** with a hover showing: focus it. Arrows scroll it, PageUp / PageDown (or Alt+Up / Alt+Down) page, Home / End (or Cmd+Up / Cmd+Down) go to the top and bottom, and Escape closes it
 - **Tab / Shift+Tab** with `tab_completion: On`: insert the best completion, then cycle through the others
 
 Tab focus mode (Ctrl+M; Ctrl+Shift+M on macOS) makes Tab and Shift+Tab move focus out of the editor, for keyboard and screen reader users.

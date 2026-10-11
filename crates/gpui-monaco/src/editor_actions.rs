@@ -137,6 +137,12 @@ fn color_picker_visible(editor: &CodeEditor, _: &App) -> bool {
     editor.is_standalone_color_picker_visible()
 }
 
+/// Monaco `hoverVisible` (Monaco requires `hoverFocused` for scrolling,
+/// which preconditions here can't see).
+fn hover_visible(editor: &CodeEditor, _: &App) -> bool {
+    editor.is_hover_visible()
+}
+
 /// Monaco `stickyScrollFocused`.
 fn sticky_focused(editor: &CodeEditor, _: &App) -> bool {
     editor.sticky.focused.is_some()
@@ -218,6 +224,15 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.wordHighlight.prev", "code_editor::WordHighlightPrev", "Go to Previous Symbol Highlight", always),
     Builtin("editor.action.wordHighlight.trigger", "code_editor::WordHighlightTrigger", "Trigger Symbol Highlight", always),
     Builtin("editor.action.showHover", "code_editor::ShowHover", "Show or Focus Hover", always),
+    Builtin("editor.action.hideHover", "code_editor::HideHover", "Hide Hover", always),
+    Builtin("editor.action.scrollUpHover", "code_editor::ScrollUpHover", "Scroll Up Hover", hover_visible),
+    Builtin("editor.action.scrollDownHover", "code_editor::ScrollDownHover", "Scroll Down Hover", hover_visible),
+    Builtin("editor.action.scrollLeftHover", "code_editor::ScrollLeftHover", "Scroll Left Hover", hover_visible),
+    Builtin("editor.action.scrollRightHover", "code_editor::ScrollRightHover", "Scroll Right Hover", hover_visible),
+    Builtin("editor.action.pageUpHover", "code_editor::PageUpHover", "Page Up Hover", hover_visible),
+    Builtin("editor.action.pageDownHover", "code_editor::PageDownHover", "Page Down Hover", hover_visible),
+    Builtin("editor.action.goToTopHover", "code_editor::GoToTopHover", "Go To Top Hover", hover_visible),
+    Builtin("editor.action.goToBottomHover", "code_editor::GoToBottomHover", "Go To Bottom Hover", hover_visible),
     Builtin("editor.action.openLink", "code_editor::OpenLink", "Open Link", always),
     Builtin("editor.action.fontZoomIn", "code_editor::FontZoomIn", "Increase Editor Font Size", always),
     Builtin("editor.action.fontZoomOut", "code_editor::FontZoomOut", "Decrease Editor Font Size", always),

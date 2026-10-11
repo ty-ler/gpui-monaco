@@ -2640,13 +2640,25 @@ impl CodeEditor {
             cx.notify();
         }
         if event.pressed_button.is_none() && self.mouse_selection.is_none() {
+            let over_hover = self
+                .hover_card_bounds(cx)
+                .is_some_and(|bounds| bounds.contains(&event.position));
             let over_widget = self.layout.as_ref().is_some_and(|layout| {
                 layout
                     .widget_bounds
                     .iter()
                     .any(|bounds| bounds.contains(&event.position))
             });
-            if !over_widget {
+            let hover_focused = self.is_hover_focused(window, cx);
+            if over_hover {
+                self.hover_mouse_move(
+                    crate::hover::HoverTarget::None,
+                    true,
+                    hover_focused,
+                    event.modifiers,
+                    cx,
+                );
+            } else if !over_widget {
                 let position = self.text_position_under_mouse(event.position, window, cx);
                 let link_modifier = self.is_definition_modifier(&event.modifiers);
                 self.links_mouse_move(position, link_modifier, cx);
@@ -2655,7 +2667,21 @@ impl CodeEditor {
                 } else if self.has_definition_link() {
                     self.clear_definition_link(cx);
                 }
-                self.hover_mouse_move(position, cx);
+                // Monaco's glyph hover: the glyph margin and line numbers.
+                let gutter_row = self.layout.as_ref().and_then(|layout| {
+                    let gutter = layout.bounds.contains(&event.position)
+                        && event.position.x
+                            < layout.bounds.left()
+                                + layout.glyph_margin_width
+                                + layout.line_numbers_width;
+                    gutter.then(|| self.position_for_point(event.position, window, cx).row)
+                });
+                let target = match (position, gutter_row) {
+                    (_, Some(row)) => crate::hover::HoverTarget::Gutter(row),
+                    (Some(position), None) => crate::hover::HoverTarget::Text(position),
+                    (None, None) => crate::hover::HoverTarget::None,
+                };
+                self.hover_mouse_move(target, false, hover_focused, event.modifiers, cx);
             }
         }
         if self.scrollbar_drag.is_some() {
@@ -3695,7 +3721,10 @@ impl Render for CodeEditor {
                 cx.listener(|this, _: &GoToPreviousMarker, _, cx| this.go_to_marker(false, cx)),
             )
             .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| this.go_to_definition(cx)))
-            .on_action(cx.listener(|this, _: &ShowHover, _, cx| this.show_hover_at_cursor(cx)))
+            .on_action(
+                cx.listener(|this, _: &ShowHover, window, cx| this.show_or_focus_hover(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &HideHover, _, cx| this.hide_hover(cx)))
             .on_action(cx.listener(|this, _: &OpenLink, _, cx| this.open_link(cx)))
             .on_action(cx.listener(|this, _: &GotoLine, window, cx| {
                 if this.options.single_line {
@@ -3767,6 +3796,7 @@ impl Render for CodeEditor {
             .on_modifiers_changed(cx.listener(
                 |this, event: &gpui::ModifiersChangedEvent, _, cx| {
                     this.inlay_hints_modifiers(&event.modifiers, cx);
+                    this.hover_modifiers_changed(&event.modifiers, cx);
                     this.sticky_mouse_move(None, event.modifiers.shift, cx);
                     this.dnd_modifiers_changed(&event.modifiers, cx);
                 },

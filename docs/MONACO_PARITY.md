@@ -104,7 +104,7 @@ Issues are linked by number.
 | Completion: resolve, tags, insert/replace modes, word suggestions, accept and selection options | `suggest` | ✅ | #103 |
 | Completion: tab completion, locality bonus, retrigger rules | `suggest` | ✅ | #103 |
 | Completion widget: details toggle, side docs, resizing, status bar, loading and empty messages | `suggest` | ✅ | #103 |
-| Hover | `hover` | 🟡 content hovers; options, resizing, keyboard focus and gutter hovers to come | #199 |
+| Hover | `hover` | 🟡 content and gutter hovers, options, keyboard focus and scrolling; resizing, verbosity and the copy button to come | #199 |
 | Signature help (with cycling) | `parameterHints` | ✅ | |
 | Go to definition (link, F12) | `gotoSymbol` | ✅ | |
 | References, declaration, type definition, implementation, peek view | `gotoSymbol`, `peekView` | ✅ | #95 |
