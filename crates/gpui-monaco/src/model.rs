@@ -52,8 +52,10 @@ impl Global for Models {}
 
 /// Makes `model` findable by its uri with [`model_for_uri`] while it's
 /// alive. Editors register their models; register others (e.g. files a
-/// language server talks about) yourself.
+/// language server talks about) yourself. It also adds `model` to
+/// [`models`](crate::models) if it was created before [`crate::init`].
 pub fn register_model(cx: &mut App, model: &gpui::Entity<TextModel>) {
+    crate::registry::track_model(model, cx);
     if let Some(uri) = model.read(cx).uri().cloned() {
         let models = cx.default_global::<Models>();
         models.by_uri.retain(|_, model| model.upgrade().is_some());
@@ -84,6 +86,14 @@ pub fn model_for_uri(cx: &mut App, uri: &str) -> Option<gpui::Entity<TextModel>>
     if let Some(model) = models.by_uri.get(uri).and_then(|model| model.upgrade()) {
         return Some(model);
     }
+    // Any other live model with that uri.
+    if let Some(model) = crate::registry::models(cx)
+        .into_iter()
+        .find(|model| model.read(cx).uri().is_some_and(|u| u.as_ref() == uri))
+    {
+        return Some(model);
+    }
+    let models = cx.default_global::<Models>();
     let resolver = models.resolver.clone()?;
     let model = resolver(uri, cx)?;
     register_model(cx, &model);
@@ -194,11 +204,18 @@ pub enum TextModelEvent {
     },
     /// [`TextModel::update_options`] changed the options.
     OptionsChanged,
-    /// [`TextModel::set_language`] changed the language id.
-    LanguageChanged,
+    /// [`TextModel::set_language`] changed the language id (Monaco
+    /// `onDidChangeLanguage`).
+    LanguageChanged {
+        /// The previous language id (Monaco `oldLanguage`).
+        old_language: Option<SharedString>,
+        /// The new language id (Monaco `newLanguage`).
+        new_language: Option<SharedString>,
+    },
     /// [`TextModel::set_line_ending`] changed the line ending.
     LineEndingChanged,
-    /// [`TextModel::set_markers`] changed the markers.
+    /// [`TextModel::set_markers`] changed the markers; setting none where
+    /// there were none isn't a change.
     MarkersChanged,
     /// New highlights are available (background parse finished).
     SyntaxUpdated,
@@ -403,13 +420,19 @@ impl TextModel {
     }
 
     /// Changes the language id (Monaco `setModelLanguage`), resolving it right away
-    /// and emitting [`TextModelEvent::LanguageChanged`] if it differs.
+    /// and emitting [`TextModelEvent::LanguageChanged`] (and the global
+    /// [`on_did_change_model_language`](crate::on_did_change_model_language))
+    /// if it differs.
     pub fn set_language(&mut self, language_id: Option<SharedString>, cx: &mut Context<Self>) {
         if self.language_id != language_id {
-            self.language_id = language_id;
+            let old_language = std::mem::replace(&mut self.language_id, language_id);
             self.language_pending = true;
             self.ensure_syntax(cx);
-            cx.emit(TextModelEvent::LanguageChanged);
+            cx.emit(TextModelEvent::LanguageChanged {
+                old_language: old_language.clone(),
+                new_language: self.language_id.clone(),
+            });
+            crate::registry::model_language_changed(cx.weak_entity(), old_language, cx);
             cx.notify();
         }
     }

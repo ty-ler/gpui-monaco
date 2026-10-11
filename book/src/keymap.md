@@ -79,6 +79,41 @@ div()
 
 You can also drive the editor directly. `CodeEditor` exposes many commands as methods: `undo`, `redo`, `fold`, `unfold`, `fold_all`, `go_to_definition`, `type_text`, `set_selections` and others.
 
+## Global commands, actions and keybinding rules
+
+Monaco's global `monaco.editor.addCommand`, `addEditorAction` and `addKeybindingRule(s)` are free functions. Each returns a `Disposable` whose `dispose(cx)` removes what it added; dropping it keeps the registration.
+
+```rust,ignore
+use gpui_monaco::{EditorActionDescriptor, KeybindingRule};
+
+// A command, for keybindings and providers' `Command`s. Handlers for one id
+// stack: disposing the newest brings back the one before.
+let command = gpui_monaco::add_command(cx, "my.save", |args, cx| save(args, cx));
+
+// An action in every editor, now and later: by id, keybinding and context
+// menu (not the command palette, as in Monaco).
+let action = gpui_monaco::add_editor_action(
+    cx,
+    EditorActionDescriptor::new("my.upper", "Make Upper", |editor, window, cx| { /* … */ })
+        .keybinding("ctrl-alt-u")
+        .context_menu("1_modification", 1.5),
+);
+
+// Keystrokes for a command: an editor action, a Monaco command such as
+// "cursorDown", a registered command (with its argument) or a GPUI action.
+let rules = gpui_monaco::add_keybinding_rules(
+    cx,
+    vec![
+        KeybindingRule::new("cmd-s", "my.save").args(serde_json::json!({ "all": false })),
+        KeybindingRule::unbind("cmd-k cmd-x"), // Monaco `command: null`
+    ],
+)?;
+
+rules.dispose(cx); // removes exactly those bindings
+```
+
+A rule's `when` is a GPUI key context predicate; without one it applies in the editor (`"CodeEditor"`). Rules are bound to the `RunCommand` action, which the focused editor runs.
+
 ## Commands by Monaco id
 
 `editor.trigger(id, window, cx)` runs a command by its Monaco id, as Monaco's `trigger` does:

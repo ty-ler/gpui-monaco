@@ -1258,6 +1258,8 @@ impl DiffEditor {
             _subscriptions: Vec::new(),
         };
         this.apply_word_wrap(cx);
+        // After its editors, as Monaco's `addDiffEditor`.
+        crate::registry::track_diff_editor(cx);
         this.subscribe(cx);
         this.compute_diff(true, cx);
         this

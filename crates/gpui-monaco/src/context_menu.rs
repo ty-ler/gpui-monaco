@@ -502,8 +502,13 @@ impl CodeEditor {
                 },
             ));
         }
-        // Host actions with a group (Monaco `contextMenuGroupId`).
-        for action in &self.added_actions {
+        // Host actions with a group (Monaco `contextMenuGroupId`), this
+        // editor's then the global ones it doesn't shadow.
+        let global = crate::editor_actions::global_actions(cx);
+        let global = global
+            .iter()
+            .filter(|g| !self.added_actions.iter().any(|a| a.id == g.id));
+        for action in self.added_actions.iter().chain(global) {
             let Some(group) = &action.context_menu_group_id else {
                 continue;
             };

@@ -7,7 +7,8 @@ gpui-monaco aims to *behave* like Monaco. Where it differs, it's usually because
 - **Positions:** 0-based `PointUtf16 { row, column }` instead of 1-based `{ lineNumber, column }`. Use `PointUtf16::from_monaco` and `to_monaco` to convert. View zones' `after_line` keeps Monaco's 1-based meaning.
 - **Edits and decorations:** take byte offset ranges, not `IRange`.
 - **Options:** a typed `EditorOptions` struct, not a dynamic options bag. Change them with `update_options`.
-- **Commands:** keybindings and commands are GPUI actions. Monaco's `addAction` and `addCommand` correspond to defining your own actions; see [Keybindings](keymap.md).
+- **Commands:** keybindings and commands are GPUI actions. Monaco's `addAction` is `add_action`, and the global `addCommand`, `addEditorAction` and `addKeybindingRules` are free functions returning a `Disposable`; keybindings use GPUI keystroke syntax and key context predicates instead of key codes and `when` clauses. See [Keybindings](keymap.md).
+- **Global events:** Monaco's `monaco.editor.onDid…` events take a listener and return a gpui `Subscription`. Creation events arrive after the current update, and `on_will_dispose_model` gets the model's id and state, since a released entity can't be handed out.
 - **Providers:** registered app-wide per language selector. A provider returns a GPUI `Task`, not a `Promise`, and has no cancellation token; dropping the task cancels it.
 - **Highlighting:** done by tree-sitter grammars and queries, not Monarch tokenizers. Monaco theme rules still apply, because captures are mapped to Monaco token names and TextMate scopes.
 

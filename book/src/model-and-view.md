@@ -127,3 +127,22 @@ cx.subscribe(&editor, |this, editor, event: &CodeEditorEvent, cx| {
 })
 .detach();
 ```
+
+## Global registries
+
+Monaco's `monaco.editor.getEditors`, `getDiffEditors` and `getModels` are `editors(cx)`, `diff_editors(cx)` and `models(cx)`. They hold weak handles, so released entities drop out. A diff editor's two code editors are listed too.
+
+`on_did_create_editor`, `on_did_create_diff_editor`, `on_did_create_model`, `on_will_dispose_model` and `on_did_change_model_language` subscribe to the matching Monaco events and return a gpui `Subscription`:
+
+```rust,ignore
+gpui_monaco::on_did_create_model(cx, |model, cx| {
+    println!("opened {:?}", model.read(cx).uri());
+})
+.detach();
+gpui_monaco::on_will_dispose_model(cx, |_id, model, _cx| {
+    println!("closed {:?}", model.uri());
+})
+.detach();
+```
+
+`init` starts tracking models, so call it before creating any. A model created earlier joins when an editor shows it.

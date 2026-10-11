@@ -17,6 +17,20 @@ editor.update(cx, |editor, cx| editor.set_theme(Arc::new(Theme::vs()), cx));
 - `Theme::vs()`: Monaco's `vs`
 - `Theme::hc_black()` and `Theme::hc_light()`: Monaco's high-contrast `hc-black` and `hc-light`
 
+## Themes by name
+
+As in Monaco, themes can also be set for every editor by name. `set_theme` switches every editor (including those in diff editors) and the ones created later; an unknown name gets `vs`. `define_theme` adds a theme for it, or replaces one; replacing the current theme updates the editors.
+
+```rust,ignore
+// Names are ASCII letters, digits and `-`, as in Monaco.
+let mut theme = Theme::from_vscode_file(Path::new("themes/dark_modern.json"))?;
+theme.name = "dark-modern".into();
+gpui_monaco::define_theme(cx, theme)?;
+gpui_monaco::set_theme(cx, "dark-modern");
+```
+
+`theme_named` looks one up (`vs`, `vs-dark`, `hc-black`, `hc-light` are built in), and `global_theme` is the current one.
+
 ## VS Code themes
 
 Any VS Code color theme JSON works, with or without comments. Its `colors` set the editor colors, and its `tokenColors` are matched against TextMate scopes. Some themes `include` others; for example, Dark Modern includes Dark+, which includes Dark (Visual Studio).
@@ -50,7 +64,7 @@ let element = colorize_element(code, "rust", &theme, &registry, ColorizeOptions:
 let tokens = tokenize(code, "rust", &registry); // per line: offset, `keyword.rust`, ...
 ```
 
-`colorize` returns the lines (tabs expanded) with their highlights, and `colorize_highlights` gives the highlights for a `StyledText`.
+`colorize` returns the lines (tabs expanded) with their highlights, and `colorize_highlights` gives the highlights for a `StyledText`. `colorize_model_line(model, row, tab_size, &theme, cx)` (Monaco `colorizeModelLine`) colors a line of a model with the model's own syntax, without waiting for a background parse.
 
 ## Custom themes
 

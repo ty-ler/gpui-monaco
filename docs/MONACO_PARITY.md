@@ -93,6 +93,9 @@ Issues are linked by number.
 | Decorations: background, underline, glyph, gutter bar, before/after text, overview ruler, hover message, stickiness, owner | `deltaDecorations` | ✅ | |
 | View zones, content widgets, overlay widgets | widget API | ✅ | |
 | Custom commands and keybindings | `addAction`, `addCommand` | ✅ (GPUI actions) | |
+| Global commands, actions and removable keybinding rules | `editor.addCommand`, `addEditorAction`, `addKeybindingRule(s)` | ✅ (`Disposable`; GPUI keystrokes and key contexts) | #204 |
+| Editor, diff editor and model registries and events | `getEditors`, `getDiffEditors`, `onDidCreateEditor`, `onDidCreateDiffEditor`, `getModels`, `onDidCreateModel`, `onWillDisposeModel`, `onDidChangeModelLanguage` | ✅ | #204 |
+| Markers across models | `getModelMarkers`, `removeAllMarkers`, `onDidChangeMarkers` | ✅ markers live in their model, so none for uris without one | #204 |
 | Context menu, with host items | `contextmenu` | ✅ | #91 |
 | Go to line, quick outline (quick input) | `quickAccess` | ✅ | #100 |
 | Command palette, `addAction` | `quickAccess` | ✅ | #100 |
@@ -100,7 +103,9 @@ Issues are linked by number.
 | Model helpers: lines, `modifyPosition`, find next/previous/scoped with captures, `applyEdits` undo edits, `pushEditOperations` with a cursor computer, `popStackElement`, alternative version id, bracket pairs and guides | `ITextModel` | ✅ | #206 |
 | Custom highlighter | tokenization support | ✅ (`Language::with_highlighter`) | |
 | Static colorize and tokenize | `colorizer` | ✅ | #108 |
+| Colorize a model line | `colorizeModelLine` | ✅ | #204 |
 | Themes: `vs`, `vs-dark`, VS Code JSON, `defineTheme` | standalone theme service | ✅ | |
+| Themes by name for every editor | `editor.defineTheme`, `editor.setTheme` | ✅ | #204 |
 | High-contrast themes (`hc-black`, `hc-light`) | standalone themes | ✅ | #53 |
 
 ## Language features (providers)

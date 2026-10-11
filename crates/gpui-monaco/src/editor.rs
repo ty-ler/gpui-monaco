@@ -281,6 +281,7 @@ impl CodeEditor {
     /// Creates an editor showing `model`.
     pub fn new(model: Entity<TextModel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::model::register_model(cx, &model);
+        crate::registry::track_editor(cx);
         // A tab stop, like Monaco's textarea, for tab focus mode and hosts.
         let focus_handle = cx.focus_handle().tab_stop(true);
         let subscriptions = vec![
@@ -329,7 +330,7 @@ impl CodeEditor {
             dnd: Default::default(),
             drop_paste: Default::default(),
             a11y_rows: Default::default(),
-            theme: Arc::new(Theme::vs_dark()),
+            theme: crate::theme::global_theme(cx).unwrap_or_else(|| Arc::new(Theme::vs_dark())),
             scroll_top: px(0.),
             scroll_left: px(0.),
             layout: None,
@@ -545,7 +546,8 @@ impl CodeEditor {
         &self.theme.colors
     }
 
-    /// The current theme. Defaults to [`Theme::vs_dark`].
+    /// The current theme. Defaults to the one set with
+    /// [`crate::set_theme`], else [`Theme::vs_dark`].
     pub fn theme(&self) -> &Arc<Theme> {
         &self.theme
     }
@@ -1030,7 +1032,7 @@ impl CodeEditor {
                 }
                 cx.notify();
             }
-            TextModelEvent::LanguageChanged => {
+            TextModelEvent::LanguageChanged { .. } => {
                 // Monaco closes the peek view.
                 self.close_peek(cx);
                 self.reset_inlay_hints(cx);
@@ -4002,6 +4004,11 @@ impl Render for CodeEditor {
             }))
             .on_action(cx.listener(|this, action: &RunAction, window, cx| {
                 if !this.run_action(&action.id, window, cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, action: &RunCommand, window, cx| {
+                if !this.run_command(&action.id, action.args.clone(), window, cx) {
                     cx.propagate();
                 }
             }))

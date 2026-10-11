@@ -260,6 +260,70 @@ pub fn colorize(
     result
 }
 
+/// Monaco `colorizeModelLine`: row `row` (0-based) of `model` highlighted
+/// with its own tokens, tabs expanded to `tab_size` (Monaco's default is
+/// 4). Like Monaco's `forceTokenization`, it doesn't wait for a background
+/// parse: a model that has parsed before is brought up to date right away,
+/// and one that never has (e.g. not shown yet) is parsed by its language
+/// id. Lines past `max_tokenization_line_length` aren't highlighted.
+/// `None` for rows past the end, where Monaco throws.
+pub fn colorize_model_line(
+    model: &crate::TextModel,
+    row: u32,
+    tab_size: u32,
+    theme: &Theme,
+    cx: &gpui::App,
+) -> Option<ColorizedLine> {
+    if row >= model.line_count() {
+        return None;
+    }
+    let line = model.line_content(row);
+    let rope = model.buffer().rope();
+    let line_start = rope.point_to_offset(text::Point::new(row, 0));
+    let line_end = line_start + line.len();
+    let tokenized = model.line_len_utf16(row) < model.options().max_tokenization_line_length;
+    let captures: Vec<(Range<usize>, syntax::HighlightId)> = if !tokenized {
+        Vec::new()
+    } else if let Some(syntax) = model.syntax_snapshot() {
+        let state = if syntax.text.version() == model.version() {
+            syntax.state
+        } else {
+            let patch = model.buffer().edits_since(syntax.text.version());
+            syntax.highlighter.update(
+                Some((&syntax.state, syntax.text.rope(), &patch)),
+                &model.snapshot(),
+            )
+        };
+        syntax
+            .highlighter
+            .highlights(&state, rope, line_start..line_end)
+            .into_iter()
+            .map(|span| (span.range, span.highlight))
+            .collect()
+    } else if let Some(language_id) = model.language_id() {
+        let registry = crate::language_registry(cx);
+        capture_spans(&model.buffer().rope().to_string(), language_id, &registry)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let (expanded, map) = expand_tabs(&line, tab_size.max(1) as usize);
+    let highlights = captures
+        .into_iter()
+        .filter(|(range, _)| range.start < line_end && range.end > line_start)
+        .map(|(range, capture)| {
+            let start = range.start.max(line_start) - line_start;
+            let end = range.end.min(line_end) - line_start;
+            (map[start]..map[end], token_style(theme, capture))
+        })
+        .filter(|(range, _)| !range.is_empty())
+        .collect();
+    Some(ColorizedLine {
+        text: expanded.into(),
+        highlights,
+    })
+}
+
 /// Monaco `colorizeElement`: `text` highlighted, one line per row, in the
 /// theme's editor font color. The host chooses the font and size.
 pub fn colorize_element(

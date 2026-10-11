@@ -16,12 +16,19 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `monaco.editor.create(el, { value, language })` | `cx.new(\|cx\| TextModel::new(value).with_language(language))`, then `CodeEditor::new(model, window, cx)` |
 | `monaco.editor.createModel(value, language, uri)` | `TextModel::new(value).with_language(language).with_uri(uri)`, then `register_model` so providers can find it |
 | `monaco.editor.getModel(uri)` | `model_for_uri(cx, uri)` |
+| `monaco.editor.getModels()`, `getEditors()`, `getDiffEditors()` | `models(cx)`, `editors(cx)`, `diff_editors(cx)` |
 | `monaco.editor.setModelLanguage(model, id)` | `model.set_language(id, cx)` |
 | `monaco.editor.setModelMarkers(model, owner, markers)` | `model.set_markers(owner, markers, cx)` |
-| `monaco.editor.defineTheme(name, data)` | `Theme::define(name, &base, inherit, rules, &colors)`, or `Theme::from_vscode_json` |
-| `monaco.editor.setTheme(name)` | `editor.set_theme(Arc::new(theme), cx)` (per editor) |
+| `monaco.editor.getModelMarkers({ owner, resource, take })` | `model_markers(cx, &MarkerFilter { owner, resource, take })` |
+| `monaco.editor.removeAllMarkers(owner)` | `remove_all_markers(cx, owner)` |
+| `monaco.editor.defineTheme(name, data)` | `define_theme(cx, Theme::define(name, &base, inherit, rules, &colors))`, or a theme from `Theme::from_vscode_json` |
+| `monaco.editor.setTheme(name)` | `set_theme(cx, name)` (every editor), or `editor.set_theme(Arc::new(theme), cx)` (one) |
 | `monaco.editor.colorize(text, lang, opts)` | `colorize::colorize(text, lang, &theme, &registry, opts)` or `colorize_element` |
 | `monaco.editor.tokenize(text, lang)` | `colorize::tokenize(text, lang, &registry)` |
+| `monaco.editor.colorizeModelLine(model, line, tabSize)` | `colorize::colorize_model_line(model.read(cx), row, tab_size, &theme, cx)` |
+| `monaco.editor.addCommand({ id, run })` | `add_command(cx, id, handler)`, returning a `Disposable` |
+| `monaco.editor.addEditorAction(descriptor)` | `add_editor_action(cx, EditorActionDescriptor::new(…))` |
+| `monaco.editor.addKeybindingRule(s)(rules)` | `add_keybinding_rule(s)(cx, KeybindingRule::new(keystrokes, command))` |
 | `monaco.languages.register(...)` | `set_language_registry(cx, registry)`, with grammars from `gpui-monaco-languages` |
 | `editor.dispose()` / `model.dispose()` | drop the entity |
 | `editor.layout()` | not needed: the editor lays itself out every frame |
@@ -52,7 +59,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `deltaDecorations(old, new)` | `delta_decorations(owner, &old, new, cx)` (byte ranges) |
 | `getDecorationsInRange(range)` | `decorations_in_range(range, editor)` |
 | `onDidChangeContent` | `TextModelEvent::Edited { changes, version, … }` |
-| `onDidChangeLanguage`, `onDidChangeOptions`, `onDidChangeDecorations` | `LanguageChanged`, `OptionsChanged`, `DecorationsChanged` |
+| `onDidChangeLanguage`, `onDidChangeOptions`, `onDidChangeDecorations` | `LanguageChanged { old_language, new_language }`, `OptionsChanged`, `DecorationsChanged` |
 
 ## Editor
 
@@ -75,7 +82,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `trigger(source, handlerId, payload)` | `trigger(id, window, cx)`, taking a Monaco action or command id (`cursorDown`, `undo`, …) or a GPUI action name; `DiffEditor::trigger` for `diffEditor.*` ids |
 | `getAction(id).run()` | `run_action(id, window, cx)` |
 | `addAction(descriptor)` | `add_action(EditorActionDescriptor::new(id, label, run).keybinding(…), cx)` |
-| `addCommand(keybinding, handler)` | define a GPUI action and bind it in `actions::KEY_CONTEXT` |
+| `addCommand(keybinding, handler)` | define a GPUI action and bind it in `actions::KEY_CONTEXT`, or `add_command` plus `add_keybinding_rule` |
 | `getSupportedActions()` | `supported_actions(cx)` |
 | `createDecorationsCollection(d)` | `create_decorations_collection(d, cx)` |
 | `deltaDecorations(old, new)` | the model's `delta_decorations(Some(editor_id), …)` (editor-owned) |
@@ -99,6 +106,17 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `onDidChangeModelContent` | subscribe to the model's `TextModelEvent::Edited` |
 | opener service / `registerEditorOpener` | `OpenLocation(location)` and `OpenLink(url)`: the host opens them |
 | `commandService.executeCommand` from providers | `ExecuteCommand(command)`, or `register_command` |
+
+### Global events
+
+Monaco's global `monaco.editor.on…` events are free functions returning a gpui `Subscription`; dropping it unsubscribes (`IDisposable.dispose()`), and `detach()` keeps it.
+
+| Monaco | gpui-monaco |
+|---|---|
+| `onDidCreateEditor`, `onDidCreateDiffEditor` | `on_did_create_editor(cx, …)`, `on_did_create_diff_editor(cx, …)` |
+| `onDidCreateModel`, `onWillDisposeModel` | `on_did_create_model(cx, …)`, `on_will_dispose_model(cx, …)` (the model's id and state, as it's released) |
+| `onDidChangeModelLanguage` | `on_did_change_model_language(cx, …)` (the model and its old language id) |
+| `onDidChangeMarkers` | `on_did_change_markers(cx, …)` (the changed uris) |
 
 ## Language features
 

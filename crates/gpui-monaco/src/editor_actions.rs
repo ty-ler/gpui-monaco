@@ -1,15 +1,19 @@
 //! The editor's actions (Monaco `IEditorAction`): the built-in ones with a
 //! label, and the host's from [`CodeEditor::add_action`] (Monaco
 //! `addAction`). The command palette lists the supported ones.
+//!
+//! Also Monaco's global `editor.addEditorAction` and
+//! `editor.addKeybindingRule(s)`, removable with their [`Disposable`].
 
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{App, Context, Global, KeyBinding, SharedString, Window};
 
-use crate::actions::{KEY_CONTEXT, RunAction};
+use crate::actions::{KEY_CONTEXT, RunAction, RunCommand};
 use crate::editor::CodeEditor;
 use crate::providers;
+use crate::registry::Disposable;
 
 /// Whether an action can run in an editor (Monaco's precondition).
 type Precondition = fn(&CodeEditor, &App) -> bool;
@@ -552,6 +556,189 @@ pub(crate) fn command_history(id: &str, cx: &App) -> Option<u64> {
     cx.try_global::<CommandsHistory>()?.entries.get(id).copied()
 }
 
+/// The actions added to every editor with [`add_editor_action`], oldest
+/// first.
+#[derive(Default)]
+struct GlobalActions {
+    next_id: u64,
+    actions: Vec<(u64, EditorActionDescriptor)>,
+}
+
+impl Global for GlobalActions {}
+
+/// The actions from [`add_editor_action`], newest first (the newest with an
+/// id wins).
+pub(crate) fn global_actions(cx: &App) -> Vec<EditorActionDescriptor> {
+    let Some(global) = cx.try_global::<GlobalActions>() else {
+        return Vec::new();
+    };
+    let mut actions: Vec<EditorActionDescriptor> = Vec::new();
+    for (_, action) in global.actions.iter().rev() {
+        if !actions.iter().any(|a| a.id == action.id) {
+            actions.push(action.clone());
+        }
+    }
+    actions
+}
+
+/// Adds an action to every editor, now and later (Monaco
+/// `editor.addEditorAction`), until the returned [`Disposable`] is
+/// disposed. [`CodeEditor::run_action`], [`CodeEditor::trigger`] and
+/// [`RunAction`] run it (in the focused editor for its keybindings), and
+/// with a group it's in the context menu. As in Monaco, where it's a
+/// command rather than an editor action, it isn't in
+/// [`CodeEditor::supported_actions`] (the command palette). An editor's own
+/// action with the same id ([`CodeEditor::add_action`]) wins.
+pub fn add_editor_action(cx: &mut App, descriptor: EditorActionDescriptor) -> Disposable {
+    let bindings = descriptor
+        .keybindings
+        .iter()
+        .map(|keystrokes| {
+            KeyBinding::new(
+                keystrokes,
+                RunAction {
+                    id: descriptor.id.to_string(),
+                },
+                Some(KEY_CONTEXT),
+            )
+        })
+        .collect();
+    let keybindings = bind_removable(cx, bindings);
+    let global = cx.default_global::<GlobalActions>();
+    global.next_id += 1;
+    let entry_id = global.next_id;
+    global.actions.push((entry_id, descriptor));
+    cx.refresh_windows();
+    Disposable::new(move |cx| {
+        keybindings.dispose(cx);
+        cx.default_global::<GlobalActions>()
+            .actions
+            .retain(|(id, _)| *id != entry_id);
+        cx.refresh_windows();
+    })
+}
+
+/// Monaco `IKeybindingRule`: keystrokes that run a command, for
+/// [`add_keybinding_rules`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeybindingRule {
+    /// The keystrokes, in GPUI syntax (e.g. `"cmd-k cmd-m"`), where Monaco
+    /// takes a `KeyMod | KeyCode` number.
+    pub keystrokes: SharedString,
+    /// The command: an editor action id (built-in or added), a Monaco
+    /// command such as `"cursorDown"`, a command from [`crate::add_command`]
+    /// or [`crate::register_command`], or a GPUI action name. `None`
+    /// unbinds the keystrokes (Monaco `command: null`).
+    pub command: Option<SharedString>,
+    /// The argument for a registered command (Monaco `commandArgs`).
+    pub command_args: Option<serde_json::Value>,
+    /// Where it applies, as a GPUI key context predicate (Monaco `when`,
+    /// a context key expression); `None` for the editor's key context.
+    pub when: Option<SharedString>,
+}
+
+impl KeybindingRule {
+    /// A rule binding `keystrokes` to `command` in the editor.
+    pub fn new(keystrokes: impl Into<SharedString>, command: impl Into<SharedString>) -> Self {
+        Self {
+            keystrokes: keystrokes.into(),
+            command: Some(command.into()),
+            command_args: None,
+            when: None,
+        }
+    }
+
+    /// A rule unbinding `keystrokes` in the editor (Monaco `command: null`).
+    pub fn unbind(keystrokes: impl Into<SharedString>) -> Self {
+        Self {
+            keystrokes: keystrokes.into(),
+            command: None,
+            command_args: None,
+            when: None,
+        }
+    }
+
+    /// Sets the command's argument.
+    pub fn args(mut self, args: serde_json::Value) -> Self {
+        self.command_args = Some(args);
+        self
+    }
+
+    /// Sets where it applies.
+    pub fn when(mut self, when: impl Into<SharedString>) -> Self {
+        self.when = Some(when.into());
+        self
+    }
+}
+
+/// Adds a keybinding rule (Monaco `editor.addKeybindingRule`); see
+/// [`add_keybinding_rules`].
+pub fn add_keybinding_rule(cx: &mut App, rule: KeybindingRule) -> anyhow::Result<Disposable> {
+    add_keybinding_rules(cx, vec![rule])
+}
+
+/// Adds keybinding rules (Monaco `editor.addKeybindingRules`), after (so
+/// above) the existing bindings, until the returned [`Disposable`] is
+/// disposed; the bindings they shadowed then apply again. A rule's
+/// command runs in the focused editor with [`RunCommand`]. Fails, adding
+/// nothing, if some keystrokes or `when` don't parse.
+pub fn add_keybinding_rules(
+    cx: &mut App,
+    rules: Vec<KeybindingRule>,
+) -> anyhow::Result<Disposable> {
+    let bindings = rules
+        .into_iter()
+        .map(|rule| {
+            let when = rule.when.as_deref().unwrap_or(KEY_CONTEXT);
+            let predicate = gpui::KeyBindingContextPredicate::parse(when)?;
+            let action: Box<dyn gpui::Action> = match rule.command {
+                Some(command) => Box::new(RunCommand {
+                    id: command.to_string(),
+                    args: rule.command_args,
+                }),
+                None => Box::new(gpui::NoAction),
+            };
+            Ok(KeyBinding::load(
+                &rule.keystrokes,
+                action,
+                Some(Rc::new(predicate)),
+                false,
+                None,
+                &gpui::DummyKeyboardMapper,
+            )?)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(bind_removable(cx, bindings))
+}
+
+/// Binds `bindings`, each with a context, until the returned disposable
+/// removes exactly them (told apart by their predicates' identity), so
+/// GPUI's keymap, which can't remove bindings, works like Monaco's dynamic
+/// keybindings.
+fn bind_removable(cx: &mut App, bindings: Vec<KeyBinding>) -> Disposable {
+    if bindings.is_empty() {
+        return Disposable::none();
+    }
+    let predicates: Vec<_> = bindings.iter().filter_map(KeyBinding::predicate).collect();
+    debug_assert_eq!(predicates.len(), bindings.len());
+    cx.bind_keys(bindings);
+    Disposable::new(move |cx| {
+        let keymap = cx.key_bindings();
+        let kept: Vec<KeyBinding> = keymap
+            .borrow()
+            .bindings()
+            .filter(|binding| {
+                !binding
+                    .predicate()
+                    .is_some_and(|p| predicates.iter().any(|ours| Rc::ptr_eq(ours, &p)))
+            })
+            .cloned()
+            .collect();
+        cx.clear_key_bindings();
+        cx.bind_keys(kept);
+    })
+}
+
 impl CodeEditor {
     /// Adds an action (Monaco `addAction`): the command palette lists it,
     /// [`CodeEditor::run_action`] and [`RunAction`] run it, and its
@@ -612,12 +799,17 @@ impl CodeEditor {
     /// `getAction(id).run()`); built-in ones run as if their key were
     /// pressed.
     pub fn run_action(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if let Some(action) = self.added_actions.iter().find(|a| a.id.as_ref() == id) {
+        let action = self
+            .added_actions
+            .iter()
+            .find(|a| a.id.as_ref() == id)
+            .cloned()
+            .or_else(|| global_actions(cx).into_iter().find(|a| a.id.as_ref() == id));
+        if let Some(action) = action {
             if !action.precondition.as_ref().is_none_or(|p| p(self, cx)) {
                 return false;
             }
-            let run = action.run.clone();
-            run(self, window, cx);
+            (action.run)(self, window, cx);
             return true;
         }
         let Some(builtin) = builtin(id) else {
@@ -632,6 +824,43 @@ impl CodeEditor {
         window.focus(&self.focus_handle, cx);
         window.dispatch_action(action, cx);
         true
+    }
+
+    /// Runs command `id` as a keybinding rule's [`RunCommand`] does
+    /// (Monaco's `commandService.executeCommand`): an editor action, a
+    /// Monaco command, a registered command (with `args`), or a GPUI
+    /// action. Returns whether one was found.
+    pub(crate) fn run_command(
+        &mut self,
+        id: &str,
+        args: Option<serde_json::Value>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.run_action(id, window, cx) {
+            return true;
+        }
+        if let Some(name) = command_action_name(id)
+            && let Ok(action) = cx.build_action(name, None)
+        {
+            window.dispatch_action(action, cx);
+            return true;
+        }
+        if crate::commands::has_command(cx, id) {
+            let command = providers::Command {
+                id: id.to_string().into(),
+                title: SharedString::default(),
+                arguments: args.into_iter().collect(),
+            };
+            return crate::commands::execute_command(cx, &command).is_ok();
+        }
+        match cx.build_action(id, None) {
+            Ok(action) => {
+                window.dispatch_action(action, cx);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// The keystrokes bound to each supported action in this editor, for
