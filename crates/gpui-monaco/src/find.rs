@@ -308,6 +308,15 @@ impl CodeEditor {
         self.find.visible
     }
 
+    /// Monaco `findInputFocussed`, `replaceInputFocussed` and
+    /// `findWidgetFocused`.
+    pub(crate) fn find_widget_focus(&self, window: &Window, cx: &gpui::App) -> (bool, bool, bool) {
+        match &self.find.widget {
+            Some((widget, _)) if self.find.visible => widget.read(cx).focus_state(window, cx),
+            _ => (false, false, false),
+        }
+    }
+
     /// The find widget's match counter text.
     pub fn find_status(&self) -> Option<String> {
         self.find.status()

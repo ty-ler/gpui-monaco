@@ -28,12 +28,11 @@ fn rows(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<String> 
 fn shift_f10_shows_the_default_menu(cx: &mut TestAppContext) {
     let (editor, cx) = setup("foo bar foo", cx);
     cx.simulate_keystrokes("shift-f10");
-    // No language providers: no go to definition, rename or formatting.
+    // No language providers: no go to definition, rename or formatting,
+    // and no symbols to go to (Monaco's `hasDocumentSymbolProvider`).
     assert_eq!(
         rows(&editor, cx),
         vec![
-            "Go to Symbol...",
-            "---",
             "Change All Occurrences",
             "---",
             "Cut",
@@ -44,8 +43,8 @@ fn shift_f10_shows_the_default_menu(cx: &mut TestAppContext) {
         ]
     );
     // Keyboard: down to "Change All Occurrences", Enter runs it.
-    cx.simulate_keystrokes("down down");
-    assert_eq!(rows(&editor, cx)[2], "> Change All Occurrences");
+    cx.simulate_keystrokes("down");
+    assert_eq!(rows(&editor, cx)[0], "> Change All Occurrences");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert!(!editor.read_with(cx, |e, _| e.is_context_menu_visible()));
@@ -68,10 +67,7 @@ fn escape_and_options(cx: &mut TestAppContext) {
         e.update_options(options, cx);
     });
     cx.simulate_keystrokes("shift-f10");
-    assert_eq!(
-        rows(&editor, cx),
-        vec!["Go to Symbol...", "---", "Copy", "---", "Command Palette"]
-    );
+    assert_eq!(rows(&editor, cx), vec!["Copy", "---", "Command Palette"]);
     cx.simulate_keystrokes("escape");
 
     // Off: nothing.
@@ -88,23 +84,23 @@ fn escape_and_options(cx: &mut TestAppContext) {
 fn host_actions_join_their_group(cx: &mut TestAppContext) {
     let (editor, cx) = setup("abc", cx);
     editor.update(cx, |e, cx| {
-        e.add_action(
+        let _ = e.add_action(
             EditorActionDescriptor::new("my.upper", "Make Upper", |editor, _, cx| {
                 editor.model().update(cx, |m, cx| m.set_value("ABC", cx));
             })
             .context_menu("1_modification", 0.5),
             cx,
         );
-        e.add_action(
+        let _ = e.add_action(
             EditorActionDescriptor::new("my.hidden", "Not In Menu", |_, _, _| {}),
             cx,
         );
     });
     cx.simulate_keystrokes("shift-f10");
     let menu = rows(&editor, cx);
-    assert_eq!(menu[2], "Make Upper");
+    assert_eq!(menu[0], "Make Upper");
     assert!(!menu.iter().any(|r| r.contains("Not In Menu")));
-    cx.simulate_keystrokes("down down enter");
+    cx.simulate_keystrokes("down enter");
     cx.run_until_parked();
     assert_eq!(
         editor.read_with(cx, |e, cx| e.model().read(cx).text()),

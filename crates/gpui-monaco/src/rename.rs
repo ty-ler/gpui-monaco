@@ -634,6 +634,16 @@ impl CodeEditor {
         self.rename.session.is_some()
     }
 
+    /// Whether the rename box's input has the focus (Monaco
+    /// `renameInputFocused`).
+    pub(crate) fn is_rename_input_focused(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.rename.session.as_ref().is_some_and(|session| {
+            session.view.read(cx).input.as_ref().is_some_and(|input| {
+                gpui::Focusable::focus_handle(input.read(cx), cx).is_focused(window)
+            })
+        })
+    }
+
     /// The rename box's suggestions, newest first (from
     /// [`NewSymbolNamesProvider`](crate::providers::NewSymbolNamesProvider)s).
     pub fn rename_suggestions(&self, cx: &gpui::App) -> Vec<SharedString> {
@@ -763,6 +773,7 @@ impl CodeEditor {
         let first = session.provider;
         let label: SharedString =
             format!("Renaming '{}' to '{new_name}'", session.location.text).into();
+        let old_name = session.location.text.clone();
         self.start_cancellable(crate::editor_state::CancellableOperation::Rename);
         self.rename.task = Some(cx.spawn(async move |this, cx| {
             // Monaco `RenameSkeleton._provideRenameEdits`: one provider at a
@@ -784,7 +795,14 @@ impl CodeEditor {
                     Err(err) => rejects.push(err.to_string()),
                 }
             }
-            // `rename.task` is this task: it stays until the edits are in.
+            // Monaco's standalone bulk edit summary.
+            let summary = edit.as_ref().map(|edit| {
+                let edits: usize = edit.edits.iter().map(|(_, edits)| edits.len()).sum();
+                format!("Made {edits} edits in {} files", edit.edits.len())
+            });
+            // `rename.task` is this task: it stays until the edits are
+            // applying. Applying them isn't cancelled (Monaco's bulk edit
+            // has no token), and their own text change would cancel it.
             let Ok(Some(apply)) = this.update(cx, |this, cx| {
                 if this.rename_state(cx) != state {
                     return None;
@@ -800,13 +818,35 @@ impl CodeEditor {
             }) else {
                 return;
             };
-            if let Err(err) = apply.await {
-                log::warn!("rename failed to apply edits: {err:#}");
-                this.update(cx, |this, cx| {
-                    this.show_message("Rename failed to apply edits", position, cx)
+            let Ok(()) = this.update(cx, |_, cx| {
+                cx.spawn(async move |this, cx| match apply.await {
+                    Err(err) => {
+                        log::warn!("rename failed to apply edits: {err:#}");
+                        this.update(cx, |this, cx| {
+                            this.show_message("Rename failed to apply edits", position, cx)
+                        })
+                        .ok();
+                    }
+                    Ok(false) => {}
+                    // Monaco alerts screen readers once the edits are in.
+                    Ok(true) => {
+                        if let Some(summary) = summary {
+                            this.update(cx, |this, cx| {
+                                this.announce(
+                                    format!(
+                                        "Successfully renamed '{old_name}' to '{new_name}'. Summary: {summary}"
+                                    ),
+                                    cx,
+                                )
+                            })
+                            .ok();
+                        }
+                    }
                 })
-                .ok();
-            }
+                .detach()
+            }) else {
+                return;
+            };
         }));
     }
 }

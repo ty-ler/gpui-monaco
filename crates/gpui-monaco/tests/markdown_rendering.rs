@@ -63,7 +63,8 @@ impl Setup<'_> {
         self.editor
             .update(self.cx, |editor, cx| editor.hide_hover(cx));
         self.paint();
-        self.cx.dispatch_action(gpui_monaco::actions::ShowHover);
+        self.cx
+            .dispatch_action(gpui_monaco::actions::ShowHover::default());
         self.cx.run_until_parked();
         self.paint();
         self.paint();

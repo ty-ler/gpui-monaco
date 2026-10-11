@@ -199,7 +199,7 @@ fn command_palette_runs_actions_and_remembers_them(cx: &mut TestAppContext) {
 fn host_actions_and_preconditions(cx: &mut TestAppContext) {
     let (editor, cx) = setup(RUST, cx);
     editor.update(cx, |editor, cx| {
-        editor.add_action(
+        let _ = editor.add_action(
             gpui_monaco::EditorActionDescriptor::new("my.hello", "Say Hello", |editor, _, cx| {
                 editor
                     .model()

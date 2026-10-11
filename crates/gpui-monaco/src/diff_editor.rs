@@ -2636,14 +2636,15 @@ impl DiffEditor {
     }
 
     /// Adds an action to the modified editor (Monaco
-    /// `IStandaloneDiffEditor.addAction`, which delegates the same way).
+    /// `IStandaloneDiffEditor.addAction`, which delegates the same way)
+    /// until the returned [`Disposable`](crate::Disposable) is disposed.
     pub fn add_action(
         &mut self,
         descriptor: crate::editor_actions::EditorActionDescriptor,
         cx: &mut Context<Self>,
-    ) {
+    ) -> crate::registry::Disposable {
         self.modified
-            .update(cx, |editor, cx| editor.add_action(descriptor, cx));
+            .update(cx, |editor, cx| editor.add_action(descriptor, cx))
     }
 
     /// Adds a command handler (Monaco `IStandaloneDiffEditor.addCommand`,

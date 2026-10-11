@@ -174,6 +174,11 @@ fn f2_renames_across_documents(cx: &mut TestAppContext) {
     assert!(!editor.read_with(cx, |e, _| e.is_rename_visible()));
     assert_eq!(text(&editor, cx), "fn bar() {}\nfn main() {\n    bar();\n}");
     assert_eq!(lib.read_with(cx, |m, _| m.text()), "pub fn bar() {}");
+    // Monaco alerts screen readers with the bulk edit's summary.
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.last_announcement_for_tests()),
+        Some("Successfully renamed 'foo' to 'bar'. Summary: Made 3 edits in 2 files".into())
+    );
     // The editor has focus back; one undo reverts it here.
     assert!(cx.update(|window, cx| editor.focus_handle(cx).is_focused(window)));
     editor.update(cx, |e, cx| e.undo(cx));

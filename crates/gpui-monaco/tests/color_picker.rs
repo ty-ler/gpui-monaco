@@ -64,7 +64,7 @@ fn put_cursor(editor: &Entity<CodeEditor>, row: u32, column: u32, cx: &mut Visua
 fn hover_picker_rewrites_the_color(cx: &mut TestAppContext) {
     let (editor, cx) = setup("a { color: #ff0000; }", cx);
     put_cursor(&editor, 0, 13, cx);
-    cx.dispatch_action(ShowHover);
+    cx.dispatch_action(ShowHover::default());
     let range = PointUtf16::new(0, 11)..PointUtf16::new(0, 18);
     // The default presentations are rgb, hsl and hex; the one written
     // like the text is chosen.
@@ -99,7 +99,7 @@ fn hover_picker_rewrites_the_color(cx: &mut TestAppContext) {
 fn hover_without_color_has_no_picker(cx: &mut TestAppContext) {
     let (editor, cx) = setup("a { color: red; }", cx);
     put_cursor(&editor, 0, 1, cx);
-    cx.dispatch_action(ShowHover);
+    cx.dispatch_action(ShowHover::default());
     assert_eq!(state(&editor, cx), None);
 }
 

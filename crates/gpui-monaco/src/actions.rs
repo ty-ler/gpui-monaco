@@ -376,6 +376,14 @@ actions!(
         /// or find widget if one is open; otherwise keeps only the primary
         /// cursor, then clears its selection (Monaco `removeSecondaryCursors`).
         RemoveSecondaryCursors,
+        /// Shift+Escape, Monaco's secondary Escape key: as
+        /// [`RemoveSecondaryCursors`] for the commands Monaco gives it (the
+        /// suggest widget, snippet mode, linked editing, the problem zone,
+        /// parameter hints, the reference peek, the find widget, then the
+        /// cursors and selection), leaving ghost text, the hover, inline
+        /// messages, symbol navigation, pending operations and the
+        /// selection anchor alone.
+        SecondaryEscape,
         /// Deletes the selection or the character before each cursor (Monaco
         /// `deleteLeft`).
         DeleteLeft,
@@ -440,8 +448,6 @@ actions!(
         FocusNextElement,
         /// Moves focus to the previous element (Shift+Tab in tab focus mode).
         FocusPreviousElement,
-        /// Picks how to paste the clipboard (Monaco `editor.action.pasteAs`).
-        PasteAs,
         /// Pastes the clipboard as plain text (Monaco
         /// `editor.action.pasteAsText`).
         PasteAsText,
@@ -456,10 +462,6 @@ actions!(
         HidePostEditWidget,
         /// Opens the platform's emoji and symbols picker.
         ShowCharacterPalette,
-        /// Collapses the innermost expanded region at each cursor (Monaco `editor.fold`).
-        Fold,
-        /// Expands collapsed regions at each cursor (Monaco `editor.unfold`).
-        Unfold,
         /// Collapses every region (Monaco `editor.foldAll`).
         FoldAll,
         /// Expands every region (Monaco `editor.unfoldAll`).
@@ -627,8 +629,6 @@ actions!(
         SelectFirstSuggestion,
         /// Selects the last suggestion (Monaco `selectLastSuggestion`).
         SelectLastSuggestion,
-        /// Shows the hover for the cursor position (Monaco `editor.action.showHover`).
-        ShowHover,
         /// Shows the definition preview hover for the symbol at the cursor,
         /// as Cmd/Ctrl+hover does (Monaco
         /// `editor.action.showDefinitionPreviewHover`).
@@ -775,9 +775,6 @@ actions!(
         /// Starts linked editing at the cursor, even with the option off
         /// (Monaco `editor.action.linkedEditing`).
         StartLinkedEditing,
-        /// Asks for inline completions (Monaco
-        /// `editor.action.inlineSuggest.trigger`).
-        TriggerInlineSuggest,
         /// Shows the next inline completion (Monaco
         /// `editor.action.inlineSuggest.showNext`).
         ShowNextInlineSuggestion,
@@ -873,10 +870,6 @@ actions!(
         FocusPreviousRenameSuggestion,
         /// Shows code actions (Monaco `editor.action.quickFix`).
         QuickFix,
-        /// Shows refactorings (Monaco `editor.action.refactor`).
-        Refactor,
-        /// Shows source actions (Monaco `editor.action.sourceAction`).
-        SourceAction,
         /// Organizes imports (Monaco `editor.action.organizeImports`).
         OrganizeImports,
         /// Fixes all auto-fixable problems (Monaco `editor.action.fixAll`).
@@ -1184,6 +1177,456 @@ pub struct PeekLocations {
     pub multiple: Option<String>,
 }
 
+/// Declares an action taking a Monaco command's argument object: camelCase
+/// JSON whose fields are all optional, so the action also builds without
+/// one (as a keybinding or [`crate::CodeEditor::trigger`] runs it).
+macro_rules! command_action {
+    ($(#[$meta:meta])* pub struct $name:ident { $($(#[$field_meta:meta])* pub $field:ident: $ty:ty),* $(,)? }) => {
+        $(#[$meta])*
+        #[derive(
+            Clone,
+            Debug,
+            Default,
+            PartialEq,
+            serde::Deserialize,
+            Action,
+            gpui::private::schemars::JsonSchema,
+        )]
+        #[schemars(crate = "gpui::private::schemars")]
+        #[serde(default, rename_all = "camelCase")]
+        #[action(namespace = code_editor)]
+        pub struct $name {
+            $($(#[$field_meta])* pub $field: $ty,)*
+        }
+    };
+}
+
+command_action! {
+    /// Collapses regions (Monaco `editor.fold`, `FoldingArguments`). Without
+    /// `levels` or `direction`, the innermost expanded region at each
+    /// selection, or its first expanded parent.
+    pub struct Fold {
+        /// How many levels to collapse (1 when only `direction` is set).
+        pub levels: Option<u32>,
+        /// `"up"` collapses the regions around the lines, `"down"` (the
+        /// default) the regions inside them.
+        pub direction: Option<String>,
+        /// The 0-based lines to fold at instead of the selections' first
+        /// lines.
+        pub selection_lines: Option<Vec<u32>>,
+    }
+}
+
+command_action! {
+    /// Expands regions (Monaco `editor.unfold`, `FoldingArguments`): by
+    /// default the region at each selection, one level down.
+    pub struct Unfold {
+        /// How many levels to expand (1 by default).
+        pub levels: Option<u32>,
+        /// `"up"` expands the regions around the lines, `"down"` (the
+        /// default) the regions inside them.
+        pub direction: Option<String>,
+        /// The 0-based lines to unfold at instead of the selections' first
+        /// lines.
+        pub selection_lines: Option<Vec<u32>>,
+    }
+}
+
+command_action! {
+    /// Shows refactorings (Monaco `editor.action.refactor`, with
+    /// `CodeActionCommandArgs`).
+    pub struct Refactor {
+        /// Only this kind of refactoring (a sub-kind of `refactor`), e.g.
+        /// `"refactor.extract"`; any other kind matches nothing.
+        pub kind: Option<String>,
+        /// When to apply one without the menu: `"first"`, `"ifSingle"` or
+        /// `"never"` (the default).
+        pub apply: Option<String>,
+        /// Only preferred refactorings.
+        pub preferred: bool,
+    }
+}
+
+command_action! {
+    /// Shows source actions (Monaco `editor.action.sourceAction`, with
+    /// `CodeActionCommandArgs`).
+    pub struct SourceAction {
+        /// Only this kind of source action (a sub-kind of `source`), e.g.
+        /// `"source.organizeImports"`; any other kind matches nothing.
+        pub kind: Option<String>,
+        /// When to apply one without the menu: `"first"`, `"ifSingle"` or
+        /// `"never"` (the default).
+        pub apply: Option<String>,
+        /// Only preferred source actions.
+        pub preferred: bool,
+    }
+}
+
+command_action! {
+    /// Picks how to paste the clipboard (Monaco `editor.action.pasteAs`).
+    /// With a `kind` (or `preferences`), pastes with the matching edit.
+    pub struct PasteAs {
+        /// The paste edit kind to use, e.g. `"text.plain"`.
+        pub kind: Option<String>,
+        /// Preferred kinds; the first is used, as `kind`.
+        pub preferences: Option<Vec<String>>,
+    }
+}
+
+command_action! {
+    /// Shows the hover for the cursor position, or focuses a visible one
+    /// (Monaco `editor.action.showHover`).
+    pub struct ShowHover {
+        /// Monaco's `focus`: `"noAutoFocus"` never focuses (it shows the
+        /// hover again), `"focusIfVisible"` (the default) focuses a visible
+        /// hover, `"autoFocusImmediately"` (or `true`) also focuses a new
+        /// one. With `accessibility_support` on, new hovers take focus.
+        pub focus: Option<serde_json::Value>,
+    }
+}
+
+command_action! {
+    /// Asks for inline completions (Monaco
+    /// `editor.action.inlineSuggest.trigger`).
+    pub struct TriggerInlineSuggest {
+        /// Monaco's `providerId`. Accepted for compatibility; every provider
+        /// is asked.
+        pub provider_id: Option<String>,
+        /// An explicit request (the default); `false` asks as typing does.
+        pub explicit: Option<bool>,
+        /// Monaco's `changeHintData`, accepted for compatibility.
+        pub change_hint_data: Option<serde_json::Value>,
+        /// Monaco's `showNoResultNotification`, accepted for compatibility
+        /// (there's no notification service).
+        pub show_no_result_notification: bool,
+    }
+}
+
+command_action! {
+    /// Moves the cursors to a logical position (Monaco `cursorMove`,
+    /// `CursorMove.RawArguments`).
+    pub struct CursorMove {
+        /// Where to: `"left"`, `"right"`, `"up"`, `"down"`,
+        /// `"prevBlankLine"`, `"nextBlankLine"`, `"wrappedLineStart"`,
+        /// `"wrappedLineFirstNonWhitespaceCharacter"`,
+        /// `"wrappedLineColumnCenter"`, `"wrappedLineEnd"`,
+        /// `"wrappedLineLastNonWhitespaceCharacter"`, `"viewPortTop"`,
+        /// `"viewPortCenter"`, `"viewPortBottom"` or `"viewPortIfOutside"`.
+        pub to: String,
+        /// The unit: `"line"`, `"wrappedLine"`, `"character"`, `"halfLine"`
+        /// or `"foldedLine"`.
+        pub by: Option<String>,
+        /// How many units (1 by default).
+        pub value: Option<u32>,
+        /// Extends the selections.
+        pub select: bool,
+        /// Keeps the move out of the cursor navigation history.
+        pub no_history: bool,
+    }
+}
+
+command_action! {
+    /// Scrolls without moving the cursor (Monaco `editorScroll`,
+    /// `EditorScroll_.RawArguments`).
+    pub struct EditorScroll {
+        /// `"up"`, `"down"`, `"left"` or `"right"`.
+        pub to: String,
+        /// The unit: `"line"`, `"wrappedLine"` (the default), `"page"`,
+        /// `"halfPage"`, `"editor"`, or `"column"` for left and right.
+        pub by: Option<String>,
+        /// How many units (1 by default).
+        pub value: Option<f64>,
+        /// Moves the primary cursor into the new viewport if it would be
+        /// outside it.
+        pub reveal_cursor: bool,
+        /// With `reveal_cursor`, extends the selection instead.
+        pub select: bool,
+    }
+}
+
+command_action! {
+    /// Scrolls `line_number` into view (Monaco `revealLine`).
+    pub struct RevealLine {
+        /// The 0-based line, a number or a numeric string.
+        pub line_number: Option<serde_json::Value>,
+        /// `"top"`, `"center"` or `"bottom"`; by default the least
+        /// scrolling.
+        pub at: Option<String>,
+    }
+}
+
+/// A selection as Monaco's API commands take it (`ISelection`), 1-based.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    serde::Serialize,
+    gpui::private::schemars::JsonSchema,
+)]
+#[schemars(crate = "gpui::private::schemars")]
+#[serde(rename_all = "camelCase")]
+pub struct CommandSelection {
+    /// The anchor's line, from 1.
+    pub selection_start_line_number: u32,
+    /// The anchor's UTF-16 column, from 1.
+    pub selection_start_column: u32,
+    /// The head's line, from 1.
+    pub position_line_number: u32,
+    /// The head's UTF-16 column, from 1.
+    pub position_column: u32,
+}
+
+impl CommandSelection {
+    /// The 0-based selection.
+    pub fn to_selection(self) -> crate::cursor::Selection {
+        crate::cursor::Selection::new(
+            CommandPosition {
+                line_number: self.selection_start_line_number,
+                column: self.selection_start_column,
+            }
+            .to_point(),
+            CommandPosition {
+                line_number: self.position_line_number,
+                column: self.position_column,
+            }
+            .to_point(),
+        )
+    }
+}
+
+command_action! {
+    /// Replaces the selections with `selection` (Monaco `setSelection`).
+    pub struct SetSelection {
+        /// The new selection.
+        pub selection: Option<CommandSelection>,
+    }
+}
+
+command_action! {
+    /// Adds a cursor at `position`, or removes the cursor there (Monaco
+    /// `createCursor`, Alt+click).
+    pub struct CreateCursor {
+        /// Where.
+        pub position: Option<CommandPosition>,
+        /// Selects the whole line instead.
+        pub whole_line: bool,
+    }
+}
+
+command_action! {
+    /// Column-selects from the last column selection's start, or from
+    /// `position`, to `position` at `mouse_column` (Monaco `columnSelect`,
+    /// Shift+Alt+drag).
+    pub struct ColumnSelect {
+        /// The position under the mouse.
+        pub position: Option<CommandPosition>,
+        /// The same position in view coordinates; unused (the editor
+        /// converts `position`).
+        pub view_position: Option<CommandPosition>,
+        /// The 1-based visible column under the mouse.
+        pub mouse_column: Option<u32>,
+        /// Extends the current column selection instead of starting one.
+        pub do_column_select: bool,
+    }
+}
+
+/// Declares Monaco's mouse commands, which take `MoveCommandOptions`.
+macro_rules! move_to_command {
+    ($($(#[$meta:meta])* $name:ident,)*) => {$(
+        command_action! {
+            $(#[$meta])*
+            pub struct $name {
+                /// Where, 1-based.
+                pub position: Option<CommandPosition>,
+                /// The same position in view coordinates; unused (the
+                /// editor converts `position`).
+                pub view_position: Option<CommandPosition>,
+                /// Monaco's `revealType`: 2 doesn't scroll to the cursor.
+                pub reveal_type: Option<u32>,
+            }
+        }
+    )*};
+}
+
+move_to_command! {
+    /// Moves the primary cursor to `position`, dropping the others (Monaco
+    /// `_moveTo`, a click).
+    MoveTo,
+    /// Extends the primary selection to `position` (Monaco `_moveToSelect`,
+    /// a Shift+click), by word or line after a double or triple click.
+    MoveToSelect,
+    /// Selects the word at `position` (Monaco `_wordSelect`, a double
+    /// click).
+    WordSelect,
+    /// Extends a word selection to `position` (Monaco `_wordSelectDrag`).
+    WordSelectDrag,
+    /// Selects the line at `position` (Monaco `_lineSelect`, a triple
+    /// click).
+    LineSelect,
+    /// Extends a line selection to `position` (Monaco `_lineSelectDrag`).
+    LineSelectDrag,
+    /// Extends the last added cursor's selection to `position` (Monaco
+    /// `_lastCursorMoveToSelect`, an Alt+drag).
+    LastCursorMoveToSelect,
+    /// Selects the word at `position` with the last added cursor (Monaco
+    /// `lastCursorWordSelect`).
+    LastCursorWordSelect,
+    /// Selects the line at `position` with the last added cursor (Monaco
+    /// `lastCursorLineSelect`).
+    LastCursorLineSelect,
+    /// Extends the last added cursor's line selection to `position`
+    /// (Monaco `lastCursorLineSelectDrag`).
+    LastCursorLineSelectDrag,
+}
+
+command_action! {
+    /// Types `text` at every cursor as the keyboard does (Monaco's `type`
+    /// handler, `editor.trigger('keyboard', 'type', { text })`).
+    pub struct Type {
+        /// The text.
+        pub text: String,
+    }
+}
+
+command_action! {
+    /// Replaces the `replace_char_cnt` UTF-16 units before each cursor with
+    /// `text` (Monaco's `replacePreviousChar` handler).
+    pub struct ReplacePreviousChar {
+        /// The text.
+        pub text: String,
+        /// How many units to replace.
+        pub replace_char_cnt: u32,
+    }
+}
+
+command_action! {
+    /// An IME composition update (Monaco's `compositionType` handler):
+    /// replaces `replace_prev_char_cnt` units before and
+    /// `replace_next_char_cnt` after each cursor with `text`, then moves it
+    /// by `position_delta`.
+    pub struct CompositionType {
+        /// The composed text.
+        pub text: String,
+        /// Units to replace before each cursor.
+        pub replace_prev_char_cnt: u32,
+        /// Units to replace after each cursor.
+        pub replace_next_char_cnt: u32,
+        /// How far to move each cursor from the end of `text`.
+        pub position_delta: i32,
+    }
+}
+
+command_action! {
+    /// Pastes `text` (Monaco's `paste` handler, `editor.trigger('keyboard',
+    /// 'paste', { text })`): no paste providers, as in Monaco. Without
+    /// `text`, pastes the clipboard.
+    pub struct PasteText {
+        /// The text.
+        pub text: String,
+        /// Pastes whole lines above the cursor (Monaco
+        /// `pasteOnNewLine`, text copied from an empty selection).
+        pub paste_on_new_line: bool,
+        /// One piece per cursor, as copied from as many cursors.
+        pub multicursor_text: Option<Vec<String>>,
+        /// The language the text was copied from.
+        pub mode: Option<String>,
+    }
+}
+
+command_action! {
+    /// Peeks the references at `position` (Monaco
+    /// `editor.action.findReferences`). Run in an editor, it does nothing
+    /// when `uri` names another model.
+    pub struct FindReferences {
+        /// The model; unset for the editor's.
+        pub uri: Option<String>,
+        /// Where; unset for the cursor.
+        pub position: Option<CommandPosition>,
+    }
+}
+
+actions!(
+    code_editor,
+    [
+        /// Accepts the focused suggestion (Monaco `acceptSelectedSuggestion`
+        /// and `acceptSelectedSuggestionOnEnter`, Tab and Enter).
+        AcceptSelectedSuggestion,
+        /// Closes the suggest widget (Monaco `hideSuggestWidget`, Escape).
+        HideSuggestWidget,
+        /// Inserts the best completion without the widget (Monaco
+        /// `insertBestCompletion`, Tab with `tabCompletion` on).
+        InsertBestCompletion,
+        /// Replaces the last tab completion with the next suggestion (Monaco
+        /// `insertNextSuggestion`, Tab after a tab completion).
+        InsertNextSuggestion,
+        /// Replaces the last tab completion with the previous suggestion
+        /// (Monaco `insertPrevSuggestion`, Shift+Tab after one).
+        InsertPrevSuggestion,
+        /// Selects the snippet's next tab stop (Monaco
+        /// `jumpToNextSnippetPlaceholder`, Tab).
+        JumpToNextSnippetPlaceholder,
+        /// Selects the snippet's previous tab stop (Monaco
+        /// `jumpToPrevSnippetPlaceholder`, Shift+Tab).
+        JumpToPrevSnippetPlaceholder,
+        /// Leaves snippet mode (Monaco `leaveSnippet`, Escape).
+        LeaveSnippet,
+        /// Leaves snippet mode at the final tab stop (Monaco
+        /// `acceptSnippet`).
+        AcceptSnippet,
+        /// Stops linked editing (Monaco `cancelLinkedEditingInput`,
+        /// Escape).
+        CancelLinkedEditingInput,
+        /// Closes the inline message (Monaco `leaveEditorMessage`, Escape).
+        LeaveEditorMessage,
+        /// Asks which characters, comments, strings or kinds to stop
+        /// highlighting (Monaco
+        /// `editor.action.unicodeHighlight.showExcludeOptions`).
+        ShowUnicodeHighlightExcludeOptions,
+        /// Moves to the previous word start, by Monaco's accessibility word
+        /// navigation (Monaco `cursorWordAccessibilityLeft`).
+        CursorWordAccessibilityLeft,
+        /// Selects to the previous word start, by accessibility word
+        /// navigation (Monaco `cursorWordAccessibilityLeftSelect`).
+        CursorWordAccessibilityLeftSelect,
+        /// Moves to the next word end, by accessibility word navigation
+        /// (Monaco `cursorWordAccessibilityRight`).
+        CursorWordAccessibilityRight,
+        /// Selects to the next word end, by accessibility word navigation
+        /// (Monaco `cursorWordAccessibilityRightSelect`).
+        CursorWordAccessibilityRightSelect,
+        /// Closes the find widget (Monaco `closeFindWidget`, Escape).
+        CloseFindWidget,
+        /// Closes the problem zone (Monaco `closeMarkersNavigation`,
+        /// Escape).
+        CloseMarkersNavigation,
+        /// After going to one of several results, goes to the next (Monaco
+        /// `editor.gotoNextSymbolFromResult`).
+        GoToNextSymbolFromResult,
+        /// Stops stepping through results (Monaco
+        /// `editor.gotoNextSymbolFromResult.cancel`, Escape).
+        CancelSymbolNavigation,
+        /// Formats the selections, or the document when they're empty
+        /// (Monaco's legacy `editor.action.format`).
+        FormatSelectionOrDocument,
+        /// Scrolls two columns left (Monaco `scrollLeft`).
+        ScrollLeft,
+        /// Scrolls two columns right (Monaco `scrollRight`).
+        ScrollRight,
+        /// An IME composition starts (Monaco's `compositionStart` handler).
+        CompositionStart,
+        /// The IME composition ends (Monaco's `compositionEnd` handler).
+        CompositionEnd,
+        /// Deletes what Cut would cut, without writing the clipboard
+        /// (Monaco's `cut` handler; [`Cut`] is
+        /// `editor.action.clipboardCutAction`).
+        CutText,
+    ]
+);
+
 /// Monaco's default keybindings for the current platform.
 pub fn default_key_bindings() -> Vec<KeyBinding> {
     let ctx = Some(KEY_CONTEXT);
@@ -1207,6 +1650,11 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-a", SelectAll, ctx),
         KeyBinding::new("secondary-l", ExpandLineSelection, ctx),
         KeyBinding::new("escape", RemoveSecondaryCursors, ctx),
+        // Monaco's secondary key for `cancelSelection`,
+        // `removeSecondaryCursors`, `hideSuggestWidget`, `leaveSnippet`,
+        // `cancelLinkedEditingInput`, `closeFindWidget`,
+        // `closeMarkersNavigation` and `closeReferenceSearch`.
+        KeyBinding::new("shift-escape", SecondaryEscape, ctx),
         KeyBinding::new("backspace", DeleteLeft, ctx),
         KeyBinding::new("shift-backspace", DeleteLeft, ctx),
         KeyBinding::new("delete", DeleteRight, ctx),
@@ -1242,7 +1690,12 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-k secondary-c", AddCommentLine, ctx),
         KeyBinding::new("secondary-k secondary-u", RemoveCommentLine, ctx),
         KeyBinding::new("secondary-shift-l", SelectAllOccurrences, ctx),
-        KeyBinding::new("secondary-f2", SelectAllOccurrences, ctx),
+        // Monaco `editor.action.changeAll`, writable editors only.
+        KeyBinding::new(
+            "secondary-f2",
+            SelectAllOccurrences,
+            Some("CodeEditor && !editorReadonly"),
+        ),
         KeyBinding::new("secondary-shift-\\", JumpToBracket, ctx),
         KeyBinding::new("f3", NextMatch, ctx),
         KeyBinding::new("secondary-f3", NextSelectionMatch, ctx),
@@ -1253,7 +1706,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-f12", GoToReferences, ctx),
         KeyBinding::new("f2", Rename, ctx),
         KeyBinding::new("secondary-.", QuickFix, ctx),
-        KeyBinding::new("ctrl-shift-r", Refactor, ctx),
+        KeyBinding::new("ctrl-shift-r", Refactor::default(), ctx),
         KeyBinding::new("shift-alt-o", OrganizeImports, ctx),
         KeyBinding::new(
             if cfg!(target_os = "macos") {
@@ -1277,7 +1730,6 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-alt-space", ToggleSuggestionFocus, SUGGEST),
         KeyBinding::new("secondary-k f12", RevealDefinitionAside, ctx),
         KeyBinding::new("secondary-k f2", TogglePeekWidgetFocus, ctx),
-        KeyBinding::new("alt-\\", TriggerInlineSuggest, ctx),
         KeyBinding::new("secondary-shift-f2", StartLinkedEditing, ctx),
         // Monaco binds Ctrl+G on every platform.
         KeyBinding::new("ctrl-g", GotoLine, ctx),
@@ -1298,6 +1750,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-tab", FocusPreviousElement, TAB_MOVES_FOCUS),
         // After QuickFix's binding, so they win while the button shows.
         KeyBinding::new("secondary-.", ChangePasteType, POST_EDIT_WIDGET),
+        KeyBinding::new("secondary-.", ChangeDropType, POST_EDIT_WIDGET),
         KeyBinding::new("escape", HidePostEditWidget, POST_EDIT_WIDGET),
         KeyBinding::new("down", SelectNextStickyScrollLine, STICKY_FOCUSED),
         KeyBinding::new("up", SelectPreviousStickyScrollLine, STICKY_FOCUSED),
@@ -1331,6 +1784,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-end", QuickInputLast, QUICK_INPUT),
         KeyBinding::new("ctrl-n", QuickInputNext, QUICK_INPUT),
         KeyBinding::new("ctrl-p", QuickInputPrevious, QUICK_INPUT),
+        // Monaco's quick input closes on Escape only.
+        KeyBinding::new("shift-escape", gpui::NoAction, QUICK_INPUT),
         KeyBinding::new("alt-]", ShowNextInlineSuggestion, INLINE),
         KeyBinding::new("alt-[", ShowPreviousInlineSuggestion, INLINE),
         KeyBinding::new(
@@ -1438,8 +1893,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-d", DeleteRight, ctx),
             KeyBinding::new("cmd-shift-z", Redo, ctx),
             KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, ctx),
-            KeyBinding::new("cmd-alt-[", Fold, ctx),
-            KeyBinding::new("cmd-alt-]", Unfold, ctx),
+            KeyBinding::new("cmd-alt-[", Fold::default(), ctx),
+            KeyBinding::new("cmd-alt-]", Unfold::default(), ctx),
             KeyBinding::new("cmd-k cmd-0", FoldAll, ctx),
             KeyBinding::new("cmd-k cmd-j", UnfoldAll, ctx),
             KeyBinding::new("cmd-k cmd-l", ToggleFold, ctx),
@@ -1466,7 +1921,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("cmd-k cmd-.", RemoveManualFoldingRanges, ctx),
             KeyBinding::new("cmd-alt-f", StartFindReplace, ctx),
             KeyBinding::new("cmd-k cmd-d", MoveSelectionToNextFindMatch, ctx),
-            KeyBinding::new("cmd-k cmd-i", ShowHover, ctx),
+            KeyBinding::new("cmd-k cmd-i", ShowHover::default(), ctx),
             KeyBinding::new("shift-alt-f", FormatDocument, ctx),
             KeyBinding::new("cmd-k cmd-f", FormatSelection, ctx),
             KeyBinding::new("cmd-f12", GoToImplementation, ctx),
@@ -1500,8 +1955,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-y", Redo, ctx),
             KeyBinding::new("ctrl-shift-z", Redo, ctx),
             KeyBinding::new("shift-insert", Paste, ctx),
-            KeyBinding::new("ctrl-shift-[", Fold, ctx),
-            KeyBinding::new("ctrl-shift-]", Unfold, ctx),
+            KeyBinding::new("ctrl-shift-[", Fold::default(), ctx),
+            KeyBinding::new("ctrl-shift-]", Unfold::default(), ctx),
             KeyBinding::new("ctrl-k ctrl-0", FoldAll, ctx),
             KeyBinding::new("ctrl-k ctrl-j", UnfoldAll, ctx),
             KeyBinding::new("ctrl-k ctrl-l", ToggleFold, ctx),
@@ -1524,7 +1979,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-k ctrl-.", RemoveManualFoldingRanges, ctx),
             KeyBinding::new("ctrl-h", StartFindReplace, ctx),
             KeyBinding::new("ctrl-k ctrl-d", MoveSelectionToNextFindMatch, ctx),
-            KeyBinding::new("ctrl-k ctrl-i", ShowHover, ctx),
+            KeyBinding::new("ctrl-k ctrl-i", ShowHover::default(), ctx),
             KeyBinding::new("ctrl-k ctrl-f", FormatSelection, ctx),
             KeyBinding::new("ctrl-f12", GoToImplementation, ctx),
             KeyBinding::new("ctrl-shift-f12", PeekImplementation, ctx),
@@ -1656,6 +2111,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("left", PeekCollapse, peek),
         KeyBinding::new("right", PeekExpand, peek),
         KeyBinding::new("escape", ClosePeek, peek),
+        KeyBinding::new("shift-escape", ClosePeek, peek),
         KeyBinding::new("f4", GoToNextReference, peek),
         // Monaco's secondary key (the editor keeps F12 for go to
         // definition).
@@ -1709,7 +2165,27 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             ),
         ]);
     }
-    bindings
+    if cfg!(target_os = "windows") {
+        // Monaco gives Ctrl+Left/Right to accessibility word navigation
+        // while a screen reader is in use.
+        let accessibility = Some("CodeEditor && accessibilityModeEnabled");
+        bindings.extend([
+            KeyBinding::new("ctrl-left", CursorWordAccessibilityLeft, accessibility),
+            KeyBinding::new(
+                "ctrl-shift-left",
+                CursorWordAccessibilityLeftSelect,
+                accessibility,
+            ),
+            KeyBinding::new("ctrl-right", CursorWordAccessibilityRight, accessibility),
+            KeyBinding::new(
+                "ctrl-shift-right",
+                CursorWordAccessibilityRightSelect,
+                accessibility,
+            ),
+        ]);
+    }
+    // Monaco folds an action's precondition into its keybindings' `when`.
+    crate::editor_actions::with_preconditions(bindings)
 }
 
 /// Binds [`default_key_bindings`].

@@ -511,6 +511,8 @@ pub struct CodeEditor {
     pub(crate) color_picker: crate::color_picker::ColorPickerState,
     pub(crate) context_menu: crate::context_menu::ContextMenuState,
     pub(crate) added_actions: Vec<crate::editor_actions::EditorActionDescriptor>,
+    /// Context keys, the host's commands and their keybindings.
+    pub(crate) commands: crate::editor_commands::EditorCommandsState,
     pub(crate) minimap_cache: crate::element::MinimapCache,
     /// The editor font's measured character widths, for `Advanced`
     /// wrapping.
@@ -745,6 +747,7 @@ impl CodeEditor {
         // Providers coming and going (e.g. a language server starting) and
         // refresh requests are noticed when painting.
         subscriptions.extend(crate::providers::observe_language_features(cx));
+        subscriptions.extend(crate::editor_commands::subscriptions(cx));
         subscriptions.push(
             cx.observe_global::<crate::font_zoom::EditorZoom>(|this, cx| this.on_zoom_changed(cx)),
         );
@@ -853,6 +856,7 @@ impl CodeEditor {
             code_lens: Default::default(),
             quick: None,
             added_actions: Vec::new(),
+            commands: Default::default(),
             sticky: Default::default(),
             colors: Default::default(),
             section_headers: Default::default(),
@@ -2389,7 +2393,12 @@ impl CodeEditor {
 
     // ----- navigation ---------------------------------------------------------
 
-    fn move_cursors(&mut self, command: MoveCommand, select: bool, cx: &mut Context<Self>) {
+    pub(crate) fn move_cursors(
+        &mut self,
+        command: MoveCommand,
+        select: bool,
+        cx: &mut Context<Self>,
+    ) {
         // Monaco `columnSelection`: Shift+arrows extend a column selection.
         if select && self.options.column_selection {
             let column = match command {
@@ -2586,17 +2595,21 @@ impl CodeEditor {
     }
 
     fn add_cursor_above(&mut self, _: &AddCursorAbove, _: &mut Window, cx: &mut Context<Self>) {
+        let before = self.cursors.selections();
         let config = self.cursor_config(cx);
         cursor::add_cursor_above(&config, self.snapshot.rope(), &mut self.cursors);
         self.next_selection_change.reason = CursorChangeReason::Explicit;
         self.cursors_changed(true, cx);
+        self.announce_cursor_change(&before, cx);
     }
 
     fn add_cursor_below(&mut self, _: &AddCursorBelow, _: &mut Window, cx: &mut Context<Self>) {
+        let before = self.cursors.selections();
         let config = self.cursor_config(cx);
         cursor::add_cursor_below(&config, self.snapshot.rope(), &mut self.cursors);
         self.next_selection_change.reason = CursorChangeReason::Explicit;
         self.cursors_changed(true, cx);
+        self.announce_cursor_change(&before, cx);
     }
 
     /// Escape while parameter hints show (Monaco `closeParameterHints`):
@@ -2626,6 +2639,12 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.escape(false, window, cx);
+    }
+
+    /// Escape's chain of Monaco commands, or with `secondary` Shift+Escape's
+    /// (only the commands Monaco gives Shift+Escape as a secondary key).
+    pub(crate) fn escape(&mut self, secondary: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.dnd_cancel(cx) {
             // Monaco `onMouseDropCanceled`: Escape while dragging.
             cx.emit(CodeEditorEvent::MouseDropCanceled);
@@ -2643,7 +2662,7 @@ impl CodeEditor {
             self.hide_suggest(cx);
             return;
         }
-        if self.inline_suggestion_visible(cx) || self.inline_edit_visible(cx) {
+        if !secondary && (self.inline_suggestion_visible(cx) || self.inline_edit_visible(cx)) {
             self.hide_inline_suggestion(cx);
             return;
         }
@@ -2658,11 +2677,11 @@ impl CodeEditor {
             self.hide_signature_help(cx);
             return;
         }
-        if self.is_hover_visible() {
+        if !secondary && self.is_hover_visible() {
             self.hide_hover(cx);
             return;
         }
-        if self.is_message_visible() {
+        if !secondary && self.is_message_visible() {
             self.close_message(cx);
             return;
         }
@@ -2671,7 +2690,7 @@ impl CodeEditor {
         if !self.options.stable_peek && self.close_peek(cx) {
             return;
         }
-        if self.cancel_symbol_navigation(cx) {
+        if !secondary && self.cancel_symbol_navigation(cx) {
             return;
         }
         // Monaco's `closeFindWidget` and `cancelSelectionAnchor` outrank
@@ -2682,15 +2701,17 @@ impl CodeEditor {
         }
         // Monaco `editor.cancelOperation` (weight `EditorContrib`) outranks
         // the core commands.
-        if self.cancel_operation(cx) {
+        if !secondary && self.cancel_operation(cx) {
             return;
         }
-        if self.cancel_selection_anchor(cx) {
+        if !secondary && self.cancel_selection_anchor(cx) {
             return;
         }
         let primary = self.cursors.primary().clone();
         if self.cursors.all().len() > 1 {
             self.cursors.set_states(vec![primary]);
+            // Monaco `removeSecondaryCursors` says so.
+            self.announce("Removed secondary cursors", cx);
         } else if primary.has_selection() {
             self.cursors
                 .set_states(vec![SingleCursorState::from_position(primary.position)]);
@@ -3215,7 +3236,7 @@ impl CodeEditor {
         self.trigger_inline_completions(cx);
     }
 
-    fn paste_item_inner(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
+    pub(crate) fn paste_item_inner(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
         let version = self.snapshot.version();
         let primary_start = self.cursors.primary().selection().start();
         let start = self
@@ -5232,6 +5253,8 @@ impl Render for CodeEditor {
                 key_context.add("inline_suggestion_alternative_action_visible");
             }
         }
+        // Monaco's context keys, for keybinding rules and preconditions.
+        self.render_commands(&mut key_context, window, cx);
         let root = div()
             .id("code-editor")
             .key_context(key_context)
@@ -5601,8 +5624,6 @@ impl Render for CodeEditor {
             .on_action(cx.listener(|this, _: &BlockComment, _, cx| this.comment(None, cx)))
             .on_action(cx.listener(Self::insert_line_after))
             .on_action(cx.listener(Self::insert_line_before))
-            .on_action(cx.listener(|this, _: &Fold, _, cx| this.fold(cx)))
-            .on_action(cx.listener(|this, _: &Unfold, _, cx| this.unfold(cx)))
             .on_action(cx.listener(|this, _: &FoldAll, _, cx| this.fold_all(cx)))
             .on_action(cx.listener(|this, _: &UnfoldAll, _, cx| this.unfold_all(cx)))
             .on_action(cx.listener(|this, _: &ToggleFold, _, cx| this.toggle_fold(cx)))
@@ -5776,9 +5797,6 @@ impl Render for CodeEditor {
                 cx.listener(|this, _: &GoToPreviousMarker, _, cx| this.go_to_marker(false, cx)),
             )
             .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| this.go_to_definition(cx)))
-            .on_action(
-                cx.listener(|this, _: &ShowHover, window, cx| this.show_or_focus_hover(window, cx)),
-            )
             .on_action(cx.listener(|this, _: &HideHover, _, cx| this.hide_hover(cx)))
             .on_action(cx.listener(|this, _: &ShowDefinitionPreviewHover, _, cx| {
                 this.show_definition_preview_hover(cx)
@@ -5875,11 +5893,6 @@ impl Render for CodeEditor {
             .on_action(cx.listener(|this, _: &StartLinkedEditing, _, cx| {
                 this.update_linked_editing(true, cx)
             }))
-            .on_action(
-                cx.listener(|this, _: &TriggerInlineSuggest, _, cx| {
-                    this.trigger_inline_suggest(cx)
-                }),
-            )
             .on_action(cx.listener(|this, _: &ShowNextInlineSuggestion, _, cx| {
                 this.show_next_inline_suggestion(true, cx)
             }))
@@ -5931,7 +5944,6 @@ impl Render for CodeEditor {
             .on_action(
                 cx.listener(|this, _: &ToggleStickyScroll, _, cx| this.toggle_sticky_scroll(cx)),
             )
-            .on_action(cx.listener(|this, _: &PasteAs, window, cx| this.paste_as(None, window, cx)))
             .on_action(cx.listener(|this, _: &ToggleTabFocusMode, _, cx| {
                 let on = !crate::tab_focus_mode(cx);
                 crate::set_tab_focus_mode(on, cx);
@@ -6004,8 +6016,6 @@ impl Render for CodeEditor {
             .on_action(cx.listener(|this, _: &SelectEditor, _, cx| this.sticky_select_editor(cx)))
             .on_action(cx.listener(|this, _: &Rename, _, cx| this.rename(cx)))
             .on_action(cx.listener(|this, _: &QuickFix, _, cx| this.quick_fix(cx)))
-            .on_action(cx.listener(|this, _: &Refactor, _, cx| this.refactor(cx)))
-            .on_action(cx.listener(|this, _: &SourceAction, _, cx| this.source_action(cx)))
             .on_action(cx.listener(|this, _: &OrganizeImports, _, cx| this.organize_imports(cx)))
             .on_action(cx.listener(|this, _: &FixAll, _, cx| this.fix_all(cx)))
             .on_action(cx.listener(|this, _: &AutoFix, _, cx| this.auto_fix(cx)))
@@ -6221,6 +6231,7 @@ impl Render for CodeEditor {
             // Mouse moves are `EditorElement`'s, to follow drags out of the
             // editor.
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel));
+        let root = crate::editor_commands::register_handlers(root, cx);
         // Monaco `setBanner`: the banner takes its height off the top.
         match self.banner.clone() {
             Some((banner, height)) => root

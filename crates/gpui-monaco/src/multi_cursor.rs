@@ -178,9 +178,7 @@ impl CodeEditor {
         Some((self.range_selection(found), whole_word, match_case))
     }
 
-    /// Adds the previous occurrence of the selected text as a selection
-    /// (Monaco `editor.action.addSelectionToPreviousFindMatch`).
-    pub fn add_selection_to_previous_find_match(&mut self, cx: &mut Context<Self>) {
+    fn add_selection_to_previous_find_match_inner(&mut self, cx: &mut Context<Self>) {
         let Some((found, whole_word, match_case)) = self.previous_match(cx) else {
             return;
         };
@@ -197,9 +195,7 @@ impl CodeEditor {
         });
     }
 
-    /// Moves the last selection to the previous occurrence (Monaco
-    /// `editor.action.moveSelectionToPreviousFindMatch`).
-    pub fn move_selection_to_previous_find_match(&mut self, cx: &mut Context<Self>) {
+    fn move_selection_to_previous_find_match_inner(&mut self, cx: &mut Context<Self>) {
         let Some((found, whole_word, match_case)) = self.previous_match(cx) else {
             return;
         };
@@ -215,9 +211,7 @@ impl CodeEditor {
         });
     }
 
-    /// Shift+Alt+I: a cursor at the end of every line each selection
-    /// covers (Monaco `editor.action.insertCursorAtEndOfEachLineSelected`).
-    pub fn insert_cursor_at_end_of_each_line_selected(&mut self, cx: &mut Context<Self>) {
+    fn insert_cursor_at_end_of_each_line_selected_inner(&mut self, cx: &mut Context<Self>) {
         let rope = self.snapshot.rope();
         let mut cursors = Vec::new();
         for selection in self.cursors.selections() {
@@ -240,10 +234,7 @@ impl CodeEditor {
         }
     }
 
-    /// The primary selection's columns repeated on every line from it to
-    /// the last (`down`) or first line (Monaco `editor.action.addCursorsToBottom`
-    /// / `addCursorsToTop`).
-    pub fn add_cursors_to_edge(&mut self, down: bool, cx: &mut Context<Self>) {
+    fn add_cursors_to_edge_inner(&mut self, down: bool, cx: &mut Context<Self>) {
         let first = self.cursors.selections()[0];
         let (start, end) = (first.start(), first.end());
         let rows: Vec<u32> = if down {
@@ -265,9 +256,7 @@ impl CodeEditor {
         self.set_selections(&selections, cx);
     }
 
-    /// Makes the next (or previous) cursor primary (Monaco
-    /// `editor.action.focusNextCursor` / `focusPreviousCursor`).
-    pub fn focus_next_cursor(&mut self, next: bool, cx: &mut Context<Self>) {
+    fn focus_next_cursor_inner(&mut self, next: bool, cx: &mut Context<Self>) {
         let mut selections = self.cursors.selections();
         if selections.len() < 2 {
             return;
@@ -287,9 +276,7 @@ impl CodeEditor {
         }
     }
 
-    /// Cmd/Ctrl+D: select the word, or add the next occurrence of the
-    /// selected text as a new selection.
-    pub fn add_selection_to_next_find_match(&mut self, cx: &mut Context<Self>) {
+    fn add_selection_to_next_find_match_inner(&mut self, cx: &mut Context<Self>) {
         if self.expand_empty_selections(cx) {
             return;
         }
@@ -317,9 +304,7 @@ impl CodeEditor {
         });
     }
 
-    /// Cmd/Ctrl+K Cmd/Ctrl+D: move the last selection to the next
-    /// occurrence.
-    pub fn move_selection_to_next_find_match(&mut self, cx: &mut Context<Self>) {
+    fn move_selection_to_next_find_match_inner(&mut self, cx: &mut Context<Self>) {
         if self.expand_empty_selections(cx) {
             return;
         }
@@ -348,9 +333,7 @@ impl CodeEditor {
         });
     }
 
-    /// Cmd/Ctrl+Shift+L: select every occurrence of the selection (or of
-    /// the word at the cursor). The current selection stays primary.
-    pub fn select_all_occurrences(&mut self, cx: &mut Context<Self>) {
+    fn select_all_occurrences_inner(&mut self, cx: &mut Context<Self>) {
         let primary = self.cursors.primary().selection();
         let from_word = primary.is_empty();
         let primary = self.word_selection(&primary, cx);
@@ -401,5 +384,91 @@ impl CodeEditor {
         );
         self.set_selections(&selections, cx);
         self.multi_cursor = None;
+    }
+
+    /// Adds the previous occurrence of the selected text as a selection
+    /// (Monaco `editor.action.addSelectionToPreviousFindMatch`).
+    pub fn add_selection_to_previous_find_match(&mut self, cx: &mut Context<Self>) {
+        let before = self.cursors.selections();
+        self.add_selection_to_previous_find_match_inner(cx);
+        self.announce_cursor_change(&before, cx);
+    }
+
+    /// Moves the last selection to the previous occurrence (Monaco
+    /// `editor.action.moveSelectionToPreviousFindMatch`).
+    pub fn move_selection_to_previous_find_match(&mut self, cx: &mut Context<Self>) {
+        let before = self.cursors.selections();
+        self.move_selection_to_previous_find_match_inner(cx);
+        self.announce_cursor_change(&before, cx);
+    }
+
+    /// Shift+Alt+I: a cursor at the end of every line each selection
+    /// covers (Monaco `editor.action.insertCursorAtEndOfEachLineSelected`).
+    pub fn insert_cursor_at_end_of_each_line_selected(&mut self, cx: &mut Context<Self>) {
+        let before = self.cursors.selections();
+        self.insert_cursor_at_end_of_each_line_selected_inner(cx);
+        self.announce_cursor_change(&before, cx);
+    }
+
+    /// The primary selection's columns repeated on every line from it to
+    /// the last (`down`) or first line (Monaco `editor.action.addCursorsToBottom`
+    /// / `addCursorsToTop`).
+    pub fn add_cursors_to_edge(&mut self, down: bool, cx: &mut Context<Self>) {
+        let before = self.cursors.selections();
+        self.add_cursors_to_edge_inner(down, cx);
+        self.announce_cursor_change(&before, cx);
+    }
+
+    /// Makes the next (or previous) cursor primary (Monaco
+    /// `editor.action.focusNextCursor` / `focusPreviousCursor`).
+    pub fn focus_next_cursor(&mut self, next: bool, cx: &mut Context<Self>) {
+        let before = self.cursors.selections();
+        self.focus_next_cursor_inner(next, cx);
+        self.announce_cursor_change(&before, cx);
+    }
+
+    /// Cmd/Ctrl+D: select the word, or add the next occurrence of the
+    /// selected text as a new selection.
+    pub fn add_selection_to_next_find_match(&mut self, cx: &mut Context<Self>) {
+        let before = self.cursors.selections();
+        self.add_selection_to_next_find_match_inner(cx);
+        self.announce_cursor_change(&before, cx);
+    }
+
+    /// Cmd/Ctrl+K Cmd/Ctrl+D: move the last selection to the next
+    /// occurrence.
+    pub fn move_selection_to_next_find_match(&mut self, cx: &mut Context<Self>) {
+        let before = self.cursors.selections();
+        self.move_selection_to_next_find_match_inner(cx);
+        self.announce_cursor_change(&before, cx);
+    }
+
+    /// Cmd/Ctrl+Shift+L: select every occurrence of the selection (or of
+    /// the word at the cursor). The current selection stays primary.
+    pub fn select_all_occurrences(&mut self, cx: &mut Context<Self>) {
+        let before = self.cursors.selections();
+        self.select_all_occurrences_inner(cx);
+        self.announce_cursor_change(&before, cx);
+    }
+
+    /// Monaco's `announceCursorChange`: screen readers hear where the
+    /// multicursor commands added cursors.
+    pub(crate) fn announce_cursor_change(&mut self, before: &[Selection], cx: &mut Context<Self>) {
+        let added: Vec<String> = self
+            .cursors
+            .selections()
+            .iter()
+            .filter(|s| !before.contains(s))
+            .map(|s| format!("line {} column {}", s.head.row + 1, s.head.column + 1))
+            .collect();
+        if added.is_empty() {
+            return;
+        }
+        let message = if added.len() == 1 {
+            format!("Cursor added: {}", added[0])
+        } else {
+            format!("Cursors added: {}", added.join(", "))
+        };
+        self.announce(message, cx);
     }
 }

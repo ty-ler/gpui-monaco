@@ -994,6 +994,16 @@ impl CodeEditor {
         self.show_hover_at_cursor(cx);
     }
 
+    /// Focuses the visible hover; returns whether one shows.
+    pub(crate) fn focus_hover(&self, window: &mut Window, cx: &mut gpui::App) -> bool {
+        let Some((widget, _)) = &self.hover.widget else {
+            return false;
+        };
+        let handle = widget.read(cx).focus_handle.clone();
+        window.focus(&handle, cx);
+        true
+    }
+
     /// Where the hover card was last painted.
     pub(crate) fn hover_card_bounds(&self, cx: &gpui::App) -> Option<Bounds<Pixels>> {
         let (widget, _) = self.hover.widget.as_ref()?;

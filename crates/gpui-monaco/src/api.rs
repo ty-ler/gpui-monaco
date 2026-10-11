@@ -1163,35 +1163,35 @@ impl CodeEditor {
     }
 
     /// Runs the editor action or command with Monaco id `name` (e.g.
-    /// `"editor.action.commentLine"`, `"cursorDown"`, or one from
-    /// [`CodeEditor::add_action`]), or else the GPUI action named `name`
-    /// (e.g. `"code_editor::CommentLine"`), as if its key were pressed in
-    /// this editor (Monaco `trigger`). Fails for unknown names.
+    /// `"editor.action.commentLine"`, `"cursorDown"`, `"type"`, an alias
+    /// such as `"editor.action.goToDeclaration"`, one from
+    /// [`CodeEditor::add_action`] or [`CodeEditor::add_command`], or a
+    /// command from [`crate::register_command`]), or else the GPUI action
+    /// named `name` (e.g. `"code_editor::CommentLine"`), as if its key were
+    /// pressed in this editor (Monaco `trigger`). A built-in action or
+    /// command whose precondition fails does nothing, as in Monaco. Fails
+    /// for unknown names.
     pub fn trigger(
         &mut self,
         name: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        if self.run_action(name, window, cx) {
-            return Ok(());
-        }
-        // Monaco's unlabelled commands (`cursorDown`, `undo`, …), then GPUI
-        // action names.
-        let name = crate::editor_actions::command_action_name(name).unwrap_or(name);
-        let action = cx.build_action(name, None)?;
-        window.focus(&self.focus_handle, cx);
-        window.dispatch_action(action, cx);
-        Ok(())
+        self.trigger_command(name, None, window, cx)
     }
 
     /// [`CodeEditor::trigger`] with Monaco's `payload`: the arguments of
-    /// commands that take some, such as `editor.actions.findWithArgs`
+    /// commands that take some, as JSON in Monaco's shape, such as
+    /// `editor.trigger('keyboard', 'type', { text })`
+    /// ([`Type`](crate::actions::Type)), `cursorMove`
+    /// ([`CursorMove`](crate::actions::CursorMove)), `editor.fold`
+    /// ([`Fold`](crate::actions::Fold)), `editor.actions.findWithArgs`
     /// ([`FindWithArgs`](crate::actions::FindWithArgs)) and
     /// `editor.action.codeAction`
-    /// ([`TriggerCodeAction`](crate::actions::TriggerCodeAction)), as JSON.
-    /// Actions added with [`CodeEditor::add_action`] run without it. Fails
-    /// for unknown names and payloads the action can't be built from.
+    /// ([`TriggerCodeAction`](crate::actions::TriggerCodeAction)). Actions
+    /// added with [`CodeEditor::add_action`] run without it; registered
+    /// commands get it as their argument. Fails for unknown names and
+    /// payloads the action can't be built from.
     pub fn trigger_with_payload(
         &mut self,
         name: &str,
@@ -1199,20 +1199,45 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        if self.added_actions.iter().any(|a| a.id.as_ref() == name) {
+        self.trigger_command(name, Some(payload), window, cx)
+    }
+
+    fn trigger_command(
+        &mut self,
+        name: &str,
+        payload: Option<serde_json::Value>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let added = self.added_actions.iter().any(|a| a.id.as_ref() == name)
+            || crate::editor_actions::global_actions(cx)
+                .iter()
+                .any(|a| a.id.as_ref() == name);
+        if added {
             self.run_action(name, window, cx);
             return Ok(());
         }
-        let name = match crate::editor_actions::action_name(name) {
-            Some((name, precondition)) => {
-                if precondition.is_some_and(|precondition| !precondition(self, cx)) {
+        if let Some(handler) = self.commands.handlers.get(name).cloned() {
+            handler(self, window, cx);
+            return Ok(());
+        }
+        let action = match crate::editor_actions::action_name(name) {
+            Some((action, when)) => {
+                if !self.when(when, cx) {
                     return Ok(());
                 }
-                name
+                cx.build_action(action, payload)?
             }
-            None => name,
+            None if crate::commands::has_command(cx, name) => {
+                let command = crate::providers::Command {
+                    id: name.to_string().into(),
+                    arguments: payload.into_iter().collect(),
+                    ..Default::default()
+                };
+                return crate::commands::execute_command(cx, &command);
+            }
+            None => cx.build_action(name, payload)?,
         };
-        let action = cx.build_action(name, Some(payload))?;
         window.focus(&self.focus_handle, cx);
         window.dispatch_action(action, cx);
         Ok(())

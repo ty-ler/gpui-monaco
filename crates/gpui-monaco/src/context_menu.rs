@@ -60,12 +60,10 @@ fn has_selection(editor: &CodeEditor, cx: &App) -> bool {
     writable(editor, cx) && editor.selections().iter().any(|s| !s.is_empty())
 }
 
-/// Whether the built-in action `id` can run.
+/// Whether the built-in action `id` can run (its precondition holds, which
+/// Monaco folds into the menu item's `when`).
 fn supported(editor: &CodeEditor, id: &str, cx: &App) -> bool {
-    editor
-        .supported_actions(cx)
-        .iter()
-        .any(|action| action.id.as_ref() == id)
+    editor.action_enabled(id, cx)
 }
 
 macro_rules! when_supported {
@@ -86,8 +84,20 @@ when_supported!(can_go_to_implementation, "editor.action.goToImplementation");
 when_supported!(can_go_to_references, "editor.action.goToReferences");
 when_supported!(can_rename, "editor.action.rename");
 when_supported!(can_format, "editor.action.formatDocument");
-when_supported!(can_refactor, "editor.action.refactor");
-when_supported!(can_source_action, "editor.action.sourceAction");
+when_supported!(can_go_to_symbol, "editor.action.quickOutline");
+
+/// Monaco's Refactor... item: a provider declares refactorings
+/// (`contextKeyForSupportedActions(Refactor)`).
+fn can_refactor(editor: &CodeEditor, cx: &App) -> bool {
+    supported(editor, "editor.action.refactor", cx)
+        && editor.when("supportedCodeAction_refactor", cx)
+}
+
+/// Monaco's Source Action... item: a provider declares source actions.
+fn can_source_action(editor: &CodeEditor, cx: &App) -> bool {
+    supported(editor, "editor.action.sourceAction", cx)
+        && editor.when("supportedCodeAction_source", cx)
+}
 
 fn can_format_selection(editor: &CodeEditor, cx: &App) -> bool {
     has_selection(editor, cx) && supported(editor, "editor.action.formatSelection", cx)
@@ -101,7 +111,7 @@ static ITEMS: &[BuiltinItem] = &[
     BuiltinItem("navigation", 1.4, "Go to Type Definition", "code_editor::GoToTypeDefinition", can_go_to_type_definition),
     BuiltinItem("navigation", 1.45, "Go to Implementations", "code_editor::GoToImplementation", can_go_to_implementation),
     BuiltinItem("navigation", 1.45, "Go to References", "code_editor::GoToReferences", can_go_to_references),
-    BuiltinItem("navigation", 3., "Go to Symbol...", "code_editor::QuickOutline", always),
+    BuiltinItem("navigation", 3., "Go to Symbol...", "code_editor::QuickOutline", can_go_to_symbol),
     BuiltinItem("1_modification", 1.1, "Rename Symbol", "code_editor::Rename", can_rename),
     BuiltinItem("1_modification", 1.2, "Change All Occurrences", "code_editor::SelectAllOccurrences", writable),
     BuiltinItem("1_modification", 1.3, "Format Document", "code_editor::FormatDocument", can_format),

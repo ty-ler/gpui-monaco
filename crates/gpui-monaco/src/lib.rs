@@ -26,6 +26,7 @@
 mod accessibility;
 pub mod actions;
 mod api;
+pub mod api_commands;
 mod bracket_colors;
 mod bracket_matching;
 mod bulk_edit;
@@ -38,6 +39,7 @@ pub use color_picker::{ColorPickerWidget, STANDALONE_COLOR_PICKER_KEY_CONTEXT};
 mod color_detector;
 pub mod colorize;
 mod commands;
+pub mod context_keys;
 mod context_menu;
 pub use context_menu::CONTEXT_MENU_KEY_CONTEXT;
 mod completion;
@@ -62,6 +64,7 @@ mod dnd;
 mod drop_paste;
 mod editor;
 mod editor_actions;
+mod editor_commands;
 mod editor_state;
 mod element;
 pub mod events;
@@ -136,6 +139,7 @@ pub use bulk_edit::{
     set_workspace_file_edit_handler,
 };
 pub use commands::{add_command, execute_command, register_command, unregister_command};
+pub use context_keys::{ContextKey, ContextKeyValue};
 pub use decorations::{
     BlockDecoration, DecorationId, DecorationOptions, DecorationUnderline, InjectedText,
     LeftBorder, OverviewRulerLane,
@@ -144,6 +148,9 @@ pub use editor::{CodeEditor, CodeEditorEvent, FoldingRegionState, FoldingViewSta
 pub use editor_actions::{
     ActionPrecondition, ActionRun, EditorActionDescriptor, EditorActionInfo, KeybindingRule,
     add_editor_action, add_keybinding_rule, add_keybinding_rules,
+};
+pub use editor_commands::{
+    CursorStateComputerData, EditOperationBuilder, EditorCommand, TrackedSelection,
 };
 pub use element::EditorElement;
 pub use events::{

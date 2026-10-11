@@ -35,6 +35,21 @@ fn setup<'a>(
     (editor, cx)
 }
 
+/// A rename provider: Monaco's Start Linked Editing needs one.
+struct NoRename;
+
+impl RenameProvider for NoRename {
+    fn provide_rename_edits(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        _: &str,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Option<WorkspaceEdit>>> {
+        Task::ready(Ok(None))
+    }
+}
+
 fn settle(cx: &mut VisualTestContext) {
     cx.executor().advance_clock(Duration::from_millis(300));
     cx.run_until_parked();
@@ -108,7 +123,12 @@ fn off_by_default_and_escape_ends_it(cx: &mut TestAppContext) {
     });
     move_to(&editor, cx, 0, 2);
     assert!(ranges(&editor, cx).is_empty());
-    // The command works anyway.
+    // Without a rename provider, Monaco's precondition leaves the key alone.
+    cx.simulate_keystrokes("cmd-shift-f2");
+    cx.run_until_parked();
+    assert!(ranges(&editor, cx).is_empty());
+    // With one, the command works anyway.
+    cx.update(|_, cx| register_rename_provider(cx, LanguageSelector::All, NoRename));
     cx.simulate_keystrokes("cmd-shift-f2");
     cx.run_until_parked();
     assert_eq!(ranges(&editor, cx).len(), 2);

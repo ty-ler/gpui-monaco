@@ -98,10 +98,13 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `saveViewState()` / `restoreViewState(s)` | `save_view_state(cx)` / `restore_view_state(&s, cx)` (with the folded regions) |
 | `executeEdits(source, edits, endCursorState)` | `execute_edits(edits, end_selections, cx)`, or `execute_edit_operations(edits, end_cursor_state, cx)` with `SingleEditOperation`s (`force_move_markers`) and an `EndCursorState` (selections or a cursor state computer) |
 | `pushUndoStop()` / `popUndoStop()` | `push_undo_stop(cx)` / `pop_undo_stop(cx)` |
-| `trigger(source, handlerId, payload)` | `trigger(id, window, cx)`, taking a Monaco action or command id (`cursorDown`, `undo`, …) or a GPUI action name; `DiffEditor::trigger` for `diffEditor.*` ids |
+| `trigger(source, handlerId, payload)` | `trigger(id, window, cx)` / `trigger_with_payload(id, json, window, cx)`, taking any Monaco action, command or handler id (`cursorDown`, `type`, `cursorMove`, `editor.fold`, aliases, …) with Monaco's payload, or a GPUI action name; `DiffEditor::trigger` for `diffEditor.*` ids |
 | `getAction(id).run()` | `run_action(id, window, cx)` |
-| `addAction(descriptor)` | `add_action(EditorActionDescriptor::new(id, label, run).keybinding(…), cx)` |
-| `addCommand(keybinding, handler)` | define a GPUI action and bind it in `actions::KEY_CONTEXT`, or `add_command` plus `add_keybinding_rule` |
+| `addAction(descriptor)` | `add_action(EditorActionDescriptor::new(id, label, run).keybinding(…), cx)`, returning a `Disposable`; its keybindings apply in this editor only |
+| `addCommand(keybinding, handler, context)` | `add_command(keystrokes, handler, when, cx)`, returning the command's id and a `Disposable`; its keybinding applies in this editor only |
+| `createContextKey(key, defaultValue)` | `create_context_key(key, default, cx)`; `ContextKey::set`, `reset`, `get` |
+| `executeCommand(source, command)` / `executeCommands(source, commands)` | `execute_command(source, command, cx)` / `execute_commands(source, commands, cx)` with an `EditorCommand` |
+| `when` clauses over context keys | GPUI predicates over `context_keys(cx)` (`CodeEditor && editorTextFocus && editorLangId == rust`) |
 | `getSupportedActions()` | `supported_actions(cx)` |
 | `createDecorationsCollection(d)` | `create_decorations_collection(d, cx)` |
 | `deltaDecorations(old, new)`, `removeDecorations(ids)` | `delta_decorations(&old, new, cx)`, `remove_decorations(&ids, cx)` (editor-owned) |
@@ -187,6 +190,7 @@ Monaco's `monaco.languages.register…Provider(selector, provider)` functions be
 | `Location`, `LocationLink` | `Location`, with `origin_selection_range` and `target_selection_range` for a link |
 | `WorkspaceEdit` (text, file and snippet edits, `versionId`, `metadata`) | `WorkspaceEdit` with `edits`, `file_edits` (applied by `set_workspace_file_edit_handler`), `snippet_edits`, `versions` and `metadata` |
 | `editor.remeasureFonts` | `remeasure_fonts(cx)`, a no-op: GPUI measures text every frame |
+| `executeCommand('_executeLinkProvider', uri)`, `_executeSignatureHelpProvider`, `_executeSelectionRangeProvider`, `_executeCompletionItemProvider`, `_provideDocument(Range)SemanticTokens(Legend)` | `api_commands::execute_link_provider(&model, resolve_count, cx)` and the others, returning a `Task` with the providers' answers |
 | `editor.setColorMap`, `languages.getEncodedLanguageId`, `EncodedTokensProvider` | none: there are no encoded tokens; themes resolve token names |
 
 The `gpui-monaco-lsp` bridge registers these providers from a language server (see [Language servers](lsp.md)).

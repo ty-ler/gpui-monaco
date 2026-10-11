@@ -22,6 +22,8 @@ struct Actions {
     contexts: Rc<RefCell<Vec<CodeActionContext>>>,
     /// Edits filled in by `resolve_code_action`.
     resolved: Option<WorkspaceEdit>,
+    /// `provided_kinds`, which the kind actions' keybindings need.
+    kinds: Option<Vec<CodeActionKind>>,
 }
 
 impl CodeActionProvider for Actions {
@@ -45,6 +47,10 @@ impl CodeActionProvider for Actions {
         let mut action = action.clone();
         action.edit = Some(edit);
         Some(Task::ready(Ok(action)))
+    }
+
+    fn provided_kinds(&self) -> Option<Vec<CodeActionKind>> {
+        self.kinds.clone()
     }
 }
 
@@ -213,6 +219,9 @@ fn commands_with_a_kind_apply_a_single_action(cx: &mut TestAppContext) {
             action("Other fix", "quickfix"),
         ],
         resolved: Some(replace(p(0, 0)..p(0, 0), "use std;\n")),
+        // Monaco's Auto Fix and Organize Imports need the provider to
+        // declare these kinds.
+        kinds: Some(vec!["quickfix".into(), "source.organizeImports".into()]),
         ..Default::default()
     };
     let contexts = provider.contexts.clone();

@@ -269,6 +269,16 @@ impl FindWidget {
 
     /// Selects the find input's text without focusing it (Monaco
     /// `_findInput.select()`).
+    /// Whether the find input, the replace input and the widget have the
+    /// focus.
+    pub(crate) fn focus_state(&self, window: &Window, cx: &gpui::App) -> (bool, bool, bool) {
+        (
+            self.find_input.focus_handle(cx).is_focused(window),
+            self.replace_input.focus_handle(cx).is_focused(window),
+            self.focus_handle.contains_focused(window, cx),
+        )
+    }
+
     pub(crate) fn select_find_input(&mut self, cx: &mut Context<Self>) {
         self.find_input.update(cx, |input, cx| {
             let end = input.model().read(cx).buffer().max_point_utf16();

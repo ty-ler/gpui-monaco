@@ -206,6 +206,11 @@ impl Grammar {
     pub fn indents_query(&self) -> Option<&Query> {
         self.indents.as_ref()
     }
+
+    /// The tags query, if set.
+    pub fn tags_query(&self) -> Option<&Query> {
+        self.tags.as_ref()
+    }
 }
 
 /// A language: identity, file associations, editing configuration and an
