@@ -48,6 +48,8 @@ Issues are linked by number.
 | Snippet sessions: tab stops, choices, nesting, completion integration | `snippet` | ✅ | #55 |
 | Drag and drop text, double-click block selection | `dnd`, `doubleClickSelectsBlock` | ✅ | #92 |
 | External drops, paste as | `dropOrPasteInto` | ✅ | #92 |
+| Copy-time paste data (`prepareDocumentPaste`, `copyMimeTypes`) | `dropOrPasteInto` | ✅ | #227 |
+| Escape cancels pending go to, format, rename, paste and drop requests | `editor.cancelOperation` | ✅ | #227 |
 | Find/replace: case, word, regex, in selection, replace all | `find` | ✅ | |
 | Find model (Monaco's `FindModel`), preserve case, case escapes in replace, loop, seed and auto find in selection options | `find` | ✅ | #104 |
 | Find controller commands, history, extra space on top, widget width and states, remembered toggles | `find` | ✅ | #104 |
@@ -82,12 +84,14 @@ Issues are linked by number.
 | Bracket pair colorization, independent color pool per bracket type | `bracketPairColorization` | ✅ | #85, #203 |
 | Occurrence and selection highlight, `selectedTextMatchMode`, `occurrencesHighlightFromAllProviders` | `wordHighlighter` | ✅ `multiFile` highlights in the current editor only | #83, #203, #228 |
 | Unicode highlighting, unusual line terminators | `unicodeHighlighter`, `unusualLineTerminators` | ✅ | #86 |
+| Unicode highlighter "too many characters" banner, `disableHighlightingOf*` commands | `unicodeHighlighter`, `setBanner` | ✅ the commands change the editor's options, not user settings | #227 |
 | Font weight, ligatures, zoom, mouse wheel zoom | `fontZoom`, options | ✅ | #87 |
 | Variable line heights (`lineHeight` decorations, `allowVariableLineHeights`) | decorations | ✅ | #87 |
 | Letter spacing, font variations, per-decoration fonts | options | ❌ | #87 |
 | Smooth scrolling, caret animation, blinking styles, cursor surrounding lines, padding, wheel and middle-click options | options | ✅ | #88 |
 | Placeholder text, read-only message | `placeholderText`, `readOnlyMessage`, `message` | ✅ | #89 |
 | Very long lines | `stopRenderingLineAfter`, `maxTokenizationLineLength` | ✅ | #59 |
+| Clicking past the rendering limit turns it off | `longLinesHelper` | ✅ | #227 |
 
 ## Extensibility
 
@@ -101,6 +105,7 @@ Issues are linked by number.
 | Markers across models | `getModelMarkers`, `removeAllMarkers`, `onDidChangeMarkers` | ✅ markers live in their model, so none for uris without one | #204 |
 | Context menu, with host items | `contextmenu` | ✅ | #91 |
 | Go to line, quick outline (quick input) | `quickAccess` | ✅ | #100 |
+| Go to offset (`::`, `editor.action.gotoOffset`) | `quickAccess` | ✅ | #100, #227 |
 | Command palette, `addAction` | `quickAccess` | ✅ | #100 |
 | Reveal APIs, `executeEdits`, mouse hit-test events, word and position helpers, content-change details, cursor change reasons, decorations collections | editor API | ✅ | #105 |
 | Editor events: model, language, configuration, layout and content size changes, typing, clipboard, key, wheel and drag events, widget focus | `ICodeEditor.on*` | ✅ no composition, hidden-area, view-zone or begin/end update events; listeners can't change clipboard data or cancel keys | #205 |
@@ -113,6 +118,8 @@ Issues are linked by number.
 | Themes: `vs`, `vs-dark`, VS Code JSON, `defineTheme` | standalone theme service | ✅ | |
 | Themes by name for every editor | `editor.defineTheme`, `editor.setTheme` | ✅ | #204 |
 | High-contrast themes (`hc-black`, `hc-light`) | standalone themes | ✅ | #53 |
+| Toggle high contrast, force retokenize, inspect tokens | `toggleHighContrast`, `tokenization`, `inspectTokens` | ✅ inspect tokens shows tree-sitter captures and their TextMate scopes | #227 |
+| Symbol icon colors | `symbolIcon.*Foreground` | ✅ suggest widget and quick outline (glyphs, not codicons) | #227 |
 
 ## Language features (providers)
 
@@ -130,6 +137,7 @@ Issues are linked by number.
 | Definition preview hover (Cmd/Ctrl+hover, `showDefinitionPreviewHover`) | `gotoSymbol` | ✅ | #225 |
 | References, declaration, type definition, implementation, peek view | `gotoSymbol`, `peekView` | ✅ | #95 |
 | Open definition to the side (host event), peek focus toggle and default, resizable peek view, `definitionLinkOpensInPeek` | `gotoSymbol`, `peekView` | ✅ | #202 |
+| `goToLocations`/`peekLocations` API commands (and `showReferences`), `gotoLocation.multipleTests` | `gotoSymbol` | ✅ | #227 |
 | Diagnostics: squiggles, ruler, hover, F8 | `gotoError` | ✅ | |
 | Diagnostic tags (unused, deprecated), related information | `gotoError` | ✅ | #90 |
 | Document highlights | `wordHighlighter` | ✅ | #83 |

@@ -216,6 +216,11 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.quickCommand", "code_editor::QuickCommand", "Command Palette", always),
     Builtin("editor.action.gotoLine", "code_editor::GotoLine", "Go to Line/Column...", always),
     Builtin("editor.action.quickOutline", "code_editor::QuickOutline", "Go to Symbol...", always),
+    Builtin("editor.action.gotoOffset", "code_editor::GotoOffset", "Go to Offset...", always),
+    // Developer and theme.
+    Builtin("editor.action.forceRetokenize", "code_editor::ForceRetokenize", "Developer: Force Retokenize", always),
+    Builtin("editor.action.inspectTokens", "code_editor::InspectTokens", "Developer: Inspect Tokens", always),
+    Builtin("editor.action.toggleHighContrast", "code_editor::ToggleHighContrast", "Toggle High Contrast Theme", always),
     // Cursors and selections.
     Builtin("expandLineSelection", "code_editor::ExpandLineSelection", "Expand Line Selection", always),
     Builtin("editor.action.insertCursorAbove", "code_editor::AddCursorAbove", "Add Cursor Above", always),
@@ -522,6 +527,14 @@ static COMMANDS: &[Command] = &[
     Command("editor.action.clipboardCopyAction", "code_editor::Copy"),
     Command("editor.action.hideLongLineWarningHover", "code_editor::HideLongLineWarningHover"),
     Command("editor.action.inlineSuggest.toggleAlwaysShowToolbar", "code_editor::ToggleAlwaysShowInlineSuggestionToolbar"),
+    Command("editor.action.goToLocations", "code_editor::GoToLocations"),
+    Command("editor.action.peekLocations", "code_editor::PeekLocations"),
+    // Monaco's alias for `peekLocations`.
+    Command("editor.action.showReferences", "code_editor::PeekLocations"),
+    Command("editor.cancelOperation", "code_editor::CancelOperation"),
+    Command("editor.action.unicodeHighlight.disableHighlightingOfAmbiguousCharacters", "code_editor::DisableHighlightingOfAmbiguousCharacters"),
+    Command("editor.action.unicodeHighlight.disableHighlightingOfInvisibleCharacters", "code_editor::DisableHighlightingOfInvisibleCharacters"),
+    Command("editor.action.unicodeHighlight.disableHighlightingOfNonBasicAsciiCharacters", "code_editor::DisableHighlightingOfNonBasicAsciiCharacters"),
 ];
 
 /// The GPUI action name and precondition for the Monaco id `id`, labelled
@@ -861,8 +874,13 @@ impl CodeEditor {
         if self.run_action(id, window, cx) {
             return true;
         }
+        // Commands with a payload (`editor.action.goToLocations`, …) take
+        // `args` when they fit it.
         if let Some(name) = command_action_name(id)
-            && let Ok(action) = cx.build_action(name, None)
+            && let Ok(action) = args
+                .clone()
+                .and_then(|args| cx.build_action(name, Some(args)).ok())
+                .map_or_else(|| cx.build_action(name, None), Ok)
         {
             window.dispatch_action(action, cx);
             return true;

@@ -1908,6 +1908,11 @@ impl DataTransfer {
         self.items.retain(|(mime, _)| *mime != mime_type);
     }
 
+    /// Each MIME type with its data, in the order they were added.
+    pub fn iter(&self) -> impl Iterator<Item = (&SharedString, &DataTransferItem)> {
+        self.items.iter().map(|(mime, item)| (mime, item))
+    }
+
     /// The MIME types with data.
     pub fn mime_types(&self) -> impl Iterator<Item = &SharedString> {
         self.items.iter().map(|(mime, _)| mime)
@@ -2045,6 +2050,28 @@ pub trait DocumentPasteEditProvider: 'static {
         trigger: DocumentPasteTriggerKind,
         cx: &mut App,
     ) -> Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>>;
+
+    /// The MIME types [`prepare_document_paste`](Self::prepare_document_paste)
+    /// adds at copy time (Monaco `copyMimeTypes`), so that pasting the text
+    /// asks the providers that handle them.
+    fn copy_mime_types(&self) -> Vec<SharedString> {
+        Vec::new()
+    }
+
+    /// Runs when text is copied or cut in an editor with this provider
+    /// (Monaco `prepareDocumentPaste`): returns data to add to the paste's
+    /// [`DataTransfer`] when that copy is pasted, such as what the copied
+    /// code imports. `ranges` are the copied ranges (whole lines for empty
+    /// selections). Data of higher priority providers wins. `None` (the
+    /// default) if it doesn't prepare pastes.
+    fn prepare_document_paste(
+        &self,
+        _context: &ProviderContext,
+        _ranges: &[Range<PointUtf16>],
+        _cx: &mut App,
+    ) -> Option<Task<anyhow::Result<DataTransfer>>> {
+        None
+    }
 
     /// Whether it's the built-in plain text provider, which leaves the
     /// paste to the editor when it's the only one.

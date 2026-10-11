@@ -134,21 +134,19 @@ pub struct QuickInput {
     _subscriptions: Vec<Subscription>,
 }
 
-/// A short glyph per symbol kind, standing in for Monaco's codicons.
-fn symbol_icon(kind: SymbolKind) -> (&'static str, Hsla) {
+/// A short glyph per symbol kind, standing in for Monaco's codicons, in
+/// the theme's `symbolIcon.*Foreground` color.
+fn symbol_icon(kind: SymbolKind, colors: &crate::theme::EditorColors) -> (&'static str, Hsla) {
     use SymbolKind::*;
-    let purple: Hsla = rgb(0xb180d7).into();
-    let blue: Hsla = rgb(0x75beff).into();
-    let orange: Hsla = rgb(0xee9d28).into();
-    let gray: Hsla = rgb(0xc5c5c5).into();
-    match kind {
-        Method | Function | Constructor | Operator => ("ƒ", purple),
-        Field | Variable | Property | Key | TypeParameter => ("𝑥", blue),
-        Class | Struct | Interface | Enum | Object => ("◆", orange),
-        EnumMember | Constant | Number | Boolean | Null => ("π", blue),
-        Module | Namespace | Package | File => ("{}", gray),
-        String | Array | Event => ("ab", gray),
-    }
+    let glyph = match kind {
+        Method | Function | Constructor | Operator => "ƒ",
+        Field | Variable | Property | Key | TypeParameter => "𝑥",
+        Class | Struct | Interface | Enum | Object => "◆",
+        EnumMember | Constant | Number | Boolean | Null => "π",
+        Module | Namespace | Package | File => "{}",
+        String | Array | Event => "ab",
+    };
+    (glyph, colors.symbol_icons.for_symbol_kind(kind))
 }
 
 /// Monaco `NLS_SYMBOL_KIND_CACHE` groups for `@:`.
@@ -934,7 +932,7 @@ impl CodeEditor {
                     label: symbol.name.clone(),
                     highlights,
                     description: container.clone().map(Into::into),
-                    icon: Some(symbol_icon(symbol.kind)),
+                    icon: Some(symbol_icon(symbol.kind, &self.theme.colors)),
                     strikethrough: symbol.deprecated,
                     keybinding: None,
                     action: QuickAction::GoTo {

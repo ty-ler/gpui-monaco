@@ -671,6 +671,29 @@ impl TextModel {
         }
     }
 
+    /// Throws away the syntax state and parses the whole text again, right
+    /// away (Monaco's `resetTokenization` then `forceTokenization` for every
+    /// line, as `editor.action.forceRetokenize` does), cancelling any
+    /// background parse. Returns how long it took, or `None` without a
+    /// grammar (or for a model too large to tokenize).
+    pub fn force_retokenize(&mut self, cx: &mut Context<Self>) -> Option<std::time::Duration> {
+        if self.too_large_for_tokenization {
+            return None;
+        }
+        let syntax = self.syntax.as_mut()?;
+        syntax.task = None;
+        syntax.dirty = false;
+        syntax.latest = None;
+        let snapshot = self.buffer.snapshot();
+        let start = web_time::Instant::now();
+        let state = syntax.highlighter.update(None, &snapshot);
+        let elapsed = start.elapsed();
+        syntax.latest = Some((state, snapshot));
+        cx.emit(TextModelEvent::SyntaxUpdated);
+        cx.notify();
+        Some(elapsed)
+    }
+
     /// Whether a background parse is in flight.
     pub fn is_parsing(&self) -> bool {
         self.syntax

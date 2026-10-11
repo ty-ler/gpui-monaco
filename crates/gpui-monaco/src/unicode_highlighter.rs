@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use gpui::{Context, SharedString, Task, Window};
+use gpui::{AppContext as _, Context, SharedString, Task, Window};
 
 use crate::cursor::StandardTokenType;
 use crate::decorations::{DecorationId, DecorationOptions, TrackedRangeStickiness};
@@ -13,7 +13,7 @@ use crate::editor::CodeEditor;
 use crate::options::UnicodeHighlightOptions;
 use crate::unicode_highlight::{
     InvisibleCharacters, UnicodeHighlighterOptions, UnicodeHighlighterReason,
-    compute_unicode_highlight_reason, compute_unicode_highlights,
+    UnicodeHighlighterResult, compute_unicode_highlight_reason, compute_unicode_highlights,
 };
 
 /// Monaco's `RunOnceScheduler` delay after an edit.
@@ -30,6 +30,13 @@ pub(crate) struct UnicodeHighlightState {
         UnicodeHighlightOptions,
     )>,
     task: Option<Task<()>>,
+    /// The model it last highlighted, to reopen the banner for another.
+    model: Option<gpui::EntityId>,
+    /// What the "too many characters" banner is about, while it shows.
+    banner: Option<BannerKind>,
+    /// Its close button was clicked (Monaco `_bannerClosed`), until the
+    /// model changes.
+    banner_closed: bool,
 }
 
 /// The system's locale as a BCP 47 tag (`ru-RU`), from `LC_ALL`, `LC_CTYPE`
@@ -112,6 +119,20 @@ impl CodeEditor {
     /// painting.
     pub(crate) fn refresh_unicode_highlights(&mut self, cx: &mut Context<Self>) {
         let options = self.options.unicode_highlight.clone();
+        // Monaco `_updateHighlighter`: another model reopens a closed
+        // banner, and another model or options hide it until the new
+        // highlights are in.
+        let model_id = self.model().entity_id();
+        let model_changed = self.unicode_highlights.model != Some(model_id);
+        let options_changed =
+            (self.unicode_highlights.key.as_ref()).is_some_and(|key| key.2 != options);
+        if model_changed {
+            self.unicode_highlights.model = Some(model_id);
+            self.unicode_highlights.banner_closed = false;
+        }
+        if model_changed || options_changed {
+            self.update_unicode_banner(None, cx);
+        }
         let model = self.model().read(cx);
         let parsed = model.syntax_snapshot().map(|syntax| syntax.text.version());
         let key = (model.buffer().version(), parsed, options.clone());
@@ -144,6 +165,13 @@ impl CodeEditor {
                 if model.buffer().version() != key.0 {
                     return;
                 }
+                let counts = UnicodeHighlighterResult {
+                    ranges: Vec::new(),
+                    has_more: result.has_more,
+                    ambiguous_character_count: result.ambiguous_character_count,
+                    invisible_character_count: result.invisible_character_count,
+                    non_basic_ascii_character_count: result.non_basic_ascii_character_count,
+                };
                 // Monaco shows nothing when there are too many (and offers
                 // to turn the kind off in a banner).
                 let ranges = if result.has_more {
@@ -169,6 +197,7 @@ impl CodeEditor {
                         .collect()
                 };
                 this.set_unicode_decorations(ranges, cx);
+                this.update_unicode_banner(Some(&counts), cx);
                 this.unicode_highlights.task = None;
             })
             .ok();
@@ -366,11 +395,226 @@ impl CodeEditor {
             cx,
         );
     }
+
+    /// Turns a kind of highlighting off in the editor's options (Monaco's
+    /// `disableHighlightingOf*` actions, which change the user settings).
+    pub(crate) fn disable_unicode_highlighting(
+        &mut self,
+        change: impl FnOnce(&mut UnicodeHighlightOptions),
+        cx: &mut Context<Self>,
+    ) {
+        let mut options = self.options().clone();
+        change(&mut options.unicode_highlight);
+        self.update_options(options, cx);
+    }
+
+    /// Monaco `UnicodeHighlighter._updateState`: with too many characters
+    /// to highlight, a banner says which kind there's most of and offers to
+    /// turn it off, unless it was closed for this model.
+    fn update_unicode_banner(
+        &mut self,
+        result: Option<&UnicodeHighlighterResult>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(result) = result.filter(|result| result.has_more) else {
+            if self.unicode_highlights.banner.take().is_some() {
+                self.set_banner(None, gpui::px(0.), cx);
+            }
+            return;
+        };
+        if self.unicode_highlights.banner_closed {
+            return;
+        }
+        let kind = BannerKind::for_result(result);
+        let editor = cx.weak_entity();
+        let view = cx.new(|_| UnicodeBanner {
+            editor,
+            kind,
+            colors: self.theme.colors.clone(),
+        });
+        self.unicode_highlights.banner = Some(kind);
+        self.set_banner(Some(view.into()), gpui::px(BANNER_HEIGHT), cx);
+    }
+
+    /// The unicode highlighter banner's message and its action's label, if
+    /// it shows.
+    pub fn unicode_highlight_banner(&self) -> Option<(SharedString, SharedString)> {
+        let kind = self.unicode_highlights.banner?;
+        Some((kind.message().into(), kind.short_label().into()))
+    }
+
+    /// Closes the unicode highlighter banner until the model changes (its
+    /// close button, Monaco `onClose`). Returns whether it was showing.
+    pub fn close_unicode_highlight_banner(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.unicode_highlights.banner.is_none() {
+            return false;
+        }
+        self.unicode_highlights.banner_closed = true;
+        self.update_unicode_banner(None, cx);
+        true
+    }
+}
+
+/// Monaco `BANNER_ELEMENT_HEIGHT`.
+const BANNER_HEIGHT: f32 = 26.;
+
+/// Which kind of character the banner is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BannerKind {
+    NonBasicAscii,
+    Ambiguous,
+    Invisible,
+}
+
+impl BannerKind {
+    /// Monaco: the kind with the most characters, non-basic ASCII first on
+    /// ties, then ambiguous.
+    fn for_result(result: &UnicodeHighlighterResult) -> Self {
+        let max = result
+            .ambiguous_character_count
+            .max(result.non_basic_ascii_character_count)
+            .max(result.invisible_character_count);
+        if result.non_basic_ascii_character_count >= max {
+            Self::NonBasicAscii
+        } else if result.ambiguous_character_count >= max {
+            Self::Ambiguous
+        } else {
+            Self::Invisible
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::NonBasicAscii => "This document contains many non-basic ASCII unicode characters",
+            Self::Ambiguous => "This document contains many ambiguous unicode characters",
+            Self::Invisible => "This document contains many invisible unicode characters",
+        }
+    }
+
+    /// The `disableHighlighting*` action's `shortLabel`.
+    fn short_label(self) -> &'static str {
+        match self {
+            Self::NonBasicAscii => "Disable Non ASCII Highlight",
+            Self::Ambiguous => "Disable Ambiguous Highlight",
+            Self::Invisible => "Disable Invisible Highlight",
+        }
+    }
+
+    fn disable(self, options: &mut UnicodeHighlightOptions) {
+        match self {
+            Self::NonBasicAscii => options.non_basic_ascii = false,
+            Self::Ambiguous => options.ambiguous_characters = false,
+            Self::Invisible => options.invisible_characters = false,
+        }
+    }
+}
+
+/// Monaco's `Banner` (`bannerController.ts`/`.css`): a warning icon, the
+/// message, the action's link and a close button.
+struct UnicodeBanner {
+    editor: gpui::WeakEntity<CodeEditor>,
+    kind: BannerKind,
+    colors: crate::theme::EditorColors,
+}
+
+impl gpui::Render for UnicodeBanner {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+        use gpui::{
+            InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _,
+            Styled as _, div, px,
+        };
+        let kind = self.kind;
+        let link_editor = self.editor.clone();
+        let close_editor = self.editor.clone();
+        div()
+            .id("unicode-highlight-banner")
+            .size_full()
+            .flex()
+            .items_center()
+            .bg(self.colors.banner_background)
+            .text_color(self.colors.banner_foreground)
+            .text_size(px(12.))
+            .child(
+                div()
+                    .pl(px(10.))
+                    .pr(px(6.))
+                    .text_color(self.colors.banner_icon_foreground)
+                    .child("⚠"),
+            )
+            .child(
+                div()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .child(kind.message()),
+            )
+            .child(
+                div().flex_1().flex_shrink_0().mx(px(4.)).child(
+                    div()
+                        .id("unicode-highlight-banner-action")
+                        .ml(px(12.))
+                        .p(px(3.))
+                        .underline()
+                        .cursor_pointer()
+                        .child(kind.short_label())
+                        .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                            cx.stop_propagation();
+                            if let Some(editor) = link_editor.upgrade() {
+                                editor.update(cx, |editor, cx| {
+                                    editor.disable_unicode_highlighting(|o| kind.disable(o), cx)
+                                });
+                            }
+                        }),
+                ),
+            )
+            .child(
+                div()
+                    .id("unicode-highlight-banner-close")
+                    .px(px(10.))
+                    .cursor_pointer()
+                    .child("✕")
+                    .tooltip(crate::tooltip::tooltip("Close Banner", &self.colors))
+                    .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                        cx.stop_propagation();
+                        if let Some(editor) = close_editor.upgrade() {
+                            editor.update(cx, |editor, cx| {
+                                editor.close_unicode_highlight_banner(cx);
+                            });
+                        }
+                    }),
+            )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_banner_names_the_most_common_kind() {
+        let result = |ambiguous, invisible, non_basic_ascii| UnicodeHighlighterResult {
+            has_more: true,
+            ambiguous_character_count: ambiguous,
+            invisible_character_count: invisible,
+            non_basic_ascii_character_count: non_basic_ascii,
+            ..Default::default()
+        };
+        assert_eq!(
+            BannerKind::for_result(&result(5, 1, 2)),
+            BannerKind::Ambiguous
+        );
+        assert_eq!(
+            BannerKind::for_result(&result(1, 5, 2)),
+            BannerKind::Invisible
+        );
+        assert_eq!(
+            BannerKind::for_result(&result(5, 5, 5)),
+            BannerKind::NonBasicAscii
+        );
+        assert_eq!(
+            BannerKind::for_result(&result(5, 5, 1)),
+            BannerKind::Ambiguous
+        );
+    }
 
     #[test]
     fn code_points_format_like_monaco() {

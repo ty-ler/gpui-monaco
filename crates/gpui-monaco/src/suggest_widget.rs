@@ -19,7 +19,7 @@ use crate::editor::CodeEditor;
 use crate::markdown::{MarkdownStyle, render_markdown};
 use crate::options::{SuggestInsertMode, SuggestOptions};
 use crate::providers::{CompletionItem, CompletionItemKind, CompletionItemTag};
-use crate::theme::Theme;
+use crate::theme::{EditorColors, Theme};
 
 /// Rows shown at the default height (hardcoded in Monaco).
 const DEFAULT_ROWS: f32 = 12.;
@@ -192,26 +192,25 @@ pub struct SuggestWidget {
     details_scroll_top: Pixels,
 }
 
-/// A short glyph and color per kind, standing in for Monaco's codicons.
-fn kind_icon(kind: CompletionItemKind) -> (&'static str, Hsla) {
+/// A short glyph per kind, standing in for Monaco's codicons, in the
+/// theme's `symbolIcon.*Foreground` color (the row's text color for kinds
+/// without one).
+fn kind_icon(kind: CompletionItemKind, colors: &EditorColors) -> (&'static str, Option<Hsla>) {
     use CompletionItemKind::*;
-    let purple: Hsla = rgb(0xb180d7).into();
-    let blue: Hsla = rgb(0x75beff).into();
-    let orange: Hsla = rgb(0xee9d28).into();
-    let gray: Hsla = rgb(0xc5c5c5).into();
-    match kind {
-        Method | Function | Constructor => ("ƒ", purple),
-        Field | Variable | Property | Value | Reference | TypeParameter => ("𝑥", blue),
-        Class | Struct | Interface | Enum | Module => ("◆", orange),
-        EnumMember | Constant => ("π", blue),
-        Keyword | Operator => ("⌘", gray),
-        Snippet => ("{}", gray),
-        File | Folder => ("▤", gray),
-        Event | Unit | Color | Customcolor | Text => ("ab", gray),
-        User => ("@", gray),
-        Issue => ("◎", gray),
-        Tool => ("⚒", gray),
-    }
+    let glyph = match kind {
+        Method | Function | Constructor => "ƒ",
+        Field | Variable | Property | Value | Reference | TypeParameter => "𝑥",
+        Class | Struct | Interface | Enum | Module => "◆",
+        EnumMember | Constant => "π",
+        Keyword | Operator => "⌘",
+        Snippet => "{}",
+        File | Folder => "▤",
+        Event | Unit | Color | Customcolor | Text => "ab",
+        User => "@",
+        Issue => "◎",
+        Tool => "⚒",
+    };
+    (glyph, colors.symbol_icons.for_completion_kind(kind))
 }
 
 /// Monaco's `ColorExtractor` pattern: hex, `rgb[a]()` and `hsl[a]()`.
@@ -516,8 +515,11 @@ impl SuggestWidget {
                         .bg(color),
                 );
             } else {
-                let (glyph, glyph_color) = kind_icon(item.kind);
-                icon = icon.text_color(glyph_color).child(glyph);
+                let (glyph, glyph_color) = kind_icon(item.kind, &self.theme.colors);
+                if let Some(glyph_color) = glyph_color {
+                    icon = icon.text_color(glyph_color);
+                }
+                icon = icon.child(glyph);
             }
             icon
         });

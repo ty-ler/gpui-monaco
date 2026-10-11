@@ -1258,6 +1258,10 @@ pub struct GotoLocationOptions {
     pub multiple_implementations: GoToLocation,
     /// `multipleReferences`.
     pub multiple_references: GoToLocation,
+    /// `multipleTests`: for a host's go to test commands, which Monaco's
+    /// editor doesn't have (VS Code's testing view reads it); pass it as
+    /// `multiple` to [`CodeEditor::go_to_locations`](crate::CodeEditor::go_to_locations).
+    pub multiple_tests: GoToLocation,
     /// `alternativeDefinitionCommand` (go to references by default).
     pub alternative_definition_command: Option<LocationKind>,
     /// `alternativeTypeDefinitionCommand` (go to references by default).
@@ -1278,6 +1282,7 @@ impl Default for GotoLocationOptions {
             multiple_declarations: GoToLocation::Peek,
             multiple_implementations: GoToLocation::Peek,
             multiple_references: GoToLocation::Peek,
+            multiple_tests: GoToLocation::Peek,
             alternative_definition_command: Some(LocationKind::References),
             alternative_type_definition_command: Some(LocationKind::References),
             alternative_declaration_command: Some(LocationKind::References),
