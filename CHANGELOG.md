@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Fixed
+- **Keybindings match Monaco (#193):**
+  - **In-place replace:** Cmd/Ctrl+Shift+, now runs `inPlaceReplace.up` (+1) and Cmd/Ctrl+Shift+. runs `.down`; they were swapped.
+  - **Next/previous problem:** `marker.next`/`prev` are on Alt+F8 / Shift+Alt+F8. F8 / Shift+F8 run the new `marker.nextInFiles`/`prevInFiles`, which act the same within one model.
+  - **Suggest list:** Cmd+Up/Down move to the previous/next suggestion, as Monaco's `selectPrev/NextSuggestion` (new actions, plus page variants). They were bound to first/last, which Monaco leaves unbound.
+  - **Trigger completion:** also on Cmd/Ctrl+I, and Alt+Esc on macOS.
+  - **macOS:** Monaco's Emacs-style secondaries are bound: Ctrl+B/F/P/N, Ctrl+Shift+A/E, Ctrl+Backspace/Delete, and Ctrl+N/P in the suggest list.
+  - **Platform-specific keys:** Shift+Delete / Ctrl+Insert (cut and copy) and Ctrl+Shift+Up/Down (select) are bound on Windows only. On Linux, Ctrl+Shift+Up/Down add cursors.
+- **Docs:** `docs/MONACO_AUDIT.md` records a full parity audit against Monaco; its findings are tracked as #193–#206.
+
 ### Changed
 - **gpui from crates.io snapshots (#188, breaking):** gpui, gpui_platform and sum_tree now come from the `gpui-pre` crates (`=0.3.8`, zed@279fe07), the same snapshot gpui-component pins, instead of zed's git. Apps depend on `gpui = { package = "gpui-pre", version = "=0.3.8" }`, and the `[patch.crates-io]` block is gone. No API changes were needed.
 - **Web example (#58):** `examples/web` runs the editor in the browser through gpui's web platform (`gpui-pre-web`), with tree-sitter highlighting compiled to wasm. The page passes in a font, since the web platform ships none. Building it needs a nightly toolchain with `llvm-tools` and the `wasm-bindgen` CLI (see its README).

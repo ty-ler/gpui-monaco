@@ -12,15 +12,18 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **Cmd+D:** add the next match to the selection
 - **Alt+Up / Alt+Down:** move lines
 - **Cmd+Alt+[ / Cmd+Alt+]:** fold and unfold
-- **F8:** next problem
+- **Alt+F8 / F8:** next problem (Monaco's `marker.next` and `marker.nextInFiles`, which act the same within one model)
+- **Cmd+Shift+, / Cmd+Shift+.:** replace the value at the cursor with the previous or next one (`1` → `2`, `true` → `false`)
+- **Ctrl+B / Ctrl+F / Ctrl+P / Ctrl+N, Ctrl+A / Ctrl+E (with Shift to select), Ctrl+H / Ctrl+D:** Monaco's Emacs-style keys
 - **F12:** go to definition
-- **Ctrl+Space:** trigger completion
+- **Ctrl+Space (or Alt+Esc, Cmd+I):** trigger completion
 - **F1 / Ctrl+G / Cmd+Shift+O:** command palette, go to line, go to symbol
 - **Shift+F10:** context menu
 - **Tab / Cmd+Right / Alt+] / Alt+[ / Alt+\\** with ghost text: accept, accept a word, next, previous, ask explicitly
 - **Tab / Shift+Tab / Escape** in a snippet: next and previous tab stop, leave the snippet
 - **Ctrl+Space (or Cmd+I)** in the suggest widget: show or hide the details
 - **Shift+Enter / Shift+Tab** in the suggest widget: accept in the other insert mode
+- **Up / Down (or Cmd+Up / Cmd+Down, Ctrl+P / Ctrl+N), PageUp / PageDown** in the suggest widget: previous and next suggestion, by item or page
 - **Tab / Shift+Tab** with `tab_completion: On`: insert the best completion, then cycle through the others
 
 Tab focus mode (Ctrl+M; Ctrl+Shift+M on macOS) makes Tab and Shift+Tab move focus out of the editor, for keyboard and screen reader users.

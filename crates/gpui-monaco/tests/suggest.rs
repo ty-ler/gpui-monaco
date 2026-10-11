@@ -788,3 +788,33 @@ fn ctrl_space_toggles_details(cx: &mut TestAppContext) {
     assert!(!details(cx));
     assert!(visible(&editor, cx));
 }
+
+#[gpui::test]
+fn monaco_secondary_keys_move_in_the_list(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |_| {}, cx);
+    provide(cx, |_| {
+        ["print", "println", "process"]
+            .into_iter()
+            .map(|label| CompletionItem::new(label, CompletionItemKind::Function))
+            .collect()
+    });
+    cx.simulate_input("p");
+    settle(cx);
+    let selected = |cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, _| {
+            e.selected_suggestion()
+                .map(|(_, item)| item.label.to_string())
+        })
+    };
+    assert_eq!(selected(cx).as_deref(), Some("print"));
+    // Monaco `selectNextSuggestion` / `selectPrevSuggestion` secondaries.
+    cx.simulate_keystrokes("secondary-down");
+    assert_eq!(selected(cx).as_deref(), Some("println"));
+    cx.simulate_keystrokes("secondary-up");
+    assert_eq!(selected(cx).as_deref(), Some("print"));
+    cx.simulate_keystrokes("secondary-pagedown");
+    assert_eq!(selected(cx).as_deref(), Some("process"));
+    // The list stays open; the cursor didn't move.
+    assert!(visible(&editor, cx));
+    assert_eq!(text(&editor, cx), "p");
+}

@@ -298,10 +298,10 @@ actions!(
         /// `editor.action.reindentselectedlines`).
         ReindentSelectedLines,
         /// Steps the number or value at the cursor up: `1` → `2`, `true` →
-        /// `false` (Monaco `editor.action.inPlaceReplace.up`, Cmd/Ctrl+Shift+.).
+        /// `false` (Monaco `editor.action.inPlaceReplace.up`, Cmd/Ctrl+Shift+,).
         InPlaceReplaceUp,
         /// Steps the number or value at the cursor down (Monaco
-        /// `editor.action.inPlaceReplace.down`, Cmd/Ctrl+Shift+,).
+        /// `editor.action.inPlaceReplace.down`, Cmd/Ctrl+Shift+.).
         InPlaceReplaceDown,
         /// Removes the brackets around the cursor (Monaco
         /// `editor.action.removeBrackets`, Cmd/Ctrl+Alt+Backspace).
@@ -536,11 +536,16 @@ actions!(
         /// `editor.action.selectToBracket`). Unbound by default.
         SelectToBracket,
         /// Moves to the next marker and shows it inline (Monaco
-        /// `editor.action.marker.next`).
+        /// `editor.action.marker.next`, Alt+F8).
         GoToNextMarker,
         /// Moves to the previous marker and shows it inline (Monaco
-        /// `editor.action.marker.prev`).
+        /// `editor.action.marker.prev`, Shift+Alt+F8).
         GoToPreviousMarker,
+        /// Monaco `editor.action.marker.nextInFiles` (F8): the next marker,
+        /// which in a single model is [`GoToNextMarker`].
+        GoToNextMarkerInFiles,
+        /// Monaco `editor.action.marker.prevInFiles` (Shift+F8).
+        GoToPreviousMarkerInFiles,
         /// Goes to the definition of the symbol at the cursor (Monaco
         /// `editor.action.revealDefinition`).
         GoToDefinition,
@@ -555,6 +560,16 @@ actions!(
         /// Shows or hides the suggestion's details (Monaco
         /// `toggleSuggestionDetails`).
         ToggleSuggestionDetails,
+        /// Selects the next suggestion (Monaco `selectNextSuggestion`).
+        SelectNextSuggestion,
+        /// Selects the previous suggestion (Monaco `selectPrevSuggestion`).
+        SelectPreviousSuggestion,
+        /// Selects the suggestion a page down (Monaco
+        /// `selectNextPageSuggestion`).
+        SelectNextPageSuggestion,
+        /// Selects the suggestion a page up (Monaco
+        /// `selectPrevPageSuggestion`).
+        SelectPreviousPageSuggestion,
         /// Selects the first suggestion (Monaco `selectFirstSuggestion`).
         SelectFirstSuggestion,
         /// Selects the last suggestion (Monaco `selectLastSuggestion`).
@@ -777,8 +792,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-u", CursorUndo, ctx),
         KeyBinding::new("f7", WordHighlightNext, ctx),
         KeyBinding::new("shift-f7", WordHighlightPrev, ctx),
-        KeyBinding::new("secondary-shift-.", InPlaceReplaceUp, ctx),
-        KeyBinding::new("secondary-shift-,", InPlaceReplaceDown, ctx),
+        KeyBinding::new("secondary-shift-,", InPlaceReplaceUp, ctx),
+        KeyBinding::new("secondary-shift-.", InPlaceReplaceDown, ctx),
         KeyBinding::new("secondary-alt-backspace", RemoveBrackets, ctx),
         KeyBinding::new("secondary-k secondary-x", TrimTrailingWhitespace, ctx),
         KeyBinding::new("insert", ToggleOvertypeInsertMode, ctx),
@@ -793,7 +808,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("f3", NextMatch, ctx),
         KeyBinding::new("secondary-f3", NextSelectionMatch, ctx),
         KeyBinding::new("secondary-shift-f3", PreviousSelectionMatch, ctx),
-        KeyBinding::new("f8", GoToNextMarker, ctx),
+        KeyBinding::new("alt-f8", GoToNextMarker, ctx),
+        KeyBinding::new("f8", GoToNextMarkerInFiles, ctx),
         KeyBinding::new("f12", GoToDefinition, ctx),
         KeyBinding::new("shift-f12", GoToReferences, ctx),
         KeyBinding::new("f2", Rename, ctx),
@@ -813,6 +829,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-f4", GoToPreviousReference, ctx),
         KeyBinding::new("secondary-shift-space", TriggerParameterHints, ctx),
         KeyBinding::new("ctrl-space", TriggerSuggest, ctx),
+        // Monaco's secondary keys (Alt+Esc only on macOS).
+        KeyBinding::new("secondary-i", TriggerSuggest, ctx),
         KeyBinding::new("ctrl-space", ToggleSuggestionDetails, SUGGEST),
         KeyBinding::new("alt-\\", TriggerInlineSuggest, ctx),
         KeyBinding::new("secondary-shift-f2", StartLinkedEditing, ctx),
@@ -890,25 +908,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         ),
         KeyBinding::new("shift-enter", AcceptAlternativeSuggestion, SUGGEST),
         KeyBinding::new("shift-tab", AcceptAlternativeSuggestion, SUGGEST),
-        KeyBinding::new(
-            if cfg!(target_os = "macos") {
-                "cmd-up"
-            } else {
-                "ctrl-home"
-            },
-            SelectFirstSuggestion,
-            SUGGEST,
-        ),
-        KeyBinding::new(
-            if cfg!(target_os = "macos") {
-                "cmd-down"
-            } else {
-                "ctrl-end"
-            },
-            SelectLastSuggestion,
-            SUGGEST,
-        ),
-        KeyBinding::new("shift-f8", GoToPreviousMarker, ctx),
+        KeyBinding::new("shift-alt-f8", GoToPreviousMarker, ctx),
+        KeyBinding::new("shift-f8", GoToPreviousMarkerInFiles, ctx),
         KeyBinding::new("shift-f3", PreviousMatch, ctx),
         // Inside the find widget's inputs.
         KeyBinding::new("shift-enter", PreviousMatch, SINGLE_LINE),
@@ -941,6 +942,16 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-j", JoinLines, ctx),
             KeyBinding::new("ctrl-t", TransposeLetters, ctx),
             KeyBinding::new("ctrl-a", CursorLineStart, ctx),
+            KeyBinding::new("ctrl-shift-a", CursorLineStartSelect, ctx),
+            KeyBinding::new("ctrl-shift-e", CursorLineEndSelect, ctx),
+            // Monaco's Emacs-style secondary keys.
+            KeyBinding::new("ctrl-b", CursorLeft, ctx),
+            KeyBinding::new("ctrl-f", CursorRight, ctx),
+            KeyBinding::new("ctrl-p", CursorUp, ctx),
+            KeyBinding::new("ctrl-n", CursorDown, ctx),
+            KeyBinding::new("ctrl-backspace", DeleteLeft, ctx),
+            KeyBinding::new("ctrl-delete", DeleteRight, ctx),
+            KeyBinding::new("alt-escape", TriggerSuggest, ctx),
             KeyBinding::new("cmd-shift-alt-left", CursorColumnSelectLeft, ctx),
             KeyBinding::new("cmd-shift-alt-right", CursorColumnSelectRight, ctx),
             KeyBinding::new("cmd-shift-alt-up", CursorColumnSelectUp, ctx),
@@ -1037,8 +1048,6 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-delete", DeleteWordRight, ctx),
             KeyBinding::new("ctrl-y", Redo, ctx),
             KeyBinding::new("ctrl-shift-z", Redo, ctx),
-            KeyBinding::new("shift-delete", Cut, ctx),
-            KeyBinding::new("ctrl-insert", Copy, ctx),
             KeyBinding::new("shift-insert", Paste, ctx),
             KeyBinding::new("ctrl-shift-[", Fold, ctx),
             KeyBinding::new("ctrl-shift-]", Unfold, ctx),
@@ -1111,6 +1120,21 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             ]);
         }
         if cfg!(target_os = "windows") {
+            // Monaco binds these secondaries on Windows only.
+            bindings.extend([
+                KeyBinding::new("shift-delete", Cut, ctx),
+                KeyBinding::new("ctrl-insert", Copy, ctx),
+                KeyBinding::new("ctrl-shift-up", CursorUpSelect, ctx),
+                KeyBinding::new("ctrl-shift-down", CursorDownSelect, ctx),
+            ]);
+        }
+        if cfg!(target_os = "linux") {
+            bindings.extend([
+                KeyBinding::new("ctrl-shift-up", AddCursorAbove, ctx),
+                KeyBinding::new("ctrl-shift-down", AddCursorBelow, ctx),
+            ]);
+        }
+        if cfg!(target_os = "windows") {
             bindings.extend([
                 KeyBinding::new("ctrl-alt-up", AddCursorAbove, ctx),
                 KeyBinding::new("ctrl-alt-down", AddCursorBelow, ctx),
@@ -1155,6 +1179,21 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("f4", GoToNextReference, peek),
         KeyBinding::new("shift-f4", GoToPreviousReference, peek),
     ]);
+    // Monaco's secondary keys for moving in the suggest list (first and last
+    // have none). Bound last: they share the editor's context depth, where
+    // later bindings win, and must beat Cmd/Ctrl+Up/Down and Ctrl+N/P.
+    bindings.extend([
+        KeyBinding::new("secondary-down", SelectNextSuggestion, SUGGEST),
+        KeyBinding::new("secondary-up", SelectPreviousSuggestion, SUGGEST),
+        KeyBinding::new("secondary-pagedown", SelectNextPageSuggestion, SUGGEST),
+        KeyBinding::new("secondary-pageup", SelectPreviousPageSuggestion, SUGGEST),
+    ]);
+    if cfg!(target_os = "macos") {
+        bindings.extend([
+            KeyBinding::new("ctrl-n", SelectNextSuggestion, SUGGEST),
+            KeyBinding::new("ctrl-p", SelectPreviousSuggestion, SUGGEST),
+        ]);
+    }
     bindings
 }
 

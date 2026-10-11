@@ -687,9 +687,11 @@ fn in_place_replace_and_remove_brackets(cx: &mut TestAppContext) {
     editor.update(cx, |e, cx| {
         e.set_selections(&[Selection::collapsed(p(1, 13))], cx)
     });
-    cx.simulate_keystrokes("secondary-shift-.");
+    // Monaco: `inPlaceReplace.up` (+1) is Cmd/Ctrl+Shift+, and `.down` is
+    // Cmd/Ctrl+Shift+.
+    cx.simulate_keystrokes("secondary-shift-,");
     assert_eq!(text(&editor, cx), "let x = foo(2, true);");
-    cx.simulate_keystrokes("secondary-shift-, secondary-shift-,");
+    cx.simulate_keystrokes("secondary-shift-. secondary-shift-.");
     assert_eq!(text(&editor, cx), "let x = foo(0, true);");
     editor.update(cx, |e, cx| {
         e.set_selections(&[Selection::collapsed(p(1, 16))], cx)
