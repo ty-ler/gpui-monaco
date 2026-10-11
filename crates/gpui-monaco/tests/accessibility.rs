@@ -1,11 +1,18 @@
-//! Accessibility: tab focus mode (Monaco `toggleTabFocusMode`).
+//! Accessibility: tab focus mode (Monaco `toggleTabFocusMode`) and screen
+//! reader announcements of inline suggestions (Monaco
+//! `screenReaderAnnounceInlineSuggestion`).
+
+use std::time::Duration;
 
 use gpui::{
-    AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, ParentElement, Render,
-    Styled, TestAppContext, Window, div,
+    App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, ParentElement, Render,
+    Styled, Task, TestAppContext, VisualTestContext, Window, div,
 };
 use gpui_monaco::CodeEditor;
 use gpui_monaco::actions::ToggleTabFocusMode;
+use gpui_monaco::options::AccessibilitySupport;
+use gpui_monaco::providers::*;
+use gpui_monaco::text::PointUtf16;
 
 struct TwoEditors {
     first: Entity<CodeEditor>,
@@ -31,7 +38,7 @@ fn tab_moves_focus_in_tab_focus_mode(cx: &mut TestAppContext) {
         second: cx.new(|cx| CodeEditor::with_text("two", window, cx)),
     });
     let (first, second) = view.read_with(cx, |v, _| (v.first.clone(), v.second.clone()));
-    let handle = |e: &Entity<CodeEditor>, cx: &mut gpui::VisualTestContext| -> FocusHandle {
+    let handle = |e: &Entity<CodeEditor>, cx: &mut VisualTestContext| -> FocusHandle {
         cx.update(|_, cx| e.focus_handle(cx))
     };
     let first_handle = handle(&first, cx);
@@ -49,6 +56,11 @@ fn tab_moves_focus_in_tab_focus_mode(cx: &mut TestAppContext) {
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     assert!(cx.update(|_, cx| gpui_monaco::tab_focus_mode(cx)));
+    // Monaco alerts the new mode.
+    assert_eq!(
+        first.read_with(cx, |e, _| e.last_announcement_for_tests()),
+        Some("Pressing Tab will now move focus to the next focusable element".into())
+    );
     cx.simulate_keystrokes("tab");
     let second_handle = handle(&second, cx);
     assert!(cx.update(|window, _| second_handle.is_focused(window)));
@@ -58,4 +70,88 @@ fn tab_moves_focus_in_tab_focus_mode(cx: &mut TestAppContext) {
     );
     cx.simulate_keystrokes("shift-tab");
     assert!(cx.update(|window, _| first_handle.is_focused(window)));
+}
+
+/// Completes the word before the cursor with `hello world`.
+struct Hello;
+
+impl InlineCompletionsProvider for Hello {
+    fn provide_inline_completions(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        _: InlineCompletionContext,
+        _: &mut App,
+    ) -> Task<anyhow::Result<InlineCompletionList>> {
+        let line = context.snapshot.line(position.row);
+        let items = (!line.is_empty() && "hello world".starts_with(&line))
+            .then(|| InlineCompletion {
+                insert_text: "hello world".into(),
+                range: Some(PointUtf16::new(position.row, 0)..position),
+                ..Default::default()
+            })
+            .into_iter()
+            .collect();
+        Task::ready(Ok(InlineCompletionList {
+            items,
+            ..Default::default()
+        }))
+    }
+}
+
+fn announcement(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Option<String> {
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    editor.read_with(cx, |e, _| {
+        e.last_announcement_for_tests().map(|m| m.to_string())
+    })
+}
+
+#[gpui::test]
+fn screen_readers_hear_inline_suggestions(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_inline_completions_provider(cx, LanguageSelector::All, Hello);
+    });
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let mut editor = CodeEditor::with_text("", window, cx);
+        let mut options = editor.options().clone();
+        options.quick_suggestions = gpui_monaco::options::QuickSuggestions::OFF;
+        options.word_based_suggestions = gpui_monaco::options::WordBasedSuggestions::Off;
+        options.accessibility_support = AccessibilitySupport::On;
+        editor.update_options(options, cx);
+        editor
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    cx.simulate_input("he");
+    cx.executor().advance_clock(Duration::from_millis(100));
+    // Monaco `renderForScreenReader`: the ghost text.
+    assert_eq!(announcement(&editor, cx).as_deref(), Some("llo world"));
+    // Only once per suggestion.
+    editor.update(cx, |e, cx| e.announce("other", cx));
+    assert_eq!(announcement(&editor, cx).as_deref(), Some("other"));
+
+    // Monaco `screenReaderAnnounceInlineSuggestion: false`.
+    cx.simulate_keystrokes("escape");
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.screen_reader_announce_inline_suggestion = false;
+        e.update_options(options, cx);
+    });
+    cx.simulate_input("l");
+    cx.executor().advance_clock(Duration::from_millis(100));
+    assert_eq!(announcement(&editor, cx).as_deref(), Some("other"));
+
+    // Nothing without a screen reader.
+    cx.simulate_keystrokes("escape");
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.screen_reader_announce_inline_suggestion = true;
+        options.accessibility_support = AccessibilitySupport::Off;
+        e.update_options(options, cx);
+    });
+    cx.simulate_input("l");
+    cx.executor().advance_clock(Duration::from_millis(100));
+    assert_eq!(announcement(&editor, cx).as_deref(), Some("other"));
+    assert!(!editor.read_with(cx, |e, _| e.is_screen_reader_optimized()));
 }

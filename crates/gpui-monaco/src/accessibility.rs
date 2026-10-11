@@ -9,11 +9,45 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::accesskit::{self, NodeId, Role};
-use gpui::{A11ySubtreeBuilder, Context};
+use gpui::{A11ySubtreeBuilder, Context, SharedString, Window};
 use text::{PointUtf16, Rope};
 
 use crate::cursor::Selection;
 use crate::editor::CodeEditor;
+use crate::options::AccessibilitySupport;
+
+/// Monaco `ariaLabelForScreenReaderContent` with `accessibilitySupport:
+/// 'off'` (without a keybinding to turn screen reader mode on).
+pub(crate) const NOT_ACCESSIBLE_LABEL: &str = "The editor is not accessible at this time.";
+
+/// Screen reader mode (Monaco's computed `accessibilitySupport`) and
+/// announcements (Monaco `aria.alert`).
+#[derive(Default)]
+pub(crate) struct ScreenReaderState {
+    /// Monaco `isDominatedByLongLines`, read when the model is attached.
+    pub dominated_by_long_lines: bool,
+    /// Whether the last frame was optimized for a screen reader.
+    pub optimized: bool,
+    /// The last announcement, and whether it's in the second of Monaco's two
+    /// alert regions (alternated so a repeated message is read again).
+    pub announcement: Option<(SharedString, bool)>,
+    /// What identifies the inline suggestion announced last.
+    pub announced_suggestion: Option<String>,
+}
+
+/// Adds the announcement as an assertive live region (Monaco's
+/// `role="alert"` container).
+pub(crate) fn build_announcement(
+    builder: &mut A11ySubtreeBuilder,
+    message: &SharedString,
+    second: bool,
+) {
+    let id = builder.synthetic_node_id(("announcement", second));
+    let mut node = accesskit::Node::new(Role::Alert);
+    node.set_live(accesskit::Live::Assertive);
+    node.set_label(message.to_string());
+    builder.push_child(id, node);
+}
 
 /// What a screen reader reads: whole lines of the selection's pages.
 #[derive(Clone, Debug, PartialEq)]
@@ -127,6 +161,91 @@ fn selection_from_a11y(
 }
 
 impl CodeEditor {
+    /// Whether the editor runs optimized for screen readers (Monaco's
+    /// computed `accessibilitySupport` is `Enabled`): `On`, or `Auto` while
+    /// assistive technology is connected.
+    pub(crate) fn screen_reader_optimized(&self, window: &Window) -> bool {
+        match self.options.accessibility_support {
+            AccessibilitySupport::On => true,
+            AccessibilitySupport::Off => false,
+            AccessibilitySupport::Auto => window.is_a11y_active(),
+        }
+    }
+
+    /// Whether the last frame was optimized for screen readers (see
+    /// [`EditorOptions::accessibility_support`](crate::EditorOptions::accessibility_support)).
+    pub fn is_screen_reader_optimized(&self) -> bool {
+        self.screen_reader.optimized
+    }
+
+    /// Has screen readers read `message` now (Monaco `aria.alert`): an
+    /// assertive live region under the editor's node.
+    pub fn announce(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.set_announcement(message.into());
+        cx.notify();
+    }
+
+    fn set_announcement(&mut self, message: SharedString) {
+        // Monaco uses the second region when the first already says it.
+        let second = self
+            .screen_reader
+            .announcement
+            .as_ref()
+            .is_some_and(|(last, second)| *last == message && !second);
+        self.screen_reader.announcement = Some((message, second));
+    }
+
+    /// The last announcement, for tests.
+    #[doc(hidden)]
+    pub fn last_announcement_for_tests(&self) -> Option<SharedString> {
+        self.screen_reader
+            .announcement
+            .as_ref()
+            .map(|(message, _)| message.clone())
+    }
+
+    /// The announcement for the accessibility tree.
+    pub(crate) fn announcement(&self) -> Option<(SharedString, bool)> {
+        self.screen_reader.announcement.clone()
+    }
+
+    /// Monaco `InlineCompletionsController`'s
+    /// `playAccessibilitySignalAndReadSuggestion`, run each frame: once
+    /// another inline suggestion shows (and the suggest widget is closed),
+    /// screen readers read its ghost text, or where the next edit
+    /// suggestion is, with `screen_reader_announce_inline_suggestion`.
+    pub(crate) fn announce_inline_suggestion(&mut self, cx: &mut Context<Self>) {
+        if !self.screen_reader.optimized || self.is_suggest_visible() {
+            return;
+        }
+        let suggestion = if let Some((row, text)) = self.ghost_text_for_screen_reader(cx) {
+            Some((format!("ghost {row} {text}"), text))
+        } else if let Some((ix, edits)) = self.inline_edit_state(cx) {
+            let line = edits.first().map_or(0, |(range, _)| range.start.row) + 1;
+            let message = if self.tab_should_accept_inline_edit(cx) {
+                format!("Next edit suggestion available on line {line}, press Tab to accept")
+            } else if self.tab_should_jump_to_inline_edit(cx) {
+                format!("Next edit suggestion available on line {line}, press Tab to jump")
+            } else {
+                format!("Next edit suggestion available on line {line}")
+            };
+            Some((format!("edit {ix} {edits:?}"), message))
+        } else {
+            None
+        };
+        let key = suggestion.as_ref().map(|(key, _)| key.clone());
+        if key == self.screen_reader.announced_suggestion {
+            return;
+        }
+        self.screen_reader.announced_suggestion = key;
+        if let Some((_, message)) = suggestion
+            && self.options.screen_reader_announce_inline_suggestion
+            && !message.is_empty()
+        {
+            self.set_announcement(message.into());
+        }
+    }
+
     /// What the screen reader gets for the current selection.
     pub(crate) fn screen_reader_content(&self) -> ScreenReaderContent {
         screen_reader_content(

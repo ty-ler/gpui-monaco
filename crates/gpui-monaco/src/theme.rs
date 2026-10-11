@@ -221,6 +221,9 @@ pub struct EditorColors {
     pub unexpected_bracket: Hsla,
     /// Rendered whitespace (`editorWhitespace.foreground`).
     pub whitespace: Hsla,
+    /// The `wordWrapIndicator` glyph (`editorWordWrapIndicator.foreground`,
+    /// defaulting to the whitespace color).
+    pub word_wrap_indicator: Hsla,
     /// Indent guides (`editorIndentGuide.background1`).
     pub indent_guide: Hsla,
     /// The active indent guide (`editorIndentGuide.activeBackground1`).
@@ -531,6 +534,7 @@ impl EditorColors {
             ],
             unexpected_bracket: c(rgba(0xff1212cc)),
             whitespace: c(rgba(0xe3e4e229)),
+            word_wrap_indicator: c(rgba(0xe3e4e229)),
             indent_guide: c(rgb(0x404040)),
             indent_guide_active: c(rgb(0x707070)),
             ruler: c(rgb(0x5a5a5a)),
@@ -666,6 +670,7 @@ impl EditorColors {
             ],
             unexpected_bracket: c(rgba(0xff1212cc)),
             whitespace: c(rgba(0x33333333)),
+            word_wrap_indicator: c(rgba(0x33333333)),
             indent_guide: c(rgb(0xd3d3d3)),
             indent_guide_active: c(rgb(0x939393)),
             ruler: c(rgb(0xd3d3d3)),
@@ -815,6 +820,7 @@ impl EditorColors {
             ],
             unexpected_bracket: c(rgb(0xff3232)),
             whitespace: c(rgba(0xe3e4e229)),
+            word_wrap_indicator: c(rgba(0xe3e4e229)),
             indent_guide: c(rgb(0xffffff)),
             indent_guide_active: c(rgb(0xffffff)),
             ruler: c(rgb(0xffffff)),
@@ -963,6 +969,7 @@ impl EditorColors {
             ],
             unexpected_bracket: c(rgb(0xb5200d)),
             whitespace: c(rgb(0xcccccc)),
+            word_wrap_indicator: c(rgb(0xcccccc)),
             indent_guide: c(rgb(0x292929)),
             indent_guide_active: c(rgb(0x292929)),
             ruler: c(rgb(0x292929)),
@@ -1315,6 +1322,9 @@ impl EditorColors {
             "editorBracketHighlight.unexpectedBracket.foreground",
         );
         set(&mut self.whitespace, "editorWhitespace.foreground");
+        self.word_wrap_indicator = get("editorWordWrapIndicator.foreground")
+            .or_else(|| get("editorWhitespace.foreground"))
+            .unwrap_or(self.word_wrap_indicator);
         set(&mut self.indent_guide, "editorIndentGuide.background");
         set(&mut self.indent_guide, "editorIndentGuide.background1");
         set(

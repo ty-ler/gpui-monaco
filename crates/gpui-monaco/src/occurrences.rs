@@ -18,6 +18,17 @@ use crate::search::{self, SearchParams};
 /// Monaco's `SelectionHighlighter` waits this long after edits.
 const SELECTION_UPDATE_DELAY: Duration = Duration::from_millis(300);
 
+/// Monaco `mergeHighlights`: the answers in provider order, keeping the
+/// first highlight of each range.
+fn merge_highlights(answers: Vec<Vec<DocumentHighlight>>) -> Vec<DocumentHighlight> {
+    let mut seen = std::collections::HashSet::new();
+    answers
+        .into_iter()
+        .flatten()
+        .filter(|h| seen.insert((h.range.start, h.range.end)))
+        .collect()
+}
+
 #[derive(Default)]
 pub(crate) struct OccurrenceHighlights {
     /// Word highlights: decorations and their kinds' ranges at `word_version`.
@@ -170,25 +181,46 @@ impl CodeEditor {
         } else {
             self.options.occurrences_highlight_delay
         };
+        let merge = self.options.occurrences_highlight_from_all_providers;
         self.occurrences.word_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(delay).await;
-            let Ok(tasks) = this.update(cx, |_, cx| {
-                providers
-                    .iter()
-                    .map(|p| p.provide_document_highlights(&context, head, cx))
-                    .collect::<Vec<_>>()
-            }) else {
-                return;
-            };
-            let mut highlights = None;
-            for task in tasks {
-                if let Ok(Some(found)) = task.await
-                    && !found.is_empty()
-                {
-                    highlights = Some(found);
-                    break;
+            let highlights = if merge && !providers.is_empty() {
+                // Monaco `getOccurrencesAtPosition` with `mergeProviders`:
+                // every provider at once, their answers merged in provider
+                // order without repeated ranges. The textual highlights are
+                // only for when no provider matches.
+                let Ok(tasks) = this.update(cx, |_, cx| {
+                    providers
+                        .iter()
+                        .map(|p| p.provide_document_highlights(&context, head, cx))
+                        .collect::<Vec<_>>()
+                }) else {
+                    return;
+                };
+                let mut answers = Vec::new();
+                for task in tasks {
+                    if let Ok(Some(found)) = task.await {
+                        answers.push(found);
+                    }
                 }
-            }
+                Some(merge_highlights(answers))
+            } else {
+                // Monaco asks the providers in turn until one answers; an
+                // empty answer counts, and stops the search too.
+                let mut highlights = None;
+                for provider in &providers {
+                    let Ok(task) = this.update(cx, |_, cx| {
+                        provider.provide_document_highlights(&context, head, cx)
+                    }) else {
+                        return;
+                    };
+                    if let Ok(Some(found)) = task.await {
+                        highlights = Some(found);
+                        break;
+                    }
+                }
+                highlights
+            };
             // Monaco's `TextualDocumentHighlightProvider`: case-sensitive,
             // whole-word matches of the word.
             let highlights = match highlights {
@@ -231,6 +263,17 @@ impl CodeEditor {
             })
             .ok();
         }));
+    }
+
+    /// Monaco `WordHighlighter`'s `_stopAll` then `_run`: drops the word
+    /// highlights and computes them again (unless occurrence highlighting is
+    /// off).
+    pub(crate) fn restart_word_highlights(&mut self, cx: &mut Context<Self>) {
+        self.occurrences.word_version = None;
+        self.clear_word_highlights(cx);
+        if self.options.occurrences_highlight != crate::options::OccurrencesHighlight::Off {
+            self.update_word_highlights(false, cx);
+        }
     }
 
     /// Highlights the symbol's occurrences right away, even with
@@ -442,5 +485,38 @@ impl CodeEditor {
         if !self.occurrences.selection.is_empty() {
             self.set_selection_highlights(Vec::new(), cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn h(start: u32, end: u32, kind: DocumentHighlightKind) -> DocumentHighlight {
+        DocumentHighlight {
+            range: PointUtf16::new(0, start)..PointUtf16::new(0, end),
+            kind,
+        }
+    }
+
+    /// Monaco `wordHighlighter.test.ts` "queries different priorities
+    /// concurrently and deduplicates ranges in provider order".
+    #[test]
+    fn merged_highlights_keep_the_first_of_each_range() {
+        use DocumentHighlightKind::*;
+        let (first, second) = (h(0, 4, Read), h(5, 9, Write));
+        let (text, overlapping) = (h(10, 14, Text), h(1, 4, Write));
+        let higher = vec![first.clone(), first.clone(), text.clone()];
+        let lower = vec![
+            h(0, 4, Write),
+            second.clone(),
+            h(10, 14, Read),
+            overlapping.clone(),
+        ];
+        assert_eq!(
+            merge_highlights(vec![higher, lower]),
+            vec![first, text, second, overlapping]
+        );
+        assert_eq!(merge_highlights(Vec::new()), Vec::new());
     }
 }

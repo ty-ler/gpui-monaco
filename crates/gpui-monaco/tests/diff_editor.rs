@@ -787,6 +787,184 @@ fn compact_mode(cx: &mut TestAppContext) {
     assert!(!diff.read_with(cx, |d, _| d.renders_side_by_side()));
 }
 
+fn update_options(
+    diff: &Entity<DiffEditor>,
+    cx: &mut VisualTestContext,
+    f: impl FnOnce(&mut gpui_monaco::DiffEditorOptions),
+) {
+    diff.update(cx, |d, cx| {
+        let mut options = d.options().clone();
+        f(&mut options);
+        d.update_options(options, cx);
+    });
+    paint(cx);
+}
+
+/// The diff editor's decorations on one side: (Monaco 1-based range,
+/// options).
+fn side_decorations(
+    diff: &Entity<DiffEditor>,
+    modified: bool,
+    cx: &mut VisualTestContext,
+) -> Vec<((u32, u32, u32, u32), gpui_monaco::DecorationOptions)> {
+    let editor = diff.read_with(cx, |d, _| {
+        if modified {
+            d.modified_editor().clone()
+        } else {
+            d.original_editor().clone()
+        }
+    });
+    let id = editor.entity_id();
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    model.update(cx, |model, _| {
+        let buffer = model.buffer().clone();
+        model
+            .all_decorations(Some(id))
+            .into_iter()
+            .filter(|d| d.owner == Some(id))
+            .map(|d| {
+                let a = buffer.offset_to_point_utf16(d.range.start).to_monaco();
+                let b = buffer.offset_to_point_utf16(d.range.end).to_monaco();
+                ((a.0, a.1, b.0, b.1), (*d.options).clone())
+            })
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn diff_code_lens(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a", "b", cx);
+    let code_lens = |diff: &Entity<DiffEditor>, cx: &mut VisualTestContext| {
+        diff.read_with(cx, |d, cx| {
+            (
+                d.original_editor().read(cx).options().code_lens,
+                d.modified_editor().read(cx).options().code_lens,
+            )
+        })
+    };
+    // Monaco `diffCodeLens` is off by default, for both editors.
+    assert_eq!(code_lens(&diff, cx), (false, false));
+    update_options(&diff, cx, |o| o.diff_code_lens = true);
+    assert_eq!(code_lens(&diff, cx), (true, true));
+}
+
+#[gpui::test]
+fn accessibility_verbose(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a", "b", cx);
+    let labels = |diff: &Entity<DiffEditor>, cx: &mut VisualTestContext| {
+        diff.read_with(cx, |d, cx| {
+            (
+                d.original_editor()
+                    .read(cx)
+                    .options()
+                    .aria_label
+                    .to_string(),
+                d.modified_editor()
+                    .read(cx)
+                    .options()
+                    .aria_label
+                    .to_string(),
+            )
+        })
+    };
+    let plain = labels(&diff, cx);
+    assert_eq!(plain.1, "Editor content");
+    // Monaco `_updateAriaLabel`: a navigation tip, added once and removed
+    // again.
+    update_options(&diff, cx, |o| o.accessibility_verbose = true);
+    let verbose = labels(&diff, cx);
+    assert!(verbose.0.starts_with("Editor content use "));
+    assert!(verbose.1.ends_with("accessible diff viewer."));
+    update_options(&diff, cx, |o| o.diff_code_lens = true);
+    assert_eq!(labels(&diff, cx), verbose);
+    update_options(&diff, cx, |o| o.accessibility_verbose = false);
+    assert_eq!(labels(&diff, cx), plain);
+}
+
+#[gpui::test]
+fn show_empty_decorations(cx: &mut TestAppContext) {
+    // `x` inserted: an empty range on the original side.
+    let (diff, cx) = setup("abc\nd", "abxc\nd", cx);
+    let empty = |diff: &Entity<DiffEditor>, cx: &mut VisualTestContext| {
+        side_decorations(diff, false, cx)
+            .into_iter()
+            .filter_map(|(range, options)| Some((range, options.left_border?)))
+            .collect::<Vec<_>>()
+    };
+    // Monaco `diffDeleteDecorationEmpty`: a 3px bar a pixel left of the
+    // insertion point.
+    let marks = empty(&diff, cx);
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].0, (1, 3, 1, 3));
+    assert_eq!(marks[0].1.width, px(3.));
+    assert_eq!(marks[0].1.offset, px(-1.));
+    update_options(&diff, cx, |o| o.show_empty_decorations = false);
+    assert!(empty(&diff, cx).is_empty());
+}
+
+#[gpui::test]
+fn true_inline_view(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nfoo bar\nc", "a\nfoo baz\nc", cx);
+    let deleted_text = |diff: &Entity<DiffEditor>, cx: &mut VisualTestContext| {
+        side_decorations(diff, true, cx)
+            .into_iter()
+            .filter_map(|(range, options)| {
+                let before = options.before?;
+                assert!(before.style.strikethrough);
+                Some((range, before.content.to_string()))
+            })
+            .collect::<Vec<_>>()
+    };
+    update_options(&diff, cx, |o| o.render_side_by_side = false);
+    // The deleted line shows above.
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.alignment_zones_for_tests()),
+        (0, 1)
+    );
+    assert!(deleted_text(&diff, cx).is_empty());
+    // Monaco `experimental.useTrueInlineView`: the deleted `r` struck
+    // through before the inserted `z`, and no zone.
+    update_options(&diff, cx, |o| o.use_true_inline_view = true);
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.alignment_zones_for_tests()),
+        (0, 0)
+    );
+    assert_eq!(
+        deleted_text(&diff, cx),
+        vec![((2, 7, 2, 7), "r".to_string())]
+    );
+    // Only in the inline view.
+    update_options(&diff, cx, |o| o.render_side_by_side = true);
+    assert!(deleted_text(&diff, cx).is_empty());
+}
+
+#[gpui::test]
+fn true_inline_changes_count_as_simple_in_compact_mode(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("foo bar", "foo baz", cx);
+    update_options(&diff, cx, |o| o.compact_mode = true);
+    assert!(diff.read_with(cx, |d, _| d.renders_side_by_side()));
+    update_options(&diff, cx, |o| o.use_true_inline_view = true);
+    assert!(!diff.read_with(cx, |d, _| d.renders_side_by_side()));
+}
+
+#[gpui::test]
+fn screen_readers_keep_narrow_diffs_side_by_side(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb", "a\nc", cx);
+    cx.simulate_resize(gpui::size(px(600.), px(600.)));
+    paint(cx);
+    assert!(!diff.read_with(cx, |d, _| d.renders_side_by_side()));
+    // Monaco's `_screenReaderMode` ignores `useInlineViewWhenSpaceIsLimited`.
+    let modified = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    modified.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.accessibility_support = gpui_monaco::options::AccessibilitySupport::On;
+        e.update_options(options, cx);
+    });
+    paint(cx);
+    paint(cx);
+    assert!(diff.read_with(cx, |d, _| d.renders_side_by_side()));
+}
+
 #[gpui::test]
 fn diff_toggle_actions(cx: &mut TestAppContext) {
     use gpui_monaco::diff_editor::{

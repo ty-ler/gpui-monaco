@@ -103,6 +103,10 @@ pub(crate) struct TextMetrics {
     pub space_width: Pixels,
     /// Show control characters as their Unicode control pictures.
     pub render_control_characters: bool,
+    /// Monaco `effectiveFullwidthCharacterWidth: 'twoCells'`: the cell
+    /// full-width characters are centered in (two spaces wide), with a
+    /// monospace font.
+    pub full_width_cell: Option<Pixels>,
 }
 
 impl TextMetrics {
@@ -126,6 +130,14 @@ impl TextMetrics {
         };
         let em_width = width("m");
         let space_width = width(" ");
+        // Monaco `FontInfo.isMonospace`: the typical characters are equally
+        // wide.
+        let two_cells = options.fullwidth_character_width
+            == crate::options::FullwidthCharacterWidth::TwoCells
+            && ["i", "W", "1", ".", "_"]
+                .into_iter()
+                .all(|text| (width(text) - em_width).abs() < px(0.01))
+            && (space_width - em_width).abs() < px(0.01);
         Self {
             font,
             font_size,
@@ -133,6 +145,7 @@ impl TextMetrics {
             em_width,
             space_width,
             render_control_characters: options.render_control_characters,
+            full_width_cell: two_cells.then_some(space_width * 2.),
         }
     }
 }
@@ -147,6 +160,9 @@ pub(crate) struct CharWidths {
     column_width: Pixels,
     ascii: [f32; 128],
     max_ascii: f32,
+    /// Full-width characters' columns with `fullwidthCharacterWidth:
+    /// 'twoCells'`.
+    full_width_columns: Option<f32>,
     other: std::sync::Mutex<std::collections::HashMap<char, f32>>,
 }
 
@@ -162,6 +178,9 @@ impl CharWidths {
             column_width: metrics.em_width.max(px(1.)),
             ascii: [0.; 128],
             max_ascii: 0.,
+            full_width_columns: metrics
+                .full_width_cell
+                .map(|cell| cell / metrics.em_width.max(px(1.))),
             other: Default::default(),
         };
         for code in 32..128u8 {
@@ -183,7 +202,8 @@ impl CharWidths {
             Some(widths)
                 if widths.font == metrics.font
                     && widths.font_size == metrics.font_size
-                    && widths.column_width == metrics.em_width.max(px(1.)) =>
+                    && widths.column_width == metrics.em_width.max(px(1.))
+                    && widths.full_width_columns.is_some() == metrics.full_width_cell.is_some() =>
             {
                 widths.clone()
             }
@@ -204,6 +224,11 @@ impl crate::view::line_breaks::MeasureChar for CharWidths {
     fn columns(&self, ch: char) -> f32 {
         if (ch as u32) < 128 {
             return self.ascii[ch as usize];
+        }
+        if let Some(columns) = self.full_width_columns
+            && crate::cursor::strings::is_full_width_character(ch as u32)
+        {
+            return columns;
         }
         let mut other = self.other.lock().unwrap_or_else(|e| e.into_inner());
         *other.entry(ch).or_insert_with(|| self.measure(ch))
@@ -248,6 +273,11 @@ pub(crate) struct ChunkedLine {
     chunks: Vec<(usize, Pixels, ShapedLine)>,
     /// The total width.
     pub width: Pixels,
+    /// Full-width characters fitted to two cells (Monaco `twoCells`): their
+    /// display byte range and the cell's left edge, in order.
+    cells: Vec<(Range<usize>, Pixels)>,
+    /// The cells' width.
+    cell_width: Pixels,
 }
 
 impl ChunkedLine {
@@ -257,6 +287,7 @@ impl ChunkedLine {
     fn shape(
         display: String,
         font_size: Pixels,
+        full_width_cell: Option<Pixels>,
         sizes: &[(Range<usize>, Pixels)],
         runs: &[TextRun],
         window: &mut Window,
@@ -288,6 +319,7 @@ impl ChunkedLine {
             bounds.dedup();
         }
         let mut chunks = Vec::with_capacity(bounds.len() - 1);
+        let mut cells = Vec::new();
         let mut x = px(0.);
         let mut run_ix = 0;
         let mut run_offset = 0;
@@ -314,17 +346,34 @@ impl ChunkedLine {
                 .iter()
                 .find(|(range, _)| range.start <= start && end <= range.end)
                 .map_or(font_size, |(_, size)| *size);
-            let shaped = window.text_system().shape_line(
+            let mut shaped = window.text_system().shape_line(
                 SharedString::from(display[start..end].to_string()),
                 size,
                 &chunk_runs,
                 None,
             );
+            if let Some(cell) = full_width_cell.filter(|_| size == font_size) {
+                for (range, left) in fit_full_width_to_cells(&mut shaped, cell) {
+                    cells.push((start + range.start..start + range.end, x + left));
+                }
+            }
             let width = shaped.width;
             chunks.push((start, x, shaped));
             x += width;
         }
-        Self { chunks, width: x }
+        Self {
+            chunks,
+            width: x,
+            cells,
+            cell_width: full_width_cell.unwrap_or_default(),
+        }
+    }
+
+    /// The two-cell box of the full-width character at display byte
+    /// `index`, if fitted.
+    fn cell_at(&self, index: usize) -> Option<&(Range<usize>, Pixels)> {
+        let ix = self.cells.partition_point(|(range, _)| range.start < index);
+        self.cells.get(ix).filter(|(range, _)| range.start == index)
     }
 
     /// The chunk holding display byte `index`.
@@ -335,11 +384,30 @@ impl ChunkedLine {
     }
 
     pub fn x_for_index(&self, index: usize) -> Pixels {
+        // Monaco `getColumnLeft` with `useTwoCellFullwidthCharacters`: a
+        // centered full-width character starts at its cell's left edge.
+        if let Some((_, left)) = self.cell_at(index) {
+            return *left;
+        }
         let (start, x, shaped) = &self.chunks[self.chunk(index)];
         *x + shaped.x_for_index(index - start)
     }
 
     pub fn closest_index_for_x(&self, x: Pixels) -> usize {
+        // In a two-cell box, the nearer edge.
+        let cell = self
+            .cells
+            .partition_point(|(_, left)| *left <= x)
+            .checked_sub(1)
+            .and_then(|ix| self.cells.get(ix))
+            .filter(|(_, left)| x < *left + self.cell_width);
+        if let Some((range, left)) = cell {
+            return if x < *left + self.cell_width / 2. {
+                range.start
+            } else {
+                range.end
+            };
+        }
         let ix = self
             .chunks
             .partition_point(|(_, chunk_x, _)| *chunk_x <= x)
@@ -369,6 +437,73 @@ impl ChunkedLine {
         }
         Ok(())
     }
+}
+
+/// Monaco `useTwoCellFullwidthCharacters` (`splitFullWidthCharacters` and
+/// the `mtkfullwidth` parts in `viewLineRenderer.ts`): moves each
+/// full-width character's glyph to the middle of a `cell`-wide box and the
+/// glyphs after it along. Returns the boxes as (byte range, left edge).
+/// Lines with right-to-left glyphs, and characters drawn with several
+/// glyphs, are left alone, as Monaco leaves RTL parts and multi code point
+/// characters.
+fn fit_full_width_to_cells(shaped: &mut ShapedLine, cell: Pixels) -> Vec<(Range<usize>, Pixels)> {
+    use crate::cursor::strings::is_full_width_character;
+    let text = shaped.text.clone();
+    if !text.chars().any(|ch| is_full_width_character(ch as u32)) {
+        return Vec::new();
+    }
+    // The glyphs in visual order: (run, glyph, x, byte index).
+    let mut glyphs: Vec<(usize, usize, Pixels, usize)> = shaped
+        .runs
+        .iter()
+        .enumerate()
+        .flat_map(|(r, run)| {
+            run.glyphs
+                .iter()
+                .enumerate()
+                .map(move |(g, glyph)| (r, g, glyph.position.x, glyph.index))
+        })
+        .collect();
+    glyphs.sort_by(|a, b| f32::from(a.2).total_cmp(&f32::from(b.2)));
+    if glyphs.windows(2).any(|w| w[1].3 < w[0].3) {
+        return Vec::new();
+    }
+    let mut runs = shaped.runs.clone();
+    let mut cells = Vec::new();
+    let mut shift = px(0.);
+    for (k, &(r, g, x, index)) in glyphs.iter().enumerate() {
+        let next = glyphs.get(k + 1);
+        let next_x = next.map_or(shaped.width, |n| n.2);
+        let next_index = next.map_or(text.len(), |n| n.3);
+        let ch = text[index..].chars().next();
+        let fits = ch.filter(|ch| {
+            is_full_width_character(*ch as u32) && next_index == index + ch.len_utf8()
+        });
+        let position = &mut runs[r].glyphs[g].position.x;
+        if let Some(ch) = fits {
+            let advance = next_x - x;
+            let left = x + shift;
+            *position = left + (cell - advance) / 2.;
+            cells.push((index..index + ch.len_utf8(), left));
+            shift += cell - advance;
+        } else {
+            *position = x + shift;
+        }
+    }
+    if cells.is_empty() {
+        return cells;
+    }
+    let layout = gpui::LineLayout {
+        font_size: shaped.font_size,
+        width: shaped.width + shift,
+        ascent: shaped.ascent,
+        descent: shaped.descent,
+        runs,
+        len: shaped.len,
+    };
+    // `ShapedLine` derefs to its `Arc<LineLayout>`.
+    **shaped = std::sync::Arc::new(layout);
+    cells
 }
 
 /// Monaco `renderOverflowingCharCount`.
@@ -596,7 +731,14 @@ pub(crate) fn layout_segment<'a>(
             (!range.is_empty()).then(|| (range.clone(), size))
         })
         .collect();
-    let shaped = ChunkedLine::shape(display, metrics.font_size, &sizes, &runs, window);
+    let shaped = ChunkedLine::shape(
+        display,
+        metrics.font_size,
+        metrics.full_width_cell,
+        &sizes,
+        &runs,
+        window,
+    );
     LineLayout {
         view_line: segment.view_line,
         row: segment.row,
@@ -970,6 +1112,9 @@ pub(crate) struct EditorLayout {
     pub line_number_labels: Vec<(u32, String)>,
     /// The cursors drawn, and whether they're outlined (for tests).
     pub cursors: (Vec<Bounds<Pixels>>, bool),
+    /// The rows and left edges of the `wordWrapIndicator` glyphs drawn (for
+    /// tests).
+    pub wrap_indicators: Vec<(u32, Pixels)>,
 }
 
 impl EditorLayout {
@@ -1071,6 +1216,8 @@ pub struct PrepaintState {
     guides: Vec<(Bounds<Pixels>, Hsla)>,
     /// Rendered whitespace.
     whitespace: Option<WhitespaceMarks>,
+    /// The `wordWrapIndicator` glyph and where it goes.
+    wrap_indicators: Option<(ShapedLine, Vec<gpui::Point<Pixels>>)>,
     embedded: Vec<Embedded>,
     section_headers: Vec<MinimapSectionHeader>,
     /// The placeholder's lines and where they go.
@@ -1336,20 +1483,41 @@ fn prepaint_editor(
     // Bring the view lines up to date: edits, wrapping, folds. Monaco
     // doesn't wrap models too large to tokenize (`IdentityLinesCollection`).
     let too_large = editor.model().read(cx).is_too_large_for_tokenization();
+    // Monaco `accessibilitySupport`: optimized for a screen reader, a model
+    // dominated by long lines wraps at the viewport, measured and without
+    // continuation indent, so the wrapping matches the screen reader's.
+    let screen_reader = editor.screen_reader_optimized(window);
+    let (word_wrap, wrap_minified) =
+        options.wrap_mode(screen_reader, editor.screen_reader.dominated_by_long_lines);
+    let wrapping_strategy = if screen_reader {
+        crate::options::WrappingStrategy::Advanced
+    } else {
+        options.wrapping_strategy
+    };
+    let wrapping_indent = if screen_reader {
+        crate::view::line_breaks::WrappingIndent::None
+    } else {
+        options.wrapping_indent
+    };
     let wrap_column = {
         let viewport_columns = ((text_width - metrics.em_width) / metrics.em_width)
             .floor()
             .max(1.) as u32;
-        match options.effective_word_wrap() {
+        // Monaco leaves the rightmost column for the `wordWrapIndicator`,
+        // so it overlaps neither the text nor the scrollbar.
+        let wrapping_columns = viewport_columns
+            .saturating_sub(options.word_wrap_indicator as u32)
+            .max(1);
+        match word_wrap {
             _ if too_large => None,
             WordWrap::Off => None,
-            WordWrap::On => Some(viewport_columns),
+            WordWrap::On => Some(wrapping_columns),
             WordWrap::WordWrapColumn => Some(options.word_wrap_column.max(1)),
-            WordWrap::Bounded => Some(viewport_columns.min(options.word_wrap_column.max(1))),
+            WordWrap::Bounded => Some(wrapping_columns.min(options.word_wrap_column.max(1))),
         }
     };
     let measure = (wrap_column.is_some()
-        && options.wrapping_strategy == crate::options::WrappingStrategy::Advanced)
+        && wrapping_strategy == crate::options::WrappingStrategy::Advanced)
         .then(|| {
             let widths = CharWidths::for_metrics(&editor.char_widths, &metrics, cx);
             editor.char_widths = Some(widths.clone());
@@ -1360,7 +1528,7 @@ fn prepaint_editor(
         wrap_column.map(|column| WrapSettings {
             column,
             tab_size,
-            indent: options.wrapping_indent,
+            indent: wrapping_indent,
             keep_all: options.word_break == crate::options::WordBreak::KeepAll,
             classifier,
             wrap_on_escaped_line_feeds: options.wrap_on_escaped_line_feeds,
@@ -1455,16 +1623,6 @@ fn prepaint_editor(
             Vec::new()
         });
 
-    let lines_height =
-        line_height * view_line_count as f32 + zones.total() + options.padding.bottom;
-    let content_height = lines_height
-        + if options.scroll_beyond_last_line {
-            (viewport_height - line_height - options.padding.bottom).max(px(0.))
-        } else {
-            px(0.)
-        };
-    let max_scroll_top = (content_height - viewport_height).max(px(0.));
-
     // Rough content width from the longest row; refined by shaped lines below.
     let mut content_width = if wrap_column.is_some() {
         text_width
@@ -1478,6 +1636,35 @@ fn prepaint_editor(
                 + options.scroll_beyond_last_column as f32)
     };
     let show_hbar = content_width > text_width;
+
+    let lines_height =
+        line_height * view_line_count as f32 + zones.total() + options.padding.bottom;
+    // Monaco `ViewLayout._getContentHeight`: scrolling beyond the last
+    // line, or else room for a shown horizontal scrollbar under it (unless
+    // `ignoreHorizontalScrollbarInContentHeight`).
+    let hbar_height = if show_hbar
+        && options.scrollbar.horizontal != crate::options::ScrollbarVisibility::Hidden
+    {
+        hbar
+    } else {
+        px(0.)
+    };
+    let lines_height = if options.scroll_beyond_last_line
+        || options
+            .scrollbar
+            .ignore_horizontal_scrollbar_in_content_height
+    {
+        lines_height
+    } else {
+        lines_height + hbar_height
+    };
+    let content_height = lines_height
+        + if options.scroll_beyond_last_line {
+            (viewport_height - line_height - options.padding.bottom).max(px(0.))
+        } else {
+            px(0.)
+        };
+    let max_scroll_top = (content_height - viewport_height).max(px(0.));
     let text_height = if show_hbar {
         viewport_height - hbar
     } else {
@@ -2092,12 +2279,8 @@ fn prepaint_editor(
         minimap: Default::default(),
         // Leaving 2px for the cursor after the last character.
         viewport_column: (((text_width - px(2.)) / metrics.em_width).floor() as u32).max(1),
-        is_word_wrap_minified: false,
-        is_viewport_wrapping: !too_large
-            && matches!(
-                options.effective_word_wrap(),
-                WordWrap::On | WordWrap::Bounded
-            ),
+        is_word_wrap_minified: !too_large && wrap_minified,
+        is_viewport_wrapping: !too_large && matches!(word_wrap, WordWrap::On | WordWrap::Bounded),
         wrapping_column: wrap_column,
         vertical_scrollbar_width: vbar,
         horizontal_scrollbar_height: hbar,
@@ -2135,6 +2318,7 @@ fn prepaint_editor(
         horizontal_scrollbar,
         line_number_labels: Vec::new(),
         cursors: (Vec::new(), false),
+        wrap_indicators: Vec::new(),
     };
 
     // Minimap: token-colored characters or blocks (Monaco `minimap`), sized
@@ -2585,6 +2769,17 @@ fn prepaint_editor(
                     );
                     decoration_quads.push((bounds, options.background, options.border));
                 }
+            }
+            // Monaco's `border-left` on an inline decoration: at its start.
+            if let Some(border) = options.left_border
+                && line.contains(*start)
+            {
+                let x = origin_x + line.x_for_column(start.column) + border.offset;
+                decoration_quads.push((
+                    Bounds::new(point(x, top), size(border.width, height)),
+                    Some(border.color),
+                    None,
+                ));
             }
             // Monaco `squiggly-unnecessary`: a themed underline for unused
             // code without a squiggle.
@@ -3069,6 +3264,37 @@ fn prepaint_editor(
             (dot, arrow, marks)
         });
 
+    // Monaco `WordWrapIndicatorOverlay`: `↩` at the wrapping column of each
+    // view line that continues on the next one.
+    let wrap_indicators = wrap_column
+        .filter(|_| options.word_wrap_indicator)
+        .map(|column| {
+            let text = "\u{21a9}";
+            let glyph = window.text_system().shape_line(
+                text.into(),
+                metrics.font_size,
+                &[run(text.len(), &metrics.font, colors.word_wrap_indicator)],
+                None,
+            );
+            let left = metrics.em_width * column as f32;
+            let lines: Vec<&LineLayout> = layout
+                .lines
+                .iter()
+                .filter(|line| !line.is_last_segment)
+                .collect();
+            layout.wrap_indicators = lines.iter().map(|line| (line.row, left)).collect();
+            let marks = lines
+                .iter()
+                .map(|line| {
+                    point(
+                        layout.text_origin_x() + left,
+                        layout.text_top(line.view_line),
+                    )
+                })
+                .collect();
+            (glyph, marks)
+        });
+
     // Gutter numbers: on the first view line of each row.
     let mut gutter_numbers = Vec::new();
     if options.line_numbers != LineNumbers::Off {
@@ -3280,6 +3506,7 @@ fn prepaint_editor(
         ruler_marks,
         guides,
         whitespace,
+        wrap_indicators,
         embedded,
         minimap_image,
         section_headers,
@@ -3511,6 +3738,14 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                 if let Some((dot, arrow, marks)) = &state.whitespace {
                     for (origin, is_tab) in marks {
                         let glyph = if *is_tab { arrow } else { dot };
+                        glyph
+                            .paint(*origin, line_height, TextAlign::Left, None, window, cx)
+                            .ok();
+                    }
+                }
+
+                if let Some((glyph, marks)) = &state.wrap_indicators {
+                    for origin in marks {
                         glyph
                             .paint(*origin, line_height, TextAlign::Left, None, window, cx)
                             .ok();

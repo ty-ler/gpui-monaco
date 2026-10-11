@@ -107,7 +107,7 @@ pub use bulk_edit::{has_workspace_edit_preview_handler, set_workspace_edit_previ
 pub use commands::{add_command, execute_command, register_command, unregister_command};
 pub use decorations::{
     BlockDecoration, DecorationId, DecorationOptions, DecorationUnderline, InjectedText,
-    OverviewRulerLane,
+    LeftBorder, OverviewRulerLane,
 };
 pub use editor::{CodeEditor, CodeEditorEvent, FoldingRegionState, FoldingViewState, ViewState};
 pub use editor_actions::{

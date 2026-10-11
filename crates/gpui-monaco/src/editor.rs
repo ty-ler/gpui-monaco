@@ -287,6 +287,10 @@ pub struct CodeEditor {
     pub(crate) drop_paste: crate::drop_paste::DropPasteState,
     /// Screen reader text run ids to rows.
     a11y_rows: crate::accessibility::RunRows,
+    /// Screen reader mode and announcements.
+    pub(crate) screen_reader: crate::accessibility::ScreenReaderState,
+    /// Monaco `inertialScroll`'s fling after wheel events, while it runs.
+    inertial_scroll_task: Option<Task<()>>,
     pub(crate) theme: Arc<Theme>,
     pub(crate) scroll_top: Pixels,
     pub(crate) scroll_left: Pixels,
@@ -427,6 +431,7 @@ impl CodeEditor {
     pub fn new(model: Entity<TextModel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::model::register_model(cx, &model);
         crate::registry::track_editor(cx);
+        let dominated_by_long_lines = model.read(cx).is_dominated_by_long_lines();
         // A tab stop, like Monaco's textarea, for tab focus mode and hosts.
         let focus_handle = cx.focus_handle().tab_stop(true);
         let subscriptions = vec![
@@ -500,6 +505,11 @@ impl CodeEditor {
             dnd: Default::default(),
             drop_paste: Default::default(),
             a11y_rows: Default::default(),
+            screen_reader: crate::accessibility::ScreenReaderState {
+                dominated_by_long_lines,
+                ..Default::default()
+            },
+            inertial_scroll_task: None,
             theme: crate::theme::global_theme(cx).unwrap_or_else(|| Arc::new(Theme::vs_dark())),
             scroll_top: px(0.),
             scroll_left: px(0.),
@@ -640,6 +650,8 @@ impl CodeEditor {
 
         self._subscriptions[0] = cx.subscribe(&model, Self::on_model_event);
         model.update(cx, |model, cx| model.ensure_syntax(cx));
+        // Monaco `setIsDominatedByLongLines` when a model is attached.
+        self.screen_reader.dominated_by_long_lines = model.read(cx).is_dominated_by_long_lines();
         self.snapshot = model.read(cx).snapshot();
         self.view_lines = Arc::new(ViewLines::new(
             self.snapshot.rope().clone(),
@@ -738,6 +750,7 @@ impl CodeEditor {
 
     /// Replaces the editor options (Monaco `updateOptions`, but with a full set).
     pub fn update_options(&mut self, options: EditorOptions, cx: &mut Context<Self>) {
+        let old_from_all_providers = self.options.occurrences_highlight_from_all_providers;
         let old = std::mem::replace(
             &mut self.options,
             crate::font_zoom::zoomed_options(&options, crate::font_zoom::editor_zoom_level(cx)),
@@ -762,6 +775,14 @@ impl CodeEditor {
         // Monaco `ParameterHintsModel.onEditorConfigurationChange`.
         if !self.options.parameter_hints.enabled {
             self.hide_signature_help(cx);
+        }
+        // Monaco `WordHighlighter`: changing how providers are asked stops
+        // the highlights and asks again.
+        if old_from_all_providers != self.options.occurrences_highlight_from_all_providers {
+            self.restart_word_highlights(cx);
+        }
+        if !self.options.inertial_scroll {
+            self.stop_inertial_scroll();
         }
         if let Some(change) = change {
             cx.emit(change);
@@ -1110,6 +1131,15 @@ impl CodeEditor {
                 .map(|line| (line.row, line.columns.clone()))
                 .collect()
         })
+    }
+
+    /// The rows and left edges (from the text's start) of the
+    /// `word_wrap_indicator` glyphs in the last frame, for tests.
+    #[doc(hidden)]
+    pub fn wrap_indicators_for_tests(&self) -> Vec<(u32, Pixels)> {
+        self.layout
+            .as_ref()
+            .map_or_else(Vec::new, |l| l.wrap_indicators.clone())
     }
 
     /// The mouse cursor over the text without links, for tests.
@@ -3520,6 +3550,11 @@ impl CodeEditor {
         self.scroll_left -= delta.x;
         self.clamp_scroll();
         let moved = before != (self.scroll_top, self.scroll_left);
+        // Monaco `inertialScroll`: keep scrolling, slowing down, after the
+        // wheel events stop.
+        if self.options.inertial_scroll && self.animation.inertial.on_wheel(delta) {
+            self.run_inertial_scroll(cx);
+        }
         cx.emit(CodeEditorEvent::ScrollChanged);
         cx.notify();
         // Monaco `alwaysConsumeMouseWheel: false` lets the parent scroll
@@ -3527,6 +3562,50 @@ impl CodeEditor {
         if moved || self.options.scrollbar.always_consume_mouse_wheel {
             cx.stop_propagation();
         }
+    }
+
+    /// Monaco `AbstractScrollableElement._periodicSync`: scrolls by the
+    /// inertial speed now and every 1/60s while it lasts.
+    fn run_inertial_scroll(&mut self, cx: &mut Context<Self>) {
+        if !self.inertial_scroll_step(cx) {
+            return;
+        }
+        self.inertial_scroll_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(crate::view::animation::INERTIAL_SCROLL_INTERVAL)
+                    .await;
+                let Ok(going) = this.update(cx, |this, cx| this.inertial_scroll_step(cx)) else {
+                    return;
+                };
+                if !going {
+                    break;
+                }
+            }
+            this.update(cx, |this, _| this.inertial_scroll_task = None)
+                .ok();
+        }));
+    }
+
+    /// One inertial scroll step; whether another follows.
+    fn inertial_scroll_step(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(delta) = self.animation.inertial.tick() else {
+            return false;
+        };
+        let before = (self.scroll_top, self.scroll_left);
+        self.scroll_top -= delta.y;
+        self.scroll_left -= delta.x;
+        self.clamp_scroll();
+        if before != (self.scroll_top, self.scroll_left) {
+            cx.emit(CodeEditorEvent::ScrollChanged);
+            cx.notify();
+        }
+        self.animation.inertial.is_moving()
+    }
+
+    fn stop_inertial_scroll(&mut self) {
+        self.animation.inertial = Default::default();
+        self.inertial_scroll_task = None;
     }
 
     // ----- UTF-16 helpers for the input handler ----------------------------------
@@ -3764,6 +3843,11 @@ impl Render for CodeEditor {
         if std::mem::take(&mut self.refocus) {
             window.focus(&self.focus_handle, cx);
         }
+        // Monaco `accessibilitySupport`, and reading new inline suggestions.
+        self.screen_reader.optimized = self.screen_reader_optimized(window);
+        self.announce_inline_suggestion(cx);
+        let accessibility_off =
+            self.options.accessibility_support == crate::options::AccessibilitySupport::Off;
         // Focus listeners can miss changes (e.g. before the window is
         // active), so the frame keeps `has_focus` true to the window.
         let focused = self.focus_handle.is_focused(window);
@@ -3825,18 +3909,32 @@ impl Render for CodeEditor {
             } else {
                 gpui::Role::MultilineTextInput
             })
-            .aria_label(self.options.aria_label.clone())
+            // Monaco `ariaLabelForScreenReaderContent`.
+            .aria_label(if accessibility_off {
+                crate::accessibility::NOT_ACCESSIBLE_LABEL.into()
+            } else {
+                self.options.aria_label.clone()
+            })
             .map(|root| {
                 if !window.is_a11y_active() {
                     return root;
                 }
-                let content = self.screen_reader_content();
+                // Monaco `accessibilitySupport: 'off'` gives the screen
+                // reader no text.
+                let content = (!accessibility_off).then(|| self.screen_reader_content());
+                let announcement = self.announcement();
                 let rows = self.a11y_rows.clone();
                 let (read_only, required) = (self.options.read_only, self.options.aria_required);
                 let editor = cx.entity().downgrade();
                 let action_rows = self.a11y_rows.clone();
                 root.a11y_synthetic_children(move |builder| {
-                    content.build(builder, &rows);
+                    match &content {
+                        Some(content) => content.build(builder, &rows),
+                        None => rows.borrow_mut().clear(),
+                    }
+                    if let Some((message, second)) = &announcement {
+                        crate::accessibility::build_announcement(builder, message, *second);
+                    }
                     let node = builder.parent_node();
                     if read_only {
                         node.set_read_only();
@@ -4458,9 +4556,19 @@ impl Render for CodeEditor {
                 cx.listener(|this, _: &ToggleStickyScroll, _, cx| this.toggle_sticky_scroll(cx)),
             )
             .on_action(cx.listener(|this, _: &PasteAs, window, cx| this.paste_as(None, window, cx)))
-            .on_action(|_: &ToggleTabFocusMode, _, cx| {
-                crate::set_tab_focus_mode(!crate::tab_focus_mode(cx), cx)
-            })
+            .on_action(cx.listener(|this, _: &ToggleTabFocusMode, _, cx| {
+                let on = !crate::tab_focus_mode(cx);
+                crate::set_tab_focus_mode(on, cx);
+                // Monaco `ToggleTabFocusModeAction` alerts the new mode.
+                this.announce(
+                    if on {
+                        "Pressing Tab will now move focus to the next focusable element"
+                    } else {
+                        "Pressing Tab will now insert the tab character"
+                    },
+                    cx,
+                );
+            }))
             .on_action(|_: &FocusNextElement, window, cx| window.focus_next(cx))
             .on_action(|_: &FocusPreviousElement, window, cx| window.focus_prev(cx))
             .on_action(cx.listener(|this, _: &PasteAsText, window, cx| {

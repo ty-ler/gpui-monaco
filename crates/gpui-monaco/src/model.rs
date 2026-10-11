@@ -410,6 +410,32 @@ impl TextModel {
         self.too_large_for_tokenization
     }
 
+    /// Whether lines of 10 000 UTF-16 units or more hold most of the text
+    /// (Monaco `isDominatedByLongLines`). Never for a model too large to
+    /// tokenize. Optimized for screen readers, such a model wraps.
+    pub fn is_dominated_by_long_lines(&self) -> bool {
+        /// Monaco `LONG_LINE_BOUNDARY`.
+        const LONG_LINE_BOUNDARY: u32 = 10_000;
+        if self.too_large_for_tokenization {
+            return false;
+        }
+        let rope = self.buffer.rope();
+        // A char is at most two UTF-16 units.
+        if rope.summary().longest_row_chars.saturating_mul(2) < LONG_LINE_BOUNDARY {
+            return false;
+        }
+        let (mut short, mut long) = (0u64, 0u64);
+        for row in 0..rope.line_count() {
+            let len = rope.line_len_utf16(row);
+            if len >= LONG_LINE_BOUNDARY {
+                long += len as u64;
+            } else {
+                short += len as u64;
+            }
+        }
+        long > short
+    }
+
     /// The model options.
     pub fn options(&self) -> &ModelOptions {
         &self.options

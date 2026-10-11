@@ -1,6 +1,8 @@
 //! Occurrence highlighting (Monaco's word highlighter and selection
 //! highlighter).
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
@@ -157,6 +159,161 @@ fn document_highlight_provider(cx: &mut TestAppContext) {
     assert_eq!(
         highlighted(&editor, cx, |c| c.word_highlight_strong_background),
         vec![(1, 1, 1, 2)]
+    );
+}
+
+/// Highlights on the cursor's row: (start column, end column, kind).
+type Ranges = Vec<(u32, u32, DocumentHighlightKind)>;
+
+/// Answers with fixed ranges on the cursor's row (`None` declines), and
+/// records that it was asked.
+struct Fixed {
+    name: &'static str,
+    answer: Option<Ranges>,
+    calls: Rc<RefCell<Vec<&'static str>>>,
+}
+
+impl DocumentHighlightProvider for Fixed {
+    fn provide_document_highlights(
+        &self,
+        _: &ProviderContext,
+        position: PointUtf16,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Option<Vec<DocumentHighlight>>>> {
+        self.calls.borrow_mut().push(self.name);
+        Task::ready(Ok(self.answer.as_ref().map(|ranges| {
+            ranges
+                .iter()
+                .map(|&(start, end, kind)| DocumentHighlight {
+                    range: PointUtf16::new(position.row, start)..PointUtf16::new(position.row, end),
+                    kind,
+                })
+                .collect()
+        })))
+    }
+}
+
+/// Registers `Fixed` providers in order, returning what they were asked.
+fn register(
+    cx: &mut VisualTestContext,
+    answers: Vec<(&'static str, Option<Ranges>)>,
+) -> Rc<RefCell<Vec<&'static str>>> {
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    for (name, answer) in answers {
+        let provider = Fixed {
+            name,
+            answer,
+            calls: calls.clone(),
+        };
+        cx.update(|_, cx| {
+            register_document_highlight_provider(cx, LanguageSelector::All, provider)
+        });
+    }
+    calls
+}
+
+fn from_all_providers(editor: &Entity<CodeEditor>, on: bool, cx: &mut VisualTestContext) {
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.occurrences_highlight_from_all_providers = on;
+        e.update_options(options, cx);
+    });
+}
+
+/// Every word highlight, strong (write) ones included.
+fn all_words(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<(u32, u32, u32, u32)> {
+    let mut all = words(editor, cx);
+    all.extend(highlighted(editor, cx, |c| {
+        c.word_highlight_strong_background
+    }));
+    all.sort();
+    all
+}
+
+#[gpui::test]
+fn occurrences_from_all_providers(cx: &mut TestAppContext) {
+    use DocumentHighlightKind::*;
+    // Monaco `wordHighlighter.test.ts` (`DocumentHighlightProviders`).
+    let (editor, cx) = setup("word word word", cx);
+    let calls = register(
+        cx,
+        vec![
+            ("first", Some(vec![(0, 4, Read)])),
+            ("second", Some(vec![(0, 4, Write), (5, 9, Write)])),
+        ],
+    );
+    // "keeps the first answer when merging is disabled": the next provider
+    // isn't even asked.
+    set(&editor, cx, p(1, 2), p(1, 2));
+    wait(cx);
+    assert_eq!(all_words(&editor, cx), vec![(1, 1, 1, 5)]);
+    assert_eq!(*calls.borrow(), vec!["first"]);
+
+    // Turning merging on asks again, and every provider at once; the first
+    // answer for a range wins.
+    calls.borrow_mut().clear();
+    from_all_providers(&editor, true, cx);
+    wait(cx);
+    assert_eq!(*calls.borrow(), vec!["first", "second"]);
+    assert_eq!(words(&editor, cx), vec![(1, 1, 1, 5)]);
+    assert_eq!(
+        highlighted(&editor, cx, |c| c.word_highlight_strong_background),
+        vec![(1, 6, 1, 10)]
+    );
+}
+
+#[gpui::test]
+fn empty_and_declined_answers(cx: &mut TestAppContext) {
+    use DocumentHighlightKind::*;
+    let (editor, cx) = setup("word word word", cx);
+    let calls = register(
+        cx,
+        vec![
+            ("empty", Some(Vec::new())),
+            ("other", Some(vec![(5, 9, Read)])),
+        ],
+    );
+    // "an empty answer still stops the default provider search".
+    set(&editor, cx, p(1, 2), p(1, 2));
+    wait(cx);
+    assert!(all_words(&editor, cx).is_empty());
+    assert_eq!(*calls.borrow(), vec!["empty"]);
+    // "merges other providers when a higher-priority provider returns an
+    // empty array".
+    from_all_providers(&editor, true, cx);
+    wait(cx);
+    assert_eq!(all_words(&editor, cx), vec![(1, 6, 1, 10)]);
+}
+
+#[gpui::test]
+fn no_textual_fallback_when_merging(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("word word word", cx);
+    register(cx, vec![("declines", None)]);
+    // "preserves textual fallback after a declined answer when merging is
+    // disabled".
+    set(&editor, cx, p(1, 2), p(1, 2));
+    wait(cx);
+    assert_eq!(
+        all_words(&editor, cx),
+        vec![(1, 1, 1, 5), (1, 6, 1, 10), (1, 11, 1, 15)]
+    );
+    // "does not use textual fallback when a matching provider returns
+    // null".
+    from_all_providers(&editor, true, cx);
+    wait(cx);
+    assert!(all_words(&editor, cx).is_empty());
+}
+
+#[gpui::test]
+fn textual_occurrences_when_merging_without_providers(cx: &mut TestAppContext) {
+    // "uses textual fallback only when no other provider matches".
+    let (editor, cx) = setup("word word\nword", cx);
+    from_all_providers(&editor, true, cx);
+    set(&editor, cx, p(1, 2), p(1, 2));
+    wait(cx);
+    assert_eq!(
+        all_words(&editor, cx),
+        vec![(1, 1, 1, 5), (1, 6, 1, 10), (2, 1, 2, 5)]
     );
 }
 

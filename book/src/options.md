@@ -31,6 +31,7 @@ editor.update(cx, |editor, cx| {
 | `scroll_beyond_last_column`, `reveal_horizontal_right_padding` | same names | room past the longest line (4 columns) and right of revealed positions (15px) |
 | `fast_scroll_sensitivity`, `scroll_predominant_axis` | same names | Alt+wheel speed (5); scroll along the main axis only (on) |
 | `scroll_on_middle_click` | `scrollOnMiddleClick` | a middle click scrolls toward the mouse until the next click (off) |
+| `inertial_scroll` | `inertialScroll` | wheel and trackpad scrolling keeps going and slows down after the events stop, as Monaco's scrollable element does (off; mostly for Linux touchpads, since macOS and Windows already add momentum) |
 | `padding` | `padding` | `top` and `bottom` space |
 | `rounded_selection`, `render_line_highlight_only_when_focus` | same names | (on, off) |
 | `read_only` | `readOnly` | edits are refused and show `read_only_message` |
@@ -42,21 +43,25 @@ editor.update(cx, |editor, cx| {
 | `selection_clipboard` | `selectionClipboard` | Linux primary selection: selected text is copied to it, and a middle click pastes it (default on) |
 | `stop_rendering_line_after` | `stopRenderingLineAfter` | draw at most this many characters of a line, then "Show more" (default 10 000) |
 | `aria_label`, `aria_required`, `accessibility_page_size` | `ariaLabel`, `ariaRequired`, `accessibilityPageSize` | the screen reader name and how many lines it can read around the selection (500) |
+| `accessibility_support` | `accessibilitySupport` | `Auto` (optimized while assistive technology is connected), `On` or `Off`. Optimized, wrapping is measured without continuation indent, and a model mostly made of lines of 10 000+ characters wraps at the viewport (unless `word_wrap_override1` is set); a diff editor stays side by side when narrow. `Off` gives the screen reader no text, only "The editor is not accessible at this time." |
+| `screen_reader_announce_inline_suggestion` | `screenReaderAnnounceInlineSuggestion` | screen readers announce new ghost text, or where a next edit suggestion is (on); `CodeEditor::announce` announces anything |
 | `tab_focus_mode` | `tabFocusMode` | Tab moves focus instead of indenting; `set_tab_focus_mode` (Ctrl+M) turns it on for every editor |
 | `drop_into_editor`, `paste_as` | `dropIntoEditor`, `pasteAs` | `enabled` and when to show the button that switches edits |
 | `unusual_line_terminators` | `unusualLineTerminators` | `Prompt` (default), `Auto` or `Off` for LS and PS characters |
 | `word_separators` | `wordSeparators` | used by word movement and whole-word find |
 | `word_wrap`, `word_wrap_column`, `wrapping_indent` | `wordWrap`, `wordWrapColumn`, `wrappingIndent` | `Off`, `On`, `WordWrapColumn`, `Bounded` |
+| `word_wrap_indicator` | `wordWrapIndicator` | a `↩` (theme color `editorWordWrapIndicator.foreground`, defaulting to the whitespace color) at the wrapping column of each soft-wrapped line; wrapping at the viewport then stops a column earlier (off) |
 | `word_wrap_override1`, `word_wrap_override2` | `wordWrapOverride1`, `wordWrapOverride2` | `On`, `Off` or `Inherit` (default); the second overrides the first, which overrides `word_wrap`. `EditorOptions::effective_word_wrap` resolves them. The diff editor sets the first from `diff_word_wrap` |
 | `word_wrap_break_before_characters`, `word_wrap_break_after_characters` | `wordWrapBreakBeforeCharacters`, `wordWrapBreakAfterCharacters` | where wrapping may break (Monaco's defaults) |
 | `word_break` | `wordBreak` | `Normal`, or `KeepAll` to not break between CJK characters |
 | `wrap_on_escaped_line_feeds` | `wrapOnEscapedLineFeeds` | while wrapping, a line with a quote also breaks after each literal `\n` (off) |
 | `wrapping_strategy` | `wrappingStrategy` | `Simple` counts monospace columns; `Advanced` measures characters, for proportional fonts |
+| `fullwidth_character_width` | `fullwidthCharacterWidth` | `Font` (default) or `TwoCells`: with a monospace font, full-width characters are centered in two cells, so columns line up; carets, clicks and measured wrapping follow the cells. Characters drawn with several glyphs and right-to-left lines keep the font's width, and so does ghost text |
 | `folding`, `show_folding_controls` | `folding`, `showFoldingControls` | |
 | `scroll_beyond_last_line`, `mouse_wheel_scroll_sensitivity` | same names | |
 | `allow_variable_line_heights` | `allowVariableLineHeights` | decorations' `line_height` applies (default on) |
 | `vertical_scrollbar_size`, `horizontal_scrollbar_size` | `scrollbar.verticalScrollbarSize`, … | |
-| `scrollbar` | `scrollbar.*` | `vertical`/`horizontal` (`Auto` shows while hovered or just scrolled, `Visible`, `Hidden`), `use_shadows`, `*_has_arrows`, `arrow_size`, `*_slider_size`, `handle_mouse_wheel`, `always_consume_mouse_wheel`, `scroll_by_page` |
+| `scrollbar` | `scrollbar.*` | `vertical`/`horizontal` (`Auto` shows while hovered or just scrolled, `Visible`, `Hidden`), `use_shadows`, `*_has_arrows`, `arrow_size`, `*_slider_size`, `handle_mouse_wheel`, `always_consume_mouse_wheel`, `scroll_by_page`, `ignore_horizontal_scrollbar_in_content_height` (without `scroll_beyond_last_line`, a shown horizontal scrollbar adds its height to the content height so the last line can scroll above it; this leaves it out) |
 | `overview_ruler_lanes`, `overview_ruler_border`, `hide_cursor_in_overview_ruler` | same names | lanes (3; 0 hides the marks), a left border, the cursor marks |
 | `minimap` | `minimap` | `enabled`, `max_column`, `scale`, `always_show_slider`, `side` (right or left), `render_characters`, `size` (`Proportional`, `Fill`, `Fit`), section headers (`show_region_section_headers`, `show_mark_section_headers`, `mark_section_header_regex`, `section_header_font_size`, `section_header_letter_spacing`), `autohide` (`None`; `Mouseover` shows it while hovered; `Scroll` shows it while scrolling and lets clicks through while hidden) |
 | `sticky_scroll` | `stickyScroll` | `enabled`, `max_line_count`, `default_model`, `scroll_with_editor` |
@@ -111,6 +116,7 @@ editor.update(cx, |editor, cx| {
 | `guides`, `rulers` | `guides`, `rulers` | indent guides (with the active one highlighted: `highlight_active_indentation` is `On`, `Off` or `Always`, which also highlights it on lines with bracket pair guides), bracket pair guides (`bracket_pairs`: off, active or on, plus horizontal ones) and vertical rulers |
 | `bracket_pair_colorization` | `bracketPairColorization` | `enabled`: color brackets by nesting level (on); `independent_color_pool_per_bracket_type`: each bracket kind counts its own nesting (off) |
 | `occurrences_highlight`, `occurrences_highlight_delay` | `occurrencesHighlight`, `occurrencesHighlightDelay` | `Off`, `SingleFile` (default) or `MultiFile`, which like `SingleFile` highlights in this editor only (editors don't share highlights) |
+| `occurrences_highlight_from_all_providers` | `occurrencesHighlightFromAllProviders` | ask every document highlight provider at once and merge their answers (off: the first provider that answers wins, and an empty answer counts); the textual occurrences are only used when no provider is registered |
 | `selection_highlight`, `selection_highlight_max_length`, `selection_highlight_multiline` | same names | highlight other occurrences of the selection |
 | `selected_text_match_mode` | `selectedTextMatchMode` | how Cmd/Ctrl+D, select all occurrences and selection highlights match selected text: `FindOptions` (the find widget's options while it's open), `CaseSensitive` or `CaseInsensitive` |
 | `single_line` | — | a one-line input. Enter, Tab and Escape go to the parent, and pasted line breaks become spaces. |
