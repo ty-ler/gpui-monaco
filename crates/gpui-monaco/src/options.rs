@@ -527,8 +527,9 @@ impl Default for QuickSuggestions {
 pub enum WordBasedSuggestions {
     /// None.
     Off,
-    /// Monaco's default: on unless inline suggestions are available (there
-    /// are none yet, so the same as `MatchingDocuments`).
+    /// Monaco's default: like `MatchingDocuments`, but off while an inline
+    /// completions provider serves the language (and `inline_suggest` is
+    /// enabled).
     #[default]
     OffWithInlineSuggestions,
     /// Words of this document.
@@ -618,8 +619,9 @@ pub enum TabCompletion {
     /// At the end of a word, Tab inserts the best completion; Tab and
     /// Shift+Tab then cycle through the other suggestions.
     On,
-    /// Only snippet prefixes complete (Monaco's `onlySnippets`). Until
-    /// snippets land this behaves like `Off`.
+    /// Only snippet prefixes complete (Monaco's `onlySnippets`). Standalone
+    /// Monaco has no snippet prefixes (VS Code's workbench completes its user
+    /// snippets), so like Monaco this behaves like `Off`.
     OnlySnippets,
 }
 
@@ -1183,6 +1185,13 @@ pub struct EditorOptions {
     /// Monaco `stickyTabStops`: move the cursor over indentation spaces as if they were
     /// tabs (default `false`).
     pub sticky_tab_stops: bool,
+    /// Monaco `useTabStops`: Backspace in indentation deletes to the
+    /// previous indent stop, and Tab/Shift+Tab snap to indent stops
+    /// (default `true`).
+    pub use_tab_stops: bool,
+    /// Monaco `trimWhitespaceOnDelete`: deleting a line break also deletes
+    /// the next line's leading whitespace (default `false`).
+    pub trim_whitespace_on_delete: bool,
     /// Monaco `wordWrap`.
     pub word_wrap: WordWrap,
     /// Monaco `wordWrapColumn`, in characters (default 80); used by
@@ -1435,6 +1444,8 @@ impl Default for EditorOptions {
             mouse_wheel_zoom: false,
             empty_selection_clipboard: true,
             sticky_tab_stops: false,
+            use_tab_stops: true,
+            trim_whitespace_on_delete: false,
             word_wrap: WordWrap::Off,
             word_wrap_column: 80,
             wrapping_indent: crate::view::line_breaks::WrappingIndent::Same,

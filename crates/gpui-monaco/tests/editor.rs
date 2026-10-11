@@ -743,3 +743,28 @@ fn bracket_pair_colorization(cx: &mut TestAppContext) {
             .is_empty()
     );
 }
+
+#[gpui::test]
+fn cursor_options_from_editor_options(cx: &mut TestAppContext) {
+    let (editor, cx) = rust_editor("a\n    b", cx);
+    // `trim_whitespace_on_delete`: deleting the line break also deletes the
+    // next line's indentation.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.trim_whitespace_on_delete = true;
+        e.update_options(options, cx);
+        e.set_selections(&[Selection::collapsed(p(1, 2))], cx)
+    });
+    cx.simulate_keystrokes("delete");
+    assert_eq!(text(&editor, cx), "ab");
+    // `use_tab_stops: false`: Backspace in indentation deletes one space.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.use_tab_stops = false;
+        e.update_options(options, cx);
+        e.model().update(cx, |m, cx| m.set_value("        x", cx));
+        e.set_selections(&[Selection::collapsed(p(1, 9))], cx)
+    });
+    cx.simulate_keystrokes("backspace");
+    assert_eq!(text(&editor, cx), "       x");
+}

@@ -818,3 +818,37 @@ fn monaco_secondary_keys_move_in_the_list(cx: &mut TestAppContext) {
     assert!(visible(&editor, cx));
     assert_eq!(text(&editor, cx), "p");
 }
+
+#[gpui::test]
+fn word_based_suggestions_off_with_inline_suggestions(cx: &mut TestAppContext) {
+    struct Ghost;
+    impl InlineCompletionsProvider for Ghost {
+        fn provide_inline_completions(
+            &self,
+            _: &ProviderContext,
+            _: PointUtf16,
+            _: InlineCompletionContext,
+            _: &mut App,
+        ) -> Task<anyhow::Result<InlineCompletionList>> {
+            Task::ready(Ok(InlineCompletionList {
+                items: Vec::new(),
+                suppress_suggestions: None,
+            }))
+        }
+    }
+    // Monaco's default: words come from the document...
+    let (editor, cx) = setup("alpha\n", |_| {}, cx);
+    cx.simulate_keystrokes("down");
+    cx.simulate_input("al");
+    cx.simulate_keystrokes("ctrl-space");
+    settle(cx);
+    assert!(visible(&editor, cx));
+    cx.simulate_keystrokes("escape");
+    // ...until an inline completions provider serves the language.
+    cx.update(|_, cx| {
+        register_inline_completions_provider(cx, LanguageSelector::All, Ghost);
+    });
+    cx.simulate_keystrokes("ctrl-space");
+    settle(cx);
+    assert!(!visible(&editor, cx));
+}

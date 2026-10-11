@@ -5,6 +5,9 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Word-based suggestions (#198):** the default, `OffWithInlineSuggestions`, now turns word-based suggestions off while an inline completions provider serves the language, as in Monaco. It used to act like `MatchingDocuments`.
+- **Options exposed (#198):** `use_tab_stops` (default on) and `trim_whitespace_on_delete` (default off) are now `EditorOptions`. They were built into the cursor code but stuck at their defaults.
+- **Stale docs (#198):** `differences.md` no longer lists the diff editor, code actions, rename, formatting, inlay hints, color decorators and links as missing, or says that clicking `⋯` doesn't unfold. `MONACO_PARITY.md` now marks hover, bracket matching, inline completions and indentation detection as partial or missing. The `TabCompletion::OnlySnippets` doc comment explains that standalone Monaco also treats it as off.
 - **Keybindings match Monaco (#193):**
   - **In-place replace:** Cmd/Ctrl+Shift+, now runs `inPlaceReplace.up` (+1) and Cmd/Ctrl+Shift+. runs `.down`; they were swapped.
   - **Next/previous problem:** `marker.next`/`prev` are on Alt+F8 / Shift+Alt+F8. F8 / Shift+F8 run the new `marker.nextInFiles`/`prevInFiles`, which act the same within one model.

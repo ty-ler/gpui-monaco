@@ -10,6 +10,8 @@ The audit compares three things:
 
 These were checked against our actions, options and modules. The Monaco source can be fetched with `script/fetch-monaco-source`.
 
+[`MONACO_AUDIT.md`](MONACO_AUDIT.md) is a finer-grained audit (2026-10) of sub-features, every option and command id, and the public API, with gaps tracked as #193–#206.
+
 **Legend:**
 
 - ✅ done
@@ -34,6 +36,7 @@ Issues are linked by number.
 | Auto-closing, overtype, auto-surround | `cursor` | ✅ | |
 | Auto-indent (`onEnterRules`, `indentationRules`, electric characters) | `indentation` | ✅ | |
 | Reindent lines | `indentation` | ✅ | #80 |
+| Indentation detection and conversion commands | `indentation` | ❌ | #197 |
 | Line operations: move, copy, delete, insert, indent | `linesOperations` | ✅ | |
 | Sort, join, reverse, transpose, case transforms, delete duplicates, trim whitespace | `linesOperations`, `caretOperations` | ✅ | #80 |
 | In-place replace | `inPlaceReplace` | ✅ | #80 |
@@ -47,7 +50,7 @@ Issues are linked by number.
 | Find/replace: case, word, regex, in selection, replace all | `find` | ✅ | |
 | Find model (Monaco's `FindModel`), preserve case, case escapes in replace, loop, seed and auto find in selection options | `find` | ✅ | #104 |
 | Find controller commands, history, extra space on top, widget width and states, remembered toggles | `find` | ✅ | #104 |
-| Bracket matching and jump | `bracketMatching` | ✅ | |
+| Bracket matching and jump | `bracketMatching` | 🟡 brackets next to the cursor; enclosing brackets (`'always'`), `'near'` and the overview ruler mark to come | #195 |
 
 ## View
 
@@ -101,7 +104,7 @@ Issues are linked by number.
 | Completion: resolve, tags, insert/replace modes, word suggestions, accept and selection options | `suggest` | ✅ | #103 |
 | Completion: tab completion, locality bonus, retrigger rules | `suggest` | ✅ | #103 |
 | Completion widget: details toggle, side docs, resizing, status bar, loading and empty messages | `suggest` | ✅ | #103 |
-| Hover | `hover` | ✅ | |
+| Hover | `hover` | 🟡 content hovers; options, resizing, keyboard focus and gutter hovers to come | #199 |
 | Signature help (with cycling) | `parameterHints` | ✅ | |
 | Go to definition (link, F12) | `gotoSymbol` | ✅ | |
 | References, declaration, type definition, implementation, peek view | `gotoSymbol`, `peekView` | ✅ | #95 |
@@ -117,7 +120,7 @@ Issues are linked by number.
 | Color picker (hover and standalone) | `colorPicker` | ✅ | #97 |
 | Links | `links` | ✅ | #93 |
 | Semantic tokens | `semanticTokens` | ✅ | #98 |
-| Inline completions (ghost text) | `inlineCompletions` | ✅ | #99 |
+| Inline completions (ghost text) | `inlineCompletions` | 🟡 ghost text; hover toolbar, inline edits and some commands to come | #99, #201 |
 | Document symbols | `documentSymbols` | ✅ | #100 |
 | Selection ranges | `smartSelect` | ✅ | #82 |
 | Folding ranges | `folding` | ✅ | #102 |
