@@ -663,7 +663,7 @@ pub fn delete_word(
     whitespace_heuristics: bool,
 ) -> EditOperation {
     let model: &dyn CursorModel = model;
-    let classifier = WordClassifier::new(&config.word_separators);
+    let classifier = WordClassifier::for_config(config);
     let selections = cursors.selections();
     let ranges = selections
         .iter()
@@ -729,7 +729,7 @@ pub fn delete_word_part(
     left: bool,
 ) -> EditOperation {
     let model: &dyn CursorModel = model;
-    let classifier = WordClassifier::new(&config.word_separators);
+    let classifier = WordClassifier::for_config(config);
     let selections = cursors.selections();
     let ranges = selections
         .iter()
@@ -763,7 +763,7 @@ pub fn delete_inside_word(
     only_word: bool,
 ) -> EditOperation {
     let model: &dyn CursorModel = model;
-    let classifier = WordClassifier::new(&config.word_separators);
+    let classifier = WordClassifier::for_config(config);
     let selections = cursors.selections();
     let ranges = selections
         .iter()

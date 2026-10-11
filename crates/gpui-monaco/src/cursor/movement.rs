@@ -127,7 +127,7 @@ pub fn move_cursors(
         MoveCommand::WordEndLeft => word_move(cursors, true, WordNavigationType::WordEnd),
         MoveCommand::WordEndRight => word_move(cursors, false, WordNavigationType::WordEnd),
         MoveCommand::WordPartLeft | MoveCommand::WordPartRight => {
-            let classifier = WordClassifier::new(&config.word_separators);
+            let classifier = WordClassifier::for_config(config);
             let has_multicursor = cursors.all().len() > 1;
             let left = command == MoveCommand::WordPartLeft;
             word::move_selections_by(model, cursors, select, |p| {

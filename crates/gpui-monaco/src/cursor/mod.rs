@@ -40,6 +40,7 @@ pub(crate) mod strings;
 mod transforms;
 mod typing;
 mod word;
+mod word_segmenter;
 
 #[cfg(test)]
 mod tests;
@@ -173,6 +174,12 @@ pub struct CursorConfig {
     pub insert_spaces: bool,
     /// Characters that separate words (Monaco `editor.wordSeparators`).
     pub word_separators: String,
+    /// BCP 47 tags of the languages whose words word navigation, deletion
+    /// and selection find with a word segmenter (Monaco
+    /// `editor.wordSegmenterLocales`). The first valid tag is used; none (the
+    /// default) or the `word-segmenter` cargo feature off means words are
+    /// found by `word_separators` alone.
+    pub word_segmenter_locales: Vec<String>,
     /// Monaco `editor.stickyTabStops`: Left/Right move over a tab stop's
     /// worth of leading spaces at once.
     pub sticky_tab_stops: bool,
@@ -216,6 +223,7 @@ impl Default for CursorConfig {
             indent_size: 4,
             insert_spaces: true,
             word_separators: USUAL_WORD_SEPARATORS.to_string(),
+            word_segmenter_locales: Vec::new(),
             sticky_tab_stops: false,
             multi_cursor_paste: MultiCursorPaste::Spread,
             empty_selection_clipboard: true,

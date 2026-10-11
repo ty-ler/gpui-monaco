@@ -26,6 +26,7 @@ Issues are linked by number.
 |---|---|---|---|
 | Typing, delete, tab, outdent, newline | `coreCommands` | ✅ | |
 | Cursor movement: char, word, word part, line, page, document | `coreCommands`, `wordOperations`, `wordPartOperations` | ✅ | #81 |
+| Word segmentation for languages without spaces (Japanese, Chinese, Thai) in word movement, deletion and selection | `wordSegmenterLocales` | ✅ ICU4X's segmenter instead of `Intl.Segmenter`, with the first valid locale only; needs the `word-segmenter` cargo feature (on by default) | #234 |
 | Multi-cursor: add above/below, Cmd+D and previous-match variants, select all occurrences, cursors at line ends/top/bottom, Alt+click, box select by mouse and keyboard, options | `multicursor` | ✅ | #81 |
 | Cursor undo, selection anchor, overtype mode | `cursorUndo`, `anchorSelect` | ✅ | #81 |
 | Scroll commands (Ctrl+Up/Down, …) | `coreCommands` | ✅ | #81 |

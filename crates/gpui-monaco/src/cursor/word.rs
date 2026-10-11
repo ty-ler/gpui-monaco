@@ -3,12 +3,14 @@
 //! Ports Monaco's `src/vs/editor/common/cursor/cursorWordOperations.ts` and
 //! `src/vs/editor/common/core/wordCharacterClassifier.ts` (MIT). Lines are
 //! classified per UTF-16 code unit exactly like Monaco's `charCodeAt` loops.
-//! `Intl.Segmenter`-based word segmentation (`wordSegmenterLocales`) is not
-//! ported.
+//! With `wordSegmenterLocales`, words found by the segmenter
+//! ([`super::word_segmenter`]) take precedence, as Monaco's `Intl.Segmenter`
+//! words do.
 
 use std::collections::HashMap;
 use std::ops::Range;
 
+use super::word_segmenter::{IntlWord, IntlWordSegmenter};
 use super::{
     CursorCollection, CursorConfig, CursorModel, Position, SelectionStartKind, SingleCursorState,
     USUAL_WORD_SEPARATORS, last_row, line_units, strings,
@@ -25,13 +27,34 @@ pub(crate) enum WordCharClass {
 pub(crate) struct WordClassifier {
     ascii: [WordCharClass; 256],
     other: HashMap<u16, WordCharClass>,
+    /// Monaco `_segmenter`, for `intlSegmenterLocales`.
+    segmenter: Option<IntlWordSegmenter>,
 }
 
 impl WordClassifier {
+    /// A classifier without word segmentation (Monaco
+    /// `getMapForWordSeparators(wordSeparators, [])`).
     pub(crate) fn new(word_separators: &str) -> Self {
+        Self::with_segmenter_locales::<&str>(word_separators, &[])
+    }
+
+    /// The classifier for `config`'s word separators and segmenter locales
+    /// (Monaco `getMapForWordSeparators(config.wordSeparators,
+    /// config.wordSegmenterLocales)`).
+    pub(crate) fn for_config(config: &CursorConfig) -> Self {
+        Self::with_segmenter_locales(&config.word_separators, &config.word_segmenter_locales)
+    }
+
+    /// Monaco `new WordCharacterClassifier(wordSeparators,
+    /// intlSegmenterLocales)`.
+    pub(crate) fn with_segmenter_locales<S: AsRef<str>>(
+        word_separators: &str,
+        intl_segmenter_locales: &[S],
+    ) -> Self {
         let mut this = Self {
             ascii: [WordCharClass::Regular; 256],
             other: HashMap::new(),
+            segmenter: IntlWordSegmenter::new(intl_segmenter_locales),
         };
         for c in word_separators.encode_utf16() {
             this.set(c, WordCharClass::WordSeparator);
@@ -58,6 +81,28 @@ impl WordClassifier {
                 .copied()
                 .unwrap_or(WordCharClass::Regular)
         }
+    }
+
+    /// Monaco `findPrevIntlWordBeforeOrAtOffset`.
+    fn find_prev_intl_word_before_or_at_offset(
+        &self,
+        line: &[u16],
+        offset: i64,
+    ) -> Option<IntlWord> {
+        self.segmenter
+            .as_ref()?
+            .find_prev_word_before_or_at_offset(line, offset)
+    }
+
+    /// Monaco `findNextIntlWordAtOrAfterOffset`.
+    fn find_next_intl_word_at_or_after_offset(
+        &self,
+        line: &[u16],
+        offset: i64,
+    ) -> Option<IntlWord> {
+        self.segmenter
+            .as_ref()?
+            .find_next_word_at_or_after_offset(line, offset)
     }
 }
 
@@ -111,8 +156,14 @@ fn do_find_previous_word_on_line(
 ) -> Option<FoundWord> {
     let mut word_type = WordType::None;
     let mut ch_index = column.min(line.len() as u32) as i64 - 1;
+    let previous_intl_word = classifier.find_prev_intl_word_before_or_at_offset(line, ch_index);
     while ch_index >= 0 {
         let ch_class = classifier.get(line[ch_index as usize]);
+        if let Some(w) = previous_intl_word
+            && ch_index == w.index as i64
+        {
+            return Some(create_intl_word(w, ch_class));
+        }
         let next = ch_index as u32 + 1;
         match ch_class {
             WordCharClass::Regular => {
@@ -175,14 +226,24 @@ fn create_word(
     }
 }
 
+/// Monaco `_createIntlWord`: segmenter words are regular words.
+fn create_intl_word(word: IntlWord, next_char_class: WordCharClass) -> FoundWord {
+    create_word(WordType::Regular, next_char_class, word.index, word.end)
+}
+
 fn find_end_of_word(
     line: &[u16],
     classifier: &WordClassifier,
     word_type: WordType,
     start_index: u32,
 ) -> u32 {
+    let next_intl_word =
+        classifier.find_next_intl_word_at_or_after_offset(line, start_index as i64);
     for (ch_index, &ch) in line.iter().enumerate().skip(start_index as usize) {
         let ch_class = classifier.get(ch);
+        if next_intl_word.is_some_and(|w| ch_index == w.end as usize) {
+            return ch_index as u32;
+        }
         if ch_class == WordCharClass::Whitespace
             || (word_type == WordType::Regular && ch_class == WordCharClass::WordSeparator)
             || (word_type == WordType::Separator && ch_class == WordCharClass::Regular)
@@ -209,8 +270,14 @@ fn do_find_next_word_on_line(
 ) -> Option<FoundWord> {
     let mut word_type = WordType::None;
     let len = line.len();
+    let next_intl_word = classifier.find_next_intl_word_at_or_after_offset(line, column as i64);
     for ch_index in column as usize..len {
         let ch_class = classifier.get(line[ch_index]);
+        if let Some(w) = next_intl_word
+            && ch_index == w.index as usize
+        {
+            return Some(create_intl_word(w, ch_class));
+        }
         let make = |word_type| {
             create_word(
                 word_type,
@@ -257,8 +324,12 @@ fn find_start_of_word(
     start_index: i64,
 ) -> u32 {
     let mut ch_index = start_index;
+    let previous_intl_word = classifier.find_prev_intl_word_before_or_at_offset(line, start_index);
     while ch_index >= 0 {
         let ch_class = classifier.get(line[ch_index as usize]);
+        if previous_intl_word.is_some_and(|w| ch_index == w.index as i64) {
+            return ch_index as u32;
+        }
         if ch_class == WordCharClass::Whitespace
             || (word_type == WordType::Regular && ch_class == WordCharClass::WordSeparator)
             || (word_type == WordType::Separator && ch_class == WordCharClass::Regular)
@@ -789,6 +860,24 @@ fn word_ranges(
     )
 }
 
+/// Monaco `WordOperations.getWordAtPosition` (behind
+/// `getConfiguredWordAtPosition`): the regular word (not separators or
+/// whitespace) touching `position`.
+pub(crate) fn word_at_position(
+    config: &CursorConfig,
+    model: &dyn CursorModel,
+    position: Position,
+) -> Option<Range<Position>> {
+    let classifier = WordClassifier::for_config(config);
+    let col = position.column;
+    let touching = |w: Option<FoundWord>| {
+        w.filter(|w| w.word_type == WordType::Regular && w.start <= col && col <= w.end)
+    };
+    let word = touching(find_previous_word_on_line(&classifier, model, position))
+        .or_else(|| touching(find_next_word_on_line(&classifier, model, position)))?;
+    Some(Position::new(position.row, word.start)..Position::new(position.row, word.end))
+}
+
 /// Monaco `WordOperations.word`: the cursor state after selecting the word
 /// at `position` (double click), or extending a word selection to it (drag
 /// after double click, `in_selection_mode`).
@@ -799,7 +888,7 @@ pub(crate) fn word_selection(
     in_selection_mode: bool,
     position: Position,
 ) -> SingleCursorState {
-    let classifier = WordClassifier::new(&config.word_separators);
+    let classifier = WordClassifier::for_config(config);
     let (prev_word, next_word) = word_ranges(&classifier, model, position);
     let col = position.column;
     let row = position.row;
@@ -893,12 +982,15 @@ pub fn move_word(
     select: bool,
 ) {
     let model: &dyn CursorModel = model;
+    // Accessibility navigation uses the default separators, but keeps the
+    // segmenter locales (Monaco's `CursorWordAccessibilityLeft._move`).
     let separators = if nav == WordNavigationType::WordAccessibility {
         USUAL_WORD_SEPARATORS
     } else {
         config.word_separators.as_str()
     };
-    let classifier = WordClassifier::new(separators);
+    let classifier =
+        WordClassifier::with_segmenter_locales(separators, &config.word_segmenter_locales);
     let has_multicursor = cursors.all().len() > 1;
     move_selections_by(model, cursors, select, |position| {
         if left {

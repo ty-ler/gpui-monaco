@@ -20,7 +20,7 @@ use super::edit::{
 use super::lines::copy_lines_command;
 use super::movement::{left_position, right_position};
 use super::strings::{self, utf16};
-use super::word::{WordCharClass, WordClassifier};
+use super::word;
 use super::{CursorCollection, CursorConfig, CursorModel, Position, Selection};
 
 type Commands<'a> = Vec<Option<Box<dyn Command + 'a>>>;
@@ -905,28 +905,7 @@ fn word_range_at(
     model: &dyn CursorModel,
     p: Position,
 ) -> Option<Range<Position>> {
-    let classifier = WordClassifier::new(&config.word_separators);
-    let line = utf16(&model.line_content(p.row));
-    let is_word = |i: usize| classifier.get(line[i]) == WordCharClass::Regular;
-    let column = (p.column as usize).min(line.len());
-    let anchor = if column < line.len() && is_word(column) {
-        column
-    } else if column > 0 && is_word(column - 1) {
-        column - 1
-    } else {
-        return None;
-    };
-    let start = (0..anchor)
-        .rev()
-        .take_while(|&i| is_word(i))
-        .last()
-        .unwrap_or(anchor);
-    let end = (anchor..line.len())
-        .take_while(|&i| is_word(i))
-        .last()
-        .unwrap_or(anchor)
-        + 1;
-    Some(Position::new(p.row, start as u32)..Position::new(p.row, end as u32))
+    word::word_at_position(config, model, super::validate_position(model, p))
 }
 
 /// Applies a case transform to each selection, or to the word at each

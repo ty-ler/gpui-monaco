@@ -49,6 +49,7 @@ editor.update(cx, |editor, cx| {
 | `drop_into_editor`, `paste_as` | `dropIntoEditor`, `pasteAs` | `enabled` and when to show the button that switches edits |
 | `unusual_line_terminators` | `unusualLineTerminators` | `Prompt` (default), `Auto` or `Off` for LS and PS characters |
 | `word_separators` | `wordSeparators` | used by word movement and whole-word find |
+| `word_segmenter_locales` | `wordSegmenterLocales` | BCP 47 tags (`ja`, `zh-CN`, `th`, …) whose words word movement, deletion and double-click selection find with ICU4X's word segmenter, for languages written without spaces (empty by default). The first valid tag is used; invalid ones are ignored. Needs the `word-segmenter` cargo feature (on by default) |
 | `word_wrap`, `word_wrap_column`, `wrapping_indent` | `wordWrap`, `wordWrapColumn`, `wrappingIndent` | `Off`, `On`, `WordWrapColumn`, `Bounded` |
 | `word_wrap_indicator` | `wordWrapIndicator` | a `↩` (theme color `editorWordWrapIndicator.foreground`, defaulting to the whitespace color) at the wrapping column of each soft-wrapped line; wrapping at the viewport then stops a column earlier (off) |
 | `word_wrap_override1`, `word_wrap_override2` | `wordWrapOverride1`, `wordWrapOverride2` | `On`, `Off` or `Inherit` (default); the second overrides the first, which overrides `word_wrap`. `EditorOptions::effective_word_wrap` resolves them. The diff editor sets the first from `diff_word_wrap` |
