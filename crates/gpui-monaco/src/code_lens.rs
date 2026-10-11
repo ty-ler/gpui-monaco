@@ -136,7 +136,11 @@ impl CodeEditor {
     pub(crate) fn refresh_code_lenses(&mut self, cx: &mut Context<Self>) {
         let model = self.model().read(cx);
         let language = model.language_id().map(|l| l.to_string());
-        if !self.options.code_lens || code_lens_providers(cx, language.as_deref()).is_empty() {
+        // Monaco: no lenses for models too large to tokenize.
+        if !self.options.code_lens
+            || model.is_too_large_for_tokenization()
+            || code_lens_providers(cx, language.as_deref()).is_empty()
+        {
             if !self.code_lens.groups.is_empty() || self.code_lens.task.is_some() {
                 self.clear_code_lenses(cx);
             }

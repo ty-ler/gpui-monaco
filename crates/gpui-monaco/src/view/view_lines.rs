@@ -28,6 +28,12 @@ pub struct WrapSettings {
     /// Don't break between CJK characters (Monaco `editor.wordBreak:
     /// keepAll`).
     pub keep_all: bool,
+    /// Which characters lines may break before and after (Monaco
+    /// `wordWrapBreakBeforeCharacters`/`wordWrapBreakAfterCharacters`).
+    pub classifier: Arc<WrapClassifier>,
+    /// Also break after literal `\n`s in lines with a quote (Monaco
+    /// `wrapOnEscapedLineFeeds`).
+    pub wrap_on_escaped_line_feeds: bool,
     /// Measured character widths (Monaco `wrappingStrategy: advanced`);
     /// `None` counts monospace columns.
     pub measure: Option<MeasuredWidths>,
@@ -94,7 +100,6 @@ pub struct ViewLines {
     rope: Rope,
     version: Version,
     wrap: Option<WrapSettings>,
-    classifier: Arc<WrapClassifier>,
     breaks: Vec<Option<Arc<LineBreakData>>>,
     /// Sorted, disjoint hidden model row ranges.
     hidden: Vec<Range<u32>>,
@@ -110,7 +115,6 @@ impl ViewLines {
             rope,
             version,
             wrap: None,
-            classifier: Arc::new(WrapClassifier::default()),
             hidden: Vec::new(),
             counts: PrefixSum::default(),
         };
@@ -142,12 +146,13 @@ impl ViewLines {
     fn compute_row(&self, row: u32) -> Option<Arc<LineBreakData>> {
         let wrap = self.wrap.as_ref()?;
         compute_measured_line_breaks(
-            &self.classifier,
+            &wrap.classifier,
             &self.rope.line(row),
             wrap.tab_size,
             Some(wrap.column),
             wrap.indent,
             wrap.keep_all,
+            wrap.wrap_on_escaped_line_feeds,
             wrap.measure.as_ref().map(|m| &*m.0),
         )
         .map(Arc::new)
@@ -182,12 +187,13 @@ impl ViewLines {
                 self.rope.for_each_line(0..self.rope.len(), |_, line| {
                     breaks.push(
                         compute_measured_line_breaks(
-                            &self.classifier,
+                            &wrap.classifier,
                             line,
                             wrap.tab_size,
                             Some(wrap.column),
                             wrap.indent,
                             wrap.keep_all,
+                            wrap.wrap_on_escaped_line_feeds,
                             wrap.measure.as_ref().map(|m| &*m.0),
                         )
                         .map(Arc::new),
@@ -200,11 +206,14 @@ impl ViewLines {
         self.rebuild_counts();
     }
 
-    /// Changes which characters wrapping may break around, rewrapping every
+    /// Changes which characters wrapping may break around (the wrap
+    /// settings' [`classifier`](WrapSettings::classifier)), rewrapping every
     /// row.
     pub fn set_classifier(&mut self, classifier: WrapClassifier) {
-        self.classifier = Arc::new(classifier);
-        let wrap = self.wrap.take();
+        let wrap = self.wrap.clone().map(|wrap| WrapSettings {
+            classifier: Arc::new(classifier),
+            ..wrap
+        });
         self.set_wrap(wrap);
     }
 
@@ -427,6 +436,8 @@ mod tests {
             tab_size: 4,
             indent: WrappingIndent::Same,
             keep_all: false,
+            classifier: Arc::default(),
+            wrap_on_escaped_line_feeds: false,
             measure: None,
         })
     }

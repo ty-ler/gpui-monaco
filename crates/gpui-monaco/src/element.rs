@@ -734,6 +734,10 @@ pub(crate) struct MinimapLayout {
     pub line_height: Pixels,
     /// Minimap pixels scrolled off the top.
     pub scroll: Pixels,
+    /// Monaco `minimap.autohide`: its opacity, and whether it takes the
+    /// mouse (not while hidden with `scroll`).
+    pub opacity: f32,
+    pub interactive: bool,
 }
 
 /// Cached minimap blocks for one view of the minimap.
@@ -949,6 +953,10 @@ pub(crate) struct EditorLayout {
     pub sticky_lines: Vec<StickyLine>,
     pub vertical_scrollbar: Option<ScrollbarLayout>,
     pub horizontal_scrollbar: Option<ScrollbarLayout>,
+    /// The line number labels drawn, by row (for tests).
+    pub line_number_labels: Vec<(u32, String)>,
+    /// The cursors drawn, and whether they're outlined (for tests).
+    pub cursors: (Vec<Bounds<Pixels>>, bool),
 }
 
 impl EditorLayout {
@@ -1029,6 +1037,8 @@ pub struct PrepaintState {
     /// View lines with a cursor (for the current line highlight).
     cursor_view_lines: Vec<u32>,
     cursor_quads: Vec<Bounds<Pixels>>,
+    /// Monaco `block-outline`: the cursors are outlined, not filled.
+    cursor_outline: bool,
     gutter_numbers: Vec<(Pixels, ShapedLine, Pixels)>,
     /// (x after the text, top) of rows whose region is collapsed.
     fold_placeholders: Vec<(Pixels, Pixels)>,
@@ -1310,12 +1320,15 @@ fn prepaint_editor(
     let text_width =
         bounds.size.width - gutter_width - vbar - if minimap_left { px(0.) } else { minimap_width };
 
-    // Bring the view lines up to date: edits, wrapping, folds.
+    // Bring the view lines up to date: edits, wrapping, folds. Monaco
+    // doesn't wrap models too large to tokenize (`IdentityLinesCollection`).
+    let too_large = editor.model().read(cx).is_too_large_for_tokenization();
     let wrap_column = {
         let viewport_columns = ((text_width - metrics.em_width) / metrics.em_width)
             .floor()
             .max(1.) as u32;
-        match options.word_wrap {
+        match options.effective_word_wrap() {
+            _ if too_large => None,
             WordWrap::Off => None,
             WordWrap::On => Some(viewport_columns),
             WordWrap::WordWrapColumn => Some(options.word_wrap_column.max(1)),
@@ -1329,12 +1342,15 @@ fn prepaint_editor(
             editor.char_widths = Some(widths.clone());
             crate::view::view_lines::MeasuredWidths(widths)
         });
+    let classifier = editor.wrap_classifier();
     editor.sync_view_lines(
         wrap_column.map(|column| WrapSettings {
             column,
             tab_size,
             indent: options.wrapping_indent,
-            keep_all: false,
+            keep_all: options.word_break == crate::options::WordBreak::KeepAll,
+            classifier,
+            wrap_on_escaped_line_feeds: options.wrap_on_escaped_line_feeds,
             measure,
         }),
         cx,
@@ -1917,6 +1933,8 @@ fn prepaint_editor(
         .is_some_and(|l| l.scroll_top != scroll_top || l.scroll_left != scroll_left)
     {
         editor.animation.scrollbars.revealed_at = Some(web_time::Instant::now());
+        // Monaco `minimap.autohide: scroll` shows it while scrolling.
+        editor.animation.minimap.scrolled_at = Some(web_time::Instant::now());
     }
 
     // Fold controls and placeholders.
@@ -2001,6 +2019,8 @@ fn prepaint_editor(
         sticky_lines: Vec::new(),
         vertical_scrollbar,
         horizontal_scrollbar,
+        line_number_labels: Vec::new(),
+        cursors: (Vec::new(), false),
     };
 
     // Minimap: token-colored characters or blocks (Monaco `minimap`), sized
@@ -2231,19 +2251,29 @@ fn prepaint_editor(
             });
         }
         let travel = (total.min(viewport_height) - slider.size.height).max(px(1.));
+        let (opacity, fading, interactive) = editor
+            .animation
+            .minimap
+            .update(minimap_options.autohide, editor.minimap_hovered);
+        if fading {
+            window.request_animation_frame();
+        }
         layout.minimap = Some(MinimapLayout {
             bounds: minimap_bounds,
             slider,
             drag_ratio: max_scroll_top / travel,
             line_height: per_view_line,
             scroll: minimap_scroll,
+            opacity,
+            interactive,
         });
     }
 
     // Sticky scroll: headers of the fold ranges enclosing the top of the
     // viewport (Monaco `stickyScroll`; see `sticky_model`).
     let mut sticky_shaped: Vec<(usize, Pixels, LineLayout, Option<ShapedLine>)> = Vec::new();
-    if options.sticky_scroll.enabled && !options.single_line && scroll_top > px(0.) {
+    // Monaco: no sticky scroll for models too large to tokenize.
+    if options.sticky_scroll.enabled && !options.single_line && !too_large && scroll_top > px(0.) {
         let max = options.sticky_scroll.max_line_count as usize;
         let mut sticky_rows: Vec<(u32, u32)> = Vec::new();
         while sticky_rows.len() < max {
@@ -2309,8 +2339,15 @@ fn prepaint_editor(
                 None,
                 window,
             );
-            let number = (options.line_numbers != LineNumbers::Off).then(|| {
-                let label = (row + 1).to_string();
+            // Monaco's sticky line numbers: absolute (every 10th with
+            // `interval`), relative, or none for `off` and custom labels.
+            let label = match &options.line_numbers {
+                LineNumbers::On => Some((row + 1).to_string()),
+                LineNumbers::Interval if (row + 1) % 10 == 0 => Some((row + 1).to_string()),
+                LineNumbers::Relative => Some(primary.row.abs_diff(*row).to_string()),
+                _ => None,
+            };
+            let number = label.map(|label| {
                 window.text_system().shape_line(
                     label.clone().into(),
                     metrics.font_size,
@@ -2627,6 +2664,11 @@ fn prepaint_editor(
 
     // Cursors.
     let mut cursor_quads = Vec::new();
+    let cursor_style = if editor.overtype {
+        options.overtype_cursor_style
+    } else {
+        options.cursor_style
+    };
     let mut cursor_view_lines = Vec::new();
     for selection in &selections {
         let head = selection.head;
@@ -2646,11 +2688,7 @@ fn prepaint_editor(
             } else {
                 metrics.em_width
             };
-            let style = if editor.overtype {
-                options.overtype_cursor_style
-            } else {
-                options.cursor_style
-            };
+            let style = cursor_style;
             // Monaco `cursorHeight` for the line styles, centered.
             let line_cursor_height = if options.cursor_height > px(0.) {
                 options.cursor_height.min(line_height)
@@ -2666,9 +2704,15 @@ fn prepaint_editor(
                 CursorStyle::LineThin => {
                     Bounds::new(point(x, line_y), size(px(1.), line_cursor_height))
                 }
-                CursorStyle::Block => Bounds::new(point(x, y), size(char_width, line_height)),
+                CursorStyle::Block | CursorStyle::BlockOutline => {
+                    Bounds::new(point(x, y), size(char_width, line_height))
+                }
                 CursorStyle::Underline => {
                     Bounds::new(point(x, y + line_height - px(2.)), size(char_width, px(2.)))
+                }
+                // Monaco: a 2px box with a 1px bottom border.
+                CursorStyle::UnderlineThin => {
+                    Bounds::new(point(x, y + line_height - px(1.)), size(char_width, px(1.)))
                 }
             };
             cursor_quads.push(bounds);
@@ -2720,7 +2764,9 @@ fn prepaint_editor(
         } else {
             vec![0; rows.len()]
         };
-        let active = (options.guides.indentation && options.guides.highlight_active_indentation)
+        let highlight_active = options.guides.highlight_active_indentation;
+        let active = (options.guides.indentation
+            && highlight_active != crate::options::HighlightActiveIndentation::Off)
             .then(|| {
                 crate::view::guides::active_indent_guide(
                     rope,
@@ -2810,7 +2856,10 @@ fn prepaint_editor(
                 {
                     continue;
                 }
-                let is_active = in_line.is_empty()
+                // Monaco: lines with bracket guides don't highlight the
+                // active indent guide, unless `always`.
+                let is_active = (in_line.is_empty()
+                    || highlight_active == crate::options::HighlightActiveIndentation::Always)
                     && active.is_some_and(|a| {
                         a.indent == level && a.start_row <= line.row && line.row <= a.end_row
                     });
@@ -2904,13 +2953,20 @@ fn prepaint_editor(
             {
                 continue;
             }
-            let label = match options.line_numbers {
+            // Monaco `_getLineRenderLineNumber`.
+            let label = match &options.line_numbers {
+                LineNumbers::Custom(render) => render.render(row + 1).to_string(),
                 LineNumbers::Relative if !is_active => primary.row.abs_diff(row).to_string(),
-                LineNumbers::Interval if !is_active && (row + 1) % 10 != 0 && row != 0 => {
+                LineNumbers::Interval
+                    if !is_active && (row + 1) % 10 != 0 && row + 1 != snapshot.line_count() =>
+                {
                     continue;
                 }
                 _ => (row + 1).to_string(),
             };
+            if label.is_empty() {
+                continue;
+            }
             let color = line_number_colors
                 .iter()
                 .find(|(r, _)| *r == row)
@@ -2934,6 +2990,7 @@ fn prepaint_editor(
                 None,
             );
             gutter_numbers.push((layout.text_top(line.view_line), shaped, right));
+            layout.line_number_labels.push((row, label));
         }
     }
 
@@ -3065,12 +3122,17 @@ fn prepaint_editor(
         ))
     });
     let focused = editor.focus_handle.is_focused(window);
+    layout.cursors = (
+        cursor_quads.clone(),
+        cursor_style == CursorStyle::BlockOutline,
+    );
     editor.layout = Some(layout.clone());
     PrepaintState {
         layout,
         selections,
         cursor_view_lines,
         cursor_quads,
+        cursor_outline: cursor_style == CursorStyle::BlockOutline,
         gutter_numbers,
         fold_placeholders,
         fold_highlights,
@@ -3357,8 +3419,19 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                             ),
                             size(cursor.size.width, height),
                         );
-                        window
-                            .paint_quad(fill(bounds, colors.cursor.opacity(state.cursor_opacity)));
+                        let color = colors.cursor.opacity(state.cursor_opacity);
+                        if state.cursor_outline {
+                            window.paint_quad(quad(
+                                bounds,
+                                Corners::default(),
+                                gpui::transparent_black(),
+                                Edges::all(px(1.)),
+                                color,
+                                BorderStyle::Solid,
+                            ));
+                        } else {
+                            window.paint_quad(fill(bounds, color));
+                        }
                     }
                 }
             },
@@ -3584,6 +3657,14 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                     }
                     if state.minimap_slider_visible {
                         window.paint_quad(fill(minimap.slider, colors.minimap_slider));
+                    }
+                    // `minimap.autohide`: fade it into the editor's
+                    // background (GPUI images have no opacity).
+                    if minimap.opacity < 1. {
+                        window.paint_quad(fill(
+                            minimap.bounds,
+                            colors.background.opacity(1. - minimap.opacity),
+                        ));
                     }
                 },
             );

@@ -85,7 +85,7 @@ You can also drive the editor directly. `CodeEditor` exposes many commands as me
 - **Labelled actions** such as `"editor.action.commentLine"` or `"actions.findWithSelection"`. These are the ones the command palette lists and `run_action` and `supported_actions` know.
 - **Unlabelled commands** such as `"cursorDown"`, `"undo"`, `"deleteWordLeft"`, `"closeReferenceSearch"` or `"acceptAlternativeSelectedSuggestion"`.
 
-It falls back to GPUI action names (`"code_editor::CursorDown"`). `DiffEditor::trigger` also takes the diff editor's ids (`"diffEditor.revert"`, `"diffEditor.toggleCollapseUnchangedRegions"`, `"editor.action.accessibleDiffViewer.next"`, …) and passes any others to the modified editor.
+It falls back to GPUI action names (`"code_editor::CursorDown"`). `DiffEditor::trigger` also takes the diff editor's ids (`"diffEditor.revert"`, `"diffEditor.switchSide"`, `"diffEditor.toggleCollapseUnchangedRegions"`, `"editor.action.accessibleDiffViewer.next"`, …) and passes any others to the modified editor.
 
 `trigger_with_payload(id, payload, window, cx)` passes Monaco's payload, as JSON, to commands that take arguments:
 

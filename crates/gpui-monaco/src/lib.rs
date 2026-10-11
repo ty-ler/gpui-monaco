@@ -30,7 +30,8 @@ pub mod diff;
 pub mod diff_editor;
 pub mod multi_diff_editor;
 pub use diff_editor::{
-    AccessibilitySignal, DiffEditor, DiffEditorEvent, DiffEditorOptions, HideUnchangedRegions,
+    AccessibilitySignal, DiffAlgorithm, DiffEditor, DiffEditorEvent, DiffEditorOptions,
+    DiffEditorViewState, HideUnchangedRegions,
 };
 pub use multi_diff_editor::{MultiDiffDocument, MultiDiffEditor, MultiDiffEditorEvent};
 mod dnd;

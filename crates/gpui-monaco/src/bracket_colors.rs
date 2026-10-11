@@ -50,9 +50,9 @@ impl CodeEditor {
                 .unwrap_or_else(|| config.brackets.clone())
         });
         let guides = self.options.guides.bracket_pairs != crate::options::BracketPairGuides::Off;
-        let Some(pairs) =
-            pairs.filter(|p| !p.is_empty() && (self.options.bracket_pair_colorization || guides))
-        else {
+        let Some(pairs) = pairs.filter(|p| {
+            !p.is_empty() && (self.options.bracket_pair_colorization.enabled || guides)
+        }) else {
             self.bracket_colors = BracketColors::default();
             return;
         };
@@ -152,9 +152,13 @@ impl CodeEditor {
         let Some(version) = self.bracket_colors.version else {
             return Vec::new();
         };
-        if !self.options.bracket_pair_colorization {
+        if !self.options.bracket_pair_colorization.enabled {
             return Vec::new();
         }
+        let independent = self
+            .options
+            .bracket_pair_colorization
+            .independent_color_pool_per_bracket_type;
         let tokens = &self.bracket_colors.tokens;
         let buffer = self.model().read(cx).buffer();
         let patch = (version != buffer.version()).then(|| buffer.edits_since(version));
@@ -174,6 +178,11 @@ impl CodeEditor {
             .take_while(|t| t.range.start < old_range.end)
             .filter_map(|t| {
                 let color = match t.level {
+                    // Monaco `getInlineClassName`: each bracket type's own
+                    // levels with `independentColorPoolPerBracketType`.
+                    Some(_) if independent => {
+                        colors.bracket_color(t.level_of_equal_bracket_type)?
+                    }
                     Some(level) => colors.bracket_color(level)?,
                     None => colors.unexpected_bracket,
                 };
@@ -216,6 +225,10 @@ impl CodeEditor {
         };
         let point = |offset: usize| rope.offset_to_point_utf16(offset.min(rope.len()));
         let pairs = &self.bracket_colors.pairs;
+        let independent = self
+            .options
+            .bracket_pair_colorization
+            .independent_color_pool_per_bracket_type;
         let last = pairs.partition_point(|p| p.open.start <= old_end);
         pairs[..last]
             .iter()
@@ -225,7 +238,13 @@ impl CodeEditor {
                     ..point(map(p.open.end, text::Bias::Right)),
                 close: point(map(p.close.start, text::Bias::Left))
                     ..point(map(p.close.end, text::Bias::Right)),
-                level: p.level,
+                // Colored like the brackets (Monaco's guides use the same
+                // `getInlineClassName`).
+                level: if independent {
+                    p.level_of_equal_bracket_type
+                } else {
+                    p.level
+                },
                 min_indentation: p.min_indentation,
             })
             .collect()

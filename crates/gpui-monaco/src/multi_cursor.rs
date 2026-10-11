@@ -50,15 +50,29 @@ impl CodeEditor {
             .unwrap_or(*selection)
     }
 
-    /// Match options for a session: from the find widget when it's open,
-    /// whole-word and case-sensitive when started from a word.
+    /// Match options for a session: whole-word and case-sensitive when
+    /// started from a word, else per `selected_text_match_mode`.
     fn session_options(&self, from_word: bool) -> (bool, bool) {
         if from_word {
             (true, true)
-        } else if self.find.visible {
-            (self.find.options.whole_word, self.find.options.match_case)
         } else {
-            (false, true)
+            self.selected_text_match_options()
+        }
+    }
+
+    /// (whole word, match case) for selected text (Monaco
+    /// `getSelectionSearchOptions`): the find widget's options while it's
+    /// open with `FindOptions`, else substrings matched as the mode says.
+    pub(crate) fn selected_text_match_options(&self) -> (bool, bool) {
+        use crate::options::SelectedTextMatchMode;
+        match self.options.selected_text_match_mode {
+            SelectedTextMatchMode::FindOptions if self.find.visible => {
+                (self.find.options.whole_word, self.find.options.match_case)
+            }
+            SelectedTextMatchMode::FindOptions | SelectedTextMatchMode::CaseSensitive => {
+                (false, true)
+            }
+            SelectedTextMatchMode::CaseInsensitive => (false, false),
         }
     }
 
@@ -346,7 +360,13 @@ impl CodeEditor {
         let (whole_word, match_case) = self.session_options(from_word);
         let rope = self.snapshot.rope().clone();
         let primary_range = self.selection_range(&primary);
-        let params = if self.find.visible && !from_word {
+        // Monaco: the find widget's regex search applies with
+        // `selectedTextMatchMode: findOptions`.
+        let params = if self.find.visible
+            && !from_word
+            && self.options.selected_text_match_mode
+                == crate::options::SelectedTextMatchMode::FindOptions
+        {
             SearchParams {
                 query: self.find.options.query.clone(),
                 is_regex: self.find.options.is_regex,

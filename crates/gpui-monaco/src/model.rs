@@ -130,6 +130,15 @@ pub struct ModelOptions {
     /// is removed by the next edit if it is still all that's on its line
     /// and that edit is near the cursors (default `true`).
     pub trim_auto_whitespace: bool,
+    /// Monaco `largeFileOptimizations`: a model created with more than 20M
+    /// characters or 300K lines is never tokenized, and folding, sticky
+    /// scroll, code lenses, occurrence highlights, selection highlights
+    /// and wrapping are off for it (default `true`). Only the creation
+    /// options count (see [`TextModel::is_too_large_for_tokenization`]).
+    pub large_file_optimizations: bool,
+    /// Monaco `defaultEOL`: the line ending of text without line breaks,
+    /// when the model is created or its value set (default LF).
+    pub default_eol: LineEnding,
 }
 
 impl Default for ModelOptions {
@@ -141,6 +150,8 @@ impl Default for ModelOptions {
             max_tokenization_line_length: 20_000,
             detect_indentation: true,
             trim_auto_whitespace: true,
+            large_file_optimizations: true,
+            default_eol: LineEnding::Lf,
         }
     }
 }
@@ -210,7 +221,15 @@ pub struct TextModel {
     /// Set when `language_id` hasn't been resolved against the registry yet.
     language_pending: bool,
     auto_whitespace: AutoWhitespaceLines,
+    /// Decided from the creation options and text, then kept (Monaco
+    /// `_isTooLargeForTokenization`).
+    too_large_for_tokenization: bool,
 }
+
+/// Monaco `TextModel.LARGE_FILE_SIZE_THRESHOLD`, in characters.
+const LARGE_FILE_SIZE_THRESHOLD: usize = 20 * 1024 * 1024;
+/// Monaco `TextModel.LARGE_FILE_LINE_COUNT_THRESHOLD`.
+const LARGE_FILE_LINE_COUNT_THRESHOLD: u32 = 300 * 1000;
 
 impl EventEmitter<TextModelEvent> for TextModel {}
 
@@ -230,6 +249,7 @@ impl TextModel {
             markers: Default::default(),
             language_pending: false,
             auto_whitespace: AutoWhitespaceLines::default(),
+            too_large_for_tokenization: false,
         }
         .with_options(ModelOptions::default())
     }
@@ -237,8 +257,19 @@ impl TextModel {
     /// Sets the creation options (Monaco `createModel`'s options): with
     /// `detect_indentation`, the indentation is guessed from the text, with
     /// `options` as the defaults.
+    ///
+    /// Like Monaco's creation options, `large_file_optimizations` decides
+    /// here, once, whether the model is too large to tokenize, and
+    /// `default_eol` is the line ending when the text has no line breaks.
     pub fn with_options(mut self, options: ModelOptions) -> Self {
         self.options = options;
+        let rope = self.buffer.rope();
+        self.too_large_for_tokenization = self.options.large_file_optimizations
+            && (rope.len_utf16().0 > LARGE_FILE_SIZE_THRESHOLD
+                || rope.line_count() > LARGE_FILE_LINE_COUNT_THRESHOLD);
+        if rope.line_count() == 1 {
+            self.buffer.set_line_ending(self.options.default_eol);
+        }
         if self.options.detect_indentation {
             let guessed = text::guess_indentation(
                 self.buffer.rope(),
@@ -334,6 +365,15 @@ impl TextModel {
             cx.emit(TextModelEvent::LineEndingChanged);
             cx.notify();
         }
+    }
+
+    /// Whether the model was too large to tokenize when created, with
+    /// [`ModelOptions::large_file_optimizations`] (Monaco
+    /// `isTooLargeForTokenization`). Such a model has no syntax
+    /// highlighting, folding, sticky scroll, code lenses, occurrence or
+    /// selection highlights, or wrapping.
+    pub fn is_too_large_for_tokenization(&self) -> bool {
+        self.too_large_for_tokenization
     }
 
     /// The model options.
@@ -548,6 +588,10 @@ impl TextModel {
 
     /// Starts (or queues) a background parse of the current text.
     fn reparse(&mut self, cx: &mut Context<Self>) {
+        // Monaco never tokenizes models too large at creation.
+        if self.too_large_for_tokenization {
+            return;
+        }
         let Some(syntax) = self.syntax.as_mut() else {
             return;
         };
@@ -589,11 +633,17 @@ impl TextModel {
         }));
     }
 
-    /// Replaces the whole text and clears undo history (Monaco `setValue`).
-    /// It's a whole-text edit, so versions keep increasing and anchors,
+    /// Replaces the whole text and clears undo history (Monaco `setValue`),
+    /// detecting the line ending from `text` (see
+    /// [`ModelOptions::default_eol`]). It's a whole-text edit, so versions keep increasing and anchors,
     /// decorations and syntax update normally.
     pub fn set_value(&mut self, text: &str, cx: &mut Context<Self>) {
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        // Monaco builds a new text buffer, detecting its line ending with
+        // `defaultEOL` for text without line breaks.
+        let line_ending = LineEnding::detect(text, self.options.default_eol);
+        let line_ending_changed = line_ending != self.buffer.line_ending();
+        self.buffer.set_line_ending(line_ending);
         let len = self.buffer.len();
         let old = self.buffer.rope().clone();
         let Ok(patch) = self.buffer.edit([(0..len, text)]) else {
@@ -611,6 +661,9 @@ impl TextModel {
             source: None,
             restore: None,
         });
+        if line_ending_changed {
+            cx.emit(TextModelEvent::LineEndingChanged);
+        }
         cx.notify();
     }
 

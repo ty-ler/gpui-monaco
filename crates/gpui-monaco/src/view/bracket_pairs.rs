@@ -19,6 +19,10 @@ pub struct BracketToken {
     /// Nesting level (0 for top-level pairs), or `None` for an unmatched
     /// bracket (Monaco's `editorBracketHighlight.unexpectedBracket`).
     pub level: Option<u32>,
+    /// Nesting level among pairs with the same opening bracket (Monaco
+    /// `nestingLevelOfEqualBracketType`, for
+    /// `independentColorPoolPerBracketType`); 0 when unmatched.
+    pub level_of_equal_bracket_type: u32,
 }
 
 /// A closed bracket pair (Monaco `BracketPairWithMinIndentationInfo`).
@@ -30,6 +34,8 @@ pub struct BracketPair {
     pub close: Range<usize>,
     /// Nesting level (0 for top-level pairs).
     pub level: u32,
+    /// Nesting level among pairs with the same opening bracket.
+    pub level_of_equal_bracket_type: u32,
     /// The least indentation (visible columns) of the non-blank lines
     /// after the opening bracket's, through the closing bracket's
     /// (`u32::MAX` without any).
@@ -67,6 +73,7 @@ pub fn bracket_pairs(
         .into_iter()
         .filter_map(|(open, close)| {
             let level = tokens[open].level?;
+            let level_of_equal_bracket_type = tokens[open].level_of_equal_bracket_type;
             let open = tokens[open].range.clone();
             let close = tokens[close].range.clone();
             let first = rope.offset_to_point(open.start).row + 1;
@@ -76,6 +83,7 @@ pub fn bracket_pairs(
                 open,
                 close,
                 level,
+                level_of_equal_bracket_type,
                 min_indentation: min_indentation.unwrap_or(u32::MAX),
             })
         })
@@ -137,25 +145,41 @@ fn parse_brackets(
                 continue;
             };
             let range = offset..offset + text.len();
+            // Monaco's `levelPerBracketType`: the enclosing pairs opened by
+            // the same bracket.
+            let same_type = |stack: &[(usize, usize)]| {
+                stack
+                    .iter()
+                    .filter(|(p, _)| pairs[*p].0 == pairs[pair].0)
+                    .count() as u32
+            };
             if is_open {
                 tokens.push(BracketToken {
                     range,
                     level: Some(stack.len() as u32),
+                    level_of_equal_bracket_type: same_type(&stack),
                 });
                 stack.push((pair, tokens.len() - 1));
             } else if let Some(depth) = stack.iter().rposition(|(p, _)| *p == pair) {
                 // Pairs opened inside this one never closed.
                 for (_, token) in stack.drain(depth + 1..) {
                     tokens[token].level = None;
+                    tokens[token].level_of_equal_bracket_type = 0;
                 }
                 let (_, open) = stack.pop().expect("found above");
+                let level_of_equal_bracket_type = tokens[open].level_of_equal_bracket_type;
                 tokens.push(BracketToken {
                     range,
                     level: Some(depth as u32),
+                    level_of_equal_bracket_type,
                 });
                 matched.push((open, tokens.len() - 1));
             } else {
-                tokens.push(BracketToken { range, level: None });
+                tokens.push(BracketToken {
+                    range,
+                    level: None,
+                    level_of_equal_bracket_type: 0,
+                });
             }
             i += text.len();
         }
@@ -163,6 +187,7 @@ fn parse_brackets(
     });
     for (_, token) in stack {
         tokens[token].level = None;
+        tokens[token].level_of_equal_bracket_type = 0;
     }
     (tokens, matched)
 }
@@ -238,6 +263,33 @@ mod tests {
             .map(|p| (&text[p.open.clone()], p.level, p.min_indentation))
             .collect();
         assert_eq!(summary, vec![("(", 0, u32::MAX), ("{", 0, 0), ("{", 1, 4)]);
+    }
+
+    #[test]
+    fn levels_of_equal_bracket_type() {
+        let text = "f(a[b(c)], (d))";
+        let found: Vec<_> = colorize_brackets(&Rope::from(text), &pairs(), &[])
+            .into_iter()
+            .map(|t| {
+                (
+                    text[t.range.clone()].chars().next().unwrap(),
+                    t.level_of_equal_bracket_type,
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ('(', 0),
+                ('[', 0),
+                ('(', 1),
+                (')', 1),
+                (']', 0),
+                ('(', 1),
+                (')', 1),
+                (')', 0),
+            ]
+        );
     }
 
     #[test]

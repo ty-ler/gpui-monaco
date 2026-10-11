@@ -1,12 +1,15 @@
 //! Port of Monaco's diffing fixture test (`fixtures.test.ts`) for the
-//! default ("advanced") diff computer: each directory in
-//! `tests/fixtures/diffing` holds two inputs (`1.*`, `2.*`) and the result
-//! Monaco computes for them (`advanced.expected.diff.json`).
+//! default ("advanced") and the legacy diff computer: each directory in
+//! `tests/fixtures/diffing` holds two inputs (`1.*`, `2.*`) and the results
+//! Monaco computes for them (`advanced.expected.diff.json`,
+//! `legacy.expected.diff.json`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use gpui_monaco::diff::{DetailedLineRangeMapping, DiffOptions, LinesDiff, Range, compute_diff};
+use gpui_monaco::diff::{
+    DetailedLineRangeMapping, DiffOptions, LinesDiff, Range, compute_diff, compute_legacy_diff,
+};
 use serde_json::{Value, json};
 
 fn fixtures_dir() -> PathBuf {
@@ -42,7 +45,28 @@ fn format_range(range: &Range, lines: &[&str]) -> String {
     )
 }
 
-fn diffs_json(changes: &[DetailedLineRangeMapping], original: &[&str], modified: &[&str]) -> Value {
+/// The two diff computers Monaco's fixtures cover.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Algorithm {
+    Advanced,
+    Legacy,
+}
+
+impl Algorithm {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Advanced => "advanced",
+            Self::Legacy => "legacy",
+        }
+    }
+}
+
+fn diffs_json(
+    changes: &[DetailedLineRangeMapping],
+    original: &[&str],
+    modified: &[&str],
+    algorithm: Algorithm,
+) -> Value {
     Value::Array(
         changes
             .iter()
@@ -54,13 +78,26 @@ fn diffs_json(changes: &[DetailedLineRangeMapping], original: &[&str], modified:
                         "range mappings must be sorted"
                     );
                 }
+                // The legacy computer's `undefined` inner changes are
+                // serialized as `null`.
+                let inner_changes = if algorithm == Algorithm::Legacy && c.inner_changes.is_empty()
+                {
+                    Value::Null
+                } else {
+                    c.inner_changes
+                        .iter()
+                        .map(|i| {
+                            json!({
+                                "originalRange": format_range(&i.original_range, original),
+                                "modifiedRange": format_range(&i.modified_range, modified),
+                            })
+                        })
+                        .collect()
+                };
                 json!({
                     "originalRange": c.original.to_string(),
                     "modifiedRange": c.modified.to_string(),
-                    "innerChanges": c.inner_changes.iter().map(|i| json!({
-                        "originalRange": format_range(&i.original_range, original),
-                        "modifiedRange": format_range(&i.modified_range, modified),
-                    })).collect::<Vec<_>>(),
+                    "innerChanges": inner_changes,
                 })
             })
             .collect(),
@@ -109,7 +146,7 @@ fn assert_diff_correctness(diff: &LinesDiff, original: &[&str], modified: &[&str
 }
 
 /// Runs one fixture; returns an error message on mismatch.
-fn run_fixture(dir: &Path) -> Result<(), String> {
+fn run_fixture(dir: &Path, algorithm: Algorithm) -> Result<(), String> {
     let folder = dir.file_name().unwrap().to_str().unwrap();
     let (first_name, first_content) = find_file(dir, "1.");
     let (second_name, second_content) = find_file(dir, "2.");
@@ -117,26 +154,27 @@ fn run_fixture(dir: &Path) -> Result<(), String> {
     let second_lines: Vec<&str> = second_content.split('\n').collect();
 
     let ignore_trim_whitespace = folder.contains("trimws");
-    let diff = compute_diff(
-        &first_lines,
-        &second_lines,
-        &DiffOptions {
-            ignore_trim_whitespace,
-            // `Number.MAX_SAFE_INTEGER` in Monaco: effectively no limit.
-            max_computation_time_ms: 9_007_199_254_740_991,
-            compute_moves: true,
-            extend_to_subwords: false,
-        },
-    );
+    let options = DiffOptions {
+        ignore_trim_whitespace,
+        // `Number.MAX_SAFE_INTEGER` in Monaco: effectively no limit.
+        max_computation_time_ms: 9_007_199_254_740_991,
+        compute_moves: true,
+        extend_to_subwords: false,
+    };
+    let diff = match algorithm {
+        Algorithm::Advanced => compute_diff(&first_lines, &second_lines, &options),
+        Algorithm::Legacy => compute_legacy_diff(&first_lines, &second_lines, &options),
+    };
 
-    if !ignore_trim_whitespace {
+    // Like Monaco, only the advanced computer's inner changes are checked.
+    if algorithm == Algorithm::Advanced && !ignore_trim_whitespace {
         assert_diff_correctness(&diff, &first_lines, &second_lines);
     }
 
     let mut actual = json!({
         "original": { "content": first_content, "fileName": format!("./{first_name}") },
         "modified": { "content": second_content, "fileName": format!("./{second_name}") },
-        "diffs": diffs_json(&diff.changes, &first_lines, &second_lines),
+        "diffs": diffs_json(&diff.changes, &first_lines, &second_lines, algorithm),
     });
     if !diff.moves.is_empty() {
         actual["moves"] = diff
@@ -146,15 +184,15 @@ fn run_fixture(dir: &Path) -> Result<(), String> {
                 json!({
                     "originalRange": m.line_range_mapping.original.to_string(),
                     "modifiedRange": m.line_range_mapping.modified.to_string(),
-                    "changes": diffs_json(&m.changes, &first_lines, &second_lines),
+                    "changes": diffs_json(&m.changes, &first_lines, &second_lines, algorithm),
                 })
             })
             .collect();
     }
 
+    let expected_file = format!("{}.expected.diff.json", algorithm.name());
     let expected: Value =
-        serde_json::from_str(&fs::read_to_string(dir.join("advanced.expected.diff.json")).unwrap())
-            .unwrap();
+        serde_json::from_str(&fs::read_to_string(dir.join(expected_file)).unwrap()).unwrap();
     if actual == expected {
         Ok(())
     } else {
@@ -167,8 +205,8 @@ fn run_fixture(dir: &Path) -> Result<(), String> {
     }
 }
 
-#[test]
-fn diffing_fixtures() {
+/// Runs all fixtures with `algorithm`.
+fn run_fixtures(algorithm: Algorithm) {
     // Set `DIFF_FIXTURE=<name>` to run (and print the mismatch of) one fixture.
     let only = std::env::var("DIFF_FIXTURE").ok();
     let mut dirs: Vec<PathBuf> = fs::read_dir(fixtures_dir())
@@ -183,7 +221,7 @@ fn diffing_fixtures() {
     let mut failures = Vec::new();
     for dir in &dirs {
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
-        if let Err(message) = run_fixture(dir) {
+        if let Err(message) = run_fixture(dir, algorithm) {
             if only.is_some() {
                 eprintln!("{message}");
             }
@@ -191,9 +229,20 @@ fn diffing_fixtures() {
         }
     }
     eprintln!(
-        "{} of {} diffing fixtures pass",
+        "{} of {} {} diffing fixtures pass",
         dirs.len() - failures.len(),
-        dirs.len()
+        dirs.len(),
+        algorithm.name()
     );
     assert!(failures.is_empty(), "failing fixtures: {failures:?}");
+}
+
+#[test]
+fn diffing_fixtures() {
+    run_fixtures(Algorithm::Advanced);
+}
+
+#[test]
+fn legacy_diffing_fixtures() {
+    run_fixtures(Algorithm::Legacy);
 }

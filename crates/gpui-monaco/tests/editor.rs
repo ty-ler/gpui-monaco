@@ -791,10 +791,24 @@ fn bracket_pair_colorization(cx: &mut TestAppContext) {
             (22..23, level(0)),
         ]
     );
+    // Monaco `independentColorPoolPerBracketType`: each kind counts its
+    // own nesting, so the `[` inside `(` gets the first color.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options
+            .bracket_pair_colorization
+            .independent_color_pool_per_bracket_type = true;
+        e.update_options(options, cx);
+    });
+    let ranges = editor.read_with(cx, |e, cx| e.bracket_colors_for_tests(cx));
+    assert!(
+        ranges.iter().all(|(_, color)| *color == level(0)),
+        "{ranges:?}"
+    );
     // Turning it off removes the colors.
     editor.update(cx, |e, cx| {
         let mut options = e.options().clone();
-        options.bracket_pair_colorization = false;
+        options.bracket_pair_colorization.enabled = false;
         e.update_options(options, cx);
     });
     assert!(

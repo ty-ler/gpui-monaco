@@ -123,7 +123,11 @@ impl CodeEditor {
     /// highlight the symbol's occurrences from the document highlight
     /// providers, or the word's textual occurrences.
     fn update_word_highlights(&mut self, force: bool, cx: &mut Context<Self>) {
-        if !self.options.occurrences_highlight && !force {
+        // Monaco has no word highlighter for models too large to tokenize.
+        if (self.options.occurrences_highlight == crate::options::OccurrencesHighlight::Off
+            && !force)
+            || self.model().read(cx).is_too_large_for_tokenization()
+        {
             self.clear_word_highlights(cx);
             return;
         }
@@ -296,8 +300,12 @@ impl CodeEditor {
 
     /// Monaco `SelectionHighlighter._createState`: what to search for, or
     /// `None` when the selection shouldn't highlight anything.
-    fn selection_highlight_search(&self) -> Option<SearchParams> {
+    fn selection_highlight_search(&self, cx: &gpui::App) -> Option<SearchParams> {
         if !self.options.selection_highlight {
+            return None;
+        }
+        // Monaco doesn't search models too large to tokenize.
+        if self.model().read(cx).is_too_large_for_tokenization() {
             return None;
         }
         let primary = self.cursors.primary().selection();
@@ -314,13 +322,9 @@ impl CodeEditor {
             )
         };
         let text = text_of(&primary);
-        // Same as Cmd+D: selected text matches case-sensitively unless the
-        // find widget says otherwise; never whole-word.
-        let match_case = if self.find.visible {
-            self.find.options.match_case
-        } else {
-            true
-        };
+        // Same as Cmd+D: selected text matches per
+        // `selected_text_match_mode`; never whole-word here.
+        let (_, match_case) = self.selected_text_match_options();
         let selections = self.cursors.selections();
         if selections.len() > 1 {
             let same = selections.iter().all(|s| {
@@ -352,7 +356,11 @@ impl CodeEditor {
                 }
             };
             let find = &self.find.options;
-            if normalize(&find.query) == normalize(&text) && !find.whole_word && !find.is_regex {
+            if normalize(&find.query) == normalize(&text)
+                && find.match_case == match_case
+                && !find.whole_word
+                && !find.is_regex
+            {
                 return None;
             }
         }
@@ -361,7 +369,7 @@ impl CodeEditor {
 
     /// Recomputes the selection highlights, after `delay`.
     fn update_selection_highlights(&mut self, delay: Duration, cx: &mut Context<Self>) {
-        let Some(params) = self.selection_highlight_search() else {
+        let Some(params) = self.selection_highlight_search(cx) else {
             self.occurrences.selection_task = None;
             if !self.occurrences.selection.is_empty() {
                 self.set_selection_highlights(Vec::new(), cx);

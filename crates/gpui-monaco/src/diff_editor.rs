@@ -24,10 +24,11 @@ use crate::cursor::Selection;
 use crate::decorations::{BlockDecoration, DecorationId, DecorationOptions, OverviewRulerLane};
 use crate::diff::{
     DetailedLineRangeMapping, DiffOptions, LineRange, LineRangeMapping, LinesDiff, RangeMapping,
-    compute_diff,
+    compute_diff, compute_legacy_diff,
 };
-use crate::editor::{CodeEditor, CodeEditorEvent};
+use crate::editor::{CodeEditor, CodeEditorEvent, ViewState};
 use crate::model::{TextModel, TextModelEvent};
+use crate::options::WordWrapOverride;
 use crate::theme::EditorColors;
 use crate::widgets::{ViewZone, WidgetId, ZoneHeight};
 
@@ -64,6 +65,18 @@ gpui::actions!(
         /// Stops comparing a moved block (Monaco
         /// `diffEditor.exitCompareMove`, Escape).
         ExitCompareMove,
+        /// Focuses the other side, with the selection mapped through the
+        /// diff (Monaco `diffEditor.switchSide`).
+        SwitchSide,
+        /// Turns hiding unchanged regions on or off (Monaco
+        /// `diffEditor.toggleCollapseUnchangedRegions`).
+        ToggleCollapseUnchangedRegions,
+        /// Turns showing moved code blocks on or off (Monaco
+        /// `diffEditor.toggleShowMovedCodeBlocks`).
+        ToggleShowMovedCodeBlocks,
+        /// Turns the inline view for narrow diff editors on or off (Monaco
+        /// `diffEditor.toggleUseInlineViewWhenSpaceIsLimited`).
+        ToggleUseInlineViewWhenSpaceIsLimited,
     ]
 );
 
@@ -156,6 +169,44 @@ pub struct DiffEditorOptions {
     /// Show only the accessible diff viewer, which can't be closed (Monaco
     /// `onlyShowAccessibleDiffViewer`, default `false`).
     pub only_show_accessible_diff_viewer: bool,
+    /// Don't compute a diff when either model is larger than this many MB
+    /// (Monaco `maxFileSize`, default 50; 0 for no limit). Such models show
+    /// without changes, and [`DiffEditor::diff`] is `None`.
+    pub max_file_size: u64,
+    /// Optimize for small views (Monaco `compactMode`, default `false`): a
+    /// diff of only insertions and deletions shows inline, and hidden
+    /// unchanged regions get thin "N hidden lines" separators, none at the
+    /// start or end.
+    pub compact_mode: bool,
+    /// Override both editors' word wrap (Monaco `diffWordWrap`, default
+    /// inherit): sets their [`word_wrap_override1`](crate::EditorOptions::word_wrap_override1).
+    pub diff_word_wrap: WordWrapOverride,
+    /// The diff algorithm (Monaco `diffAlgorithm`, default advanced).
+    pub diff_algorithm: DiffAlgorithm,
+}
+
+/// Monaco `diffAlgorithm`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiffAlgorithm {
+    /// Monaco's legacy line diff (`LegacyLinesDiffComputer`), which never
+    /// detects moves.
+    Legacy,
+    /// Monaco's default line diff (`DefaultLinesDiffComputer`).
+    #[default]
+    Advanced,
+}
+
+/// A diff editor's view state (Monaco `IDiffEditorViewState`), from
+/// [`DiffEditor::save_view_state`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiffEditorViewState {
+    /// The original editor's selections and scroll position.
+    pub original: ViewState,
+    /// The modified editor's.
+    pub modified: ViewState,
+    /// The hidden unchanged ranges of the modified side, as 1-based line
+    /// ranges (Monaco's serialized `collapsedRegions`).
+    pub collapsed_regions: Vec<LineRange>,
 }
 
 /// Monaco `hideUnchangedRegions`.
@@ -200,6 +251,10 @@ impl Default for DiffEditorOptions {
             render_gutter_menu: true,
             render_margin_revert_icon: true,
             only_show_accessible_diff_viewer: false,
+            max_file_size: 50,
+            compact_mode: false,
+            diff_word_wrap: WordWrapOverride::Inherit,
+            diff_algorithm: DiffAlgorithm::Advanced,
         }
     }
 }
@@ -209,6 +264,9 @@ impl Default for DiffEditorOptions {
 pub enum DiffEditorEvent {
     /// A new diff is shown (Monaco `onDidUpdateDiff`).
     DiffUpdated,
+    /// [`DiffEditor::set_models`] showed other models (Monaco
+    /// `onDidChangeModel`).
+    ModelChanged,
     /// A sound or announcement cue for screen reader users (Monaco
     /// `IAccessibilitySignalService.playSignal`). Standalone Monaco ignores
     /// these; hosts may play a sound, as VS Code does.
@@ -737,6 +795,8 @@ struct UnchangedDrag {
 
 /// The height of a "hidden lines" bar (Monaco's 24px placeholder zone).
 const UNCHANGED_BAR_HEIGHT: f32 = 24.;
+/// Monaco's `PlaceholderViewZone` height in `compactMode`.
+const COMPACT_UNCHANGED_BAR_HEIGHT: f32 = 12.;
 
 /// Monaco `CollapsedCodeOverlayWidget`: the bar where unchanged lines are
 /// hidden. Its top and bottom edges reveal more lines above and below; the
@@ -747,6 +807,9 @@ struct UnchangedBar {
     editor: WeakEntity<CodeEditor>,
     index: usize,
     hidden_lines: usize,
+    /// Monaco `CompactCollapsedCodeOverlayWidget` (`compactMode`): a thin
+    /// labelled separator without controls.
+    compact: bool,
 }
 
 impl Render for UnchangedBar {
@@ -756,6 +819,33 @@ impl Render for UnchangedBar {
         };
         let editor = editor.read(cx);
         let colors = editor.colors().clone();
+        if self.compact {
+            // `.diff-hidden-lines-compact`: a 20px rule, the label and a
+            // rule to the end, in the code lens color.
+            let rule = || {
+                div()
+                    .h(px(1.))
+                    .bg(colors.code_lens_foreground.opacity(0.5))
+                    .flex_none()
+            };
+            return div()
+                .size_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .child(rule().w(px(20.)))
+                .child(
+                    div()
+                        .mx(px(4.))
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .text_size(px(11.))
+                        .line_height(px(11.))
+                        .text_color(colors.code_lens_foreground)
+                        .child(format!("{} hidden lines", self.hidden_lines)),
+                )
+                .child(rule().flex_1());
+        }
         let gutter = editor
             .layout
             .as_ref()
@@ -1098,6 +1188,15 @@ pub struct DiffEditor {
     /// The moved block compared with its original (Monaco
     /// `movedTextToCompare`).
     move_to_compare: Option<usize>,
+    /// Monaco `shouldRenderInlineViewInSmartMode` for `compact_mode`:
+    /// whether the first diff of these models was only insertions and
+    /// deletions (decided once).
+    simple_diff: Option<bool>,
+    /// [`DiffEditor::reveal_first_diff`] waits for the diff.
+    reveal_first_diff_pending: bool,
+    /// Collapsed regions from [`DiffEditor::restore_view_state`], applied
+    /// to the next diff when there was none yet.
+    pending_collapsed_regions: Option<Vec<LineRange>>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -1152,9 +1251,13 @@ impl DiffEditor {
             move_decorations: Default::default(),
             active_move: None,
             move_to_compare: None,
+            simple_diff: None,
+            reveal_first_diff_pending: false,
+            pending_collapsed_regions: None,
             focus_handle: cx.focus_handle(),
             _subscriptions: Vec::new(),
         };
+        this.apply_word_wrap(cx);
         this.subscribe(cx);
         this.compute_diff(true, cx);
         this
@@ -1225,7 +1328,10 @@ impl DiffEditor {
         let recompute = options.ignore_trim_whitespace != self.options.ignore_trim_whitespace
             || options.max_computation_time_ms != self.options.max_computation_time_ms
             || options.show_moves != self.options.show_moves
-            || options.hide_unchanged_regions != self.options.hide_unchanged_regions;
+            || options.hide_unchanged_regions != self.options.hide_unchanged_regions
+            || options.max_file_size != self.options.max_file_size
+            || options.diff_algorithm != self.options.diff_algorithm
+            || options.compact_mode != self.options.compact_mode;
         if options.original_editable != self.options.original_editable {
             let read_only = !options.original_editable;
             self.original.update(cx, |editor, cx| {
@@ -1241,6 +1347,7 @@ impl DiffEditor {
         let only_viewer = options.only_show_accessible_diff_viewer;
         let was_only_viewer = self.options.only_show_accessible_diff_viewer;
         self.options = options;
+        self.apply_word_wrap(cx);
         if only_viewer {
             self.set_accessible_viewer_visible(true, cx);
         } else if was_only_viewer {
@@ -1262,12 +1369,46 @@ impl DiffEditor {
         cx: &mut Context<Self>,
     ) {
         self.clear_diff(cx);
+        self.simple_diff = None;
         self.original
             .update(cx, |editor, cx| editor.set_model(original, cx));
         self.modified
             .update(cx, |editor, cx| editor.set_model(modified, cx));
         self.subscribe(cx);
         self.compute_diff(true, cx);
+        cx.emit(DiffEditorEvent::ModelChanged);
+    }
+
+    /// The editors' word wrap overrides (Monaco `_adjustOptionsForLeftHandSide`
+    /// and `...RightHandSide`): `diff_word_wrap`, except that the hidden
+    /// original editor never wraps inline.
+    fn apply_word_wrap(&mut self, cx: &mut Context<Self>) {
+        let (original1, original2) = if self.inline {
+            (WordWrapOverride::Off, WordWrapOverride::Off)
+        } else {
+            (self.options.diff_word_wrap, WordWrapOverride::Inherit)
+        };
+        let set = |editor: &Entity<CodeEditor>,
+                   override1: WordWrapOverride,
+                   override2: Option<WordWrapOverride>,
+                   cx: &mut Context<Self>| {
+            editor.update(cx, |editor, cx| {
+                let current = editor.options();
+                if current.word_wrap_override1 == override1
+                    && override2.is_none_or(|o| current.word_wrap_override2 == o)
+                {
+                    return;
+                }
+                let mut options = current.clone();
+                options.word_wrap_override1 = override1;
+                if let Some(override2) = override2 {
+                    options.word_wrap_override2 = override2;
+                }
+                editor.update_options(options, cx);
+            });
+        };
+        set(&self.original, original1, Some(original2), cx);
+        set(&self.modified, self.options.diff_word_wrap, None, cx);
     }
 
     /// Monaco `renderSideBySide` after `useInlineViewWhenSpaceIsLimited`:
@@ -1279,6 +1420,10 @@ impl DiffEditor {
 
     /// Whether `options` and the width call for side by side.
     fn side_by_side_for(&self, options: &DiffEditorOptions) -> bool {
+        // Monaco `compactMode`: only insertions and deletions show inline.
+        if options.compact_mode && self.simple_diff == Some(true) {
+            return false;
+        }
         let width = self.bounds.get().size.width;
         options.render_side_by_side
             && !(options.use_inline_view_when_space_is_limited
@@ -1371,6 +1516,18 @@ impl DiffEditor {
     fn compute_diff(&mut self, now: bool, cx: &mut Context<Self>) {
         let original = self.original.read(cx).model().read(cx);
         let modified = self.modified.read(cx).model().read(cx);
+        // Monaco `maxFileSize`: no diff for larger models.
+        let max_bytes = self.options.max_file_size.saturating_mul(1024 * 1024);
+        if max_bytes > 0
+            && (original.buffer().len() as u64 > max_bytes
+                || modified.buffer().len() as u64 > max_bytes)
+        {
+            if self.diff.is_some() || self.diff_task.is_some() {
+                self.clear_diff(cx);
+                cx.notify();
+            }
+            return;
+        }
         let versions = (original.buffer().version(), modified.buffer().version());
         let original_lines: Vec<String> = original.buffer().rope().lines().collect();
         let modified_lines: Vec<String> = modified.buffer().rope().lines().collect();
@@ -1380,20 +1537,46 @@ impl DiffEditor {
             compute_moves: self.options.show_moves,
             extend_to_subwords: false,
         };
+        let algorithm = self.options.diff_algorithm;
         self.diff_task = Some(cx.spawn(async move |this, cx| {
             if !now {
                 cx.background_executor().timer(RECOMPUTE_DELAY).await;
             }
             let diff = cx
                 .background_executor()
-                .spawn(async move { compute_diff(&original_lines, &modified_lines, &options) })
+                .spawn(async move {
+                    match algorithm {
+                        DiffAlgorithm::Advanced => {
+                            compute_diff(&original_lines, &modified_lines, &options)
+                        }
+                        DiffAlgorithm::Legacy => {
+                            compute_legacy_diff(&original_lines, &modified_lines, &options)
+                        }
+                    }
+                })
                 .await;
             this.update(cx, |this, cx| {
+                // Monaco `isSimpleDiff`, decided by the first diff.
+                if this.simple_diff.is_none() {
+                    this.simple_diff = Some(
+                        diff.changes
+                            .iter()
+                            .all(|c| c.original.is_empty() || c.modified.is_empty()),
+                    );
+                }
                 this.diff = Some(Arc::new(diff));
                 this.diff_versions = Some(versions);
                 this.diff_task = None;
+                this.inline = !this.side_by_side_for(&this.options);
+                this.apply_word_wrap(cx);
                 this.apply_diff(cx);
+                if let Some(ranges) = this.pending_collapsed_regions.take() {
+                    this.restore_collapsed_regions(&ranges, cx);
+                }
                 cx.emit(DiffEditorEvent::DiffUpdated);
+                if std::mem::take(&mut this.reveal_first_diff_pending) {
+                    this.reveal_first_change(cx);
+                }
                 cx.notify();
             })
             .ok();
@@ -2007,8 +2190,14 @@ impl DiffEditor {
         clear_side(&self.modified, Vec::new(), old_modified, cx);
         let this = cx.entity().downgrade();
         let mut zones = (Vec::new(), Vec::new());
+        let compact = self.options.compact_mode;
+        let count = self.unchanged.len();
         for (index, region) in self.unchanged.iter().enumerate() {
             if region.should_hide_controls() {
+                continue;
+            }
+            // Monaco `compactMode`: no separators at the start and end.
+            if compact && (index == 0 || index + 1 == count) {
                 continue;
             }
             let sides = [
@@ -2025,11 +2214,17 @@ impl DiffEditor {
                     editor: editor.downgrade(),
                     index,
                     hidden_lines: hidden.len(),
+                    compact,
                 });
+                let height = if compact {
+                    COMPACT_UNCHANGED_BAR_HEIGHT
+                } else {
+                    UNCHANGED_BAR_HEIGHT
+                };
                 let id = editor.update(cx, |editor, cx| {
                     editor.add_zone(
                         hidden.start_line_number as u32 - 1,
-                        ZoneHeight::Pixels(px(UNCHANGED_BAR_HEIGHT)),
+                        ZoneHeight::Pixels(px(height)),
                         bar.into(),
                         true,
                         cx,
@@ -2757,6 +2952,7 @@ impl DiffEditor {
                 },
                 cx,
             ),
+            "diffEditor.switchSide" => self.switch_side(window, cx),
             "editor.action.accessibleDiffViewer.next" => {
                 self.accessible_diff_viewer_next(window, cx)
             }
@@ -2770,6 +2966,137 @@ impl DiffEditor {
             }
         }
         Ok(())
+    }
+
+    /// Monaco `revealFirstDiff`: once the diff is computed, moves the
+    /// modified editor's cursor to the first change and reveals it.
+    pub fn reveal_first_diff(&mut self, cx: &mut Context<Self>) {
+        if self.diff_task.is_some() || self.diff.is_none() {
+            // Monaco `waitForDiff`.
+            self.reveal_first_diff_pending = true;
+        } else {
+            self.reveal_first_change(cx);
+        }
+    }
+
+    /// Monaco `_goTo(diffs[0])`.
+    fn reveal_first_change(&mut self, cx: &mut Context<Self>) {
+        let Some(change) = self.diff.as_ref().and_then(|d| d.changes.first()) else {
+            return;
+        };
+        let modified = change.modified;
+        self.modified.update(cx, |editor, cx| {
+            let row = modified.start_line_number as u32 - 1;
+            editor.set_selections(&[Selection::collapsed(PointUtf16::new(row, 0))], cx);
+            // Monaco `toExclusiveRange`: through the start of the next line.
+            let end = modified.end_line_number_exclusive as u32 - 1;
+            editor.reveal_range(
+                PointUtf16::new(row, 0)..PointUtf16::new(end, 0),
+                crate::view::reveal::RevealType::Center,
+                cx,
+            );
+        });
+    }
+
+    /// Monaco `mapToOtherSide`: the other editor than the focused one (the
+    /// original when neither is), and the focused editor's selection
+    /// mapped through the diff to it.
+    pub fn map_to_other_side(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> (Entity<CodeEditor>, Option<Range<PointUtf16>>) {
+        let modified_focused = self.modified.focus_handle(cx).contains_focused(window, cx);
+        let (source, destination) = if modified_focused {
+            (&self.modified, &self.original)
+        } else {
+            (&self.original, &self.modified)
+        };
+        let selection = source.read(cx).selections()[0];
+        let destination_selection = self.diff.as_ref().map(|diff| {
+            let mappings: Vec<DetailedLineRangeMapping> = if modified_focused {
+                diff.changes.iter().map(|c| c.flip()).collect()
+            } else {
+                diff.changes.clone()
+            };
+            let translate = |point: PointUtf16| {
+                translate_position(crate::diff::Position::from_point_utf16(point), &mappings)
+            };
+            let range = translate(selection.start()).plus_range(&translate(selection.end()));
+            range.to_point_utf16_range()
+        });
+        (destination.clone(), destination_selection)
+    }
+
+    /// Focuses the other side with the selection mapped to it (Monaco
+    /// `diffEditor.switchSide`).
+    pub fn switch_side(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (destination, selection) = self.map_to_other_side(window, cx);
+        window.focus(&destination.focus_handle(cx), cx);
+        if let Some(range) = selection {
+            destination.update(cx, |editor, cx| {
+                editor.set_selections(
+                    &[Selection {
+                        anchor: range.start,
+                        head: range.end,
+                    }],
+                    cx,
+                );
+            });
+        }
+    }
+
+    /// Both editors' view states and the collapsed unchanged regions
+    /// (Monaco `saveViewState`).
+    pub fn save_view_state(&self, cx: &App) -> DiffEditorViewState {
+        DiffEditorViewState {
+            original: self.original.read(cx).save_view_state(),
+            modified: self.modified.read(cx).save_view_state(),
+            collapsed_regions: self
+                .unchanged
+                .iter()
+                .map(|r| r.hidden_modified_range())
+                .collect(),
+        }
+    }
+
+    /// Restores a [`DiffEditor::save_view_state`] (Monaco
+    /// `restoreViewState`). The collapsed regions apply to the regions
+    /// they intersect, once the diff is computed.
+    pub fn restore_view_state(&mut self, state: &DiffEditorViewState, cx: &mut Context<Self>) {
+        self.original.update(cx, |editor, cx| {
+            editor.restore_view_state(&state.original, cx)
+        });
+        self.modified.update(cx, |editor, cx| {
+            editor.restore_view_state(&state.modified, cx)
+        });
+        if self.diff.is_some() && self.diff_task.is_none() {
+            // After the editors' selection events, which reveal the lines
+            // with cursors, like Monaco's order.
+            let ranges = state.collapsed_regions.clone();
+            let this = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                this.update(cx, |this, cx| this.restore_collapsed_regions(&ranges, cx))
+                    .ok();
+            });
+        } else {
+            self.pending_collapsed_regions = Some(state.collapsed_regions.clone());
+        }
+    }
+
+    /// Monaco `restoreSerializedState`: each region takes the first saved
+    /// range it intersects as its hidden range.
+    fn restore_collapsed_regions(&mut self, ranges: &[LineRange], cx: &mut Context<Self>) {
+        if self.unchanged.is_empty() {
+            return;
+        }
+        for region in &mut self.unchanged {
+            let unchanged = region.modified_unchanged_range();
+            if let Some(range) = ranges.iter().find(|r| unchanged.intersect(r).is_some()) {
+                region.set_hidden_modified_range(*range);
+            }
+        }
+        self.apply_unchanged(cx);
     }
 
     /// Monaco `goToDiff`: moves the modified editor's cursor to the next or
@@ -2873,6 +3200,63 @@ impl CodeEditor {
             })
             .collect()
     }
+}
+
+/// Monaco `translatePosition`: where `position` in the original text is in
+/// the modified text, given the changes (a range when it's inside a
+/// changed span).
+fn translate_position(
+    position: crate::diff::Position,
+    mappings: &[DetailedLineRangeMapping],
+) -> crate::diff::Range {
+    use crate::diff::{Position, Range};
+    let at = |p: Position| Range::from_positions(p, p);
+    let Some(mapping) = mappings
+        .iter()
+        .rev()
+        .find(|m| m.original.start_line_number <= position.line_number)
+    else {
+        // No changes before the position.
+        return at(position);
+    };
+    if mapping.original.end_line_number_exclusive <= position.line_number {
+        let line = position.line_number - mapping.original.end_line_number_exclusive
+            + mapping.modified.end_line_number_exclusive;
+        return at(Position::new(line, position.column));
+    }
+    // Only for the legacy algorithm, which may have no inner changes.
+    if mapping.inner_changes.is_empty() {
+        return at(Position::new(mapping.modified.start_line_number, 1));
+    }
+    let Some(inner) = mapping
+        .inner_changes
+        .iter()
+        .rev()
+        .find(|m| m.original_range.start() <= position)
+    else {
+        let line = position.line_number - mapping.original.start_line_number
+            + mapping.modified.start_line_number;
+        return at(Position::new(line, position.column));
+    };
+    let original = inner.original_range;
+    if original.start() <= position && position <= original.end() {
+        return inner.modified_range;
+    }
+    // Monaco `lengthBetweenPositions(end, position).addToPosition(...)`.
+    let end = original.end();
+    let modified_end = inner.modified_range.end();
+    let translated = if end.line_number == position.line_number {
+        Position::new(
+            modified_end.line_number,
+            modified_end.column + position.column - end.column,
+        )
+    } else {
+        Position::new(
+            modified_end.line_number + position.line_number - end.line_number,
+            position.column,
+        )
+    };
+    at(translated)
 }
 
 fn clear_side(
@@ -3030,6 +3414,7 @@ impl Render for DiffEditor {
         let inline = !self.side_by_side_for(&self.options);
         if inline != self.inline {
             self.inline = inline;
+            self.apply_word_wrap(cx);
             self.apply_diff(cx);
         }
         let gutter = self.render_gutter(cx);
@@ -3104,6 +3489,29 @@ impl Render for DiffEditor {
             .on_action(cx.listener(|this, _: &Revert, window, cx| {
                 this.revert_focused_range_mappings(window, cx)
             }))
+            .on_action(cx.listener(|this, _: &SwitchSide, window, cx| this.switch_side(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleCollapseUnchangedRegions, window, cx| {
+                    this.trigger("diffEditor.toggleCollapseUnchangedRegions", window, cx)
+                        .ok();
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &ToggleShowMovedCodeBlocks, window, cx| {
+                    this.trigger("diffEditor.toggleShowMovedCodeBlocks", window, cx)
+                        .ok();
+                }),
+            )
+            .on_action(cx.listener(
+                |this, _: &ToggleUseInlineViewWhenSpaceIsLimited, window, cx| {
+                    this.trigger(
+                        "diffEditor.toggleUseInlineViewWhenSpaceIsLimited",
+                        window,
+                        cx,
+                    )
+                    .ok();
+                },
+            ))
             .on_action(
                 cx.listener(|this, _: &AccessibleDiffViewerNext, window, cx| {
                     this.accessible_diff_viewer_next(window, cx)

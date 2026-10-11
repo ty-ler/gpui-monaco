@@ -1,8 +1,7 @@
 //! Soft-wrap break computation for monospace text.
 //!
 //! Ported from Monaco's `common/viewModel/monospaceLineBreaksComputer.ts`
-//! (MIT) and `modelLineProjectionData.ts`, minus injected text and
-//! `wrapOnEscapedLineFeeds`. Offsets are UTF-16 code units within the line,
+//! (MIT) and `modelLineProjectionData.ts`, minus injected text. Offsets are UTF-16 code units within the line,
 //! widths are visible columns (full-width characters take two).
 
 use crate::cursor::strings::is_full_width_character;
@@ -37,7 +36,7 @@ enum CharClass {
 }
 
 /// Classifies UTF-16 code units for wrapping.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WrapClassifier {
     ascii: [CharClass; 256],
     other: Vec<(u32, CharClass)>,
@@ -222,13 +221,33 @@ pub fn compute_line_breaks(
         wrapping_column,
         wrapping_indent,
         keep_all,
+        false,
         None,
     )
+}
+
+/// Monaco `isEscapedLineBreakAtPosition`: whether `units[i]` follows a
+/// literal `\n` (an `n` after an odd number of backslashes).
+fn is_escaped_line_break_at(units: &[u16], i: usize) -> bool {
+    if i < 2 || units[i - 1] != b'n' as u16 {
+        return false;
+    }
+    let backslashes = units[..i - 1]
+        .iter()
+        .rev()
+        .take_while(|&&u| u == b'\\' as u16)
+        .count();
+    // Monaco only counts backslashes with a character before them.
+    backslashes < i - 1 && backslashes % 2 == 1
 }
 
 /// [`compute_line_breaks`], with widths from `measure` when given: Monaco's
 /// monospace computer with the DOM computer's measured widths. Breaks
 /// still follow the classifier, and visible columns stay monospace.
+///
+/// With `wrap_on_escaped_line_feeds` (Monaco `wrapOnEscapedLineFeeds`), a
+/// line containing `"` and a literal `\n` also breaks after each `\n`.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_measured_line_breaks(
     classifier: &WrapClassifier,
     line: &str,
@@ -236,14 +255,18 @@ pub fn compute_measured_line_breaks(
     wrapping_column: Option<u32>,
     wrapping_indent: WrappingIndent,
     keep_all: bool,
+    wrap_on_escaped_line_feeds: bool,
     measure: Option<&dyn MeasureChar>,
 ) -> Option<LineBreakData> {
     let first_break_column = wrapping_column?;
+    let wrap_on_escaped_line_feeds =
+        wrap_on_escaped_line_feeds && line.contains('"') && line.contains("\\n");
     // Fast path for the common short line: without tabs or other control
     // characters (2 columns wide) no character is wider than its UTF-8
     // length (or the widest ASCII character), so it fits.
     let widest = measure.map_or(1., |m| m.max_ascii_columns().max(1.));
-    if line.len() as f32 * widest <= first_break_column as f32
+    if !wrap_on_escaped_line_feeds
+        && line.len() as f32 * widest <= first_break_column as f32
         && line
             .bytes()
             .all(|b| (b' '..0x80).contains(&b) || (measure.is_none() && b >= b' '))
@@ -309,7 +332,14 @@ pub fn compute_measured_line_breaks(
             (classifier.get(code), char_w, measured(code, char_w))
         };
 
-        if can_break(prev_code, prev_class, code, class, keep_all) {
+        // A literal `\n` forces a break.
+        let mut wrap_escaped_line_feed = false;
+        if wrap_on_escaped_line_feeds && is_escaped_line_break_at(&units, char_start) {
+            break_offset = char_start;
+            break_offset_visible = visible;
+            break_offset_width = width;
+            wrap_escaped_line_feed = true;
+        } else if can_break(prev_code, prev_class, code, class, keep_all) {
             break_offset = char_start;
             break_offset_visible = visible;
             break_offset_width = width;
@@ -318,7 +348,7 @@ pub fn compute_measured_line_breaks(
         visible += char_w;
         width += char_width_measured;
 
-        if width > breaking_width {
+        if width > breaking_width || wrap_escaped_line_feed {
             if break_offset == 0 || width - break_offset_width > wrapped_line_break_width {
                 break_offset = char_start;
                 break_offset_visible = visible - char_w;
@@ -354,7 +384,7 @@ pub fn compute_measured_line_breaks(
 mod tests {
     //! Ported from Monaco's
     //! `test/common/viewModel/monospaceLineBreaksComputer.test.ts`. Skipped:
-    //! injected-text and escaped-line-feed cases (not ported), incremental
+    //! injected-text cases (not ported), incremental
     //! re-wrapping (we always recompute), and fractional full-width ratios
     //! (we assume two-cell full-width characters).
     use super::*;
@@ -611,9 +641,89 @@ mod tests {
             Some(column),
             WrappingIndent::None,
             false,
+            false,
             Some(&Proportional),
         )
         .map_or_else(Vec::new, |data| data.break_offsets)
+    }
+
+    /// `text` with `|` at each break, with `wrapOnEscapedLineFeeds`.
+    fn escaped_line_feed_breaks(text: &str, column: u32) -> String {
+        let data = compute_measured_line_breaks(
+            &WrapClassifier::default(),
+            text,
+            4,
+            Some(column),
+            WrappingIndent::None,
+            false,
+            true,
+            None,
+        );
+        let mut annotated = text.to_string();
+        if let Some(data) = data {
+            for &offset in data.break_offsets[..data.break_offsets.len() - 1]
+                .iter()
+                .rev()
+            {
+                annotated.insert(offset as usize, '|');
+            }
+        }
+        annotated
+    }
+
+    #[test]
+    fn issue_258022_wrap_on_escaped_line_feeds() {
+        // Monaco: a literal `\n` triggers a soft wrap, whatever the width;
+        // an escaped backslash before `n` doesn't.
+        let text = r#""Short text with\nescaped newline and an escaped\\nbackslash""#;
+        let at_30 = escaped_line_feed_breaks(text, 30);
+        assert!(at_30.contains(r"with\n|"), "{at_30}");
+        assert!(!at_30.contains(r"\\n|"), "{at_30}");
+        let at_35 = escaped_line_feed_breaks(text, 35);
+        assert!(at_35.contains(r"with\n|"), "{at_35}");
+        // Short lines break too, but only with a quote on the line.
+        assert_eq!(escaped_line_feed_breaks(r#""a\nb""#, 100), r#""a\n|b""#);
+        assert_eq!(escaped_line_feed_breaks(r"a\nb", 100), r"a\nb");
+        // Off: no break.
+        assert_eq!(
+            compute_line_breaks(
+                &WrapClassifier::default(),
+                r#""a\nb""#,
+                4,
+                Some(100),
+                WrappingIndent::None,
+                false
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn custom_break_characters() {
+        // Monaco `wordWrapBreakBeforeCharacters`/`AfterCharacters`: with no
+        // break characters, words break where they overflow.
+        let none = WrapClassifier::new("", "");
+        let data = compute_line_breaks(
+            &none,
+            "aaa bbb ccc",
+            4,
+            Some(5),
+            WrappingIndent::None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(data.break_offsets, vec![5, 10, 11]);
+        let spaces = WrapClassifier::new("", " ");
+        let data = compute_line_breaks(
+            &spaces,
+            "aaa bbb ccc",
+            4,
+            Some(5),
+            WrappingIndent::None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(data.break_offsets, vec![4, 8, 11]);
     }
 
     #[test]
