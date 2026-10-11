@@ -100,6 +100,28 @@ pub struct InjectedText {
     /// Its font size; `None` uses the editor's. Smaller text is centered
     /// vertically on the line.
     pub font_size: Option<Pixels>,
+    /// The inline box around the text, as Monaco's inlay hints style
+    /// theirs with CSS; `None` fills the line's height (less 1px above and
+    /// below) behind it, with 3px corners.
+    pub text_box: Option<InjectedTextBox>,
+}
+
+/// Room around [`InjectedText`] and the shape of its background (Monaco's
+/// inlay hint CSS: the `paddingLeft`/`paddingRight` spacers, and the
+/// `padding` option's `padding` and `border-radius`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct InjectedTextBox {
+    /// Space before and after the background (left, right).
+    pub margin: (Pixels, Pixels),
+    /// Space inside the background before and after the text (left,
+    /// right).
+    pub padding: (Pixels, Pixels),
+    /// Space inside the background above and below the text: the
+    /// background is the text's height (its font's ascent and descent)
+    /// plus twice this.
+    pub padding_y: Pixels,
+    /// The background's corner radii on its left and right side.
+    pub corner_radius: (Pixels, Pixels),
 }
 
 /// A lane of the glyph margin (Monaco `GlyphMarginLane`). The margin is a

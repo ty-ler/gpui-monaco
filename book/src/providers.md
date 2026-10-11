@@ -277,11 +277,12 @@ As in Monaco:
 The editor shows them as injected text that moves with edits. As in Monaco:
 
 - **Requests:** made again when you scroll past the covered lines, shortly after edits, and when you call `refresh_inlay_hints(cx)`.
-- **Hover:** resting the mouse on a part shows the hint's and the part's tooltips, how to follow the part, and "Double-click to insert" when the hint has edits.
+- **Hover:** resting the mouse on a part shows the hint's and the part's tooltips, the hover providers' answers at the part's `location` (when its model is open), how to follow the part, and "Double-click to insert" when the hint has edits.
 - **Clicks:** Cmd/Ctrl+click on a part opens its `location` like go to definition (other models through `CodeEditorEvent::OpenLocation`), or else runs its `command` (through `register_command`, else `CodeEditorEvent::ExecuteCommand`).
+- **Right-click:** on a part with a `location`, a menu offers Go to Definition, Declaration, Type Definition, Implementations and References, asked of the providers at the location, then the part's `command`.
+- **Spacing:** `padding_left` and `padding_right` add a third of the hint font size beside the hint; `options.inlay_hints.padding` pads the label's background and rounds its corners.
+- **Typing:** shortly after an edit, hints before the cursor on its line keep their old length (cut with `…` or padded), so the cursor doesn't jump; a model's hints are cached and shown at once when you switch back to it.
 - **Options:** `options.inlay_hints.enabled` is `On`, `OnUnlessPressed` or `OffUnlessPressed` (Ctrl+Alt toggles), or `Off`. Line text is cut at `maximum_length` (43) with `…`. `font_size` and `font_family` change the hints' font.
-
-Unlike Monaco, a part has no right-click menu, and its hover doesn't include the hover of its location.
 
 ## Document symbols
 
@@ -289,7 +290,7 @@ A `DocumentSymbolProvider` returns a document's outline as nested `DocumentSymbo
 
 ## Code lens
 
-A `CodeLensProvider` puts clickable commands above lines, such as "3 references" or "Run test". `provide_code_lenses` can return lenses without a `command`; `resolve_code_lens` then fills them in when they scroll into view. Lenses on the same line show together, separated by `|`. A command's `tooltip` shows when hovering its lens (Monaco `Command.tooltip`).
+A `CodeLensProvider` puts clickable commands above lines, such as "3 references" or "Run test". `provide_code_lenses` can return lenses without a `command`; `resolve_code_lens` then fills them in when they scroll into view. Lenses on the same line show together, separated by `|`, starting above the line's first non-whitespace character and scrolling sideways with the text. Until a line's lenses have a command, its zone stays empty; they fade in once resolved, and "no commands" shows only when resolving failed. A title's `$(name)` draws a codicon, and a command's `tooltip` shows when hovering its lens (Monaco `Command.tooltip`). Their font, height and color follow the editor's font size, zoom and theme (`editorCodeLens.foreground`).
 
 Clicking a lens runs its command through [`register_command`](editing.md) handlers. If no handler is registered, the editor emits `CodeEditorEvent::ExecuteCommand` for the host. "Show CodeLens Commands for Current Line" (Monaco's `codelens.showLensesInCurrentLine`) lists the cursor line's commands in the quick input instead. The `code_lens`, `code_lens_font_family` and `code_lens_font_size` options control them.
 

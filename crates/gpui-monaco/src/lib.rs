@@ -143,8 +143,8 @@ pub use commands::{add_command, execute_command, register_command, unregister_co
 pub use context_keys::{ContextKey, ContextKeyValue};
 pub use decorations::{
     BlockDecoration, DecorationId, DecorationOptions, DecorationUnderline, GlyphMarginLane,
-    GlyphMarginOptions, InjectedText, LeftBorder, MinimapDecoration, MinimapPosition,
-    MinimapSectionHeaderStyle, OverviewRulerLane,
+    GlyphMarginOptions, InjectedText, InjectedTextBox, LeftBorder, MinimapDecoration,
+    MinimapPosition, MinimapSectionHeaderStyle, OverviewRulerLane,
 };
 #[doc(hidden)]
 pub use editor::OverviewRulerForTests;

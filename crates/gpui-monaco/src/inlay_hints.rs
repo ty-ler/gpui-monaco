@@ -2,29 +2,32 @@
 //! parameter names.
 //!
 //! Ports Monaco's `src/vs/editor/contrib/inlayHints/browser/`
-//! (`inlayHintsController.ts`, `inlayHintsHover.ts`, `inlayHints.ts`) (MIT):
-//! label parts with their own hover, Cmd/Ctrl+click to a part's location or
-//! command, double-click to apply a hint's text edits, and the hints' font.
-//! Not ported: the label part context menu, hovers from a part's location,
-//! and the cursor-line length freezing.
+//! (`inlayHintsController.ts`, `inlayHintsHover.ts`,
+//! `inlayHintsLocations.ts`, `inlayHints.ts`) (MIT): label parts with their
+//! own hover (with the hover of a part's location), Cmd/Ctrl+click to a
+//! part's location or command, a context menu of navigation commands for a
+//! part's location, double-click to apply a hint's text edits, the hints'
+//! font, spacing and rounded boxes, hint lengths kept on the cursor's line
+//! while typing, and Monaco's cache of each model's hints.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::FutureExt as _;
 use futures::future::Shared;
-use gpui::{Context, Modifiers, Pixels, Point, Task, px};
+use gpui::{App, Bounds, Context, EntityId, Global, Modifiers, Pixels, Point, Task, Window, px};
 use text::PointUtf16;
+use web_time::Instant;
 
 use crate::api::DecorationsCollection;
-use crate::decorations::{DecorationId, DecorationOptions, InjectedText};
+use crate::decorations::{DecorationId, DecorationOptions, InjectedText, InjectedTextBox};
 use crate::editor::{CodeEditor, CodeEditorEvent};
-use crate::options::{InlayHintsMode, MultiCursorModifier};
+use crate::options::{InlayHintsMode, LocationKind, MultiCursorModifier};
 use crate::providers::{
     Command, Documentation, InlayHint, InlayHintKind, InlayHintsEpoch, InlayHintsProvider,
-    MarkdownString, inlay_hints_providers,
+    Location, MarkdownString, hover_providers, inlay_hints_providers,
 };
 use crate::theme::TokenStyle;
 
@@ -32,6 +35,40 @@ use crate::theme::TokenStyle;
 const SCROLL_DELAY: Duration = Duration::from_millis(25);
 /// After edits.
 const EDIT_DELAY: Duration = Duration::from_millis(250);
+/// Monaco keeps hint lengths on the cursor's line this long after an edit
+/// (`Math.max(scheduler.delay, 800)`), then asks for hints again.
+const CURSOR_FREEZE: Duration = Duration::from_millis(800);
+/// Monaco `InlayHintsCache`'s `LRUCache` size.
+const CACHE_SIZE: usize = 50;
+
+/// Monaco `InlayHintsCache`: the hints last shown for each model and
+/// version, shown again at once when an editor switches back to the model
+/// or its options change (`_cacheHintsForFastRestore`).
+#[derive(Default)]
+struct InlayHintsCache(Vec<(EntityId, text::Version, Vec<InlayHintItem>)>);
+
+impl Global for InlayHintsCache {}
+
+impl InlayHintsCache {
+    fn get(&mut self, model: EntityId, version: &text::Version) -> Option<Vec<InlayHintItem>> {
+        let ix = self
+            .0
+            .iter()
+            .position(|(m, v, _)| *m == model && v == version)?;
+        let entry = self.0.remove(ix);
+        let items = entry.2.clone();
+        self.0.push(entry);
+        Some(items)
+    }
+
+    fn set(&mut self, model: EntityId, version: text::Version, items: Vec<InlayHintItem>) {
+        self.0.retain(|(m, v, _)| !(*m == model && *v == version));
+        self.0.push((model, version, items));
+        if self.0.len() > CACHE_SIZE {
+            self.0.remove(0);
+        }
+    }
+}
 
 /// A hint and the provider that gave it (Monaco `InlayHintItem`).
 #[derive(Clone)]
@@ -71,6 +108,14 @@ pub(crate) struct InlayHintState {
     decorations: Option<DecorationsCollection>,
     /// The label part each rendered decoration shows.
     parts: HashMap<DecorationId, InlayHintPart>,
+    /// The hint (index into `items`) of each rendered decoration, label
+    /// parts and the padding that keeps a hint's length.
+    decoration_items: HashMap<DecorationId, usize>,
+    /// Monaco `_cursorInfo`: the cursor at the last edit, and until when
+    /// the hints before it on its line keep their lengths.
+    cursor: Option<(PointUtf16, Instant)>,
+    /// Asks for hints again when that's over.
+    cursor_task: Option<Task<()>>,
     /// The part under the mouse that has a location or command, and
     /// whether the link modifier is held (Monaco `_activeInlayHintPart`).
     active: Option<(InlayHintPart, bool)>,
@@ -119,13 +164,48 @@ fn limit_per_line(hints: &[InlayHint], maximum: usize) -> Vec<(usize, Vec<(usize
     out
 }
 
+/// Monaco's fixed lengths in `_updateHintsDecorators`: a hint's shown
+/// parts cut to `fixed` characters (its last one ending in `…`, which
+/// Monaco does even when it's exactly that long), and the characters of
+/// padding it needs to reach it.
+fn fix_length(parts: Vec<(usize, String)>, fixed: usize) -> (Vec<(usize, String)>, usize) {
+    let mut out = Vec::with_capacity(parts.len());
+    let mut actual = 0;
+    for (part_ix, text) in parts {
+        let len = text.chars().count();
+        actual += len;
+        if actual >= fixed {
+            let over = actual - fixed;
+            // `textlabel.slice(0, -(1 + over)) + '…'`.
+            let mut cut: String = text.chars().take(len.saturating_sub(over + 1)).collect();
+            cut.push('…');
+            out.push((part_ix, cut));
+            return (out, 0);
+        }
+        out.push((part_ix, text));
+    }
+    (out, fixed - actual)
+}
+
+/// Monaco's matching of the old hints' lengths before the cursor (in
+/// order) with the new hints there: each new one takes the next length,
+/// or 0 when there are more new hints. Lengths left over are dropped, as
+/// Monaco's code computes their sum but never stores it.
+fn match_fixed_lengths(new_items: &[usize], lengths: &[usize]) -> HashMap<usize, usize> {
+    new_items
+        .iter()
+        .enumerate()
+        .map(|(ix, item)| (*item, lengths.get(ix).copied().unwrap_or(0)))
+        .collect()
+}
+
 /// Monaco `fixSpace`: spaces show as no-break spaces.
 fn fix_space(text: &str) -> String {
-    text.replace(' ', "\u{a0}")
+    text.replace([' ', '\t'], "\u{a0}")
 }
 
 impl CodeEditor {
-    fn inlay_hints_active(&self, cx: &gpui::App) -> bool {
+    fn inlay_hints_active(&self, cx: &App) -> bool {
         self.options.inlay_hints.enabled != InlayHintsMode::Off
             && !self.options.single_line
             && !inlay_hints_providers(cx, self.provider_target(cx)).is_empty()
@@ -137,7 +217,7 @@ impl CodeEditor {
         if !self.inlay_hints_active(cx) {
             self.inlay.task = None;
             if !self.inlay.items.is_empty() {
-                self.set_inlay_hint_items(Vec::new(), cx);
+                self.set_inlay_hint_items(Vec::new(), &HashMap::new(), cx);
             }
             return;
         }
@@ -163,17 +243,140 @@ impl CodeEditor {
             items.sort_by_key(|item| item.hint.position);
             this.update(cx, |this, cx| {
                 this.inlay.task = None;
-                this.set_inlay_hint_items(items, cx);
+                // Monaco `_updateHintsDecorators`, then
+                // `_cacheHintsForFastRestore`.
+                let fixed = this.cursor_line_fixed_lengths(&items, cx);
+                this.set_inlay_hint_items(items, &fixed, cx);
+                this.cache_inlay_hints(cx);
             })
             .ok();
         }));
     }
 
-    fn set_inlay_hint_items(&mut self, items: Vec<InlayHintItem>, cx: &mut Context<Self>) {
+    fn set_inlay_hint_items(
+        &mut self,
+        items: Vec<InlayHintItem>,
+        fixed: &HashMap<usize, usize>,
+        cx: &mut Context<Self>,
+    ) {
         self.inlay.items = items;
         self.inlay.generation += 1;
         self.inlay.active = None;
-        self.render_inlay_hints(cx);
+        self.render_inlay_hints_with(fixed, cx);
+    }
+
+    /// Monaco `_updateHintsDecorators`' fixed lengths: shortly after an
+    /// edit, the new hints on the cursor's line before the cursor keep the
+    /// lengths the old ones there had, so the cursor doesn't jump while
+    /// typing. Returns them by index into `items`.
+    fn cursor_line_fixed_lengths(
+        &mut self,
+        items: &[InlayHintItem],
+        cx: &App,
+    ) -> HashMap<usize, usize> {
+        let Some((position, until)) = self.inlay.cursor else {
+            return HashMap::new();
+        };
+        let covered = self
+            .inlay
+            .requested
+            .as_ref()
+            .is_some_and(|rows| rows.contains(&position.row));
+        if until <= Instant::now() || !covered {
+            return HashMap::new();
+        }
+        self.inlay.cursor = None;
+        // The old hints' lengths there, in order.
+        let mut lengths: BTreeMap<usize, usize> = BTreeMap::new();
+        if let Some(decorations) = &self.inlay.decorations {
+            let model = self.model().read(cx);
+            let rope = model.buffer().rope();
+            for id in decorations.ids() {
+                let Some(item) = self.inlay.decoration_items.get(id) else {
+                    continue;
+                };
+                let Some(decoration) = model.decoration(*id) else {
+                    continue;
+                };
+                let at = rope.offset_to_point_utf16(decoration.range.start);
+                if at.row != position.row || at.column > position.column {
+                    continue;
+                }
+                if let Some(before) = &decoration.options.before {
+                    *lengths.entry(*item).or_default() += before.content.chars().count();
+                }
+            }
+        }
+        let lengths: Vec<usize> = lengths.into_values().collect();
+        let new_items: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                item.hint.position.row == position.row
+                    && item.hint.position.column <= position.column
+            })
+            .map(|(ix, _)| ix)
+            .collect();
+        match_fixed_lengths(&new_items, &lengths)
+    }
+
+    /// The hints shown, at where their decorations are now (Monaco
+    /// `_copyInlayHintsWithCurrentAnchor`).
+    fn inlay_hints_with_current_positions(&self, cx: &App) -> Vec<InlayHintItem> {
+        let Some(decorations) = &self.inlay.decorations else {
+            return Vec::new();
+        };
+        let model = self.model().read(cx);
+        let rope = model.buffer().rope();
+        let mut positions: BTreeMap<usize, PointUtf16> = BTreeMap::new();
+        for id in decorations.ids() {
+            if let Some(item) = self.inlay.decoration_items.get(id)
+                && !positions.contains_key(item)
+                && let Some(decoration) = model.decoration(*id)
+            {
+                positions.insert(*item, rope.offset_to_point_utf16(decoration.range.start));
+            }
+        }
+        let mut items: Vec<InlayHintItem> = positions
+            .into_iter()
+            .filter_map(|(ix, position)| {
+                let mut item = self.inlay.items.get(ix)?.clone();
+                item.hint.position = position;
+                Some(item)
+            })
+            .collect();
+        items.sort_by_key(|item| item.hint.position);
+        items
+    }
+
+    /// Monaco `_cacheHintsForFastRestore`.
+    fn cache_inlay_hints(&self, cx: &mut Context<Self>) {
+        let items = self.inlay_hints_with_current_positions(cx);
+        if items.is_empty() {
+            return;
+        }
+        let model = self.model().read(cx);
+        let (id, version) = (self.model().entity_id(), model.buffer().version());
+        cx.default_global::<InlayHintsCache>()
+            .set(id, version, items);
+    }
+
+    /// Monaco `_update`'s "quickly update from cache": shows the hints
+    /// last shown for this model at this version, if any.
+    pub(crate) fn restore_cached_inlay_hints(&mut self, cx: &mut Context<Self>) {
+        if !self.inlay_hints_active(cx) {
+            return;
+        }
+        let version = self.model().read(cx).buffer().version();
+        let id = self.model().entity_id();
+        let cached = cx
+            .try_global::<InlayHintsCache>()
+            .is_some()
+            .then(|| cx.global_mut::<InlayHintsCache>().get(id, &version))
+            .flatten();
+        if let Some(items) = cached {
+            self.set_inlay_hint_items(items, &HashMap::new(), cx);
+        }
     }
 
     /// Monaco `getVisibleRangesPlusViewportAboveBelow`.
@@ -234,20 +437,36 @@ impl CodeEditor {
     /// The text changed: hints move with it until the new ones arrive.
     pub(crate) fn inlay_hints_after_edit(&mut self, cx: &mut Context<Self>) {
         if self.inlay_hints_active(cx) {
+            // Monaco marks the cursor, and when the hints before it may
+            // change length again, asking for them then.
+            let delay = EDIT_DELAY.max(CURSOR_FREEZE);
+            self.inlay.cursor = Some((self.cursors.primary().position, Instant::now() + delay));
+            self.inlay.cursor_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                this.update(cx, |this, cx| this.schedule_inlay_hints(Duration::ZERO, cx))
+                    .ok();
+            }));
             self.schedule_inlay_hints(EDIT_DELAY, cx);
         }
     }
 
-    /// The model, its language or the options changed.
+    /// The model, its language or the options changed (Monaco `_update`):
+    /// the model's hints are cached, then shown again from the cache, if
+    /// it has this model's, until new ones arrive.
     pub(crate) fn reset_inlay_hints(&mut self, cx: &mut Context<Self>) {
+        self.cache_inlay_hints(cx);
         if let Some(mut decorations) = self.inlay.decorations.take() {
             decorations.clear(cx);
         }
         self.inlay.parts.clear();
+        self.inlay.decoration_items.clear();
         self.inlay.items.clear();
         self.inlay.generation += 1;
         self.inlay.active = None;
         self.inlay.requested = None;
+        self.inlay.cursor = None;
+        self.inlay.cursor_task = None;
+        self.restore_cached_inlay_hints(cx);
         self.schedule_inlay_hints(Duration::ZERO, cx);
     }
 
@@ -366,78 +585,116 @@ impl CodeEditor {
         cx.notify();
     }
 
-    /// Shows the hints as injected text the editor owns: one decoration per
-    /// label part, plus one per padding.
+    /// Shows the hints as injected text the editor owns.
     fn render_inlay_hints(&mut self, cx: &mut Context<Self>) {
+        self.render_inlay_hints_with(&HashMap::new(), cx);
+    }
+
+    /// Monaco `_updateHintsDecorators`: one decoration per label part,
+    /// boxed as Monaco's CSS boxes them, and the padding of hints that keep
+    /// a `fixed` length (by index into the items).
+    fn render_inlay_hints_with(&mut self, fixed: &HashMap<usize, usize>, cx: &mut Context<Self>) {
         if let Some(mut decorations) = self.inlay.decorations.take() {
             decorations.clear(cx);
         }
         self.inlay.parts.clear();
+        self.inlay.decoration_items.clear();
         if !self.inlay_hints_visible() || self.inlay.items.is_empty() {
             cx.notify();
             return;
         }
         let padding = self.options.inlay_hints.padding;
         let (font_size, font_family) = self.inlay_hints_font();
+        // Monaco `_getLayoutInfo().fontSize`, whole pixels as in its CSS.
+        let size = f32::from(font_size.unwrap_or(self.options.font_size));
+        // `addInjectedWhitespace`: an inline-block `(fontSize / 3) | 0` wide.
+        let spacer = px((size / 3.).trunc());
+        // The `padding` option: `padding: 1px max(1, fontSize / 4)px` and
+        // `border-radius: (fontSize / 4)px`, split over the first and last
+        // parts.
+        let (padding_x, padding_y, radius) = if padding {
+            (
+                px((size / 4.).max(1.).trunc()),
+                px(1.),
+                px((size / 4.).trunc()),
+            )
+        } else {
+            (px(0.), px(0.), px(0.))
+        };
         let hints: Vec<InlayHint> = self.inlay.items.iter().map(|i| i.hint.clone()).collect();
         let mut decorations = Vec::new();
-        // The part each decoration shows, by index into `decorations`.
+        // The hint, and the part, each decoration shows, by index into
+        // `decorations`.
+        let mut items = Vec::new();
         let mut parts = Vec::new();
         for (item, shown) in limit_per_line(&hints, self.options.inlay_hints.maximum_length) {
             let hint = &hints[item];
+            let (shown, pad) = match fixed.get(&item) {
+                Some(fixed) => fix_length(shown, *fixed),
+                None => (shown, 0),
+            };
             let (_, background) = self.inlay_hint_colors(hint.kind);
             let position = hint.position..hint.position;
-            // Monaco pads with a third of the font size; a thin space is
-            // close.
-            let whitespace = |decorations: &mut Vec<_>| {
-                decorations.push((
-                    position.clone(),
-                    DecorationOptions {
-                        before: Some(InjectedText {
-                            content: "\u{2009}".into(),
-                            font_size,
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                ));
-            };
-            if hint.padding_left {
-                whitespace(&mut decorations);
-            }
+            let margin_left = if hint.padding_left { spacer } else { px(0.) };
+            let margin_right = if hint.padding_right { spacer } else { px(0.) };
             let count = shown.len();
-            for (ix, (part_ix, mut text)) in shown.into_iter().enumerate() {
+            for (ix, (part_ix, text)) in shown.into_iter().enumerate() {
                 let part = InlayHintPart {
                     generation: self.inlay.generation,
                     item,
                     part: part_ix,
                 };
-                let style = self.inlay_part_style(part);
-                // Monaco's `padding` option pads the label's background.
-                if padding && ix == 0 {
-                    text.insert(0, '\u{2009}');
-                }
-                if padding && ix + 1 == count {
-                    text.push('\u{2009}');
-                }
+                let (first, last) = (ix == 0, ix + 1 == count);
+                let edge = |at_edge: bool, value: Pixels| if at_edge { value } else { px(0.) };
+                items.push((decorations.len(), item));
                 parts.push((decorations.len(), part));
                 decorations.push((
                     position.clone(),
                     DecorationOptions {
                         before: Some(InjectedText {
                             content: fix_space(&text).into(),
-                            style,
+                            style: self.inlay_part_style(part),
                             background: Some(background),
                             swatch: None,
                             font_family: font_family.clone(),
                             font_size,
+                            text_box: Some(InjectedTextBox {
+                                margin: (
+                                    edge(first, margin_left),
+                                    edge(last && pad == 0, margin_right),
+                                ),
+                                padding: (edge(first, padding_x), edge(last, padding_x)),
+                                padding_y,
+                                corner_radius: (edge(first, radius), edge(last, radius)),
+                            }),
                         }),
                         ..Default::default()
                     },
                 ));
             }
-            if hint.padding_right {
-                whitespace(&mut decorations);
+            if pad > 0 {
+                // Monaco pads a hint shorter than its fixed length with hair
+                // spaces, without a background.
+                items.push((decorations.len(), item));
+                decorations.push((
+                    position.clone(),
+                    DecorationOptions {
+                        before: Some(InjectedText {
+                            content: "\u{200a}".repeat(pad).into(),
+                            font_family: font_family.clone(),
+                            font_size,
+                            text_box: Some(InjectedTextBox {
+                                margin: (
+                                    if count == 0 { margin_left } else { px(0.) },
+                                    margin_right,
+                                ),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ));
             }
         }
         let model = self.model().clone();
@@ -447,6 +704,11 @@ impl CodeEditor {
         for (ix, part) in parts {
             if let Some(id) = ids.get(ix) {
                 self.inlay.parts.insert(*id, part);
+            }
+        }
+        for (ix, item) in items {
+            if let Some(id) = ids.get(ix) {
+                self.inlay.decoration_items.insert(*id, item);
             }
         }
         self.inlay.decorations = Some(collection);
@@ -468,13 +730,39 @@ impl CodeEditor {
             top <= point.y && point.y < top + layout.line_height_of(line.view_line)
         })?;
         let x = point.x - layout.text_origin_x() - line.indent_x;
+        // The spacers beside a hint aren't part of it (Monaco's
+        // `_whitespaceData`).
         line.injected
             .iter()
-            .find(|injected| {
-                line.shaped.x_for_index(injected.range.start) <= x
-                    && x < line.shaped.x_for_index(injected.range.end)
-            })
+            .find(|injected| injected.background_range(&line.shaped).contains(&x))
             .and_then(|injected| self.inlay.parts.get(&injected.decoration?).copied())
+    }
+
+    /// Where a shown label part is drawn, in window coordinates: its box
+    /// (Monaco's part `span`).
+    fn inlay_part_bounds(&self, part: InlayHintPart) -> Option<Bounds<Pixels>> {
+        let layout = self.layout.as_ref()?;
+        for line in &layout.lines {
+            for injected in &line.injected {
+                let Some(id) = injected.decoration else {
+                    continue;
+                };
+                if self.inlay.parts.get(&id) != Some(&part) {
+                    continue;
+                }
+                let x = injected.background_range(&line.shaped);
+                let height = line.shaped.text_height(injected.range.start)
+                    + injected.text_box.map_or(px(0.), |b| b.padding_y * 2.);
+                let top =
+                    layout.text_top(line.view_line) + (layout.metrics.line_height - height) / 2.;
+                let left = layout.text_origin_x() + line.indent_x + x.start;
+                return Some(Bounds::new(
+                    gpui::point(left, top),
+                    gpui::size(x.end - x.start, height),
+                ));
+            }
+        }
+        None
     }
 
     fn inlay_hint_item(&self, part: InlayHintPart) -> Option<&InlayHintItem> {
@@ -641,7 +929,7 @@ impl CodeEditor {
             (MultiCursorModifier::CtrlCmd, true) => "option + click",
             (MultiCursorModifier::CtrlCmd, false) => "alt + click",
         };
-        cx.spawn(async move |_, _| {
+        cx.spawn(async move |this, cx| {
             let hint = resolve.await?;
             let label_part = hint.label.parts().get(part.part).cloned()?;
             let mut contents = Vec::new();
@@ -649,11 +937,35 @@ impl CodeEditor {
             // String tooltips are plain text (Monaco `appendText`).
             contents.extend(hint.tooltip.as_ref().map(Documentation::to_markdown));
             contents.extend(label_part.tooltip.as_ref().map(Documentation::to_markdown));
+            // Then the hovers at the part's location (ordinals 2 and up:
+            // `_resolveInlayHintLabelPartHover`).
+            if let Some(location) = &label_part.location {
+                let tasks = this
+                    .update(cx, |this, cx| this.inlay_hint_location_hovers(location, cx))
+                    .unwrap_or_default();
+                for task in tasks {
+                    match task.await {
+                        Ok(Some(hover)) => contents.extend(
+                            hover
+                                .contents
+                                .into_iter()
+                                .filter(|content| !content.value.trim().is_empty()),
+                        ),
+                        Ok(None) => {}
+                        Err(err) => log::warn!("hover failed: {err:#}"),
+                    }
+                }
+            }
             let mut command = None;
-            if label_part.location.is_some() {
-                contents.push(format!("Go to Definition ({keys})").into());
-            } else if let Some(part_command) = label_part.command {
-                command = Some((part_command, format!(" ({keys})")));
+            match (&label_part.location, label_part.command) {
+                (Some(_), Some(_)) => {
+                    contents.push(format!("Go to Definition ({keys}), right click for more").into())
+                }
+                (Some(_), None) => contents.push(format!("Go to Definition ({keys})").into()),
+                (None, Some(part_command)) => {
+                    command = Some((part_command, format!(" ({keys})")));
+                }
+                (None, None) => {}
             }
             if !hint.text_edits.is_empty() {
                 contents.push("Double-click to insert".into());
@@ -666,8 +978,94 @@ impl CodeEditor {
         })
     }
 
+    /// Asks the hover providers of `location`'s model about its start
+    /// (Monaco `getHoverProviderResultsAsAsyncIterable` on the model
+    /// `ITextModelService` resolves). Nothing when no open model has it.
+    #[allow(clippy::type_complexity)]
+    fn inlay_hint_location_hovers(
+        &mut self,
+        location: &Location,
+        cx: &mut Context<Self>,
+    ) -> Vec<Task<anyhow::Result<Option<crate::providers::Hover>>>> {
+        let Some(model) = self.model_for_location(location, cx) else {
+            return Vec::new();
+        };
+        let model = model.read(cx);
+        let context = model.provider_context();
+        let target: crate::providers::ProviderTarget = model.into();
+        hover_providers(cx, target)
+            .into_iter()
+            .map(|provider| provider.provide_hover(&context, location.range.start, cx))
+            .collect()
+    }
+
+    /// A right-click on an inlay hint label part (Monaco
+    /// `_installContextMenu`): once its hint is resolved, a part with a
+    /// location shows Monaco's `showGoToContextMenu` below it, in place of
+    /// the editor's context menu.
+    pub(crate) fn inlay_hint_context_menu(
+        &mut self,
+        point: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(part) = self.inlay_hint_part_at(point) else {
+            return;
+        };
+        // Monaco anchors it 8px below the part.
+        let anchor = self.inlay_part_bounds(part).map_or(point, |bounds| {
+            bounds.bottom_left() + gpui::point(px(0.), px(8.))
+        });
+        let resolve = self.resolve_inlay_hint(part, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(hint) = resolve.await else {
+                return;
+            };
+            let Some(label_part) = hint.label.parts().get(part.part).cloned() else {
+                return;
+            };
+            let Some(location) = label_part.location else {
+                return;
+            };
+            this.update_in(cx, |this, window, cx| {
+                this.show_inlay_hint_location_menu(location, label_part.command, anchor, window, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Runs the navigation command `kind` from `location` (an item of the
+    /// inlay hint location menu: Monaco runs the `SymbolNavigationAction`
+    /// with a `SymbolNavigationAnchor` at the location's start).
+    pub(crate) fn run_inlay_hint_location(
+        &mut self,
+        kind: LocationKind,
+        location: &Location,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(model) = self.model_for_location(location, cx) else {
+            log::warn!("no model for {:?}", location.uri);
+            return;
+        };
+        let foreign = model != *self.model();
+        self.navigate_from(
+            kind,
+            &model,
+            location.range.start,
+            crate::goto::Navigation {
+                // The no-result message would be about another model's
+                // word.
+                mute_message: foreign,
+                allow_alternative: false,
+                ..Default::default()
+            },
+            cx,
+        );
+    }
+
     /// The inlay hints shown, as (position, text).
-    pub fn visible_inlay_hints(&self, cx: &gpui::App) -> Vec<(PointUtf16, String)> {
+    pub fn visible_inlay_hints(&self, cx: &App) -> Vec<(PointUtf16, String)> {
         let Some(decorations) = &self.inlay.decorations else {
             return Vec::new();
         };
@@ -675,7 +1073,7 @@ impl CodeEditor {
         let mut hints: Vec<(PointUtf16, String)> = Vec::new();
         let mut last_item = None;
         for id in decorations.ids() {
-            let Some(part) = self.inlay.parts.get(id) else {
+            let Some(&item) = self.inlay.decoration_items.get(id) else {
                 continue;
             };
             let Some(decoration) = model.decoration(*id) else {
@@ -687,7 +1085,7 @@ impl CodeEditor {
             let text = before.content.replace('\u{a0}', " ");
             match hints.last_mut() {
                 // The parts of one hint show as one.
-                Some((_, label)) if last_item == Some(part.item) => label.push_str(&text),
+                Some((_, label)) if last_item == Some(item) => label.push_str(&text),
                 _ => {
                     let position = model
                         .buffer()
@@ -696,7 +1094,7 @@ impl CodeEditor {
                     hints.push((position, text));
                 }
             }
-            last_item = Some(part.item);
+            last_item = Some(item);
         }
         hints
     }
@@ -704,11 +1102,7 @@ impl CodeEditor {
     /// The window point over the middle of the shown label part `text`, for
     /// tests.
     #[doc(hidden)]
-    pub fn inlay_hint_part_point_for_tests(
-        &self,
-        text: &str,
-        cx: &gpui::App,
-    ) -> Option<Point<Pixels>> {
+    pub fn inlay_hint_part_point_for_tests(&self, text: &str, cx: &App) -> Option<Point<Pixels>> {
         let layout = self.layout.as_ref()?;
         let model = self.model().read(cx);
         let decorations = self.inlay.decorations.as_ref()?;
@@ -719,20 +1113,16 @@ impl CodeEditor {
                     .and_then(|d| d.options.before.clone())
                     .is_some_and(|before| before.content.replace('\u{a0}', " ") == text)
         })?;
-        for line in &layout.lines {
-            for injected in &line.injected {
-                if injected.decoration == Some(id) {
-                    let from = line.shaped.x_for_index(injected.range.start);
-                    let to = line.shaped.x_for_index(injected.range.end);
-                    let top = layout.line_top(line.view_line);
-                    return Some(gpui::point(
-                        layout.text_origin_x() + line.indent_x + (from + to) / 2.,
-                        top + layout.line_height_of(line.view_line) / 2.,
-                    ));
-                }
-            }
-        }
-        None
+        let bounds = self.inlay_part_bounds(*self.inlay.parts.get(&id)?)?;
+        let _ = layout;
+        Some(bounds.center())
+    }
+
+    /// The window bounds of the shown label part `text`'s box, for tests.
+    #[doc(hidden)]
+    pub fn inlay_hint_part_bounds_for_tests(&self, text: &str, cx: &App) -> Option<Bounds<Pixels>> {
+        let center = self.inlay_hint_part_point_for_tests(text, cx)?;
+        self.inlay_part_bounds(self.inlay_hint_part_at(center)?)
     }
 }
 
@@ -770,6 +1160,58 @@ mod tests {
         );
         // No limit.
         assert_eq!(texts(&hints, 0).len(), 4);
+    }
+
+    fn parts(texts: &[&str]) -> Vec<(usize, String)> {
+        texts
+            .iter()
+            .enumerate()
+            .map(|(ix, text)| (ix, text.to_string()))
+            .collect()
+    }
+
+    /// Monaco's fixed lengths: longer labels are cut to the length (the
+    /// part reaching it ends in `…`, even at exactly the length), shorter
+    /// ones padded.
+    #[test]
+    fn fixed_lengths_cut_or_pad() {
+        let texts = |(parts, pad): (Vec<(usize, String)>, usize)| {
+            (
+                parts.into_iter().map(|(_, text)| text).collect::<Vec<_>>(),
+                pad,
+            )
+        };
+        assert_eq!(
+            texts(fix_length(parts(&[": ", "Foo"]), 4)),
+            (vec![": ".to_string(), "F…".to_string()], 0)
+        );
+        assert_eq!(
+            texts(fix_length(parts(&[": ", "Foo"]), 5)),
+            (vec![": ".to_string(), "Fo…".to_string()], 0)
+        );
+        assert_eq!(
+            texts(fix_length(parts(&[": ", "Foo"]), 8)),
+            (vec![": ".to_string(), "Foo".to_string()], 3)
+        );
+        // Cut within the first part: the rest is dropped.
+        assert_eq!(
+            texts(fix_length(parts(&["abcd", "ef"]), 2)),
+            (vec!["a…".to_string()], 0)
+        );
+        // A new hint with no old length shows as `…`.
+        assert_eq!(
+            texts(fix_length(parts(&["ab"]), 0)),
+            (vec!["…".to_string()], 0)
+        );
+    }
+
+    #[test]
+    fn fixed_lengths_match_in_order() {
+        let fixed = match_fixed_lengths(&[3, 5], &[4]);
+        assert_eq!(fixed.get(&3), Some(&4));
+        assert_eq!(fixed.get(&5), Some(&0));
+        // Lengths left over are dropped.
+        assert_eq!(match_fixed_lengths(&[1], &[2, 3]).len(), 1);
     }
 
     #[test]

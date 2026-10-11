@@ -115,14 +115,15 @@ pub fn has_symbol_navigation(cx: &App) -> bool {
 }
 
 impl CodeEditor {
+    /// Asks `model`'s providers of `kind` about `position` in it.
     fn request_locations(
-        &mut self,
+        model: &Entity<crate::TextModel>,
         kind: LocationKind,
         position: PointUtf16,
         cx: &mut Context<Self>,
     ) -> Vec<Task<anyhow::Result<Vec<Location>>>> {
-        let context = self.model().read(cx).provider_context();
-        let language = self.provider_target(cx);
+        let context = model.read(cx).provider_context();
+        let language: crate::providers::ProviderTarget = model.read(cx).into();
         match kind {
             LocationKind::Definition => definition_providers(cx, language)
                 .into_iter()
@@ -255,10 +256,44 @@ impl CodeEditor {
         self.on_locations(None, preference, locations, open_in_peek, false, cx);
     }
 
+    /// The model `location` is in: this editor's for no uri or its own,
+    /// else an open model with that uri (Monaco's `ITextModelService`,
+    /// which in the standalone editor resolves only existing models).
+    pub(crate) fn model_for_location(
+        &self,
+        location: &Location,
+        cx: &App,
+    ) -> Option<Entity<crate::TextModel>> {
+        match &location.uri {
+            None => Some(self.model().clone()),
+            Some(uri) if Some(uri) == self.model().read(cx).uri() => Some(self.model().clone()),
+            Some(uri) => crate::registry::models(cx)
+                .into_iter()
+                .find(|model| model.read(cx).uri() == Some(uri)),
+        }
+    }
+
     /// Monaco `SymbolNavigationAction.run`.
     pub(crate) fn navigate(
         &mut self,
         kind: LocationKind,
+        navigation: Navigation,
+        cx: &mut Context<Self>,
+    ) {
+        let position = self.cursors.primary().position;
+        let model = self.model().clone();
+        self.navigate_from(kind, &model, position, navigation, cx);
+    }
+
+    /// Runs a navigation command from `position` in `model`, which may be
+    /// another model than this editor's (Monaco's `runEditorCommand` with
+    /// a `SymbolNavigationAnchor`, as the inlay hint location menu runs
+    /// them), showing the results in this editor.
+    pub(crate) fn navigate_from(
+        &mut self,
+        kind: LocationKind,
+        model: &Entity<crate::TextModel>,
+        position: PointUtf16,
         navigation: Navigation,
         cx: &mut Context<Self>,
     ) {
@@ -268,10 +303,9 @@ impl CodeEditor {
             mute_message,
             allow_alternative,
         } = navigation;
-        let position = self.cursors.primary().position;
-        let tasks = self.request_locations(kind, position, cx);
+        let tasks = Self::request_locations(model, kind, position, cx);
         let state = self.navigation_state(cx);
-        let uri = self.model().read(cx).uri().cloned();
+        let uri = model.read(cx).uri().cloned();
         self.start_cancellable(crate::editor_state::CancellableOperation::Navigation);
         self.goto.task = Some(cx.spawn(async move |this, cx| {
             let mut locations = Vec::new();

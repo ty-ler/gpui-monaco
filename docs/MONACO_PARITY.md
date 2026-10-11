@@ -185,8 +185,8 @@ Issues are linked by number.
 | Code action menu: "Show Disabled", documentation links, preview (Cmd/Ctrl+Enter, through a host preview handler; no Refactor Preview panel) | `codeAction` | ✅ | #225 |
 | The `editor.action.codeAction` command with `kind`, `apply` and `preferred` | `codeAction` | ✅ | #202 |
 | Rename suggestions (`NewSymbolNamesProvider`) | `rename` | ✅ | #225 |
-| Inlay hints: label parts, tooltips, Cmd/Ctrl+click, double-click edits, resolve, font options (no part context menu or location hovers) | `inlayHints` | ✅ | #56, #200 |
-| Code lens | `codelens` | ✅ (and "Show CodeLens Commands for Current Line", #202) | #96 |
+| Inlay hints: label parts, tooltips, Cmd/Ctrl+click, double-click edits, resolve, font options, spacers, padding and rounded boxes, the part location menu and location hovers, fixed lengths while typing, the per-model cache | `inlayHints` | ✅ | #56, #200, #253 |
+| Code lens: placeholder while resolving, theme/font/zoom-following style and height, first non-whitespace column, horizontal scrolling, `$(icon)` titles, tooltips, fade-in | `codelens` | ✅ (and "Show CodeLens Commands for Current Line", #202) | #96, #253 |
 | Color decorators (providers, default finder) | `colorDecorators` | ✅ | #97 |
 | Color picker (hover and standalone) | `colorPicker` | ✅ | #97 |
 | Links | `links` | ✅ | #93 |

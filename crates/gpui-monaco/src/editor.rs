@@ -1005,6 +1005,9 @@ impl CodeEditor {
         self.fold_rerun = false;
         *self.shared_model.borrow_mut() = model.downgrade();
         self.model = model;
+        // Monaco `InlayHintsController._update`: the new model's cached
+        // hints, at once.
+        self.restore_cached_inlay_hints(cx);
         self.cursors = CursorCollection::new(SingleCursorState::from_position(PointUtf16::zero()));
         self.cursors
             .set_merge_overlapping(self.options.multi_cursor_merge_overlapping);
@@ -3983,6 +3986,9 @@ impl CodeEditor {
             MouseTargetKind::ContentText | MouseTargetKind::ContentEmpty { .. }
         ) {
             self.context_menu_mouse_down(mouse.target.position, event.position, window, cx);
+            // Monaco's inlay hints show their own menu over a label part
+            // with a location.
+            self.inlay_hint_context_menu(event.position, window, cx);
         }
     }
 
