@@ -15,7 +15,7 @@ use gpui::{
 use text::PointUtf16;
 
 use crate::editor::CodeEditor;
-use crate::theme::{Theme, monaco_token_for_capture, textmate_scopes_for_capture};
+use crate::theme::{Theme, monaco_token_type, textmate_scopes_for_capture};
 use crate::widgets::{ContentWidget, ContentWidgetPreference, WidgetId};
 
 /// What the inspect tokens widget shows about the token at the cursor
@@ -42,7 +42,8 @@ pub struct TokenInspection {
     /// (`keyword.rust`), or `""` between highlighted tokens, as Monaco's
     /// `tokenize` reports it.
     pub token: String,
-    /// The tree-sitter capture behind it (`keyword.control`), if any.
+    /// The tree-sitter capture behind it (`keyword.control`), or the
+    /// Monarch token (`keyword.rust`), if any.
     pub capture: Option<SharedString>,
     /// The TextMate scopes the capture is matched against in VS Code
     /// themes, most specific first.
@@ -288,13 +289,9 @@ impl CodeEditor {
             .map(|capture| self.theme.style_for(capture))
             .unwrap_or_default();
         let capture_name = capture.map(|capture| capture.name());
-        let token = match &capture_name {
-            Some(name) => {
-                let token = monaco_token_for_capture(name).unwrap_or(name);
-                format!("{token}.{language}")
-            }
-            None => String::new(),
-        };
+        let token = capture
+            .map(|capture| monaco_token_type(capture, &language))
+            .unwrap_or_default();
         TokenInspection {
             text: render_token_text(token_text),
             length: token_text.encode_utf16().count(),

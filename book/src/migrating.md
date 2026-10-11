@@ -174,7 +174,9 @@ Monaco's `monaco.languages.register…Provider(selector, provider)` functions be
 | `onLanguage(id, callback)` | `on_language(cx, id, callback)` |
 | `LanguageFilter { language, scheme, pattern }` | `LanguageSelector::Filters(vec![LanguageFilter { … }])` |
 | `FormattingConflicts.setFormatterSelector` (not public in Monaco's API) | `set_formatter_selector(cx, …)` |
-| `setMonarchTokensProvider` | a tree-sitter grammar with highlight queries (see [Languages](languages.md)) |
+| `setMonarchTokensProvider` | `set_monarch_tokens_provider(cx, id, &grammar)` with the grammar as JSON, or `Language::with_monarch_grammar`; a tree-sitter grammar with highlight queries also works (see [Languages](languages.md#monarch-grammars)) |
+| `editor.remeasureFonts` | `remeasure_fonts(cx)`, a no-op: GPUI measures text every frame |
+| `editor.setColorMap`, `languages.getEncodedLanguageId` | none: there are no encoded tokens; themes resolve token names |
 
 The `gpui-monaco-lsp` bridge registers these providers from a language server (see [Language servers](lsp.md)).
 

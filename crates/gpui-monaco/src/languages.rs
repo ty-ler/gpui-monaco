@@ -1,13 +1,20 @@
-//! Monaco's `monaco.languages` extras: `setLanguageConfiguration` at
-//! runtime, `onLanguage`, and guessing a model's language from its uri and
-//! first line.
+//! Monaco's `monaco.languages` extras: `setLanguageConfiguration` and
+//! `setMonarchTokensProvider` at runtime, `onLanguage`, and guessing a
+//! model's language from its uri and first line.
+//!
+//! Monaco's `setColorMap` and `getEncodedLanguageId` have no equivalent:
+//! they serve encoded token metadata (language and color indices packed
+//! into numbers, from `EncodedTokensProvider`s), while highlighters here
+//! give named tokens that the theme resolves by name.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use gpui::{App, Global, SharedString};
-use syntax::LanguageConfiguration;
+use syntax::{LanguageConfiguration, MonarchHighlighter, MonarchTokenizer};
 
 use crate::model::language_registry;
+use crate::registry::Disposable;
 
 /// An `on_language` callback.
 type LanguageCallback = Box<dyn FnOnce(&mut App)>;
@@ -44,6 +51,67 @@ pub fn set_language_configuration(
         });
     }
     true
+}
+
+/// Highlights the registered language `language_id` with a Monarch grammar
+/// (Monaco `languages.setMonarchTokensProvider`): the JSON form of
+/// Monaco's `IMonarchLanguage`, regexes as strings (see
+/// [`syntax::monarch`] for the regex dialect). It replaces the language's
+/// tree-sitter or custom highlighting; models of the language, and of
+/// Monarch languages embedding others, re-tokenize. [`colorize`] and
+/// [`tokenize`] use it too.
+///
+/// Fails, as Monaco throws, for an unknown language or an invalid grammar.
+/// Disposing the result restores the previous highlighting, unless another
+/// provider replaced this one since.
+///
+/// [`colorize`]: crate::colorize::colorize
+/// [`tokenize`]: crate::colorize::tokenize
+pub fn set_monarch_tokens_provider(
+    cx: &mut App,
+    language_id: &str,
+    grammar: &serde_json::Value,
+) -> anyhow::Result<Disposable> {
+    let registry = language_registry(cx);
+    let Some(language) = registry.language_for_id(language_id) else {
+        anyhow::bail!("Cannot set tokens provider for unknown language {language_id}");
+    };
+    let tokenizer = Arc::new(MonarchTokenizer::new(language_id, grammar)?);
+    let factory = MonarchHighlighter::factory(tokenizer);
+    let previous = language.highlighter.clone();
+    registry.set_highlighter(language_id, Some(factory.clone()));
+    refresh_highlighting(cx, language_id);
+    let language_id = language_id.to_string();
+    Ok(Disposable::new(move |cx| {
+        let registry = language_registry(cx);
+        let ours = registry
+            .language_for_id(&language_id)
+            .and_then(|language| language.highlighter.clone())
+            .is_some_and(|current| Arc::ptr_eq(&current, &factory));
+        if ours {
+            registry.set_highlighter(&language_id, previous);
+            refresh_highlighting(cx, &language_id);
+        }
+    }))
+}
+
+/// Re-resolves the highlighter of models in `language_id`, and of models in
+/// Monarch languages that embed languages (which may be this one).
+fn refresh_highlighting(cx: &mut App, language_id: &str) {
+    let registry = language_registry(cx);
+    for model in crate::registry::models(cx) {
+        model.update(cx, |model, cx| {
+            let affected = model.language_id().is_some_and(|id| id == language_id)
+                || model.language().is_some_and(|language| {
+                    &*language.id == language_id
+                        || MonarchHighlighter::tokenizer_of(language, &registry)
+                            .is_some_and(|tokenizer| tokenizer.uses_embedded_languages())
+                });
+            if affected {
+                model.refresh_highlighter(cx);
+            }
+        });
+    }
 }
 
 /// Runs `callback` once, the first time a model uses `language_id` (Monaco

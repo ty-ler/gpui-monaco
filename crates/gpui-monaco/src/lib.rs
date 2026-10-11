@@ -62,7 +62,7 @@ mod folding_commands;
 mod font_zoom;
 mod indentation_commands;
 mod tooltip;
-pub use font_zoom::{editor_zoom_level, set_editor_zoom_level};
+pub use font_zoom::{editor_zoom_level, remeasure_fonts, set_editor_zoom_level};
 mod format;
 mod geometry;
 mod goto;
@@ -137,7 +137,7 @@ pub use find_widget::FindWidget;
 pub use goto::has_symbol_navigation;
 pub use hover::{HOVER_DELAY, HoverWidget};
 pub use inline_completions::inline_edits::InlineEditViewKind;
-pub use languages::{on_language, set_language_configuration};
+pub use languages::{on_language, set_language_configuration, set_monarch_tokens_provider};
 pub use layout_info::{LayoutInfo, MinimapLayoutInfo, OverviewRulerPosition, RenderMinimap};
 pub use markers::{
     Marker, MarkerFilter, MarkerSeverity, MarkerTag, MarkerZone, ModelMarker, RelatedInformation,

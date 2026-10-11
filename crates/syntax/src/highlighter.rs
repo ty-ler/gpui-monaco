@@ -74,6 +74,13 @@ pub trait Highlighter: Send + Sync {
         None
     }
 
+    /// The highlighter as [`Any`], for downcasting to its concrete type
+    /// (such as [`MonarchHighlighter`](crate::MonarchHighlighter)), or
+    /// `None`.
+    fn as_any(&self) -> Option<&dyn Any> {
+        None
+    }
+
     /// The tag name at `offset` and its matching start or end tag's name,
     /// for linked editing, or `None`.
     fn linked_tag_ranges(

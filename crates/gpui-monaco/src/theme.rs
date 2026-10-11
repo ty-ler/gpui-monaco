@@ -12,6 +12,11 @@
 //!
 //! Tree-sitter capture names (e.g. `function.method`) are mapped onto both
 //! vocabularies by [`monaco_token_for_capture`] and [`textmate_scopes_for_capture`].
+//! Monarch tokens (`keyword.rust`, from
+//! [`set_monarch_tokens_provider`](crate::set_monarch_tokens_provider)) are
+//! Monaco token names already: Monaco rules match them as Monaco's
+//! `TokenTheme` does, then TextMate rules as if they were scopes, then the
+//! TextMate scopes of the capture they'd be.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -2232,12 +2237,35 @@ impl Theme {
         .map_err(std::io::Error::other)
     }
 
-    /// The style for a highlight capture.
+    /// The style for a highlight capture or Monarch token.
     pub fn style_for(&self, highlight: HighlightId) -> TokenStyle {
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        *cache
-            .entry(highlight)
-            .or_insert_with(|| self.resolve(&highlight.name()))
+        *cache.entry(highlight).or_insert_with(|| {
+            if highlight.is_monaco_token() {
+                self.resolve_monaco_token(&highlight.name())
+            } else {
+                self.resolve(&highlight.name())
+            }
+        })
+    }
+
+    /// The style for a Monarch token such as `keyword.rust`: the longest
+    /// matching Monaco rule (`keyword.rust`, then `keyword`), as Monaco's
+    /// `TokenTheme.match` picks, else the longest TextMate rule matching the
+    /// token as a scope, else the TextMate scopes of the capture its first
+    /// segment names (`type` gives `entity.name.type`, ...).
+    fn resolve_monaco_token(&self, token: &str) -> TokenStyle {
+        if let Some(style) = best_match(&self.rules, RuleKind::Monaco, token)
+            .or_else(|| best_match(&self.rules, RuleKind::TextMate, token))
+        {
+            return style;
+        }
+        for scope in textmate_scopes_for_capture(token) {
+            if let Some(style) = best_match(&self.rules, RuleKind::TextMate, scope) {
+                return style;
+            }
+        }
+        TokenStyle::default()
     }
 
     fn resolve(&self, capture: &str) -> TokenStyle {
@@ -2380,6 +2408,18 @@ pub fn monaco_token_for_capture(capture: &str) -> Option<&'static str> {
             _ => return None,
         },
     })
+}
+
+/// The Monaco token type Monaco's `tokenize` reports for a highlight: a
+/// Monarch token as it is (`keyword.rust`), or a capture's Monaco token
+/// with the language as a suffix.
+pub(crate) fn monaco_token_type(highlight: HighlightId, language: &str) -> String {
+    let name = highlight.name();
+    if highlight.is_monaco_token() {
+        return name.to_string();
+    }
+    let token = monaco_token_for_capture(&name).unwrap_or(&name);
+    format!("{token}.{language}")
 }
 
 /// Candidate TextMate scopes for a tree-sitter capture, most specific first.

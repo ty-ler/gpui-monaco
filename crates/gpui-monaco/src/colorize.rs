@@ -3,15 +3,19 @@
 //! `standaloneEditor.ts`, MIT): for docs, hovers or any host UI.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use gpui::{
     AnyElement, FontStyle, FontWeight, HighlightStyle, IntoElement, ParentElement, SharedString,
     Styled, StyledText, div,
 };
-use syntax::{LanguageRegistry, SyntaxSnapshot};
+use syntax::{
+    HighlightState, Highlighter, Language, LanguageRegistry, MonarchHighlightState,
+    MonarchHighlighter, MonarchToken, SyntaxSnapshot,
+};
 use text::Buffer;
 
-use crate::theme::{Theme, monaco_token_for_capture};
+use crate::theme::{Theme, monaco_token_type};
 
 /// A token of a line (Monaco `Token`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,18 +58,76 @@ fn split_lines(text: &str) -> Vec<&str> {
     lines
 }
 
-/// The highlights of `text` (byte ranges and their captures) in
-/// `language_id`, if it's registered with a grammar.
+/// The registered language `language_id` (by id, else by name).
+fn find_language(language_id: &str, registry: &LanguageRegistry) -> Option<Arc<Language>> {
+    registry
+        .language_for_id(language_id)
+        .or_else(|| registry.language_for_name(language_id))
+}
+
+/// A shared copy of `registry`, for a [`syntax::HighlighterFactory`].
+fn shared_registry(registry: &LanguageRegistry) -> Arc<LanguageRegistry> {
+    let shared = LanguageRegistry::new();
+    for language in registry.languages() {
+        shared.register((*language).clone());
+    }
+    Arc::new(shared)
+}
+
+/// The Monarch highlighter of `language_id`, if its highlighter is one
+/// (see [`set_monarch_tokens_provider`](crate::set_monarch_tokens_provider)).
+fn monarch_highlighter(
+    language_id: &str,
+    registry: &LanguageRegistry,
+) -> Option<Arc<dyn Highlighter>> {
+    let language = find_language(language_id, registry)?;
+    let factory = language.highlighter.as_ref()?;
+    let highlighter = factory(&language, &shared_registry(registry));
+    MonarchHighlighter::downcast(&*highlighter)?;
+    Some(highlighter)
+}
+
+/// Monaco's tokens of each line of `text` with a Monarch grammar: byte
+/// offsets in the line become UTF-16 ones.
+fn monarch_tokens(lines: &[&str], tokens: Vec<Vec<MonarchToken>>) -> Vec<Vec<Token>> {
+    lines
+        .iter()
+        .zip(tokens)
+        .map(|(line, tokens)| {
+            tokens
+                .into_iter()
+                .map(|token| Token {
+                    offset: line[..token.offset.min(line.len())].encode_utf16().count() as u32,
+                    token_type: token.token_type.into(),
+                    language: token.language.to_string().into(),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The highlights of `text` (byte ranges and their captures or Monarch
+/// tokens) in `language_id`, if it's registered with a grammar or a custom
+/// highlighter.
 pub(crate) fn capture_spans(
     text: &str,
     language_id: &str,
     registry: &LanguageRegistry,
 ) -> Option<Vec<(Range<usize>, syntax::HighlightId)>> {
-    let language = registry
-        .language_for_id(language_id)
-        .or_else(|| registry.language_for_name(language_id))
-        .filter(|l| l.grammar.is_some())?;
+    let language =
+        find_language(language_id, registry).filter(|language| language.has_highlighter())?;
     let buffer = Buffer::new(text);
+    if let Some(factory) = &language.highlighter {
+        let highlighter = factory(&language, &shared_registry(registry));
+        let state = highlighter.update(None, &buffer.snapshot());
+        return Some(
+            highlighter
+                .highlights(&state, buffer.rope(), 0..buffer.len())
+                .into_iter()
+                .map(|span| (span.range, span.highlight))
+                .collect(),
+        );
+    }
     let syntax = SyntaxSnapshot::parse(language, &buffer.snapshot(), registry);
     Some(
         syntax
@@ -77,9 +139,18 @@ pub(crate) fn capture_spans(
 }
 
 /// Monaco `monaco.editor.tokenize`: each line's tokens, covering it from
-/// the start. Unknown languages give one `""` token per line.
+/// the start. Unknown languages give one `""` token per line. A Monarch
+/// language (see
+/// [`set_monarch_tokens_provider`](crate::set_monarch_tokens_provider))
+/// gives exactly its tokenizer's tokens, as in Monaco: empty lines may have
+/// none, and embedded languages' tokens name them.
 pub fn tokenize(text: &str, language_id: &str, registry: &LanguageRegistry) -> Vec<Vec<Token>> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    if let Some(highlighter) = monarch_highlighter(language_id, registry)
+        && let Some(monarch) = MonarchHighlighter::downcast(&*highlighter)
+    {
+        return monarch_tokens(&split_lines(text), monarch.tokenize_text(text));
+    }
     let spans = capture_spans(text, language_id, registry).unwrap_or_default();
     let language: SharedString = language_id.to_string().into();
     let mut result = Vec::new();
@@ -134,7 +205,7 @@ fn line_tokens<I: Iterator<Item = (Range<usize>, syntax::HighlightId)>>(
         if range.start >= line_end {
             break;
         }
-        let (range, capture) = (range.clone(), capture.name());
+        let (range, capture) = (range.clone(), *capture);
         if range.end <= position {
             spans.next();
             continue;
@@ -143,14 +214,11 @@ fn line_tokens<I: Iterator<Item = (Range<usize>, syntax::HighlightId)>>(
         if start > position {
             push(&mut tokens, position, "".into(), language_at(position));
         }
-        let token = monaco_token_for_capture(&capture)
-            .map(str::to_string)
-            .unwrap_or_else(|| capture.to_string());
         let language = language_at(start);
         push(
             &mut tokens,
             start,
-            format!("{token}.{language}").into(),
+            monaco_token_type(capture, &language).into(),
             language,
         );
         position = range.end.min(line_end);
@@ -335,18 +403,8 @@ fn model_line_captures(
     let tokenized = model.line_len_utf16(row) < model.options().max_tokenization_line_length;
     if !tokenized {
         Vec::new()
-    } else if let Some(syntax) = model.syntax_snapshot() {
-        let state = if syntax.text.version() == model.version() {
-            syntax.state
-        } else {
-            let patch = model.buffer().edits_since(syntax.text.version());
-            syntax.highlighter.update(
-                Some((&syntax.state, syntax.text.rope(), &patch)),
-                &model.snapshot(),
-            )
-        };
-        syntax
-            .highlighter
+    } else if let Some((highlighter, state)) = model_state(model) {
+        highlighter
             .highlights(&state, rope, line_start..line_end)
             .into_iter()
             .map(|span| (span.range, span.highlight))
@@ -360,6 +418,56 @@ fn model_line_captures(
     }
 }
 
+/// The model's highlighter and its state brought up to date with the text,
+/// if it has parsed before.
+fn model_state(model: &crate::TextModel) -> Option<(Arc<dyn Highlighter>, HighlightState)> {
+    let syntax = model.syntax_snapshot()?;
+    let state = if syntax.text.version() == model.version() {
+        syntax.state
+    } else {
+        let patch = model.buffer().edits_since(syntax.text.version());
+        syntax.highlighter.update(
+            Some((&syntax.state, syntax.text.rope(), &patch)),
+            &model.snapshot(),
+        )
+    };
+    Some((syntax.highlighter, state))
+}
+
+/// Monaco's model tokens of row `row` from a Monarch grammar, if the model
+/// is highlighted by one. Empty lines get one `""` token.
+fn model_monarch_line_tokens(
+    model: &crate::TextModel,
+    row: u32,
+    line: &str,
+    cx: &gpui::App,
+) -> Option<Vec<Token>> {
+    let tokens = match model_state(model) {
+        Some((highlighter, state)) => {
+            MonarchHighlighter::downcast(&*highlighter)?;
+            state
+                .downcast_ref::<MonarchHighlightState>()?
+                .line_tokens(row as usize)?
+        }
+        None => {
+            let registry = crate::language_registry(cx);
+            let highlighter = monarch_highlighter(model.language_id()?, &registry)?;
+            let monarch = MonarchHighlighter::downcast(&*highlighter)?;
+            let text = model.buffer().rope().to_string();
+            monarch.tokenize_text(&text).into_iter().nth(row as usize)?
+        }
+    };
+    let mut tokens = monarch_tokens(&[line], vec![tokens]).pop()?;
+    if tokens.is_empty() {
+        tokens.push(Token {
+            offset: 0,
+            token_type: "".into(),
+            language: model.language_id().cloned().unwrap_or_default(),
+        });
+    }
+    Some(tokens)
+}
+
 impl crate::TextModel {
     /// The tokens of row `row` (Monaco `tokenization.getLineTokens`), like
     /// [`tokenize`]'s: each token's start in UTF-16 units, its Monaco token
@@ -371,12 +479,18 @@ impl crate::TextModel {
     /// that parsed before is brought up to date right away, and one that
     /// never has (not shown yet) is parsed by its language id. Lines past
     /// `max_tokenization_line_length` and models without a grammar give one
-    /// `""` token. `None` for rows past the end.
+    /// `""` token. A Monarch language gives its tokenizer's tokens (one `""`
+    /// token for an empty line). `None` for rows past the end.
     pub fn line_tokens(&self, row: u32, cx: &gpui::App) -> Option<Vec<Token>> {
         if row >= self.line_count() {
             return None;
         }
         let line = self.line_content(row);
+        if self.line_len_utf16(row) < self.options().max_tokenization_line_length
+            && let Some(tokens) = model_monarch_line_tokens(self, row, &line, cx)
+        {
+            return Some(tokens);
+        }
         let line_start = self
             .buffer()
             .rope()

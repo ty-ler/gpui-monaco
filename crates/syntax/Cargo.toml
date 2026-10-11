@@ -18,9 +18,11 @@ workspace = true
 [dependencies]
 gpui-monaco-text.workspace = true
 fancy-regex = "0.18"
+log = "0.4"
 regex.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# Monarch grammars depend on key order (`cases`, the first state).
+serde_json = { workspace = true, features = ["preserve_order"] }
 streaming-iterator.workspace = true
 tree-sitter.workspace = true
 

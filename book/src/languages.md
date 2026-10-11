@@ -104,6 +104,40 @@ An injections query (`with_injections_query`) embeds other languages. It support
 
 Parsing runs on a background thread and reparses incrementally after edits. Until a parse finishes, the previous highlights are shifted through the new edits.
 
+### Monarch grammars
+
+Monaco's Monarch grammars work unchanged, as JSON with regexes as strings (each regex backslash doubled). `gpui_monaco::set_monarch_tokens_provider` (Monaco `setMonarchTokensProvider`) highlights a registered language with one, replacing its tree-sitter highlighting, and models of the language re-tokenize. `Language::with_monarch_grammar` does the same when building a language:
+
+```rust,ignore
+use serde_json::json;
+
+let grammar = json!({
+    "defaultToken": "invalid",
+    "keywords": ["fn", "let", "return"],
+    "tokenizer": {
+        "root": [
+            ["[a-z_]\\w*", { "cases": { "@keywords": "keyword", "@default": "identifier" } }],
+            ["\\d+", "number"],
+            ["\"", "string", "@string"],
+            ["//.*$", "comment"],
+            ["[{}()\\[\\]]", "@brackets"],
+            ["[ \\t]+", "white"],
+        ],
+        "string": [
+            ["[^\\\\\"]+", "string"],
+            ["\\\\.", "string.escape"],
+            ["\"", "string", "@pop"],
+        ],
+    },
+});
+// Returns a `Disposable`; disposing it restores the previous highlighting.
+let provider = gpui_monaco::set_monarch_tokens_provider(cx, "mylang", &grammar)?;
+```
+
+Tokens get the language as a suffix (`keyword.mylang`), and themes match them as Monaco does: the longest Monaco rule (`keyword.mylang`, then `keyword`), then VS Code `tokenColors` matching the token as a scope. `colorize` and `tokenize` give Monarch languages' own tokens. Everything Monarch has is supported, including `cases`, groups, `@rematch`, `$S2`-style state substitutions and `nextEmbedded` (other Monarch languages in the registry, by id, name, alias or MIME type).
+
+Regexes are JavaScript sources run by `fancy-regex`, translated so `\d`, `\w`, `\s` and `.` keep their JavaScript meaning; lookaround and backreferences work. `\b` uses Unicode word characters, matching is by code point rather than UTF-16 code unit, and octal escapes aren't supported. A Monarch grammar tokenizes line by line, keeping each line's end state, and re-tokenizes after an edit until a line ends in the same state as before.
+
 ### Custom highlighters
 
 `syntax::Highlighter` is the pluggable interface behind highlighting, and tree-sitter is one implementation of it. To use another, such as TextMate grammars or LSP semantic tokens, build it with `Language::with_highlighter`:

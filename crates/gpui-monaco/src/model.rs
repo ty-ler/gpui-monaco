@@ -582,6 +582,19 @@ impl TextModel {
         cx.notify();
     }
 
+    /// Resolves the highlighter again after the language's changed (see
+    /// [`set_monarch_tokens_provider`](crate::set_monarch_tokens_provider)),
+    /// re-tokenizing from scratch. Models that haven't resolved their
+    /// language yet pick it up when they do.
+    pub(crate) fn refresh_highlighter(&mut self, cx: &mut Context<Self>) {
+        if self.language_id.is_none() || self.language_pending {
+            return;
+        }
+        self.language_pending = true;
+        self.ensure_syntax(cx);
+        cx.notify();
+    }
+
     /// The latest highlight state, if the model has a grammar and a parse has
     /// finished. Its text may lag behind the model while a reparse runs.
     pub fn syntax_snapshot(&self) -> Option<SyntaxSnapshot> {
@@ -679,9 +692,6 @@ impl TextModel {
         let Some(syntax) = self.syntax_snapshot() else {
             return model_language;
         };
-        let Some(tree) = syntax.state.syntax() else {
-            return model_language;
-        };
         let offset = if syntax.text.version() == self.buffer.version() {
             offset
         } else {
@@ -689,6 +699,21 @@ impl TextModel {
                 .edits_since(syntax.text.version())
                 .invert()
                 .transform_offset(offset, text::Bias::Left)
+        };
+        if let Some(monarch) = syntax.state.downcast_ref::<syntax::MonarchHighlightState>() {
+            // A Monarch grammar's embedded language (`nextEmbedded`).
+            let point = syntax.text.rope().offset_to_point(offset);
+            return monarch
+                .language_at(point.row as usize, point.column as usize)
+                .and_then(|id| {
+                    syntax::MonarchHighlighter::downcast(&*syntax.highlighter)?
+                        .registry()?
+                        .language_for_id(&id)
+                })
+                .or(model_language);
+        }
+        let Some(tree) = syntax.state.syntax() else {
+            return model_language;
         };
         tree.layers()
             .iter()
