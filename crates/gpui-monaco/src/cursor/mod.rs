@@ -68,6 +68,7 @@ pub use movement::{
     MoveCommand, add_cursor_above, add_cursor_below, expand_line_selection, move_cursors, move_to,
     select_all, select_line, select_word,
 };
+pub(crate) use movement::{move_left, move_right, move_to_beginning_of_line, move_to_end_of_line};
 pub use reindent::{reindent_lines, reindent_selected_lines};
 pub use text::PointUtf16 as Position;
 pub use transforms::{

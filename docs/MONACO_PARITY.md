@@ -85,7 +85,8 @@ Issues are linked by number.
 | Minimap options (side, render characters, size, autohide), section headers | `minimap`, `sectionHeaders` | ✅ | #88, #203 |
 | Sticky scroll (outline, folding and indentation models) | `stickyScroll` | ✅ | |
 | Sticky scroll keyboard focus, toggle, folding controls, hover, scroll with editor | `stickyScroll` | ✅ | #106 |
-| Render whitespace, indent guides, rulers, control characters | view parts | ✅ | #84 |
+| Render whitespace, indent guides, rulers, control characters | view parts | ✅ whitespace always as Monaco's default SVG marks (no `experimentalWhitespaceRendering`) | #84, #259 |
+| Cursor and selection rendering: block cursor text, view positions at wrap points, multi-cursor colors, selection corners and insets, view part paint order | `viewCursors`, `selections`, `CursorState.viewState` | ✅ the "Show more" chip has no 4px padding | #259 |
 | Bracket pair guides, `guides.highlightActiveIndentation: 'always'` | view parts | ✅ | #118, #203 |
 | Bracket pair colorization, independent color pool per bracket type | `bracketPairColorization` | ✅ | #85, #203 |
 | Occurrence and selection highlight, `selectedTextMatchMode`, `occurrencesHighlightFromAllProviders` | `wordHighlighter` | ✅ `multiFile` highlights in the current editor only | #83, #203, #228 |

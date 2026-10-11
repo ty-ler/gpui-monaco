@@ -21,11 +21,11 @@ editor.update(cx, |editor, cx| {
 | `select_on_line_numbers` | `selectOnLineNumbers` | clicking a line number selects the line (on); other gutter clicks never select |
 | `line_numbers_min_chars`, `line_decorations_width`, `glyph_margin` | same names | gutter layout (see [Layout](#layout)); `line_decorations_width` takes pixels (`px(10.).into()`) or `LineDecorationsWidth::Chars(1.5)` for Monaco's `"1.5ch"` |
 | `render_line_highlight` | `renderLineHighlight` | `None`, `Gutter`, `Line`, `All` |
-| `cursor_style`, `cursor_width`, `cursor_height` | `cursorStyle`, `cursorWidth`, `cursorHeight` | `Line`, `Block`, `Underline`, `LineThin`, `BlockOutline`, `UnderlineThin`; `cursor_width` 0 (the default) draws 2px and it's at most a character wide; `cursor_height` 0 is the line height |
+| `cursor_style`, `cursor_width`, `cursor_height` | `cursorStyle`, `cursorWidth`, `cursorHeight` | `Line`, `Block`, `Underline`, `LineThin`, `BlockOutline`, `UnderlineThin`; `cursor_width` 0 (the default) draws 2px and it's at most a character wide; a bar of 2px or more straddles the character boundary, 1px to the left. A block cursor (and a bar wider than 2px) draws the character under it in `editorCursor.background` (the caret color's opposite if unset); on a tab it's half a character wide. With several cursors they use `editorMultiCursor.primary.*` and `secondary.*`. `cursor_height` 0 is the line height |
 | `mouse_style` | `mouseStyle` | the mouse cursor over the text: `Text` (I-beam), `Default` (arrow) or `Copy` |
 | `mouse_middle_click_action` | `mouseMiddleClickAction` | `Default`, `OpenLink` (a middle click opens a link) or `CtrlLeftClick` (it acts like Cmd/Ctrl+click) |
 | `cursor_blinking` | `cursorBlinking` | `Blink`, `Smooth`, `Phase`, `Expand`, `Solid` (read-only editors don't blink) |
-| `cursor_smooth_caret_animation` | `cursorSmoothCaretAnimation` | `Off`, `Explicit` (keys and clicks, not typing), `On` |
+| `cursor_smooth_caret_animation` | `cursorSmoothCaretAnimation` | `Off`, `Explicit` (keys and clicks, not typing), `On`; every cursor slides |
 | `cursor_surrounding_lines`, `cursor_surrounding_lines_style` | same names | lines kept around the cursor; `All` applies them to mouse moves too |
 | `smooth_scrolling` | `smoothScrolling` | animate reveals, cursor moves and mouse wheels (off) |
 | `scroll_beyond_last_column`, `reveal_horizontal_right_padding` | same names | room past the longest line (4 columns) and right of revealed positions (15px) |
@@ -33,7 +33,7 @@ editor.update(cx, |editor, cx| {
 | `scroll_on_middle_click` | `scrollOnMiddleClick` | a middle click scrolls toward the mouse until the next click (off) |
 | `inertial_scroll` | `inertialScroll` | wheel and trackpad scrolling keeps going and slows down after the events stop, as Monaco's scrollable element does (off; mostly for Linux touchpads, since macOS and Windows already add momentum) |
 | `padding` | `padding` | `top` and `bottom` space |
-| `rounded_selection`, `render_line_highlight_only_when_focus` | same names | (on, off) |
+| `rounded_selection`, `render_line_highlight_only_when_focus` | same names | (on, off). Rounded selections get Monaco's reverse-rounded inner corners; high contrast themes draw them square. With several selections, each is inset 1px at its first and last line |
 | `read_only` | `readOnly` | edits are refused and show `read_only_message` |
 | `read_only_message` | `readOnlyMessage` | markdown; defaults to "Cannot edit in read-only editor" |
 | `placeholder` | `placeholder` | shown while the model is empty |
@@ -116,7 +116,7 @@ editor.update(cx, |editor, cx| {
 | `column_selection` | `columnSelection` | mouse drags and Shift+arrows make column selections |
 | `overtype_cursor_style`, `overtype_on_paste` | `overtypeCursorStyle`, `overtypeOnPaste` | overtype mode (Insert) |
 | `comments` | `comments` | `insert_space`, `ignore_empty_lines` |
-| `render_whitespace`, `render_control_characters`, `render_final_newline` | same names | `·` and `→` for whitespace; `␇` for control characters; the final newline's line number is `Dimmed` by default on Linux and `On` elsewhere, as in Monaco |
+| `render_whitespace`, `render_control_characters`, `render_final_newline` | same names | whitespace as Monaco's default SVG dots and arrows (`boundary` skips single spaces between non-spaces; a tab doesn't count as a space); control characters in white on dark red, C0 controls and DEL as `␇` and the like, and bidi formatting characters (U+202A–202E, U+2066–2069, U+200E/F, U+061C) as `[U+202E]`, so they can't reorder the line; the BOM and line/paragraph separators always show as U+FFFD; the final newline's line number is `Dimmed` by default on Linux and `On` elsewhere, as in Monaco |
 | `guides`, `rulers` | `guides`, `rulers` | indent guides (with the active one highlighted: `highlight_active_indentation` is `On`, `Off` or `Always`, which also highlights it on lines with bracket pair guides), bracket pair guides (`bracket_pairs`: off, active or on, plus horizontal ones) and vertical rulers |
 | `bracket_pair_colorization` | `bracketPairColorization` | `enabled`: color brackets by nesting level (on); `independent_color_pool_per_bracket_type`: each bracket kind counts its own nesting (off) |
 | `occurrences_highlight`, `occurrences_highlight_delay` | `occurrencesHighlight`, `occurrencesHighlightDelay` | `Off`, `SingleFile` (default) or `MultiFile`, which like `SingleFile` highlights in this editor only (editors don't share highlights). Highlights are computed 50ms after the cursor rests and shown no sooner than the delay (0) after it moved |

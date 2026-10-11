@@ -24,6 +24,20 @@ use crate::widgets::{ContentWidgetPreference, OverlayPosition};
 
 /// Minimum scrollbar slider length.
 const MIN_SLIDER: f32 = 20.;
+/// Monaco `.mtkcontrol` (`viewLines.css`): `rgb(255, 255, 255)` text.
+const CONTROL_CHARACTER_FOREGROUND: Hsla = Hsla {
+    h: 0.,
+    s: 0.,
+    l: 1.,
+    a: 1.,
+};
+/// Monaco `.mtkcontrol` background, `rgb(150, 0, 0)`.
+const CONTROL_CHARACTER_BACKGROUND: Hsla = Hsla {
+    h: 0.,
+    s: 1.,
+    l: 150. / 255. / 2.,
+    a: 1.,
+};
 
 /// One shaped view line: a (possibly wrapped) segment of a model row.
 #[derive(Clone)]
@@ -42,6 +56,9 @@ pub(crate) struct LineLayout {
     /// Byte index into the shaped text for each column in `columns`,
     /// inclusive of the end.
     pub display_index: Vec<usize>,
+    /// Display byte ranges of control characters, drawn in Monaco's
+    /// `mtkcontrol` style.
+    pub controls: Vec<Range<usize>>,
     /// Injected (decoration before/after) text.
     pub injected: Vec<InjectedLayout>,
 }
@@ -56,6 +73,8 @@ pub(crate) struct InjectedLayout {
     /// The decoration it comes from, if any (Monaco's mouse target
     /// `injectedText`).
     pub decoration: Option<DecorationId>,
+    /// Monaco's `mtkoverflow` "Show more" chip, styled as a button.
+    pub chip: bool,
 }
 
 impl LineLayout {
@@ -250,13 +269,56 @@ fn run(len: usize, font: &Font, color: Hsla) -> TextRun {
     }
 }
 
-/// The Unicode control picture for a C0 control character or DEL.
-fn control_picture(ch: char) -> Option<char> {
+/// Monaco `isControlCharacter` (`viewLineRenderer.ts`): C0 controls other
+/// than tab, DEL, and the Unicode directional formatting characters (LRE,
+/// RLE, PDF, LRO, RLO, LRI, RLI, FSI, PDI, LRM, RLM and ALM).
+pub(crate) fn is_control_character(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0}'..='\u{8}'
+            | '\u{a}'..='\u{1f}'
+            | '\u{7f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{200e}'..='\u{200f}'
+            | '\u{61c}'
+    )
+}
+
+/// What Monaco's `_renderLine` draws instead of a character.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Substitute {
+    /// A C0 control or DEL as its Unicode control picture (`␇`), one
+    /// column wide, in `mtkcontrol` style.
+    Picture(char),
+    /// A directional formatting character as the text `[U+202E]`, eight
+    /// columns wide, in `mtkcontrol` style, so it can't reorder the line.
+    Hex(u32),
+    /// The BOM, line and paragraph separators and NEL as U+FFFD (whatever
+    /// `renderControlCharacters` says).
+    Replacement,
+}
+
+impl Substitute {
+    /// Columns it takes (Monaco's `producedCharacters`).
+    pub(crate) fn columns(self) -> usize {
+        match self {
+            Substitute::Hex(_) => 8,
+            Substitute::Picture(_) | Substitute::Replacement => 1,
+        }
+    }
+}
+
+/// How Monaco renders `ch` (`viewLineRenderer.ts` `_renderLine`), if not as
+/// itself: with `render_control_characters`, control characters (see
+/// [`is_control_character`]) show as control pictures or `[U+XXXX]`.
+pub(crate) fn substitute(ch: char, render_control_characters: bool) -> Option<Substitute> {
     match ch {
-        '\t' => None,
-        '\u{0}'..='\u{1f}' => char::from_u32(0x2400 + ch as u32),
-        '\u{7f}' => Some('\u{2421}'),
-        _ => None,
+        '\u{feff}' | '\u{2028}' | '\u{2029}' | '\u{85}' => Some(Substitute::Replacement),
+        _ if !render_control_characters || !is_control_character(ch) => None,
+        '\u{0}'..='\u{1f}' => char::from_u32(0x2400 + ch as u32).map(Substitute::Picture),
+        '\u{7f}' => Some(Substitute::Picture('\u{2421}')),
+        _ => Some(Substitute::Hex(ch as u32)),
     }
 }
 
@@ -416,6 +478,44 @@ impl ChunkedLine {
         start + shaped.closest_index_for_x(x - *chunk_x)
     }
 
+    /// Paints just the glyphs of display bytes `range` in `color`, where
+    /// [`Self::paint`] would put them (the character inside a block
+    /// cursor).
+    pub fn paint_glyphs(
+        &self,
+        range: Range<usize>,
+        origin: gpui::Point<Pixels>,
+        line_height: Pixels,
+        color: Hsla,
+        window: &mut Window,
+    ) {
+        for (start, x, shaped) in &self.chunks {
+            if *start >= range.end || *start + shaped.len <= range.start {
+                continue;
+            }
+            // As `ShapedLine::paint` places them.
+            let padding_top = (line_height - shaped.ascent - shaped.descent) / 2.;
+            let baseline = point(origin.x + *x, origin.y + padding_top + shaped.ascent);
+            for run in &shaped.runs {
+                for glyph in &run.glyphs {
+                    if !range.contains(&(start + glyph.index)) {
+                        continue;
+                    }
+                    let at = baseline + glyph.position;
+                    if glyph.is_emoji {
+                        window
+                            .paint_emoji(at, run.font_id, glyph.id, shaped.font_size)
+                            .ok();
+                    } else {
+                        window
+                            .paint_glyph(at, run.font_id, glyph.id, shaped.font_size, color)
+                            .ok();
+                    }
+                }
+            }
+        }
+    }
+
     pub fn paint(
         &self,
         origin: gpui::Point<Pixels>,
@@ -564,6 +664,8 @@ pub(crate) fn layout_segment<'a>(
     let mut visible_column = segment.start_visible_column as usize;
     // (display range, injection) of injected text.
     let mut injected: Vec<Injected> = Vec::new();
+    // Display ranges of control characters (Monaco `mtkcontrol`).
+    let mut controls: Vec<Range<usize>> = Vec::new();
     let mut injection_ix = 0;
     // Emits injections at `column` (`after` ones first) and returns where the
     // column itself displays: before `after` text (it ends a decorated range)
@@ -606,12 +708,22 @@ pub(crate) fn layout_segment<'a>(
             let spaces = tab_size - visible_column % tab_size;
             display.extend(std::iter::repeat_n(' ', spaces));
             visible_column += spaces;
-        } else if let Some(picture) =
-            control_picture(ch).filter(|_| metrics.render_control_characters)
-        {
-            // Monaco `renderControlCharacters`: `\u{7}` shows as `␇`.
-            display.push(picture);
-            visible_column += 1;
+        } else if let Some(substitute) = substitute(ch, metrics.render_control_characters) {
+            // Monaco `renderControlCharacters`: `\u{7}` shows as `␇` and
+            // U+202E as `[U+202E]`, in `mtkcontrol` style.
+            let start = display.len();
+            match substitute {
+                Substitute::Picture(picture) => display.push(picture),
+                Substitute::Hex(code) => {
+                    use std::fmt::Write as _;
+                    write!(display, "[U+{code:04X}]").ok();
+                }
+                Substitute::Replacement => display.push('\u{fffd}'),
+            }
+            if substitute != Substitute::Replacement {
+                controls.push(start..display.len());
+            }
+            visible_column += substitute.columns();
         } else {
             display.push(ch);
             visible_column += 1;
@@ -656,6 +768,9 @@ pub(crate) fn layout_segment<'a>(
     for (range, _) in &injected {
         bounds.extend([range.start, range.end]);
     }
+    for range in &controls {
+        bounds.extend([range.start, range.end]);
+    }
     if let Some((range, _)) = &marked_display {
         bounds.extend([range.start, range.end]);
     }
@@ -698,6 +813,16 @@ pub(crate) fn layout_segment<'a>(
         let mut foreground = style.foreground.unwrap_or(color);
         if let Some(opacity) = style.opacity {
             foreground.a *= opacity;
+        }
+        // Monaco `.mtkcontrol`: white on dark red, replacing the token's
+        // class.
+        let is_control = injected_text.is_none()
+            && controls
+                .iter()
+                .any(|range| range.start <= start && end <= range.end);
+        if is_control {
+            font = metrics.font.clone();
+            foreground = CONTROL_CHARACTER_FOREGROUND;
         }
         let mut text_run = run(end - start, &font, foreground);
         let is_marked = marked_display
@@ -748,13 +873,22 @@ pub(crate) fn layout_segment<'a>(
         indent_x: metrics.space_width * segment.indent as f32,
         shaped,
         display_index,
+        controls,
         injected: injected
             .into_iter()
-            .map(|(range, (_, _, text, decoration))| InjectedLayout {
-                range,
-                background: text.background,
-                swatch: text.swatch,
-                decoration: *decoration,
+            .map(|(range, injection)| {
+                let (_, _, text, decoration) = injection;
+                InjectedLayout {
+                    range,
+                    background: text.background,
+                    swatch: text.swatch,
+                    decoration: *decoration,
+                    // The overflow chip is always the last injection.
+                    chip: segment.overflow > 0
+                        && injections
+                            .last()
+                            .is_some_and(|last| std::ptr::eq(last, injection)),
+                }
             })
             .collect(),
     }
@@ -1165,6 +1299,25 @@ impl EditorLayout {
         ((self.text_bounds.size.height / self.metrics.line_height).floor() as u32).max(1)
     }
 
+    /// The "Show more" chips (Monaco `.mtkoverflow`) in window coordinates.
+    pub fn overflow_chips(&self) -> impl Iterator<Item = Bounds<Pixels>> + '_ {
+        self.lines.iter().flat_map(move |line| {
+            let top = self.text_top(line.view_line);
+            let origin_x = self.text_origin_x() + line.indent_x;
+            line.injected
+                .iter()
+                .filter(|i| i.chip)
+                .map(move |injected| {
+                    let from = line.shaped.x_for_index(injected.range.start);
+                    let to = line.shaped.x_for_index(injected.range.end);
+                    Bounds::new(
+                        point(origin_x + from, top),
+                        size(to - from, self.metrics.line_height),
+                    )
+                })
+        })
+    }
+
     /// The laid-out view line showing `point`, if visible.
     pub fn line_for_point(&self, point: PointUtf16) -> Option<&LineLayout> {
         self.lines.iter().find(|line| line.contains(point))
@@ -1228,15 +1381,43 @@ struct MinimapSectionHeader {
     separator: Option<Bounds<Pixels>>,
 }
 
-/// The `·` and `→` glyphs, and where each goes (`true` for a tab).
-type WhitespaceMarks = (ShapedLine, ShapedLine, Vec<(gpui::Point<Pixels>, bool)>);
+/// Where each rendered whitespace mark's character starts (on its line's
+/// text top), and whether it's a tab.
+type WhitespaceMarks = Vec<(gpui::Point<Pixels>, bool)>;
+
+/// One cursor to paint (Monaco `ViewCursorRenderData`).
+struct CursorPaint {
+    /// Its box, after `cursorSmoothCaretAnimation`.
+    bounds: Bounds<Pixels>,
+    /// `editorCursor.foreground` (or the multi-cursor color).
+    color: Hsla,
+    /// `editorCursor.background`: the character inside a block cursor,
+    /// and the cursor's sides over a selection in high contrast themes.
+    text_color: Hsla,
+    /// The character inside it (Monaco's `textContent`): its view line,
+    /// display byte range, and how far the box is from where the
+    /// character is (while sliding).
+    glyph: Option<(u32, Range<usize>, gpui::Point<Pixels>)>,
+}
+
+/// Monaco `Color.opposite`: each RGB channel inverted.
+fn opposite(color: Hsla) -> Hsla {
+    let rgba = gpui::Rgba::from(color);
+    gpui::Rgba {
+        r: 1. - rgba.r,
+        g: 1. - rgba.g,
+        b: 1. - rgba.b,
+        a: rgba.a,
+    }
+    .into()
+}
 
 pub struct PrepaintState {
     layout: EditorLayout,
     selections: Vec<Selection>,
     /// View lines with a cursor (for the current line highlight).
     cursor_view_lines: Vec<u32>,
-    cursor_quads: Vec<Bounds<Pixels>>,
+    cursors: Vec<CursorPaint>,
     /// Monaco `block-outline`: the cursors are outlined, not filled.
     cursor_outline: bool,
     gutter_numbers: Vec<(Pixels, ShapedLine, Pixels)>,
@@ -1248,14 +1429,18 @@ pub struct PrepaintState {
     /// Block decorations' boxes, colors and border widths.
     block_borders: Vec<(Bounds<Pixels>, Hsla, Pixels)>,
     decoration_underlines: Vec<(gpui::Point<Pixels>, Pixels, UnderlineStyle)>,
+    /// The IME composition's boxes in high contrast themes.
+    composition_boxes: Vec<Bounds<Pixels>>,
     gutter_bars: Vec<(Bounds<Pixels>, Hsla)>,
     /// Monaco `marginClassName` backgrounds.
     margin_backgrounds: Vec<(Bounds<Pixels>, Hsla)>,
     glyphs: Vec<(gpui::Point<Pixels>, ShapedLine)>,
     lightbulb: Option<(Bounds<Pixels>, Hsla)>,
     ruler_marks: Vec<(Bounds<Pixels>, Hsla)>,
-    /// Indent guides and rulers.
+    /// Indent and bracket pair guides.
     guides: Vec<(Bounds<Pixels>, Hsla)>,
+    /// Monaco `rulers`.
+    rulers: Vec<(Bounds<Pixels>, Hsla)>,
     /// Rendered whitespace.
     whitespace: Option<WhitespaceMarks>,
     /// The `wordWrapIndicator` glyph and where it goes.
@@ -1297,6 +1482,8 @@ pub struct PrepaintState {
     /// Widgets whose clicks don't focus the editor (see `paint`).
     widgets_keeping_focus: Vec<Bounds<Pixels>>,
     colors: EditorColors,
+    /// A high contrast theme (Monaco's `hc-black`/`hc-light` rules).
+    high_contrast: bool,
     options: EditorOptions,
     focused: bool,
     cursor_visible: bool,
@@ -1304,6 +1491,8 @@ pub struct PrepaintState {
     cursor_scale: f32,
     /// Middle-click scrolling's anchor dot.
     middle_scroll_anchor: Option<gpui::Point<Pixels>>,
+    /// The mouse over the editor, for hover styles.
+    mouse_position: Option<gpui::Point<Pixels>>,
     /// The scrollbars' sliders: (opacity, hovered, dragged) for vertical
     /// and horizontal.
     scrollbar_looks: [(f32, bool, bool); 2],
@@ -1373,6 +1562,8 @@ impl Element for EditorElement {
                 .iter()
                 .map(|control| control.bounds)
                 .chain(layout.fold_placeholders.iter().map(|(_, bounds)| *bounds))
+                // Monaco `.mtkoverflow`'s `cursor: pointer`.
+                .chain(layout.overflow_chips())
                 .collect();
             for area in arrows {
                 cursor_areas.push((
@@ -1993,7 +2184,9 @@ fn prepaint_editor(
     // Vertical autoscroll before choosing lines.
     let selections = editor.cursors.selections();
     let primary = selections[0].head;
-    let (primary_view_line, _) = view_lines.to_view(primary, false);
+    // The cursors' view positions (Monaco `CursorState.viewState`).
+    let cursor_views = editor.cursor_view_positions();
+    let primary_view_line = cursor_views[0].row;
     if let Some(offset) = editor.pending_cursor_offset.take() {
         editor.scroll_top = zones.line_y(primary_view_line, line_height) - offset;
         editor.autoscroll_requested = false;
@@ -2221,10 +2414,14 @@ fn prepaint_editor(
                 (start..end, *style)
             })
             .collect();
-        let marked_cols = marked.as_ref().and_then(|range| {
-            (range.start.row == segment.row && range.end.row == segment.row)
-                .then_some((range.start.column..range.end.column, colors.ime_underline))
-        });
+        // High contrast themes box the composition instead (below).
+        let marked_cols = marked
+            .as_ref()
+            .filter(|_| !editor.theme.high_contrast)
+            .and_then(|range| {
+                (range.start.row == segment.row && range.end.row == segment.row)
+                    .then_some((range.start.column..range.end.column, colors.ime_underline))
+            });
         // Decoration text styles override syntax colors; injected text goes
         // before/after decorated ranges.
         let mut decoration_styles: Vec<(Range<usize>, TokenStyle)> = bracket_colors
@@ -2375,7 +2572,7 @@ fn prepaint_editor(
     if editor.autoscroll_requested {
         let primary_x = lines
             .iter()
-            .find(|line| line.contains(primary))
+            .find(|line| line.view_line == primary_view_line)
             .map(|line| line.x_for_column(primary.column))
             .unwrap_or(px(0.));
         // Monaco `_computeScrollLeftToReveal`: 30px of room on the left,
@@ -2990,6 +3187,27 @@ fn prepaint_editor(
         ));
     }
     let mut decoration_underlines: Vec<(gpui::Point<Pixels>, Pixels, UnderlineStyle)> = Vec::new();
+    // Monaco `nativeEditContext.css`: high contrast themes border the IME
+    // composition all round rather than underlining it.
+    let composition_boxes: Vec<Bounds<Pixels>> = match &marked {
+        Some(range) if editor.theme.high_contrast => layout
+            .lines
+            .iter()
+            .filter_map(|line| {
+                let (from, to) = decoration_x_range(line, range.start, range.end)?;
+                (to > from).then(|| {
+                    Bounds::new(
+                        point(
+                            layout.text_origin_x() + from,
+                            layout.line_top(line.view_line),
+                        ),
+                        size(to - from, layout.line_height_of(line.view_line)),
+                    )
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     let mut gutter_bars: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
     let mut margin_backgrounds: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
     let options_line_decorations_width = line_decorations_width;
@@ -3210,8 +3428,8 @@ fn prepaint_editor(
         }
         // Monaco draws the cursors across the ruler, 2px tall.
         if !options.hide_cursor_in_overview_ruler {
-            for selection in &selections {
-                let (view_line, _) = view_lines.to_view(selection.head, false);
+            for view in &cursor_views {
+                let view_line = view.row;
                 let y = track.top() + track.size.height * (view_line as f32 / total);
                 ruler_marks.push((
                     Bounds::new(point(track.left(), y), size(track.size.width, px(2.))),
@@ -3259,80 +3477,166 @@ fn prepaint_editor(
         scrollbar_looks[ix] = (opacity, hovered, dragged);
     }
 
-    // Cursors.
-    let mut cursor_quads = Vec::new();
+    // Cursors (Monaco `ViewCursors`), at their view positions: a cursor
+    // moved to the end of a wrapped segment stays there.
     let cursor_style = if editor.overtype {
         options.overtype_cursor_style
     } else {
         options.cursor_style
     };
-    let mut cursor_view_lines = Vec::new();
-    for selection in &selections {
-        let head = selection.head;
-        let (view_line, _) = view_lines.to_view(head, false);
-        cursor_view_lines.push(view_line);
-        if let Some(line) = layout
-            .view_line(view_line)
-            .filter(|line| line.contains(head))
-        {
-            let x = layout.text_origin_x() + line.x_for_column(head.column);
-            let y = layout.line_top(line.view_line);
-            // Monaco's cursor fills a taller line.
-            let line_height = layout.line_height_of(line.view_line);
-            let char_width = if head.column < line.columns.end {
-                (line.x_for_column(head.column + 1) - line.x_for_column(head.column))
-                    .max(metrics.em_width / 2.)
+    let em_width = metrics.em_width;
+    // `editorCursor.*`, or `editorMultiCursor.primary.*`/`secondary.*` with
+    // several cursors; the character inside is in the background color,
+    // else the caret's opposite.
+    let cursor_colors = |ix: usize| {
+        let (foreground, background) = if selections.len() == 1 {
+            (colors.cursor, colors.cursor_background)
+        } else if ix == 0 {
+            (
+                colors.multi_cursor_primary_foreground,
+                colors
+                    .multi_cursor_primary_background
+                    .or(colors.cursor_background),
+            )
+        } else {
+            (
+                colors.multi_cursor_secondary_foreground,
+                colors
+                    .multi_cursor_secondary_background
+                    .or(colors.cursor_background),
+            )
+        };
+        (
+            foreground,
+            background.unwrap_or_else(|| opposite(foreground)),
+        )
+    };
+    let rope = snapshot.rope();
+    let mut cursor_view_lines = Vec::with_capacity(selections.len());
+    // (bounds, the character inside, colors) of each cursor on screen.
+    let mut cursor_targets = Vec::with_capacity(selections.len());
+    let mut cursor_parts = Vec::with_capacity(selections.len());
+    for (ix, (selection, view)) in selections.iter().zip(&cursor_views).enumerate() {
+        cursor_view_lines.push(view.row);
+        let Some(line) = layout.view_line(view.row) else {
+            cursor_targets.push(None);
+            cursor_parts.push(None);
+            continue;
+        };
+        let column = selection
+            .head
+            .column
+            .clamp(line.columns.start, line.columns.end);
+        let x = layout.text_origin_x() + line.x_for_column(column);
+        let y = layout.line_top(line.view_line);
+        // Monaco's cursor fills a taller line.
+        let line_height = layout.line_height_of(line.view_line);
+        // Monaco `_getGraphemeAwarePosition`: the character after the
+        // cursor on its view line, if any.
+        let next = (column < line.columns.end).then(|| {
+            let ix = (column - line.columns.start) as usize;
+            // A surrogate pair's halves display at the same index.
+            let len = if line.display_index.get(ix + 1) == line.display_index.get(ix) {
+                2
             } else {
-                metrics.em_width
+                1
             };
-            let style = cursor_style;
-            // Monaco `cursorHeight` for the line styles, centered.
-            let line_cursor_height = if options.cursor_height > px(0.) {
-                options.cursor_height.min(line_height)
-            } else {
-                line_height
-            };
-            let line_y = y + (line_height - line_cursor_height) / 2.;
-            let bounds = match style {
-                CursorStyle::Line => Bounds::new(
-                    point(x, line_y),
-                    size(
-                        options.line_cursor_width(metrics.em_width),
-                        line_cursor_height,
-                    ),
-                ),
-                CursorStyle::LineThin => {
-                    Bounds::new(point(x, line_y), size(px(1.), line_cursor_height))
-                }
-                CursorStyle::Block | CursorStyle::BlockOutline => {
-                    Bounds::new(point(x, y), size(char_width, line_height))
-                }
-                CursorStyle::Underline => {
-                    Bounds::new(point(x, y + line_height - px(2.)), size(char_width, px(2.)))
-                }
-                // Monaco: a 2px box with a 1px bottom border.
-                CursorStyle::UnderlineThin => {
-                    Bounds::new(point(x, y + line_height - px(1.)), size(char_width, px(1.)))
-                }
-            };
-            cursor_quads.push(bounds);
-        }
+            let end = (column + len).min(line.columns.end);
+            let is_tab = rope
+                .chars_at(rope.point_utf16_to_offset(PointUtf16::new(line.row, column)))
+                .next()
+                == Some('\t');
+            (end, is_tab)
+        });
+        // Monaco: a tab, the line end or a zero-width character are a
+        // half-width character wide.
+        let char_width = match next {
+            Some((end, false)) => {
+                let width = line.x_for_column(end) - line.x_for_column(column);
+                if width < px(1.) { em_width } else { width }
+            }
+            _ => em_width,
+        };
+        // Monaco `cursorHeight` for the line styles, centered.
+        let line_cursor_height = if options.cursor_height > px(0.) {
+            options.cursor_height.min(line_height)
+        } else {
+            line_height
+        };
+        let line_y = y + (line_height - line_cursor_height) / 2.;
+        let mut shows_character = false;
+        let bounds = match cursor_style {
+            CursorStyle::Line => {
+                let width = options.line_cursor_width(em_width);
+                // Monaco draws the character inside a bar wider than 2px.
+                shows_character = width > px(2.);
+                // Monaco shifts a bar of 2px or more 1px left, between the
+                // characters (`paddingLeft`).
+                let left = if width >= px(2.) && x - layout.text_origin_x() >= px(1.) {
+                    x - px(1.)
+                } else {
+                    x
+                };
+                Bounds::new(point(left, line_y), size(width, line_cursor_height))
+            }
+            CursorStyle::LineThin => {
+                Bounds::new(point(x, line_y), size(px(1.), line_cursor_height))
+            }
+            CursorStyle::Block => {
+                shows_character = true;
+                Bounds::new(point(x, y), size(char_width, line_height))
+            }
+            CursorStyle::BlockOutline => Bounds::new(point(x, y), size(char_width, line_height)),
+            CursorStyle::Underline => {
+                Bounds::new(point(x, y + line_height - px(2.)), size(char_width, px(2.)))
+            }
+            // Monaco: a 2px box with a 1px bottom border.
+            CursorStyle::UnderlineThin => {
+                Bounds::new(point(x, y + line_height - px(1.)), size(char_width, px(1.)))
+            }
+        };
+        // The character, drawn in the cursor's background color (not a tab,
+        // which shows nothing).
+        let glyph = next
+            .filter(|(_, is_tab)| shows_character && !is_tab)
+            .map(|(end, _)| {
+                let start = line.display_index[(column - line.columns.start) as usize];
+                let end = line.display_index[(end - line.columns.start) as usize];
+                (line.view_line, start..end)
+            });
+        cursor_targets.push(Some(bounds));
+        cursor_parts.push(Some((glyph, cursor_colors(ix))));
     }
-    // Monaco `cursorSmoothCaretAnimation`: the primary cursor slides, in
-    // content coordinates so scrolling doesn't animate it.
-    if let Some(primary) = cursor_quads.first_mut() {
-        let offset = point(
-            layout.text_bounds.left() - scroll_left,
-            bounds.top() - scroll_top,
-        );
-        let content = Bounds::new(primary.origin - offset, primary.size);
-        let enabled = options.cursor_smooth_caret_animation
-            != crate::options::CursorSmoothCaretAnimation::Off;
-        let (shown, animating) = editor.animation.caret(content, enabled);
-        *primary = Bounds::new(shown.origin + offset, shown.size);
-        if animating {
-            window.request_animation_frame();
-        }
+    // Monaco `cursorSmoothCaretAnimation`: every cursor slides, in content
+    // coordinates so scrolling doesn't animate them.
+    let offset = point(
+        layout.text_bounds.left() - scroll_left,
+        bounds.top() - scroll_top,
+    );
+    let content: Vec<Option<Bounds<Pixels>>> = cursor_targets
+        .iter()
+        .map(|target| target.map(|b| Bounds::new(b.origin - offset, b.size)))
+        .collect();
+    let enabled =
+        options.cursor_smooth_caret_animation != crate::options::CursorSmoothCaretAnimation::Off;
+    let (shown, animating) = editor.animation.carets(&content, enabled);
+    if animating {
+        window.request_animation_frame();
+    }
+    let mut cursors = Vec::with_capacity(cursor_parts.len());
+    for ((shown, target), parts) in shown.into_iter().zip(&cursor_targets).zip(cursor_parts) {
+        let (Some(shown), Some(target), Some((glyph, (color, text_color)))) =
+            (shown, target, parts)
+        else {
+            continue;
+        };
+        let bounds = Bounds::new(shown.origin + offset, shown.size);
+        cursors.push(CursorPaint {
+            bounds,
+            color,
+            text_color,
+            glyph: glyph.map(|(line, range)| (line, range, bounds.origin - target.origin)),
+        });
     }
     // Monaco's smooth, phase and expand blinking.
     let (cursor_opacity, cursor_scale) = crate::view::animation::cursor_appearance(
@@ -3393,6 +3697,8 @@ fn prepaint_editor(
             )
         });
         let origin_x = layout.text_origin_x();
+        // Monaco `_maxIndentLeft`: the wrapping column's x.
+        let max_indent_left = wrap_column.map(|column| metrics.em_width * column as f32);
         for line in &layout.lines {
             let ix = (line.row - rows.start) as usize;
             let count = counts[ix];
@@ -3438,7 +3744,10 @@ fn prepaint_editor(
                         }
                         None => Bounds::new(point(left, top), size(px(1.), line_height)),
                     };
-                    guides.push((bounds, color));
+                    // Monaco `_maxIndentLeft`: none past the wrapping column.
+                    if max_indent_left.is_none_or(|max| left - origin_x <= max) {
+                        guides.push((bounds, color));
+                    }
                 };
             // Monaco `getGuidesByLine`: indent guides, minus those a
             // vertical bracket guide replaces, in column order.
@@ -3467,6 +3776,9 @@ fn prepaint_editor(
                 };
                 let color = if is_active { active } else { inactive };
                 let x = origin_x + metrics.em_width * ((level - 1) * ctx.indent_size) as f32;
+                if max_indent_left.is_some_and(|max| x - origin_x > max) {
+                    continue;
+                }
                 guides.push((Bounds::new(point(x, top), size(px(1.), line_height)), color));
             }
             for guide in queue {
@@ -3474,9 +3786,12 @@ fn prepaint_editor(
             }
         }
     }
+    // Monaco `Rulers`: above the content overlays (selections, guides,
+    // decorations), below the text.
+    let mut rulers = Vec::new();
     for ruler in &options.rulers {
         let x = layout.text_origin_x() + metrics.em_width * ruler.column as f32;
-        guides.push((
+        rulers.push((
             Bounds::new(
                 point(x, text_bounds.top()),
                 size(px(1.), text_bounds.size.height),
@@ -3485,22 +3800,19 @@ fn prepaint_editor(
         ));
     }
 
-    // Rendered whitespace (Monaco `renderWhitespace`).
+    // Rendered whitespace (Monaco `renderWhitespace`, drawn as
+    // `WhitespaceOverlay`'s default SVG: a dot per space, an arrow per tab).
     let whitespace =
         (options.render_whitespace != crate::options::RenderWhitespace::None).then(|| {
-            let shape = |text: &'static str| {
-                window.text_system().shape_line(
-                    text.into(),
-                    metrics.font_size,
-                    &[run(text.len(), &metrics.font, colors.whitespace)],
-                    None,
-                )
-            };
-            let (dot, arrow) = (shape("\u{b7}"), shape("\u{2192}"));
             let rope = snapshot.rope();
             let mut marks = Vec::new();
+            let mut text = String::new();
+            let mut text_row = None;
             for line in &layout.lines {
-                let text = rope.line(line.row);
+                if text_row != Some(line.row) {
+                    text = rope.line(line.row);
+                    text_row = Some(line.row);
+                }
                 let selected: Vec<Range<u32>> = selections
                     .iter()
                     .filter(|s| s.start().row <= line.row && line.row <= s.end().row)
@@ -3518,21 +3830,36 @@ fn prepaint_editor(
                         start..end
                     })
                     .collect();
+                let segment = &text[utf16_to_byte(&text, line.columns.start)
+                    ..utf16_to_byte(&text, line.columns.end)];
+                let faux_indent = (line.indent_x / metrics.space_width).round() as u32;
                 let top = layout.text_top(line.view_line);
-                for column in crate::view::guides::whitespace_columns(
-                    &text,
+                let columns = crate::view::guides::whitespace_columns(
+                    segment,
+                    line.columns.start,
+                    faux_indent,
+                    !line.is_last_segment,
                     options.render_whitespace,
                     &selected,
-                ) {
-                    if column < line.columns.start || column >= line.columns.end {
-                        continue;
+                );
+                // The tabs among them, by offset in the segment.
+                let mut tabs = segment
+                    .encode_utf16()
+                    .enumerate()
+                    .filter(|(_, c)| *c == b'\t' as u16)
+                    .map(|(ix, _)| ix as u32);
+                let mut next_tab = tabs.next();
+                for column in columns {
+                    let offset = column - line.columns.start;
+                    while next_tab.is_some_and(|tab| tab < offset) {
+                        next_tab = tabs.next();
                     }
-                    let is_tab = text.encode_utf16().nth(column as usize) == Some(b'\t' as u16);
+                    let is_tab = next_tab == Some(offset);
                     let x = layout.text_origin_x() + line.x_for_column(column);
                     marks.push((point(x, top), is_tab));
                 }
             }
-            (dot, arrow, marks)
+            marks
         });
 
     // Monaco `WordWrapIndicatorOverlay`: `↩` at the wrapping column of each
@@ -3757,7 +4084,7 @@ fn prepaint_editor(
     });
     let focused = editor.focus_handle.is_focused(window);
     layout.cursors = (
-        cursor_quads.clone(),
+        cursors.iter().map(|cursor| cursor.bounds).collect(),
         cursor_style == CursorStyle::BlockOutline,
     );
     editor.layout = Some(layout.clone());
@@ -3766,7 +4093,7 @@ fn prepaint_editor(
         layout,
         selections,
         cursor_view_lines,
-        cursor_quads,
+        cursors,
         cursor_outline: cursor_style == CursorStyle::BlockOutline,
         gutter_numbers,
         fold_placeholders,
@@ -3775,12 +4102,14 @@ fn prepaint_editor(
         decoration_quads,
         block_borders,
         decoration_underlines,
+        composition_boxes,
         gutter_bars,
         margin_backgrounds,
         glyphs,
         lightbulb,
         ruler_marks,
         guides,
+        rulers,
         whitespace,
         wrap_indicators,
         embedded,
@@ -3814,12 +4143,14 @@ fn prepaint_editor(
         overflow_bounds: Vec::new(),
         widgets_keeping_focus: Vec::new(),
         colors,
+        high_contrast: editor.theme.high_contrast,
         options,
         focused,
         cursor_visible: editor.cursor_visible,
         cursor_opacity,
         cursor_scale,
         middle_scroll_anchor: editor.animation.middle_scroll.map(|s| s.anchor),
+        mouse_position: editor.animation.scrollbars.mouse_position,
         scrollbar_looks,
         overview_ruler: show_ruler_border.then_some(ruler),
     }
@@ -3945,6 +4276,22 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                     colors.inactive_selection_background
                 };
                 let origin_x = layout.text_origin_x();
+                // Monaco's content overlays, bottom to top (`view.ts`):
+                // selections, indent guides, decorations, whitespace and the
+                // wrap indicator; then the rulers, the text and the cursors.
+                // High contrast themes have square selections.
+                paint_selections(
+                    layout,
+                    &state.selections,
+                    origin_x,
+                    selection_color,
+                    colors.background,
+                    state.options.rounded_selection && !state.high_contrast,
+                    window,
+                );
+                for (bounds, color) in &state.guides {
+                    window.paint_quad(fill(*bounds, *color));
+                }
                 for (bounds, background, border) in &state.decoration_quads {
                     window.paint_quad(quad(
                         *bounds,
@@ -3955,22 +4302,49 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                         BorderStyle::Solid,
                     ));
                 }
-                // Injected text backgrounds.
+                if let Some(marks) = &state.whitespace {
+                    paint_whitespace(marks, layout, colors.whitespace, window);
+                }
+                if let Some((glyph, marks)) = &state.wrap_indicators {
+                    for origin in marks {
+                        glyph
+                            .paint(*origin, line_height, TextAlign::Left, None, window, cx)
+                            .ok();
+                    }
+                }
+                for (bounds, color) in &state.rulers {
+                    window.paint_quad(fill(*bounds, *color));
+                }
+
+                // The view lines: injected text and control character
+                // backgrounds, then the text.
                 for line in &layout.lines {
+                    let top = layout.text_top(line.view_line);
+                    for range in &line.controls {
+                        let from = line.shaped.x_for_index(range.start);
+                        let to = line.shaped.x_for_index(range.end);
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(origin_x + line.indent_x + from, top),
+                                size(to - from, line_height),
+                            ),
+                            CONTROL_CHARACTER_BACKGROUND,
+                        ));
+                    }
                     for InjectedLayout {
                         range,
                         background,
                         swatch,
+                        chip,
                         ..
                     } in &line.injected
                     {
+                        let from = line.shaped.x_for_index(range.start);
+                        let to = line.shaped.x_for_index(range.end);
                         if let Some(swatch) = swatch {
                             // Monaco: a 0.8em square with a 0.1em border,
                             // centered in its 1.2em of room.
-                            let from = line.shaped.x_for_index(range.start);
-                            let to = line.shaped.x_for_index(range.end);
                             let side = (layout.metrics.font_size * 0.8).round();
-                            let top = layout.text_top(line.view_line);
                             window.paint_quad(quad(
                                 Bounds::new(
                                     point(
@@ -3986,15 +4360,35 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                                 BorderStyle::Solid,
                             ));
                         }
-                        if let Some(background) = background {
-                            let from = line.shaped.x_for_index(range.start);
-                            let to = line.shaped.x_for_index(range.end);
-                            let top = layout.text_top(line.view_line);
+                        let bounds = Bounds::new(
+                            point(origin_x + line.indent_x + from, top + px(1.)),
+                            size(to - from, line_height - px(2.)),
+                        );
+                        if *chip {
+                            // Monaco `.mtkoverflow`: `button.background`
+                            // (`button.hoverBackground` hovered), a 1px
+                            // `contrastBorder` and a 2px radius.
+                            let hovered = state.mouse_position.is_some_and(|m| bounds.contains(&m));
+                            let background = if hovered {
+                                colors.button_hover_background
+                            } else {
+                                background.unwrap_or(colors.button_background)
+                            };
                             window.paint_quad(quad(
-                                Bounds::new(
-                                    point(origin_x + line.indent_x + from, top + px(1.)),
-                                    size(to - from, line_height - px(2.)),
-                                ),
+                                bounds,
+                                Corners::all(px(2.)),
+                                background,
+                                Edges::all(if colors.contrast_border.is_some() {
+                                    px(1.)
+                                } else {
+                                    px(0.)
+                                }),
+                                colors.contrast_border.unwrap_or(gpui::transparent_black()),
+                                BorderStyle::Solid,
+                            ));
+                        } else if let Some(background) = background {
+                            window.paint_quad(quad(
+                                bounds,
                                 Corners::all(px(3.)),
                                 *background,
                                 Edges::default(),
@@ -4003,22 +4397,6 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                             ));
                         }
                     }
-                }
-                for (bounds, color) in &state.guides {
-                    window.paint_quad(fill(*bounds, *color));
-                }
-                for selection in &state.selections {
-                    if selection.is_empty() {
-                        continue;
-                    }
-                    paint_selection(
-                        layout,
-                        selection,
-                        origin_x,
-                        selection_color,
-                        state.options.rounded_selection,
-                        window,
-                    );
                 }
 
                 for (shaped, origin) in &state.placeholder {
@@ -4040,29 +4418,24 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                         .ok();
                 }
 
-                if let Some((dot, arrow, marks)) = &state.whitespace {
-                    for (origin, is_tab) in marks {
-                        let glyph = if *is_tab { arrow } else { dot };
-                        glyph
-                            .paint(*origin, line_height, TextAlign::Left, None, window, cx)
-                            .ok();
-                    }
-                }
-
-                if let Some((glyph, marks)) = &state.wrap_indicators {
-                    for origin in marks {
-                        glyph
-                            .paint(*origin, line_height, TextAlign::Left, None, window, cx)
-                            .ok();
-                    }
-                }
-
                 for element in &mut zone_elements {
                     element.paint(window, cx);
                 }
 
                 for (origin, width, style) in &state.decoration_underlines {
                     window.paint_underline(*origin, *width, style);
+                }
+                // High contrast themes box the IME composition (Monaco
+                // `nativeEditContext.css`).
+                for bounds in &state.composition_boxes {
+                    window.paint_quad(quad(
+                        *bounds,
+                        Corners::default(),
+                        gpui::transparent_black(),
+                        Edges::all(px(1.)),
+                        colors.ime_underline,
+                        BorderStyle::Solid,
+                    ));
                 }
 
                 // Folded region placeholder ("⋯").
@@ -4083,29 +4456,7 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                     }
                 }
                 if state.focused && state.cursor_visible {
-                    for cursor in &state.cursor_quads {
-                        let height = cursor.size.height * state.cursor_scale;
-                        let bounds = Bounds::new(
-                            point(
-                                cursor.left(),
-                                cursor.top() + (cursor.size.height - height) / 2.,
-                            ),
-                            size(cursor.size.width, height),
-                        );
-                        let color = colors.cursor.opacity(state.cursor_opacity);
-                        if state.cursor_outline {
-                            window.paint_quad(quad(
-                                bounds,
-                                Corners::default(),
-                                gpui::transparent_black(),
-                                Edges::all(px(1.)),
-                                color,
-                                BorderStyle::Solid,
-                            ));
-                        } else {
-                            window.paint_quad(fill(bounds, color));
-                        }
-                    }
+                    paint_cursors(state, window);
                 }
             },
         );
@@ -4601,78 +4952,273 @@ fn paint_chevron(control: &FoldControl, color: Hsla, window: &mut Window) {
     }
 }
 
-fn paint_selection(
+/// Monaco `WhitespaceOverlay` with its default SVG rendering
+/// (`_renderCircle`, `_renderArrow`): a dot a seventh of a space wide in the
+/// middle of each space, and an arrow 0.8 spaces long from the start of each
+/// tab, both centered vertically.
+fn paint_whitespace(
+    marks: &[(gpui::Point<Pixels>, bool)],
     layout: &EditorLayout,
-    selection: &Selection,
-    origin_x: Pixels,
     color: Hsla,
-    rounded: bool,
     window: &mut Window,
 ) {
-    let mut rows: Vec<Bounds<Pixels>> = Vec::new();
-    let start: PointUtf16 = selection.start();
-    let end: PointUtf16 = selection.end();
-    let eol_width = layout.metrics.em_width / 2.;
-    for line in &layout.lines {
-        let row = line.row;
-        if row < start.row || row > end.row {
-            continue;
-        }
-        // Selected columns of this row, clipped to this view line.
-        let sel_start = if row == start.row { start.column } else { 0 };
-        let sel_end = if row == end.row { end.column } else { u32::MAX };
-        if sel_end < line.columns.start || sel_start > line.columns.end {
-            continue;
-        }
-        let from = line.x_for_column(sel_start.max(line.columns.start));
-        let to = if sel_end > line.columns.end {
-            // Continues past this view line.
-            line.width()
-                + if line.is_last_segment {
-                    eol_width
-                } else {
-                    px(0.)
-                }
+    let space_width = f32::from(layout.metrics.space_width);
+    let line_height = f32::from(layout.metrics.line_height);
+    let radius = space_width / 7.;
+    let mut arrows = PathBuilder::fill();
+    let mut has_arrows = false;
+    for (origin, is_tab) in marks {
+        let (left, top) = (f32::from(origin.x), f32::from(origin.y));
+        let cy = top + line_height / 2.;
+        if *is_tab {
+            // Monaco's ten-point arrow: a shaft `strokeWidth` thick and a
+            // head, mirrored about the middle of the line.
+            let stroke = space_width / 7.;
+            let p2x = 100. / 125. * space_width;
+            let p1 = (0., stroke / 2.);
+            let p2 = (p2x, p1.1);
+            let p3 = (p2.0 - 0.2 * p2.0, p2.1 + 0.2 * p2.0);
+            let p4 = (p3.0 + 0.1 * p2.0, p3.1 + 0.1 * p2.0);
+            let p5 = (p4.0 + 0.35 * p2.0, p4.1 - 0.35 * p2.0);
+            let points = [
+                p1,
+                p2,
+                p3,
+                p4,
+                p5,
+                (p5.0, -p5.1),
+                (p4.0, -p4.1),
+                (p3.0, -p3.1),
+                (p2.0, -p2.1),
+                (p1.0, -p1.1),
+            ];
+            let at = |(x, y): (f32, f32)| point(px(left + x), px(cy + y));
+            arrows.move_to(at(points[0]));
+            for p in &points[1..] {
+                arrows.line_to(at(*p));
+            }
+            arrows.close();
+            has_arrows = true;
         } else {
-            line.x_for_column(sel_end)
-        };
-        if to > from {
-            rows.push(Bounds::new(
-                point(origin_x + from, layout.line_top(line.view_line)),
-                size(to - from, layout.line_height_of(line.view_line)),
+            let cx = left + space_width / 2.;
+            window.paint_quad(quad(
+                Bounds::new(
+                    point(px(cx - radius), px(cy - radius)),
+                    size(px(radius * 2.), px(radius * 2.)),
+                ),
+                Corners::all(px(radius)),
+                color,
+                Edges::default(),
+                gpui::transparent_black(),
+                BorderStyle::Solid,
             ));
         }
     }
-    // Monaco `roundedSelection`: 3px on the outer corners.
-    for (ix, bounds) in rows.iter().enumerate() {
-        let span = |b: &Bounds<Pixels>| (b.left(), b.right());
-        let adjacent = |other: Option<&Bounds<Pixels>>| {
-            other
-                .filter(|o| {
-                    // Touching rows, whatever their heights.
-                    (o.bottom() - bounds.top()).abs() <= px(0.5)
-                        || (bounds.bottom() - o.top()).abs() <= px(0.5)
-                })
-                .map(span)
-        };
-        let corners = if rounded {
-            let [tl, tr, br, bl] = crate::view::animation::rounded_corners(
-                span(bounds),
-                adjacent(ix.checked_sub(1).and_then(|i| rows.get(i))),
-                adjacent(rows.get(ix + 1)),
-            );
-            let r = |round: bool| if round { px(3.) } else { px(0.) };
-            Corners {
-                top_left: r(tl),
-                top_right: r(tr),
-                bottom_right: r(br),
-                bottom_left: r(bl),
-            }
+    if has_arrows && let Ok(path) = arrows.build() {
+        window.paint_path(path, color);
+    }
+}
+
+/// Paints the cursors (Monaco `ViewCursors`): each box in its color (or
+/// outlined), blinking, with the character inside a block cursor drawn in
+/// the cursor's background color, and in high contrast themes 1px sides in
+/// that color while there's a selection.
+fn paint_cursors(state: &PrepaintState, window: &mut Window) {
+    let layout = &state.layout;
+    let has_selection = state.selections.iter().any(|s| !s.is_empty());
+    for cursor in &state.cursors {
+        let height = cursor.bounds.size.height * state.cursor_scale;
+        let bounds = Bounds::new(
+            point(
+                cursor.bounds.left(),
+                cursor.bounds.top() + (cursor.bounds.size.height - height) / 2.,
+            ),
+            size(cursor.bounds.size.width, height),
+        );
+        let color = cursor.color.opacity(state.cursor_opacity);
+        let text_color = cursor.text_color.opacity(state.cursor_opacity);
+        if state.cursor_outline {
+            window.paint_quad(quad(
+                bounds,
+                Corners::default(),
+                gpui::transparent_black(),
+                Edges::all(px(1.)),
+                color,
+                BorderStyle::Solid,
+            ));
         } else {
-            Corners::default()
-        };
+            window.paint_quad(fill(bounds, color));
+        }
+        if let Some((view_line, range, shift)) = &cursor.glyph
+            && let Some(line) = layout.view_line(*view_line)
+        {
+            let origin = point(
+                layout.text_origin_x() + line.indent_x,
+                layout.text_top(line.view_line),
+            ) + *shift;
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                line.shaped.paint_glyphs(
+                    range.clone(),
+                    origin,
+                    layout.metrics.line_height,
+                    text_color,
+                    window,
+                );
+            });
+        }
+        if state.high_contrast && has_selection {
+            for x in [bounds.left(), bounds.right() - px(1.)] {
+                window.paint_quad(fill(
+                    Bounds::new(point(x, bounds.top()), size(px(1.), bounds.size.height)),
+                    text_color,
+                ));
+            }
+        }
+    }
+}
+
+/// Monaco `SelectionsOverlay`: each selection's rectangle on each view
+/// line, extended by a character where it continues on the next model line,
+/// with `roundedSelection`'s outer corners rounded and its inner corners
+/// joined by reverse-rounded pieces, and 1px insets between several
+/// selections. Every selection's inner-corner pieces are painted before the
+/// rectangles, as Monaco renders them.
+fn paint_selections(
+    layout: &EditorLayout,
+    selections: &[Selection],
+    origin_x: Pixels,
+    color: Hsla,
+    background: Hsla,
+    rounded: bool,
+    window: &mut Window,
+) {
+    use crate::view::selections::{CornerStyle, ROUNDED_PIECE_WIDTH, corner_styles, insets};
+    // Monaco `typicalHalfwidthCharacterWidth`, added where the selection
+    // continues on the next model line.
+    let eol_width = layout.metrics.em_width;
+    let multiple = selections.len() > 1;
+    let radius = px(3.);
+    let piece = px(ROUNDED_PIECE_WIDTH);
+    // (bounds, corners) of every selection's rectangles, for the second
+    // pass.
+    let mut rects: Vec<(Bounds<Pixels>, Corners<Pixels>)> = Vec::new();
+    let mut rows: Vec<(Pixels, Pixels, &LineLayout)> = Vec::new();
+    for selection in selections.iter().filter(|s| !s.is_empty()) {
+        rows.clear();
+        let start: PointUtf16 = selection.start();
+        let end: PointUtf16 = selection.end();
+        for line in &layout.lines {
+            let row = line.row;
+            if row < start.row || row > end.row {
+                continue;
+            }
+            // Selected columns of this row, clipped to this view line.
+            let sel_start = if row == start.row { start.column } else { 0 };
+            let sel_end = if row == end.row { end.column } else { u32::MAX };
+            if sel_end < line.columns.start || sel_start > line.columns.end {
+                continue;
+            }
+            let from = line.x_for_column(sel_start.max(line.columns.start));
+            let to = if sel_end > line.columns.end {
+                // Continues past this view line.
+                line.width()
+                    + if line.is_last_segment {
+                        eol_width
+                    } else {
+                        px(0.)
+                    }
+            } else {
+                line.x_for_column(sel_end)
+            };
+            rows.push((from, to.max(from), line));
+        }
+        let styles = (rounded && !rows.is_empty()).then(|| {
+            let spans: Vec<(f32, f32)> = rows
+                .iter()
+                .map(|(from, to, _)| (f32::from(*from), f32::from(*to)))
+                .collect();
+            corner_styles(&spans, f32::from(eol_width))
+        });
+        for (ix, (from, to, line)) in rows.iter().enumerate() {
+            let (top, bottom) = insets(ix, rows.len(), multiple);
+            let line_top = layout.line_top(line.view_line);
+            let bounds = Bounds::from_corners(
+                point(origin_x + *from, line_top + px(top)),
+                point(
+                    origin_x + *to,
+                    line_top + layout.line_height_of(line.view_line) - px(bottom),
+                ),
+            );
+            let Some(styles) = styles.as_ref().map(|styles| styles[ix]) else {
+                rects.push((bounds, Corners::default()));
+                continue;
+            };
+            let round = |style: CornerStyle| {
+                if style == CornerStyle::Extern {
+                    radius
+                } else {
+                    px(0.)
+                }
+            };
+            let is_intern = |style: CornerStyle| style == CornerStyle::Intern;
+            // Reverse-rounded corners: a selection-colored piece outside
+            // the rectangle, then the editor background over it with the
+            // opposite corner rounded.
+            for (left, top_style, bottom_style, start_side) in [
+                (
+                    bounds.left() - piece,
+                    styles.start_top,
+                    styles.start_bottom,
+                    true,
+                ),
+                (bounds.right(), styles.end_top, styles.end_bottom, false),
+            ] {
+                if !is_intern(top_style) && !is_intern(bottom_style) {
+                    continue;
+                }
+                let piece_bounds =
+                    Bounds::new(point(left, bounds.top()), size(piece, bounds.size.height));
+                window.paint_quad(fill(piece_bounds, color));
+                let r = |intern: bool| if intern { radius } else { px(0.) };
+                let corners = if start_side {
+                    Corners {
+                        top_right: r(is_intern(top_style)),
+                        bottom_right: r(is_intern(bottom_style)),
+                        ..Corners::default()
+                    }
+                } else {
+                    Corners {
+                        top_left: r(is_intern(top_style)),
+                        bottom_left: r(is_intern(bottom_style)),
+                        ..Corners::default()
+                    }
+                };
+                window.paint_quad(quad(
+                    piece_bounds,
+                    corners,
+                    background,
+                    Edges::default(),
+                    gpui::transparent_black(),
+                    BorderStyle::Solid,
+                ));
+            }
+            rects.push((
+                bounds,
+                Corners {
+                    top_left: round(styles.start_top),
+                    bottom_left: round(styles.start_bottom),
+                    top_right: round(styles.end_top),
+                    bottom_right: round(styles.end_bottom),
+                },
+            ));
+        }
+    }
+    for (bounds, corners) in rects {
+        if bounds.size.width <= px(0.) {
+            continue;
+        }
         window.paint_quad(quad(
-            *bounds,
+            bounds,
             corners,
             color,
             Edges::default(),
