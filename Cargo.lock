@@ -2416,6 +2416,7 @@ version = "0.1.0"
 dependencies = [
  "fancy-regex",
  "gpui-monaco-text",
+ "log",
  "proptest",
  "regex",
  "serde",

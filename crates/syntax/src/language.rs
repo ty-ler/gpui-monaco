@@ -8,35 +8,61 @@ use tree_sitter::Query;
 use crate::config::LanguageConfiguration;
 use crate::highlighter::Highlighter;
 
-/// An interned highlight capture name such as `keyword` or `string.special`.
+/// An interned highlight capture name such as `keyword` or `string.special`,
+/// or a Monaco token name from a Monarch grammar such as `keyword.rust`.
 ///
 /// Ids are process-wide, so spans from different languages share one
 /// namespace and a theme resolves each name once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct HighlightId(pub u32);
 
-fn interner() -> &'static Mutex<Vec<Arc<str>>> {
-    static NAMES: OnceLock<Mutex<Vec<Arc<str>>>> = OnceLock::new();
+/// Interned names, with whether each is a Monaco token name.
+type Names = Mutex<Vec<(Arc<str>, bool)>>;
+
+fn interner() -> &'static Names {
+    static NAMES: OnceLock<Names> = OnceLock::new();
     NAMES.get_or_init(Default::default)
 }
 
 impl HighlightId {
-    /// Interns `name`.
-    pub fn intern(name: &str) -> Self {
+    fn intern_kind(name: &str, monaco_token: bool) -> Self {
         let mut names = interner().lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ix) = names.iter().position(|existing| &**existing == name) {
+        if let Some(ix) = names
+            .iter()
+            .position(|(existing, token)| &**existing == name && *token == monaco_token)
+        {
             return HighlightId(ix as u32);
         }
-        names.push(name.into());
+        names.push((name.into(), monaco_token));
         HighlightId(names.len() as u32 - 1)
     }
 
-    /// The capture name, e.g. `keyword.function`.
+    /// Interns the tree-sitter capture name `name`.
+    pub fn intern(name: &str) -> Self {
+        Self::intern_kind(name, false)
+    }
+
+    /// Interns `name` as a Monaco token name (e.g. `keyword.rust` from a
+    /// Monarch grammar), which themes match directly against their Monaco
+    /// rules rather than mapping it as a tree-sitter capture. Its id differs
+    /// from the capture of the same name.
+    pub fn intern_monaco_token(name: &str) -> Self {
+        Self::intern_kind(name, true)
+    }
+
+    /// Whether this is a Monaco token name (see
+    /// [`HighlightId::intern_monaco_token`]) rather than a capture.
+    pub fn is_monaco_token(self) -> bool {
+        let names = interner().lock().unwrap_or_else(|e| e.into_inner());
+        names.get(self.0 as usize).is_some_and(|(_, token)| *token)
+    }
+
+    /// The capture or token name, e.g. `keyword.function`.
     pub fn name(self) -> Arc<str> {
         let names = interner().lock().unwrap_or_else(|e| e.into_inner());
         names
             .get(self.0 as usize)
-            .cloned()
+            .map(|(name, _)| name.clone())
             .unwrap_or_else(|| "".into())
     }
 }
@@ -457,6 +483,22 @@ impl LanguageRegistry {
                 })
             })
             .cloned()
+    }
+
+    /// Replaces the [`Language::highlighter`] of the language `id` (e.g. a
+    /// [`MonarchHighlighter`](crate::MonarchHighlighter) for Monaco
+    /// `setMonarchTokensProvider`), `None` going back to its grammar.
+    /// Returns whether it's registered. Models pick it up when they next
+    /// resolve their language.
+    pub fn set_highlighter(&self, id: &str, highlighter: Option<HighlighterFactory>) -> bool {
+        let mut languages = self.languages.write().unwrap_or_else(|e| e.into_inner());
+        let Some(slot) = languages.iter_mut().find(|language| &*language.id == id) else {
+            return false;
+        };
+        let mut language = (**slot).clone();
+        language.highlighter = highlighter;
+        *slot = Arc::new(language);
+        true
     }
 
     /// The language with this MIME type (Monaco `getLanguageIdByMimeType`).

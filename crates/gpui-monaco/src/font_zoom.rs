@@ -37,6 +37,11 @@ pub fn set_editor_zoom_level(level: f32, cx: &mut App) {
     }
 }
 
+/// Monaco `editor.remeasureFonts`: does nothing. Monaco caches font
+/// measurements and must clear them after web fonts load; GPUI lays text
+/// out with the current fonts every frame, so editors already use them.
+pub fn remeasure_fonts(_cx: &mut App) {}
+
 /// Monaco `BareFontInfo._create`: the font size and line height grow by
 /// 10% per zoom level.
 pub(crate) fn zoomed_options(options: &EditorOptions, level: f32) -> EditorOptions {
