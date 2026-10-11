@@ -13,6 +13,7 @@ All notable changes to this project are documented here. The format follows [Kee
   - **`trigger`:** `CodeEditor::trigger` runs about 100 of Monaco's unlabelled commands by id, as Monaco's `trigger` does: cursor and word movement, scrolling, deletion, `undo`/`redo`, clipboard, find toggles, suggest and peek navigation, paste/drop, inline suggestions and others.
   - **Palette:** 17 labelled actions that were missing are now listed and runnable with `run_action`: `deleteInsideWord`, `actions.findWithSelection`, the next/previous selection match finds, the six `inlineSuggest.*` actions, the color picker actions, the four sticky scroll actions, and `changeAll`.
   - **Diff editor:** `DiffEditor::trigger` adds the `diffEditor.*` ids: `revert`, the unchanged-region and toggle commands, `exitCompareMove`, and the accessible diff viewer.
+- **trimAutoWhitespace (#196):** indentation that Enter or Tab inserted is removed again by the next edit if the line is still blank and the edit is near the cursors, as in Monaco. `ModelOptions::trim_auto_whitespace` (default on) turns it off. Monaco's `removeAutoWhitespace` and `issue #15118` tests are ported.
 - **Bracket matching like Monaco (#195, breaking):** `match_brackets` is now a `MatchBrackets` enum: `Always` (default), `Near` or `Never`.
   - **Always:** when no bracket is next to the cursor, the enclosing pair is highlighted, as in Monaco's default.
   - **Ruler mark:** a pair next to the cursor gets an overview-ruler mark (`editorOverviewRuler.bracketMatchForeground`).

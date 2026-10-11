@@ -334,22 +334,8 @@ impl CodeEditor {
         snippets: &mut [OneSnippet],
         cx: &mut Context<Self>,
     ) -> Vec<Selection> {
-        let starts: Vec<usize> = edits
-            .iter()
-            .map(|(range, _)| self.snapshot.point_utf16_to_offset(range.start))
-            .collect();
-        let mut order: Vec<usize> = (0..edits.len()).collect();
-        order.sort_by_key(|&ix| starts[ix]);
-        // Each edit's start in the new text.
-        let mut new_starts = vec![0; edits.len()];
-        let mut delta: isize = 0;
-        for &ix in &order {
-            let (range, text) = &edits[ix];
-            let end = self.snapshot.point_utf16_to_offset(range.end);
-            new_starts[ix] = (starts[ix] as isize + delta) as usize;
-            delta += text.len() as isize - (end - starts[ix]) as isize;
-        }
-        self.apply(
+        // Each edit's range in the new text.
+        let ranges = self.apply(
             EditOperation {
                 edits: edits.to_vec(),
                 selections_after: self.cursors.selections(),
@@ -358,19 +344,16 @@ impl CodeEditor {
                 push_stack_element_after: false,
                 auto_closed: Vec::new(),
                 follow_up: None,
+                auto_whitespace: Vec::new(),
             },
             cx,
         );
-        for (ix, one) in snippets.iter_mut().enumerate() {
-            one.offset = new_starts[ix];
+        for (one, range) in snippets.iter_mut().zip(&ranges) {
+            one.offset = range.start;
         }
-        edits
+        ranges
             .iter()
-            .enumerate()
-            .map(|(ix, (_, text))| {
-                let end = (new_starts[ix] + text.len()).min(self.snapshot.len());
-                Selection::collapsed(self.snapshot.offset_to_point_utf16(end))
-            })
+            .map(|range| Selection::collapsed(self.snapshot.offset_to_point_utf16(range.end)))
             .collect()
     }
 
@@ -719,6 +702,7 @@ impl CodeEditor {
                     push_stack_element_after: false,
                     auto_closed: Vec::new(),
                     follow_up: None,
+                    auto_whitespace: Vec::new(),
                 },
                 cx,
             );

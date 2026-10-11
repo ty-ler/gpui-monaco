@@ -28,8 +28,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use super::brackets::{Brackets, find_matching_bracket_up, has_unmatched_closing_bracket_after};
 use super::edit::{
     Command, CursorStateHelper, EditBuilder, EditOperation, EditOperationType, ReplaceCommand,
-    ReplaceCommandWithOffsetCursorState, ReplaceCommandWithoutChangingPosition, execute_commands,
-    should_push_stack_element_between, typing_operation,
+    ReplaceCommandWithOffsetCursorState, ReplaceCommandWithoutChangingPosition, auto_whitespace,
+    execute_commands, should_push_stack_element_between, typing_operation,
 };
 use super::language::{
     AutoClosingPair, LanguageContext, LanguageSupport, enter_action, good_indent_for_line,
@@ -155,10 +155,10 @@ pub fn line_break_insert<M: CursorModel>(
         None => selections
             .iter()
             .map(|s| {
-                Some(Box::new(ReplaceCommandWithoutChangingPosition {
+                auto_whitespace(Some(Box::new(ReplaceCommandWithoutChangingPosition {
                     range: s.range(),
                     text: enter_text(config, dm, &s.range()),
-                }) as Box<dyn Command>)
+                })))
             })
             .collect(),
     };
@@ -236,19 +236,20 @@ pub fn tab_with_language<M: CursorModel>(
 // ---------------------------------------------------------------------------
 // Enter
 
+/// Monaco `typeCommand`, which inserts auto whitespace.
 fn type_command(
     range: Range<Position>,
     text: String,
     keep_position: bool,
 ) -> Option<Box<dyn Command>> {
-    if keep_position {
+    auto_whitespace(if keep_position {
         Some(Box::new(ReplaceCommandWithoutChangingPosition {
             range,
             text,
         }))
     } else {
         ReplaceCommand::boxed(range, text)
-    }
+    })
 }
 
 /// Monaco `EnterOperation._enter`.
@@ -285,18 +286,17 @@ pub(crate) fn enter_command_with_language(
                     config.normalize_indentation(&format!("{}{}", r.indentation, r.append_text));
                 let text = format!("\n{increased_indent}\n{normal_indent}");
                 if keep_position {
-                    return Some(Box::new(ReplaceCommandWithoutChangingPosition {
-                        range,
-                        text,
-                    }));
+                    return auto_whitespace(Some(Box::new(
+                        ReplaceCommandWithoutChangingPosition { range, text },
+                    )));
                 }
-                return Some(Box::new(ReplaceCommandWithOffsetCursorState {
+                return auto_whitespace(Some(Box::new(ReplaceCommandWithOffsetCursorState {
                     range,
                     text,
                     line_delta: -1,
                     column_delta: strings::utf16_len(&increased_indent) as i32
                         - strings::utf16_len(&normal_indent) as i32,
-                }));
+                })));
             }
             IndentAction::Outdent => {
                 let actual_indentation = unshift_indent(config, &r.indentation);
@@ -324,10 +324,10 @@ pub(crate) fn enter_command_with_language(
         let after_enter = config.normalize_indentation(&after_enter);
         let text = format!("\n{after_enter}");
         if keep_position {
-            return Some(Box::new(ReplaceCommandWithoutChangingPosition {
+            return auto_whitespace(Some(Box::new(ReplaceCommandWithoutChangingPosition {
                 range,
                 text,
-            }));
+            })));
         }
         let mut offset = 0i64;
         if let Some(f) = first_non_whitespace
@@ -339,12 +339,12 @@ pub(crate) fn enter_command_with_language(
             }
             offset = (old_end_view_column + 1 - strings::utf16_len(&after_enter) as i64 - 1).min(0);
         }
-        return Some(Box::new(ReplaceCommandWithOffsetCursorState {
+        return auto_whitespace(Some(Box::new(ReplaceCommandWithOffsetCursorState {
             range,
             text,
             line_delta: 0,
             column_delta: offset as i32,
-        }));
+        })));
     }
     let text = format!("\n{}", config.normalize_indentation(&indentation));
     type_command(range, text, keep_position)
@@ -396,7 +396,7 @@ fn auto_indent_type(
             _ => {
                 let (range, text) =
                     edit_from_indentation(config, model, indentation, *selection, ch, true);
-                ReplaceCommand::boxed(range, text)
+                type_command(range, text, false)
             }
         })
         .collect();
@@ -694,7 +694,7 @@ fn auto_closing_open_char_type(
     if strings::utf16_len(&pair.open) > strings::utf16_len(ch) {
         let commands = selections
             .iter()
-            .map(|s| ReplaceCommand::boxed(s.range(), ch))
+            .map(|s| type_command(s.range(), ch.to_string(), false))
             .collect();
         return type_and_auto_close_with_undo_stop(model, selections, commands, ch, &pair.close);
     }

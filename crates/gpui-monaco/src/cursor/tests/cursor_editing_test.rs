@@ -7,8 +7,6 @@
 //!   tokenization): ported in `cursor_language_test.rs`, which lists the
 //!   ones still skipped there (IME composition, reentrant listeners,
 //!   snippets).
-//! - Auto-whitespace trimming (a text model feature, `trimAutoWhitespace`):
-//!   `removeAutoWhitespace on: ...` (x3), `issue #15118`.
 //! - Word wrap / view model: `issue #36740`, `issue #110376`, `issue #98320`,
 //!   `issue #41573`, `issue #112301`, `move right normalizes the cursor to
 //!   the next wrapped line`.
@@ -46,7 +44,8 @@ fn issue_monaco_editor_443_indentation_of_a_single_row_deletes_selected_text() {
 
 #[test]
 fn bug_9121_auto_indent_undo_redo_is_funky() {
-    let mut editor = TestEditor::with_config("", config(|c| c.insert_spaces = false));
+    let mut editor = TestEditor::with_config("", config(|c| c.insert_spaces = false))
+        .with_trim_auto_whitespace(false);
     editor.type_keyboard("\n");
     assert_eq!(editor.value(), "\n", "assert1");
 
@@ -720,7 +719,7 @@ fn issue_148256_pressing_enter_creates_line_with_bad_indent_with_insert_spaces_f
 
 #[test]
 fn remove_auto_whitespace_off() {
-    let mut editor = TestEditor::lines(&["    some  line abc  "]);
+    let mut editor = TestEditor::lines(&["    some  line abc  "]).with_trim_auto_whitespace(false);
 
     // Move cursor to the end, verify that we do not trim whitespaces if line has values
     let len = editor.line(1).encode_utf16().count() as u32;
@@ -734,6 +733,144 @@ fn remove_auto_whitespace_off() {
     assert_eq!(editor.line(1), "    some  line abc  ");
     assert_eq!(editor.line(2), "    ");
     assert_eq!(editor.line(3), "    ");
+}
+
+#[test]
+fn remove_auto_whitespace_on_removes_only_whitespace_the_cursor_added_1() {
+    let mut editor = TestEditor::lines(&["    "]);
+    let len = editor.line(1).encode_utf16().count() as u32;
+    editor.move_to(1, len + 1, false);
+    editor.type_keyboard("\n");
+    assert_eq!(editor.line(1), "    ");
+    assert_eq!(editor.line(2), "    ");
+
+    editor.type_keyboard("\n");
+    assert_eq!(editor.line(1), "    ");
+    assert_eq!(editor.line(2), "");
+    assert_eq!(editor.line(3), "    ");
+}
+
+#[test]
+fn remove_auto_whitespace_on_removes_only_whitespace_the_cursor_added_2() {
+    let mut editor = TestEditor::lines(&["    if (a) {", "        ", "", "", "    }"]);
+
+    editor.move_to(3, 1, false);
+    editor.tab();
+    assert_eq!(editor.line(1), "    if (a) {");
+    assert_eq!(editor.line(2), "        ");
+    assert_eq!(editor.line(3), "    ");
+    assert_eq!(editor.line(4), "");
+    assert_eq!(editor.line(5), "    }");
+
+    editor.move_to(4, 1, false);
+    editor.tab();
+    assert_eq!(editor.line(1), "    if (a) {");
+    assert_eq!(editor.line(2), "        ");
+    assert_eq!(editor.line(3), "");
+    assert_eq!(editor.line(4), "    ");
+    assert_eq!(editor.line(5), "    }");
+
+    let len = editor.line(5).encode_utf16().count() as u32;
+    editor.move_to(5, len + 1, false);
+    editor.type_keyboard("something");
+    assert_eq!(editor.line(1), "    if (a) {");
+    assert_eq!(editor.line(2), "        ");
+    assert_eq!(editor.line(3), "");
+    assert_eq!(editor.line(4), "");
+    assert_eq!(editor.line(5), "    }something");
+}
+
+#[test]
+fn remove_auto_whitespace_on_test_1() {
+    let mut editor = TestEditor::lines(&["    some  line abc  "]);
+
+    // Move cursor to the end, verify that we do not trim whitespaces if line has values
+    let len = editor.line(1).encode_utf16().count() as u32;
+    editor.move_to(1, len + 1, false);
+    editor.type_keyboard("\n");
+    assert_eq!(editor.line(1), "    some  line abc  ");
+    assert_eq!(editor.line(2), "    ");
+
+    // Try to enter again, we should trimmed previous line
+    editor.type_keyboard("\n");
+    assert_eq!(editor.line(1), "    some  line abc  ");
+    assert_eq!(editor.line(2), "");
+    assert_eq!(editor.line(3), "    ");
+
+    // More whitespaces
+    editor.tab();
+    assert_eq!(editor.line(1), "    some  line abc  ");
+    assert_eq!(editor.line(2), "");
+    assert_eq!(editor.line(3), "        ");
+
+    // Enter and verify that trimmed again
+    editor.type_keyboard("\n");
+    assert_eq!(editor.line(1), "    some  line abc  ");
+    assert_eq!(editor.line(2), "");
+    assert_eq!(editor.line(3), "");
+    assert_eq!(editor.line(4), "        ");
+
+    // Trimmed if we will keep only text
+    editor.move_to(1, 5, false);
+    editor.type_keyboard("\n");
+    assert_eq!(editor.line(1), "    ");
+    assert_eq!(editor.line(2), "    some  line abc  ");
+    assert_eq!(editor.line(3), "");
+    assert_eq!(editor.line(4), "");
+    assert_eq!(editor.line(5), "");
+
+    // Trimmed if we will keep only text by selection
+    editor.move_to(2, 5, false);
+    editor.move_to(3, 1, true);
+    editor.type_keyboard("\n");
+    assert_eq!(editor.line(1), "    ");
+    assert_eq!(editor.line(2), "    ");
+    assert_eq!(editor.line(3), "    ");
+    assert_eq!(editor.line(4), "");
+    assert_eq!(editor.line(5), "");
+}
+
+#[test]
+fn issue_15118_remove_auto_whitespace_when_pasting_entire_line() {
+    let mut editor = TestEditor::lines(&[
+        "    function f() {",
+        "        // I'm gonna copy this line",
+        "        return 3;",
+        "    }",
+    ]);
+
+    let len = editor.line(3).encode_utf16().count() as u32;
+    editor.move_to(3, len + 1, false);
+    editor.type_keyboard("\n");
+
+    assert_eq!(
+        editor.value(),
+        [
+            "    function f() {",
+            "        // I'm gonna copy this line",
+            "        return 3;",
+            "        ",
+            "    }",
+        ]
+        .join("\n")
+    );
+    let len = editor.line(4).encode_utf16().count() as u32;
+    editor.assert_cursor(4, len + 1);
+
+    editor.paste("        // I'm gonna copy this line\n", true, None);
+    assert_eq!(
+        editor.value(),
+        [
+            "    function f() {",
+            "        // I'm gonna copy this line",
+            "        return 3;",
+            "        // I'm gonna copy this line",
+            "",
+            "    }",
+        ]
+        .join("\n")
+    );
+    editor.assert_cursor(5, 1);
 }
 
 #[test]
