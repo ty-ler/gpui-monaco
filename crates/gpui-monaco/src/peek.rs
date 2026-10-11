@@ -288,7 +288,7 @@ impl PeekView {
             groups,
             selected: selected_pos,
             preview: None,
-            no_preview: cx.new(|_| TextModel::new("no preview available")),
+            no_preview: cx.new(|_| TextModel::new_internal("no preview available")),
             colors: theme.colors.clone(),
             preview_theme: Arc::new(preview_theme),
             options: preview_options,
@@ -920,6 +920,9 @@ impl CodeEditor {
             true,
             cx,
         );
+        // Monaco's peek is a zone widget: an overlay widget, outside the
+        // editor's scrollable element.
+        self.widgets.set_zone_captures_wheel(id);
         self.peek = PeekState {
             zone: Some(id),
             view: Some(view),

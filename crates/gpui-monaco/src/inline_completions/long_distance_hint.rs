@@ -738,6 +738,7 @@ impl CodeEditor {
             OverlayWidget {
                 position: OverlayPosition::Custom(position),
                 view: view.clone().into(),
+                allow_editor_overflow: false,
             },
             cx,
         );

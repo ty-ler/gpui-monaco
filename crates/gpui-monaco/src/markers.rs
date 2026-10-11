@@ -755,6 +755,8 @@ impl CodeEditor {
             },
             cx,
         );
+        // A zone widget in Monaco, outside the scrollable element.
+        self.widgets.set_zone_captures_wheel(id);
         self.marker_navigation.zone = Some((zone, id));
         self.marker_navigation.index = Some(index);
     }

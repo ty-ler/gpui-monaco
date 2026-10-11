@@ -35,8 +35,8 @@ use crate::view::folding::{
 };
 use crate::view::view_lines::{ViewLines, WrapSettings, normalize_hidden};
 use crate::widgets::{
-    ContentWidget, ContentWidgetState, OverlayWidget, OverlayWidgetState, ViewZone, WidgetId,
-    Widgets, ZoneHeight, ZoneState,
+    ContentWidget, ContentWidgetState, OverlayPosition, OverlayWidget, OverlayWidgetState,
+    ViewZone, WidgetId, Widgets, ZoneHeight, ZoneState,
 };
 
 /// Events emitted by [`CodeEditor`].
@@ -272,6 +272,41 @@ enum MouseSelectMode {
     Column,
 }
 
+/// Where the mouse is outside the text while drag-selecting (Monaco
+/// `outsidePosition`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DragOutside {
+    Above,
+    Below,
+    Left,
+    Right,
+}
+
+impl DragOutside {
+    fn vertical(self) -> bool {
+        matches!(self, Self::Above | Self::Below)
+    }
+}
+
+/// How often drag scrolling runs (Monaco: every animation frame).
+const DRAG_SCROLL_FRAME: Duration = Duration::from_millis(16);
+
+/// Scrolling while drag-selecting outside the text.
+struct DragScroll {
+    outside: DragOutside,
+    distance: Pixels,
+    mouse: Point<Pixels>,
+    /// The line under the mouse, for left and right.
+    row: u32,
+    _task: Task<()>,
+}
+
+impl DragScroll {
+    fn vertical(&self) -> bool {
+        self.outside.vertical()
+    }
+}
+
 struct MouseSelection {
     mode: MouseSelectMode,
     /// The selection made by the initial click (a word or line for
@@ -435,6 +470,9 @@ pub struct CodeEditor {
     /// This editor is a peek view's preview: F4 and unhandled Escape go to
     /// the editor around it.
     pub(crate) in_peek: bool,
+    /// This editor is an input in one of the editor's widgets (see
+    /// [`CodeEditor::new_widget_input`]).
+    pub(crate) widget_input: bool,
     /// Take focus on the next render (after closing a peek view).
     pub(crate) refocus: bool,
     /// A running format document, selection or paste request.
@@ -448,6 +486,8 @@ pub struct CodeEditor {
     /// frame (Monaco `StableEditorScrollState`).
     pub(crate) pending_cursor_offset: Option<Pixels>,
     mouse_selection: Option<MouseSelection>,
+    /// Scrolling while drag-selecting outside the text.
+    drag_scroll: Option<DragScroll>,
     pub(crate) scrollbar_drag: Option<ScrollbarDrag>,
     /// A held scrollbar arrow's repeat.
     scrollbar_arrow_task: Option<Task<()>>,
@@ -467,8 +507,47 @@ impl Focusable for CodeEditor {
 impl CodeEditor {
     /// Creates an editor showing `model`.
     pub fn new(model: Entity<TextModel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::build(model, false, window, cx)
+    }
+
+    /// A one-line input inside one of the editor's widgets (find, replace,
+    /// rename, quick input), with its own internal model. Monaco's are
+    /// plain `<input>`s, so it isn't in [`crate::editors`] or
+    /// [`crate::models`] and is announced to no one; it has
+    /// [`widget_input_options`], the input background (whatever the theme)
+    /// and no font zoom.
+    pub(crate) fn new_widget_input(
+        text: &str,
+        theme: Arc<Theme>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let model = cx.new(|_| TextModel::new_internal(text));
+        let mut editor = Self::build(model, true, window, cx);
+        editor.widget_input = true;
+        editor.set_theme(theme, cx);
+        editor.update_options(widget_input_options(), cx);
+        editor
+    }
+
+    /// The font zoom level this editor follows: none for widget inputs
+    /// (Monaco's inputs are styled by CSS, not the editor's zoom).
+    pub(crate) fn zoom_level(&self, cx: &App) -> f32 {
+        if self.widget_input {
+            0.
+        } else {
+            crate::font_zoom::editor_zoom_level(cx)
+        }
+    }
+
+    fn build(
+        model: Entity<TextModel>,
+        internal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         crate::model::register_model(cx, &model);
-        crate::registry::track_editor(cx);
+        crate::registry::track_editor(internal, cx);
         let dominated_by_long_lines = model.read(cx).is_dominated_by_long_lines();
         // A tab stop, like Monaco's textarea, for tab focus mode and hosts.
         let focus_handle = cx.focus_handle().tab_stop(true);
@@ -481,14 +560,15 @@ impl CodeEditor {
                 cx.emit(CodeEditorEvent::Focused);
                 cx.notify();
             }),
+            // Monaco `onDidBlurEditorText`: the text lost focus, maybe to
+            // one of the editor's widgets (the hover, the find input).
             cx.on_blur(&focus_handle, window, |this, _, cx| {
                 this.has_focus = false;
                 this.update_bracket_highlights(cx);
                 this.mouse_selection = None;
+                this.drag_scroll = None;
                 this.dnd_cancel(cx);
-                this.hide_hover(cx);
                 this.close_message(cx);
-                this.inline_blurred(cx);
                 cx.emit(CodeEditorEvent::Blurred);
                 cx.notify();
             }),
@@ -497,8 +577,18 @@ impl CodeEditor {
                 this.find_widget_focus_in(cx);
                 cx.emit(CodeEditorEvent::WidgetFocused);
             }),
-            cx.on_focus_out(&focus_handle, window, |_, _, _, cx| {
+            // Monaco `onDidBlurEditorWidget`: focus left the editor and its
+            // widgets. Suggest (`SuggestController`) and parameter hints
+            // (`ParameterHintsModel`) cancel, and so do inline suggestions;
+            // the hover goes too (focusing it, Cmd/Ctrl+K Cmd/Ctrl+I, keeps
+            // it).
+            cx.on_focus_out(&focus_handle, window, |this, _, _, cx| {
+                this.hide_hover(cx);
+                this.hide_suggest(cx);
+                this.hide_signature_help(cx);
+                this.inline_blurred(cx);
                 cx.emit(CodeEditorEvent::WidgetBlurred);
+                cx.notify();
             }),
             // Monaco `onKeyDown` fires before key bindings run, so it's an
             // interceptor rather than a key down listener (which bound keys
@@ -584,12 +674,14 @@ impl CodeEditor {
             inlay: Default::default(),
             smart_select: Default::default(),
             in_peek: false,
+            widget_input: false,
             refocus: false,
             format_task: None,
             format_on_type_task: None,
             last_cursor_offset: None,
             pending_cursor_offset: None,
             mouse_selection: None,
+            drag_scroll: None,
             scrollbar_drag: None,
             scrollbar_arrow_task: None,
             blink_epoch: 0,
@@ -817,10 +909,8 @@ impl CodeEditor {
     /// Replaces the editor options (Monaco `updateOptions`, but with a full set).
     pub fn update_options(&mut self, options: EditorOptions, cx: &mut Context<Self>) {
         let old_from_all_providers = self.options.occurrences_highlight_from_all_providers;
-        let old = std::mem::replace(
-            &mut self.options,
-            crate::font_zoom::zoomed_options(&options, crate::font_zoom::editor_zoom_level(cx)),
-        );
+        let zoomed = crate::font_zoom::zoomed_options(&options, self.zoom_level(cx));
+        let old = std::mem::replace(&mut self.options, zoomed);
         // Monaco `onDidChangeConfiguration` fires when an option changed.
         let change = (old != self.options).then(|| {
             CodeEditorEvent::ConfigurationChanged(ConfigurationChange::new(
@@ -869,7 +959,15 @@ impl CodeEditor {
 
     /// Sets the theme (Monaco `editor.setTheme`).
     pub fn set_theme(&mut self, theme: Arc<Theme>, cx: &mut Context<Self>) {
-        self.theme = theme;
+        // Monaco's inputs paint `input.background`, not the editor's.
+        self.theme = if self.widget_input {
+            let mut theme = (*theme).clone();
+            theme.colors.background = theme.colors.input_background;
+            theme.colors.gutter_background = theme.colors.input_background;
+            Arc::new(theme)
+        } else {
+            theme
+        };
         // The bracket highlights carry the theme's colors.
         self.update_bracket_highlights(cx);
         cx.notify();
@@ -1059,6 +1157,7 @@ impl CodeEditor {
             height,
             view,
             full_width,
+            captures_wheel: false,
         });
         self.widgets.zones_generation += 1;
         cx.emit(CodeEditorEvent::ViewZonesChanged);
@@ -1096,6 +1195,9 @@ impl CodeEditor {
             anchor,
             preference: widget.preference,
             view: widget.view,
+            allow_overflow: widget.allow_editor_overflow,
+            layer: crate::widgets::layer::DEFAULT,
+            room: Default::default(),
         });
         cx.notify();
         id
@@ -1144,8 +1246,55 @@ impl CodeEditor {
             id,
             position: widget.position,
             view: widget.view,
+            allow_overflow: widget.allow_editor_overflow,
+            layer: crate::widgets::layer::DEFAULT,
         });
         cx.notify();
+        id
+    }
+
+    /// Adds one of the editor's own content widgets that overflow it
+    /// (Monaco's widgets with `allowEditorOverflow`), painted at `layer`;
+    /// returns its id and where it learns the room it has.
+    pub(crate) fn add_overflow_content_widget(
+        &mut self,
+        position: PointUtf16,
+        preference: Vec<crate::widgets::ContentWidgetPreference>,
+        view: gpui::AnyView,
+        layer: usize,
+        cx: &mut Context<Self>,
+    ) -> (WidgetId, crate::widgets::OverflowRoomCell) {
+        let id = self.add_content_widget(
+            ContentWidget {
+                position,
+                preference,
+                view,
+                allow_editor_overflow: true,
+            },
+            cx,
+        );
+        self.widgets.set_layer(id, layer);
+        (id, self.widgets.room(id))
+    }
+
+    /// Adds one of the editor's own overlay widgets that overflow it,
+    /// painted at `layer`.
+    pub(crate) fn add_overflow_overlay_widget(
+        &mut self,
+        position: OverlayPosition,
+        view: gpui::AnyView,
+        layer: usize,
+        cx: &mut Context<Self>,
+    ) -> WidgetId {
+        let id = self.add_overlay_widget(
+            OverlayWidget {
+                position,
+                view,
+                allow_editor_overflow: true,
+            },
+            cx,
+        );
+        self.widgets.set_layer(id, layer);
         id
     }
 
@@ -1192,6 +1341,30 @@ impl CodeEditor {
                 layout.minimap.is_some(),
             )
         })
+    }
+
+    /// The editor's bounds and the visible parts of its zones and widgets
+    /// (top-most last) from the last layout, for tests.
+    #[doc(hidden)]
+    pub fn widget_bounds_for_tests(
+        &self,
+    ) -> (
+        Bounds<Pixels>,
+        Vec<(Bounds<Pixels>, crate::mouse_target::EmbeddedKind)>,
+    ) {
+        self.layout
+            .as_ref()
+            .map_or_else(Default::default, |layout| {
+                (
+                    layout.bounds,
+                    layout
+                        .widget_bounds
+                        .iter()
+                        .copied()
+                        .zip(layout.widget_kinds.iter().copied())
+                        .collect(),
+                )
+            })
     }
 
     /// (content y of the last view line, line height) from the last layout.
@@ -2833,6 +3006,31 @@ impl CodeEditor {
         }
     }
 
+    /// Whether `position` is over an embedded view (a zone or widget),
+    /// which handles its own clicks and focus.
+    fn over_widget(&self, position: Point<Pixels>) -> bool {
+        self.layout.as_ref().is_some_and(|layout| {
+            layout
+                .widget_bounds
+                .iter()
+                .any(|bounds| bounds.contains(&position))
+        })
+    }
+
+    /// Whether the wheel at `position` is over an embedded view that keeps
+    /// it from the editor: overlay and overflowing widgets and zone widgets
+    /// (Monaco's, which aren't in the editor's scrollable element). Plain
+    /// zones and content widgets scroll the editor, as in Monaco.
+    fn wheel_over_widget(&self, position: Point<Pixels>) -> bool {
+        self.layout.as_ref().is_some_and(|layout| {
+            layout
+                .widget_bounds
+                .iter()
+                .zip(&layout.widget_captures_wheel)
+                .any(|(bounds, captures)| *captures && bounds.contains(&position))
+        })
+    }
+
     /// Monaco `scrollOnMiddleClick`: a middle click starts scrolling
     /// toward the mouse; another click ends it.
     fn on_middle_mouse_down(
@@ -2842,6 +3040,20 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         if self.end_middle_scroll(cx) {
+            return;
+        }
+        // Widgets handle their own clicks: no autoscroll, focus or link
+        // under them.
+        if self.over_widget(event.position) {
+            let mouse = self.emit_mouse(
+                event.position,
+                Some(event.button),
+                event.modifiers,
+                event.click_count,
+                window,
+                cx,
+            );
+            cx.emit(CodeEditorEvent::MouseDown(mouse));
             return;
         }
         cx.stop_propagation();
@@ -2970,7 +3182,13 @@ impl CodeEditor {
         if self.end_middle_scroll(cx) {
             return;
         }
-        window.focus(&self.focus_handle, cx);
+        // Monaco `_onContextMenu` ignores widgets (e.g. the find input's
+        // own menu), and they keep focus: the editor doesn't take it, so
+        // the quick input, rename box and menus stay open.
+        let over_widget = self.over_widget(event.position);
+        if !over_widget {
+            window.focus(&self.focus_handle, cx);
+        }
         let mouse = self.emit_mouse(
             event.position,
             Some(event.button),
@@ -2980,6 +3198,10 @@ impl CodeEditor {
             cx,
         );
         cx.emit(CodeEditorEvent::MouseDown(mouse));
+        if over_widget {
+            cx.emit(CodeEditorEvent::ContextMenu(mouse));
+            return;
+        }
         self.long_lines_mouse_down(&mouse, cx);
         cx.emit(CodeEditorEvent::ContextMenu(mouse));
         // Monaco: only over text, and not on widgets.
@@ -3013,12 +3235,7 @@ impl CodeEditor {
         self.long_lines_mouse_down(&mouse, cx);
         // Embedded views (zones and widgets) handle their own clicks and
         // focus.
-        if self.layout.as_ref().is_some_and(|layout| {
-            layout
-                .widget_bounds
-                .iter()
-                .any(|bounds| bounds.contains(&event.position))
-        }) {
+        if self.over_widget(event.position) {
             return;
         }
         window.focus(&self.focus_handle, cx);
@@ -3323,7 +3540,9 @@ impl CodeEditor {
         }
     }
 
-    fn on_mouse_move(
+    /// Mouse moves over the editor or its overflowing widgets, and anywhere
+    /// while dragging (see `EditorElement::paint`).
+    pub(crate) fn editor_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
         window: &mut Window,
@@ -3478,25 +3697,36 @@ impl CodeEditor {
             && event.pressed_button == Some(MouseButton::Middle);
         if event.pressed_button != Some(MouseButton::Left) && !middle_column {
             self.mouse_selection = None;
+            self.drag_scroll = None;
             return;
         }
-        let (mode, origin, index) = (drag.mode, drag.origin, drag.cursor_index);
-
-        // Drag past the edges scrolls.
-        if let Some(layout) = self.layout.as_ref() {
-            let text = layout.text_bounds;
-            let line_height = layout.metrics.line_height;
-            if event.position.y < text.top() {
-                self.scroll_top = (self.scroll_top - line_height).max(px(0.));
-            } else if event.position.y > text.bottom() {
-                self.scroll_top += line_height;
-            }
+        // Monaco `_onMouseDownThenMove`: outside the text, scroll towards
+        // the mouse on a timer; inside, select to the mouse.
+        if let Some((outside, distance)) = self.drag_outside(event.position) {
+            let row = self.position_for_point(event.position, window, cx).row;
+            self.start_drag_scroll(outside, distance, event.position, row, window, cx);
+            return;
         }
-
+        self.drag_scroll = None;
         let position = self.position_for_point(event.position, window, cx);
+        self.extend_mouse_selection(position, event.position, cx);
+    }
+
+    /// Extends the selection being dragged to `position`, with the mouse at
+    /// `mouse` (Monaco `_dispatchMouse` in selection mode).
+    fn extend_mouse_selection(
+        &mut self,
+        position: PointUtf16,
+        mouse: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.mouse_selection.as_ref() else {
+            return;
+        };
+        let (mode, origin, index) = (drag.mode, drag.origin, drag.cursor_index);
         let config = self.cursor_config(cx);
         if mode == MouseSelectMode::Column {
-            let visible_column = self.mouse_visible_column(event.position);
+            let visible_column = self.mouse_visible_column(mouse);
             cursor::column_select_to(
                 &config,
                 self.snapshot.rope(),
@@ -3560,6 +3790,150 @@ impl CodeEditor {
         self.cursors_changed(false, cx);
     }
 
+    /// Whether a mouse drag that started in the editor is going on, so it
+    /// follows the mouse anywhere in the window (Monaco's global pointer
+    /// monitor).
+    pub(crate) fn is_mouse_dragging(&self) -> bool {
+        self.mouse_selection.is_some()
+            || self.scrollbar_drag.is_some()
+            || self.minimap_drag.is_some()
+            || self.dnd.active
+    }
+
+    /// Where `mouse` is outside the text while drag-selecting, and how far
+    /// (Monaco `MouseDownOperation._getPositionOutsideEditor`): above or
+    /// below the editor, else left of the text (over the gutter too) or
+    /// right of it.
+    fn drag_outside(&self, mouse: Point<Pixels>) -> Option<(DragOutside, Pixels)> {
+        let layout = self.layout.as_ref()?;
+        let editor = layout.bounds;
+        let text = layout.text_bounds;
+        if mouse.y < editor.top() {
+            Some((DragOutside::Above, editor.top() - mouse.y))
+        } else if mouse.y > editor.bottom() {
+            Some((DragOutside::Below, mouse.y - editor.bottom()))
+        } else if mouse.x <= text.left() {
+            Some((DragOutside::Left, text.left() - mouse.x))
+        } else if mouse.x >= text.right() {
+            Some((DragOutside::Right, mouse.x - text.right()))
+        } else {
+            None
+        }
+    }
+
+    /// Starts (or retargets) scrolling while drag-selecting outside the
+    /// text (Monaco `TopBottomDragScrolling` and `LeftRightDragScrolling`):
+    /// every frame it scrolls towards the mouse, faster the farther away it
+    /// is, and extends the selection to the edge. `row` is the line under
+    /// the mouse, for left and right.
+    fn start_drag_scroll(
+        &mut self,
+        outside: DragOutside,
+        distance: Pixels,
+        mouse: Point<Pixels>,
+        row: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(scroll) = self.drag_scroll.as_mut()
+            && scroll.vertical() == outside.vertical()
+        {
+            scroll.outside = outside;
+            scroll.distance = distance;
+            scroll.mouse = mouse;
+            scroll.row = row;
+            return;
+        }
+        let task = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(DRAG_SCROLL_FRAME).await;
+                let Ok(going) =
+                    this.update_in(cx, |this, window, cx| this.drag_scroll_step(window, cx))
+                else {
+                    return;
+                };
+                if !going {
+                    return;
+                }
+            }
+        });
+        self.drag_scroll = Some(DragScroll {
+            outside,
+            distance,
+            mouse,
+            row,
+            _task: task,
+        });
+    }
+
+    /// One frame of drag scrolling (Monaco `DragScrollingOperation._execute`);
+    /// whether it goes on.
+    fn drag_scroll_step(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let (Some(scroll), Some(layout)) = (self.drag_scroll.as_ref(), self.layout.as_ref()) else {
+            return false;
+        };
+        if self.mouse_selection.is_none() {
+            self.drag_scroll = None;
+            return false;
+        }
+        let (outside, distance, mouse, row) =
+            (scroll.outside, scroll.distance, scroll.mouse, scroll.row);
+        let elapsed = DRAG_SCROLL_FRAME.as_secs_f32();
+        // Monaco `_getScrollSpeed`: lines (or characters) per second.
+        let speed = |viewport: f32, outside: f32| {
+            if outside <= 1.5 {
+                (viewport * (1. + outside)).max(30.)
+            } else if outside <= 3. {
+                (viewport * (2. + outside)).max(60.)
+            } else {
+                (viewport * (7. + outside)).max(200.)
+            }
+        };
+        let text = layout.text_bounds;
+        let before = (self.scroll_top, self.scroll_left);
+        let position = if outside.vertical() {
+            let line_height = layout.metrics.line_height;
+            let lines = speed(
+                layout.bounds.size.height / line_height,
+                distance / line_height,
+            );
+            let delta = line_height * lines * elapsed;
+            // The edge line, in the last frame's layout.
+            let max = self.snapshot.max_point_utf16();
+            if outside == DragOutside::Above {
+                self.scroll_top -= delta;
+                let top = self.position_for_point(point(text.left(), text.top()), window, cx);
+                PointUtf16::new(top.row, 0)
+            } else {
+                self.scroll_top += delta;
+                // At the mouse's x on the last visible line; the end of
+                // the text once that's the last line.
+                let edge = point(mouse.x.max(text.left()), text.bottom() - px(0.1));
+                let bottom = self.position_for_point(edge, window, cx);
+                if bottom.row >= max.row { max } else { bottom }
+            }
+        } else {
+            // Monaco uses the font's full-width character width.
+            let char_width = layout.metrics.em_width * 2.;
+            let chars = speed(text.size.width / char_width, distance / char_width);
+            let delta = char_width * chars * elapsed * 0.5;
+            if outside == DragOutside::Left {
+                self.scroll_left -= delta;
+                PointUtf16::new(row, 0)
+            } else {
+                self.scroll_left += delta;
+                PointUtf16::new(row, self.snapshot.rope().line_len_utf16(row))
+            }
+        };
+        self.clamp_scroll();
+        if before != (self.scroll_top, self.scroll_left) {
+            cx.emit(CodeEditorEvent::ScrollChanged);
+        }
+        self.extend_mouse_selection(position, mouse, cx);
+        cx.notify();
+        true
+    }
+
     fn on_mouse_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.scrollbar_arrow_task = None;
         let mut drop_target = None;
@@ -3602,6 +3976,7 @@ impl CodeEditor {
         }
         self.minimap_drag = None;
         self.mouse_selection = None;
+        self.drag_scroll = None;
         self.scrollbar_drag = None;
     }
 
@@ -3663,6 +4038,19 @@ impl CodeEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Widgets that keep the wheel: it scrolls them (GPUI's scrollable
+        // elements don't stop it), never the editor.
+        if self.wheel_over_widget(event.position) {
+            cx.stop_propagation();
+            return;
+        }
+        self.scroll_by_wheel(event, cx);
+    }
+
+    /// Scrolls by a wheel event, as over the text (Monaco
+    /// `delegateScrollFromMouseWheelEvent`, e.g. for the diff editor's
+    /// gutter).
+    pub(crate) fn scroll_by_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
         let line_height = self
             .layout
             .as_ref()
@@ -5074,7 +5462,8 @@ impl Render for CodeEditor {
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            // Mouse moves are `EditorElement`'s, to follow drags out of the
+            // editor.
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel));
         // Monaco `setBanner`: the banner takes its height off the top.
         match self.banner.clone() {
@@ -5091,6 +5480,68 @@ impl Render for CodeEditor {
                 ),
             None => root.child(EditorElement::new(cx.entity())),
         }
+    }
+}
+
+/// Options for an input in one of the editor's widgets (find, replace,
+/// quick input, rename): [`EditorOptions::single_line_input`] without the
+/// language features, since Monaco's are plain `<input>`s (no suggestions,
+/// ghost text, hovers, highlights, links, lenses or lightbulb), in the UI
+/// font at 13px (Monaco's `findWidget.css` and `quickInput.css`).
+pub(crate) fn widget_input_options() -> EditorOptions {
+    use crate::options::*;
+    EditorOptions {
+        font_family: ".SystemUIFont".into(),
+        font_size: px(13.),
+        quick_suggestions: QuickSuggestions::OFF,
+        suggest_on_trigger_characters: false,
+        word_based_suggestions: WordBasedSuggestions::Off,
+        snippet_suggestions: None,
+        tab_completion: TabCompletion::Off,
+        parameter_hints: ParameterHintsOptions {
+            enabled: false,
+            ..Default::default()
+        },
+        inline_suggest: InlineSuggestOptions {
+            enabled: false,
+            ..Default::default()
+        },
+        hover: HoverOptions {
+            enabled: HoverEnabled::Off,
+            ..Default::default()
+        },
+        inlay_hints: InlayHintsOptions {
+            enabled: InlayHintsMode::Off,
+            ..Default::default()
+        },
+        lightbulb: LightbulbMode::Off,
+        code_lens: false,
+        links: false,
+        occurrences_highlight: OccurrencesHighlight::Off,
+        selection_highlight: false,
+        format_on_type: false,
+        linked_editing: false,
+        semantic_highlighting: SemanticHighlighting::Off,
+        bracket_pair_colorization: BracketPairColorizationOptions {
+            enabled: false,
+            ..Default::default()
+        },
+        unicode_highlight: UnicodeHighlightOptions {
+            non_basic_ascii: false,
+            invisible_characters: false,
+            ambiguous_characters: false,
+            ..Default::default()
+        },
+        drop_into_editor: DropIntoEditorOptions {
+            enabled: false,
+            ..Default::default()
+        },
+        paste_as: PasteAsOptions {
+            enabled: false,
+            ..Default::default()
+        },
+        drag_and_drop: false,
+        ..EditorOptions::single_line_input()
     }
 }
 

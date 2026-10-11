@@ -40,11 +40,14 @@ editor.update(cx, |editor, cx| {
             position: PointUtf16::new(15, 4),
             preference: vec![ContentWidgetPreference::Above, ContentWidgetPreference::Below],
             view: label.into(),
+            allow_editor_overflow: false,
         },
         cx,
     )
 });
 ```
+
+A content widget is clipped to the text area and paints under the sticky scroll, as in Monaco. With `allow_editor_overflow` (Monaco `allowEditorOverflow`), it can extend past the editor into the rest of the window instead: it paints above everything else, fits above or below its line against the window, and takes the mouse from whatever is under it. The editor's hover, suggest widget, parameter hints, code action menu, rename box and messages work this way, so they show in full in a short editor.
 
 To move a widget, call `set_content_widget_position(id, position, cx)`.
 
@@ -61,11 +64,21 @@ use gpui_monaco::{OverlayPosition, OverlayWidget};
 
 editor.update(cx, |editor, cx| {
     editor.add_overlay_widget(
-        OverlayWidget { position: OverlayPosition::TopRight, view: badge.into() },
+        OverlayWidget {
+            position: OverlayPosition::TopRight,
+            view: badge.into(),
+            allow_editor_overflow: false,
+        },
         cx,
     )
 });
 ```
+
+Overlay widgets paint above the text, the sticky scroll and the other widgets, clipped to the editor unless `allow_editor_overflow` is set (then they're kept inside the window, like the context menu).
+
+## The mouse over widgets
+
+Widgets get their own clicks: the editor doesn't take focus, move the cursor, open its context menu or start middle-click scrolling under them. The wheel over an overlay widget, an overflowing widget or a zone widget (the peek view, the problem zone) scrolls the widget if it can and never the editor, as Monaco's are outside its scrollable element. Plain view zones, content widgets and glyph margin widgets are part of the text, so the wheel over them scrolls the editor. Parts of zones and widgets scrolled out of the editor, or under the sticky scroll and scrollbars, take no clicks.
 
 ## Glyph margin widgets
 

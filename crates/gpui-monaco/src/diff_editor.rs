@@ -2022,6 +2022,32 @@ impl DiffEditor {
         }
     }
 
+    /// Dragging the sash resizes the split.
+    fn drag_sash(&mut self, event: &gpui::MouseMoveEvent, cx: &mut Context<Self>) {
+        if !self.dragging_sash {
+            return;
+        }
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.dragging_sash = false;
+            cx.notify();
+            return;
+        }
+        let bounds = self.bounds.get();
+        if bounds.size.width > px(0.) {
+            self.ratio = ((event.position.x - bounds.left()) / bounds.size.width).clamp(0.1, 0.9);
+            cx.notify();
+        }
+    }
+
+    /// Monaco `gutterFeature.ts`'s `delegateScrollFromMouseWheelEvent`: the
+    /// wheel over the gutter (or the moved-lines column) scrolls the
+    /// modified editor, which the original follows.
+    fn delegate_wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        self.modified
+            .update(cx, |editor, cx| editor.scroll_by_wheel(event, cx));
+    }
+
     /// Monaco `MovedBlocksLinesFeature`: a column between the sides with a
     /// line from each moved block to where it went.
     fn render_move_lines(&self, cx: &App) -> Option<gpui::AnyElement> {
@@ -2873,6 +2899,7 @@ impl DiffEditor {
                     this.gutter_hovered = *hovered;
                     cx.notify();
                 }))
+                .on_scroll_wheel(cx.listener(|this, event, _, cx| this.delegate_wheel(event, cx)))
                 .children(items)
                 .into_any_element(),
         )
@@ -3614,7 +3641,48 @@ impl Render for DiffEditor {
             .absolute()
             .size_0()
         });
-        let move_lines = (!self.inline).then(|| self.render_move_lines(cx)).flatten();
+        // Dragging the sash follows the mouse anywhere in the window, not
+        // just over the diff editor.
+        let sash_listener = self.dragging_sash.then(|| {
+            let this = cx.entity().downgrade();
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let moves = this.clone();
+                    window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                        if phase != gpui::DispatchPhase::Capture {
+                            return;
+                        }
+                        moves.update(cx, |this, cx| this.drag_sash(event, cx)).ok();
+                    });
+                    let ups = this.clone();
+                    window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
+                        if phase == gpui::DispatchPhase::Capture {
+                            ups.update(cx, |this, cx| {
+                                this.dragging_sash = false;
+                                cx.notify();
+                            })
+                            .ok();
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .size_0()
+        });
+        let move_lines = (!self.inline)
+            .then(|| self.render_move_lines(cx))
+            .flatten()
+            .map(|lines| {
+                div()
+                    .id("diff-move-lines")
+                    .h_full()
+                    .flex_none()
+                    .on_scroll_wheel(
+                        cx.listener(|this, event, _, cx| this.delegate_wheel(event, cx)),
+                    )
+                    .child(lines)
+            });
         let bounds = self.bounds.clone();
         let ratio = self.ratio.clamp(0.1, 0.9);
         let border = self.modified.read(cx).colors().widget_border;
@@ -3684,28 +3752,7 @@ impl Render for DiffEditor {
                     this.accessible_diff_viewer_prev(window, cx)
                 }),
             )
-            // Dragging the sash resizes the split.
-            .on_mouse_move(
-                cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
-                    if !this.dragging_sash {
-                        return;
-                    }
-                    if event.pressed_button != Some(MouseButton::Left) {
-                        this.dragging_sash = false;
-                        return;
-                    }
-                    let bounds = this.bounds.get();
-                    if bounds.size.width > px(0.) {
-                        this.ratio = ((event.position.x - bounds.left()) / bounds.size.width)
-                            .clamp(0.1, 0.9);
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _: &gpui::MouseUpEvent, _, _| this.dragging_sash = false),
-            )
+            .children(sash_listener)
             .child(
                 canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
                     .absolute()
@@ -3731,6 +3778,7 @@ impl Render for DiffEditor {
                                 cx.listener(|this, _, _, cx| {
                                     this.dragging_sash = true;
                                     cx.stop_propagation();
+                                    cx.notify();
                                 }),
                             )
                         }),

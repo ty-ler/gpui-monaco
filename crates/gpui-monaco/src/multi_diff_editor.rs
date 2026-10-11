@@ -164,12 +164,14 @@ impl MultiDiffEditor {
             _ if document.original_label.is_some() => FileStatus::Renamed,
             _ => FileStatus::Modified,
         };
+        // Placeholders for a missing side are the editor's own, not listed
+        // models.
         let original = document
             .original
-            .unwrap_or_else(|| cx.new(|_| TextModel::new("")));
+            .unwrap_or_else(|| cx.new(|_| TextModel::new_internal("")));
         let modified = document
             .modified
-            .unwrap_or_else(|| cx.new(|_| TextModel::new("")));
+            .unwrap_or_else(|| cx.new(|_| TextModel::new_internal("")));
         let options = self.item_options();
         let diff = cx.new(|cx| {
             let mut diff = DiffEditor::new(original, modified, window, cx);

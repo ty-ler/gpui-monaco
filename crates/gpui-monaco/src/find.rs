@@ -1480,6 +1480,7 @@ impl CodeEditor {
                     OverlayWidget {
                         position: OverlayPosition::TopRight,
                         view: widget.clone().into(),
+                        allow_editor_overflow: false,
                     },
                     cx,
                 );

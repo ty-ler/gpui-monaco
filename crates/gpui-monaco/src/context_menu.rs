@@ -21,7 +21,7 @@ use crate::actions::{
 };
 use crate::cursor::Selection;
 use crate::editor::CodeEditor;
-use crate::widgets::{OverlayPosition, OverlayWidget, WidgetId};
+use crate::widgets::{OverlayPosition, WidgetId};
 
 /// The key context of the context menu.
 pub const CONTEXT_MENU_KEY_CONTEXT: &str = "EditorContextMenu";
@@ -180,6 +180,8 @@ pub struct ContextMenu {
     submenu: Option<(usize, Option<usize>)>,
     focus: FocusHandle,
     colors: crate::theme::EditorColors,
+    /// The window's height: the list scrolls past it.
+    max_height: Pixels,
 }
 
 impl ContextMenu {
@@ -390,7 +392,11 @@ impl<E: Styled> ActiveRow for E {
 impl Render for ContextMenu {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entries = self.entries.clone();
-        let menu = self.render_entries(&entries, self.active, None, cx);
+        let menu = div()
+            .id("context-menu-list")
+            .max_h(self.max_height)
+            .overflow_y_scroll()
+            .child(self.render_entries(&entries, self.active, None, cx));
         let submenu = self.submenu.and_then(|(ix, active)| match &entries[ix] {
             Entry::Submenu { entries, .. } => {
                 // Beside its row.
@@ -571,18 +577,21 @@ impl CodeEditor {
                 None => layout.text_bounds.origin,
             }
         });
-        // Keep it inside the editor, flipping up or left as Monaco's
-        // context view does at the window edges.
-        let bounds = layout.bounds;
-        let height = menu_height(&entries);
+        // Monaco's context view: in the window, not just the editor,
+        // flipping up or left at its edges, and scrolling when it's taller
+        // than the window.
+        let viewport = window.viewport_size();
+        let max_height = viewport.height;
+        let height = menu_height(&entries).min(max_height);
         let width = px(MENU_WIDTH);
-        let mut offset = anchor - bounds.origin;
-        if anchor.y + height > bounds.bottom() {
-            offset.y = (offset.y - height).max(px(0.));
+        let mut origin = anchor;
+        if anchor.y + height > viewport.height {
+            origin.y = (anchor.y - height).max(px(0.));
         }
-        if anchor.x + width > bounds.right() {
-            offset.x = (offset.x - width).max(px(0.));
+        if anchor.x + width > viewport.width {
+            origin.x = (anchor.x - width).max(px(0.));
         }
+        let offset = origin - layout.bounds.origin;
         let focus = cx.focus_handle();
         let colors = self.theme.colors.clone();
         let editor = cx.entity().downgrade();
@@ -593,12 +602,12 @@ impl CodeEditor {
             submenu: None,
             focus: focus.clone(),
             colors,
+            max_height,
         });
-        let id = self.add_overlay_widget(
-            OverlayWidget {
-                position: OverlayPosition::Custom(offset),
-                view: menu.clone().into(),
-            },
+        let id = self.add_overflow_overlay_widget(
+            OverlayPosition::Custom(offset),
+            menu.clone().into(),
+            crate::widgets::layer::MENU,
             cx,
         );
         self.context_menu.menu = Some((menu, id));

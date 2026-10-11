@@ -479,7 +479,7 @@ impl CodeEditor {
     /// Asks for inline completions now (Monaco
     /// `editor.action.inlineSuggest.trigger`, Alt+\).
     pub fn trigger_inline_suggest(&mut self, cx: &mut Context<Self>) {
-        if self.options.read_only {
+        if self.options.read_only || self.widget_input {
             return;
         }
         self.inline.active = true;
@@ -635,6 +635,10 @@ impl CodeEditor {
         options: FetchOptions,
         cx: &mut Context<Self>,
     ) {
+        // Widget inputs are plain inputs in Monaco.
+        if self.widget_input {
+            return;
+        }
         let model = self.model().read(cx);
         let version = model.buffer().version();
         let position = self.cursors.primary().position;
@@ -2167,9 +2171,11 @@ impl CodeEditor {
                     ContentWidgetPreference::Below,
                 ],
                 view: view.clone().into(),
+                allow_editor_overflow: true,
             },
             cx,
         );
+        self.widgets.set_layer(id, crate::widgets::layer::WIDGET);
         self.inline.toolbar = Some((view, id));
     }
 

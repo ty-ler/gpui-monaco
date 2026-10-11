@@ -28,7 +28,6 @@ use crate::cursor::Selection;
 use crate::decorations::{DecorationId, DecorationOptions, OverviewRulerLane};
 use crate::editor::{CodeEditor, CodeEditorEvent, ViewState};
 use crate::model::TextModelEvent;
-use crate::options::EditorOptions;
 use crate::outline::flatten_symbols;
 use crate::providers::{DocumentSymbol, SymbolKind};
 use crate::view::reveal::RevealType;
@@ -127,6 +126,8 @@ pub struct QuickInput {
     active: Option<usize>,
     scroll: usize,
     visible_rows: usize,
+    /// Wheel movement not yet a whole row.
+    wheel_remainder: Pixels,
     width: Pixels,
     /// Monaco's title bar above the input (quick picks).
     title: Option<SharedString>,
@@ -210,9 +211,7 @@ impl QuickInput {
     ) -> Self {
         let colors = theme.colors.clone();
         let input = cx.new(|cx| {
-            let mut input = CodeEditor::with_text(value, window, cx);
-            input.update_options(EditorOptions::single_line_input(), cx);
-            input.set_theme(theme, cx);
+            let mut input = CodeEditor::new_widget_input(value, theme, window, cx);
             let end = PointUtf16::new(0, value.encode_utf16().count() as u32);
             input.set_selections(&[Selection::collapsed(end)], cx);
             input
@@ -238,6 +237,7 @@ impl QuickInput {
             rows,
             active: None,
             scroll: 0,
+            wheel_remainder: px(0.),
             visible_rows,
             width,
             title: None,
@@ -546,7 +546,30 @@ impl Render for QuickInput {
                         .child(self.input.clone()),
                 ),
             )
-            .child(div().pb(px(4.)).children(rows))
+            .child(
+                div()
+                    .id("quick-rows")
+                    .pb(px(4.))
+                    .on_scroll_wheel(cx.listener(|this, event, _, cx| this.scroll_wheel(event, cx)))
+                    .children(rows),
+            )
+    }
+}
+
+impl QuickInput {
+    /// Monaco's list scrolls with the wheel, which it consumes.
+    fn scroll_wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        let row = px(ROW_HEIGHT);
+        let delta = event.delta.pixel_delta(row).y + self.wheel_remainder;
+        let rows = (delta / row).trunc();
+        self.wheel_remainder = delta - row * rows;
+        let max = self.rows.len().saturating_sub(self.visible_rows);
+        let scroll = (self.scroll as f32 - rows).clamp(0., max as f32) as usize;
+        if scroll != self.scroll {
+            self.scroll = scroll;
+            cx.notify();
+        }
     }
 }
 
@@ -627,6 +650,7 @@ impl CodeEditor {
             OverlayWidget {
                 position: OverlayPosition::TopCenter,
                 view: widget.clone().into(),
+                allow_editor_overflow: false,
             },
             cx,
         );

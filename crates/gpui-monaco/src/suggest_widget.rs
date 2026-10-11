@@ -190,6 +190,10 @@ pub struct SuggestWidget {
     details_scroll: gpui::ScrollHandle,
     /// The scroll position asked for, kept until layout can clamp it.
     details_scroll_top: Pixels,
+    /// The room it has in the window (it overflows the editor).
+    pub(crate) room: crate::widgets::OverflowRoomCell,
+    /// Wheel movement not yet a whole row.
+    wheel_remainder: Pixels,
 }
 
 /// A short glyph per kind, standing in for Monaco's codicons, in the
@@ -325,6 +329,8 @@ impl SuggestWidget {
             scroll: 0,
             details_scroll: gpui::ScrollHandle::new(),
             details_scroll_top: px(0.),
+            room: Default::default(),
+            wheel_remainder: px(0.),
         };
         this.keep_selected_visible(cx);
         this
@@ -410,7 +416,9 @@ impl SuggestWidget {
     }
 
     /// The list's size: the resized one, or Monaco's default of 12 rows,
-    /// shrunk to the rows there are.
+    /// shrunk to the rows there are and to the room above or below the
+    /// cursor in the window (Monaco `_layout`'s `maxHeightAbove` and
+    /// `maxHeightBelow`).
     fn list_size(&self, cx: &App) -> Size<Pixels> {
         let item_height = self.metrics.item_height;
         let status = self.status_bar_height();
@@ -419,10 +427,56 @@ impl SuggestWidget {
         let wanted = stored.unwrap_or(default);
         let full = status + item_height * self.state.rows.len().max(1) as f32;
         let min = status + item_height;
+        // Whole rows, less the border.
+        let room = self.room.get().map_or(full, |room| {
+            let rows = ((room.max_height() - status - px(2.)) / item_height).floor();
+            status + item_height * rows.max(1.)
+        });
         size(
             wanted.width.max(px(MIN_WIDTH)),
-            wanted.height.min(full).max(min),
+            wanted.height.min(full).min(room).max(min),
         )
+    }
+
+    /// Monaco's list consumes the wheel (`alwaysConsumeMouseWheel`) and
+    /// scrolls by it.
+    fn scroll_wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        let item_height = self.metrics.item_height;
+        let delta = event.delta.pixel_delta(item_height).y + self.wheel_remainder;
+        let rows = (delta / item_height).trunc();
+        self.wheel_remainder = delta - item_height * rows;
+        let max = self.state.rows.len().saturating_sub(self.visible_rows(cx));
+        let scroll = (self.scroll as f32 - rows).clamp(0., max as f32) as usize;
+        if scroll != self.scroll {
+            self.scroll = scroll;
+            cx.notify();
+        }
+    }
+
+    /// Monaco's list scrollbar: a slider while not every row fits.
+    fn render_scrollbar(&self, visible: usize) -> Option<impl IntoElement + use<>> {
+        let count = self.state.rows.len();
+        if count <= visible {
+            return None;
+        }
+        let height = self.metrics.item_height * visible as f32;
+        let thumb = (height * (visible as f32 / count as f32)).max(px(10.));
+        let top = (height - thumb) * (self.scroll as f32 / (count - visible) as f32);
+        Some(
+            div()
+                .absolute()
+                .right_0()
+                .top(top)
+                .w(px(10.))
+                .h(thumb)
+                .bg(self.theme.colors.scrollbar_slider),
+        )
+    }
+
+    /// The first row shown.
+    pub(crate) fn first_visible_row(&self) -> usize {
+        self.scroll
     }
 
     /// Rows that fit in the list.
@@ -808,7 +862,16 @@ impl Render for SuggestWidget {
             .h(list_size.height + px(2.))
             .flex()
             .flex_col()
-            .child(div().flex_1().overflow_hidden().children(rows))
+            .child(
+                div()
+                    .id("suggest-rows")
+                    .relative()
+                    .flex_1()
+                    .overflow_hidden()
+                    .on_scroll_wheel(cx.listener(|this, event, _, cx| this.scroll_wheel(event, cx)))
+                    .children(rows)
+                    .children(self.render_scrollbar(visible)),
+            )
             .when(self.options.show_status_bar, |this| {
                 this.child(self.render_status_bar(show_details))
             })
@@ -835,7 +898,14 @@ impl Render for SuggestWidget {
         // Monaco places the details east of the list, else west, else
         // below; here east when it fits, else below.
         let details = show_details.then(|| self.render_details(cx)).flatten();
-        let beside = self.metrics.available_width.is_none_or(|available| {
+        // The room right of the cursor in the window, as the list may
+        // overflow the editor.
+        let available = self
+            .room
+            .get()
+            .map(|room| room.right)
+            .or(self.metrics.available_width);
+        let beside = available.is_none_or(|available| {
             list_size.width + px(DETAILS_WIDTH + HORIZONTAL_PADDING) <= available
         });
         div()

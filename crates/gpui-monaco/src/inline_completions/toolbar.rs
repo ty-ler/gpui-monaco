@@ -13,6 +13,10 @@ use gpui::{
 };
 
 use crate::editor::CodeEditor;
+
+/// The More Actions menu paints above the editor's overflowing widgets,
+/// the hover included.
+const MENU_PRIORITY: usize = 1000;
 use crate::options::InlineSuggestShowToolbar;
 use crate::theme::Theme;
 
@@ -224,9 +228,7 @@ impl Render for InlineToolbar {
         );
         let menu = self.menu_open.then(|| {
             let mut menu = div()
-                .absolute()
-                .top_full()
-                .right(px(0.))
+                .occlude()
                 .mt(px(2.))
                 .py(px(4.))
                 .min_w(px(180.))
@@ -269,7 +271,18 @@ impl Render for InlineToolbar {
                     cx,
                 ));
             }
-            menu
+            // Monaco's More Actions menu is a context menu outside the
+            // widget: a popup above everything (the hover card around an
+            // on-hover toolbar would clip it), taking the mouse.
+            div().absolute().top_full().right(px(0.)).child(
+                gpui::deferred(
+                    gpui::anchored()
+                        .anchor(gpui::Anchor::TopRight)
+                        .snap_to_window()
+                        .child(menu),
+                )
+                .with_priority(MENU_PRIORITY),
+            )
         });
         div()
             .id("inline-toolbar")
