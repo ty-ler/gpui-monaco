@@ -828,3 +828,37 @@ fn cursor_options_from_editor_options(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("backspace");
     assert_eq!(text(&editor, cx), "       x");
 }
+
+#[gpui::test]
+fn insert_final_new_line(cx: &mut TestAppContext) {
+    let (editor, cx) = editor_with_text("a\nbc", cx);
+    let run = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            editor.update(cx, |e, cx| {
+                e.run_action("editor.action.insertFinalNewLine", window, cx)
+            })
+        });
+        cx.run_until_parked();
+    };
+    // Monaco keeps the selection, even at the end of the document.
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(2, 3))], cx)
+    });
+    run(&editor, cx);
+    assert_eq!(text(&editor, cx), "a\nbc\n");
+    assert_eq!(heads(&editor, cx), vec![(2, 3)]);
+    // Monaco inserts one even after an empty last line.
+    run(&editor, cx);
+    assert_eq!(text(&editor, cx), "a\nbc\n\n");
+    // One undo step each.
+    cx.simulate_keystrokes("secondary-z");
+    assert_eq!(text(&editor, cx), "a\nbc\n");
+    // Not in a read-only editor.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.read_only = true;
+        e.update_options(options, cx);
+    });
+    run(&editor, cx);
+    assert_eq!(text(&editor, cx), "a\nbc\n");
+}

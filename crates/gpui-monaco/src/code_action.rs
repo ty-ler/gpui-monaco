@@ -801,6 +801,36 @@ impl CodeEditor {
         );
     }
 
+    /// Monaco's `editor.action.codeAction` command: the code actions of
+    /// `args.kind` (every action with a kind, source actions included,
+    /// when unset), applied as `args.apply` says (`"ifSingle"` by default).
+    pub fn code_action_with_args(&mut self, args: &TriggerCodeAction, cx: &mut Context<Self>) {
+        let apply = match args.apply.as_deref().map(str::to_lowercase).as_deref() {
+            Some("first") => CodeActionAutoApply::First,
+            Some("never") => CodeActionAutoApply::Never,
+            _ => CodeActionAutoApply::IfSingle,
+        };
+        let message = match (&args.kind, args.preferred) {
+            (Some(kind), true) => format!("No preferred code actions for '{kind}' available"),
+            (Some(kind), false) => format!("No code actions for '{kind}' available"),
+            (None, true) => "No preferred code actions available".to_string(),
+            (None, false) => "No code actions available".to_string(),
+        };
+        self.trigger_code_actions(
+            CodeActionFilter {
+                // Monaco's default is the empty kind, which keeps every
+                // action that has a kind.
+                include: Some(CodeActionKind::new(args.kind.clone().unwrap_or_default())),
+                include_source_actions: true,
+                only_preferred: args.preferred,
+                ..Default::default()
+            },
+            apply,
+            message,
+            cx,
+        );
+    }
+
     /// The lightbulb was clicked: its actions in the menu.
     pub(crate) fn show_lightbulb_menu(&mut self, cx: &mut Context<Self>) {
         let Some(lightbulb) = self.code_actions.lightbulb.clone() else {

@@ -178,6 +178,18 @@ has_provider!(
 );
 has_provider!(can_rename, writable, rename_providers);
 has_provider!(can_code_action, writable, code_action_providers);
+has_provider!(has_code_lens, code_lens_providers);
+
+/// Monaco `findWidgetVisible`.
+fn find_visible(editor: &CodeEditor, _: &App) -> bool {
+    editor.is_find_visible()
+}
+
+/// Monaco's `hasDefinitionProvider` and not `isInEmbeddedEditor` (a peek
+/// view's preview).
+fn has_definition_not_embedded(editor: &CodeEditor, cx: &App) -> bool {
+    !editor.in_peek && has_definition(editor, cx)
+}
 
 /// Monaco's labelled editor actions that this editor implements.
 #[rustfmt::skip]
@@ -213,6 +225,8 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.startFindReplaceAction", "code_editor::StartFindReplace", "Replace", always),
     Builtin("editor.action.nextMatchFindAction", "code_editor::NextMatch", "Find Next", always),
     Builtin("editor.action.previousMatchFindAction", "code_editor::PreviousMatch", "Find Previous", always),
+    Builtin("editor.actions.findWithArgs", "code_editor::FindWithArgs", "Find with Arguments", always),
+    Builtin("editor.action.goToMatchFindAction", "code_editor::GoToMatch", "Go to Match...", find_visible),
     // Brackets, problems, highlights.
     Builtin("editor.action.jumpToBracket", "code_editor::JumpToBracket", "Go to Bracket", always),
     Builtin("editor.action.selectToBracket", "code_editor::SelectToBracket", "Select to Bracket", always),
@@ -284,6 +298,8 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.insertLineBefore", "code_editor::InsertLineBefore", "Insert Line Above", writable),
     Builtin("editor.action.linkedEditing", "code_editor::StartLinkedEditing", "Start Linked Editing", writable),
     Builtin("editor.action.triggerSuggest", "code_editor::TriggerSuggest", "Trigger Suggest", writable),
+    Builtin("editor.action.resetSuggestSize", "code_editor::ResetSuggestSize", "Reset Suggest Widget Size", always),
+    Builtin("editor.action.insertFinalNewLine", "code_editor::InsertFinalNewLine", "Insert Final New Line", writable),
     Builtin("editor.action.inlineSuggest.trigger", "code_editor::TriggerInlineSuggest", "Trigger Inline Suggestion", writable),
     Builtin("editor.action.triggerParameterHints", "code_editor::TriggerParameterHints", "Trigger Parameter Hints", has_signature_help),
     // Folding.
@@ -328,6 +344,8 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.autoFix", "code_editor::AutoFix", "Auto Fix...", can_code_action),
     Builtin("editor.action.revealDefinition", "code_editor::GoToDefinition", "Go to Definition", has_definition),
     Builtin("editor.action.peekDefinition", "code_editor::PeekDefinition", "Peek Definition", has_definition),
+    Builtin("editor.action.revealDefinitionAside", "code_editor::RevealDefinitionAside", "Open Definition to the Side", has_definition_not_embedded),
+    Builtin("codelens.showLensesInCurrentLine", "code_editor::ShowLensesInCurrentLine", "Show CodeLens Commands for Current Line", has_code_lens),
     Builtin("editor.action.revealDeclaration", "code_editor::GoToDeclaration", "Go to Declaration", has_declaration),
     Builtin("editor.action.peekDeclaration", "code_editor::PeekDeclaration", "Peek Declaration", has_declaration),
     Builtin("editor.action.goToTypeDefinition", "code_editor::GoToTypeDefinition", "Go to Type Definition", has_type_definition),
@@ -462,6 +480,13 @@ static COMMANDS: &[Command] = &[
     Command("selectPrevPageSuggestion", "code_editor::SelectPreviousPageSuggestion"),
     Command("selectFirstSuggestion", "code_editor::SelectFirstSuggestion"),
     Command("selectLastSuggestion", "code_editor::SelectLastSuggestion"),
+    Command("focusSuggestion", "code_editor::FocusSuggestion"),
+    Command("focusAndAcceptSuggestion", "code_editor::FocusAndAcceptSuggestion"),
+    Command("toggleExplainMode", "code_editor::ToggleExplainMode"),
+    Command("togglePeekWidgetFocus", "code_editor::TogglePeekWidgetFocus"),
+    // Monaco's alias for `revealDefinitionAside`.
+    Command("editor.action.openDeclarationToTheSide", "code_editor::RevealDefinitionAside"),
+    Command("editor.action.codeAction", "code_editor::TriggerCodeAction"),
     Command("closeParameterHints", "code_editor::CloseParameterHints"),
     Command("showNextParameterHint", "code_editor::ShowNextParameterHint"),
     Command("showPrevParameterHint", "code_editor::ShowPrevParameterHint"),
@@ -473,6 +498,14 @@ static COMMANDS: &[Command] = &[
     Command("editor.action.hideLongLineWarningHover", "code_editor::HideLongLineWarningHover"),
     Command("editor.action.inlineSuggest.toggleAlwaysShowToolbar", "code_editor::ToggleAlwaysShowInlineSuggestionToolbar"),
 ];
+
+/// The GPUI action name and precondition for the Monaco id `id`, labelled
+/// or not (unlabelled commands always run).
+pub(crate) fn action_name(id: &str) -> Option<(&'static str, Option<Precondition>)> {
+    builtin(id)
+        .map(|b| (b.1, Some(b.3)))
+        .or_else(|| command_action_name(id).map(|name| (name, None)))
+}
 
 /// The GPUI action name for the unlabelled Monaco command `id`.
 pub(crate) fn command_action_name(id: &str) -> Option<&'static str> {

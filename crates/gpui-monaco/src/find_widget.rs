@@ -123,10 +123,20 @@ impl FindWidget {
                 this.update(cx, |this, cx| this.update_history(cx)).ok();
             }));
         }
+        // Monaco `find.findOnType`: when off, Enter sends the search string.
+        let find_on_type = self.find_on_type(cx);
         self.update_options(cx, |options| {
-            options.query = query;
+            if find_on_type {
+                options.query = query;
+            }
             options.replace = replace;
         });
+    }
+
+    fn find_on_type(&self, cx: &gpui::App) -> bool {
+        self.editor
+            .upgrade()
+            .is_none_or(|editor| editor.read(cx).options().find.find_on_type)
     }
 
     fn update_options(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut FindOptions)) {
@@ -305,6 +315,10 @@ impl FindWidget {
         if self.replace_input.focus_handle(cx).is_focused(window) {
             self.with_editor(cx, |editor, cx| editor.replace_one(cx));
         } else {
+            if !self.find_on_type(cx) {
+                let query = Self::input_text(&self.find_input, cx);
+                self.update_options(cx, |options| options.query = query);
+            }
             self.with_editor(cx, |editor, cx| editor.find_next(cx));
         }
     }

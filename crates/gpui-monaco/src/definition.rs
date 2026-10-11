@@ -144,11 +144,13 @@ impl CodeEditor {
         self.definition.link.is_some()
     }
 
-    /// Follows the link under the mouse (Cmd/Ctrl+click). Returns whether
-    /// there was one.
+    /// Follows the link under the mouse (Cmd/Ctrl+click; with Alt, or Cmd/Ctrl
+    /// when Alt adds cursors, `open_to_side`). Returns whether there was
+    /// one.
     pub(crate) fn follow_definition_link(
         &mut self,
         position: PointUtf16,
+        open_to_side: bool,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some((range, _)) = self.definition.link.clone() else {
@@ -161,11 +163,17 @@ impl CodeEditor {
         // Monaco moves the cursor there and runs go to definition, without
         // a message when nothing is found.
         self.set_selections(&[Selection::collapsed(position)], cx);
+        // Monaco `definitionLinkOpensInPeek`, except in a peek view.
+        let open_in_peek =
+            !open_to_side && self.options.definition_link_opens_in_peek && !self.in_peek;
         self.navigate(
             crate::options::LocationKind::Definition,
-            false,
-            true,
-            true,
+            crate::goto::Navigation {
+                open_in_peek,
+                open_to_side,
+                mute_message: true,
+                allow_alternative: true,
+            },
             cx,
         );
         true

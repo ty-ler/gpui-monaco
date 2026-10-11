@@ -284,6 +284,9 @@ pub struct FindEditorOptions {
     /// Close the widget when Find Next/Previous from the find input lands
     /// on a match (Monaco `find.closeOnResult`, default `false`).
     pub close_on_result: bool,
+    /// Search as the find input is typed in (Monaco `find.findOnType`,
+    /// default `true`); when off, Enter searches.
+    pub find_on_type: bool,
 }
 
 impl Default for FindEditorOptions {
@@ -297,6 +300,7 @@ impl Default for FindEditorOptions {
             history: true,
             replace_history: true,
             close_on_result: false,
+            find_on_type: true,
         }
     }
 }
@@ -707,6 +711,24 @@ pub enum TabCompletion {
     OnlySnippets,
 }
 
+/// Monaco `suggest.selectionMode`: whether a suggestion is focused when
+/// the widget opens by itself (an explicit request, like Ctrl+Space, always
+/// focuses one).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SuggestSelectionMode {
+    /// Always focus a suggestion.
+    #[default]
+    Always,
+    /// Never: Enter and Tab then type as usual until a suggestion is
+    /// focused with the arrow keys or Ctrl+Space (Monaco `focusSuggestion`).
+    Never,
+    /// Only when a trigger character opened the widget.
+    WhenTriggerCharacter,
+    /// Only when typing a word opened the widget (quick suggestions), or
+    /// once more is typed after a trigger character.
+    WhenQuickSuggestion,
+}
+
 /// Monaco `editor.suggest`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SuggestOptions {
@@ -738,6 +760,12 @@ pub struct SuggestOptions {
     pub preview: bool,
     /// `previewMode`: how the preview relates to the typed text.
     pub preview_mode: InlineSuggestMode,
+    /// `selectionMode`: whether a suggestion is focused when the widget
+    /// opens by itself.
+    pub selection_mode: SuggestSelectionMode,
+    /// `snippetsPreventQuickSuggestions`: no quick suggestions while a
+    /// snippet is active (off).
+    pub snippets_prevent_quick_suggestions: bool,
 }
 
 impl Default for SuggestOptions {
@@ -756,6 +784,8 @@ impl Default for SuggestOptions {
             show_inline_details: true,
             preview: false,
             preview_mode: InlineSuggestMode::SubwordSmart,
+            selection_mode: SuggestSelectionMode::Always,
+            snippets_prevent_quick_suggestions: false,
         }
     }
 }
@@ -884,6 +914,17 @@ pub enum GoToLocation {
     GotoAndPeek,
     /// Go to the first; F4 goes to the next.
     Goto,
+}
+
+/// Monaco `peekWidgetDefaultFocus`: what has focus when a peek view
+/// opens.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PeekWidgetDefaultFocus {
+    /// The results list.
+    #[default]
+    Tree,
+    /// The preview editor.
+    Editor,
 }
 
 /// A symbol navigation command.
@@ -1369,6 +1410,12 @@ pub struct EditorOptions {
     pub suggest: SuggestOptions,
     /// Monaco `gotoLocation`.
     pub goto_location: GotoLocationOptions,
+    /// Monaco `peekWidgetDefaultFocus`.
+    pub peek_widget_default_focus: PeekWidgetDefaultFocus,
+    /// Monaco `definitionLinkOpensInPeek`: Cmd/Ctrl+click on a symbol
+    /// shows its definitions in a peek view instead of going there
+    /// (default `false`).
+    pub definition_link_opens_in_peek: bool,
     /// Monaco `lightbulb.enabled`.
     pub lightbulb: LightbulbMode,
     /// Monaco `inlayHints`.
@@ -1596,6 +1643,8 @@ impl Default for EditorOptions {
             snippet_suggestions: Some(crate::suggest::SnippetSortOrder::Inline),
             suggest: SuggestOptions::default(),
             goto_location: GotoLocationOptions::default(),
+            peek_widget_default_focus: PeekWidgetDefaultFocus::Tree,
+            definition_link_opens_in_peek: false,
             lightbulb: LightbulbMode::OnCode,
             inlay_hints: InlayHintsOptions::default(),
             parameter_hints: ParameterHintsOptions::default(),

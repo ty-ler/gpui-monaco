@@ -1299,6 +1299,18 @@ impl CodeEditor {
     /// Monaco `FindController._start`: shows the widget, seeds the search
     /// string, maybe scopes to the selections, and binds a fresh find model.
     fn find_start(&mut self, start: FindStart, window: &mut Window, cx: &mut Context<Self>) {
+        self.find_start_with(start, |_| {}, window, cx);
+    }
+
+    /// [`Self::find_start`] with Monaco's `newState`: changes to the find
+    /// state made before the search string is seeded.
+    fn find_start_with(
+        &mut self,
+        start: FindStart,
+        new_state: impl FnOnce(&mut FindOptions),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         use crate::options::AutoFindInSelection;
         // The widget's controller: `find.autoFindInSelection`.
         let selection = self.cursors.primary().selection();
@@ -1310,12 +1322,14 @@ impl CodeEditor {
             };
         self.stop_find_model(cx);
         let mut options = self.find.options.clone();
+        new_state(&mut options);
         match start.seed {
             SeedMode::Single => {
                 if let Some(seed) =
                     self.selection_search_string(false, start.seed_non_empty_only, cx)
                 {
-                    options.query = if options.is_regex {
+                    // Monaco escapes for the regex toggle as it was.
+                    options.query = if self.find.options.is_regex {
                         regex::escape(&seed)
                     } else {
                         seed
@@ -1453,6 +1467,97 @@ impl CodeEditor {
             window,
             cx,
         );
+    }
+
+    /// Opens find with `args` (Monaco `editor.actions.findWithArgs`): unset
+    /// fields keep their values, a replace string shows the replace input,
+    /// and `find_in_selection` searches in the selections. As in Monaco, an
+    /// empty search string is first seeded from the selection or the word
+    /// at the cursor, which wins over `args.search_string`.
+    pub fn find_with_args(
+        &mut self,
+        args: &crate::actions::FindWithArgs,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::options::SeedSearchString;
+        let option = self.options.find.seed_search_string_from_selection;
+        let seed = if self.find.options.query.is_empty() && option != SeedSearchString::Never {
+            SeedMode::Single
+        } else {
+            SeedMode::None
+        };
+        let args = args.clone();
+        self.find_start_with(
+            FindStart {
+                force_reveal_replace: args.replace_string.is_some(),
+                seed,
+                seed_non_empty_only: option == SeedSearchString::Selection,
+                focus: StartFocus::FindInput,
+                update_search_scope: args.find_in_selection,
+            },
+            move |options| {
+                if let Some(query) = args.search_string {
+                    options.query = query;
+                }
+                if let Some(replace) = args.replace_string {
+                    options.replace = replace;
+                }
+                if let Some(is_regex) = args.is_regex {
+                    options.is_regex = is_regex;
+                }
+                if let Some(whole_word) = args.match_whole_word {
+                    options.whole_word = whole_word;
+                }
+                if let Some(match_case) = args.is_case_sensitive {
+                    options.match_case = match_case;
+                }
+                if let Some(preserve_case) = args.preserve_case {
+                    options.preserve_case = preserve_case;
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// The number of matches, as the find widget counts them.
+    pub fn find_matches_count(&self) -> usize {
+        self.find.matches_count
+    }
+
+    /// Asks for a match number in the quick input and selects that match
+    /// (Monaco `editor.action.goToMatchFindAction`, "Go to Match..."): 1 is
+    /// the first, -1 the last. Needs the find widget open.
+    pub fn go_to_match(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.find.visible {
+            return;
+        }
+        if self.find.matches_count < 1 {
+            // Monaco shows this as a warning notification.
+            let position = self.cursors.primary().position;
+            self.show_message(
+                "No matches. Try searching for something else.",
+                position,
+                cx,
+            );
+            return;
+        }
+        self.open_go_to_match(window, cx);
+    }
+
+    /// Monaco's `toFindMatchIndex` for the "Go to Match..." input: a
+    /// 0-based match index for `value` (1-based, or negative from the end).
+    pub(crate) fn find_match_index(&self, value: &str) -> Option<usize> {
+        let count = self.find.matches_count as i64;
+        let index = parse_int(value)?;
+        if index > 0 && index <= count {
+            Some((index - 1) as usize)
+        } else if index < 0 && index >= -count {
+            Some((count + index) as usize)
+        } else {
+            None
+        }
     }
 
     /// Opens find with the selection, even over several lines, as the
@@ -1675,5 +1780,33 @@ impl CodeEditor {
             self.find.matches_position,
             self.find.matches_count,
         )
+    }
+}
+
+/// JavaScript's `parseInt(value)` for base 10: an optional sign and the
+/// digits that follow, after leading whitespace; `None` without digits.
+fn parse_int(value: &str) -> Option<i64> {
+    let value = value.trim_start();
+    let (sign, rest) = match value.strip_prefix('-') {
+        Some(rest) => (-1, rest),
+        None => (1, value.strip_prefix('+').unwrap_or(value)),
+    };
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse::<i64>().ok().map(|n| sign * n)
+}
+
+#[cfg(test)]
+mod parse_int_tests {
+    use super::parse_int;
+
+    #[test]
+    fn parses_like_javascript() {
+        assert_eq!(parse_int("12"), Some(12));
+        assert_eq!(parse_int(" -3x"), Some(-3));
+        assert_eq!(parse_int("+4"), Some(4));
+        assert_eq!(parse_int("4.9"), Some(4));
+        assert_eq!(parse_int(""), None);
+        assert_eq!(parse_int("abc"), None);
+        assert_eq!(parse_int("-"), None);
     }
 }

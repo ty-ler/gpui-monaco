@@ -39,6 +39,7 @@ Issues are linked by number.
 | Indentation detection and conversion commands | `indentation` | ✅ | #197 |
 | Line operations: move, copy, delete, insert, indent | `linesOperations` | ✅ | |
 | Sort, join, reverse, transpose, case transforms, delete duplicates, trim whitespace | `linesOperations`, `caretOperations` | ✅ | #80 |
+| Insert final new line | `insertFinalNewLine` | ✅ | #202 |
 | In-place replace | `inPlaceReplace` | ✅ | #80 |
 | Toggle line and block comments | `comment` | ✅ | #79 |
 | Smart select (expand and shrink) | `smartSelect` | ✅ | #82 |
@@ -50,6 +51,7 @@ Issues are linked by number.
 | Find/replace: case, word, regex, in selection, replace all | `find` | ✅ | |
 | Find model (Monaco's `FindModel`), preserve case, case escapes in replace, loop, seed and auto find in selection options | `find` | ✅ | #104 |
 | Find controller commands, history, extra space on top, widget width and states, remembered toggles | `find` | ✅ | #104 |
+| Find with arguments, go to match, `findOnType` | `find` | 🟡 no multi-line search inputs | #202 |
 | Bracket matching and jump | `bracketMatching` | ✅ `always`/`near`/`never`, overview ruler mark | #195 |
 
 ## View
@@ -105,18 +107,22 @@ Issues are linked by number.
 | Completion: resolve, tags, insert/replace modes, word suggestions, accept and selection options | `suggest` | ✅ | #103 |
 | Completion: tab completion, locality bonus, retrigger rules | `suggest` | ✅ | #103 |
 | Completion widget: details toggle, side docs, resizing, status bar, loading and empty messages | `suggest` | ✅ | #103 |
+| Completion: `selectionMode` and `focusSuggestion`, explain mode, reset size, `snippetsPreventQuickSuggestions`, every item kind | `suggest` | 🟡 no `quickSuggestions: 'inline'`/`'offWhenInlineCompletions'`, details focus or `shareSuggestSelections` | #202 |
 | Hover | `hover` | ✅ content and gutter hovers, options, keyboard focus and scrolling, resizing, verbosity, copy button, long line warnings | #199 |
 | Signature help: overload cycling and arrows, `enabled`/`cycle` options, close and next/previous commands | `parameterHints` | ✅ | #200 |
 | Go to definition (link, F12) | `gotoSymbol` | ✅ | |
 | References, declaration, type definition, implementation, peek view | `gotoSymbol`, `peekView` | ✅ | #95 |
+| Open definition to the side (host event), peek focus toggle and default, resizable peek view, `definitionLinkOpensInPeek` | `gotoSymbol`, `peekView` | ✅ | #202 |
 | Diagnostics: squiggles, ruler, hover, F8 | `gotoError` | ✅ | |
 | Diagnostic tags (unused, deprecated), related information | `gotoError` | ✅ | #90 |
 | Document highlights | `wordHighlighter` | ✅ | #83 |
 | Formatting: document, range, on type, on paste | `format` | ✅ | #94 |
 | Rename | `rename` | ✅ | #56 |
 | Code actions and lightbulb (no AI actions, "Show Disabled" toggle, refactor preview or nearby quick fixes) | `codeAction` | ✅ | #56 |
+| The `editor.action.codeAction` command with `kind`, `apply` and `preferred` | `codeAction` | ✅ | #202 |
+| Rename suggestions (`NewSymbolNamesProvider`) | `rename` | ❌ | #202 |
 | Inlay hints: label parts, tooltips, Cmd/Ctrl+click, double-click edits, resolve, font options (no part context menu or location hovers) | `inlayHints` | ✅ | #56, #200 |
-| Code lens | `codelens` | ✅ | #96 |
+| Code lens | `codelens` | ✅ (and "Show CodeLens Commands for Current Line", #202) | #96 |
 | Color decorators (providers, default finder) | `colorDecorators` | ✅ | #97 |
 | Color picker (hover and standalone) | `colorPicker` | ✅ | #97 |
 | Links | `links` | ✅ | #93 |

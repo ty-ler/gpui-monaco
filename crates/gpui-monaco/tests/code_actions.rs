@@ -273,3 +273,112 @@ fn no_actions_and_disabled_ones_say_why(cx: &mut TestAppContext) {
     assert!(!editor.read_with(cx, |e, _| e.is_code_action_menu_visible()));
     assert!(editor.read_with(cx, |e, _| e.is_message_visible()));
 }
+
+fn code_action(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, args: serde_json::Value) {
+    cx.update(|window, cx| {
+        editor.update(cx, |e, cx| {
+            e.trigger_with_payload("editor.action.codeAction", args, window, cx)
+        })
+    })
+    .unwrap();
+    draw(cx);
+}
+
+#[gpui::test]
+fn the_code_action_command_takes_arguments(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: vec![
+            CodeAction {
+                edit: Some(replace(p(1, 4)..p(1, 5), "z")),
+                ..action("Fix it", "quickfix")
+            },
+            CodeAction {
+                is_preferred: true,
+                edit: Some(replace(p(1, 4)..p(1, 5), "w")),
+                ..action("Preferred fix", "quickfix")
+            },
+            CodeAction {
+                edit: Some(replace(p(0, 0)..p(0, 0), "use std;\n")),
+                ..action("Organize imports", "source.organizeImports")
+            },
+            action("No kind", ""),
+        ],
+        ..Default::default()
+    };
+    let contexts = provider.contexts.clone();
+    let (editor, cx) = setup(provider, cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 4))], cx)
+    });
+    let menu =
+        |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.is_code_action_menu_visible());
+    // Without arguments: every action with a kind, source actions too, in
+    // the menu since there are several (Monaco's default `ifSingle`).
+    code_action(&editor, cx, serde_json::json!({}));
+    assert!(menu(cx));
+    let rows = editor.read_with(cx, |e, cx| e.code_action_menu_rows(cx));
+    assert!(
+        rows.iter().any(|row| row.contains("Organize imports")),
+        "{rows:?}"
+    );
+    assert!(!rows.iter().any(|row| row.contains("No kind")), "{rows:?}");
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+
+    // Two quick fixes: the menu.
+    code_action(&editor, cx, serde_json::json!({ "kind": "quickfix" }));
+    assert!(menu(cx));
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    // `apply: first` applies the first (preferred ones sort first); case
+    // doesn't matter.
+    code_action(
+        &editor,
+        cx,
+        serde_json::json!({ "kind": "quickfix", "apply": "First" }),
+    );
+    assert!(!menu(cx));
+    assert_eq!(text(&editor, cx), "let x = 1;\nlet w = 2;\n");
+    assert_eq!(
+        contexts.borrow().last().unwrap().only,
+        Some("quickfix".into())
+    );
+
+    // `preferred` keeps only preferred ones.
+    code_action(
+        &editor,
+        cx,
+        serde_json::json!({ "kind": "quickfix", "preferred": true, "apply": "never" }),
+    );
+    let rows = editor.read_with(cx, |e, cx| e.code_action_menu_rows(cx));
+    assert!(
+        rows.iter().any(|row| row.contains("Preferred fix")),
+        "{rows:?}"
+    );
+    assert!(!rows.iter().any(|row| row.contains("Fix it")), "{rows:?}");
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+
+    // A single one is applied.
+    code_action(
+        &editor,
+        cx,
+        serde_json::json!({ "kind": "source.organizeImports" }),
+    );
+    assert_eq!(text(&editor, cx), "use std;\nlet x = 1;\nlet w = 2;\n");
+
+    // `apply: never` always shows the menu.
+    code_action(
+        &editor,
+        cx,
+        serde_json::json!({ "kind": "source", "apply": "never" }),
+    );
+    assert!(menu(cx));
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+
+    // Nothing of the kind: a message.
+    code_action(&editor, cx, serde_json::json!({ "kind": "refactor" }));
+    assert!(!menu(cx));
+    assert!(editor.read_with(cx, |e, _| e.is_message_visible()));
+}

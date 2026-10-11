@@ -74,7 +74,7 @@ editor.update(cx, |editor, cx| {
 | `suggest_selection` | `suggestSelection` | `First`, `RecentlyUsed` or `RecentlyUsedByPrefix` |
 | `word_based_suggestions` | `wordBasedSuggestions` | words of the current, matching-language or all registered documents when providers have nothing |
 | `snippet_suggestions` | `snippetSuggestions` | where snippets sort; `None` hides them |
-| `suggest` | `suggest.*` | `insert_mode`, `filter_graceful`, `match_on_word_start_only`, `show_deprecated`, `hidden_kinds`, `locality_bonus`, `font_size`, `line_height`, `show_icons`, `show_status_bar`, `show_inline_details` |
+| `suggest` | `suggest.*` | `insert_mode`, `filter_graceful`, `match_on_word_start_only`, `show_deprecated`, `hidden_kinds`, `locality_bonus`, `font_size`, `line_height`, `show_icons`, `show_status_bar`, `show_inline_details`, `preview`, `preview_mode`, `selection_mode` (whether a suggestion is focused when the list opens by itself: `Always`, `Never`, `WhenTriggerCharacter` or `WhenQuickSuggestion`), `snippets_prevent_quick_suggestions` (off) |
 | `tab_completion` | `tabCompletion` | `Off`, `On` (Tab inserts the best suggestion and cycles through the others) or `OnlySnippets` (like `Off` until snippets land) |
 | `inlay_hints` | `inlayHints` | whether inlay hints show (`On`, `OnUnlessPressed`, `OffUnlessPressed`, `Off`), padding, the per-line maximum length, and `font_size` (0, under 5 or above the editor's uses the editor's) and `font_family` |
 | `parameter_hints` | `parameterHints` | `enabled`: open parameter hints while typing (on); `cycle`: going past the last or first signature wraps around instead of closing them (on) |
@@ -86,6 +86,9 @@ editor.update(cx, |editor, cx| {
 | `smart_select` | `smartSelect` | expand selection over leading/trailing whitespace lines and word parts (both on) |
 | `lightbulb` | `lightbulb.enabled` | when the code action lightbulb asks for actions: `Off`, `OnCode` (default) or `On` |
 | `goto_location` | `gotoLocation` | what go to definition, references and the other navigation commands do with several results, and their alternative commands |
+| `peek_widget_default_focus` | `peekWidgetDefaultFocus` | what a new peek view focuses: `Tree` (the results list, default) or `Editor` (the preview) |
+| `definition_link_opens_in_peek` | `definitionLinkOpensInPeek` | Cmd/Ctrl+click on a symbol shows its definitions in a peek view (off) |
+| `find` | `find.*` | `cursor_move_on_type` (on), `seed_search_string_from_selection`, `auto_find_in_selection`, `add_extra_space_on_top` (on), `loop_` (on), `history` and `replace_history` (on), `close_on_result` (off), `find_on_type` (search while typing; when off, Enter searches; on) |
 | `format_on_type` | `formatOnType` | format with the on-type formatter after its trigger characters (off) |
 | `format_on_paste` | `formatOnPaste` | format pasted text with the range formatter (off) |
 | `empty_selection_clipboard` | `emptySelectionClipboard` | copying with no selection copies the line |
