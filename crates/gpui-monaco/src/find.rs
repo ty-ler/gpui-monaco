@@ -84,7 +84,16 @@ pub(crate) struct FindState {
     pub matches_position: usize,
     pub matches_count: usize,
     model: Option<FindModel>,
-    widget: Option<(Entity<FindWidget>, WidgetId)>,
+    /// Monaco's one `FindWidget` per editor, made when find first opens and
+    /// kept across closes (its width and history stay), and its overlay
+    /// while it shows or slides out.
+    widget: Option<(Entity<FindWidget>, Option<WidgetId>)>,
+    /// Removes the overlay once the widget has slid out.
+    widget_hide: Option<Task<()>>,
+    /// When `visible` last changed, on the executor's clock, and how far in
+    /// the widget had slid then (Monaco's `visible` class runs a 200ms
+    /// transform transition from where the widget is).
+    reveal_from: Option<(std::time::Instant, f32)>,
     /// Monaco's `FindWidgetViewZone` (`find.addExtraSpaceOnTop`) and its
     /// height.
     zone: Option<(WidgetId, gpui::Pixels)>,
@@ -377,7 +386,44 @@ impl CodeEditor {
     /// The pointer the find widget shows over the whole window during a
     /// drag of its sash.
     pub(crate) fn find_widget_captured_cursor(&self, cx: &gpui::App) -> Option<gpui::CursorStyle> {
+        if !self.find.visible {
+            return None;
+        }
         self.find_widget()?.read(cx).captured_cursor()
+    }
+
+    /// Whether find shows, and how far in its widget has slid, from 0 (out
+    /// of sight above) to 1: linearly over 200ms on the executor's clock,
+    /// so tests step it, and at once when motion is reduced (Monaco's
+    /// `.monaco-reduce-motion` 0ms transition). Opening or closing mid-slide
+    /// turns back from where it is, as the CSS transition does.
+    pub(crate) fn find_widget_reveal(&self, cx: &gpui::App) -> (bool, f32) {
+        let shown = self.find.visible;
+        let target = if shown { 1. } else { 0. };
+        let Some((at, from)) = self.find.reveal_from else {
+            return (shown, target);
+        };
+        if cx.reduce_motion() {
+            return (shown, target);
+        }
+        let elapsed = cx.background_executor().now().saturating_duration_since(at);
+        let step = elapsed.as_secs_f32() / crate::find_widget::REVEAL_DURATION.as_secs_f32();
+        let progress = if shown {
+            (from + step).min(1.)
+        } else {
+            (from - step).max(0.)
+        };
+        (shown, progress)
+    }
+
+    /// Sets `find.visible`, starting the widget's slide from where it is.
+    fn set_find_visible(&mut self, visible: bool, cx: &gpui::App) {
+        if self.find.visible == visible {
+            return;
+        }
+        let (_, from) = self.find_widget_reveal(cx);
+        self.find.reveal_from = Some((cx.background_executor().now(), from));
+        self.find.visible = visible;
     }
 
     fn find_widget(&self) -> Option<&Entity<FindWidget>> {
@@ -736,14 +782,17 @@ impl CodeEditor {
         let mut options = self.find.options.clone();
         toggle(&mut options);
         self.change_find_options(options, false, cx);
-        if !self.find.visible {
-            self.highlight_find_options(cx);
-        }
+        self.highlight_find_options(cx);
     }
 
-    /// Monaco `FindController.highlightFindOptions`, while find is closed:
-    /// makes the options widget if needed and shows it for a moment.
-    fn highlight_find_options(&mut self, cx: &mut Context<Self>) {
+    /// Monaco `FindController.highlightFindOptions`: while find is closed,
+    /// makes the options widget if needed and shows it for a moment. (With
+    /// find open, Monaco flashes the find input's toggles instead, which
+    /// isn't ported.)
+    pub(crate) fn highlight_find_options(&mut self, cx: &mut Context<Self>) {
+        if self.find.visible {
+            return;
+        }
         self.ensure_find_options_widget(cx);
         self.reveal_find_options_temporarily(cx);
     }
@@ -1875,7 +1924,7 @@ impl CodeEditor {
                     .collect::<Vec<_>>(),
             );
         }
-        self.find.visible = true;
+        self.set_find_visible(true, cx);
         if let Some(scope) = scope {
             options.in_selection = true;
             self.find.search_scope = Some(scope);
@@ -1893,15 +1942,22 @@ impl CodeEditor {
                 let theme = self.theme.clone();
                 let widget = cx.new(|cx| FindWidget::new(editor, theme, window, cx));
                 self.find.inputs = Some(widget.read(cx).inputs());
-                let id = self.add_overlay_widget(
-                    OverlayWidget::new(OverlayPosition::TopRight, widget.clone().into()),
-                    cx,
-                );
-                self.find.widget = Some((widget.clone(), id));
+                self.find.widget = Some((widget.clone(), None));
                 self.ensure_find_options_widget(cx);
                 widget
             }
         };
+        // Shown again before it slid out: it stays.
+        self.find.widget_hide = None;
+        if !self.find_widget_mounted() {
+            let id = self.add_overlay_widget(
+                OverlayWidget::new(OverlayPosition::TopRight, widget.clone().into()),
+                cx,
+            );
+            if let Some((_, overlay)) = &mut self.find.widget {
+                *overlay = Some(id);
+            }
+        }
         widget.update(cx, |widget, cx| {
             widget.sync_from_editor(&options, replace, window, cx);
             match start.focus {
@@ -2098,8 +2154,9 @@ impl CodeEditor {
         self.set_global_find_term(&query, cx);
     }
 
-    /// Monaco `matchFindAction` (Find Next/Previous, F3, Cmd/Ctrl+G): moves
-    /// to the next match, first opening find (seeded from the cursor when
+    /// Monaco `matchFindAction` (Find Next/Previous, F3, Cmd/Ctrl+G, and
+    /// Enter and Shift+Enter in the find input): moves to the next match
+    /// with an undo stop, first opening find (seeded from the cursor when
     /// there's no search string) if that doesn't land on one. With
     /// `find.closeOnResult`, landing on a match from the find input closes
     /// the widget.
@@ -2149,7 +2206,14 @@ impl CodeEditor {
             window,
             cx,
         );
-        run(self, window, cx);
+        if !run(self, window, cx) {
+            // Monaco re-announces "no results" on explicit navigation.
+            let query = &self.find.options.query;
+            if was_visible && self.find.matches_count == 0 && !query.is_empty() {
+                let message = format!("No results found for '{query}'");
+                self.announce(message, cx);
+            }
+        }
     }
 
     /// Monaco `SelectionMatchFindAction` (Find Next/Previous Selection,
@@ -2336,11 +2400,23 @@ impl CodeEditor {
         if !self.find.visible {
             return;
         }
-        self.find.visible = false;
-        if let Some((_, id)) = self.find.widget.take() {
-            self.remove_widget(id, cx);
+        // Monaco `_hide`: the widget stays and slides out (removing
+        // `visible`), keeping its width; its overlay goes once it's out.
+        self.set_find_visible(false, cx);
+        if self.find.widget.is_some() {
+            cx.notify();
+            if cx.reduce_motion() {
+                self.remove_find_widget_overlay(cx);
+            } else {
+                self.find.widget_hide = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(crate::find_widget::REVEAL_DURATION)
+                        .await;
+                    this.update(cx, |this, cx| this.remove_find_widget_overlay(cx))
+                        .ok();
+                }));
+            }
         }
-        self.find.inputs = None;
         self.find.measured = None;
         self.find.last_alert = None;
         // Monaco disposes the model and clears the scope when hidden.
@@ -2353,6 +2429,32 @@ impl CodeEditor {
         self.refresh_selection_highlights(cx);
         window.focus(&self.focus_handle, cx);
         cx.notify();
+    }
+
+    /// The hidden find widget has slid out: its overlay goes.
+    fn remove_find_widget_overlay(&mut self, cx: &mut Context<Self>) {
+        self.find.widget_hide = None;
+        if self.find.visible {
+            return;
+        }
+        if let Some((_, overlay)) = &mut self.find.widget
+            && let Some(id) = overlay.take()
+        {
+            self.remove_widget(id, cx);
+        }
+    }
+
+    /// Whether the find widget's overlay is mounted: it shows or slides
+    /// out.
+    fn find_widget_mounted(&self) -> bool {
+        matches!(self.find.widget, Some((_, Some(_))))
+    }
+
+    /// Whether the find widget's overlay is mounted (it shows or slides
+    /// out), for tests.
+    #[doc(hidden)]
+    pub fn is_find_widget_mounted_for_tests(&self) -> bool {
+        self.find_widget_mounted()
     }
 
     /// Sets the selections as an explicit gesture would (Monaco's tests'

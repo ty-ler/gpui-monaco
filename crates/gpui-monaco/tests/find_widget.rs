@@ -1104,3 +1104,205 @@ fn find_match_foregrounds(cx: &mut TestAppContext) {
         &all[..3]
     );
 }
+
+/// Monaco binds Enter in the find input to `NextMatchFindAction`, so
+/// `find.closeOnResult` closes the widget on landing on a match, as F3
+/// and Shift+Enter do.
+#[gpui::test]
+fn enter_in_the_find_input_closes_on_result(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("foo bar foo", cx);
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.find.close_on_result = true;
+        e.update_options(options, cx);
+    });
+    cx.simulate_keystrokes("secondary-f");
+    type_query("foo", cx);
+    assert_eq!(selection(&editor, cx), (0, 0, 0, 3));
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(selection(&editor, cx), (0, 8, 0, 11));
+    assert!(!editor.read_with(cx, |e, _| e.is_find_visible()));
+    assert!(editor_focused(&editor, cx));
+}
+
+/// Monaco `MultiCursorSession._highlightFindOptions`: Cmd/Ctrl+D past the
+/// word it starts from, and Select All Occurrences, show the find options
+/// for 2s with find closed; not while find shows.
+#[gpui::test]
+fn multi_cursor_sessions_flash_the_find_options(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("foo foo foo", cx);
+    let wait = |ms: u64, cx: &mut VisualTestContext| {
+        cx.executor().advance_clock(Duration::from_millis(ms));
+        cx.run_until_parked();
+    };
+    // The first Cmd/Ctrl+D selects the word (Monaco's `currentMatch`).
+    cx.simulate_keystrokes("secondary-d");
+    assert!(!options_widget_visible(&editor, cx));
+    cx.simulate_keystrokes("secondary-d");
+    assert!(options_widget_visible(&editor, cx));
+    assert_eq!(selections(&editor, cx).len(), 2);
+    wait(1900, cx);
+    cx.simulate_keystrokes("secondary-d");
+    wait(1900, cx);
+    // Each step shows them for another 2s.
+    assert!(options_widget_visible(&editor, cx));
+    wait(200, cx);
+    assert!(!options_widget_visible(&editor, cx));
+
+    // Select All Occurrences from a word.
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(
+                text::PointUtf16::new(0, 5),
+            )],
+            cx,
+        )
+    });
+    cx.simulate_keystrokes("secondary-shift-l");
+    assert_eq!(selections(&editor, cx).len(), 3);
+    assert!(options_widget_visible(&editor, cx));
+    wait(2100, cx);
+
+    // Not while find shows.
+    cx.simulate_keystrokes("secondary-f");
+    wait(2100, cx);
+    assert!(!options_widget_visible(&editor, cx));
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(
+                text::PointUtf16::new(0, 1),
+            )],
+            cx,
+        );
+        e.add_selection_to_next_find_match(cx);
+        e.add_selection_to_next_find_match(cx);
+    });
+    assert_eq!(selections(&editor, cx).len(), 2);
+    assert!(!options_widget_visible(&editor, cx));
+}
+
+fn widget_top(cx: &mut VisualTestContext) -> Option<gpui::Pixels> {
+    cx.debug_bounds("find-widget").map(|b| b.origin.y)
+}
+
+fn widget_mounted(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> bool {
+    editor.read_with(cx, |e, _| e.is_find_widget_mounted_for_tests())
+}
+
+/// Monaco `_hide`: closing removes `visible`, so the widget slides out over
+/// 200ms; Monaco keeps the one widget, so its resized width stays.
+#[gpui::test]
+fn closing_find_slides_the_widget_out_and_keeps_its_width(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, point, px};
+    let (editor, cx) = setup("alpha beta\n", cx);
+    let width = |cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, cx| e.find_widget_layout_for_tests(cx))
+            .unwrap()
+            .0
+    };
+    cx.simulate_keystrokes("secondary-f");
+    cx.executor().advance_clock(Duration::from_millis(200));
+    draw(cx);
+    assert_eq!(width(cx), px(419.));
+    // Widen it by dragging the sash.
+    let from = cx.debug_bounds("find-sash").expect("the sash").center();
+    cx.simulate_mouse_move(from, None, Modifiers::default());
+    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+    draw(cx);
+    let to = from - point(px(100.), px(0.));
+    cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+    draw(cx);
+    assert_eq!(width(cx), px(519.));
+
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_find_visible()));
+    assert!(editor_focused(&editor, cx));
+    // Sliding out, linearly, to 10px past its own height above.
+    assert_eq!(widget_top(cx), Some(px(4.)));
+    cx.executor().advance_clock(Duration::from_millis(100));
+    draw(cx);
+    assert_eq!(widget_top(cx), Some(px(-17.5)));
+    cx.executor().advance_clock(Duration::from_millis(100));
+    draw(cx);
+    assert_eq!(widget_top(cx), None);
+    assert!(!widget_mounted(&editor, cx));
+
+    // Reopened at the width it had.
+    cx.simulate_keystrokes("secondary-f");
+    cx.executor().advance_clock(Duration::from_millis(200));
+    draw(cx);
+    assert!(widget_mounted(&editor, cx));
+    assert_eq!(width(cx), px(519.));
+    assert_eq!(widget_top(cx), Some(px(4.)));
+
+    // Reopened mid-slide, it turns back from where it is.
+    cx.simulate_keystrokes("escape");
+    cx.executor().advance_clock(Duration::from_millis(100));
+    draw(cx);
+    assert_eq!(widget_top(cx), Some(px(-17.5)));
+    cx.simulate_keystrokes("secondary-f");
+    draw(cx);
+    assert_eq!(widget_top(cx), Some(px(-17.5)));
+    cx.executor().advance_clock(Duration::from_millis(100));
+    draw(cx);
+    assert_eq!(widget_top(cx), Some(px(4.)));
+    // The overlay removal the close scheduled doesn't take it.
+    cx.executor().advance_clock(Duration::from_millis(200));
+    draw(cx);
+    assert!(widget_mounted(&editor, cx));
+}
+
+/// With reduced motion the widget goes at once.
+#[gpui::test]
+fn reduced_motion_hides_the_find_widget_at_once(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("a\nb", cx);
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    cx.simulate_keystrokes("secondary-f");
+    draw(cx);
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    assert_eq!(widget_top(cx), None);
+    assert!(!widget_mounted(&editor, cx));
+}
+
+/// Monaco's Close title is "Close (Escape)" (`closeFindWidget`'s key).
+#[gpui::test]
+fn the_close_title_shows_escape(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("foo", cx);
+    cx.simulate_keystrokes("secondary-f");
+    draw(cx);
+    let title = cx
+        .update(|window, cx| {
+            editor
+                .read(cx)
+                .find_widget_title_for_tests("close", window, cx)
+        })
+        .unwrap();
+    assert_eq!(title, "Close (Escape)");
+}
+
+/// `findWidget.css`: the replace toggle is `left: 0; top: 0` with
+/// `margin: 4px 0 4px 5px` and 18px wide, filling the height; Close is at
+/// `top: 5px; right: 4px`.
+#[gpui::test]
+fn the_replace_toggle_and_close_button_positions(cx: &mut TestAppContext) {
+    use gpui::px;
+    let (_editor, cx) = setup("foo", cx);
+    cx.simulate_keystrokes("secondary-f");
+    cx.executor().advance_clock(Duration::from_millis(200));
+    draw(cx);
+    let widget = cx.debug_bounds("find-widget").expect("the find widget");
+    let toggle = cx.debug_bounds("toggle-replace").expect("the toggle");
+    let close = cx.debug_bounds("close").expect("the close button");
+    // Inside the 1px border.
+    assert_eq!(toggle.left() - widget.left(), px(1. + 5.));
+    assert_eq!(toggle.top() - widget.top(), px(1. + 4.));
+    assert_eq!(toggle.size.width, px(18.));
+    assert_eq!(widget.bottom() - toggle.bottom(), px(1. + 4.));
+    assert_eq!(close.top() - widget.top(), px(1. + 5.));
+    assert_eq!(widget.right() - close.right(), px(1. + 4.));
+}

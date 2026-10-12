@@ -11,7 +11,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
@@ -21,8 +21,8 @@ use gpui::{
 };
 
 use crate::actions::{
-    CloseFindWidget, FindHistoryNext, FindHistoryPrevious, FindInputFocusEditor, FindInputNewline,
-    FocusNextElement, FocusPreviousElement, Newline, NextMatch, Outdent, Paste, PreviousMatch,
+    FindHistoryNext, FindHistoryPrevious, FindInputFocusEditor, FindInputNewline, FocusNextElement,
+    FocusPreviousElement, Newline, NextMatch, Outdent, Paste, PreviousMatch,
     RemoveSecondaryCursors, ReplaceAll, ReplaceOne, Tab, ToggleCaseSensitive,
     ToggleFindInSelection, TogglePreserveCase, ToggleRegex, ToggleWholeWord,
 };
@@ -83,8 +83,8 @@ const SASH_CURSOR: gpui::CursorStyle = gpui::CursorStyle::ResizeLeftRight;
 /// The sash: Monaco's vertical `Sash` (`size: 2`), and a wider grab area.
 const SASH_SIZE: f32 = 2.;
 const SASH_HIT_SIZE: f32 = 4.;
-/// The slide-in (`transition: transform 200ms linear`).
-const REVEAL_DURATION: Duration = Duration::from_millis(200);
+/// The slide in and out (`transition: transform 200ms linear`).
+pub(crate) const REVEAL_DURATION: Duration = Duration::from_millis(200);
 /// Monaco's delay before a typed search string joins the history.
 const HISTORY_DELAY: Duration = Duration::from_millis(500);
 /// `NLS_MATCHES_COUNT_LIMIT_TITLE`.
@@ -167,6 +167,14 @@ impl Control {
         }
     }
 
+    /// The Monaco command whose keybinding rules the title shows, when it
+    /// isn't the action's: Close is Monaco's `closeFindWidget` (Escape,
+    /// `findController.ts`), which the port runs from Escape's
+    /// `RemoveSecondaryCursors`, so its default key is Escape's.
+    fn command_id(self) -> Option<&'static str> {
+        (self == Control::Close).then_some("closeFindWidget")
+    }
+
     /// Monaco's title, before the keybinding.
     fn title(self) -> &'static str {
         match self {
@@ -195,7 +203,9 @@ impl Control {
             Control::Previous => Box::new(PreviousMatch),
             Control::Next => Box::new(NextMatch),
             Control::InSelection => Box::new(ToggleFindInSelection),
-            Control::Close => Box::new(CloseFindWidget),
+            // Escape closes find through `RemoveSecondaryCursors` (see
+            // `command_id`).
+            Control::Close => Box::new(RemoveSecondaryCursors),
             Control::PreserveCase => Box::new(TogglePreserveCase),
             Control::Replace => Box::new(ReplaceOne),
             Control::ReplaceAll => Box::new(ReplaceAll),
@@ -381,9 +391,6 @@ pub struct FindWidget {
     measured: Rc<Cell<Option<(Pixels, Pixels)>>>,
     /// The layout of the last frame, for tests.
     last_layout: FindWidgetLayout,
-    /// When the widget was shown, on the executor's clock (Monaco adds
-    /// `visible`, starting the slide-in).
-    revealed_at: Instant,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -464,23 +471,8 @@ impl FindWidget {
             matches_width: px(MATCHES_COUNT_MIN_WIDTH),
             measured: Rc::new(Cell::new(None)),
             last_layout: FindWidgetLayout::default(),
-            revealed_at: cx.background_executor().now(),
             _subscriptions: subscriptions,
         }
-    }
-
-    /// How far the slide-in is, from 0 to 1: on the executor's clock, so
-    /// tests step it, and done at once when motion is reduced (Monaco's
-    /// `.monaco-reduce-motion` 0ms transition).
-    fn reveal_progress(&self, cx: &gpui::App) -> f32 {
-        if cx.reduce_motion() {
-            return 1.;
-        }
-        let elapsed = cx
-            .background_executor()
-            .now()
-            .saturating_duration_since(self.revealed_at);
-        (elapsed.as_secs_f32() / REVEAL_DURATION.as_secs_f32()).min(1.)
     }
 
     /// The find and replace inputs.
@@ -882,7 +874,10 @@ impl FindWidget {
                 let query = Self::input_text(&self.find_input, cx);
                 self.update_options(cx, |options| options.query = query);
             }
-            self.with_editor(cx, |editor, cx| editor.find_next(cx));
+            // Monaco binds Enter in the find input to `NextMatchFindAction`:
+            // an undo stop, `find.closeOnResult` and a restart when nothing
+            // matches.
+            window.dispatch_action(Box::new(NextMatch), cx);
         }
     }
 
@@ -1151,7 +1146,12 @@ impl FindWidget {
     fn title(control: Control, focus: &FocusHandle, window: &Window) -> String {
         let label = control.title().to_string();
         let keys = control.action().and_then(|action| {
-            crate::keybinding_label::command_label(action.as_ref(), None, focus, window)
+            crate::keybinding_label::command_label(
+                action.as_ref(),
+                control.command_id(),
+                focus,
+                window,
+            )
         });
         match keys {
             Some(keys) => format!("{label} ({keys})"),
@@ -1180,7 +1180,9 @@ struct ControlLook<'a> {
 }
 
 /// A find option toggle (Monaco's `Toggle`: a 16px codicon in a 20px
-/// box, `inputOption.*` colors when checked).
+/// box, `inputOption.*` colors when checked). Find in selection is
+/// `.codicon-find-selection`: 22px with a 5px radius, and
+/// `toolbar.hoverBackground` on hover, checked or not (`!important`).
 fn toggle(
     control: Control,
     icon: Codicon,
@@ -1192,6 +1194,7 @@ fn toggle(
 ) -> impl IntoElement {
     let colors = look.colors;
     let tooltip = crate::tooltip::tooltip(look.title, colors);
+    let find_selection = control == Control::InSelection;
     div()
         .id(control.id())
         .when_some(look.focus, |this, focus| this.track_focus(&focus))
@@ -1201,7 +1204,11 @@ fn toggle(
         .flex_none()
         .items_center()
         .justify_center()
-        .rounded(px(TOGGLE_RADIUS))
+        .rounded(px(if find_selection {
+            BUTTON_RADIUS
+        } else {
+            TOGGLE_RADIUS
+        }))
         .border_1()
         .border_color(if look.focused {
             colors.focus_border
@@ -1215,7 +1222,12 @@ fn toggle(
                 .text_color(colors.input_option_active_foreground)
         })
         .when(!enabled, |this| this.text_color(colors.disabled_foreground))
-        .when(enabled && !checked, |this| {
+        .when(enabled && find_selection, |this| {
+            let hover = colors.clone();
+            this.hover(move |style| hover.toolbar_hover(style))
+                .cursor_pointer()
+        })
+        .when(enabled && !checked && !find_selection, |this| {
             let hover = colors.input_option_hover_background;
             this.hover(move |style| style.bg(hover)).cursor_pointer()
         })
@@ -1247,6 +1259,7 @@ fn button(
     let hover = colors.clone();
     div()
         .id(control.id())
+        .debug_selector(|| control.id().into())
         .when_some(look.focus, |this, focus| this.track_focus(&focus))
         .size(px(BUTTON_SIZE))
         .ml(px(BUTTON_MARGIN))
@@ -1293,8 +1306,16 @@ impl Render for FindWidget {
             )
         };
         let replace_visible = self.replace_visible && !state.read_only;
-        let reveal = self.reveal_progress(cx);
-        if reveal < 1. {
+        let (shown, reveal) = editor.read(cx).find_widget_reveal(cx);
+        if !shown {
+            // Monaco `_hide`: hidden mid-drag, the sash lets go.
+            self.resize = None;
+            if reveal <= 0. {
+                // Slid out; the editor removes the overlay.
+                return div().into_any_element();
+            }
+        }
+        if reveal != if shown { 1. } else { 0. } {
             window.request_animation_frame();
         }
         // Monaco `MAX_MATCHES_COUNT_WIDTH`: the count's box grows to fit.
@@ -1563,19 +1584,21 @@ impl Render for FindWidget {
                 )
         });
 
-        // The replace toggle: a full-height column at the left (`.button.toggle.left`),
-        // hidden when the editor is read-only.
+        // The replace toggle: a full-height column at the left
+        // (`.button.toggle.left`: `left: 0; top: 0` with `margin: 4px 0 4px
+        // 5px`), hidden when the editor is read-only.
         let toggle_replace = (!state.read_only).then(|| {
             let hover = colors.clone();
             let control = Control::ToggleReplace;
             let look = look(control);
             div()
                 .id(control.id())
+                .debug_selector(|| control.id().into())
                 .when_some(look.focus, |this, focus| this.track_focus(&focus))
                 .absolute()
-                .left(px(0.))
-                .top(px(0.))
-                .bottom(px(0.))
+                .left(px(5.))
+                .top(px(4.))
+                .bottom(px(4.))
                 .w(px(18.))
                 .flex()
                 .items_center()
@@ -1612,8 +1635,8 @@ impl Render for FindWidget {
             cx,
         )
         .absolute()
-        .top(px(4.))
-        .right(px(PADDING_RIGHT - 1.));
+        .top(px(5.))
+        .right(px(4.));
 
         // Monaco's sash: dragging the left edge resizes the widget; a
         // double click switches between the initial and widest widths
@@ -1725,15 +1748,8 @@ impl Render for FindWidget {
             .border_1()
             .border_color(colors.widget_outline.unwrap_or(gpui::transparent_black()))
             .rounded(px(CORNER_RADIUS_LARGE))
-            .when_some(colors.widget_shadow, |this, shadow| {
-                this.shadow(vec![gpui::BoxShadow {
-                    color: shadow,
-                    offset: gpui::point(px(0.), px(0.)),
-                    blur_radius: px(8.),
-                    spread_radius: px(2.),
-                    inset: false,
-                }])
-            })
+            // `box-shadow: var(--vscode-shadow-lg)`.
+            .shadow(crate::widgets::card::shadow_lg())
             .children(toggle_replace)
             .child(
                 div()

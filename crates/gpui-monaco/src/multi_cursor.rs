@@ -291,6 +291,20 @@ impl CodeEditor {
         })
     }
 
+    /// Monaco `MultiCursorSession._highlightFindOptions`, on each search
+    /// step and on select all: a session that uses the find options (any
+    /// started from a word) shows them, with find closed in the options
+    /// widget for 2s.
+    fn highlight_session_find_options(
+        &mut self,
+        session: &MultiCursorSession,
+        cx: &mut Context<Self>,
+    ) {
+        if session.uses_find_options {
+            self.highlight_find_options(cx);
+        }
+    }
+
     fn session_search(&self, session: &MultiCursorSession) -> Option<search::SearchData> {
         SearchParams {
             query: session.search_text.clone(),
@@ -336,6 +350,7 @@ impl CodeEditor {
             }
         }
         let session = self.begin_session(from_find_widget, cx)?;
+        self.highlight_session_find_options(&session, cx);
         let data = self.session_search(&session)?;
         let last = *self.cursors.selections().last()?;
         let range = self.selection_range(&last);
@@ -499,6 +514,7 @@ impl CodeEditor {
                 let Some(session) = self.begin_session(from_find_widget, cx) else {
                     return;
                 };
+                self.highlight_session_find_options(&session, cx);
                 let Some(data) = self.session_search(&session) else {
                     return;
                 };
