@@ -190,6 +190,40 @@ fn complete_bracket_pairs_closes_what_it_opens(cx: &mut TestAppContext) {
     assert_eq!(text(&editor, cx), "call(arg, \"(\")");
 }
 
+/// Monaco `closeBrackets` skips brackets whose token isn't `Other`
+/// (`toStandardTokenType`), `invalid.string` included (#428).
+#[gpui::test]
+fn complete_bracket_pairs_skips_every_string_token_type(cx: &mut TestAppContext) {
+    let provider = Recorder::new(|before, position, _| {
+        let mut items = line_completion(before, position, "call(arg, '('");
+        for item in &mut items {
+            item.complete_bracket_pairs = true;
+        }
+        items
+    });
+    let (editor, cx, _) = setup(Some("javascript"), vec![provider], |_| {}, cx);
+    let _tokens = cx
+        .update(|_, cx| {
+            gpui_monaco::set_monarch_tokens_provider(
+                cx,
+                "javascript",
+                &serde_json::json!({
+                    "tokenizer": {
+                        "root": [
+                            ["'[^']*'", "invalid.string"],
+                            ["[a-z]+", "identifier"],
+                            ["[(), ]", "delimiter"],
+                        ],
+                    },
+                }),
+            )
+        })
+        .unwrap();
+    cx.simulate_input("ca");
+    draw(cx);
+    assert_eq!(ghost(&editor, cx), Some(vec![(2, "ll(arg, '(')".into())]));
+}
+
 #[gpui::test]
 fn shown_command_runs_once(cx: &mut TestAppContext) {
     let provider = Recorder::new(|before, position, _| {

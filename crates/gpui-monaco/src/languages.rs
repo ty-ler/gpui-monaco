@@ -44,6 +44,17 @@ struct RequestedLanguages {
 
 impl Global for RequestedLanguages {}
 
+/// Each language's tokens provider factory (Monaco
+/// `TokenizationRegistry._factories`): one per language id, with its
+/// registration id and what disposes it.
+#[derive(Default)]
+struct TokenizerFactories {
+    next_id: u64,
+    factories: HashMap<SharedString, (u64, Disposable)>,
+}
+
+impl Global for TokenizerFactories {}
+
 /// Layers `config` over the configuration of the registered language
 /// `language_id` at runtime (Monaco `languages.setLanguageConfiguration`).
 /// Each field `config` sets replaces the language's, and fields it leaves
@@ -202,6 +213,10 @@ impl LanguageTokenizer {
 /// wins, and the factory isn't called; a tree-sitter grammar doesn't
 /// count, so a factory can replace it.
 ///
+/// A language has one factory, as in Monaco's `registerFactory`: a new
+/// one disposes the previous, which then isn't called (or, if it was,
+/// its task's result is dropped and the tokenizer it installed removed).
+///
 /// Disposing the result drops the factory if it wasn't called yet, and
 /// otherwise restores the previous highlighting, unless another tokenizer
 /// replaced this one since.
@@ -211,6 +226,15 @@ pub fn register_tokens_provider_factory(
     factory: impl FnOnce(&mut App) -> Task<anyhow::Result<Option<LanguageTokenizer>>> + 'static,
 ) -> Disposable {
     let language_id = language_id.into();
+    // Monaco `registerFactory`: the language's previous factory is
+    // disposed first.
+    let previous = cx
+        .default_global::<TokenizerFactories>()
+        .factories
+        .remove(&language_id);
+    if let Some((_, previous)) = previous {
+        previous.dispose(cx);
+    }
     let installed: Rc<RefCell<Option<Disposable>>> = Rc::default();
     let disposed = Rc::new(Cell::new(false));
     let create = {
@@ -243,12 +267,30 @@ pub fn register_tokens_provider_factory(
             .detach();
         }
     };
-    let registration = when_requested(cx, language_id, false, true, Box::new(create));
-    Disposable::new(move |cx| {
+    let registration = when_requested(cx, language_id.clone(), false, true, Box::new(create));
+    let disposable = Disposable::new(move |cx| {
         disposed.set(true);
         registration.dispose(cx);
         if let Some(installed) = installed.borrow_mut().take() {
             installed.dispose(cx);
+        }
+    });
+    let factories = cx.default_global::<TokenizerFactories>();
+    factories.next_id += 1;
+    let id = factories.next_id;
+    factories
+        .factories
+        .insert(language_id.clone(), (id, disposable));
+    Disposable::new(move |cx| {
+        let factories = cx.default_global::<TokenizerFactories>();
+        // Only while it's still the language's factory.
+        if factories
+            .factories
+            .get(&language_id)
+            .is_some_and(|(current, _)| *current == id)
+            && let Some((_, disposable)) = factories.factories.remove(&language_id)
+        {
+            disposable.dispose(cx);
         }
     })
 }

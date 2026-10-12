@@ -243,8 +243,7 @@ impl CodeEditor {
         let line = model.line_content(position.row);
         let line_start = rope.point_to_offset(text::Point::new(position.row, 0));
         let column = rope.point_utf16_to_offset(position) - line_start;
-        let tokenized =
-            model.line_len_utf16(position.row) < model.options().max_tokenization_line_length;
+        let tokenized = model.line_len_utf16(position.row) < model.tokenization_line_limit();
         let spans: Vec<(Range<usize>, syntax::HighlightId)> = match model.syntax_snapshot() {
             Some(syntax) if tokenized => {
                 let state = if syntax.text.version() == model.version() {

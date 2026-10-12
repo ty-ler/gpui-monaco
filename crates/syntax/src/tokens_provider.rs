@@ -260,6 +260,11 @@ impl<P: TokensProvider> Highlighter for TokensProviderHighlighter<P> {
     fn as_any(&self) -> Option<&dyn Any> {
         Some(self)
     }
+
+    /// Monaco's `TokenizationSupportAdapter` tokenizes lines of any length.
+    fn limits_line_length(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

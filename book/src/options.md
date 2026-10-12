@@ -133,7 +133,7 @@ Model-level settings live in `ModelOptions` (Monaco `ITextModelUpdateOptions`), 
 - `indent_size` (at least 1)
 - `indent_size_is_tab_size` (Monaco `indentSize: 'tabSize'`, off by default): `indent_size` follows `tab_size`. Models created with `detect_indentation` start with it on, as Monaco's do.
 - `insert_spaces`
-- `max_tokenization_line_length` (Monaco `maxTokenizationLineLength`, default 20 000): longer lines aren't highlighted
+- `max_tokenization_line_length` (Monaco `maxTokenizationLineLength`, default 20 000): longer lines aren't highlighted. A Monarch grammar skips them while tokenizing, keeping the line's state, as Monaco's does; languages highlighted with `set_tokens_provider` have no limit, as in Monaco
 - `detect_indentation` (Monaco `detectIndentation`, default on): when the model is created, `tab_size`, `indent_size` and `insert_spaces` are guessed from its text, with the given values as the fallback. Pass creation options with `TextModel::new(text).with_options(…)`. `model.detect_indentation(…)` and the "Detect Indentation from Content" command guess again later.
 - `trim_auto_whitespace` (Monaco `trimAutoWhitespace`, default on): indentation that Enter or Tab inserted is removed by the next edit if the line is still blank
 - `large_file_optimizations` (Monaco `largeFileOptimizations`, default on): a model created with more than 20M characters or 300K lines is never tokenized, and has no folding, sticky scroll, code lenses, occurrence or selection highlights, or wrapping (`TextModel::is_too_large_for_tokenization`). Only the creation options count.

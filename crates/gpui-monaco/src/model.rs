@@ -94,13 +94,32 @@ fn resolve_language(
     }
 }
 
+/// `highlighter` with `max_length` as its line length limit, if it's a
+/// Monarch highlighter (Monaco's `MonarchTokenizer` reads
+/// `editor.maxTokenizationLineLength`).
+fn with_line_length_limit(
+    highlighter: Arc<dyn Highlighter>,
+    max_length: u32,
+) -> Arc<dyn Highlighter> {
+    match syntax::MonarchHighlighter::downcast(&*highlighter) {
+        Some(monarch) => Arc::new(
+            syntax::MonarchHighlighter::new(
+                monarch.tokenizer().clone(),
+                monarch.registry().cloned(),
+            )
+            .with_max_tokenization_line_length(max_length as usize),
+        ),
+        None => highlighter,
+    }
+}
+
 /// Monaco's standard token type of a token or capture name
 /// (`toStandardTokenType`): the first whole word, between dots or other
 /// non-word characters, that is `comment`, `string`, `regex` or `regexp`,
 /// so `string.regexp` is a string and `meta.comment` a comment. A
 /// tree-sitter `character` capture (a character literal) counts as a
 /// string.
-fn standard_token_type(name: &str) -> crate::cursor::StandardTokenType {
+pub(crate) fn standard_token_type(name: &str) -> crate::cursor::StandardTokenType {
     use crate::cursor::StandardTokenType;
     if name == "character" || name.starts_with("character.") {
         return StandardTokenType::String;
@@ -366,6 +385,10 @@ pub struct SyntaxSnapshot {
 
 struct Syntax {
     highlighter: Arc<dyn Highlighter>,
+    /// The registry the language was resolved in, to look injected
+    /// languages up again by id (Monaco reads a language's configuration
+    /// at each use).
+    registry: Arc<LanguageRegistry>,
     latest: Option<(HighlightState, BufferSnapshot)>,
     task: Option<Task<()>>,
     dirty: bool,
@@ -980,6 +1003,17 @@ impl TextModel {
         &self.options
     }
 
+    /// The line length (UTF-16 units) from which lines are untokenized:
+    /// [`ModelOptions::max_tokenization_line_length`], or none (`u32::MAX`)
+    /// with a highlighter that has no limit, as Monaco's `setTokensProvider`
+    /// and `registerTokensProviderFactory` tokenizers.
+    pub(crate) fn tokenization_line_limit(&self) -> u32 {
+        match &self.syntax {
+            Some(syntax) if !syntax.highlighter.limits_line_length() => u32::MAX,
+            _ => self.options.max_tokenization_line_length,
+        }
+    }
+
     /// Replaces the options, [validated](ModelOptions::validated), emitting
     /// [`TextModelEvent::OptionsChanged`] if they differ.
     pub fn update_options(&mut self, options: ModelOptions, cx: &mut Context<Self>) {
@@ -993,7 +1027,17 @@ impl TextModel {
                 insert_spaces: old.insert_spaces != options.insert_spaces,
                 trim_auto_whitespace: old.trim_auto_whitespace != options.trim_auto_whitespace,
             };
+            let retokenize = old.max_tokenization_line_length
+                != options.max_tokenization_line_length
+                && self.syntax.as_ref().is_some_and(|syntax| {
+                    syntax::MonarchHighlighter::downcast(&*syntax.highlighter).is_some()
+                });
             self.options = options;
+            // Monaco's Monarch tokenizer reads `maxTokenizationLineLength`;
+            // here the model's highlighter takes it, so it's made again.
+            if retokenize {
+                self.refresh_highlighter(cx);
+            }
             cx.emit(TextModelEvent::OptionsChanged(change));
             cx.notify();
         }
@@ -1103,9 +1147,16 @@ impl TextModel {
         // `LanguageConfigurationRegistry` doesn't need a tokenizer).
         self.syntax = language.has_highlighter().then(|| Syntax {
             highlighter: match &language.highlighter {
-                Some(factory) => factory(&language, &registry),
-                None => Arc::new(TreeSitterHighlighter::new(language.clone(), registry)),
+                Some(factory) => with_line_length_limit(
+                    factory(&language, &registry),
+                    self.options.max_tokenization_line_length,
+                ),
+                None => Arc::new(TreeSitterHighlighter::new(
+                    language.clone(),
+                    registry.clone(),
+                )),
             },
+            registry,
             latest: None,
             task: None,
             dirty: false,
@@ -1209,7 +1260,7 @@ impl TextModel {
             .rope()
             .offset_to_point(offset.min(self.buffer.len()))
             .row;
-        if self.buffer.rope().line_len_utf16(row) >= self.options.max_tokenization_line_length {
+        if self.buffer.rope().line_len_utf16(row) >= self.tokenization_line_limit() {
             return None;
         }
         let offset = if syntax.text.version() == self.buffer.version() {
@@ -1250,7 +1301,7 @@ impl TextModel {
         tokenized_ranges(
             syntax.text.rope(),
             old_range,
-            self.options.max_tokenization_line_length,
+            self.tokenization_line_limit(),
         )
         .into_iter()
         .flat_map(|old_range| {
@@ -1315,8 +1366,20 @@ impl TextModel {
                         .any(|r| r.start <= offset && offset <= r.end)
             })
             .max_by_key(|layer| layer.depth)
-            .map(|layer| layer.language.clone())
+            .map(|layer| self.current_language(&layer.language))
             .or(model_language)
+    }
+
+    /// `language` as registered now: an injection layer keeps the
+    /// [`Language`] it was parsed with, while Monaco looks a language's
+    /// configuration up by id at each use, so a
+    /// [`set_language_configuration`](crate::set_language_configuration)
+    /// or re-registration applies to embedded regions at once.
+    fn current_language(&self, language: &Arc<Language>) -> Arc<Language> {
+        self.syntax
+            .as_ref()
+            .and_then(|syntax| syntax.registry.language_for_id(&language.id))
+            .unwrap_or_else(|| language.clone())
     }
 
     /// The languages of `row`'s characters, as runs of byte columns with
@@ -1338,7 +1401,7 @@ impl TextModel {
         let Some(syntax) = self.syntax_snapshot() else {
             return single(model_language);
         };
-        if rope.line_len_utf16(row) >= self.options.max_tokenization_line_length {
+        if rope.line_len_utf16(row) >= self.tokenization_line_limit() {
             return single(model_language);
         }
         let line_start = rope.point_to_offset(text::Point::new(row, 0));
@@ -1382,18 +1445,24 @@ impl TextModel {
         if layers.is_empty() {
             return single(model_language);
         }
+        // Each layer's language as registered now (see `current_language`).
+        let languages: Vec<Arc<Language>> = layers
+            .iter()
+            .map(|layer| self.current_language(&layer.language))
+            .collect();
         language_runs(&line, line_start, |offset| {
             let offset = old(offset);
             layers
                 .iter()
-                .filter(|layer| {
+                .zip(&languages)
+                .filter(|(layer, _)| {
                     layer
                         .ranges
                         .iter()
                         .any(|r| r.start <= offset && offset < r.end)
                 })
-                .max_by_key(|layer| layer.depth)
-                .map(|layer| layer.language.clone())
+                .max_by_key(|(layer, _)| layer.depth)
+                .map(|(_, language)| language.clone())
                 .or_else(|| model_language.clone())
         })
     }
@@ -2136,6 +2205,9 @@ pub(crate) fn tokenized_ranges(
     max_line_length: u32,
 ) -> Vec<Range<usize>> {
     let range = range.start.min(rope.len())..range.end.min(rope.len());
+    if max_line_length == u32::MAX {
+        return vec![range];
+    }
     let (first, last) = (
         rope.offset_to_point(range.start).row,
         rope.offset_to_point(range.end).row,

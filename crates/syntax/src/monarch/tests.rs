@@ -986,3 +986,47 @@ fn highlighter_embeds_registered_monarch_languages() {
     assert_eq!(state.language_at(0, 2).as_deref(), Some("inner"));
     assert_eq!(state.language_at(0, 3).as_deref(), Some("outer"));
 }
+
+/// Monaco's tokenizers all read `editor.maxTokenizationLineLength`: a
+/// highlighter's limit replaces the grammar's own and an embedded
+/// language's (#428).
+#[test]
+fn highlighter_line_length_limit_applies_to_embedded_languages() {
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(
+        Language::new("inner", "Inner")
+            .with_monarch_grammar(&json!({ "tokenizer": { "root": [["\\w+", "word"]] } }))
+            .unwrap(),
+    );
+    let outer = Arc::new(tokenizer_for(
+        "outer",
+        json!({
+            "tokenizer": {
+                "root": [["<", { "token": "tag", "next": "@inner", "nextEmbedded": "inner" }]],
+                "inner": [[">", { "token": "tag", "next": "@pop", "nextEmbedded": "@pop" }]],
+            },
+        }),
+    ));
+    let line = format!("<{}", "a".repeat(30_000));
+    let types = |highlighter: &MonarchHighlighter| -> Vec<String> {
+        highlighter.tokenize_text(&line)[0]
+            .iter()
+            .map(|t| t.token_type.clone())
+            .collect()
+    };
+    // The default limit (20,000) skips the line.
+    let default = MonarchHighlighter::new(outer.clone(), Some(registry.clone()));
+    assert_eq!(default.max_tokenization_line_length(), None);
+    assert_eq!(types(&default), vec![String::new()]);
+    // 50,000 tokenizes it, the embedded part included.
+    let longer = MonarchHighlighter::new(outer.clone(), Some(registry.clone()))
+        .with_max_tokenization_line_length(50_000);
+    assert_eq!(types(&longer), vec!["tag.outer", "word.inner"]);
+    // A shorter limit skips shorter lines, keeping their state.
+    let shorter =
+        MonarchHighlighter::new(outer, Some(registry)).with_max_tokenization_line_length(3);
+    let tokens = shorter.tokenize_text("<abcd\n<a");
+    assert_eq!(tokens[0].len(), 1);
+    assert_eq!(tokens[0][0].token_type, "");
+    assert_eq!(tokens[1][0].token_type, "tag.outer");
+}
