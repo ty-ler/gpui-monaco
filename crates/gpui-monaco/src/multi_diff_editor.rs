@@ -2184,7 +2184,8 @@ fn select_last_change(diff: &Entity<DiffEditor>, cx: &mut App) {
         };
         let row = change.modified.start_line_number as u32 - 1;
         diff.modified_editor().update(cx, |editor, cx| {
-            editor.set_selections(&[Selection::collapsed(PointUtf16::new(row, 0))], cx)
+            editor.set_selections(&[Selection::collapsed(PointUtf16::new(row, 0))], cx);
+            editor.reveal_line_in_center(row, cx);
         });
     });
 }

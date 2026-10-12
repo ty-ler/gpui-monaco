@@ -402,6 +402,7 @@ impl CodeEditor {
                 }],
                 cx,
             );
+            self.reveal_all_cursors(true, false, cx);
         } else {
             self.open_location_with_openers(location, false, cx);
         }

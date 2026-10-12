@@ -114,7 +114,7 @@ A `ViewState` (Monaco `ICodeEditorViewState`) holds the selections, the scroll p
 | `visible_ranges(cx)` | `getVisibleRanges` |
 | `execute_edits(edits, Some(end_selections), cx)`, `execute_edit_operations(edits, end_cursor_state, cx)` (`SingleEditOperation` with `force_move_markers`, `EndCursorState::Computer`) | `executeEdits`: joins the open undo step, and returns `false` in a read-only editor without the read-only message |
 | `push_undo_stop(cx)`, `pop_undo_stop(cx)` | `pushUndoStop`, `popUndoStop` |
-| `position()`, `set_position(p, cx)`, `selection()`, `set_selection(s, cx)` | `getPosition`, `setPosition`, `getSelection`, `setSelection` |
+| `position()`, `set_position(p, cx)`, `selection()`, `set_selection(s, cx)` | `getPosition`, `setPosition`, `getSelection`, `setSelection`: like `set_selections`, they don't scroll, so follow them with a `reveal_*` call to show the cursor |
 | `value(eol, preserve_bom, cx)`, `set_value(text, cx)` | `getValue`, `setValue` |
 | `configured_word_at_position(p, cx)` | `getConfiguredWordAtPosition` (the editor's `word_separators`) |
 | `update_options_with(\|o\| o.read_only = true, cx)` | `updateOptions` with some options |

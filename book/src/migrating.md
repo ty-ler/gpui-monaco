@@ -79,7 +79,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `getPosition()` / `setPosition(p)`, `getSelection()` / `setSelection(s)` | `position()` / `set_position(p, cx)`, `selection()` / `set_selection(s, cx)` |
 | `getConfiguredWordAtPosition(p)` | `configured_word_at_position(p, cx)` |
 | `getOption(EditorOption.fontInfo)` | `font_info()` (after the first frame) |
-| `getSelections()` / `setSelections(s)` | `selections()` / `set_selections(&s, cx)` |
+| `getSelections()` / `setSelections(s)` | `selections()` / `set_selections(&s, cx)` (as in Monaco, the setters don't scroll: `set_position(p, cx)` then `reveal_position_in_center(p, cx)`) |
 | `revealLine`, `revealLineInCenter`, `revealLines…`, `revealRange…`, `revealPosition…` | `reveal_line`, `reveal_line_in_center`, `reveal_lines…`, `reveal_range…`, `reveal_position…` |
 | `revealRange(range, ScrollType.Immediate)` | `reveal_range_with_scroll_type(range, RevealType::Simple, ScrollType::Immediate, cx)`; `reveal_lines_with_scroll_type` for lines |
 | `revealAllCursors(revealHorizontal, minimalReveal)` | `reveal_all_cursors(reveal_horizontal, minimal_reveal, cx)` |

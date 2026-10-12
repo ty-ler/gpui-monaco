@@ -639,7 +639,7 @@ impl CodeEditor {
     /// Monaco `editorScroll`.
     fn editor_scroll(&mut self, args: &EditorScroll, cx: &mut Context<Self>) {
         let value = args.value.unwrap_or(1.).floor().max(1.) as f32;
-        let page = self.layout.as_ref().map_or(20, |l| l.page_rows()) as f32;
+        let page = self.page_lines() as f32;
         match (args.to.as_str(), args.by.as_deref()) {
             ("left" | "right", Some("column")) => {
                 let sign = if args.to == "left" { -1. } else { 1. };
@@ -680,16 +680,82 @@ impl CodeEditor {
             _ => return,
         }
         if args.reveal_cursor {
-            // Monaco keeps the primary cursor in the new viewport.
-            self.cursor_move(
-                &CursorMove {
-                    to: "viewPortIfOutside".into(),
-                    select: args.select,
-                    ..Default::default()
-                },
-                cx,
-            );
+            self.move_cursor_into_viewport(args.select, cx);
         }
+    }
+
+    /// Monaco `_runVerticalEditorScroll` with `revealCursor`: the primary
+    /// cursor, as the only one, moves into the lines that fully show at the
+    /// new scroll top, less the `cursorSurroundingLines` padding
+    /// (`getCompletelyVisibleViewRangeAtScrollTop`,
+    /// `getViewRangeWithCursorPadding`, `findPositionInViewportIfOutside`).
+    /// Nothing is revealed: the scroll stays where the command put it.
+    fn move_cursor_into_viewport(&mut self, select: bool, cx: &mut Context<Self>) {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let line_height = layout.metrics.line_height;
+        let count = self.view_lines.line_count();
+        if count == 0 {
+            return;
+        }
+        let zones = &layout.zones;
+        // Monaco's viewport is the editor's height.
+        let top = self.scroll_top.clamp(px(0.), layout.max_scroll.y);
+        let bottom = top + layout.bounds.size.height;
+        let mut start = zones.line_at(top, line_height, count);
+        if zones.line_y(start, line_height) < top {
+            start += 1;
+        }
+        let mut end = zones.line_at(bottom, line_height, count);
+        if end > 0 && zones.line_y(end, line_height) + zones.height(end, line_height) > bottom {
+            end -= 1;
+        }
+        let (mut start, mut end) = (start.min(count - 1), end.min(count - 1));
+        // `getViewRangeWithCursorPadding`.
+        let sticky = &self.options.sticky_scroll;
+        let surrounding = self
+            .options
+            .cursor_surrounding_lines
+            .max(if sticky.enabled {
+                sticky.max_line_count
+            } else {
+                0
+            });
+        let line_count = end.saturating_sub(start) + 1;
+        let padding = surrounding.min(line_count / 2);
+        let (padded_start, padded_end) = (start + padding, end.saturating_sub(padding.max(1) - 1));
+        if padding > 0 && padded_start <= padded_end {
+            (start, end) = (padded_start, padded_end);
+        }
+        // `findPositionInViewportIfOutside`: Monaco keeps the cursor off the
+        // range's last line.
+        let view = self.cursor_view_states().swap_remove(0);
+        let line = view.position.row;
+        let last = end.saturating_sub(1);
+        let (model_state, view_state) = if start <= line && line <= last {
+            (self.cursors.primary().clone(), view)
+        } else {
+            let target = if line > last { last } else { start };
+            let config = self.cursor_config(cx);
+            let lines = self.view_lines.clone();
+            let (position, leftover) = cursor::vertical(
+                &config,
+                &ViewCursorModel(&lines),
+                line,
+                view.position.column,
+                view.leftover_visible_columns,
+                target as i64,
+                false,
+            );
+            let view = view.move_to(select, position, leftover);
+            (map_state(&view, |p| lines.to_model(p.row, p.column)), view)
+        };
+        let rope = self.snapshot.rope().clone();
+        self.cursors.validated_states(&rope, vec![model_state]);
+        self.set_cursor_view_states(vec![Some(view_state)]);
+        self.next_selection_change.reason = CursorChangeReason::Explicit;
+        self.cursors_changed(false, cx);
     }
 
     /// Scrolls by `columns` typical character widths.
@@ -1006,7 +1072,8 @@ impl CodeEditor {
             self.commands.column_select_view = data.map(|data| (data, self.cursors.all().to_vec()));
         }
         self.next_selection_change.reason = CursorChangeReason::Explicit;
-        self.cursors_changed(true, cx);
+        self.cursors_changed(false, cx);
+        self.reveal_column_select(false, cx);
     }
 
     /// Monaco's `compositionType` handler.

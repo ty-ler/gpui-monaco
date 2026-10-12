@@ -38,7 +38,7 @@ impl CodeEditor {
         let ranges = self.folds.ranges().to_vec();
         let toggle = command(&FoldingModel::new(&ranges, collapsed), &rows);
         self.folds.toggle(&buffer, toggle);
-        self.after_fold_change(cx);
+        self.after_fold_command(cx);
     }
 
     /// Collapses the innermost expanded region at each selection, or its
@@ -80,7 +80,7 @@ impl CodeEditor {
             }
         };
         self.folds.toggle(&buffer, toggle);
-        self.after_fold_change(cx);
+        self.after_fold_command(cx);
     }
 
     /// Expands the region at each selection (Monaco `editor.unfold`).
@@ -283,7 +283,7 @@ impl CodeEditor {
         if let Some(cursor) = cursor {
             self.set_selections(&[Selection::collapsed(cursor)], cx);
         }
-        self.after_fold_change(cx);
+        self.after_fold_command(cx);
     }
 
     /// Removes manual folding ranges around the cursors or touching the
@@ -301,7 +301,7 @@ impl CodeEditor {
             })
             .collect();
         self.folds.remove_manual(&buffer, &selections);
-        self.after_fold_change(cx);
+        self.after_fold_command(cx);
     }
 
     /// A click on the fold control at `row`, or (`icon: false`) on the `⋯`
@@ -363,12 +363,26 @@ impl CodeEditor {
         };
         self.folds.toggle(&buffer, toggle);
         self.after_fold_change(cx);
+        // Monaco `FoldingController.onEditorMouseUp`: the clicked line shows
+        // (`revealPositionInCenterIfOutsideViewport`), not the cursor.
+        self.reveal_position_in_center_if_outside_viewport(PointUtf16::new(row, 0), cx);
     }
 
     /// Moves cursors out of hidden rows to the end of their fold's start row.
+    /// Like Monaco's line mapping change (`Cursor.onLineMappingChanged`), it
+    /// doesn't scroll.
     pub(crate) fn after_fold_change(&mut self, cx: &mut Context<Self>) {
         self.move_cursors_out_of_folds(cx);
-        self.cursors_changed(true, cx);
+        self.cursors_changed(false, cx);
+    }
+
+    /// [`Self::after_fold_change`] for a folding command: then the primary
+    /// selection's start shows, centered if it was off screen (Monaco
+    /// `FoldingAction.runEditorCommand`, `FoldingController.reveal`).
+    fn after_fold_command(&mut self, cx: &mut Context<Self>) {
+        self.after_fold_change(cx);
+        let start = self.cursors.primary().selection().start();
+        self.reveal_position_in_center_if_outside_viewport(start, cx);
     }
 
     fn move_cursors_out_of_folds(&mut self, cx: &mut Context<Self>) {

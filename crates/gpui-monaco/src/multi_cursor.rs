@@ -328,11 +328,17 @@ impl CodeEditor {
             return;
         };
         let mut selections = self.cursors.selections();
-        if selections.contains(&found) {
-            return;
+        if !selections.contains(&found) {
+            selections.push(found);
+            self.apply_session_selections(&selections, cx);
         }
-        selections.push(found);
-        self.apply_session_selections(&selections, cx);
+        self.reveal_session_match(found, cx);
+    }
+
+    /// Monaco `_applySessionResult`: the new match shows, centered if it
+    /// was off screen (`revealRangeInCenterIfOutsideViewport`).
+    fn reveal_session_match(&mut self, found: Selection, cx: &mut Context<Self>) {
+        self.reveal_range_in_center_if_outside_viewport(found.start()..found.end(), cx);
     }
 
     fn move_selection_to_find_match_inner(
@@ -349,6 +355,7 @@ impl CodeEditor {
             *slot = found;
         }
         self.apply_session_selections(&selections, cx);
+        self.reveal_session_match(found, cx);
     }
 
     fn insert_cursor_at_end_of_each_line_selected_inner(&mut self, cx: &mut Context<Self>) {
@@ -407,6 +414,8 @@ impl CodeEditor {
             selections.rotate_right(1);
         }
         self.set_selections(&selections, cx);
+        // Monaco `revealPrimaryCursor(source, true)`.
+        self.reveal_primary_cursor(cx);
     }
 
     /// The matches of `data` in the find scope (Monaco `searchScope`), or

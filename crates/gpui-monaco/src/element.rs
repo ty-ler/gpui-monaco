@@ -1834,9 +1834,17 @@ impl EditorLayout {
         ))
     }
 
-    /// Visible view lines that fit fully, for page up/down.
+    /// Visible view lines that fit fully.
     pub fn page_rows(&self) -> u32 {
         ((self.text_bounds.size.height / self.metrics.line_height).floor() as u32).max(1)
+    }
+
+    /// The lines PageUp/PageDown and the page scrolls move (Monaco
+    /// `CursorConfiguration.pageSize`): the lines the editor's height holds,
+    /// less two, so two lines stay in view.
+    pub fn page_size(&self) -> u32 {
+        let lines = (self.bounds.size.height / self.metrics.line_height).floor() as i64;
+        (lines - 2).max(1) as u32
     }
 
     /// The "Show more" chips (Monaco `.mtkoverflow`) in window coordinates.
@@ -3079,7 +3087,7 @@ fn prepaint_editor(
             box_end: f32::from(zones.line_y(end, line_height) + zones.height(end, line_height)),
             line_height: f32::from(line_height),
             surrounding_lines: surrounding,
-            mouse: request.minimal
+            mouse: (request.mouse || request.minimal)
                 && options.cursor_surrounding_lines_style
                     == crate::options::CursorSurroundingLinesStyle::Default,
             minimal: request.minimal,
@@ -3128,8 +3136,8 @@ fn prepaint_editor(
         }
     }
     if editor.autoscroll_requested {
-        // Monaco's primary cursor reveal: `cursorSurroundingLines` (or the
-        // sticky lines) of context, unless a mouse gesture moved it.
+        // Monaco `revealAllCursors`: `cursorSurroundingLines` (or the
+        // sticky lines) of context, unless a mouse gesture moved them.
         let mouse = editor.autoscroll_from_mouse
             && options.cursor_surrounding_lines_style
                 == crate::options::CursorSurroundingLinesStyle::Default;
@@ -3139,20 +3147,50 @@ fn prepaint_editor(
             } else {
                 0.
             });
-        let top = zones.line_y(primary_view_line, line_height);
-        editor.scroll_top = px(crate::view::reveal::scroll_top_to_reveal(
-            crate::view::reveal::RevealRequest {
-                viewport_top: f32::from(editor.scroll_top),
-                viewport_height: f32::from(text_height),
-                box_start: f32::from(top),
-                box_end: f32::from(top + zones.height(primary_view_line, line_height)),
-                line_height: f32::from(line_height),
-                surrounding_lines: if mouse { 0. } else { surrounding },
-                mouse,
-                minimal: editor.autoscroll_minimal,
-            },
-            crate::view::reveal::RevealType::Simple,
-        ));
+        let request = |start: u32, end: u32| crate::view::reveal::RevealRequest {
+            viewport_top: f32::from(editor.scroll_top),
+            viewport_height: f32::from(text_height),
+            box_start: f32::from(zones.line_y(start, line_height)),
+            box_end: f32::from(zones.line_y(end, line_height) + zones.height(end, line_height)),
+            line_height: f32::from(line_height),
+            surrounding_lines: if mouse { 0. } else { surrounding },
+            mouse,
+            minimal: editor.autoscroll_minimal,
+        };
+        if selections.len() > 1 {
+            // Several cursors (Monaco `Cursor.revealAll` with the view
+            // selections): the lines from the first selection to the last,
+            // and not at all when they don't fit, horizontally either.
+            let (start, end) = selections.iter().fold((u32::MAX, 0), |(start, end), s| {
+                (
+                    start.min(view_lines.to_view(s.start(), false).0),
+                    end.max(view_lines.to_view(s.end(), false).0),
+                )
+            });
+            let top = crate::view::reveal::scroll_top_to_reveal_cursors(
+                request(start, end),
+                crate::view::reveal::RevealType::Simple,
+            );
+            if let Some(top) = top {
+                editor.scroll_top = px(top);
+                if !editor.autoscroll_vertical_only {
+                    editor.pending_reveal_x = Some(crate::editor::HorizontalReveal {
+                        ranges: selections.iter().map(|s| s.start()..s.end()).collect(),
+                        cursors: true,
+                        minimal: editor.autoscroll_minimal,
+                    });
+                }
+            }
+            // The horizontal reveal is `pending_reveal_x`'s.
+            editor.autoscroll_requested = false;
+            editor.autoscroll_vertical_only = false;
+        } else {
+            // One cursor: its position, as a single range.
+            editor.scroll_top = px(crate::view::reveal::scroll_top_to_reveal(
+                request(primary_view_line, primary_view_line),
+                crate::view::reveal::RevealType::Simple,
+            ));
+        }
     }
     editor.scroll_top = editor.scroll_top.clamp(px(0.), max_scroll_top);
     // Monaco `smoothScrolling`: animate to the new position.
@@ -3399,7 +3437,8 @@ fn prepaint_editor(
         lines.push(line);
     }
 
-    // Horizontal autoscroll to the primary cursor.
+    // Horizontal autoscroll to the cursor (several cursors reveal through
+    // `pending_reveal_x`).
     let max_scroll_left = (content_width - text_width).max(px(0.));
     if std::mem::take(&mut editor.autoscroll_vertical_only) {
         editor.autoscroll_requested = false;

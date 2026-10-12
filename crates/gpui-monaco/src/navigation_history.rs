@@ -222,9 +222,11 @@ impl CodeEditor {
         self.scroll_by(delta, px(0.), cx);
     }
 
-    /// Scrolls by `pages` pages (Monaco `scrollPageUp`/`Down`).
+    /// Scrolls by `pages` pages (Monaco `scrollPageUp`/`Down`): Monaco's
+    /// `pageSize` lines a page, two less than fit, so two lines of the
+    /// last page stay in view.
     pub fn scroll_pages(&mut self, pages: f32, cx: &mut Context<Self>) {
-        let rows = self.layout.as_ref().map_or(20, |l| l.page_rows()) as f32;
+        let rows = self.page_lines() as f32;
         self.scroll_lines(rows * pages, cx);
     }
 
