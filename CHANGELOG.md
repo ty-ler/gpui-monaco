@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Diff editor high contrast and inline deleted lines (#421):** Ported Monaco's overview colors, deleted-lines borders, tint and render options, and the original side's border (audit 4 §E.9–§E.13).
+  - **Overview colors:** the diff overview ruler falls back to Monaco's `defaultInsertColor` and `defaultRemoveColor` (at twice their alpha) when the theme sets neither the overview nor the text colors. Before, its marks were transparent in hc-black and hc-light.
+  - **Deleted lines' borders:** the inline view's deleted lines get a 1px `diffEditor.removedTextBorder` around the zone and around each changed run (Monaco's `line-delete` and `char-delete`), dashed in high contrast themes. Before, they had backgrounds only.
+  - **Full-width tint:** deleted lines without inner changes (the legacy diff's pure deletions) layer `diffEditor.removedTextBackground` across each view line, as Monaco's `view-line char-delete` does.
+  - **Render options:** deleted lines follow the modified editor's `render_whitespace` (`·` and `→` in `editorWhitespace.foreground`), `render_control_characters` and `font_ligatures`, as Monaco's `RenderOptions.fromEditor`. Before, they only expanded tabs.
+  - **Original side and gutter:** side by side, the original editor gets `diffEditor.border` on its right and a mirrored `scrollbar.shadow`, and the gutter menu draws Monaco's top scroll shadow while the modified editor is scrolled down.
 - **Code actions and code lenses (#419):** Ported Monaco's code action menu placement, lightbulb position and code lens updates (audit 4 §C.32–§C.35).
   - **The menu after scrolling:** the Cmd/Ctrl+. menu is fixed in the window where its line was first laid out (Monaco `toCoords`), so scrolling the line out of view leaves it showing instead of unplaced while it kept the focus, and Enter applied an action nobody could see. A layout change (a resize, the glyph margin, the minimap, …) closes it (Monaco `onDidLayoutChange`).
   - **The selection's start:** the lightbulb and the Cmd/Ctrl+. menu go at the primary selection's start, not its head, so a selection made downward gets them on its first line (Monaco's `CodeActionsState` position). "No code actions available" and why an action is disabled still show at the cursor.

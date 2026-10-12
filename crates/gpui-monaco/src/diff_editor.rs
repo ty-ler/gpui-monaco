@@ -907,6 +907,9 @@ impl Render for DeletionPadding {
 
 /// The gutter menu's width (Monaco's 35px `DiffEditorGutter`).
 const GUTTER_WIDTH: f32 = 35.;
+
+/// The gutter's `.scroll-decoration` height and shadow size.
+const GUTTER_SCROLL_SHADOW: f32 = 6.;
 /// A gutter button's height.
 const GUTTER_BUTTON_HEIGHT: f32 = 20.;
 
@@ -1386,6 +1389,125 @@ fn utf16_to_byte(line: &str, column: u32) -> usize {
     line.len()
 }
 
+/// A deleted line as Monaco's `renderViewLine` draws it with the modified
+/// editor's `renderWhitespace` and `renderControlCharacters`.
+#[derive(Clone, Debug, PartialEq)]
+struct DeletedLineDisplay {
+    /// The text to shape.
+    text: String,
+    /// Each byte offset of the line (and its end) in `text`.
+    map: Vec<usize>,
+    /// The rendered whitespace (`mtkw`), in `text`.
+    whitespace: Vec<Range<usize>>,
+    /// The rendered control characters (`mtkcontrol`), in `text`.
+    controls: Vec<Range<usize>>,
+}
+
+/// Monaco `renderViewLine` for one deleted line: tabs to the next tab stop,
+/// the tabs and spaces at UTF-16 `whitespace` columns (sorted) as `→` and
+/// `·` (Monaco `mtkw`), and with `render_control_characters`, control
+/// characters as their control pictures or `[U+XXXX]` (the BOM and line
+/// separators always as U+FFFD).
+fn deleted_line_display(
+    line: &str,
+    tab_size: usize,
+    whitespace: &[u32],
+    render_control_characters: bool,
+) -> DeletedLineDisplay {
+    use crate::element::Substitute;
+    let mut text = String::with_capacity(line.len());
+    let mut map = Vec::with_capacity(line.len() + 1);
+    let mut rendered_whitespace = Vec::new();
+    let mut controls = Vec::new();
+    let mut visible_column = 0;
+    let mut utf16_column = 0;
+    for (byte, ch) in line.char_indices() {
+        while map.len() <= byte {
+            map.push(text.len());
+        }
+        let start = text.len();
+        let marked = (ch == ' ' || ch == '\t') && whitespace.binary_search(&utf16_column).is_ok();
+        utf16_column += ch.len_utf16() as u32;
+        if ch == '\t' {
+            let spaces = tab_size - visible_column % tab_size;
+            if marked {
+                // Monaco: `→`, then non-breaking spaces to the tab stop.
+                text.push('\u{2192}');
+                text.extend(std::iter::repeat_n('\u{a0}', spaces - 1));
+                rendered_whitespace.push(start..text.len());
+            } else {
+                text.extend(std::iter::repeat_n(' ', spaces));
+            }
+            visible_column += spaces;
+            continue;
+        }
+        if marked {
+            // Monaco's `&middot;` (its zero-width non-joiner isn't needed).
+            text.push('\u{b7}');
+            rendered_whitespace.push(start..text.len());
+            visible_column += 1;
+            continue;
+        }
+        match crate::element::substitute(ch, render_control_characters) {
+            Some(substitute) => {
+                match substitute {
+                    Substitute::Picture(picture) => text.push(picture),
+                    Substitute::Hex(code) => {
+                        use std::fmt::Write as _;
+                        write!(text, "[U+{code:04X}]").ok();
+                    }
+                    Substitute::Replacement => text.push('\u{fffd}'),
+                }
+                if substitute != Substitute::Replacement {
+                    controls.push(start..text.len());
+                }
+                visible_column += substitute.columns();
+            }
+            None => {
+                text.push(ch);
+                visible_column += 1;
+            }
+        }
+    }
+    while map.len() <= line.len() {
+        map.push(text.len());
+    }
+    DeletedLineDisplay {
+        text,
+        map,
+        whitespace: rendered_whitespace,
+        controls,
+    }
+}
+
+/// `highlights` less the parts inside `holes` (sorted, disjoint), so the
+/// holes' own styles replace them.
+fn without_ranges(
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    holes: &[Range<usize>],
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    if holes.is_empty() {
+        return highlights;
+    }
+    let mut result = Vec::with_capacity(highlights.len());
+    for (range, style) in highlights {
+        let mut start = range.start;
+        for hole in holes {
+            if hole.end <= start || hole.start >= range.end {
+                continue;
+            }
+            if hole.start > start {
+                result.push((start..hole.start, style));
+            }
+            start = start.max(hole.end);
+        }
+        if start < range.end {
+            result.push((start..range.end, style));
+        }
+    }
+    result
+}
+
 /// Deleted lines in the inline view (Monaco `renderLines` into a
 /// `line-delete line-delete-selectable` view zone, with
 /// `inline-deleted-margin-view-zone` and `InlineDiffDeletedCodeMargin`):
@@ -1431,6 +1553,12 @@ impl DeletedCode {
             focus_handle: cx.focus_handle(),
             _subscription: subscription,
         }
+    }
+
+    /// Monaco `renderLines`' `!hasCharChanges`: without character
+    /// decorations, each view line is a full-width `char-delete`.
+    fn full_width_char_delete(&self) -> bool {
+        self.source.inner_changes.is_empty()
     }
 
     /// The deleted lines' view lines, with the modified editor's wrapping.
@@ -1656,6 +1784,20 @@ impl Render for DeletedCode {
         let font_family = options.font_family.clone();
         let font_size = options.font_size;
         let font_weight = options.font_weight;
+        // Monaco `RenderOptions.fromEditor`: the modified editor's options.
+        let font_features = options.font_ligatures.features();
+        let render_whitespace = options.render_whitespace;
+        let render_control_characters = options.render_control_characters;
+        // Monaco's `.line-delete` and `.char-delete`: a 1px
+        // `diffEditor.removedTextBorder`, dashed in high contrast themes.
+        let removed_border = colors.diff_removed_text_border;
+        let high_contrast = theme.high_contrast;
+        let border_style = if high_contrast {
+            gpui::BorderStyle::Dashed
+        } else {
+            gpui::BorderStyle::Solid
+        };
+        let has_char_changes = !self.full_width_char_delete();
         let view_lines = self.view_lines(cx);
         let model = self.source.original.read(cx);
         let rope = model.buffer().rope();
@@ -1681,7 +1823,24 @@ impl Render for DeletedCode {
             let line = rope.line(row);
             let line_start = rope.point_to_offset(Point::new(row, 0));
             let line_end = line_start + line.len();
-            let (text, map) = crate::colorize::expand_tabs(&line, tab_size);
+            // Monaco renders each view line on its own, so whitespace
+            // boundaries and trailing whitespace are the view line's.
+            let segment = &line[utf16_to_byte(&line, view_line.range.start)
+                ..utf16_to_byte(&line, view_line.range.end)];
+            let whitespace = crate::view::guides::whitespace_columns(
+                segment,
+                view_line.range.start,
+                0,
+                false,
+                render_whitespace,
+                &[],
+            );
+            let DeletedLineDisplay {
+                text,
+                map,
+                whitespace,
+                controls,
+            } = deleted_line_display(&line, tab_size, &whitespace, render_control_characters);
             let from = map[utf16_to_byte(&line, view_line.range.start)];
             let to = map[utf16_to_byte(&line, view_line.range.end)];
             // Highlights in expanded line offsets, clipped to this view line
@@ -1750,6 +1909,36 @@ impl Render for DeletedCode {
                 })
                 .into_iter()
                 .collect();
+            // Monaco `mtkw` (`editorWhitespace.foreground`) and
+            // `mtkcontrol` (white on dark red) replace the token's class.
+            let rendered: Vec<_> = whitespace
+                .iter()
+                .filter_map(|range| {
+                    Some((
+                        clip(range.clone())?,
+                        HighlightStyle {
+                            color: Some(colors.whitespace),
+                            ..Default::default()
+                        },
+                    ))
+                })
+                .chain(controls.iter().filter_map(|range| {
+                    Some((
+                        clip(range.clone())?,
+                        HighlightStyle {
+                            color: Some(crate::element::CONTROL_CHARACTER_FOREGROUND),
+                            background_color: Some(crate::element::CONTROL_CHARACTER_BACKGROUND),
+                            ..Default::default()
+                        },
+                    ))
+                }))
+                .collect();
+            let mut holes: Vec<Range<usize>> = rendered.iter().map(|(r, _)| r.clone()).collect();
+            holes.sort_by_key(|r| r.start);
+            let mut syntax = without_ranges(syntax, &holes);
+            syntax.extend(rendered);
+            let changed_ranges: Vec<Range<usize>> =
+                changed.iter().map(|(range, _)| range.clone()).collect();
             let highlights: Vec<_> = gpui::combine_highlights(
                 gpui::combine_highlights(syntax, changed).collect::<Vec<_>>(),
                 selected,
@@ -1820,24 +2009,108 @@ impl Render for DeletedCode {
                             )
                         }),
                 )
-                .child(
+                .child({
+                    let styled = StyledText::new(text).with_highlights(highlights);
+                    // Monaco's `char-delete` spans' 1px
+                    // `diffEditor.removedTextBorder`, around the changed
+                    // characters' boxes.
+                    let run_borders = (has_char_changes && !changed_ranges.is_empty())
+                        .then_some(removed_border)
+                        .flatten()
+                        .map(|border| {
+                            let layout = styled.layout().clone();
+                            canvas(
+                                |_, _, _| {},
+                                move |bounds, _, window, _| {
+                                    let x = |ix: usize| layout.position_for_index(ix).map(|p| p.x);
+                                    for range in &changed_ranges {
+                                        let (Some(left), Some(right)) =
+                                            (x(range.start), x(range.end))
+                                        else {
+                                            continue;
+                                        };
+                                        window.paint_quad(gpui::quad(
+                                            Bounds::new(
+                                                point(left, bounds.top()),
+                                                gpui::size(right - left, bounds.size.height),
+                                            ),
+                                            gpui::Corners::default(),
+                                            gpui::transparent_black(),
+                                            gpui::Edges::all(px(1.)),
+                                            border,
+                                            border_style,
+                                        ));
+                                    }
+                                },
+                            )
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                        });
                     div()
+                        .relative()
                         .h_full()
                         .flex_1()
                         .overflow_hidden()
                         .bg(colors.diff_removed_line_background)
+                        // Monaco's `view-line char-delete` when the change
+                        // has no inner changes: `diffEditor.removedTextBackground`
+                        // and its border across the (1000000px wide) line.
+                        .when(!has_char_changes, |line| {
+                            line.child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .h_full()
+                                    .left(-scroll_left)
+                                    .right(px(-2.))
+                                    .bg(colors.diff_removed_text_background)
+                                    .when_some(removed_border, |layer, border| {
+                                        layer
+                                            .border_1()
+                                            .border_color(border)
+                                            .when(high_contrast, |layer| layer.border_dashed())
+                                    }),
+                            )
+                        })
                         .child(
                             div()
+                                .relative()
                                 .ml(-scroll_left)
                                 .when(!first_of_row, |text| {
                                     text.pl(em_width * view_line.indent as f32)
                                 })
                                 .whitespace_nowrap()
-                                .child(StyledText::new(text).with_highlights(highlights)),
-                        ),
-                )
+                                .child(styled),
+                        )
+                        .children(run_borders)
+                })
         });
         let lines: Vec<_> = lines.collect();
+        // Monaco's `line-delete` zone node: the text area of all the view
+        // lines, scrolled with the text, with a 1px
+        // `diffEditor.removedTextBorder` (painted over the lines here).
+        let zone_border = removed_border.map(|border| {
+            div()
+                .absolute()
+                .top_0()
+                .left(text_left)
+                .right_0()
+                .h(line_height * lines.len() as f32)
+                .overflow_hidden()
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .h_full()
+                        .left(-scroll_left)
+                        .right_0()
+                        .border_1()
+                        .border_color(border)
+                        .when(high_contrast, |zone| zone.border_dashed()),
+                )
+        });
         let bounds = self.bounds.clone();
         let menu = self.menu.map(|(position, row)| {
             let items = self.menu_items(row, cx);
@@ -1894,6 +2167,7 @@ impl Render for DeletedCode {
             .font_family(font_family)
             .text_size(font_size)
             .font_weight(font_weight)
+            .font_features(font_features)
             .line_height(line_height)
             .text_color(colors.foreground)
             .child(
@@ -1964,6 +2238,7 @@ impl Render for DeletedCode {
                 }
             }))
             .children(lines)
+            .children(zone_border)
             .children(menu)
     }
 }
@@ -3461,6 +3736,18 @@ impl DiffEditor {
             .collect()
     }
 
+    /// Whether each deleted lines zone tints its view lines full width
+    /// (Monaco's `view-line char-delete`, without inner changes), for
+    /// tests.
+    #[doc(hidden)]
+    pub fn deleted_code_full_width_for_tests(&self, cx: &App) -> Vec<bool> {
+        self.deleted_code
+            .iter()
+            .filter_map(|z| z.upgrade())
+            .map(|z| z.read(cx).full_width_char_delete())
+            .collect()
+    }
+
     /// Runs gutter action `id` for gutter item `item`, for tests.
     #[doc(hidden)]
     pub fn run_hunk_action_for_tests(
@@ -4465,22 +4752,7 @@ impl DiffEditor {
         let modified = self.modified.read(cx);
         let colors = modified.colors().clone();
         let light = modified.theme().kind == crate::theme::ThemeKind::Light;
-        // `diffEditorOverview.*Foreground`, else Monaco's
-        // `diffInserted`/`diffRemoved` at twice their alpha.
-        let insert_color = colors.diff_overview_inserted.unwrap_or_else(|| {
-            let c = colors.diff_inserted_text_background;
-            Hsla {
-                a: (c.a * 2.).min(1.),
-                ..c
-            }
-        });
-        let remove_color = colors.diff_overview_removed.unwrap_or_else(|| {
-            let c = colors.diff_removed_text_background;
-            Hsla {
-                a: (c.a * 2.).min(1.),
-                ..c
-            }
-        });
+        let (insert_color, remove_color) = diff_overview_colors(modified.theme());
         let (original_zones, modified_zones) = self.overview_zones(cx);
         let slider = modified.layout.as_ref().and_then(|layout| {
             let scroll_height = modified.scroll_height()?;
@@ -5529,6 +5801,19 @@ impl DiffEditor {
         (action.run)(&context, window, cx);
     }
 
+    /// Whether the gutter shows its top scroll shadow (Monaco
+    /// `EditorGutter`'s `isScrollTopZero`): the modified editor isn't
+    /// scrolled to the top.
+    fn gutter_scroll_decoration(&self, cx: &App) -> bool {
+        self.modified.read(cx).scroll_position().y > px(0.)
+    }
+
+    /// Whether the gutter shows its top scroll shadow, for tests.
+    #[doc(hidden)]
+    pub fn gutter_scroll_decoration_for_tests(&self, cx: &App) -> bool {
+        self.shows_gutter(cx) && self.gutter_scroll_decoration(cx)
+    }
+
     /// Monaco `DiffEditorGutter`: a 35px column left of the modified editor
     /// with a vertical toolbar beside each change.
     fn render_gutter(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -5640,6 +5925,33 @@ impl DiffEditor {
                 );
             }
         }
+        // Monaco `EditorGutter`'s `.scroll-decoration` while the modified
+        // editor is scrolled down: `box-shadow: scrollbar.shadow 0 6px 6px
+        // -6px inset`, 6px tall.
+        let scroll_decoration = self.gutter_scroll_decoration(cx).then(|| {
+            let shadow = colors.scrollbar_shadow;
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    window.paint_inset_shadows(
+                        bounds,
+                        gpui::Corners::default(),
+                        &[gpui::BoxShadow {
+                            color: shadow,
+                            offset: point(px(0.), px(GUTTER_SCROLL_SHADOW)),
+                            blur_radius: px(GUTTER_SCROLL_SHADOW),
+                            spread_radius: px(-GUTTER_SCROLL_SHADOW),
+                            inset: true,
+                        }],
+                    )
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .w_full()
+            .h(px(GUTTER_SCROLL_SHADOW))
+        });
         Some(
             div()
                 .id("diff-gutter")
@@ -5649,6 +5961,7 @@ impl DiffEditor {
                 .flex_none()
                 .overflow_hidden()
                 .bg(colors.background)
+                .children(scroll_decoration)
                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                     if this.gutter_hovered && !hovered {
                         this.gutter_fade += 1;
@@ -6332,6 +6645,41 @@ impl Side {
     }
 }
 
+/// The diff overview's insert and remove colors (Monaco
+/// `OverviewRulerFeature`'s `currentColors`): `diffEditorOverview.*Foreground`,
+/// else `diffEditor.*TextBackground`, else Monaco's `defaultInsertColor`
+/// (`rgba(155, 185, 85, .2)`) or `defaultRemoveColor` (`rgba(255, 0, 0,
+/// .2)`), at twice the alpha. High contrast themes set none of them.
+fn diff_overview_colors(theme: &crate::theme::Theme) -> (Hsla, Hsla) {
+    let color = |overview: &str, text: &str, default: gpui::Rgba| {
+        theme.color(overview).unwrap_or_else(|| {
+            let c = theme.color(text).unwrap_or_else(|| default.into());
+            Hsla {
+                a: (c.a * 2.).min(1.),
+                ..c
+            }
+        })
+    };
+    let rgba = |r: f32, g: f32, b: f32| gpui::Rgba {
+        r: r / 255.,
+        g: g / 255.,
+        b: b / 255.,
+        a: 0.2,
+    };
+    (
+        color(
+            "diffEditorOverview.insertedForeground",
+            "diffEditor.insertedTextBackground",
+            rgba(155., 185., 85.),
+        ),
+        color(
+            "diffEditorOverview.removedForeground",
+            "diffEditor.removedTextBackground",
+            rgba(255., 0., 0.),
+        ),
+    )
+}
+
 /// A decoration on one side of the diff.
 type SideDecoration = (Side, DecorationOptions);
 
@@ -6618,16 +6966,26 @@ impl Render for DiffEditor {
                         .w(original_width + px(200.))
                         .child(self.original.clone()),
                 )
-        } else if measured {
-            div()
-                .h_full()
-                .w(original_width)
-                .flex_none()
-                .child(self.original.clone())
         } else {
-            div()
-                .h_full()
-                .w(gpui::relative(self.ratio.clamp(0.1, 0.9)))
+            // Monaco's `.editor.original`: `diffEditor.border` and a
+            // `scrollbar.shadow` box shadow on its right.
+            let original = div().h_full();
+            let original = if measured {
+                original.w(original_width).flex_none()
+            } else {
+                original.w(gpui::relative(self.ratio.clamp(0.1, 0.9)))
+            };
+            original
+                .when_some(colors.diff_border, |original, border| {
+                    original.border_r_1().border_color(border)
+                })
+                .shadow(vec![gpui::BoxShadow {
+                    color: colors.scrollbar_shadow,
+                    offset: point(px(6.), px(0.)),
+                    blur_radius: px(5.),
+                    spread_radius: px(-5.),
+                    inset: false,
+                }])
                 .child(self.original.clone())
         };
         // Monaco `Sash`: a 4px hit area on the boundary, `sash.hoverBorder`
@@ -6792,6 +7150,88 @@ use gpui::{AnimationExt as _, anchored, deferred};
 mod tests {
     use super::*;
     use crate::diff::compute_diff;
+
+    fn hex(c: Hsla) -> String {
+        let c = gpui::Rgba::from(c);
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}",
+            (c.r * 255.).round() as u8,
+            (c.g * 255.).round() as u8,
+            (c.b * 255.).round() as u8,
+            (c.a * 255.).round() as u8,
+        )
+    }
+
+    /// Monaco `OverviewRulerFeature`: high contrast themes set neither the
+    /// overview nor the text colors, so `defaultInsertColor` and
+    /// `defaultRemoveColor` show, at twice their alpha.
+    #[test]
+    fn overview_colors_fall_back_to_monaco_defaults() {
+        for theme in [
+            crate::theme::Theme::hc_black(),
+            crate::theme::Theme::hc_light(),
+        ] {
+            let (insert, remove) = diff_overview_colors(&theme);
+            assert_eq!(hex(insert), "9bb95566");
+            assert_eq!(hex(remove), "ff000066");
+        }
+        // vs-dark: `diffEditor.insertedTextBackground` (#9ccc2c33) doubled.
+        let (insert, remove) = diff_overview_colors(&crate::theme::Theme::vs_dark());
+        assert_eq!(hex(insert), "9ccc2c66");
+        assert_eq!(hex(remove), "ff000066");
+    }
+
+    /// Monaco `renderViewLine` with `renderWhitespace` and
+    /// `renderControlCharacters`, as the inline deleted lines render.
+    #[test]
+    fn deleted_line_display_renders_whitespace_and_controls() {
+        let plain = deleted_line_display("\ta b", 4, &[], false);
+        assert_eq!(plain.text, "    a b");
+        assert_eq!(plain.map, vec![0, 4, 5, 6, 7]);
+        assert!(plain.whitespace.is_empty() && plain.controls.is_empty());
+
+        let all = crate::view::guides::whitespace_columns(
+            "\ta b",
+            0,
+            0,
+            false,
+            crate::options::RenderWhitespace::All,
+            &[],
+        );
+        let shown = deleted_line_display("\ta b", 4, &all, false);
+        assert_eq!(shown.text, "\u{2192}\u{a0}\u{a0}\u{a0}a\u{b7}b");
+        assert_eq!(shown.map, vec![0, 9, 10, 12, 13]);
+        assert_eq!(shown.whitespace, vec![0..9, 10..12]);
+
+        let controls = deleted_line_display("a\u{7}b\u{202e}", 4, &[], true);
+        assert_eq!(controls.text, "a\u{2407}b[U+202E]");
+        assert_eq!(controls.controls, vec![1..4, 5..13]);
+        // Without `renderControlCharacters` they're themselves.
+        assert_eq!(
+            deleted_line_display("a\u{7}b", 4, &[], false).text,
+            "a\u{7}b"
+        );
+    }
+
+    /// Monaco `renderLines` with no selection: `selection` mode draws no
+    /// whitespace, and `trailing` draws a view line's trailing whitespace.
+    #[test]
+    fn deleted_lines_whitespace_modes() {
+        use crate::options::RenderWhitespace;
+        let columns =
+            |mode| crate::view::guides::whitespace_columns("a  b  ", 0, 0, false, mode, &[]);
+        assert!(columns(RenderWhitespace::Selection).is_empty());
+        assert_eq!(columns(RenderWhitespace::Trailing), vec![4, 5]);
+        assert_eq!(columns(RenderWhitespace::Boundary), vec![1, 2, 4, 5]);
+    }
+
+    #[test]
+    fn without_ranges_cuts_holes() {
+        let style = HighlightStyle::default();
+        let cut = without_ranges(vec![(0..10, style), (12..14, style)], &[2..3, 5..7, 13..20]);
+        let ranges: Vec<_> = cut.into_iter().map(|(r, _)| r).collect();
+        assert_eq!(ranges, vec![0..2, 3..5, 7..10, 12..13]);
+    }
 
     /// The inner changes of the normalized diff, as Monaco prints ranges.
     fn normalized(original: &str, modified: &str) -> (Vec<String>, LinesDiff) {
