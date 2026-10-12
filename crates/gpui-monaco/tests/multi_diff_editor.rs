@@ -764,7 +764,9 @@ fn smooth_wheel_scrolling(cx: &mut TestAppContext) {
     assert!(multi.read_with(cx, |m, _| m.has_pending_scroll_animation()));
     let shown = multi.read_with(cx, |m, _| m.scroll_state_for_tests().0);
     assert!(shown < target, "{shown:?}");
-    std::thread::sleep(std::time::Duration::from_millis(120));
+    // The animation runs on the executor's clock (fake in tests).
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(120));
     paint(cx);
     assert!(!multi.read_with(cx, |m, _| m.has_pending_scroll_animation()));
     assert_eq!(
