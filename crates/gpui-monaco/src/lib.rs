@@ -188,8 +188,8 @@ pub use layout_info::{LayoutInfo, MinimapLayoutInfo, OverviewRulerPosition, Rend
 #[doc(hidden)]
 pub use markers::MarkerZoneState;
 pub use markers::{
-    Marker, MarkerFilter, MarkerSeverity, MarkerTag, MarkerZone, ModelMarker, RelatedInformation,
-    model_markers, remove_all_markers,
+    MAX_DECORATED_MARKERS, Marker, MarkerFilter, MarkerSeverity, MarkerTag, MarkerZone,
+    ModelMarker, RelatedInformation, model_markers, remove_all_markers,
 };
 pub use model::{
     EditKind, ModelOptions, SyntaxSnapshot, TextModel, TextModelEvent, create_model,

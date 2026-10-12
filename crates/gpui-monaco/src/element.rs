@@ -1267,6 +1267,65 @@ pub(crate) fn hide_segment_from(segment: &RowSegment, from: u32) -> Option<RowSe
 /// Monaco `_renderNormalDecoration` with `showIfCollapsed`: a range
 /// narrower than a typical (half-width) character is widened to that,
 /// around its center (rounded, and not left of the line's start).
+/// The marks a marker draws besides its squiggle, between `left` and
+/// `right` above `bottom`, clipped to them as CSS clips a background:
+/// Monaco `squiggly-hint`'s three dots (`editorHint.foreground`, a 12×3
+/// SVG at the bottom left) and dotted `editorHint.border` (2px), for an
+/// `untagged` hint; and in high contrast `squiggly-error`, `-warning` and
+/// `-info`'s `4px double` `editorError.border` and the like.
+pub(crate) fn marker_marks_for(
+    severity: crate::MarkerSeverity,
+    untagged: bool,
+    (left, right): (Pixels, Pixels),
+    bottom: Pixels,
+    colors: &EditorColors,
+) -> Vec<(Bounds<Pixels>, Hsla, Pixels)> {
+    let mut marks = Vec::new();
+    // Round dots `diameter` wide, `step` apart from `left`, at most `count`.
+    let mut dots = |top: Pixels, diameter: Pixels, step: Pixels, count: usize, color: Hsla| {
+        let mut x = left;
+        for _ in 0..count {
+            if x >= right {
+                break;
+            }
+            let width = diameter.min(right - x);
+            marks.push((
+                Bounds::new(point(x, top), size(width, diameter)),
+                color,
+                diameter / 2.,
+            ));
+            x += step;
+        }
+    };
+    if severity == crate::MarkerSeverity::Hint {
+        if !untagged {
+            return marks;
+        }
+        // `<circle cx="1|5|9" cy="1" r="1"/>` in a box 3px high.
+        if let Some(color) = colors.editor_hint_foreground {
+            dots(bottom - px(3.), px(2.), px(4.), 3, color);
+        }
+        // `border-bottom: 2px dotted`.
+        if let Some(color) = colors.editor_hint_border {
+            dots(bottom - px(2.), px(2.), px(4.), usize::MAX, color);
+        }
+        return marks;
+    }
+    // `border-bottom: 4px double`: two 1px lines 2px apart.
+    if let Some(color) = colors.marker_border(severity)
+        && right > left
+    {
+        for top in [bottom - px(4.), bottom - px(1.)] {
+            marks.push((
+                Bounds::new(point(left, top), size(right - left, px(1.))),
+                color,
+                px(0.),
+            ));
+        }
+    }
+    marks
+}
+
 pub(crate) fn widen_collapsed(from: Pixels, to: Pixels, half_width: Pixels) -> (Pixels, Pixels) {
     if to - from >= half_width {
         return (from, to);
@@ -2155,6 +2214,9 @@ pub struct PrepaintState {
     /// Block decorations' boxes, colors and border widths.
     block_borders: Vec<(Bounds<Pixels>, Hsla, Pixels)>,
     decoration_underlines: Vec<(gpui::Point<Pixels>, Pixels, UnderlineStyle)>,
+    /// Markers' hint dots and high contrast borders: boxes, colors and
+    /// corner radii.
+    marker_marks: Vec<(Bounds<Pixels>, Hsla, Pixels)>,
     /// The IME composition's boxes in high contrast themes.
     composition_boxes: Vec<Bounds<Pixels>>,
     gutter_bars: Vec<(Bounds<Pixels>, Hsla)>,
@@ -4328,6 +4390,7 @@ fn prepaint_editor(
         ));
     }
     let mut decoration_underlines: Vec<(gpui::Point<Pixels>, Pixels, UnderlineStyle)> = Vec::new();
+    let mut marker_marks: Vec<(Bounds<Pixels>, Hsla, Pixels)> = Vec::new();
     // Monaco `nativeEditContext.css`: high contrast themes border the IME
     // composition all round rather than underlining it.
     let composition_boxes: Vec<Bounds<Pixels>> = match &marked {
@@ -4445,14 +4508,32 @@ fn prepaint_editor(
             if let Some(underline) = underline
                 && let Some((from, to)) = decoration_x_range(line, *start, *end)
             {
+                // Monaco draws an empty marker one character wide.
+                let (from, to) = if options.show_if_collapsed {
+                    widen_collapsed(from, to, metrics.em_width)
+                } else {
+                    (from, from + (to - from).max(metrics.em_width / 2.))
+                };
                 decoration_underlines.push((
                     point(origin_x + from, text_top + line_height - px(3.)),
-                    (to - from).max(metrics.em_width / 2.),
+                    to - from,
                     UnderlineStyle {
                         thickness: px(1.),
                         color: Some(underline.color),
                         wavy: underline.wavy,
                     },
+                ));
+            }
+            if let Some(severity) = options.severity
+                && let Some((from, to)) = decoration_x_range(line, *start, *end)
+            {
+                let (from, to) = widen_collapsed(from, to, metrics.em_width);
+                marker_marks.extend(marker_marks_for(
+                    severity,
+                    !options.unnecessary && !options.deprecated,
+                    (origin_x + from, origin_x + to),
+                    text_top + line_height,
+                    &colors,
                 ));
             }
             // Monaco `firstLineDecorationClassName`: in the line decorations
@@ -5669,6 +5750,7 @@ fn prepaint_editor(
         decoration_quads,
         block_borders,
         decoration_underlines,
+        marker_marks,
         composition_boxes,
         gutter_bars,
         margin_backgrounds,
@@ -5985,6 +6067,9 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
 
                 for (origin, width, style) in &state.decoration_underlines {
                     window.paint_underline(*origin, *width, style);
+                }
+                for (bounds, color, radius) in &state.marker_marks {
+                    window.paint_quad(fill(*bounds, *color).corner_radii(*radius));
                 }
                 // High contrast themes box the IME composition (Monaco
                 // `nativeEditContext.css`).
@@ -7598,5 +7683,77 @@ mod decoration_option_tests {
         assert_eq!(injected_text_style(&text, 0..3), red);
         assert_eq!(injected_text_style(&text, 1..2), red);
         assert_eq!(injected_text_style(&text, 3..5), bold);
+    }
+}
+
+#[cfg(test)]
+mod marker_mark_tests {
+    //! Monaco `squiggly-hint`'s dots and the high contrast `squiggly-*`
+    //! borders (`codeEditorWidget.ts`'s theming participant, `editor.css`).
+
+    use super::*;
+    use crate::MarkerSeverity as S;
+
+    fn marks(
+        severity: S,
+        untagged: bool,
+        width: f32,
+        colors: &EditorColors,
+    ) -> Vec<(Bounds<Pixels>, Hsla, Pixels)> {
+        marker_marks_for(
+            severity,
+            untagged,
+            (px(10.), px(10. + width)),
+            px(20.),
+            colors,
+        )
+    }
+
+    #[test]
+    fn hints_draw_three_dots() {
+        let colors = EditorColors::vs_dark();
+        let dots = marks(S::Hint, true, 16., &colors);
+        let color = colors.editor_hint_foreground.unwrap();
+        assert_eq!(
+            dots,
+            [10., 14., 18.]
+                .map(|x| (
+                    Bounds::new(point(px(x), px(17.)), size(px(2.), px(2.))),
+                    color,
+                    px(1.)
+                ))
+                .to_vec()
+        );
+        // Clipped to the range, as CSS clips the background.
+        assert_eq!(marks(S::Hint, true, 7., &colors).len(), 2);
+        // A tagged hint has no dots (unnecessary or deprecated instead).
+        assert!(marks(S::Hint, false, 16., &colors).is_empty());
+        // Squiggles have no marks outside high contrast.
+        assert!(marks(S::Error, true, 16., &colors).is_empty());
+    }
+
+    #[test]
+    fn high_contrast_draws_double_and_dotted_borders() {
+        let colors = EditorColors::hc_black();
+        let error = marks(S::Error, true, 16., &colors);
+        let border = colors.editor_error_border.unwrap();
+        let line = |top: f32| {
+            (
+                Bounds::new(point(px(10.), px(top)), size(px(16.), px(1.))),
+                border,
+                px(0.),
+            )
+        };
+        assert_eq!(error, vec![line(16.), line(19.)]);
+        assert_eq!(marks(S::Warning, true, 16., &colors).len(), 2);
+        assert_eq!(marks(S::Info, true, 16., &colors).len(), 2);
+        // No hint foreground in high contrast: a dotted border, 2px dots
+        // 2px apart.
+        let hint = marks(S::Hint, true, 16., &colors);
+        assert_eq!(hint.len(), 4);
+        assert!(
+            hint.iter()
+                .all(|(b, c, _)| b.top() == px(18.) && Some(*c) == colors.editor_hint_border)
+        );
     }
 }

@@ -24,12 +24,13 @@ model.update(cx, |model, cx| {
 
 Markers are rendered as:
 
-- **Squiggles:** red for errors, yellow for warnings and blue for info. Hints get no squiggle.
+- **Squiggles:** red for errors, yellow for warnings and blue for info, in the theme's `editorError.foreground` and the like. High contrast themes also draw Monaco's double underline (`editorError.border`, `editorWarning.border`, `editorInfo.border`).
+- **Hint dots:** a hint gets Monaco's three dots under its first two characters (`editorHint.foreground`), or a dotted underline (`editorHint.border`) in high contrast.
 - **Overview ruler marks** for errors, warnings and infos, in the right lane, in the theme's `editorOverviewRuler.errorForeground`, `warningForeground` and `infoForeground`.
 - **Tags:**
   - `MarkerTag::Unnecessary` fades the code (`show_unused`, using the theme's `editorUnnecessaryCode.opacity`).
   - `MarkerTag::Deprecated` strikes it through (`show_deprecated`).
-  - Tagged hints get no squiggle.
+  - Tagged hints get no dots.
 - **Hovers:** the message in the editor font, then the source and code, then each `related_information` entry, whose `file(line, col): ` link opens the location or emits `CodeEditorEvent::OpenLocation`. With a `code_target` (Monaco's `code: { value, target }`), the code is a link to it, here and in the marker zone, opened through the link openers or `CodeEditorEvent::OpenLink`. The marker's range is highlighted (`editor.hoverHighlightBackground`). At the bottom, the status bar for the most severe marker: "View Problem" (errors, warnings and infos) opens the marker zone, and Quick Fix, computed from the quick fix code actions for the marker, says "Checking for quick fixes...", then "Quick Fix..." (the code action menu with them, below the link) or "No quick fixes available". Read-only editors get no Quick Fix.
 
 `render_validation_decorations` hides all of this as Monaco does:
@@ -37,7 +38,11 @@ Markers are rendered as:
 - `On` always shows it.
 - `Off` never does.
 
-Marker ranges follow edits. `model.markers()` returns the current ranges, sorted by position. As in Monaco, an empty range is widened to the character at its position, markers without a message are dropped, and an end before the start moves to the start's line.
+Marker ranges follow edits. `model.markers()` returns the current ranges, sorted by position. As in Monaco (`_createDecorationRange`):
+- An empty range covers the word at its position. On an empty line or after the line's last non-whitespace character it stays empty and is drawn one character wide.
+- A whole-line marker, from column 0 to `u32::MAX` (Monaco's `Number.MAX_VALUE`), starts at the line's first non-whitespace character.
+- Markers without a message are dropped, and an end before the start moves to the start's line.
+- Only the first 500 markers of a model are drawn (`MAX_DECORATED_MARKERS`).
 
 ## Markers across models
 
@@ -46,7 +51,7 @@ Monaco's global marker API works across every live model:
 ```rust,ignore
 use gpui_monaco::MarkerFilter;
 
-// Monaco `getModelMarkers`: any of owner, resource (the model's uri) and take.
+// Monaco `getModelMarkers`: any of owner, resource (a model's `resource()`) and take.
 let errors = gpui_monaco::model_markers(cx, &MarkerFilter {
     owner: Some("rustc".into()),
     ..Default::default()
@@ -62,7 +67,9 @@ gpui_monaco::remove_all_markers(cx, "rustc");
 gpui_monaco::on_did_change_markers(cx, |uris, cx| refresh_problems_panel(uris, cx)).detach();
 ```
 
-Unlike `model.markers()`, `model_markers` returns markers as they were set, as Monaco's marker service does. Changes made in one update arrive as one event, each uri once (Monaco debounces it). Markers live in their model, so they go away with it; Monaco keeps markers for uris without a model except in-memory ones.
+Unlike `model.markers()`, `model_markers` returns markers as they were set, as Monaco's marker service does. Changes made in one update arrive as one event, each uri once (Monaco debounces it).
+
+As in Monaco, markers belong to the uri rather than the model. A model without a uri has Monaco's `inmemory://model/N` as its `resource()`, so its markers are reported and filtered like any other's. When a model is released, its markers stay for the next model with that uri, unless the uri is `inmemory:`, `internal:` or `vscode:`.
 
 ## Navigation
 
