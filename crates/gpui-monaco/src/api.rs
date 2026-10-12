@@ -2100,10 +2100,10 @@ pub struct FontInfo {
     pub font_size: gpui::Pixels,
     /// The line height (Monaco `lineHeight`).
     pub line_height: gpui::Pixels,
-    /// A space is as wide as an `m` (Monaco `isMonospace` checks more
+    /// A space is as wide as an `n` (Monaco `isMonospace` checks more
     /// characters).
     pub is_monospace: bool,
-    /// The width of a typical half-width character, an `m` (Monaco
+    /// The width of a typical half-width character, an `n` (Monaco
     /// `typicalHalfwidthCharacterWidth`).
     pub typical_halfwidth_character_width: gpui::Pixels,
     /// The width of a space (Monaco `spaceWidth`).

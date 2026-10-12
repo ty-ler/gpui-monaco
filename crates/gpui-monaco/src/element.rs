@@ -208,6 +208,8 @@ pub(crate) struct TextMetrics {
     pub font: Font,
     pub font_size: Pixels,
     pub line_height: Pixels,
+    /// Monaco `typicalHalfwidthCharacterWidth`: the width of `n`, a column
+    /// for wrapping, rulers and `scrollBeyondLastColumn`.
     pub em_width: Pixels,
     /// A space's width: wrapped lines' indentation.
     pub space_width: Pixels,
@@ -241,7 +243,8 @@ impl TextMetrics {
                 )
                 .width
         };
-        let em_width = width("m");
+        // Monaco `typicalHalfwidthCharacter` (`fontMeasurements.ts`).
+        let em_width = width("n");
         let space_width = width(" ");
         // Monaco `FontInfo.maxDigitWidth`: the widest of the digits.
         let digits = window.text_system().shape_line(
@@ -264,7 +267,7 @@ impl TextMetrics {
         Self {
             font,
             font_size,
-            line_height: options.resolved_line_height(),
+            line_height: crate::font_zoom::effective_line_height(options),
             em_width,
             space_width,
             max_digit_width,

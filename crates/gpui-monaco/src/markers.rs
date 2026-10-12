@@ -1399,7 +1399,7 @@ impl CodeEditor {
         self.set_selections(&[crate::cursor::Selection::collapsed(position)], cx);
         // Monaco `ZoneWidget._getMaximumHeightInLines`: 80% of the editor,
         // at least 12 lines.
-        let line_height = self.options.resolved_line_height();
+        let line_height = self.line_height();
         let editor_lines = self
             .layout_size()
             .map_or(0., |size| size.height / line_height);

@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use web_time::Instant;
 
-use gpui::{App, Context, Global, Modifiers, PinchEvent, ScrollDelta, ScrollWheelEvent, px};
+use gpui::{
+    App, Context, Global, Modifiers, PinchEvent, Pixels, ScrollDelta, ScrollWheelEvent, px,
+};
 
 use crate::editor::CodeEditor;
 use crate::options::EditorOptions;
@@ -45,17 +47,28 @@ pub fn remeasure_fonts(_cx: &mut App) {}
 /// Monaco `BareFontInfo._create`: the font size and line height grow by
 /// 10% per zoom level, after [`EditorOptions::validated`].
 ///
-/// Unlike Monaco, a zoomed out line height stays at least 8px: the zoomed
-/// options keep it in `line_height`, where smaller values multiply the font
-/// size.
+/// The zoomed options keep the line height resolved, in pixels, in
+/// `line_height`: Monaco rounds the line height before zooming and not
+/// after, so at zoom level 1 an 18px line is 19.8px. Read it with
+/// [`effective_line_height`], not [`EditorOptions::resolved_line_height`],
+/// which would round it again (and read values under 8 as multiples of the
+/// font size).
 pub(crate) fn zoomed_options(options: &EditorOptions, level: f32) -> EditorOptions {
     let mut zoomed = options.validated();
+    let multiplier = 1. + level * 0.1;
+    zoomed.line_height = Some(zoomed.resolved_line_height() * multiplier);
     if level != 0. {
-        let multiplier = 1. + level * 0.1;
-        zoomed.line_height = Some((zoomed.resolved_line_height() * multiplier).max(px(8.)));
         zoomed.font_size *= multiplier;
     }
     zoomed
+}
+
+/// The line height of options from [`zoomed_options`] (Monaco
+/// `fontInfo.lineHeight`), unrounded.
+pub(crate) fn effective_line_height(zoomed: &EditorOptions) -> Pixels {
+    zoomed
+        .line_height
+        .unwrap_or_else(|| zoomed.resolved_line_height())
 }
 
 /// A trackpad zoom gesture in progress (Monaco treats wheel events within
@@ -177,8 +190,54 @@ mod tests {
         };
         let zoomed = zoomed_options(&options, 2.);
         assert_eq!(zoomed.font_size, px(12.));
-        assert_eq!(zoomed.line_height, Some(px(24.)));
+        assert_eq!(effective_line_height(&zoomed), px(24.));
         options.line_height = None;
-        assert_eq!(zoomed_options(&options, 0.), options);
+        let unzoomed = zoomed_options(&options, 0.);
+        assert_eq!(unzoomed.font_size, options.font_size);
+        assert_eq!(
+            effective_line_height(&unzoomed),
+            options.resolved_line_height()
+        );
+    }
+
+    /// Monaco `BareFontInfo._create` rounds the line height, then zooms it
+    /// without rounding again.
+    #[test]
+    fn zoomed_line_height_stays_fractional() {
+        let options = EditorOptions {
+            font_size: px(12.),
+            line_height: Some(px(18.)),
+            ..Default::default()
+        };
+        let line_height =
+            |level: f32| f32::from(effective_line_height(&zoomed_options(&options, level)));
+        assert!((line_height(1.) - 19.8).abs() < 1e-4);
+        assert!((line_height(0.5) - 18.9).abs() < 1e-4);
+        // A rounded user line height: 18.4 is 18 before zooming.
+        let options = EditorOptions {
+            line_height: Some(px(18.4)),
+            ..options
+        };
+        assert!(
+            (f32::from(effective_line_height(&zoomed_options(&options, 1.))) - 19.8).abs() < 1e-4
+        );
+        // Zooming out goes under Monaco's 8px minimum, as Monaco does.
+        let options = EditorOptions {
+            line_height: Some(px(8.)),
+            ..options
+        };
+        assert_eq!(
+            effective_line_height(&zoomed_options(&options, -5.)),
+            px(4.)
+        );
+        // Zooming in goes over the 150px limit of the option.
+        let options = EditorOptions {
+            line_height: Some(px(150.)),
+            ..options
+        };
+        assert_eq!(
+            effective_line_height(&zoomed_options(&options, 10.)),
+            px(300.)
+        );
     }
 }

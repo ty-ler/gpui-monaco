@@ -211,14 +211,6 @@ impl CodeEditor {
 
     // ----- scrolling ----------------------------------------------------------
 
-    fn line_height(&self) -> Pixels {
-        self.layout
-            .as_ref()
-            .map_or(self.options.resolved_line_height(), |l| {
-                l.metrics.line_height
-            })
-    }
-
     /// Scrolls by `delta_y` and `delta_x` from where the scroll is now,
     /// without moving the cursors (Monaco `editorScroll`): smoothly, when
     /// `smooth_scrolling` is on (`ScrollType.Smooth`), clamped to the last

@@ -1716,7 +1716,7 @@ impl CodeEditor {
             // Monaco `ContentHoverWidget._updateFont` and
             // `ParameterHintsWidget.updateFont`: the editor's line height
             // over its font size.
-            line_height: f32::from(self.options.resolved_line_height()) / f32::from(font_size),
+            line_height: f32::from(self.line_height()) / f32::from(font_size),
             separator: colors.text_separator_foreground,
             quote_background: colors.text_block_quote_background,
             quote_border: colors.text_block_quote_border,
@@ -3091,7 +3091,7 @@ impl CodeEditor {
             _ => QuickFixStatus::Hidden,
         };
         let editor = cx.entity().downgrade();
-        let line_height = self.options.resolved_line_height();
+        let line_height = self.line_height();
         // Monaco `ContentHoverWidget._updateMaxDimensions`.
         let editor_size = self.layout_size().unwrap_or_default();
         let last = self.hover.last_size.get().unwrap_or_default();

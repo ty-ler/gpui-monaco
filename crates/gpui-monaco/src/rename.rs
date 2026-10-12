@@ -701,12 +701,7 @@ impl CodeEditor {
         let has_suggestions = !new_symbol_names_providers(cx, self.provider_target(cx)).is_empty();
         let support_preview = crate::has_workspace_edit_preview_handler(cx);
         let (line_height, char_width) = self.layout.as_ref().map_or_else(
-            || {
-                (
-                    self.options.resolved_line_height(),
-                    self.options.font_size * 0.6,
-                )
-            },
+            || (self.line_height(), self.options.font_size * 0.6),
             |layout| (layout.metrics.line_height, layout.metrics.em_width),
         );
         let location_length = location
