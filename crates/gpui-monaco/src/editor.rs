@@ -2956,7 +2956,11 @@ impl CodeEditor {
                         edge(range.start, Bias::Right).min(end)..end
                     });
                 }
-                let restored = own
+                // Monaco `Cursor.onModelContentChanged`: an undo or redo
+                // restores its selections in the focused editor, whoever
+                // called `model.undo()`, and in the editor that asked for
+                // it; other editors recover from markers.
+                let restored = (own || self.has_focus)
                     && matches!(kind, EditKind::Undo | EditKind::Redo)
                     && restore
                         .as_ref()
@@ -2998,8 +3002,11 @@ impl CodeEditor {
                 if !own || matches!(kind, EditKind::Undo | EditKind::Redo) {
                     self.next_selection_change = CursorChangeCause {
                         reason: match kind {
-                            EditKind::Undo => CursorChangeReason::Undo,
-                            EditKind::Redo => CursorChangeReason::Redo,
+                            EditKind::Undo if restored => CursorChangeReason::Undo,
+                            EditKind::Redo if restored => CursorChangeReason::Redo,
+                            EditKind::Undo | EditKind::Redo => {
+                                CursorChangeReason::RecoverFromMarkers
+                            }
                             EditKind::SetValue => CursorChangeReason::ContentFlush,
                             EditKind::Edit => CursorChangeReason::RecoverFromMarkers,
                         },
@@ -3008,7 +3015,8 @@ impl CodeEditor {
                             _ => CursorChangeSource::ModelChange,
                         },
                     };
-                    self.cursors_changed(own, cx);
+                    // Monaco reveals the restored selections.
+                    self.cursors_changed(own || restored, cx);
                 }
                 cx.notify();
             }
@@ -6978,12 +6986,25 @@ impl EntityInputHandler for CodeEditor {
         let explicit = range_utf16
             .map(|r| self.range_from_utf16(&r))
             .or(marked.clone());
+        // Monaco `_emitTypeEvent` measures the replacement against the
+        // primary selection. Replacing exactly that selection (inserting
+        // from the Character Viewer, say) is a plain `type` at every
+        // selection, with the typing interceptors (auto-close,
+        // auto-surround).
+        if marked.is_none()
+            && let Some(range) = explicit.clone()
+            && range == self.primary_selection_offsets().0
+        {
+            self.type_text(text, cx);
+            return;
+        }
         // Monaco commits a composition at every cursor. Replacing text
         // around the cursor without one (macOS press-and-hold swapping `e`
         // for `é`, or autocorrect) is also a `compositionType` with
-        // `replacePrevCharCnt`/`replaceNextCharCnt`, at every cursor
-        // (`nativeEditContext.ts` `_emitTypeEvent`).
-        if self.cursors.all().len() > 1
+        // `replacePrevCharCnt`/`replaceNextCharCnt`, at every cursor: a
+        // `TypingOther` edit that joins the typing before it in one undo
+        // step.
+        if (self.cursors.all().len() > 1 || marked.is_none())
             && let Some(range) = explicit.clone()
             && (marked.is_some() || !range.is_empty())
             && self

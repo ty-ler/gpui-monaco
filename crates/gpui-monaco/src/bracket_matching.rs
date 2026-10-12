@@ -72,23 +72,52 @@ impl CodeEditor {
     }
 
     /// Deletes the bracket pair at or around each cursor (Monaco
-    /// `editor.action.removeBrackets`, Cmd/Ctrl+Alt+Backspace).
+    /// `editor.action.removeBrackets`, Cmd/Ctrl+Alt+Backspace). Each
+    /// cursor's pair is its own undo step, with undo stops before and after
+    /// (Monaco `removeBrackets` wraps each `executeEdits` in
+    /// `pushUndoStop`); a pair shared by several cursors is removed once.
     pub fn remove_brackets(&mut self, cx: &mut Context<Self>) {
-        let mut ranges: Vec<Range<PointUtf16>> = Vec::new();
+        // Each pair as byte ranges in the text before any removal.
+        let mut pairs: Vec<[Range<usize>; 2]> = Vec::new();
         for selection in self.cursors.selections() {
             if let Some((open, close)) = self.bracket_pair(selection.head, cx) {
-                ranges.extend([open, close]);
+                let to_offsets = |r: Range<PointUtf16>| {
+                    self.snapshot.point_utf16_to_offset(r.start)
+                        ..self.snapshot.point_utf16_to_offset(r.end)
+                };
+                let pair = [to_offsets(open), to_offsets(close)];
+                if !pairs.contains(&pair) {
+                    pairs.push(pair);
+                }
             }
         }
-        ranges.sort_by_key(|r| (r.start, r.end));
-        ranges.dedup();
-        if ranges.is_empty() {
-            return;
+        // The ranges removed so far, to carry the later pairs through them.
+        let mut removed: Vec<Range<usize>> = Vec::new();
+        for pair in pairs {
+            let shift = |offset: usize| -> usize {
+                offset
+                    - removed
+                        .iter()
+                        .filter(|r| r.end <= offset)
+                        .map(|r| r.len())
+                        .sum::<usize>()
+            };
+            let edits = pair
+                .iter()
+                .map(|r| {
+                    let start = self.snapshot.offset_to_point_utf16(shift(r.start));
+                    let end = self.snapshot.offset_to_point_utf16(shift(r.end));
+                    (start..end, String::new())
+                })
+                .collect();
+            let operation = cursor::EditOperation::from_edits(
+                self.snapshot.rope(),
+                &self.cursors.selections(),
+                edits,
+            );
+            self.apply(operation, cx);
+            removed.extend(pair);
         }
-        let rope = self.snapshot.rope();
-        let edits = ranges.into_iter().map(|r| (r, String::new())).collect();
-        let operation = cursor::EditOperation::from_edits(rope, &self.cursors.selections(), edits);
-        self.apply(operation, cx);
     }
 
     /// Re-highlights the bracket pairs at the cursors (Monaco
