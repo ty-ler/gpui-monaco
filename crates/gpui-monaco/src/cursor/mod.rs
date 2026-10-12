@@ -73,7 +73,7 @@ pub use movement::{
 };
 pub(crate) use movement::{
     line_state, move_left, move_right, move_to_beginning_of_line, move_to_end_of_line,
-    move_to_state, word_state,
+    move_to_state, vertical, word_state,
 };
 pub use reindent::{reindent_lines, reindent_selected_lines};
 pub use text::PointUtf16 as Position;

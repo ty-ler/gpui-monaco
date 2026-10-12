@@ -171,6 +171,12 @@ impl CodeEditor {
             })
             .collect();
         self.set_selections(&selections, cx);
+        // Monaco `revealRange(newSelections[0])`.
+        self.reveal_range(
+            selections[0].start()..selections[0].end(),
+            crate::view::reveal::RevealType::Simple,
+            cx,
+        );
     }
 
     /// Selects to the matching bracket, including the brackets (Monaco
@@ -189,5 +195,11 @@ impl CodeEditor {
             })
             .collect();
         self.set_selections(&selections, cx);
+        // Monaco `revealRange(newSelections[0])`.
+        self.reveal_range(
+            selections[0].start()..selections[0].end(),
+            crate::view::reveal::RevealType::Simple,
+            cx,
+        );
     }
 }

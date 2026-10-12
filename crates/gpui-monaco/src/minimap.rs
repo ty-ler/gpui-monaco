@@ -1299,6 +1299,7 @@ impl CodeEditor {
                 reveal: crate::view::reveal::RevealType::Center,
                 horizontal: false,
                 minimal: false,
+                mouse: false,
                 scroll_type: crate::view::reveal::ScrollType::Smooth,
             },
             cx,

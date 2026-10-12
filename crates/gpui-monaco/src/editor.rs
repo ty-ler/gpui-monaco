@@ -337,6 +337,9 @@ pub(crate) struct PendingReveal {
     pub horizontal: bool,
     /// Monaco `minimalReveal`.
     pub minimal: bool,
+    /// A mouse gesture asked for it (Monaco's `source === 'mouse'`): with
+    /// the default `cursorSurroundingLinesStyle`, no context lines.
+    pub mouse: bool,
     pub scroll_type: crate::view::reveal::ScrollType,
 }
 
@@ -1311,6 +1314,10 @@ impl CodeEditor {
 
     /// Replaces the selections (the first becomes primary), clamped to the text, and
     /// emits [`CodeEditorEvent::SelectionsChanged`]. An empty slice is ignored.
+    ///
+    /// Like Monaco's `setSelections`, it doesn't scroll: reveal the cursors
+    /// with [`CodeEditor::reveal_all_cursors`] or one of the `reveal_*`
+    /// methods.
     pub fn set_selections(&mut self, selections: &[Selection], cx: &mut Context<Self>) {
         if selections.is_empty() {
             return;
@@ -1329,7 +1336,8 @@ impl CodeEditor {
         // same selections.
         self.cursor_views = None;
         self.next_selection_change.source = CursorChangeSource::Api;
-        self.cursors_changed(true, cx);
+        // Monaco `Cursor.setStates` only emits events: no reveal.
+        self.cursors_changed(false, cx);
         self.end_update(cx);
     }
 
@@ -1398,6 +1406,11 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         self.apply_scroll_type(scroll_type);
+        // Monaco reveals as soon as it's asked to, so a scroll position set
+        // after a reveal wins; ours wait for the next frame.
+        self.pending_reveal = None;
+        self.pending_reveal_x = None;
+        self.autoscroll_requested = false;
         self.scroll_left = position.x;
         self.scroll_top = position.y;
         self.clamp_scroll();
@@ -2452,8 +2465,9 @@ impl CodeEditor {
         Some(start..start + text.len())
     }
 
-    fn page_lines(&self) -> u32 {
-        self.layout.as_ref().map_or(20, EditorLayout::page_rows)
+    /// Monaco `pageSize` as of the last layout.
+    pub(crate) fn page_lines(&self) -> u32 {
+        self.layout.as_ref().map_or(20, EditorLayout::page_size)
     }
 
     // ----- model synchronisation -------------------------------------------------
@@ -3337,17 +3351,8 @@ impl CodeEditor {
         self.cursors.validate(self.snapshot.rope());
         self.set_cursor_view_states(view_states);
         self.update_cursor_injected_after_move(command, select, &before, cx);
-        // Like Monaco, paging also scrolls the viewport by a page.
-        if matches!(command, MoveCommand::PageUp | MoveCommand::PageDown)
-            && let Some(layout) = self.layout.as_ref()
-        {
-            let delta = layout.metrics.line_height * page as f32;
-            self.scroll_top = if command == MoveCommand::PageDown {
-                self.scroll_top + delta
-            } else {
-                (self.scroll_top - delta).max(px(0.))
-            };
-        }
+        // Paging doesn't scroll by itself: like every cursor move, Monaco's
+        // `cursorPageDown` only reveals the cursors (`revealAllCursors`).
         self.prev_edit_kind = None;
         if self.cursors.selections() != before {
             self.model.update(cx, |model, _| model.push_stack_element());
@@ -3385,7 +3390,9 @@ impl CodeEditor {
         let config = self.cursor_config(cx);
         cursor::add_cursor_above(&config, self.snapshot.rope(), &mut self.cursors);
         self.next_selection_change.reason = CursorChangeReason::Explicit;
-        self.cursors_changed(true, cx);
+        self.cursors_changed(false, cx);
+        // Monaco `revealTopMostCursor`: the new cursor shows.
+        self.reveal_edge_cursor(true, false, cx);
         self.announce_cursor_change(&before, cx);
     }
 
@@ -3394,7 +3401,9 @@ impl CodeEditor {
         let config = self.cursor_config(cx);
         cursor::add_cursor_below(&config, self.snapshot.rope(), &mut self.cursors);
         self.next_selection_change.reason = CursorChangeReason::Explicit;
-        self.cursors_changed(true, cx);
+        self.cursors_changed(false, cx);
+        // Monaco `revealBottomMostCursor`: the new cursor shows.
+        self.reveal_edge_cursor(false, false, cx);
         self.announce_cursor_change(&before, cx);
     }
 
@@ -3863,7 +3872,19 @@ impl CodeEditor {
         let rope = self.snapshot.rope().clone();
         cursor::column_select(&config, &rope, &mut self.cursors, command, page);
         self.next_selection_change.reason = CursorChangeReason::Explicit;
-        self.cursors_changed(true, cx);
+        self.cursors_changed(false, cx);
+        self.reveal_column_select(false, cx);
+    }
+
+    /// Monaco `ColumnSelectCommand`: reveals the top-most cursor when the
+    /// column selection goes up from where it started, the bottom-most one
+    /// otherwise.
+    pub(crate) fn reveal_column_select(&mut self, mouse: bool, cx: &mut Context<Self>) {
+        let reversed = self
+            .cursors
+            .column_select_data()
+            .is_some_and(|data| data.from_row > data.to_row);
+        self.reveal_edge_cursor(reversed, mouse, cx);
     }
 
     /// Runs a comment command with the comment tokens of the language at
@@ -5136,6 +5157,7 @@ impl CodeEditor {
                 in_selection_mode,
             )])
         };
+        let column_select = matches!(next, Next::Column(_));
         match next {
             Next::States(states) => self.cursors.validated_states(model, states),
             Next::Column(extend) => column(self, extend),
@@ -5158,6 +5180,10 @@ impl CodeEditor {
         if let Some(horizontal) = reveal_kind {
             self.autoscroll_minimal = true;
             self.autoscroll_vertical_only = !horizontal;
+        }
+        if column_select && reveal {
+            // Monaco's `columnSelect` reveals the top- or bottom-most cursor.
+            self.reveal_column_select(true, cx);
         }
     }
 
@@ -6683,6 +6709,8 @@ impl Render for CodeEditor {
                 let primary = this.cursors.primary().position;
                 if !this.cursors.primary().selection().is_empty() {
                     this.set_selections(&[Selection::collapsed(primary)], cx);
+                    // Monaco `cancelSelection`: `revealAllCursors`.
+                    this.reveal_all_cursors(true, false, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &LineBreakInsert, _, cx| {

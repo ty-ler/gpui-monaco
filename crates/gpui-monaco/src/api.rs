@@ -763,6 +763,7 @@ impl CodeEditor {
                 reveal,
                 horizontal: true,
                 minimal: false,
+                mouse: false,
                 scroll_type,
             },
             cx,
@@ -787,6 +788,7 @@ impl CodeEditor {
                 reveal,
                 horizontal: false,
                 minimal: false,
+                mouse: false,
                 scroll_type,
             },
             cx,
@@ -958,6 +960,53 @@ impl CodeEditor {
                 reveal: RevealType::Simple,
                 horizontal: reveal_horizontal,
                 minimal: minimal_reveal,
+                mouse: false,
+                scroll_type: ScrollType::Smooth,
+            },
+            cx,
+        );
+    }
+
+    /// Scrolls so the primary selection shows (Monaco `revealPrimaryCursor`
+    /// with `revealHorizontal`): not at all when it doesn't fit.
+    pub(crate) fn reveal_primary_cursor(&mut self, cx: &mut Context<Self>) {
+        let selection = self.cursors.primary().selection();
+        self.request_reveal(
+            PendingReveal {
+                ranges: vec![selection.start()..selection.end()],
+                cursors: true,
+                reveal: RevealType::Simple,
+                horizontal: true,
+                minimal: false,
+                mouse: false,
+                scroll_type: ScrollType::Smooth,
+            },
+            cx,
+        );
+    }
+
+    /// Scrolls so the top-most (`top`) or bottom-most cursor shows (Monaco
+    /// `revealTopMostCursor` / `revealBottomMostCursor`), as Add Cursor
+    /// Above/Below and column selection do. `mouse` is Monaco's `source ===
+    /// 'mouse'`.
+    pub(crate) fn reveal_edge_cursor(&mut self, top: bool, mouse: bool, cx: &mut Context<Self>) {
+        let positions = self.cursors.all().iter().map(|cursor| cursor.position);
+        let position = if top {
+            positions.min()
+        } else {
+            positions.max()
+        };
+        let Some(position) = position else {
+            return;
+        };
+        self.request_reveal(
+            PendingReveal {
+                ranges: vec![position..position],
+                cursors: false,
+                reveal: RevealType::Simple,
+                horizontal: true,
+                minimal: false,
+                mouse,
                 scroll_type: ScrollType::Smooth,
             },
             cx,
@@ -1759,7 +1808,8 @@ impl CodeEditor {
     }
 
     /// Puts a single cursor at `position`, clamped to the text (Monaco
-    /// `setPosition`).
+    /// `setPosition`). It doesn't scroll; follow it with a `reveal_*` call
+    /// (e.g. [`CodeEditor::reveal_position_in_center`]) to show it.
     pub fn set_position(&mut self, position: PointUtf16, cx: &mut Context<Self>) {
         self.set_selections(&[Selection::collapsed(position)], cx);
     }
@@ -1769,7 +1819,8 @@ impl CodeEditor {
         self.cursors.selections()[0]
     }
 
-    /// Replaces the selections with `selection` (Monaco `setSelection`).
+    /// Replaces the selections with `selection` (Monaco `setSelection`),
+    /// without scrolling.
     pub fn set_selection(&mut self, selection: Selection, cx: &mut Context<Self>) {
         self.set_selections(&[selection], cx);
     }

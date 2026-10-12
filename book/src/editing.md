@@ -6,6 +6,8 @@ Every feature here works out of the box. Each follows Monaco's behavior, which t
 
 - **Movement:** character, word, word part (camelCase and snake_case), line, page and document moves. Each has a selecting variant.
 - **Keeping the column:** moving up or down remembers the column you started from. Tabs count as visible columns.
+- **Paging:** PageUp and PageDown move the cursors by two lines less than the editor shows (Monaco's `pageSize`) and then scroll only as far as needed to show them. Cmd+PageUp/PageDown (Alt on Linux and Windows) scroll by the same amount, so two lines of the last page stay in view.
+- **Revealing:** after a keyboard move the view shows every cursor, unless they're further apart than the editor is tall. Adding a cursor above or below, and column selection, follow the new cursor; Cmd+D centers the match it adds when it's off screen. The editor's API doesn't scroll: `set_position` and `set_selections` leave the view where it is, as Monaco's do.
 - **Multiple cursors:**
   - Alt+Click adds a cursor.
   - Cmd+Alt+Up/Down adds a cursor on the line above or below (Shift+Alt+Up/Down on Linux).
@@ -93,6 +95,7 @@ Fold ranges come from these sources, in order (Monaco's `foldingStrategy: auto`)
   - Manual ranges have their own icons (Monaco's `folding-manual-collapsed` and `folding-manual-expanded`). They look like the others unless the host changes them with `view::folding::set_folding_icon(FoldingIcon::ManualCollapsed, Some(codicon), cx)`, as a VS Code product icon theme does.
   - Shift-click (or middle-click) a chevron to toggle the region with everything inside it.
   - Alt-click it to fold the regions around it instead (or unfold them if any are folded).
+  - A click keeps the view on the clicked line rather than scrolling back to the cursor. The folding commands show the cursor, centered if it was off screen.
 - **Placeholder:** a collapsed region shows `⋯` after its first line. Clicking it unfolds the region, and so does clicking after the end of the line with `unfold_on_click_after_end_of_line`. With `folding_highlight` (the default), the line gets the `editor.foldBackground` color.
 - **Commands:** Monaco's, with Cmd on macOS and Ctrl elsewhere:
 
