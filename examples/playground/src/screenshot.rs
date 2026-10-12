@@ -2,8 +2,9 @@
 //!
 //! `PLAYGROUND_KEYS` optionally scripts input before the capture: whitespace
 //! separated keystrokes in GPUI syntax (`cmd-down shift-up`), where a token
-//! `text:abc` types `abc` character by character (`_` types a space) and
-//! `wait` pauses 150ms and draws a frame.
+//! `text:abc` types `abc` character by character (`_` types a space),
+//! `wheel:x,y,dy` moves the mouse to `x, y` (window pixels) and turns the
+//! wheel by `dy` pixels there, and `wait` pauses 150ms and draws a frame.
 
 use gpui::{AnyWindowHandle, App};
 
@@ -31,6 +32,41 @@ pub fn capture_if_requested(window: AnyWindowHandle, cx: &mut App) {
                 cx.update_window(window, |_, window, cx| {
                     window.refresh();
                     window.draw(cx).clear(cx);
+                })
+                .ok();
+                continue;
+            }
+            if let Some(args) = token.strip_prefix("wheel:") {
+                let [x, y, dy]: [f32; 3] = args
+                    .split(',')
+                    .map(|n| n.parse().expect("invalid wheel number"))
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .expect("wheel:x,y,dy");
+                let position = gpui::point(gpui::px(x), gpui::px(y));
+                cx.update_window(window, |_, window, cx| {
+                    window.dispatch_event(
+                        gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                            position,
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                    // Hit testing goes by the last frame: draw one with the
+                    // mouse there first.
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                    window.dispatch_event(
+                        gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                            position,
+                            delta: gpui::ScrollDelta::Pixels(gpui::point(
+                                gpui::px(0.),
+                                gpui::px(dy),
+                            )),
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
                 })
                 .ok();
                 continue;

@@ -461,14 +461,40 @@ impl CodeEditor {
         widget.read(cx).status_bar_text(cx)
     }
 
-    /// Whether the suggest scrollbars show without the mouse over them
-    /// (for a while after scrolling), for tests.
+    /// Whether the suggest list's scrollbar shows without the mouse over
+    /// it (for a while after scrolling), for tests.
     #[doc(hidden)]
     pub fn suggest_scrollbars_revealed_for_tests(&self, cx: &gpui::App) -> bool {
         self.suggest
             .widget
             .as_ref()
-            .is_some_and(|(widget, _)| widget.read(cx).scrollbars_revealed())
+            .is_some_and(|(widget, _)| widget.read(cx).scrollbars_revealed(cx))
+    }
+
+    /// The suggest list's and details panel's scrollbar opacity as last
+    /// rendered, and whether either was fading, for tests.
+    #[doc(hidden)]
+    pub fn suggest_scrollbar_opacities_for_tests(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<([f32; 2], bool)> {
+        let (widget, _) = self.suggest.widget.as_ref()?;
+        Some(widget.read(cx).scrollbar_opacities())
+    }
+
+    /// The suggest list's scroll position in pixels, for tests.
+    #[doc(hidden)]
+    pub fn suggest_list_scroll_top_for_tests(&self, cx: &gpui::App) -> Option<gpui::Pixels> {
+        let (widget, _) = self.suggest.widget.as_ref()?;
+        Some(widget.read(cx).list_scroll_top())
+    }
+
+    /// The height of the suggest details panel's content as last painted,
+    /// for tests.
+    #[doc(hidden)]
+    pub fn suggest_details_content_height_for_tests(&self, cx: &gpui::App) -> Option<gpui::Pixels> {
+        let (widget, _) = self.suggest.widget.as_ref()?;
+        widget.read(cx).details_content_height()
     }
 
     /// The size the suggest widget was resized to, if any.

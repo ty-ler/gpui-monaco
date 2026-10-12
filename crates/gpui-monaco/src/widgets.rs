@@ -296,6 +296,11 @@ pub(crate) struct WidgetAnchor {
     /// The part of the widget placed against the line, relative to the
     /// widget's top left; the rest lies around it.
     pub anchor_box: gpui::Bounds<Pixels>,
+    /// Another part beside `anchor_box`, relative to the widget's top left
+    /// (the suggest widget's details panel). With it, only the two parts
+    /// take the mouse, and the rest of the widget's box lets it through to
+    /// the editor (Monaco's suggest list and details are separate widgets).
+    pub beside: Option<gpui::Bounds<Pixels>>,
 }
 
 #[derive(Default)]

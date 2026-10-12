@@ -5,10 +5,10 @@ use std::ops::Range;
 use gpui::{
     App, AvailableSpace, BorderStyle, Bounds, ContentMask, Corners, CursorStyle as MouseCursor,
     DispatchPhase, Edges, Element, ElementId, ElementInputHandler, Entity, Font, FontStyle,
-    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
-    InteractiveElement as _, IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent,
-    ParentElement as _, PathBuilder, Pixels, ShapedLine, SharedString, Style, Styled as _,
-    TextAlign, TextRun, UnderlineStyle, Window, fill, font, point, px, quad, relative, size,
+    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement,
+    LayoutId, MouseDownEvent, MouseMoveEvent, ParentElement as _, PathBuilder, Pixels, ShapedLine,
+    SharedString, Style, Styled as _, TextAlign, TextRun, UnderlineStyle, Window, fill, font,
+    point, px, quad, relative, size,
 };
 use text::{PointUtf16, Rope};
 
@@ -2210,11 +2210,12 @@ impl Element for EditorElement {
                     // Monaco's `maxWidth` for overflowing widgets: the
                     // window's width.
                     let (element, measured) =
-                        layout_capped(&view, true, viewport.size.width, window, cx);
+                        layout_capped(&view, Some(&room), viewport.size.width, window, cx);
                     // The part placed against the line: the whole widget, or
                     // the box it asked for (the suggest list, with its
                     // details around it), on the side it asked for.
-                    let (preference, anchor_box) = match room.anchor() {
+                    let asked = room.anchor();
+                    let (preference, anchor_box) = match asked {
                         Some(asked) => (vec![asked.preference], asked.anchor_box),
                         None => (preference, Bounds::new(point(px(0.), px(0.)), measured)),
                     };
@@ -2236,11 +2237,19 @@ impl Element for EditorElement {
                         continue;
                     };
                     let origin = point(x, y) - anchor_box.origin;
-                    widgets.push_overflowing(
-                        Bounds::new(origin, measured).intersect(&viewport),
-                        crate::mouse_target::EmbeddedKind::ContentWidget,
-                        layer,
-                    );
+                    // The parts that take the mouse: the whole widget, or
+                    // the anchored part and the one beside it.
+                    let (part, beside) = match asked.and_then(|asked| asked.beside) {
+                        Some(beside) => (anchor_box, Some(beside)),
+                        None => (Bounds::new(point(px(0.), px(0.)), measured), None),
+                    };
+                    for part in std::iter::once(part).chain(beside) {
+                        widgets.push_overflowing(
+                            Bounds::new(origin + part.origin, part.size).intersect(&viewport),
+                            crate::mouse_target::EmbeddedKind::ContentWidget,
+                            layer,
+                        );
+                    }
                     window.defer_draw(element, origin, OVERFLOW_PRIORITY + layer, None);
                 }
                 Embedded::Content {
@@ -2253,7 +2262,7 @@ impl Element for EditorElement {
                 } => {
                     // Monaco's `maxWidth`: the text area's width.
                     let (mut element, measured) =
-                        layout_capped(&view, false, text.size.width, window, cx);
+                        layout_capped(&view, None, text.size.width, window, cx);
                     let anchor_x =
                         reduce_anchor_x(anchor.x, secondary_x, measured.width, wide_char);
                     // Monaco `_layoutBoxInViewport`: kept in the text area.
@@ -2317,7 +2326,7 @@ impl Element for EditorElement {
                     overflow,
                 } => {
                     let mut element = match overflow {
-                        Some(_) => overflowing(view),
+                        Some(_) => overflowing(view, None),
                         None => view.into_any_element(),
                     };
                     // A self-placing widget gets the editor's size.
@@ -6605,31 +6614,61 @@ const OVERFLOW_PRIORITY: usize = 2;
 /// An overflowing widget, wrapped to block the mouse from what's under it
 /// (Monaco's overflow widgets are outside the editor's scrollable element,
 /// so neither the editor nor the page under them gets their wheel or
-/// clicks), with the arrow pointer.
-fn overflowing(view: gpui::AnyView) -> gpui::AnyElement {
+/// clicks), with the arrow pointer. A widget that asks for a part beside
+/// its anchored one in `room` (the suggest widget's details panel) blocks
+/// it under those two parts only, and the rest of its box lets the mouse
+/// through (Monaco's suggest list and details are separate widgets).
+fn overflowing(
+    view: gpui::AnyView,
+    room: Option<crate::widgets::OverflowRoomCell>,
+) -> gpui::AnyElement {
+    // Under the view, so it blocks only what's under the widget. Read once
+    // the view has rendered and asked for its parts.
+    let blocker = gpui::canvas(
+        move |bounds, window, _| {
+            let asked = room
+                .and_then(|room| room.anchor())
+                .and_then(|asked| Some((asked.anchor_box, asked.beside?)));
+            let (part, beside) = match asked {
+                Some((anchor_box, beside)) => (anchor_box, Some(beside)),
+                None => (Bounds::new(point(px(0.), px(0.)), bounds.size), None),
+            };
+            std::iter::once(part)
+                .chain(beside)
+                .map(|part| {
+                    let part = Bounds::new(bounds.origin + part.origin, part.size);
+                    window.insert_hitbox(part, HitboxBehavior::BlockMouse)
+                })
+                .collect::<Vec<_>>()
+        },
+        |_, hitboxes, window, _| {
+            for hitbox in &hitboxes {
+                window.set_cursor_style(MouseCursor::Arrow, hitbox);
+            }
+        },
+    )
+    .absolute()
+    .size_full();
     gpui::div()
-        .occlude()
-        .cursor(MouseCursor::Arrow)
+        .relative()
+        .child(blocker)
         .child(view)
         .into_any_element()
 }
 
 /// Lays out a content widget's view at its min-content size, again at
 /// `max_width` when that's wider (Monaco's `maxWidth` on the widget's
-/// node). `overflow` wraps it as an overflowing widget.
+/// node). With `overflow`, its room, it wraps it as an overflowing widget.
 fn layout_capped(
     view: &gpui::AnyView,
-    overflow: bool,
+    overflow: Option<&crate::widgets::OverflowRoomCell>,
     max_width: Pixels,
     window: &mut Window,
     cx: &mut App,
 ) -> (gpui::AnyElement, gpui::Size<Pixels>) {
-    let element = |view: &gpui::AnyView| {
-        if overflow {
-            overflowing(view.clone())
-        } else {
-            view.clone().into_any_element()
-        }
+    let element = |view: &gpui::AnyView| match overflow {
+        Some(room) => overflowing(view.clone(), Some(room.clone())),
+        None => view.clone().into_any_element(),
     };
     let mut measured_element = element(view);
     let measured = measured_element.layout_as_root(
