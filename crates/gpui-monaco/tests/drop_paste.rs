@@ -275,6 +275,37 @@ fn paste_edits_are_resolved_before_applying(cx: &mut TestAppContext) {
     assert_eq!(*asked.borrow(), [None, Some("text.lazy".to_string())]);
 }
 
+/// Monaco `editor.hidePasteWidget` binds Escape at weight `EditorContrib`,
+/// so the heavier Escape rules (`closeFindWidget`, `leaveSnippet`, …) run
+/// first, and the button goes on the next Escape.
+#[gpui::test]
+fn escape_closes_find_before_the_options_button(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", cx);
+    cx.update(|_, cx| {
+        register_document_paste_edit_provider(cx, LanguageSelector::All, Shout);
+    });
+    cx.write_to_clipboard(ClipboardItem::new_string("hi".into()));
+    cx.dispatch_action(Paste);
+    paint(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_post_edit_widget_visible()));
+    editor.update_in(cx, |e, window, cx| {
+        e.trigger("actions.find", window, cx).unwrap();
+        window.focus(&e.focus_handle(cx), cx);
+    });
+    paint(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_find_visible()));
+    assert!(editor.read_with(cx, |e, _| e.is_post_edit_widget_visible()));
+
+    cx.simulate_keystrokes("escape");
+    paint(cx);
+    assert!(editor.read_with(cx, |e, _| !e.is_find_visible()));
+    assert!(editor.read_with(cx, |e, _| e.is_post_edit_widget_visible()));
+    cx.simulate_keystrokes("escape");
+    paint(cx);
+    assert!(editor.read_with(cx, |e, _| !e.is_post_edit_widget_visible()));
+    assert_eq!(text(&editor, cx), "HI");
+}
+
 /// Monaco `PostEditWidget`: the options button goes when the cursor moves
 /// (`onDidChangeCursorPosition`), and the command with it.
 #[gpui::test]

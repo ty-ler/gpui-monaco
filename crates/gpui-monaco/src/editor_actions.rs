@@ -890,7 +890,9 @@ pub struct KeybindingRule {
     /// The command: an editor action id (built-in or added), a Monaco
     /// command such as `"cursorDown"`, a command from [`crate::add_command`]
     /// or [`crate::register_command`], or a GPUI action name. `None`
-    /// unbinds the keystrokes (Monaco `command: null`).
+    /// unbinds the keystrokes (Monaco `command: null`). A `-` before the
+    /// id removes the command's default bindings instead; see
+    /// [`KeybindingRule::remove`].
     pub command: Option<SharedString>,
     /// The argument for a registered command (Monaco `commandArgs`).
     pub command_args: Option<serde_json::Value>,
@@ -915,6 +917,19 @@ impl KeybindingRule {
         Self {
             keystrokes: keystrokes.into(),
             command: None,
+            command_args: None,
+            when: None,
+        }
+    }
+
+    /// A rule removing `command`'s default bindings of `keystrokes`, or
+    /// of every keystroke if `keystrokes` is empty (Monaco's `-command`,
+    /// e.g. `-actions.find`). Other commands' bindings of the keystrokes
+    /// still apply. With [`KeybindingRule::when`], only where it holds.
+    pub fn remove(keystrokes: impl Into<SharedString>, command: &str) -> Self {
+        Self {
+            keystrokes: keystrokes.into(),
+            command: Some(format!("-{command}").into()),
             command_args: None,
             when: None,
         }
@@ -948,29 +963,79 @@ pub fn add_keybinding_rules(
     cx: &mut App,
     rules: Vec<KeybindingRule>,
 ) -> anyhow::Result<Disposable> {
-    let bindings = rules
-        .into_iter()
-        .map(|rule| {
-            let when = rule.when.as_deref().unwrap_or(KEY_CONTEXT);
-            let predicate = gpui::KeyBindingContextPredicate::parse(when)?;
-            let action: Box<dyn gpui::Action> = match rule.command {
-                Some(command) => Box::new(RunCommand {
-                    id: command.to_string(),
-                    args: rule.command_args,
-                }),
-                None => Box::new(gpui::NoAction),
-            };
+    let mut bindings = Vec::new();
+    for rule in rules {
+        let when = rule.when.as_deref().unwrap_or(KEY_CONTEXT);
+        let predicate = Rc::new(gpui::KeyBindingContextPredicate::parse(when)?);
+        if let Some(removed) = rule.command.as_deref().and_then(|c| c.strip_prefix('-')) {
+            bindings.extend(removal_bindings(cx, removed, &rule.keystrokes, predicate)?);
+            continue;
+        }
+        let action: Box<dyn gpui::Action> = match rule.command {
+            Some(command) => Box::new(RunCommand {
+                id: command.to_string(),
+                args: rule.command_args,
+            }),
+            None => Box::new(gpui::NoAction),
+        };
+        bindings.push(KeyBinding::load(
+            &rule.keystrokes,
+            action,
+            Some(predicate),
+            false,
+            None,
+            &gpui::DummyKeyboardMapper,
+        )?);
+    }
+    Ok(bind_removable(cx, bindings))
+}
+
+/// A `-command` rule's bindings (Monaco `KeybindingResolver.handleRemovals`):
+/// [`gpui::Unbind`] markers that take the bindings of command `id`'s
+/// action off `keystrokes`, or off every keystroke it's bound to if
+/// `keystrokes` is empty, where `predicate` holds. Other bindings of the
+/// keystrokes still apply.
+fn removal_bindings(
+    cx: &App,
+    id: &str,
+    keystrokes: &str,
+    predicate: Rc<gpui::KeyBindingContextPredicate>,
+) -> anyhow::Result<Vec<KeyBinding>> {
+    let name = action_name(id).map_or(id, |(name, _)| name);
+    let keystrokes = if keystrokes.trim().is_empty() {
+        let keymap = cx.key_bindings();
+        let keymap = keymap.borrow();
+        let mut bound: Vec<String> = keymap
+            .bindings()
+            .filter(|binding| binding.action().name() == name)
+            .map(|binding| {
+                binding
+                    .keystrokes()
+                    .iter()
+                    .map(|keystroke| keystroke.inner().unparse())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect();
+        bound.sort();
+        bound.dedup();
+        bound
+    } else {
+        vec![keystrokes.to_string()]
+    };
+    keystrokes
+        .iter()
+        .map(|keystrokes| {
             Ok(KeyBinding::load(
-                &rule.keystrokes,
-                action,
-                Some(Rc::new(predicate)),
+                keystrokes,
+                Box::new(gpui::Unbind(name.to_string().into())),
+                Some(predicate.clone()),
                 false,
                 None,
                 &gpui::DummyKeyboardMapper,
             )?)
         })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    Ok(bind_removable(cx, bindings))
+        .collect()
 }
 
 /// Binds `bindings`, each with a context, until the returned disposable
@@ -1324,6 +1389,49 @@ impl CodeEditor {
             }
             Err(_) => false,
         }
+    }
+
+    /// Runs a provider's command (a completion item's or a code action's)
+    /// as Monaco's `commandService.executeCommand` does, where editor
+    /// actions are commands too: a registered command with all its
+    /// arguments; else, once the current update is done (to get the
+    /// editor's window), whatever [`CodeEditor::run_command`] finds with
+    /// the first argument (`editor.action.triggerParameterHints`,
+    /// `editor.action.rename`, …); else [`CodeEditorEvent::ExecuteCommand`]
+    /// for the host, as for code lenses.
+    ///
+    /// [`CodeEditorEvent::ExecuteCommand`]: crate::CodeEditorEvent::ExecuteCommand
+    pub(crate) fn run_provider_command(
+        &mut self,
+        command: providers::Command,
+        cx: &mut Context<Self>,
+    ) {
+        if crate::commands::execute_command(cx, &command).is_ok() {
+            return;
+        }
+        let window = self.window_id.and_then(|id| {
+            cx.windows()
+                .into_iter()
+                .find(|window| window.window_id() == id)
+        });
+        let Some(window) = window else {
+            cx.emit(crate::CodeEditorEvent::ExecuteCommand(command));
+            return;
+        };
+        let editor = cx.weak_entity();
+        cx.defer(move |cx| {
+            let ran = window.update(cx, |_, window, cx| {
+                editor.update(cx, |editor, cx| {
+                    let args = command.arguments.first().cloned();
+                    if !editor.run_command(&command.id, args, window, cx) {
+                        cx.emit(crate::CodeEditorEvent::ExecuteCommand(command));
+                    }
+                })
+            });
+            if let Err(err) = ran {
+                log::warn!("{err:#}");
+            }
+        });
     }
 
     /// The keystrokes bound to each supported action in this editor, as

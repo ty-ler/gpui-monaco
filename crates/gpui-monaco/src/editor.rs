@@ -3911,6 +3911,11 @@ impl CodeEditor {
             self.close_find(window, cx);
             return;
         }
+        // Monaco `editor.hidePasteWidget` and `editor.hideDropWidget`
+        // (`EditorContrib`, Escape only, no `editorTextFocus`).
+        if !secondary && self.clear_post_edit(cx) {
+            return;
+        }
         if !secondary && self.cancel_symbol_navigation(cx) {
             return;
         }
