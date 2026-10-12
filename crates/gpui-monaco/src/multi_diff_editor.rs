@@ -1367,7 +1367,7 @@ impl MultiDiffEditor {
         let viewport = self.bounds.get().size;
         let max_top = self.max_scroll_top(viewport.height);
         let max_left = self.max_scroll_left(cx);
-        let now = Instant::now();
+        let now = cx.background_executor().now();
         let top = (self.scroll_top - delta.y).clamp(px(0.), max_top);
         if matches!(event.delta, ScrollDelta::Lines(_)) && top != self.scroll_top {
             // Monaco `SmoothScrollingOperation.combine`: on from where it
@@ -1533,7 +1533,7 @@ impl MultiDiffEditor {
         self.scrollbar_fade.mouse_position = over.then_some(position);
         self.scrollbar_fade.mouse_over = over;
         if was_over && !over {
-            self.scrollbar_fade.left_at = Some(Instant::now());
+            self.scrollbar_fade.left_at = Some(cx.background_executor().now());
         }
         if was_over != over
             || hovered_before != slider_hovered(&self.scrollbar_fade, &self.scrollbars)
@@ -2259,7 +2259,7 @@ fn list_colors(this: &MultiDiffEditor, cx: &App) -> EditorColors {
 
 impl Render for MultiDiffEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let now = Instant::now();
+        let now = cx.background_executor().now();
         let bounds = self.bounds.get();
         // Before the first layout, the window's height.
         let viewport = if bounds.size.height > px(0.) {
@@ -2320,7 +2320,7 @@ impl Render for MultiDiffEditor {
         // Monaco reveals `auto` scrollbars whenever the list scrolls.
         if self.drawn_scroll != point(scroll_left, shown) {
             self.drawn_scroll = point(scroll_left, shown);
-            self.scrollbar_fade.revealed_at = Some(Instant::now());
+            self.scrollbar_fade.revealed_at = Some(cx.background_executor().now());
         }
         // The list's top in the files' coordinates.
         let scroll_top = shown - self.anchoring.leading_slack;
