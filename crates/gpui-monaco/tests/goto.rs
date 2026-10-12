@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use gpui::{App, AppContext as _, Entity, Focusable, Task, TestAppContext, VisualTestContext};
 use gpui_monaco::cursor::Selection;
-use gpui_monaco::options::{GoToLocation, LocationKind};
+use gpui_monaco::options::{GoToLocation, LocationKind, NavigationCommand};
 use gpui_monaco::providers::*;
 use gpui_monaco::text::PointUtf16;
 use gpui_monaco::{CodeEditor, CodeEditorEvent, TextModel};
@@ -37,6 +37,8 @@ fn elsewhere(uri: &str, row: u32) -> Location {
 struct Fixed {
     definitions: Vec<Location>,
     references: Vec<Location>,
+    /// The references without the declaration (`references` when `None`).
+    references_without_declaration: Option<Vec<Location>>,
     declarations: Vec<Location>,
     type_definitions: Vec<Location>,
     implementations: Vec<Location>,
@@ -73,8 +75,15 @@ impl ReferenceProvider for Fixed {
         context: ReferenceContext,
         _: &mut App,
     ) -> Task<anyhow::Result<Vec<Location>>> {
-        assert!(context.include_declaration);
-        self.answer("references", &self.references)
+        if context.include_declaration {
+            self.answer("references", &self.references)
+        } else {
+            let without = self.references_without_declaration.as_ref();
+            self.answer(
+                "references without declaration",
+                without.unwrap_or(&self.references),
+            )
+        }
     }
 }
 impl DeclarationProvider for Fixed {
@@ -111,6 +120,14 @@ impl ImplementationProvider for Fixed {
 const TEXT: &str = "fn add(a: i32) {}\nfn main() {\n    add(1);\n    add(2);\n}\n";
 
 fn setup(fixed: Fixed, cx: &mut TestAppContext) -> (Entity<CodeEditor>, &mut VisualTestContext) {
+    setup_with(TEXT, fixed, cx)
+}
+
+fn setup_with<'a>(
+    text: &str,
+    fixed: Fixed,
+    cx: &'a mut TestAppContext,
+) -> (Entity<CodeEditor>, &'a mut VisualTestContext) {
     cx.update(|cx| {
         gpui_monaco::init(cx);
         let all = LanguageSelector::All;
@@ -121,7 +138,7 @@ fn setup(fixed: Fixed, cx: &mut TestAppContext) -> (Entity<CodeEditor>, &mut Vis
         register_implementation_provider(cx, all, fixed);
     });
     let (editor, cx) = cx.add_window_view(|window, cx| {
-        let model = cx.new(|_| TextModel::new(TEXT).with_uri("file:///src/main.rs"));
+        let model = cx.new(|_| TextModel::new(text).with_uri("file:///src/main.rs"));
         CodeEditor::new(model, window, cx)
     });
     cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
@@ -886,4 +903,266 @@ fn location_links_select_and_underline_their_ranges(cx: &mut TestAppContext) {
             .collect()
     });
     assert_eq!(underlined, vec![34..40usize]);
+}
+
+/// `fn add(a: i32) {}` as a `LocationLink`: the whole function, with its
+/// name as the target selection range.
+fn add_link() -> Location {
+    Location {
+        range: p(0, 0)..p(0, 17),
+        target_selection_range: Some(p(0, 3)..p(0, 6)),
+        ..Default::default()
+    }
+}
+
+/// Monaco `referenceAt` tests `OneReference.range`, a link's
+/// `targetSelectionRange`: inside the definition's body but off its name,
+/// F12 goes to the name instead of running the alternative.
+#[gpui::test]
+fn the_alternative_runs_only_on_the_target_selection_range(cx: &mut TestAppContext) {
+    let fixed = Fixed {
+        definitions: vec![add_link()],
+        references: vec![here(0, 3, 6), here(2, 4, 7), here(3, 4, 7)],
+        ..Default::default()
+    };
+    let log = fixed.log.clone();
+    let (editor, cx) = setup(fixed, cx);
+    // In the parameter list, inside the link's full range.
+    set_cursor(&editor, cx, p(0, 10));
+    cx.simulate_keystrokes("f12");
+    draw(cx);
+    assert_eq!(*log.borrow(), ["definition"]);
+    assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
+    assert_eq!(head(&editor, cx), p(0, 3));
+    // On the name: Go to References.
+    log.borrow_mut().clear();
+    set_cursor(&editor, cx, p(0, 6));
+    cx.simulate_keystrokes("f12");
+    draw(cx);
+    assert_eq!(*log.borrow(), ["definition", "references"]);
+    assert!(editor.read_with(cx, |e, _| e.is_peek_visible()));
+}
+
+/// F12 stepping stops once the cursor leaves the results' target selection
+/// ranges (Monaco `SymbolNavigationService`), and the peek view selects
+/// the result whose name is nearest (`nearestReference`).
+#[gpui::test]
+fn stepping_and_the_peek_use_the_target_selection_range(cx: &mut TestAppContext) {
+    let link = |row: u32| Location {
+        range: p(row, 0)..p(row, 11),
+        target_selection_range: Some(p(row, 4)..p(row, 7)),
+        ..Default::default()
+    };
+    let fixed = Fixed {
+        implementations: vec![link(2), link(3)],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(fixed, cx);
+    set_goto(&editor, cx, |o| {
+        o.multiple_implementations = GoToLocation::Goto
+    });
+    set_cursor(&editor, cx, p(1, 3));
+    editor.update(cx, |e, cx| e.go_to(LocationKind::Implementation, cx));
+    cx.run_until_parked();
+    assert_eq!(head(&editor, cx), p(2, 4));
+    assert!(cx.update(|_, cx| gpui_monaco::has_symbol_navigation(cx)));
+    // Still inside the full range, off the name.
+    set_cursor(&editor, cx, p(2, 9));
+    assert!(!cx.update(|_, cx| gpui_monaco::has_symbol_navigation(cx)));
+
+    // The peek view selects the result whose name is nearest the cursor.
+    set_goto(&editor, cx, |o| {
+        o.multiple_implementations = GoToLocation::Peek
+    });
+    editor.update(cx, |e, cx| {
+        let link = |row: u32, name: u32| Location {
+            range: p(row, 0)..p(row, 11),
+            target_selection_range: Some(p(row, name)..p(row, name + 1)),
+            ..Default::default()
+        };
+        // Full range starts: (2,0) is 100+9 = 109 away, (4,0) also 109;
+        // names: (2,1) is 108 away, (4,9) is 100.
+        e.peek_locations(p(3, 9), vec![link(2, 1), link(4, 9)], None, cx)
+    });
+    draw(cx);
+    let (_, selected) = editor.read_with(cx, |e, cx| e.peek_results(cx)).unwrap();
+    assert_eq!(selected, 1);
+}
+
+/// Monaco `getReferencesAtPosition` with `compact`: Go to References asks
+/// again without the declaration when a provider finds exactly two, and
+/// takes that answer if it has one; Peek References doesn't.
+#[gpui::test]
+fn go_to_references_is_compact(cx: &mut TestAppContext) {
+    let fixed = Fixed {
+        references: vec![here(0, 3, 6), here(2, 4, 7)],
+        references_without_declaration: Some(vec![here(2, 4, 7)]),
+        ..Default::default()
+    };
+    let log = fixed.log.clone();
+    let (editor, cx) = setup(fixed, cx);
+    set_cursor(&editor, cx, p(0, 4));
+    cx.simulate_keystrokes("shift-f12");
+    draw(cx);
+    assert_eq!(
+        *log.borrow(),
+        ["references", "references without declaration"]
+    );
+    assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
+    assert_eq!(head(&editor, cx), p(2, 4));
+
+    // Peek References shows both.
+    log.borrow_mut().clear();
+    set_cursor(&editor, cx, p(0, 4));
+    editor.update(cx, |e, cx| e.peek(LocationKind::References, cx));
+    draw(cx);
+    assert_eq!(*log.borrow(), ["references"]);
+    let (locations, _) = editor.read_with(cx, |e, cx| e.peek_results(cx)).unwrap();
+    assert_eq!(locations.len(), 2);
+}
+
+#[gpui::test]
+fn compact_references_keep_the_first_answer_unless_it_has_one(cx: &mut TestAppContext) {
+    // Two without the declaration too: the first answer stays.
+    let fixed = Fixed {
+        references: vec![here(0, 3, 6), here(2, 4, 7)],
+        ..Default::default()
+    };
+    let log = fixed.log.clone();
+    let (editor, cx) = setup(fixed, cx);
+    set_cursor(&editor, cx, p(0, 4));
+    cx.simulate_keystrokes("shift-f12");
+    draw(cx);
+    assert_eq!(
+        *log.borrow(),
+        ["references", "references without declaration"]
+    );
+    let (locations, _) = editor.read_with(cx, |e, cx| e.peek_results(cx)).unwrap();
+    assert_eq!(locations.len(), 2);
+}
+
+#[gpui::test]
+fn compact_references_ask_again_only_for_two(cx: &mut TestAppContext) {
+    let fixed = Fixed {
+        references: vec![here(0, 3, 6), here(2, 4, 7), here(3, 4, 7)],
+        references_without_declaration: Some(vec![here(2, 4, 7)]),
+        ..Default::default()
+    };
+    let log = fixed.log.clone();
+    let (editor, cx) = setup(fixed, cx);
+    set_cursor(&editor, cx, p(0, 4));
+    cx.simulate_keystrokes("shift-f12");
+    draw(cx);
+    assert_eq!(*log.borrow(), ["references"]);
+    let (locations, _) = editor.read_with(cx, |e, cx| e.peek_results(cx)).unwrap();
+    assert_eq!(locations.len(), 3);
+}
+
+/// The alternative runs as its own command (Monaco runs the registered
+/// action with its `SymbolNavigationActionConfig`): from Peek Definition,
+/// Go to References with one result goes there without a peek view.
+#[gpui::test]
+fn the_alternative_runs_with_its_own_configuration(cx: &mut TestAppContext) {
+    let fixed = Fixed {
+        definitions: vec![here(0, 3, 6)],
+        references: vec![here(2, 4, 7)],
+        ..Default::default()
+    };
+    let log = fixed.log.clone();
+    let (editor, cx) = setup(fixed, cx);
+    set_cursor(&editor, cx, p(0, 4));
+    editor.update(cx, |e, cx| e.peek(LocationKind::Definition, cx));
+    draw(cx);
+    assert_eq!(*log.borrow(), ["definition", "references"]);
+    assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
+    assert_eq!(head(&editor, cx), p(2, 4));
+
+    // Naming Peek References opens even one result in a peek view.
+    set_goto(&editor, cx, |o| {
+        o.alternative_definition_command = Some(NavigationCommand::PeekReferences)
+    });
+    set_cursor(&editor, cx, p(0, 4));
+    cx.simulate_keystrokes("f12");
+    draw(cx);
+    let (locations, _) = editor.read_with(cx, |e, cx| e.peek_results(cx)).unwrap();
+    assert_eq!(locations.len(), 1);
+}
+
+/// Monaco `_activeAlternativeCommands`: a command whose alternative is
+/// running can't run as an alternative again, so chains end.
+#[gpui::test]
+fn chains_of_alternatives_end(cx: &mut TestAppContext) {
+    let fixed = Fixed {
+        definitions: vec![here(0, 3, 6)],
+        references: vec![here(0, 3, 6)],
+        ..Default::default()
+    };
+    let log = fixed.log.clone();
+    let (editor, cx) = setup(fixed, cx);
+    // Definition -> references -> peek definition, whose alternative (Go to
+    // References) already ran one.
+    set_goto(&editor, cx, |o| {
+        o.alternative_reference_command = Some(NavigationCommand::PeekDefinition)
+    });
+    set_cursor(&editor, cx, p(0, 4));
+    cx.simulate_keystrokes("f12");
+    draw(cx);
+    assert_eq!(*log.borrow(), ["definition", "references", "definition"]);
+    assert!(editor.read_with(cx, |e, _| e.is_peek_visible()));
+
+    // Back to the command that started it: it doesn't run again.
+    cx.simulate_keystrokes("escape");
+    log.borrow_mut().clear();
+    set_goto(&editor, cx, |o| {
+        o.alternative_reference_command = Some(NavigationCommand::RevealDefinition)
+    });
+    set_cursor(&editor, cx, p(0, 4));
+    cx.simulate_keystrokes("f12");
+    draw(cx);
+    assert_eq!(*log.borrow(), ["definition", "references"]);
+    assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
+    assert_eq!(head(&editor, cx), p(0, 3));
+}
+
+fn visible_rows(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> (u32, u32) {
+    editor.read_with(cx, |e, cx| {
+        let ranges = e.visible_ranges(cx);
+        (ranges[0].start.row, ranges.last().unwrap().end.row)
+    })
+}
+
+/// Standalone Monaco's `openCodeEditor` centers a jump's target at once
+/// (`StandaloneCodeEditorService.doOpenEditor`), even when it's visible and
+/// with `smooth_scrolling`.
+#[gpui::test]
+fn jumps_in_this_model_center_the_target_at_once(cx: &mut TestAppContext) {
+    let text: String = (0..400).map(|i| format!("line {i}\n")).collect();
+    let fixed = Fixed {
+        definitions: vec![here(300, 0, 4)],
+        ..Default::default()
+    };
+    let (editor, cx) = setup_with(&text, fixed, cx);
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.smooth_scrolling = true;
+        e.update_options(options, cx);
+    });
+    draw(cx);
+    assert_eq!(visible_rows(&editor, cx).0, 0);
+    cx.simulate_keystrokes("f12");
+    // One frame, no clock: no animation.
+    draw(cx);
+    assert_eq!(head(&editor, cx), p(300, 0));
+    let (top, bottom) = visible_rows(&editor, cx);
+    assert!((top + bottom).abs_diff(600) <= 2, "{top}..{bottom}");
+
+    // A visible target is centered too.
+    let near = bottom - 2;
+    editor.update(cx, |e, cx| {
+        e.go_to_locations(p(300, 0), vec![here(near, 0, 4)], None, None, cx)
+    });
+    draw(cx);
+    assert_eq!(head(&editor, cx), p(near, 0));
+    let (top, bottom) = visible_rows(&editor, cx);
+    assert!((top + bottom).abs_diff(2 * near) <= 2, "{top}..{bottom}");
 }

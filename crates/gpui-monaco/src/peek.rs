@@ -187,7 +187,8 @@ fn nearest(locations: &[Location], uri: Option<&SharedString>, position: PointUt
     (0..locations.len())
         .min_by_key(|&ix| {
             let location = &locations[ix];
-            let start = location.range.start;
+            // Monaco `OneReference.range`: a link's target selection range.
+            let start = location.selection_range().start;
             let distance = start.row.abs_diff(position.row) as u64 * 100
                 + start.column.abs_diff(position.column) as u64;
             (std::cmp::Reverse(prefix(location.uri.as_ref())), distance)
@@ -1733,10 +1734,12 @@ impl CodeEditor {
             return;
         }
         let here = self.model().read(cx).is_at(location.uri.as_deref());
+        // Monaco `OneReference.range`: a link's target selection range.
+        let range = location.selection_range();
         if here && !close {
             // Move the peek view to the result, keeping its list (Monaco
             // focuses the list then).
-            let start = location.range.start;
+            let start = range.start;
             self.set_selections(&[crate::cursor::Selection::collapsed(start)], cx);
             self.open_peek(kind, locations, Some(selected), cx);
             if let Some(view) = &self.peek.view {
@@ -1746,9 +1749,16 @@ impl CodeEditor {
         }
         self.close_peek(cx);
         if here {
-            let start = location.range.start;
+            let start = range.start;
             self.set_selections(&[crate::cursor::Selection::collapsed(start)], cx);
-            self.reveal_range(location.range, RevealType::Center, cx);
+            // Standalone Monaco's `openCodeEditor` centers the selection
+            // at once (`StandaloneCodeEditorService.doOpenEditor`).
+            self.reveal_range_with_scroll_type(
+                range,
+                RevealType::Center,
+                ScrollType::Immediate,
+                cx,
+            );
         } else {
             self.open_location_with_openers(location, false, cx);
         }

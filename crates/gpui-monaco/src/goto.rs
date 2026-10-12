@@ -16,12 +16,12 @@ use crate::actions::{CommandLocation, CommandPosition, GoToLocations, PeekLocati
 use crate::cursor::Selection;
 use crate::decorations::DecorationOptions;
 use crate::editor::CodeEditor;
-use crate::options::{GoToLocation, LocationKind};
+use crate::options::{GoToLocation, LocationKind, NavigationCommand};
 use crate::providers::{
     Location, ReferenceContext, declaration_providers, definition_providers,
     implementation_providers, reference_providers, type_definition_providers,
 };
-use crate::view::reveal::RevealType;
+use crate::view::reveal::{RevealType, ScrollType};
 
 /// How a navigation command shows its results (Monaco
 /// `SymbolNavigationActionConfig`, plus whether the alternative command may
@@ -37,6 +37,48 @@ pub(crate) struct Navigation {
     /// Run `gotoLocation`'s alternative command when the only result is
     /// at the cursor.
     pub allow_alternative: bool,
+    /// Monaco `SymbolNavigationAction._activeAlternativeCommands`: the
+    /// commands, as bits by [`NavigationCommand`] discriminant, whose
+    /// alternative led here; none of them runs as an alternative again.
+    pub running_alternatives: u16,
+}
+
+impl Navigation {
+    /// The registered command this navigation of `kind` is.
+    fn command(&self, kind: LocationKind) -> NavigationCommand {
+        use NavigationCommand::*;
+        match (kind, self.open_in_peek) {
+            (LocationKind::Definition, _) if self.open_to_side => RevealDefinitionAside,
+            (LocationKind::Definition, false) => RevealDefinition,
+            (LocationKind::Definition, true) => PeekDefinition,
+            (LocationKind::Declaration, false) => RevealDeclaration,
+            (LocationKind::Declaration, true) => PeekDeclaration,
+            (LocationKind::TypeDefinition, false) => GoToTypeDefinition,
+            (LocationKind::TypeDefinition, true) => PeekTypeDefinition,
+            (LocationKind::Implementation, false) => GoToImplementation,
+            (LocationKind::Implementation, true) => PeekImplementation,
+            (LocationKind::References, false) => GoToReferences,
+            (LocationKind::References, true) => PeekReferences,
+        }
+    }
+
+    /// Running `command` with its own configuration (Monaco runs the
+    /// registered action) as the alternative of this navigation of `kind`.
+    fn alternative(&self, kind: LocationKind, command: NavigationCommand) -> Self {
+        Self {
+            open_in_peek: command.open_in_peek(),
+            open_to_side: command.open_to_side(),
+            // No registered navigation command mutes its message.
+            mute_message: false,
+            allow_alternative: true,
+            running_alternatives: self.running_alternatives | 1 << self.command(kind) as u16,
+        }
+    }
+
+    /// Whether `command` may run as an alternative from here.
+    fn may_run(&self, command: NavigationCommand) -> bool {
+        self.allow_alternative && self.running_alternatives & (1 << command as u16) == 0
+    }
 }
 
 impl Default for Navigation {
@@ -46,6 +88,7 @@ impl Default for Navigation {
             open_to_side: false,
             mute_message: false,
             allow_alternative: true,
+            running_alternatives: 0,
         }
     }
 }
@@ -134,11 +177,16 @@ pub fn has_symbol_navigation(cx: &App) -> bool {
 }
 
 impl CodeEditor {
-    /// Asks `model`'s providers of `kind` about `position` in it.
+    /// Asks `model`'s providers of `kind` about `position` in it. With
+    /// `compact` (Monaco's Go to References), a reference provider that
+    /// finds exactly two references is asked again without the declaration,
+    /// and that answer is used if it has exactly one (Monaco
+    /// `getReferencesAtPosition`).
     fn request_locations(
         model: &Entity<crate::TextModel>,
         kind: LocationKind,
         position: PointUtf16,
+        compact: bool,
         cx: &mut Context<Self>,
     ) -> Vec<Task<anyhow::Result<Vec<Location>>>> {
         let context = model.read(cx).provider_context();
@@ -162,15 +210,42 @@ impl CodeEditor {
                 .collect(),
             LocationKind::References => reference_providers(cx, language)
                 .into_iter()
-                .map(|p| {
-                    p.provide_references(
+                .map(|provider| {
+                    let with_declaration = provider.provide_references(
                         &context,
                         position,
                         ReferenceContext {
                             include_declaration: true,
                         },
                         cx,
-                    )
+                    );
+                    if !compact {
+                        return with_declaration;
+                    }
+                    let context = context.clone();
+                    cx.spawn(async move |_, cx| {
+                        let references = with_declaration.await?;
+                        if references.len() != 2 {
+                            return Ok(references);
+                        }
+                        let without_declaration = cx
+                            .update(|cx| {
+                                provider.provide_references(
+                                    &context,
+                                    position,
+                                    ReferenceContext {
+                                        include_declaration: false,
+                                    },
+                                    cx,
+                                )
+                            })
+                            .await?;
+                        Ok(if without_declaration.len() == 1 {
+                            without_declaration
+                        } else {
+                            references
+                        })
+                    })
                 })
                 .collect(),
         }
@@ -323,9 +398,12 @@ impl CodeEditor {
             open_in_peek,
             open_to_side,
             mute_message,
-            allow_alternative,
+            ..
         } = navigation;
-        let tasks = Self::request_locations(model, kind, position, cx);
+        // Go to References is compact, Peek References isn't.
+        let compact = kind == LocationKind::References && !open_in_peek;
+        let tasks = Self::request_locations(model, kind, position, compact, cx);
+        let model = model.clone();
         let state = self.navigation_state(cx);
         let uri = model.read(cx).uri().cloned();
         self.start_cancellable(crate::editor_state::CancellableOperation::Navigation);
@@ -346,12 +424,17 @@ impl CodeEditor {
                 }
                 // Monaco alerts the results' `ariaMessage` first.
                 this.announce(aria_message(&locations), cx);
+                // Monaco `referenceAt`, on `OneReference.range`: a link's
+                // target selection range.
                 let at_cursor = locations.iter().any(|location| {
-                    location.uri == uri
-                        && location.range.start <= position
-                        && position <= location.range.end
+                    let range = location.selection_range();
+                    location.uri == uri && range.start <= position && position <= range.end
                 });
-                let alternative = this.options.goto_location.alternative(kind);
+                let alternative = this
+                    .options
+                    .goto_location
+                    .alternative(kind)
+                    .filter(|&alternative| navigation.may_run(alternative));
                 match (locations.len(), alternative) {
                     (0, _) => {
                         if !mute_message {
@@ -365,15 +448,12 @@ impl CodeEditor {
                         }
                     }
                     // Already at the only result: run the alternative.
-                    (1, Some(alternative)) if at_cursor && allow_alternative => {
-                        this.navigate(
-                            alternative,
-                            Navigation {
-                                open_in_peek,
-                                mute_message,
-                                allow_alternative: false,
-                                open_to_side: false,
-                            },
+                    (1, Some(alternative)) if at_cursor => {
+                        this.navigate_from(
+                            alternative.kind(),
+                            &model,
+                            position,
+                            navigation.alternative(kind, alternative),
                             cx,
                         );
                     }
@@ -436,8 +516,8 @@ impl CodeEditor {
         }
     }
 
-    /// Selects the start of `location` and reveals it near the top if it's
-    /// in this editor's model, briefly highlighting it; otherwise offers it
+    /// Selects the start of `location` and centers it at once if it's in
+    /// this editor's model, briefly highlighting it; otherwise offers it
     /// to the host's editor openers, else emits
     /// [`CodeEditorEvent::OpenLocation`](crate::CodeEditorEvent::OpenLocation).
     /// Returns whether it was in this model.
@@ -457,7 +537,15 @@ impl CodeEditor {
         let range = location.selection_range();
         let start = range.start;
         self.set_selections(&[Selection::collapsed(start)], cx);
-        self.reveal_range(start..start, RevealType::NearTopIfOutsideViewport, cx);
+        // Standalone Monaco's `openCodeEditor` ignores the requested
+        // `NearTopIfOutsideViewport` and centers the selection at once
+        // (`StandaloneCodeEditorService.doOpenEditor`).
+        self.reveal_range_with_scroll_type(
+            start..start,
+            RevealType::Center,
+            ScrollType::Immediate,
+            cx,
+        );
         if highlight {
             self.highlight_symbol(range, cx);
         }
@@ -537,10 +625,10 @@ impl CodeEditor {
         }
         let uri = self.model().read(cx).uri().cloned();
         let position = self.cursors.primary().position;
+        // Monaco tests `OneReference.range`: a link's target selection range.
         let inside = nav.locations.iter().any(|location| {
-            location.uri == uri
-                && location.range.start <= position
-                && position <= location.range.end
+            let range = location.selection_range();
+            location.uri == uri && range.start <= position && position <= range.end
         });
         if !inside {
             cx.set_global(SymbolNavigation::default());

@@ -403,7 +403,7 @@ impl CodeEditor {
                 open_in_peek,
                 open_to_side,
                 mute_message: true,
-                allow_alternative: true,
+                ..Default::default()
             },
             cx,
         );
