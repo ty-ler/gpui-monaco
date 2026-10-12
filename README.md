@@ -19,7 +19,7 @@ A Monaco-like code editor component for [GPUI](https://github.com/zed-industries
 
 ## Non-goals (for the MVP)
 
-Diff editor, CRDT collaboration and a browser runner (the crates already compile for wasm32). See the `post-mvp` issues.
+Diff editor and CRDT collaboration. See the `post-mvp` issues.
 
 ## Crates
 
@@ -31,12 +31,14 @@ Diff editor, CRDT collaboration and a browser runner (the crates already compile
 | `gpui-monaco-languages` | `crates/gpui-monaco-languages` | Feature-flagged grammars and queries. |
 | `gpui-monaco-lsp` | `crates/gpui-monaco-lsp` | Bridges language servers to the providers and markers. |
 | `playground` | `examples/playground` | Monaco-playground-like demo app. |
+| `web` | `examples/web` | The editor in a browser, through gpui's web platform. |
 
 ## Documentation
 
 - **Guide:** [`book/`](book/src/SUMMARY.md). Build it with `mdbook build book`; it covers embedding, models and editors, options, keybindings, themes, languages, decorations, widgets, providers and diagnostics.
 - **API docs:** `cargo doc --open -p gpui-monaco`.
 - **Monaco parity:** [`docs/MONACO_PARITY.md`](docs/MONACO_PARITY.md) lists what's implemented and links the issue for each gap.
+- **In a browser:** [`examples/web`](examples/web/README.md) runs the editor in a browser on a nightly toolchain (`examples/web/build.sh --release --font path/to/Mono.ttf`, then serve `examples/web/www`); the guide's [Running in a browser](book/src/web.md) chapter has the details.
 - **Performance:** [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) has the large-file budget and how to measure it.
 - **Playground:** [`examples/playground`](examples/playground/README.md) is a demo app with every feature.
 - **With gpui-component:** [`examples/with-gpui-component`](examples/with-gpui-component/src/main.rs) uses the editor in a [gpui-component](https://github.com/longbridge/gpui-component) window.

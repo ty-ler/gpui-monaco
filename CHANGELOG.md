@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Web runner (#303):** `examples/web` runs the editor in a browser through gpui's web platform, with the playground's sample.
+  - **Runner:** opens `examples/playground/samples/sample.rs` instead of a four-line snippet. `build.sh` takes `--font <path>` (copied to `www/fonts/editor.ttf`, since gpui's web platform ships no fonts), checks the `wasm-bindgen` CLI matches `Cargo.lock`, and prints how to serve `www/`.
+  - **CI:** a `build-web` job (best-effort, as it needs nightly) installs nightly with the wasm target and `llvm-tools` and the matching `wasm-bindgen` CLI, runs `build.sh --release` and uploads `www/` as the `web` artifact.
+  - **Docs:** the guide's new "Running in a browser" chapter, the README, `examples/web/README.md` and `CONTRIBUTING.md` say how to try it; the parity doc's wasm row is ✅ with its limits (nightly, a font from the page, no language servers).
 - **Inline completions leftovers (#297):** the rest of Monaco's `InlineCompletionsModel`, `SuggestWidgetAdaptor`, `GhostTextView` and inline edit view transitions.
   - **Suggest preselection:** when the suggest widget opens or refilters while an inline completion is selected, it selects the suggestion the completion extends, the one inserting the most of several, before the selection memory gets a say (Monaco's `registerSelector` with priority 100 in `SuggestWidgetAdaptor`).
   - **`enableForwardStability`:** `InlineCompletionList::enable_forward_stability` keeps the shown item first through the requests typing makes, as long as typing agrees with it (Monaco `itemToPreserve` with `forwardStable`). An explicit request (Alt+\, cycling) keeps it first too, as Monaco's `preserveCurrentCompletion` does.
