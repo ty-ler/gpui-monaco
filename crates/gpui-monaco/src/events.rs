@@ -397,7 +397,7 @@ impl ConfigurationChange {
 
 /// The details of a [`CodeEditorEvent::ContentSizeChanged`](crate::CodeEditorEvent)
 /// (Monaco `IContentSizeChangedEvent`).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ContentSizeChange {
     /// See [`CodeEditor::content_width`](crate::CodeEditor::content_width).
     pub content_width: Pixels,

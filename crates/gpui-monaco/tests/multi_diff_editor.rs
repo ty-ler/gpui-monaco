@@ -1414,3 +1414,27 @@ fn the_active_control(cx: &mut TestAppContext) {
     paint(cx);
     assert_eq!(*events.borrow(), 1);
 }
+
+/// Monaco `inMultiDiffEditor`, which the files' editors inherit with the
+/// diff editor keys, and `multiDiffEditorAllCollapsed`.
+#[gpui::test]
+fn context_keys(cx: &mut TestAppContext) {
+    let (multi, cx) = setup(cx);
+    let diff = multi.read_with(cx, |m, _| m.diff_editor(0).unwrap().clone());
+    let modified = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    let keys = modified.read_with(cx, |e, cx| e.context_keys(cx));
+    assert!(keys.contains("inMultiDiffEditor") && keys.contains("isInDiffEditor"));
+    assert!(!keys.contains("multiDiffEditorAllCollapsed"));
+    // All but this file collapsed.
+    multi.update(cx, |m, cx| {
+        m.set_collapsed(1, true, cx);
+        m.set_collapsed(2, true, cx);
+    });
+    paint(cx);
+    let keys = modified.read_with(cx, |e, cx| e.context_keys(cx));
+    assert!(!keys.contains("multiDiffEditorAllCollapsed"));
+    assert!(
+        diff.read_with(cx, |d, cx| d.context_keys(cx))
+            .contains("inMultiDiffEditor")
+    );
+}

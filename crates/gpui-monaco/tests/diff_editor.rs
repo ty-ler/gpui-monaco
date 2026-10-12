@@ -108,14 +108,14 @@ fn go_to_next_and_previous_diff(cx: &mut TestAppContext) {
     let (diff, cx) = setup("a\nb\nc\nd\ne\nf", "a\nB\nc\nd\nE\nf", cx);
     let modified = diff.read_with(cx, |d, _| d.modified_editor().clone());
     let row = |cx: &mut VisualTestContext| modified.read_with(cx, |e, _| e.selections()[0].head);
-    diff.update_in(cx, |d, window, cx| d.go_to_diff(true, window, cx));
+    diff.update(cx, |d, cx| d.go_to_diff(true, cx));
     assert_eq!(row(cx), PointUtf16::new(1, 0));
-    diff.update_in(cx, |d, window, cx| d.go_to_diff(true, window, cx));
+    diff.update(cx, |d, cx| d.go_to_diff(true, cx));
     assert_eq!(row(cx), PointUtf16::new(4, 0));
     // Wraps around.
-    diff.update_in(cx, |d, window, cx| d.go_to_diff(true, window, cx));
+    diff.update(cx, |d, cx| d.go_to_diff(true, cx));
     assert_eq!(row(cx), PointUtf16::new(1, 0));
-    diff.update_in(cx, |d, window, cx| d.go_to_diff(false, window, cx));
+    diff.update(cx, |d, cx| d.go_to_diff(false, cx));
     assert_eq!(row(cx), PointUtf16::new(4, 0));
 }
 
@@ -1846,8 +1846,8 @@ fn accessibility_signals_for_changes(cx: &mut TestAppContext) {
         })
         .detach()
     });
-    diff.update_in(cx, |d, window, cx| d.go_to_diff(true, window, cx));
-    diff.update_in(cx, |d, window, cx| d.go_to_diff(true, window, cx));
+    diff.update(cx, |d, cx| d.go_to_diff(true, cx));
+    diff.update(cx, |d, cx| d.go_to_diff(true, cx));
     paint(cx);
     assert_eq!(
         signals.borrow().as_slice(),
@@ -2246,4 +2246,233 @@ fn bars_between_changes_show(cx: &mut TestAppContext) {
     let line_height = modified_editor.read_with(cx, |e, _| e.options().resolved_line_height());
     let top = cx.debug_bounds("unchanged-top").expect("a bar's top edge");
     assert!(top.top() > line_height * 7., "{top:?}");
+}
+
+/// Monaco's diff editor context keys (`diffEditorWidget.ts`,
+/// `DiffEditorEditors`): on the diff editor and inherited by both editors,
+/// as from Monaco's scoped context key service.
+#[gpui::test]
+fn context_keys(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb", "a\nc", cx);
+    let (original, modified) = editors(&diff, cx);
+    cx.simulate_resize(gpui::size(px(1200.), px(600.)));
+    paint(cx);
+    for keys in [
+        diff.read_with(cx, |d, cx| d.context_keys(cx)),
+        original.read_with(cx, |e, cx| e.context_keys(cx)),
+        modified.read_with(cx, |e, cx| e.context_keys(cx)),
+    ] {
+        for key in [
+            "isInDiffEditor",
+            "inDiffEditor",
+            "diffEditorHasChanges",
+            "diffEditorModifiedWritable",
+            "diffEditorAutomaticRenderSideBySide",
+        ] {
+            assert!(keys.contains(key), "{key} in {keys:?}");
+        }
+        for key in [
+            "diffEditorOriginalWritable",
+            "diffEditorInlineMode",
+            "diffEditorRenderSideBySideInlineBreakpointReached",
+            "comparingMovedCode",
+            "isEmbeddedDiffEditor",
+            "inMultiDiffEditor",
+        ] {
+            assert!(!keys.contains(key), "{key} in {keys:?}");
+        }
+        assert!(
+            keys.get("diffEditorModifiedUri")
+                .is_some_and(|uri| uri.starts_with("inmemory://model/")),
+            "{keys:?}"
+        );
+    }
+    // The focused side.
+    let focus = |editor: &Entity<gpui_monaco::CodeEditor>, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+        paint(cx);
+    };
+    focus(&original, cx);
+    let keys = modified.read_with(cx, |e, cx| e.context_keys(cx));
+    assert!(keys.contains("isInDiffLeftEditor") && !keys.contains("isInDiffRightEditor"));
+    focus(&modified, cx);
+    let keys = original.read_with(cx, |e, cx| e.context_keys(cx));
+    assert!(!keys.contains("isInDiffLeftEditor") && keys.contains("isInDiffRightEditor"));
+    // Options.
+    update_options(&diff, cx, |o| {
+        o.original_editable = true;
+        o.is_in_embedded_editor = true;
+    });
+    let keys = original.read_with(cx, |e, cx| e.context_keys(cx));
+    assert!(keys.contains("diffEditorOriginalWritable") && keys.contains("isEmbeddedDiffEditor"));
+    // Narrow: the breakpoint is reached and the diff shows inline.
+    cx.simulate_resize(gpui::size(px(600.), px(600.)));
+    paint(cx);
+    let keys = modified.read_with(cx, |e, cx| e.context_keys(cx));
+    assert!(keys.contains("diffEditorRenderSideBySideInlineBreakpointReached"));
+    assert!(keys.contains("diffEditorInlineMode"));
+    assert!(!keys.contains("diffEditorAutomaticRenderSideBySide"));
+    // A read-only modified side; no changes.
+    modified.update(cx, |e, cx| {
+        e.update_options_with(|o| o.read_only = true, cx)
+    });
+    let model = modified.read_with(cx, |e, _| e.model().clone());
+    model.update(cx, |m, cx| m.set_value("a\nb", cx));
+    recompute(cx);
+    let keys = modified.read_with(cx, |e, cx| e.context_keys(cx));
+    assert!(!keys.contains("diffEditorModifiedWritable"));
+    assert!(!keys.contains("diffEditorHasChanges"));
+}
+
+/// The audit's repro: `add_command`'s `when` sees the diff editor's keys.
+#[gpui::test]
+fn add_command_when_tests_diff_editor_keys(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a", "a", cx);
+    let (_, modified) = editors(&diff, cx);
+    let count = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counter = count.clone();
+    let _command = diff
+        .update(cx, |d, cx| {
+            d.add_command(
+                "ctrl-alt-j",
+                move |_, _, _| counter.set(counter.get() + 1),
+                Some("isInDiffEditor && diffEditorHasChanges"),
+                cx,
+            )
+        })
+        .unwrap();
+    cx.update(|window, cx| window.focus(&modified.focus_handle(cx), cx));
+    paint(cx);
+    cx.simulate_keystrokes("ctrl-alt-j");
+    assert_eq!(count.get(), 0);
+    let model = modified.read_with(cx, |e, _| e.model().clone());
+    model.update(cx, |m, cx| m.set_value("b", cx));
+    recompute(cx);
+    cx.simulate_keystrokes("ctrl-alt-j");
+    assert_eq!(count.get(), 1);
+}
+
+/// Monaco `_goTo` only moves the modified editor's cursor; Alt+F5 is
+/// VS Code's workbench key, not standalone Monaco's.
+#[gpui::test]
+fn go_to_diff_keeps_the_focus_and_is_unbound(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb\nc", "a\nB\nc", cx);
+    let (original, modified) = editors(&diff, cx);
+    cx.update(|window, cx| window.focus(&original.focus_handle(cx), cx));
+    paint(cx);
+    diff.update(cx, |d, cx| d.go_to_diff(true, cx));
+    paint(cx);
+    assert_eq!(
+        modified.read_with(cx, |e, _| e.selections()[0].head),
+        PointUtf16::new(1, 0)
+    );
+    assert!(cx.update(|window, cx| original.focus_handle(cx).is_focused(window)));
+    // No default keys.
+    cx.update(|window, cx| window.focus(&modified.focus_handle(cx), cx));
+    paint(cx);
+    cx.simulate_keystrokes("alt-f5");
+    cx.simulate_keystrokes("shift-alt-f5");
+    assert_eq!(
+        modified.read_with(cx, |e, _| e.selections()[0].head),
+        PointUtf16::new(1, 0)
+    );
+}
+
+/// Monaco `IDiffEditor.onDidContentSizeChange`: the taller side's height,
+/// and both widths plus the 30px overview ruler.
+#[gpui::test]
+fn content_size_changed(cx: &mut TestAppContext) {
+    use gpui_monaco::{ContentSizeChange, DiffEditorEvent};
+    let (diff, cx) = setup("a", "b", cx);
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::<ContentSizeChange>::new()));
+    let sink = events.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&diff, move |_, event: &DiffEditorEvent, _| {
+            if let DiffEditorEvent::ContentSizeChanged(change) = event {
+                sink.borrow_mut().push(*change);
+            }
+        })
+        .detach()
+    });
+    let (original, modified) = editors(&diff, cx);
+    let model = modified.read_with(cx, |e, _| e.model().clone());
+    let text: String = (0..30).map(|i| format!("line {i}\n")).collect();
+    model.update(cx, |m, cx| m.set_value(&text, cx));
+    recompute(cx);
+    let last = *events.borrow().last().expect("a content size change");
+    assert!(events.borrow().iter().any(|e| e.content_height_changed));
+    let height = diff.read_with(cx, |d, cx| d.content_height(cx)).unwrap();
+    assert_eq!(last.content_height, height);
+    assert!(height >= modified.read_with(cx, |e, _| e.content_height()).unwrap());
+    let width = |editor: &Entity<gpui_monaco::CodeEditor>, cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, _| e.content_width()).unwrap()
+    };
+    assert_eq!(
+        last.content_width,
+        width(&original, cx) + width(&modified, cx) + px(30.)
+    );
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.content_width(cx)),
+        last.content_width
+    );
+}
+
+/// Monaco's `.line-insert`/`.char-insert` (and `-delete`) borders:
+/// `diffEditor.insertedTextBorder`/`removedTextBorder` on whole lines too,
+/// dashed in high contrast themes.
+#[gpui::test]
+fn high_contrast_change_borders(cx: &mut TestAppContext) {
+    use gpui::BorderStyle;
+    let (diff, cx) = setup("a\nb\nc", "a\nB\nc\nnew", cx);
+    let bordered = |modified: bool, cx: &mut VisualTestContext| {
+        side_decorations(&diff, modified, cx)
+            .into_iter()
+            .filter(|(_, o)| o.border.is_some())
+            .map(|(range, o)| (range, o.is_whole_line, o.border_style))
+            .collect::<Vec<_>>()
+    };
+    // `vs` has no borders.
+    assert!(bordered(true, cx).is_empty());
+    cx.update(|_, cx| gpui_monaco::set_theme(cx, "hc-black"));
+    paint(cx);
+    let modified = bordered(true, cx);
+    // The changed and the inserted lines, whole and by character.
+    assert!(
+        modified
+            .iter()
+            .any(|(range, whole, _)| *whole && range.0 == 4),
+        "{modified:?}"
+    );
+    assert!(
+        modified
+            .iter()
+            .any(|(range, whole, _)| !*whole && range.0 == 2),
+        "{modified:?}"
+    );
+    assert!(
+        modified
+            .iter()
+            .all(|(_, _, style)| *style == BorderStyle::Dashed)
+    );
+    let original = bordered(false, cx);
+    assert!(
+        original
+            .iter()
+            .any(|(range, whole, _)| *whole && range.0 == 2),
+        "{original:?}"
+    );
+}
+
+/// Monaco `validateDiffEditorOptions`: `clampedFloat(splitViewDefaultRatio,
+/// 0.5, 0.1, 0.9)`.
+#[gpui::test]
+fn split_view_default_ratio_is_clamped(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a", "b", cx);
+    for (ratio, clamped) in [(0.98, 0.9), (0.02, 0.1), (0.3, 0.3), (f32::NAN, 0.5)] {
+        update_options(&diff, cx, |o| o.split_view_default_ratio = ratio);
+        assert_eq!(
+            diff.read_with(cx, |d, _| d.options().split_view_default_ratio),
+            clamped
+        );
+    }
 }
