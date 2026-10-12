@@ -74,6 +74,16 @@ pub trait Highlighter: Send + Sync {
         None
     }
 
+    /// Whether the editor's `max_tokenization_line_length` applies: lines
+    /// that long are then shown and queried as untokenized. `true` by
+    /// default, as for Monaco's Monarch tokenizer; a
+    /// [`TokensProviderHighlighter`](crate::TokensProviderHighlighter)
+    /// returns `false`, as Monaco's `setTokensProvider` adapter has no
+    /// limit.
+    fn limits_line_length(&self) -> bool {
+        true
+    }
+
     /// The highlighter as [`Any`], for downcasting to its concrete type
     /// (such as [`MonarchHighlighter`](crate::MonarchHighlighter)), or
     /// `None`.

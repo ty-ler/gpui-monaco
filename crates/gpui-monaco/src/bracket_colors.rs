@@ -3,8 +3,8 @@
 //! `editorBracketHighlight.unexpectedBracket.foreground`.
 //!
 //! The nesting is computed for the whole document on a background thread
-//! once the syntax state matches the text (so brackets in strings and
-//! comments are skipped), and shifted through newer edits until the next
+//! once the syntax state matches the text (so brackets in strings,
+//! comments and regexes are skipped), and shifted through newer edits until the next
 //! pass lands.
 
 use std::ops::Range;
@@ -74,6 +74,7 @@ impl CodeEditor {
         }
         let rope = model.buffer().rope().clone();
         let tab_size = model.options().tab_size;
+        let max_line_length = model.tokenization_line_limit();
         self.bracket_colors.pending = Some(version);
         self.bracket_colors.pending_pairs = guides;
         // The first pass runs right away; later ones wait for a pause in
@@ -96,17 +97,21 @@ impl CodeEditor {
             let (tokens, pairs) = cx
                 .background_executor()
                 .spawn(async move {
+                    // Monaco's bracket pair tokenizer counts a bracket only
+                    // in an `Other` token (`toStandardTokenType`: comments,
+                    // strings and regexes are skipped), and lines too long
+                    // to tokenize are one `Other` token.
                     let skip: Vec<Range<usize>> = syntax
                         .map(|syntax| {
-                            syntax
-                                .highlighter
-                                .highlights(&syntax.state, syntax.text.rope(), 0..rope.len())
+                            let text = syntax.text.rope();
+                            crate::model::tokenized_ranges(text, 0..text.len(), max_line_length)
                                 .into_iter()
+                                .flat_map(|range| {
+                                    syntax.highlighter.highlights(&syntax.state, text, range)
+                                })
                                 .filter(|span| {
-                                    let name = span.highlight.name();
-                                    name.starts_with("comment")
-                                        || name.starts_with("string")
-                                        || name.starts_with("character")
+                                    crate::model::standard_token_type(&span.highlight.name())
+                                        != crate::cursor::StandardTokenType::Other
                                 })
                                 .map(|span| span.range)
                                 .collect()

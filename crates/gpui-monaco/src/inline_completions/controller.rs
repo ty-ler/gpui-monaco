@@ -3465,7 +3465,7 @@ impl CodeEditor {
     /// Monaco `closeBrackets`: `text` inserted at `start` (replacing the
     /// rest of the line) with the brackets it opens closed and those it
     /// closes without opening removed, by the language's bracket pairs.
-    /// Brackets in strings and comments of that line, tokenized on its
+    /// Brackets in strings, comments and regexes of that line, tokenized on its
     /// own, don't count.
     fn close_inline_brackets(&self, text: &str, start: PointUtf16, cx: &gpui::App) -> String {
         let model = self.model().read(cx);
@@ -3485,12 +3485,9 @@ impl CodeEditor {
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|(range, highlight)| {
-                    let name = highlight.name();
                     range.end > prefix_len
-                        && (name.starts_with("comment")
-                            || name.starts_with("string")
-                            || name.starts_with("character")
-                            || name.contains("regex"))
+                        && crate::model::standard_token_type(&highlight.name())
+                            != crate::cursor::StandardTokenType::Other
                 })
                 .map(|(range, _)| range.start.saturating_sub(prefix_len)..range.end - prefix_len)
                 .collect();

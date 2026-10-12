@@ -94,6 +94,8 @@ impl MonarchHighlightState {
 pub struct MonarchHighlighter {
     tokenizer: Arc<MonarchTokenizer>,
     registry: Option<Arc<LanguageRegistry>>,
+    /// Overrides the tokenizers' own `max_tokenization_line_length`.
+    max_tokenization_line_length: Option<usize>,
 }
 
 impl MonarchHighlighter {
@@ -103,7 +105,24 @@ impl MonarchHighlighter {
         Self {
             tokenizer,
             registry,
+            max_tokenization_line_length: None,
         }
+    }
+
+    /// Skips lines this long (in UTF-16 code units) or longer, in the
+    /// grammar and the languages it embeds, instead of each tokenizer's
+    /// own limit (Monaco's tokenizers all read
+    /// `editor.maxTokenizationLineLength`): they get one `""` token and
+    /// keep their state.
+    pub fn with_max_tokenization_line_length(mut self, length: usize) -> Self {
+        self.max_tokenization_line_length = Some(length);
+        self
+    }
+
+    /// The line length limit set with
+    /// [`MonarchHighlighter::with_max_tokenization_line_length`].
+    pub fn max_tokenization_line_length(&self) -> Option<usize> {
+        self.max_tokenization_line_length
     }
 
     /// A [`HighlighterFactory`] for [`Language::highlighter`] creating
@@ -145,7 +164,8 @@ impl MonarchHighlighter {
     /// Tokenizes every line of `text` from the initial state (Monaco
     /// `editor.tokenize`), with embedded languages from the registry.
     pub fn tokenize_text(&self, text: &str) -> Vec<Vec<MonarchToken>> {
-        let embedded = RegistryLanguages::new(self.registry.as_ref());
+        let embedded =
+            RegistryLanguages::new(self.registry.as_ref(), self.max_tokenization_line_length);
         self.tokenizer.tokenize_text(text, &embedded)
     }
 }
@@ -155,13 +175,18 @@ impl MonarchHighlighter {
 struct RegistryLanguages<'a> {
     registry: Option<&'a Arc<LanguageRegistry>>,
     tokenizers: RefCell<HashMap<String, Option<Arc<MonarchTokenizer>>>>,
+    max_tokenization_line_length: Option<usize>,
 }
 
 impl<'a> RegistryLanguages<'a> {
-    fn new(registry: Option<&'a Arc<LanguageRegistry>>) -> Self {
+    fn new(
+        registry: Option<&'a Arc<LanguageRegistry>>,
+        max_tokenization_line_length: Option<usize>,
+    ) -> Self {
         Self {
             registry,
             tokenizers: RefCell::default(),
+            max_tokenization_line_length,
         }
     }
 }
@@ -190,6 +215,10 @@ impl EmbeddedLanguages for RegistryLanguages<'_> {
             .borrow_mut()
             .insert(language_id.to_string(), tokenizer.clone());
         tokenizer
+    }
+
+    fn max_tokenization_line_length(&self) -> Option<usize> {
+        self.max_tokenization_line_length
     }
 }
 
@@ -248,7 +277,8 @@ impl Highlighter for MonarchHighlighter {
             ));
         }
 
-        let embedded = RegistryLanguages::new(self.registry.as_ref());
+        let embedded =
+            RegistryLanguages::new(self.registry.as_ref(), self.max_tokenization_line_length);
         let mut ids = HashMap::new();
         let start_row = lines.len();
         let mut state = lines.last().map_or_else(

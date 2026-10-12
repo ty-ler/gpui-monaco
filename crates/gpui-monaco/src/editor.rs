@@ -4087,9 +4087,7 @@ impl CodeEditor {
                     model.token_type_at(offset)
                 };
                 let context = cursor::LanguageContext::new(&language.config, &token_type)
-                    .with_max_tokenization_line_length(
-                        model.options().max_tokenization_line_length,
-                    );
+                    .with_max_tokenization_line_length(model.tokenization_line_limit());
                 f(&config, rope, &self.cursors, Some(&context))
             }
             None => f(&config, rope, &self.cursors, None),

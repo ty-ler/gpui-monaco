@@ -1765,7 +1765,7 @@ impl HighlightSource {
         Some(Self {
             syntax,
             patch,
-            max_line_length: model.options().max_tokenization_line_length,
+            max_line_length: model.tokenization_line_limit(),
         })
     }
 

@@ -410,7 +410,7 @@ fn model_line_captures(
     let rope = model.buffer().rope();
     let line_start = rope.point_to_offset(text::Point::new(row, 0));
     let line_end = line_start + rope.line_len(row) as usize;
-    let tokenized = model.line_len_utf16(row) < model.options().max_tokenization_line_length;
+    let tokenized = model.line_len_utf16(row) < model.tokenization_line_limit();
     if !tokenized {
         Vec::new()
     } else if let Some((highlighter, state)) = model_state(model) {
@@ -463,6 +463,12 @@ fn model_monarch_line_tokens(
             let registry = crate::language_registry(cx);
             let highlighter = monarch_highlighter(model.language_id()?, &registry)?;
             let monarch = MonarchHighlighter::downcast(&*highlighter)?;
+            // With the model's limit, as its own highlighter has.
+            let monarch =
+                MonarchHighlighter::new(monarch.tokenizer().clone(), monarch.registry().cloned())
+                    .with_max_tokenization_line_length(
+                        model.options().max_tokenization_line_length as usize,
+                    );
             let text = model.buffer().rope().to_string();
             monarch.tokenize_text(&text).into_iter().nth(row as usize)?
         }
@@ -488,7 +494,9 @@ impl crate::TextModel {
     /// Like Monaco's `getLineTokens` after `forceTokenization`, a model
     /// that parsed before is brought up to date right away, and one that
     /// never has (not shown yet) is parsed by its language id. Lines past
-    /// `max_tokenization_line_length` and models without a grammar give one
+    /// `max_tokenization_line_length` (except with a
+    /// [`set_tokens_provider`](crate::set_tokens_provider) tokenizer, which
+    /// has no limit, as in Monaco) and models without a grammar give one
     /// `""` token. A Monarch language gives its tokenizer's tokens (one `""`
     /// token for an empty line). `None` for rows past the end.
     pub fn line_tokens(&self, row: u32, cx: &gpui::App) -> Option<Vec<Token>> {
@@ -496,7 +504,7 @@ impl crate::TextModel {
             return None;
         }
         let line = self.line_content(row);
-        if self.line_len_utf16(row) < self.options().max_tokenization_line_length
+        if self.line_len_utf16(row) < self.tokenization_line_limit()
             && let Some(tokens) = model_monarch_line_tokens(self, row, &line, cx)
         {
             return Some(tokens);

@@ -166,6 +166,14 @@ pub trait EmbeddedLanguages {
 
     /// The Monarch tokenizer of the language `language_id`, if it has one.
     fn tokenizer(&self, language_id: &str) -> Option<Arc<MonarchTokenizer>>;
+
+    /// The line length (in UTF-16 code units) from which tokenizers skip a
+    /// line, overriding their own: Monaco's tokenizers, embedded ones
+    /// included, all read `editor.maxTokenizationLineLength`. `None` keeps
+    /// each tokenizer's.
+    fn max_tokenization_line_length(&self) -> Option<usize> {
+        None
+    }
 }
 
 impl EmbeddedLanguages for () {
@@ -259,7 +267,10 @@ impl MonarchTokenizer {
         state: &MonarchState,
         embedded: &dyn EmbeddedLanguages,
     ) -> Result<MonarchLineTokens, MonarchError> {
-        if line.encode_utf16().count() >= self.max_tokenization_line_length {
+        let max_length = embedded
+            .max_tokenization_line_length()
+            .unwrap_or(self.max_tokenization_line_length);
+        if line.encode_utf16().count() >= max_length {
             return Ok(self.null_tokens(state));
         }
         let mut collector = Collector::new();
