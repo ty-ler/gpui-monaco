@@ -387,8 +387,13 @@ fn the_status_bar_is_for_the_most_severe_marker(cx: &mut TestAppContext) {
     assert!(editor.update(cx, |e, cx| {
         e.run_hover_status_action_for_tests("View Problem", cx)
     }));
-    // The error's marker zone.
-    assert_eq!(editor.read_with(cx, |e, _| e.selections()[0].head), p(0, 6));
+    // The error's marker zone (errors go first), at the cursor, which is
+    // in it.
+    let zone = editor
+        .read_with(cx, |e, cx| e.marker_zone_state_for_tests(cx))
+        .expect("marker zone");
+    assert_eq!((zone.index, zone.total), (1, 2));
+    assert_eq!(editor.read_with(cx, |e, _| e.selections()[0].head), p(0, 7));
 }
 
 #[gpui::test]
