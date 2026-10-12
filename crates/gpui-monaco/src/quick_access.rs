@@ -110,6 +110,9 @@ pub(crate) struct QuickItem {
     /// Byte ranges of `label` that matched the query.
     pub highlights: Vec<Range<usize>>,
     pub description: Option<SharedString>,
+    /// Byte ranges of `description` that matched the query (Monaco
+    /// `highlights.description`: Go to Symbol's container words).
+    pub description_highlights: Vec<Range<usize>>,
     pub icon: Option<(Codicon, Hsla)>,
     pub strikethrough: bool,
     /// The keys that run it, shown as keycaps on the right.
@@ -129,6 +132,7 @@ impl QuickItem {
             label: label.into(),
             highlights: Vec::new(),
             description: None,
+            description_highlights: Vec::new(),
             icon: None,
             strikethrough: false,
             keybinding: None,
@@ -184,6 +188,10 @@ pub struct QuickInput {
     list_top: std::rc::Rc<std::cell::Cell<Option<Pixels>>>,
     /// Monaco's title bar above the input (quick picks).
     title: Option<SharedString>,
+    /// Monaco `ItemActivation.NONE`: the first items shown activate only
+    /// the item the provider picks, not the first one ("only valid once,
+    /// then unset").
+    item_activation_none: bool,
     colors: crate::theme::EditorColors,
     _subscriptions: Vec<Subscription>,
 }
@@ -287,11 +295,12 @@ impl QuickInput {
             slider_drag: None,
             list_top: Default::default(),
             title: None,
+            item_activation_none: false,
             colors,
             _subscriptions: subscriptions,
         };
         this.list_height = this.list_height_for(max_list_height);
-        this.active = this.active.or((!this.items.is_empty()).then_some(0));
+        this.active = this.activation(this.active);
         this.reveal_active();
         this
     }
@@ -323,12 +332,25 @@ impl QuickInput {
         });
         let (items, active) = items_from_rows(rows.0, rows.1);
         self.items = items;
-        self.active = active.or((!self.items.is_empty()).then_some(0));
+        self.active = self.activation(active);
         self.list_height = self.list_height_for(self.max_list_height);
         self.scroll_top = px(0.);
         self.reveal_active();
         self.preview(cx);
         cx.notify();
+    }
+
+    /// The item to activate for new items: the provider's, else the first
+    /// (Monaco `ItemActivation.FIRST`), or only the provider's once after
+    /// [`Self::item_activation_none`].
+    fn activation(&mut self, active: Option<usize>) -> Option<usize> {
+        if self.items.is_empty() {
+            return None;
+        }
+        if std::mem::take(&mut self.item_activation_none) {
+            return active;
+        }
+        active.or(Some(0))
     }
 
     fn active_item(&self) -> Option<&QuickItem> {
@@ -417,7 +439,11 @@ impl QuickInput {
         }
         let current = self.active.unwrap_or(0) as isize;
         let count = self.items.len() as isize;
-        let next = if delta.abs() == 1 {
+        let next = if self.active.is_none() && delta.abs() == 1 {
+            // Monaco's list `focusNext`/`focusPrevious` without a focused
+            // row focus the first.
+            0
+        } else if delta.abs() == 1 {
             (current + delta).rem_euclid(count)
         } else {
             (current + delta).clamp(0, count - 1)
@@ -515,12 +541,18 @@ impl QuickInput {
         let item = &self.items[ix];
         let colors = &self.colors;
         let is_active = self.active == Some(ix);
-        // Monaco `list.highlightForeground`, and
-        // `quickInputList.focusHighlightForeground` on the focused row.
+        // Monaco's `standaloneQuickInput.css` highlight colors, which
+        // override `list.highlightForeground` and
+        // `quickInputList.focusHighlightForeground`.
         let highlight: Hsla = if is_active {
-            colors.quick_input_list_focus_highlight_foreground
+            colors.quick_input_focus_highlight_foreground
         } else {
-            colors.list_highlight_foreground
+            colors.quick_input_highlight_foreground
+        };
+        let highlight_style = HighlightStyle {
+            color: Some(highlight),
+            font_weight: Some(FontWeight::BOLD),
+            ..Default::default()
         };
         let label_highlights: Vec<(Range<usize>, HighlightStyle)> = if item.strikethrough {
             vec![(
@@ -536,18 +568,14 @@ impl QuickInput {
         } else {
             item.highlights
                 .iter()
-                .map(|range| {
-                    (
-                        range.clone(),
-                        HighlightStyle {
-                            color: Some(highlight),
-                            font_weight: Some(FontWeight::BOLD),
-                            ..Default::default()
-                        },
-                    )
-                })
+                .map(|range| (range.clone(), highlight_style))
                 .collect()
         };
+        let description_highlights: Vec<(Range<usize>, HighlightStyle)> = item
+            .description_highlights
+            .iter()
+            .map(|range| (range.clone(), highlight_style))
+            .collect();
         // `.quick-input-list-separator-border`, except on the first row.
         let border = item.separator.is_some() && ix > 0;
         // Monaco's list `option`s. The input keeps focus, and GPUI can only
@@ -607,7 +635,9 @@ impl QuickInput {
                     .overflow_hidden()
                     .child(StyledText::new(item.label.clone()).with_highlights(label_highlights))
                     .children(item.description.clone().map(|description| {
-                        div().opacity(0.7).text_size(px(12.)).child(description)
+                        div().opacity(0.7).text_size(px(12.)).child(
+                            StyledText::new(description).with_highlights(description_highlights),
+                        )
                     })),
             )
             // `.quick-input-list-entry-keybinding`, 8px from the separator
@@ -868,8 +898,11 @@ impl Render for QuickInput {
                                 AriaNode::new(Role::CheckBox, "Toggle Zero-Based Offset")
                                     .checked(checked)
                                     .apply(div().id("quick-zero-based-offset"))
+                                    .debug_selector(|| "quick-zero-based-offset".into())
+                                    // Monaco's `.monaco-custom-toggle`: a
+                                    // 16px icon, 1px padding and border.
                                     .flex_none()
-                                    .px(px(4.))
+                                    .p(px(1.))
                                     .rounded(px(3.))
                                     .border_1()
                                     .cursor_pointer()
@@ -894,7 +927,7 @@ impl Render for QuickInput {
                                             this.refresh(cx);
                                         }),
                                     )
-                                    .child("0"),
+                                    .child(codicon(Codicon::IndexZero)),
                             )
                         }),
                 ),
@@ -969,6 +1002,17 @@ impl CodeEditor {
     /// `"@"` to a symbol, `""` shows the help.
     pub fn open_quick_access(&mut self, value: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.open_quick_input(value, None, None, false, window, cx);
+    }
+
+    /// Monaco's Go to Symbol action (`GotoSymbolAction` in
+    /// `standaloneGotoSymbolQuickAccess.ts`): quick access at `@` with
+    /// `ItemActivation.NONE`, so only the symbol around the cursor is
+    /// activated and previewed.
+    pub(crate) fn open_quick_outline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_quick_input("@", None, None, false, window, cx);
+        if let Some((widget, _)) = self.quick.as_ref().and_then(|q| q.widget.as_ref()) {
+            widget.update(cx, |widget, _| widget.item_activation_none = true);
+        }
     }
 
     /// Monaco's "Go to Match..." input box (`goToMatchFindAction`).
@@ -1435,6 +1479,7 @@ impl CodeEditor {
         for (ix, (container, symbol)) in flat.iter().enumerate() {
             let mut score = 0;
             let mut highlights = Vec::new();
+            let mut description_highlights = Vec::new();
             if !query.is_empty() {
                 // Monaco: first the whole query against the name (so
                 // "change log" finds "Change Log"), which then skips the
@@ -1454,13 +1499,14 @@ impl CodeEditor {
                 if let Some(container_query) = container_query.as_deref()
                     && !skip_container
                 {
-                    let Some((container_score, _)) = container
+                    let Some((container, (container_score, matches))) = container
                         .as_deref()
-                        .and_then(|c| score_fuzzy2(c, container_query))
+                        .and_then(|c| Some((c, score_fuzzy2(c, container_query)?)))
                     else {
                         continue;
                     };
                     score += container_score;
+                    description_highlights = utf16_matches_to_bytes(container, &matches);
                 }
             }
             items.push((
@@ -1471,6 +1517,12 @@ impl CodeEditor {
                     label: symbol.name.clone(),
                     highlights,
                     description: container.clone().map(Into::into),
+                    // Monaco: no highlights on a deprecated symbol.
+                    description_highlights: if symbol.deprecated {
+                        Vec::new()
+                    } else {
+                        description_highlights
+                    },
                     icon: Some(symbol_icon(symbol.kind, &self.theme.colors)),
                     strikethrough: symbol.deprecated,
                     keybinding: None,
@@ -1593,6 +1645,32 @@ impl CodeEditor {
         rows
     }
 
+    /// Each item's description and the parts of it that matched the query
+    /// (for tests).
+    #[doc(hidden)]
+    pub fn quick_access_description_highlights_for_tests(
+        &self,
+        cx: &gpui::App,
+    ) -> Vec<(String, Vec<String>)> {
+        let Some((widget, _)) = self.quick.as_ref().and_then(|q| q.widget.as_ref()) else {
+            return Vec::new();
+        };
+        widget
+            .read(cx)
+            .items
+            .iter()
+            .filter_map(|item| {
+                let description = item.description.as_ref()?;
+                let matched = item
+                    .description_highlights
+                    .iter()
+                    .map(|range| description[range.clone()].to_string())
+                    .collect();
+                Some((description.to_string(), matched))
+            })
+            .collect()
+    }
+
     /// The quick input's window-wide pointer while its slider is dragged.
     pub(crate) fn quick_access_captured_cursor(&self, cx: &gpui::App) -> Option<gpui::CursorStyle> {
         let (widget, _) = self.quick.as_ref()?.widget.as_ref()?;
@@ -1693,6 +1771,7 @@ impl CodeEditor {
                 label: action.label.clone(),
                 highlights,
                 description: duplicate.then(|| action.id.clone()),
+                description_highlights: Vec::new(),
                 icon: None,
                 strikethrough: false,
                 keybinding: keys.and_then(|keys| keys.get(&action.id).cloned()),
@@ -1741,6 +1820,7 @@ fn help_rows() -> Vec<QuickRow> {
             label: prefix.into(),
             highlights: Vec::new(),
             description: Some(help.into()),
+            description_highlights: Vec::new(),
             icon: None,
             strikethrough: false,
             keybinding: None,

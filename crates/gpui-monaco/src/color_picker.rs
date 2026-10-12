@@ -764,7 +764,8 @@ impl CodeEditor {
 
     /// Monaco `updateEditorModel`: writes `presentation` over `range` (or
     /// at each of `insertion`) as one undo step, returning the color's new
-    /// range.
+    /// range: the replaced range tracked through every edit, additional
+    /// ones included, with `GrowsOnlyWhenTypingAfter`.
     pub(crate) fn apply_color_presentation(
         &mut self,
         range: Range<PointUtf16>,
@@ -781,12 +782,20 @@ impl CodeEditor {
             Some(ranges) => edits.extend(ranges.into_iter().map(|r| (r, text.clone()))),
             None => edits.push((edit_range.clone(), text.clone())),
         }
+        let rope = self.model().read(cx).buffer().rope().clone();
+        let mut tracked = [edit_range];
+        crate::cursor::transform_ranges_with(
+            &rope,
+            &mut tracked,
+            &edits,
+            crate::cursor::Stickiness::GrowsOnlyWhenTypingAfter,
+        );
         self.color_picker.editing = true;
         self.execute_edits_from("colorpicker", edits, None, cx);
         self.color_picker.editing = false;
         self.push_undo_stop(cx);
-        let start = edit_range.start;
-        start..PointUtf16::new(start.row, start.column + text.encode_utf16().count() as u32)
+        let [range] = tracked;
+        range
     }
 
     /// Shows the standalone picker at the cursor, or focuses it (Monaco
@@ -946,6 +955,27 @@ impl CodeEditor {
             self.remove_widget(id, cx);
             self.refocus = true;
             cx.notify();
+        }
+    }
+
+    /// Monaco hides the standalone picker when the mouse moves onto a color
+    /// swatch (`colorpicker-color-decoration`) in the text, not over a
+    /// widget.
+    pub(crate) fn color_picker_mouse_move(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.color_picker.standalone.is_some()
+            && !self.layout.as_ref().is_some_and(|layout| {
+                layout
+                    .widget_bounds
+                    .iter()
+                    .any(|bounds| bounds.contains(&position))
+            })
+            && self.swatch_at(position).is_some()
+        {
+            self.hide_standalone_color_picker(cx);
         }
     }
 

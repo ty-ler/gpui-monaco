@@ -6160,6 +6160,7 @@ impl CodeEditor {
                 self.message_mouse_move(position.row, cx);
             }
             cx.emit(CodeEditorEvent::MouseMove(mouse));
+            self.color_picker_mouse_move(event.position, cx);
         }
         let minimap_hovered = self
             .layout
@@ -7832,7 +7833,7 @@ impl Render for CodeEditor {
                 if this.options.single_line {
                     return cx.propagate();
                 }
-                this.open_quick_access("@", window, cx)
+                this.open_quick_outline(window, cx)
             }))
             .on_action(cx.listener(|this, _: &GotoOffset, window, cx| {
                 if this.options.single_line {

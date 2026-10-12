@@ -60,7 +60,10 @@ pub use collection::{CursorCollection, SelectionStartKind, SingleCursorState};
 pub use column::{ColumnSelectCommand, ColumnSelectData, column_select, column_select_to};
 pub use comment::{CommentOptions, CommentsAt, LineCommentType, block_comment, line_comment};
 pub use composition::{CompositionOutcome, CompositionState, composition_end_with_language};
-pub(crate) use edit::{Command, CursorStateHelper, EditBuilder, TrackedId, execute_commands};
+pub(crate) use edit::{
+    Command, CursorStateHelper, EditBuilder, Stickiness, TrackedId, execute_commands,
+    transform_ranges_with,
+};
 pub use edit::{EditOperation, EditOperationType};
 pub(crate) use edit::{execute_edits_forcing, selections_from_markers};
 pub use in_place_replace::in_place_replace;

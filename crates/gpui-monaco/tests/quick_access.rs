@@ -680,3 +680,175 @@ fn the_quick_input_text_box_has_a_line_of_height(cx: &mut TestAppContext) {
     assert_eq!(bounds.size.height, gpui::px(22.));
     assert!(bounds.size.width > gpui::px(100.), "{bounds:?}");
 }
+
+/// Symbols with and without their own container.
+struct ContainerSymbols;
+
+impl gpui_monaco::providers::DocumentSymbolProvider for ContainerSymbols {
+    fn provide_document_symbols(
+        &self,
+        _: &gpui_monaco::providers::ProviderContext,
+        _: &mut gpui::App,
+    ) -> gpui::Task<anyhow::Result<Vec<gpui_monaco::providers::DocumentSymbol>>> {
+        use gpui_monaco::providers::{DocumentSymbol, SymbolKind};
+        let at = |row| PointUtf16::new(row, 0)..PointUtf16::new(row, 3);
+        gpui::Task::ready(Ok(vec![
+            // A flat `SymbolInformation`-like result.
+            DocumentSymbol {
+                name: "run".into(),
+                kind: SymbolKind::Function,
+                range: at(0),
+                selection_range: at(0),
+                container_name: Some("Server".into()),
+                ..Default::default()
+            },
+            DocumentSymbol {
+                name: "Bar".into(),
+                kind: SymbolKind::Class,
+                range: PointUtf16::new(2, 0)..PointUtf16::new(4, 1),
+                selection_range: at(2),
+                children: vec![DocumentSymbol {
+                    name: "foo".into(),
+                    kind: SymbolKind::Method,
+                    range: at(3),
+                    selection_range: at(3),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ]))
+    }
+}
+
+fn description_highlights(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+) -> Vec<(String, String)> {
+    cx.run_until_parked();
+    editor.read_with(cx, |e, cx| {
+        e.quick_access_description_highlights_for_tests(cx)
+            .into_iter()
+            .map(|(description, matched)| (description, matched.concat()))
+            .collect()
+    })
+}
+
+/// Monaco `_flattenDocumentSymbols` and `doGetSymbolPicks`: a symbol's own
+/// `containerName` is its description, the words after the first match
+/// it, and the matched part is highlighted.
+#[gpui::test]
+fn go_to_symbol_matches_and_highlights_containers(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::providers::register_document_symbol_provider(
+            cx,
+            gpui_monaco::providers::LanguageSelector::All,
+            ContainerSymbols,
+        );
+    });
+    let (editor, cx) = setup("run\n\nBar {\nfoo\n}\n", cx);
+    cx.simulate_keystrokes("cmd-shift-o");
+    cx.run_until_parked();
+    assert_eq!(
+        rows(&editor, cx),
+        vec!["[symbols (3)]", "> run (Server)", "Bar", "foo (Bar)"]
+    );
+    // Nothing typed, nothing highlighted.
+    assert_eq!(
+        description_highlights(&editor, cx),
+        vec![
+            ("Server".to_string(), String::new()),
+            ("Bar".to_string(), String::new())
+        ]
+    );
+    cx.simulate_input("run Server");
+    assert_eq!(rows(&editor, cx), vec!["[symbols (1)]", "> run (Server)"]);
+    assert_eq!(
+        description_highlights(&editor, cx),
+        vec![("Server".to_string(), "Server".to_string())]
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-shift-o");
+    cx.simulate_input("foo bar");
+    assert_eq!(rows(&editor, cx), vec!["[symbols (1)]", "> foo (Bar)"]);
+    assert_eq!(
+        description_highlights(&editor, cx),
+        vec![("Bar".to_string(), "Bar".to_string())]
+    );
+}
+
+/// Monaco's Go to Symbol action opens with `ItemActivation.NONE`: with
+/// the cursor in no symbol, nothing is active or previewed; typing, or
+/// opening `@` from the help, activates the first item.
+#[gpui::test]
+fn go_to_symbol_outside_symbols_activates_nothing(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(RUST, cx);
+    // The blank line between `struct Point` and `impl Point`.
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                3, 0,
+            ))],
+            cx,
+        )
+    });
+    cx.simulate_keystrokes("cmd-shift-o");
+    assert_eq!(
+        rows(&editor, cx),
+        vec![
+            "[symbols (5)]",
+            "Point",
+            "Point",
+            "len (Point)",
+            "scale (Point)",
+            "main"
+        ]
+    );
+    // No preview: no range highlight, and the cursor stays.
+    let previews = editor.update(cx, |e, cx| {
+        let id = Some(cx.entity_id());
+        e.model()
+            .update(cx, |model, _| model.all_decorations(id).len())
+    });
+    assert_eq!(previews, 0);
+    assert_eq!(cursor(&editor, cx), PointUtf16::new(3, 0));
+    // Enter does nothing without an active item.
+    cx.simulate_keystrokes("enter");
+    assert!(open(&editor, cx));
+    // Down focuses the first row.
+    cx.simulate_keystrokes("down");
+    assert_eq!(active_index(&editor, cx), Some(0));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    // Typing activates the first match.
+    cx.simulate_keystrokes("cmd-shift-o");
+    cx.run_until_parked();
+    cx.simulate_input("s");
+    assert_eq!(active_index(&editor, cx), Some(0));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    // `@` typed after the help: Monaco's default `ItemActivation.FIRST`.
+    cx.simulate_keystrokes("f1");
+    cx.simulate_keystrokes("backspace");
+    cx.simulate_input("@");
+    cx.run_until_parked();
+    assert_eq!(active_index(&editor, cx), Some(0));
+}
+
+/// Monaco's "Toggle Zero-Based Offset" is a `Toggle` with the
+/// `index-zero` codicon: 16px, with 1px padding and border.
+#[gpui::test]
+fn the_zero_based_offset_toggle_is_an_icon_toggle(cx: &mut TestAppContext) {
+    let (_editor, cx) = setup(RUST, cx);
+    cx.simulate_keystrokes("ctrl-g");
+    cx.simulate_input(":");
+    draw(cx);
+    let toggle = cx
+        .debug_bounds("quick-zero-based-offset")
+        .expect("the toggle");
+    assert_eq!(toggle.size.width, gpui::px(20.));
+    assert_eq!(toggle.size.height, gpui::px(20.));
+}

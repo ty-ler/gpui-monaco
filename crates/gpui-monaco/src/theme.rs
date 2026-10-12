@@ -782,6 +782,24 @@ editor_colors! { r;
     /// (`quickInputList.focusHighlightForeground`).
     quick_input_list_focus_highlight_foreground: Hsla =
         r.color("quickInputList.focusHighlightForeground");
+    /// Matched characters in the quick input's rows: Monaco's
+    /// `standaloneQuickInput.css`, which overrides the theme's
+    /// `list.highlightForeground` by base theme (`#0097fb` in vs-dark,
+    /// `#0066bf` in vs, `#f38518` in hc-black, `#0f4a85` in hc-light).
+    quick_input_highlight_foreground: Hsla = match r.scheme() {
+        ColorScheme::Dark => c(rgb(0x0097fb)),
+        ColorScheme::Light => c(rgb(0x0066bf)),
+        ColorScheme::HcDark => c(rgb(0xf38518)),
+        ColorScheme::HcLight => c(rgb(0x0f4a85)),
+    };
+    /// Matched characters on the quick input's focused row: the same, but
+    /// `#9dddff` in vs (`standaloneQuickInput.css`).
+    quick_input_focus_highlight_foreground: Hsla = match r.scheme() {
+        ColorScheme::Light => c(rgb(0x9dddff)),
+        ColorScheme::Dark => c(rgb(0x0097fb)),
+        ColorScheme::HcDark => c(rgb(0xf38518)),
+        ColorScheme::HcLight => c(rgb(0x0f4a85)),
+    };
     /// Quick access group labels (`pickerGroup.foreground`).
     picker_group_foreground: Hsla = r.color("pickerGroup.foreground");
     /// The line above a group (`pickerGroup.border`).
@@ -2924,6 +2942,21 @@ mod tests {
             "#2aaaffff"
         );
         assert_eq!(hex(light.list_highlight_foreground), "#0066bfff");
+        // `standaloneQuickInput.css`.
+        assert_eq!(hex(dark.quick_input_highlight_foreground), "#0097fbff");
+        assert_eq!(
+            hex(dark.quick_input_focus_highlight_foreground),
+            "#0097fbff"
+        );
+        assert_eq!(hex(light.quick_input_highlight_foreground), "#0066bfff");
+        assert_eq!(
+            hex(light.quick_input_focus_highlight_foreground),
+            "#9dddffff"
+        );
+        assert_eq!(
+            hex(hc_dark.quick_input_focus_highlight_foreground),
+            "#f38518ff"
+        );
         assert_eq!(hex(hc_dark.list_highlight_foreground), "#f38518ff");
         assert_eq!(hex(dark.keybinding_label_foreground), "#ccccccff");
         assert_eq!(

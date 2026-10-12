@@ -920,6 +920,22 @@ pub(crate) fn transform_ranges(
     ranges: &mut [Range<Position>],
     edits: &[(Range<Position>, String)],
 ) {
+    transform_ranges_with(
+        model,
+        ranges,
+        edits,
+        Stickiness::NeverGrowsWhenTypingAtEdges,
+    );
+}
+
+/// [`transform_ranges`] with any `stickiness` (Monaco `_setTrackedRange`
+/// then `_getTrackedRange` around one `executeEdits`).
+pub(crate) fn transform_ranges_with(
+    model: &dyn CursorModel,
+    ranges: &mut [Range<Position>],
+    edits: &[(Range<Position>, String)],
+    stickiness: Stickiness,
+) {
     if edits.is_empty() {
         return;
     }
@@ -937,12 +953,7 @@ pub(crate) fn transform_ranges(
         })
         .collect();
     for range in ranges {
-        *range = adjust_range(
-            model,
-            range.clone(),
-            Stickiness::NeverGrowsWhenTypingAtEdges,
-            &applied,
-        );
+        *range = adjust_range(model, range.clone(), stickiness, &applied);
     }
 }
 
