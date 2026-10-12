@@ -191,6 +191,9 @@ pub(crate) struct PeekView {
     no_preview: Entity<TextModel>,
     preview_theme: Arc<Theme>,
     options: crate::options::EditorOptions,
+    /// The editor's line height with the font zoom (Monaco
+    /// `EditorOption.lineHeight`), refreshed every frame.
+    line_height: Pixels,
     colors: EditorColors,
     high_contrast: bool,
     focus: FocusHandle,
@@ -507,6 +510,8 @@ impl PeekView {
             colors: theme.colors.clone(),
             high_contrast: theme.high_contrast,
             preview_theme: Arc::new(preview_theme),
+            // Until the opening editor sets its zoomed height.
+            line_height: preview_options.resolved_line_height(),
             options: preview_options,
             focus: cx.focus_handle(),
             focus_pending: true,
@@ -646,7 +651,7 @@ impl PeekView {
     /// height (a third of a line, above and below the frame), the header's
     /// (1.2 lines) and the body's.
     fn layout_heights(&self) -> (Pixels, Pixels, Pixels) {
-        let line_height = self.options.resolved_line_height();
+        let line_height = self.line_height;
         let arrow = (line_height / 3.).round();
         let container = line_height * self.height_in_lines - arrow * 2.;
         let head = (line_height * 1.2).ceil();
@@ -1287,6 +1292,9 @@ impl Render for PeekView {
                 None => window.focus(&self.focus, cx),
             }
         }
+        if let Some(editor) = self.editor.upgrade() {
+            self.line_height = editor.read(cx).line_height();
+        }
         let colors = self.colors.clone();
         let (arrow_height, head_height, body_height) = self.layout_heights();
         // Monaco `Arrow.show`: under the anchor, pushed to the second
@@ -1711,7 +1719,7 @@ impl PeekView {
                 let Some((start_y, start_lines)) = self.sash_start else {
                     return;
                 };
-                let line_height = self.options.resolved_line_height();
+                let line_height = self.line_height;
                 let delta = (position.y - start_y) / line_height;
                 let delta = if delta < 0. {
                     delta.ceil()
@@ -1805,12 +1813,14 @@ impl CodeEditor {
         let model = self.model().clone();
         let theme = self.theme().clone();
         let options = self.options().clone();
+        let line_height = self.line_height();
         let focus_preview = self.options.peek_widget_default_focus
             == crate::options::PeekWidgetDefaultFocus::Editor;
         let view = cx.new(|cx| {
             let mut view = PeekView::new(
                 &editor, model, theme, options, kind, anchor, locations, selected, cx,
             );
+            view.line_height = line_height;
             view.focus_preview = focus_preview;
             view.peek_mode = peek_mode;
             view.loading = loading;
@@ -1820,7 +1830,6 @@ impl CodeEditor {
         });
         // Monaco: the last height (18 lines at first), at most 80% of the
         // editor (at least 12 lines).
-        let line_height = self.line_height();
         let height = cx
             .try_global::<PeekLayout>()
             .map_or(HEIGHT_IN_LINES, |layout| layout.height_in_lines);

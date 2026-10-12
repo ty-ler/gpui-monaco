@@ -299,6 +299,32 @@ fn the_frame_follows_the_zone_widget_layout(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_frame_uses_the_zoomed_line_height(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&numbered(100), cx);
+    cx.update(|_, cx| gpui_monaco::set_editor_zoom_level(1., cx));
+    draw(cx);
+    peek(&editor, cx, vec![here(1, 0, 4), here(5, 0, 4)]);
+    let lh = editor.read_with(cx, |e, _| e.layout_for_tests().unwrap().1);
+    let unzoomed = editor.read_with(cx, |e, _| e.options().resolved_line_height());
+    assert!(lh > unzoomed);
+    let (_, widgets) = editor.read_with(cx, |e, _| e.widget_bounds_for_tests());
+    let zone = widgets
+        .iter()
+        .find(|(_, kind)| *kind == EmbeddedKind::ViewZone)
+        .unwrap()
+        .0;
+    let results = cx.debug_bounds("peek-results").unwrap();
+    // Monaco's peek view lays out from `EditorOption.lineHeight`, which
+    // includes the font zoom.
+    let arrow = (lh / 3.).round();
+    let head = (lh * 1.2).ceil();
+    // Within the pixel snapping of the fractional zoomed zone top.
+    let expected = zone.top() + arrow + px(1.) + head + px(1.);
+    assert!((results.top() - expected).abs() < px(0.5));
+    cx.update(|_, cx| gpui_monaco::set_editor_zoom_level(0., cx));
+}
+
+#[gpui::test]
 fn the_height_sash_moves_in_whole_lines_from_where_it_started(cx: &mut TestAppContext) {
     let (editor, cx) = setup(&numbered(100), cx);
     peek(&editor, cx, vec![here(1, 0, 4), here(5, 0, 4)]);

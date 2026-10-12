@@ -5,6 +5,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Peek view zoom (#453):** the peek view's frame, header and height sash use the editor's zoomed line height (Monaco `EditorOption.lineHeight`). Before, they used the unzoomed height, so with font zoom the header and list were sized for smaller lines. Follow-up to #420.
 - **Layout changes (#420):** ported Monaco's stable viewport, zoomed line heights and font measurement (audit 4 §F.1, §F.2, §B.11).
   - **First visible line:** changing the options (wrapping, font size, line height, zoom, ...) or the editor's width, and `set_hidden_areas` or folding, keep the first visible line where it is on screen, as Monaco's `ViewModel._onConfigurationChanged` and `setHiddenAreas` do with `_captureStableViewport`; the scroll position no longer keeps its pixel value, which showed an earlier or later line. Not at the top of the file, and not when the first visible line is hidden, as in Monaco.
   - **Fractional zoomed line heights:** the zoomed line height isn't rounded again (Monaco `BareFontInfo._create`): with 18px lines, zoom level 1 lays lines out 19.8px apart, not 20px, and `computed_options().line_height` and `font_info().line_height` are 19.8. Zoomed out, a line height may go under 8px, as in Monaco. Widgets, zones and the diff editor use the zoomed line height too.
