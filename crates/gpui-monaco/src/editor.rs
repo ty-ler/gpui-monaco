@@ -1614,6 +1614,7 @@ impl CodeEditor {
             suppress_mouse_down: widget.suppress_mouse_down,
             layer: crate::widgets::layer::DEFAULT,
             room: Default::default(),
+            window_anchor: None,
         });
         cx.notify();
         id

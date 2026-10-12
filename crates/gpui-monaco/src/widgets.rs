@@ -578,6 +578,10 @@ pub(crate) struct ContentWidgetState {
     /// Where the editor publishes the room the widget has, when it
     /// overflows.
     pub room: OverflowRoomCell,
+    /// A box in the window it's placed against instead of its position's
+    /// line, for an overflowing widget (Monaco's `IAnchor`, such as the
+    /// code action menu at a clicked hover link).
+    pub window_anchor: Option<gpui::Bounds<Pixels>>,
 }
 
 #[derive(Clone)]
@@ -650,6 +654,14 @@ impl Widgets {
             .find(|w| w.id == id)
             .map(|w| w.room.clone())
             .unwrap_or_default()
+    }
+
+    /// Places overflowing content widget `id` against `bounds` in the
+    /// window instead of its position's line.
+    pub fn set_window_anchor(&mut self, id: WidgetId, bounds: gpui::Bounds<Pixels>) {
+        if let Some(widget) = self.content.iter_mut().find(|w| w.id == id) {
+            widget.window_anchor = Some(bounds);
+        }
     }
 
     /// Makes the wheel over zone `id` leave the editor alone.

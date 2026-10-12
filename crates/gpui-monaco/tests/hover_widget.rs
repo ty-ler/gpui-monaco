@@ -1,6 +1,7 @@
-//! The hover widget's Monaco fidelity (#247): the problem hover's status
-//! bar and body, the `hoverHighlight` decoration, screen reader
-//! announcements, full-edge resizing and the full-width row separators.
+//! The hover widget's Monaco fidelity (#247, #294): the problem hover's
+//! status bar and body, the Quick Fix menu at the clicked link, the
+//! `hoverHighlight` decoration, screen reader announcements, focusable
+//! rows, full-edge resizing and the full-width row separators.
 
 use std::cell::RefCell;
 use std::ops::Range;
@@ -819,4 +820,203 @@ fn the_marker_zone_links_the_code_too(cx: &mut TestAppContext) {
     cx.simulate_click(code.center(), Modifiers::default());
     cx.run_until_parked();
     assert_eq!(*opened.borrow(), ["https://example.com/unused"]);
+}
+
+/// Monaco's "Quick Fix..." opens the code action menu at the clicked link
+/// (`showCodeActions` with the link's box), not at the marker.
+#[gpui::test]
+fn quick_fix_opens_the_menu_at_the_clicked_link(cx: &mut TestAppContext) {
+    let fixes = Fixes::default();
+    *fixes.actions.borrow_mut() = vec![quick_fix("Add semicolon")];
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_code_action_provider(cx, LanguageSelector::All, fixes);
+    });
+    let (editor, cx) = setup("let x = 1\n", |_| {}, cx);
+    set_markers(
+        &editor,
+        cx,
+        vec![marker(MarkerSeverity::Error, p(0, 8)..p(0, 9))],
+    );
+    show_at(&editor, cx, p(0, 8));
+    cx.run_until_parked();
+    paint(cx);
+    assert_eq!(
+        labels(&status_bar(&editor, cx)),
+        ["View Problem", "Quick Fix..."]
+    );
+    let link = cx
+        .debug_bounds("hover-status-action-1")
+        .expect("Quick Fix link");
+    let line_height = editor.read_with(cx, |e, _| e.options().resolved_line_height());
+    cx.simulate_click(link.center(), Modifiers::default());
+    cx.run_until_parked();
+    paint(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_hover_visible()));
+    assert!(editor.read_with(cx, |e, _| e.is_code_action_menu_visible()));
+    let menu = cx.debug_bounds("code-action-menu").expect("menu");
+    // Below the link, at its left (Monaco's context view below its
+    // anchor), not below the marker's line (row 0; the hover was below
+    // it).
+    assert_eq!(menu.top(), link.bottom());
+    assert_eq!(menu.left(), link.left());
+    assert!(menu.top() > line_height * 2., "{menu:?}");
+
+    // Run as if clicked where the link was last painted: the same place.
+    editor.update(cx, |e, cx| e.hide_code_action_menu(cx));
+    show_at(&editor, cx, p(0, 8));
+    cx.run_until_parked();
+    paint(cx);
+    assert!(editor.update(cx, |e, cx| {
+        e.run_hover_status_action_for_tests("Quick Fix", cx)
+    }));
+    paint(cx);
+    let again = cx.debug_bounds("code-action-menu").expect("menu");
+    assert_eq!(again.top(), link.bottom());
+
+    // Quick Fix from the keyboard: still at the cursor, below its line
+    // (Monaco `toCoords`).
+    editor.update(cx, |e, cx| {
+        e.hide_code_action_menu(cx);
+        e.set_selections(&[Selection::collapsed(p(0, 8))], cx);
+        e.quick_fix(cx);
+    });
+    cx.run_until_parked();
+    paint(cx);
+    let at_cursor = cx.debug_bounds("code-action-menu").expect("menu");
+    assert!(at_cursor.top() < link.top(), "{at_cursor:?} {link:?}");
+}
+
+/// Monaco's rows each take the focus (`tabIndex` 0): Tab walks from the
+/// card through its parts and status bar and on out to the editor, and
+/// screen readers read each row.
+#[gpui::test]
+fn tab_walks_the_hover_rows_and_reads_each(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_hover_provider(cx, LanguageSelector::All, RangedHover(None));
+    });
+    let (editor, cx) = setup("let x = 1;\n", |_| {}, cx);
+    set_markers(
+        &editor,
+        cx,
+        vec![marker(MarkerSeverity::Error, p(0, 4)..p(0, 5))],
+    );
+    show_at(&editor, cx, p(0, 4));
+    rest(cx, 0);
+    // The marker, the provider's docs, the status bar.
+    assert_eq!(editor.read_with(cx, |e, cx| e.hover_part_count(cx)), 3);
+    let focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| editor.read(cx).focused_hover_part_index(window, cx))
+    };
+    let hover_focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| editor.read(cx).is_hover_focused(window, cx))
+    };
+    let editor_focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| editor.read(cx).focus_handle(cx).is_focused(window))
+    };
+    let announced = |cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, _| e.last_announcement_for_tests())
+            .map(|a| a.to_string())
+            .unwrap_or_default()
+    };
+    let text = |cx: &mut VisualTestContext| editor.read_with(cx, |e, cx| e.model().read(cx).text());
+    // Show or Focus Hover: several rows, so the card takes the focus.
+    cx.dispatch_action(gpui_monaco::actions::ShowHover::default());
+    rest(cx, 0);
+    assert!(hover_focused(cx));
+    assert_eq!(focused(cx), None);
+    cx.simulate_keystrokes("tab");
+    rest(cx, 0);
+    assert_eq!(focused(cx), Some(0));
+    assert_eq!(announced(cx), "Error here");
+    assert!(hover_focused(cx));
+    cx.simulate_keystrokes("tab");
+    rest(cx, 0);
+    assert_eq!(focused(cx), Some(1));
+    assert_eq!(announced(cx), "docs");
+    cx.simulate_keystrokes("tab");
+    rest(cx, 0);
+    assert_eq!(focused(cx), Some(2));
+    let status = announced(cx);
+    assert!(
+        status.starts_with("This is a hover status bar.\nIt has an action with label View Problem"),
+        "{status}"
+    );
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.hover_part_accessible_content(2, cx)),
+        Some(status)
+    );
+    // Shift+Tab goes back; neither indents the text.
+    cx.simulate_keystrokes("shift-tab");
+    rest(cx, 0);
+    assert_eq!(focused(cx), Some(1));
+    assert_eq!(text(cx), "let x = 1;\n");
+    // Past the last row: the editor, with the hover still showing.
+    cx.simulate_keystrokes("tab tab");
+    rest(cx, 0);
+    assert!(editor_focused(cx));
+    assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));
+    assert_eq!(text(cx), "let x = 1;\n");
+
+    // From the first row, Shift+Tab goes to the card, then the editor.
+    assert!(cx.update(|window, cx| editor.update(cx, |e, cx| e.focus_hover_part(0, window, cx))));
+    rest(cx, 0);
+    assert_eq!(focused(cx), Some(0));
+    cx.simulate_keystrokes("shift-tab");
+    rest(cx, 0);
+    assert_eq!(focused(cx), None);
+    assert!(hover_focused(cx));
+    cx.simulate_keystrokes("shift-tab");
+    rest(cx, 0);
+    assert!(editor_focused(cx));
+    // The arrows still scroll a focused row's hover, and Escape closes it.
+    assert!(cx.update(|window, cx| editor.update(cx, |e, cx| e.focus_hover_part(1, window, cx))));
+    rest(cx, 0);
+    cx.simulate_keystrokes("down");
+    rest(cx, 0);
+    assert_eq!(focused(cx), Some(1));
+    assert_eq!(text(cx), "let x = 1;\n");
+    cx.simulate_keystrokes("escape");
+    rest(cx, 0);
+    assert!(!editor.read_with(cx, |e, _| e.is_hover_visible()));
+    assert!(editor_focused(cx));
+}
+
+/// Monaco `ContentHoverWidgetWrapper.focus`: a hover with a single row
+/// focuses that row; clicking a row focuses it too.
+#[gpui::test]
+fn a_lone_row_takes_the_focus_and_clicks_focus_rows(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_hover_provider(cx, LanguageSelector::All, RangedHover(None));
+    });
+    let (editor, cx) = setup("alpha beta\n", |_| {}, cx);
+    show_at(&editor, cx, p(0, 1));
+    rest(cx, 0);
+    assert_eq!(editor.read_with(cx, |e, cx| e.hover_part_count(cx)), 1);
+    let focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| editor.read(cx).focused_hover_part_index(window, cx))
+    };
+    cx.dispatch_action(gpui_monaco::actions::ShowHover::default());
+    rest(cx, 0);
+    assert_eq!(focused(cx), Some(0));
+    assert_eq!(
+        editor
+            .read_with(cx, |e, _| e.last_announcement_for_tests())
+            .map(|a| a.to_string()),
+        Some("docs".to_string())
+    );
+    // A click on a row focuses it.
+    editor.update(cx, |e, cx| e.hide_hover(cx));
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    show_at(&editor, cx, p(0, 1));
+    rest(cx, 0);
+    assert_eq!(focused(cx), None);
+    let row = cx.debug_bounds("hover-part-0").expect("row");
+    cx.simulate_click(row.center(), Modifiers::default());
+    rest(cx, 0);
+    assert_eq!(focused(cx), Some(0));
+    assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));
 }

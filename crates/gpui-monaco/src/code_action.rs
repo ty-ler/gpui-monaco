@@ -41,6 +41,29 @@ pub const CODE_ACTION_MENU_KEY_CONTEXT: &str = "CodeActionMenu";
 /// Monaco `CodeActionOracle` waits this long after the cursor moves.
 const AUTO_TRIGGER_DELAY: Duration = Duration::from_millis(250);
 
+/// Where the code action menu shows (Monaco `showCodeActionList`'s
+/// `IAnchor | IPosition`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MenuAnchor {
+    /// Below (else above) a text position's line (Monaco `toCoords`).
+    Text(PointUtf16),
+    /// Below (else above) a box in the window, such as the problem hover's
+    /// clicked "Quick Fix..." link; `position` is where it's about.
+    Window {
+        bounds: gpui::Bounds<gpui::Pixels>,
+        position: PointUtf16,
+    },
+}
+
+impl MenuAnchor {
+    /// The text position it's about.
+    fn position(self) -> PointUtf16 {
+        match self {
+            MenuAnchor::Text(position) | MenuAnchor::Window { position, .. } => position,
+        }
+    }
+}
+
 /// Which actions a request keeps (Monaco `CodeActionFilter`).
 #[derive(Clone, Debug, Default)]
 pub struct CodeActionFilter {
@@ -431,7 +454,7 @@ pub(crate) struct CodeActionMenu {
     rows: Vec<Row>,
     /// Everything the request found, to list again with "Show Disabled".
     set: std::rc::Rc<CodeActionSet>,
-    position: PointUtf16,
+    at: MenuAnchor,
     options: MenuOptions,
     bar: Vec<BarAction>,
     focused: Option<usize>,
@@ -532,7 +555,7 @@ impl CodeActionMenu {
         let Some(action) = self.bar.get(ix).cloned() else {
             return;
         };
-        let (set, position, options) = (self.set.clone(), self.position, self.options);
+        let (set, at, options) = (self.set.clone(), self.at, self.options);
         if let Some(editor) = self.editor.upgrade() {
             editor.update(cx, |editor, cx| match action {
                 BarAction::Documentation(command) => {
@@ -545,7 +568,7 @@ impl CodeActionMenu {
                 }
                 BarAction::ToggleDisabled { showing } => {
                     editor.code_actions.show_disabled = !showing;
-                    editor.show_code_action_list(set, position, options, cx);
+                    editor.show_code_action_list(set, at, options, cx);
                 }
             });
         }
@@ -784,6 +807,7 @@ impl Render for CodeActionMenu {
             .collect();
         div()
             .id("code-action-menu")
+            .debug_selector(|| "code-action-menu".into())
             .key_context(CODE_ACTION_MENU_KEY_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &CodeActionMenuNext, _, cx| this.move_focus(true, cx)))
@@ -943,18 +967,19 @@ impl CodeEditor {
     }
 
     /// Monaco `CodeActionController.showCodeActions`, from the problem
-    /// hover's "Quick Fix...": the valid actions of `set` at `position`.
+    /// hover's "Quick Fix...": the valid actions of `set` at `at` (the
+    /// clicked link).
     pub(crate) fn show_marker_quick_fixes(
         &mut self,
         set: std::rc::Rc<CodeActionSet>,
-        position: PointUtf16,
+        at: MenuAnchor,
         cx: &mut Context<Self>,
     ) {
         let options = MenuOptions {
             include_disabled: false,
             from_lightbulb: false,
         };
-        self.show_code_action_list(set, position, options, cx);
+        self.show_code_action_list(set, at, options, cx);
     }
 
     /// After the cursor moves or markers change: asks for actions for the
@@ -1122,7 +1147,12 @@ impl CodeEditor {
                     include_disabled,
                     from_lightbulb: false,
                 };
-                this.show_code_action_list(std::rc::Rc::new(set), position, options, cx);
+                this.show_code_action_list(
+                    std::rc::Rc::new(set),
+                    MenuAnchor::Text(position),
+                    options,
+                    cx,
+                );
             })
             .ok();
         }));
@@ -1257,7 +1287,7 @@ impl CodeEditor {
             include_disabled: false,
             from_lightbulb: true,
         };
-        self.show_code_action_list(std::rc::Rc::new(set), anchor, options, cx);
+        self.show_code_action_list(std::rc::Rc::new(set), MenuAnchor::Text(anchor), options, cx);
     }
 
     /// Clicks the lightbulb, for tests.
@@ -1268,11 +1298,12 @@ impl CodeEditor {
 
     /// Monaco `CodeActionController.showCodeActionList`: the valid actions
     /// (all of them with `include_disabled` when "Show Disabled" is on or
-    /// none is valid), with an action bar unless from the lightbulb.
+    /// none is valid), with an action bar unless from the lightbulb, below
+    /// (else above) `at`.
     fn show_code_action_list(
         &mut self,
         set: std::rc::Rc<CodeActionSet>,
-        position: PointUtf16,
+        at: MenuAnchor,
         options: MenuOptions,
         cx: &mut Context<Self>,
     ) {
@@ -1314,7 +1345,7 @@ impl CodeEditor {
                 items,
                 rows,
                 set,
-                position,
+                at,
                 options,
                 bar,
                 focused: None,
@@ -1334,7 +1365,7 @@ impl CodeEditor {
             menu
         });
         let (id, room) = self.add_overflow_content_widget(
-            position,
+            at.position(),
             vec![
                 ContentWidgetPreference::Below,
                 ContentWidgetPreference::Above,
@@ -1343,6 +1374,9 @@ impl CodeEditor {
             crate::widgets::layer::MENU,
             cx,
         );
+        if let MenuAnchor::Window { bounds, .. } = at {
+            self.widgets.set_window_anchor(id, bounds);
+        }
         menu.update(cx, |menu, _| menu.room = room);
         self.code_actions.menu = Some((id, menu));
     }
