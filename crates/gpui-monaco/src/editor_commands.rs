@@ -749,6 +749,7 @@ impl CodeEditor {
                 view.leftover_visible_columns,
                 target as i64,
                 false,
+                None,
             );
             let view = view.move_to(select, position, leftover);
             (map_state(&view, |p| lines.to_model(p.row, p.column)), view)

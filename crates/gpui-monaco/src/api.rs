@@ -1397,6 +1397,26 @@ impl DecorationsCollection {
         ids
     }
 
+    /// Removes the decorations `remove` and adds `add`, keeping the rest
+    /// (Monaco `deltaDecorations` on some of the collection's ids). Returns
+    /// the new ids.
+    pub(crate) fn replace(
+        &mut self,
+        remove: &[DecorationId],
+        add: Vec<(Range<PointUtf16>, DecorationOptions)>,
+        cx: &mut App,
+    ) -> Vec<DecorationId> {
+        self.follow_model();
+        if remove.is_empty() && add.is_empty() {
+            return Vec::new();
+        }
+        let removed: std::collections::HashSet<DecorationId> = remove.iter().copied().collect();
+        self.ids.retain(|id| !removed.contains(id));
+        let ids = self.delta(remove, add, cx);
+        self.ids.extend(&ids);
+        ids
+    }
+
     /// Removes every decoration (Monaco `clear`).
     pub fn clear(&mut self, cx: &mut App) {
         self.follow_model();

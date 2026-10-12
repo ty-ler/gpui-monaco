@@ -295,6 +295,17 @@ pub trait CursorModel {
     fn splits_surrogate_pair(&self, row: u32, column: u32) -> bool {
         strings::splits_surrogate_pair(&self.line_content(row), column)
     }
+    /// Monaco `normalizePosition`: `position` moved out of injected text
+    /// (and off a wrap point's other side) as `affinity` says. Models
+    /// without injected text or wrapping leave it as is.
+    fn normalize_position(
+        &self,
+        position: Position,
+        affinity: crate::view::injected_text::PositionAffinity,
+    ) -> Position {
+        let _ = affinity;
+        position
+    }
     /// The UTF-16 `columns` of `row` (clamped to it). Long lines are
     /// sliced without copying the whole line.
     fn line_slice(&self, row: u32, columns: Range<u32>) -> String {

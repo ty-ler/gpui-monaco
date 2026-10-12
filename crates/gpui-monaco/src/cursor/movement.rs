@@ -11,6 +11,7 @@ use super::{
     CursorCollection, CursorConfig, CursorModel, Position, SelectionStartKind, SingleCursorState,
     first_non_whitespace_column, last_row, max_position, strings, validate_position,
 };
+use crate::view::injected_text::PositionAffinity;
 
 /// A cursor movement, as bound to keys by Monaco's default keymap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,6 +157,10 @@ impl CursorModel for DynModel<'_> {
     fn line_max_column(&self, row: u32) -> u32 {
         self.0.line_max_column(row)
     }
+
+    fn normalize_position(&self, position: Position, affinity: PositionAffinity) -> Position {
+        self.0.normalize_position(position, affinity)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +227,9 @@ pub(crate) fn move_left(
             cursor.position.row,
             cursor.position.column as i64 - (no_of_columns as i64 - 1),
         );
+        // Monaco normalizes before stepping, so a step from after injected
+        // text (or the start of a wrapped segment) goes past it.
+        let pos = model.normalize_position(pos, PositionAffinity::Left);
         left(config, model, pos)
     };
     cursor.move_to(in_selection_mode, p, 0)
@@ -230,14 +238,15 @@ pub(crate) fn move_left(
 /// Monaco `MoveOperations.rightPosition`: one grapheme right, wrapping to the
 /// start of the next line.
 pub(crate) fn right_position(model: &dyn CursorModel, row: u32, column: u32) -> Position {
-    if column < model.line_max_column(row) {
+    let position = if column < model.line_max_column(row) {
         let line = model.line_content(row);
         Position::new(row, column + strings::next_char_length(&line, column))
     } else if row < last_row(model) {
         Position::new(row + 1, 0)
     } else {
         Position::new(row, column)
-    }
+    };
+    model.normalize_position(position, PositionAffinity::Right)
 }
 
 fn right_position_atomic_soft_tabs(
@@ -287,13 +296,17 @@ pub(crate) fn move_right(
             cursor.position.row,
             cursor.position.column as i64 + (no_of_columns as i64 - 1),
         );
+        let pos = model.normalize_position(pos, PositionAffinity::Right);
         right(config, model, pos)
     };
     cursor.move_to(in_selection_mode, p, 0)
 }
 
 /// Monaco `MoveOperations.vertical`: moves to `new_row`, keeping the visible
-/// column (plus leftover). Returns the position and the new leftover.
+/// column (plus leftover), then normalizes the position with
+/// `normalization` (out of injected text, counting what it skips as
+/// leftover). Returns the position and the new leftover.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn vertical(
     config: &CursorConfig,
     model: &dyn CursorModel,
@@ -302,6 +315,7 @@ pub(crate) fn vertical(
     leftover_visible_columns: i32,
     new_row: i64,
     allow_move_on_edge_line: bool,
+    normalization: Option<PositionAffinity>,
 ) -> (Position, i32) {
     let current_visible_column =
         strings::visible_column_from_column(&model.line_content(row), column, config.tab_size)
@@ -338,14 +352,62 @@ pub(crate) fn vertical(
         )
     };
 
-    let leftover = if was_at_edge_position {
+    let mut leftover = if was_at_edge_position {
         0
     } else {
         current_visible_column
             - strings::visible_column_from_column(&model.line_content(row), column, config.tab_size)
                 as i64
     };
-    (Position::new(row, column), leftover as i32)
+    let mut position = Position::new(row, column);
+    if let Some(affinity) = normalization {
+        let normalized = model.normalize_position(position, affinity);
+        leftover += position.column as i64 - normalized.column as i64;
+        position = normalized;
+    }
+    (position, leftover as i32)
+}
+
+/// Monaco `MoveOperations.down`.
+fn down(
+    config: &CursorConfig,
+    model: &dyn CursorModel,
+    from: Position,
+    leftover_visible_columns: i32,
+    count: u32,
+    allow_move_on_last_line: bool,
+) -> (Position, i32) {
+    vertical(
+        config,
+        model,
+        from.row,
+        from.column,
+        leftover_visible_columns,
+        from.row as i64 + count as i64,
+        allow_move_on_last_line,
+        Some(PositionAffinity::RightOfInjectedText),
+    )
+}
+
+/// Monaco `MoveOperations.up`.
+fn up(
+    config: &CursorConfig,
+    model: &dyn CursorModel,
+    from: Position,
+    leftover_visible_columns: i32,
+    count: u32,
+    allow_move_on_first_line: bool,
+) -> (Position, i32) {
+    vertical(
+        config,
+        model,
+        from.row,
+        from.column,
+        leftover_visible_columns,
+        from.row as i64 - count as i64,
+        allow_move_on_first_line,
+        Some(PositionAffinity::LeftOfInjectedText),
+    )
 }
 
 /// Monaco `MoveOperations.moveDown`.
@@ -361,15 +423,25 @@ pub(crate) fn move_down(
     } else {
         cursor.position
     };
-    let (p, leftover) = vertical(
-        config,
-        model,
-        from.row,
-        from.column,
-        cursor.leftover_visible_columns,
-        from.row as i64 + lines_count as i64,
-        true,
-    );
+    // Monaco: if the line below normalizes back onto this one (injected
+    // text wrapped onto it), try the lines after it.
+    let line_count = model.line_count();
+    let mut i = 0;
+    let (p, leftover) = loop {
+        let moved = down(
+            config,
+            model,
+            Position::new(from.row + i, from.column),
+            cursor.leftover_visible_columns,
+            lines_count,
+            true,
+        );
+        let normalized = model.normalize_position(moved.0, PositionAffinity::None);
+        i += 1;
+        if normalized.row > from.row || i > 10 || from.row + i + 1 >= line_count {
+            break moved;
+        }
+    };
     cursor.move_to(in_selection_mode, p, leftover)
 }
 
@@ -386,13 +458,12 @@ pub(crate) fn move_up(
     } else {
         cursor.position
     };
-    let (p, leftover) = vertical(
+    let (p, leftover) = up(
         config,
         model,
-        from.row,
-        from.column,
+        from,
         cursor.leftover_visible_columns,
-        from.row as i64 - lines_count as i64,
+        lines_count,
         true,
     );
     cursor.move_to(in_selection_mode, p, leftover)
@@ -407,22 +478,21 @@ fn translate(
     delta: i64,
 ) -> SingleCursorState {
     let selection = cursor.selection();
-    let (start, start_leftover) = vertical(
+    let vertical_of = if delta < 0 { up } else { down };
+    let (start, start_leftover) = vertical_of(
         config,
         model,
-        selection.anchor.row,
-        selection.anchor.column,
+        selection.anchor,
         cursor.selection_start_leftover_visible_columns,
-        selection.anchor.row as i64 + delta,
+        delta.unsigned_abs() as u32,
         false,
     );
-    let (position, leftover) = vertical(
+    let (position, leftover) = vertical_of(
         config,
         model,
-        selection.head.row,
-        selection.head.column,
+        selection.head,
         cursor.leftover_visible_columns,
-        selection.head.row as i64 + delta,
+        delta.unsigned_abs() as u32,
         false,
     );
     SingleCursorState {
