@@ -31,7 +31,7 @@ Issues are linked by number.
 | Typing, delete, tab, outdent, newline | `coreCommands` | ✅ | |
 | Cursor movement: char, word, word part, line, page, document | `coreCommands`, `wordOperations`, `wordPartOperations` | ✅ | #81 |
 | Word segmentation for languages without spaces (Japanese, Chinese, Thai) in word movement, deletion and selection | `wordSegmenterLocales` | ✅ ICU4X's segmenter instead of `Intl.Segmenter`, with the first valid locale only; needs the `word-segmenter` cargo feature (on by default) | #234 |
-| Multi-cursor: add above/below, Cmd+D and previous-match variants, select all occurrences, cursors at line ends/top/bottom, Alt+click, box select by mouse and keyboard, options | `multicursor` | ✅ | #81, #260 |
+| Multi-cursor: add above/below (`logicalLine`), Cmd+D and previous-match variants, select all occurrences, cursors at line ends/top/bottom, Alt+click, box select by mouse and keyboard on view lines (folds skipped, wrapped segments each a line), undo stops, read-only no-ops, options | `multicursor`, `cursorColumnSelection` | ✅ | #81, #260, #334 |
 | Mouse gestures: click counting, quadruple-click select all, Shift+double/triple-click and line-number Shift+click extension, `createCursor` toggle, column select following `multiCursorModifier`, middle-drag, drag autoscroll | `mouseHandler`, `viewController.dispatchMouse`, `dragScrolling` | ✅ | #245, #260 |
 | IME composition at every cursor, active-clause underline | `compositionType`, `nativeEditContext` | 🟡 GPUI passes the IME's selected range but not its clause boundaries or underline styles, so only the selected clause is drawn thick | #260 |
 | Cursor undo, selection anchor, overtype mode | `cursorUndo`, `anchorSelect` | ✅ | #81 |
@@ -100,7 +100,7 @@ Issues are linked by number.
 | Cursor and selection rendering: block cursor text, view positions at wrap points, multi-cursor colors, selection corners and insets, view part paint order | `viewCursors`, `selections`, `CursorState.viewState` | ✅ the "Show more" chip has `.mtkoverflow`'s 4px padding, the line shaped around it | #259, #302 |
 | Bracket pair guides, `guides.highlightActiveIndentation: 'always'` | view parts | ✅ | #118, #203 |
 | Bracket pair colorization, independent color pool per bracket type | `bracketPairColorization` | ✅ | #85, #203 |
-| Occurrence and selection highlight, `selectedTextMatchMode`, `occurrencesHighlightFromAllProviders` | `wordHighlighter` | ✅ `multiFile` highlights in the current editor only | #83, #203, #228 |
+| Occurrence and selection highlight, `selectedTextMatchMode` (`findOptions` uses the find state's toggles, open or closed), `occurrencesHighlightFromAllProviders` | `wordHighlighter`, `multicursor` | ✅ `multiFile` highlights in the current editor only | #83, #203, #228, #334 |
 | Unicode highlighting, unusual line terminators | `unicodeHighlighter`, `unusualLineTerminators` | ✅ | #86 |
 | Unicode highlighter "too many characters" banner, `disableHighlightingOf*` commands | `unicodeHighlighter`, `setBanner` | ✅ the commands change the editor's options, not user settings; the banner is a tab stop labelled with its message | #227, #335 |
 | Font weight, ligatures, zoom, mouse wheel zoom | `fontZoom`, options | ✅ | #87 |

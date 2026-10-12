@@ -124,7 +124,7 @@ editor.update(cx, |editor, cx| {
 | `occurrences_highlight`, `occurrences_highlight_delay` | `occurrencesHighlight`, `occurrencesHighlightDelay` | `Off`, `SingleFile` (default) or `MultiFile`, which like `SingleFile` highlights in this editor only (editors don't share highlights). Highlights are computed 50ms after the cursor rests and shown no sooner than the delay (0) after it moved |
 | `occurrences_highlight_from_all_providers` | `occurrencesHighlightFromAllProviders` | ask every document highlight provider at once and merge their answers (off: the first provider that answers wins, and an empty answer counts); the textual occurrences are only used when no provider is registered |
 | `selection_highlight`, `selection_highlight_max_length`, `selection_highlight_multiline` | same names | highlight other occurrences of the selection |
-| `selected_text_match_mode` | `selectedTextMatchMode` | how Cmd/Ctrl+D, select all occurrences and selection highlights match selected text: `FindOptions` (the find widget's options while it's open), `CaseSensitive` or `CaseInsensitive` |
+| `selected_text_match_mode` | `selectedTextMatchMode` | how Cmd/Ctrl+D, select all occurrences and selection highlights match selected text: `FindOptions` (the find state's match case and whole word, open or closed; both off by default), `CaseSensitive` or `CaseInsensitive` |
 | `single_line` | — | a one-line input. Enter, Tab and Escape go to the parent, and pasted line breaks become spaces. |
 
 Model-level settings live in `ModelOptions` (Monaco `ITextModelUpdateOptions`), set with `model.update_options(…)`:

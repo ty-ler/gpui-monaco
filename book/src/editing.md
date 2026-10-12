@@ -11,9 +11,10 @@ Every feature here works out of the box. Each follows Monaco's behavior, which t
 - **Multiple cursors:**
   - Alt+Click adds a cursor.
   - Cmd+Alt+Up/Down adds a cursor on the line above or below (Shift+Alt+Up/Down on Linux).
-  - Cmd+D adds the next match to the selection, Cmd+K Cmd+D moves the last selection to the next match, and Cmd+Shift+L selects all occurrences.
+  - Cmd+D adds the next match to the selection, Cmd+K Cmd+D moves the last selection to the next match, and Cmd+Shift+L selects all occurrences. Selected text matches with the find state's match case and whole word, both off unless set in the find widget (`selected_text_match_mode`); starting from an empty cursor matches whole words, case-sensitively.
+  - Adding cursors and column selection are undo stops: undo after typing with the new cursors removes only that typing.
   - Escape returns to one cursor.
-- **Column (box) selection:** Shift+Alt+drag or Shift+Alt+click (Shift+Cmd/Ctrl, or an Alt drag, with `multi_cursor_modifier: CtrlCmd`), a middle-button drag, or any drag with `column_selection`.
+- **Column (box) selection:** Shift+Alt+drag or Shift+Alt+click (Shift+Cmd/Ctrl, or an Alt drag, with `multi_cursor_modifier: CtrlCmd`), a middle-button drag, or any drag with `column_selection`. It goes by lines as shown: a fold counts as one line, and each segment of a wrapped line gets a cursor.
 - **Mouse:**
   - Double-click selects a word, triple-click a line and quadruple-click everything. Clicks count only at the same position within 400ms.
   - Dragging extends the selection by character, word or line, depending on the click count. Shift+click, Shift+double-click and Shift+triple-click extend the selection the same way.

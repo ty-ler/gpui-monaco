@@ -167,8 +167,8 @@ pub enum OccurrencesHighlight {
 /// always starts a whole-word, case-sensitive search.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SelectedTextMatchMode {
-    /// The find widget's match case and whole word settings while it's
-    /// open; case-sensitive otherwise (the default).
+    /// The find state's match case and whole word, whether or not the
+    /// widget is open (the default). Both are off until set.
     #[default]
     FindOptions,
     /// Case-sensitive substrings, whatever the find widget says.

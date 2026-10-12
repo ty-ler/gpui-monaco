@@ -126,7 +126,7 @@ fn word_deletion_finds_japanese_words(cx: &mut TestAppContext) {
             .update(cx, |m, cx| m.set_value("これはテストです", cx))
     });
     set_cursor(&editor, cx, 4);
-    cx.dispatch_action(DeleteInsideWord);
+    cx.dispatch_action(DeleteInsideWord::default());
     assert_eq!(text(&editor, cx), "これはです");
 }
 

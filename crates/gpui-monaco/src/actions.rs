@@ -154,10 +154,6 @@ actions!(
         /// Extends each selection to whole lines, then one more line per repeat (Monaco
         /// `expandLineSelection`).
         ExpandLineSelection,
-        /// Adds a cursor on the line above (Monaco `editor.action.insertCursorAbove`).
-        AddCursorAbove,
-        /// Adds a cursor on the line below (Monaco `editor.action.insertCursorBelow`).
-        AddCursorBelow,
         /// Moves to the previous word start (Monaco `cursorWordStartLeft`).
         CursorWordStartLeft,
         /// Selects to the previous word start (Monaco `cursorWordStartLeftSelect`).
@@ -188,9 +184,6 @@ actions!(
         /// Deletes to the next camelCase / `snake_case` part (Monaco
         /// `deleteWordPartRight`, Ctrl+Alt+Delete on macOS).
         DeleteWordPartRight,
-        /// Deletes the word under each cursor and the whitespace next to it
-        /// (Monaco `deleteInsideWord`).
-        DeleteInsideWord,
         /// Inserts a line break after each cursor without moving it (Monaco
         /// `lineBreakInsert`, Ctrl+O on macOS).
         LineBreakInsert,
@@ -1480,12 +1473,43 @@ command_action! {
         /// The same position in view coordinates (view line and column,
         /// from 1). With it the selection goes by view lines, as Monaco's
         /// does: a wrapped line's segments are lines of their own and a
-        /// fold is one line. Without it, by model lines.
+        /// fold is one line. Without it, from where `position` shows.
         pub view_position: Option<CommandPosition>,
         /// The 1-based visible column under the mouse.
         pub mouse_column: Option<u32>,
         /// Extends the current column selection instead of starting one.
         pub do_column_select: bool,
+    }
+}
+
+command_action! {
+    /// Adds a cursor on the line above each cursor (Monaco
+    /// `editor.action.insertCursorAbove`, `InsertCursorArgs`). Does nothing
+    /// in a read-only editor.
+    pub struct AddCursorAbove {
+        /// `Some(false)` goes by view lines (a wrapped line's segments and a
+        /// fold are lines); by model lines otherwise (the default).
+        pub logical_line: Option<bool>,
+    }
+}
+
+command_action! {
+    /// Adds a cursor on the line below each cursor (Monaco
+    /// `editor.action.insertCursorBelow`, `InsertCursorArgs`). Does nothing
+    /// in a read-only editor.
+    pub struct AddCursorBelow {
+        /// `Some(false)` goes by view lines (a wrapped line's segments and a
+        /// fold are lines); by model lines otherwise (the default).
+        pub logical_line: Option<bool>,
+    }
+}
+
+command_action! {
+    /// Deletes the word under each cursor and the whitespace next to it
+    /// (Monaco `deleteInsideWord`).
+    pub struct DeleteInsideWord {
+        /// Deletes only the word, leaving the whitespace around it.
+        pub only_word: bool,
     }
 }
 
@@ -1978,8 +2002,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("cmd-end", CursorBottom, ctx),
             KeyBinding::new("shift-alt-up", CopyLinesUp, ctx),
             KeyBinding::new("shift-alt-down", CopyLinesDown, ctx),
-            KeyBinding::new("cmd-alt-up", AddCursorAbove, ctx),
-            KeyBinding::new("cmd-alt-down", AddCursorBelow, ctx),
+            KeyBinding::new("cmd-alt-up", AddCursorAbove::default(), ctx),
+            KeyBinding::new("cmd-alt-down", AddCursorBelow::default(), ctx),
             KeyBinding::new("alt-backspace", DeleteWordLeft, ctx),
             KeyBinding::new("alt-delete", DeleteWordRight, ctx),
             KeyBinding::new("cmd-backspace", DeleteAllLeft, ctx),
@@ -2131,21 +2155,21 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         }
         if cfg!(target_os = "linux") {
             bindings.extend([
-                KeyBinding::new("ctrl-shift-up", AddCursorAbove, ctx),
-                KeyBinding::new("ctrl-shift-down", AddCursorBelow, ctx),
+                KeyBinding::new("ctrl-shift-up", AddCursorAbove::default(), ctx),
+                KeyBinding::new("ctrl-shift-down", AddCursorBelow::default(), ctx),
             ]);
         }
         if cfg!(target_os = "windows") {
             bindings.extend([
-                KeyBinding::new("ctrl-alt-up", AddCursorAbove, ctx),
-                KeyBinding::new("ctrl-alt-down", AddCursorBelow, ctx),
+                KeyBinding::new("ctrl-alt-up", AddCursorAbove::default(), ctx),
+                KeyBinding::new("ctrl-alt-down", AddCursorBelow::default(), ctx),
                 KeyBinding::new("shift-alt-up", CopyLinesUp, ctx),
                 KeyBinding::new("shift-alt-down", CopyLinesDown, ctx),
             ]);
         } else {
             bindings.extend([
-                KeyBinding::new("shift-alt-up", AddCursorAbove, ctx),
-                KeyBinding::new("shift-alt-down", AddCursorBelow, ctx),
+                KeyBinding::new("shift-alt-up", AddCursorAbove::default(), ctx),
+                KeyBinding::new("shift-alt-down", AddCursorBelow::default(), ctx),
                 KeyBinding::new("ctrl-shift-alt-up", CopyLinesUp, ctx),
                 KeyBinding::new("ctrl-shift-alt-down", CopyLinesDown, ctx),
             ]);

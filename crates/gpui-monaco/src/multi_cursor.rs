@@ -32,6 +32,9 @@ pub(crate) struct MultiCursorSession {
     /// Monaco `isDisconnectedFromFindController`: started from a word, so
     /// it overrides the find toggles while it lasts.
     from_word: bool,
+    /// Monaco `usesFindOptions`: changing the find widget's match case or
+    /// whole word ends the session.
+    uses_find_options: bool,
     /// Set while the session changes the selections itself (Monaco
     /// `_ignoreSelectionChange`).
     applying: bool,
@@ -69,28 +72,33 @@ impl CodeEditor {
             .unwrap_or(*selection)
     }
 
-    /// Match options for a session: whole-word and case-sensitive when
-    /// started from a word, else per `selected_text_match_mode`.
-    fn session_options(&self, from_word: bool) -> (bool, bool) {
+    /// Match options for a session (whole word, match case, uses find
+    /// options): whole-word and case-sensitive when started from a word,
+    /// else per `selected_text_match_mode`.
+    fn session_options(&self, from_word: bool) -> (bool, bool, bool) {
         if from_word {
-            (true, true)
+            (true, true, true)
         } else {
-            self.selected_text_match_options()
+            let (whole_word, match_case) = self.selected_text_match_options();
+            (whole_word, match_case, self.uses_find_options())
         }
     }
 
+    fn uses_find_options(&self) -> bool {
+        self.options.selected_text_match_mode == crate::options::SelectedTextMatchMode::FindOptions
+    }
+
     /// (whole word, match case) for selected text (Monaco
-    /// `getSelectionSearchOptions`): the find widget's options while it's
-    /// open with `FindOptions`, else substrings matched as the mode says.
+    /// `getSelectionSearchOptions`): with `FindOptions`, the find state's
+    /// toggles, open or closed (both off until set); else substrings matched
+    /// as the mode says.
     pub(crate) fn selected_text_match_options(&self) -> (bool, bool) {
         use crate::options::SelectedTextMatchMode;
         match self.options.selected_text_match_mode {
-            SelectedTextMatchMode::FindOptions if self.find.visible => {
+            SelectedTextMatchMode::FindOptions => {
                 (self.find.options.whole_word, self.find.options.match_case)
             }
-            SelectedTextMatchMode::FindOptions | SelectedTextMatchMode::CaseSensitive => {
-                (false, true)
-            }
+            SelectedTextMatchMode::CaseSensitive => (false, true),
             SelectedTextMatchMode::CaseInsensitive => (false, false),
         }
     }
@@ -118,10 +126,27 @@ impl CodeEditor {
         if session.applying || session.selections == self.cursors.selections() {
             return;
         }
-        let from_word = session.from_word;
-        self.multi_cursor = None;
-        if from_word {
+        self.end_multi_cursor_session(cx);
+    }
+
+    /// Monaco `_endSession`: no session, and the find toggles a session
+    /// started from a word overrode get their own values back.
+    pub(crate) fn end_multi_cursor_session(&mut self, cx: &mut Context<Self>) {
+        if self.multi_cursor.take().is_some_and(|s| s.from_word) {
             self.clear_find_overrides(cx);
+        }
+    }
+
+    /// Monaco's session listener on `onFindReplaceStateChange`: the find
+    /// widget's match case or whole word changed, which ends a session
+    /// that uses them.
+    pub(crate) fn multi_cursor_find_toggles_changed(&mut self, cx: &mut Context<Self>) {
+        if self
+            .multi_cursor
+            .as_ref()
+            .is_some_and(|s| s.uses_find_options && !s.applying)
+        {
+            self.end_multi_cursor_session(cx);
         }
     }
 
@@ -142,12 +167,13 @@ impl CodeEditor {
                 search_text: find.query.clone(),
                 whole_word: find.whole_word,
                 match_case: find.match_case,
+                uses_find_options: true,
                 ..Default::default()
             });
         }
         let selections = self.cursors.selections();
         let from_word = selections.len() == 1 && selections[0].is_empty();
-        let (whole_word, match_case) = self.session_options(from_word);
+        let (whole_word, match_case, uses_find_options) = self.session_options(from_word);
         let primary = self.word_selection(&self.cursors.primary().selection(), cx);
         if primary.is_empty() {
             return None;
@@ -157,6 +183,7 @@ impl CodeEditor {
             whole_word,
             match_case,
             from_word,
+            uses_find_options,
             ..Default::default()
         })
     }
@@ -204,7 +231,10 @@ impl CodeEditor {
         }
     }
 
-    /// Expands empty selections to their words, starting a session.
+    /// Expands empty selections to their words. A single cursor starts a
+    /// whole-word, case-sensitive session; with several selections Monaco
+    /// only expands them (`addSelectionToNextFindMatch` when the
+    /// selections don't share their text, which an empty one never does).
     /// Returns whether any changed.
     fn expand_empty_selections(&mut self, from_find_widget: bool, cx: &mut Context<Self>) -> bool {
         if self.is_find_widget_search(from_find_widget) {
@@ -218,21 +248,21 @@ impl CodeEditor {
             .iter()
             .map(|s| self.word_selection(s, cx))
             .collect();
-        let from_word = selections.len() == 1 || selections.iter().all(|s| s.is_empty());
-        let (whole_word, match_case) = self.session_options(from_word);
         let primary = self.word_selection(&self.cursors.primary().selection(), cx);
         let search_text = self.selection_text(&primary);
-        if search_text.is_empty() {
-            self.multi_cursor = None;
+        if selections.len() > 1 || search_text.is_empty() {
+            self.end_multi_cursor_session(cx);
             self.set_selections(&expanded, cx);
             return true;
         }
+        let (whole_word, match_case, uses_find_options) = self.session_options(true);
         self.start_multi_cursor_session(
             MultiCursorSession {
                 search_text,
                 whole_word,
                 match_case,
-                from_word,
+                from_word: true,
+                uses_find_options,
                 ..Default::default()
             },
             cx,
@@ -463,9 +493,7 @@ impl CodeEditor {
                     return;
                 };
                 // No session: these selections end any running one.
-                if self.multi_cursor.take().is_some_and(|s| s.from_word) {
-                    self.clear_find_overrides(cx);
-                }
+                self.end_multi_cursor_session(cx);
                 self.occurrences_in_scope(&data)
             } else {
                 let Some(session) = self.begin_session(from_find_widget, cx) else {
@@ -528,8 +556,13 @@ impl CodeEditor {
     }
 
     /// Makes the next (or previous) cursor primary (Monaco
-    /// `editor.action.focusNextCursor` / `focusPreviousCursor`).
+    /// `editor.action.focusNextCursor` / `focusPreviousCursor`), after an
+    /// undo stop. Does nothing in a read-only editor.
     pub fn focus_next_cursor(&mut self, next: bool, cx: &mut Context<Self>) {
+        if self.options.read_only {
+            return;
+        }
+        self.push_undo_stop(cx);
         let before = self.cursors.selections();
         self.focus_next_cursor_inner(next, cx);
         self.announce_cursor_change(&before, cx);

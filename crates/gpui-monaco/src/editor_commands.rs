@@ -50,9 +50,6 @@ pub(crate) struct EditorCommandsState {
     /// Focus the hover once it shows (`editor.action.showHover` with
     /// `autoFocusImmediately`).
     pub(crate) focus_hover_when_shown: bool,
-    /// The last `columnSelect` with a `viewPosition`, in view lines (Monaco
-    /// `IColumnSelectData`), and the cursors it left.
-    column_select_view: Option<(cursor::ColumnSelectData, Vec<SingleCursorState>)>,
 }
 
 impl Default for EditorCommandsState {
@@ -67,7 +64,6 @@ impl Default for EditorCommandsState {
             action_bindings: HashMap::new(),
             pending_dispose: Vec::new(),
             focus_hover_when_shown: false,
-            column_select_view: None,
         }
     }
 }
@@ -999,81 +995,28 @@ impl CodeEditor {
         self.set_cursor_states_with_views(states, reveal_type != Some(2), cx);
     }
 
-    /// Monaco `columnSelect` (Shift+Alt+drag): with a `viewPosition`, on
-    /// view lines as Monaco does (a wrapped line's segments are lines, a
-    /// fold is one); without one, on model lines.
+    /// Monaco `columnSelect` (Shift+Alt+drag), on view lines as Monaco
+    /// does (a wrapped line's segments are lines, a fold is one): from the
+    /// `viewPosition`, or where `position` shows without one.
     fn column_select_command(&mut self, args: &ColumnSelect, cx: &mut Context<Self>) {
         let (Some(position), Some(column)) = (args.position, args.mouse_column) else {
             return;
         };
         let config = self.cursor_config(cx);
-        let rope = self.snapshot.rope().clone();
         let mouse_column = column.saturating_sub(1);
-        self.model()
-            .update(cx, |model, _| model.push_stack_element());
-        if args.view_position.is_none() {
+        let p = cursor::validate_position(self.snapshot.rope(), position.to_point());
+        let view = self.command_view_position(args.view_position, p);
+        self.push_undo_stop(cx);
+        self.on_view_lines(|model, cursors| {
             cursor::column_select_to(
                 &config,
-                &rope,
-                &mut self.cursors,
-                position.to_point(),
-                mouse_column,
-                args.do_column_select,
-            );
-        } else {
-            let p = cursor::validate_position(&rope, position.to_point());
-            let view = self.command_view_position(args.view_position, p);
-            let lines = self.view_lines.clone();
-            let to_view_row = |row: u32| lines.to_view(PointUtf16::new(row, 0), false).0;
-            let to_model_row = |line: u32| lines.to_model(line, 0).row;
-            // The column selection so far, in view lines: the last one
-            // this command made, or a keyboard one's.
-            let data = self
-                .commands
-                .column_select_view
-                .as_ref()
-                .filter(|(_, states)| states.as_slice() == self.cursors.all())
-                .map(|(data, _)| *data)
-                .or_else(|| {
-                    self.cursors
-                        .column_select_data()
-                        .map(|data| cursor::ColumnSelectData {
-                            from_row: to_view_row(data.from_row),
-                            to_row: to_view_row(data.to_row),
-                            ..data
-                        })
-                });
-            let mut view_cursors = self.cursors.clone();
-            view_cursors.set_states(self.cursor_view_states());
-            view_cursors.set_column_select_data(data);
-            cursor::column_select_to(
-                &config,
-                &ViewCursorModel(&lines),
-                &mut view_cursors,
+                model,
+                cursors,
                 view,
                 mouse_column,
                 args.do_column_select,
-            );
-            let data = view_cursors.column_select_data();
-            let views = view_cursors.all().to_vec();
-            self.cursors.set_states(
-                views
-                    .iter()
-                    .map(|state| map_state(state, |q| lines.to_model(q.row, q.column)))
-                    .collect(),
-            );
-            self.cursors.validate(&rope);
-            self.set_cursor_view_states(views.into_iter().map(Some).collect());
-            // The keyboard's column selection goes on from it, on model
-            // rows.
-            self.cursors
-                .set_column_select_data(data.map(|data| cursor::ColumnSelectData {
-                    from_row: to_model_row(data.from_row),
-                    to_row: to_model_row(data.to_row),
-                    ..data
-                }));
-            self.commands.column_select_view = data.map(|data| (data, self.cursors.all().to_vec()));
-        }
+            )
+        });
         self.next_selection_change.reason = CursorChangeReason::Explicit;
         self.cursors_changed(false, cx);
         self.reveal_column_select(false, cx);

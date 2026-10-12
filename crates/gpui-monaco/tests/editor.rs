@@ -569,7 +569,7 @@ fn word_start_end_and_delete_commands(cx: &mut TestAppContext) {
     editor.update(cx, |e, cx| {
         e.set_selections(&[Selection::collapsed(p(1, 3))], cx)
     });
-    cx.dispatch_action(DeleteInsideWord);
+    cx.dispatch_action(DeleteInsideWord::default());
     assert_eq!(text(&editor, cx), "baz qux");
     editor.update(cx, |e, cx| {
         e.set_selections(&[Selection::collapsed(p(1, 4))], cx)

@@ -11,7 +11,7 @@ use gpui::{
 use gpui_monaco::cursor::Selection;
 use gpui_monaco::providers::*;
 use gpui_monaco::text::PointUtf16;
-use gpui_monaco::{CodeEditor, TextModel};
+use gpui_monaco::{CodeEditor, FindOptions, TextModel};
 
 fn setup<'a>(
     text: &str,
@@ -414,11 +414,142 @@ fn selection_highlights_follow_a_cmd_d_session(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("secondary-d");
     cx.run_until_parked();
     assert_eq!(selected_text_matches(&editor, cx), vec![(1, 10, 1, 13)]);
-    // Selecting the same text by hand matches substrings again.
+    // Selecting the same text by hand matches substrings again, with the
+    // find state's match case (off).
     set(&editor, cx, p(1, 4), p(1, 1));
     cx.run_until_parked();
     assert_eq!(
         selected_text_matches(&editor, cx),
-        vec![(1, 6, 1, 9), (1, 10, 1, 13)]
+        vec![(1, 6, 1, 9), (1, 10, 1, 13), (1, 14, 1, 17)]
     );
+}
+
+/// Monaco's "Selected text occurrence matching highlights" text.
+const HIGHLIGHTED: &str = "foo\nFOO\nfooBar\nFOOBar";
+
+fn match_mode(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+    mode: gpui_monaco::options::SelectedTextMatchMode,
+) {
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.selected_text_match_mode = mode;
+        e.update_options(options, cx);
+    });
+    cx.run_until_parked();
+}
+
+/// Opens find with `options`, the focus back in the text.
+fn find_open(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, options: FindOptions) {
+    cx.simulate_keystrokes("secondary-f");
+    editor.update(cx, |e, cx| e.change_find_options(options, false, cx));
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    cx.run_until_parked();
+}
+
+/// The lines whose `foo` (columns 1-4) are highlighted.
+fn highlighted_lines(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<u32> {
+    selected_text_matches(editor, cx)
+        .into_iter()
+        .map(|(line, start, end_line, end)| {
+            assert_eq!((start, end_line, end), (1, line, 4));
+            line
+        })
+        .collect()
+}
+
+/// Monaco: "selection highlighting uses match case false/true, editor
+/// focused true": with `caseSensitive` or `caseInsensitive`, the find
+/// widget's toggles don't matter.
+#[gpui::test]
+fn selection_highlights_match_by_the_mode(cx: &mut TestAppContext) {
+    use gpui_monaco::options::SelectedTextMatchMode::{CaseInsensitive, CaseSensitive};
+    for (mode, expected) in [(CaseInsensitive, vec![2, 3, 4]), (CaseSensitive, vec![3])] {
+        let (editor, vcx) = setup(HIGHLIGHTED, cx);
+        match_mode(&editor, vcx, mode);
+        find_open(
+            &editor,
+            vcx,
+            FindOptions {
+                query: "f.*".into(),
+                match_case: mode != CaseSensitive,
+                whole_word: true,
+                is_regex: true,
+                ..Default::default()
+            },
+        );
+        set(&editor, vcx, p(1, 1), p(1, 4));
+        vcx.run_until_parked();
+        assert_eq!(highlighted_lines(&editor, vcx), expected, "{mode:?}");
+    }
+}
+
+/// Monaco: "only suppress duplicate Find highlights with the same matching
+/// rules": the find widget showing the same search hides the highlights,
+/// until its match case differs.
+#[gpui::test]
+fn selection_highlights_hide_only_the_find_widgets_own_matches(cx: &mut TestAppContext) {
+    use gpui_monaco::options::SelectedTextMatchMode::{CaseInsensitive, CaseSensitive};
+    for (mode, expected) in [(CaseInsensitive, vec![2, 3, 4]), (CaseSensitive, vec![3])] {
+        let (editor, vcx) = setup(HIGHLIGHTED, cx);
+        match_mode(&editor, vcx, mode);
+        set(&editor, vcx, p(1, 1), p(1, 4));
+        let match_case = mode == CaseSensitive;
+        find_open(
+            &editor,
+            vcx,
+            FindOptions {
+                query: "foo".into(),
+                match_case,
+                ..Default::default()
+            },
+        );
+        let same_options = highlighted_lines(&editor, vcx);
+        editor.update(vcx, |e, cx| {
+            let mut options = e.find_options().clone();
+            options.match_case = !match_case;
+            e.change_find_options(options, false, cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            (same_options, highlighted_lines(&editor, vcx)),
+            (vec![], expected),
+            "{mode:?}"
+        );
+    }
+}
+
+/// Monaco: "selection highlighting refreshes on case-only configuration
+/// changes without cursor movement". By default the find state's match
+/// case (off, with find closed) applies.
+#[gpui::test]
+fn selection_highlights_refresh_when_the_match_mode_changes(cx: &mut TestAppContext) {
+    use gpui_monaco::options::SelectedTextMatchMode::{CaseInsensitive, CaseSensitive};
+    let (editor, cx) = setup(HIGHLIGHTED, cx);
+    set(&editor, cx, p(1, 1), p(1, 4));
+    cx.run_until_parked();
+    let mut actual = vec![highlighted_lines(&editor, cx)];
+    match_mode(&editor, cx, CaseSensitive);
+    actual.push(highlighted_lines(&editor, cx));
+    match_mode(&editor, cx, CaseInsensitive);
+    actual.push(highlighted_lines(&editor, cx));
+    assert_eq!(actual, vec![vec![2, 3, 4], vec![3], vec![2, 3, 4]]);
+}
+
+/// With the default `findOptions`, the highlights follow the find state's
+/// match case even with find closed, and refresh when it changes.
+#[gpui::test]
+fn selection_highlights_follow_the_closed_find_states_match_case(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(HIGHLIGHTED, cx);
+    set(&editor, cx, p(1, 1), p(1, 4));
+    cx.run_until_parked();
+    assert_eq!(highlighted_lines(&editor, cx), vec![2, 3, 4]);
+    editor.update(cx, |e, cx| {
+        let mut options = e.find_options().clone();
+        options.match_case = true;
+        e.change_find_options(options, false, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(highlighted_lines(&editor, cx), vec![3]);
 }

@@ -578,6 +578,12 @@ impl CodeEditor {
         self.update_selection_highlights(Duration::ZERO, cx);
     }
 
+    /// Recomputes the selection highlights now (Monaco
+    /// `SelectionHighlighter._update`), after a find state or option change.
+    pub(crate) fn refresh_selection_highlights(&mut self, cx: &mut Context<Self>) {
+        self.update_selection_highlights(Duration::ZERO, cx);
+    }
+
     /// After an edit: word highlights stop, selection highlights refresh
     /// shortly (Monaco's `onDidChangeModelContent` handlers).
     pub(crate) fn occurrences_after_edit(&mut self, cx: &mut Context<Self>) {

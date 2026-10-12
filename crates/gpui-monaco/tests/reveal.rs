@@ -226,7 +226,7 @@ fn add_cursor_above_and_below_reveal_the_new_cursor(cx: &mut TestAppContext) {
     // view follows the newest.
     let count = page + 10;
     for _ in 0..count {
-        cx.dispatch_action(AddCursorBelow);
+        cx.dispatch_action(AddCursorBelow::default());
     }
     draw(cx);
     assert_eq!(rows(&editor, cx).len(), count as usize + 1);
@@ -237,7 +237,7 @@ fn add_cursor_above_and_below_reveal_the_new_cursor(cx: &mut TestAppContext) {
     select(&editor, cx, &[Selection::collapsed(p(300, 0))]);
     set_scroll_top(&editor, cx, lh * 300.);
     for _ in 0..3 {
-        cx.dispatch_action(AddCursorAbove);
+        cx.dispatch_action(AddCursorAbove::default());
     }
     draw(cx);
     assert!(fully_visible(&editor, cx, 297));

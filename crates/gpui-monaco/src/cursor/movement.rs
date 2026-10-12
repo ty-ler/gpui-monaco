@@ -640,7 +640,8 @@ pub fn add_cursor_below(
     add_cursors(config, model, cursors, 1);
 }
 
-fn add_cursors(
+/// Adds a cursor `delta` lines (-1 or 1) from each cursor.
+pub(crate) fn add_cursors(
     config: &CursorConfig,
     model: &dyn CursorModel,
     cursors: &mut CursorCollection,
