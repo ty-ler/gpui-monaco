@@ -209,7 +209,7 @@ A rule's `when` is a GPUI key context predicate; without one it applies in the e
 
 A command whose precondition fails does nothing, as in Monaco.
 
-It falls back to GPUI action names (`"code_editor::CursorDown"`). `DiffEditor::trigger` also takes the diff editor's ids (`"diffEditor.revert"`, `"diffEditor.switchSide"`, `"diffEditor.toggleCollapseUnchangedRegions"`, `"editor.action.accessibleDiffViewer.next"`, …) and passes any others to the modified editor.
+It falls back to GPUI action names (`"code_editor::CursorDown"`). `DiffEditor::trigger` also takes the diff editor's ids (`"diffEditor.revert"`, `"diffEditor.switchSide"`, `"diffEditor.toggleCollapseUnchangedRegions"`, `"editor.action.accessibleDiffViewer.next"` or its old alias `"editor.action.diffReview.next"`, …) and passes any others to the modified editor.
 
 `trigger_with_payload(id, payload, window, cx)` passes Monaco's payload, as JSON, to commands that take arguments:
 

@@ -2836,3 +2836,288 @@ fn gutter_scroll_decoration_follows_the_modified_scroll_top(cx: &mut TestAppCont
     paint(cx);
     assert!(!diff.read_with(cx, |d, cx| d.gutter_scroll_decoration_for_tests(cx)));
 }
+
+// ----- Diff editor polish (#424) --------------------------------------------
+
+fn line_height(diff: &Entity<DiffEditor>, cx: &mut VisualTestContext) -> gpui::Pixels {
+    diff.read_with(cx, |d, cx| {
+        d.modified_editor()
+            .read(cx)
+            .options()
+            .resolved_line_height()
+    })
+}
+
+fn new_model(text: &str, cx: &mut VisualTestContext) -> Entity<TextModel> {
+    let text = text.to_string();
+    cx.update(|_, cx| cx.new(|_| TextModel::new(&text)))
+}
+
+/// Monaco `EditorGutter.render`: an item spans the view zones above its
+/// first line and below its last, here the inline view's deleted lines
+/// above and the side by side view's padding below.
+#[gpui::test]
+fn gutter_items_span_the_zones_next_to_a_change(cx: &mut TestAppContext) {
+    let original = "1\n2\n3\n4\n5\n6\nsame\nsame2";
+    let (diff, cx) = setup(original, "x\nsame\nsame2", cx);
+    let lh = line_height(&diff, cx);
+    // Side by side: the one modified line and five lines of padding.
+    let spans = diff.read_with(cx, |d, cx| d.gutter_spans_for_tests(cx));
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].1 - spans[0].0, lh * 6.);
+    // Inline: the six deleted lines above and the modified line.
+    update_options(&diff, cx, |o| o.render_side_by_side = false);
+    let spans = diff.read_with(cx, |d, cx| d.gutter_spans_for_tests(cx));
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0], (px(0.), lh * 7.));
+}
+
+/// Monaco `computeLineStart`: a moved block's line starts halfway from the
+/// top of its "Code moved" caption to the bottom of its last line.
+#[gpui::test]
+fn moved_block_lines_start_at_the_caption(cx: &mut TestAppContext) {
+    let filler: String = (0..10).map(|i| format!("let x{i} = {i};\n")).collect();
+    let block: String = (0..3)
+        .map(|i| format!("fn moved_{i}() {{ body_{i}(); }}\n"))
+        .collect();
+    let (diff, cx) = setup(&format!("{block}{filler}"), &format!("{filler}{block}"), cx);
+    update_options(&diff, cx, |o| o.show_moves = true);
+    let lh = line_height(&diff, cx);
+    let (original, modified) = editors(&diff, cx);
+    let ys = diff.read_with(cx, |d, cx| d.move_line_ys_for_tests(cx));
+    assert_eq!(ys.len(), 1);
+    let span = |editor: &Entity<gpui_monaco::CodeEditor>, row: u32, cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, _| {
+            let scroll_top = e.scroll_position().y;
+            let top = e.top_for_line_number(row, true).unwrap() - scroll_top;
+            let bottom = e.top_for_line_number(row, false).unwrap() + lh - scroll_top;
+            (top, bottom)
+        })
+    };
+    // The caption is above the line on both sides.
+    let (top, _) = span(&original, 0, cx);
+    let (_, bottom) = span(&original, 2, cx);
+    assert!(bottom - top > lh * 3., "{top:?} {bottom:?}");
+    assert_eq!(ys[0].0, (top + bottom) / 2.);
+    let (top, _) = span(&modified, 10, cx);
+    let (_, bottom) = span(&modified, 12, cx);
+    assert!(bottom - top > lh * 3., "{top:?} {bottom:?}");
+    assert_eq!(ys[0].1, (top + bottom) / 2.);
+}
+
+/// Monaco `RevertButton.getPosition`: the right lane at z-index 10001, so a
+/// host's glyph on the changed line doesn't hide the arrow.
+#[gpui::test]
+fn revert_arrows_take_the_right_lane_over_host_glyphs(cx: &mut TestAppContext) {
+    use gpui_monaco::decorations::{GlyphMarginLane, GlyphMarginOptions};
+    let (diff, cx) = setup("a\nb\nc\nd\ne", "a\nB\nc\nd\ne", cx);
+    with_glyph_margin(&diff, cx);
+    update_options(&diff, cx, |o| o.render_gutter_menu = false);
+    let (_, modified) = editors(&diff, cx);
+    let id = modified.entity_id();
+    let model = modified.read_with(cx, |e, _| e.model().clone());
+    model.update(cx, |m, cx| {
+        m.delta_decorations(
+            Some(id),
+            &[],
+            vec![(
+                2..2,
+                gpui_monaco::DecorationOptions {
+                    glyph: Some(("●".into(), gpui::red())),
+                    glyph_margin: Some(GlyphMarginOptions {
+                        position: GlyphMarginLane::Center,
+                        persist_lane: false,
+                    }),
+                    z_index: 100,
+                    ..Default::default()
+                },
+            )],
+            cx,
+        );
+    });
+    paint(cx);
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.revert_arrow_bounds_for_tests(cx))
+            .len(),
+        1
+    );
+}
+
+/// Monaco `_adjustOptionsForRightHandSide`: the modified editor reveals
+/// with the overview ruler's width more padding and has no scrollbar
+/// arrows, whatever the host sets.
+#[gpui::test]
+fn the_modified_editor_overrides_reveal_padding_and_scrollbar_arrows(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a", "b", cx);
+    let (original, modified) = editors(&diff, cx);
+    let options = modified.read_with(cx, |e, _| e.options().clone());
+    assert_eq!(options.reveal_horizontal_right_padding, px(45.));
+    assert!(!options.scrollbar.vertical_has_arrows);
+    set_editor_options(&modified, cx, |o| {
+        o.reveal_horizontal_right_padding = px(5.);
+        o.scrollbar.vertical_has_arrows = true;
+    });
+    let options = modified.read_with(cx, |e, _| e.options().clone());
+    assert_eq!(options.reveal_horizontal_right_padding, px(45.));
+    assert!(!options.scrollbar.vertical_has_arrows);
+    // The original editor keeps the default.
+    let options = original.read_with(cx, |e, _| e.options().clone());
+    assert_eq!(options.reveal_horizontal_right_padding, px(15.));
+}
+
+/// Monaco `SashLayout`: `_sashRatio ?? splitViewDefaultRatio`, so a new
+/// default moves the sash only until it's dragged, and a reset follows it
+/// again.
+#[gpui::test]
+fn a_dragged_sash_survives_a_new_default_ratio(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a", "b", cx);
+    cx.simulate_resize(gpui::size(px(1030.), px(600.)));
+    paint(cx);
+    // Not dragged: follows the default.
+    update_options(&diff, cx, |o| o.split_view_default_ratio = 0.4);
+    assert_eq!(diff.read_with(cx, |d, _| d.sash_left_for_tests()), px(400.));
+    diff.update(cx, |d, cx| d.drag_sash_for_tests(px(400.), px(300.), cx));
+    assert_eq!(diff.read_with(cx, |d, _| d.sash_left_for_tests()), px(300.));
+    update_options(&diff, cx, |o| o.split_view_default_ratio = 0.6);
+    assert_eq!(diff.read_with(cx, |d, _| d.sash_left_for_tests()), px(300.));
+    diff.update(cx, |d, cx| d.reset_sash(cx));
+    assert_eq!(diff.read_with(cx, |d, _| d.sash_left_for_tests()), px(600.));
+}
+
+/// Monaco's legacy diff leaves `innerChanges` undefined for changes of 20+
+/// lines: no `charChanges` and no margin revert arrow.
+#[gpui::test]
+fn legacy_changes_without_inner_changes(cx: &mut TestAppContext) {
+    let original: String = (0..25).map(|i| format!("old {i}\n")).collect();
+    let modified: String = (0..25).map(|i| format!("new {i}\n")).collect();
+    let (diff, cx) = setup(&original, &modified, cx);
+    with_glyph_margin(&diff, cx);
+    update_options(&diff, cx, |o| {
+        o.diff_algorithm = gpui_monaco::DiffAlgorithm::Legacy;
+        o.render_gutter_menu = false;
+    });
+    let changes = diff.read_with(cx, |d, _| d.line_changes().unwrap());
+    assert_eq!(changes.len(), 1);
+    assert!(changes[0].char_changes.is_none());
+    assert!(
+        diff.read_with(cx, |d, cx| d.revert_arrow_bounds_for_tests(cx))
+            .is_empty()
+    );
+    // A small change has them.
+    let (original, modified) = (new_model("a\nb\nc", cx), new_model("a\nB\nc", cx));
+    diff.update(cx, |d, cx| d.set_models(original, modified, cx));
+    paint(cx);
+    let changes = diff.read_with(cx, |d, _| d.line_changes().unwrap());
+    assert_eq!(changes[0].char_changes.as_ref().map(Vec::len), Some(1));
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.revert_arrow_bounds_for_tests(cx))
+            .len(),
+        1
+    );
+}
+
+/// Monaco `WorkerBasedDocumentDiffProvider`: an empty original skips the
+/// algorithms, with one change and one inner change covering everything
+/// (so the legacy algorithm marks the inserted text too).
+#[gpui::test]
+fn an_empty_original_takes_the_fast_path(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("", "one\ntwo\nthree", cx);
+    update_options(&diff, cx, |o| {
+        o.diff_algorithm = gpui_monaco::DiffAlgorithm::Legacy
+    });
+    let lines_diff = diff.read_with(cx, |d, _| d.diff().cloned().unwrap());
+    assert_eq!(lines_diff.changes.len(), 1);
+    let change = &lines_diff.changes[0];
+    assert_eq!(
+        (change.original.to_string(), change.modified.to_string()),
+        ("[1,2)".to_string(), "[1,4)".to_string())
+    );
+    assert_eq!(change.inner_changes.len(), 1);
+    assert_eq!(
+        (
+            change.inner_changes[0].original_range.to_string(),
+            change.inner_changes[0].modified_range.to_string()
+        ),
+        ("[1,1 -> 1,1]".to_string(), "[1,1 -> 3,6]".to_string())
+    );
+    let changes = diff.read_with(cx, |d, _| d.line_changes().unwrap());
+    assert_eq!(changes[0].char_changes.as_ref().map(Vec::len), Some(1));
+    assert_eq!(diff.read_with(cx, |d, _| d.identical()), Some(false));
+    // Both empty: identical.
+    let (original, modified) = (new_model("", cx), new_model("", cx));
+    diff.update(cx, |d, cx| d.set_models(original, modified, cx));
+    paint(cx);
+    assert!(diff.read_with(cx, |d, _| d.diff().unwrap().changes.is_empty()));
+    assert_eq!(diff.read_with(cx, |d, _| d.identical()), Some(true));
+}
+
+/// Monaco registers `editor.action.diffReview.next`/`.prev` as aliases of
+/// the accessible diff viewer's commands.
+#[gpui::test]
+fn the_old_diff_review_ids_are_aliases(cx: &mut TestAppContext) {
+    let (original, modified) = two_change_texts();
+    let (diff, cx) = setup(&original, &modified, cx);
+    for id in [
+        "editor.action.diffReview.next",
+        "editor.action.diffReview.prev",
+    ] {
+        cx.update(|window, cx| diff.update(cx, |d, cx| d.trigger(id, window, cx)))
+            .unwrap();
+        paint(cx);
+        assert!(
+            diff.read_with(cx, |d, cx| d.accessible_viewer_state_for_tests(cx))
+                .is_some(),
+            "{id}"
+        );
+    }
+}
+
+/// Monaco `revealFirstDiff` returns at once without a model, and waits only
+/// on the view model it captured.
+#[gpui::test]
+fn a_pending_reveal_does_not_outlive_the_models(cx: &mut TestAppContext) {
+    let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let modified = original.replace("line 60\n", "changed\n");
+    let (diff, cx) = setup("a", "a", cx);
+    let (_, modified_editor) = editors(&diff, cx);
+    let head =
+        |cx: &mut VisualTestContext| modified_editor.read_with(cx, |e, _| e.selections()[0].head);
+    // Without a model, nothing waits.
+    diff.update(cx, |d, cx| {
+        d.set_model(None, cx);
+        d.reveal_first_diff(cx);
+    });
+    let (a, b) = (new_model(&original, cx), new_model(&modified, cx));
+    diff.update(cx, |d, cx| d.set_models(a, b, cx));
+    paint(cx);
+    assert_eq!(head(cx), PointUtf16::new(0, 0));
+    // Waiting for a diff of models that go.
+    let (a, b) = (new_model(&original, cx), new_model(&modified, cx));
+    let (c, d) = (new_model(&original, cx), new_model(&modified, cx));
+    diff.update(cx, |diff, cx| {
+        diff.set_models(a, b, cx);
+        diff.reveal_first_diff(cx);
+        diff.set_models(c, d, cx);
+    });
+    paint(cx);
+    assert_eq!(head(cx), PointUtf16::new(0, 0));
+    // Models over `max_file_size`: no diff to reveal.
+    let big = "x".repeat(1024 * 1024 + 1);
+    update_options(&diff, cx, |o| o.max_file_size = 1);
+    let (a, b) = (new_model(&big, cx), new_model(&modified, cx));
+    diff.update(cx, |d, cx| {
+        d.set_models(a, b, cx);
+        d.reveal_first_diff(cx);
+    });
+    paint(cx);
+    update_options(&diff, cx, |o| o.max_file_size = 0);
+    assert_eq!(head(cx), PointUtf16::new(0, 0));
+    // A reveal with the models it waits for still happens.
+    let (a, b) = (new_model(&original, cx), new_model(&modified, cx));
+    diff.update(cx, |d, cx| {
+        d.set_models(a, b, cx);
+        d.reveal_first_diff(cx);
+    });
+    paint(cx);
+    assert_eq!(head(cx), PointUtf16::new(60, 0));
+}

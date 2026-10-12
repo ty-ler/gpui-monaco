@@ -357,6 +357,54 @@ fn aria_label_with_tip(label: &str, verbose: bool) -> SharedString {
     }
 }
 
+/// Monaco `WorkerBasedDocumentDiffProvider.computeDiff`: the diff of the
+/// texts' `original` and `modified` lines with `algorithm`, and whether
+/// they're identical. An empty original takes a fast path before either
+/// algorithm runs: one change covering everything, with one inner change
+/// from the empty original to the whole modified text.
+pub(crate) fn compute_document_diff<S: AsRef<str>>(
+    original: &[S],
+    modified: &[S],
+    algorithm: DiffAlgorithm,
+    options: &DiffOptions,
+) -> (LinesDiff, bool) {
+    let is_empty =
+        |lines: &[S]| lines.len() <= 1 && lines.first().is_none_or(|l| l.as_ref().is_empty());
+    if is_empty(original) {
+        if is_empty(modified) {
+            return (LinesDiff::default(), true);
+        }
+        let line_count = modified.len();
+        let last_column = modified[line_count - 1].as_ref().encode_utf16().count() + 1;
+        let change = DetailedLineRangeMapping::new(
+            LineRange::new(1, 2),
+            LineRange::new(1, line_count + 1),
+            vec![RangeMapping::new(
+                crate::diff::Range::new(1, 1, 1, 1),
+                crate::diff::Range::new(1, 1, line_count, last_column),
+            )],
+        );
+        let diff = LinesDiff {
+            changes: vec![change],
+            moves: Vec::new(),
+            hit_timeout: false,
+        };
+        return (diff, false);
+    }
+    let diff = match algorithm {
+        DiffAlgorithm::Advanced => compute_diff(original, modified, options),
+        DiffAlgorithm::Legacy => compute_legacy_diff(original, modified, options),
+    };
+    // Monaco's worker: `identical` when there are no changes and the
+    // texts are equal.
+    let identical = diff.changes.is_empty()
+        && original
+            .iter()
+            .map(AsRef::as_ref)
+            .eq(modified.iter().map(AsRef::as_ref));
+    (diff, identical)
+}
+
 /// Monaco `allowsTrueInlineDiffRendering`: every inner change stays on one
 /// line on both sides (or inserts at the very start).
 fn allows_true_inline_diff_rendering(mapping: &DetailedLineRangeMapping) -> bool {
@@ -2297,7 +2345,9 @@ pub(crate) fn to_line_changes(diff: &LinesDiff) -> Vec<LineChange> {
     diff.changes
         .iter()
         .map(|m| {
-            let mut inner = Some(&m.inner_changes);
+            // Monaco's `charChanges: undefined` when the inner changes
+            // weren't computed (legacy changes of 20+ lines), here empty.
+            let mut inner = (!m.inner_changes.is_empty()).then_some(&m.inner_changes);
             let (original_start_line_number, original_end_line_number) = if m.original.is_empty() {
                 inner = None;
                 (m.original.start_line_number - 1, 0)
@@ -2473,8 +2523,14 @@ fn clamp_split_view_ratio(ratio: f32) -> f32 {
     }
 }
 
+/// The z-index of the diff editor's revert arrows and fold glyphs
+/// (Monaco's `zIndex: 10001`), over the host's glyph decorations.
+const DIFF_GLYPH_Z_INDEX: i32 = 10001;
 /// Monaco `OverviewRulerFeature.ENTIRE_DIFF_OVERVIEW_WIDTH`.
 const DIFF_OVERVIEW_WIDTH: f32 = 30.;
+/// The modified editor's `reveal_horizontal_right_padding` (Monaco's
+/// default, 15, plus `ENTIRE_DIFF_OVERVIEW_WIDTH`).
+const MODIFIED_REVEAL_HORIZONTAL_RIGHT_PADDING: f32 = 15. + DIFF_OVERVIEW_WIDTH;
 /// Monaco `ScrollbarState`'s minimum slider size.
 const MINIMUM_SLIDER_SIZE: f32 = 20.;
 
@@ -2560,8 +2616,9 @@ pub struct DiffEditor {
     move_caption_zones: (Vec<WidgetId>, Vec<WidgetId>),
     /// The inline view's deleted lines zones.
     deleted_code: Vec<WeakEntity<DeletedCode>>,
-    /// The original side's share of the width.
-    ratio: f32,
+    /// The original side's share of the width once the sash was dragged
+    /// (Monaco `_sashRatio`); `None` follows `split_view_default_ratio`.
+    ratio: Option<f32>,
     /// The diff editor's bounds, for dragging the sash.
     bounds: Rc<Cell<Bounds<Pixels>>>,
     /// Monaco `DiffEditorSash`: a drag's start x and sash left.
@@ -2680,7 +2737,7 @@ impl DiffEditor {
             original: original_editor,
             modified: modified_editor,
             id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            ratio: options.split_view_default_ratio,
+            ratio: None,
             options,
             diff: None,
             identical: false,
@@ -2864,9 +2921,6 @@ impl DiffEditor {
                 editor.update_options(editor_options, cx);
             });
         }
-        if options.split_view_default_ratio != self.options.split_view_default_ratio {
-            self.ratio = options.split_view_default_ratio;
-        }
         self.inline = !self.side_by_side_for(&options);
         let only_viewer = options.only_show_accessible_diff_viewer;
         let was_only_viewer = self.options.only_show_accessible_diff_viewer;
@@ -2905,6 +2959,9 @@ impl DiffEditor {
         }
         self.clear_diff(cx);
         self.simple_diff = None;
+        // Monaco's `revealFirstDiff` waits on the view model it captured,
+        // which goes with the models.
+        self.reveal_first_diff_pending = false;
         self.has_model = model.is_some();
         let DiffEditorModel { original, modified } = model.unwrap_or_else(|| DiffEditorModel {
             original: cx.new(|_| TextModel::new("")),
@@ -2971,7 +3028,8 @@ impl DiffEditor {
     /// the hidden original editor inline); no unicode highlighting in the
     /// hidden original editor; the original's glyph margin only side by
     /// side; `code_lens` from `diff_code_lens`; the aria labels, with the
-    /// `accessibility_verbose` tip.
+    /// `accessibility_verbose` tip; the modified editor's 45px
+    /// `reveal_horizontal_right_padding` and no vertical scrollbar arrows.
     fn apply_editor_options(&mut self, cx: &mut Context<Self>) {
         let code_lens = self.options.diff_code_lens;
         let verbose = self.options.accessibility_verbose;
@@ -3022,6 +3080,13 @@ impl DiffEditor {
                     } else if let Some(saved) = saved_unicode.take() {
                         *highlights = saved;
                     }
+                } else {
+                    // Monaco `_adjustOptionsForRightHandSide`: room for the
+                    // overview ruler right of a revealed position, and no
+                    // scrollbar arrows (the overview slider assumes none).
+                    options.reveal_horizontal_right_padding =
+                        px(MODIFIED_REVEAL_HORIZONTAL_RIGHT_PADDING);
+                    options.scrollbar.vertical_has_arrows = false;
                 }
                 if options != *current {
                     editor.update_options(options, cx);
@@ -3399,12 +3464,13 @@ impl DiffEditor {
                     index,
                     colors: colors.clone(),
                 });
-                ids.push(editor.update(cx, |editor, cx| {
-                    editor.add_glyph_margin_widget(
-                        crate::widgets::GlyphMarginWidget::new(line as u32 - 1, view),
-                        cx,
-                    )
-                }));
+                // Monaco's `unchangedLinesDecorationShow`: `zIndex: 10001`,
+                // over the host's glyphs.
+                let mut widget = crate::widgets::GlyphMarginWidget::new(line as u32 - 1, view);
+                widget.z_index = DIFF_GLYPH_Z_INDEX;
+                ids.push(
+                    editor.update(cx, |editor, cx| editor.add_glyph_margin_widget(widget, cx)),
+                );
             }
         }
         self.fold_glyphs = glyphs;
@@ -3580,7 +3646,7 @@ impl DiffEditor {
         let editor = self.modified.read(cx);
         self.gutter_items(cx)
             .iter()
-            .filter_map(|item| editor.rows_y_span(item.lines.to_rows()))
+            .filter_map(|item| editor.rows_y_span_with_zones(item.lines.to_rows()))
             .collect()
     }
 
@@ -3796,6 +3862,8 @@ impl DiffEditor {
             && (original.buffer().len() as u64 > max_bytes
                 || modified.buffer().len() as u64 > max_bytes)
         {
+            // Monaco's `waitForDiff` resolves with no diff to reveal.
+            self.reveal_first_diff_pending = false;
             if self.diff.is_some() || self.diff_task.is_some() {
                 self.clear_diff(cx);
                 cx.notify();
@@ -3819,17 +3887,12 @@ impl DiffEditor {
             let (diff, identical) = cx
                 .background_executor()
                 .spawn(async move {
-                    let diff = match algorithm {
-                        DiffAlgorithm::Advanced => {
-                            compute_diff(&original_lines, &modified_lines, &options)
-                        }
-                        DiffAlgorithm::Legacy => {
-                            compute_legacy_diff(&original_lines, &modified_lines, &options)
-                        }
-                    };
-                    // Monaco's worker: `identical` when there are no
-                    // changes and the texts are equal.
-                    let identical = diff.changes.is_empty() && original_lines == modified_lines;
+                    let (diff, identical) = compute_document_diff(
+                        &original_lines,
+                        &modified_lines,
+                        algorithm,
+                        &options,
+                    );
                     let diff = normalize_document_diff(diff, &original_lines, &modified_lines);
                     (diff, identical)
                 })
@@ -4501,7 +4564,7 @@ impl DiffEditor {
     /// left, at least 100px from either side.
     fn sash_left(&self) -> Pixels {
         compute_sash_left(
-            self.ratio,
+            self.ratio(),
             self.options.split_view_default_ratio,
             self.options.enable_split_view_resizing,
             self.sides_width(),
@@ -4551,7 +4614,7 @@ impl DiffEditor {
         let width = self.sides_width();
         if width > px(0.) {
             let left = start_left + (event.position.x - start_x);
-            self.ratio = left / width;
+            self.ratio = Some(left / width);
             cx.notify();
         }
     }
@@ -4559,8 +4622,15 @@ impl DiffEditor {
     /// Monaco `DiffEditorSash.onDidReset` (a double click): back to
     /// `split_view_default_ratio`.
     pub fn reset_sash(&mut self, cx: &mut Context<Self>) {
-        self.ratio = self.options.split_view_default_ratio;
+        self.ratio = None;
         cx.notify();
+    }
+
+    /// The original side's share of the width: the dragged ratio, else
+    /// `split_view_default_ratio` (Monaco `sashLeft`'s
+    /// `_sashRatio ?? splitViewDefaultRatio`).
+    fn ratio(&self) -> f32 {
+        self.ratio.unwrap_or(self.options.split_view_default_ratio)
     }
 
     /// The sash's x from the diff editor's left, for tests.
@@ -4603,19 +4673,26 @@ impl DiffEditor {
     /// from each moved block to where it went: from the original editor's
     /// vertical scrollbar into the modified editor's gutter, ending in an
     /// arrow on a background rectangle at the moved code.
-    fn render_move_lines(&self, cx: &App) -> Option<(Pixels, gpui::AnyElement)> {
-        let diff = self.diff.as_deref()?;
-        let moves = self.shown_moves(diff);
-        if moves.is_empty() {
-            return None;
-        }
+    /// Monaco `MovedBlocksLinesFeature`'s `from` and `to`: each shown
+    /// move's y in the original and modified editor, and whether it's
+    /// active.
+    fn move_line_ys(
+        &self,
+        moves: &[crate::diff::MovedText],
+        cx: &App,
+    ) -> Vec<(Pixels, Pixels, bool)> {
         let original = self.original.read(cx);
         let modified = self.modified.read(cx);
+        // Monaco `computeLineStart`: halfway from the top of the view zones
+        // above the first line (the "Code moved" caption) to the top of
+        // those above the line after the last.
         let middle = |editor: &CodeEditor, lines: LineRange| {
-            let (top, bottom) = editor.rows_y_span(lines.to_rows())?;
+            let rows = lines.to_rows();
+            let top = editor.top_for_row(rows.start, true)?;
+            let bottom = editor.top_for_row(rows.end, true)?;
             Some((top + bottom) / 2.)
         };
-        let mut lines: Vec<(Pixels, Pixels, bool)> = moves
+        moves
             .iter()
             .enumerate()
             .filter_map(|(ix, m)| {
@@ -4625,7 +4702,31 @@ impl DiffEditor {
                     self.active_move == Some(ix),
                 ))
             })
-            .collect();
+            .collect()
+    }
+
+    /// Each shown move's line ends: (y in the original editor, y in the
+    /// modified editor), for tests.
+    #[doc(hidden)]
+    pub fn move_line_ys_for_tests(&self, cx: &App) -> Vec<(Pixels, Pixels)> {
+        let Some(diff) = self.diff.as_deref() else {
+            return Vec::new();
+        };
+        self.move_line_ys(self.shown_moves(diff), cx)
+            .into_iter()
+            .map(|(from, to, _)| (from, to))
+            .collect()
+    }
+
+    fn render_move_lines(&self, cx: &App) -> Option<(Pixels, gpui::AnyElement)> {
+        let diff = self.diff.as_deref()?;
+        let moves = self.shown_moves(diff);
+        if moves.is_empty() {
+            return None;
+        }
+        let mut lines = self.move_line_ys(moves, cx);
+        let original = self.original.read(cx);
+        let modified = self.modified.read(cx);
         // Monaco sorts downward moves first, then by where they start.
         lines.sort_by(|a, b| {
             let down = |l: &(Pixels, Pixels, bool)| l.0 > l.1;
@@ -5444,7 +5545,12 @@ impl DiffEditor {
             arrows.push((line, GutterRevert::Selection(selected)));
         }
         for (ix, change) in diff.changes.iter().enumerate() {
-            if selected_changes.contains(&ix) || change.modified.is_empty() {
+            // Monaco also needs `innerChanges`, which legacy changes of 20+
+            // lines lack (here empty).
+            if selected_changes.contains(&ix)
+                || change.modified.is_empty()
+                || change.inner_changes.is_empty()
+            {
                 continue;
             }
             arrows.push((
@@ -5459,10 +5565,15 @@ impl DiffEditor {
                 revert,
                 colors: colors.clone(),
             });
-            ids.push(self.modified.update(cx, |editor, cx| {
-                editor
-                    .add_glyph_margin_widget(crate::widgets::GlyphMarginWidget::new(row, view), cx)
-            }));
+            // Monaco `RevertButton.getPosition`: the right lane at
+            // `zIndex: 10001`.
+            let mut widget = crate::widgets::GlyphMarginWidget::new(row, view);
+            widget.lane = crate::decorations::GlyphMarginLane::Right;
+            widget.z_index = DIFF_GLYPH_Z_INDEX;
+            ids.push(
+                self.modified
+                    .update(cx, |editor, cx| editor.add_glyph_margin_widget(widget, cx)),
+            );
         }
         self.revert_arrows = ids;
     }
@@ -5831,7 +5942,7 @@ impl DiffEditor {
         let mut items = Vec::new();
         for (ix, item) in self.gutter_items(cx).into_iter().enumerate() {
             let editor = self.modified.read(cx);
-            let Some((top, bottom)) = editor.rows_y_span(item.lines.to_rows()) else {
+            let Some((top, bottom)) = editor.rows_y_span_with_zones(item.lines.to_rows()) else {
                 continue;
             };
             if bottom < px(0.) || top > viewport {
@@ -6179,10 +6290,11 @@ impl DiffEditor {
                 cx,
             ),
             "diffEditor.switchSide" => self.switch_side(window, cx),
-            "editor.action.accessibleDiffViewer.next" => {
+            // Monaco registers the old `diffReview` ids as aliases.
+            "editor.action.accessibleDiffViewer.next" | "editor.action.diffReview.next" => {
                 self.accessible_diff_viewer_next(window, cx)
             }
-            "editor.action.accessibleDiffViewer.prev" => {
+            "editor.action.accessibleDiffViewer.prev" | "editor.action.diffReview.prev" => {
                 self.accessible_diff_viewer_prev(window, cx)
             }
             _ if self.run_added_command(name, window, cx) => {}
@@ -6196,8 +6308,13 @@ impl DiffEditor {
     }
 
     /// Monaco `revealFirstDiff`: once the diff is computed, moves the
-    /// modified editor's cursor to the first change and reveals it.
+    /// modified editor's cursor to the first change and reveals it. Does
+    /// nothing without a model; a later [`DiffEditor::set_model`] drops a
+    /// reveal still waiting.
     pub fn reveal_first_diff(&mut self, cx: &mut Context<Self>) {
+        if !self.has_model {
+            return;
+        }
         if self.diff_task.is_some() || self.diff.is_none() {
             // Monaco `waitForDiff`.
             self.reveal_first_diff_pending = true;
@@ -6408,6 +6525,44 @@ impl CodeEditor {
         let end = self.view_lines.first_view_line_of_row(rows.end);
         // Hidden rows have no view lines.
         (end > first).then(|| (y(first), y(end - 1) + zones.height(end - 1, line_height)))
+    }
+
+    /// Monaco `getTopForLineNumber(row + 1, include_zones)` less the
+    /// scroll top (see [`CodeEditor::top_for_line_number`]): the top of
+    /// model `row`, or with `include_zones` of the view zones right above
+    /// it. Rows past the end clamp to the last, as Monaco validates the
+    /// position.
+    pub(crate) fn top_for_row(&self, row: u32, include_zones: bool) -> Option<Pixels> {
+        Some(self.top_for_line_number(row, include_zones)? - self.scroll_position().y)
+    }
+
+    /// Monaco `getBottomForLineNumber(row + 1, include_zones)` less the
+    /// scroll top: the bottom of model `row`, or with `include_zones` of
+    /// the view zones right below it.
+    pub(crate) fn bottom_for_row(&self, row: u32, include_zones: bool) -> Option<Pixels> {
+        Some(self.bottom_for_line_number(row, include_zones)? - self.scroll_position().y)
+    }
+
+    /// Monaco `EditorGutter.render`'s item span for model `rows`: from the
+    /// top of the view zones above the first row to the bottom of those
+    /// below the last (the inline view's deleted lines, the side by side
+    /// view's alignment padding). Empty `rows` span the zones before their
+    /// row.
+    pub(crate) fn rows_y_span_with_zones(&self, rows: Range<u32>) -> Option<(Pixels, Pixels)> {
+        let line_count = self.view_lines.rope().line_count();
+        let top = if rows.start < line_count {
+            self.top_for_row(rows.start, true)?
+        } else if rows.start > 0 {
+            self.bottom_for_row(rows.start - 1, false)?
+        } else {
+            px(0.)
+        };
+        let bottom = if rows.end == 0 {
+            top.max(self.top_for_row(rows.start, false)?)
+        } else {
+            top.max(self.bottom_for_row(rows.end - 1, true)?)
+        };
+        Some((top, bottom))
     }
 
     /// Monaco `getAdditionalLineHeights` for wrapping: (1-based line,
@@ -6973,7 +7128,7 @@ impl Render for DiffEditor {
             let original = if measured {
                 original.w(original_width).flex_none()
             } else {
-                original.w(gpui::relative(self.ratio.clamp(0.1, 0.9)))
+                original.w(gpui::relative(self.ratio().clamp(0.1, 0.9)))
             };
             original
                 .when_some(colors.diff_border, |original, border| {
