@@ -770,11 +770,19 @@ fn legacy_diff_algorithm(cx: &mut TestAppContext) {
         d.update_options(options, cx);
     });
     paint(cx);
-    let expected = compute_legacy_diff(
+    let mut expected = compute_legacy_diff(
         &original.split('\n').collect::<Vec<_>>(),
         &modified.split('\n').collect::<Vec<_>>(),
         &DiffOptions::default(),
     );
+    // Normalized (Monaco `normalizeDocumentDiff`): `b` -> `x` is the whole
+    // line, so it takes the line break.
+    let inner = &mut expected.changes[0].inner_changes[0];
+    assert_eq!(inner.original_range.to_string(), "[2,1 -> 2,2]");
+    for range in [&mut inner.original_range, &mut inner.modified_range] {
+        range.end_line_number = 3;
+        range.end_column = 1;
+    }
     assert_eq!(diff.read_with(cx, |d, _| d.diff().cloned()), Some(expected));
 }
 
@@ -1892,4 +1900,186 @@ fn the_sash_hover_border_waits_for_the_hover_delay(cx: &mut TestAppContext) {
     cx.simulate_mouse_move(point(px(300.), px(300.)), None, Modifiers::default());
     paint(cx);
     assert!(!shown(cx));
+}
+
+fn set_cursor(editor: &Entity<gpui_monaco::CodeEditor>, row: u32, cx: &mut VisualTestContext) {
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                row, 0,
+            ))],
+            cx,
+        )
+    });
+}
+
+/// Monaco `normalizeDocumentDiff`: a whole-line change ends on the next
+/// line, so its highlight fills to the right edge and the true inline view
+/// shows the deleted line instead of striking it through.
+#[gpui::test]
+fn whole_line_changes_are_normalized(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nfoo\nb", "a\nbar\nb", cx);
+    let inner = diff.read_with(cx, |d, _| {
+        d.diff().unwrap().changes[0].inner_changes[0]
+            .modified_range
+            .to_string()
+    });
+    assert_eq!(inner, "[2,1 -> 3,1]");
+    let fills = side_decorations(&diff, true, cx)
+        .into_iter()
+        .filter(|(_, options)| options.should_fill_line_on_line_break)
+        .map(|(range, _)| range)
+        .collect::<Vec<_>>();
+    assert_eq!(fills, vec![(2, 1, 3, 1)]);
+    update_options(&diff, cx, |o| {
+        o.render_side_by_side = false;
+        o.use_true_inline_view = true;
+    });
+    // The deleted line in a zone, nothing struck through.
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.alignment_zones_for_tests()),
+        (1, 1)
+    );
+    assert!(
+        side_decorations(&diff, true, cx)
+            .iter()
+            .all(|(_, options)| options.before.is_none())
+    );
+}
+
+/// Monaco `revertFocusedRangeMappings`: the cursor's line range is empty,
+/// and touching line ranges intersect, so the cursor below a deletion or on
+/// the line after a change reverts it.
+#[gpui::test]
+fn the_revert_action_reverts_a_deletion_above_the_cursor(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb\nc\nd\ne\nf", "a\nb\ne\nf", cx);
+    let modified = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    cx.update(|window, cx| window.focus(&modified.read(cx).focus_handle(cx), cx));
+    // The cursor on `e`, right below the deleted `c` and `d`.
+    set_cursor(&modified, 2, cx);
+    cx.dispatch_action(gpui_monaco::diff_editor::Revert);
+    assert_eq!(modified_text(&diff, cx), "a\nb\nc\nd\ne\nf");
+}
+
+#[gpui::test]
+fn the_revert_action_reverts_a_change_ending_at_the_cursor(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb\nc\nd", "a\nX\nc\nd", cx);
+    let modified = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    cx.update(|window, cx| window.focus(&modified.read(cx).focus_handle(cx), cx));
+    set_cursor(&modified, 2, cx);
+    cx.dispatch_action(gpui_monaco::diff_editor::Revert);
+    assert_eq!(modified_text(&diff, cx), "a\nb\nc\nd");
+}
+
+/// Monaco `Range.areIntersecting`: a selection that ends where a changed
+/// span starts doesn't select it, so the change keeps its own arrow.
+#[gpui::test]
+fn the_revert_selection_arrow_needs_a_real_intersection(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("x\none two\n", "x\none TWO\n", cx);
+    update_options(&diff, cx, |o| o.render_gutter_menu = false);
+    let modified = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    // Selected backwards from `one |TWO` up to the first line, so the
+    // selection's arrow is on line 1 and the change's on line 2.
+    let select_to = |column: u32, cx: &mut VisualTestContext| {
+        modified.update(cx, |e, cx| {
+            e.set_selections(
+                &[gpui_monaco::cursor::Selection::new(
+                    PointUtf16::new(1, column),
+                    PointUtf16::new(0, 0),
+                )],
+                cx,
+            )
+        });
+        paint(cx);
+        let arrows = diff.read_with(cx, |d, cx| d.revert_arrow_bounds_for_tests(cx));
+        assert_eq!(arrows.len(), 1);
+        arrows[0].top()
+    };
+    let touching = select_to(4, cx);
+    let intersecting = select_to(5, cx);
+    assert!(intersecting < touching, "{intersecting:?} {touching:?}");
+}
+
+/// Monaco `setActiveMovedTextFromCursor`: moving the cursor off the
+/// compared block stops comparing it, and a new diff keeps comparing it
+/// only while the cursor is in it.
+#[gpui::test]
+fn comparing_a_moved_block_follows_the_cursor(cx: &mut TestAppContext) {
+    let block: String = (0..6)
+        .map(|i| format!("fn moved_{i}() {{ body_{i}(); }}\n"))
+        .collect();
+    let filler: String = (0..10).map(|i| format!("let x{i} = {i};\n")).collect();
+    let (diff, cx) = setup(&format!("{block}{filler}"), &format!("{filler}{block}"), cx);
+    update_options(&diff, cx, |o| o.show_moves = true);
+    let modified = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    let comparing = |cx: &mut VisualTestContext| diff.read_with(cx, |d, _| d.move_to_compare());
+    // In the block (lines 11-16 on the right).
+    set_cursor(&modified, 12, cx);
+    diff.update(cx, |d, cx| d.set_move_to_compare(Some(0), cx));
+    set_cursor(&modified, 13, cx);
+    assert_eq!(comparing(cx), Some(0));
+    // An edit elsewhere: the new diff still has it, and the cursor is in it.
+    model_edit_end(&diff, "// end\n", cx);
+    recompute(cx);
+    assert_eq!(comparing(cx), Some(0));
+    // Off the block.
+    set_cursor(&modified, 2, cx);
+    assert_eq!(comparing(cx), None);
+    // Comparing with the cursor elsewhere lasts until the next diff.
+    diff.update(cx, |d, cx| d.set_move_to_compare(Some(0), cx));
+    assert_eq!(comparing(cx), Some(0));
+    model_edit_end(&diff, "// more\n", cx);
+    recompute(cx);
+    assert_eq!(comparing(cx), None);
+}
+
+/// Monaco `_adjustOptionsForSubEditor`: no variable line heights, which
+/// alignment can't account for.
+#[gpui::test]
+fn sub_editors_have_no_variable_line_heights(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb", "a\nc", cx);
+    let allowed = diff.read_with(cx, |d, cx| {
+        [d.original_editor(), d.modified_editor()]
+            .map(|e| e.read(cx).options().allow_variable_line_heights)
+    });
+    assert_eq!(allowed, [false, false]);
+}
+
+/// Monaco's `StableEditorScrollState` around the modified editor's view
+/// zones: padding added above the viewport doesn't move the text.
+#[gpui::test]
+fn realignment_keeps_the_modified_side_still(cx: &mut TestAppContext) {
+    let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    let (diff, cx) = setup(&text, &text, cx);
+    let modified = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    modified.update(cx, |e, cx| {
+        e.set_scroll_position(point(px(0.), px(1005.)), cx)
+    });
+    paint(cx);
+    let first_visible = |cx: &mut VisualTestContext| {
+        modified.read_with(cx, |e, cx| e.visible_ranges(cx)[0].start.row)
+    };
+    let top_of = |row: u32, cx: &mut VisualTestContext| {
+        modified.read_with(cx, |e, _| {
+            e.top_for_line_number(row, false).unwrap() - e.scroll_position().y
+        })
+    };
+    let row = first_visible(cx);
+    assert!(row > 20, "{row}");
+    let top = top_of(row, cx);
+    // Five lines more near the top of the original: the modified side
+    // gets five lines of padding above the viewport.
+    let original = diff.read_with(cx, |d, cx| d.original_editor().read(cx).model().clone());
+    original.update(cx, |m, cx| {
+        let at = m.text().find("line 5\n").unwrap();
+        m.edit([(at..at, "new\n".repeat(5))], cx).unwrap();
+    });
+    recompute(cx);
+    paint(cx);
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.alignment_zones_for_tests()),
+        (0, 1)
+    );
+    assert_eq!(first_visible(cx), row);
+    assert_eq!(top_of(row, cx), top);
 }

@@ -208,6 +208,41 @@ impl CodeEditor {
         self.options.smooth_scrolling && self.animation.is_scrolling()
     }
 
+    /// Monaco `StableEditorScrollState.capture`, restored in the next
+    /// frame: keeps the first visible position where it is on screen while
+    /// view zones above it change. Not at the top of the file, during a
+    /// smooth scroll, or after the scroll position changed since the last
+    /// frame (whatever changed it wins), and it leaves an anchor or reveal
+    /// already waiting for the next frame alone.
+    pub(crate) fn keep_scroll_stable(&mut self) {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        if self.scroll_top <= px(0.)
+            || layout.scroll_top != self.scroll_top
+            || self.has_pending_scroll_animation()
+            || self.pending_scroll_anchor.is_some()
+            || self.pending_reveal.is_some()
+        {
+            return;
+        }
+        // Monaco `getVisibleRanges()[0].getStartPosition()`, from the frame
+        // on screen.
+        let line_height = layout.metrics.line_height;
+        let Some(first) = layout.lines.iter().find(|line| {
+            layout.zones.line_y(line.view_line, line_height)
+                + layout.zones.height(line.view_line, line_height)
+                > self.scroll_top
+        }) else {
+            return;
+        };
+        let top = layout.zones.line_y(first.view_line, line_height);
+        self.pending_scroll_anchor = Some((
+            PointUtf16::new(first.row, first.columns.start),
+            top - self.scroll_top,
+        ));
+    }
+
     /// Reports layout and content size changes after a frame (Monaco
     /// `onDidLayoutChange` and `onDidContentSizeChange`).
     pub(crate) fn report_layout(&mut self, cx: &mut Context<Self>) {
