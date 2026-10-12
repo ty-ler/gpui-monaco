@@ -590,9 +590,9 @@ impl CodeActionMenu {
         let organize = CodeActionKind::from(CodeActionKind::SOURCE_ORGANIZE_IMPORTS);
         let fix_all = CodeActionKind::from(CodeActionKind::SOURCE_FIX_ALL);
         let binding = if organize.contains(kind) {
-            window.highest_precedence_binding_for_action_in(&OrganizeImports, editor_focus)
+            crate::keybinding_label::command_binding(&OrganizeImports, None, editor_focus, window)
         } else if fix_all.contains(kind) {
-            window.highest_precedence_binding_for_action_in(&FixAll, editor_focus)
+            crate::keybinding_label::command_binding(&FixAll, None, editor_focus, window)
         } else {
             None
         }?;
@@ -1401,9 +1401,7 @@ impl CodeEditor {
     pub fn lightbulb_title_for_tests(&self, window: &Window) -> Option<String> {
         let bulb = self.code_actions.lightbulb.as_ref()?;
         let keys = |action: &dyn gpui::Action| {
-            window
-                .highest_precedence_binding_for_action_in(action, &self.focus_handle)
-                .map(|binding| crate::keybinding_label::binding_label(&binding))
+            crate::keybinding_label::command_label(action, None, &self.focus_handle, window)
         };
         Some(lightbulb_title(
             bulb,

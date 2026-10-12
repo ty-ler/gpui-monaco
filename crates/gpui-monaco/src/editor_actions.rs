@@ -564,6 +564,16 @@ pub(crate) fn action_name(id: &str) -> Option<(&'static str, &'static str)> {
         .or_else(|| COMMANDS.iter().find(|c| c.0 == id).map(|c| (c.1, c.2)))
 }
 
+/// The Monaco command id the GPUI action named `name` runs (the first, if
+/// several share it), for looking up keybinding rules that name the id.
+pub(crate) fn monaco_id(name: &str) -> Option<&'static str> {
+    BUILTINS
+        .iter()
+        .find(|b| b.1 == name)
+        .map(|b| b.0)
+        .or_else(|| COMMANDS.iter().find(|c| c.1 == name).map(|c| c.0))
+}
+
 fn builtin(id: &str) -> Option<&'static Builtin> {
     BUILTINS.iter().find(|b| b.0 == id)
 }
@@ -1102,9 +1112,12 @@ impl CodeEditor {
             let Ok(action) = cx.build_action(b.1, None) else {
                 continue;
             };
-            if let Some(binding) =
-                window.highest_precedence_binding_for_action_in(action.as_ref(), &self.focus_handle)
-            {
+            if let Some(binding) = crate::keybinding_label::command_binding(
+                action.as_ref(),
+                Some(b.0),
+                &self.focus_handle,
+                window,
+            ) {
                 keys.insert(SharedString::from(b.0), text(binding));
             }
         }

@@ -301,6 +301,45 @@ pub(crate) fn binding_keystrokes(binding: &KeyBinding) -> Vec<Keystroke> {
         .collect()
 }
 
+/// The binding Monaco's `lookupKeybinding` shows for `action` in the
+/// context of `focus`: the last keybinding rule (`add_keybinding_rules`,
+/// bound as [`RunCommand`](crate::actions::RunCommand)) naming its Monaco
+/// command id, as Monaco's dynamic keybindings come after the defaults;
+/// else its default binding. `id` names the command when the action runs
+/// several; by default it's the action's.
+pub(crate) fn command_binding(
+    action: &dyn gpui::Action,
+    id: Option<&str>,
+    focus: &gpui::FocusHandle,
+    window: &gpui::Window,
+) -> Option<KeyBinding> {
+    let default = window.highest_precedence_binding_for_action_in(action, focus);
+    let Some(id) = id.or_else(|| crate::editor_actions::monaco_id(action.name())) else {
+        return default;
+    };
+    let rule = window
+        .bindings_for_action_in(
+            &crate::actions::RunCommand {
+                id: id.to_string(),
+                args: None,
+            },
+            focus,
+        )
+        .pop();
+    // Monaco's dynamic keybindings come after the defaults, so they win.
+    rule.or(default)
+}
+
+/// [`command_binding`]'s label.
+pub(crate) fn command_label(
+    action: &dyn gpui::Action,
+    id: Option<&str>,
+    focus: &gpui::FocusHandle,
+    window: &gpui::Window,
+) -> Option<SharedString> {
+    command_binding(action, id, focus, window).map(|binding| binding_label(&binding))
+}
+
 /// `binding`'s UI label on this platform.
 pub(crate) fn binding_label(binding: &KeyBinding) -> SharedString {
     ui_label(&binding_keystrokes(binding), OperatingSystem::current())

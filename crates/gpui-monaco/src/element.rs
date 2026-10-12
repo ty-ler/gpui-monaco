@@ -4103,9 +4103,7 @@ fn prepaint_editor(
             .is_some_and(|(bounds, _, _)| bounds.contains(&window.mouse_position()));
         if hovered && !in_gutter {
             let keys = |action: &dyn gpui::Action| {
-                window
-                    .highest_precedence_binding_for_action_in(action, &editor.focus_handle)
-                    .map(|binding| crate::keybinding_label::binding_label(&binding))
+                crate::keybinding_label::command_label(action, None, &editor.focus_handle, window)
             };
             let preferred = keys(&crate::actions::AutoFix);
             let quick_fix = keys(&crate::actions::QuickFix);
