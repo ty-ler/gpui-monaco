@@ -686,7 +686,7 @@ impl CodeEditor {
             .clone()
             .unwrap_or_else(|| self.options.font_family.clone());
         let font_size = self.options.font_size;
-        let line_height = self.options.resolved_line_height();
+        let line_height = self.line_height();
         if let Some((view, id, current)) = self.inline.edit_view.long_distance.view.clone() {
             // Visible again while fading out: it fades back in.
             if self

@@ -1676,7 +1676,7 @@ impl CodeEditor {
             }
             None => (
                 IndicatorPlacement::Docked(row),
-                self.options.resolved_line_height(),
+                self.line_height(),
                 (px(0.), px(0.), px(0.)),
             ),
         };
@@ -1897,7 +1897,7 @@ impl CodeEditor {
         )];
         let editor = cx.entity().downgrade();
         let colors = self.theme.colors.inline_edit_gutter_indicator_primary();
-        let line_height = self.options.resolved_line_height();
+        let line_height = self.line_height();
         let view = cx.new(|_| JumpToLabel {
             editor,
             colors,
@@ -2130,7 +2130,7 @@ impl CodeEditor {
             .clone()
             .unwrap_or_else(|| self.options.font_family.clone());
         let font_size = self.options.font_size;
-        let line_height = self.options.resolved_line_height();
+        let line_height = self.line_height();
         cx.new(|_| InlineEditBox {
             editor,
             lines,

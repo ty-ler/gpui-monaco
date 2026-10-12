@@ -1457,7 +1457,7 @@ impl CodeEditor {
         let height = if line_height > 0. {
             gpui::px(line_height)
         } else {
-            self.options.resolved_line_height()
+            self.line_height()
         };
         height.clamp(gpui::px(8.), gpui::px(1000.))
     }
@@ -1471,7 +1471,7 @@ impl CodeEditor {
                 let line = layout.line_for_point(point)?;
                 Some(layout.line_height_of(line.view_line))
             })
-            .unwrap_or_else(|| self.options.resolved_line_height())
+            .unwrap_or_else(|| self.line_height())
     }
 
     fn suggest_metrics(&self, anchor: PointUtf16) -> SuggestWidgetMetrics {

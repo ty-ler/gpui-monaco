@@ -1820,7 +1820,7 @@ impl CodeEditor {
         });
         // Monaco: the last height (18 lines at first), at most 80% of the
         // editor (at least 12 lines).
-        let line_height = self.options.resolved_line_height();
+        let line_height = self.line_height();
         let height = cx
             .try_global::<PeekLayout>()
             .map_or(HEIGHT_IN_LINES, |layout| layout.height_in_lines);

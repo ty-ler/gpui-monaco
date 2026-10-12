@@ -273,7 +273,7 @@ impl CodeEditor {
             editor,
             kind,
             title,
-            line_height: self.options.resolved_line_height(),
+            line_height: self.line_height(),
             font_size,
             colors: self.theme.colors.clone(),
             hovered: false,

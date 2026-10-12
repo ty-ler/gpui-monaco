@@ -969,6 +969,13 @@ impl CodeEditor {
         }
     }
 
+    /// The line height the editor lays out with (Monaco
+    /// `fontInfo.lineHeight`): the resolved line height with the font zoom,
+    /// unrounded.
+    pub(crate) fn line_height(&self) -> Pixels {
+        crate::font_zoom::effective_line_height(&self.options)
+    }
+
     fn build(
         model: Entity<TextModel>,
         internal: bool,
@@ -1498,6 +1505,13 @@ impl CodeEditor {
             self.options.folding_strategy,
         );
         let zoomed = crate::font_zoom::zoomed_options(&options, self.zoom_level(cx));
+        // Monaco `ViewModel._onConfigurationChanged`: a configuration
+        // change (a new line height, font, zoom, padding, ...) keeps the
+        // first visible line where it is (`_captureStableViewport`);
+        // re-wrapping does too (`sync_view_lines`).
+        if zoomed != self.options {
+            self.keep_scroll_stable();
+        }
         let old = std::mem::replace(&mut self.options, zoomed);
         // Monaco `ContentHoverController._hookListeners`: turning
         // `hover.enabled` off hides the hover.
@@ -4999,7 +5013,10 @@ impl CodeEditor {
     /// when stale.
     pub(crate) fn sync_view_lines(&mut self, wrap: Option<WrapSettings>, cx: &mut Context<Self>) {
         let mut edited_rows = Vec::new();
-        if self.view_lines.version() != self.snapshot.version() {
+        // The last frame's rows are the text's (no edits to map them over),
+        // so its first visible line can anchor the scroll.
+        let unedited = self.view_lines.version() == self.snapshot.version();
+        if !unedited {
             // Monaco `onModelContentChanged`: the cursors' view states come
             // from their model states again.
             self.cursor_views = None;
@@ -5023,6 +5040,12 @@ impl CodeEditor {
         // Only touch the view lines when something changed, so a clone held
         // elsewhere isn't copied every frame.
         if self.view_lines.wrap() != wrap.as_ref() {
+            // Monaco `_onConfigurationChanged`: re-wrapping (for a new
+            // width, font or wrapping option) keeps the first visible line
+            // where it is (`_captureStableViewport`).
+            if unedited {
+                self.keep_scroll_stable();
+            }
             Arc::make_mut(&mut self.view_lines).set_wrap(wrap);
         }
         self.sync_injected_text(&edited_rows, cx);
@@ -5040,6 +5063,16 @@ impl CodeEditor {
         );
         let hidden = normalize_hidden(hidden);
         if self.view_lines.hidden() != hidden {
+            // Monaco `ViewModel.setHiddenAreas`: the first visible line
+            // stays where it is, unless it's hidden now.
+            if unedited && self.pending_scroll_anchor.is_none() {
+                self.keep_scroll_stable();
+                if let Some((position, _)) = self.pending_scroll_anchor
+                    && hidden.iter().any(|rows| rows.contains(&position.row))
+                {
+                    self.pending_scroll_anchor = None;
+                }
+            }
             Arc::make_mut(&mut self.view_lines).set_hidden(hidden);
             // Monaco `HiddenAreasChangedEvent`, when the line mapping
             // changed.
@@ -6681,9 +6714,7 @@ impl CodeEditor {
         let line_height = self
             .layout
             .as_ref()
-            .map_or(self.options.resolved_line_height(), |l| {
-                l.metrics.line_height
-            });
+            .map_or(self.line_height(), |l| l.metrics.line_height);
         // Monaco `onMouseWheel`, before zooming or scrolling.
         cx.emit(CodeEditorEvent::MouseWheel(MouseWheelEvent {
             position: event.position,
@@ -8218,7 +8249,7 @@ fn computed_options(options: &EditorOptions, screen_reader: bool) -> EditorOptio
     use crate::options::{AccessibilitySupport, WrappingStrategy};
     let mut computed = options.clone();
     computed.font_size = options.resolved_font_size();
-    computed.line_height = Some(options.resolved_line_height());
+    computed.line_height = Some(crate::font_zoom::effective_line_height(options));
     let screen_reader = match options.accessibility_support {
         AccessibilitySupport::On => true,
         AccessibilitySupport::Off => false,

@@ -121,7 +121,7 @@ A `ViewState` (Monaco `ICodeEditorViewState`) holds the selections, the scroll p
 | `value(eol, preserve_bom, cx)`, `set_value(text, cx)` | `getValue`, `setValue` |
 | `configured_word_at_position(p, cx)` | `getConfiguredWordAtPosition` (the editor's `word_separators`) |
 | `update_options_with(\|o\| o.read_only = true, cx)` | `updateOptions` with some options |
-| `set_hidden_areas(areas, cx)`, `set_hidden_areas_from(source, areas, cx)` | `setHiddenAreas(ranges, source)`: each source's areas are kept apart |
+| `set_hidden_areas(areas, cx)`, `set_hidden_areas_from(source, areas, cx)` | `setHiddenAreas(ranges, source)`: each source's areas are kept apart; the first visible line stays where it is unless it's hidden |
 | `line_decorations(row, cx)`, `decorations_in_range(range, cx)`, `delta_decorations(old, new, cx)`, `remove_decorations(ids, cx)`, `create_decorations_collection` | `getLineDecorations`, `getDecorationsInRange`, `deltaDecorations`, `removeDecorations`, `createDecorationsCollection` (which acts on the current model, also after `set_model`) |
 | `trigger("code_editor::CommentLine", window, cx)` | `trigger` (with GPUI action names) |
 | `has_text_focus(window)`, `has_widget_focus(window, cx)` | `hasTextFocus`, `hasWidgetFocus` |

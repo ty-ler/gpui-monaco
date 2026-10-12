@@ -251,7 +251,7 @@ impl CodeEditor {
     /// Monaco `_getLayoutInfo`: the lens font size and zone height.
     fn code_lens_layout(&self) -> (Pixels, Pixels) {
         let editor_size = f32::from(self.options.font_size);
-        let line_height = f32::from(self.options.resolved_line_height());
+        let line_height = f32::from(self.line_height());
         let factor = (line_height / editor_size).max(1.3);
         let mut size = self.options.code_lens_font_size;
         if size < 5. {
@@ -727,7 +727,7 @@ impl CodeEditor {
                     .find(|z| z.id == group.zone)
                     .map_or(px(0.), |zone| match zone.height {
                         ZoneHeight::Pixels(height) => height,
-                        ZoneHeight::Lines(lines) => self.options.resolved_line_height() * lines,
+                        ZoneHeight::Lines(lines) => self.line_height() * lines,
                     });
                 (group.row, view.text(), view.fade_start.is_some(), height)
             })

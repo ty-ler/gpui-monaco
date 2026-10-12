@@ -484,7 +484,7 @@ impl Render for AccessibleDiffViewer {
         let modified_editor = self.modified.read(cx);
         let colors = modified_editor.colors().clone();
         let options = modified_editor.options().clone();
-        let line_height = options.resolved_line_height();
+        let line_height = modified_editor.line_height();
         let numbers_width = |editor: &CodeEditor| {
             editor
                 .layout

@@ -888,7 +888,7 @@ impl Render for DeletionPadding {
         let line_height = self
             .editor
             .upgrade()
-            .map_or(px(18.), |e| e.read(cx).options().resolved_line_height());
+            .map_or(px(18.), |e| e.read(cx).line_height());
         div()
             .size_full()
             .flex()
@@ -1620,7 +1620,7 @@ impl DeletedCode {
         let editor = self.source.editor.upgrade()?;
         let editor = editor.read(cx);
         let layout = editor.layout.as_ref()?;
-        let line_height = editor.options().resolved_line_height();
+        let line_height = editor.line_height();
         let bounds = self.bounds.get();
         let lines = self.view_lines(cx);
         if lines.is_empty() {
@@ -1769,7 +1769,7 @@ impl Render for DeletedCode {
         let options = editor.options();
         let colors = editor.colors().clone();
         let theme = editor.theme().clone();
-        let line_height = options.resolved_line_height();
+        let line_height = editor.line_height();
         let (gutter_width, text_left, decorations_width, scroll_left, em_width) =
             match &editor.layout {
                 Some(layout) => (
@@ -3987,8 +3987,8 @@ impl DiffEditor {
     fn alignment_zones(&self, diff: &LinesDiff, cx: &App) -> Vec<AlignmentZone> {
         let original_editor = self.original.read(cx);
         let modified_editor = self.modified.read(cx);
-        let original_line_height = f32::from(original_editor.options().resolved_line_height());
-        let modified_line_height = f32::from(modified_editor.options().resolved_line_height());
+        let original_line_height = f32::from(original_editor.line_height());
+        let modified_line_height = f32::from(modified_editor.line_height());
         let extra = |editor: &CodeEditor, original: bool| {
             let mut extra = editor.wrap_extra_heights();
             extra.extend(editor.zone_heights(&self.ignored_zones(original), cx));
@@ -5188,7 +5188,7 @@ impl DiffEditor {
         };
         let delta = y - drag.start_y;
         drag.moved |= delta.abs() > px(2.);
-        let line_height = f32::from(self.modified.read(cx).options().resolved_line_height());
+        let line_height = f32::from(self.modified.read(cx).line_height());
         let lines = (f32::from(delta) / line_height).round() as isize;
         let (index, top, original, start) =
             (drag.index, drag.top, drag.original, drag.start as isize);
@@ -5253,7 +5253,7 @@ impl DiffEditor {
                 + view_lines.unhidden_line_count(a.start.max(b.end)..a.end)
         };
         let shown = minus(&before, &after) as f32 - minus(&after, &before) as f32;
-        let line_height = editor.options().resolved_line_height();
+        let line_height = editor.line_height();
         let delta =
             line_height * shown + px(bar_after.unwrap_or(0.)) - px(bar_before.unwrap_or(0.));
         for editor in [&self.original, &self.modified] {
@@ -6413,7 +6413,7 @@ impl CodeEditor {
     /// Monaco `getAdditionalLineHeights` for wrapping: (1-based line,
     /// pixels) for each line that wraps, as of the last layout.
     pub(crate) fn wrap_extra_heights(&self) -> Vec<(usize, f32)> {
-        let line_height = f32::from(self.options.resolved_line_height());
+        let line_height = f32::from(self.line_height());
         let view_lines = &self.view_lines;
         if view_lines.wrap().is_none() {
             return Vec::new();
@@ -6437,7 +6437,7 @@ impl CodeEditor {
     /// Monaco `getAdditionalLineHeights` for view zones: (1-based line the
     /// zone is after, pixels) for each zone not in `ignore`.
     pub(crate) fn zone_heights(&self, ignore: &[WidgetId], cx: &App) -> Vec<(usize, f32)> {
-        let line_height = f32::from(self.options.resolved_line_height());
+        let line_height = f32::from(self.line_height());
         let buffer = self.model().read(cx).buffer();
         self.widgets
             .zones

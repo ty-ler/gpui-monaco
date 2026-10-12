@@ -328,7 +328,7 @@ pub(crate) fn opening_width(layout_info: &crate::LayoutInfo) -> Pixels {
 /// `flexibleMaxHeight`, plus the box's padding and border.
 fn input_box_height(input: &CodeEditor, cx: &gpui::App) -> Pixels {
     let lines = input.model().read(cx).buffer().max_point_utf16().row + 1;
-    let line_height = input.options().resolved_line_height();
+    let line_height = input.line_height();
     let inner = (line_height * lines as f32 + px(4.)).min(px(INPUT_MAX_HEIGHT));
     inner.max(line_height + px(4.)) + px(2.)
 }

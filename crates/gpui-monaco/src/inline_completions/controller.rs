@@ -2557,7 +2557,7 @@ impl CodeEditor {
                 font: self.options.font_family.clone(),
                 ghost_font: font_family.clone(),
                 font_size: self.options.font_size,
-                line_height: self.options.resolved_line_height(),
+                line_height: self.line_height(),
                 left: px(0.),
                 warning: warning_color,
             });
