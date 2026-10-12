@@ -1967,8 +1967,13 @@ pub struct PrepaintState {
     hitbox: Option<Hitbox>,
     /// Pointers over parts of the editor other than the text.
     cursor_areas: Vec<(MouseCursor, Hitbox)>,
-    /// Whether to set `cursor_areas` (not while dragging).
+    /// Whether to set the gutter's, scrollbars', minimap's and folding
+    /// controls' `cursor_areas`: not while dragging the selection to move
+    /// or copy it, which shows `mouseStyle` over the whole editor.
     cursor_areas_enabled: bool,
+    /// The pointer for the whole window during a drag that captured it
+    /// ([`CodeEditor::drag_mouse_cursor`]).
+    drag_cursor: Option<MouseCursor>,
     /// Where the overflowing widgets are, in window coordinates.
     overflow_bounds: Vec<Bounds<Pixels>>,
     /// Widgets whose clicks don't focus the editor (see `paint`).
@@ -2033,7 +2038,9 @@ impl Element for EditorElement {
         state.hitbox = Some(window.insert_hitbox(bounds, HitboxBehavior::Normal));
         // Monaco's pointer: the I-beam over the text only; the arrow over
         // the gutter, scrollbars, minimap and widgets, a hand over folding
-        // controls. Not while dragging, which keeps its own pointer.
+        // controls. Kept while drag-selecting text (the I-beam isn't shown
+        // over them); a drag that captures the pointer shows its own over
+        // all of them (`drag_cursor`).
         let mut cursor_areas = Vec::new();
         if state.cursor_areas_enabled {
             let layout = &state.layout;
@@ -2539,6 +2546,18 @@ impl Element for EditorElement {
         for (cursor, hitbox) in &state.cursor_areas {
             window.set_cursor_style(*cursor, hitbox);
         }
+        {
+            let editor = self.editor.read(cx);
+            let mut painted = editor.painted_cursor_areas.borrow_mut();
+            painted.clear();
+            painted.extend(
+                state
+                    .cursor_areas
+                    .iter()
+                    .map(|(cursor, hitbox)| (*cursor, hitbox.bounds)),
+            );
+        }
+        crate::pointer_capture::paint_captured_cursor(state.drag_cursor, window);
         paint_editor(state, window, cx);
     }
 }
@@ -5093,7 +5112,8 @@ fn prepaint_editor(
         overlay_elements: Vec::new(),
         hitbox: None,
         cursor_areas: Vec::new(),
-        cursor_areas_enabled: !editor.is_mouse_dragging(),
+        cursor_areas_enabled: editor.dnd.target.is_none() && !editor.dnd.copy,
+        drag_cursor: editor.drag_mouse_cursor(),
         overflow_bounds: Vec::new(),
         widgets_keeping_focus: Vec::new(),
         colors,

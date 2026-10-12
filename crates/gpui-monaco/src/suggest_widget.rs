@@ -1038,6 +1038,9 @@ impl SuggestWidget {
                         .w_full()
                         .h(length)
                         .block_mouse_except_scroll()
+                        // GPUI keeps a drag's cursor over the whole window
+                        // (Monaco's pointer capture): the slider's arrow.
+                        .cursor(gpui::CursorStyle::Arrow)
                         .bg(if dragging {
                             colors.scrollbar_slider_active
                         } else {

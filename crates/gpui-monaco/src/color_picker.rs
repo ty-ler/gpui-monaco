@@ -13,9 +13,9 @@ use std::sync::Arc;
 
 use gpui::{
     AppContext as _, Bounds, Context, DispatchPhase, Entity, FocusHandle, Focusable, Hsla,
-    InteractiveElement, IntoElement, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement,
-    Pixels, Point, Render, Rgba, SharedString, StatefulInteractiveElement, Styled, Task,
-    WeakEntity, Window, canvas, checkerboard, div, linear_color_stop, linear_gradient, px,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, Render, Rgba,
+    SharedString, StatefulInteractiveElement, Styled, Task, WeakEntity, Window, canvas,
+    checkerboard, div, linear_color_stop, linear_gradient, px,
 };
 use text::PointUtf16;
 
@@ -350,6 +350,15 @@ impl ColorPickerWidget {
             .shadow_sm()
     }
 
+    /// The pointer over the whole window during a drag (Monaco's pointer
+    /// capture): a strip's `grabbing`, the saturation box's arrow.
+    pub(crate) fn captured_cursor(&self) -> Option<gpui::CursorStyle> {
+        self.drag.map(|part| match part {
+            Part::Saturation => gpui::CursorStyle::Arrow,
+            Part::Opacity | Part::Hue => gpui::CursorStyle::ClosedHand,
+        })
+    }
+
     /// A canvas recording `part`'s bounds and starting drags on it.
     fn part_tracker(&self, part: Part, cx: &mut Context<Self>) -> impl IntoElement {
         let bounds = self.bounds.clone();
@@ -522,20 +531,25 @@ impl Render for ColorPickerWidget {
                     .shadow_sm(),
             )
             .child(self.part_tracker(Part::Saturation, cx));
-        // `.strip { cursor: grab }`, `grabbing` while dragged.
-        let strip_cursor = if self.drag.is_some() {
-            gpui::CursorStyle::ClosedHand
-        } else {
-            gpui::CursorStyle::OpenHand
+        // `.strip { cursor: grab }`, `.strip.grabbing` while that strip is
+        // dragged.
+        let strip_cursor = |part: Part| {
+            if self.drag == Some(part) {
+                gpui::CursorStyle::ClosedHand
+            } else {
+                gpui::CursorStyle::OpenHand
+            }
         };
         let opaque = to_hsla(&self.model.color).opacity(1.);
         let opaque = Hsla { a: 1., ..opaque };
         let opacity = div()
+            .id("color-picker-opacity-strip")
+            .debug_selector(|| "color-picker-opacity-strip".into())
             .relative()
             .ml(px(8.))
             .w(px(25.))
             .h(strip_height)
-            .cursor(strip_cursor)
+            .cursor(strip_cursor(Part::Opacity))
             .child(checker())
             .child(div().absolute().size_full().bg(linear_gradient(
                 180.,
@@ -560,11 +574,13 @@ impl Render for ColorPickerWidget {
                 ))
         });
         let hue_strip = div()
+            .id("color-picker-hue-strip")
+            .debug_selector(|| "color-picker-hue-strip".into())
             .relative()
             .ml(px(8.))
             .w(px(25.))
             .h(strip_height)
-            .cursor(strip_cursor)
+            .cursor(strip_cursor(Part::Hue))
             .flex()
             .flex_col()
             .children(segments)
@@ -602,39 +618,21 @@ impl Render for ColorPickerWidget {
                     .on_click(cx.listener(|this, _, _, cx| this.insert(cx)))
             }));
 
-        // Drags continue outside the picker until the button is released.
-        let entity = cx.entity().downgrade();
-        let dragging = self.drag;
-        let drag_listener = canvas(
-            |_, _, _| (),
-            move |_, _, window, _| {
-                let Some(part) = dragging else {
-                    return;
-                };
-                let moved = entity.clone();
-                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                    if phase == DispatchPhase::Capture
-                        && let Some(entity) = moved.upgrade()
-                    {
-                        entity.update(cx, |this, cx| this.drag_to(part, event.position, cx));
+        // Drags continue outside the picker until the button is released,
+        // with the pointer they started with.
+        let drag_listener = self.drag.map(|part| {
+            crate::pointer_capture::capture(
+                cx.entity().downgrade(),
+                self.captured_cursor(),
+                move |this: &mut Self, event, cx| this.drag_to(part, event.position, cx),
+                |this, cx| {
+                    if this.drag.take().is_some() {
+                        this.flush(cx);
+                        cx.notify();
                     }
-                });
-                let released = entity.clone();
-                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-                    if phase == DispatchPhase::Capture
-                        && let Some(entity) = released.upgrade()
-                    {
-                        entity.update(cx, |this, cx| {
-                            this.drag = None;
-                            this.flush(cx);
-                            cx.notify();
-                        });
-                    }
-                });
-            },
-        )
-        .absolute()
-        .size_0();
+                },
+            )
+        });
 
         let mut root = div()
             .w(px(302.))
@@ -644,7 +642,7 @@ impl Render for ColorPickerWidget {
             .text_color(colors.widget_foreground)
             .child(header)
             .child(body)
-            .child(drag_listener);
+            .children(drag_listener);
         if let Some(standalone) = &self.standalone {
             root =
                 root.track_focus(&standalone.focus)

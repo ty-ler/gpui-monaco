@@ -1285,6 +1285,9 @@ impl Render for PeekView {
                         .bottom_0()
                         .right_0()
                         .w(LIST_SCROLLBAR_WIDTH)
+                        // GPUI keeps a drag's cursor over the whole window
+                        // (Monaco's pointer capture): the slider's arrow.
+                        .cursor(gpui::CursorStyle::Arrow)
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -1306,6 +1309,7 @@ impl Render for PeekView {
                                     .right_0()
                                     .top(top)
                                     .h(size)
+                                    .cursor(gpui::CursorStyle::Arrow)
                                     .bg(colors.scrollbar_slider)
                                     .hover(|style| style.bg(colors.scrollbar_slider_hover))
                                     .on_mouse_down(

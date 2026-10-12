@@ -149,6 +149,19 @@ struct ResizeEdges {
     vertical: bool,
 }
 
+impl ResizeEdges {
+    /// The sash's pointer (Monaco's `ew-resize`, `ns-resize`, and the
+    /// corner's diagonal), kept over the whole window while it's dragged.
+    fn cursor(self, above: bool) -> gpui::CursorStyle {
+        match (self.east, self.vertical) {
+            (true, false) => gpui::CursorStyle::ResizeLeftRight,
+            (false, _) => gpui::CursorStyle::ResizeUpDown,
+            (true, true) if above => gpui::CursorStyle::ResizeUpRightDownLeft,
+            (true, true) => gpui::CursorStyle::ResizeUpLeftDownRight,
+        }
+    }
+}
+
 /// What the mouse is over, for hovers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HoverTarget {
@@ -613,17 +626,15 @@ impl HoverWidget {
     /// full edge away from the line (north above it, south below it), with
     /// the corner between them moving both.
     fn render_resize_sashes(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        let entity = cx.entity().downgrade();
-        let resizing = self.resizing;
         let above = self.shown_above(cx);
         let sash_size = px(SASH_SIZE);
         let offset = -sash_size / 2.;
-        let sash = |id: &'static str, edges: ResizeEdges, cursor: gpui::CursorStyle| {
+        let sash = |id: &'static str, edges: ResizeEdges| {
             div()
                 .id(id)
                 .debug_selector(move || id.to_string())
                 .absolute()
-                .cursor(cursor)
+                .cursor(edges.cursor(above))
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
@@ -641,7 +652,6 @@ impl HoverWidget {
                 east: true,
                 vertical: false,
             },
-            gpui::CursorStyle::ResizeLeftRight,
         )
         .top_0()
         .bottom_0()
@@ -657,7 +667,6 @@ impl HoverWidget {
                 east: false,
                 vertical: true,
             },
-            gpui::CursorStyle::ResizeUpDown,
         )
         .left_0()
         .right_0()
@@ -670,38 +679,29 @@ impl HoverWidget {
                 east: true,
                 vertical: true,
             },
-            if above {
-                gpui::CursorStyle::ResizeUpRightDownLeft
-            } else {
-                gpui::CursorStyle::ResizeUpLeftDownRight
-            },
         )
         .right(-sash_size)
         .size(sash_size * 2.)
         .when(above, |this| this.top(-sash_size))
         .when(!above, |this| this.bottom(-sash_size));
-        let min_height = self.line_height + px(8.);
-        let editor = self.editor.clone();
-        // While dragging: follow the mouse anywhere in the window.
-        let drag = canvas(
-            |_, _, _| (),
-            move |_, _, window, _| {
-                let Some((start, start_size, above, edges)) = resizing else {
-                    return;
-                };
-                let moved = entity.clone();
-                let editor = editor.clone();
-                window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
-                    if phase != gpui::DispatchPhase::Capture {
-                        return;
-                    }
-                    let Some(this) = moved.upgrade() else {
-                        return;
-                    };
-                    let editor_size = editor
-                        .upgrade()
-                        .and_then(|editor| editor.read(cx).layout_size());
-                    this.update(cx, |this, cx| {
+        let mut sashes = vec![
+            east.into_any_element(),
+            vertical.into_any_element(),
+            corner.into_any_element(),
+        ];
+        // While dragging: follow the mouse anywhere in the window, with the
+        // sash's pointer.
+        if let Some((start, start_size, above, edges)) = self.resizing {
+            let min_height = self.line_height + px(8.);
+            let editor = self.editor.clone();
+            sashes.push(
+                crate::pointer_capture::capture(
+                    cx.entity().downgrade(),
+                    self.captured_cursor(),
+                    move |this: &mut Self, event, cx| {
+                        let editor_size = editor
+                            .upgrade()
+                            .and_then(|editor| editor.read(cx).layout_size());
                         let delta = event.position - start;
                         let dx = if edges.east { delta.x } else { px(0.) };
                         let dy = match (edges.vertical, above) {
@@ -719,29 +719,23 @@ impl HoverWidget {
                         this.size = Some(new_size);
                         this.last_size.set(Some(new_size));
                         cx.notify();
-                    });
-                });
-                let released = entity.clone();
-                window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
-                    if phase == gpui::DispatchPhase::Capture
-                        && let Some(this) = released.upgrade()
-                    {
-                        this.update(cx, |this, cx| {
-                            this.resizing = None;
-                            cx.notify();
-                        });
-                    }
-                });
-            },
-        )
-        .absolute()
-        .size_0();
-        vec![
-            east.into_any_element(),
-            vertical.into_any_element(),
-            corner.into_any_element(),
-            drag.into_any_element(),
-        ]
+                    },
+                    |this, cx| {
+                        this.resizing = None;
+                        cx.notify();
+                    },
+                )
+                .into_any_element(),
+            );
+        }
+        sashes
+    }
+
+    /// The pointer over the whole window while a sash is dragged (Monaco's
+    /// pointer capture on the sash).
+    pub(crate) fn captured_cursor(&self) -> Option<gpui::CursorStyle> {
+        self.resizing
+            .map(|(_, _, above, edges)| edges.cursor(above))
     }
 
     /// Whether the card was laid out above its anchor's line.
@@ -1274,6 +1268,12 @@ impl CodeEditor {
     }
 
     /// Whether the hover card is being resized (Monaco `isResizing`).
+    /// The pointer the hover shows over the whole window during a resize.
+    pub(crate) fn hover_captured_cursor(&self, cx: &gpui::App) -> Option<gpui::CursorStyle> {
+        let (widget, _) = self.hover.widget.as_ref()?;
+        widget.read(cx).captured_cursor()
+    }
+
     fn is_hover_resizing(&self, cx: &gpui::App) -> bool {
         self.hover
             .widget

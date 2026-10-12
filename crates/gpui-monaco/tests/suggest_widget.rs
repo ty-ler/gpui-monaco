@@ -324,6 +324,34 @@ fn the_north_sash_resizes_a_list_above(cx: &mut TestAppContext) {
     assert!(rows.bottom() <= line_top(&editor, cx, row));
 }
 
+/// Monaco captures the pointer on a sash: its resize cursor stays over the
+/// whole window, over the text too, until the release (GPUI's drags keep
+/// the dragged element's cursor).
+#[gpui::test]
+fn dragging_a_sash_keeps_its_pointer_everywhere(cx: &mut TestAppContext) {
+    let (editor, cx, row) = near_the_bottom(|_| {}, cx);
+    provide(cx, 40);
+    set_cursor(&editor, cx, row, 0);
+    cx.simulate_keystrokes("ctrl-space");
+    draw(cx);
+    let captured =
+        |cx: &mut VisualTestContext| editor.read_with(cx, |e, cx| e.captured_cursor_for_tests(cx));
+    assert_eq!(captured(cx), None);
+    let (rows, _) = painted(&editor, cx);
+    let edge = point(rows.left() + px(100.), rows.top() - px(1.));
+    let none = Modifiers::none();
+    cx.simulate_mouse_move(edge, None, none);
+    cx.simulate_mouse_down(edge, MouseButton::Left, none);
+    for to in [edge - point(px(0.), px(20.)), point(px(5.), px(5.))] {
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), none);
+        draw(cx);
+        assert_eq!(captured(cx), Some(gpui::CursorStyle::ResizeRow));
+    }
+    cx.simulate_mouse_up(point(px(5.), px(5.)), MouseButton::Left, none);
+    draw(cx);
+    assert_eq!(captured(cx), None);
+}
+
 /// Monaco `SuggestDetailsOverlay._placeAtAnchor`: without room on the
 /// right, the details go west of the list.
 #[gpui::test]

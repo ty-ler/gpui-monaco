@@ -158,3 +158,54 @@ fn escape_hides_the_standalone_picker(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(!editor.read_with(cx, |e, _| e.is_standalone_color_picker_visible()));
 }
+
+/// Monaco captures the pointer on a strip: `grabbing` over the whole
+/// window, off the strip and over the text, until the release; the
+/// saturation box keeps the arrow.
+#[gpui::test]
+fn dragging_a_strip_keeps_grabbing_everywhere(cx: &mut TestAppContext) {
+    use gpui::{CursorStyle, Modifiers, MouseButton, point, px};
+    let (editor, cx) = setup("a { color: #ff0000; }", cx);
+    put_cursor(&editor, 0, 13, cx);
+    cx.dispatch_action(ShowHover::default());
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let captured =
+        |cx: &mut VisualTestContext| editor.read_with(cx, |e, cx| e.captured_cursor_for_tests(cx));
+    assert_eq!(captured(cx), None);
+    let hue = cx
+        .debug_bounds("color-picker-hue-strip")
+        .expect("the hue strip");
+    let opacity = cx
+        .debug_bounds("color-picker-opacity-strip")
+        .expect("the opacity strip");
+    let saturation = point(opacity.left() - px(60.), opacity.center().y);
+    for (from, cursor) in [
+        (hue.center(), CursorStyle::ClosedHand),
+        (opacity.center(), CursorStyle::ClosedHand),
+        (saturation, CursorStyle::Arrow),
+    ] {
+        cx.simulate_mouse_move(from, None, Modifiers::default());
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        for to in [
+            from + point(px(0.), px(10.)),
+            point(px(5.), px(5.)),
+            point(px(-20.), px(400.)),
+        ] {
+            cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            assert_eq!(captured(cx), Some(cursor));
+        }
+        cx.simulate_mouse_up(
+            point(px(5.), px(5.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(captured(cx), None);
+        assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));
+    }
+}

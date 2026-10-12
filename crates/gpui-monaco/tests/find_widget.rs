@@ -728,3 +728,56 @@ fn screen_reader_status(cx: &mut TestAppContext) {
     type_query("zzz", cx);
     assert_eq!(last(cx).as_deref(), Some("No results found for 'zzz'"));
 }
+
+/// Monaco captures the pointer on the sash: `ew-resize` over the whole
+/// window, off the sash and over the text, until the release; Escape
+/// closing the widget mid-drag gives the pointers back.
+#[gpui::test]
+fn dragging_the_sash_keeps_its_pointer_everywhere(cx: &mut TestAppContext) {
+    use gpui::{CursorStyle, Modifiers, MouseButton, point, px};
+    let (editor, cx) = setup("alpha beta\n", cx);
+    let paint = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    };
+    let captured =
+        |cx: &mut VisualTestContext| editor.read_with(cx, |e, cx| e.captured_cursor_for_tests(cx));
+    cx.simulate_keystrokes("secondary-f");
+    paint(cx);
+    let sash = cx.debug_bounds("find-sash").expect("the sash");
+    let from = sash.center();
+    cx.simulate_mouse_move(from, None, Modifiers::default());
+    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+    paint(cx);
+    assert_eq!(captured(cx), Some(CursorStyle::ResizeLeftRight));
+    for to in [
+        from - point(px(80.), px(0.)),
+        point(px(20.), px(200.)),
+        point(px(-30.), px(-30.)),
+    ] {
+        cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+        paint(cx);
+        assert_eq!(captured(cx), Some(CursorStyle::ResizeLeftRight));
+    }
+    cx.simulate_mouse_up(
+        point(px(20.), px(200.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    paint(cx);
+    assert_eq!(captured(cx), None);
+
+    let sash = cx.debug_bounds("find-sash").expect("the sash");
+    cx.simulate_mouse_move(sash.center(), None, Modifiers::default());
+    cx.simulate_mouse_down(sash.center(), MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(
+        point(px(20.), px(200.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    paint(cx);
+    assert_eq!(captured(cx), Some(CursorStyle::ResizeLeftRight));
+    cx.simulate_keystrokes("escape");
+    paint(cx);
+    assert_eq!(captured(cx), None);
+}

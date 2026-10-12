@@ -934,6 +934,16 @@ fn revert_points(
     )
 }
 
+/// A hidden-lines bar edge's pointer: Monaco's `n-resize`, `s-resize` or
+/// `ns-resize`, whether dragging up and down does anything.
+fn unchanged_edge_cursor(can_move_up: bool, can_move_down: bool) -> gpui::CursorStyle {
+    match (can_move_up, can_move_down) {
+        (true, false) => gpui::CursorStyle::ResizeUp,
+        (false, true) => gpui::CursorStyle::ResizeDown,
+        _ => gpui::CursorStyle::ResizeUpDown,
+    }
+}
+
 /// A hidden-lines bar's edge being dragged (Monaco `isDragged`).
 #[derive(Clone, Copy, Debug)]
 struct UnchangedDrag {
@@ -1020,14 +1030,8 @@ impl Render for UnchangedBar {
         // Monaco's `n-resize`/`s-resize`/`ns-resize`: whether dragging up and
         // down does anything.
         let fully_revealed = self.hidden_lines == 0;
-        let cursor =
-            |can_move_top: bool, can_move_bottom: bool| match (can_move_top, can_move_bottom) {
-                (true, false) => gpui::CursorStyle::ResizeUp,
-                (false, true) => gpui::CursorStyle::ResizeDown,
-                _ => gpui::CursorStyle::ResizeUpDown,
-            };
-        let top_cursor = cursor(self.visible_top, !fully_revealed);
-        let bottom_cursor = cursor(!fully_revealed, self.visible_bottom);
+        let top_cursor = unchanged_edge_cursor(self.visible_top, !fully_revealed);
+        let bottom_cursor = unchanged_edge_cursor(!fully_revealed, self.visible_bottom);
         let edge = |id: &'static str, cursor: gpui::CursorStyle| {
             div()
                 .id(id)
@@ -2070,6 +2074,8 @@ fn breadcrumb_items(symbols: &[BreadcrumbSymbol], range: LineRange) -> Vec<Bread
 
 /// Monaco `DiffEditorSash`'s `MINIMUM_EDITOR_WIDTH`.
 const MINIMUM_EDITOR_WIDTH: f32 = 100.;
+/// The sash's pointer (Monaco's vertical `Sash`: `ew-resize`).
+const SASH_CURSOR: gpui::CursorStyle = gpui::CursorStyle::ResizeColumn;
 /// Monaco's sash size (`Sash` with the default `size` of 4px).
 const SASH_SIZE: f32 = 4.;
 /// Monaco `OverviewRulerFeature.ENTIRE_DIFF_OVERVIEW_WIDTH`.
@@ -3784,6 +3790,35 @@ impl DiffEditor {
             self.options.enable_split_view_resizing,
             self.content_width(),
         )
+    }
+
+    /// The pointer over the whole window during a drag (Monaco's pointer
+    /// capture): the sash's resize cursor, the overview slider's arrow, or
+    /// a hidden-lines bar edge's `n-resize`/`s-resize`/`ns-resize` (whether
+    /// dragging up and down still does anything).
+    pub(crate) fn captured_cursor(&self) -> Option<gpui::CursorStyle> {
+        if self.sash_drag.is_some() {
+            return Some(SASH_CURSOR);
+        }
+        if self.overview_drag.is_some() {
+            return Some(gpui::CursorStyle::Arrow);
+        }
+        let drag = self.unchanged_drag?;
+        let region = self.unchanged.get(drag.index)?;
+        let fully_revealed = region.hidden_modified_range().is_empty();
+        let (up, down) = if drag.top {
+            (region.visible_top > 0, !fully_revealed)
+        } else {
+            (!fully_revealed, region.visible_bottom > 0)
+        };
+        Some(unchanged_edge_cursor(up, down))
+    }
+
+    /// [`Self::captured_cursor`], for tests: GPUI's test platform doesn't
+    /// keep the cursor.
+    #[doc(hidden)]
+    pub fn captured_cursor_for_tests(&self) -> Option<gpui::CursorStyle> {
+        self.captured_cursor()
     }
 
     /// Monaco `DiffEditorSash.onDidChange`: the sash moves by how far the
@@ -5873,34 +5908,6 @@ fn diff_decorations(
     (original, modified)
 }
 
-/// A canvas that listens to the window's mouse moves and ups while a drag
-/// goes on, wherever the mouse is (Monaco's global pointer monitors).
-fn window_drag_listener(
-    this: WeakEntity<DiffEditor>,
-    on_move: fn(&mut DiffEditor, &gpui::MouseMoveEvent, &mut Context<DiffEditor>),
-    on_up: fn(&mut DiffEditor, &mut Context<DiffEditor>),
-) -> impl IntoElement {
-    canvas(
-        |_, _, _| {},
-        move |_, _, window, _| {
-            let moves = this.clone();
-            window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
-                if phase == gpui::DispatchPhase::Capture {
-                    moves.update(cx, |this, cx| on_move(this, event, cx)).ok();
-                }
-            });
-            let ups = this.clone();
-            window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
-                if phase == gpui::DispatchPhase::Capture {
-                    ups.update(cx, on_up).ok();
-                }
-            });
-        },
-    )
-    .absolute()
-    .size_0()
-}
-
 impl Render for DiffEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.screen_reader_mode = self.modified.read(cx).screen_reader_optimized(window);
@@ -5919,47 +5926,30 @@ impl Render for DiffEditor {
             px(0.)
         };
         let this = cx.entity().downgrade();
-        // A bar edge drag follows the mouse anywhere in the window.
+        // Drags follow the mouse anywhere in the window, with the pointer
+        // they started with (Monaco's pointer capture).
+        let captured_cursor = self.captured_cursor();
         let drag_listener = self.unchanged_drag.is_some().then(|| {
-            window_drag_listener(
+            crate::pointer_capture::capture(
                 this.clone(),
-                |this, event, cx| {
-                    if event.pressed_button == Some(MouseButton::Left) {
-                        this.drag_unchanged(event.position.y, cx)
-                    } else {
-                        this.end_unchanged_drag(cx)
-                    }
-                },
+                captured_cursor,
+                |this: &mut Self, event, cx| this.drag_unchanged(event.position.y, cx),
                 |this, cx| this.end_unchanged_drag(cx),
             )
         });
-        // Monaco's cursor on the whole editor while dragging a bar's edge.
-        let drag_cursor = self.unchanged_drag.and_then(|drag| {
-            let region = self.unchanged.get(drag.index)?;
-            let fully_revealed = region.hidden_modified_range().is_empty();
-            let (up, down) = if drag.top {
-                (region.visible_top > 0, !fully_revealed)
-            } else {
-                (!fully_revealed, region.visible_bottom > 0)
-            };
-            let cursor = match (up, down) {
-                (true, false) => gpui::CursorStyle::ResizeUp,
-                (false, true) => gpui::CursorStyle::ResizeDown,
-                _ => gpui::CursorStyle::ResizeUpDown,
-            };
-            Some(
-                div()
-                    .id("diff-drag-cursor")
-                    .absolute()
-                    .size_full()
-                    .occlude()
-                    .cursor(cursor),
-            )
+        // The editors under a bar edge drag take no mouse.
+        let drag_occluder = self.unchanged_drag.is_some().then(|| {
+            div()
+                .id("diff-drag-occluder")
+                .absolute()
+                .size_full()
+                .occlude()
         });
         let sash_listener = self.sash_drag.is_some().then(|| {
-            window_drag_listener(
+            crate::pointer_capture::capture(
                 this.clone(),
-                |this, event, cx| this.drag_sash(event, cx),
+                captured_cursor,
+                |this: &mut Self, event, cx| this.drag_sash(event, cx),
                 |this, cx| {
                     this.sash_drag = None;
                     cx.notify();
@@ -5967,16 +5957,10 @@ impl Render for DiffEditor {
             )
         });
         let overview_listener = self.overview_drag.is_some().then(|| {
-            window_drag_listener(
+            crate::pointer_capture::capture(
                 this.clone(),
-                |this, event, cx| {
-                    if event.pressed_button == Some(MouseButton::Left) {
-                        this.drag_overview(event.position.y, cx)
-                    } else {
-                        this.overview_drag = None;
-                        cx.notify();
-                    }
-                },
+                captured_cursor,
+                |this: &mut Self, event, cx| this.drag_overview(event.position.y, cx),
                 |this, cx| {
                     this.overview_drag = None;
                     cx.notify();
@@ -6055,7 +6039,7 @@ impl Render for DiffEditor {
                 .h_full()
                 .left(x - px(SASH_SIZE / 2.))
                 .w(px(SASH_SIZE))
-                .cursor_col_resize()
+                .cursor(SASH_CURSOR)
                 .when(active, |sash| sash.bg(colors.focus_border))
                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                     this.sash_hovered = *hovered;
@@ -6190,7 +6174,7 @@ impl Render for DiffEditor {
             .children(move_lines_overlay)
             .children(sashes.into_iter().flatten())
             .children(drag_listener)
-            .children(drag_cursor)
+            .children(drag_occluder)
             // Monaco hides both editors behind the viewer.
             .when(viewer_shown, |this| {
                 this.children(self.accessible_viewer.clone())

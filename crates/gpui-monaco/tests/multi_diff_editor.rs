@@ -361,6 +361,49 @@ fn scrollbar_wheel_and_drag(cx: &mut TestAppContext) {
     assert_eq!(scroll_top(&multi, cx), total - px(800.));
 }
 
+/// Monaco captures the pointer on the slider: the arrow over the whole
+/// window, over the editors' text too, until the release (or a move
+/// without the button).
+#[gpui::test]
+fn a_scrollbar_drag_keeps_the_arrow_everywhere(cx: &mut TestAppContext) {
+    use gpui::CursorStyle;
+    let (multi, cx) = setup_many(40, cx);
+    let captured =
+        |cx: &mut VisualTestContext| multi.read_with(cx, |m, _| m.captured_cursor_for_tests());
+    let (bar, slider) = multi
+        .read_with(cx, |m, _| m.scrollbar_for_tests(true))
+        .unwrap();
+    assert_eq!(captured(cx), None);
+    let grab = slider.center();
+    cx.simulate_mouse_move(grab, None, Modifiers::default());
+    cx.simulate_mouse_down(grab, MouseButton::Left, Modifiers::default());
+    paint(cx);
+    assert_eq!(captured(cx), Some(CursorStyle::Arrow));
+    // Over the first file's text, then outside the window.
+    for to in [point(px(300.), px(60.)), point(px(1500.), grab.y + px(50.))] {
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::default());
+        paint(cx);
+        assert_eq!(captured(cx), Some(CursorStyle::Arrow));
+    }
+    cx.simulate_mouse_up(grab, MouseButton::Left, Modifiers::default());
+    paint(cx);
+    assert_eq!(captured(cx), None);
+
+    // A press on the track drags too.
+    cx.simulate_mouse_move(bar.center(), None, Modifiers::default());
+    cx.simulate_mouse_down(bar.center(), MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(
+        point(px(300.), px(60.)),
+        Some(MouseButton::Left),
+        Modifiers::default(),
+    );
+    paint(cx);
+    assert_eq!(captured(cx), Some(CursorStyle::Arrow));
+    cx.simulate_mouse_move(point(px(300.), px(60.)), None, Modifiers::default());
+    paint(cx);
+    assert_eq!(captured(cx), None);
+}
+
 #[gpui::test]
 fn horizontal_scrollbar_for_long_lines(cx: &mut TestAppContext) {
     cx.update(gpui_monaco::init);

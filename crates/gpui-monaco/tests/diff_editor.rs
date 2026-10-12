@@ -1306,6 +1306,64 @@ fn the_sash(cx: &mut TestAppContext) {
     assert_eq!(diff.read_with(cx, |d, _| d.sash_left_for_tests()), px(600.));
 }
 
+/// Monaco captures the pointer on the sash: its resize cursor stays over
+/// the whole window, over both editors' text, until the release (or a move
+/// without the button).
+#[gpui::test]
+fn dragging_the_sash_keeps_its_pointer_everywhere(cx: &mut TestAppContext) {
+    use gpui::{CursorStyle, Modifiers, MouseButton};
+    let (diff, cx) = setup("a\nb", "a\nc", cx);
+    cx.simulate_resize(gpui::size(px(1230.), px(600.)));
+    paint(cx);
+    let captured =
+        |cx: &mut VisualTestContext| diff.read_with(cx, |d, _| d.captured_cursor_for_tests());
+    assert_eq!(captured(cx), None);
+    let from = point(px(600.), px(300.));
+    cx.simulate_mouse_move(from, None, Modifiers::default());
+    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+    paint(cx);
+    assert_eq!(captured(cx), Some(CursorStyle::ResizeColumn));
+    for to in [
+        point(px(400.), px(20.)),
+        point(px(900.), px(20.)),
+        point(px(-10.), px(700.)),
+    ] {
+        cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+        paint(cx);
+        assert_eq!(captured(cx), Some(CursorStyle::ResizeColumn));
+    }
+    cx.simulate_mouse_move(
+        point(px(500.), px(20.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    cx.simulate_mouse_up(
+        point(px(500.), px(20.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    paint(cx);
+    assert_eq!(captured(cx), None);
+    assert_eq!(diff.read_with(cx, |d, _| d.sash_left_for_tests()), px(500.));
+
+    cx.simulate_mouse_move(point(px(500.), px(300.)), None, Modifiers::default());
+    cx.simulate_mouse_down(
+        point(px(500.), px(300.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    cx.simulate_mouse_move(
+        point(px(300.), px(20.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    paint(cx);
+    assert_eq!(captured(cx), Some(CursorStyle::ResizeColumn));
+    cx.simulate_mouse_move(point(px(300.), px(20.)), None, Modifiers::default());
+    paint(cx);
+    assert_eq!(captured(cx), None);
+}
+
 /// Monaco: a click on the gutter focuses the modified editor.
 #[gpui::test]
 fn clicking_the_gutter_focuses_the_modified_editor(cx: &mut TestAppContext) {
