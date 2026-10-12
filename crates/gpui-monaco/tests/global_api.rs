@@ -734,6 +734,80 @@ fn keybinding_rules_run_commands_until_disposed(cx: &mut TestAppContext) {
     );
 }
 
+/// Monaco `KeybindingResolver.handleRemovals`: a `-command` rule takes the
+/// command's default binding off the keystrokes (or off all of them),
+/// and the keystrokes' other bindings still apply.
+#[gpui::test]
+fn minus_rules_remove_default_bindings(cx: &mut TestAppContext) {
+    let ran = Rc::new(RefCell::new(0));
+    // Bound before the defaults, so Find outweighs it.
+    cx.update(|cx| {
+        let ran = ran.clone();
+        let _ = gpui_monaco::add_command(cx, "my.find", move |_, _| *ran.borrow_mut() += 1);
+        let _ = gpui_monaco::add_keybinding_rule(cx, KeybindingRule::new("secondary-f", "my.find"))
+            .unwrap();
+    });
+    let (editor, cx) = setup("abc", cx);
+    let find = |cx: &mut VisualTestContext| {
+        let visible = editor.read_with(cx, |e, _| e.is_find_visible());
+        // Close it, and give the text the focus back.
+        editor.update_in(cx, |e, window, cx| {
+            e.trigger("closeFindWidget", window, cx).unwrap();
+            window.focus(&e.focus_handle(cx), cx);
+        });
+        cx.run_until_parked();
+        visible
+    };
+    cx.simulate_keystrokes("secondary-f");
+    cx.run_until_parked();
+    assert!(find(cx));
+    assert_eq!(*ran.borrow(), 0);
+
+    let removal = cx.update(|_, cx| {
+        gpui_monaco::add_keybinding_rule(cx, KeybindingRule::remove("secondary-f", "actions.find"))
+            .unwrap()
+    });
+    cx.simulate_keystrokes("secondary-f");
+    cx.run_until_parked();
+    assert!(!find(cx));
+    assert_eq!(*ran.borrow(), 1);
+    // The command itself still runs.
+    editor.update_in(cx, |e, window, cx| {
+        e.trigger("actions.find", window, cx).unwrap()
+    });
+    cx.run_until_parked();
+    assert!(find(cx));
+
+    cx.update(|_, cx| removal.dispose(cx));
+    cx.simulate_keystrokes("secondary-f");
+    cx.run_until_parked();
+    assert!(find(cx));
+    assert_eq!(*ran.borrow(), 1);
+
+    // Without keystrokes, every binding of the command goes, as its
+    // label does.
+    let bound = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            keymap
+                .bindings_for_action(&gpui_monaco::actions::StartFind)
+                .count()
+        })
+    };
+    assert_eq!(bound(cx), 1);
+    let removal = cx.update(|_, cx| {
+        gpui_monaco::add_keybinding_rule(cx, KeybindingRule::remove("", "actions.find")).unwrap()
+    });
+    cx.simulate_keystrokes("secondary-f");
+    cx.run_until_parked();
+    assert!(!find(cx));
+    assert_eq!(*ran.borrow(), 2);
+    assert_eq!(bound(cx), 0);
+    cx.update(|_, cx| removal.dispose(cx));
+    assert_eq!(bound(cx), 1);
+}
+
 // ----- colorizeModelLine ----------------------------------------------------------
 
 #[gpui::test]

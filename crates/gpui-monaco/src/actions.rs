@@ -1878,7 +1878,6 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         // After QuickFix's binding, so they win while the button shows.
         KeyBinding::new("secondary-.", ChangePasteType, POST_EDIT_WIDGET),
         KeyBinding::new("secondary-.", ChangeDropType, POST_EDIT_WIDGET),
-        KeyBinding::new("escape", HidePostEditWidget, POST_EDIT_WIDGET),
         KeyBinding::new("down", SelectNextStickyScrollLine, STICKY_FOCUSED),
         KeyBinding::new("up", SelectPreviousStickyScrollLine, STICKY_FOCUSED),
         KeyBinding::new("enter", GoToFocusedStickyScrollLine, STICKY_FOCUSED),

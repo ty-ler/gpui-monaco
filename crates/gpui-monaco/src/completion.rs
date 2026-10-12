@@ -2382,8 +2382,8 @@ impl CodeEditor {
                 self.next_snippet_placeholder(cx);
             } else if command.id == "editor.action.triggerSuggest" {
                 self.request_suggestions(CompletionTrigger::Invoke, true, cx);
-            } else if let Err(err) = crate::commands::execute_command(cx, command) {
-                log::warn!("{err:#}");
+            } else {
+                self.run_provider_command(command.clone(), cx);
             }
         }
         // Monaco `_alertCompletionItem`.

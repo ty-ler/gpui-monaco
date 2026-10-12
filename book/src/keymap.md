@@ -187,6 +187,7 @@ let rules = gpui_monaco::add_keybinding_rules(
     vec![
         KeybindingRule::new("cmd-s", "my.save").args(serde_json::json!({ "all": false })),
         KeybindingRule::unbind("cmd-k cmd-x"), // Monaco `command: null`
+        KeybindingRule::remove("cmd-f", "actions.find"), // Monaco `-actions.find`
     ],
 )?;
 
@@ -194,6 +195,8 @@ rules.dispose(cx); // removes exactly those bindings
 ```
 
 A rule's `when` is a GPUI key context predicate; without one it applies in the editor (`"CodeEditor"`). Rules are bound to the `RunCommand` action, which the focused editor runs.
+
+`KeybindingRule::unbind` takes the keys away from every command, as Monaco's `command: null` does. `KeybindingRule::remove` (a command id starting with `-`, as in Monaco) takes only that command's default binding off the keys, or off all its keys if you pass none, and the keys' other bindings still apply. It removes the command's GPUI action from the keys wherever the rule's `when` holds, where Monaco only removes a default whose `when` is the same.
 
 ## Commands by Monaco id
 

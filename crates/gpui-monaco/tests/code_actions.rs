@@ -206,6 +206,66 @@ fn quick_fix_menu_applies_edits_and_commands(cx: &mut TestAppContext) {
     assert!(cx.update(|window, cx| editor.focus_handle(cx).is_focused(window)));
 }
 
+/// Monaco runs a code action's command through `ICommandService`, where
+/// editor actions are commands; one nothing handles goes to the host, as
+/// a code lens's does.
+#[gpui::test]
+fn code_action_commands_run_editor_actions(cx: &mut TestAppContext) {
+    let command = |id: &str| Command {
+        id: id.to_string().into(),
+        title: "".into(),
+        ..Default::default()
+    };
+    let provider = Actions {
+        actions: vec![
+            CodeAction {
+                edit: Some(replace(p(0, 4)..p(0, 5), "renamed")),
+                command: Some(command("editor.action.selectAll")),
+                ..action("Rename and select all", "quickfix")
+            },
+            CodeAction {
+                command: Some(command("host.command")),
+                ..action("Host", "quickfix")
+            },
+        ],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    let unhandled = Rc::new(RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        let sink = unhandled.clone();
+        cx.subscribe(&editor, move |_, event, _| {
+            if let gpui_monaco::CodeEditorEvent::ExecuteCommand(command) = event {
+                sink.borrow_mut().push(command.id.to_string());
+            }
+        })
+        .detach();
+    });
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    cx.simulate_keystrokes("secondary-.");
+    draw(cx);
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert_eq!(text(&editor, cx), "let renamed = 1;\nlet y = 2;\n");
+    let selection = editor.read_with(cx, |e, _| e.selections()[0]);
+    assert_eq!(
+        (selection.anchor, selection.head),
+        (p(0, 0), p(2, 0)),
+        "selectAll ran"
+    );
+    assert!(unhandled.borrow().is_empty());
+    assert!(!editor.read_with(cx, |e, _| e.is_message_visible()));
+
+    cx.simulate_keystrokes("secondary-.");
+    draw(cx);
+    cx.simulate_keystrokes("down enter");
+    draw(cx);
+    assert_eq!(*unhandled.borrow(), ["host.command"]);
+    assert!(!editor.read_with(cx, |e, _| e.is_message_visible()));
+}
+
 #[gpui::test]
 fn commands_with_a_kind_apply_a_single_action(cx: &mut TestAppContext) {
     let provider = Actions {

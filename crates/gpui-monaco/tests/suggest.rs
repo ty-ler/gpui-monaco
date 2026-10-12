@@ -502,6 +502,85 @@ fn resolves_the_focused_item_and_runs_commands(cx: &mut TestAppContext) {
     );
 }
 
+/// One signature, for parameter hints.
+struct Signature;
+impl SignatureHelpProvider for Signature {
+    fn provide_signature_help(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        _: SignatureHelpTrigger,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Option<SignatureHelp>>> {
+        Task::ready(Ok(Some(SignatureHelp {
+            signatures: vec![SignatureInformation {
+                label: "foo(a: u32)".into(),
+                documentation: None,
+                parameters: vec![ParameterInformation {
+                    label: ParameterLabel::Text("a: u32".into()),
+                    documentation: None,
+                }],
+                active_parameter: None,
+            }],
+            active_signature: 0,
+            active_parameter: 0,
+        })))
+    }
+}
+
+/// Monaco runs an item's command through `ICommandService`, where editor
+/// actions are commands: `editor.action.triggerParameterHints` after a
+/// function opens parameter hints, and a command nothing handles goes to
+/// the host, as a code lens's does.
+#[gpui::test]
+fn item_commands_run_editor_actions(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    let command = |id: &str| Command {
+        id: id.to_string().into(),
+        title: "".into(),
+        ..Default::default()
+    };
+    provide(cx, move |_| {
+        vec![
+            CompletionItem {
+                insert_text: Some("foo($0)".into()),
+                insert_text_is_snippet: true,
+                command: Some(command("editor.action.triggerParameterHints")),
+                ..CompletionItem::new("foo", CompletionItemKind::Function)
+            },
+            CompletionItem {
+                command: Some(command("host.command")),
+                ..CompletionItem::new("zed", CompletionItemKind::Function)
+            },
+        ]
+    });
+    let unhandled = Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        register_signature_help_provider(cx, LanguageSelector::All, Signature);
+        let sink = unhandled.clone();
+        cx.subscribe(&editor, move |_, event, _| {
+            if let gpui_monaco::CodeEditorEvent::ExecuteCommand(command) = event {
+                sink.borrow_mut().push(command.id.to_string());
+            }
+        })
+        .detach();
+    });
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.executor().advance_clock(Duration::from_millis(200));
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "foo()");
+    assert!(editor.read_with(cx, |e, _| e.is_signature_help_visible()));
+    assert!(unhandled.borrow().is_empty());
+
+    cx.simulate_keystrokes("escape ctrl-space");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("down enter");
+    cx.run_until_parked();
+    assert_eq!(*unhandled.borrow(), ["host.command"]);
+}
+
 /// Resolves after 100ms with an edit at `edit_at` on row 0.
 struct SlowResolve {
     edit_at: u32,

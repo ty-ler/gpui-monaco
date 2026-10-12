@@ -1691,7 +1691,6 @@ impl CodeEditor {
         } else {
             None
         };
-        let position = self.cursors.primary().position;
         self.code_actions.apply = Some(cx.spawn(async move |this, cx| {
             let mut action = item.action;
             if let Some(resolve) = resolve {
@@ -1727,10 +1726,8 @@ impl CodeEditor {
             }
             this.update(cx, |this, cx| {
                 this.code_actions.apply = None;
-                if let Some(command) = &action.command
-                    && let Err(err) = crate::commands::execute_command(cx, command)
-                {
-                    this.show_message(err.to_string(), position, cx);
+                if let Some(command) = action.command.clone() {
+                    this.run_provider_command(command, cx);
                 }
                 if retrigger {
                     this.schedule_auto_code_actions(cx);
