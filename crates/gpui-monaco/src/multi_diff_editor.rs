@@ -17,18 +17,23 @@
 //! Monaco's `SmoothScrollableElement` scrollbars and smooth wheel
 //! scrolling, and the headers follow one of the three variants of Monaco's
 //! `style.css` ([`MultiDiffEditorVariant`]).
+//!
+//! The files are keyed like Monaco's `mapObservableArrayCached` items:
+//! updating the list keeps each file still there as it was. When files load
+//! and none is active, the list goes to the first change; an empty list
+//! says "No Changed Files" (or "Loading...").
 
 mod scroll_layout;
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, BoxShadow, Context, DispatchPhase, Entity,
+    AnyElement, App, AppContext as _, Bounds, BoxShadow, Context, DispatchPhase, Entity, EntityId,
     EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, InteractiveElement as _, IntoElement,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels, Point,
     Render, ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _,
@@ -38,6 +43,7 @@ use text::PointUtf16;
 use web_time::Instant;
 
 use crate::codicons::{Codicon, icon as codicon};
+use crate::context_keys::ContextKeyValue;
 use crate::cursor::Selection;
 use crate::decorations::DecorationOptions;
 use crate::diff_editor::{DiffEditor, DiffEditorEvent, DiffEditorOptions, DiffEditorViewState};
@@ -166,7 +172,10 @@ impl MultiDiffEditorVariant {
 }
 
 /// A file in a multi-diff editor (Monaco `IDocumentDiffItem`).
-#[derive(Clone)]
+///
+/// [`MultiDiffEditor::set_documents`] matches files to the ones shown by
+/// their [`key`](Self::key), so a file still there keeps its state.
+#[derive(Clone, Default)]
 pub struct MultiDiffDocument {
     /// The header's title, usually the modified file's path. The part
     /// after the last `/` shows as the name, the rest as its description.
@@ -182,6 +191,20 @@ pub struct MultiDiffDocument {
     /// diff; `original` and `modified` still say which sides exist, and
     /// their text isn't shown.
     pub binary: bool,
+    /// This file's diff editor options (Monaco `IDocumentDiffItem.options`),
+    /// in place of [`MultiDiffEditor::options`]; `None` uses those. Change
+    /// them with [`MultiDiffEditor::set_document_options`] (Monaco
+    /// `onOptionsDidChange`).
+    pub options: Option<DiffEditorOptions>,
+    /// Whether this file hides its original line numbers in the inline
+    /// view (Monaco's `hideOriginalLineNumbers` in `options`), over the
+    /// variant's default; `None` leaves it to the variant (and to
+    /// [`DiffEditorOptions::hide_original_line_numbers`], which can only
+    /// hide them).
+    pub hide_original_line_numbers: Option<bool>,
+    /// Context keys set on this file's editors while it has them (Monaco
+    /// `IDocumentDiffItem.contextKeys`), for keybindings' `when`.
+    pub context_keys: Vec<(SharedString, ContextKeyValue)>,
 }
 
 impl MultiDiffDocument {
@@ -196,7 +219,7 @@ impl MultiDiffDocument {
             original_label: None,
             original: Some(original),
             modified: Some(modified),
-            binary: false,
+            ..Self::default()
         }
     }
 
@@ -259,6 +282,10 @@ pub enum MultiDiffEditorEvent {
         /// Whether it's collapsed now.
         collapsed: bool,
     },
+    /// [`MultiDiffEditor::active_control`] changed (Monaco
+    /// `onDidChangeActiveControl`): another file became active, or the
+    /// active file got or lost its diff editor.
+    ActiveControlChanged,
 }
 
 /// What a [`MultiDiffFileAction`] runs: it gets the file's index and
@@ -324,6 +351,63 @@ struct Item {
 }
 
 impl Item {
+    /// A new file, expanded and not measured yet.
+    fn new(document: MultiDiffDocument, cx: &mut App) -> Self {
+        let (status, original, modified) = Self::models(&document, cx);
+        Self {
+            document,
+            status,
+            original,
+            modified,
+            collapsed: false,
+            content_height: px(INITIAL_CONTENT_HEIGHT),
+            view_state: None,
+            selections: None,
+            header_focus: cx.focus_handle(),
+            placeholder_focus: cx.focus_handle(),
+        }
+    }
+
+    /// What happened to the file.
+    fn status(document: &MultiDiffDocument) -> FileStatus {
+        match (&document.original, &document.modified) {
+            (None, _) => FileStatus::Added,
+            (_, None) => FileStatus::Deleted,
+            _ if document.original_label.is_some() => FileStatus::Renamed,
+            _ => FileStatus::Modified,
+        }
+    }
+
+    /// The file's status and the models shown, with empty placeholders
+    /// for a missing side (the editor's own, not listed models).
+    fn models(
+        document: &MultiDiffDocument,
+        cx: &mut App,
+    ) -> (FileStatus, Entity<TextModel>, Entity<TextModel>) {
+        let status = Self::status(document);
+        let original = document
+            .original
+            .clone()
+            .unwrap_or_else(|| cx.new(|_| TextModel::new_internal("")));
+        let modified = document
+            .modified
+            .clone()
+            .unwrap_or_else(|| cx.new(|_| TextModel::new_internal("")));
+        (status, original, modified)
+    }
+
+    /// The same file's new document, keeping the state.
+    fn set_document(&mut self, document: MultiDiffDocument, cx: &mut App) {
+        let same_models = self.document.original == document.original
+            && self.document.modified == document.modified;
+        if same_models {
+            self.status = Self::status(&document);
+        } else {
+            (self.status, self.original, self.modified) = Self::models(&document, cx);
+        }
+        self.document = document;
+    }
+
     /// Monaco `DiffEditorItemTemplate.size` (and `getUnboundSize` for
     /// binary files).
     fn height(&self, config: &VariantConfiguration) -> Pixels {
@@ -356,6 +440,9 @@ struct Template {
     /// Frames left in which a scroll of the editors, from revealing a cursor
     /// moved by the keyboard, scrolls the list along.
     follow_cursor: u8,
+    /// The file's context keys set on the editors (Monaco's item
+    /// template's scoped keys), removed when unbound.
+    context_keys: Vec<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -557,6 +644,20 @@ pub struct MultiDiffEditor {
     scrollbar_fade: ScrollbarFade,
     bounds: Rc<Cell<Bounds<Pixels>>>,
     focus_handle: FocusHandle,
+    /// The documents are loading (Monaco's `'loading'` documents): the
+    /// list is empty and says "Loading...".
+    loading: bool,
+    /// Empty space below the last file (Monaco `setPaddingBottom`).
+    padding_bottom: Pixels,
+    /// Shows or hides original line numbers in every file, over the files'
+    /// and the variant's choice (Monaco `diffEditorOptions`'
+    /// `hideOriginalLineNumbers`).
+    hide_original_line_numbers: Option<bool>,
+    /// Don't focus the first change when files load (Monaco
+    /// `setPreserveFocusOnLoad`).
+    preserve_focus_on_load: bool,
+    /// The diff editor last reported by `ActiveControlChanged`.
+    reported_active_control: Option<EntityId>,
 }
 
 impl EventEmitter<MultiDiffEditorEvent> for MultiDiffEditor {}
@@ -570,7 +671,9 @@ impl Focusable for MultiDiffEditor {
 impl MultiDiffEditor {
     /// A multi-diff editor showing `documents`, in the
     /// [`MultiDiffEditorVariant::NoCardsNonCompact`] variant as standalone
-    /// Monaco's.
+    /// Monaco's, at the first change and with it focused (see
+    /// [`MultiDiffEditor::set_documents`]). With no documents, it says "No
+    /// Changed Files".
     pub fn new(
         documents: Vec<MultiDiffDocument>,
         window: &mut Window,
@@ -604,67 +707,137 @@ impl MultiDiffEditor {
             scrollbar_fade: ScrollbarFade::default(),
             bounds: Default::default(),
             focus_handle: cx.focus_handle(),
+            loading: false,
+            padding_bottom: px(0.),
+            hide_original_line_numbers: None,
+            preserve_focus_on_load: false,
+            reported_active_control: None,
         };
         this.set_documents(documents, window, cx);
         this
     }
 
-    /// Replaces the files (Monaco `setViewModel`), scrolled to the top.
-    /// Nothing of the previous files' view state carries over (Monaco
-    /// `clearPendingRestorationState`); restore some with
-    /// [`MultiDiffEditor::restore_view_state`].
+    /// Updates the files (Monaco's observable `IMultiDiffEditorModel.documents`,
+    /// mapped with `mapObservableArrayCached`). A file with the
+    /// [`key`](MultiDiffDocument::key) of one shown keeps its collapsed
+    /// state, view state, measured height and editor, and the list keeps
+    /// its scroll position; the others start expanded. Ends
+    /// [`MultiDiffEditor::set_documents_loading`].
+    ///
+    /// When no file is active (as when the first files load), it goes to
+    /// the first change (Monaco's "Initialize first change"), focusing it
+    /// unless [`MultiDiffEditor::set_preserve_focus_on_load`] says not to.
+    /// Restore a saved state with [`MultiDiffEditor::restore_view_state`].
     pub fn set_documents(
         &mut self,
         documents: Vec<MultiDiffDocument>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        while !self.bound.is_empty() {
-            self.unbind(0, false, cx);
+        self.loading = false;
+        self.replace_documents(documents, cx);
+        // Monaco's "Initialize first change" autorun.
+        if !self.items.is_empty() && self.active.is_none() {
+            self.navigate_to_change(true, !self.preserve_focus_on_load, window, cx);
         }
-        self.items = documents
+        self.report_active_control(cx);
+    }
+
+    /// Empties the list until the next [`MultiDiffEditor::set_documents`],
+    /// saying "Loading..." (Monaco's `'loading'` documents). Like Monaco,
+    /// the files shown are dropped with their state.
+    pub fn set_documents_loading(&mut self, cx: &mut Context<Self>) {
+        self.loading = true;
+        self.replace_documents(Vec::new(), cx);
+        self.report_active_control(cx);
+    }
+
+    /// Whether the documents are loading (Monaco `isLoading`).
+    pub fn is_loading(&self) -> bool {
+        self.loading
+    }
+
+    /// Monaco `setPreserveFocusOnLoad`: whether going to the first change
+    /// when files load leaves the focus where it is (default `false`: it
+    /// focuses the change, as Monaco's `setViewModel` without
+    /// `preserveFocus`).
+    pub fn set_preserve_focus_on_load(&mut self, preserve_focus: bool) {
+        self.preserve_focus_on_load = preserve_focus;
+    }
+
+    /// The files' new list, keyed by [`MultiDiffDocument::key`]: kept files
+    /// keep their state and editors, removed ones give their editors back.
+    fn replace_documents(&mut self, documents: Vec<MultiDiffDocument>, cx: &mut Context<Self>) {
+        let old_keys: Vec<MultiDiffDocumentKey> =
+            self.items.iter().map(|item| item.document.key()).collect();
+        let mut old_items: Vec<Option<Item>> = std::mem::take(&mut self.items)
             .into_iter()
-            .map(|document| {
-                let status = match (&document.original, &document.modified) {
-                    (None, _) => FileStatus::Added,
-                    (_, None) => FileStatus::Deleted,
-                    _ if document.original_label.is_some() => FileStatus::Renamed,
-                    _ => FileStatus::Modified,
-                };
-                // Placeholders for a missing side are the editor's own, not
-                // listed models.
-                let original = document
-                    .original
-                    .clone()
-                    .unwrap_or_else(|| cx.new(|_| TextModel::new_internal("")));
-                let modified = document
-                    .modified
-                    .clone()
-                    .unwrap_or_else(|| cx.new(|_| TextModel::new_internal("")));
-                Item {
-                    document,
-                    status,
-                    original,
-                    modified,
-                    collapsed: false,
-                    content_height: px(INITIAL_CONTENT_HEIGHT),
-                    view_state: None,
-                    selections: None,
-                    header_focus: cx.focus_handle(),
-                    placeholder_focus: cx.focus_handle(),
-                }
-            })
+            .map(Some)
             .collect();
-        self.active = None;
-        self.focused_item = None;
+        let mut by_key: HashMap<&MultiDiffDocumentKey, VecDeque<usize>> = HashMap::new();
+        for (index, key) in old_keys.iter().enumerate() {
+            by_key.entry(key).or_default().push_back(index);
+        }
+        // Each old file's new index, and the kept files whose models
+        // changed.
+        let mut moved_to = vec![None; old_keys.len()];
+        let mut new_models = Vec::new();
+        let mut new_keys = Vec::with_capacity(documents.len());
+        for document in documents {
+            let key = document.key();
+            let old = by_key.get_mut(&key).and_then(|indices| indices.pop_front());
+            new_keys.push(key);
+            let item = match old {
+                Some(index) => {
+                    let mut item = old_items[index].take().expect("each file is kept once");
+                    moved_to[index] = Some(self.items.len());
+                    if item.document.original != document.original
+                        || item.document.modified != document.modified
+                        || item.document.binary != document.binary
+                    {
+                        new_models.push(self.items.len());
+                    }
+                    item.set_document(document, cx);
+                    item
+                }
+                None => Item::new(document, cx),
+            };
+            self.items.push(item);
+        }
+        // Editors follow their files; a removed file's go back to the pool,
+        // and a file showing other models gets an editor anew.
+        let mut ix = 0;
+        while ix < self.bound.len() {
+            match moved_to[self.bound[ix].item] {
+                Some(index) if !new_models.contains(&index) => {
+                    self.bound[ix].item = index;
+                    self.configure_template(ix, cx);
+                    ix += 1;
+                }
+                Some(index) => {
+                    self.bound[ix].item = index;
+                    self.unbind(ix, true, cx);
+                }
+                None => self.unbind(ix, false, cx),
+            }
+        }
+        let remap = |index: Option<usize>| index.and_then(|index| moved_to.get(index).copied()?);
+        // Monaco `activeDiffItem` keeps its last value while it's listed.
+        self.active = remap(self.active);
+        self.focused_item = remap(self.focused_item);
+        self.pending_reveal = self.pending_reveal.and_then(|pending| {
+            Some(PendingReveal {
+                item: remap(Some(pending.item))?,
+                ..pending
+            })
+        });
         self.hovered_header = None;
         self.hovered_entry = None;
-        self.pending_reveal = None;
-        self.pending_scroll = None;
-        self.scroll_top = px(0.);
-        self.scroll_left = px(0.);
-        self.smooth_scroll = None;
-        self.anchoring.reset();
+        // Monaco `CompressedVirtualizedScrollView._update`: other items
+        // drop the scroll slack instead of anchoring.
+        if old_keys != new_keys {
+            self.anchoring.items_changed();
+        }
         cx.notify();
     }
 
@@ -680,12 +853,7 @@ impl MultiDiffEditor {
             return;
         }
         self.variant = variant;
-        let options = self.item_options();
-        for template in self.bound.iter().chain(&self.pool) {
-            template
-                .diff
-                .update(cx, |diff, cx| diff.update_options(options.clone(), cx));
-        }
+        self.configure_bound_templates(cx);
         self.hovered_header = None;
         cx.notify();
     }
@@ -697,7 +865,7 @@ impl MultiDiffEditor {
     /// A diff editor for the pool, with Monaco's item template options:
     /// the list scrolls, not the editors.
     fn create_template(&self, window: &mut Window, cx: &mut Context<Self>) -> Template {
-        let options = self.item_options();
+        let options = self.item_options(None);
         let (original, modified) = self.empty_models.clone();
         let diff = cx.new(|cx| {
             let mut diff = DiffEditor::new(original, modified, window, cx);
@@ -763,6 +931,7 @@ impl MultiDiffEditor {
             stale: true,
             expected_scroll: Point::default(),
             follow_cursor: 0,
+            context_keys: Vec::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -818,15 +987,47 @@ impl MultiDiffEditor {
             Some(template) => template,
             None => self.create_template(window, cx),
         };
+        template.item = index;
+        template.stale = true;
+        template.follow_cursor = 0;
+        self.bound.push(template);
+        // Monaco applies the file's options before its models.
+        self.configure_template(self.bound.len() - 1, cx);
         let item = &mut self.items[index];
-        let deleted = item.status == FileStatus::Deleted;
-        let original_read_only = deleted || !self.options.original_editable;
         let (original, modified) = (item.original.clone(), item.modified.clone());
         let view_state = item.view_state.clone();
         // Monaco `onDidBind`: the selections it had.
         let selections = item.selections.take();
-        template.diff.update(cx, |diff, cx| {
+        let diff = self.bound[self.bound.len() - 1].diff.clone();
+        diff.update(cx, |diff, cx| {
             diff.set_models(original, modified, cx);
+            if let Some(state) = &view_state {
+                diff.restore_view_state(state, cx);
+            }
+            if let Some(selections) = selections.filter(|s| !s.is_empty()) {
+                diff.modified_editor()
+                    .update(cx, |editor, cx| editor.set_selections(&selections, cx));
+            }
+        });
+    }
+
+    /// Gives `self.bound[ix]`'s editor its file's options, read-only sides
+    /// and context keys (Monaco `DiffEditorItemTemplate.setItem`'s
+    /// `updateOptions` and `contextKeys`).
+    fn configure_template(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let index = self.bound[ix].item;
+        let item = &self.items[index];
+        let options = self.item_options(Some(&item.document));
+        let deleted = item.status == FileStatus::Deleted;
+        let original_read_only = deleted || !options.original_editable;
+        let keys = item.document.context_keys.clone();
+        let template = &mut self.bound[ix];
+        let stale_keys = std::mem::take(&mut template.context_keys);
+        template.context_keys = keys.iter().map(|(key, _)| key.clone()).collect();
+        template.diff.update(cx, |diff, cx| {
+            if *diff.options() != options {
+                diff.update_options(options, cx);
+            }
             for (editor, read_only) in [
                 (diff.original_editor().clone(), original_read_only),
                 (diff.modified_editor().clone(), deleted),
@@ -837,20 +1038,19 @@ impl MultiDiffEditor {
                         options.read_only = read_only;
                         editor.update_options(options, cx);
                     }
+                    if !stale_keys.is_empty() || !keys.is_empty() {
+                        set_host_keys(editor, &stale_keys, &keys, cx);
+                    }
                 });
             }
-            if let Some(state) = &view_state {
-                diff.restore_view_state(state, cx);
-            }
-            if let Some(selections) = selections.filter(|s| !s.is_empty()) {
-                diff.modified_editor()
-                    .update(cx, |editor, cx| editor.set_selections(&selections, cx));
-            }
         });
-        template.item = index;
-        template.stale = true;
-        template.follow_cursor = 0;
-        self.bound.push(template);
+    }
+
+    /// [`Self::configure_template`] for every bound editor.
+    fn configure_bound_templates(&mut self, cx: &mut Context<Self>) {
+        for ix in 0..self.bound.len() {
+            self.configure_template(ix, cx);
+        }
     }
 
     /// Monaco `ManagedVirtualizedItem._clearBinding`: gives `self.bound[ix]`
@@ -858,9 +1058,19 @@ impl MultiDiffEditor {
     /// `onWillUnbind`). The pool keeps up to five editors and drops the
     /// rest.
     fn unbind(&mut self, ix: usize, save: bool, cx: &mut Context<Self>) {
-        let template = self.bound.remove(ix);
+        let mut template = self.bound.remove(ix);
         if save && let Some(item) = self.items.get_mut(template.item) {
             item.view_state = Some(template.diff.read(cx).save_view_state(cx));
+        }
+        let keys = std::mem::take(&mut template.context_keys);
+        if !keys.is_empty() {
+            let diff = template.diff.read(cx);
+            for editor in [
+                diff.original_editor().clone(),
+                diff.modified_editor().clone(),
+            ] {
+                editor.update(cx, |editor, cx| set_host_keys(editor, &keys, &[], cx));
+            }
         }
         if self.pool.len() < MAX_UNUSED_EDITORS {
             let (original, modified) = self.empty_models.clone();
@@ -913,46 +1123,115 @@ impl MultiDiffEditor {
             .map(|t| t.diff.clone())
     }
 
-    /// Monaco's item options: unchanged regions hidden, no overview ruler,
-    /// and the variant's `hideOriginalLineNumbers`.
-    fn item_options(&self) -> DiffEditorOptions {
-        let mut options = self.options.clone();
+    /// Monaco's item options (`DiffEditorItemTemplate.setItem`): the
+    /// file's options, else the list's, with unchanged regions hidden and
+    /// no overview ruler. Original line numbers follow the list's choice,
+    /// else the file's, else the variant (Monaco's `override` before
+    /// `options.hideOriginalLineNumbers` before the variant).
+    fn item_options(&self, document: Option<&MultiDiffDocument>) -> DiffEditorOptions {
+        let mut options = document
+            .and_then(|document| document.options.clone())
+            .unwrap_or_else(|| self.options.clone());
         options.hide_unchanged_regions.enabled = true;
         options.render_overview_ruler = false;
-        options.hide_original_line_numbers |= self.config().hide_original_line_numbers;
+        options.hide_original_line_numbers = self
+            .hide_original_line_numbers
+            .or(document.and_then(|document| document.hide_original_line_numbers))
+            .unwrap_or(
+                options.hide_original_line_numbers || self.config().hide_original_line_numbers,
+            );
         options
     }
 
-    /// The options every file's diff editor uses (unchanged regions are
-    /// always hidden).
+    /// The options of the files without their own
+    /// ([`MultiDiffDocument::options`]); unchanged regions are always
+    /// hidden.
     pub fn options(&self) -> &DiffEditorOptions {
         &self.options
     }
 
-    /// Replaces the options of every file's diff editor.
+    /// Replaces the options of the files without their own.
     pub fn update_options(&mut self, options: DiffEditorOptions, cx: &mut Context<Self>) {
-        let editable_changed = options.original_editable != self.options.original_editable;
         self.options = options;
-        let options = self.item_options();
-        for template in self.bound.iter().chain(&self.pool) {
-            template
-                .diff
-                .update(cx, |diff, cx| diff.update_options(options.clone(), cx));
-        }
-        // A deleted file's original stays read-only.
-        if editable_changed {
-            for template in &self.bound {
-                if self.items[template.item].status == FileStatus::Deleted {
-                    let editor = template.diff.read(cx).original_editor().clone();
-                    editor.update(cx, |editor, cx| {
-                        let mut options = editor.options().clone();
-                        options.read_only = true;
-                        editor.update_options(options, cx);
-                    });
-                }
-            }
+        self.configure_bound_templates(cx);
+        cx.notify();
+    }
+
+    /// Whether every file shows (`Some(false)`) or hides (`Some(true)`)
+    /// its original line numbers in the inline view, over the files' and
+    /// the variant's choice (Monaco's widget `diffEditorOptions`); `None`
+    /// leaves it to them.
+    pub fn hide_original_line_numbers(&self) -> Option<bool> {
+        self.hide_original_line_numbers
+    }
+
+    /// Sets [`MultiDiffEditor::hide_original_line_numbers`].
+    pub fn set_hide_original_line_numbers(&mut self, hide: Option<bool>, cx: &mut Context<Self>) {
+        self.hide_original_line_numbers = hide;
+        self.configure_bound_templates(cx);
+        cx.notify();
+    }
+
+    /// File `index`'s document.
+    pub fn document(&self, index: usize) -> Option<&MultiDiffDocument> {
+        self.items.get(index).map(|item| &item.document)
+    }
+
+    /// Changes file `index`'s own options (Monaco
+    /// `IDocumentDiffItem.onOptionsDidChange`): its
+    /// [`options`](MultiDiffDocument::options) and
+    /// [`hide_original_line_numbers`](MultiDiffDocument::hide_original_line_numbers).
+    /// Its editor, if it has one, takes them at once.
+    pub fn set_document_options(
+        &mut self,
+        index: usize,
+        options: Option<DiffEditorOptions>,
+        hide_original_line_numbers: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(item) = self.items.get_mut(index) else {
+            return;
+        };
+        item.document.options = options;
+        item.document.hide_original_line_numbers = hide_original_line_numbers;
+        if let Some(ix) = self.bound.iter().position(|t| t.item == index) {
+            self.configure_template(ix, cx);
         }
         cx.notify();
+    }
+
+    /// Reserves empty space below the last file (Monaco
+    /// `setPaddingBottom`), as part of the scrollable height.
+    pub fn set_padding_bottom(&mut self, padding: Pixels, cx: &mut Context<Self>) {
+        let padding = padding.max(px(0.));
+        if padding != self.padding_bottom {
+            self.padding_bottom = padding;
+            // Monaco's padding item is a new item for each size.
+            self.anchoring.items_changed();
+            cx.notify();
+        }
+    }
+
+    /// The space below the last file.
+    pub fn padding_bottom(&self) -> Pixels {
+        self.padding_bottom
+    }
+
+    /// The active file's diff editor (Monaco `getActiveControl`), if it
+    /// has one: only files in view (and a focused one) do, and binary
+    /// files never do.
+    pub fn active_control(&self) -> Option<&Entity<DiffEditor>> {
+        self.diff_editor(self.active?)
+    }
+
+    /// Emits `ActiveControlChanged` when the active file's diff editor
+    /// changed since it was last reported.
+    fn report_active_control(&mut self, cx: &mut Context<Self>) {
+        let control = self.active_control().map(|diff| diff.entity_id());
+        if control != self.reported_active_control {
+            self.reported_active_control = control;
+            cx.emit(MultiDiffEditorEvent::ActiveControlChanged);
+        }
     }
 
     /// The file count.
@@ -1061,10 +1340,11 @@ impl MultiDiffEditor {
         cx.notify();
     }
 
-    /// The scrollable height: the files and the anchoring's room above and
-    /// below them (Monaco's layout `scrollHeight`).
+    /// The scrollable height: the files, the bottom padding and the
+    /// anchoring's room above and below them (Monaco's layout
+    /// `scrollHeight`).
     pub fn scroll_height(&self) -> Pixels {
-        self.anchoring.scroll_height(&self.heights())
+        self.anchoring.scroll_height(&self.layout_heights())
     }
 
     /// Whether a smooth scroll is on its way (Monaco
@@ -1125,6 +1405,9 @@ impl MultiDiffEditor {
             };
             match self.diff_editor(index).cloned() {
                 Some(diff) => {
+                    // The restored selections win over a first change still
+                    // waiting for its diff.
+                    diff.update(cx, |diff, _| diff.cancel_reveal_first_diff());
                     let editor = diff.read(cx).modified_editor().clone();
                     editor.update(cx, |editor, cx| editor.set_selections(&selections, cx));
                 }
@@ -1202,29 +1485,36 @@ impl MultiDiffEditor {
     /// the first change of the next file (wrapping around), expanding it
     /// and focusing its modified editor (a binary file's placeholder).
     pub fn go_to_next_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate_to_change(true, window, cx);
+        self.navigate_to_change(true, true, window, cx);
     }
 
     /// Monaco `goToPreviousChange`: the previous change of the active
     /// file, else the last change of the previous file.
     pub fn go_to_previous_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate_to_change(false, window, cx);
+        self.navigate_to_change(false, true, window, cx);
     }
 
     /// Goes to file `index`'s first change (Monaco `_goToFile`): expands
     /// and reveals it, puts the modified editor's cursor on the change and
     /// focuses it.
     pub fn go_to_file(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.go_to_file_at(index, true, window, cx);
+        self.go_to_file_at(index, true, true, window, cx);
     }
 
-    /// Monaco `_navigateToChange`.
-    fn navigate_to_change(&mut self, next: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Monaco `_navigateToChange`; `focus` focuses the file's editor
+    /// when it goes to another file.
+    fn navigate_to_change(
+        &mut self,
+        next: bool,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.items.is_empty() {
             return;
         }
         let Some(current) = self.active.filter(|&ix| ix < self.items.len()) else {
-            self.go_to_file_at(0, true, window, cx);
+            self.go_to_file_at(0, true, focus, window, cx);
             return;
         };
         self.set_collapsed(current, false, cx);
@@ -1261,14 +1551,16 @@ impl MultiDiffEditor {
         } else {
             (current + count - 1) % count
         };
-        self.go_to_file_at(index, next, window, cx);
+        self.go_to_file_at(index, next, focus, window, cx);
     }
 
-    /// Monaco `_goToFile`: the file's first or last change.
+    /// Monaco `_goToFile`: the file's first or last change, focusing its
+    /// editor if `focus`.
     fn go_to_file_at(
         &mut self,
         index: usize,
         first: bool,
+        focus: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1280,8 +1572,10 @@ impl MultiDiffEditor {
         let Some(diff) = self.ensure_bound(index, window, cx) else {
             // Monaco `DiffEditorItemBinding.focus`: a binary file's
             // placeholder (or its "Open Diff" button).
-            let focus = self.items[index].placeholder_focus.clone();
-            window.focus(&focus, cx);
+            if focus {
+                let handle = self.items[index].placeholder_focus.clone();
+                window.focus(&handle, cx);
+            }
             return;
         };
         if first {
@@ -1303,14 +1597,24 @@ impl MultiDiffEditor {
             item: index,
             target: RevealTarget::Cursor,
         });
-        let modified = diff.read(cx).modified_editor().focus_handle(cx);
-        window.focus(&modified, cx);
+        if focus {
+            let modified = diff.read(cx).modified_editor().focus_handle(cx);
+            window.focus(&modified, cx);
+        }
     }
 
     /// Each file's height.
     fn heights(&self) -> Vec<Pixels> {
         let config = self.config();
         self.items.iter().map(|item| item.height(&config)).collect()
+    }
+
+    /// The scroll layout's item heights: each file's, then the bottom
+    /// padding (Monaco's `paddingBottomItem`).
+    fn layout_heights(&self) -> Vec<Pixels> {
+        let mut heights = self.heights();
+        heights.push(self.padding_bottom);
+        heights
     }
 
     /// The top of file `index` in the list, below any room the anchoring
@@ -1487,6 +1791,14 @@ impl MultiDiffEditor {
         if template.stale || diff.is_computing_diff() {
             return;
         }
+        // Not measured yet (as when files load): the file's height, so the
+        // line's place in the list, is about to change.
+        if diff
+            .content_height(cx)
+            .is_none_or(|height| (height - self.items[pending.item].content_height).abs() > px(0.5))
+        {
+            return;
+        }
         let (row, original) = match pending.target {
             RevealTarget::Cursor => {
                 if diff.diff().is_none_or(|d| d.changes.is_empty()) {
@@ -1579,6 +1891,16 @@ impl MultiDiffEditor {
     pub fn scrollbar_for_tests(&self, vertical: bool) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
         let state = self.scrollbars[usize::from(!vertical)]?;
         Some((state.bar, state.slider()))
+    }
+
+    /// The message shown over an empty list (Monaco's `.placeholder`):
+    /// "Loading..." or "No Changed Files".
+    pub fn placeholder_message(&self) -> Option<&'static str> {
+        match (self.items.is_empty(), self.loading) {
+            (false, _) => None,
+            (true, true) => Some("Loading..."),
+            (true, false) => Some("No Changed Files"),
+        }
     }
 
     /// The vertical scroll position last drawn and the anchoring's room
@@ -2175,6 +2497,23 @@ fn highlight_range(editor: &Entity<CodeEditor>, range: Range<PointUtf16>, cx: &m
     .detach();
 }
 
+/// Removes the context keys `stale` from `editor`, then sets `keys` (a
+/// file's [`MultiDiffDocument::context_keys`]).
+fn set_host_keys(
+    editor: &mut CodeEditor,
+    stale: &[SharedString],
+    keys: &[(SharedString, ContextKeyValue)],
+    cx: &mut Context<CodeEditor>,
+) {
+    for key in stale {
+        editor.commands.host_keys.remove(key);
+    }
+    for (key, value) in keys {
+        editor.commands.host_keys.insert(key.clone(), value.clone());
+    }
+    cx.notify();
+}
+
 /// Monaco `_goToFile(_, 'last')`: puts the modified editor's cursor on the
 /// last change.
 fn select_last_change(diff: &Entity<DiffEditor>, cx: &mut App) {
@@ -2272,10 +2611,11 @@ impl Render for MultiDiffEditor {
         // Monaco `CompressedVirtualizedScrollView._update`: keep the anchor
         // in place through height changes; a correction ends a smooth
         // scroll.
-        let heights = self.heights();
         let shown = self.shown_scroll_top(now);
         let (anchored, geometry_changed) =
-            self.anchoring.update(&heights, viewport.height, shown, now);
+            self.anchoring
+                .update(&self.layout_heights(), viewport.height, shown, now);
+        let heights = self.heights();
         if geometry_changed || anchored != shown {
             self.scroll_top = anchored;
             self.smooth_scroll = None;
@@ -2366,6 +2706,7 @@ impl Render for MultiDiffEditor {
                 self.active = focused;
             }
         }
+        self.report_active_control(cx);
         let list_focused = self.focus_handle.contains_focused(window, cx);
 
         // Monaco `ScrollableElement`: each bar leaves room for the other.
@@ -2578,6 +2919,19 @@ impl Render for MultiDiffEditor {
             );
         }
         let scrollbars = self.render_scrollbars(bounds.origin, &colors, window, cx);
+        // Monaco's `.placeholder`, centered over an empty list.
+        let placeholder = self.placeholder_message().map(|message| {
+            div()
+                .debug_selector(|| "multi-diff-placeholder".into())
+                .absolute()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(13.))
+                .text_color(colors.multi_diff_header_foreground)
+                .child(message)
+        });
         let bounds_cell = self.bounds.clone();
         let this = cx.entity().downgrade();
         div()
@@ -2604,6 +2958,7 @@ impl Render for MultiDiffEditor {
                 .size_full(),
             )
             .children(children)
+            .children(placeholder)
             .children(scrollbars)
     }
 }

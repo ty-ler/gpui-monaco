@@ -676,7 +676,8 @@ fn main() {
             .and_then(|w| w.parse::<f32>().ok())
             .unwrap_or(1100.);
         let bounds = Bounds::centered(None, size(px(width), px(760.)), cx);
-        // `PLAYGROUND_MULTI_DIFF=old1:new1,old2:new2` opens a multi-diff editor.
+        // `PLAYGROUND_MULTI_DIFF=old1:new1,old2:new2` opens a multi-diff editor
+        // (an empty list shows its "No Changed Files" placeholder).
         // An empty side (`:new` or `old:`) is a created or deleted file, and
         // a file that isn't UTF-8 shows the binary placeholder.
         // `PLAYGROUND_MULTI_DIFF_VARIANT=cards|noCards|noCardsNonCompact`
@@ -716,6 +717,7 @@ fn main() {
                         original,
                         modified,
                         binary: original_binary || modified_binary,
+                        ..Default::default()
                     }
                 })
                 .collect();

@@ -50,7 +50,7 @@ Demo providers are registered by default:
 | `PLAYGROUND_DIFF_HIDE_UNCHANGED=1` | Hide that diff's unchanged regions |
 | `PLAYGROUND_DIFF_MOVES=1` | Show that diff's moved blocks |
 | `PLAYGROUND_DIFF_MARGIN_ARROWS=1` | Show margin revert arrows instead of the gutter menu |
-| `PLAYGROUND_MULTI_DIFF=old1:new1,old2:new2` | Open a multi-diff editor with those files |
+| `PLAYGROUND_MULTI_DIFF=old1:new1,old2:new2` | Open a multi-diff editor with those files (empty: its "No Changed Files" placeholder) |
 | `PLAYGROUND_FONT="JetBrains Mono"` | Use another font family |
 | `PLAYGROUND_PLACEHOLDER="Type here"` | Show a placeholder while the file is empty |
 | `PLAYGROUND_READ_ONLY=1` | Start read-only (typing shows the read-only message) |

@@ -5517,6 +5517,12 @@ impl DiffEditor {
         }
     }
 
+    /// Drops a [`DiffEditor::reveal_first_diff`] still waiting for its
+    /// diff (the multi-diff editor's restored selections win over it).
+    pub(crate) fn cancel_reveal_first_diff(&mut self) {
+        self.reveal_first_diff_pending = false;
+    }
+
     /// Monaco `_goTo(diffs[0])`.
     fn reveal_first_change(&mut self, cx: &mut Context<Self>) {
         let Some(change) = self.diff.as_ref().and_then(|d| d.changes.first()) else {

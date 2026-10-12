@@ -9,7 +9,8 @@ use gpui::{
 };
 use gpui_monaco::text::PointUtf16;
 use gpui_monaco::{
-    MultiDiffDocument, MultiDiffEditor, MultiDiffEditorVariant, MultiDiffFileAction, TextModel,
+    MultiDiffDocument, MultiDiffEditor, MultiDiffEditorEvent, MultiDiffEditorVariant,
+    MultiDiffFileAction, TextModel,
 };
 
 fn paint(cx: &mut VisualTestContext) {
@@ -40,12 +41,14 @@ fn setup(cx: &mut TestAppContext) -> (Entity<MultiDiffEditor>, &mut VisualTestCo
                 original: None,
                 modified: Some(model("fresh\nfile", cx)),
                 binary: false,
+                ..Default::default()
             },
         ];
         MultiDiffEditor::new(documents, window, cx)
     });
     cx.simulate_resize(gpui::size(px(1200.), px(800.)));
     paint(cx);
+    blur(cx);
     (multi, cx)
 }
 
@@ -74,7 +77,15 @@ fn setup_many(
     });
     cx.simulate_resize(gpui::size(px(1200.), px(800.)));
     paint(cx);
+    blur(cx);
     (multi, cx)
+}
+
+/// Takes the focus loading gave the first change, so that file's editor
+/// isn't kept for having focus (Monaco `shouldKeepAlive`).
+fn blur(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.blur(cx));
+    paint(cx);
 }
 
 fn scroll_top(multi: &Entity<MultiDiffEditor>, cx: &mut VisualTestContext) -> gpui::Pixels {
@@ -468,8 +479,7 @@ fn next_and_previous_change_across_files(cx: &mut TestAppContext) {
         cx.update(|window, cx| multi.update(cx, |m, cx| m.go_to_previous_change(window, cx)));
         paint(cx);
     };
-    // No active file: the first file's first change.
-    next(&multi, cx);
+    // Loading went to the first file's first change.
     assert_eq!(multi.read_with(cx, |m, _| m.active_item()), Some(0));
     assert_eq!(cursor(&multi, 0, cx).row, 20);
     // Each file has one change: the next file's.
@@ -677,6 +687,7 @@ fn binary_file_placeholders(cx: &mut TestAppContext) {
             original: Some(empty(cx)),
             modified: Some(empty(cx)),
             binary: true,
+            ..Default::default()
         });
         documents.push(MultiDiffDocument {
             label: "img/new.png".into(),
@@ -684,6 +695,7 @@ fn binary_file_placeholders(cx: &mut TestAppContext) {
             original: None,
             modified: Some(empty(cx)),
             binary: true,
+            ..Default::default()
         });
         documents.extend(many_documents(1, cx));
         MultiDiffEditor::new(documents, window, cx)
@@ -855,16 +867,24 @@ fn whole_list_view_state(cx: &mut TestAppContext) {
     );
     assert!(saved.scroll_top > px(0.));
 
-    // New documents with the same paths start fresh, then get the state.
+    // Files loaded anew start fresh (at the first change), then get the
+    // state.
+    // (At the top, past Monaco's 100ms scroll direction, so measuring the
+    // new files anchors the top.)
+    multi.update(cx, |m, cx| m.set_scroll_top(px(0.), cx));
+    paint(cx);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(200));
     cx.update(|window, cx| {
         multi.update(cx, |m, cx| {
+            m.set_documents_loading(cx);
             let documents = many_documents(20, cx);
             m.set_documents(documents, window, cx);
         })
     });
     paint(cx);
     assert!(!multi.read_with(cx, |m, _| m.is_collapsed(3)));
-    assert_eq!(multi.read_with(cx, |m, _| m.active_item()), None);
+    assert_eq!(multi.read_with(cx, |m, _| m.active_item()), Some(0));
     multi.update(cx, |m, cx| m.restore_view_state(&saved, cx));
     paint(cx);
     assert!(multi.read_with(cx, |m, _| m.is_collapsed(3) && m.is_collapsed(5)));
@@ -999,4 +1019,398 @@ fn the_reveal_highlight_lasts_350ms(cx: &mut TestAppContext) {
         .advance_clock(std::time::Duration::from_millis(60));
     paint(cx);
     assert!(highlights(cx).is_empty());
+}
+
+/// The documents shown, for passing back to `set_documents`.
+fn documents(
+    multi: &Entity<MultiDiffEditor>,
+    cx: &mut VisualTestContext,
+) -> Vec<MultiDiffDocument> {
+    multi.read_with(cx, |m, _| {
+        (0..m.len())
+            .map(|i| m.document(i).unwrap().clone())
+            .collect()
+    })
+}
+
+/// Monaco's observable documents, mapped with `mapObservableArrayCached`:
+/// updating the list keeps each file still there as it was, and the scroll
+/// position (audit 3 §E.19).
+#[gpui::test]
+fn updating_the_files_keeps_their_state(cx: &mut TestAppContext) {
+    let (multi, cx) = setup_many(20, cx);
+    let top5 = multi.read_with(cx, |m, _| m.item_bounds_for_tests(5).0);
+    multi.update(cx, |m, cx| {
+        m.set_collapsed(2, true, cx);
+        m.set_scroll_top(top5, cx);
+    });
+    paint(cx);
+    multi.update(cx, |m, cx| {
+        let editor = m.diff_editor(5).unwrap().read(cx).modified_editor().clone();
+        editor.update(cx, |editor, cx| {
+            editor.set_selections(
+                &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                    20, 4,
+                ))],
+                cx,
+            )
+        });
+        m.reveal(5, cx);
+    });
+    paint(cx);
+    let scroll = scroll_top(&multi, cx);
+    let height5 = multi.read_with(cx, |m, _| m.item_bounds_for_tests(5).1);
+    let diff5 = multi.read_with(cx, |m, _| m.diff_editor(5).cloned().unwrap());
+
+    // A new file at the end, and file 19 gone.
+    let mut new_documents = documents(&multi, cx);
+    new_documents.pop();
+    new_documents.push(MultiDiffDocument::new(
+        "src/added.rs",
+        cx.update(|_, cx| cx.new(|_| TextModel::new("a\n"))),
+        cx.update(|_, cx| cx.new(|_| TextModel::new("b\n"))),
+    ));
+    cx.update(|window, cx| multi.update(cx, |m, cx| m.set_documents(new_documents, window, cx)));
+    paint(cx);
+    multi.read_with(cx, |m, _| {
+        assert_eq!(m.len(), 20);
+        assert!(m.is_collapsed(2));
+        assert!(!m.is_collapsed(19));
+        assert_eq!(m.document(19).unwrap().label.as_ref(), "src/added.rs");
+        // The active file stays, so loading doesn't go to the first change.
+        assert_eq!(m.active_item(), Some(5));
+        assert_eq!(m.item_bounds_for_tests(5).1, height5);
+        assert_eq!(m.scroll_top(), scroll);
+        // The file keeps its editor.
+        assert_eq!(m.diff_editor(5), Some(&diff5));
+    });
+    assert_eq!(cursor(&multi, 5, cx), PointUtf16::new(20, 4));
+
+    // A file inserted above: the others follow it with their state, and
+    // the list keeps its scroll position.
+    let mut new_documents = documents(&multi, cx);
+    new_documents.insert(
+        0,
+        MultiDiffDocument::new(
+            "src/first.rs",
+            cx.update(|_, cx| cx.new(|_| TextModel::new("x\n"))),
+            cx.update(|_, cx| cx.new(|_| TextModel::new("y\n"))),
+        ),
+    );
+    cx.update(|window, cx| multi.update(cx, |m, cx| m.set_documents(new_documents, window, cx)));
+    paint(cx);
+    multi.read_with(cx, |m, _| {
+        assert!(m.is_collapsed(3) && !m.is_collapsed(2));
+        assert_eq!(m.active_item(), Some(6));
+        assert_eq!(m.item_bounds_for_tests(6).1, height5);
+        assert_eq!(m.scroll_top(), scroll);
+    });
+    assert_eq!(cursor(&multi, 6, cx), PointUtf16::new(20, 4));
+
+    // The same files with other models keep their state too (Monaco's
+    // workbench keys its documents by their uris).
+    let fresh = cx.update(|_, cx| many_documents(20, cx));
+    cx.update(|window, cx| multi.update(cx, |m, cx| m.set_documents(fresh, window, cx)));
+    paint(cx);
+    multi.read_with(cx, |m, _| {
+        assert_eq!(m.len(), 20);
+        assert!(m.is_collapsed(2));
+        assert_eq!(m.active_item(), Some(5));
+    });
+}
+
+/// Monaco's "Initialize first change": once files load and none is
+/// active, the first change is selected and focused (audit 3 §E.20).
+#[gpui::test]
+fn loading_files_goes_to_the_first_change(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let original: String = (0..300).map(|i| format!("line {i}\n")).collect();
+    let modified = original.replace("line 250\n", "changed\n");
+    let (multi, cx) = cx.add_window_view(|window, cx| {
+        let documents = vec![MultiDiffDocument::new(
+            "far.rs",
+            cx.new(|_| TextModel::new(&original)),
+            cx.new(|_| TextModel::new(&modified)),
+        )];
+        MultiDiffEditor::new(documents, window, cx)
+    });
+    cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+    paint(cx);
+    assert_eq!(multi.read_with(cx, |m, _| m.active_item()), Some(0));
+    assert_eq!(cursor(&multi, 0, cx), PointUtf16::new(250, 0));
+    let focused = cx.update(|window, cx| {
+        let diff = multi.read(cx).diff_editor(0).unwrap().read(cx);
+        diff.modified_editor().focus_handle(cx).is_focused(window)
+    });
+    assert!(focused);
+}
+
+/// Monaco `setPreserveFocusOnLoad`: the first change is selected, but not
+/// focused.
+#[gpui::test]
+fn loading_files_can_leave_the_focus(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let original: String = (0..300).map(|i| format!("line {i}\n")).collect();
+    let modified = original.replace("line 250\n", "changed\n");
+    let (multi, cx) = cx.add_window_view(|window, cx| {
+        let mut multi = MultiDiffEditor::new(Vec::new(), window, cx);
+        multi.set_preserve_focus_on_load(true);
+        let documents = vec![MultiDiffDocument::new(
+            "far.rs",
+            cx.new(|_| TextModel::new(&original)),
+            cx.new(|_| TextModel::new(&modified)),
+        )];
+        multi.set_documents(documents, window, cx);
+        multi
+    });
+    paint(cx);
+    assert_eq!(multi.read_with(cx, |m, _| m.active_item()), Some(0));
+    assert_eq!(cursor(&multi, 0, cx), PointUtf16::new(250, 0));
+    let focused =
+        cx.update(|window, cx| multi.read(cx).focus_handle(cx).contains_focused(window, cx));
+    assert!(!focused);
+}
+
+/// Monaco's `.placeholder`: "No Changed Files", or "Loading..." while the
+/// documents load (audit 3 §E.21).
+#[gpui::test]
+fn an_empty_list_shows_a_placeholder(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let (multi, cx) = cx.add_window_view(|window, cx| MultiDiffEditor::new(Vec::new(), window, cx));
+    cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+    paint(cx);
+    assert_eq!(
+        multi.read_with(cx, |m, _| m.placeholder_message()),
+        Some("No Changed Files")
+    );
+    let placeholder = cx.debug_bounds("multi-diff-placeholder").unwrap();
+    assert_eq!(placeholder.size, gpui::size(px(1200.), px(800.)));
+
+    multi.update(cx, |m, cx| m.set_documents_loading(cx));
+    paint(cx);
+    assert!(multi.read_with(cx, |m, _| m.is_loading()));
+    assert_eq!(
+        multi.read_with(cx, |m, _| m.placeholder_message()),
+        Some("Loading...")
+    );
+
+    cx.update(|window, cx| {
+        multi.update(cx, |m, cx| {
+            let documents = many_documents(2, cx);
+            m.set_documents(documents, window, cx)
+        })
+    });
+    paint(cx);
+    assert!(!multi.read_with(cx, |m, _| m.is_loading()));
+    assert_eq!(multi.read_with(cx, |m, _| m.placeholder_message()), None);
+    assert!(cx.debug_bounds("multi-diff-placeholder").is_none());
+}
+
+/// Monaco `IDocumentDiffItem.options`, `onOptionsDidChange` and
+/// `contextKeys` (audit 3 §E.22).
+#[gpui::test]
+fn per_file_options_and_context_keys(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let (multi, cx) = cx.add_window_view(|window, cx| {
+        let mut documents = many_documents(2, cx);
+        documents[1].options = Some(gpui_monaco::DiffEditorOptions {
+            render_side_by_side: false,
+            ..Default::default()
+        });
+        documents[1].context_keys = vec![("reviewFile".into(), true.into())];
+        MultiDiffEditor::new(documents, window, cx)
+    });
+    cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+    paint(cx);
+    let side_by_side = |index: usize, cx: &mut VisualTestContext| {
+        multi.read_with(cx, |m, cx| {
+            m.diff_editor(index)
+                .unwrap()
+                .read(cx)
+                .options()
+                .render_side_by_side
+        })
+    };
+    assert!(side_by_side(0, cx));
+    assert!(!side_by_side(1, cx));
+    // Unchanged regions are hidden in a file with its own options too.
+    assert!(multi.read_with(cx, |m, cx| {
+        m.diff_editor(1)
+            .unwrap()
+            .read(cx)
+            .options()
+            .hide_unchanged_regions
+            .enabled
+    }));
+    let has_key = |index: usize, cx: &mut VisualTestContext| {
+        multi.read_with(cx, |m, cx| {
+            let diff = m.diff_editor(index).unwrap().read(cx);
+            [diff.original_editor(), diff.modified_editor()]
+                .iter()
+                .all(|editor| editor.read(cx).context_keys(cx).contains("reviewFile"))
+        })
+    };
+    assert!(has_key(1, cx));
+    assert!(!has_key(0, cx));
+
+    // `onOptionsDidChange`: the file's editor takes them at once.
+    multi.update(cx, |m, cx| m.set_document_options(1, None, None, cx));
+    assert!(side_by_side(1, cx));
+    multi.update(cx, |m, cx| {
+        m.set_document_options(
+            0,
+            Some(gpui_monaco::DiffEditorOptions {
+                render_side_by_side: false,
+                ..Default::default()
+            }),
+            None,
+            cx,
+        )
+    });
+    assert!(!side_by_side(0, cx));
+
+    // The keys go with the file: a list without it leaves its editor
+    // without them.
+    let diff1 = multi.read_with(cx, |m, _| m.diff_editor(1).cloned().unwrap());
+    let first = documents(&multi, cx).remove(0);
+    cx.update(|window, cx| multi.update(cx, |m, cx| m.set_documents(vec![first], window, cx)));
+    paint(cx);
+    let keyed = multi.read_with(cx, |_, cx| {
+        let diff = diff1.read(cx);
+        diff.modified_editor()
+            .read(cx)
+            .context_keys(cx)
+            .contains("reviewFile")
+    });
+    assert!(!keyed);
+}
+
+/// Monaco's "resolves original line number visibility from variant and
+/// explicit options" (`multiDiffEditorWidget.test.ts`; audit 3 §E.23).
+#[gpui::test]
+fn original_line_numbers_follow_the_variant_and_explicit_options(cx: &mut TestAppContext) {
+    let (multi, cx) = setup_many(1, cx);
+    let hidden = |cx: &mut VisualTestContext| {
+        multi.read_with(cx, |m, cx| {
+            m.diff_editor(0)
+                .unwrap()
+                .read(cx)
+                .options()
+                .hide_original_line_numbers
+        })
+    };
+    let set_file = |hide: Option<bool>, cx: &mut VisualTestContext| {
+        multi.update(cx, |m, cx| m.set_document_options(0, None, hide, cx));
+        paint(cx);
+    };
+    set_variant(&multi, MultiDiffEditorVariant::NoCards, cx);
+    let default_no_cards_hidden = hidden(cx);
+    set_file(Some(false), cx);
+    let explicit_false_shows = !hidden(cx);
+    set_file(Some(true), cx);
+    let explicit_true_hides = hidden(cx);
+    set_file(None, cx);
+    set_variant(&multi, MultiDiffEditorVariant::Cards, cx);
+    let default_cards_hidden = hidden(cx);
+    set_variant(&multi, MultiDiffEditorVariant::NoCardsNonCompact, cx);
+    let default_non_compact_shows = !hidden(cx);
+    assert_eq!(
+        (
+            default_no_cards_hidden,
+            explicit_false_shows,
+            explicit_true_hides,
+            default_cards_hidden,
+            default_non_compact_shows,
+        ),
+        (true, true, true, true, true)
+    );
+
+    // The list's own choice comes first (Monaco's widget options override).
+    set_variant(&multi, MultiDiffEditorVariant::NoCards, cx);
+    set_file(Some(true), cx);
+    multi.update(cx, |m, cx| {
+        m.set_hide_original_line_numbers(Some(false), cx)
+    });
+    paint(cx);
+    assert!(!hidden(cx));
+}
+
+/// Monaco's "models bottom padding as trailing scroll content"
+/// (`multiDiffEditorWidget.test.ts`; audit 3 §E.24).
+#[gpui::test]
+fn bottom_padding_is_trailing_scroll_content(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let (multi, cx) = cx.add_window_view(|window, cx| MultiDiffEditor::new(Vec::new(), window, cx));
+    cx.simulate_resize(gpui::size(px(800.), px(200.)));
+    paint(cx);
+    let initial = multi.read_with(cx, |m, _| m.scroll_height());
+    multi.update(cx, |m, cx| m.set_padding_bottom(px(24.), cx));
+    paint(cx);
+    assert_eq!(
+        (
+            multi.read_with(cx, |m, _| m.scroll_height()) - initial,
+            multi.read_with(cx, |m, _| m.len())
+        ),
+        (px(24.), 0)
+    );
+}
+
+/// With files, the list scrolls past the last one by the bottom padding.
+#[gpui::test]
+fn bottom_padding_below_the_last_file(cx: &mut TestAppContext) {
+    let (multi, cx) = setup_many(10, cx);
+    multi.update(cx, |m, cx| m.set_padding_bottom(px(100.), cx));
+    // Scrolled to the end once every file is measured.
+    for _ in 0..2 {
+        multi.update(cx, |m, cx| m.set_scroll_top(px(100_000.), cx));
+        paint(cx);
+    }
+    let (top, height) = multi.read_with(cx, |m, _| m.item_bounds_for_tests(9));
+    let (_, leading, trailing) = multi.read_with(cx, |m, _| m.scroll_state_for_tests());
+    let scroll_height = multi.read_with(cx, |m, _| m.scroll_height());
+    assert_eq!(scroll_height - leading - trailing, top + height + px(100.));
+    assert_eq!(scroll_top(&multi, cx), scroll_height - px(800.));
+}
+
+/// Monaco `getActiveControl` and `onDidChangeActiveControl` (audit 3
+/// §E.24).
+#[gpui::test]
+fn the_active_control(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let events = Rc::new(RefCell::new(0));
+    let (multi, cx) = cx.add_window_view(|window, cx| {
+        let documents = many_documents(10, cx);
+        MultiDiffEditor::new(documents, window, cx)
+    });
+    let log = events.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&multi, move |_, event: &MultiDiffEditorEvent, _| {
+            if *event == MultiDiffEditorEvent::ActiveControlChanged {
+                *log.borrow_mut() += 1;
+            }
+        })
+        .detach()
+    });
+    cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+    paint(cx);
+    // Loading made the first file active.
+    let active = multi.read_with(cx, |m, _| m.active_control().cloned());
+    assert_eq!(
+        active,
+        multi.read_with(cx, |m, _| m.diff_editor(0).cloned())
+    );
+    assert!(active.is_some());
+
+    cx.update(|window, cx| multi.update(cx, |m, cx| m.go_to_file(7, window, cx)));
+    paint(cx);
+    assert_eq!(*events.borrow(), 1);
+    let active = multi.read_with(cx, |m, _| m.active_control().cloned());
+    assert_eq!(
+        active,
+        multi.read_with(cx, |m, _| m.diff_editor(7).cloned())
+    );
+    assert!(active.is_some());
+    // No change, no event.
+    paint(cx);
+    assert_eq!(*events.borrow(), 1);
 }

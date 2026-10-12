@@ -83,9 +83,10 @@ pub(super) fn map_offset(offset: Pixels, edits: &[SizeEdit]) -> Pixels {
 /// slack and scroll direction).
 #[derive(Debug, Default)]
 pub(super) struct ScrollAnchoring {
-    /// The item heights last laid out, `None` before the first layout of
-    /// the current items.
+    /// The item heights last laid out, `None` before the first layout.
     previous_heights: Option<Vec<Pixels>>,
+    /// Other items than those last laid out (Monaco's `!hasStableItems`).
+    items_changed: bool,
     /// Room above the first item (Monaco `leadingScrollSlack`).
     pub leading_slack: Pixels,
     /// Room below the last item (Monaco `trailingScrollSlack`).
@@ -98,10 +99,11 @@ pub(super) struct ScrollAnchoring {
 }
 
 impl ScrollAnchoring {
-    /// Forgets the items: new ones start without slack (Monaco's
-    /// `itemsChanged`).
-    pub fn reset(&mut self) {
-        *self = Self::default();
+    /// Notes that the items changed (some added, removed or moved): the
+    /// next layout keeps the scroll position and drops the slack instead
+    /// of anchoring (Monaco's `itemsChanged`).
+    pub fn items_changed(&mut self) {
+        self.items_changed = true;
     }
 
     /// The whole scroll height: the items and the slack.
@@ -130,8 +132,11 @@ impl ScrollAnchoring {
             .last_direction
             .is_some_and(|(up, at)| up && now.duration_since(at) < SCROLL_DIRECTION_RETENTION);
         let previous = self.previous_heights.replace(heights.to_vec());
+        let items_changed = std::mem::take(&mut self.items_changed);
         let changed = match previous {
-            Some(previous) if previous.len() == heights.len() && previous != heights => {
+            Some(previous)
+                if !items_changed && previous.len() == heights.len() && previous != heights =>
+            {
                 let old_height = scroll_height(&previous);
                 let old_top = requested - self.leading_slack;
                 let anchor = (old_top + if scrolling_up { viewport } else { px(0.) })
@@ -145,7 +150,7 @@ impl ScrollAnchoring {
                 target = self.leading_slack + desired;
                 true
             }
-            Some(previous) if previous.len() != heights.len() => {
+            Some(previous) if items_changed || previous.len() != heights.len() => {
                 self.leading_slack = px(0.);
                 self.trailing_slack = px(0.);
                 false
@@ -231,6 +236,30 @@ mod tests {
         let (top, _) = anchoring.update(&pxs(&[500., 450.]), viewport, px(870.), later);
         assert_eq!(top, px(870.));
         assert_eq!(anchoring.trailing_slack, px(20.));
+    }
+
+    #[test]
+    fn other_items_keep_the_scroll_position_without_slack() {
+        // Monaco `_update`'s `itemsChanged`: no anchoring, no slack.
+        let now = Instant::now();
+        let mut anchoring = ScrollAnchoring::default();
+        let viewport = px(100.);
+        anchoring.update(&pxs(&[500., 500.]), viewport, px(0.), now);
+        anchoring.last_scroll_top = px(900.);
+        let later = now + Duration::from_millis(200);
+        anchoring.update(&pxs(&[500., 450.]), viewport, px(900.), later);
+        assert_eq!(anchoring.trailing_slack, px(50.));
+        anchoring.items_changed();
+        let (top, changed) = anchoring.update(&pxs(&[100., 450.]), viewport, px(900.), later);
+        assert_eq!((top, changed), (px(900.), false));
+        assert_eq!(
+            (anchoring.leading_slack, anchoring.trailing_slack),
+            (px(0.), px(0.))
+        );
+        // The next change anchors again.
+        let (top, changed) = anchoring.update(&pxs(&[50., 450.]), viewport, px(400.), later);
+        assert!(changed);
+        assert_eq!(top, px(350.));
     }
 
     #[test]
