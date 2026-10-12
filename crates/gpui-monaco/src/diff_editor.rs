@@ -1035,6 +1035,7 @@ impl Render for UnchangedBar {
         let edge = |id: &'static str, cursor: gpui::CursorStyle| {
             div()
                 .id(id)
+                .debug_selector(move || id.into())
                 .absolute()
                 .left_0()
                 .w_full()
@@ -4106,6 +4107,7 @@ impl DiffEditor {
         };
         div()
             .id("diff-overview")
+            .debug_selector(|| "diff-overview".into())
             .h_full()
             .w(px(DIFF_OVERVIEW_WIDTH))
             .flex_none()

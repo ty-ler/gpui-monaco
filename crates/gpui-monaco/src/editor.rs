@@ -5335,8 +5335,8 @@ impl CodeEditor {
 
     /// The pointer the editor and its widgets show over the whole window in
     /// the last frame, during a drag that captured it: the editor's own
-    /// ([`Self::drag_mouse_cursor`]), the hover's, find widget's or color
-    /// picker's, else a GPUI drag's (the suggest widget's and peek view's
+    /// ([`Self::drag_mouse_cursor`]), the hover's, find widget's, quick
+    /// input's or color picker's, else a GPUI drag's (the suggest widget's and peek view's
     /// sashes and sliders). For tests: GPUI's test platform doesn't keep
     /// the cursor.
     #[doc(hidden)]
@@ -5344,6 +5344,7 @@ impl CodeEditor {
         self.drag_mouse_cursor()
             .or_else(|| self.hover_captured_cursor(cx))
             .or_else(|| self.find_widget_captured_cursor(cx))
+            .or_else(|| self.quick_access_captured_cursor(cx))
             .or_else(|| {
                 self.color_picker_for_tests(cx)
                     .and_then(|picker| picker.read(cx).captured_cursor())
