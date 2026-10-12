@@ -5,6 +5,11 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Ported test suites (#357):** Monaco's `cursorMoveCommand.test.ts`, `linkedEditing.test.ts` and `snippetVariables.test.ts` are ported in full (audit 3 §A.32). No behaviour changes were needed.
+  - **`cursorMoveCommand.test.ts`:** the 46 cases #333 hadn't ported (character, half-line, line position, model-line, wrapped-line, blank-line and `foldedLine` moves) run the `cursorMove` command in a GPUI editor (`tests/cursor_move_command.rs`); the nine viewport cases were already unit tests.
+  - **`linkedEditing.test.ts`:** all 38 cases run with Monaco's word-matching provider and word patterns (`tests/linked_editing.rs`). "Selection insert - across boundary" is ignored: Monaco's `nodeAcceptEdit` keeps a decoration edge inside a replaced span in place for the length of the shorter text, but the port moves it to the start of the new text, so the typed character joins the linked range.
+  - **`snippetVariables.test.ts`:** the 16 cases #351 hadn't ported run as unit tests (`src/snippet/variables_tests.rs`), with "editor variables, selection" also in an editor (`tests/snippet.rs`). The label service and workspace mocks are replaced by the context's path and `SnippetWorkspace`.
+  - **Integration tests:** typing without a language, word moves under wrap, reveals after adding cursors, PageDown scrolling and column select across folds were already covered by #326, #333, #323 and #334.
 - **Input (#356):** trackpad pinch zoom and press-and-hold accents at every cursor, as in Monaco.
   - **Pinch zoom:** with `mouse_wheel_zoom`, a trackpad pinch zooms every editor's font (Monaco's `hasMouseWheelZoomModifiers` accepts the Ctrl+wheel browsers send for a pinch). Each GPUI `PinchEvent` counts as one wheel notch of the trackpad gesture, a zoom level per five, like Chromium's synthetic pinch wheel; Shift or Alt held stops it. Before, pinching did nothing.
   - **Press-and-hold at every cursor:** replacing text around the primary cursor without a composition (picking `é` from the macOS accent menu after holding `e`, or autocorrect) replaces it at every cursor, as Monaco's `compositionType` with `replacePrevCharCnt` does. Before, only the primary cursor's character changed.
