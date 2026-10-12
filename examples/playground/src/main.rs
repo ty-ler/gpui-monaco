@@ -677,26 +677,53 @@ fn main() {
             .unwrap_or(1100.);
         let bounds = Bounds::centered(None, size(px(width), px(760.)), cx);
         // `PLAYGROUND_MULTI_DIFF=old1:new1,old2:new2` opens a multi-diff editor.
+        // An empty side (`:new` or `old:`) is a created or deleted file, and
+        // a file that isn't UTF-8 shows the binary placeholder.
+        // `PLAYGROUND_MULTI_DIFF_VARIANT=cards|noCards|noCardsNonCompact`
+        // picks the variant.
         if let Ok(pairs) = std::env::var("PLAYGROUND_MULTI_DIFF") {
+            // The model, and whether the file is binary.
             let load = |path: &str, cx: &mut App| {
-                let text = std::fs::read_to_string(path).unwrap_or_else(|e| format!("{path}: {e}"));
+                if path.is_empty() {
+                    return (None, false);
+                }
+                let (text, binary) = match std::fs::read_to_string(path) {
+                    Ok(text) => (text, false),
+                    Err(e) if e.kind() == std::io::ErrorKind::InvalidData => (String::new(), true),
+                    Err(e) => (format!("{path}: {e}"), false),
+                };
                 let language = language_for_path(path, cx);
-                cx.new(|_| TextModel::new(&text).with_language(language))
+                let model = cx.new(|_| TextModel::new(&text).with_language(language));
+                (Some(model), binary)
             };
             let documents: Vec<_> = pairs
                 .split(',')
                 .filter_map(|pair| pair.split_once(':'))
                 .map(|(original, modified)| {
-                    let label = std::path::Path::new(modified)
+                    let path = if modified.is_empty() {
+                        original
+                    } else {
+                        modified
+                    };
+                    let label = std::path::Path::new(path)
                         .file_name()
-                        .map_or(modified.to_string(), |n| n.to_string_lossy().into_owned());
-                    gpui_monaco::MultiDiffDocument::new(
-                        label,
-                        load(original, cx),
-                        load(modified, cx),
-                    )
+                        .map_or(path.to_string(), |n| n.to_string_lossy().into_owned());
+                    let (original, original_binary) = load(original, cx);
+                    let (modified, modified_binary) = load(modified, cx);
+                    gpui_monaco::MultiDiffDocument {
+                        label: label.into(),
+                        original_label: None,
+                        original,
+                        modified,
+                        binary: original_binary || modified_binary,
+                    }
                 })
                 .collect();
+            let variant = match std::env::var("PLAYGROUND_MULTI_DIFF_VARIANT").as_deref() {
+                Ok("cards") => gpui_monaco::MultiDiffEditorVariant::Cards,
+                Ok("noCards") => gpui_monaco::MultiDiffEditorVariant::NoCards,
+                _ => gpui_monaco::MultiDiffEditorVariant::NoCardsNonCompact,
+            };
             let window = cx
                 .open_window(
                     WindowOptions {
@@ -704,7 +731,12 @@ fn main() {
                         ..Default::default()
                     },
                     |window, cx| {
-                        cx.new(|cx| gpui_monaco::MultiDiffEditor::new(documents, window, cx))
+                        cx.new(|cx| {
+                            let mut multi =
+                                gpui_monaco::MultiDiffEditor::new(documents, window, cx);
+                            multi.set_variant(variant, cx);
+                            multi
+                        })
                     },
                 )
                 .expect("failed to open window");

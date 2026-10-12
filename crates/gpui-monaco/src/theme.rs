@@ -193,6 +193,24 @@ editor_colors! { r;
     /// (`sideBarSectionHeader.border`, high contrast themes only by
     /// default).
     multi_diff_header_border: Option<Hsla> = r.visible("sideBarSectionHeader.border");
+    /// The line between files of the compact multi-diff variants
+    /// (`panel.border`).
+    multi_diff_entry_border: Option<Hsla> = r.visible("panel.border");
+    /// The card variant's headers (`sideBarSectionHeader.background`).
+    multi_diff_card_header_background: Option<Hsla> =
+        r.visible("sideBarSectionHeader.background");
+    /// The card variant's card borders (`widget.border`, else
+    /// `editorWidget.border`).
+    multi_diff_card_border: Option<Hsla> = r
+        .first(&["widget.border", "editorWidget.border"])
+        .filter(|color| color.a > 0.);
+    /// The `A` of a created file in the compact headers
+    /// (`gitDecoration.addedResourceForeground`).
+    multi_diff_added_foreground: Hsla = r.color("gitDecoration.addedResourceForeground");
+    /// The `D` of a deleted file (`gitDecoration.deletedResourceForeground`).
+    multi_diff_deleted_foreground: Hsla = r.color("gitDecoration.deletedResourceForeground");
+    /// The `R` of a renamed file (`gitDecoration.modifiedResourceForeground`).
+    multi_diff_renamed_foreground: Hsla = r.color("gitDecoration.modifiedResourceForeground");
     /// Selections in an unfocused editor (`editor.inactiveSelectionBackground`).
     inactive_selection_background: Hsla = r.color("editor.inactiveSelectionBackground");
     /// The cursor (`editorCursor.foreground`).
