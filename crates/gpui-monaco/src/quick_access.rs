@@ -365,9 +365,31 @@ impl QuickInput {
         self.scroll_top = self.scroll_top.clamp(px(0.), self.max_scroll_top());
     }
 
-    /// Rows that fit in the list, for Page Up/Down.
-    fn page_rows(&self) -> isize {
-        ((self.list_height / px(ROW_HEIGHT)).floor() as isize).max(1)
+    /// Monaco `List.focusNextPage` / `focusPreviousPage` (Page Down / Up):
+    /// focus the last (first) fully visible row; when it's focused already,
+    /// scroll a page and focus the new last (first) row.
+    fn focus_page(&mut self, next: bool, cx: &mut Context<Self>) {
+        if self.items.is_empty() {
+            return;
+        }
+        let list = PageList {
+            count: self.items.len(),
+            row_height: px(ROW_HEIGHT),
+            render_height: self.list_height,
+            max_scroll_top: self.max_scroll_top(),
+        };
+        let (active, scroll_top) = if next {
+            list.focus_next_page(self.active, self.scroll_top)
+        } else {
+            list.focus_previous_page(self.active, self.scroll_top)
+        };
+        self.scroll_top = scroll_top;
+        if active.is_some() {
+            self.active = active;
+        }
+        self.reveal_active();
+        self.preview(cx);
+        cx.notify();
     }
 
     /// Moves the active item by `delta` items (wrapping for single steps).
@@ -755,14 +777,10 @@ impl Render for QuickInput {
             .text_color(colors.quick_input_foreground)
             .on_action(cx.listener(|this, _: &QuickInputNext, _, cx| this.move_active(1, cx)))
             .on_action(cx.listener(|this, _: &QuickInputPrevious, _, cx| this.move_active(-1, cx)))
-            .on_action(cx.listener(|this, _: &QuickInputPageNext, _, cx| {
-                let page = this.page_rows();
-                this.move_active(page, cx)
-            }))
-            .on_action(cx.listener(|this, _: &QuickInputPagePrevious, _, cx| {
-                let page = this.page_rows();
-                this.move_active(-page, cx)
-            }))
+            .on_action(cx.listener(|this, _: &QuickInputPageNext, _, cx| this.focus_page(true, cx)))
+            .on_action(
+                cx.listener(|this, _: &QuickInputPagePrevious, _, cx| this.focus_page(false, cx)),
+            )
             .on_action(cx.listener(|this, _: &QuickInputFirst, _, cx| {
                 this.move_active(-(this.items.len() as isize), cx)
             }))
@@ -1680,6 +1698,41 @@ mod tests {
         matches_words(&word, &target, false)
     }
 
+    /// Monaco `List.focusNextPage` / `focusPreviousPage` over 22px rows
+    /// in a 100px list (4 full rows, a fifth partly shown).
+    #[test]
+    fn page_focus_like_monaco() {
+        let list = PageList {
+            count: 20,
+            row_height: px(22.),
+            render_height: px(100.),
+            max_scroll_top: px(22. * 20. - 100.),
+        };
+        // Page Down: first to the last fully visible row, then a page on.
+        assert_eq!(list.focus_next_page(Some(0), px(0.)), (Some(3), px(0.)));
+        assert_eq!(list.focus_next_page(Some(3), px(0.)), (Some(8), px(100.)));
+        // At the end: the last row, then nothing more.
+        let end = px(22. * 20. - 100.);
+        assert_eq!(list.focus_next_page(Some(17), end), (Some(19), end));
+        assert_eq!(list.focus_next_page(Some(19), end), (None, end));
+        // Page Up: the first fully visible row (row 5 starts at 110px),
+        // then a page back.
+        assert_eq!(
+            list.focus_previous_page(Some(8), px(100.)),
+            (Some(5), px(100.))
+        );
+        assert_eq!(
+            list.focus_previous_page(Some(5), px(100.)),
+            (Some(0), px(0.))
+        );
+        assert_eq!(list.focus_previous_page(Some(0), px(0.)), (None, px(0.)));
+        // A focus above the page moves to the page's first row.
+        assert_eq!(
+            list.focus_previous_page(Some(2), px(100.)),
+            (Some(0), px(0.))
+        );
+    }
+
     /// From VS Code's `filters.test.ts` (`matchesWords`).
     #[test]
     fn matches_words_like_monaco() {
@@ -1771,5 +1824,78 @@ mod tests {
         assert_eq!(column_from_visible("\tab", 4, 4), 1);
         assert_eq!(column_from_visible("\tab", 5, 4), 2);
         assert_eq!(column_from_visible("ab", 1, 4), 1);
+    }
+}
+
+/// A list of rows of one height, for Monaco's page focus moves
+/// (`listWidget.ts` `focusNextPage` / `focusPreviousPage` over
+/// `listView.ts` `indexAt` / `indexAfter`).
+#[derive(Clone, Copy, Debug)]
+struct PageList {
+    count: usize,
+    row_height: Pixels,
+    render_height: Pixels,
+    max_scroll_top: Pixels,
+}
+
+impl PageList {
+    /// Monaco `RangeMap.indexAt`: the row at `y`, `count` past the end.
+    fn index_at(&self, y: Pixels) -> usize {
+        ((y / self.row_height).floor().max(0.) as usize).min(self.count)
+    }
+
+    /// Monaco `RangeMap.indexAfter`.
+    fn index_after(&self, y: Pixels) -> usize {
+        (self.index_at(y) + 1).min(self.count)
+    }
+
+    fn clamp(&self, scroll_top: Pixels) -> Pixels {
+        scroll_top.clamp(px(0.), self.max_scroll_top)
+    }
+
+    /// The new focus (`None`: unchanged) and scroll top for Page Down.
+    fn focus_next_page(
+        &self,
+        focused: Option<usize>,
+        scroll_top: Pixels,
+    ) -> (Option<usize>, Pixels) {
+        let last_page = self
+            .index_at(scroll_top + self.render_height)
+            .saturating_sub(1);
+        if focused != Some(last_page) && focused.is_none_or(|f| last_page > f) {
+            return (Some(last_page), scroll_top);
+        }
+        let mut next_top = scroll_top + self.render_height;
+        if focused.is_some_and(|f| last_page > f) {
+            next_top -= self.row_height;
+        }
+        let next_top = self.clamp(next_top);
+        if next_top == scroll_top {
+            return (None, scroll_top);
+        }
+        // Monaco clears the focus and runs again after the scroll.
+        self.focus_next_page(None, next_top)
+    }
+
+    /// The new focus (`None`: unchanged) and scroll top for Page Up.
+    fn focus_previous_page(
+        &self,
+        focused: Option<usize>,
+        scroll_top: Pixels,
+    ) -> (Option<usize>, Pixels) {
+        let first_page = if scroll_top == px(0.) {
+            self.index_at(scroll_top)
+        } else {
+            self.index_after(scroll_top - px(1.))
+        }
+        .min(self.count - 1);
+        if focused != Some(first_page) && focused.is_none_or(|f| f >= first_page) {
+            return (Some(first_page), scroll_top);
+        }
+        let next_top = self.clamp(scroll_top - self.render_height);
+        if next_top == scroll_top {
+            return (None, scroll_top);
+        }
+        self.focus_previous_page(None, next_top)
     }
 }

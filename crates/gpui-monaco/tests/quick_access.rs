@@ -316,3 +316,44 @@ fn keybindings_use_monaco_labels(cx: &mut TestAppContext) {
     };
     assert!(rows.iter().any(|row| row == rename), "{rows:?}");
 }
+
+/// The active row's index among the items (separators aren't rows).
+fn active_index(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Option<usize> {
+    rows(editor, cx)
+        .iter()
+        .filter(|row| !row.starts_with('['))
+        .position(|row| row.starts_with("> "))
+}
+
+/// Monaco `List.focusNextPage` / `focusPreviousPage`: Page Down focuses
+/// the last fully visible row, and only then scrolls a page; Page Up the
+/// same upwards.
+#[gpui::test]
+fn page_keys_move_like_monaco_lists(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&"fn main() {}\n".repeat(200), cx);
+    cx.simulate_keystrokes("f1");
+    draw(cx);
+    let (_, height, _) = scroll(&editor, cx);
+    let row = gpui::px(22.);
+    let last_visible = ((height / row).floor() as usize).saturating_sub(1);
+    assert_eq!(active_index(&editor, cx), Some(0));
+    cx.simulate_keystrokes("pagedown");
+    draw(cx);
+    assert_eq!(active_index(&editor, cx), Some(last_visible));
+    assert_eq!(scroll(&editor, cx).0, gpui::px(0.));
+    cx.simulate_keystrokes("pagedown");
+    draw(cx);
+    let top = scroll(&editor, cx).0;
+    assert_eq!(top, height);
+    let bottom_row = ((top + height) / row).floor() as usize - 1;
+    assert_eq!(active_index(&editor, cx), Some(bottom_row));
+    cx.simulate_keystrokes("pageup");
+    draw(cx);
+    let first_visible = (top / row).ceil() as usize;
+    assert_eq!(active_index(&editor, cx), Some(first_visible));
+    assert_eq!(scroll(&editor, cx).0, top);
+    cx.simulate_keystrokes("pageup");
+    draw(cx);
+    assert_eq!(scroll(&editor, cx).0, gpui::px(0.));
+    assert_eq!(active_index(&editor, cx), Some(0));
+}
