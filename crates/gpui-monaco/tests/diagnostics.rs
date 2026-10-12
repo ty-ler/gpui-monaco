@@ -113,6 +113,174 @@ fn untagged_hints_cover_two_columns(cx: &mut TestAppContext) {
     );
 }
 
+// ----- markerDecorationsService.test.ts --------------------------------------
+
+/// The decorated ranges of `markers` set on a model holding `text`.
+fn decorated(
+    text: &str,
+    markers: Vec<Marker>,
+    cx: &mut TestAppContext,
+) -> Vec<std::ops::Range<PointUtf16>> {
+    let (editor, cx) = setup(text, |_| {}, cx);
+    set_markers(&editor, cx, markers);
+    editor.update(cx, |e, cx| {
+        e.model()
+            .read(cx)
+            .markers()
+            .into_iter()
+            .map(|m| m.range)
+            .collect()
+    })
+}
+
+fn at(row: u32, column: u32) -> PointUtf16 {
+    PointUtf16::new(row, column)
+}
+
+#[gpui::test]
+fn an_empty_marker_in_a_word_covers_the_word(cx: &mut TestAppContext) {
+    let ranges = decorated(
+        "  foobar baz\n",
+        vec![marker(MarkerSeverity::Error, at(0, 5)..at(0, 5))],
+        cx,
+    );
+    assert_eq!(ranges, vec![at(0, 2)..at(0, 8)]);
+}
+
+#[gpui::test]
+fn an_empty_marker_at_the_end_of_a_line_stays_empty(cx: &mut TestAppContext) {
+    // Behind the last non-whitespace character, and on an empty line:
+    // drawn one character wide rather than over the line break.
+    let ranges = decorated(
+        "foobar  \n\nnext\n",
+        vec![
+            marker(MarkerSeverity::Error, at(0, 6)..at(0, 6)),
+            marker(MarkerSeverity::Error, at(0, 7)..at(0, 7)),
+            marker(MarkerSeverity::Warning, at(1, 0)..at(1, 0)),
+        ],
+        cx,
+    );
+    assert_eq!(
+        ranges,
+        vec![at(0, 6)..at(0, 6), at(0, 7)..at(0, 7), at(1, 0)..at(1, 0)]
+    );
+}
+
+#[gpui::test]
+fn an_empty_marker_between_words_stays_empty(cx: &mut TestAppContext) {
+    let ranges = decorated(
+        "foo  = bar\n",
+        vec![marker(MarkerSeverity::Error, at(0, 4)..at(0, 4))],
+        cx,
+    );
+    assert_eq!(ranges, vec![at(0, 4)..at(0, 4)]);
+}
+
+#[gpui::test]
+fn a_whole_line_marker_starts_at_the_first_non_whitespace(cx: &mut TestAppContext) {
+    let ranges = decorated(
+        "fn main() {\n    let x = 1;\n}\n",
+        vec![
+            marker(MarkerSeverity::Error, at(1, 0)..at(1, u32::MAX)),
+            // Not from column 0: kept.
+            marker(MarkerSeverity::Warning, at(1, 1)..at(1, u32::MAX)),
+            // Not to `u32::MAX`: kept.
+            marker(MarkerSeverity::Info, at(1, 0)..at(1, 14)),
+        ],
+        cx,
+    );
+    assert_eq!(
+        ranges,
+        vec![
+            at(1, 0)..at(1, 14),
+            at(1, 1)..at(1, 14),
+            at(1, 4)..at(1, 14)
+        ]
+    );
+}
+
+#[gpui::test]
+fn only_the_first_500_markers_are_decorated(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&"x\n".repeat(600), |_| {}, cx);
+    let markers = (0..600)
+        .map(|row| marker(MarkerSeverity::Error, at(row, 0)..at(row, 1)))
+        .collect();
+    set_markers(&editor, cx, markers);
+    let (live, all) = editor.update(cx, |e, cx| {
+        let live = e.model().read(cx).markers().len();
+        (
+            live,
+            gpui_monaco::model_markers(cx, &Default::default()).len(),
+        )
+    });
+    assert_eq!(live, gpui_monaco::MAX_DECORATED_MARKERS);
+    assert_eq!(all, 600);
+    // Another owner's markers come after: none of them is decorated, until
+    // the first owner's go.
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| {
+            m.set_markers(
+                "other",
+                vec![marker(MarkerSeverity::Warning, at(0, 0)..at(0, 1))],
+                cx,
+            )
+        })
+    });
+    let warnings = |cx: &mut VisualTestContext| {
+        editor.update(cx, |e, cx| {
+            e.model()
+                .read(cx)
+                .markers()
+                .iter()
+                .filter(|m| m.severity == MarkerSeverity::Warning)
+                .count()
+        })
+    };
+    assert_eq!(warnings(cx), 0);
+    set_markers(&editor, cx, Vec::new());
+    assert_eq!(warnings(cx), 1);
+    let live = editor.update(cx, |e, cx| e.model().read(cx).markers().len());
+    assert_eq!(live, 1);
+}
+
+/// Monaco `MarkerDecorations.update`: an owner's markers keep their
+/// decorations while another owner's change.
+#[gpui::test]
+fn unchanged_markers_keep_their_decorations(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("let value = 1;\n", |_| {}, cx);
+    set_markers(
+        &editor,
+        cx,
+        vec![marker(MarkerSeverity::Error, at(0, 4)..at(0, 9))],
+    );
+    let ids = |cx: &mut VisualTestContext| {
+        let mut ids: Vec<_> = editor.update(cx, |e, cx| {
+            e.model().update(cx, |m, _| {
+                m.all_decorations(None)
+                    .iter()
+                    .filter(|d| d.options.validation)
+                    .map(|d| d.id)
+                    .collect()
+            })
+        });
+        ids.sort();
+        ids
+    };
+    let first = ids(cx);
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| {
+            m.set_markers(
+                "other",
+                vec![marker(MarkerSeverity::Warning, at(0, 12)..at(0, 13))],
+                cx,
+            )
+        })
+    });
+    let both = ids(cx);
+    assert_eq!(both.len(), 2);
+    assert!(both.contains(&first[0]));
+}
+
 fn hover_markers(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<Marker> {
     editor.update(cx, |e, cx| {
         e.set_selections(

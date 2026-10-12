@@ -109,6 +109,15 @@ fn standard_token_type(name: &str) -> crate::cursor::StandardTokenType {
         .unwrap_or(StandardTokenType::Other)
 }
 
+/// Monaco `TextModel`'s `MODEL_ID`, counting every model made.
+static MODEL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A new model's uri without one (Monaco `inmemory://model/${MODEL_ID}`).
+fn next_inmemory_uri() -> SharedString {
+    let id = MODEL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    format!("inmemory://model/{id}").into()
+}
+
 /// Monaco `guessLanguageIdByFilepathOrFirstLine` for a model with this uri
 /// and first line.
 fn guess_language_id(
@@ -145,7 +154,10 @@ pub fn register_model(cx: &mut App, model: &gpui::Entity<TextModel>) {
     if model.read(cx).is_internal() {
         return;
     }
-    crate::registry::track_model(model, cx);
+    // A model made before `init` gets the markers set on its uri.
+    if crate::registry::track_model(model, cx) {
+        model.update(cx, |model, cx| model.update_marker_decorations(cx));
+    }
     if let Some(uri) = model.read(cx).uri().cloned() {
         let models = cx.default_global::<Models>();
         models.by_uri.retain(|_, model| model.upgrade().is_some());
@@ -190,7 +202,7 @@ fn live_model_for_uri(cx: &mut App, uri: &str) -> Option<gpui::Entity<TextModel>
     }
     crate::registry::models(cx)
         .into_iter()
-        .find(|model| model.read(cx).uri().is_some_and(|u| u.as_ref() == uri))
+        .find(|model| model.read(cx).resource().as_ref() == uri)
 }
 
 /// Creates a model holding `value`, in `language` (a language id or a MIME
@@ -468,13 +480,17 @@ pub struct TextModel {
     /// or not, else plain text. `None` until first resolved.
     language: Option<Arc<Language>>,
     uri: Option<SharedString>,
+    /// `uri`, or `inmemory://model/N` without one (Monaco's
+    /// `_associatedResource`).
+    resource: SharedString,
     /// Highlighting, for a language with a grammar or highlighter.
     syntax: Option<Syntax>,
     decorations: DecorationSet,
     /// The user chose to keep this model's unusual line terminators
     /// (Monaco's `ignoreUnusualLineTerminators` model property).
     pub(crate) ignore_unusual_line_terminators: bool,
-    pub(crate) markers: crate::markers::MarkerSet,
+    /// The decorated markers of `resource`.
+    pub(crate) markers: Vec<crate::markers::DecoratedMarker>,
     /// Set when `language_id` hasn't been resolved against the registry yet.
     language_pending: bool,
     /// No language was given: guess one from the uri and first line when
@@ -514,10 +530,11 @@ impl TextModel {
             language_id: None,
             language: None,
             uri: None,
+            resource: next_inmemory_uri(),
             syntax: None,
             decorations: DecorationSet::default(),
             ignore_unusual_line_terminators: false,
-            markers: Default::default(),
+            markers: Vec::new(),
             // Plain text, resolved when first shown.
             language_pending: true,
             guess_language: false,
@@ -619,7 +636,9 @@ impl TextModel {
     /// [`LanguageRegistry::language_for_path_or_first_line`]), and guessed
     /// again when languages are registered, until one is set.
     pub fn with_uri(mut self, uri: impl Into<SharedString>) -> Self {
-        self.uri = Some(uri.into());
+        let uri = uri.into();
+        self.resource = uri.clone();
+        self.uri = Some(uri);
         if self.language_id.is_none() {
             self.language_pending = true;
             self.guess_language = true;
@@ -631,6 +650,16 @@ impl TextModel {
     /// The uri set with [`TextModel::with_uri`].
     pub fn uri(&self) -> Option<&SharedString> {
         self.uri.as_ref()
+    }
+
+    /// The model's uri as Monaco has it (`ITextModel.uri`): the one set
+    /// with [`TextModel::with_uri`], else `inmemory://model/N`, unique to
+    /// the model. Markers are kept by it, so a model without a uri has its
+    /// markers reported by [`on_did_change_markers`](crate::on_did_change_markers)
+    /// and found by [`model_markers`](crate::model_markers), and
+    /// [`model_for_uri`] finds the model by it.
+    pub fn resource(&self) -> &SharedString {
+        &self.resource
     }
 
     /// What language feature providers see about this model.

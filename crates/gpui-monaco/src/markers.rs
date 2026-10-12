@@ -3,12 +3,14 @@
 //! messages, and navigable with F8 / Shift+F8.
 
 use std::ops::Range;
+use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, Hsla, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement, PathBuilder, Pixels, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, canvas, div, point, px, rgb, rgba,
+    App, AppContext as _, Context, Entity, EntityId, Global, Hsla, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement, PathBuilder, Pixels, Render, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled, Window, canvas, div, point, px, rgb,
+    rgba,
 };
 use text::PointUtf16;
 
@@ -24,7 +26,8 @@ use crate::widgets::{ViewZone, WidgetId, ZoneHeight};
 /// Monaco `MarkerSeverity`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MarkerSeverity {
-    /// A hint; no squiggle, only a hover message.
+    /// A hint: three dots under its first two characters, or nothing when
+    /// tagged.
     Hint,
     /// Information: blue squiggle.
     Info,
@@ -145,7 +148,10 @@ pub struct Marker {
     pub severity: MarkerSeverity,
     /// The message, shown on hover and by marker navigation.
     pub message: SharedString,
-    /// The range (0-based rows, UTF-16 columns). An empty range is widened to one
+    /// The range (0-based rows, UTF-16 columns). As in Monaco, an empty
+    /// range is drawn over the word there (one character wide at the end
+    /// of a line), and a whole-line one, from column 0 to `u32::MAX`
+    /// (Monaco's `Number.MAX_VALUE`), from the first non-whitespace
     /// character.
     pub range: Range<PointUtf16>,
     /// E.g. `rustc`; shown after the message.
@@ -168,17 +174,142 @@ impl Marker {
     }
 }
 
-/// Markers of one model, by owner (e.g. one per linter), in the order the
-/// owners first set them (Monaco's `DoubleResourceMap` keeps insertion
-/// order).
+/// Monaco `MarkerDecorationsService._updateDecorations`: only the first
+/// 500 markers of a resource are decorated (`read({ resource, take: 500 })`).
+pub const MAX_DECORATED_MARKERS: usize = 500;
+
+/// Monaco `MarkerService`: every marker, by owner and resource uri, apart
+/// from the models. Markers outlive their model (only an in-memory model's
+/// go with it) and decorate a model created later with their uri.
+///
+/// Like Monaco's `DoubleResourceMap`, owners and resources keep the order
+/// they were first set in; replacing markers keeps the place, and removing
+/// them all gives it up.
 #[derive(Default)]
-pub(crate) struct MarkerSet {
-    by_owner: Vec<(SharedString, Vec<Marker>, Vec<DecorationId>)>,
+struct MarkerService {
+    /// Each owner's markers by resource.
+    by_owner: Vec<(SharedString, Vec<ResourceMarkers>)>,
+    /// Each resource's owners.
+    by_resource: Vec<(SharedString, Vec<SharedString>)>,
+}
+
+/// A resource's markers of one owner.
+type ResourceMarkers = (SharedString, Vec<Rc<Marker>>);
+
+/// An owner, a resource and its markers of the owner.
+type MarkerEntry<'a> = (&'a SharedString, &'a SharedString, &'a Vec<Rc<Marker>>);
+
+impl Global for MarkerService {}
+
+impl MarkerService {
+    fn set(&mut self, owner: SharedString, resource: SharedString, markers: Vec<Rc<Marker>>) {
+        let resources = match self.by_owner.iter().position(|(o, _)| *o == owner) {
+            Some(ix) => &mut self.by_owner[ix].1,
+            None => {
+                self.by_owner.push((owner.clone(), Vec::new()));
+                &mut self.by_owner.last_mut().unwrap().1
+            }
+        };
+        match resources.iter_mut().find(|(r, _)| *r == resource) {
+            Some((_, old)) => *old = markers,
+            None => resources.push((resource.clone(), markers)),
+        }
+        let owners = match self.by_resource.iter().position(|(r, _)| *r == resource) {
+            Some(ix) => &mut self.by_resource[ix].1,
+            None => {
+                self.by_resource.push((resource, Vec::new()));
+                &mut self.by_resource.last_mut().unwrap().1
+            }
+        };
+        if !owners.contains(&owner) {
+            owners.push(owner);
+        }
+    }
+
+    /// Removes `owner`'s markers of `resource`; whether there were any.
+    fn delete(&mut self, owner: &str, resource: &str) -> bool {
+        let Some(ix) = self.by_owner.iter().position(|(o, _)| o == owner) else {
+            return false;
+        };
+        let resources = &mut self.by_owner[ix].1;
+        let Some(rx) = resources.iter().position(|(r, _)| r == resource) else {
+            return false;
+        };
+        resources.remove(rx);
+        if resources.is_empty() {
+            self.by_owner.remove(ix);
+        }
+        if let Some(ix) = self.by_resource.iter().position(|(r, _)| r == resource) {
+            let owners = &mut self.by_resource[ix].1;
+            owners.retain(|o| o != owner);
+            if owners.is_empty() {
+                self.by_resource.remove(ix);
+            }
+        }
+        true
+    }
+
+    /// The resources `owner` has markers for.
+    fn resources_of(&self, owner: &str) -> Vec<SharedString> {
+        self.by_owner
+            .iter()
+            .find(|(o, _)| o == owner)
+            .map(|(_, resources)| resources.iter().map(|(r, _)| r.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// The owners with markers for `resource`.
+    fn owners_of(&self, resource: &str) -> Vec<SharedString> {
+        self.by_resource
+            .iter()
+            .find(|(r, _)| r == resource)
+            .map(|(_, owners)| owners.clone())
+            .unwrap_or_default()
+    }
+
+    /// Monaco `MarkerService.read`: by owner, then resource, in the order
+    /// first set; a resource's by owner; an owner's by resource.
+    fn read(&self, filter: &MarkerFilter) -> Vec<(&SharedString, &SharedString, &Rc<Marker>)> {
+        let take = filter.take.filter(|&take| take > 0).unwrap_or(usize::MAX);
+        let entries: Box<dyn Iterator<Item = MarkerEntry<'_>>> =
+            match (&filter.owner, &filter.resource) {
+                (_, Some(resource)) => Box::new(
+                    self.by_resource
+                        .iter()
+                        .filter(move |(r, _)| r == resource)
+                        .flat_map(|(_, owners)| owners)
+                        .filter(|owner| filter.owner.as_ref().is_none_or(|o| o == *owner))
+                        .filter_map(move |owner| {
+                            let (owner, resources) =
+                                self.by_owner.iter().find(|(o, _)| o == owner)?;
+                            let (resource, markers) =
+                                resources.iter().find(|(r, _)| r == resource)?;
+                            Some((owner, resource, markers))
+                        }),
+                ),
+                (owner, None) => Box::new(
+                    self.by_owner
+                        .iter()
+                        .filter(move |(o, _)| owner.as_ref().is_none_or(|owner| owner == o))
+                        .flat_map(|(owner, resources)| {
+                            resources
+                                .iter()
+                                .map(move |(resource, markers)| (owner, resource, markers))
+                        }),
+                ),
+            };
+        entries
+            .flat_map(|(owner, resource, markers)| {
+                markers.iter().map(move |marker| (owner, resource, marker))
+            })
+            .take(take)
+            .collect()
+    }
 }
 
 /// Monaco `MarkerService._toMarker`: drops markers without a message and
 /// moves an end before the start to the start's line.
-fn sanitize(markers: Vec<Marker>) -> Vec<Marker> {
+fn sanitize(markers: Vec<Marker>) -> Vec<Rc<Marker>> {
     markers
         .into_iter()
         .filter(|marker| !marker.message.is_empty())
@@ -186,114 +317,226 @@ fn sanitize(markers: Vec<Marker>) -> Vec<Marker> {
             if marker.range.end.row < marker.range.start.row {
                 marker.range.end.row = marker.range.start.row;
             }
-            marker
+            Rc::new(marker)
         })
         .collect()
 }
 
+/// Monaco `MarkerService.changeOne`: replaces `owner`'s markers of
+/// `resource`, queueing an [`on_did_change_markers`](crate::on_did_change_markers)
+/// event. Removing nothing isn't a change; whether it changed.
+fn change_one(
+    owner: SharedString,
+    resource: SharedString,
+    markers: Vec<Marker>,
+    cx: &mut App,
+) -> bool {
+    let service = cx.default_global::<MarkerService>();
+    if markers.is_empty() {
+        if !service.delete(&owner, &resource) {
+            return false;
+        }
+    } else {
+        service.set(owner, resource.clone(), sanitize(markers));
+    }
+    crate::registry::markers_changed(resource, cx);
+    true
+}
+
+/// Redecorates the live models (but `except`) with one of `resources`
+/// (Monaco `MarkerDecorationsService._handleMarkerChange`).
+fn update_models(resources: &[SharedString], except: Option<EntityId>, cx: &mut App) {
+    for model in crate::registry::models(cx) {
+        if Some(model.entity_id()) != except && resources.contains(model.read(cx).resource()) {
+            model.update(cx, |model, cx| model.update_marker_decorations(cx));
+        }
+    }
+}
+
+/// Monaco `MarkerDecorationsService._onModelRemoved`: the markers of an
+/// `inmemory:`, `internal:` or `vscode:` model go with it; others stay
+/// for the next model with the uri.
+pub(crate) fn model_disposed(resource: &SharedString, cx: &mut App) {
+    let transient = ["inmemory:", "internal:", "vscode:"]
+        .iter()
+        .any(|scheme| resource.starts_with(scheme));
+    if !transient {
+        return;
+    }
+    let Some(service) = cx.try_global::<MarkerService>() else {
+        return;
+    };
+    for owner in service.owners_of(resource) {
+        change_one(owner, resource.clone(), Vec::new(), cx);
+    }
+}
+
+/// A decorated marker of a model (Monaco `MarkerDecorations._map`).
+pub(crate) struct DecoratedMarker {
+    /// The marker service's instance: unchanged markers keep their
+    /// decorations when others change.
+    marker: Rc<Marker>,
+    id: DecorationId,
+    /// For an empty marker, how far into its (widened) decoration it is,
+    /// in bytes: F8 goes there.
+    collapsed_at: Option<usize>,
+}
+
 impl TextModel {
-    /// Replaces the markers of `owner` (Monaco `setModelMarkers`). Markers
-    /// without a message are dropped. Emits
+    /// Replaces the markers of `owner` for this model's
+    /// [`resource`](TextModel::resource) (Monaco `setModelMarkers`).
+    /// Markers without a message are dropped. Emits
     /// [`TextModelEvent::MarkersChanged`](crate::TextModelEvent::MarkersChanged)
     /// and the global [`on_did_change_markers`](crate::on_did_change_markers)
     /// unless `owner` had no markers and gets none.
+    ///
+    /// As in Monaco, markers belong to the uri rather than the model: they
+    /// outlive it (but for an `inmemory:` one) and decorate the next model
+    /// with the uri. Only the first [`MAX_DECORATED_MARKERS`] of the uri
+    /// are drawn; [`model_markers`] has them all.
     pub fn set_markers(
         &mut self,
         owner: impl Into<SharedString>,
         markers: Vec<Marker>,
         cx: &mut Context<Self>,
     ) {
-        let owner = owner.into();
-        let index = self.markers.by_owner.iter().position(|(o, ..)| *o == owner);
-        // Monaco `changeOne`: removing nothing isn't a change.
-        if index.is_none() && markers.is_empty() {
+        let resource = self.resource().clone();
+        if !change_one(owner.into(), resource.clone(), markers, cx) {
             return;
         }
         crate::registry::track_model(&cx.entity(), cx);
-        let markers = sanitize(markers);
-        let old = index
-            .map(|i| std::mem::take(&mut self.markers.by_owner[i].2))
-            .unwrap_or_default();
-        let buffer = self.buffer();
-        let decorations = markers
-            .iter()
-            .map(|marker| {
-                let start = buffer.point_utf16_to_offset(
-                    buffer.clip_point_utf16(marker.range.start, text::Bias::Left),
-                );
-                // Monaco never draws untagged hints on several lines, and
-                // gives them room for their three dots.
-                let tagged = !marker.tags.is_empty();
-                let end_point = if marker.severity == MarkerSeverity::Hint && !tagged {
-                    PointUtf16::new(marker.range.start.row, marker.range.start.column + 2)
-                } else {
-                    marker.range.end
-                };
-                let mut end = buffer
-                    .point_utf16_to_offset(buffer.clip_point_utf16(end_point, text::Bias::Right));
-                // Monaco widens empty markers to the word or character there.
-                if end <= start {
-                    end = buffer
-                        .clip_offset(start + 1, text::Bias::Right)
-                        .min(buffer.len());
-                }
-                let color = marker.severity.color();
-                // Hints have no squiggle; an unnecessary one is underlined
-                // only by themes with an `editorUnnecessaryCode.border` (see
-                // the element).
-                let underline = (marker.severity != MarkerSeverity::Hint)
-                    .then_some(DecorationUnderline { color, wavy: true });
-                (
-                    start..end,
-                    DecorationOptions {
-                        underline,
-                        // Monaco marks infos too.
-                        overview_ruler: (marker.severity >= MarkerSeverity::Info)
-                            .then(|| OverviewRulerDecoration::new(color, OverviewRulerLane::Right)),
-                        // Monaco marks infos, warnings and errors in the
-                        // minimap, in the theme's colors for the severity.
-                        minimap: (marker.severity >= MarkerSeverity::Info)
-                            .then(crate::MinimapDecoration::default),
-                        stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
-                        z_index: 10 + marker.severity as i32,
-                        validation: true,
-                        severity: Some(marker.severity),
-                        // Monaco: deprecated wins over unnecessary.
-                        unnecessary: marker.has_tag(MarkerTag::Unnecessary)
-                            && !marker.has_tag(MarkerTag::Deprecated),
-                        deprecated: marker.has_tag(MarkerTag::Deprecated),
+        self.update_marker_decorations(cx);
+        update_models(&[resource], Some(cx.entity_id()), cx);
+    }
+
+    /// Monaco `MarkerDecorations.update`: decorates the first
+    /// [`MAX_DECORATED_MARKERS`] markers of the model's resource, keeping
+    /// the decorations of markers that didn't change, and emits
+    /// [`TextModelEvent::MarkersChanged`](crate::TextModelEvent::MarkersChanged)
+    /// if any did.
+    pub(crate) fn update_marker_decorations(&mut self, cx: &mut Context<Self>) {
+        let markers: Vec<Rc<Marker>> = cx
+            .try_global::<MarkerService>()
+            .map(|service| {
+                service
+                    .read(&MarkerFilter {
+                        resource: Some(self.resource().clone()),
+                        take: Some(MAX_DECORATED_MARKERS),
                         ..Default::default()
-                    },
-                )
+                    })
+                    .into_iter()
+                    .map(|(_, _, marker)| marker.clone())
+                    .collect()
             })
+            .unwrap_or_default();
+        let key = |marker: &Rc<Marker>| Rc::as_ptr(marker) as usize;
+        let new: std::collections::HashSet<usize> = markers.iter().map(key).collect();
+        let old: std::collections::HashSet<usize> =
+            self.markers.iter().map(|d| key(&d.marker)).collect();
+        let added: Vec<Rc<Marker>> = markers
+            .into_iter()
+            .filter(|marker| !old.contains(&key(marker)))
             .collect();
-        let ids = self.delta_decorations(None, &old, decorations, cx);
-        match index {
-            Some(i) if markers.is_empty() => {
-                self.markers.by_owner.remove(i);
-            }
-            Some(i) => self.markers.by_owner[i] = (owner, markers, ids),
-            None if markers.is_empty() => {}
-            None => self.markers.by_owner.push((owner, markers, ids)),
-        }
-        cx.emit(crate::TextModelEvent::MarkersChanged);
-        if let Some(uri) = self.uri().cloned() {
-            crate::registry::markers_changed(uri, cx);
-        }
-    }
-
-    /// Whether any owner has markers here.
-    pub(crate) fn has_markers(&self) -> bool {
-        !self.markers.by_owner.is_empty()
-    }
-
-    /// The markers of each owner as they were set (Monaco's marker service
-    /// data, which doesn't follow edits), in owner order.
-    pub(crate) fn markers_by_owner(&self) -> impl Iterator<Item = (&SharedString, &[Marker])> {
-        self.markers
-            .by_owner
+        let removed: Vec<DecorationId> = self
+            .markers
             .iter()
-            .map(|(owner, markers, _)| (owner, markers.as_slice()))
+            .filter(|d| !new.contains(&key(&d.marker)))
+            .map(|d| d.id)
+            .collect();
+        if added.is_empty() && removed.is_empty() {
+            return;
+        }
+        let ranges: Vec<(Range<usize>, Option<usize>)> = added
+            .iter()
+            .map(|marker| self.marker_decoration_range(marker))
+            .collect();
+        let decorations = added
+            .iter()
+            .zip(&ranges)
+            .map(|(marker, (range, _))| (range.clone(), marker_decoration_options(marker)))
+            .collect();
+        let ids = self.delta_decorations(None, &removed, decorations, cx);
+        self.markers.retain(|d| new.contains(&key(&d.marker)));
+        self.markers
+            .extend(added.into_iter().zip(ids).zip(ranges).map(
+                |((marker, id), (range, collapsed_at))| DecoratedMarker {
+                    marker,
+                    id,
+                    collapsed_at: collapsed_at.map(|offset| offset.saturating_sub(range.start)),
+                },
+            ));
+        cx.emit(crate::TextModelEvent::MarkersChanged);
+    }
+
+    /// Monaco `MarkerDecorations._createDecorationRange`, in bytes, with
+    /// an empty marker's offset: an untagged hint covers two characters
+    /// on its first line (room for its three dots); an empty marker
+    /// widens to the word there, and stays empty (drawn one character
+    /// wide) on an empty line or after the last non-whitespace
+    /// character; a whole-line marker (column 0 to `u32::MAX`) starts at
+    /// the first non-whitespace character.
+    fn marker_decoration_range(&self, marker: &Marker) -> (Range<usize>, Option<usize>) {
+        let raw = &marker.range;
+        let mut range = raw.clone();
+        if marker.severity == MarkerSeverity::Hint
+            && !marker.has_tag(MarkerTag::Unnecessary)
+            && !marker.has_tag(MarkerTag::Deprecated)
+        {
+            range.end = PointUtf16::new(range.start.row, range.start.column.saturating_add(2));
+        }
+        let mut range = self.validate_range(range);
+        let mut collapsed = None;
+        if range.is_empty() {
+            let row = range.start.row;
+            collapsed = Some(range.start);
+            let max_column = self
+                .line_last_non_whitespace_column(row)
+                .unwrap_or_else(|| self.buffer().rope().line_len_utf16(row));
+            if max_column > 0
+                && range.end.column < max_column
+                && let Some(word) = self.word_at_position(range.start)
+            {
+                range = word.range;
+            }
+        } else if raw.end.column == u32::MAX
+            && raw.start.column == 0
+            && range.start.row == range.end.row
+        {
+            let min_column = self
+                .line_first_non_whitespace_column(raw.start.row)
+                .unwrap_or(0);
+            if min_column < range.end.column {
+                range.start.column = min_column;
+            }
+        }
+        let offset = |point| self.offset_at(point);
+        (
+            offset(range.start)..offset(range.end),
+            collapsed.map(offset),
+        )
+    }
+
+    /// Whether any marker is decorated here.
+    pub(crate) fn has_markers(&self) -> bool {
+        !self.markers.is_empty()
+    }
+
+    /// The decorated markers with their current ranges (they follow edits).
+    fn live_markers(&self) -> impl Iterator<Item = (Marker, Option<usize>)> + '_ {
+        let buffer = self.buffer();
+        self.markers.iter().map(move |decorated| {
+            let mut marker = (*decorated.marker).clone();
+            let mut collapsed = None;
+            if let Some(decoration) = self.decoration(decorated.id) {
+                let range = &decoration.range;
+                marker.range = buffer.offset_to_point_utf16(range.start)
+                    ..buffer.offset_to_point_utf16(range.end);
+                collapsed = decorated.collapsed_at.map(|at| {
+                    buffer.clip_offset((range.start + at).min(range.end), text::Bias::Left)
+                });
+            }
+            (marker, collapsed)
+        })
     }
 
     /// The markers whose (current) range contains byte `offset`, most severe
@@ -301,43 +544,24 @@ impl TextModel {
     pub fn markers_at(&self, offset: usize) -> Vec<Marker> {
         let buffer = self.buffer();
         let mut found: Vec<Marker> = self
-            .markers
-            .by_owner
-            .iter()
-            .flat_map(|(_, markers, ids)| markers.iter().zip(ids))
-            .filter_map(|(marker, id)| {
-                let range = &self.decoration(*id)?.range;
-                (range.start <= offset && offset <= range.end).then(|| {
-                    let mut marker = marker.clone();
-                    marker.range = buffer.offset_to_point_utf16(range.start)
-                        ..buffer.offset_to_point_utf16(range.end);
-                    marker
-                })
+            .live_markers()
+            .map(|(marker, _)| marker)
+            .filter(|marker| {
+                let start = buffer.point_utf16_to_offset(marker.range.start);
+                let end = buffer.point_utf16_to_offset(marker.range.end);
+                start <= offset && offset <= end
             })
             .collect();
         found.sort_by_key(|m| (std::cmp::Reverse(m.severity), m.range.start));
         found
     }
 
-    /// All markers with their current ranges (they move with edits), sorted
-    /// by position.
+    /// The decorated markers (the first [`MAX_DECORATED_MARKERS`] of the
+    /// model's uri; Monaco `getLiveMarkers`) with their current ranges
+    /// (they move with edits, and empty ones are widened to the word),
+    /// sorted by position.
     pub fn markers(&self) -> Vec<Marker> {
-        let buffer = self.buffer();
-        let mut all: Vec<Marker> = self
-            .markers
-            .by_owner
-            .iter()
-            .flat_map(|(_, markers, ids)| {
-                markers.iter().zip(ids).map(|(marker, id)| {
-                    let mut marker = marker.clone();
-                    if let Some(decoration) = self.decoration(*id) {
-                        marker.range = buffer.offset_to_point_utf16(decoration.range.start)
-                            ..buffer.offset_to_point_utf16(decoration.range.end);
-                    }
-                    marker
-                })
-            })
-            .collect();
+        let mut all: Vec<Marker> = self.live_markers().map(|(marker, _)| marker).collect();
         all.sort_by_key(|m| (m.range.start, std::cmp::Reverse(m.severity)));
         all
     }
@@ -345,26 +569,17 @@ impl TextModel {
     /// The markers F8 visits (Monaco `MarkerList`): errors, warnings and
     /// infos, not hints, most severe first and then by range (Monaco's
     /// `problems.sortOrder: 'severity'`, as standalone Monaco has no such
-    /// setting). Ranges follow edits; an empty one stays empty (not widened
-    /// as its decoration is).
+    /// setting). Ranges follow edits; an empty one stays empty, where it
+    /// was set (not widened as its decoration is).
     pub(crate) fn navigable_markers(&self) -> Vec<Marker> {
         let buffer = self.buffer();
         let mut all: Vec<Marker> = self
-            .markers
-            .by_owner
-            .iter()
-            .flat_map(|(_, markers, ids)| markers.iter().zip(ids))
+            .live_markers()
             .filter(|(marker, _)| marker.severity >= MarkerSeverity::Info)
-            .map(|(marker, id)| {
-                let mut marker = marker.clone();
-                if let Some(decoration) = self.decoration(*id) {
-                    let start = buffer.offset_to_point_utf16(decoration.range.start);
-                    let end = if marker.range.is_empty() {
-                        start
-                    } else {
-                        buffer.offset_to_point_utf16(decoration.range.end)
-                    };
-                    marker.range = start..end;
+            .map(|(mut marker, collapsed)| {
+                if let Some(at) = collapsed {
+                    let at = buffer.offset_to_point_utf16(at);
+                    marker.range = at..at;
                 }
                 marker
             })
@@ -375,13 +590,45 @@ impl TextModel {
     }
 }
 
-/// Monaco `IMarker`: a marker with its owner and the uri of its model.
+/// Monaco `MarkerDecorations._createDecorationOption`.
+fn marker_decoration_options(marker: &Marker) -> DecorationOptions {
+    let color = marker.severity.color();
+    // Hints have no squiggle: an untagged one gets three dots, an
+    // unnecessary one is underlined only by themes with an
+    // `editorUnnecessaryCode.border` (see the element).
+    let underline = (marker.severity != MarkerSeverity::Hint)
+        .then_some(DecorationUnderline { color, wavy: true });
+    DecorationOptions {
+        underline,
+        // Monaco marks infos too.
+        overview_ruler: (marker.severity >= MarkerSeverity::Info)
+            .then(|| OverviewRulerDecoration::new(color, OverviewRulerLane::Right)),
+        // Monaco marks infos, warnings and errors in the minimap, in the
+        // theme's colors for the severity.
+        minimap: (marker.severity >= MarkerSeverity::Info).then(crate::MinimapDecoration::default),
+        stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
+        // Monaco: an empty marker is drawn one character wide.
+        show_if_collapsed: true,
+        z_index: 10 + marker.severity as i32,
+        validation: true,
+        severity: Some(marker.severity),
+        // Monaco: deprecated wins over unnecessary.
+        unnecessary: marker.has_tag(MarkerTag::Unnecessary)
+            && !marker.has_tag(MarkerTag::Deprecated),
+        deprecated: marker.has_tag(MarkerTag::Deprecated),
+        ..Default::default()
+    }
+}
+
+/// Monaco `IMarker`: a marker with its owner and uri.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelMarker {
     /// Who set it (Monaco `owner`).
     pub owner: SharedString,
-    /// The model's uri (Monaco `resource`); `None` for a model without one.
-    pub resource: Option<SharedString>,
+    /// The uri of the model it was set on (Monaco `resource`): its
+    /// [`TextModel::resource`], `inmemory://model/N` for a model without
+    /// a uri.
+    pub resource: SharedString,
     /// The marker as it was set: its range doesn't follow edits, as in
     /// Monaco's marker service (see [`TextModel::markers`] for the current
     /// ranges).
@@ -394,63 +641,43 @@ pub struct ModelMarker {
 pub struct MarkerFilter {
     /// Only this owner's.
     pub owner: Option<SharedString>,
-    /// Only those of the model with this uri.
+    /// Only those of this uri (a model's [`TextModel::resource`]).
     pub resource: Option<SharedString>,
     /// At most this many; `None` or `Some(0)` for all.
     pub take: Option<usize>,
 }
 
-/// The markers of every live model matching `filter` (Monaco
-/// `editor.getModelMarkers`), by model in creation order, then by owner in
-/// the order they first set markers.
+/// The markers matching `filter` (Monaco `editor.getModelMarkers`), whether
+/// or not a model with their uri is alive: by owner, then uri, in the
+/// order they were first set; with a `resource`, by owner.
 pub fn model_markers(cx: &App, filter: &MarkerFilter) -> Vec<ModelMarker> {
-    let take = filter.take.filter(|&take| take > 0).unwrap_or(usize::MAX);
-    let mut result = Vec::new();
-    for model in crate::registry::models(cx) {
-        let model = model.read(cx);
-        let resource = model.uri();
-        if filter
-            .resource
-            .as_ref()
-            .is_some_and(|uri| resource != Some(uri))
-        {
-            continue;
-        }
-        for (owner, markers) in model.markers_by_owner() {
-            if filter.owner.as_ref().is_some_and(|o| o != owner) {
-                continue;
-            }
-            for marker in markers {
-                if result.len() == take {
-                    return result;
-                }
-                result.push(ModelMarker {
-                    owner: owner.clone(),
-                    resource: resource.cloned(),
-                    marker: marker.clone(),
-                });
-            }
-        }
-    }
-    result
+    let Some(service) = cx.try_global::<MarkerService>() else {
+        return Vec::new();
+    };
+    service
+        .read(filter)
+        .into_iter()
+        .map(|(owner, resource, marker)| ModelMarker {
+            owner: owner.clone(),
+            resource: resource.clone(),
+            marker: (**marker).clone(),
+        })
+        .collect()
 }
 
-/// Removes `owner`'s markers from every live model (Monaco
-/// `editor.removeAllMarkers`), with one
-/// [`on_did_change_markers`](crate::on_did_change_markers) event for all of
-/// them.
+/// Removes `owner`'s markers everywhere (Monaco `editor.removeAllMarkers`),
+/// with one [`on_did_change_markers`](crate::on_did_change_markers) event
+/// for all of them.
 pub fn remove_all_markers(cx: &mut App, owner: &str) {
-    for model in crate::registry::models(cx) {
-        if model
-            .read(cx)
-            .markers_by_owner()
-            .any(|(o, _)| o.as_ref() == owner)
-        {
-            model.update(cx, |model, cx| {
-                model.set_markers(owner.to_string(), Vec::new(), cx)
-            });
-        }
+    let Some(service) = cx.try_global::<MarkerService>() else {
+        return;
+    };
+    let resources = service.resources_of(owner);
+    let owner = SharedString::from(owner.to_string());
+    for resource in &resources {
+        change_one(owner.clone(), resource.clone(), Vec::new(), cx);
     }
+    update_models(&resources, None, cx);
 }
 
 /// Monaco `MessageWidget.getHeightInLines`: the body shows at most this
@@ -495,7 +722,7 @@ pub struct MarkerZone {
     editor: gpui::WeakEntity<CodeEditor>,
     scroll: ScrollHandle,
     /// Where it was painted.
-    bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
+    bounds: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
 }
 
 impl MarkerZone {

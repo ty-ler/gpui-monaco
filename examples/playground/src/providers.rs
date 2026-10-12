@@ -845,6 +845,13 @@ pub fn add_markers(editor: &Entity<CodeEditor>, cx: &mut App) {
             ..Default::default()
         })
         .chain([
+            // A hint: three dots under its first two characters.
+            Marker {
+                severity: MarkerSeverity::Hint,
+                message: "consider deriving `Copy`".into(),
+                range: PointUtf16::new(15, 5)..PointUtf16::new(15, 9),
+                ..Default::default()
+            },
             // Faded and struck-through code (Monaco `showUnused`,
             // `showDeprecated`).
             Marker {

@@ -378,7 +378,7 @@ fn invalid_marker_data(cx: &mut TestAppContext) {
     let markers = cx.update(|_, cx| gpui_monaco::model_markers(cx, &MarkerFilter::default()));
     assert_eq!(markers.len(), 1);
     assert_eq!(markers[0].owner.as_ref(), "far");
-    assert_eq!(markers[0].resource.as_deref(), Some("some:uri/path"));
+    assert_eq!(markers[0].resource.as_ref(), "some:uri/path");
     assert_eq!(
         markers[0].marker.range,
         PointUtf16::new(1, 2)..PointUtf16::new(1, 4)
@@ -409,8 +409,9 @@ fn markers_take_and_order(cx: &mut TestAppContext) {
             .collect::<Vec<_>>()
         })
     };
-    assert_eq!(messages(None, cx), vec!["a1", "a2", "a0", "b2"]);
-    assert_eq!(messages(Some(2), cx), vec!["a1", "a2"]);
+    // Monaco's `DoubleResourceMap`: by owner, in the order first set.
+    assert_eq!(messages(None, cx), vec!["b2", "a1", "a2", "a0"]);
+    assert_eq!(messages(Some(2), cx), vec!["b2", "a1"]);
     // Monaco: a `take` of 0 means all.
     assert_eq!(messages(Some(0), cx).len(), 4);
     // Markers as set, even after edits move their decorations.
@@ -421,6 +422,101 @@ fn markers_take_and_order(cx: &mut TestAppContext) {
             .range,
         PointUtf16::new(0, 0)..PointUtf16::new(0, 1)
     );
+}
+
+/// Monaco gives a model without a uri `inmemory://model/N`, so its
+/// markers are reported and found like any other's.
+#[gpui::test]
+fn markers_of_a_model_without_a_uri(cx: &mut TestAppContext) {
+    let (_, cx) = setup("", cx);
+    let model = cx.update(|_, cx| gpui_monaco::create_model(cx, "text", None, None).unwrap());
+    let resource = model.read_with(cx, |m, _| m.resource().clone());
+    assert!(resource.starts_with("inmemory://model/"));
+    assert_eq!(model.read_with(cx, |m, _| m.uri().cloned()), None);
+    let other = cx.update(|_, cx| gpui_monaco::create_model(cx, "text", None, None).unwrap());
+    assert_ne!(other.read_with(cx, |m, _| m.resource().clone()), resource);
+    flush(cx);
+
+    let events: Log<Vec<SharedString>> = Rc::default();
+    let _subscription = cx.update(|_, cx| {
+        let events = events.clone();
+        gpui_monaco::on_did_change_markers(cx, move |uris, _| {
+            events.borrow_mut().push(uris.to_vec())
+        })
+    });
+    set(&model, "far", vec![marker("a")], cx);
+    flush(cx);
+    assert_eq!(*events.borrow(), vec![vec![resource.clone()]]);
+    assert_eq!(read(None, Some(&resource), cx), 1);
+    let markers = cx.update(|_, cx| gpui_monaco::model_markers(cx, &MarkerFilter::default()));
+    assert_eq!(markers[0].resource, resource);
+    // `getModel` finds it by that uri.
+    let found = cx.update(|_, cx| gpui_monaco::model_for_uri(cx, &resource));
+    assert_eq!(found.map(|m| m.entity_id()), Some(model.entity_id()));
+}
+
+/// Monaco `MarkerDecorationsService._onModelRemoved`: an in-memory model's
+/// markers go with it.
+#[gpui::test]
+fn markers_of_an_inmemory_model_go_with_it(cx: &mut TestAppContext) {
+    let (_, cx) = setup("", cx);
+    let model = cx.update(|_, cx| gpui_monaco::create_model(cx, "text", None, None).unwrap());
+    let resource = model.read_with(cx, |m, _| m.resource().clone());
+    set(&model, "far", vec![marker("a")], cx);
+    flush(cx);
+    let events: Log<Vec<SharedString>> = Rc::default();
+    let _subscription = cx.update(|_, cx| {
+        let events = events.clone();
+        gpui_monaco::on_did_change_markers(cx, move |uris, _| {
+            events.borrow_mut().push(uris.to_vec())
+        })
+    });
+    drop(model);
+    flush(cx);
+    assert_eq!(read(None, None, cx), 0);
+    assert_eq!(*events.borrow(), vec![vec![resource]]);
+}
+
+/// Monaco's markers belong to the uri: they outlive a `file:` model and
+/// decorate the next model with its uri.
+#[gpui::test]
+fn markers_outlive_their_model(cx: &mut TestAppContext) {
+    let (_, cx) = setup("", cx);
+    let uri = "file:///c/test/file.cs";
+    let create = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| gpui_monaco::create_model(cx, "some text", None, Some(uri)).unwrap())
+    };
+    let model = create(cx);
+    set(&model, "far", vec![marker("a")], cx);
+    flush(cx);
+    let events: Log<Vec<SharedString>> = Rc::default();
+    let _subscription = cx.update(|_, cx| {
+        let events = events.clone();
+        gpui_monaco::on_did_change_markers(cx, move |uris, _| {
+            events.borrow_mut().push(uris.to_vec())
+        })
+    });
+    drop(model);
+    flush(cx);
+    assert!(
+        cx.update(|_, cx| gpui_monaco::model_for_uri(cx, uri))
+            .is_none()
+    );
+    assert_eq!(read(Some("far"), Some(uri), cx), 1);
+    assert!(events.borrow().is_empty());
+
+    let again = create(cx);
+    let live = again.read_with(cx, |m, _| m.markers());
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].message.as_ref(), "a");
+
+    // Removing them without a model is a change of the uri.
+    drop(again);
+    flush(cx);
+    cx.update(|_, cx| gpui_monaco::remove_all_markers(cx, "far"));
+    flush(cx);
+    assert_eq!(read(None, None, cx), 0);
+    assert_eq!(*events.borrow(), vec![vec![SharedString::from(uri)]]);
 }
 
 // ----- themes -----------------------------------------------------------------

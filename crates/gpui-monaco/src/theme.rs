@@ -1343,6 +1343,19 @@ impl EditorColors {
         }
     }
 
+    /// A marker's double underline in high contrast (`editorError.border`
+    /// and the like; Monaco `squiggly-error`'s `border-bottom`). Hints
+    /// have their own dotted `editor_hint_border`.
+    pub fn marker_border(&self, severity: crate::MarkerSeverity) -> Option<Hsla> {
+        use crate::MarkerSeverity as S;
+        match severity {
+            S::Error => self.editor_error_border,
+            S::Warning => self.editor_warning_border,
+            S::Info => self.editor_info_border,
+            S::Hint => None,
+        }
+    }
+
     /// A marker's overview ruler mark (`editorOverviewRuler.errorForeground`
     /// and the like; none for hints).
     pub fn marker_overview_color(&self, severity: crate::MarkerSeverity) -> Option<Hsla> {

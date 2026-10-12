@@ -115,21 +115,24 @@ pub(crate) fn ensure(cx: &mut App) {
         if model.is_internal() {
             return;
         }
-        let model = cx.entity();
-        track_model(&model, cx);
+        track_model(&cx.entity(), cx);
+        // Monaco `MarkerDecorationsService._onModelAdded`: markers set on
+        // its uri before decorate it.
+        model.update_marker_decorations(cx);
     })
     .detach();
 }
 
 /// Adds `model` to the registry if it isn't there yet, announcing it
 /// (Monaco `IModelService.onModelAdded`) and its release (`onModelRemoved`).
-pub(crate) fn track_model(model: &Entity<TextModel>, cx: &mut App) {
+/// Whether it wasn't there.
+pub(crate) fn track_model(model: &Entity<TextModel>, cx: &mut App) -> bool {
     ensure(cx);
     let id = model.entity_id();
     let registry = cx.global_mut::<Registry>();
     registry.models.retain(|m| m.upgrade().is_some());
     if registry.models.iter().any(|m| m.entity_id() == id) {
-        return;
+        return false;
     }
     registry.models.push(model.downgrade());
     cx.observe_release(model, move |model, cx| will_dispose_model(id, model, cx))
@@ -144,6 +147,7 @@ pub(crate) fn track_model(model: &Entity<TextModel>, cx: &mut App) {
             listener(&model, cx);
         }
     });
+    true
 }
 
 fn will_dispose_model(id: EntityId, model: &mut TextModel, cx: &mut App) {
@@ -153,13 +157,9 @@ fn will_dispose_model(id: EntityId, model: &mut TextModel, cx: &mut App) {
     for listener in listeners {
         listener(id, model, cx);
     }
-    // Its markers go with it (Monaco removes an in-memory model's markers
-    // when it's disposed).
-    if model.has_markers()
-        && let Some(uri) = model.uri().cloned()
-    {
-        markers_changed(uri, cx);
-    }
+    // An in-memory model's markers go with it; others stay for the next
+    // model with its uri.
+    crate::markers::model_disposed(model.resource(), cx);
 }
 
 /// Adds the editor being built to the registry and announces it once it
@@ -343,7 +343,8 @@ pub fn on_did_change_model_language(
 
 /// Calls `listener` with the uris of the models whose markers changed
 /// (Monaco `editor.onDidChangeMarkers`). Changes made in one update arrive
-/// together, after it, each uri once. Models without a uri aren't reported.
+/// together, after it, each uri once. A model without a uri is reported by
+/// its [`TextModel::resource`], `inmemory://model/N`.
 pub fn on_did_change_markers(
     cx: &mut App,
     listener: impl Fn(&[SharedString], &mut App) + 'static,
