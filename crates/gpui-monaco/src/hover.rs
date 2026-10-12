@@ -22,9 +22,8 @@ use gpui::{
 use text::PointUtf16;
 
 use crate::actions::{
-    FocusNextElement, FocusPreviousElement, GoToBottomHover, GoToTopHover, HideHover, Outdent,
+    FocusNextElement, FocusPreviousElement, GoToBottomHover, GoToTopHover, HideHover,
     PageDownHover, PageUpHover, ScrollDownHover, ScrollLeftHover, ScrollRightHover, ScrollUpHover,
-    Tab,
 };
 use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor;
@@ -238,6 +237,54 @@ enum RenderedPart {
     StatusBar,
 }
 
+/// Whether `part`'s row has Monaco's copy button (`HoverCopyButton`, on
+/// every part but the color picker's, the inline suggestion toolbar's and
+/// the inlay hint command's).
+fn has_copy_button(part: RenderedPart) -> bool {
+    matches!(
+        part,
+        RenderedPart::Marker(_) | RenderedPart::Markdown(_) | RenderedPart::Unicode(_)
+    )
+}
+
+/// A tab stop inside the hover card (Monaco's elements with `tabIndex` 0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HoverStop {
+    /// A row (`hover-row`), by [`HoverWidget::rendered_parts`] index.
+    Row(usize),
+    /// A row's copy button, by row.
+    Copy(usize),
+    /// A status bar action (`HoverAction`), by status bar entry.
+    StatusAction(usize),
+}
+
+/// The copy button's label (Monaco `hover.copy`).
+const COPY_LABEL: &str = "Copy";
+
+/// A status bar action's text: `label (keys)`.
+fn status_action_text(label: &str, keys: &Option<gpui::SharedString>) -> String {
+    match keys {
+        Some(keys) => format!("{label} ({keys})"),
+        None => label.to_string(),
+    }
+}
+
+/// `handles[ix]`, made (with any before it) if it's new.
+fn lazy_focus<T>(handles: &mut Vec<FocusHandle>, ix: usize, cx: &mut Context<T>) -> FocusHandle {
+    while handles.len() <= ix {
+        handles.push(cx.focus_handle());
+    }
+    handles[ix].clone()
+}
+
+/// Monaco `SimpleButton` and `HoverAction`: Enter or Space presses a
+/// focused button.
+fn presses_button(keystroke: &gpui::Keystroke) -> bool {
+    let modifiers = &keystroke.modifiers;
+    !(modifiers.control || modifiers.alt || modifiers.platform || modifiers.shift)
+        && matches!(keystroke.key.as_str(), "enter" | "space")
+}
+
 /// The hover card.
 pub struct HoverWidget {
     /// Diagnostics at the position (Monaco's marker hover part).
@@ -257,6 +304,12 @@ pub struct HoverWidget {
     /// Each row's focus (Monaco gives every `hover-row` `tabIndex` 0), made
     /// as rows appear.
     part_focus: Vec<FocusHandle>,
+    /// Each row's copy button's focus (Monaco's `HoverCopyButton` is a
+    /// `SimpleButton`, `tabIndex` 0), by row, made as rows appear.
+    copy_focus: Vec<FocusHandle>,
+    /// Each status bar action's focus (Monaco `HoverAction`, `tabIndex` 0),
+    /// by entry, made as entries appear.
+    status_focus: Vec<FocusHandle>,
     /// Verbosity requests in flight per part, with their accumulated
     /// delta (Monaco `_ongoingHoverOperations`).
     verbosity_requests: HashMap<usize, (i32, Task<()>)>,
@@ -358,19 +411,72 @@ impl HoverWidget {
 
     /// Row `ix`'s focus, made if it's new.
     fn part_focus(&mut self, ix: usize, cx: &mut Context<Self>) -> FocusHandle {
-        while self.part_focus.len() <= ix {
-            self.part_focus.push(cx.focus_handle());
-        }
-        self.part_focus[ix].clone()
+        lazy_focus(&mut self.part_focus, ix, cx)
     }
 
-    /// The focused row, if one is (Monaco `focusedHoverPartIndex`).
+    /// The card's tab stops after the card itself, in Monaco's DOM order:
+    /// each row, then its copy button (a marker, markdown or unicode
+    /// part's); the status bar, then its actions.
+    fn tab_stops(&self) -> Vec<HoverStop> {
+        let mut stops = Vec::new();
+        for (ix, part) in self.rendered_parts().into_iter().enumerate() {
+            stops.push(HoverStop::Row(ix));
+            if has_copy_button(part) {
+                stops.push(HoverStop::Copy(ix));
+            }
+            if part == RenderedPart::StatusBar {
+                stops.extend(
+                    self.status_bar_entries()
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, entry)| matches!(entry, StatusBarEntry::Action { .. }))
+                        .map(|(entry, _)| HoverStop::StatusAction(entry)),
+                );
+            }
+        }
+        stops
+    }
+
+    /// `stop`'s focus, if it has been made.
+    fn stop_handle(&self, stop: HoverStop) -> Option<&FocusHandle> {
+        match stop {
+            HoverStop::Row(ix) => self.part_focus.get(ix),
+            HoverStop::Copy(ix) => self.copy_focus.get(ix),
+            HoverStop::StatusAction(entry) => self.status_focus.get(entry),
+        }
+    }
+
+    /// The focused stop with the row it's in, if one has the focus.
+    fn focused_stop_in(&self, window: &Window) -> Option<(HoverStop, usize)> {
+        let mut row = 0;
+        for stop in self.tab_stops() {
+            if let HoverStop::Row(ix) = stop {
+                row = ix;
+            }
+            if self.stop_handle(stop).is_some_and(|h| h.is_focused(window)) {
+                return Some((stop, row));
+            }
+        }
+        None
+    }
+
+    /// The row the focus is in, if one has it (Monaco
+    /// `focusedHoverPartIndex`, set by focus events that bubble from a
+    /// row's copy button or actions).
     fn focused_part_in(&self, window: &Window) -> Option<usize> {
-        let count = self.rendered_parts().len();
-        self.part_focus
-            .iter()
-            .take(count)
-            .position(|handle| handle.is_focused(window))
+        self.focused_stop_in(window).map(|(_, row)| row)
+    }
+
+    /// Scrolls row `ix` into view, as the browser does for a focused
+    /// element (the first row to the top, rather than to the card's
+    /// border).
+    fn reveal_part(&mut self, ix: usize) {
+        if ix == 0 {
+            let offset = self.scroll.offset();
+            self.scroll.set_offset(point(offset.x, px(0.)));
+        } else {
+            self.scroll.scroll_to_item(ix);
+        }
     }
 
     /// Focuses row `ix` (Monaco `focusHoverPartWithIndex`), or the card with
@@ -387,14 +493,7 @@ impl HoverWidget {
         let (handle, content) = match ix {
             Some(ix) => {
                 let part = *parts.get(ix)?;
-                // The browser scrolls a focused row into view (the first
-                // to the top, rather than to the card's border).
-                if ix == 0 {
-                    let offset = self.scroll.offset();
-                    self.scroll.set_offset(point(offset.x, px(0.)));
-                } else {
-                    self.scroll.scroll_to_item(ix);
-                }
+                self.reveal_part(ix);
                 (self.part_focus(ix, cx), self.part_accessible_content(part))
             }
             None => (self.focus_handle.clone(), self.accessible_content()),
@@ -405,24 +504,62 @@ impl HoverWidget {
         Some(content)
     }
 
-    /// Tab and Shift+Tab: the browser's tab order over Monaco's card and its
-    /// `hover-row`s (each `tabIndex` 0), from the card into the first row
-    /// and back; past either end, the editor. Screen readers read where
-    /// the focus lands.
+    /// Focuses `stop` (the card with `None`); returns what screen readers
+    /// read for it: a row's or the card's contents, a button's label.
+    fn focus_stop(
+        &mut self,
+        stop: Option<HoverStop>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let (handle, row, label) = match stop {
+            None => return self.focus_part(None, window, cx),
+            Some(HoverStop::Row(ix)) => return self.focus_part(Some(ix), window, cx),
+            Some(HoverStop::Copy(ix)) => (
+                lazy_focus(&mut self.copy_focus, ix, cx),
+                ix,
+                COPY_LABEL.to_string(),
+            ),
+            Some(HoverStop::StatusAction(entry)) => {
+                let row = self
+                    .rendered_parts()
+                    .iter()
+                    .position(|part| *part == RenderedPart::StatusBar)?;
+                let label = match self.status_bar_entries().into_iter().nth(entry)? {
+                    StatusBarEntry::Action { label, keys, .. } => status_action_text(&label, &keys),
+                    StatusBarEntry::Text(_) => return None,
+                };
+                (lazy_focus(&mut self.status_focus, entry, cx), row, label)
+            }
+        };
+        self.reveal_part(row);
+        window.focus(&handle, cx);
+        self.focused_part = Some(row);
+        cx.notify();
+        Some(label)
+    }
+
+    /// Tab and Shift+Tab: the browser's tab order over Monaco's card, its
+    /// `hover-row`s and their buttons (each `tabIndex` 0), from the card
+    /// into the first row and back; past either end, the editor. Screen
+    /// readers read where the focus lands. (Markdown links aren't stops.)
     fn move_part_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let count = self.rendered_parts().len();
-        let target = match (self.focused_part_in(window), forward) {
+        let stops = self.tab_stops();
+        let current = self
+            .focused_stop_in(window)
+            .and_then(|(stop, _)| stops.iter().position(|s| *s == stop));
+        let target = match (current, forward) {
             (None, true) => Some(Some(0)),
             (Some(ix), true) => Some(Some(ix + 1)),
             (Some(0), false) => Some(None),
             (Some(ix), false) => Some(Some(ix - 1)),
             (None, false) => None,
         }
-        .filter(|target| target.is_none_or(|ix| ix < count));
+        .filter(|target| target.is_none_or(|ix| ix < stops.len()));
         let Some(editor) = self.editor.upgrade() else {
             return;
         };
-        match target.and_then(|target| self.focus_part(target, window, cx)) {
+        match target.and_then(|target| self.focus_stop(target.map(|ix| stops[ix]), window, cx)) {
             Some(content) if !content.is_empty() => {
                 editor.update(cx, |editor, cx| editor.announce(content, cx))
             }
@@ -583,9 +720,9 @@ impl Render for HoverWidget {
         if !self.markers.is_empty()
             && let Some(editor) = self.editor.upgrade()
         {
-            let focus = editor.read(cx).focus_handle(cx);
+            let editor = editor.read(cx);
             let label = |action: &dyn gpui::Action| {
-                crate::keybinding_label::command_label(action, None, &focus, window)
+                crate::keybinding_label::editor_command_label(action, None, editor, window, cx)
             };
             self.status_keys = StatusKeys {
                 view_problem: label(&crate::actions::GoToNextMarker),
@@ -606,7 +743,7 @@ impl Render for HoverWidget {
                     let marker = &self.markers[ix];
                     let copy = marker_accessible_content(marker, self.uri.as_deref());
                     let row = self.render_marker(ix, marker);
-                    self.copy_row(("marker-row", ix), row, copy, focused, cx)
+                    self.copy_row(("marker-row", ix), index, row, copy, focused, window, cx)
                 }
                 RenderedPart::ColorPicker => match &self.color_picker {
                     Some(picker) => picker.clone().into_any_element(),
@@ -615,12 +752,12 @@ impl Render for HoverWidget {
                 RenderedPart::Unicode(ix) => {
                     let row = self.render_unicode(ix, cx);
                     let copy = self.unicode[ix].reason.to_string();
-                    self.copy_row(("unicode-row", ix), row, copy, focused, cx)
+                    self.copy_row(("unicode-row", ix), index, row, copy, focused, window, cx)
                 }
                 RenderedPart::Markdown(ix) => {
                     let row = self.render_markdown_part(ix, cx);
                     let copy = markdown_accessible_content(&self.parts[ix]);
-                    self.copy_row(("markdown-row", ix), row, copy, focused, cx)
+                    self.copy_row(("markdown-row", ix), index, row, copy, focused, window, cx)
                 }
                 RenderedPart::InlineToolbar => match &self.inline_toolbar {
                     Some(toolbar) => div()
@@ -634,13 +771,15 @@ impl Render for HoverWidget {
                     Some(row) => row,
                     None => continue,
                 },
-                RenderedPart::StatusBar => match self.render_status_bar() {
+                RenderedPart::StatusBar => match self.render_status_bar(window, cx) {
                     Some(row) => row,
                     None => continue,
                 },
             };
             let label = self.part_accessible_content(*part);
             let focus = self.part_focus(index, cx);
+            // The outline is the row's own, not its buttons'.
+            let row_focused = focus.is_focused(window);
             // Monaco `.hover-row:not(:first-child):not(:empty)`: a top
             // border across the card's full width, in the hover border at
             // half alpha (`hoverContribution.ts`). A focused row has the
@@ -658,7 +797,7 @@ impl Render for HoverWidget {
                             .border_color(colors.hover_border.opacity(0.5))
                     })
                     .child(row)
-                    .when(focused, |this| {
+                    .when(row_focused, |this| {
                         this.child(
                             div()
                                 .absolute()
@@ -765,14 +904,8 @@ impl Render for HoverWidget {
             .on_action(cx.listener(|this, _: &GoToBottomHover, _, cx| {
                 this.scroll_by(point(px(0.), px(1e9)), cx)
             }))
-            .on_action(
-                cx.listener(|this, _: &Tab, window, cx| this.move_part_focus(true, window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &Outdent, window, cx| {
-                    this.move_part_focus(false, window, cx)
-                }),
-            )
+            // Tab and Shift+Tab (the editor's `tab` and `outdent` need
+            // `editorTextFocus`, so the browser's apply).
             .on_action(cx.listener(|this, _: &FocusNextElement, window, cx| {
                 this.move_part_focus(true, window, cx)
             }))
@@ -807,17 +940,25 @@ impl Render for HoverWidget {
 
 impl HoverWidget {
     /// Monaco `HoverCopyButton`: a hover row with a copy button that shows
-    /// while the mouse is over the row or the row has focus.
+    /// while the mouse is over the row or the focus is in it. The button
+    /// (row `index`'s) is a `SimpleButton`: a tab stop that a click, Enter
+    /// or Space presses.
+    #[allow(clippy::too_many_arguments)]
     fn copy_row(
-        &self,
+        &mut self,
         id: (&'static str, usize),
+        index: usize,
         row: gpui::AnyElement,
         text: String,
         focused: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let focus = lazy_focus(&mut self.copy_focus, index, cx);
+        let button_focused = focus.is_focused(window);
         let colors = &self.theme.colors;
         let group: gpui::SharedString = format!("{}-{}", id.0, id.1).into();
+        let key_text = text.clone();
         div()
             .group(group.clone())
             .relative()
@@ -842,25 +983,51 @@ impl HoverWidget {
                         let group = group.clone();
                         move || format!("hover-copy-{group}")
                     })
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
+                    .track_focus(&focus)
+                    .role(gpui::Role::Button)
+                    .aria_label(COPY_LABEL)
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.copy_content(&text, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                        if presses_button(&event.keystroke) {
                             cx.stop_propagation();
-                            if !text.is_empty() {
-                                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                                // Monaco `_copyContent`'s `status`.
-                                if let Some(editor) = this.editor.upgrade() {
-                                    editor.update(cx, |editor, cx| {
-                                        editor.announce_status("Copied to clipboard", cx)
-                                    });
-                                }
-                            }
-                        }),
-                    )
+                            this.copy_content(&key_text, cx);
+                        }
+                    }))
                     // `.hover-copy-button`: a 16px `copy` codicon.
-                    .child(codicon(Codicon::Copy)),
+                    .child(codicon(Codicon::Copy))
+                    // `.hover-copy-button:focus`: a 1px `focusBorder`
+                    // outline, inset by its width.
+                    .when(button_focused, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .rounded(px(3.))
+                                .border_1()
+                                .border_color(colors.focus_border),
+                        )
+                    }),
             )
             .into_any_element()
+    }
+
+    /// Monaco `HoverCopyButton._copyContent`: copies `text` and tells
+    /// screen readers.
+    fn copy_content(&self, text: &str, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+        // Monaco `_copyContent`'s `status`.
+        if let Some(editor) = self.editor.upgrade() {
+            editor.update(cx, |editor, cx| {
+                editor.announce_status("Copied to clipboard", cx)
+            });
+        }
     }
 
     /// Monaco `UnicodeHighlighterHoverParticipant`: a markdown hover, the
@@ -1276,12 +1443,20 @@ impl HoverWidget {
 
     /// Monaco `EditorHoverStatusBar`: `div.hover-row.status-bar` on
     /// `editorHoverWidget.statusBarBackground`, 12px text on 22px rows,
-    /// each action a link `label (keys)`.
-    fn render_status_bar(&self) -> Option<gpui::AnyElement> {
+    /// each action a link `label (keys)`: a tab stop (Monaco `HoverAction`,
+    /// `tabIndex` 0) that a click, Enter or Space runs.
+    fn render_status_bar(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         let entries = self.status_bar_entries();
         if entries.is_empty() {
             return None;
         }
+        let focus: Vec<FocusHandle> = (0..entries.len())
+            .map(|ix| lazy_focus(&mut self.status_focus, ix, cx))
+            .collect();
         let colors = &self.theme.colors;
         let link = self.style.link;
         let actions = entries.into_iter().enumerate().map(|(ix, entry)| {
@@ -1301,9 +1476,20 @@ impl HoverWidget {
             let run = Rc::new(run);
             let links = self.status_links.clone();
             let painted = self.status_links.clone();
+            // Monaco's `run(target)`: the action's element.
+            let run_action = move |cx: &mut gpui::App| {
+                let target = links.borrow().get(ix).copied().flatten();
+                if let Some(editor) = editor.upgrade() {
+                    let run = run.clone();
+                    editor.update(cx, |editor, cx| run.run(target, editor, cx));
+                }
+            };
+            let on_key = run_action.clone();
+            let focused = focus[ix].is_focused(window);
             div()
                 .id(("hover-status-action", ix))
                 .debug_selector(move || format!("hover-status-action-{ix}"))
+                .track_focus(&focus[ix])
                 .role(gpui::Role::Button)
                 .relative()
                 .flex()
@@ -1311,14 +1497,25 @@ impl HoverWidget {
                 .mr(px(16.))
                 .cursor_pointer()
                 .text_color(link)
-                .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, _, cx| {
                     cx.stop_propagation();
-                    // Monaco's `run(target)`: the clicked action's element.
-                    let target = links.borrow().get(ix).copied().flatten();
-                    if let Some(editor) = editor.upgrade() {
-                        let run = run.clone();
-                        editor.update(cx, |editor, cx| run.run(target, editor, cx));
+                    run_action(cx);
+                })
+                .on_key_down(move |event: &gpui::KeyDownEvent, _, cx| {
+                    if presses_button(&event.keystroke) {
+                        cx.stop_propagation();
+                        on_key(cx);
                     }
+                })
+                .when(focused, |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .border_1()
+                            .border_color(colors.focus_border),
+                    )
                 })
                 .child(
                     canvas(
@@ -1335,10 +1532,7 @@ impl HoverWidget {
                     .size_full(),
                 )
                 .children(icon.map(|icon| div().pr(px(4.)).child(codicon(icon))))
-                .child(match keys {
-                    Some(keys) => format!("{label} ({keys})"),
-                    None => label.to_string(),
-                })
+                .child(status_action_text(&label, &keys))
                 .into_any_element()
         });
         let radius = card::CORNER_RADIUS - px(1.);
@@ -2058,7 +2252,12 @@ impl CodeEditor {
         self.hover.widget.as_ref().is_some_and(|(widget, _)| {
             let widget = widget.read(cx);
             widget.focus_handle.is_focused(window)
-                || widget.part_focus.iter().any(|h| h.is_focused(window))
+                || widget
+                    .part_focus
+                    .iter()
+                    .chain(&widget.copy_focus)
+                    .chain(&widget.status_focus)
+                    .any(|h| h.is_focused(window))
         })
     }
 
@@ -2914,6 +3113,8 @@ impl CodeEditor {
             parts,
             focused_part: None,
             part_focus: Vec::new(),
+            copy_focus: Vec::new(),
+            status_focus: Vec::new(),
             verbosity_requests: HashMap::new(),
             anchor,
             glyph: beside.is_some(),

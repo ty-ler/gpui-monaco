@@ -22,9 +22,9 @@ use gpui::{
 
 use crate::actions::{
     CloseFindWidget, FindHistoryNext, FindHistoryPrevious, FindInputFocusEditor, FindInputNewline,
-    Newline, NextMatch, Outdent, Paste, PreviousMatch, RemoveSecondaryCursors, ReplaceAll,
-    ReplaceOne, Tab, ToggleCaseSensitive, ToggleFindInSelection, TogglePreserveCase, ToggleRegex,
-    ToggleWholeWord,
+    FocusNextElement, FocusPreviousElement, Newline, NextMatch, Outdent, Paste, PreviousMatch,
+    RemoveSecondaryCursors, ReplaceAll, ReplaceOne, Tab, ToggleCaseSensitive,
+    ToggleFindInSelection, TogglePreserveCase, ToggleRegex, ToggleWholeWord,
 };
 use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
@@ -1807,6 +1807,15 @@ impl Render for FindWidget {
             .on_action(cx.listener(Self::on_escape))
             .on_action(cx.listener(Self::on_tab))
             .on_action(cx.listener(Self::on_shift_tab))
+            // Tab on a focused button or toggle (the inputs send `Tab`):
+            // the browser's tab order over the widget's stops, in read-only
+            // editors and tab focus mode too.
+            .on_action(cx.listener(|this, _: &FocusNextElement, window, cx| {
+                this.move_focus(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPreviousElement, window, cx| {
+                this.move_focus(false, window, cx)
+            }))
             .on_action(cx.listener(Self::on_history_previous))
             .on_action(cx.listener(Self::on_history_next))
             .on_key_down(cx.listener(Self::on_key_down))

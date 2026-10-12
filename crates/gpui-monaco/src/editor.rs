@@ -3696,7 +3696,8 @@ impl CodeEditor {
         }
     }
 
-    fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_text_from_widget(window, cx);
         cursor::select_all(self.snapshot.rope(), &mut self.cursors);
         self.next_selection_change.reason = CursorChangeReason::Explicit;
         self.cursors_changed(false, cx);
@@ -3825,6 +3826,22 @@ impl CodeEditor {
         self.escape(false, window, cx);
     }
 
+    /// Whether one of the editor's widgets (a hover, the find widget, a
+    /// menu, …) has the focus, rather than its text (Monaco `editorFocus`
+    /// without `editorTextFocus`).
+    pub(crate) fn widget_has_focus(&self, window: &Window, cx: &App) -> bool {
+        !self.focus_handle.is_focused(window) && self.focus_handle.contains_focused(window, cx)
+    }
+
+    /// Monaco's `undo`, `redo` and `editor.action.selectAll` from one of the
+    /// editor's widgets (`EditorOrNativeTextInputCommand`'s `generic-dom`
+    /// implementation): they focus the editor, then run on it.
+    fn focus_text_from_widget(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.widget_has_focus(window, cx) {
+            window.focus(&self.focus_handle, cx);
+        }
+    }
+
     /// Escape's chain of Monaco commands, or with `secondary` Shift+Escape's
     /// (only the commands Monaco gives Shift+Escape as a secondary key).
     pub(crate) fn escape(&mut self, secondary: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -3891,6 +3908,12 @@ impl CodeEditor {
             return;
         }
         if !secondary && self.cancel_selection_anchor(cx) {
+            return;
+        }
+        // Monaco's `removeSecondaryCursors` and `cancelSelection` need
+        // `editorTextFocus`.
+        if self.widget_has_focus(window, cx) {
+            cx.propagate();
             return;
         }
         let primary = self.cursors.primary().clone();
@@ -8030,8 +8053,14 @@ impl Render for CodeEditor {
             .on_action(cx.listener(|this, _: &ShowPrevParameterHint, _, cx| {
                 this.show_previous_parameter_hint(cx)
             }))
-            .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
-            .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))
+            .on_action(cx.listener(|this, _: &Undo, window, cx| {
+                this.focus_text_from_widget(window, cx);
+                this.undo(cx)
+            }))
+            .on_action(cx.listener(|this, _: &Redo, window, cx| {
+                this.focus_text_from_widget(window, cx);
+                this.redo(cx)
+            }))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))

@@ -649,8 +649,11 @@ pub(crate) fn editor_keys_for_widgets(editor: &WeakEntity<CodeEditor>, cx: &App)
 /// [`WIDGET_KEY_CONTEXTS`]): `widget`, then the editor's context keys
 /// (from [`editor_keys_for_widgets`]) but not [`KEY_CONTEXT`], so the
 /// editor's preconditions folded into the widget's keybindings (and hosts'
-/// rules such as `HoverWidget && editorLangId == rust`) see them, while the
-/// editor's own keybindings don't match in the widget.
+/// rules such as `HoverWidget && editorLangId == rust`) see them. The
+/// widget still draws inside the editor's own context, where GPUI matches
+/// the editor's bindings too; those that act on the text need
+/// `editorTextFocus`, which a focused widget's editor lacks (see
+/// `actions::with_text_focus`).
 pub(crate) fn widget_key_context(widget: &'static str, editor_keys: &KeyContext) -> KeyContext {
     debug_assert!(WIDGET_KEY_CONTEXTS.contains(&widget));
     let mut context = KeyContext::default();

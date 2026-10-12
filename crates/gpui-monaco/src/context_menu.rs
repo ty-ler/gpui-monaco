@@ -682,12 +682,7 @@ impl CodeEditor {
     fn context_menu_entries(&self, window: &Window, cx: &App) -> Vec<Entry> {
         let keys = |name: &str| -> Option<SharedString> {
             let action = cx.build_action(name, None).ok()?;
-            crate::keybinding_label::command_label(
-                action.as_ref(),
-                None,
-                &self.focus_handle,
-                window,
-            )
+            crate::keybinding_label::editor_command_label(action.as_ref(), None, self, window, cx)
         };
         let builtin = |items: &[BuiltinItem]| -> Vec<Grouped> {
             items

@@ -313,21 +313,65 @@ pub(crate) fn command_binding(
     focus: &gpui::FocusHandle,
     window: &gpui::Window,
 ) -> Option<KeyBinding> {
-    let default = window.highest_precedence_binding_for_action_in(action, focus);
+    command_binding_with(action, id, |action| {
+        window.bindings_for_action_in(action, focus)
+    })
+}
+
+/// [`command_binding`], with `bindings` giving an action's bindings in the
+/// context looked in, in the order they were added.
+fn command_binding_with(
+    action: &dyn gpui::Action,
+    id: Option<&str>,
+    bindings: impl Fn(&dyn gpui::Action) -> Vec<KeyBinding>,
+) -> Option<KeyBinding> {
+    let default = bindings(action).pop();
     let Some(id) = id.or_else(|| crate::editor_actions::monaco_id(action.name())) else {
         return default;
     };
-    let rule = window
-        .bindings_for_action_in(
-            &crate::actions::RunCommand {
-                id: id.to_string(),
-                args: None,
-            },
-            focus,
-        )
-        .pop();
+    let rule = bindings(&crate::actions::RunCommand {
+        id: id.to_string(),
+        args: None,
+    })
+    .pop();
     // Monaco's dynamic keybindings come after the defaults, so they win.
     rule.or(default)
+}
+
+/// [`command_binding`] in `editor`, as bound while its text has the focus
+/// when one of its widgets has it: Monaco's labels don't depend on the
+/// focus (`lookupKeybinding` without a context), and the text's own keys
+/// need `editorTextFocus`, so a focused hover or menu would otherwise
+/// show none for them.
+pub(crate) fn editor_command_binding(
+    action: &dyn gpui::Action,
+    id: Option<&str>,
+    editor: &crate::CodeEditor,
+    window: &gpui::Window,
+    cx: &gpui::App,
+) -> Option<KeyBinding> {
+    command_binding(action, id, &editor.focus_handle, window).or_else(|| {
+        if !editor.widget_has_focus(window, cx) {
+            return None;
+        }
+        let mut context = editor.context_keys(cx);
+        context.add("editorTextFocus");
+        context.add("textInputFocus");
+        command_binding_with(action, id, |action| {
+            window.bindings_for_action_in_context(action, context.clone())
+        })
+    })
+}
+
+/// [`editor_command_binding`]'s label.
+pub(crate) fn editor_command_label(
+    action: &dyn gpui::Action,
+    id: Option<&str>,
+    editor: &crate::CodeEditor,
+    window: &gpui::Window,
+    cx: &gpui::App,
+) -> Option<SharedString> {
+    editor_command_binding(action, id, editor, window, cx).map(|binding| binding_label(&binding))
 }
 
 /// [`command_binding`]'s label.
