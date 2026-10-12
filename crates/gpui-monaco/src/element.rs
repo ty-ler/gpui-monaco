@@ -87,12 +87,41 @@ pub(crate) struct InjectedLayout {
     pub chip: bool,
 }
 
+/// Monaco `.mtkoverflow`'s box: `padding: 4px` inside a 1px border (which
+/// takes its room even when `contrastBorder` leaves it uncolored), and a
+/// 2px radius.
+const OVERFLOW_CHIP_BOX: crate::decorations::InjectedTextBox =
+    crate::decorations::InjectedTextBox {
+        margin: (px(0.), px(0.)),
+        padding: (px(5.), px(5.)),
+        padding_y: px(5.),
+        corner_radius: (px(2.), px(2.)),
+    };
+
 impl InjectedLayout {
     /// The x range of its background on `shaped` (its box less the
     /// margins), relative to the line's text start.
     pub fn background_range(&self, shaped: &ChunkedLine) -> Range<Pixels> {
         let (left, right) = self.text_box.map_or((px(0.), px(0.)), |b| b.margin);
         shaped.x_for_index(self.range.start) + left..shaped.x_for_index(self.range.end) - right
+    }
+
+    /// Its box (Monaco's inline box: the text's height plus its padding,
+    /// centered like the text) on a line at `origin` (the text start, the
+    /// line top), if it has one.
+    pub fn box_bounds(
+        &self,
+        shaped: &ChunkedLine,
+        origin: gpui::Point<Pixels>,
+        line_height: Pixels,
+    ) -> Option<Bounds<Pixels>> {
+        let text_box = self.text_box?;
+        let x = self.background_range(shaped);
+        let height = shaped.text_height(self.range.start) + text_box.padding_y * 2.;
+        Some(Bounds::new(
+            point(origin.x + x.start, origin.y + (line_height - height) / 2.),
+            size(x.end - x.start, height),
+        ))
     }
 }
 
@@ -1818,12 +1847,11 @@ impl EditorLayout {
             line.injected
                 .iter()
                 .filter(|i| i.chip)
-                .map(move |injected| {
-                    let from = line.shaped.x_for_index(injected.range.start);
-                    let to = line.shaped.x_for_index(injected.range.end);
-                    Bounds::new(
-                        point(origin_x + from, top),
-                        size(to - from, self.metrics.line_height),
+                .filter_map(move |injected| {
+                    injected.box_bounds(
+                        &line.shaped,
+                        point(origin_x, top),
+                        self.metrics.line_height,
                     )
                 })
         })
@@ -3080,13 +3108,13 @@ fn prepaint_editor(
     }
     editor.scroll_top = editor.scroll_top.clamp(px(0.), max_scroll_top);
     // Monaco `smoothScrolling`: animate to the new position.
-    let (shown, scrolling) = editor
+    let (shown_top, scrolling) = editor
         .animation
-        .scroll_position(point(px(0.), editor.scroll_top), options.smooth_scrolling);
+        .scroll_top_position(editor.scroll_top, options.smooth_scrolling);
     if scrolling {
         window.request_animation_frame();
     }
-    let scroll_top = shown.y.clamp(px(0.), max_scroll_top);
+    let scroll_top = shown_top.clamp(px(0.), max_scroll_top);
     editor.last_cursor_offset = Some(zones.line_y(primary_view_line, line_height) - scroll_top);
 
     let first_line = zones.line_at(scroll_top, line_height, view_line_count);
@@ -3242,6 +3270,8 @@ fn prepaint_editor(
                     },
                     background: Some(colors.button_background),
                     swatch: None,
+                    // The line is shaped around its padding and border.
+                    text_box: Some(OVERFLOW_CHIP_BOX),
                     ..Default::default()
                 },
                 None,
@@ -3354,7 +3384,14 @@ fn prepaint_editor(
         editor.scroll_left = left;
     }
     editor.scroll_left = editor.scroll_left.clamp(px(0.), max_scroll_left);
-    let scroll_left = editor.scroll_left;
+    // Monaco `smoothScrolling` animates both axes.
+    let (shown_left, scrolling) = editor
+        .animation
+        .scroll_left_position(editor.scroll_left, options.smooth_scrolling);
+    if scrolling {
+        window.request_animation_frame();
+    }
+    let scroll_left = shown_left.clamp(px(0.), max_scroll_left);
 
     let text_bounds = Bounds::new(
         point(bounds.left() + gutter_width, bounds.top()),
@@ -5403,7 +5440,14 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                         if *chip {
                             // Monaco `.mtkoverflow`: `button.background`
                             // (`button.hoverBackground` hovered), a 1px
-                            // `contrastBorder` and a 2px radius.
+                            // `contrastBorder`, 4px padding and a 2px radius.
+                            let bounds = injected
+                                .box_bounds(
+                                    &line.shaped,
+                                    point(origin_x + line.indent_x, top),
+                                    line_height,
+                                )
+                                .unwrap_or(bounds);
                             let hovered = state.mouse_position.is_some_and(|m| bounds.contains(&m));
                             let background = if hovered {
                                 colors.button_hover_background

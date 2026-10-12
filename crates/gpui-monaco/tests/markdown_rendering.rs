@@ -146,6 +146,56 @@ fn hovers_mix_tables_code_and_markup(cx: &mut TestAppContext) {
     assert!(contents[0].starts_with("# Title"));
 }
 
+/// Markdown in a narrow box, with a style.
+struct Narrow(MarkdownString, gpui_monaco::markdown::MarkdownStyle);
+
+impl gpui::Render for Narrow {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::{ParentElement as _, Styled as _};
+        let theme = gpui_monaco::theme::Theme::vs_dark();
+        gpui::div()
+            .w(px(60.))
+            .child(gpui_monaco::markdown::render_markdown(
+                &self.0, &self.1, &theme, cx,
+            ))
+    }
+}
+
+/// Monaco's suggest details and parameter hints round inline code
+/// (`border-radius: 3px`): the backgrounds drawn under the text follow it
+/// when it wraps.
+#[gpui::test]
+fn rounded_inline_code_wraps(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let colors = gpui_monaco::theme::EditorColors::vs_dark();
+    let style = gpui_monaco::markdown::MarkdownStyle {
+        foreground: colors.foreground,
+        link: colors.text_link_foreground,
+        code_background: colors.text_code_block_background,
+        code_corner_radius: px(3.),
+        code_font: "Menlo".into(),
+        font_size: px(13.),
+        line_height: 1.4,
+        separator: colors.text_separator_foreground,
+        quote_background: None,
+        quote_border: colors.text_block_quote_border,
+    };
+    let markdown = MarkdownString::new("call `a_rather_long_function_name()` then `b`");
+    let (view, cx) = cx.add_window_view(|_, _| Narrow(markdown, style));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    // Square backgrounds too.
+    view.update(cx, |view, cx| {
+        view.1.code_corner_radius = px(0.);
+        cx.notify();
+    });
+    cx.run_until_parked();
+}
+
 #[gpui::test]
 fn plain_text_documentation_is_not_markdown(cx: &mut TestAppContext) {
     let plain: Documentation = "*not emphasis*\n    indented".into();

@@ -50,7 +50,7 @@ Issues are linked by number.
 | Smart select (expand and shrink) | `smartSelect` | ✅ | #82 |
 | Linked editing (HTML tags) | `linkedEditing` | ✅ | #101 |
 | Snippet syntax: parser, variables, transforms | `snippet` | ✅ | #55 |
-| Snippet sessions: tab stops, choices, nesting, completion integration | `snippet` | ✅ | #55 |
+| Snippet sessions: tab stops, choices, nesting, completion integration, `$SELECTION` from text typed over a selection (`OvertypingCapturer`) | `snippet`, `suggestOvertypingCapturer` | ✅ | #55, #302 |
 | Drag and drop text, double-click block selection | `dnd`, `doubleClickSelectsBlock` | ✅ | #92 |
 | External drops, paste as | `dropOrPasteInto` | ✅ | #92 |
 | Copy-time paste data (`prepareDocumentPaste`, `copyMimeTypes`) | `dropOrPasteInto` | ✅ | #227 |
@@ -88,13 +88,13 @@ Issues are linked by number.
 | Folding: indentation and markers, gutter chevrons | `folding` | ✅ | |
 | Syntax and provider folding (`foldingStrategy`, `foldingMaximumRegions`) | `folding` | ✅ | #102 |
 | Fold level and recursive commands, fold navigation, manual ranges, unfold on `⋯` click, `foldingHighlight`, `foldingImportsByDefault` | `folding` | ✅ | #102 |
-| Minimap | `minimap` | ✅ Monaco's `MinimapLayout` (scroll, slider, start line), relative slider drags, click to reveal centered or drag (`fill`/`fit`), prebaked glyphs (`MinimapCharRenderer`) with `minimap.foregroundOpacity` and the light-theme variant, selection, find, occurrence, marker and custom decorations (`Inline`, `Gutter`), slider hover/active colors and the shadow. Scales above 2 device pixels enlarge the scale-2 glyphs; no touch gestures | #255 |
+| Minimap | `minimap` | ✅ Monaco's `MinimapLayout` (scroll, slider, start line), relative slider drags, click to reveal centered or drag (`fill`/`fit`), prebaked glyphs (`MinimapCharRenderer`) with `minimap.foregroundOpacity` and the light-theme variant, selection, find, occurrence, marker and custom decorations (`Inline`, `Gutter`), slider hover/active colors and the shadow, per-line redraws after edits and recoloring (`onLinesChanged`, `onLinesInserted`, `onLinesDeleted`, `onTokensChanged`). Scales above 2 device pixels enlarge the scale-2 glyphs; no touch gestures | #255, #302 |
 | Minimap options (side, render characters, size, autohide), section headers | `minimap`, `sectionHeaders` | ✅ | #88, #203 |
 | Sticky scroll (outline, folding and indentation models) | `stickyScroll` | ✅ | |
 | Sticky scroll keyboard focus, toggle, folding controls, hover, scroll with editor | `stickyScroll` | ✅ | #106 |
 | Sticky scroll widget state (`findScrollWidgetState`, the pushed last line, the 25% cap), models without `folding`, `offSide`, column and chevron clicks, a click's `revealPosition`, Cmd/Ctrl+click definition, decorations and inlay hints, shadow, border and gutter colors, the `mouseover` chevrons' fade, its context menu | `stickyScroll` | ✅ | #254, #251, #295 |
 | Render whitespace, indent guides, rulers, control characters | view parts | ✅ whitespace always as Monaco's default SVG marks (no `experimentalWhitespaceRendering`) | #84, #259 |
-| Cursor and selection rendering: block cursor text, view positions at wrap points, multi-cursor colors, selection corners and insets, view part paint order | `viewCursors`, `selections`, `CursorState.viewState` | ✅ the "Show more" chip has no 4px padding | #259 |
+| Cursor and selection rendering: block cursor text, view positions at wrap points, multi-cursor colors, selection corners and insets, view part paint order | `viewCursors`, `selections`, `CursorState.viewState` | ✅ the "Show more" chip has `.mtkoverflow`'s 4px padding, the line shaped around it | #259, #302 |
 | Bracket pair guides, `guides.highlightActiveIndentation: 'always'` | view parts | ✅ | #118, #203 |
 | Bracket pair colorization, independent color pool per bracket type | `bracketPairColorization` | ✅ | #85, #203 |
 | Occurrence and selection highlight, `selectedTextMatchMode`, `occurrencesHighlightFromAllProviders` | `wordHighlighter` | ✅ `multiFile` highlights in the current editor only | #83, #203, #228 |
@@ -104,7 +104,7 @@ Issues are linked by number.
 | Variable line heights (`lineHeight` decorations, `allowVariableLineHeights`) | decorations | ✅ | #87 |
 | Per-decoration fonts (`fontFamily`, `fontWeight`, `fontStyle`) | decorations | ✅ wrapping measures the editor's font; no per-decoration `fontSize` | #272 |
 | Letter spacing, font variations | options | ❌ | #87 |
-| Smooth scrolling, caret animation, blinking styles, cursor surrounding lines, padding, wheel and middle-click options | options | ✅ | #88 |
+| Smooth scrolling (both axes), caret animation, blinking styles, cursor surrounding lines, padding, wheel and middle-click options | options | ✅ | #88, #302 |
 | Placeholder text, read-only message | `placeholderText`, `readOnlyMessage`, `message` | ✅ the message's arrow, 8px gap, fade in and out, reveal, `editorHoverWidget.*` colors with the `inputValidation.infoBorder` border, and staying open on blur under the mouse | #89, #251 |
 | Very long lines | `stopRenderingLineAfter`, `maxTokenizationLineLength` | ✅ | #59 |
 | Clicking past the rendering limit turns it off | `longLinesHelper` | ✅ | #227 |
@@ -167,7 +167,7 @@ Issues are linked by number.
 |---|---|---|---|
 | Completion: fuzzy filter, docs, commit characters, additional edits | `suggest` | ✅ | |
 | Completion: resolve, tags, insert/replace modes, word suggestions, accept and selection options | `suggest` | ✅ | #103 |
-| Completion: tab completion, locality bonus, retrigger rules | `suggest` | ✅ | #103 |
+| Completion: tab completion, locality bonus (`WordDistance`, word-based suggestions included), retrigger rules | `suggest`, `wordDistance` | ✅ | #103, #302 |
 | Completion widget: details toggle, side docs, resizing, status bar, loading and empty messages | `suggest` | ✅ | #103 |
 | Completion widget layout: sized to the room above and below without flipping while typing, north sash, Monaco's list scrollbar, details placed east, west, below or above and resizable, clickable status bar, ellipsis, the details type line in the editor font, `fitWidthToDetails`, screen reader announcements | `SuggestWidget._layout`, `SuggestDetailsOverlay._placeAtAnchor`, `SuggestWidgetStatus` | ✅ | #248 |
 | Completion widget scrolling and details sizing: the list scrolls by pixels (`ListView`, partly shown rows at the edges, the focused row revealed in full), the list and details scrollbars fade in and out (`ScrollbarVisibilityController`), the details panel fits its content in the frame it changes, the empty corners around the list and details let the mouse through | `ListView`, `ScrollableElement`, `SuggestDetailsWidget.layout`, `SuggestDetailsOverlay` | ✅ the wheel isn't animated, as Monaco's list (`smoothScrolling` off) | #292 |
@@ -175,7 +175,7 @@ Issues are linked by number.
 | Completion: `selectionMode` and `focusSuggestion`, explain mode, reset size, `snippetsPreventQuickSuggestions`, `shareSuggestSelections`, every item kind | `suggest` | ✅ memories are kept per window unless shared (Monaco's workspace and profile storage); nothing is persisted | #202, #248 |
 | Completion: `quickSuggestions: 'inline'` (completion items as ghost text) and `'offWhenInlineCompletions'`, details focus (`toggleSuggestionFocus`), `suggestWidgetCopy` | `suggest`, `suggestInlineCompletions` | ✅ copying takes the whole details panel (there's no text selection in it); inline items skip word-based suggestions and eager resolving | #226 |
 | Hover | `hover` | ✅ content and gutter hovers, options, keyboard focus and scrolling, focusable rows (Tab and Shift+Tab, each read when focused, `focusedHoverPartIndex` for verbosity), resizing from full edges, verbosity, copy button, long line warnings, the `hoverHighlight` range, rounded card with `shadow-lg`, full-width row separators, read on focus; the problem hover's status bar (View Problem, Quick Fix from the marker's quick fixes with the menu at the clicked link, "No quick fixes available", AI fixes; no menu-contributed actions), editor-font body with code and related-information links; links, copy buttons and status bar actions aren't tab stops of their own | #199, #247, #294 |
-| Markdown in hovers, suggest details, parameter hints and messages | `MarkdownRenderer`, `IMarkdownString` | 🟡 GFM tables, quotes, nested lists, strikethrough, images, highlighted code blocks, `$(icon)`s (`supportThemeIcons`), a sanitized HTML subset (`supportHtml`), trusted `command:` links, plain-text documentation, the editor's line height; text can't be selected (GPUI has no selectable text) and inline code isn't rounded | #246 |
+| Markdown in hovers, suggest details, parameter hints and messages | `MarkdownRenderer`, `IMarkdownString` | 🟡 GFM tables, quotes, nested lists, strikethrough, images, highlighted code blocks, `$(icon)`s (`supportThemeIcons`), a sanitized HTML subset (`supportHtml`), trusted `command:` links, plain-text documentation, the editor's line height; text can't be selected (GPUI has no selectable text); inline code is rounded in suggest details and parameter hints, as their CSS does (Monaco's hover CSS doesn't round it) | #246, #302 |
 | Signature help: overload cycling and arrows, `enabled`/`cycle` options, close and next/previous commands | `parameterHints` | ✅ | #200 |
 | Signature help fidelity: maximum height and scrolling, whole-word parameter labels, active parameter style and docs separator, the 120ms delay with merged triggers, no default trigger characters, screen reader announcements | `ParameterHintsModel`, `ParameterHintsWidget` | ✅ | #248 |
 | Go to definition (link, F12) | `gotoSymbol` | ✅ | |

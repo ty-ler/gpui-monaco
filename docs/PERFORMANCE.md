@@ -96,7 +96,7 @@ Each of these was a measured hot spot on large files:
 - **Per-frame work scales with the viewport, not the file.**
   - Sticky scroll walks fold-range parents instead of scanning every range.
   - The fold gutter uses a binary search.
-  - The minimap walks highlights with a cursor and rebuilds in the background.
+  - The minimap walks highlights with a cursor and rebuilds in the background; after an edit it draws only the changed lines and keeps the rest of its tiles' pixels.
   - Bracket matching queries strings and comments a block of rows at a time.
   - Typing within a line updates only the edited rows' view-line counts.
   - `ViewLines` and `Buffer` are shared, not cloned, each frame.

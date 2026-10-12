@@ -513,7 +513,11 @@ impl CodeEditor {
             cx.notify();
             return;
         }
-        let style = self.markdown_style();
+        let style = MarkdownStyle {
+            // Monaco `.parameter-hints-widget .docs code`.
+            code_corner_radius: px(3.),
+            ..self.markdown_style()
+        };
         let theme = self.theme.clone();
         let editor = cx.entity().downgrade();
         let widget = cx.new(|_| SignatureHelpWidget {

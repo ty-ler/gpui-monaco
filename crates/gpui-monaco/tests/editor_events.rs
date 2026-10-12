@@ -615,6 +615,49 @@ fn scroll_types(cx: &mut TestAppContext) {
     assert_eq!(editor.read_with(cx, |e, _| e.scroll_left()), px(0.));
 }
 
+/// Monaco's `SmoothScrollingOperation` animates `scrollLeft` as it does
+/// `scrollTop`.
+#[gpui::test]
+fn horizontal_smooth_scrolling(cx: &mut TestAppContext) {
+    let long = format!("{}\n", "x".repeat(300)).repeat(50);
+    let (editor, cx) = setup(&long, cx);
+    let mut options = editor.read_with(cx, |e, _| e.options().clone());
+    options.smooth_scrolling = true;
+    editor.update(cx, |e, cx| e.update_options(options, cx));
+    draw(cx);
+    let shown = |cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, _| e.shown_scroll_position_for_tests().unwrap())
+    };
+
+    // Smooth: the frame shows a point on the way.
+    editor.update(cx, |e, cx| {
+        e.set_scroll_left(px(400.), ScrollType::Smooth, cx)
+    });
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.has_pending_scroll_animation()));
+    assert_eq!(editor.read_with(cx, |e, _| e.scroll_left()), px(400.));
+    assert!(shown(cx).x < px(400.));
+    assert_eq!(shown(cx).y, px(0.));
+
+    // Immediate jumps.
+    editor.update(cx, |e, cx| {
+        e.set_scroll_left(px(100.), ScrollType::Immediate, cx)
+    });
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.has_pending_scroll_animation()));
+    assert_eq!(shown(cx).x, px(100.));
+
+    // Without `smooth_scrolling`, smooth requests jump too.
+    let mut options = editor.read_with(cx, |e, _| e.options().clone());
+    options.smooth_scrolling = false;
+    editor.update(cx, |e, cx| e.update_options(options, cx));
+    editor.update(cx, |e, cx| {
+        e.set_scroll_left(px(300.), ScrollType::Smooth, cx)
+    });
+    draw(cx);
+    assert_eq!(shown(cx).x, px(300.));
+}
+
 #[gpui::test]
 fn reveal_lines_leave_horizontal_scroll(cx: &mut TestAppContext) {
     let long = format!("{}\n", "x".repeat(300)).repeat(200);

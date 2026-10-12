@@ -6,6 +6,7 @@
 pub mod completion_model;
 pub mod fuzzy;
 pub mod memory;
+pub(crate) mod word_distance;
 
 #[cfg(test)]
 mod tests;

@@ -671,6 +671,60 @@ fn clicking_past_the_rendering_limit_turns_it_off(cx: &mut TestAppContext) {
     );
 }
 
+/// Monaco `.mtkoverflow`: `padding: 4px` inside a 1px border, so the chip's
+/// box is the line's last 10px wider than its text and overflows the line
+/// by 5px above and below.
+#[gpui::test]
+fn the_show_more_chip_is_padded(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_with(|| TextModel::new(&"x".repeat(200)), cx);
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.stop_rendering_line_after = Some(50);
+        e.update_options(options, cx);
+    });
+    draw(cx);
+    let (chips, start, at_limit, width, line_height) = editor.read_with(cx, |e, _| {
+        (
+            e.overflow_chips_for_tests(),
+            e.scrolled_visible_position(p(0, 0)).unwrap(),
+            e.scrolled_visible_position(p(0, 50)).unwrap(),
+            e.width_of_line(0).unwrap(),
+            e.options().resolved_line_height(),
+        )
+    });
+    let [chip] = chips[..] else {
+        panic!("{chips:?}");
+    };
+    // The line is shaped around the box: it starts where drawing stops and
+    // ends the line.
+    assert_eq!(chip.origin.x, at_limit.x);
+    assert_eq!(chip.right(), start.x + width);
+    // 5px on each side of its text.
+    let (family, font_size) = editor.read_with(cx, |e, _| {
+        (e.options().font_family.clone(), e.options().font_size)
+    });
+    let text = "Show more (150 chars)";
+    let text_width = cx.update(|window, _| {
+        let run = gpui::TextRun {
+            len: text.len(),
+            font: gpui::font(family),
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window
+            .text_system()
+            .shape_line(text.into(), font_size, &[run], None)
+            .width
+    });
+    assert!((chip.size.width - text_width - gpui::px(10.)).abs() < gpui::px(0.01));
+    // Its text's height plus 5px each way, centered on the line.
+    assert!(chip.size.height > gpui::px(10.));
+    let middle = chip.origin.y + chip.size.height / 2.;
+    assert_eq!(middle, start.y + line_height / 2.);
+}
+
 // ----- The unicode highlighter banner ----------------------------------------
 
 #[gpui::test]

@@ -8,7 +8,7 @@ use gpui::{
 };
 use gpui_monaco::cursor::Selection;
 use gpui_monaco::options::{EditorOptions, MinimapSize};
-use gpui_monaco::text::PointUtf16;
+use gpui_monaco::text::{Point, PointUtf16};
 use gpui_monaco::{
     CodeEditor, DecorationOptions, Marker, MarkerSeverity, MinimapDecoration, MinimapPosition,
     MinimapSectionHeaderStyle,
@@ -492,4 +492,106 @@ fn scrolling_reuses_the_drawn_tiles(cx: &mut TestAppContext) {
     paint(cx);
     let typed = editor.read_with(cx, |e, _| e.minimap_tiles_for_tests());
     assert!(typed.iter().all(|tile| !after.contains(tile)));
+}
+
+/// Each drawn tile's first minimap line and pixels.
+type TilePixels = Vec<(u32, Vec<u8>)>;
+
+/// The tiles' pixels, then the pixels of the same tiles drawn from scratch.
+fn redrawn_from_scratch(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+) -> (TilePixels, TilePixels) {
+    let kept = editor.read_with(cx, |e, _| e.minimap_tile_pixels_for_tests());
+    editor.update(cx, |e, _| e.clear_minimap_tiles_for_tests());
+    paint(cx);
+    let fresh = editor.read_with(cx, |e, _| e.minimap_tile_pixels_for_tests());
+    (kept, fresh)
+}
+
+/// Monaco's `onLinesChanged`: typing in a line redraws only the tile with
+/// that line, and its other lines keep their pixels.
+#[gpui::test]
+fn typing_redraws_only_the_edited_lines(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&lines(5000), |_| {}, cx);
+    set_scroll_top(&editor, cx, px(40_000.));
+    let before = editor.read_with(cx, |e, _| e.minimap_tiles_for_tests());
+    assert!(before.len() >= 2, "{before:?}");
+    // A line in the second tile.
+    let row = before[1].0 + 8;
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| {
+            let offset = m.buffer().rope().point_to_offset(Point::new(row, 4));
+            m.edit([(offset..offset, "xyz")], cx).unwrap();
+        })
+    });
+    paint(cx);
+    let after = editor.read_with(cx, |e, _| e.minimap_tiles_for_tests());
+    for (tile, image) in &after {
+        let redrawn = !before.contains(&(*tile, *image));
+        assert_eq!(redrawn, *tile == before[1].0, "{before:?} {after:?}");
+    }
+    let (kept, fresh) = redrawn_from_scratch(&editor, cx);
+    assert_eq!(kept, fresh);
+}
+
+/// Monaco's `onLinesInserted` and `onLinesDeleted`: the lines below move
+/// with their pixels, and the result is what drawing the tiles again gives.
+#[gpui::test]
+fn inserted_and_deleted_lines_move_the_others(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&lines(5000), |_| {}, cx);
+    set_scroll_top(&editor, cx, px(40_000.));
+    let first = editor.read_with(cx, |e, _| e.minimap_tiles_for_tests())[1].0;
+    editor.update(cx, |e, cx| {
+        e.set_position(PointUtf16::new(first + 20, 3), cx);
+        e.type_text("\n\nnew", cx);
+    });
+    paint(cx);
+    let (kept, fresh) = redrawn_from_scratch(&editor, cx);
+    assert_eq!(kept, fresh);
+    // Deleting lines across a tile boundary.
+    editor.update(cx, |e, cx| {
+        e.set_selection(
+            Selection::from_range(
+                PointUtf16::new(first + 120, 2)..PointUtf16::new(first + 135, 5),
+                false,
+            ),
+            cx,
+        );
+        e.type_text("q", cx);
+    });
+    paint(cx);
+    let (kept, fresh) = redrawn_from_scratch(&editor, cx);
+    assert_eq!(kept, fresh);
+}
+
+/// Monaco's `onTokensChanged`: lines whose colors the parser changed (an
+/// opened string colors the lines after it) are drawn again too.
+#[gpui::test]
+fn lines_recolored_by_the_parser_are_redrawn(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
+    });
+    let text = (0..600)
+        .map(|i| format!("fn f{i}() {{ let s = 1; }}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = gpui::AppContext::new(cx, |_| {
+            gpui_monaco::TextModel::new(&text).with_language("rust")
+        });
+        CodeEditor::new(model, window, cx)
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    paint(cx);
+    let before = editor.read_with(cx, |e, _| e.minimap_tile_pixels_for_tests());
+    editor.update(cx, |e, cx| {
+        e.set_position(PointUtf16::new(3, 20), cx);
+        e.type_text("\"", cx);
+    });
+    paint(cx);
+    let (kept, fresh) = redrawn_from_scratch(&editor, cx);
+    assert_ne!(kept, before);
+    assert_eq!(kept, fresh);
 }

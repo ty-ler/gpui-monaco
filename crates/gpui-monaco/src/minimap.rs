@@ -5,7 +5,7 @@
 //!
 //! As in Monaco the text is a canvas-like image (drawn on a background
 //! thread here, and kept until the text, the colors or the lines shown
-//! change), and the selections, decorations and section headers a layer
+//! change, when only the changed lines are drawn again), and the selections, decorations and section headers a layer
 //! on top of it (quads here, redrawn every frame).
 
 use std::sync::Arc;
@@ -28,7 +28,7 @@ use crate::view::minimap::{
     MINIMAP_GUTTER_WIDTH, MinimapLayout as SliderLayout, Rgba8, SamplingState, fit_section_header,
     render_line, x_offset_for_position,
 };
-use crate::view::view_lines::{ViewLines, utf16_to_byte};
+use crate::view::view_lines::{ViewLine, ViewLines, utf16_to_byte};
 
 /// Monaco's `.minimap canvas { opacity: .9 }`.
 const CANVAS_OPACITY: f32 = 0.9;
@@ -41,7 +41,17 @@ const CANVAS_OPACITY: f32 = 0.9;
 /// canvas is kept in tiles of whole lines instead: scrolling moves them,
 /// and only a tile coming into view is drawn (on a background thread) and
 /// uploaded. The pixels are the same as Monaco's canvas.
+///
+/// After an edit, as Monaco's `onLinesChanged`, `onLinesInserted` and
+/// `onLinesDeleted` mark lines, a tile keeps the pixels of the lines that
+/// didn't change (moved up or down with the lines around them) and draws
+/// only the edited lines and those whose colors the highlighter changed.
 const TILE_LINES: u32 = 128;
+
+/// How many highlighter changes ([`MinimapCache::note_tokens_changed`]) are
+/// kept for tiles that haven't caught up; a tile further behind is drawn
+/// again.
+const TOKEN_CHANGES_KEPT: usize = 32;
 
 /// The text canvas's tiles and what they were drawn for.
 #[derive(Clone, Default)]
@@ -55,6 +65,10 @@ pub(crate) struct MinimapCache {
     /// shown (a frame-stale minimap is invisible, a few ms per keystroke on
     /// the main thread isn't).
     pending: Vec<(TileKey, Arc<gpui::Task<()>>)>,
+    /// The latest highlighter changes (Monaco's `onTokensChanged`), oldest
+    /// first, and how many there have been.
+    token_changes: std::collections::VecDeque<TokenChange>,
+    token_change_count: usize,
     /// What the layout remembers between frames (Monaco
     /// `ComputeOptionsMemory`).
     pub layout_memory: crate::layout_info::LayoutMemory,
@@ -66,20 +80,99 @@ pub(crate) struct MinimapCache {
     pub sampling: Option<(Arc<SamplingState>, (u32, u64))>,
 }
 
-/// What the lines look like: (text, parsed text, theme, view lines,
-/// render settings). Lines are redrawn once the syntax tree catches up,
-/// for colors.
-type ContentKey = (text::Version, Option<text::Version>, usize, u64, [u64; 4]);
+/// Rows whose highlights changed: byte ranges of the text at `version`.
+#[derive(Clone, Debug)]
+struct TokenChange {
+    version: text::Version,
+    ranges: Vec<std::ops::Range<usize>>,
+}
 
-/// A tile's (content, index).
-type TileKey = (ContentKey, u32);
+/// What the lines look like apart from their text: (theme, highlighter,
+/// view line settings, render settings). A tile drawn for other settings
+/// is drawn again from scratch.
+type StyleKey = (usize, usize, u64, [u64; 4]);
+
+/// A tile's (settings, view lines generation, highlighter changes seen,
+/// index): what a background draw is for.
+type TileKey = (StyleKey, u64, usize, u32);
 
 /// A drawn tile: minimap lines `index * TILE_LINES + 1` on.
 #[derive(Clone)]
 struct Tile {
     index: u32,
-    content: ContentKey,
+    style: StyleKey,
+    /// The 0-based view line on each of its minimap lines, from
+    /// `view_lines`.
+    lines: Arc<[u32]>,
+    view_lines: Arc<ViewLines>,
+    /// How many highlighter changes it reflects.
+    token_changes_seen: usize,
+    /// Its pixels (GPUI's BGRA), to keep the lines that didn't change.
+    pixels: Arc<Vec<u8>>,
     image: Arc<gpui::RenderImage>,
+}
+
+/// Where a line of a tile being redrawn comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineSource {
+    /// The old tile's line at this index, unchanged.
+    Keep(u32),
+    /// Drawn again.
+    Draw,
+}
+
+impl MinimapCache {
+    /// Remembers which rows' highlights changed (Monaco's minimap
+    /// `onTokensChanged`), from rows of the text the highlighter parsed, so
+    /// tiles redraw just those.
+    pub(crate) fn note_tokens_changed(
+        &mut self,
+        rows: &[std::ops::RangeInclusive<u32>],
+        model: &crate::model::TextModel,
+    ) {
+        let buffer = model.buffer();
+        let ranges = match model.syntax_snapshot() {
+            Some(syntax) => {
+                let parsed = syntax.text.rope();
+                let patch = (syntax.text.version() != buffer.version())
+                    .then(|| buffer.edits_since(syntax.text.version()));
+                let max_row = parsed.max_point().row;
+                rows.iter()
+                    .map(|rows| {
+                        let start_row = (*rows.start()).min(max_row);
+                        let end_row = (*rows.end()).min(max_row);
+                        let start = parsed.point_to_offset(text::Point::new(start_row, 0));
+                        let end = parsed
+                            .point_to_offset(text::Point::new(end_row, parsed.line_len(end_row)));
+                        match &patch {
+                            Some(patch) => {
+                                patch.transform_offset(start, text::Bias::Left)
+                                    ..patch.transform_offset(end, text::Bias::Right)
+                            }
+                            None => start..end,
+                        }
+                    })
+                    .collect()
+            }
+            // No highlighter: any row may have changed.
+            None => std::iter::once(0..buffer.rope().len()).collect(),
+        };
+        self.token_changes.push_back(TokenChange {
+            version: buffer.version(),
+            ranges,
+        });
+        self.token_change_count += 1;
+        if self.token_changes.len() > TOKEN_CHANGES_KEPT {
+            self.token_changes.pop_front();
+        }
+    }
+
+    /// The highlighter changes after the first `seen`, or `None` if some
+    /// of them are no longer kept.
+    fn token_changes_since(&self, seen: usize) -> Option<impl Iterator<Item = &TokenChange>> {
+        let first_kept = self.token_change_count - self.token_changes.len();
+        (seen >= first_kept).then(|| self.token_changes.iter().skip(seen - first_kept))
+    }
 }
 
 /// A slider drag (Monaco `_startSliderDragging`).
@@ -313,24 +406,23 @@ pub(crate) fn prepaint(
         }
     };
     let (start, end) = (layout.start_line_number, layout.end_line_number);
-    let parsed = editor
+    let highlighter = editor
         .model()
         .read(cx)
         .syntax_snapshot()
-        .map(|syntax| syntax.text.version());
+        .map_or(0, |syntax| {
+            Arc::as_ptr(&syntax.highlighter) as *const () as usize
+        });
     let view_key = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        view_lines.hidden().hash(&mut hasher);
-        view_line_count.hash(&mut hasher);
         wrap_column.hash(&mut hasher);
         tab_size.hash(&mut hasher);
         hasher.finish()
     };
-    let content: ContentKey = (
-        snapshot.version(),
-        parsed,
+    let style_key: StyleKey = (
         Arc::as_ptr(theme) as usize,
+        highlighter,
         view_key,
         [
             u64::from(info.minimap_canvas_inner_width) << 32
@@ -352,55 +444,129 @@ pub(crate) fn prepaint(
             .partition(|tile| tiles.contains(&tile.index));
         cache.tiles = keep;
         cache.stale.extend(drop.into_iter().map(|tile| tile.image));
+        let token_change_count = cache.token_change_count;
         cache
             .pending
-            .retain(|((c, index), _)| *c == content && tiles.contains(index));
+            .retain(|((style, generation, seen, index), _)| {
+                *style == style_key
+                    && *generation == view_lines.generation()
+                    && *seen == token_change_count
+                    && tiles.contains(index)
+            });
     }
     let canvas_background = Rgba8::from_hsla(background);
     let first_paint = editor.minimap_cache.tiles.is_empty();
+    let token_change_count = editor.minimap_cache.token_change_count;
     for index in tiles.clone() {
         let cache = &editor.minimap_cache;
-        let current = cache
-            .tiles
-            .iter()
-            .any(|tile| tile.index == index && tile.content == content);
-        if current
-            || cache
-                .pending
-                .iter()
-                .any(|(key, _)| *key == (content, index))
-        {
+        let key = (
+            style_key,
+            view_lines.generation(),
+            token_change_count,
+            index,
+        );
+        let old = cache.tiles.iter().position(|tile| tile.index == index);
+        let current = old.is_some_and(|ix| {
+            let tile = &cache.tiles[ix];
+            tile.style == style_key
+                && tile.view_lines.generation() == view_lines.generation()
+                && tile.token_changes_seen == token_change_count
+        });
+        if current || cache.pending.iter().any(|(pending, _)| *pending == key) {
             continue;
         }
         let first = index * TILE_LINES + 1;
         let last = ((index + 1) * TILE_LINES).min(line_count);
-        let lines: Vec<u32> = (first..=last).map(|line| view_line_of(line) - 1).collect();
+        let lines: Arc<[u32]> = (first..=last).map(|line| view_line_of(line) - 1).collect();
+        // Monaco's line events: keep what didn't change.
+        let plan = old.and_then(|ix| {
+            let model = editor.model().read(cx);
+            plan_tile(
+                &cache.tiles[ix],
+                cache,
+                style_key,
+                &lines,
+                view_lines,
+                model.buffer(),
+                &style,
+            )
+        });
+        if let (Some(ix), Some(plan)) = (old, plan.as_ref())
+            && plan.len() == cache.tiles[ix].lines.len()
+            && plan
+                .iter()
+                .enumerate()
+                .all(|(i, source)| *source == LineSource::Keep(i as u32))
+        {
+            // Nothing it shows changed.
+            let tile = &mut editor.minimap_cache.tiles[ix];
+            tile.view_lines = view_lines.clone();
+            tile.lines = lines;
+            tile.token_changes_seen = token_change_count;
+            continue;
+        }
+        let old_pixels = plan
+            .zip(old)
+            .map(|(plan, ix)| (editor.minimap_cache.tiles[ix].pixels.clone(), plan));
         let source = HighlightSource::new(editor.model().read(cx));
         let build = {
             let (view_lines, snapshot, theme) =
                 (view_lines.clone(), snapshot.clone(), theme.clone());
+            let lines = lines.clone();
             let width = info.minimap_canvas_inner_width;
             move || {
-                render_tile(
-                    source.as_ref(),
-                    &view_lines,
-                    &snapshot,
-                    &theme,
-                    &lines,
-                    &style,
-                    width,
-                    canvas_background,
-                )
+                let lines_to = |lines: &[u32]| {
+                    render_lines(
+                        source.as_ref(),
+                        &view_lines,
+                        &snapshot,
+                        &theme,
+                        lines,
+                        &style,
+                        width,
+                        canvas_background,
+                    )
+                };
+                let pixels = match old_pixels {
+                    None => lines_to(&lines)?,
+                    Some((old, plan)) => {
+                        let drawn: Vec<u32> = lines
+                            .iter()
+                            .zip(&plan)
+                            .filter(|(_, source)| **source == LineSource::Draw)
+                            .map(|(line, _)| *line)
+                            .collect();
+                        let fresh = if drawn.is_empty() {
+                            Vec::new()
+                        } else {
+                            lines_to(&drawn)?
+                        };
+                        let line_bytes = width as usize * 4 * style.minimap_line_height as usize;
+                        compose_lines(&old, &fresh, &plan, line_bytes)
+                    }
+                };
+                let height = (pixels.len() / (width as usize * 4).max(1)) as u32;
+                let buffer = image::RgbaImage::from_raw(width, height, pixels.clone())?;
+                let image = Arc::new(gpui::RenderImage::new(vec![image::Frame::new(buffer)]));
+                Some((Arc::new(pixels), image))
+            }
+        };
+        let tile = {
+            let view_lines = view_lines.clone();
+            move |(pixels, image)| Tile {
+                index,
+                style: style_key,
+                lines,
+                view_lines,
+                token_changes_seen: token_change_count,
+                pixels,
+                image,
             }
         };
         if first_paint && shown.contains(&index) {
             // Nothing to show yet: draw it now.
-            if let Some(image) = build() {
-                editor.minimap_cache.tiles.push(Tile {
-                    index,
-                    content,
-                    image,
-                });
+            if let Some(drawn) = build() {
+                editor.minimap_cache.tiles.push(tile(drawn));
             }
             continue;
         }
@@ -412,7 +578,7 @@ pub(crate) fn prepaint(
             gpui::Priority::Low
         };
         let task = cx.spawn(async move |this, cx| {
-            let image = cx
+            let drawn = cx
                 .background_executor()
                 .spawn_with_priority(priority, async move { build() })
                 .await;
@@ -421,7 +587,7 @@ pub(crate) fn prepaint(
                 let Some(ix) = cache
                     .pending
                     .iter()
-                    .position(|(key, _)| *key == (content, index))
+                    .position(|(pending, _)| *pending == key)
                 else {
                     return;
                 };
@@ -430,21 +596,14 @@ pub(crate) fn prepaint(
                     let old = cache.tiles.remove(old);
                     cache.stale.push(old.image);
                 }
-                if let Some(image) = image {
-                    cache.tiles.push(Tile {
-                        index,
-                        content,
-                        image,
-                    });
+                if let Some(drawn) = drawn {
+                    cache.tiles.push(tile(drawn));
                 }
                 cx.notify();
             })
             .ok();
         });
-        editor
-            .minimap_cache
-            .pending
-            .push(((content, index), Arc::new(task)));
+        editor.minimap_cache.pending.push((key, Arc::new(task)));
     }
     let mut paint = MinimapPaint {
         // The canvas's background, at its opacity.
@@ -860,9 +1019,9 @@ fn to_gpui_pixels(rows: &mut [u8]) {
 }
 
 /// Monaco `renderLines` for one tile: the 0-based view `lines`, one
-/// minimap line each, on the canvas `background`.
+/// minimap line each, on the canvas `background`, as GPUI's BGRA pixels.
 #[allow(clippy::too_many_arguments)]
-fn render_tile(
+fn render_lines(
     highlights: Option<&HighlightSource>,
     view_lines: &ViewLines,
     snapshot: &text::BufferSnapshot,
@@ -871,7 +1030,7 @@ fn render_tile(
     style: &LineStyle,
     width: u32,
     background: Rgba8,
-) -> Option<Arc<gpui::RenderImage>> {
+) -> Option<Vec<u8>> {
     let height = (lines.len() as f64 * style.minimap_line_height).ceil() as u32;
     if width == 0 || height == 0 {
         return None;
@@ -949,10 +1108,140 @@ fn render_tile(
         dy += style.minimap_line_height;
     }
     to_gpui_pixels(&mut image.data);
-    let buffer = image::RgbaImage::from_raw(width, height, image.data)?;
-    Some(Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
-        buffer,
-    )])))
+    Some(image.data)
+}
+
+/// A redrawn tile's pixels: each line kept from `old` or taken, in order,
+/// from `fresh` (the lines drawn again), `line_bytes` each.
+fn compose_lines(old: &[u8], fresh: &[u8], plan: &[LineSource], line_bytes: usize) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(plan.len() * line_bytes);
+    let mut fresh = fresh.chunks_exact(line_bytes);
+    for source in plan {
+        let line = match source {
+            LineSource::Keep(ix) => {
+                let start = *ix as usize * line_bytes;
+                old.get(start..start + line_bytes)
+            }
+            LineSource::Draw => fresh.next(),
+        };
+        match line {
+            Some(line) => pixels.extend_from_slice(line),
+            None => pixels.resize(pixels.len() + line_bytes, 0),
+        }
+    }
+    pixels
+}
+
+/// Monaco's minimap line events (`onLinesChanged`, `onLinesInserted`,
+/// `onLinesDeleted`, `onTokensChanged`) for one tile: which of its new
+/// `lines` keep their pixels from `tile`, moved with the lines around them,
+/// and which are drawn again because their text or highlights changed.
+/// `None` draws it all.
+fn plan_tile(
+    tile: &Tile,
+    cache: &MinimapCache,
+    style_key: StyleKey,
+    lines: &[u32],
+    view_lines: &ViewLines,
+    buffer: &text::Buffer,
+    style: &LineStyle,
+) -> Option<Vec<LineSource>> {
+    if tile.style != style_key || !crate::view::minimap::lines_are_separate(style) {
+        return None;
+    }
+    let old_lines = &*tile.view_lines;
+    let version = view_lines.version();
+    if old_lines.version() > version || version != buffer.version() {
+        return None;
+    }
+    let (old_rope, rope) = (old_lines.rope(), view_lines.rope());
+    // The rows each edit replaced (old rows, new rows), as `ViewLines`
+    // splices them.
+    let mut spans: Vec<(std::ops::Range<u32>, std::ops::Range<u32>)> = Vec::new();
+    if old_lines.version() != version {
+        for edit in buffer.edits_since(old_lines.version()).edits() {
+            let old_rows = old_rope.offset_to_point(edit.old.start).row
+                ..old_rope.offset_to_point(edit.old.end).row + 1;
+            let new_rows = rope.offset_to_point(edit.new.start).row
+                ..rope.offset_to_point(edit.new.end).row + 1;
+            match spans.last_mut() {
+                Some((last_old, last_new)) if old_rows.start < last_old.end => {
+                    last_old.end = last_old.end.max(old_rows.end);
+                    last_new.end = last_new.end.max(new_rows.end);
+                }
+                _ => spans.push((old_rows, new_rows)),
+            }
+        }
+    }
+    // Edited rows, and rows the highlighter changed since the tile was
+    // drawn (in today's rows).
+    let mut dirty: Vec<std::ops::Range<u32>> = spans.iter().map(|(_, new)| new.clone()).collect();
+    for change in cache.token_changes_since(tile.token_changes_seen)? {
+        let patch = (change.version != version).then(|| buffer.edits_since(change.version));
+        for range in &change.ranges {
+            let (start, end) = match &patch {
+                Some(patch) => (
+                    patch.transform_offset(range.start, text::Bias::Left),
+                    patch.transform_offset(range.end, text::Bias::Right),
+                ),
+                None => (range.start, range.end),
+            };
+            let (start, end) = (start.min(rope.len()), end.min(rope.len()));
+            dirty.push(rope.offset_to_point(start).row..rope.offset_to_point(end).row + 1);
+        }
+    }
+    let wrapped = old_lines.wrap().is_some() || view_lines.wrap().is_some();
+    // Unwrapped with nothing folded, view lines are rows.
+    let direct = !wrapped && old_lines.hidden().is_empty() && view_lines.hidden().is_empty();
+    let plan: Vec<LineSource> = lines
+        .iter()
+        .map(|&line| {
+            let ViewLine { row, segment } = if direct {
+                ViewLine {
+                    row: line,
+                    segment: 0,
+                }
+            } else {
+                view_lines.view_line(line)
+            };
+            if dirty.iter().any(|rows| rows.contains(&row)) {
+                return LineSource::Draw;
+            }
+            // Rows below an edit moved by its change in line count.
+            let old_row = spans
+                .iter()
+                .take_while(|(_, new)| new.end <= row)
+                .last()
+                .map_or(row, |(old, new)| row - new.end + old.end);
+            if old_row >= old_rope.line_count() || (!direct && old_lines.is_row_hidden(old_row)) {
+                return LineSource::Draw;
+            }
+            let old_segment = ViewLine {
+                row: old_row,
+                segment,
+            };
+            // Without wrapping, an unchanged row is one unchanged segment;
+            // wrapped, its breaks may still have moved.
+            if wrapped
+                && old_lines.segment_info(old_segment)
+                    != view_lines.segment_info(ViewLine { row, segment })
+            {
+                return LineSource::Draw;
+            }
+            let old_line = if direct {
+                old_row
+            } else {
+                old_lines.first_view_line_of_row(old_row) + segment
+            };
+            match tile.lines.binary_search(&old_line) {
+                Ok(ix) => LineSource::Keep(ix as u32),
+                Err(_) => LineSource::Draw,
+            }
+        })
+        .collect();
+    // Mostly new lines: drawing it all costs the same.
+    let drawn = plan.iter().filter(|s| **s == LineSource::Draw).count();
+    (drawn * 2 <= plan.len()).then_some(plan)
 }
 
 impl CodeEditor {
@@ -1143,6 +1432,31 @@ impl CodeEditor {
             .collect();
         tiles.sort();
         tiles
+    }
+
+    /// The pixels of each drawn tile of the minimap's text canvas, by first
+    /// minimap line; for tests.
+    #[doc(hidden)]
+    pub fn minimap_tile_pixels_for_tests(&self) -> Vec<(u32, Vec<u8>)> {
+        let mut tiles: Vec<_> = self
+            .minimap_cache
+            .tiles
+            .iter()
+            .map(|tile| (tile.index * TILE_LINES + 1, tile.pixels.to_vec()))
+            .collect();
+        tiles.sort();
+        tiles
+    }
+
+    /// Forgets the minimap's drawn tiles, so the next frame draws them from
+    /// scratch; for tests.
+    #[doc(hidden)]
+    pub fn clear_minimap_tiles_for_tests(&mut self) {
+        let cache = &mut self.minimap_cache;
+        cache
+            .stale
+            .extend(cache.tiles.drain(..).map(|tile| tile.image));
+        cache.pending.clear();
     }
 
     /// Whether the minimap's shadow showed in the last frame, for tests.
