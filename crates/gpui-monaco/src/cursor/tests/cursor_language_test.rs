@@ -7,16 +7,13 @@
 //! Tests without a `languageId` in Monaco run in its `plaintext` language
 //! ([`plaintext`]).
 //!
+//! The IME composition tests are in `composition_test.rs`.
+//!
 //! Skipped (by reason):
-//! - IME composition (`compositionEndWithInterceptors` is not ported):
-//!   `issue #15825`, `issue #90016`, `issue #2773`, `issue #26820`,
-//!   `issue #144690`, `issue #144693`, `issue #82701`.
 //! - Reentrant model/decoration listeners: `issue #338693: multi-character
 //!   autoclose does not insert an orphan close when a listener reentrantly
 //!   removes the typed character`, `issue #338693: multi-character autoclose
 //!   does not use stale selections after a reentrant edit`, `issue #205598`.
-//! - Snippet edits that auto-close (`executeEdits('snippet', ...)`):
-//!   `issue #78975`.
 //! - Auto-whitespace trimming (a text model feature): `removeAutoWhitespace
 //!   on: removes only whitespace the cursor added 2`.
 
@@ -1844,6 +1841,54 @@ fn issue_78833_add_config_to_use_old_brackets_quotes_overtyping() {
 }
 
 #[test]
+fn issue_78975_parentheses_swallowing_does_not_work_when_parentheses_are_inserted_by_autocomplete()
+{
+    let mut ed = using_cursor(&["<div id"], auto_closing_language());
+    ed.set_selections(&[sel(1, 8, 1, 8)]);
+
+    ed.execute_snippet_edits(&[((1, 6, 1, 8), "id=\"\"")], &[sel(1, 10, 1, 10)]);
+    assert_eq!(ed.line(1), "<div id=\"\"");
+
+    ed.type_keyboard("a");
+    assert_eq!(ed.line(1), "<div id=\"a\"");
+
+    ed.type_keyboard("\"");
+    assert_eq!(ed.line(1), "<div id=\"a\"");
+}
+
+#[test]
+fn snippet_closing_parenthesis_is_auto_closed() {
+    // Not in Monaco's tests: the audit's `log($1)` repro (#331), with
+    // Backspace deleting the pair as for a typed one.
+    let mut ed = using_cursor(&[""], auto_closing_language());
+    ed.execute_snippet_edits(&[((1, 1, 1, 1), "log()")], &[sel(1, 5, 1, 5)]);
+    ed.type_keyboard("x)");
+    assert_eq!(ed.line(1), "log(x)");
+    ed.assert_cursor(1, 7);
+
+    let mut ed = using_cursor(&[""], auto_closing_language());
+    ed.execute_snippet_edits(&[((1, 1, 1, 1), "log()")], &[sel(1, 5, 1, 5)]);
+    ed.delete_left();
+    assert_eq!(ed.line(1), "log");
+
+    // Text without closing characters after the last one counts too.
+    let mut ed = using_cursor(&[""], auto_closing_language());
+    ed.execute_snippet_edits(&[((1, 1, 1, 1), "log();")], &[sel(1, 5, 1, 5)]);
+    ed.type_keyboard(")");
+    assert_eq!(ed.line(1), "log();");
+
+    // When any edit's text has no pair to track, none is tracked.
+    let mut ed = using_cursor(&["", ""], auto_closing_language());
+    ed.execute_snippet_edits(
+        &[((1, 1, 1, 1), "log()"), ((2, 1, 2, 1), "log(")],
+        &[sel(1, 5, 1, 5), sel(2, 5, 2, 5)],
+    );
+    assert!(ed.cursors.auto_closed_ranges().is_empty());
+    ed.type_keyboard(")");
+    assert_eq!(ed.value(), "log())\nlog()");
+}
+
+#[test]
 fn issue_53357_over_typing_ignores_characters_after_backslash() {
     let mut ed = using_cursor(&["console.log();"], auto_closing_language());
     ed.set_selections(&[sel(1, 13, 1, 13)]);
@@ -1931,4 +1976,29 @@ fn auto_closed_ranges_follow_edits_before_them() {
     );
     ed.type_keyboard(")");
     assert_eq!(ed.line(2), "x(a)");
+}
+
+#[test]
+fn insert_line_after_and_before_use_the_on_enter_and_indentation_rules() {
+    // Not in Monaco's tests: the audit's repro (#331). Insert Line Below on
+    // `if (x) {` indents the new line like Enter at the end of it does.
+    let mut ed = using_cursor(&["if (x) {", "}"], typescript_test_language());
+    ed.set_selections(&[sel(1, 3, 1, 3)]);
+    ed.insert_line_after();
+    assert_eq!(ed.value(), "if (x) {\n    \n}");
+    ed.assert_cursor(2, 5);
+
+    // Insert Line Above on the line after `{` is Enter at the end of `{`'s
+    // line.
+    let mut ed = using_cursor(&["if (x) {", "}"], typescript_test_language());
+    ed.set_selections(&[sel(2, 1, 2, 1)]);
+    ed.insert_line_before();
+    assert_eq!(ed.value(), "if (x) {\n    \n}");
+    ed.assert_cursor(2, 5);
+
+    // Doc comments continue.
+    let mut ed = using_cursor(&["/**", " * a", " */"], typescript_test_language());
+    ed.set_selections(&[sel(2, 1, 2, 1)]);
+    ed.insert_line_after();
+    assert_eq!(ed.value(), "/**\n * a\n * \n */");
 }

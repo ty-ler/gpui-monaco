@@ -16,6 +16,7 @@ use super::language::{
     CompleteEnterAction, IndentConsts, LanguageContext, LanguageSupport, VirtualModel,
     enter_action, indent_metadata, rules_good_indent_for_line, unshift_indent,
 };
+use super::language_typing::enter_command_with_language;
 use super::typing::{enter_command, shift};
 use super::{
     AutoIndent, CursorCollection, CursorConfig, CursorModel, Position, Selection, last_row,
@@ -37,7 +38,7 @@ pub fn indent_lines(
     model: &impl CursorModel,
     cursors: &CursorCollection,
 ) -> EditOperation {
-    shift(config, model, cursors, false)
+    shift(config, model, cursors, false, None)
 }
 
 /// Outdents the lines of every selection (Monaco
@@ -47,7 +48,33 @@ pub fn outdent_lines(
     model: &impl CursorModel,
     cursors: &CursorCollection,
 ) -> EditOperation {
-    shift(config, model, cursors, true)
+    shift(config, model, cursors, true, None)
+}
+
+/// [`indent_lines`], keeping the continuation lines of doc comments (` * `)
+/// aligned by the language's onEnter rules (Monaco `ShiftCommand`). With
+/// `lang == None` this is exactly [`indent_lines`].
+pub fn indent_lines_with_language(
+    config: &CursorConfig,
+    model: &impl CursorModel,
+    cursors: &CursorCollection,
+    lang: Option<&LanguageContext>,
+) -> EditOperation {
+    let lang = lang.map(LanguageSupport::new);
+    shift(config, model, cursors, false, lang.as_ref())
+}
+
+/// [`outdent_lines`], keeping the continuation lines of doc comments (` * `)
+/// aligned by the language's onEnter rules (Monaco `ShiftCommand`). With
+/// `lang == None` this is exactly [`outdent_lines`].
+pub fn outdent_lines_with_language(
+    config: &CursorConfig,
+    model: &impl CursorModel,
+    cursors: &CursorCollection,
+    lang: Option<&LanguageContext>,
+) -> EditOperation {
+    let lang = lang.map(LanguageSupport::new);
+    shift(config, model, cursors, true, lang.as_ref())
 }
 
 // ---------------------------------------------------------------------------
@@ -696,13 +723,52 @@ pub fn delete_lines(
 
 /// Inserts an empty line above each cursor's line and moves the cursor
 /// there, keeping indentation (Monaco `editor.action.insertLineBefore`,
-/// Cmd+Shift+Enter).
+/// Cmd+Shift+Enter, without language rules).
 pub fn insert_line_above(
     config: &CursorConfig,
     model: &impl CursorModel,
     cursors: &CursorCollection,
 ) -> EditOperation {
+    insert_line_above_with_language(config, model, cursors, None)
+}
+
+/// Inserts an empty line below each cursor's line and moves the cursor
+/// there, keeping indentation (Monaco `editor.action.insertLineAfter`,
+/// Cmd+Enter, without language rules).
+pub fn insert_line_below(
+    config: &CursorConfig,
+    model: &impl CursorModel,
+    cursors: &CursorCollection,
+) -> EditOperation {
+    insert_line_below_with_language(config, model, cursors, None)
+}
+
+/// Monaco `EnterOperation._enter` at `at`, the end of a line: with a
+/// language, Enter's onEnter and indentation rules indent the new line.
+fn insert_line_command(
+    config: &CursorConfig,
+    lang: Option<&LanguageSupport>,
+    model: &dyn CursorModel,
+    at: Position,
+) -> Option<Box<dyn Command>> {
+    match lang {
+        Some(lang) => enter_command_with_language(config, lang, model, false, at..at),
+        None => enter_command(config, model, false, at..at),
+    }
+}
+
+/// [`insert_line_above`], indenting the new line as Enter at the end of the
+/// line above would: by the language's onEnter and indentation rules (Monaco
+/// `EnterOperation.lineInsertBefore`). With `lang == None` this is exactly
+/// [`insert_line_above`].
+pub fn insert_line_above_with_language(
+    config: &CursorConfig,
+    model: &impl CursorModel,
+    cursors: &CursorCollection,
+    lang: Option<&LanguageContext>,
+) -> EditOperation {
     let model: &dyn CursorModel = model;
+    let lang = lang.map(LanguageSupport::new);
     let selections = cursors.selections();
     let commands: Commands = selections
         .iter()
@@ -715,7 +781,7 @@ pub fn insert_line_above(
                 }) as Box<dyn Command>)
             } else {
                 let at = Position::new(row - 1, model.line_max_column(row - 1));
-                enter_command(config, model, false, at..at)
+                insert_line_command(config, lang.as_ref(), model, at)
             }
         })
         .collect();
@@ -729,22 +795,25 @@ pub fn insert_line_above(
     )
 }
 
-/// Inserts an empty line below each cursor's line and moves the cursor
-/// there, keeping indentation (Monaco `editor.action.insertLineAfter`,
-/// Cmd+Enter).
-pub fn insert_line_below(
+/// [`insert_line_below`], indenting the new line as Enter at the end of the
+/// cursor's line would: by the language's onEnter and indentation rules
+/// (Monaco `EnterOperation.lineInsertAfter`). With `lang == None` this is
+/// exactly [`insert_line_below`].
+pub fn insert_line_below_with_language(
     config: &CursorConfig,
     model: &impl CursorModel,
     cursors: &CursorCollection,
+    lang: Option<&LanguageContext>,
 ) -> EditOperation {
     let model: &dyn CursorModel = model;
+    let lang = lang.map(LanguageSupport::new);
     let selections = cursors.selections();
     let commands: Commands = selections
         .iter()
         .map(|s| {
             let row = s.head.row;
             let at = Position::new(row, model.line_max_column(row));
-            enter_command(config, model, false, at..at)
+            insert_line_command(config, lang.as_ref(), model, at)
         })
         .collect();
     execute_commands(

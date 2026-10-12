@@ -21,16 +21,17 @@ Every feature here works out of the box. Each follows Monaco's behavior, which t
   - Alt+click adds a cursor, or removes the one clicked; Alt+double-click and Alt+triple-click select the new cursor's word or line.
   - Dragging past the editor's edge scrolls, faster the farther away the mouse is.
 - **Clipboard:** copy, cut and paste with Monaco's multi-cursor rules. With one cursor per line, each cursor pastes its own line. With no selection, the whole line is copied (`empty_selection_clipboard`).
-- **IME:** marked text is shown inline, underlined, with the clause being converted underlined thicker, and the candidate window is positioned at the cursor. With several cursors, the composition is typed at each of them.
+- **IME:** marked text is shown inline, underlined, with the clause being converted underlined thicker, and the candidate window is positioned at the cursor. With several cursors, the composition is typed at each of them. A committed character gets the typing helpers below, so a dead-key quote auto-closes or surrounds the selection.
 
 ## Typing helpers
 
 - **Auto-closing:** typing an opening bracket or quote inserts the closing one. It follows the language's `autoClosingPairs`, `autoCloseBefore` and "not in strings or comments" rules.
-- **Overtyping and deleting pairs:** typing a closing character you just auto-inserted moves past it. Backspace deletes both halves of the pair.
+- **Overtyping and deleting pairs:** typing a closing character you just auto-inserted moves past it. Backspace deletes both halves of the pair. Closing characters a snippet inserts count too, and so do pairs after undo or edits from another editor.
 - **Auto-surround:** typing a bracket or quote with a selection wraps the selection.
 - **Auto-indent:**
   - Enter applies the language's `onEnterRules` and `indentationRules`; for example, it continues `///` doc comments and indents after `{`.
   - Typing a closing bracket outdents the line.
+  - Insert Line Above/Below indent the new line as Enter would, and indenting or outdenting lines keeps the ` * ` of doc comments aligned.
 - **Comments:** Cmd+/ toggles line comments, Cmd+K Cmd+C adds them, Cmd+K Cmd+U removes them, and Shift+Alt+A toggles a block comment. The language at the cursor decides the tokens, so a Rust fence in Markdown gets `//` and Markdown text gets `<!-- -->`. Languages without a line comment fall back to block comments. `EditorOptions::comments` sets `insert_space` and `ignore_empty_lines`.
 - **Line operations:**
   - Move, copy and delete lines, insert a line above or below, indent and outdent.

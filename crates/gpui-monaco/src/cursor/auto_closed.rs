@@ -69,8 +69,9 @@ impl AutoClosedAction {
 ///    edits, then [`super::CursorCollection::set_selections`] with
 ///    `selections_after`. Then do the same for its `follow_up`, if any.
 /// 2. For any other edit (undo, redo, paste from elsewhere, collaborators),
-///    either [`AutoClosedRanges::transform`] the ranges through it or just
-///    [`AutoClosedRanges::clear`] them.
+///    [`AutoClosedRanges::transform`] or [`AutoClosedRanges::map`] the
+///    ranges through it, as Monaco's decorations follow every edit, then
+///    set the cursors. [`AutoClosedRanges::clear`] forgets them instead.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AutoClosedRanges {
     actions: Vec<AutoClosedAction>,
@@ -110,6 +111,18 @@ impl AutoClosedRanges {
         for action in &mut self.actions {
             transform_ranges(model, &mut action.closing, edits);
             transform_ranges(model, &mut action.enclosing, edits);
+        }
+    }
+
+    /// Moves every range with `f` (from coordinates before an edit to after
+    /// it), for edits known only by how they move positions. Map starts
+    /// after text inserted at them and ends before it, as
+    /// [`Self::transform`] does (Monaco's `NeverGrowsWhenTypingAtEdges`).
+    pub fn map(&mut self, mut f: impl FnMut(Range<Position>) -> Range<Position>) {
+        for action in &mut self.actions {
+            for range in action.closing.iter_mut().chain(&mut action.enclosing) {
+                *range = f(range.clone());
+            }
         }
     }
 

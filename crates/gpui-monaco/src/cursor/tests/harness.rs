@@ -15,6 +15,10 @@ use crate::cursor::{
 };
 use crate::model::{AutoWhitespaceLines, shift_past_trimmed};
 
+/// Monaco `new Range(startLineNumber, startColumn, endLineNumber,
+/// endColumn)`.
+pub type MonacoRange = (u32, u32, u32, u32);
+
 /// Monaco `Position(lineNumber, column)`.
 pub fn pos(line: u32, column: u32) -> Position {
     Position::from_monaco(line, column)
@@ -438,15 +442,116 @@ impl TestEditor {
     }
 
     pub fn outdent(&mut self) {
-        let buffer = &self.buffer;
-        let op = cursor::outdent(&self.config, buffer, &self.cursors);
+        let op = self.with_lang(|lang| {
+            cursor::outdent_with_language(&self.config, &self.buffer, &self.cursors, lang)
+        });
         self.apply(op);
     }
 
     pub fn indent_lines(&mut self) {
-        let buffer = &self.buffer;
-        let op = cursor::indent_lines(&self.config, buffer, &self.cursors);
+        let op = self.with_lang(|lang| {
+            cursor::indent_lines_with_language(&self.config, &self.buffer, &self.cursors, lang)
+        });
         self.apply(op);
+    }
+
+    pub fn outdent_lines(&mut self) {
+        let op = self.with_lang(|lang| {
+            cursor::outdent_lines_with_language(&self.config, &self.buffer, &self.cursors, lang)
+        });
+        self.apply(op);
+    }
+
+    /// Monaco `editor.action.insertLineAfter`.
+    pub fn insert_line_after(&mut self) {
+        let op = self.with_lang(|lang| {
+            cursor::insert_line_below_with_language(&self.config, &self.buffer, &self.cursors, lang)
+        });
+        self.apply(op);
+    }
+
+    /// Monaco `editor.action.insertLineBefore`.
+    pub fn insert_line_before(&mut self) {
+        let op = self.with_lang(|lang| {
+            cursor::insert_line_above_with_language(&self.config, &self.buffer, &self.cursors, lang)
+        });
+        self.apply(op);
+    }
+
+    // --- IME composition
+
+    /// Monaco `viewModel.startComposition()`.
+    pub fn start_composition(&mut self) {
+        let buffer = &self.buffer;
+        self.cursors.start_composition(buffer);
+    }
+
+    /// Monaco `viewModel.compositionType(text, replacePrevCharCnt,
+    /// replaceNextCharCnt, positionDelta)`.
+    pub fn composition_type(&mut self, text: &str, prev: u32, next: u32, delta: i32) {
+        let buffer = &self.buffer;
+        let op =
+            cursor::composition_type(buffer, &self.cursors, text, prev, next, delta, self.prev);
+        self.apply(op);
+    }
+
+    /// Monaco `viewModel.endComposition('keyboard')`.
+    pub fn end_composition(&mut self) {
+        let Some(composition) = self.cursors.end_composition() else {
+            return;
+        };
+        let op = self.with_lang(|lang| {
+            cursor::composition_end_with_language(
+                &self.config,
+                &self.buffer,
+                &self.cursors,
+                &composition,
+                lang,
+            )
+        });
+        if let Some(op) = op {
+            self.apply(op);
+        }
+    }
+
+    /// Monaco `viewModel.executeEdits('snippet', edits, () => selections)`:
+    /// the edits, then the closing characters they end with tracked as
+    /// auto-closed.
+    pub fn execute_snippet_edits(
+        &mut self,
+        edits: &[(MonacoRange, &str)],
+        selections: &[Selection],
+    ) {
+        let edits: Vec<_> = edits
+            .iter()
+            .map(|(r, text)| (pos(r.0, r.1)..pos(r.2, r.3), text.to_string()))
+            .collect();
+        let op = EditOperation {
+            selections_after: selections.to_vec(),
+            ..EditOperation::from_edits(&self.buffer, &self.selections(), edits.clone())
+        };
+        // Where each edit's text starts once applied (the edits are sorted
+        // and on one line each here).
+        let mut inserted = Vec::new();
+        let mut shift: (u32, i64) = (u32::MAX, 0);
+        for (range, text) in &edits {
+            if shift.0 != range.start.row {
+                shift = (range.start.row, 0);
+            }
+            let start = Position::new(
+                range.start.row,
+                (range.start.column as i64 + shift.1) as u32,
+            );
+            shift.1 += text.encode_utf16().count() as i64
+                - (range.end.column as i64 - range.start.column as i64);
+            inserted.push((start, text.as_str()));
+        }
+        let pairs = self.with_lang(|lang| {
+            lang.map(|lang| cursor::snippet_auto_closed_pairs(lang, &inserted))
+                .unwrap_or_default()
+        });
+        self.apply(op);
+        self.cursors.auto_closed_ranges_mut().push(&pairs);
     }
 
     pub fn cut(&mut self) {

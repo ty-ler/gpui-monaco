@@ -16,9 +16,9 @@
 //! `SurroundSelectionCommand` from
 //! `src/vs/editor/common/commands/surroundSelectionCommand.ts` (MIT).
 //!
-//! Not ported: IME composition interceptors
-//! (`compositionEndWithInterceptors`), overtype (insert key) mode, and
-//! auto-closing of pairs inserted by snippets.
+//! The interceptors that run when an IME composition ends are in
+//! `composition.rs`, and the auto-closed pairs of snippet edits in
+//! [`snippet_auto_closed_pairs`].
 
 use std::ops::Range;
 
@@ -37,8 +37,8 @@ use super::language::{
     is_quote, on_electric_character, unshift_indent,
 };
 use super::typing::{
-    delete_left, delete_word_part_with, delete_word_with, enter_text, line_break, tab,
-    tab_with_good_indent, type_text,
+    delete_left, delete_word_part_with, delete_word_with, enter_text, line_break, shift, tab,
+    tab_with_good_indent, type_simple, type_text,
 };
 use super::word::{WordCharClass, WordClassifier, WordNavigationType};
 use super::{
@@ -57,8 +57,15 @@ type Commands = Vec<Option<Box<dyn Command>>>;
 /// characters).
 ///
 /// `text` is one typed character (grapheme), as Monaco handles keyboard
-/// input; longer text is typed without interceptors. With `lang == None`
-/// this is exactly [`type_text`].
+/// input; longer text is typed without interceptors, so type it a grapheme
+/// at a time. With `lang == None` this is exactly [`type_text`].
+///
+/// While an IME composition is in progress
+/// ([`CursorCollection::is_composing`]), only typing over an auto-inserted
+/// closing character applies, and the text replaces the selections as it is
+/// (no line break handling or overtype mode), as in Monaco; the rest runs
+/// when the composition ends (see
+/// [`composition_end_with_language`](super::composition_end_with_language)).
 ///
 /// Reads [`CursorCollection::auto_closed_ranges`] to decide what to type
 /// over; the returned operation's `auto_closed` lists the closing characters
@@ -72,14 +79,18 @@ pub fn type_with_language<M: CursorModel>(
     prev: Option<EditOperationType>,
     lang: Option<&LanguageContext>,
 ) -> EditOperation {
+    let composing = cursors.is_composing();
     let Some(ctx) = lang else {
+        if composing {
+            return type_simple(model, cursors, text, prev, false);
+        }
         return type_text(config, model, cursors, text, prev);
     };
-    if matches!(text, "\n" | "\r\n" | "\r") {
+    if !composing && matches!(text, "\n" | "\r\n" | "\r") {
         return line_break_with_language(config, model, cursors, lang);
     }
     if text.graphemes(true).count() != 1 {
-        return type_text(config, model, cursors, text, prev);
+        return type_simple(model, cursors, text, prev, config.overtype && !composing);
     }
     let lang = LanguageSupport::new(ctx);
     let dm: &dyn CursorModel = model;
@@ -87,14 +98,17 @@ pub fn type_with_language<M: CursorModel>(
     let prev_kind = prev.unwrap_or(EditOperationType::Other);
     let auto_closed = cursors.auto_closed_ranges().closing_ranges();
 
-    if let Some(op) = auto_indent_type(config, &lang, dm, &selections, text) {
+    if !composing && let Some(op) = auto_indent_type(config, &lang, dm, &selections, text) {
         return op;
     }
     if is_auto_closing_overtype(config, &lang, dm, &selections, &auto_closed, text) {
         return auto_closing_overtype(dm, &selections, text, prev_kind);
     }
-    if let Some(pair) = auto_closing_pair(config, &lang, dm, &selections, text) {
-        return auto_closing_open_char_type(dm, &selections, text, &pair);
+    if composing {
+        return type_simple(dm, cursors, text, prev, false);
+    }
+    if let Some(pair) = auto_closing_pair(config, &lang, dm, &selections, text, false) {
+        return auto_closing_open_char_type(dm, &selections, text, false, &pair);
     }
     if is_surround_selection_type(config, &lang, dm, &selections, text) {
         return surround_selection_type(&lang, dm, &selections, text);
@@ -288,9 +302,90 @@ pub fn tab_with_language<M: CursorModel>(
     };
     let lang = LanguageSupport::new(ctx);
     let dm: &dyn CursorModel = model;
-    tab_with_good_indent(config, dm, cursors, &|row| {
+    tab_with_good_indent(config, dm, cursors, Some(&lang), &|row| {
         good_indent_for_line(config, &lang, dm, row)
     })
+}
+
+/// Shift+Tab like [`outdent`](super::outdent), keeping the continuation
+/// lines of doc comments (` * `) aligned by the language's onEnter rules
+/// (Monaco `ShiftCommand`). With `lang == None` this is exactly
+/// [`outdent`](super::outdent).
+pub fn outdent_with_language<M: CursorModel>(
+    config: &CursorConfig,
+    model: &M,
+    cursors: &CursorCollection,
+    lang: Option<&LanguageContext>,
+) -> EditOperation {
+    let lang = lang.map(LanguageSupport::new);
+    shift(config, model, cursors, true, lang.as_ref())
+}
+
+/// The closing characters a snippet's edits insert, to track as
+/// auto-closed (Monaco `Cursor._findAutoClosingPairs`, which `executeEdits`
+/// runs for the `'snippet'` source): typing `"` in `id="|"` inserted by a
+/// snippet then types over the closing quote, and Backspace deletes both.
+///
+/// `inserted` is each edit's text with where it starts in the text after
+/// the edits. Every text must be on one line and end with a single-character
+/// pair's closing character, possibly followed by text without closing
+/// characters, after the pair's opening character: `id=""` or `log()` gives
+/// a pair, and nothing is tracked if any text doesn't. Pass the result to
+/// [`AutoClosedRanges::push`](super::AutoClosedRanges::push).
+pub fn snippet_auto_closed_pairs(
+    lang: &LanguageContext,
+    inserted: &[(Position, &str)],
+) -> Vec<AutoClosedPair> {
+    const CLOSERS: &[u16] = &[
+        b')' as u16,
+        b']' as u16,
+        b'}' as u16,
+        b'>' as u16,
+        b'\'' as u16,
+        b'"' as u16,
+        b'`' as u16,
+    ];
+    if inserted.is_empty() {
+        return Vec::new();
+    }
+    let lang = LanguageSupport::new(lang);
+    let mut pairs = Vec::with_capacity(inserted.len());
+    for &(start, text) in inserted {
+        if text.is_empty() || text.contains('\n') {
+            return Vec::new();
+        }
+        // Monaco's `/([)\]}>'"`])([^)\]}>'"`]*)$/`: the last closing
+        // character.
+        let units = strings::utf16(text);
+        let Some(close_index) = units.iter().rposition(|c| CLOSERS.contains(c)) else {
+            return Vec::new();
+        };
+        let close_char = String::from_utf16_lossy(&units[close_index..=close_index]);
+        // `autoClosingPairsCloseSingleChar`: exactly one single-character
+        // pair must close with it.
+        let mut candidates = lang
+            .auto_closing_pairs
+            .iter()
+            .filter(|p| p.open_len() == 1 && p.close_len() == 1 && p.close == close_char);
+        let (Some(pair), None) = (candidates.next(), candidates.next()) else {
+            return Vec::new();
+        };
+        let open = strings::utf16(&pair.open);
+        // `text.lastIndexOf(openChar, closeCharIndex - 1)`.
+        let Some(open_index) = units[..close_index.max(1)]
+            .iter()
+            .rposition(|&c| c == open[0])
+        else {
+            return Vec::new();
+        };
+        let row = start.row;
+        let at = |index: usize| Position::new(row, start.column + index as u32);
+        pairs.push(AutoClosedPair {
+            closing: at(close_index)..at(close_index + 1),
+            enclosing: at(open_index)..at(close_index + 1),
+        });
+    }
+    pairs
 }
 
 // ---------------------------------------------------------------------------
@@ -434,7 +529,7 @@ fn auto_indent_type(
         }
         indentation_for_selections.push((selection, actual));
     }
-    let pair = auto_closing_pair(config, lang, model, selections, ch);
+    let pair = auto_closing_pair(config, lang, model, selections, ch, false);
     let auto_close_with_undo_stop = pair
         .as_ref()
         .is_some_and(|p| strings::utf16_len(&p.open) > strings::utf16_len(ch));
@@ -508,7 +603,7 @@ fn edit_from_indentation(
 // Auto-closing
 
 /// Monaco `isAutoClosingOvertype`.
-fn is_auto_closing_overtype(
+pub(crate) fn is_auto_closing_overtype(
     config: &CursorConfig,
     lang: &LanguageSupport,
     model: &dyn CursorModel,
@@ -571,27 +666,43 @@ fn auto_closing_overtype(
 }
 
 /// The pair to auto-close and the closing text to insert.
-struct PairToClose {
+pub(crate) struct PairToClose {
     open: String,
     close: String,
 }
 
-/// Monaco `AutoClosingOpenCharTypeOperation.getAutoClosingPair` (with `ch`
-/// not yet typed): the pair whose opening text typing `ch` completes at
-/// every cursor, if it should be auto-closed there.
-fn auto_closing_pair(
+/// Monaco `AutoClosingOpenCharTypeOperation.getAutoClosingPair`: the pair
+/// whose opening text typing `ch` completes at every cursor, if it should be
+/// auto-closed there. `ch_is_already_typed` when a composition has typed it
+/// before each cursor already.
+pub(crate) fn auto_closing_pair(
     config: &CursorConfig,
     lang: &LanguageSupport,
     model: &dyn CursorModel,
     selections: &[Selection],
     ch: &str,
+    ch_is_already_typed: bool,
 ) -> Option<PairToClose> {
     if selections.iter().any(|s| !s.is_empty()) {
         return None;
     }
-    let positions: Vec<Position> = selections.iter().map(|s| s.head).collect();
+    // Work with the position before `ch` and the one after it, whether or
+    // not it is in the text yet.
+    let ch_len = if ch_is_already_typed {
+        strings::utf16_len(ch)
+    } else {
+        0
+    };
+    let positions: Vec<(Position, Position)> = selections
+        .iter()
+        .map(|s| {
+            let p = s.head;
+            (Position::new(p.row, p.column.saturating_sub(ch_len)), p)
+        })
+        .collect();
+    let before_positions: Vec<Position> = positions.iter().map(|(before, _)| *before).collect();
     // The longest auto-closing open pair ending in `ch`.
-    let pair = find_auto_closing_pair_open(lang, model, &positions, ch)?;
+    let pair = find_auto_closing_pair_open(lang, model, &before_positions, ch)?;
 
     let (strategy, for_quotes, check_bracket_balance) = if is_quote(ch) {
         (config.auto_closing_quotes, true, false)
@@ -618,11 +729,11 @@ fn auto_closing_pair(
     let brackets = Brackets::configured(lang.config());
     let classifier = WordClassifier::new(&config.word_separators);
 
-    for &position in &positions {
+    for &(position, after) in &positions {
         let line = line_units(model, position.row);
         let c = position.column as usize;
         let line_before = &line[..c.min(line.len())];
-        let line_after = &line[c.min(line.len())..];
+        let line_after = &line[(after.column as usize).min(line.len())..];
         if !line_after.starts_with(&contained_close) {
             is_contained_pair_present = false;
         }
@@ -639,6 +750,8 @@ fn auto_closing_pair(
         }
         if check_bracket_balance
             && strategy != AutoClosingStrategy::Always
+            // With `ch` typed, the brackets are no longer imbalanced.
+            && !ch_is_already_typed
             && let Some(brackets) = &brackets
             && has_unmatched_closing_bracket_after(model, brackets, position, &pair.open, &|p| {
                 lang.is_skippable(p)
@@ -745,13 +858,14 @@ fn is_before_closing_brace(lang: &LanguageSupport, line_after: &str) -> bool {
 }
 
 /// Monaco `_runAutoClosingOpenCharType`.
-fn auto_closing_open_char_type(
+pub(crate) fn auto_closing_open_char_type(
     model: &dyn CursorModel,
     selections: &[Selection],
     ch: &str,
+    ch_is_already_typed: bool,
     pair: &PairToClose,
 ) -> EditOperation {
-    if strings::utf16_len(&pair.open) > strings::utf16_len(ch) {
+    if !ch_is_already_typed && strings::utf16_len(&pair.open) > strings::utf16_len(ch) {
         let commands = selections
             .iter()
             .map(|s| type_command(s.range(), ch.to_string(), false))
@@ -764,7 +878,7 @@ fn auto_closing_open_char_type(
             Some(Box::new(TypeWithAutoClosingCommand::new(
                 s.range(),
                 ch,
-                true,
+                !ch_is_already_typed,
                 &pair.close,
             )) as Box<dyn Command>)
         })
@@ -888,7 +1002,7 @@ fn is_auto_closing_pair_delete(
 // Surround selection
 
 /// Monaco `shouldSurroundChar`.
-fn should_surround_char(config: &CursorConfig, ch: &str) -> bool {
+pub(crate) fn should_surround_char(config: &CursorConfig, ch: &str) -> bool {
     if is_quote(ch) {
         matches!(
             config.auto_surround,

@@ -40,11 +40,11 @@ Issues are linked by number.
 | Paste as, Linux primary selection, reindent on paste | `clipboard`, `dropOrPasteInto`, `autoIndentOnPaste` | ✅ | #107 |
 | Copy with syntax highlighting | `copyWithSyntaxHighlighting` | ❌ (GPUI's clipboard has no HTML) | #107 |
 | Undo/redo with grouping, cursor restore | model | ✅ | |
-| Auto-closing, overtype, auto-surround | `cursor` | ✅ | |
-| Auto-indent (`onEnterRules`, `indentationRules`, electric characters) | `indentation` | ✅ | |
+| Auto-closing, overtype, auto-surround, also for IME and dead-key commits (`compositionEndWithInterceptors`) and closing characters inserted by snippets; auto-closed characters tracked through undo and edits from elsewhere | `cursor` | ✅ | #331 |
+| Auto-indent (`onEnterRules`, `indentationRules`, electric characters), doc comment alignment when indenting and outdenting (`ShiftCommand`) | `indentation`, `shiftCommand` | ✅ | #331 |
 | Reindent lines | `indentation` | ✅ | #80 |
 | Indentation detection and conversion commands, tab size pickers starting on the current size | `indentation` | ✅ | #197, #328 |
-| Line operations: move (reindenting with `autoIndent: full`), copy, delete, insert, indent | `linesOperations`, `moveLinesCommand` | ✅ | #260 |
+| Line operations: move (reindenting with `autoIndent: full`), copy, delete, insert (with Enter's onEnter and indentation rules), indent | `linesOperations`, `moveLinesCommand` | ✅ | #260, #331 |
 | Sort (the root collation, as the default `Intl.Collator`), join, reverse, transpose, case transforms, delete duplicates, trim whitespace (skipping strings and regular expressions) | `linesOperations`, `caretOperations` | ✅ sorting ignores the locale | #80, #328 |
 | Insert final new line | `insertFinalNewLine` | ✅ | #202 |
 | In-place replace, with the `vs` theme's outline flash | `inPlaceReplace` | ✅ | #80, #328 |

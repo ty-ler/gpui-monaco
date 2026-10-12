@@ -3,6 +3,7 @@
 mod auto_indent_paste_test;
 mod bundled_language_test;
 mod comment_test;
+mod composition_test;
 mod cursor_editing_test;
 mod cursor_language_test;
 mod cursor_test;
@@ -14,6 +15,7 @@ mod lines_command_cases;
 mod lines_test;
 mod on_enter_test;
 mod overtype_test;
+mod shift_command_test;
 mod smart_select_test;
 mod tokenizer;
 mod transforms_test;

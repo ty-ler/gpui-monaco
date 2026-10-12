@@ -360,6 +360,26 @@ impl CodeEditor {
         for (one, range) in snippets.iter_mut().zip(&ranges) {
             one.offset = range.start;
         }
+        // Monaco's `executeEdits('snippet', ...)` tracks the closing
+        // characters the snippets end with as auto-closed, so typing them
+        // types over them (`Cursor._findAutoClosingPairs`).
+        if ranges.len() == edits.len() {
+            let inserted: Vec<(PointUtf16, &str)> = ranges
+                .iter()
+                .zip(edits)
+                .map(|(range, (_, text))| {
+                    (
+                        self.snapshot.offset_to_point_utf16(range.start),
+                        text.as_str(),
+                    )
+                })
+                .collect();
+            let pairs = self.with_language(cx, |_, _, _, lang| {
+                lang.map(|lang| crate::cursor::snippet_auto_closed_pairs(lang, &inserted))
+                    .unwrap_or_default()
+            });
+            self.cursors.auto_closed_ranges_mut().push(&pairs);
+        }
         ranges
             .iter()
             .map(|range| Selection::collapsed(self.snapshot.offset_to_point_utf16(range.end)))

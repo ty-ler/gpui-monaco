@@ -154,3 +154,109 @@ fn composition_active_clause(cx: &mut TestAppContext) {
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
 }
+
+fn js_setup<'a>(
+    text: &str,
+    cx: &'a mut TestAppContext,
+) -> (Entity<CodeEditor>, &'a mut VisualTestContext) {
+    use gpui::AppContext as _;
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
+    });
+    let text = text.to_string();
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| gpui_monaco::TextModel::new(&text).with_language("javascript"));
+        CodeEditor::new(model, window, cx)
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    cx.run_until_parked();
+    (editor, cx)
+}
+
+/// A dead-key quote committed by the IME (US International: `'` then
+/// Space) auto-closes like a typed one (Monaco
+/// `compositionEndWithInterceptors`), and the closing quote it adds is typed
+/// over.
+#[gpui::test]
+fn dead_key_quote_auto_closes(cx: &mut TestAppContext) {
+    let (editor, cx) = js_setup("", cx);
+    mark(&editor, "'", None, cx);
+    assert_eq!(text(&editor, cx), "'");
+    commit(&editor, "'", cx);
+    assert_eq!(text(&editor, cx), "''");
+    assert_eq!(selections(&editor, cx), vec![Selection::collapsed(p(1, 2))]);
+    // Typing the closing quote with the dead key types over it.
+    mark(&editor, "'", None, cx);
+    commit(&editor, "'", cx);
+    assert_eq!(text(&editor, cx), "''");
+    assert_eq!(selections(&editor, cx), vec![Selection::collapsed(p(1, 3))]);
+}
+
+/// A dead-key quote over a selection surrounds it.
+#[gpui::test]
+fn dead_key_quote_surrounds_the_selection(cx: &mut TestAppContext) {
+    let (editor, cx) = js_setup("test", cx);
+    set(
+        &editor,
+        &[Selection {
+            anchor: p(1, 1),
+            head: p(1, 5),
+        }],
+        cx,
+    );
+    mark(&editor, "'", None, cx);
+    assert_eq!(text(&editor, cx), "'");
+    commit(&editor, "'", cx);
+    assert_eq!(text(&editor, cx), "'test'");
+    assert_eq!(
+        selections(&editor, cx),
+        vec![Selection {
+            anchor: p(1, 2),
+            head: p(1, 6),
+        }]
+    );
+}
+
+/// A dead key that composes an accent (`'` then `e`) is left alone, and a
+/// canceled composition (marking nothing) doesn't auto-close.
+#[gpui::test]
+fn composed_accents_and_canceled_compositions_are_left_alone(cx: &mut TestAppContext) {
+    let (editor, cx) = js_setup("", cx);
+    mark(&editor, "'", None, cx);
+    commit(&editor, "é", cx);
+    assert_eq!(text(&editor, cx), "é");
+    mark(&editor, "(", None, cx);
+    mark(&editor, "", None, cx);
+    assert_eq!(text(&editor, cx), "é");
+    assert_eq!(marked(&editor, cx), None);
+}
+
+/// With several cursors, the committed dead-key quote auto-closes at each.
+#[gpui::test]
+fn dead_key_quote_auto_closes_at_every_cursor(cx: &mut TestAppContext) {
+    let (editor, cx) = js_setup("a = \nb = ", cx);
+    set(
+        &editor,
+        &[Selection::collapsed(p(1, 5)), Selection::collapsed(p(2, 5))],
+        cx,
+    );
+    mark(&editor, "'", None, cx);
+    commit(&editor, "'", cx);
+    assert_eq!(text(&editor, cx), "a = ''\nb = ''");
+    assert_eq!(
+        selections(&editor, cx),
+        vec![Selection::collapsed(p(1, 6)), Selection::collapsed(p(2, 6))]
+    );
+}
+
+/// `unmark_text` ends the composition with the marked text, which then
+/// auto-closes.
+#[gpui::test]
+fn unmark_text_ends_the_composition(cx: &mut TestAppContext) {
+    let (editor, cx) = js_setup("", cx);
+    mark(&editor, "(", None, cx);
+    editor.update_in(cx, |e, window, cx| e.unmark_text(window, cx));
+    assert_eq!(text(&editor, cx), "()");
+    assert_eq!(marked(&editor, cx), None);
+}
