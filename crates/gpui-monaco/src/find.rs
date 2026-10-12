@@ -307,6 +307,11 @@ fn match_options(colors: &crate::theme::EditorColors, overview: bool) -> Decorat
         }),
         minimap: overview.then(|| find_match_minimap(colors)),
         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
+        // Empty (regex) matches show a character wide, and the line breaks
+        // in a match half that (Monaco's `findMatch` class name).
+        show_if_collapsed: true,
+        include_new_lines: true,
+        // `_FIND_MATCH_NO_OVERVIEW_DECORATION` has the default z-index.
         z_index: if overview { 10 } else { 0 },
         ..Default::default()
     }
@@ -325,6 +330,7 @@ fn current_match_options(colors: &crate::theme::EditorColors) -> DecorationOptio
         )),
         minimap: Some(find_match_minimap(colors)),
         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
+        show_if_collapsed: true,
         z_index: 13,
         ..Default::default()
     }

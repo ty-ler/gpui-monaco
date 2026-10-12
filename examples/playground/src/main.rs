@@ -976,6 +976,10 @@ fn add_demo_decorations(editor: &Entity<CodeEditor>, cx: &mut App) {
                         // number hovers.
                         hover_message: vec!["*Blame:* added in the first commit".into()],
                         line_number_hover_message: vec!["Line changed".into()],
+                        // As a debugger's line highlight: whole-line
+                        // decorations stay under the others (find matches,
+                        // word highlights) whatever their z-index.
+                        z_index: 20,
                         ..Default::default()
                     },
                 ),

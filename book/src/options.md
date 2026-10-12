@@ -97,7 +97,7 @@ editor.update(cx, |editor, cx| {
 | `parameter_hints` | `parameterHints` | `enabled`: open parameter hints while typing (on); `cycle`: going past the last or first signature wraps around instead of closing them (on) |
 | `folding_strategy` | `foldingStrategy` | `Auto` (providers, then syntax, then indentation) or `Indentation` |
 | `folding_maximum_regions` | `foldingMaximumRegions` | at most this many provider or syntax fold ranges (5000) |
-| `folding_highlight` | `foldingHighlight` | shade the first line of collapsed regions (on) |
+| `folding_highlight` | `foldingHighlight` | shade the first line of collapsed regions (on), over selections and indent guides, as a whole-line decoration |
 | `unfold_on_click_after_end_of_line` | `unfoldOnClickAfterEndOfLine` | unfold when clicking after a collapsed line (off) |
 | `folding_imports_by_default` | `foldingImportsByDefault` | collapse import ranges at first (off) |
 | `smart_select` | `smartSelect` | expand selection over leading/trailing whitespace lines and word parts (both on) |
