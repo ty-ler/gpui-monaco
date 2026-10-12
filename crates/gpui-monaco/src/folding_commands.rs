@@ -7,11 +7,10 @@ use gpui::{App, Context};
 use text::PointUtf16;
 
 use crate::cursor::Selection;
-use crate::editor::{CodeEditor, FoldingRegionState, FoldingViewState};
+use crate::editor::{CodeEditor, CodeEditorEvent, FoldingRegionState, FoldingViewState};
 use crate::providers::FoldingRangeKind;
 use crate::view::fold_model::{self as fm, FoldingModel, SelectedRows};
-use crate::view::folding::{FoldSource, MergeRange};
-use crate::view::reveal::RevealType;
+use crate::view::folding::{FoldSource, FoldState, FoldingLimit, MergeRange};
 
 /// Monaco's `cursorChangedScheduler` delay before
 /// [`CodeEditor::reveal_cursor_in_folds`].
@@ -230,21 +229,32 @@ impl CodeEditor {
         });
     }
 
-    /// Toggles the import ranges (Monaco `editor.toggleImportFold`).
+    /// Toggles the import ranges (Monaco `editor.toggleImportFold`), then
+    /// computes the ranges again.
     pub fn toggle_import_fold(&mut self, cx: &mut Context<Self>) {
+        if !self.options.folding {
+            return;
+        }
         self.run_fold_command(cx, |m, _| {
             (0..m.ranges.len())
                 .rev()
                 .filter(|&ix| m.ranges[ix].kind == Some(FoldingRangeKind::Imports))
                 .collect()
         });
+        self.refresh_folding(cx);
     }
 
+    /// Moves to the line `find` gives, then reveals the selection's start
+    /// centered if it's off screen, as every folding action does (Monaco
+    /// `FoldingAction.runEditorCommand`).
     fn go_to_fold_line(
         &mut self,
         cx: &mut Context<Self>,
         find: impl FnOnce(u32, &FoldingModel) -> Option<u32>,
     ) {
+        if !self.options.folding {
+            return;
+        }
         self.sync_folds(cx);
         let collapsed = self.folds.collapsed_flags();
         let ranges = self.folds.ranges().to_vec();
@@ -252,8 +262,9 @@ impl CodeEditor {
         if let Some(target) = find(row, &FoldingModel::new(&ranges, collapsed)) {
             let start = PointUtf16::new(target, 0);
             self.set_selections(&[Selection::collapsed(start)], cx);
-            self.reveal_range(start..start, RevealType::Simple, cx);
         }
+        let start = self.cursors.primary().selection().start();
+        self.reveal_position_in_center_if_outside_viewport(start, cx);
     }
 
     /// Moves to the start of the enclosing fold (Monaco
@@ -304,6 +315,9 @@ impl CodeEditor {
     /// Removes manual folding ranges around the cursors or touching the
     /// selections (Monaco `editor.removeManualFoldingRanges`).
     pub fn remove_manual_folding_ranges(&mut self, cx: &mut Context<Self>) {
+        if !self.options.folding {
+            return;
+        }
         let selections: Vec<SelectedRows> = self
             .cursors
             .selections()
@@ -332,6 +346,9 @@ impl CodeEditor {
         surrounding: bool,
         cx: &mut Context<Self>,
     ) {
+        if !self.options.folding {
+            return;
+        }
         self.sync_folds(cx);
         let collapsed = self.folds.collapsed_flags();
         let ranges = self.folds.ranges().to_vec();
@@ -473,6 +490,7 @@ impl CodeEditor {
         if !self.options.folding || model.is_too_large_for_tokenization() {
             return FoldingViewState::default();
         }
+        let folded_imports = self.folded_imports;
         let rope = model.buffer().rope();
         let line_count = rope.line_count();
         let regions = self
@@ -491,12 +509,15 @@ impl CodeEditor {
         FoldingViewState {
             regions,
             line_count,
+            folded_imports,
         }
     }
 
     /// Monaco `FoldingController.restoreViewState`
     /// (`FoldingModel.applyMemento`): the regions whose lines still match
-    /// their checksum are merged in, without revealing the cursor.
+    /// their checksum are merged in. The cursors stay where they are, even
+    /// in hidden lines (Monaco skips `adjustSelections` while restoring),
+    /// and aren't revealed.
     pub(crate) fn restore_folding_state(
         &mut self,
         state: &FoldingViewState,
@@ -504,10 +525,11 @@ impl CodeEditor {
     ) {
         let model = self.model().clone();
         let model = model.read(cx);
-        if !self.options.folding
-            || model.is_too_large_for_tokenization()
-            || state.regions.is_empty()
-        {
+        if !self.options.folding || model.is_too_large_for_tokenization() {
+            return;
+        }
+        self.folded_imports = state.folded_imports;
+        if state.regions.is_empty() {
             return;
         }
         let buffer = model.buffer();
@@ -535,8 +557,105 @@ impl CodeEditor {
             })
             .collect();
         self.folds.apply_memento(buffer, saved);
-        self.move_cursors_out_of_folds();
         cx.notify();
+    }
+
+    /// Forgets the folding regions and any computation (Monaco
+    /// `FoldingController.onModelChanged`, for a new model or when
+    /// `folding` or `foldingMaximumRegions` change).
+    pub(crate) fn reset_folding(&mut self) {
+        self.folds = FoldState::default();
+        self.fold_task = None;
+        self.fold_requested = None;
+        self.fold_computing = false;
+        self.fold_rerun = false;
+        self.fold_stale = false;
+        self.folded_imports = false;
+        self.fold_mouse_down = None;
+        self.fold_reveal_task = None;
+    }
+
+    /// Computes the ranges again for the current text on the next frame
+    /// (Monaco `FoldingController.onFoldingStrategyChanged`, after the
+    /// strategy, the language configuration or the providers changed).
+    pub(crate) fn refresh_folding(&mut self, cx: &mut Context<Self>) {
+        self.fold_stale = true;
+        cx.notify();
+    }
+
+    /// Monaco `FoldingController`'s `onDidChangeConfiguration`: changing
+    /// `folding` or `foldingMaximumRegions` starts over (turning folding off
+    /// discards the folds), and changing `foldingStrategy` computes the
+    /// ranges again. `old` holds the previous `(folding,
+    /// folding_maximum_regions, folding_strategy)`.
+    pub(crate) fn folding_options_changed(
+        &mut self,
+        old: &(bool, usize, crate::options::FoldingStrategy),
+        cx: &mut Context<Self>,
+    ) {
+        let (folding, maximum_regions, strategy) = *old;
+        if folding != self.options.folding
+            || maximum_regions != self.options.folding_maximum_regions
+        {
+            self.reset_folding();
+            cx.notify();
+        } else if strategy != self.options.folding_strategy {
+            self.refresh_folding(cx);
+        }
+    }
+
+    /// Records what the last range computation found, emitting
+    /// [`CodeEditorEvent::FoldingLimitChanged`] when it changed (Monaco
+    /// `RangesLimitReporter.update`).
+    pub(crate) fn set_folding_limit(&mut self, limit: FoldingLimit, cx: &mut Context<Self>) {
+        if limit != self.folding_limit {
+            self.folding_limit = limit;
+            cx.emit(CodeEditorEvent::FoldingLimitChanged);
+        }
+    }
+
+    /// How many folding ranges the last computation found, and the limit
+    /// (`folding_maximum_regions`) they were cut to if there were more
+    /// (Monaco `FoldingController.limitReporter`'s `computed` and
+    /// `limited`). [`CodeEditorEvent::FoldingLimitChanged`] reports changes.
+    pub fn folding_limit(&self) -> FoldingLimit {
+        self.folding_limit
+    }
+
+    /// Monaco `FoldingController.onEditorMouseDown`: a left or middle press
+    /// the folding contribution may act on when released on the same line
+    /// (see [`Self::folding_mouse_up`]): on a folding control (`icon`), or
+    /// at the end of a collapsed line's text (its `⋯`, or past it with
+    /// `unfold_on_click_after_end_of_line`) while lines are hidden. `None`
+    /// forgets any earlier press.
+    pub(crate) fn folding_mouse_down(&mut self, row: Option<u32>, icon: bool) {
+        self.fold_mouse_down = row
+            .filter(|_| self.options.folding && (icon || self.folds.has_hidden()))
+            .map(|row| (row, icon));
+    }
+
+    /// Monaco `FoldingController.onEditorMouseUp`: toggles the region
+    /// starting at the line pressed if released on it, over the folding
+    /// controls' column for a control press (`on_controls`) or at the end
+    /// of the line's text otherwise (`at_line_end`). Returns whether it
+    /// did.
+    pub(crate) fn folding_mouse_up(
+        &mut self,
+        row: Option<u32>,
+        on_controls: bool,
+        at_line_end: bool,
+        recursive: bool,
+        surrounding: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((line, icon)) = self.fold_mouse_down.take() else {
+            return false;
+        };
+        if row != Some(line) || (icon && !on_controls) || (!icon && !at_line_end) {
+            return false;
+        }
+        self.click_fold(line, icon, recursive, surrounding, cx);
+        true
     }
 }
 

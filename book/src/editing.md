@@ -93,16 +93,18 @@ Fold ranges come from these sources, in order (Monaco's `foldingStrategy: auto`)
 2. **Syntax tree:** the language's tree-sitter `folds.scm` query. Each `@fold` node folds from its first line to the line before its closing bracket or tag. Every bundled language has one. Region markers are added to these ranges.
 3. **Indentation:** indentation plus `#region` / `#endregion` markers, where the language defines them.
 
-`folding_strategy: Indentation` uses only the last source. Provider and syntax ranges are capped at `folding_maximum_regions` (5000); the most deeply nested are dropped first, as in Monaco. Recomputing waits for a 200ms pause in edits. In the meantime the regions move with the text, so the chevrons and the folding commands stay on the right lines. Folded regions stay folded through edits, lines typed into them included, and keep their state when the new ranges arrive, unless their lines changed with a cursor in them. `editor.folding_ranges()` and `editor.collapsed_folds(cx)` read the current state.
+`folding_strategy: Indentation` uses only the last source. Ranges are capped at `folding_maximum_regions` (5000): the most deeply nested provider and syntax ranges are dropped first, and the most indented indentation ranges, as in Monaco. `editor.folding_limit()` says how many were found and the limit applied, and `CodeEditorEvent::FoldingLimitChanged` reports changes, for a status bar warning. `api_commands::execute_folding_range_provider` computes a model's ranges without an editor. Recomputing waits for a 200ms pause in edits. Changing `folding_strategy`, the language or its configuration, and registering or unregistering a folding range provider (or `refresh_folding_ranges`) recompute at once; changing `folding` or `folding_maximum_regions` starts over, so turning folding off drops the folds. In the meantime the regions move with the text, so the chevrons and the folding commands stay on the right lines. Folded regions stay folded through edits, lines typed into them included, and keep their state when the new ranges arrive, unless their lines changed with a cursor in them. `editor.folding_ranges()` and `editor.collapsed_folds(cx)` read the current state.
 
 - **Cursors:** 200ms after a cursor lands in a folded region, from find, Go to Line, Go to Definition, Jump to Bracket, Cmd+D or `set_selections`, the region unfolds and the cursor shows.
 
 - **Gutter:** chevrons fade in on hover, or show always with `show_folding_controls: Always`; `Never` drops the column. A folded region ends with a grey "⋯"; click it to unfold.
   - Manual ranges have their own icons (Monaco's `folding-manual-collapsed` and `folding-manual-expanded`). They look like the others unless the host changes them with `view::folding::set_folding_icon(FoldingIcon::ManualCollapsed, Some(codicon), cx)`, as a VS Code product icon theme does.
+  - A chevron toggles when the mouse is pressed and released on its line, as in Monaco; its first 4px are left to other gutter decorations.
   - Shift-click (or middle-click) a chevron to toggle the region with everything inside it.
   - Alt-click it to fold the regions around it instead (or unfold them if any are folded).
-  - A click keeps the view on the clicked line rather than scrolling back to the cursor. The folding commands show the cursor, centered if it was off screen.
-- **Placeholder:** a collapsed region shows `⋯` after its first line. Clicking it unfolds the region, and so does clicking after the end of the line with `unfold_on_click_after_end_of_line`. With `folding_highlight` (the default), the line gets the `editor.foldBackground` color.
+  - A click keeps the view on the clicked line rather than scrolling back to the cursor. The folding commands, Go to Parent/Previous/Next Fold included, show the cursor, centered if it was off screen.
+  - A collapsed region the ranges no longer include stays folded, with the manual icons.
+- **Placeholder:** a collapsed region shows `⋯` after its first line. Clicking it, or at the end of the line's text, unfolds the region and puts the cursor there, and so does clicking after the end of the line with `unfold_on_click_after_end_of_line`. With `folding_highlight` (the default), the line gets the `editor.foldBackground` color, in the minimap too.
 - **Commands:** Monaco's, with Cmd on macOS and Ctrl elsewhere:
 
 | Keys | Command |
@@ -120,8 +122,8 @@ Fold ranges come from these sources, in order (Monaco's `foldingStrategy: auto`)
 | Cmd+K Cmd+. | Remove manual folding ranges at the cursor or in the selection |
 | – | Go to Parent / Previous / Next Fold, Toggle Import Fold |
 
-Block comments and regions are found by kind when a folding range provider gives kinds. Otherwise they're found by the first line matching the language's block comment or region marker, as in Monaco. `folding_imports_by_default` collapses import ranges when a model is first shown.
-- **Editing:** editing inside a collapsed region expands it, as in Monaco.
+Block comments and regions are found by kind when a folding range provider gives ranges with kinds. Otherwise they're found by the first line matching the language's block comment or region marker, as in Monaco. `folding_imports_by_default` collapses import ranges the first time a computation finds some, even from a provider registered later; a saved view state remembers it (`FoldingViewState::folded_imports`), so restored imports aren't folded again.
+- **View state:** `save_view_state` keeps the collapsed and manual regions, and `restore_view_state` folds them again, leaving cursors where they were saved, even in a fold.
 
 ## Smart select
 

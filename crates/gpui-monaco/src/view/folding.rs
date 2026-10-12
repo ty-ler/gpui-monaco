@@ -74,6 +74,27 @@ struct Previous {
     line: u32,
 }
 
+/// How many folding ranges a computation found, and the limit it kept
+/// them to if there were more (Monaco `FoldingLimitReporter.update`'s
+/// `computed` and `limited`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FoldingLimit {
+    /// The ranges found, before limiting.
+    pub computed: usize,
+    /// `foldingMaximumRegions`, when more ranges than that were found
+    /// (Monaco `limited`, `false` otherwise).
+    pub limited: Option<usize>,
+}
+
+impl FoldingLimit {
+    fn new(computed: usize, limit: usize) -> Self {
+        Self {
+            computed,
+            limited: (computed > limit).then_some(limit),
+        }
+    }
+}
+
 /// Folding ranges for `rope` (Monaco 1-based logic, returned 0-based), sorted
 /// by start row with parents set.
 pub fn compute_indent_ranges(
@@ -82,18 +103,19 @@ pub fn compute_indent_ranges(
     off_side: bool,
     markers: Option<(&Pattern, &Pattern)>,
 ) -> Vec<FoldRange> {
-    compute_indent_ranges_limited(rope, tab_size, off_side, markers, usize::MAX)
+    compute_indent_ranges_limited(rope, tab_size, off_side, markers, usize::MAX).0
 }
 
 /// [`compute_indent_ranges`] keeping at most `limit` ranges (Monaco's
-/// indent `RangesCollector`): the least indented first.
+/// indent `RangesCollector`): the least indented first. Also returns how
+/// many were found.
 pub fn compute_indent_ranges_limited(
     rope: &Rope,
     tab_size: u32,
     off_side: bool,
     markers: Option<(&Pattern, &Pattern)>,
     limit: usize,
-) -> Vec<FoldRange> {
+) -> (Vec<FoldRange>, FoldingLimit) {
     let tab_size = tab_size.max(1);
     let line_count = rope.line_count();
     // (start, end, is_marker), collected bottom-up like Monaco's insertFirst.
@@ -172,6 +194,7 @@ pub fn compute_indent_ranges_limited(
         }
     }
     collected.reverse();
+    let report = FoldingLimit::new(collected.len(), limit);
     if collected.len() > limit {
         let indent = |line: u32| indent_level(&rope.line(line - 1), tab_size).unwrap_or(0) as usize;
         let mut occurrences: Vec<usize> = Vec::new();
@@ -229,7 +252,7 @@ pub fn compute_indent_ranges_limited(
         });
         stack.push(ranges.len() - 1);
     }
-    ranges
+    (ranges, report)
 }
 
 /// A range from a provider or the syntax tree, before sanitizing (Monaco
@@ -251,8 +274,11 @@ pub struct FoldingRangeData {
 /// Monaco `sanitizeRanges` and `RangesCollector`: sorts ranges, drops
 /// those that would cross an enclosing one, and keeps at most `limit`,
 /// dropping the most deeply nested first. Returns the ranges with parents,
-/// and whether some were dropped for the limit.
-pub fn sanitize_ranges(mut data: Vec<FoldingRangeData>, limit: usize) -> (Vec<FoldRange>, bool) {
+/// and how many there were before limiting.
+pub fn sanitize_ranges(
+    mut data: Vec<FoldingRangeData>,
+    limit: usize,
+) -> (Vec<FoldRange>, FoldingLimit) {
     data.sort_by(|a, b| a.start.cmp(&b.start).then(a.rank.cmp(&b.rank)));
     // (start, end, kind, nesting level)
     let mut collected: Vec<(u32, u32, Option<FoldingRangeKind>, bool, usize)> = Vec::new();
@@ -312,8 +338,8 @@ pub fn sanitize_ranges(mut data: Vec<FoldingRangeData>, limit: usize) -> (Vec<Fo
             }
         }
     }
-    let limited = collected.len() > limit;
-    if limited {
+    let report = FoldingLimit::new(collected.len(), limit);
+    if report.limited.is_some() {
         // Keep whole nesting levels from the top while they fit, then fill
         // with the next level in order.
         let mut counts: Vec<usize> = Vec::new();
@@ -364,7 +390,7 @@ pub fn sanitize_ranges(mut data: Vec<FoldingRangeData>, limit: usize) -> (Vec<Fo
         });
         stack.push(ranges.len() - 1);
     }
-    (ranges, limited)
+    (ranges, report)
 }
 
 /// Region marker ranges (`#region` … `#endregion`), for syntax folding,
@@ -420,13 +446,14 @@ mod syntax_tests {
                 .collect::<Vec<_>>()
         };
         let check = |limit: usize, expected: &[(u32, u32)]| {
-            let (ranges, limited) = sanitize_ranges(data(), limit);
+            let (ranges, report) = sanitize_ranges(data(), limit);
             let actual: Vec<(u32, u32)> = ranges
                 .iter()
                 .map(|r| (r.start_row + 1, r.end_row + 1))
                 .collect();
             assert_eq!(actual, expected, "{limit}");
-            assert_eq!(limited, limit < 9, "limited {limit}");
+            assert_eq!(report.computed, 9);
+            assert_eq!(report.limited, (limit < 9).then_some(limit), "{limit}");
         };
         check(1000, &all);
         check(9, &all);
@@ -712,6 +739,64 @@ mod tests {
             false,
             true,
         );
+    }
+
+    /// Monaco `indentFold.test.ts` "Limit by indent", with what the limit
+    /// reporter is told.
+    #[test]
+    fn limit_by_indent() {
+        let lines = [
+            "A",
+            "  A",
+            "  A",
+            "    A",
+            "      A",
+            "    A",
+            "      A",
+            "      A",
+            "         A",
+            "      A",
+            "         A",
+            "  A",
+            "              A",
+            "                 A",
+            "A",
+            "  A",
+        ];
+        let rope = Rope::from(lines.join("\n").as_str());
+        // Monaco's 1-based lines.
+        let (r1, r2, r3, r4, r5, r6, r7, r8, r9) = (
+            (1, 14),
+            (3, 11),
+            (4, 5),
+            (6, 11),
+            (8, 9),
+            (10, 11),
+            (12, 14),
+            (13, 14),
+            (15, 16),
+        );
+        let check = |limit: usize, expected: &[(u32, u32)]| {
+            let (ranges, report) = compute_indent_ranges_limited(&rope, 4, true, None, limit);
+            let actual: Vec<(u32, u32)> = ranges
+                .iter()
+                .map(|r| (r.start_row + 1, r.end_row + 1))
+                .collect();
+            assert_eq!(actual, expected, "{limit}");
+            assert_eq!(report.computed, 9, "{limit}");
+            assert_eq!(report.limited, (limit < 9).then_some(limit), "{limit}");
+        };
+        check(1000, &[r1, r2, r3, r4, r5, r6, r7, r8, r9]);
+        check(9, &[r1, r2, r3, r4, r5, r6, r7, r8, r9]);
+        check(8, &[r1, r2, r3, r4, r5, r6, r7, r9]);
+        check(7, &[r1, r2, r3, r4, r5, r7, r9]);
+        check(6, &[r1, r2, r3, r4, r7, r9]);
+        check(5, &[r1, r2, r3, r7, r9]);
+        check(4, &[r1, r2, r7, r9]);
+        check(3, &[r1, r2, r9]);
+        check(2, &[r1, r9]);
+        check(1, &[r1]);
+        check(0, &[]);
     }
 
     #[test]
@@ -1199,6 +1284,36 @@ impl FoldState {
         buffer: &text::Buffer,
         selection: &[u32],
     ) -> bool {
+        self.update(ranges, None, version, rope, buffer, selection)
+            .0
+    }
+
+    /// [`Self::set_ranges`], with the new ranges of `kind` collapsed first
+    /// (Monaco `FoldingRegions.setCollapsedAllOfType`, for
+    /// `foldingImportsByDefault`); collapsed or manual regions at their
+    /// lines keep their state. Returns whether the hidden rows changed, and
+    /// whether any range was of `kind`.
+    pub fn set_ranges_collapsing(
+        &mut self,
+        ranges: Vec<FoldRange>,
+        kind: &FoldingRangeKind,
+        version: text::Version,
+        rope: &Rope,
+        buffer: &text::Buffer,
+        selection: &[u32],
+    ) -> (bool, bool) {
+        self.update(ranges, Some(kind), version, rope, buffer, selection)
+    }
+
+    fn update(
+        &mut self,
+        ranges: Vec<FoldRange>,
+        collapse: Option<&FoldingRangeKind>,
+        version: text::Version,
+        rope: &Rope,
+        buffer: &text::Buffer,
+        selection: &[u32],
+    ) -> (bool, bool) {
         self.sync(buffer);
         self.ranges_version = Some(version);
         let edits = if version == buffer.version() {
@@ -1206,9 +1321,12 @@ impl FoldState {
         } else {
             point_edits(rope, buffer.rope(), &buffer.edits_since(version))
         };
+        let mut found = false;
         let computed: Vec<MergeRange> = ranges
             .into_iter()
             .filter_map(|range| {
+                let collapsed = collapse.is_some_and(|kind| range.kind.as_ref() == Some(kind));
+                found |= collapsed;
                 let (mut start, mut end) = (range.start_row, range.end_row);
                 if !edits.is_empty() {
                     let at_end = |row: u32| text::Point::new(row, rope.line_len(row));
@@ -1219,7 +1337,7 @@ impl FoldState {
                     start,
                     end,
                     kind: range.kind,
-                    collapsed: false,
+                    collapsed,
                     source: FoldSource::Provider,
                 })
             })
@@ -1227,7 +1345,7 @@ impl FoldState {
         let folded = self.folded_or_manual(Some(selection));
         let line_count = buffer.rope().line_count();
         let merged = sanitize_and_merge(&computed, &folded, line_count, Some(selection));
-        self.update_post(merged, buffer.rope())
+        (self.update_post(merged, buffer.rope()), found)
     }
 
     /// Monaco `HiddenRangeModel.updateHiddenRanges`: the hidden areas from

@@ -642,3 +642,408 @@ fn set_value_unfolds(cx: &mut TestAppContext) {
     assert_eq!(ranges(&editor, cx), [(0, 3), (1, 2), (5, 6), (7, 8)]);
     assert!(collapsed(&editor, cx).is_empty());
 }
+
+/// An editor with `folding_imports_by_default`, for `text`.
+fn setup_imports<'a>(
+    text: &str,
+    cx: &'a mut TestAppContext,
+) -> (Entity<CodeEditor>, &'a mut VisualTestContext) {
+    cx.update(gpui_monaco::init);
+    let text = text.to_string();
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new(&text).with_language("rust"));
+        let mut editor = CodeEditor::new(model, window, cx);
+        editor.update_options_with(|o| o.folding_imports_by_default = true, cx);
+        editor
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    settle(cx);
+    (editor, cx)
+}
+
+/// Monaco `foldingImportsByDefault` keeps trying until imports were
+/// folded: a provider registered after the editor opened folds them, and
+/// registering one recomputes the ranges without an edit.
+#[gpui::test]
+fn imports_fold_when_a_provider_registers_late(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_imports(NESTED, cx);
+    assert!(collapsed(&editor, cx).is_empty());
+    let registration =
+        cx.update(|_, cx| register_folding_range_provider(cx, LanguageSelector::All, Imports));
+    settle(cx);
+    assert_eq!(ranges(&editor, cx), [(0, 2), (5, 6)]);
+    assert_eq!(collapsed(&editor, cx), [(0, 2)]);
+    // Once folded, unfolding them sticks.
+    editor.update(cx, |e, cx| e.toggle_import_fold(cx));
+    append_line(&editor, cx);
+    assert!(collapsed(&editor, cx).is_empty());
+    // Unregistering recomputes too: back to the syntax ranges.
+    cx.update(|_, cx| unregister_provider(cx, registration));
+    settle(cx);
+    assert_eq!(ranges(&editor, cx), [(0, 3), (1, 2), (5, 6), (7, 8)]);
+}
+
+/// Monaco saves `foldedImports` in the view state: restored right after
+/// `set_model`, folded imports stay folded and unfolded ones aren't folded
+/// again.
+#[gpui::test]
+fn restored_view_states_remember_folded_imports(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        register_folding_range_provider(cx, LanguageSelector::All, Imports);
+    });
+    let (editor, cx) = setup_imports(NESTED, cx);
+    assert_eq!(collapsed(&editor, cx), [(0, 2)]);
+    let folded = editor.read_with(cx, |e, cx| e.save_view_state(cx));
+    assert!(folded.folding.folded_imports);
+    editor.update(cx, |e, cx| e.toggle_import_fold(cx));
+    let unfolded = editor.read_with(cx, |e, cx| e.save_view_state(cx));
+    assert!(unfolded.folding.folded_imports);
+    assert!(unfolded.folding.regions.is_empty());
+
+    for (state, expected) in [(&folded, vec![(0, 2)]), (&unfolded, vec![])] {
+        editor.update(cx, |e, cx| {
+            let model = cx.new(|_| TextModel::new(NESTED).with_language("rust"));
+            e.set_model(model, cx);
+            e.restore_view_state(state, cx);
+        });
+        settle(cx);
+        assert_eq!(collapsed(&editor, cx), expected);
+    }
+}
+
+/// Ranges from a provider, without kinds.
+struct Untyped;
+impl FoldingRangeProvider for Untyped {
+    fn provide_folding_ranges(
+        &self,
+        _: &ProviderContext,
+        _: &FoldingContext,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Option<Vec<FoldingRange>>>> {
+        let range = |start_row, end_row| FoldingRange {
+            start_row,
+            end_row,
+            kind: None,
+        };
+        Task::ready(Ok(Some(vec![range(0, 3), range(5, 6), range(7, 8)])))
+    }
+}
+
+/// Monaco `FoldingRegions.fromFoldRanges` drops the types when no range
+/// has one: Fold All Block Comments then goes by the comment start.
+#[gpui::test]
+fn providers_without_kinds_have_no_types(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        register_folding_range_provider(cx, LanguageSelector::All, Untyped);
+    });
+    let (editor, cx) = setup(NESTED, cx);
+    assert_eq!(ranges(&editor, cx), [(0, 3), (5, 6), (7, 8)]);
+    editor.update(cx, |e, cx| e.fold_all_block_comments(cx));
+    assert_eq!(collapsed(&editor, cx), [(5, 6)]);
+}
+
+/// Monaco `onFoldingStrategyChanged`: changing `folding_strategy`
+/// recomputes the ranges without waiting for an edit.
+#[gpui::test]
+fn changing_the_strategy_recomputes(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        register_folding_range_provider(cx, LanguageSelector::All, Untyped);
+    });
+    let (editor, cx) = setup(NESTED, cx);
+    assert_eq!(ranges(&editor, cx), [(0, 3), (5, 6), (7, 8)]);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.folding_strategy = FoldingStrategy::Indentation, cx)
+    });
+    settle(cx);
+    assert_eq!(ranges(&editor, cx), [(0, 3), (1, 2), (5, 6), (7, 8)]);
+}
+
+/// Monaco `onDidChangeModelLanguageConfiguration`: a language change
+/// recomputes the ranges.
+#[gpui::test]
+fn changing_the_language_recomputes(cx: &mut TestAppContext) {
+    // Python folds off-side: the blank line after a block isn't part of it.
+    let (editor, cx) = setup("a:\n    b\n\nc\n", cx);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.folding_strategy = FoldingStrategy::Indentation, cx)
+    });
+    settle(cx);
+    assert_eq!(ranges(&editor, cx), [(0, 2)]);
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    model.update(cx, |m, cx| m.set_language(Some("python".into()), cx));
+    settle(cx);
+    assert_eq!(ranges(&editor, cx), [(0, 1)]);
+}
+
+/// Monaco discards the folds when `folding` is turned off, and starts
+/// over when it's turned back on.
+#[gpui::test]
+fn turning_folding_off_discards_the_folds(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(NESTED, cx);
+    editor.update(cx, |e, cx| e.fold_all(cx));
+    assert_eq!(collapsed(&editor, cx).len(), 4);
+    editor.update(cx, |e, cx| e.update_options_with(|o| o.folding = false, cx));
+    settle(cx);
+    assert!(collapsed(&editor, cx).is_empty());
+    assert!(ranges(&editor, cx).is_empty());
+    // Go to fold commands do nothing.
+    cursor(&editor, cx, 2);
+    editor.update(cx, |e, cx| e.go_to_parent_fold(cx));
+    assert_eq!(head(&editor, cx).row, 2);
+    editor.update(cx, |e, cx| e.update_options_with(|o| o.folding = true, cx));
+    settle(cx);
+    assert_eq!(ranges(&editor, cx), [(0, 3), (1, 2), (5, 6), (7, 8)]);
+    assert!(collapsed(&editor, cx).is_empty());
+}
+
+/// Monaco skips `adjustSelections` while restoring a view state: a cursor
+/// saved inside a collapsed region stays there.
+#[gpui::test]
+fn restoring_a_view_state_keeps_cursors_in_folds(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(NESTED, cx);
+    editor.update(cx, |e, cx| e.fold_all(cx));
+    let mut state = editor.read_with(cx, |e, cx| e.save_view_state(cx));
+    editor.update(cx, |e, cx| e.unfold_all(cx));
+    state.selections = vec![gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+        8, 2,
+    ))];
+    editor.update(cx, |e, cx| e.restore_view_state(&state, cx));
+    assert_eq!(collapsed(&editor, cx), [(0, 3), (1, 2), (5, 6), (7, 8)]);
+    assert_eq!(head(&editor, cx), PointUtf16::new(8, 2));
+}
+
+/// Monaco `limitReporter`: how many ranges were found, and the limit they
+/// were cut to, with an event when either changes.
+#[gpui::test]
+fn the_folding_limit_is_reported(cx: &mut TestAppContext) {
+    use gpui_monaco::CodeEditorEvent;
+    use gpui_monaco::view::folding::FoldingLimit;
+    // Twelve functions, each with a nested block.
+    let text = "fn a() {\n    if x {\n        y();\n    }\n}\n".repeat(12);
+    let (editor, cx) = setup(&text, cx);
+    let limit = |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.folding_limit());
+    assert_eq!(
+        limit(cx),
+        FoldingLimit {
+            computed: 24,
+            limited: None
+        }
+    );
+    let changes = std::rc::Rc::new(std::cell::Cell::new(0));
+    let sink = changes.clone();
+    let _subscription = cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event: &CodeEditorEvent, _| {
+            if *event == CodeEditorEvent::FoldingLimitChanged {
+                sink.set(sink.get() + 1);
+            }
+        })
+    });
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.folding_maximum_regions = 15, cx)
+    });
+    settle(cx);
+    assert_eq!(
+        limit(cx),
+        FoldingLimit {
+            computed: 24,
+            limited: Some(15)
+        }
+    );
+    // Every function, then the first blocks.
+    let kept = ranges(&editor, cx);
+    assert_eq!(kept.len(), 15);
+    assert_eq!(kept.iter().filter(|(start, _)| start % 5 == 0).count(), 12);
+    assert_eq!(changes.get(), 1);
+    // Unchanged: no event.
+    append_line(&editor, cx);
+    assert_eq!(changes.get(), 1);
+}
+
+/// Monaco `_executeFoldingRangeProvider`: a model's ranges as an editor
+/// with the given options computes them.
+#[gpui::test]
+fn execute_folding_range_provider(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
+        register_folding_range_provider(cx, LanguageSelector::All, Imports);
+    });
+    let model = cx.new(|_| TextModel::new(NESTED).with_language("rust"));
+    let mut options = gpui_monaco::EditorOptions::default();
+    let run = |options: &gpui_monaco::EditorOptions, cx: &mut TestAppContext| {
+        let task = cx.update(|cx| {
+            gpui_monaco::api_commands::execute_folding_range_provider(&model, options, cx)
+        });
+        cx.run_until_parked();
+        cx.foreground_executor().block_test(task)
+    };
+    let ranges = run(&options, cx);
+    assert_eq!(
+        ranges
+            .iter()
+            .map(|r| (r.start_row, r.end_row, r.kind.clone()))
+            .collect::<Vec<_>>(),
+        [
+            (0, 2, Some(FoldingRangeKind::Imports)),
+            (5, 6, Some(FoldingRangeKind::Comment))
+        ]
+    );
+    options.folding_strategy = FoldingStrategy::Indentation;
+    options.folding_maximum_regions = 3;
+    let ranges: Vec<_> = run(&options, cx)
+        .iter()
+        .map(|r| (r.start_row, r.end_row))
+        .collect();
+    assert_eq!(ranges, [(0, 3), (5, 6), (7, 8)]);
+    options.folding = false;
+    assert!(run(&options, cx).is_empty());
+}
+
+fn control(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+    row: u32,
+) -> gpui::Bounds<gpui::Pixels> {
+    draw(cx);
+    editor.read_with(cx, |e, _| {
+        e.fold_controls_for_tests()
+            .into_iter()
+            .find(|(r, _, _)| *r == row)
+            .map(|(_, bounds, _)| bounds)
+            .unwrap()
+    })
+}
+
+/// Monaco `onEditorMouseDown`/`onEditorMouseUp`: a chevron toggles on
+/// release on the same line, not on press, and not from its first 4px.
+#[gpui::test]
+fn chevrons_toggle_on_mouse_up_on_the_same_line(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, point, px};
+    let (editor, cx) = setup(NESTED, cx);
+    let bounds = control(&editor, cx, 0);
+    let at = point(bounds.right() - px(4.), bounds.center().y);
+    cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+    assert!(collapsed(&editor, cx).is_empty());
+    cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+    assert_eq!(collapsed(&editor, cx), [(0, 3)]);
+    // Released on another line: nothing.
+    editor.update(cx, |e, cx| e.unfold_all(cx));
+    let other = control(&editor, cx, 5);
+    cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(
+        other.center(),
+        Some(MouseButton::Left),
+        Modifiers::default(),
+    );
+    cx.simulate_mouse_up(other.center(), MouseButton::Left, Modifiers::default());
+    assert!(collapsed(&editor, cx).is_empty());
+    // The dead zone at the control's left.
+    let dead = point(bounds.left() + px(2.), bounds.center().y);
+    cx.simulate_click(dead, Modifiers::default());
+    assert!(collapsed(&editor, cx).is_empty());
+    // Middle click folds recursively.
+    cx.simulate_mouse_down(at, MouseButton::Middle, Modifiers::default());
+    cx.simulate_mouse_up(at, MouseButton::Middle, Modifiers::default());
+    assert_eq!(collapsed(&editor, cx), [(1, 2)]);
+}
+
+/// Monaco `onEditorMouseUp`: a click at the end of a collapsed line's text
+/// unfolds it, and moves the cursor there.
+#[gpui::test]
+fn a_click_at_the_end_of_a_collapsed_line_unfolds_it(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(NESTED, cx);
+    cursor(&editor, cx, 9);
+    editor.update(cx, |e, cx| e.fold_all(cx));
+    draw(cx);
+    let end = editor.read_with(cx, |e, _| {
+        e.scrolled_visible_position(PointUtf16::new(7, 8)).unwrap()
+    });
+    // Just left of the end of `fn b() {`, so on its last character's
+    // right half.
+    let at = gpui::point(end.x - gpui::px(2.), end.y + gpui::px(8.));
+    cx.simulate_click(at, gpui::Modifiers::default());
+    assert_eq!(head(&editor, cx), PointUtf16::new(7, 8));
+    assert_eq!(collapsed(&editor, cx), [(0, 3), (1, 2), (5, 6)]);
+}
+
+/// Monaco's collapsed region decorations shade the minimap
+/// (`foldedBackgroundMinimap`): the header's line, at half the color.
+#[gpui::test]
+fn the_fold_highlight_shades_the_minimap(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(NESTED, cx);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.minimap.enabled = true, cx)
+    });
+    cursor(&editor, cx, 9);
+    let fold = editor.read_with(cx, |e, _| e.colors().fold_background);
+    let shaded = |cx: &mut VisualTestContext| {
+        draw(cx);
+        editor.read_with(cx, |e, _| {
+            e.minimap_marks_for_tests()
+                .into_iter()
+                .filter(|(_, color)| (color.h, color.s, color.l) == (fold.h, fold.s, fold.l))
+                .map(|(bounds, _)| bounds.top())
+                .collect::<Vec<_>>()
+        })
+    };
+    assert!(shaded(cx).is_empty());
+    cursor(&editor, cx, 9);
+    editor.update(cx, |e, cx| e.fold_all(cx));
+    // The two functions' and the comment's headers; the `if` is hidden.
+    let mut tops = shaded(cx);
+    tops.sort();
+    tops.dedup();
+    assert_eq!(tops.len(), 3, "{tops:?}");
+    // Without `folding_highlight`, none.
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.folding_highlight = false, cx)
+    });
+    assert!(shaded(cx).is_empty());
+}
+
+/// Ranges a test changes.
+struct Changing(std::rc::Rc<std::cell::RefCell<Vec<FoldingRange>>>);
+impl FoldingRangeProvider for Changing {
+    fn provide_folding_ranges(
+        &self,
+        _: &ProviderContext,
+        _: &FoldingContext,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Option<Vec<FoldingRange>>>> {
+        Task::ready(Ok(Some(self.0.borrow().clone())))
+    }
+}
+
+/// Monaco `foldingDecorations.ts`: a collapsed region the provider no
+/// longer gives is kept, recovered, with the manual icon.
+#[gpui::test]
+fn recovered_folds_get_the_manual_icon(cx: &mut TestAppContext) {
+    use gpui_monaco::view::folding::FoldingIcon;
+    let provided = std::rc::Rc::new(std::cell::RefCell::new(vec![FoldingRange {
+        start_row: 0,
+        end_row: 3,
+        kind: None,
+    }]));
+    let provider = Changing(provided.clone());
+    cx.update(|cx| {
+        register_folding_range_provider(cx, LanguageSelector::All, provider);
+    });
+    let (editor, cx) = setup(NESTED, cx);
+    let icons = |cx: &mut VisualTestContext| {
+        draw(cx);
+        editor.read_with(cx, |e, cx| {
+            e.fold_control_icons_for_tests(cx)
+                .into_iter()
+                .map(|(row, icon, _)| (row, icon))
+                .collect::<Vec<_>>()
+        })
+    };
+    cursor(&editor, cx, 0);
+    editor.update(cx, |e, cx| e.fold(cx));
+    assert_eq!(icons(cx), [(0, FoldingIcon::Collapsed)]);
+    provided.borrow_mut().clear();
+    cx.update(|_, cx| refresh_folding_ranges(cx));
+    settle(cx);
+    assert_eq!(collapsed(&editor, cx), [(0, 3)]);
+    assert_eq!(icons(cx), [(0, FoldingIcon::ManualCollapsed)]);
+}
