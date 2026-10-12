@@ -12,7 +12,7 @@ use crate::cursor::{self, Selection};
 use crate::decorations::{Decoration, DecorationId, DecorationOptions};
 use crate::editor::{CodeEditor, CodeEditorEvent, PendingReveal};
 use crate::events::DecorationsChange;
-use crate::model::TextModel;
+use crate::model::{LanguageRun, TextModel};
 use crate::search::{self, SearchParams};
 use crate::view::reveal::{RevealType, ScrollType};
 
@@ -61,14 +61,53 @@ impl TextModel {
         self.buffer().rope().clip_point_utf16(position, Bias::Left)
     }
 
-    /// [`TextModel::validate_position`] for both ends, ordered (Monaco
-    /// `validateRange`).
+    /// `position` with its row and column clamped to the text, which may
+    /// leave it inside a surrogate pair (Monaco's `Relaxed` validation).
+    fn clamp_position(&self, position: PointUtf16) -> PointUtf16 {
+        let rope = self.buffer().rope();
+        let max = rope.max_point_utf16();
+        if position.row > max.row {
+            return max;
+        }
+        PointUtf16::new(
+            position.row,
+            position.column.min(rope.line_len_utf16(position.row)),
+        )
+    }
+
+    /// The nearest valid range to `range`, ordered (Monaco
+    /// `validateRange`): rows and columns are clamped as in
+    /// [`TextModel::validate_position`], and an end inside a surrogate pair
+    /// moves after it, so the range grows to take the whole character; an
+    /// empty range inside one moves before it.
     pub fn validate_range(&self, range: Range<PointUtf16>) -> Range<PointUtf16> {
         let (a, b) = (
-            self.validate_position(range.start),
-            self.validate_position(range.end),
+            self.clamp_position(range.start),
+            self.clamp_position(range.end),
         );
-        a.min(b)..a.max(b)
+        self.buffer().rope().clip_range_utf16(a.min(b)..a.max(b))
+    }
+
+    /// Whether `range` is valid as it is (Monaco `isValidRange`): ordered,
+    /// both ends within the text, and neither inside a surrogate pair.
+    pub fn is_valid_range(&self, range: &Range<PointUtf16>) -> bool {
+        let valid = |position: PointUtf16| {
+            self.clamp_position(position) == position
+                && self.validate_position(position) == position
+        };
+        range.start <= range.end && valid(range.start) && valid(range.end)
+    }
+
+    /// The first column of `row` (Monaco `getLineMinColumn`, 0-based): always
+    /// `0`.
+    pub fn line_min_column(&self, _row: u32) -> u32 {
+        0
+    }
+
+    /// The column after `row`'s last character (Monaco `getLineMaxColumn`,
+    /// 0-based): [`TextModel::line_len_utf16`].
+    pub fn line_max_column(&self, row: u32) -> u32 {
+        self.line_len_utf16(row)
     }
 
     /// The UTF-8 byte offset of `position` in the stored text, whose line
@@ -169,23 +208,85 @@ impl TextModel {
         text.chars().filter(|&c| c != '\n').count() + breaks * self.eol_str(eol).len()
     }
 
-    /// The word containing `position`, by the language's `wordPattern` or
-    /// Monaco's default (Monaco `getWordAtPosition`).
+    /// The language run of `row` holding the character at `position`
+    /// (Monaco `findTokenIndexAtOffset(column - 1)`: the last run at the
+    /// line's end), with the runs and the position's byte column.
+    fn language_run_at(&self, position: PointUtf16) -> (Vec<LanguageRun>, usize, usize) {
+        let rope = self.buffer().rope();
+        let column = rope.point_utf16_to_offset(position)
+            - rope.point_to_offset(text::Point::new(position.row, 0));
+        let runs = self.line_language_runs(position.row);
+        let ix = runs
+            .iter()
+            .position(|run| run.columns.start <= column && column < run.columns.end)
+            .unwrap_or(runs.len() - 1);
+        (runs, ix, column)
+    }
+
+    /// The word containing `position` (Monaco `getWordAtPosition`): by the
+    /// `wordPattern` of the language at `position` (an embedded one's, as
+    /// in a `<script>` of HTML) or Monaco's default, within that language's
+    /// run of the line. At the boundary of two languages, the word ending
+    /// at `position` in the language before counts too.
     pub fn word_at_position(&self, position: PointUtf16) -> Option<WordAtPosition> {
         let position = self.validate_position(position);
-        let pattern = self.language().and_then(|l| l.config.word_pattern.clone());
-        let regex = match pattern.as_ref().and_then(syntax::Pattern::regex) {
-            Some(regex) => regex,
-            None => cursor::in_place_replace::default_word_regex(),
-        };
         let line = self.line_content(position.row);
-        let columns = cursor::in_place_replace::word_at(&line, position.column, regex)?;
+        let (runs, ix, column) = self.language_run_at(position);
+        let word_in = |run: &LanguageRun| {
+            let pattern = run
+                .language
+                .as_ref()
+                .and_then(|l| l.config.word_pattern.clone());
+            let regex = match pattern.as_ref().and_then(syntax::Pattern::regex) {
+                Some(regex) => regex,
+                None => cursor::in_place_replace::default_word_regex(),
+            };
+            let offset = cursor::strings::utf16_len(&line[..run.columns.start]);
+            let word = cursor::in_place_replace::word_at(
+                &line[run.columns.clone()],
+                position.column - offset,
+                regex,
+            )?;
+            Some(word.start + offset..word.end + offset)
+        };
+        // Monaco: the right-biased word, else, at a language boundary, the
+        // left-biased one.
+        let columns = word_in(&runs[ix]).or_else(|| {
+            (ix > 0 && runs[ix].columns.start == column)
+                .then(|| word_in(&runs[ix - 1]))
+                .flatten()
+        })?;
         let range = PointUtf16::new(position.row, columns.start)
             ..PointUtf16::new(position.row, columns.end);
         Some(WordAtPosition {
             word: self.value_in_range(range.clone(), EndOfLinePreference::Lf),
             range,
         })
+    }
+
+    /// The id of the language at `position` (Monaco
+    /// `getLanguageIdAtPosition`): the language of the character after it
+    /// (the last one at a line's end), an embedded language's id where one
+    /// is (see [`TextModel::language_at`]), else the model's
+    /// [`language_id`](TextModel::language_id), `plaintext` without one.
+    pub fn language_id_at_position(&self, position: PointUtf16) -> gpui::SharedString {
+        let position = self.validate_position(position);
+        let (runs, ix, _) = self.language_run_at(position);
+        let model_id = || {
+            self.language_id()
+                .cloned()
+                .unwrap_or_else(|| syntax::Language::PLAIN_TEXT_ID.into())
+        };
+        match &runs[ix].language {
+            Some(language)
+                if !self.language().is_some_and(|model| {
+                    Arc::ptr_eq(model, language) || model.id == language.id
+                }) =>
+            {
+                language.id.to_string().into()
+            }
+            _ => model_id(),
+        }
     }
 
     /// The part of the word at `position` before it (Monaco
@@ -625,6 +726,13 @@ impl SingleEditOperation {
     }
 }
 
+impl<T: Into<String>> From<(Range<PointUtf16>, T)> for SingleEditOperation {
+    /// Replaces the range with the text, without `force_move_markers`.
+    fn from((range, text): (Range<PointUtf16>, T)) -> Self {
+        Self::new(range, text)
+    }
+}
+
 /// Where [`CodeEditor::execute_edit_operations`] leaves the cursors
 /// (Monaco's `endCursorState`).
 pub enum EndCursorState {
@@ -646,7 +754,9 @@ impl std::fmt::Debug for EndCursorState {
 
 impl TextModel {
     /// Applies `edits` and returns the edits that undo them, in the new
-    /// text's coordinates (Monaco `applyEdits` with `computeUndoEdits`).
+    /// text's coordinates and the order of `edits` (Monaco `applyEdits`
+    /// with `computeUndoEdits`). Ranges are validated as
+    /// [`TextModel::validate_range`] does.
     /// Unlike Monaco, the edit is also recorded for undo, which keeps undo
     /// history consistent with the text.
     pub fn apply_edits(
@@ -696,11 +806,12 @@ impl TextModel {
         if !force.is_empty() {
             self.force_move_markers_on_next_edit(force);
         }
+        let ranges: Vec<Range<usize>> = edits.iter().map(|(range, _)| range.clone()).collect();
         let patch = self.edit_from(edits, group, None, cx);
         self.force_move_markers_on_next_edit(Vec::new());
         let patch = patch?;
         let new = self.buffer().rope();
-        Ok(patch
+        let mut undo: Vec<_> = patch
             .edits()
             .iter()
             .map(|edit| {
@@ -710,25 +821,38 @@ impl TextModel {
                     old.text_for_range(edit.old.clone()),
                 )
             })
-            .collect())
+            .collect();
+        // Monaco returns the undo edits in the order of the edits (issue
+        // #46342); the patch has them by position.
+        if undo.len() == ranges.len() {
+            let mut order: Vec<usize> = (0..ranges.len()).collect();
+            order.sort_by_key(|&ix| (ranges[ix].start, ranges[ix].end));
+            let mut sorted = undo.into_iter();
+            let mut by_edit = vec![None; ranges.len()];
+            for ix in order {
+                by_edit[ix] = sorted.next();
+            }
+            undo = by_edit.into_iter().flatten().collect();
+        }
+        Ok(undo)
     }
 
     /// Applies `edits` as part of the current undo step (Monaco
     /// `pushEditOperations`): they join the open step, typing's included,
     /// until [`TextModel::push_stack_element`]. `before_cursor_state` is restored
     /// by undo. `cursor_state_computer` gets the undo edits and returns the
-    /// selections after, which redo restores; they're returned.
+    /// selections after, which redo restores; they're returned. As in
+    /// [`TextModel::apply_edit_operations`], an edit's
+    /// [`force_move_markers`](SingleEditOperation::force_move_markers) moves
+    /// the decorations and cursors at its edges past its new text; a
+    /// `(range, text)` pair converts with `.into()`.
     pub fn push_edit_operations(
         &mut self,
         before_cursor_state: Option<Vec<Selection>>,
-        edits: Vec<(Range<PointUtf16>, String)>,
+        edits: Vec<SingleEditOperation>,
         cursor_state_computer: Option<&CursorStateComputer>,
         cx: &mut Context<Self>,
     ) -> Result<Option<Vec<Selection>>, text::EditError> {
-        let edits = edits
-            .into_iter()
-            .map(|(range, text)| SingleEditOperation::new(range, text))
-            .collect();
         let undo_edits = self.apply_edits_in(edits, Some(text::JOIN_OPEN_UNDO_STEP), cx)?;
         let after = cursor_state_computer.and_then(|compute| compute(&undo_edits));
         let metadata = |selections: Option<Vec<Selection>>| {

@@ -35,6 +35,12 @@ impl Global for Openers {}
 /// asked first; when none opens the link, the editor emits
 /// [`CodeEditorEvent::OpenLink`] as before.
 ///
+/// Links clicked in markdown (hovers, suggest details, parameter hints,
+/// messages) go through the openers too, as they go through Monaco's
+/// opener service, `command:` links of untrusted strings included. When
+/// none opens one, `http`, `https` and `mailto` links open in the browser
+/// and a trusted string's `command:` links run; others are dropped.
+///
 /// Openers run after the editor's update, so they may update the editor.
 pub fn register_link_opener(
     cx: &mut App,
@@ -80,6 +86,12 @@ fn link_openers(cx: &App) -> Vec<LinkOpener> {
     cx.try_global::<Openers>()
         .map(|o| o.links.iter().rev().map(|(_, o)| o.clone()).collect())
         .unwrap_or_default()
+}
+
+/// Offers `url` to the link openers, most recent first (Monaco
+/// `OpenerService.open`'s registered openers); whether one opened it.
+pub(crate) fn offer_link(url: &str, cx: &mut App) -> bool {
+    link_openers(cx).iter().any(|open| open(url, cx))
 }
 
 fn editor_openers(cx: &App) -> Vec<EditorOpener> {

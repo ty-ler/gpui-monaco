@@ -109,6 +109,45 @@ fn standard_token_type(name: &str) -> crate::cursor::StandardTokenType {
         .unwrap_or(StandardTokenType::Other)
 }
 
+/// A run of a line's characters in one language (see
+/// [`TextModel::line_language_runs`]).
+#[derive(Clone, Debug)]
+pub(crate) struct LanguageRun {
+    /// Byte columns in the line.
+    pub columns: Range<usize>,
+    /// `None` before the model's language is resolved.
+    pub language: Option<Arc<Language>>,
+}
+
+/// Groups `line`'s characters (starting at byte `line_start` of the text)
+/// by `language_of`, which takes a character's offset in the text. An
+/// empty line is one empty run, in the language at its start.
+fn language_runs(
+    line: &str,
+    line_start: usize,
+    language_of: impl Fn(usize) -> Option<Arc<Language>>,
+) -> Vec<LanguageRun> {
+    let id = |language: &Option<Arc<Language>>| language.as_ref().map(|l| l.id.clone());
+    let mut runs: Vec<LanguageRun> = Vec::new();
+    for (ix, ch) in line.char_indices() {
+        let language = language_of(line_start + ix);
+        match runs.last_mut() {
+            Some(run) if id(&run.language) == id(&language) => run.columns.end = ix + ch.len_utf8(),
+            _ => runs.push(LanguageRun {
+                columns: ix..ix + ch.len_utf8(),
+                language,
+            }),
+        }
+    }
+    if runs.is_empty() {
+        runs.push(LanguageRun {
+            columns: 0..0,
+            language: language_of(line_start),
+        });
+    }
+    runs
+}
+
 /// Monaco `TextModel`'s `MODEL_ID`, counting every model made.
 static MODEL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -162,10 +201,11 @@ pub fn register_model(cx: &mut App, model: &gpui::Entity<TextModel>) {
     if crate::registry::track_model(model, cx) {
         model.update(cx, |model, cx| model.update_marker_decorations(cx));
     }
-    if let Some(uri) = model.read(cx).uri().cloned() {
+    if model.read(cx).uri().is_some() {
+        let resource = model.read(cx).resource().clone();
         let models = cx.default_global::<Models>();
         models.by_uri.retain(|_, model| model.upgrade().is_some());
-        models.by_uri.insert(uri, model.downgrade());
+        models.by_uri.insert(resource, model.downgrade());
     }
 }
 
@@ -186,7 +226,9 @@ pub(crate) fn registered_models(cx: &App) -> Vec<gpui::Entity<TextModel>> {
 }
 
 /// The live model with `uri`, or one from the resolver (Monaco
-/// `getModel`, then `createModelReference`).
+/// `getModel`, then `createModelReference`). Uris are compared in
+/// [`normalize_uri`](crate::normalize_uri)'s form, as Monaco compares
+/// `URI.toString()`s: `file:///a b` finds the model of `file:///a%20b`.
 pub fn model_for_uri(cx: &mut App, uri: &str) -> Option<gpui::Entity<TextModel>> {
     if let Some(model) = live_model_for_uri(cx, uri) {
         return Some(model);
@@ -200,8 +242,13 @@ pub fn model_for_uri(cx: &mut App, uri: &str) -> Option<gpui::Entity<TextModel>>
 
 /// The live model with `uri`, not asking the resolver.
 fn live_model_for_uri(cx: &mut App, uri: &str) -> Option<gpui::Entity<TextModel>> {
+    let uri = crate::normalize_uri(uri);
     let models = cx.default_global::<Models>();
-    if let Some(model) = models.by_uri.get(uri).and_then(|model| model.upgrade()) {
+    if let Some(model) = models
+        .by_uri
+        .get(uri.as_str())
+        .and_then(|model| model.upgrade())
+    {
         return Some(model);
     }
     crate::registry::models(cx)
@@ -730,7 +777,7 @@ impl TextModel {
     /// again when languages are registered, until one is set.
     pub fn with_uri(mut self, uri: impl Into<SharedString>) -> Self {
         let uri = uri.into();
-        self.resource = uri.clone();
+        self.resource = crate::normalize_uri(&uri).into();
         self.uri = Some(uri);
         if self.language_id.is_none() {
             self.language_pending = true;
@@ -745,14 +792,24 @@ impl TextModel {
         self.uri.as_ref()
     }
 
-    /// The model's uri as Monaco has it (`ITextModel.uri`): the one set
-    /// with [`TextModel::with_uri`], else `inmemory://model/N`, unique to
-    /// the model. Markers are kept by it, so a model without a uri has its
+    /// The model's uri as Monaco has it (`ITextModel.uri.toString()`): the
+    /// one set with [`TextModel::with_uri`] in
+    /// [`normalize_uri`](crate::normalize_uri)'s form (`file:///a b` is
+    /// `file:///a%20b`), else `inmemory://model/N`, unique to the model. Markers are kept by it, so a model without a uri has its
     /// markers reported by [`on_did_change_markers`](crate::on_did_change_markers)
     /// and found by [`model_markers`](crate::model_markers), and
     /// [`model_for_uri`] finds the model by it.
     pub fn resource(&self) -> &SharedString {
         &self.resource
+    }
+
+    /// Whether `uri` names this model: a location without a uri does, and
+    /// one whose normalized uri is the [`TextModel::resource`] (Monaco
+    /// compares `URI.toString()`s).
+    pub(crate) fn is_at(&self, uri: Option<&str>) -> bool {
+        uri.is_none_or(|uri| {
+            uri == self.resource.as_ref() || crate::normalize_uri(uri) == self.resource
+        })
     }
 
     /// What language feature providers see about this model.
@@ -1170,8 +1227,9 @@ impl TextModel {
         .collect()
     }
 
-    /// The language at byte `offset` (Monaco `getLanguageIdAtPosition`): the
-    /// innermost injected language there (e.g. Rust in a Markdown code fence,
+    /// The language at byte `offset` (as Monaco's `getLanguageIdAtPosition`,
+    /// which is [`TextModel::language_id_at_position`]): the innermost
+    /// injected language there (e.g. Rust in a Markdown code fence,
     /// JavaScript in an HTML `<script>`), or the model's language. Hidden
     /// helper languages such as `markdown_inline` are skipped.
     pub fn language_at(&self, offset: usize) -> Option<Arc<Language>> {
@@ -1214,6 +1272,85 @@ impl TextModel {
             .max_by_key(|layer| layer.depth)
             .map(|layer| layer.language.clone())
             .or(model_language)
+    }
+
+    /// The languages of `row`'s characters, as runs of byte columns with
+    /// their language (Monaco's line tokens grouped by `getLanguageId`):
+    /// embedded languages where [`TextModel::language_at`] finds them, the
+    /// model's elsewhere. A character belongs to the innermost layer that
+    /// contains it, a layer's end being outside it. An empty line, or one
+    /// too long to tokenize, is one run.
+    pub(crate) fn line_language_runs(&self, row: u32) -> Vec<LanguageRun> {
+        let model_language = self.language().cloned();
+        let rope = self.buffer.rope();
+        let line_len = rope.line_len(row) as usize;
+        let single = |language: Option<Arc<Language>>| {
+            vec![LanguageRun {
+                columns: 0..line_len,
+                language,
+            }]
+        };
+        let Some(syntax) = self.syntax_snapshot() else {
+            return single(model_language);
+        };
+        if rope.line_len_utf16(row) >= self.options.max_tokenization_line_length {
+            return single(model_language);
+        }
+        let line_start = rope.point_to_offset(text::Point::new(row, 0));
+        let line = rope.line(row);
+        // Offsets in the text the syntax state was computed for.
+        let inverse = (syntax.text.version() != self.buffer.version())
+            .then(|| self.buffer.edits_since(syntax.text.version()).invert());
+        let old = |offset: usize| match &inverse {
+            Some(patch) => patch.transform_offset(offset, text::Bias::Left),
+            None => offset,
+        };
+        if let Some(monarch) = syntax.state.downcast_ref::<syntax::MonarchHighlightState>() {
+            // A Monarch grammar's embedded languages (`nextEmbedded`).
+            let registry = syntax::MonarchHighlighter::downcast(&*syntax.highlighter)
+                .and_then(|highlighter| highlighter.registry());
+            let old_rope = syntax.text.rope();
+            return language_runs(&line, line_start, |offset| {
+                let point = old_rope.offset_to_point(old(offset));
+                monarch
+                    .language_at(point.row as usize, point.column as usize)
+                    .and_then(|id| registry?.language_for_id(&id))
+                    .or_else(|| model_language.clone())
+            });
+        }
+        let Some(tree) = syntax.state.syntax() else {
+            return single(model_language);
+        };
+        let (old_start, old_end) = (old(line_start), old(line_start + line_len));
+        let layers: Vec<_> = tree
+            .layers()
+            .iter()
+            .filter(|layer| {
+                layer.depth > 0
+                    && !layer.language.hidden
+                    && layer
+                        .ranges
+                        .iter()
+                        .any(|r| r.start <= old_end && old_start < r.end)
+            })
+            .collect();
+        if layers.is_empty() {
+            return single(model_language);
+        }
+        language_runs(&line, line_start, |offset| {
+            let offset = old(offset);
+            layers
+                .iter()
+                .filter(|layer| {
+                    layer
+                        .ranges
+                        .iter()
+                        .any(|r| r.start <= offset && offset < r.end)
+                })
+                .max_by_key(|layer| layer.depth)
+                .map(|layer| layer.language.clone())
+                .or_else(|| model_language.clone())
+        })
     }
 
     /// Monaco's standard token type of the character at byte `offset`.

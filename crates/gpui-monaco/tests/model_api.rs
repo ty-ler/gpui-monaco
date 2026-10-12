@@ -171,7 +171,7 @@ fn push_edit_operations_and_the_undo_stack(cx: &mut TestAppContext) {
     let after = model.update(cx, |m, cx| {
         m.push_edit_operations(
             Some(vec![Selection::collapsed(p(0, 0))]),
-            vec![(p(0, 0)..p(0, 0), "ab".into())],
+            vec![(p(0, 0)..p(0, 0), "ab").into()],
             Some(&|undo: &[(std::ops::Range<PointUtf16>, String)]| {
                 Some(vec![Selection::collapsed(undo[0].0.end)])
             }),
@@ -182,10 +182,10 @@ fn push_edit_operations_and_the_undo_stack(cx: &mut TestAppContext) {
     assert_eq!(after, Some(vec![Selection::collapsed(p(0, 2))]));
     // Consecutive pushes join one undo step until push_stack_element.
     model.update(cx, |m, cx| {
-        m.push_edit_operations(None, vec![(p(0, 2)..p(0, 2), "c".into())], None, cx)
+        m.push_edit_operations(None, vec![(p(0, 2)..p(0, 2), "c").into()], None, cx)
             .unwrap();
         m.push_stack_element();
-        m.push_edit_operations(None, vec![(p(0, 3)..p(0, 3), "d".into())], None, cx)
+        m.push_edit_operations(None, vec![(p(0, 3)..p(0, 3), "d").into()], None, cx)
             .unwrap();
     });
     let typed = alternative(cx);

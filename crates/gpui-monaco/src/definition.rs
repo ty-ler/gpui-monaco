@@ -412,8 +412,7 @@ impl CodeEditor {
     /// Selects `location` if it's in this model, else asks the host to open
     /// it.
     pub fn go_to_location(&mut self, location: Location, cx: &mut Context<Self>) {
-        let same_model =
-            location.uri.is_none() || location.uri.as_ref() == self.model().read(cx).uri();
+        let same_model = self.model().read(cx).is_at(location.uri.as_deref());
         if same_model {
             self.set_selections(
                 &[Selection {
