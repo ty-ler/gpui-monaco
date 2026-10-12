@@ -5,6 +5,13 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Tab handling (#332):** Tab and Shift+Tab follow Monaco's rules: `tab` and `outdent` need `editorTextFocus`, `tabDoesNotMoveFocus` and `writable`, while the suggest, snippet and tab completion rules don't test tab focus mode.
+  - **Quick input and rename box:** Tab and Shift+Tab stay in the widget. Before, they reached the editor and indented it at its hidden cursor, adding an undo step.
+  - **Tab focus mode:** Tab accepts the focused suggestion, moves to a snippet's next tab stop and inserts tab completions, and Shift+Tab moves back and swaps in the previous completion, instead of moving the focus. Ghost text and inline edits still give way to the focus, as Monaco's `inlineSuggest.commit` and `inlineSuggest.jump` require `!tabMovesFocus`.
+  - **Read-only editors:** Tab and Shift+Tab move the focus, as in Monaco, where the key falls through to the browser, instead of showing the read-only message and keeping it. That includes the diff editor's original side by default. The `tab` and `outdent` commands do nothing there. The find widget's inputs keep their Tab order.
+  - **Snippet choices:** Shift+Tab goes back to the previous tab stop (Monaco's second `jumpToPrevSnippetPlaceholder` rule, `EditorContrib + 91`) instead of accepting the option in the other insert mode.
+  - **Docs:** the book's keymap page and the parity doc's precedence row.
+  - **Tests:** GPUI keystroke tests for each case, the find widget's inputs in a read-only editor with tab focus mode on included.
 - **Sticky scroll and section headers (#337):** state follows the model, and sticky clicks, pointer and keyboard focus match Monaco's `StickyScrollController`, `StickyScrollWidget` and `SectionHeaderDetector`.
   - **Switching models:** `set_model` resets the sticky scroll model and the minimap section headers, and their caches key on the model as well as its text version, so an unedited model no longer shows the previous model's sticky lines or `MARK:` labels.
   - **Stale sticky lines:** while the sticky model is recomputed after an edit, the widget keeps the lines it last drew (Monaco renders only when the model's version is the text's), instead of drawing old rows over new text.

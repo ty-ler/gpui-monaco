@@ -22,8 +22,8 @@ use gpui::{
 use text::PointUtf16;
 
 use crate::actions::{
-    Newline, QuickInputFirst, QuickInputLast, QuickInputNext, QuickInputPageNext,
-    QuickInputPagePrevious, QuickInputPrevious, RemoveSecondaryCursors,
+    Newline, Outdent, QuickInputFirst, QuickInputLast, QuickInputNext, QuickInputPageNext,
+    QuickInputPagePrevious, QuickInputPrevious, RemoveSecondaryCursors, Tab,
 };
 use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
@@ -798,6 +798,12 @@ impl Render for QuickInput {
             }))
             .on_action(cx.listener(|this, _: &Newline, window, cx| this.accept(window, cx)))
             .on_action(cx.listener(|this, _: &RemoveSecondaryCursors, _, cx| this.close(false, cx)))
+            // The input propagates Tab and Shift+Tab. Monaco's `tab` and
+            // `outdent` need `editorTextFocus`, and the quick input keeps
+            // the focus among its own elements (here the input alone), so
+            // they stop here rather than indent the editor.
+            .on_action(|_: &Tab, _, _| {})
+            .on_action(|_: &Outdent, _, _| {})
             .when_some(self.title.clone(), |this, title| {
                 this.child(
                     div()

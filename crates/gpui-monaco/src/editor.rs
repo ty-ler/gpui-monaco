@@ -3790,18 +3790,19 @@ impl CodeEditor {
             return;
         }
         // Monaco `inlineSuggest.commit` (it outranks snippets and tab
-        // completion).
-        if self.tab_accepts_inline_suggestion(cx) && self.accept_inline_suggestion(cx) {
-            return;
-        }
-        // Monaco `inlineSuggest.jump` (weighed above accepting) and
-        // `inlineSuggest.commit` for inline edits.
-        if self.tab_should_jump_to_inline_edit(cx) {
-            self.jump_to_next_inline_edit(cx);
-            return;
-        }
-        if self.tab_should_accept_inline_edit(cx) && self.accept_inline_suggestion(cx) {
-            return;
+        // completion), `inlineSuggest.jump` (weighed above accepting) and
+        // `inlineSuggest.commit` for inline edits, none in tab focus mode.
+        if !self.tab_moves_focus(cx) {
+            if self.tab_accepts_inline_suggestion(cx) && self.accept_inline_suggestion(cx) {
+                return;
+            }
+            if self.tab_should_jump_to_inline_edit(cx) {
+                self.jump_to_next_inline_edit(cx);
+                return;
+            }
+            if self.tab_should_accept_inline_edit(cx) && self.accept_inline_suggestion(cx) {
+                return;
+            }
         }
         if self.has_next_tabstop() {
             self.next_snippet_placeholder(cx);
@@ -3818,8 +3819,19 @@ impl CodeEditor {
                 return;
             }
         }
+        // Monaco's `tab` precondition (`writable`); its keys move the focus
+        // in a read-only editor (`TAB_MOVES_FOCUS` in `actions.rs`).
+        if self.options.read_only {
+            return;
+        }
         self.insert_tab(cx);
         self.trigger_inline_completions(cx);
+    }
+
+    /// Whether Tab moves the focus (Monaco `editorTabMovesFocus`): tab focus
+    /// mode is on for this editor or for all of them.
+    pub(crate) fn tab_moves_focus(&self, cx: &App) -> bool {
+        self.options.tab_focus_mode || crate::tab_focus_mode(cx)
     }
 
     /// Monaco's `tab` command: indents or inserts a tab.
@@ -3875,6 +3887,10 @@ impl CodeEditor {
             && self.has_other_suggestions()
         {
             self.insert_other_suggestion(false, cx);
+            return;
+        }
+        // Monaco's `outdent` precondition (`writable`).
+        if self.options.read_only {
             return;
         }
         let operation = self.with_language(cx, cursor::outdent_with_language);
@@ -6714,7 +6730,7 @@ impl Render for CodeEditor {
         if self.is_post_edit_widget_visible() {
             key_context.add("post_edit_widget");
         }
-        if self.options.tab_focus_mode || crate::tab_focus_mode(cx) {
+        if self.tab_moves_focus(cx) {
             key_context.add("tab_moves_focus");
         }
         if self.inline_suggestion_visible(cx) {

@@ -33,8 +33,28 @@ const REFERENCE_SEARCH: Option<&str> =
     Some("CodeEditor && (referenceSearchVisible || inReferenceSearchEditor)");
 /// While the drop or paste options button shows.
 const POST_EDIT_WIDGET: Option<&str> = Some("CodeEditor && post_edit_widget");
-/// With tab focus mode on.
-const TAB_MOVES_FOCUS: Option<&str> = Some("CodeEditor && tab_moves_focus");
+/// Where Monaco's `tab` and `outdent` don't apply, so Tab falls through to
+/// the browser, which moves the focus: they need `tabDoesNotMoveFocus` and,
+/// as their precondition, `writable`. (Single-line inputs leave Tab to
+/// their widget.)
+const TAB_MOVES_FOCUS: Option<&str> =
+    Some("CodeEditor && !single_line && (tab_moves_focus || editorReadonly)");
+/// The Tab rules that outweigh [`TAB_MOVES_FOCUS`], as they don't test
+/// `tabMovesFocus` or `writable`: `acceptSelectedSuggestion`,
+/// `jumpToNextSnippetPlaceholder`, and the tab completion's
+/// `insertNextSuggestion` and `insertBestCompletion`. (Ghost text's
+/// `inlineSuggest.commit` and `inlineSuggest.jump` require
+/// `!tabMovesFocus`.) [`Tab`]'s handler picks among them.
+const TAB_OUTWEIGHS_FOCUS: Option<&str> = Some(
+    "CodeEditor && (suggest_widget_has_focused_suggestion || hasNextTabstop || ((hasOtherSuggestions || atEndOfWord) && !suggest_widget_visible && !inSnippetMode))",
+);
+/// The Shift+Tab rules that outweigh [`TAB_MOVES_FOCUS`]:
+/// `jumpToPrevSnippetPlaceholder`, `insertPrevSuggestion` and
+/// `inlineSuggest.commitAlternativeAction`. [`Outdent`]'s handler picks
+/// among them.
+const SHIFT_TAB_OUTWEIGHS_FOCUS: Option<&str> = Some(
+    "CodeEditor && (hasPrevTabstop || inline_suggestion_alternative_action_visible || (hasOtherSuggestions && !suggest_widget_visible && !inSnippetMode))",
+);
 /// The context menu.
 const CONTEXT_MENU: Option<&str> = Some("EditorContextMenu");
 /// The find widget's inputs.
@@ -454,9 +474,11 @@ actions!(
         /// Turns tab focus mode on or off for every editor (Monaco
         /// `editor.action.toggleTabFocusMode`, Ctrl+M, Ctrl+Shift+M on macOS).
         ToggleTabFocusMode,
-        /// Moves focus to the next element (Tab in tab focus mode).
+        /// Moves focus to the next element (Tab in tab focus mode and in
+        /// read-only editors).
         FocusNextElement,
-        /// Moves focus to the previous element (Shift+Tab in tab focus mode).
+        /// Moves focus to the previous element (Shift+Tab in tab focus mode
+        /// and in read-only editors).
         FocusPreviousElement,
         /// Pastes the clipboard as plain text (Monaco
         /// `editor.action.pasteAsText`).
@@ -1834,9 +1856,12 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             ToggleTabFocusMode,
             ctx,
         ),
-        // After Tab's bindings, so they win in tab focus mode.
+        // After Tab's bindings, so they win in tab focus mode and in
+        // read-only editors, and before the rules that outweigh them.
         KeyBinding::new("tab", FocusNextElement, TAB_MOVES_FOCUS),
         KeyBinding::new("shift-tab", FocusPreviousElement, TAB_MOVES_FOCUS),
+        KeyBinding::new("tab", Tab, TAB_OUTWEIGHS_FOCUS),
+        KeyBinding::new("shift-tab", Outdent, SHIFT_TAB_OUTWEIGHS_FOCUS),
         // After QuickFix's binding, so they win while the button shows.
         KeyBinding::new("secondary-.", ChangePasteType, POST_EDIT_WIDGET),
         KeyBinding::new("secondary-.", ChangeDropType, POST_EDIT_WIDGET),
@@ -1906,6 +1931,14 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         ),
         KeyBinding::new("shift-enter", AcceptAlternativeSuggestion, SUGGEST),
         KeyBinding::new("shift-tab", AcceptAlternativeSuggestion, SUGGEST),
+        // Monaco's second `jumpToPrevSnippetPlaceholder` rule
+        // (`EditorContrib + 91`): in a snippet choice, whose suggest widget
+        // shows, Shift+Tab goes back instead of accepting the alternative.
+        KeyBinding::new(
+            "shift-tab",
+            JumpToPrevSnippetPlaceholder,
+            Some("CodeEditor && hasPrevTabstop && inSnippetChoice"),
+        ),
         KeyBinding::new("shift-alt-f8", GoToPreviousMarker, ctx),
         KeyBinding::new("shift-f8", GoToPreviousMarkerInFiles, ctx),
         KeyBinding::new("shift-f3", PreviousMatch, ctx),

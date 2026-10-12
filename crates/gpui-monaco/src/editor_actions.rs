@@ -436,6 +436,10 @@ static COMMANDS: &[Command] = &[
     Command("deleteRight", "code_editor::DeleteRight", ""),
     Command("deleteWordLeft", "code_editor::DeleteWordLeft", WRITABLE),
     Command("deleteWordRight", "code_editor::DeleteWordRight", WRITABLE),
+    // Monaco's `writable` precondition is tested in their handlers:
+    // folded into the bindings, GPUI's `!editorReadonly` would test every
+    // context up the tree and take Tab from the find widget's inputs in a
+    // read-only editor.
     Command("tab", "code_editor::Tab", ""),
     Command("outdent", "code_editor::Outdent", ""),
     Command("undo", "code_editor::Undo", ""),

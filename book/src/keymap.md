@@ -29,7 +29,7 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **Tab / Cmd+Right / Alt+] / Alt+[** with ghost text: accept, accept a word, next, previous (asking explicitly, `editor.action.inlineSuggest.trigger`, has no key, as in Monaco). With a screen reader, Cmd+Right moves the cursor instead
 - **Tab / Escape** with an inline edit: jump to it while the cursor is away from it (or open its file, for a cross-file edit), then accept it; reject it
 - **Shift+Tab** with an inline edit that has an alternative action: run it instead of the edit (`editor.action.inlineSuggest.commitAlternativeAction`)
-- **Tab / Shift+Tab / Escape** in a snippet: next and previous tab stop, leave the snippet
+- **Tab / Shift+Tab / Escape** in a snippet: next and previous tab stop, leave the snippet. In a choice, where the suggest widget shows its options, Shift+Tab still goes back (Tab accepts the focused option)
 - **Ctrl+Space (or Cmd+I)** in the suggest widget: show or hide the details, or focus the first suggestion if none is (Monaco's `focusSuggestion`, see `suggest.selection_mode`)
 - **Ctrl+Alt+Space** in the suggest widget: move the focus to the details panel and back (Monaco's `toggleSuggestionFocus`); there, Up / Down and PageUp / PageDown scroll it and Cmd/Ctrl+C copies it
 - **Ctrl+Enter** in the find or replace input: insert a line break
@@ -45,7 +45,7 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **Shift+Escape:** Monaco's second Escape. It closes the suggest widget, parameter hints, the problem zone, the reference peek and the find widget, leaves snippet mode and linked editing, then removes the other cursors and the selection. Unlike Escape, it leaves ghost text, the hover, inline messages and the selection anchor alone
 - **Ctrl+Left / Ctrl+Right** on Windows with a screen reader: Monaco's accessibility word navigation (`cursorWordAccessibilityLeft`/`Right`)
 
-Tab focus mode (Ctrl+M; Ctrl+Shift+M on macOS) makes Tab and Shift+Tab move focus out of the editor, for keyboard and screen reader users.
+Tab focus mode (Ctrl+M; Ctrl+Shift+M on macOS) makes Tab and Shift+Tab move focus out of the editor, for keyboard and screen reader users. As in Monaco, only indenting and accepting ghost text give way: Tab still accepts the focused suggestion, moves between a snippet's tab stops and inserts tab completions. In a read-only editor Tab and Shift+Tab always move the focus, as Monaco's `tab` and `outdent` need a writable editor. In the quick input and the rename box they stay in the widget.
 
 Font zoom (`FontZoomIn`, `FontZoomOut`, `FontZoomReset`) has no default key, as in Monaco. Run it from the command palette, or bind it yourself. The zoom level is shared by every editor; `set_editor_zoom_level` sets it directly.
 
