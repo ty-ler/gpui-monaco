@@ -240,6 +240,15 @@ impl ViewLines {
             .map_or(1, |p| p.output_line_count())
     }
 
+    /// How many view lines model `rows` show once shown, hidden or not
+    /// (wrapped rows count each part).
+    pub fn unhidden_line_count(&self, rows: Range<u32>) -> u32 {
+        let end = (rows.end as usize).min(self.projections.len());
+        (rows.start as usize..end)
+            .map(|row| self.row_line_count(row))
+            .sum()
+    }
+
     fn rebuild_counts(&mut self) {
         self.generation = next_generation();
         let mut counts: Vec<u32> = (0..self.projections.len())

@@ -990,6 +990,9 @@ struct UnchangedDrag {
     index: usize,
     /// The top edge (else the bottom).
     top: bool,
+    /// In the original editor's bar (else the modified's), whose lines
+    /// anchor the scroll position.
+    original: bool,
     /// Where the drag started, in window coordinates.
     start_y: Pixels,
     /// The visible line count at the start.
@@ -1011,6 +1014,8 @@ struct UnchangedBar {
     diff: WeakEntity<DiffEditor>,
     /// The editor it's in, for the gutter width.
     editor: WeakEntity<CodeEditor>,
+    /// In the original editor (else the modified).
+    original: bool,
     index: usize,
     hidden_lines: usize,
     /// Monaco `canMoveTop` for the top edge: lines above can be hidden
@@ -1025,9 +1030,18 @@ struct UnchangedBar {
     compact: bool,
 }
 
-/// The top and bottom edges' height (Monaco's 4px band with transparent
-/// borders around it).
-const UNCHANGED_EDGE_HEIGHT: f32 = 6.;
+/// The top and bottom edges' height: Monaco's 4px band with transparent
+/// borders, 4px above and 2px below (`.diff-hidden-lines .top`).
+const UNCHANGED_EDGE_HEIGHT: f32 = 10.;
+/// The band's height and where it starts in the edge.
+const UNCHANGED_EDGE_BAND: (f32, f32) = (4., 4.);
+/// Where the top edge starts above the bar (Monaco's `-10px` translate of
+/// `.diff-hidden-lines` and `4px` of `.top`): its band straddles the bar's
+/// top.
+const UNCHANGED_TOP_EDGE_OFFSET: f32 = 6.;
+/// How far the bottom edge reaches below the bar (Monaco's `-6px` of
+/// `.bottom`): its band straddles the bar's bottom.
+const UNCHANGED_BOTTOM_EDGE_OVERHANG: f32 = 4.;
 
 impl Render for UnchangedBar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1072,18 +1086,40 @@ impl Render for UnchangedBar {
         let fully_revealed = self.hidden_lines == 0;
         let top_cursor = unchanged_edge_cursor(self.visible_top, !fully_revealed);
         let bottom_cursor = unchanged_edge_cursor(!fully_revealed, self.visible_bottom);
-        let edge = |id: &'static str, cursor: gpui::CursorStyle| {
+        // Monaco `isDragged`: the edge being dragged keeps its highlight
+        // (`.top.dragging`), and no edge highlights on hover meanwhile
+        // (`.diff-hidden-lines:not(.dragging)`).
+        let dragged = self
+            .diff
+            .upgrade()
+            .and_then(|diff| diff.read(cx).unchanged_drag)
+            .filter(|drag| drag.index == self.index)
+            .map(|drag| drag.top);
+        let focus_border = colors.focus_border;
+        let edge = |id: &'static str, cursor: gpui::CursorStyle, top: bool| {
+            let (band_height, band_top) = UNCHANGED_EDGE_BAND;
+            let band = div()
+                .absolute()
+                .left_0()
+                .w_full()
+                .top(px(band_top))
+                .h(px(band_height));
             div()
                 .id(id)
                 .debug_selector(move || id.into())
+                .group(id)
                 .absolute()
                 .left_0()
                 .w_full()
                 .h(px(UNCHANGED_EDGE_HEIGHT))
                 .cursor(cursor)
-                .hover(|style| style.bg(colors.focus_border))
+                .child(match dragged {
+                    Some(dragged) if dragged == top => band.bg(focus_border),
+                    Some(_) => band,
+                    None => band.group_hover(id, |style| style.bg(focus_border)),
+                })
         };
-        let (diff, index) = (self.diff.clone(), self.index);
+        let (diff, index, original) = (self.diff.clone(), self.index, self.original);
         let with_bar = move |cx: &mut App, change: fn(&mut UnchangedRegion, usize)| {
             if let Some(diff) = diff.upgrade() {
                 // Deferred: the bar is rendered by the editor being changed.
@@ -1100,7 +1136,9 @@ impl Render for UnchangedBar {
         let start_drag = move |cx: &mut App, y: Pixels, top: bool| {
             if let Some(diff) = diff.upgrade() {
                 cx.defer(move |cx| {
-                    diff.update(cx, |diff, cx| diff.start_unchanged_drag(index, top, y, cx))
+                    diff.update(cx, |diff, cx| {
+                        diff.start_unchanged_drag(index, top, original, y, cx)
+                    })
                 });
             }
         };
@@ -1141,9 +1179,9 @@ impl Render for UnchangedBar {
                     )
                 })
         });
-        div()
+        // Monaco's `.center`, with the edges over it reaching past it.
+        let center = div()
             .size_full()
-            .relative()
             .flex()
             .flex_row()
             .items_center()
@@ -1186,9 +1224,17 @@ impl Render for UnchangedBar {
                 )
                 .children(breadcrumbs)
             })
+            // Monaco's inset shadows at the top and bottom.
+            .border_t_1()
+            .border_b_1()
+            .border_color(shadow.opacity(0.35));
+        div()
+            .size_full()
+            .relative()
+            .child(center)
             .child(
-                edge("unchanged-top", top_cursor)
-                    .top_0()
+                edge("unchanged-top", top_cursor, true)
+                    .top(px(-UNCHANGED_TOP_EDGE_OFFSET))
                     .tooltip(crate::tooltip::tooltip(
                         "Click or drag to show more above",
                         &colors,
@@ -1199,8 +1245,8 @@ impl Render for UnchangedBar {
                     }),
             )
             .child(
-                edge("unchanged-bottom", bottom_cursor)
-                    .bottom_0()
+                edge("unchanged-bottom", bottom_cursor, false)
+                    .bottom(px(-UNCHANGED_BOTTOM_EDGE_OVERHANG))
                     .tooltip(crate::tooltip::tooltip(
                         "Click or drag to show more below",
                         &colors,
@@ -1210,10 +1256,6 @@ impl Render for UnchangedBar {
                         bottom(cx, e.position.y, false)
                     }),
             )
-            // Monaco's inset shadows at the top and bottom.
-            .border_t_1()
-            .border_b_1()
-            .border_color(shadow.opacity(0.35))
     }
 }
 
@@ -2963,7 +3005,7 @@ impl DiffEditor {
         let this = cx.entity().downgrade();
         let mut glyphs = (Vec::new(), Vec::new());
         for (index, region) in self.unchanged.iter().enumerate() {
-            if !region.should_hide_controls() {
+            if !self.hides_unchanged_controls(index) {
                 continue;
             }
             let sides = [
@@ -3090,6 +3132,12 @@ impl DiffEditor {
     #[allow(clippy::type_complexity)]
     pub fn overview_zones_for_tests(&self, cx: &App) -> (Vec<(f32, f32)>, Vec<(f32, f32)>) {
         self.overview_zones(cx)
+    }
+
+    /// The "N hidden lines" bars on each side, for tests.
+    #[doc(hidden)]
+    pub fn unchanged_bars_for_tests(&self) -> (usize, usize) {
+        (self.unchanged_zones.0.len(), self.unchanged_zones.1.len())
     }
 
     /// The "Fold Unchanged Region" glyphs on each side, for tests.
@@ -4425,6 +4473,13 @@ impl DiffEditor {
 
     /// Hides the regions' hidden lines and shows a bar in their place.
     fn apply_unchanged(&mut self, cx: &mut Context<Self>) {
+        // Monaco's "collapse touching unchanged ranges", except while a bar
+        // is dragged.
+        if self.unchanged_drag.is_none()
+            && let Some(merged) = unchanged::merge_touching(&self.unchanged)
+        {
+            self.unchanged = merged;
+        }
         let colors = self.modified.read(cx).colors().clone();
         // The tracking decorations, which also tint the lines (Monaco
         // `diff-unchanged-lines`).
@@ -4492,15 +4547,10 @@ impl DiffEditor {
         let this = cx.entity().downgrade();
         let mut zones = (Vec::new(), Vec::new());
         let compact = self.options.compact_mode;
-        let count = self.unchanged.len();
         for (index, region) in self.unchanged.iter().enumerate() {
-            if region.should_hide_controls() {
+            let Some(height) = self.unchanged_bar_height(index) else {
                 continue;
-            }
-            // Monaco `compactMode`: no separators at the start and end.
-            if compact && (index == 0 || index + 1 == count) {
-                continue;
-            }
+            };
             let sides = [
                 (&self.original, region.hidden_original_range(), &mut zones.0),
                 (&self.modified, region.hidden_modified_range(), &mut zones.1),
@@ -4511,6 +4561,7 @@ impl DiffEditor {
                 let bar = cx.new(|_| UnchangedBar {
                     diff: this.clone(),
                     editor: editor.downgrade(),
+                    original: editor == &self.original,
                     index,
                     hidden_lines: hidden.len(),
                     visible_top: region.visible_top > 0,
@@ -4518,28 +4569,42 @@ impl DiffEditor {
                     breadcrumbs: breadcrumbs.clone(),
                     compact,
                 });
-                let height = if compact {
-                    COMPACT_UNCHANGED_BAR_HEIGHT
-                } else {
-                    UNCHANGED_BAR_HEIGHT
-                };
-                let id = editor.update(cx, |editor, cx| {
-                    editor.add_zone(
-                        ViewZone::new(
-                            hidden.start_line_number as u32 - 1,
-                            ZoneHeight::Pixels(px(height)),
-                            bar.into(),
-                        ),
-                        true,
-                        cx,
-                    )
-                });
+                // Monaco `PlaceholderViewZone`'s `showInHiddenAreas`: the
+                // line after the bar is the first hidden one.
+                let mut zone = ViewZone::new(
+                    hidden.start_line_number as u32 - 1,
+                    ZoneHeight::Pixels(px(height)),
+                    bar.into(),
+                );
+                zone.show_in_hidden_areas = true;
+                let id = editor.update(cx, |editor, cx| editor.add_zone(zone, true, cx));
                 ids.push(id);
             }
         }
         self.unchanged_zones = zones;
         self.apply_fold_glyphs(cx);
         cx.notify();
+    }
+
+    /// Monaco `shouldHideControls`: region `index` is fully shown and not
+    /// being dragged, so it has no bar.
+    fn hides_unchanged_controls(&self, index: usize) -> bool {
+        self.unchanged
+            .get(index)
+            .is_none_or(|r| r.should_hide_controls())
+            && self.unchanged_drag.is_none_or(|d| d.index != index)
+    }
+
+    /// The height of region `index`'s bar, if it has one.
+    fn unchanged_bar_height(&self, index: usize) -> Option<f32> {
+        if self.hides_unchanged_controls(index) {
+            return None;
+        }
+        if !self.options.compact_mode {
+            return Some(UNCHANGED_BAR_HEIGHT);
+        }
+        // Monaco `compactMode`: no separators at the start and end.
+        (index != 0 && index + 1 != self.unchanged.len()).then_some(COMPACT_UNCHANGED_BAR_HEIGHT)
     }
 
     /// Changes region `index` and shows the result.
@@ -4555,9 +4620,17 @@ impl DiffEditor {
         }
     }
 
-    /// Monaco's mouse down on a bar's top or bottom edge: a drag starts
-    /// at window y `y`.
-    fn start_unchanged_drag(&mut self, index: usize, top: bool, y: Pixels, cx: &mut Context<Self>) {
+    /// Monaco's mouse down on a bar's top or bottom edge (in the
+    /// `original` editor's bar or the modified's): a drag starts at window
+    /// y `y`.
+    fn start_unchanged_drag(
+        &mut self,
+        index: usize,
+        top: bool,
+        original: bool,
+        y: Pixels,
+        cx: &mut Context<Self>,
+    ) {
         let Some(region) = self.unchanged.get(index) else {
             return;
         };
@@ -4569,6 +4642,7 @@ impl DiffEditor {
         self.unchanged_drag = Some(UnchangedDrag {
             index,
             top,
+            original,
             start_y: y,
             start,
             moved: false,
@@ -4586,7 +4660,8 @@ impl DiffEditor {
         drag.moved |= delta.abs() > px(2.);
         let line_height = f32::from(self.modified.read(cx).options().resolved_line_height());
         let lines = (f32::from(delta) / line_height).round() as isize;
-        let (index, top, start) = (drag.index, drag.top, drag.start as isize);
+        let (index, top, original, start) =
+            (drag.index, drag.top, drag.original, drag.start as isize);
         let Some(region) = self.unchanged.get_mut(index) else {
             return;
         };
@@ -4598,30 +4673,59 @@ impl DiffEditor {
         } else {
             let value = (start - lines).clamp(0, region.max_visible_bottom() as isize) as usize;
             if region.visible_bottom != value {
-                self.with_lower_scroll_anchor(index, |r| r.visible_bottom = value, cx);
+                self.with_lower_scroll_anchor(index, original, |r| r.visible_bottom = value, cx);
             }
         }
     }
 
     /// Monaco `_runWithLowerScrollAnchor`: changes region `index` keeping
-    /// the line after it in place on screen, so a dragged bottom edge
-    /// follows the mouse.
+    /// the line after it in place on screen in the `original` editor (else
+    /// the modified), so a dragged bottom edge follows the mouse.
     fn with_lower_scroll_anchor(
         &mut self,
         index: usize,
+        original: bool,
         change: impl FnOnce(&mut UnchangedRegion),
         cx: &mut Context<Self>,
     ) {
+        let hidden = |r: &UnchangedRegion| {
+            if original {
+                r.hidden_original_range().to_rows()
+            } else {
+                r.hidden_modified_range().to_rows()
+            }
+        };
+        let bar_before = self.unchanged_bar_height(index);
         let Some(region) = self.unchanged.get_mut(index) else {
             return;
         };
-        let before = region.hidden_modified_range().len();
+        let before = hidden(region);
         change(region);
-        let after = region.hidden_modified_range().len();
-        // The lines shown (or hidden) are above the anchor. Hidden lines
-        // apply on the next frame, so count them rather than measure.
-        let line_height = self.modified.read(cx).options().resolved_line_height();
-        let delta = line_height * (before as f32 - after as f32);
+        let after = hidden(region);
+        // A click that shows the rest removes the bar; a drag keeps it.
+        let bar_after = self.unchanged_bar_height(index);
+        // The lines shown or hidden and the bar are above the anchor, the
+        // region's end. Monaco measures the anchor's top before and after;
+        // hidden lines only lay out on the next frame, so this adds up the
+        // view lines (wrapped parts included) they show. As in Monaco, the
+        // alignment that pads the other side's wrapped lines comes after,
+        // keeping the first visible line.
+        let editor = if original {
+            &self.original
+        } else {
+            &self.modified
+        };
+        let editor = editor.read(cx);
+        let view_lines = &editor.view_lines;
+        // The rows of `a` not in `b`.
+        let minus = |a: &Range<u32>, b: &Range<u32>| {
+            view_lines.unhidden_line_count(a.start..a.end.min(b.start))
+                + view_lines.unhidden_line_count(a.start.max(b.end)..a.end)
+        };
+        let shown = minus(&before, &after) as f32 - minus(&after, &before) as f32;
+        let line_height = editor.options().resolved_line_height();
+        let delta =
+            line_height * shown + px(bar_after.unwrap_or(0.)) - px(bar_before.unwrap_or(0.));
         for editor in [&self.original, &self.modified] {
             editor.update(cx, |editor, cx| {
                 let mut position = editor.scroll_position();
@@ -4633,18 +4737,24 @@ impl DiffEditor {
     }
 
     /// Monaco's mouse up: a click without dragging shows
-    /// `reveal_line_count` more lines.
+    /// `reveal_line_count` more lines. A region the drag fully showed loses
+    /// its bar now, and touching regions merge.
     fn end_unchanged_drag(&mut self, cx: &mut Context<Self>) {
         let Some(drag) = self.unchanged_drag.take() else {
             return;
         };
-        if !drag.moved {
-            let count = self.options.hide_unchanged_regions.reveal_line_count;
-            if drag.top {
-                self.update_unchanged_region(drag.index, |r| r.show_more_above(count), cx);
-            } else {
-                self.with_lower_scroll_anchor(drag.index, |r| r.show_more_below(count), cx);
-            }
+        let count = self.options.hide_unchanged_regions.reveal_line_count;
+        if drag.moved {
+            self.apply_unchanged(cx);
+        } else if drag.top {
+            self.update_unchanged_region(drag.index, |r| r.show_more_above(count), cx);
+        } else {
+            self.with_lower_scroll_anchor(
+                drag.index,
+                drag.original,
+                |r| r.show_more_below(count),
+                cx,
+            );
         }
         cx.notify();
     }
@@ -4730,7 +4840,7 @@ impl DiffEditor {
         to: Pixels,
         cx: &mut Context<Self>,
     ) {
-        self.start_unchanged_drag(index, top, from, cx);
+        self.start_unchanged_drag(index, top, false, from, cx);
         self.drag_unchanged(to, cx);
         self.end_unchanged_drag(cx);
     }
