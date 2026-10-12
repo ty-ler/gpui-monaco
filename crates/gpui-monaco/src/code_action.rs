@@ -1020,7 +1020,7 @@ impl CodeEditor {
             cx.notify();
             return;
         };
-        let position = self.cursors.primary().position;
+        let position = self.selection_start();
         self.code_actions.auto = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(AUTO_TRIGGER_DELAY).await;
             let Ok(request) = this.update(cx, |this, cx| {
@@ -1031,17 +1031,21 @@ impl CodeEditor {
             let items = request.await.items;
             this.update(cx, |this, cx| {
                 this.code_actions.auto = None;
-                // Monaco drops results once the cursor left the line, and
-                // doesn't touch an open menu.
-                if this.cursors.primary().position.row != position.row
-                    || this.code_actions.menu.is_some()
-                {
+                // Monaco drops results once the selection's start left the
+                // line, and doesn't touch an open menu.
+                if this.selection_start().row != position.row || this.code_actions.menu.is_some() {
                     return;
                 }
                 this.update_lightbulb(position, items, cx);
             })
             .ok();
         }));
+    }
+
+    /// Where the lightbulb and the menu go (Monaco's `CodeActionsState`
+    /// position): the primary selection's start, not its head.
+    fn selection_start(&self) -> PointUtf16 {
+        self.cursors.selections()[0].range().start
     }
 
     /// Monaco `_getRangeOfSelectionUnlessWhitespaceEnclosed` for `onCode`.
@@ -1103,6 +1107,15 @@ impl CodeEditor {
         self.code_actions.lightbulb.is_some()
     }
 
+    /// The position the lightbulb is for, for tests.
+    #[doc(hidden)]
+    pub fn lightbulb_position_for_tests(&self) -> Option<PointUtf16> {
+        self.code_actions
+            .lightbulb
+            .as_ref()
+            .map(|bulb| bulb.position)
+    }
+
     /// Asks for code actions at the selection and shows or applies them
     /// (Monaco `CodeActionController.manualTriggerAtCurrentPosition`). With
     /// no actions, `not_available` is shown inline.
@@ -1119,7 +1132,9 @@ impl CodeEditor {
         self.close_message(cx);
         let not_available = not_available.into();
         let range = self.cursors.selections()[0].range();
-        let position = self.cursors.primary().position;
+        let position = range.start;
+        // Monaco's `notAvailableMessage` goes at the cursor.
+        let head = self.cursors.primary().position;
         let request =
             self.request_code_actions(range, filter.clone(), CodeActionTrigger::Invoke, cx);
         self.code_actions.invoke = Some(cx.spawn(async move |this, cx| {
@@ -1127,7 +1142,7 @@ impl CodeEditor {
             let items = set.items.clone();
             this.update(cx, |this, cx| {
                 this.code_actions.invoke = None;
-                if this.cursors.primary().position.row != position.row {
+                if this.selection_start().row != position.row {
                     return;
                 }
                 this.update_lightbulb(position, items.clone(), cx);
@@ -1157,13 +1172,13 @@ impl CodeEditor {
                         && let Some(reason) =
                             items.iter().find_map(|item| item.action.disabled.clone())
                     {
-                        this.show_message(reason, position, cx);
+                        this.show_message(reason, head, cx);
                         return;
                     }
                 }
                 let include_disabled = filter.include.is_some();
                 if items.is_empty() || (!include_disabled && valid_count == 0) {
-                    this.show_message(not_available, position, cx);
+                    this.show_message(not_available, head, cx);
                     return;
                 }
                 let options = MenuOptions {
@@ -1454,8 +1469,11 @@ impl CodeEditor {
             crate::widgets::layer::MENU,
             cx,
         );
-        if let MenuAnchor::Window { bounds, .. } = at {
-            self.widgets.set_window_anchor(id, bounds);
+        match at {
+            MenuAnchor::Window { bounds, .. } => self.widgets.set_window_anchor(id, bounds),
+            // Monaco `toCoords`: page coordinates, fixed once, so the menu
+            // stays put (and visible) as the text scrolls.
+            MenuAnchor::Text(_) => self.widgets.pin_to_window(id),
         }
         // Monaco's list focuses its first action, which `onFocus` sees.
         let focused = menu.update(cx, |menu, _| {

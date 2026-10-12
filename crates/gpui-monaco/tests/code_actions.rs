@@ -1111,3 +1111,142 @@ fn the_menu_from_the_lightbulb_goes_below_it(cx: &mut TestAppContext) {
     assert_eq!(anchor.origin.x, bulb.center().x);
     assert_eq!(anchor.bottom(), bulb.bottom() + pad + line_height);
 }
+
+/// Monaco `toCoords` fixes the menu's page coordinates once: scrolling its
+/// line out of view leaves the menu where it was, visible, and Enter
+/// applies the action shown.
+#[gpui::test]
+fn the_menu_stays_put_when_its_line_scrolls_away(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: vec![CodeAction {
+            edit: Some(replace(p(0, 4)..p(0, 5), "z")),
+            ..action("Rename to z", "quickfix")
+        }],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    set_text(&editor, cx, &format!("let x = 1;{}", "\n".repeat(300)));
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    cx.simulate_keystrokes(&primary("."));
+    draw(cx);
+    let line = editor.read_with(cx, |e, _| e.scrolled_visible_position(p(0, 4)).unwrap());
+    let anchor = editor
+        .read_with(cx, |e, _| e.code_action_menu_anchor_for_tests().0)
+        .expect("pinned where its line was laid out");
+    assert_eq!(anchor.origin, line);
+    editor.update(cx, |e, cx| {
+        e.set_scroll_position(gpui::point(gpui::px(0.), gpui::px(3000.)), cx)
+    });
+    draw(cx);
+    assert!(editor.read_with(cx, |e, cx| e.visible_ranges(cx)[0].start.row > 0));
+    assert!(editor.read_with(cx, |e, _| e.is_code_action_menu_visible()));
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.code_action_menu_anchor_for_tests().0),
+        Some(anchor)
+    );
+    let (size, _, _) = menu_layout(&editor, cx);
+    assert!(size.width > gpui::px(0.), "{size:?}");
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert!(text(&editor, cx).starts_with("let z = 1;"));
+}
+
+/// Monaco `CodeActionController`: `onDidLayoutChange` hides the menu.
+#[gpui::test]
+fn a_layout_change_hides_the_menu(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: vec![action("Fix", "quickfix")],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    cx.simulate_keystrokes(&primary("."));
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_code_action_menu_visible()));
+    // Scrolling isn't a layout change.
+    editor.update(cx, |e, cx| {
+        e.set_scroll_position(gpui::point(gpui::px(0.), gpui::px(10.)), cx)
+    });
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_code_action_menu_visible()));
+    cx.simulate_resize(gpui::size(gpui::px(500.), gpui::px(300.)));
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_code_action_menu_visible()));
+}
+
+/// Monaco's `CodeActionsState` is at the selection's start: selecting
+/// lines 2 to 4 downward puts the lightbulb and the Cmd+. menu on line 2.
+#[gpui::test]
+fn the_lightbulb_and_menu_go_at_the_selection_start(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: vec![action("Fix", "quickfix")],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    set_text(
+        &editor,
+        cx,
+        "let a = 1;\nlet b = 2;\nlet c = 3;\nlet d = 4;\nlet e = 5;",
+    );
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::new(p(1, 4), p(3, 4))], cx)
+    });
+    wait(cx);
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.lightbulb_position_for_tests()),
+        Some(p(1, 4))
+    );
+    cx.simulate_keystrokes(&primary("."));
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_code_action_menu_visible()));
+    let line = editor.read_with(cx, |e, _| e.scrolled_visible_position(p(1, 4)).unwrap());
+    let anchor = editor
+        .read_with(cx, |e, _| e.code_action_menu_anchor_for_tests().0)
+        .unwrap();
+    assert_eq!(anchor.origin, line);
+    // Selected upward, the start is still line 2.
+    cx.simulate_keystrokes("escape");
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::new(p(3, 4), p(1, 4))], cx)
+    });
+    wait(cx);
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.lightbulb_position_for_tests()),
+        Some(p(1, 4))
+    );
+}
+
+/// Monaco's gutter lightbulb is a glyph margin decoration: without a
+/// glyph margin nothing draws, rather than a bulb over the code.
+#[gpui::test]
+fn no_gutter_lightbulb_without_a_glyph_margin(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: vec![action("Fix", "quickfix")],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.glyph_margin = false, cx)
+    });
+    set_text(&editor, cx, "let a = 1;\nlet b = 2;\nlet c = 3;");
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 4))], cx)
+    });
+    wait(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_lightbulb_visible()));
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.code_action_menu_anchor_for_tests().1),
+        None
+    );
+    // With the glyph margin, it's in the gutter.
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.glyph_margin = true, cx)
+    });
+    draw(cx);
+    let (bulb, line) = bulb_and_line(&editor, cx, 1);
+    assert!(bulb.right() <= line.x, "{bulb:?} over the text at {line:?}");
+}
