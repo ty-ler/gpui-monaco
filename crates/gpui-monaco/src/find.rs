@@ -290,11 +290,13 @@ fn text_color(foreground: Option<gpui::Hsla>) -> Option<crate::theme::TokenStyle
 /// Monaco `_FIND_MATCH_DECORATION`, or `_FIND_MATCH_NO_OVERVIEW_DECORATION`
 /// without `overview` (over 1000 matches): no overview or minimap mark, no
 /// text color and z-index 0.
-fn match_options(colors: &crate::theme::EditorColors, overview: bool) -> DecorationOptions {
+fn match_options(theme: &crate::theme::Theme, overview: bool) -> DecorationOptions {
+    let colors = &theme.colors;
     DecorationOptions {
         background: Some(colors.find_match_highlight_background),
-        // High contrast outlines matches.
+        // High contrast outlines matches, dotted (`findWidget.ts`'s theming).
         border: colors.find_match_highlight_border,
+        border_style: crate::decorations::dotted_in_high_contrast(theme.high_contrast),
         // Monaco's theming colors `.findMatchInline` with
         // `editor.findMatchForeground` and `.currentFindMatchInline` with
         // `editor.findMatchHighlightForeground` (`findWidget.ts`), the
@@ -321,7 +323,9 @@ fn match_options(colors: &crate::theme::EditorColors, overview: bool) -> Decorat
 fn current_match_options(colors: &crate::theme::EditorColors) -> DecorationOptions {
     DecorationOptions {
         background: Some(colors.find_match_background),
+        // `.currentFindMatch`: a 2px solid border.
         border: colors.find_match_border,
+        border_width: Some(gpui::px(2.)),
         // `.currentFindMatchInline` (see `match_options`).
         text: text_color(colors.find_match_highlight_foreground),
         overview_ruler: Some(OverviewRulerDecoration::new(
@@ -1125,9 +1129,9 @@ impl CodeEditor {
                 }
             }
             overview.push((start, end));
-            match_options(&colors, false)
+            match_options(&self.theme, false)
         } else {
-            match_options(&colors, true)
+            match_options(&self.theme, true)
         };
         let new_matches = matches
             .iter()
@@ -1158,7 +1162,13 @@ impl CodeEditor {
                     offsets(scope),
                     DecorationOptions {
                         background: Some(colors.find_range_highlight_background),
+                        // Dashed in high contrast themes (`findWidget.ts`).
                         border: colors.find_range_highlight_border,
+                        border_style: if self.theme.high_contrast {
+                            gpui::BorderStyle::Dashed
+                        } else {
+                            gpui::BorderStyle::Solid
+                        },
                         is_whole_line: true,
                         ..Default::default()
                     },
@@ -1219,7 +1229,8 @@ impl CodeEditor {
         if model.highlighted.is_none() && new_current.is_none() {
             return position;
         }
-        let colors = self.theme.colors.clone();
+        let theme = self.theme.clone();
+        let colors = &theme.colors;
         let overview = model.overview.is_empty();
         let old_highlighted = model.highlighted;
         let old_range_highlight = model.range_highlight;
@@ -1238,10 +1249,10 @@ impl CodeEditor {
         let owner = Some(cx.entity_id());
         let new_range_highlight = self.model().update(cx, |text, cx| {
             if let Some(id) = old_highlighted {
-                text.change_decoration_options(id, match_options(&colors, overview), cx);
+                text.change_decoration_options(id, match_options(&theme, overview), cx);
             }
             if let Some(id) = new_current {
-                text.change_decoration_options(id, current_match_options(&colors), cx);
+                text.change_decoration_options(id, current_match_options(colors), cx);
             }
             let old: Vec<_> = old_range_highlight.into_iter().collect();
             let new = range_highlight

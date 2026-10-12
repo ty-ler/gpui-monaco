@@ -330,11 +330,17 @@ pub struct GlyphMarginOptions {
 pub struct DecorationOptions {
     /// Background behind the range (Monaco `className`).
     pub background: Option<Hsla>,
-    /// 1px border around the range on each line.
+    /// A border around the range on each line, inside it (CSS `border`
+    /// with `box-sizing: border-box`).
     pub border: Option<Hsla>,
     /// The `border`'s style: solid (the default), or dashed as Monaco's
-    /// high contrast themes draw the diff editor's change borders.
+    /// high contrast themes draw the diff editor's change borders and
+    /// (for CSS `dotted`, which GPUI can't draw) find matches and word
+    /// highlights.
     pub border_style: gpui::BorderStyle,
+    /// The `border`'s width; `None` is 1px (Monaco's current find match,
+    /// `.currentFindMatch`, has 2px).
+    pub border_width: Option<Pixels>,
     /// A border of this color and width drawn just outside the range on
     /// each line, over the text around it (CSS `outline`, as on Monaco's
     /// in-place replace `valueSetReplacement`).
@@ -471,6 +477,17 @@ pub struct DecorationOptions {
     /// kept for hosts and the getters. GPUI has no bidirectional text
     /// layout, so lines are still laid out left to right.
     pub text_direction: Option<TextDirection>,
+}
+
+/// A border Monaco draws `dotted` in high contrast themes (find matches,
+/// word and selection highlights), dashed there as GPUI has no dotted
+/// style, and solid otherwise.
+pub(crate) fn dotted_in_high_contrast(high_contrast: bool) -> gpui::BorderStyle {
+    if high_contrast {
+        gpui::BorderStyle::Dashed
+    } else {
+        gpui::BorderStyle::Solid
+    }
 }
 
 impl DecorationOptions {

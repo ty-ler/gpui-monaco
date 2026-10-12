@@ -58,7 +58,8 @@ Ranges are byte offsets. To convert from `PointUtf16`, use `model.buffer().point
 
 | Field | Monaco | Effect |
 |---|---|---|
-| `background`, `border` | `className` styling | fills or outlines the range; an empty piece (an empty range, or an empty line inside one) draws nothing |
+| `background`, `border` | `className` styling | fills or outlines the range; an empty piece (an empty range, or an empty line inside one) draws nothing. Touching or overlapping decorations of one z-index that paint the same merge into one box, as Monaco merges same-class ones; a range starting at a wrap point paints nothing on the view line above |
+| `border_style`, `border_width` | CSS `border-style`, `border-width` | the border's style (`Dashed` stands in for CSS `dotted`, which GPUI can't draw) and width (`None` is 1px) |
 | `outline` | CSS `outline` | a border just outside the range, shown on an empty range too |
 | `min_width` | CSS `min-width` | the smallest width of the background on a line, as Monaco's snippet placeholders' 2px |
 | `underline` | `inlineClassName` with `text-decoration` | straight or wavy underline |

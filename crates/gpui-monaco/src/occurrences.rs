@@ -28,8 +28,12 @@ const WORD_HIGHLIGHT_RUN_DELAY: Duration = Duration::from_millis(50);
 /// models longer than this (`shouldSynchronizeModel`).
 const MODEL_SYNC_LIMIT: usize = 50 * 1024 * 1024;
 
+/// Monaco `LIMIT_FIND_COUNT`: `TextualDocumentHighlightProvider`'s
+/// `findMatches` keeps the default result limit.
+const WORD_HIGHLIGHT_LIMIT: usize = 999;
+
 /// Monaco's `TextualDocumentHighlightProvider`: case-sensitive, whole-word
-/// matches of `word` in `rope`.
+/// matches of `word` in `rope`, at most [`WORD_HIGHLIGHT_LIMIT`].
 fn textual_highlights(rope: &Rope, word: &str) -> Vec<DocumentHighlight> {
     let Some(data) = SearchParams::new(
         word.to_string(),
@@ -40,7 +44,7 @@ fn textual_highlights(rope: &Rope, word: &str) -> Vec<DocumentHighlight> {
     .parse() else {
         return Vec::new();
     };
-    search::find_matches(rope, &data, 0..rope.len(), crate::find::MATCHES_LIMIT)
+    search::find_matches(rope, &data, 0..rope.len(), WORD_HIGHLIGHT_LIMIT)
         .into_iter()
         .map(|m| DocumentHighlight {
             range: rope.offset_to_point_utf16(m.start)..rope.offset_to_point_utf16(m.end),
@@ -86,6 +90,14 @@ pub(crate) struct OccurrenceHighlights {
     placed_in: Vec<WeakEntity<CodeEditor>>,
 }
 
+impl OccurrenceHighlights {
+    /// The selection highlights' decorations (Monaco's `selectionHighlight`
+    /// class name), which fade while the editor isn't focused.
+    pub(crate) fn selection_decorations(&self) -> &[DecorationId] {
+        &self.selection
+    }
+}
+
 impl CodeEditor {
     fn word_pattern(&self, cx: &gpui::App) -> Option<syntax::Pattern> {
         self.model()
@@ -112,6 +124,7 @@ impl CodeEditor {
     fn set_word_highlights(&mut self, highlights: Vec<DocumentHighlight>, cx: &mut Context<Self>) {
         let rope = self.snapshot.rope().clone();
         let colors = self.theme.colors.clone();
+        let high_contrast = self.theme.high_contrast;
         let new = highlights
             .into_iter()
             .map(|h| {
@@ -139,6 +152,9 @@ impl CodeEditor {
                     DecorationOptions {
                         background: Some(background),
                         border,
+                        // `highlightDecorations.css`: dotted in hc-black and
+                        // hc-light.
+                        border_style: crate::decorations::dotted_in_high_contrast(high_contrast),
                         overview_ruler: Some(OverviewRulerDecoration::new(
                             overview,
                             OverviewRulerLane::Center,
@@ -551,8 +567,13 @@ impl CodeEditor {
                 (
                     range,
                     DecorationOptions {
+                        // Faded, with no border, while the editor isn't
+                        // focused (the editor element paints that).
                         background: Some(colors.selection_highlight_background),
                         border: colors.selection_highlight_border,
+                        border_style: crate::decorations::dotted_in_high_contrast(
+                            self.theme.high_contrast,
+                        ),
                         overview_ruler: Some(OverviewRulerDecoration::new(
                             colors.selection_highlight_overview,
                             OverviewRulerLane::Center,
