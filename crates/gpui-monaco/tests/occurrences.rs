@@ -143,6 +143,23 @@ fn textual_word_highlights(cx: &mut TestAppContext) {
     assert!(words(&editor, cx).is_empty());
 }
 
+/// Monaco `TextualDocumentHighlightProvider`: `findMatches` with the default
+/// `LIMIT_FIND_COUNT`, so at most 999 occurrences highlight and F7 cycles
+/// through those.
+#[gpui::test]
+fn textual_word_highlights_stop_at_999(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&"x ".repeat(5000), cx);
+    set(&editor, cx, p(1, 1), p(1, 1));
+    wait(cx);
+    let words = words(&editor, cx);
+    assert_eq!(words.len(), 999);
+    assert_eq!(words.last(), Some(&(1, 1997, 1, 1998)));
+    // Shift+F7 from the first wraps to the 999th.
+    cx.simulate_keystrokes("shift-f7");
+    let head = editor.read_with(cx, |e, _| e.selections()[0].head);
+    assert_eq!(head, p(1, 1997));
+}
+
 struct Writes;
 impl DocumentHighlightProvider for Writes {
     fn provide_document_highlights(

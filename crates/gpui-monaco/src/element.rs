@@ -1401,6 +1401,98 @@ pub(crate) fn normal_decoration_range(
     (from, to.max(from + options.min_width))
 }
 
+/// Monaco `_renderNormalDecorations`: with `showIfCollapsed`, a range
+/// that isn't whole-line and ends at the start of a later line ends at the
+/// end of the line before (`line_len` gives a row's length).
+fn collapsed_end(
+    start: PointUtf16,
+    end: PointUtf16,
+    options: &crate::decorations::DecorationOptions,
+    line_len: impl Fn(u32) -> u32,
+) -> PointUtf16 {
+    if options.show_if_collapsed && !options.is_whole_line && end.column == 0 && end.row > start.row
+    {
+        PointUtf16::new(end.row - 1, line_len(end.row - 1))
+    } else {
+        end
+    }
+}
+
+/// Whether two decorations paint the same in the decorations overlay, as
+/// two of Monaco's with one `className` (and `showIfCollapsed`) do, so
+/// touching ones merge. `faded` says each is a selection highlight shown
+/// faded (a class name of its own in Monaco).
+fn same_overlay_class(
+    a: &crate::decorations::Decoration,
+    b: &crate::decorations::Decoration,
+    faded: impl Fn(&crate::decorations::Decoration) -> bool,
+) -> bool {
+    let (x, y) = (&*a.options, &*b.options);
+    (std::sync::Arc::ptr_eq(&a.options, &b.options)
+        || x.background == y.background
+            && x.border == y.border
+            && x.border_style == y.border_style
+            && x.border_width == y.border_width
+            && x.outline == y.outline
+            && x.underline == y.underline
+            && x.severity == y.severity
+            && x.unnecessary == y.unnecessary
+            && x.deprecated == y.deprecated
+            && x.left_border == y.left_border
+            && x.show_if_collapsed == y.show_if_collapsed
+            && x.include_new_lines == y.include_new_lines
+            && x.should_fill_line_on_line_break == y.should_fill_line_on_line_break
+            && x.min_width == y.min_width)
+        && faded(a) == faded(b)
+}
+
+/// Monaco `_renderNormalDecorations`: the range each decoration's part in
+/// the decorations overlay (background, border, outline and squiggle)
+/// paints, in model points, after [`collapsed_end`]. A decoration that
+/// isn't whole-line, touching or overlapping an earlier one of the same
+/// z-index that paints the same ([`same_overlay_class`]), merges into it
+/// (Monaco `Range.areIntersectingOrTouching`) and paints nothing itself
+/// (`None`). `points` is in z-index and start order.
+fn overlay_ranges(
+    points: &[(PointUtf16, PointUtf16, &crate::decorations::Decoration)],
+    line_len: impl Fn(u32) -> u32,
+    faded: impl Fn(&crate::decorations::Decoration) -> bool + Copy,
+) -> Vec<Option<(PointUtf16, PointUtf16)>> {
+    let mut ranges: Vec<Option<(PointUtf16, PointUtf16)>> = Vec::with_capacity(points.len());
+    // The merged ranges (indices into `ranges`) of the current z-index a
+    // later decoration may still touch.
+    let mut open: Vec<usize> = Vec::new();
+    let mut open_z = None;
+    for (start, end, decoration) in points {
+        let options = &decoration.options;
+        let end = collapsed_end(*start, *end, options, &line_len);
+        if options.is_whole_line {
+            ranges.push(Some((*start, end)));
+            continue;
+        }
+        if open_z != Some(options.z_index) {
+            open.clear();
+            open_z = Some(options.z_index);
+        }
+        open.retain(|&ix| ranges[ix].is_some_and(|(_, open_end)| open_end >= *start));
+        let into = open
+            .iter()
+            .copied()
+            .find(|&ix| same_overlay_class(points[ix].2, decoration, faded));
+        match into.and_then(|ix| ranges[ix].as_mut()) {
+            Some((_, merged_end)) => {
+                *merged_end = (*merged_end).max(end);
+                ranges.push(None);
+            }
+            None => {
+                open.push(ranges.len());
+                ranges.push(Some((*start, end)));
+            }
+        }
+    }
+    ranges
+}
+
 #[cfg(test)]
 thread_local! {
     /// The last frame's decoration quads, in paint order.
@@ -4620,139 +4712,170 @@ fn prepaint_editor(
     // (`folded-background`, z-index 0) is a whole-line one.
     let mut whole_line_quads: Vec<DecorationQuad> = Vec::new();
     let mut fold_highlights = Some(fold_highlights);
-    for (start, end, decoration) in &decoration_points {
+    let focused = editor.focus_handle.is_focused(window);
+    // Selection highlights fade while the editor isn't focused.
+    let faded_ids: Option<std::collections::HashSet<DecorationId>> = {
+        let ids = editor.occurrences.selection_decorations();
+        (!focused && !ids.is_empty()).then(|| ids.iter().copied().collect())
+    };
+    let faded = |decoration: &crate::decorations::Decoration| {
+        faded_ids
+            .as_ref()
+            .is_some_and(|ids| ids.contains(&decoration.id))
+    };
+    let overlays = overlay_ranges(
+        &decoration_points,
+        |row| snapshot.line_len_utf16(row),
+        faded,
+    );
+    for ((start, end, decoration), overlay) in decoration_points.iter().zip(&overlays) {
         let options = &decoration.options;
         // Monaco `_renderNormalDecorations`: with `showIfCollapsed`, a range
         // ending at the start of a line ends at the end of the line before.
-        let end = &if options.show_if_collapsed
-            && !options.is_whole_line
-            && end.column == 0
-            && end.row > start.row
-        {
-            PointUtf16::new(end.row - 1, snapshot.line_len_utf16(end.row - 1))
-        } else {
-            *end
-        };
+        let end = &collapsed_end(*start, *end, options, |row| snapshot.line_len_utf16(row));
         if options.is_whole_line
             && options.z_index > 0
             && let Some(fold_highlights) = fold_highlights.take()
         {
             whole_line_quads.extend(fold_highlights);
         }
+        let faded = faded(decoration);
+        let last_row = overlay.map_or(end.row, |(_, overlay_end)| overlay_end.row.max(end.row));
         for line in layout.lines.iter() {
-            if line.row < start.row || line.row > end.row {
+            if line.row < start.row || line.row > last_row {
                 continue;
             }
             let top = layout.line_top(line.view_line);
             let height = layout.line_height_of(line.view_line);
             let text_top = layout.text_top(line.view_line);
-            // A marker's `editorError.background` and the like.
-            let background = options.background.or_else(|| {
-                options
-                    .severity
-                    .and_then(|severity| colors.marker_background(severity))
-            });
-            if background.is_some() || options.border.is_some() || options.outline.is_some() {
-                let (range, quads) = if options.is_whole_line {
-                    (
-                        Some((px(0.) - layout.scroll_left, text_width + layout.scroll_left)),
-                        &mut whole_line_quads,
-                    )
+            // The decorations overlay part, on the merged range.
+            if let Some((start, end)) = overlay
+                .as_ref()
+                .filter(|(start, end)| start.row <= line.row && line.row <= end.row)
+            {
+                // A marker's `editorError.background` and the like.
+                let background = options.background.or_else(|| {
+                    options
+                        .severity
+                        .and_then(|severity| colors.marker_background(severity))
+                });
+                // Monaco's `.selectionHighlight` outside `.focused`: half
+                // as opaque, no border.
+                let (background, border) = if faded {
+                    (background.map(|color| color.opacity(0.5)), None)
                 } else {
-                    (
-                        decoration_x_range(line, *start, *end).map(|range| {
-                            normal_decoration_range(
-                                range,
-                                options,
-                                end.row > line.row,
-                                line.is_last_segment,
-                                text_width + layout.scroll_left,
-                                metrics.em_width,
-                            )
-                        }),
-                        &mut decoration_quads,
-                    )
+                    (background, options.border)
                 };
-                if let Some((from, to)) = range {
-                    let bounds = Bounds::new(point(origin_x + from, top), size(to - from, height));
-                    // An empty piece is Monaco's 0px wide element: only its
-                    // outline shows.
-                    if (background.is_some() || options.border.is_some()) && to > from {
-                        let border = options
-                            .border
-                            .map(|color| (color, px(1.), options.border_style));
-                        quads.push((bounds, background, border));
-                    }
-                    // CSS `outline`: outside the box.
-                    if let Some((color, width)) = options.outline {
-                        quads.push((
-                            bounds.dilate(width),
-                            None,
-                            Some((color, width, BorderStyle::Solid)),
-                        ));
+                if background.is_some() || border.is_some() || options.outline.is_some() {
+                    let (range, quads) = if options.is_whole_line {
+                        (
+                            Some((px(0.) - layout.scroll_left, text_width + layout.scroll_left)),
+                            &mut whole_line_quads,
+                        )
+                    } else {
+                        (
+                            decoration_x_range(line, *start, *end).map(|range| {
+                                normal_decoration_range(
+                                    range,
+                                    options,
+                                    end.row > line.row,
+                                    line.is_last_segment,
+                                    text_width + layout.scroll_left,
+                                    metrics.em_width,
+                                )
+                            }),
+                            &mut decoration_quads,
+                        )
+                    };
+                    if let Some((from, to)) = range {
+                        let bounds =
+                            Bounds::new(point(origin_x + from, top), size(to - from, height));
+                        // An empty piece is Monaco's 0px wide element: only its
+                        // outline shows.
+                        if (background.is_some() || border.is_some()) && to > from {
+                            let border = border.map(|color| {
+                                (
+                                    color,
+                                    options.border_width.unwrap_or(px(1.)),
+                                    options.border_style,
+                                )
+                            });
+                            quads.push((bounds, background, border));
+                        }
+                        // CSS `outline`: outside the box.
+                        if let Some((color, width)) = options.outline {
+                            quads.push((
+                                bounds.dilate(width),
+                                None,
+                                Some((color, width, BorderStyle::Solid)),
+                            ));
+                        }
                     }
                 }
-            }
-            // Monaco's `border-left` on an inline decoration: at its start.
-            if let Some(border) = options.left_border
-                && line.contains(*start)
-            {
-                let x = origin_x + line.x_for_column(start.column) + border.offset;
-                decoration_quads.push((
-                    Bounds::new(point(x, top), size(border.width, height)),
-                    Some(border.color),
-                    None,
-                ));
-            }
-            // Monaco `squiggly-unnecessary`: a themed underline for unused
-            // code without a squiggle.
-            // A marker's squiggle is in the theme's color.
-            let underline = options.underline.map(|underline| match options.severity {
-                Some(severity) => crate::decorations::DecorationUnderline {
-                    color: colors.marker_color(severity),
-                    ..underline
-                },
-                None => underline,
-            });
-            let underline = underline.or_else(|| {
-                (options.unnecessary
-                    && editor.options.show_unused
-                    && colors.unnecessary_code_border.a > 0.)
-                    .then_some(crate::decorations::DecorationUnderline {
-                        color: colors.unnecessary_code_border,
-                        wavy: false,
-                    })
-            });
-            if let Some(underline) = underline
-                && let Some((from, to)) = decoration_x_range(line, *start, *end)
-            {
-                // Monaco draws an empty marker one character wide.
-                let (from, to) = if options.show_if_collapsed {
-                    widen_collapsed(from, to, metrics.em_width)
-                } else {
-                    (from, from + (to - from).max(metrics.em_width / 2.))
-                };
-                decoration_underlines.push((
-                    point(origin_x + from, text_top + line_height - px(3.)),
-                    to - from,
-                    UnderlineStyle {
-                        thickness: px(1.),
-                        color: Some(underline.color),
-                        wavy: underline.wavy,
+                // Monaco's `border-left` on an inline decoration: at its start.
+                if let Some(border) = options.left_border
+                    && line.contains(*start)
+                {
+                    let x = origin_x + line.x_for_column(start.column) + border.offset;
+                    decoration_quads.push((
+                        Bounds::new(point(x, top), size(border.width, height)),
+                        Some(border.color),
+                        None,
+                    ));
+                }
+                // Monaco `squiggly-unnecessary`: a themed underline for unused
+                // code without a squiggle.
+                // A marker's squiggle is in the theme's color.
+                let underline = options.underline.map(|underline| match options.severity {
+                    Some(severity) => crate::decorations::DecorationUnderline {
+                        color: colors.marker_color(severity),
+                        ..underline
                     },
-                ));
+                    None => underline,
+                });
+                let underline = underline.or_else(|| {
+                    (options.unnecessary
+                        && editor.options.show_unused
+                        && colors.unnecessary_code_border.a > 0.)
+                        .then_some(crate::decorations::DecorationUnderline {
+                            color: colors.unnecessary_code_border,
+                            wavy: false,
+                        })
+                });
+                if let Some(underline) = underline
+                    && let Some((from, to)) = decoration_x_range(line, *start, *end)
+                {
+                    // Monaco draws an empty marker one character wide.
+                    let (from, to) = if options.show_if_collapsed {
+                        widen_collapsed(from, to, metrics.em_width)
+                    } else {
+                        (from, from + (to - from).max(metrics.em_width / 2.))
+                    };
+                    decoration_underlines.push((
+                        point(origin_x + from, text_top + line_height - px(3.)),
+                        to - from,
+                        UnderlineStyle {
+                            thickness: px(1.),
+                            color: Some(underline.color),
+                            wavy: underline.wavy,
+                        },
+                    ));
+                }
+                if let Some(severity) = options.severity
+                    && let Some((from, to)) = decoration_x_range(line, *start, *end)
+                {
+                    let (from, to) = widen_collapsed(from, to, metrics.em_width);
+                    marker_marks.extend(marker_marks_for(
+                        severity,
+                        !options.unnecessary && !options.deprecated,
+                        (origin_x + from, origin_x + to),
+                        text_top + line_height,
+                        &colors,
+                    ));
+                }
             }
-            if let Some(severity) = options.severity
-                && let Some((from, to)) = decoration_x_range(line, *start, *end)
-            {
-                let (from, to) = widen_collapsed(from, to, metrics.em_width);
-                marker_marks.extend(marker_marks_for(
-                    severity,
-                    !options.unnecessary && !options.deprecated,
-                    (origin_x + from, origin_x + to),
-                    text_top + line_height,
-                    &colors,
-                ));
+            if line.row > end.row {
+                continue;
             }
             // Monaco `firstLineDecorationClassName`: in the line decorations
             // area too, on a wrapped line's first view line only.
@@ -5946,7 +6069,6 @@ fn prepaint_editor(
             size(px(2.), line_height),
         ))
     });
-    let focused = editor.focus_handle.is_focused(window);
     layout.line_highlights = current_line_highlights(
         &layout,
         &options,
@@ -7145,10 +7267,11 @@ fn paint_whitespace(
 /// Paints the cursors (Monaco `ViewCursors`): each box in its color (or
 /// outlined), blinking, with the character inside a block cursor drawn in
 /// the cursor's background color, and in high contrast themes 1px sides in
-/// that color while there's a selection.
+/// that color while the primary selection isn't empty.
 fn paint_cursors(state: &PrepaintState, window: &mut Window) {
     let layout = &state.layout;
-    let has_selection = state.selections.iter().any(|s| !s.is_empty());
+    // Monaco `has-selection`: the primary selection only.
+    let has_selection = state.selections.first().is_some_and(|s| !s.is_empty());
     for cursor in &state.cursors {
         let height = cursor.bounds.size.height * state.cursor_scale;
         let bounds = Bounds::new(
@@ -7367,6 +7490,12 @@ fn paint_selections(
 
 /// X range of `start..end` (model points) on `line`, or `None` if it doesn't
 /// intersect. Ranges continuing past the line end stop at the text end.
+///
+/// As Monaco's `convertModelRangeToViewRange` (start affinity right, end
+/// affinity left, and right for an empty range), a range starting at a
+/// wrap point isn't on the view line before it, one ending there isn't on
+/// the view line after it, and an empty range there is only on the later
+/// one.
 fn decoration_x_range(
     line: &LineLayout,
     start: PointUtf16,
@@ -7388,7 +7517,12 @@ fn decoration_x_range(
     if to_col < line.columns.start || from_col > line.columns.end {
         return None;
     }
-    if from_col == to_col && !(line.columns.start <= from_col && from_col <= line.columns.end) {
+    // At the wrap point ending this view line (there's a later one).
+    if !line.is_last_segment && from_col >= line.columns.end {
+        return None;
+    }
+    // At the wrap point starting this view line, for a non-empty range.
+    if line.columns.start > 0 && to_col <= line.columns.start && from_col < to_col {
         return None;
     }
     let from = line.x_for_column(from_col.max(line.columns.start));
@@ -8450,5 +8584,215 @@ mod decoration_overlay_tests {
             .map(|(bounds, _, _)| round(bounds.size.width))
             .collect();
         assert_eq!(boxes, [em]);
+    }
+
+    /// The view lines (indices into the layout's lines) the painted quads
+    /// with `background` are on, in paint order.
+    fn view_lines(
+        editor: &Entity<CodeEditor>,
+        background: Hsla,
+        cx: &mut VisualTestContext,
+    ) -> Vec<usize> {
+        draw(cx);
+        let tops: Vec<Pixels> = editor.read_with(cx, |e, _| {
+            let layout = e.layout.as_ref().unwrap();
+            layout
+                .lines
+                .iter()
+                .map(|line| layout.line_top(line.view_line))
+                .collect()
+        });
+        painted()
+            .iter()
+            .filter(|(_, b, _)| *b == Some(background))
+            .map(|(bounds, _, _)| tops.iter().position(|t| *t == bounds.top()).unwrap())
+            .collect()
+    }
+
+    /// Monaco `convertModelRangeToViewRange`: a range starting at a wrap
+    /// point has no piece on the view line before, one ending there none on
+    /// the view line after, and an empty one there is on the later line.
+    #[gpui::test]
+    fn wrap_point_pieces(cx: &mut TestAppContext) {
+        let (editor, cx) = setup("aaaa bbbb cccc", cx);
+        editor.update(cx, |e, cx| {
+            let mut options = e.options().clone();
+            options.word_wrap = crate::options::WordWrap::WordWrapColumn;
+            options.word_wrap_column = 5;
+            e.update_options(options, cx);
+        });
+        draw(cx);
+        let wrap = editor.read_with(cx, |e, _| e.layout.as_ref().unwrap().lines[1].columns.start);
+        assert!(wrap > 0);
+        let wrap_offset = wrap as usize;
+        let (red, green, blue) = (gpui::red(), gpui::green(), gpui::blue());
+        let collapsed = |color: Hsla| {
+            options(|o| {
+                o.background = Some(color);
+                o.show_if_collapsed = true;
+            })
+        };
+        decorate(
+            &editor,
+            vec![
+                (wrap_offset..wrap_offset + 4, collapsed(red)),
+                (0..wrap_offset, collapsed(green)),
+                (wrap_offset..wrap_offset, collapsed(blue)),
+            ],
+            cx,
+        );
+        assert_eq!(view_lines(&editor, red, cx), [1]);
+        assert_eq!(view_lines(&editor, green, cx), [0]);
+        assert_eq!(view_lines(&editor, blue, cx), [1]);
+        // The empty one is a character wide at the later line's start.
+        let em = em_width(&editor, cx);
+        let blue_box = quads(&editor, blue, cx);
+        assert_eq!(blue_box.len(), 1);
+        assert_eq!(blue_box[0].1 - blue_box[0].0, em);
+    }
+
+    /// Monaco `_renderNormalDecorations`: touching or overlapping
+    /// decorations that paint the same merge into one box.
+    #[gpui::test]
+    fn touching_decorations_merge(cx: &mut TestAppContext) {
+        let (editor, cx) = setup("foo(), bar\n", cx);
+        let (red, green, blue) = (gpui::red(), gpui::green(), gpui::blue());
+        let boxed = |color: Hsla| {
+            options(|o| {
+                o.background = Some(color);
+                o.border = Some(gpui::white());
+            })
+        };
+        decorate(
+            &editor,
+            vec![
+                // `()`: touching, one box.
+                (3..4, boxed(red)),
+                (4..5, boxed(red)),
+                // `ba` and `ar`: overlapping, one box.
+                (7..9, boxed(green)),
+                (8..10, boxed(green)),
+                // `f` and `o`: not touching, two boxes.
+                (0..1, boxed(blue)),
+                (2..3, boxed(blue)),
+                // Touching but painting differently: its own box.
+                (5..6, boxed(gpui::black())),
+            ],
+            cx,
+        );
+        assert_eq!(
+            quads(&editor, red, cx),
+            [(x(&editor, 0, 3, cx), x(&editor, 0, 5, cx))]
+        );
+        assert_eq!(
+            quads(&editor, green, cx),
+            [(x(&editor, 0, 7, cx), x(&editor, 0, 10, cx))]
+        );
+        assert_eq!(quads(&editor, blue, cx).len(), 2);
+        assert_eq!(quads(&editor, gpui::black(), cx).len(), 1);
+    }
+
+    /// Monaco's bracket match: the cursor between `()` boxes both brackets
+    /// with one `editorBracketMatch.border` box.
+    #[gpui::test]
+    fn bracket_match_pair_is_one_box(cx: &mut TestAppContext) {
+        use gpui::Focusable as _;
+        let (editor, cx) = setup("foo()\n", cx);
+        cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+        editor.update(cx, |e, cx| {
+            e.set_selections(&[Selection::collapsed(PointUtf16::new(0, 4))], cx)
+        });
+        let background = editor.read_with(cx, |e, _| e.theme().colors.bracket_match_background);
+        assert_eq!(
+            quads(&editor, background, cx),
+            [(x(&editor, 0, 3, cx), x(&editor, 0, 5, cx))]
+        );
+    }
+
+    /// Monaco `highlightDecorations.css`: selection highlights are full
+    /// strength with a border only in a focused editor, else half as opaque
+    /// with no border; they stay while unfocused.
+    #[gpui::test]
+    fn selection_highlights_fade_when_unfocused(cx: &mut TestAppContext) {
+        use gpui::Focusable as _;
+        let (editor, cx) = setup("foo bar foo\n", cx);
+        let mut theme = editor.read_with(cx, |e, _| (**e.theme()).clone());
+        let border = gpui::red();
+        theme.colors.selection_highlight_border = Some(border);
+        editor.update(cx, |e, cx| e.set_theme(std::sync::Arc::new(theme), cx));
+        cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+        editor.update(cx, |e, cx| {
+            e.set_selections(
+                &[Selection {
+                    anchor: PointUtf16::new(0, 0),
+                    head: PointUtf16::new(0, 3),
+                }],
+                cx,
+            )
+        });
+        let full = editor.read_with(cx, |e, _| e.theme().colors.selection_highlight_background);
+        let second = (x(&editor, 0, 8, cx), x(&editor, 0, 11, cx));
+        assert!(quads(&editor, full, cx).contains(&second));
+        assert!(
+            painted()
+                .iter()
+                .any(|(_, background, b)| *background == Some(full)
+                    && b.is_some_and(|(color, _, _)| color == border))
+        );
+
+        cx.update(|window, cx| window.blur(cx));
+        assert!(quads(&editor, full, cx).is_empty());
+        let faded = full.opacity(0.5);
+        assert!(quads(&editor, faded, cx).contains(&second));
+        assert!(
+            painted()
+                .iter()
+                .filter(|(_, background, _)| *background == Some(faded))
+                .all(|(_, _, border)| border.is_none())
+        );
+    }
+
+    /// Monaco's high contrast find decorations: the current match has a
+    /// 2px border (`.currentFindMatch`), the others a dotted one (dashed
+    /// here).
+    #[gpui::test]
+    fn high_contrast_find_borders(cx: &mut TestAppContext) {
+        let (editor, cx) = setup("ab ab ab\n", cx);
+        editor.update(cx, |e, cx| {
+            e.set_theme(std::sync::Arc::new(Theme::hc_black()), cx);
+            let mut options = e.find_options().clone();
+            options.query = "ab".into();
+            e.change_find_options(options, false, cx);
+            e.start_find_model_for_tests(cx);
+            e.find_next(cx);
+        });
+        let (current, other, backgrounds) = editor.read_with(cx, |e, _| {
+            let colors = &e.theme().colors;
+            (
+                colors.find_match_border.unwrap(),
+                colors.find_match_highlight_border.unwrap(),
+                [
+                    Some(colors.find_match_background),
+                    Some(colors.find_match_highlight_background),
+                ],
+            )
+        });
+        draw(cx);
+        let borders: Vec<(Hsla, Pixels, BorderStyle)> = painted()
+            .iter()
+            .filter(|(_, background, _)| backgrounds.contains(background))
+            .filter_map(|(_, _, border)| *border)
+            .collect();
+        let count = |border| borders.iter().filter(|b| **b == border).count();
+        assert_eq!(
+            count((other, px(1.), BorderStyle::Dashed)),
+            2,
+            "{borders:?}"
+        );
+        assert_eq!(
+            count((current, px(2.), BorderStyle::Solid)),
+            1,
+            "{borders:?}"
+        );
     }
 }
