@@ -2789,3 +2789,50 @@ fn compact_mode_keeps_the_fold_glyph(cx: &mut TestAppContext) {
         vec![1..47]
     );
 }
+
+/// Monaco `renderLines`: without character decorations (the legacy diff's
+/// pure deletions) each deleted view line is a full-width `char-delete`.
+#[gpui::test]
+fn inline_deleted_lines_without_inner_changes_tint_full_width(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb\nc\nd\ne", "a\ne", cx);
+    update_options(&diff, cx, |o| {
+        o.render_side_by_side = false;
+        o.diff_algorithm = gpui_monaco::DiffAlgorithm::Legacy;
+    });
+    paint(cx);
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.deleted_code_full_width_for_tests(cx)),
+        vec![true]
+    );
+}
+
+/// A changed line's inner changes are marked instead of the whole line.
+#[gpui::test]
+fn inline_deleted_lines_with_inner_changes_mark_them(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nfoo bar\nc", "a\nfoo baz\nc", cx);
+    update_options(&diff, cx, |o| o.render_side_by_side = false);
+    paint(cx);
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.deleted_code_full_width_for_tests(cx)),
+        vec![false]
+    );
+}
+
+/// Monaco `EditorGutter`'s `.scroll-decoration`: shown while the modified
+/// editor isn't scrolled to the top.
+#[gpui::test]
+fn gutter_scroll_decoration_follows_the_modified_scroll_top(cx: &mut TestAppContext) {
+    let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    let (diff, cx) = setup(&text, &text.replace("line 5\n", "line five\n"), cx);
+    assert!(diff.read_with(cx, |d, cx| d.shows_gutter_for_tests(cx)));
+    assert!(!diff.read_with(cx, |d, cx| d.gutter_scroll_decoration_for_tests(cx)));
+    let (_, modified) = editors(&diff, cx);
+    modified.update(cx, |e, cx| {
+        e.set_scroll_position(point(px(0.), px(100.)), cx)
+    });
+    paint(cx);
+    assert!(diff.read_with(cx, |d, cx| d.gutter_scroll_decoration_for_tests(cx)));
+    modified.update(cx, |e, cx| e.set_scroll_position(point(px(0.), px(0.)), cx));
+    paint(cx);
+    assert!(!diff.read_with(cx, |d, cx| d.gutter_scroll_decoration_for_tests(cx)));
+}

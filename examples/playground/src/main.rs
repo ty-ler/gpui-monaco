@@ -812,6 +812,29 @@ fn main() {
                                 options.render_gutter_menu = false;
                                 diff.update_options(options, cx);
                             }
+                            // `PLAYGROUND_DIFF_LEGACY=1` uses the legacy diff
+                            // algorithm (no inner changes for pure deletions).
+                            if std::env::var_os("PLAYGROUND_DIFF_LEGACY")
+                                .is_some_and(|v| !v.is_empty())
+                            {
+                                let mut options = diff.options().clone();
+                                options.diff_algorithm = gpui_monaco::DiffAlgorithm::Legacy;
+                                diff.update_options(options, cx);
+                            }
+                            // `PLAYGROUND_DIFF_WHITESPACE=1` renders whitespace
+                            // and control characters on both sides.
+                            if std::env::var_os("PLAYGROUND_DIFF_WHITESPACE")
+                                .is_some_and(|v| !v.is_empty())
+                            {
+                                for editor in [diff.original_editor(), diff.modified_editor()] {
+                                    editor.update(cx, |editor, cx| {
+                                        let mut options = editor.options().clone();
+                                        options.render_whitespace = RenderWhitespace::All;
+                                        options.render_control_characters = true;
+                                        editor.update_options(options, cx);
+                                    });
+                                }
+                            }
                             diff
                         });
                         // Typing goes to the modified side.

@@ -27,14 +27,14 @@ const MIN_SLIDER: f32 = 20.;
 /// Monaco's `.scroll-decoration` height and shadow size.
 const SCROLL_SHADOW_HEIGHT: f32 = 6.;
 /// Monaco `.mtkcontrol` (`viewLines.css`): `rgb(255, 255, 255)` text.
-const CONTROL_CHARACTER_FOREGROUND: Hsla = Hsla {
+pub(crate) const CONTROL_CHARACTER_FOREGROUND: Hsla = Hsla {
     h: 0.,
     s: 0.,
     l: 1.,
     a: 1.,
 };
 /// Monaco `.mtkcontrol` background, `rgb(150, 0, 0)`.
-const CONTROL_CHARACTER_BACKGROUND: Hsla = Hsla {
+pub(crate) const CONTROL_CHARACTER_BACKGROUND: Hsla = Hsla {
     h: 0.,
     s: 1.,
     l: 150. / 255. / 2.,
