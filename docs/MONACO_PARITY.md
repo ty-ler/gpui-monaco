@@ -196,9 +196,9 @@ Issues are linked by number.
 | Document highlights | `wordHighlighter` | ✅ 50ms after the cursor rests, then `occurrencesHighlightDelay` (0) from the move | #83, #262 |
 | Formatting: document, range, on type, on paste | `format` | ✅ | #94 |
 | Choosing between formatters (`FormattingConflicts.setFormatterSelector`, `displayName`) | `format` | ✅ the first by default, as standalone Monaco; no built-in picker (`formatDocument.multiple` is VS Code workbench) | #229 |
-| Rename | `rename` | ✅ measured input width, line-height input and candidates, scrolling suggestions, `widget.shadow`, cancelled when scrolled out of view | #56, #251 |
+| Rename | `rename` | ✅ measured input width, line-height input and candidates, scrolling suggestions, `widget.shadow`, the symbol's line revealed first (`revealLineInCenterIfOutsideViewport`), cancelled when scrolled out of view | #56, #251, #325 |
 | Rename preview (`acceptRenameInputWithPreview`, through a host preview handler) | `rename` | ✅ | #225 |
-| Code actions and lightbulb (no AI actions or nearby quick fixes) | `codeAction` | ✅ the lightbulb's title with its keybinding and AI colors; the menu measured, scrolling to the focused row with a sticky action bar, keycaps and `widget.shadow` | #56, #251 |
+| Code actions and lightbulb (no nearby quick fixes) | `codeAction` | ✅ the lightbulb's title with its keybinding and AI colors, its placement (the gutter on the last line), none with `lightbulb: Off` even after Cmd/Ctrl+.; AI actions sorted last; the menu measured, scrolling to the focused row with a sticky action bar, keycaps and `widget.shadow`, its position revealed first (`toCoords`), from the lightbulb at the click's x below the bulb; the focused action's `ranges` or diagnostics highlighted and announced; Cmd/Ctrl+. accepts and Cmd/Ctrl+Up/Down move; `editor.codeActionWidget.showHeaders` (`code_action_widget.show_headers`) | #56, #251, #325 |
 | Code action menu: "Show Disabled", documentation links, preview (Cmd/Ctrl+Enter, through a host preview handler; no Refactor Preview panel) | `codeAction` | ✅ | #225 |
 | The `editor.action.codeAction` command with `kind`, `apply` and `preferred` | `codeAction` | ✅ | #202 |
 | Rename suggestions (`NewSymbolNamesProvider`) | `rename` | ✅ | #225 |

@@ -8,7 +8,7 @@
 //! with its action bar (documentation and "Show Disabled") and preview
 //! (Cmd/Ctrl+Enter, through
 //! [`set_workspace_edit_preview_handler`](crate::set_workspace_edit_preview_handler))
-//! (MIT). Not ported: AI actions and nearby quick fixes.
+//! (MIT). Not ported: nearby quick fixes.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -222,11 +222,12 @@ fn can_preview(action: &CodeAction) -> bool {
             .is_some_and(|edit| !edit.edits.is_empty())
 }
 
-/// Monaco `ManagedCodeActionSet`'s order: actions with diagnostics first,
-/// then preferred ones; otherwise provider order.
+/// Monaco `ManagedCodeActionSet`'s order: AI actions last, actions with
+/// diagnostics first, then preferred ones; otherwise provider order.
 fn sort_items(items: &mut [Item]) {
     items.sort_by_key(|item| {
         (
+            item.action.is_ai,
             item.action.diagnostics.is_empty(),
             !item.action.is_preferred,
         )
@@ -359,7 +360,8 @@ pub(crate) fn place_lightbulb(
     if row > 0 && !folded(row - 1) {
         let prev = empty_or_indented(row - 1);
         let next = row < last && empty_or_indented(row + 1);
-        if !prev && !next && row < last && !has_glyph {
+        // The last line has no next line to block (Monaco's `endLine`).
+        if !prev && !next && !has_glyph {
             return Some(LightbulbPlacement::Gutter(row));
         }
         if prev || row == last {
@@ -379,8 +381,8 @@ pub(crate) fn place_lightbulb(
     if row < last && !folded(row + 1) {
         return Some(content(row + 1));
     }
-    // It would cover the cursor.
-    if (position.column as f32) * space_width < 22. {
+    // It would cover the cursor (Monaco's column is 1-based).
+    if ((position.column + 1) as f32) * space_width < 22. {
         return None;
     }
     Some(content(row))
@@ -431,7 +433,12 @@ fn group_icon(action: &CodeAction) -> Option<Codicon> {
     }
 }
 
-fn menu_rows(items: &[Item]) -> Vec<Row> {
+/// Monaco `toMenuItems`: grouped under headers, or without
+/// (`showHeaders: false`) in the actions' order.
+fn menu_rows(items: &[Item], show_headers: bool) -> Vec<Row> {
+    if !show_headers {
+        return (0..items.len()).map(Row::Action).collect();
+    }
     let mut groups: Vec<Vec<usize>> = vec![Vec::new(); GROUPS.len()];
     for (ix, item) in items.iter().enumerate() {
         groups[group_of(&item.action)].push(ix);
@@ -452,6 +459,10 @@ pub(crate) struct CodeActionMenu {
     /// The listed actions.
     items: Vec<Item>,
     rows: Vec<Row>,
+    /// Grouped under headers (Monaco `editor.codeActionWidget.showHeaders`);
+    /// without, rows have no group icon or keybinding, and a disabled
+    /// action shows why instead of its title.
+    show_headers: bool,
     /// Everything the request found, to list again with "Show Disabled".
     set: std::rc::Rc<CodeActionSet>,
     at: MenuAnchor,
@@ -510,22 +521,13 @@ impl CodeActionMenu {
         if let Some(row) = row {
             self.scroll.scroll_to_item(row);
         }
-        let diagnostics: Vec<Range<PointUtf16>> = row
-            .and_then(|row| match self.rows[row] {
-                Row::Action(ix) => Some(
-                    self.items[ix]
-                        .action
-                        .diagnostics
-                        .iter()
-                        .map(|marker| marker.range.clone())
-                        .collect(),
-                ),
-                Row::Header(_) => None,
-            })
-            .unwrap_or_default();
+        let action = row.and_then(|row| match self.rows[row] {
+            Row::Action(ix) => Some(self.items[ix].action.clone()),
+            Row::Header(_) => None,
+        });
         if let Some(editor) = self.editor.upgrade() {
             editor.update(cx, |editor, cx| {
-                editor.highlight_code_action(diagnostics, cx)
+                editor.focus_code_action(action.as_ref(), cx)
             });
         }
         cx.notify();
@@ -598,6 +600,16 @@ const ROW_GAP: f32 = 4.;
 const BAR_HEIGHT: f32 = 2. + 1. + 3. + 22.;
 
 impl CodeActionMenu {
+    /// A row's text: the title on one line, or without headers, why a
+    /// disabled action is (Monaco `toMenuItems`' `label`).
+    fn row_label(&self, action: &CodeAction) -> String {
+        let label = match &action.disabled {
+            Some(reason) if !self.show_headers => reason,
+            _ => &action.title,
+        };
+        label.replace(['\r', '\n'], " ")
+    }
+
     fn row_height(&self, row: usize) -> gpui::Pixels {
         match self.rows[row] {
             Row::Header(_) => px(HEADER_ROW_HEIGHT),
@@ -608,6 +620,10 @@ impl CodeActionMenu {
     /// The keybinding of the row's action (Monaco
     /// `CodeActionKeybindingResolver`), looked up in the editor.
     fn row_keybinding(&self, ix: usize, window: &Window) -> Option<KeyLabel> {
+        // Monaco's rows without headers have no keybinding.
+        if !self.show_headers {
+            return None;
+        }
         let kind = self.items[ix].action.kind.as_ref()?;
         let editor_focus = self.editor_focus.as_ref()?;
         let organize = CodeActionKind::from(CodeActionKind::SOURCE_ORGANIZE_IMPORTS);
@@ -632,7 +648,7 @@ impl CodeActionMenu {
                     ui_text_width(title, px(HEADER_FONT_SIZE), FontWeight::SEMIBOLD, window)
                 }
                 Row::Action(ix) => {
-                    let title = self.items[*ix].action.title.replace(['\r', '\n'], " ");
+                    let title = self.row_label(&self.items[*ix].action);
                     let mut w = px(ICON_WIDTH + ROW_GAP)
                         + ui_text_width(&title, px(MENU_FONT_SIZE), FontWeight::NORMAL, window);
                     if let Some(keys) = &keys[row] {
@@ -733,7 +749,7 @@ impl Render for CodeActionMenu {
                     let action = &self.items[*ix].action;
                     let disabled = action.disabled.is_some();
                     let focused = self.focused == Some(row);
-                    let label: String = action.title.replace(['\r', '\n'], " ");
+                    let label = self.row_label(action);
                     // Monaco's row titles: why it's disabled, or the keys.
                     let tooltip: SharedString = match &action.disabled {
                         Some(reason) => reason.clone(),
@@ -772,7 +788,7 @@ impl Render for CodeActionMenu {
                                 .flex_none()
                                 .flex()
                                 .justify_center()
-                                .child(match group_icon(action) {
+                                .child(match group_icon(action).filter(|_| self.show_headers) {
                                     Some(icon) => codicon(icon),
                                     None if disabled => codicon(Codicon::LightBulb),
                                     None => codicon(Codicon::LightBulb)
@@ -1062,16 +1078,19 @@ impl CodeEditor {
         (!enclosed).then(|| selection.range())
     }
 
+    /// Monaco `LightBulbWidget.update`: no bulb without valid actions or
+    /// with `lightbulb: Off`, invoked requests included.
     fn update_lightbulb(&mut self, position: PointUtf16, items: Vec<Item>, cx: &mut Context<Self>) {
-        self.code_actions.lightbulb = if valid(&items).is_empty() {
-            None
-        } else {
-            Some(Lightbulb {
-                position,
-                auto_fix: has_auto_fix(&items),
-                items: std::rc::Rc::new(items),
-            })
-        };
+        self.code_actions.lightbulb =
+            if valid(&items).is_empty() || self.options.lightbulb == LightbulbMode::Off {
+                None
+            } else {
+                Some(Lightbulb {
+                    position,
+                    auto_fix: has_auto_fix(&items),
+                    items: std::rc::Rc::new(items),
+                })
+            };
         cx.notify();
     }
 
@@ -1268,8 +1287,15 @@ impl CodeEditor {
         );
     }
 
-    /// The lightbulb was clicked: its actions in the menu.
-    pub(crate) fn show_lightbulb_menu(&mut self, cx: &mut Context<Self>) {
+    /// The lightbulb was clicked at `click_x` (its middle when `None`):
+    /// its actions in the menu, at that x and a third of a line below the
+    /// bulb, a line further when the bulb is above the cursor's line, so
+    /// the menu covers neither (Monaco `LightBulbWidget`'s mouse down).
+    pub(crate) fn show_lightbulb_menu(
+        &mut self,
+        click_x: Option<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(lightbulb) = self.code_actions.lightbulb.clone() else {
             return;
         };
@@ -1282,18 +1308,58 @@ impl CodeEditor {
             items: lightbulb.items.to_vec(),
             documentation: Vec::new(),
         };
-        let anchor = PointUtf16::new(lightbulb.position.row, 0);
+        let position = PointUtf16::new(lightbulb.position.row, 0);
+        let anchor = match self.layout.as_ref().and_then(|layout| {
+            let (bulb, row) = layout.lightbulb?;
+            Some((bulb, row, layout.metrics.line_height))
+        }) {
+            Some((bulb, row, line_height)) => {
+                let mut pad = (line_height / 3.).floor();
+                if row < lightbulb.position.row {
+                    pad += line_height;
+                }
+                let x = click_x.unwrap_or(bulb.center().x);
+                // Below the bulb's bottom plus the pad, else above the bulb.
+                MenuAnchor::Window {
+                    bounds: gpui::Bounds::new(
+                        gpui::point(x, bulb.top()),
+                        gpui::size(px(0.), bulb.size.height + pad),
+                    ),
+                    position,
+                }
+            }
+            None => MenuAnchor::Text(position),
+        };
         let options = MenuOptions {
             include_disabled: false,
             from_lightbulb: true,
         };
-        self.show_code_action_list(std::rc::Rc::new(set), MenuAnchor::Text(anchor), options, cx);
+        self.show_code_action_list(std::rc::Rc::new(set), anchor, options, cx);
     }
 
-    /// Clicks the lightbulb, for tests.
+    /// Clicks the lightbulb (in its middle), for tests.
     #[doc(hidden)]
     pub fn show_lightbulb_menu_for_tests(&mut self, cx: &mut Context<Self>) {
-        self.show_lightbulb_menu(cx);
+        self.show_lightbulb_menu(None, cx);
+    }
+
+    /// Where the open code action menu is anchored in the window (`None`
+    /// when at a text position) and the lightbulb's bounds, for tests.
+    #[doc(hidden)]
+    pub fn code_action_menu_anchor_for_tests(
+        &self,
+    ) -> (
+        Option<gpui::Bounds<gpui::Pixels>>,
+        Option<gpui::Bounds<gpui::Pixels>>,
+    ) {
+        let anchor = self
+            .code_actions
+            .menu
+            .as_ref()
+            .and_then(|(id, _)| self.widgets.content.iter().find(|w| w.id == *id))
+            .and_then(|widget| widget.window_anchor);
+        let bulb = self.layout.as_ref().and_then(|layout| layout.lightbulb);
+        (anchor, bulb.map(|(bounds, _)| bounds))
     }
 
     /// Monaco `CodeActionController.showCodeActionList`: the valid actions
@@ -1308,6 +1374,16 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         self.hide_code_action_menu(cx);
+        // Monaco `toCoords`: a text position is revealed before the menu is
+        // anchored there, so it doesn't open (and take the keys) off screen.
+        if let MenuAnchor::Text(position) = at {
+            self.reveal_range_with_scroll_type(
+                position..position,
+                crate::RevealType::Simple,
+                crate::ScrollType::Immediate,
+                cx,
+            );
+        }
         let valid_count = valid(&set.items).len();
         let items: Vec<Item> =
             if options.include_disabled && (self.code_actions.show_disabled || valid_count == 0) {
@@ -1333,7 +1409,8 @@ impl CodeEditor {
                 });
             }
         }
-        let rows = menu_rows(&items);
+        let show_headers = self.options.code_action_widget.show_headers;
+        let rows = menu_rows(&items, show_headers);
         // The new menu takes the focus the old one gave back.
         self.refocus = false;
         let editor = cx.entity().downgrade();
@@ -1344,6 +1421,7 @@ impl CodeEditor {
                 editor,
                 items,
                 rows,
+                show_headers,
                 set,
                 at,
                 options,
@@ -1377,8 +1455,16 @@ impl CodeEditor {
         if let MenuAnchor::Window { bounds, .. } = at {
             self.widgets.set_window_anchor(id, bounds);
         }
-        menu.update(cx, |menu, _| menu.room = room);
+        // Monaco's list focuses its first action, which `onFocus` sees.
+        let focused = menu.update(cx, |menu, _| {
+            menu.room = room;
+            menu.focused.and_then(|row| match menu.rows[row] {
+                Row::Action(ix) => Some(menu.items[ix].action.clone()),
+                Row::Header(_) => None,
+            })
+        });
         self.code_actions.menu = Some((id, menu));
+        self.focus_code_action(focused.as_ref(), cx);
     }
 
     /// Whether the code action menu is open.
@@ -1386,7 +1472,8 @@ impl CodeEditor {
         self.code_actions.menu.is_some()
     }
 
-    /// The titles in the open code action menu, with group headers as
+    /// The rows of the open code action menu as shown: action titles (why
+    /// a disabled action is, without headers), with group headers as
     /// `"# Title"`.
     pub fn code_action_menu_rows(&self, cx: &gpui::App) -> Vec<String> {
         let Some((_, menu)) = &self.code_actions.menu else {
@@ -1397,7 +1484,7 @@ impl CodeEditor {
             .iter()
             .map(|row| match row {
                 Row::Header(title) => format!("# {title}"),
-                Row::Action(ix) => menu.items[*ix].action.title.to_string(),
+                Row::Action(ix) => menu.row_label(&menu.items[*ix].action),
             })
             .collect()
     }
@@ -1481,8 +1568,54 @@ impl CodeEditor {
         }
     }
 
-    /// Monaco's `quickfix-edit-highlight` on the focused action's
-    /// diagnostics.
+    /// Monaco `CodeActionController`'s `onFocus`: highlights the focused
+    /// action's `ranges` (its diagnostics instead when it fixes several),
+    /// else its diagnostics, and then says where the first one is
+    /// ("Context: {word} at line {line} and column {column}.").
+    fn focus_code_action(&mut self, action: Option<&CodeAction>, cx: &mut Context<Self>) {
+        let Some(action) = action else {
+            self.highlight_code_action(Vec::new(), cx);
+            return;
+        };
+        let diagnostics = || -> Vec<Range<PointUtf16>> {
+            action
+                .diagnostics
+                .iter()
+                .map(|marker| marker.range.clone())
+                .collect()
+        };
+        if !action.ranges.is_empty() {
+            // `fix all` with several diagnostics.
+            let ranges = if action.diagnostics.len() > 1 {
+                diagnostics()
+            } else {
+                action.ranges.clone()
+            };
+            self.highlight_code_action(ranges, cx);
+        } else if let Some(first) = action.diagnostics.first() {
+            self.highlight_code_action(diagnostics(), cx);
+            let start = first.range.start;
+            let word = self
+                .model()
+                .read(cx)
+                .word_at_position(start)
+                .map(|word| word.word)
+                .unwrap_or_default();
+            self.announce(
+                format!(
+                    "Context: {word} at line {} and column {}.",
+                    start.row + 1,
+                    start.column + 1
+                ),
+                cx,
+            );
+        } else {
+            self.highlight_code_action(Vec::new(), cx);
+        }
+    }
+
+    /// The code action highlight (Monaco's `quickfix-edit-highlight`) on
+    /// `ranges`.
     fn highlight_code_action(&mut self, ranges: Vec<Range<PointUtf16>>, cx: &mut Context<Self>) {
         if let Some(mut highlight) = self.code_actions.highlight.take() {
             highlight.clear(cx);
@@ -1697,6 +1830,10 @@ mod tests {
             action("fix", Some("quickfix"), false, true),
             action("best fix", Some("quickfix"), true, true),
             action("organize", Some("source.organizeImports"), false, false),
+            CodeAction {
+                is_ai: true,
+                ..action("ai fix", Some("quickfix"), true, true)
+            },
         ]
         .into_iter()
         .map(|action| Item {
@@ -1706,9 +1843,13 @@ mod tests {
         .collect();
         sort_items(&mut items);
         let titles: Vec<_> = items.iter().map(|i| i.action.title.to_string()).collect();
-        assert_eq!(titles, ["best fix", "fix", "plain", "extract", "organize"]);
+        // AI actions last, even preferred fixes (Monaco `isAI`).
+        assert_eq!(
+            titles,
+            ["best fix", "fix", "plain", "extract", "organize", "ai fix"]
+        );
         assert!(has_auto_fix(&items));
-        let rows: Vec<String> = menu_rows(&items)
+        let rows: Vec<String> = menu_rows(&items, true)
             .iter()
             .map(|row| match row {
                 Row::Header(title) => format!("# {title}"),
@@ -1721,6 +1862,7 @@ mod tests {
                 "# Quick Fix",
                 "best fix",
                 "fix",
+                "ai fix",
                 "# Extract",
                 "extract",
                 "# Source Action",
@@ -1729,6 +1871,15 @@ mod tests {
                 "plain"
             ]
         );
+        // Without headers, in order (Monaco `showHeaders: false`).
+        let rows: Vec<String> = menu_rows(&items, false)
+            .iter()
+            .map(|row| match row {
+                Row::Header(title) => format!("# {title}"),
+                Row::Action(ix) => items[*ix].action.title.to_string(),
+            })
+            .collect();
+        assert_eq!(rows, titles);
     }
 
     #[test]
@@ -1892,5 +2043,27 @@ mod tests {
         assert_eq!(place(0, false), Some(LightbulbPlacement::Gutter(0)));
         assert_eq!(place(1, false), Some(LightbulbPlacement::Gutter(1)));
         assert_eq!(place(1, true), Some(LightbulbPlacement::Content(1, 0)));
+        // The last line too (Monaco's `endLine` has no next line to
+        // block); with a glyph there, the line above.
+        assert_eq!(place(2, false), Some(LightbulbPlacement::Gutter(2)));
+        assert_eq!(place(2, true), Some(LightbulbPlacement::Content(1, 0)));
+
+        // Nowhere above or below: inline unless over the cursor, with
+        // Monaco's 1-based column (3 * 7px < 22px, 4 * 7px isn't).
+        let text = ["x", "  y"];
+        let lines = |row: u32| text[row as usize].to_string();
+        let place = |column| {
+            place_lightbulb(
+                PointUtf16::new(0, column),
+                2,
+                &lines,
+                &|row| row == 1,
+                4,
+                7.,
+                false,
+            )
+        };
+        assert_eq!(place(2), None);
+        assert_eq!(place(3), Some(LightbulbPlacement::Content(0, 1)));
     }
 }

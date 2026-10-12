@@ -101,7 +101,8 @@ editor.update(cx, |editor, cx| {
 | `unfold_on_click_after_end_of_line` | `unfoldOnClickAfterEndOfLine` | unfold when clicking after a collapsed line (off) |
 | `folding_imports_by_default` | `foldingImportsByDefault` | collapse import ranges at first (off) |
 | `smart_select` | `smartSelect` | expand selection over leading/trailing whitespace lines and word parts (both on) |
-| `lightbulb` | `lightbulb.enabled` | when the code action lightbulb asks for actions: `Off`, `OnCode` (default) or `On` |
+| `lightbulb` | `lightbulb.enabled` | when the code action lightbulb asks for actions: `Off` (never shown), `OnCode` (default) or `On` |
+| `code_action_widget` | `editor.codeActionWidget.*` | `show_headers`: group the code action menu under headers (on) |
 | `goto_location` | `gotoLocation` | what go to definition, references and the other navigation commands do with several results, and their alternative commands. `multiple_tests` and `alternative_tests_command` are for a host's go to test commands. Monaco's deprecated `multiple` is `GotoLocationOptions::with_multiple`, which sets every `multiple_*` |
 | `peek_widget_default_focus` | `peekWidgetDefaultFocus` | what a new peek view focuses: `Tree` (the results list, default) or `Editor` (the preview) |
 | `definition_link_opens_in_peek` | `definitionLinkOpensInPeek` | Cmd/Ctrl+click on a symbol shows its definitions in a peek view (off) |

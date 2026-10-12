@@ -751,3 +751,33 @@ fn scrolling_the_box_out_of_view_cancels(cx: &mut TestAppContext) {
     draw(cx);
     assert!(!editor.read_with(cx, |e, _| e.is_rename_visible()));
 }
+
+/// Monaco `RenameWidget._show` reveals the symbol's line first: F2 on a
+/// symbol scrolled out of view scrolls back to it and shows the box,
+/// rather than cancelling it as out of view.
+#[gpui::test]
+fn f2_off_screen_reveals_the_symbol(cx: &mut TestAppContext) {
+    let (editor, _lib, cx) = setup(vec![words(Words::default())], cx);
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| {
+            m.set_value(&format!("fn foo() {{}}\n{}", "\n".repeat(300)), cx)
+        });
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx);
+        e.set_scroll_position(gpui::point(gpui::px(0.), gpui::px(3000.)), cx)
+    });
+    draw(cx);
+    assert!(editor.read_with(cx, |e, cx| e.visible_ranges(cx)[0].start.row > 0));
+    cx.simulate_keystrokes("f2");
+    draw(cx);
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_rename_visible()));
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.visible_ranges(cx)[0].start.row),
+        0
+    );
+    // Typing goes to the box.
+    cx.simulate_input("bar");
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert!(text(&editor, cx).starts_with("fn bar() {}"));
+}

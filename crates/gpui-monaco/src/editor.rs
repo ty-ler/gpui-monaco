@@ -5026,9 +5026,9 @@ impl CodeEditor {
         if event.button == MouseButton::Left
             && layout
                 .lightbulb
-                .is_some_and(|bulb| bulb.contains(&event.position))
+                .is_some_and(|(bulb, _)| bulb.contains(&event.position))
         {
-            self.show_lightbulb_menu(cx);
+            self.show_lightbulb_menu(Some(event.position.x), cx);
             return;
         }
         if let Some(minimap) = layout.minimap

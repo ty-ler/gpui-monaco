@@ -4,7 +4,8 @@
 //! separated keystrokes in GPUI syntax (`cmd-down shift-up`), where a token
 //! `text:abc` types `abc` character by character (`_` types a space),
 //! `wheel:x,y,dy` moves the mouse to `x, y` (window pixels) and turns the
-//! wheel by `dy` pixels there, and `wait` pauses 150ms and draws a frame.
+//! wheel by `dy` pixels there, `click:x,y` clicks there with the left
+//! button, and `wait` pauses 150ms and draws a frame.
 
 use gpui::{AnyWindowHandle, App};
 
@@ -32,6 +33,46 @@ pub fn capture_if_requested(window: AnyWindowHandle, cx: &mut App) {
                 cx.update_window(window, |_, window, cx| {
                     window.refresh();
                     window.draw(cx).clear(cx);
+                })
+                .ok();
+                continue;
+            }
+            if let Some(args) = token.strip_prefix("click:") {
+                let [x, y]: [f32; 2] = args
+                    .split(',')
+                    .map(|n| n.parse().expect("invalid click number"))
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .expect("click:x,y");
+                let position = gpui::point(gpui::px(x), gpui::px(y));
+                cx.update_window(window, |_, window, cx| {
+                    window.dispatch_event(
+                        gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                            position,
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                    window.dispatch_event(
+                        gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                            button: gpui::MouseButton::Left,
+                            position,
+                            click_count: 1,
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                    window.dispatch_event(
+                        gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                            button: gpui::MouseButton::Left,
+                            position,
+                            click_count: 1,
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
                 })
                 .ok();
                 continue;

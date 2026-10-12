@@ -2151,9 +2151,14 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             ]);
         }
     }
-    // The code action menu.
+    // The code action menu. Monaco's secondary keys (Cmd/Ctrl+. accepts,
+    // Cmd/Ctrl+Up/Down move) come first, so the row titles name the
+    // primary ones.
     let menu = Some(crate::code_action::CODE_ACTION_MENU_KEY_CONTEXT);
     bindings.extend([
+        KeyBinding::new("secondary-down", CodeActionMenuNext, menu),
+        KeyBinding::new("secondary-up", CodeActionMenuPrevious, menu),
+        KeyBinding::new("secondary-.", CodeActionMenuAccept, menu),
         KeyBinding::new("down", CodeActionMenuNext, menu),
         KeyBinding::new("up", CodeActionMenuPrevious, menu),
         KeyBinding::new("enter", CodeActionMenuAccept, menu),

@@ -748,3 +748,361 @@ fn a_preferred_fix_names_the_auto_fix_keys(cx: &mut TestAppContext) {
         ))
     );
 }
+
+fn set_text(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, value: &str) {
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| m.set_value(value, cx));
+    });
+}
+
+fn primary(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("cmd-{key}")
+    } else {
+        format!("ctrl-{key}")
+    }
+}
+
+/// Monaco `toCoords` reveals the position before anchoring the menu: Cmd+.
+/// with the cursor scrolled out of view scrolls back to it, and the menu
+/// shows rather than taking the keys unseen.
+#[gpui::test]
+fn the_menu_reveals_an_off_screen_cursor(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: vec![CodeAction {
+            edit: Some(replace(p(0, 4)..p(0, 5), "z")),
+            ..action("Rename to z", "quickfix")
+        }],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    set_text(&editor, cx, &format!("let x = 1;{}", "\n".repeat(300)));
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx);
+        e.set_scroll_position(gpui::point(gpui::px(0.), gpui::px(3000.)), cx)
+    });
+    draw(cx);
+    assert!(editor.read_with(cx, |e, cx| e.visible_ranges(cx)[0].start.row > 0));
+    cx.simulate_keystrokes(&primary("."));
+    draw(cx);
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_code_action_menu_visible()));
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.visible_ranges(cx)[0].start.row),
+        0
+    );
+    // Laid out and rendered.
+    let (size, _, _) = menu_layout(&editor, cx);
+    assert!(size.width > gpui::px(0.), "{size:?}");
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert!(text(&editor, cx).starts_with("let z = 1;"));
+}
+
+/// The lightbulb's bounds and the window position of `row`'s start.
+fn bulb_and_line(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+    row: u32,
+) -> (gpui::Bounds<gpui::Pixels>, gpui::Point<gpui::Pixels>) {
+    editor.read_with(cx, |e, _| {
+        (
+            e.code_action_menu_anchor_for_tests()
+                .1
+                .expect("no lightbulb"),
+            e.scrolled_visible_position(p(row, 0)).unwrap(),
+        )
+    })
+}
+
+/// Monaco `LightBulbWidget.update`: on the last line, after code, the bulb
+/// goes in the gutter, not over the line above.
+#[gpui::test]
+fn the_lightbulb_on_the_last_line_goes_in_the_gutter(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: vec![action("Fix", "quickfix")],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    set_text(&editor, cx, "let a = 1;\nlet b = 2;");
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 4))], cx)
+    });
+    wait(cx);
+    let (bulb, line) = bulb_and_line(&editor, cx, 1);
+    assert!(bulb.right() <= line.x, "{bulb:?} over the text at {line:?}");
+    assert!(bulb.top() >= line.y, "{bulb:?} above line 2 at {line:?}");
+}
+
+/// Monaco `LightBulbWidget.update` hides the bulb with `lightbulb: Off`,
+/// even after Cmd+. asked for actions.
+#[gpui::test]
+fn lightbulb_off_shows_no_bulb_after_quick_fix(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: vec![action("Fix", "quickfix")],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(
+            |o| o.lightbulb = gpui_monaco::options::LightbulbMode::Off,
+            cx,
+        );
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    cx.simulate_keystrokes(&primary("."));
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_code_action_menu_visible()));
+    cx.simulate_keystrokes("escape");
+    wait(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_lightbulb_visible()));
+    assert!(
+        editor
+            .read_with(cx, |e, _| e.code_action_menu_anchor_for_tests().1)
+            .is_none()
+    );
+}
+
+/// The ranges of the code action highlight (`background` decorations).
+fn highlights(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<Range<PointUtf16>> {
+    editor.update(cx, |e, cx| {
+        let mut ranges: Vec<_> = e
+            .decorations_in_range(p(0, 0)..p(10, 0), cx)
+            .into_iter()
+            .filter(|d| d.options.background.is_some())
+            .map(|d| d.range)
+            .collect();
+        ranges.sort_by_key(|r| r.start);
+        ranges
+    })
+}
+
+/// Monaco's `onFocus`: the focused action's `ranges`, its diagnostics when
+/// it fixes several, else its diagnostics with a "Context: …"
+/// announcement.
+#[gpui::test]
+fn focusing_an_action_highlights_its_ranges(cx: &mut TestAppContext) {
+    let marker = |range: Range<PointUtf16>| Marker {
+        severity: MarkerSeverity::Warning,
+        message: "unused".into(),
+        range,
+        ..Default::default()
+    };
+    let provider = Actions {
+        actions: vec![
+            CodeAction {
+                diagnostics: vec![marker(p(0, 4)..p(0, 5))],
+                ..action("Fix x", "quickfix")
+            },
+            CodeAction {
+                diagnostics: vec![marker(p(0, 4)..p(0, 5)), marker(p(1, 4)..p(1, 5))],
+                ranges: vec![p(0, 0)..p(1, 10)],
+                ..action("Fix all", "quickfix")
+            },
+            CodeAction {
+                ranges: vec![p(1, 8)..p(1, 9)],
+                ..action("Change 2", "quickfix")
+            },
+        ],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    editor.update(cx, |e, cx| e.quick_fix(cx));
+    draw(cx);
+    // The first action is focused as the menu opens.
+    assert_eq!(highlights(&editor, cx), [p(0, 4)..p(0, 5)]);
+    assert_eq!(
+        editor
+            .read_with(cx, |e, _| e.last_announcement_for_tests())
+            .as_deref(),
+        Some("Context: x at line 1 and column 5.")
+    );
+    cx.simulate_keystrokes("down");
+    draw(cx);
+    assert_eq!(
+        highlights(&editor, cx),
+        [p(0, 4)..p(0, 5), p(1, 4)..p(1, 5)]
+    );
+    cx.simulate_keystrokes("down");
+    draw(cx);
+    assert_eq!(highlights(&editor, cx), [p(1, 8)..p(1, 9)]);
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    assert!(highlights(&editor, cx).is_empty());
+}
+
+/// Monaco's comparator puts AI actions after the others, so `apply: first`
+/// doesn't pick one listed first by its provider.
+#[gpui::test]
+fn ai_actions_come_last(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: vec![
+            CodeAction {
+                is_ai: true,
+                edit: Some(replace(p(0, 4)..p(0, 5), "ai")),
+                ..action("Ask AI", "quickfix")
+            },
+            CodeAction {
+                edit: Some(replace(p(0, 4)..p(0, 5), "z")),
+                ..action("Rename to z", "quickfix")
+            },
+        ],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    editor.update(cx, |e, cx| e.quick_fix(cx));
+    draw(cx);
+    assert_eq!(rows(&editor, cx), ["# Quick Fix", "Rename to z", "Ask AI"]);
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    code_action(
+        &editor,
+        cx,
+        serde_json::json!({ "kind": "quickfix", "apply": "first" }),
+    );
+    draw(cx);
+    assert_eq!(text(&editor, cx), "let z = 1;\nlet y = 2;\n");
+}
+
+/// `editor.codeActionWidget.showHeaders: false` (Monaco `toMenuItems`):
+/// no headers, the actions in order, without keybindings, and a disabled
+/// action shows why.
+#[gpui::test]
+fn show_headers_off_lists_actions_without_groups(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: vec![
+            action("Extract", "refactor.extract"),
+            action("Organize imports", "source.organizeImports"),
+            CodeAction {
+                disabled: Some("Select a variable".into()),
+                ..action("Inline variable", "refactor.inline")
+            },
+            action("Fix", "quickfix"),
+        ],
+        kinds: Some(vec![
+            "refactor".into(),
+            "source.organizeImports".into(),
+            "quickfix".into(),
+        ]),
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.code_action_widget.show_headers = false, cx);
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    editor.update(cx, |e, cx| e.quick_fix(cx));
+    draw(cx);
+    assert_eq!(rows(&editor, cx), ["Extract", "Fix"]);
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    // Source actions: no Organize Imports keys.
+    editor.update(cx, |e, cx| e.source_action(cx));
+    draw(cx);
+    assert_eq!(rows(&editor, cx), ["Organize imports"]);
+    assert_eq!(menu_layout(&editor, cx).2, [None]);
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    // Disabled ones by their reason.
+    editor.update(cx, |e, cx| e.refactor(cx));
+    draw(cx);
+    click_bar(&editor, cx, "Show Disabled");
+    assert_eq!(rows(&editor, cx), ["Extract", "Select a variable"]);
+}
+
+/// Monaco's action list secondary keys: Cmd/Ctrl+Up/Down move, and
+/// Cmd/Ctrl+. accepts, so Cmd+. twice applies the first fix.
+#[gpui::test]
+fn the_menu_takes_its_secondary_keys(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: vec![
+            CodeAction {
+                edit: Some(replace(p(0, 4)..p(0, 5), "a")),
+                ..action("Rename to a", "quickfix")
+            },
+            CodeAction {
+                edit: Some(replace(p(0, 4)..p(0, 5), "b")),
+                ..action("Rename to b", "quickfix")
+            },
+        ],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    cx.simulate_keystrokes(&primary("."));
+    draw(cx);
+    cx.simulate_keystrokes(&format!(
+        "{} {} {}",
+        primary("down"),
+        primary("up"),
+        primary(".")
+    ));
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_code_action_menu_visible()));
+    assert_eq!(text(&editor, cx), "let a = 1;\nlet y = 2;\n");
+    cx.simulate_keystrokes(&primary("."));
+    draw(cx);
+    cx.simulate_keystrokes(&format!("{} {}", primary("down"), primary(".")));
+    draw(cx);
+    assert_eq!(text(&editor, cx), "let b = 1;\nlet y = 2;\n");
+}
+
+/// Monaco `LightBulbWidget`'s click: the menu at the click's x, a third of
+/// a line below the bulb, and a line further when the bulb is on the line
+/// above the cursor's, so it covers neither.
+#[gpui::test]
+fn the_menu_from_the_lightbulb_goes_below_it(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: vec![action("Fix", "quickfix")],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    let line_height = editor.read_with(cx, |e, _| e.options().resolved_line_height());
+    let pad = (line_height / 3.).floor();
+
+    // Below the cursor's line (the next line is empty).
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 4))], cx)
+    });
+    wait(cx);
+    let (bulb, line) = bulb_and_line(&editor, cx, 2);
+    assert!(bulb.top() >= line.y, "{bulb:?} not on line 3");
+    let at = bulb.center() + gpui::point(gpui::px(3.), gpui::px(0.));
+    cx.simulate_click(at, gpui::Modifiers::none());
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_code_action_menu_visible()));
+    let anchor = editor
+        .read_with(cx, |e, _| e.code_action_menu_anchor_for_tests().0)
+        .unwrap();
+    assert_eq!(anchor.origin.x, at.x);
+    assert_eq!(anchor.bottom(), bulb.bottom() + pad);
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+
+    // Above the cursor's line (the line above is indented).
+    set_text(&editor, cx, "    a\nlet b = 2;\nlet c = 3;");
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 4))], cx)
+    });
+    wait(cx);
+    let (bulb, line) = bulb_and_line(&editor, cx, 0);
+    assert!(
+        bulb.bottom() <= line.y + line_height,
+        "{bulb:?} not on line 1"
+    );
+    editor.update(cx, |e, cx| e.show_lightbulb_menu_for_tests(cx));
+    draw(cx);
+    let anchor = editor
+        .read_with(cx, |e, _| e.code_action_menu_anchor_for_tests().0)
+        .unwrap();
+    assert_eq!(anchor.origin.x, bulb.center().x);
+    assert_eq!(anchor.bottom(), bulb.bottom() + pad + line_height);
+}
