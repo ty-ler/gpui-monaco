@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use web_time::Instant;
 
-use gpui::{Bounds, Pixels, Point, point, px, size};
+use gpui::{Bounds, Pixels, Point, Size, point, px, size};
 
 use crate::options::{CursorBlinking, MinimapAutohide};
 
@@ -19,6 +19,9 @@ pub const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 pub const BLINK_ANIMATION_END: Duration = Duration::from_millis(500 + 20 * 500);
 /// Monaco's smooth scroll duration (`smoothScrollDuration`).
 pub const SMOOTH_SCROLL_DURATION: Duration = Duration::from_millis(125);
+/// How often a smooth scroll ticks between frames (Monaco ticks on each
+/// animation frame).
+pub const SMOOTH_SCROLL_FRAME: Duration = Duration::from_micros(16_667);
 /// Monaco's `.cursor-smooth-caret-animation` transition.
 pub const CARET_DURATION: Duration = Duration::from_millis(80);
 /// How often an inertial scroll moves (Monaco's `1000 / 60` ms timeout).
@@ -144,6 +147,84 @@ struct Transition<T> {
     start: Instant,
 }
 
+/// How far into the animation Monaco's composed long scroll switches from
+/// easing out of the start to easing into the end (`createComposed`'s
+/// `cut`).
+const COMPOSED_CUT: f32 = 0.33;
+
+/// Monaco `SmoothScrollingOperation._initAnimation` at `completion`
+/// (0..1): `easeOutCubic` from `from` to `to`, or, past 2.5 viewports,
+/// easing through the first and last 0.75 viewport and skipping the
+/// middle (`createComposed`).
+pub(crate) fn smooth_scroll_value(
+    from: Pixels,
+    to: Pixels,
+    viewport: Pixels,
+    completion: f32,
+) -> Pixels {
+    // Without a layout yet there's no viewport to compose around.
+    if viewport > px(0.) && (from - to).abs() > viewport * 2.5 {
+        let (stop1, stop2) = if from < to {
+            (from + viewport * 0.75, to - viewport * 0.75)
+        } else {
+            (from - viewport * 0.75, to + viewport * 0.75)
+        };
+        if completion < COMPOSED_CUT {
+            return lerp(from, stop1, ease_out_cubic(completion / COMPOSED_CUT));
+        }
+        return lerp(
+            stop2,
+            to,
+            ease_out_cubic((completion - COMPOSED_CUT) / (1. - COMPOSED_CUT)),
+        );
+    }
+    lerp(from, to, ease_out_cubic(completion))
+}
+
+/// One axis of Monaco's `SmoothScrollingOperation`, timed by the
+/// executor's clock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SmoothScroll {
+    pub from: Pixels,
+    pub to: Pixels,
+    start: Instant,
+    duration: Duration,
+    /// The viewport's size along the axis (Monaco's `to.width` or
+    /// `to.height`), for the composed animation.
+    viewport: Pixels,
+    /// Where the last tick put the scroll (Monaco `Scrollable._state`).
+    pub current: Pixels,
+}
+
+impl SmoothScroll {
+    /// Monaco `SmoothScrollingOperation.start`: it pretends to have
+    /// started 10ms ago, for a quicker response.
+    pub fn start(from: Pixels, to: Pixels, viewport: Pixels, now: Instant) -> Self {
+        const HEAD_START: Duration = Duration::from_millis(10);
+        Self {
+            from,
+            to,
+            start: now.checked_sub(HEAD_START).unwrap_or(now),
+            duration: SMOOTH_SCROLL_DURATION + HEAD_START,
+            viewport,
+            current: from,
+        }
+    }
+
+    /// Monaco `SmoothScrollingOperation._tick`: the position at `now`, and
+    /// whether the animation is done.
+    pub fn at(&self, now: Instant) -> (Pixels, bool) {
+        let elapsed = now.saturating_duration_since(self.start);
+        let completion = elapsed.as_secs_f32() / self.duration.as_secs_f32();
+        if completion < 1. {
+            let value = smooth_scroll_value(self.from, self.to, self.viewport, completion);
+            (value, false)
+        } else {
+            (self.to, true)
+        }
+    }
+}
+
 /// The editor's animation state.
 #[derive(Debug)]
 pub(crate) struct ViewAnimation {
@@ -154,14 +235,12 @@ pub(crate) struct ViewAnimation {
     pub smooth_scroll_requested: bool,
     /// The smooth scroll on each axis (Monaco's `SmoothScrollingOperation`
     /// animates `scrollLeft` and `scrollTop` side by side).
-    scroll_x: Option<Transition<Pixels>>,
-    scroll_y: Option<Transition<Pixels>>,
+    scroll_x: Option<SmoothScroll>,
+    scroll_y: Option<SmoothScroll>,
     /// This frame's scroll change animates: taken from
     /// `smooth_scroll_requested` when the frame settles the vertical
     /// position, for the horizontal one it settles after laying out lines.
     frame_smooth: bool,
-    /// The scroll position last shown.
-    shown_scroll: Option<Point<Pixels>>,
     /// Each cursor's smooth caret move, primary first.
     carets: Vec<Caret>,
     /// The next caret move jumps (Monaco pauses the transition when the
@@ -192,7 +271,6 @@ impl Default for ViewAnimation {
             scroll_x: None,
             scroll_y: None,
             frame_smooth: false,
-            shown_scroll: None,
             carets: Vec::new(),
             caret_jump: false,
             cursor_count: 1,
@@ -211,42 +289,56 @@ fn lerp(a: Pixels, b: Pixels, t: f32) -> Pixels {
     a + (b - a) * t
 }
 
-/// Where a smooth scroll on one axis is at `now`.
-fn current_scroll(scroll: Option<Transition<Pixels>>, now: Instant) -> Option<Pixels> {
-    let s = scroll?;
-    let t = ease_out_cubic((now - s.start).as_secs_f32() / SMOOTH_SCROLL_DURATION.as_secs_f32());
-    Some(lerp(s.from, s.to, t))
-}
-
-/// One axis of the scroll position to show for `target`, after `shown`:
-/// animating there when smooth scrolling is on and was `requested`, or
-/// following a target that moved while animating; `true` while animating.
-fn scroll_axis(
-    scroll: &mut Option<Transition<Pixels>>,
-    shown: Option<Pixels>,
-    target: Pixels,
-    smooth: bool,
-    requested: bool,
-) -> (Pixels, bool) {
-    let now = Instant::now();
-    let current = current_scroll(*scroll, now).or(shown);
-    if scroll.is_none_or(|s| s.to != target) {
-        // Continue towards a moved target only for smooth changes.
-        *scroll = match current {
-            Some(from) if smooth && (requested || scroll.is_some()) && from != target => {
-                Some(Transition {
-                    from,
-                    to: target,
-                    start: now,
-                })
-            }
-            _ => None,
-        };
-    }
-    let shown = current_scroll(*scroll, now).unwrap_or(target);
-    if scroll.is_some_and(|s| now - s.start >= SMOOTH_SCROLL_DURATION) {
+/// Moves a smooth scroll on one axis to `now` (Monaco
+/// `_performSmoothScrolling`), ending it when it's done; where it is now,
+/// if one was running.
+fn tick_axis(scroll: &mut Option<SmoothScroll>, now: Instant) -> Option<Pixels> {
+    let s = scroll.as_mut()?;
+    let (value, done) = s.at(now);
+    s.current = value;
+    if done {
         *scroll = None;
     }
+    Some(value)
+}
+
+/// Monaco `Scrollable.setScrollPositionSmooth` on one axis: from `current`
+/// towards `target` when smooth scrolling is on and was `requested`, or
+/// following a target that moved while animating (Monaco's `combine`
+/// starts over from where the scroll is). An animation already going to
+/// `target` carries on.
+fn retarget_axis(
+    scroll: &mut Option<SmoothScroll>,
+    current: Pixels,
+    target: Pixels,
+    viewport: Pixels,
+    (smooth, requested): (bool, bool),
+    now: Instant,
+) {
+    if scroll.is_some_and(|s| s.to == target) {
+        return;
+    }
+    *scroll = if smooth && (requested || scroll.is_some()) && current != target {
+        Some(SmoothScroll::start(current, target, viewport, now))
+    } else {
+        None
+    };
+}
+
+/// One axis of the scroll position to show at `now` for `target`, from
+/// `from` when no animation is running: animating there when smooth
+/// scrolling is on and was `requested`; `true` while animating.
+fn scroll_axis(
+    scroll: &mut Option<SmoothScroll>,
+    from: Pixels,
+    target: Pixels,
+    viewport: Pixels,
+    flags: (bool, bool),
+    now: Instant,
+) -> (Pixels, bool) {
+    let current = tick_axis(scroll, now).unwrap_or(from);
+    retarget_axis(scroll, current, target, viewport, flags, now);
+    let shown = tick_axis(scroll, now).unwrap_or(target);
     (shown, scroll.is_some())
 }
 
@@ -257,49 +349,84 @@ impl ViewAnimation {
         self.scroll_y = None;
     }
 
-    /// Where a running smooth scroll is now, if one is running.
-    pub fn animated_scroll_position(&self) -> Option<Point<Pixels>> {
-        let now = Instant::now();
-        let (x, y) = (
-            current_scroll(self.scroll_x, now),
-            current_scroll(self.scroll_y, now),
-        );
-        if x.is_none() && y.is_none() {
-            return None;
-        }
-        let shown = self.shown_scroll.unwrap_or_default();
-        Some(point(x.unwrap_or(shown.x), y.unwrap_or(shown.y)))
+    /// The scroll position now (Monaco `getCurrentScrollPosition`): where
+    /// the last tick of a running smooth scroll put it, else `future`.
+    pub fn current_scroll(&self, future: Point<Pixels>) -> Point<Pixels> {
+        point(
+            self.scroll_x.map_or(future.x, |s| s.current),
+            self.scroll_y.map_or(future.y, |s| s.current),
+        )
     }
 
     /// A smooth scroll is running or about to start (Monaco
     /// `hasPendingScrollAnimation`).
     pub fn is_scrolling(&self) -> bool {
-        self.scroll_x.is_some() || self.scroll_y.is_some() || self.smooth_scroll_requested
+        self.is_animating_scroll() || self.smooth_scroll_requested
     }
 
-    /// The scroll top to show for `target`, animating there when smooth
-    /// scrolling was requested; `true` while animating. Call it before
-    /// [`Self::scroll_left_position`] in a frame.
-    pub fn scroll_top_position(&mut self, target: Pixels, smooth: bool) -> (Pixels, bool) {
+    /// A smooth scroll is running.
+    pub fn is_animating_scroll(&self) -> bool {
+        self.scroll_x.is_some() || self.scroll_y.is_some()
+    }
+
+    /// Moves a running smooth scroll to `now`; whether it's still running.
+    pub fn tick_scroll(&mut self, now: Instant) -> bool {
+        tick_axis(&mut self.scroll_x, now);
+        tick_axis(&mut self.scroll_y, now);
+        self.is_animating_scroll()
+    }
+
+    /// Monaco `Scrollable.setScrollPositionSmooth`: animates from
+    /// `current` (where the scroll is when nothing animates) to `target`
+    /// when `smooth` (the `smoothScrolling` option), else stops animating.
+    /// `viewport` is the editor's size, for the composed animation of long
+    /// scrolls.
+    pub fn scroll_to(
+        &mut self,
+        current: Point<Pixels>,
+        target: Point<Pixels>,
+        viewport: Size<Pixels>,
+        smooth: bool,
+        now: Instant,
+    ) {
+        let x = tick_axis(&mut self.scroll_x, now).unwrap_or(current.x);
+        let y = tick_axis(&mut self.scroll_y, now).unwrap_or(current.y);
+        let flags = (smooth, true);
+        retarget_axis(&mut self.scroll_x, x, target.x, viewport.width, flags, now);
+        retarget_axis(&mut self.scroll_y, y, target.y, viewport.height, flags, now);
+    }
+
+    /// The scroll top to show at `now` for `target`, animating there from
+    /// `from` (where the scroll was before the frame moved it) when smooth
+    /// scrolling was requested; `true` while animating. `viewport` is the
+    /// editor's height. Call it before [`Self::scroll_left_position`] in a
+    /// frame.
+    pub fn scroll_top_position(
+        &mut self,
+        from: Pixels,
+        target: Pixels,
+        viewport: Pixels,
+        smooth: bool,
+        now: Instant,
+    ) -> (Pixels, bool) {
         self.frame_smooth = std::mem::take(&mut self.smooth_scroll_requested);
-        let shown = self.shown_scroll.map(|shown| shown.y);
-        let (y, animating) =
-            scroll_axis(&mut self.scroll_y, shown, target, smooth, self.frame_smooth);
-        let x = self.shown_scroll.map_or(px(0.), |shown| shown.x);
-        self.shown_scroll = Some(point(x, y));
-        (y, animating)
+        let flags = (smooth, self.frame_smooth);
+        scroll_axis(&mut self.scroll_y, from, target, viewport, flags, now)
     }
 
-    /// The scroll left to show for `target`, animating there with the
-    /// frame's vertical scroll (Monaco animates both axes); `true` while
-    /// animating.
-    pub fn scroll_left_position(&mut self, target: Pixels, smooth: bool) -> (Pixels, bool) {
-        let requested = std::mem::take(&mut self.frame_smooth);
-        let shown = self.shown_scroll.map(|shown| shown.x);
-        let (x, animating) = scroll_axis(&mut self.scroll_x, shown, target, smooth, requested);
-        let y = self.shown_scroll.map_or(px(0.), |shown| shown.y);
-        self.shown_scroll = Some(point(x, y));
-        (x, animating)
+    /// The scroll left to show at `now` for `target`, animating there with
+    /// the frame's vertical scroll (Monaco animates both axes); `true`
+    /// while animating. `viewport` is the text area's width.
+    pub fn scroll_left_position(
+        &mut self,
+        from: Pixels,
+        target: Pixels,
+        viewport: Pixels,
+        smooth: bool,
+        now: Instant,
+    ) -> (Pixels, bool) {
+        let flags = (smooth, std::mem::take(&mut self.frame_smooth));
+        scroll_axis(&mut self.scroll_x, from, target, viewport, flags, now)
     }
 
     /// The bounds to show for each cursor's `targets` (content
@@ -693,26 +820,126 @@ impl InertialScroll {
 mod tests {
     use super::*;
 
+    fn ms(t: Instant, ms: u64) -> Instant {
+        t + Duration::from_millis(ms)
+    }
+
     #[test]
     fn one_smooth_request_animates_both_axes() {
         let mut animation = ViewAnimation::default();
-        animation.scroll_top_position(px(0.), true);
-        animation.scroll_left_position(px(0.), true);
+        let now = Instant::now();
+        let view = px(500.);
+        animation.scroll_top_position(px(0.), px(0.), view, true, now);
+        animation.scroll_left_position(px(0.), px(0.), view, true, now);
         animation.smooth_scroll_requested = true;
-        let (top, top_animating) = animation.scroll_top_position(px(100.), true);
-        let (left, left_animating) = animation.scroll_left_position(px(50.), true);
+        let (top, top_animating) = animation.scroll_top_position(px(0.), px(100.), view, true, now);
+        let (left, left_animating) =
+            animation.scroll_left_position(px(0.), px(50.), view, true, now);
         assert!(top_animating && left_animating);
-        assert!(top < px(100.) && left < px(50.));
-        // Without a request the next change jumps.
-        animation.cancel_scroll();
+        assert!(top > px(0.) && top < px(100.) && left > px(0.) && left < px(50.));
+        // The current position is where the frame put it; done after the
+        // duration.
         assert_eq!(
-            animation.scroll_top_position(px(10.), true),
+            animation.current_scroll(point(px(50.), px(100.))),
+            point(left, top)
+        );
+        assert!(!animation.tick_scroll(ms(now, 125)));
+        assert_eq!(
+            animation.current_scroll(point(px(50.), px(100.))),
+            point(px(50.), px(100.))
+        );
+        // Without a request the next change jumps.
+        assert_eq!(
+            animation.scroll_top_position(px(100.), px(10.), view, true, now),
             (px(10.), false)
         );
         assert_eq!(
-            animation.scroll_left_position(px(20.), true),
+            animation.scroll_left_position(px(50.), px(20.), view, true, now),
             (px(20.), false)
         );
+    }
+
+    /// Monaco `SmoothScrollingOperation.start`: 10ms early, over the
+    /// duration plus 10ms, with `easeOutCubic`.
+    #[test]
+    fn smooth_scroll_starts_early() {
+        let now = Instant::now();
+        let scroll = SmoothScroll::start(px(0.), px(1000.), px(500.), now);
+        let (value, done) = scroll.at(now);
+        let expected = 1000. * ease_out_cubic(10. / 135.);
+        assert!((f32::from(value) - expected).abs() < 0.01);
+        assert!(!done);
+        assert!(!scroll.at(ms(now, 124)).1);
+        assert_eq!(scroll.at(ms(now, 125)), (px(1000.), true));
+    }
+
+    /// Monaco `_initAnimation`: up to 2.5 viewports, one `easeOutCubic`;
+    /// further, `createComposed` eases to 0.75 viewport past the start in
+    /// the first third, then from 0.75 viewport before the end.
+    #[test]
+    fn long_smooth_scrolls_compose() {
+        let view = px(100.);
+        // Short: plain easing.
+        assert_eq!(
+            smooth_scroll_value(px(0.), px(250.), view, 0.5),
+            px(250. * ease_out_cubic(0.5))
+        );
+        // Long, downwards.
+        let (from, to) = (px(0.), px(1000.));
+        assert_eq!(smooth_scroll_value(from, to, view, 0.), px(0.));
+        let first = smooth_scroll_value(from, to, view, 0.33 / 2.);
+        assert_eq!(first, px(75. * ease_out_cubic(0.5)));
+        assert!(smooth_scroll_value(from, to, view, 0.3) < px(75.));
+        // The middle is skipped.
+        assert_eq!(smooth_scroll_value(from, to, view, 0.33), px(925.));
+        let second = smooth_scroll_value(from, to, view, 0.33 + 0.67 / 2.);
+        assert_eq!(second, px(925.) + px(75. * ease_out_cubic(0.5)));
+        assert_eq!(smooth_scroll_value(from, to, view, 1.), to);
+        // Long, upwards.
+        assert_eq!(
+            smooth_scroll_value(to, from, view, 0.33 / 2.),
+            px(1000.) - px(75. * ease_out_cubic(0.5))
+        );
+        assert_eq!(smooth_scroll_value(to, from, view, 0.33), px(75.));
+        // Exactly 2.5 viewports isn't composed.
+        assert_eq!(
+            smooth_scroll_value(px(0.), px(250.), view, 0.33),
+            px(250. * ease_out_cubic(0.33))
+        );
+    }
+
+    /// Monaco `setScrollPositionSmooth`: the same destination keeps the
+    /// animation; a new one starts over from where the scroll is
+    /// (`combine`), and an immediate change ends it.
+    #[test]
+    fn smooth_scrolls_retarget_from_the_current_position() {
+        let mut animation = ViewAnimation::default();
+        let now = Instant::now();
+        let view = size(px(800.), px(500.));
+        let target = point(px(0.), px(400.));
+        animation.scroll_to(point(px(0.), px(0.)), target, view, true, now);
+        assert!(animation.is_animating_scroll());
+        // Nothing moves until it ticks.
+        assert_eq!(animation.current_scroll(target).y, px(0.));
+        animation.tick_scroll(ms(now, 50));
+        let halfway = animation.current_scroll(target).y;
+        assert!(halfway > px(0.) && halfway < px(400.));
+        // Same destination: carries on.
+        animation.scroll_to(point(px(0.), px(0.)), target, view, true, ms(now, 50));
+        animation.tick_scroll(ms(now, 125));
+        assert!(!animation.is_animating_scroll());
+        // A new destination mid-way starts from the current position.
+        animation.scroll_to(target, point(px(0.), px(0.)), view, true, ms(now, 200));
+        animation.tick_scroll(ms(now, 250));
+        let back = animation.current_scroll(point(px(0.), px(0.))).y;
+        let next = point(px(0.), px(900.));
+        animation.scroll_to(target, next, view, true, ms(now, 250));
+        assert_eq!(animation.current_scroll(next).y, back);
+        animation.tick_scroll(ms(now, 255));
+        assert!(animation.current_scroll(next).y > back);
+        // Without `smoothScrolling` it jumps.
+        animation.scroll_to(target, point(px(0.), px(10.)), view, false, ms(now, 260));
+        assert!(!animation.is_animating_scroll());
     }
 
     #[test]

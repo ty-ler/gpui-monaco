@@ -123,7 +123,7 @@ A `ViewState` (Monaco `ICodeEditorViewState`) holds the selections, the scroll p
 | `trigger("code_editor::CommentLine", window, cx)` | `trigger` (with GPUI action names) |
 | `has_text_focus(window)`, `has_widget_focus(window, cx)` | `hasTextFocus`, `hasWidgetFocus` |
 
-Reveals scroll smoothly (with `smooth_scrolling` on) unless given `ScrollType::Immediate`. A reveal that moves a line or less always jumps. `set_scroll_position`, `set_scroll_top` and `set_scroll_left` take a `ScrollType` (`set_scroll_position` jumps, like Monaco's default). `has_pending_scroll_animation` says whether a smooth scroll is still running.
+Reveals scroll smoothly (with `smooth_scrolling` on) unless given `ScrollType::Immediate`. A reveal that moves a line or less always jumps. `set_scroll_position`, `set_scroll_top` and `set_scroll_left` take a `ScrollType` (`set_scroll_position` jumps, like Monaco's default). `has_pending_scroll_animation` says whether a smooth scroll is still running. During one, `scroll_top()`, `scroll_left()` and `scroll_position()` are where the scroll is now and `ScrollChanged` fires at each step, as in Monaco; `future_scroll_position()` is where it's going. Scrolls longer than 2.5 viewports skip the middle, as Monaco's do.
 
 ### Geometry
 
@@ -140,7 +140,8 @@ These answer from the last frame, so they return `None` until the editor was pai
 | `scrolled_visible_position_in_editor(p)` (`top`, `left`, `height` from the editor's top-left); `scrolled_visible_position(p)` in window coordinates | `getScrolledVisiblePosition` |
 | `font_info()` | `getOption(EditorOption.fontInfo)` |
 | `visible_ranges_plus_viewport_above_below(cx)` | `getVisibleRangesPlusViewportAboveBelow` |
-| `scroll_top()`, `scroll_left()` | `getScrollTop`, `getScrollLeft` (where a smooth scroll is going) |
+| `scroll_top()`, `scroll_left()` | `getScrollTop`, `getScrollLeft` (where a smooth scroll is now) |
+| `future_scroll_position()` | `viewLayout.getFutureScrollPosition` (where a smooth scroll is going) |
 
 ### Events
 

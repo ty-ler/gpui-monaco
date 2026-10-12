@@ -1384,7 +1384,9 @@ impl CodeEditor {
         if !scroll_top.is_finite() {
             return;
         }
-        let left = self.scroll_left;
+        // Monaco `setScrollPosition({ scrollTop })`: the left stays where
+        // it is now.
+        let left = self.scroll_position().x;
         self.set_scroll_position(point(left, px(scroll_top as f32)), cx);
     }
 

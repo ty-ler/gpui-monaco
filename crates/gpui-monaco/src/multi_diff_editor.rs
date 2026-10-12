@@ -918,9 +918,9 @@ impl MultiDiffEditor {
             let diff = diff.downgrade();
             subscriptions.push(cx.subscribe(
                 &editor,
-                move |this, _, event: &CodeEditorEvent, cx| {
+                move |this, editor, event: &CodeEditorEvent, cx| {
                     if let Some(diff) = diff.upgrade() {
-                        this.on_item_editor_event(&diff, event, cx);
+                        this.on_item_editor_event(&diff, &editor, event, cx);
                     }
                 },
             ));
@@ -943,6 +943,7 @@ impl MultiDiffEditor {
     fn on_item_editor_event(
         &mut self,
         diff: &Entity<DiffEditor>,
+        editor: &Entity<CodeEditor>,
         event: &CodeEditorEvent,
         cx: &mut Context<Self>,
     ) {
@@ -957,17 +958,18 @@ impl MultiDiffEditor {
                 // the list's next render.
                 template.follow_cursor = 2;
             }
-            CodeEditorEvent::ScrollChanged(scroll) if template.follow_cursor > 0 => {
-                let delta = point(
-                    scroll.scroll_left - template.expected_scroll.x,
-                    scroll.scroll_top - template.expected_scroll.y,
-                );
+            CodeEditorEvent::ScrollChanged(_) if template.follow_cursor > 0 => {
+                // Where the reveal is going, not a smooth scroll's first
+                // step (Monaco's `getFutureScrollPosition`): the list takes
+                // the whole move at once.
+                let scroll = editor.read(cx).future_scroll_position();
+                let delta = scroll - template.expected_scroll;
                 if delta.x.abs() < px(0.5) && delta.y.abs() < px(0.5) {
                     return;
                 }
                 // The other editor follows with the same scroll.
                 template.follow_cursor = 0;
-                template.expected_scroll = point(scroll.scroll_left, scroll.scroll_top);
+                template.expected_scroll = scroll;
                 self.scroll_top = (self.scroll_top + delta.y).max(px(0.));
                 self.scroll_left = (self.scroll_left + delta.x).max(px(0.));
                 self.smooth_scroll = None;

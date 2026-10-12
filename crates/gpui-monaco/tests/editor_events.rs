@@ -566,8 +566,11 @@ fn scroll_types(cx: &mut TestAppContext) {
     editor.update(cx, |e, cx| e.reveal_line_in_center(250, cx));
     draw(cx);
     assert!(editor.read_with(cx, |e, _| e.has_pending_scroll_animation()));
-    let target = editor.read_with(cx, |e, _| e.scroll_top());
+    let target = editor.read_with(cx, |e, _| e.future_scroll_position().y);
     assert!(shown(cx) < target);
+    // `scroll_top` is where the scroll is now, as shown (Monaco
+    // `getScrollTop`).
+    assert_eq!(editor.read_with(cx, |e, _| e.scroll_top()), shown(cx));
 
     // An immediate reveal jumps.
     editor.update(cx, |e, cx| {
@@ -593,7 +596,11 @@ fn scroll_types(cx: &mut TestAppContext) {
     });
     draw(cx);
     assert!(shown(cx) < lh * 100.);
-    assert_eq!(editor.read_with(cx, |e, _| e.scroll_top()), lh * 100.);
+    assert_eq!(editor.read_with(cx, |e, _| e.scroll_top()), shown(cx));
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.future_scroll_position().y),
+        lh * 100.
+    );
 
     // A reveal moving a line or less jumps even when smooth (Monaco
     // `onRevealRangeRequest`). Row 8 at the top keeps the five sticky
@@ -635,7 +642,11 @@ fn horizontal_smooth_scrolling(cx: &mut TestAppContext) {
     });
     draw(cx);
     assert!(editor.read_with(cx, |e, _| e.has_pending_scroll_animation()));
-    assert_eq!(editor.read_with(cx, |e, _| e.scroll_left()), px(400.));
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.future_scroll_position().x),
+        px(400.)
+    );
+    assert_eq!(editor.read_with(cx, |e, _| e.scroll_left()), shown(cx).x);
     assert!(shown(cx).x < px(400.));
     assert_eq!(shown(cx).y, px(0.));
 

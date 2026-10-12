@@ -27,7 +27,7 @@ editor.update(cx, |editor, cx| {
 | `cursor_blinking` | `cursorBlinking` | `Blink`, `Smooth`, `Phase`, `Expand`, `Solid` (read-only editors don't blink) |
 | `cursor_smooth_caret_animation` | `cursorSmoothCaretAnimation` | `Off`, `Explicit` (keys and clicks, not typing), `On`; every cursor slides |
 | `cursor_surrounding_lines`, `cursor_surrounding_lines_style` | same names | lines kept around the cursor; `All` applies them to mouse moves too |
-| `smooth_scrolling` | `smoothScrolling` | animate reveals, cursor moves and mouse wheels (off) |
+| `smooth_scrolling` | `smoothScrolling` | animate reveals, cursor moves, mouse wheels and the scroll commands (off) |
 | `scroll_beyond_last_column`, `reveal_horizontal_right_padding` | same names | room past the longest line (4 columns) and right of revealed positions (15px) |
 | `fast_scroll_sensitivity`, `scroll_predominant_axis` | same names | Alt+wheel speed (5); scroll along the main axis only (on) |
 | `scroll_on_middle_click` | `scrollOnMiddleClick` | a middle click scrolls toward the mouse until the next click (off) |

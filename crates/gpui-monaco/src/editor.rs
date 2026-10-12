@@ -9,8 +9,8 @@ use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, Context, CursorStyle as MouseCursor, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
-    Point, Render, ScrollWheelEvent, StatefulInteractiveElement as _, Styled, Subscription, Task,
-    UTF16Selection, Window, div, point, px,
+    Point, Render, ScrollWheelEvent, Size, StatefulInteractiveElement as _, Styled, Subscription,
+    Task, UTF16Selection, Window, div, point, px, size,
 };
 use serde::{Deserialize, Serialize};
 use text::{Bias, BufferSnapshot, OffsetUtf16, PointUtf16};
@@ -677,7 +677,14 @@ pub struct CodeEditor {
     pub(crate) screen_reader: crate::accessibility::ScreenReaderState,
     /// Monaco `inertialScroll`'s fling after wheel events, while it runs.
     inertial_scroll_task: Option<Task<()>>,
+    /// Ticks a smooth scroll while it runs (Monaco's
+    /// `scheduleAtNextAnimationFrame`), so its position and
+    /// [`CodeEditorEvent::ScrollChanged`] follow it between frames too.
+    smooth_scroll_task: Option<Task<()>>,
     pub(crate) theme: Arc<Theme>,
+    /// Where the scroll is going (Monaco `getFutureScrollPosition`): a
+    /// smooth scroll's destination; [`CodeEditor::scroll_top`] is where it
+    /// is now.
     pub(crate) scroll_top: Pixels,
     pub(crate) scroll_left: Pixels,
     pub(crate) layout: Option<EditorLayout>,
@@ -1060,6 +1067,7 @@ impl CodeEditor {
                 ..Default::default()
             },
             inertial_scroll_task: None,
+            smooth_scroll_task: None,
             theme: crate::theme::global_theme(cx).unwrap_or_else(|| Arc::new(Theme::vs_dark())),
             scroll_top: px(0.),
             scroll_left: px(0.),
@@ -1591,8 +1599,17 @@ impl CodeEditor {
         }
     }
 
-    /// The scroll offset in pixels (`x` is the left, `y` the top).
+    /// The scroll offset in pixels (`x` is the left, `y` the top), where
+    /// the scroll is now: during a smooth scroll, a point on the way
+    /// (Monaco `getCurrentScrollPosition`).
     pub fn scroll_position(&self) -> Point<Pixels> {
+        self.animation
+            .current_scroll(point(self.scroll_left, self.scroll_top))
+    }
+
+    /// Where the scroll is going: a smooth scroll's destination, else
+    /// [`CodeEditor::scroll_position`] (Monaco `getFutureScrollPosition`).
+    pub fn future_scroll_position(&self) -> Point<Pixels> {
         point(self.scroll_left, self.scroll_top)
     }
 
@@ -1617,6 +1634,7 @@ impl CodeEditor {
         scroll_type: crate::view::reveal::ScrollType,
         cx: &mut Context<Self>,
     ) {
+        let current = self.scroll_position();
         self.apply_scroll_type(scroll_type);
         // Monaco reveals as soon as it's asked to, so a scroll position set
         // after a reveal wins; ours wait for the next frame.
@@ -1626,17 +1644,67 @@ impl CodeEditor {
         self.scroll_left = position.x;
         self.scroll_top = position.y;
         self.clamp_scroll();
+        if scroll_type == crate::view::reveal::ScrollType::Smooth {
+            self.start_smooth_scroll(current, cx);
+        }
         self.emit_scroll_changed(cx);
         cx.notify();
+    }
+
+    /// Monaco `Scrollable.setScrollPositionSmooth`: animates from `current`
+    /// to the future position, when `smooth_scrolling` is on, starting now
+    /// (a frame that moves the future position again carries on from where
+    /// the animation is).
+    pub(crate) fn start_smooth_scroll(&mut self, current: Point<Pixels>, cx: &mut Context<Self>) {
+        let viewport = self.layout.as_ref().map_or(Size::default(), |layout| {
+            size(layout.layout_info.content_width, layout.layout_info.height)
+        });
+        let now = cx.background_executor().now();
+        let target = self.future_scroll_position();
+        let smooth = self.options.smooth_scrolling;
+        self.animation
+            .scroll_to(current, target, viewport, smooth, now);
+        self.ensure_smooth_scroll_task(cx);
+    }
+
+    /// Keeps a running smooth scroll ticking every frame's time (Monaco
+    /// `scheduleAtNextAnimationFrame`), reporting each step with
+    /// [`CodeEditorEvent::ScrollChanged`]; frames drawn meanwhile tick it
+    /// too.
+    pub(crate) fn ensure_smooth_scroll_task(&mut self, cx: &mut Context<Self>) {
+        if self.smooth_scroll_task.is_some() || !self.animation.is_animating_scroll() {
+            return;
+        }
+        self.smooth_scroll_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(crate::view::animation::SMOOTH_SCROLL_FRAME)
+                    .await;
+                let Ok(going) = this.update(cx, |this, cx| {
+                    let now = cx.background_executor().now();
+                    let going = this.animation.tick_scroll(now);
+                    this.emit_scroll_changed(cx);
+                    going
+                }) else {
+                    return;
+                };
+                if !going {
+                    break;
+                }
+            }
+            this.update(cx, |this, _| this.smooth_scroll_task = None)
+                .ok();
+        }));
     }
 
     /// Reports the scroll position and scrollable size with
     /// [`CodeEditorEvent::ScrollChanged`] if they changed since the last
     /// report (Monaco's `Scrollable` only fires when its state changed).
     pub(crate) fn emit_scroll_changed(&mut self, cx: &mut Context<Self>) {
+        let position = self.scroll_position();
         let state = [
-            self.scroll_top,
-            self.scroll_left,
+            position.y,
+            position.x,
             self.scroll_width().unwrap_or_default(),
             self.scroll_height().unwrap_or_default(),
         ];
@@ -1696,7 +1764,7 @@ impl CodeEditor {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        if self.scroll_position() != position {
+        if self.future_scroll_position() != position {
             self.scroll_left = position.x;
             self.scroll_top = position.y;
             cx.notify();
@@ -2263,7 +2331,7 @@ impl CodeEditor {
     }
 
     /// The editor's size at its last layout.
-    pub(crate) fn layout_size(&self) -> Option<gpui::Size<Pixels>> {
+    pub(crate) fn layout_size(&self) -> Option<Size<Pixels>> {
         Some(self.layout.as_ref()?.bounds.size)
     }
 
@@ -6457,16 +6525,22 @@ impl CodeEditor {
         }
         // Physical wheels scroll smoothly (Monaco `mouseWheelSmoothScroll`),
         // trackpads don't.
-        if matches!(event.delta, gpui::ScrollDelta::Lines(_)) {
+        let smooth = matches!(event.delta, gpui::ScrollDelta::Lines(_));
+        let current = self.scroll_position();
+        if smooth {
             self.animation.smooth_scroll_requested = true;
         } else {
             self.animation.cancel_scroll();
         }
+        // From where the scroll is going (Monaco's `futureScrollPosition`).
         let before = (self.scroll_top, self.scroll_left);
         self.scroll_top -= delta.y;
         self.scroll_left -= delta.x;
         self.clamp_scroll();
         let moved = before != (self.scroll_top, self.scroll_left);
+        if smooth && moved {
+            self.start_smooth_scroll(current, cx);
+        }
         // Monaco `inertialScroll`: keep scrolling, slowing down, after the
         // wheel events stop.
         if self.options.inertial_scroll && self.animation.inertial.on_wheel(delta) {
@@ -6795,7 +6869,7 @@ impl EntityInputHandler for CodeEditor {
         let top = layout.line_top(line.view_line);
         Some(Bounds::new(
             point(x, top),
-            gpui::size(px(1.), layout.line_height_of(line.view_line)),
+            size(px(1.), layout.line_height_of(line.view_line)),
         ))
     }
 

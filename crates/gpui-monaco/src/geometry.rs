@@ -166,40 +166,57 @@ impl CodeEditor {
         Some(layout.max_scroll.y + layout.layout_info.height)
     }
 
-    /// The vertical scroll position (Monaco `getScrollTop`). During a
-    /// smooth scroll it's where the scroll is going.
+    /// The vertical scroll position (Monaco `getScrollTop`): during a
+    /// smooth scroll, where it is now, on the way to
+    /// [`CodeEditor::future_scroll_position`].
     pub fn scroll_top(&self) -> Pixels {
-        self.scroll_top
+        self.scroll_position().y
     }
 
-    /// The horizontal scroll position (Monaco `getScrollLeft`).
+    /// The horizontal scroll position (Monaco `getScrollLeft`): during a
+    /// smooth scroll, where it is now.
     pub fn scroll_left(&self) -> Pixels {
-        self.scroll_left
+        self.scroll_position().x
     }
 
     /// Scrolls vertically to `scroll_top` (Monaco `setScrollTop`), clamped
     /// to the scroll range, and emits [`CodeEditorEvent::ScrollChanged`].
+    /// The horizontal scroll stays where it is now, or for a smooth scroll
+    /// where it's going.
     pub fn set_scroll_top(
         &mut self,
         scroll_top: Pixels,
         scroll_type: ScrollType,
         cx: &mut Context<Self>,
     ) {
-        let position = gpui::point(self.scroll_left, scroll_top);
+        let left = self.unchanged_axis(scroll_type).x;
+        let position = gpui::point(left, scroll_top);
         self.set_scroll_position_with_scroll_type(position, scroll_type, cx);
     }
 
     /// Scrolls horizontally to `scroll_left` (Monaco `setScrollLeft`),
     /// clamped to the scroll range, and emits
-    /// [`CodeEditorEvent::ScrollChanged`].
+    /// [`CodeEditorEvent::ScrollChanged`]. The vertical scroll stays where
+    /// it is now, or for a smooth scroll where it's going.
     pub fn set_scroll_left(
         &mut self,
         scroll_left: Pixels,
         scroll_type: ScrollType,
         cx: &mut Context<Self>,
     ) {
-        let position = gpui::point(scroll_left, self.scroll_top);
+        let top = self.unchanged_axis(scroll_type).y;
+        let position = gpui::point(scroll_left, top);
         self.set_scroll_position_with_scroll_type(position, scroll_type, cx);
+    }
+
+    /// Monaco's partial scroll updates: a smooth one keeps the other
+    /// axis's destination (`_smoothScrolling.to`), an immediate one its
+    /// current position (`_state`).
+    fn unchanged_axis(&self, scroll_type: ScrollType) -> gpui::Point<Pixels> {
+        match scroll_type {
+            ScrollType::Smooth => self.future_scroll_position(),
+            ScrollType::Immediate => self.scroll_position(),
+        }
     }
 
     /// Whether a smooth scroll is still on its way (Monaco

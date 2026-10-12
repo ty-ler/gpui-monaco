@@ -4728,7 +4728,8 @@ impl DiffEditor {
             line_height * shown + px(bar_after.unwrap_or(0.)) - px(bar_before.unwrap_or(0.));
         for editor in [&self.original, &self.modified] {
             editor.update(cx, |editor, cx| {
-                let mut position = editor.scroll_position();
+                // Where a smooth scroll is going moves with the lines.
+                let mut position = editor.future_scroll_position();
                 position.y = (position.y + delta).max(px(0.));
                 editor.set_scroll_position_unclamped(position, cx);
             });
