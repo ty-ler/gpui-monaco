@@ -1389,6 +1389,8 @@ fn multicursor_alerts(cx: &mut TestAppContext) {
         announcement(&editor, cx).as_deref(),
         Some("Cursor added: line 2 column 1")
     );
+    // Monaco `status`: polite.
+    assert!(editor.read_with(cx, |e, _| e.last_announcement_is_status_for_tests()));
     set_cursor(&editor, cx, p(0, 3));
     trigger(&editor, cx, "editor.action.addSelectionToNextFindMatch");
     trigger(&editor, cx, "editor.action.addSelectionToNextFindMatch");

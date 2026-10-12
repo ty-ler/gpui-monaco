@@ -83,6 +83,25 @@ pub(crate) fn sorted_locations(
     locations
 }
 
+/// Monaco `ReferencesModel.ariaMessage`, which navigation commands alert:
+/// how many `locations` (sorted, see [`sorted_locations`]) in how many
+/// files, named by path when there's one.
+fn aria_message(locations: &[Location]) -> String {
+    let path = |location: &Location| {
+        location.uri.as_deref().map_or_else(String::new, |uri| {
+            crate::languages::uri_path(uri).unwrap_or_else(|| uri.to_string())
+        })
+    };
+    let mut files = locations.iter().map(|l| &l.uri).collect::<Vec<_>>();
+    files.dedup();
+    match (locations, files.len()) {
+        ([], _) => "No results found".to_string(),
+        ([location], _) => format!("Found 1 symbol in {}", path(location)),
+        ([first, ..], 1) => format!("Found {} symbols in {}", locations.len(), path(first)),
+        _ => format!("Found {} symbols in {} files", locations.len(), files.len()),
+    }
+}
+
 /// Monaco's message for a navigation command without results.
 fn no_result_message(kind: LocationKind, word: Option<&str>) -> String {
     let what = match kind {
@@ -245,6 +264,7 @@ impl CodeEditor {
         self.reveal_position_in_center_if_outside_viewport(position, cx);
         let uri = self.model().read(cx).uri().cloned();
         let locations = sorted_locations(locations, uri.as_ref());
+        self.announce(aria_message(&locations), cx);
         if locations.is_empty() {
             // Monaco mutes the message unless one was given.
             if let Some(message) = no_results_message {
@@ -322,6 +342,8 @@ impl CodeEditor {
                 if this.navigation_state(cx) != state {
                     return;
                 }
+                // Monaco alerts the results' `ariaMessage` first.
+                this.announce(aria_message(&locations), cx);
                 let at_cursor = locations.iter().any(|location| {
                     location.uri == uri
                         && location.range.start <= position
@@ -700,6 +722,20 @@ mod tests {
         assert_eq!(
             no_result_message(LocationKind::References, None),
             "No references found"
+        );
+    }
+
+    /// Monaco `ReferencesModel.ariaMessage`.
+    #[test]
+    fn aria_messages() {
+        assert_eq!(aria_message(&[]), "No results found");
+        let a = |row| location(Some("file:///src/a.rs"), row);
+        let b = |row| location(Some("file:///src/b.rs"), row);
+        assert_eq!(aria_message(&[a(1)]), "Found 1 symbol in /src/a.rs");
+        assert_eq!(aria_message(&[a(1), a(4)]), "Found 2 symbols in /src/a.rs");
+        assert_eq!(
+            aria_message(&[a(1), a(4), b(2)]),
+            "Found 3 symbols in 2 files"
         );
     }
 }

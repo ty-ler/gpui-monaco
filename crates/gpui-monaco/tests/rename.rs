@@ -320,6 +320,14 @@ fn suggestions_are_listed_and_picked_with_up_and_down(cx: &mut TestAppContext) {
         editor.read_with(cx, |e, cx| e.rename_suggestions(cx)),
         ["fooBar", "baz"]
     );
+    // Monaco `setCandidates`'s `status`.
+    editor.read_with(cx, |e, _| {
+        assert_eq!(
+            e.last_announcement_for_tests().as_deref(),
+            Some("Received 2 rename suggestions")
+        );
+        assert!(e.last_announcement_is_status_for_tests());
+    });
     // The button shows; the preview label doesn't without a handler.
     assert_eq!(
         editor.read_with(cx, |e, cx| e.rename_box_extras_for_tests(cx)),

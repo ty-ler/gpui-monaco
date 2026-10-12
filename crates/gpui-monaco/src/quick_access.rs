@@ -1119,9 +1119,21 @@ impl CodeEditor {
         }
     }
 
+    /// Monaco `AbstractEditorNavigationQuickAccessProvider.gotoLocation`:
+    /// selects and reveals `position`, then has screen readers read the
+    /// line (a `status`).
     pub(crate) fn quick_access_go_to(&mut self, position: PointUtf16, cx: &mut Context<Self>) {
         self.set_selections(&[Selection::collapsed(position)], cx);
         self.reveal_range(position..position, RevealType::Center, cx);
+        let line = self.snapshot.line(position.row);
+        self.announce_status(
+            format!(
+                "Line {}, column {}: {line}",
+                position.row + 1,
+                position.column + 1
+            ),
+            cx,
+        );
     }
 
     /// The rows for the input's `value`, and the item to activate.

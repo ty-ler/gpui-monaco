@@ -3727,7 +3727,7 @@ impl CodeEditor {
         if self.cursors.all().len() > 1 {
             self.cursors.set_states(vec![primary]);
             // Monaco `removeSecondaryCursors` says so.
-            self.announce("Removed secondary cursors", cx);
+            self.announce_status("Removed secondary cursors", cx);
         } else if primary.has_selection() {
             self.cursors
                 .set_states(vec![SingleCursorState::from_position(primary.position)]);
@@ -6954,8 +6954,8 @@ impl Render for CodeEditor {
                         Some(content) => content.build(builder, &rows),
                         None => rows.borrow_mut().clear(),
                     }
-                    if let Some((message, second)) = &announcement {
-                        crate::accessibility::build_announcement(builder, message, *second);
+                    if let Some(announcement) = &announcement {
+                        crate::accessibility::build_announcement(builder, announcement);
                     }
                     let node = builder.parent_node();
                     if read_only {

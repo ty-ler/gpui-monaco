@@ -923,15 +923,16 @@ impl SuggestWidget {
         self.state.message
     }
 
-    /// What screen readers read for the widget: its message, or the focused
-    /// suggestion's [`aria_label`] (with docs when `resolved` and the details
-    /// panel shows).
-    pub(crate) fn announcement(&self, resolved: bool, cx: &App) -> Option<String> {
+    /// What screen readers read for the widget, and whether it's a polite
+    /// status: its message (Monaco `status`), or the focused suggestion's
+    /// [`aria_label`] (with docs when `resolved` and the details panel
+    /// shows).
+    pub(crate) fn announcement(&self, resolved: bool, cx: &App) -> Option<(String, bool)> {
         if let Some(message) = self.state.message {
-            return Some(message.to_string());
+            return Some((message.to_string(), true));
         }
         let item = self.state.focused_item()?;
-        Some(aria_label(item, resolved && self.details_shown(cx)))
+        Some((aria_label(item, resolved && self.details_shown(cx)), false))
     }
 
     /// Scrolls the details panel (Monaco `SuggestDetailsWidget`'s scroll

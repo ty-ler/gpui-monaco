@@ -169,7 +169,11 @@ impl CodeEditor {
             )
         });
         self.navigation.anchor = ids.first().copied();
-        cx.notify();
+        // Monaco alerts where the anchor is (1-based).
+        self.announce(
+            format!("Anchor set at {}:{}", position.row + 1, position.column + 1),
+            cx,
+        );
     }
 
     /// Moves the cursor to the selection anchor (Monaco

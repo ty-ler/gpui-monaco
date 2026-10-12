@@ -1601,7 +1601,7 @@ impl CodeEditor {
                 .word_at_position(start)
                 .map(|word| word.word)
                 .unwrap_or_default();
-            self.announce(
+            self.announce_status(
                 format!(
                     "Context: {word} at line {} and column {}.",
                     start.row + 1,

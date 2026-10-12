@@ -2101,8 +2101,9 @@ pub struct EditorOptions {
     pub aria_label: SharedString,
     /// Monaco `ariaRequired`: report the editor as a required input.
     pub aria_required: bool,
-    /// Monaco `accessibilityPageSize`: how many lines a screen reader can
-    /// read at once around the selection (default 500, at least 1).
+    /// Monaco `accessibilityPageSize`: the page size, in view lines, of
+    /// what a screen reader reads: the page holding the selection's start
+    /// and the one holding its end (default 500, at least 1).
     pub accessibility_page_size: u32,
     /// Monaco `accessibilitySupport`: run optimized for screen readers
     /// (default auto: while assistive technology is connected). Optimized,

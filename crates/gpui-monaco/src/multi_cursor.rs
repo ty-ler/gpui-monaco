@@ -652,6 +652,6 @@ impl CodeEditor {
         } else {
             format!("Cursors added: {}", added.join(", "))
         };
-        self.announce(message, cx);
+        self.announce_status(message, cx);
     }
 }

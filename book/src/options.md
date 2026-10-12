@@ -42,9 +42,9 @@ editor.update(cx, |editor, cx| {
 | `auto_indent_on_paste`, `auto_indent_on_paste_within_string` | `autoIndentOnPaste`, `autoIndentOnPasteWithinString` | re-indent pasted lines (off by default; needs `auto_indent: Full`) |
 | `selection_clipboard` | `selectionClipboard` | Linux primary selection: selected text is copied to it, and a middle click pastes it (default on) |
 | `stop_rendering_line_after` | `stopRenderingLineAfter` | draw at most this many characters of a line, then "Show more" (default 10 000) |
-| `aria_label`, `aria_required`, `accessibility_page_size` | `ariaLabel`, `ariaRequired`, `accessibilityPageSize` | the screen reader name and how many lines it can read around the selection (500) |
+| `aria_label`, `aria_required`, `accessibility_page_size` | `ariaLabel`, `ariaRequired`, `accessibilityPageSize` | the screen reader name and the page size, in view lines, of what it reads: the pages holding the selection's start and end (500) |
 | `accessibility_support` | `accessibilitySupport` | `Auto` (optimized while assistive technology is connected), `On` or `Off`. Optimized, wrapping is measured without continuation indent, and a model mostly made of lines of 10 000+ characters wraps at the viewport (unless `word_wrap_override1` is set); a diff editor stays side by side when narrow. `Off` gives the screen reader no text, only "The editor is not accessible at this time." |
-| `screen_reader_announce_inline_suggestion` | `screenReaderAnnounceInlineSuggestion` | screen readers announce new ghost text, or where a next edit suggestion is (on); `CodeEditor::announce` announces anything |
+| `screen_reader_announce_inline_suggestion` | `screenReaderAnnounceInlineSuggestion` | screen readers announce new ghost text, or where a next edit suggestion is (on); `CodeEditor::announce` (assertive) and `CodeEditor::announce_status` (polite) announce anything |
 | `inline_completions_accessibility_verbose` | `inlineCompletionsAccessibilityVerbose` | adds the accessible view's keybinding to the announcement (off); like standalone Monaco, there's no accessible view, so it adds nothing |
 | `tab_focus_mode` | `tabFocusMode` | Tab moves focus instead of indenting; `set_tab_focus_mode` (Ctrl+M) turns it on for every editor |
 | `tab_index` | `tabIndex` | the editor's place in the window's Tab order (0); -1 takes it out |

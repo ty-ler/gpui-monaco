@@ -60,6 +60,14 @@ fn go_to_line(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     assert!(!open(&editor, cx));
     assert_eq!(cursor(&editor, cx), PointUtf16::new(5, 4));
+    // Monaco `gotoLocation`'s `status`: the line, for screen readers.
+    editor.read_with(cx, |e, _| {
+        assert_eq!(
+            e.last_announcement_for_tests().as_deref(),
+            Some("Line 6, column 5:     fn len(&self) -> i32 {")
+        );
+        assert!(e.last_announcement_is_status_for_tests());
+    });
 }
 
 #[gpui::test]

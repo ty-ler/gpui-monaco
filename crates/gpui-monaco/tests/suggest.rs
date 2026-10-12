@@ -493,6 +493,13 @@ fn resolves_the_focused_item_and_runs_commands(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     assert_eq!(text(&editor, cx), "use x;\nsecond");
     assert_eq!(ran.get(), Some(7));
+    // Monaco `_alertCompletionItem`.
+    assert_eq!(
+        editor
+            .read_with(cx, |e, _| e.last_announcement_for_tests())
+            .as_deref(),
+        Some("Accepting 'second' made 1 additional edits")
+    );
 }
 
 /// Resolves after 100ms with an edit at `edit_at` on row 0.
@@ -1942,6 +1949,7 @@ fn screen_readers_hear_the_focused_suggestion(cx: &mut TestAppContext) {
     cx.simulate_input("f");
     settle(cx);
     assert_eq!(heard(cx).as_deref(), Some("fizz, Variable"));
+    assert!(!editor.read_with(cx, |e, _| e.last_announcement_is_status_for_tests()));
     cx.simulate_keystrokes("down");
     assert_eq!(heard(cx).as_deref(), Some("foo, Variable"));
     cx.simulate_keystrokes("escape");
@@ -1950,6 +1958,8 @@ fn screen_readers_hear_the_focused_suggestion(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-space");
     settle(cx);
     assert_eq!(heard(cx).as_deref(), Some("No suggestions."));
+    // Monaco `status`es it, politely.
+    assert!(editor.read_with(cx, |e, _| e.last_announcement_is_status_for_tests()));
 }
 
 /// Items without docs whose docs arrive from a 300ms resolve.
