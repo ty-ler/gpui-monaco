@@ -13,7 +13,6 @@ use gpui::{
     IntoElement, MouseButton, ParentElement, Render, StatefulInteractiveElement as _, Styled,
     StyledText, Task, WeakEntity, Window, div, px,
 };
-use text::PointUtf16;
 
 use crate::codicons::{Codicon, icon as codicon};
 use crate::editor::CodeEditor;
@@ -485,7 +484,7 @@ impl CodeEditor {
             this.update(cx, |this, cx| {
                 this.signature_help.pending = false;
                 match result {
-                    Some(help) => this.show_signature_help(help, position, cx),
+                    Some(help) => this.show_signature_help(help, cx),
                     None => this.hide_signature_help(cx),
                 }
             })
@@ -493,12 +492,10 @@ impl CodeEditor {
         }));
     }
 
-    fn show_signature_help(
-        &mut self,
-        help: SignatureHelp,
-        position: PointUtf16,
-        cx: &mut Context<Self>,
-    ) {
+    /// Shows `help` at the cursor (Monaco's widget `getPosition` is the
+    /// editor's position, not the request's).
+    fn show_signature_help(&mut self, help: SignatureHelp, cx: &mut Context<Self>) {
+        let position = self.cursors.primary().position;
         self.announce_signature_help(&help, cx);
         // Monaco `updateMaxHeight`, on each layout change.
         let max_height = (self.layout_size().unwrap_or_default().height / 4.).max(px(250.));
@@ -541,6 +538,17 @@ impl CodeEditor {
         widget.update(cx, |widget, _| widget.room = room);
         self.signature_help.widget = Some((widget, id));
         cx.notify();
+    }
+
+    /// Monaco `ParameterHintsWidget` lays itself out again on each
+    /// selection change, at the cursor: the hints follow the caret while
+    /// the next request is pending.
+    pub(crate) fn signature_help_cursor_changed(&mut self, cx: &mut Context<Self>) {
+        if let Some((_, id)) = &self.signature_help.widget {
+            let id = *id;
+            let position = self.cursors.primary().position;
+            self.set_content_widget_position(id, position, cx);
+        }
     }
 
     /// Has screen readers read the active parameter, its docs and the

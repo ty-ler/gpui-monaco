@@ -235,9 +235,18 @@ pub(crate) struct Session {
     /// The provider of each item; `None` for word-based suggestions.
     item_providers: Vec<Option<usize>>,
     providers: Vec<Arc<dyn CompletionProvider>>,
-    /// Items resolved (or being resolved).
+    /// Items resolved.
     resolved: Vec<bool>,
+    /// Items whose provider resolves them (Monaco's
+    /// `provider.resolveCompletionItem`), known once one was asked to.
+    resolvable: Vec<bool>,
+    /// The item being resolved.
+    resolving: Option<usize>,
     resolve_task: Option<Task<()>>,
+    /// Monaco `_onListFocus`: the details panel shows "Loading..." once
+    /// the focused item has been resolving for 250ms.
+    details_loading: bool,
+    details_loading_task: Option<Task<()>>,
 }
 
 #[derive(Default)]
@@ -297,6 +306,10 @@ struct InlineWait {
     _timeout: Task<()>,
 }
 
+/// Monaco `_onListFocus`: how long an item resolves before its details
+/// show "Loading...".
+const DETAILS_LOADING_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Monaco's wait for inline completions before a quick suggestion.
 const INLINE_COMPLETIONS_WAIT: std::time::Duration = std::time::Duration::from_millis(750);
 
@@ -307,6 +320,37 @@ impl Session {
             word_start: self.word_start,
             word_end: self.word_end,
         }
+    }
+
+    /// The focused item's index in the session's items.
+    fn focused_index(&self) -> Option<usize> {
+        if !self.focused {
+            return None;
+        }
+        self.model.filtered().get(self.selected).map(|s| s.index)
+    }
+
+    /// Whether the focused item is resolving, and whether its details show
+    /// "Loading..." meanwhile.
+    pub(crate) fn focused_resolving(&self) -> (bool, bool) {
+        let resolving = self
+            .focused_index()
+            .is_some_and(|index| self.resolving == Some(index));
+        (resolving, resolving && self.details_loading)
+    }
+
+    /// Monaco's `suggestionCanResolve` for the focused item: its provider
+    /// resolves items, or it has docs, or a detail other than its label (no
+    /// detail counts, as Monaco compares `undefined` with the label).
+    pub(crate) fn focused_can_resolve(&self) -> bool {
+        let Some(index) = self.focused_index() else {
+            return false;
+        };
+        let item = &self.model.items()[index];
+        self.resolvable[index]
+            || item.documentation.is_some()
+            || crate::suggest_widget::has_label_object(item)
+            || item.detail.as_ref() != Some(&item.label)
     }
 
     /// Monaco `CompletionModel.getItemsByProvider`: the session's items by
@@ -768,7 +812,7 @@ impl CodeEditor {
                     if this.suggest.task.is_some() && this.suggest.session.is_none() {
                         this.show_suggest_widget(
                             SuggestWidgetState::message(LOADING_MESSAGE),
-                            PointUtf16::new(position.row, word_start),
+                            position,
                             cx,
                         );
                     }
@@ -932,6 +976,7 @@ impl CodeEditor {
             },
         };
         let resolved = vec![false; items.len()];
+        let resolvable = vec![false; items.len()];
         let mut model =
             CompletionModel::new_with_options(items, position, word_start, line_context, options);
         // Monaco: distances only count while the cursor is where the request
@@ -957,15 +1002,19 @@ impl CodeEditor {
             item_providers,
             providers,
             resolved,
+            resolvable,
+            resolving: None,
             resolve_task: None,
+            details_loading: false,
+            details_loading_task: None,
         });
         self.select_by_memory(cx);
         if self.suggest.accept_best.is_some() {
             self.finish_accept_best(cx);
             return;
         }
-        self.refresh_suggest_widget(cx);
         self.resolve_selected_suggestion(cx);
+        self.refresh_suggest_widget(cx);
     }
 
     /// Shows `items` replacing `range` (Monaco `showSimpleSuggestions`),
@@ -1240,7 +1289,8 @@ impl CodeEditor {
             self.hide_suggest(cx);
             return;
         }
-        let anchor = PointUtf16::new(session.position.row, session.word_start);
+        // Monaco `showSuggestions`: at the cursor, on every refilter.
+        let anchor = self.cursors.primary().position;
         let mut state = SuggestWidgetState::from_session(session);
         if self.suggest.explain_mode {
             state.set_explanation(self.suggest_explanation());
@@ -1447,12 +1497,24 @@ impl CodeEditor {
 
     /// Shows or hides the details panel (Monaco `toggleSuggestionDetails`,
     /// Ctrl+Space while suggestions show); remembered for later sessions.
+    /// Like Monaco's `toggleDetails`, it only shows them when the focused
+    /// item has docs or a detail (or explain mode is on), so it does
+    /// nothing on an item without.
     pub fn toggle_suggestion_details(&mut self, cx: &mut Context<Self>) {
-        if self.suggest.session.is_none() {
+        let Some(session) = &self.suggest.session else {
             return;
+        };
+        if crate::suggest_widget::details_expanded(cx) {
+            cx.default_global::<SuggestUi>().details_expanded = false;
+        } else {
+            let can_expand = session.focused_index().is_some_and(|index| {
+                crate::suggest_widget::can_expand(&session.model.items()[index])
+            });
+            if !self.is_suggest_visible() || !(can_expand || self.suggest.explain_mode) {
+                return;
+            }
+            cx.default_global::<SuggestUi>().details_expanded = true;
         }
-        let ui = cx.default_global::<SuggestUi>();
-        ui.details_expanded = !ui.details_expanded;
         self.refresh_suggest_widget(cx);
     }
 
@@ -1464,7 +1526,10 @@ impl CodeEditor {
     }
 
     /// Resolves the selected item if its provider can (Monaco resolves on
-    /// focus): its docs, detail and edits replace the original's.
+    /// focus): its docs, detail and edits replace the original's. Call it
+    /// before showing the focus, so the widget knows the item is resolving.
+    /// While it resolves, the details panel keeps what it showed, and
+    /// shows "Loading..." after 250ms (Monaco `_onListFocus`).
     fn resolve_selected_suggestion(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.suggest.session.as_mut().filter(|s| s.focused) else {
             return;
@@ -1477,7 +1542,9 @@ impl CodeEditor {
         else {
             return;
         };
-        if session.resolved[index] {
+        // Already resolved, or still resolving (Monaco caches the item's
+        // resolve promise).
+        if session.resolved[index] || session.resolving == Some(index) {
             return;
         }
         let Some(provider) = session.item_providers[index].map(|p| session.providers[p].clone())
@@ -1493,6 +1560,23 @@ impl CodeEditor {
             return;
         };
         let session = self.suggest.session.as_mut().expect("checked above");
+        session.resolvable[index] = true;
+        session.resolving = Some(index);
+        session.details_loading = false;
+        session.details_loading_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(DETAILS_LOADING_DELAY).await;
+            this.update(cx, |this, cx| {
+                let Some(session) = this.suggest.session.as_mut() else {
+                    return;
+                };
+                session.details_loading_task = None;
+                if session.resolving == Some(index) {
+                    session.details_loading = true;
+                    this.refresh_suggest_widget(cx);
+                }
+            })
+            .ok();
+        }));
         session.resolve_task = Some(cx.spawn(async move |this, cx| {
             let resolved = task.await;
             this.update(cx, |this, cx| {
@@ -1507,6 +1591,9 @@ impl CodeEditor {
                     Err(err) => log::warn!("resolving a completion failed: {err:#}"),
                 }
                 session.resolve_task = None;
+                session.resolving = None;
+                session.details_loading = false;
+                session.details_loading_task = None;
                 this.refresh_suggest_widget(cx);
             })
             .ok();
@@ -1844,8 +1931,8 @@ impl CodeEditor {
             session.focused = !no_focus;
         }
         self.select_by_memory(cx);
-        self.refresh_suggest_widget(cx);
         self.resolve_selected_suggestion(cx);
+        self.refresh_suggest_widget(cx);
     }
 
     /// Monaco `SuggestController`'s `noFocus` for `suggest.selectionMode`:
@@ -2018,8 +2105,8 @@ impl CodeEditor {
         } else {
             selected.clamp(0, count as isize - 1) as usize
         };
-        self.refresh_suggest_widget(cx);
         self.resolve_selected_suggestion(cx);
+        self.refresh_suggest_widget(cx);
         true
     }
 
@@ -2046,8 +2133,8 @@ impl CodeEditor {
             session.selected = index;
             session.focused = true;
         }
-        self.refresh_suggest_widget(cx);
         self.resolve_selected_suggestion(cx);
+        self.refresh_suggest_widget(cx);
     }
 
     /// Selects the first suggestion (Monaco `selectFirstSuggestion`); with
@@ -2085,15 +2172,25 @@ impl CodeEditor {
     }
 
     /// Accepts the selected suggestion (Tab, or Enter). Returns whether one
-    /// was accepted.
+    /// was accepted. With `tab_completion` on, Tab and Shift+Tab then
+    /// replace it with the other suggestions (Monaco's
+    /// `KeepAlternativeSuggestions`).
     pub fn accept_suggestion(&mut self, cx: &mut Context<Self>) -> bool {
-        self.accept_suggestion_with(false, cx)
+        self.accept_suggestion_with(false, true, cx)
     }
 
     /// Accepts the selected suggestion in the other insert mode (Monaco
     /// `acceptAlternativeSelectedSuggestion`, Shift+Enter or Shift+Tab).
+    /// Unlike [`Self::accept_suggestion`], Tab doesn't cycle through the
+    /// other suggestions afterwards.
     pub fn accept_alternative_suggestion(&mut self, cx: &mut Context<Self>) -> bool {
-        self.accept_suggestion_with(true, cx)
+        self.accept_suggestion_with(true, false, cx)
+    }
+
+    /// Accepts the selected suggestion without keeping the others for Tab,
+    /// as Monaco does for clicks (`onDidSelect`) and commit characters.
+    pub(crate) fn accept_suggestion_only(&mut self, cx: &mut Context<Self>) -> bool {
+        self.accept_suggestion_with(false, false, cx)
     }
 
     /// Enter with the widget open: accepts unless
@@ -2151,7 +2248,12 @@ impl CodeEditor {
         typed != item.insert_text()
     }
 
-    fn accept_suggestion_with(&mut self, toggle: bool, cx: &mut Context<Self>) -> bool {
+    fn accept_suggestion_with(
+        &mut self,
+        toggle: bool,
+        keep_alternatives: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         // Monaco's accept commands need a focused suggestion.
         if self.suggest.session.as_ref().is_some_and(|s| !s.focused) {
             return false;
@@ -2197,8 +2299,9 @@ impl CodeEditor {
         let version = self.model().read(cx).buffer().version();
         let context = session.insert_context();
         self.insert_completion(&item, context, replace, cx);
-        // Monaco keeps the other items for Tab and Shift+Tab.
-        if self.options.tab_completion == crate::options::TabCompletion::On {
+        // Monaco keeps the other items for Tab and Shift+Tab, after Tab or
+        // Enter (`KeepAlternativeSuggestions`).
+        if keep_alternatives && self.options.tab_completion == crate::options::TabCompletion::On {
             let items: Vec<CompletionItem> = session
                 .model
                 .filtered()
@@ -2442,7 +2545,7 @@ impl CodeEditor {
             .commit_characters
             .contains(&ch)
         {
-            self.accept_suggestion(cx)
+            self.accept_suggestion_only(cx)
         } else {
             false
         }

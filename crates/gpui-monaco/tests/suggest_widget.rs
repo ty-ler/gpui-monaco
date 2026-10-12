@@ -784,3 +784,211 @@ fn the_empty_corners_let_clicks_through(cx: &mut TestAppContext) {
 fn cursor_row(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> u32 {
     editor.read_with(cx, |e, _| e.selections()[0].head.row)
 }
+
+/// Where `column` of `row` is, horizontally.
+fn column_x(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+    row: u32,
+    column: u32,
+) -> Pixels {
+    editor
+        .read_with(cx, |e, _| {
+            e.scrolled_visible_position(PointUtf16::new(row, column))
+        })
+        .unwrap()
+        .x
+}
+
+/// Monaco `showSuggestions` puts the list at the cursor, on every refilter:
+/// it starts under the cursor, not the word's start, and follows typing
+/// (#344).
+#[gpui::test]
+fn the_list_follows_the_cursor(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&lines(30), None, |_| {}, cx);
+    provide(cx, 5);
+    set_cursor(&editor, cx, 2, 0);
+    cx.simulate_input("it ");
+    set_cursor(&editor, cx, 2, 2);
+    cx.simulate_keystrokes("ctrl-space");
+    draw(cx);
+    let (rows, _) = painted(&editor, cx);
+    let offset = rows.left() - column_x(&editor, cx, 2, 2);
+    // At the cursor (inside the border), not at the word's start.
+    assert!(offset.abs() < px(4.), "{offset:?}");
+    cx.simulate_input("em");
+    draw(cx);
+    let (moved, _) = painted(&editor, cx);
+    assert!(moved.left() > rows.left());
+    let moved_offset = moved.left() - column_x(&editor, cx, 2, 4);
+    assert!(
+        (moved_offset - offset).abs() < px(0.5),
+        "{moved_offset:?} {offset:?}"
+    );
+}
+
+/// Monaco inserts a clicked suggestion without `KeepAlternativeSuggestions`:
+/// Tab doesn't cycle to the next one afterwards (#344).
+#[gpui::test]
+fn a_clicked_suggestion_has_no_alternatives(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "",
+        None,
+        |o| o.tab_completion = gpui_monaco::options::TabCompletion::On,
+        cx,
+    );
+    provide(cx, 3);
+    cx.simulate_keystrokes("ctrl-space");
+    draw(cx);
+    let (rows, _) = painted(&editor, cx);
+    cx.simulate_click(
+        point(rows.left() + px(40.), rows.top() + px(5.)),
+        Modifiers::none(),
+    );
+    draw(cx);
+    let text = |cx: &mut VisualTestContext| editor.read_with(cx, |e, cx| e.model().read(cx).text());
+    assert_eq!(text(cx), "item00");
+    cx.update(|window, cx| {
+        editor.update(cx, |e, cx| e.trigger("insertNextSuggestion", window, cx))
+    })
+    .unwrap();
+    draw(cx);
+    assert_eq!(text(cx), "item00");
+}
+
+/// Double-clicks a sash at `at`.
+fn double_click(cx: &mut VisualTestContext, at: Point<Pixels>) {
+    for click_count in 1..=2 {
+        cx.simulate_event(gpui::MouseDownEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count,
+        });
+    }
+    draw(cx);
+}
+
+/// Double-clicking a sash resets the size: the list's stored size is
+/// forgotten, the details panel fits its content again (#344).
+#[gpui::test]
+fn double_clicking_a_sash_resets_the_size(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&lines(30), None, |_| {}, cx);
+    provide(cx, 40);
+    set_cursor(&editor, cx, 2, 0);
+    cx.simulate_keystrokes("ctrl-space");
+    draw(cx);
+    let (_, before) = editor
+        .read_with(cx, |e, cx| e.suggest_list_layout_for_tests(cx))
+        .unwrap();
+    // The south edge, dragged down.
+    let (rows, _) = painted(&editor, cx);
+    let edge = point(rows.left() + px(100.), rows.bottom() + px(0.5));
+    drag(cx, edge, edge + point(px(0.), px(40.)));
+    assert!(
+        cx.update(|_, cx| CodeEditor::suggest_size_for_tests(cx))
+            .is_some()
+    );
+    let (rows, _) = painted(&editor, cx);
+    double_click(cx, point(rows.left() + px(100.), rows.bottom() + px(0.5)));
+    assert_eq!(
+        cx.update(|_, cx| CodeEditor::suggest_size_for_tests(cx)),
+        None
+    );
+    let (_, after) = editor
+        .read_with(cx, |e, cx| e.suggest_list_layout_for_tests(cx))
+        .unwrap();
+    assert_eq!(after, before);
+    // The details panel's east edge.
+    cx.simulate_keystrokes("ctrl-space");
+    draw(cx);
+    let (_, fitted) = editor
+        .read_with(cx, |e, cx| e.suggest_details_placement_for_tests(cx))
+        .unwrap();
+    let (rows, _) = painted(&editor, cx);
+    let edge = point(
+        rows.left() - px(1.) + fitted.right() - px(1.),
+        rows.top() + px(20.),
+    );
+    drag(cx, edge, edge + point(px(60.), px(0.)));
+    let (_, resized) = editor
+        .read_with(cx, |e, cx| e.suggest_details_placement_for_tests(cx))
+        .unwrap();
+    assert!(resized.size.width > fitted.size.width + px(40.));
+    double_click(cx, edge + point(px(60.), px(0.)));
+    let (_, reset) = editor
+        .read_with(cx, |e, cx| e.suggest_details_placement_for_tests(cx))
+        .unwrap();
+    assert_eq!(reset, fitted);
+}
+
+/// A one-parameter signature after any `(`.
+struct OneSignature;
+impl SignatureHelpProvider for OneSignature {
+    fn trigger_characters(&self) -> Vec<char> {
+        vec!['(']
+    }
+
+    fn provide_signature_help(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        _: SignatureHelpTrigger,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Option<SignatureHelp>>> {
+        Task::ready(Ok(Some(SignatureHelp {
+            signatures: vec![SignatureInformation {
+                label: "foo(a: u32, b: u32)".into(),
+                documentation: None,
+                parameters: vec![ParameterInformation {
+                    label: ParameterLabel::Text("a: u32".into()),
+                    documentation: None,
+                }],
+                active_parameter: None,
+            }],
+            active_signature: 0,
+            active_parameter: 0,
+        })))
+    }
+}
+
+/// Monaco's parameter hints are at the cursor and laid out again on each
+/// selection change: they follow the caret while the next request waits
+/// (#344).
+#[gpui::test]
+fn parameter_hints_follow_the_caret(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&lines(30), None, |_| {}, cx);
+    cx.update(|_, cx| register_signature_help_provider(cx, LanguageSelector::All, OneSignature));
+    set_cursor(&editor, cx, 10, 0);
+    cx.simulate_input("foo(");
+    rest(cx, 120);
+    let hints = |cx: &mut VisualTestContext| {
+        let (_, widgets) = editor.read_with(cx, |e, _| e.widget_bounds_for_tests());
+        widgets
+            .iter()
+            .rev()
+            .find(|(_, kind)| *kind == EmbeddedKind::ContentWidget)
+            .unwrap()
+            .0
+    };
+    let before = hints(cx);
+    let offset = before.left() - column_x(&editor, cx, 10, 4);
+    // Typed, the next request not made yet: already at the caret.
+    cx.simulate_input("aaaa");
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_signature_help_visible()));
+    let after = hints(cx);
+    assert!(after.left() > before.left());
+    let after_offset = after.left() - column_x(&editor, cx, 10, 8);
+    assert!(
+        (after_offset - offset).abs() < px(0.5),
+        "{after_offset:?} {offset:?}"
+    );
+}
