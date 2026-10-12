@@ -20,7 +20,9 @@ fn setup(cx: &mut TestAppContext) -> (Entity<CodeEditor>, &mut VisualTestContext
     cx.update(gpui_monaco::init);
     let (editor, cx) = cx.add_window_view(|window, cx| {
         let model = cx.new(|_| TextModel::new(TEXT));
-        CodeEditor::new(model, window, cx)
+        let mut editor = CodeEditor::new(model, window, cx);
+        editor.update_options_with(|o| o.glyph_margin = true, cx);
+        editor
     });
     cx.update(|window, cx| window.focus(&editor.read(cx).focus_handle(cx), cx));
     paint(cx);

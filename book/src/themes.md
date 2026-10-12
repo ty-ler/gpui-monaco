@@ -19,8 +19,8 @@ editor.update(cx, |editor, cx| editor.set_theme(Arc::new(Theme::vs()), cx));
 
 ## Built-in themes
 
-- `Theme::vs_dark()`: Monaco's `vs-dark` (the default)
-- `Theme::vs()`: Monaco's `vs`
+- `Theme::vs()`: Monaco's `vs` (the default, as in Monaco)
+- `Theme::vs_dark()`: Monaco's `vs-dark`
 - `Theme::hc_black()` and `Theme::hc_light()`: Monaco's high-contrast `hc-black` and `hc-light`
 
 ## Themes by name
@@ -100,4 +100,4 @@ let theme = Theme::define(
 );
 ```
 
-With `inherit`, the base's rules come first and its colors stay unless the new keys change them, directly or through a default derived from one. Without it, as in Monaco, only the new rules and colors apply, over the registry defaults for the base's kind (so `vs` without `inherit` loses `themes.ts`' `#E5EBF1` inactive selection). `editor.foreground` in the colors also becomes the default token color. `TokenRule::monaco` checks colors as Monaco does: `RRGGBB` or `RRGGBBAA` with an optional `#`, the alpha ignored; anything else is an error. Unlike Monaco, any theme can be the base, not only the built-in ones.
+With `inherit`, the base's rules come first and its colors stay unless the new keys change them, directly or through a default derived from one. Without it, as in Monaco, only the new rules and colors apply, over the registry defaults for the base's kind (so `vs` without `inherit` loses `themes.ts`' `#E5EBF1` inactive selection). `editor.foreground` in the colors also becomes the default token color. A color that isn't `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa` is red, as Monaco's `Color.fromHex` makes it (in VS Code theme JSON too). `TokenRule::monaco` checks colors as Monaco does: `RRGGBB` or `RRGGBBAA` with an optional `#`, the alpha ignored; anything else is an error. Unlike Monaco, any theme can be the base, not only the built-in ones.

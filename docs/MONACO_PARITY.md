@@ -85,7 +85,9 @@ Issues are linked by number.
 | Word wrap indicator | `wordWrapIndicator` | ✅ | #228 |
 | Horizontal scrollbar left out of the content height | `scrollbar.ignoreHorizontalScrollbarInContentHeight` | ✅ | #228 |
 | Large file optimizations, default line ending | `largeFileOptimizations`, `defaultEOL` | ✅ | #203 |
-| Option validation: clamps and sentinel values (`fontSize` 0, `lineHeight` 0 and multipliers, sensitivities, minimap, sticky scroll, folding and color limits, delays, …), `tabSize`/`indentSize` at least 1, `indentSize: 'tabSize'` | each option's `validate`, `TextModelResolvedOptions` | ✅ the editor renders with `EditorOptions::validated`, `options()` returns the options as set | #262 |
+| Option validation: clamps and sentinel values (`fontSize` 0, `lineHeight` 0 and multipliers, sensitivities, minimap, sticky scroll, folding and color limits, delays, an invalid `markSectionHeaderRegex`, …), `tabSize`/`indentSize` at least 1, `indentSize: 'tabSize'` | each option's `validate`, `TextModelResolvedOptions` | ✅ the editor renders with `EditorOptions::validated`, `options()` returns the options as set | #262, #348 |
+| Computed options: `getOptions`, `getOption`, `getRawOptions` | `ComputedEditorOptions`, `codeEditorWidget` | ✅ `computed_options()` (zoomed, resolved `fontSize`, `lineHeight` and `accessibilitySupport`), `options()` raw; `fontInfo`, `layoutInfo` are `font_info()`, `layout_info()` | #348 |
+| Standalone defaults: `glyphMargin: false`, `overviewRulerLanes: 2`, `wrappingIndent: none`, `autoIndent: advanced`, theme `vs` | `editor.api.ts`, `standaloneThemeService` | ✅ | #348 |
 | Layout widths: a line-height glyph margin, 16px folding column (none with `showFoldingControls: never`), the minimap's proportional share and `fill`/`fit` sizing, `lineDecorationsWidth` in characters | `EditorLayoutInfoComputer.computeLayout` | ✅ | #262, #254 |
 | Platform defaults, `cursorWidth` 0 and its cap | `renderFinalNewline` (dimmed on Linux), `defaultEOL` (CRLF on Windows), `cursorWidth` | ✅ | #262 |
 | Inertial scrolling, two-cell full-width characters | `inertialScroll`, `fullwidthCharacterWidth` | ✅ ghost text and the inline diff's deleted lines keep the font's width | #203, #228 |
@@ -104,7 +106,7 @@ Issues are linked by number.
 | Cursor and selection rendering: block cursor text, view positions at wrap points, multi-cursor colors, selection corners and insets, view part paint order | `viewCursors`, `selections`, `CursorState.viewState` | ✅ the "Show more" chip has `.mtkoverflow`'s 4px padding, the line shaped around it | #259, #302 |
 | Bracket pair guides, `guides.highlightActiveIndentation: 'always'` | view parts | ✅ | #118, #203 |
 | Bracket pair colorization, independent color pool per bracket type | `bracketPairColorization` | ✅ | #85, #203 |
-| Occurrence and selection highlight, `selectedTextMatchMode` (`findOptions` uses the find state's toggles, open or closed), `occurrencesHighlightFromAllProviders` | `wordHighlighter`, `multicursor` | ✅ `multiFile` highlights in the current editor only | #83, #203, #228, #334 |
+| Occurrence and selection highlight, `selectedTextMatchMode` (`findOptions` uses the find state's toggles, open or closed), `occurrencesHighlightFromAllProviders` | `wordHighlighter`, `multicursor` | ✅ `multiFile` highlights the textual occurrences in every open model, as standalone Monaco's only multi-document provider does | #83, #203, #228, #334, #348 |
 | Unicode highlighting, unusual line terminators | `unicodeHighlighter`, `unusualLineTerminators` | ✅ | #86 |
 | Unicode highlighter "too many characters" banner, `disableHighlightingOf*` commands | `unicodeHighlighter`, `setBanner` | ✅ the commands change the editor's options, not user settings; the banner is a tab stop labelled with its message | #227, #335 |
 | Font weight, ligatures, zoom, mouse wheel zoom | `fontZoom`, options | ✅ | #87 |
@@ -166,7 +168,7 @@ Issues are linked by number.
 | Token-level APIs | `remeasureFonts`, `setColorMap`, `getEncodedLanguageId` | ✅ `remeasure_fonts` is a no-op (GPUI measures every frame); no `setColorMap` or `getEncodedLanguageId`, which serve encoded token metadata | #235 |
 | Static colorize and tokenize | `colorizer` | ✅ by language id, name or MIME type | #108, #326 |
 | Colorize a model line | `colorizeModelLine` | ✅ | #204 |
-| Themes: `vs`, `vs-dark`, VS Code JSON, `defineTheme` | standalone theme service | ✅ | #263 |
+| Themes: `vs` (the default), `vs-dark`, VS Code JSON, `defineTheme` (a color that isn't hex is red, as `Color.fromHex` makes it) | standalone theme service | ✅ | #263, #348 |
 | Theme colors and their defaults | color registry (`registerColor`), `StandaloneTheme.getColor` | ✅ the editor's and platform registry colors with Monaco's per-kind defaults, derived lazily from the theme's own colors; widgets use their own keys (`menu.*`, `editorHoverWidget.*`, `list.*`, `quickInput*`, `keybindingLabel.*`, `toolbar.*`, markers); high contrast outlines; workbench-only colors left out | #263 |
 | Token rules | `TokenTheme`, `ThemeTrieElement` | ✅ rule inheritance, `''` default rules and the built-in themes' language rules; tree-sitter captures get their language suffix; the default color is the editor foreground rather than `#000000`, and token backgrounds are ignored | #263 |
 | Themes by name for every editor | `editor.defineTheme`, `editor.setTheme` | ✅ | #204 |

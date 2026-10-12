@@ -182,6 +182,9 @@ fn mouse_targets_and_events(cx: &mut TestAppContext) {
     use gpui::{Modifiers, point};
     use gpui_monaco::{CodeEditorEvent, MouseTargetKind};
     let (editor, cx) = setup("short\na much longer line", cx);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.glyph_margin = true, cx)
+    });
     draw(cx);
     let text_point = |cx: &mut VisualTestContext, row, column| {
         editor

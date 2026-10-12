@@ -50,7 +50,7 @@ macro_rules! editor_colors {
         /// Editor chrome colors, resolved from VS Code color ids (named in
         /// each field's docs) and their Monaco defaults.
         ///
-        /// Defaults to [`EditorColors::vs_dark`].
+        /// Defaults to [`EditorColors::vs`], Monaco's default theme.
         #[derive(Clone, Debug, PartialEq)]
         pub struct EditorColors {
             $( $(#[$doc])* pub $field: $ty, )*
@@ -1247,11 +1247,15 @@ fn color_map(colors: &[(&str, u32)]) -> HashMap<String, Hsla> {
         .collect()
 }
 
-/// VS Code color ids and values, the valid ones parsed.
+/// VS Code color ids and values, parsed; a value that isn't a hex color is
+/// red, as Monaco's `Color.fromHex` makes it.
 fn parse_colors(colors: &HashMap<String, String>) -> HashMap<String, Hsla> {
     colors
         .iter()
-        .filter_map(|(id, value)| Some((id.clone(), parse_hex_color(value)?)))
+        .map(|(id, value)| {
+            let color = parse_hex_color(value).unwrap_or_else(|| rgba(0xff0000ff).into());
+            (id.clone(), color)
+        })
         .collect()
 }
 
@@ -1445,7 +1449,7 @@ fn transparent(color: Hsla, factor: f32) -> Hsla {
 
 impl Default for EditorColors {
     fn default() -> Self {
-        Self::vs_dark()
+        Self::vs()
     }
 }
 
@@ -1939,7 +1943,8 @@ impl Theme {
     /// selection). Without it, only `colors` and the registry defaults for
     /// the base's kind apply, and only `rules`. As in Monaco,
     /// `editor.foreground` and `editor.background` in `colors` also become a
-    /// `''` rule, the default token style.
+    /// `''` rule, the default token style. A color that isn't hex (`#rgb`,
+    /// `#rgba`, `#rrggbb` or `#rrggbbaa`) is red, as Monaco makes it.
     ///
     /// Unlike Monaco, which only accepts `vs`, `vs-dark`, `hc-black` and
     /// `hc-light`, any theme can be the base.
@@ -2532,6 +2537,34 @@ mod tests {
         assert_eq!(parse_hex_color("#11223344"), Some(rgba(0x11223344).into()));
         assert_eq!(parse_hex_color("nope"), None);
         assert_eq!(parse_hex_color("#ggg"), None);
+    }
+
+    /// Monaco `Color.fromHex`: a value `parseHex` rejects is `Color.red`,
+    /// in `defineTheme` colors and VS Code themes alike.
+    #[test]
+    fn invalid_theme_colors_are_red() {
+        let red = "#ff0000ff";
+        let theme = Theme::define(
+            "invalid",
+            &Theme::vs_dark(),
+            true,
+            Vec::new(),
+            &colors(&[
+                ("editor.background", "#12345"),
+                ("editorCursor.foreground", "blue"),
+                ("editor.lineHighlightBackground", "#123456"),
+            ]),
+        );
+        assert_eq!(hex(theme.colors.background), red);
+        assert_eq!(hex(theme.colors.cursor), red);
+        assert_eq!(
+            opt_hex(theme.colors.line_highlight_background).as_deref(),
+            Some("#123456ff")
+        );
+        let theme =
+            Theme::from_vscode_json(r#"{"type": "dark", "colors": {"editor.background": ""}}"#)
+                .unwrap();
+        assert_eq!(hex(theme.colors.background), red);
     }
 
     #[test]

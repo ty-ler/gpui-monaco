@@ -553,3 +553,66 @@ fn selection_highlights_follow_the_closed_find_states_match_case(cx: &mut TestAp
     cx.run_until_parked();
     assert_eq!(highlighted_lines(&editor, cx), vec![3]);
 }
+
+fn occurrences_highlight(
+    editor: &Entity<CodeEditor>,
+    value: gpui_monaco::options::OccurrencesHighlight,
+    cx: &mut VisualTestContext,
+) {
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.occurrences_highlight = value, cx)
+    });
+}
+
+/// Monaco `WordHighlighter` with `occurrencesHighlight: 'multiFile'`: with
+/// other models open, standalone Monaco's textual multi-document provider
+/// highlights the word in every model (the document highlight providers
+/// aren't asked), and each editor shows its model's highlights.
+#[gpui::test]
+fn multi_file_highlights_in_the_other_editors(cx: &mut TestAppContext) {
+    use gpui_monaco::options::OccurrencesHighlight;
+    let (editor, cx) = setup("foo bar foo", cx);
+    let (other, same) = cx.update(|window, cx| {
+        let model = cx.new(|_| TextModel::new("bar foo\nfoo").with_uri("file:///b.txt"));
+        let other = cx.new(|cx| CodeEditor::new(model, window, cx));
+        let shared = editor.read(cx).model().clone();
+        let same = cx.new(|cx| CodeEditor::new(shared, window, cx));
+        (other, same)
+    });
+    cx.update(|_, cx| register_document_highlight_provider(cx, LanguageSelector::All, Writes));
+    occurrences_highlight(&editor, OccurrencesHighlight::MultiFile, cx);
+    set(&editor, cx, p(1, 2), p(1, 2));
+    wait(cx);
+    assert_eq!(words(&editor, cx), vec![(1, 1, 1, 4), (1, 9, 1, 12)]);
+    assert_eq!(words(&other, cx), vec![(1, 5, 1, 8), (2, 1, 2, 4)]);
+    // An editor showing the same model shows them too.
+    assert_eq!(words(&same, cx), vec![(1, 1, 1, 4), (1, 9, 1, 12)]);
+
+    set(&editor, cx, p(1, 6), p(1, 6));
+    wait(cx);
+    assert_eq!(words(&editor, cx), vec![(1, 5, 1, 8)]);
+    assert_eq!(words(&other, cx), vec![(1, 1, 1, 4)]);
+
+    // Typing stops them everywhere (Monaco `_stopAll`).
+    cx.simulate_input("x");
+    wait(cx);
+    assert!(words(&editor, cx).is_empty());
+    assert!(words(&other, cx).is_empty());
+    assert!(words(&same, cx).is_empty());
+
+    // `SingleFile`: only this editor, from the provider.
+    occurrences_highlight(&editor, OccurrencesHighlight::SingleFile, cx);
+    set(&editor, cx, p(1, 2), p(1, 2));
+    wait(cx);
+    assert_eq!(words(&editor, cx), vec![(1, 3, 1, 4)]);
+    assert!(words(&other, cx).is_empty());
+
+    // Switching to `MultiFile` asks again, and leaving it stops the other
+    // editors' highlights.
+    occurrences_highlight(&editor, OccurrencesHighlight::MultiFile, cx);
+    wait(cx);
+    assert_eq!(words(&other, cx), vec![(1, 5, 1, 8), (2, 1, 2, 4)]);
+    occurrences_highlight(&editor, OccurrencesHighlight::SingleFile, cx);
+    wait(cx);
+    assert!(words(&other, cx).is_empty());
+}

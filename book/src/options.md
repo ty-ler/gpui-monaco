@@ -1,6 +1,6 @@
 # Options
 
-`EditorOptions` mirrors Monaco's `IEditorOptions`. Its defaults are Monaco's defaults. To change options, clone the current ones, edit the copy and apply it:
+`EditorOptions` mirrors Monaco's `IEditorOptions`. Its defaults are standalone Monaco's: Monaco's defaults with the overrides of its `editor.api.ts` (`glyph_margin` off, two `overview_ruler_lanes`, `wrapping_indent: None` and `auto_indent: Advanced`, where VS Code has on, 3, `Same` and `Full`). To change options, clone the current ones, edit the copy and apply it:
 
 ```rust,ignore
 editor.update(cx, |editor, cx| {
@@ -19,7 +19,7 @@ editor.update(cx, |editor, cx| {
 | `mouse_wheel_zoom` | `mouseWheelZoom` | Cmd+wheel (Ctrl elsewhere) zooms every editor's font; see `set_editor_zoom_level` |
 | `line_numbers` | `lineNumbers` | `On`, `Off`, `Relative`, `Interval` (every 10th, the current and the last line), or `LineNumbers::custom(\|n\| …)` for Monaco's function: a label per 1-based line, empty for none |
 | `select_on_line_numbers` | `selectOnLineNumbers` | clicking a line number selects the line (on); other gutter clicks never select |
-| `line_numbers_min_chars`, `line_decorations_width`, `glyph_margin` | same names | gutter layout (see [Layout](#layout)); `line_decorations_width` takes pixels (`px(10.).into()`) or `LineDecorationsWidth::Chars(1.5)` for Monaco's `"1.5ch"` |
+| `line_numbers_min_chars`, `line_decorations_width`, `glyph_margin` | same names | gutter layout (see [Layout](#layout)); `glyph_margin` is off by default, as in standalone Monaco; `line_decorations_width` takes pixels (`px(10.).into()`) or `LineDecorationsWidth::Chars(1.5)` for Monaco's `"1.5ch"` |
 | `render_line_highlight` | `renderLineHighlight` | `None`, `Gutter`, `Line`, `All` |
 | `cursor_style`, `cursor_width`, `cursor_height` | `cursorStyle`, `cursorWidth`, `cursorHeight` | `Line`, `Block`, `Underline`, `LineThin`, `BlockOutline`, `UnderlineThin`; `cursor_width` 0 (the default) draws 2px and it's at most a character wide; a bar of 2px or more straddles the character boundary, 1px to the left. A block cursor (and a bar wider than 2px) draws the character under it in `editorCursor.background` (the caret color's opposite if unset); on a tab it's half a character wide. With several cursors they use `editorMultiCursor.primary.*` and `secondary.*`. `cursor_height` 0 is the line height |
 | `mouse_style` | `mouseStyle` | the mouse cursor over the text: `Text` (I-beam), `Default` (arrow) or `Copy` |
@@ -54,7 +54,7 @@ editor.update(cx, |editor, cx| {
 | `unusual_line_terminators` | `unusualLineTerminators` | `Prompt` (default), `Auto` or `Off` for LS and PS characters |
 | `word_separators` | `wordSeparators` | used by word movement and whole-word find |
 | `word_segmenter_locales` | `wordSegmenterLocales` | BCP 47 tags (`ja`, `zh-CN`, `th`, …) whose words word movement, deletion and double-click selection find with ICU4X's word segmenter, for languages written without spaces (empty by default). The first valid tag is used; invalid ones are ignored. Needs the `word-segmenter` cargo feature (on by default) |
-| `word_wrap`, `word_wrap_column`, `wrapping_indent` | `wordWrap`, `wordWrapColumn`, `wrappingIndent` | `Off`, `On`, `WordWrapColumn`, `Bounded` |
+| `word_wrap`, `word_wrap_column`, `wrapping_indent` | `wordWrap`, `wordWrapColumn`, `wrappingIndent` | `Off`, `On`, `WordWrapColumn`, `Bounded`; continuation lines are indented `None` (default), `Same`, `Indent` or `DeepIndent` |
 | `word_wrap_indicator` | `wordWrapIndicator` | a `↩` (theme color `editorWordWrapIndicator.foreground`, defaulting to the whitespace color) at the wrapping column of each soft-wrapped line; wrapping at the viewport then stops a column earlier (off) |
 | `word_wrap_override1`, `word_wrap_override2` | `wordWrapOverride1`, `wordWrapOverride2` | `On`, `Off` or `Inherit` (default); the second overrides the first, which overrides `word_wrap`. `EditorOptions::effective_word_wrap` resolves them. The diff editor sets the first from `diff_word_wrap` |
 | `word_wrap_break_before_characters`, `word_wrap_break_after_characters` | `wordWrapBreakBeforeCharacters`, `wordWrapBreakAfterCharacters` | where wrapping may break (Monaco's defaults) |
@@ -67,12 +67,12 @@ editor.update(cx, |editor, cx| {
 | `allow_variable_line_heights` | `allowVariableLineHeights` | decorations' `line_height` applies (default on) |
 | `vertical_scrollbar_size`, `horizontal_scrollbar_size` | `scrollbar.verticalScrollbarSize`, … | |
 | `scrollbar` | `scrollbar.*` | `vertical`/`horizontal` (`Auto` shows while hovered or just scrolled, `Visible`, `Hidden`), `use_shadows`, `*_has_arrows`, `arrow_size`, `*_slider_size`, `handle_mouse_wheel`, `always_consume_mouse_wheel`, `scroll_by_page` (a track click pages by the viewport's height, then drags the slider), `ignore_horizontal_scrollbar_in_content_height` (without `scroll_beyond_last_line`, a shown horizontal scrollbar adds its height to the content height so the last line can scroll above it; this leaves it out) |
-| `overview_ruler_lanes`, `overview_ruler_border`, `hide_cursor_in_overview_ruler` | same names | lanes (3; 0 hides the marks), a left border, the cursor marks |
+| `overview_ruler_lanes`, `overview_ruler_border`, `hide_cursor_in_overview_ruler` | same names | lanes (2, at most 3; 0 hides the marks), a left border, the cursor marks |
 | `minimap` | `minimap` | `enabled`, `max_column`, `scale`, `always_show_slider`, `side` (right or left), `render_characters`, `size` (`Proportional`, `Fill`, `Fit`), section headers (`show_region_section_headers`, `show_mark_section_headers`, `mark_section_header_regex`, `section_header_font_size`, `section_header_letter_spacing`), `autohide` (`None`; `Mouseover` shows it while hovered; `Scroll` shows it while scrolling and lets clicks through while hidden) |
 | `sticky_scroll` | `stickyScroll` | `enabled`, `max_line_count`, `default_model`, `scroll_with_editor` |
 | `auto_closing_brackets`, `auto_closing_quotes`, `auto_closing_comments` | `autoClosingBrackets`, … | `Always`, `LanguageDefined`, `BeforeWhitespace`, `Never` |
 | `auto_closing_overtype`, `auto_closing_delete`, `auto_surround` | same names | |
-| `auto_indent` | `autoIndent` | `None`, `Keep`, `Brackets`, `Advanced`, `Full` |
+| `auto_indent` | `autoIndent` | `None`, `Keep`, `Brackets`, `Advanced` (default: brackets and onEnter rules), `Full` (also the language's indentation rules) |
 | `match_brackets` | `matchBrackets` | `Always` (the pair at the cursor, or else the enclosing pair), `Near` or `Never` |
 | `code_lens`, `code_lens_font_family`, `code_lens_font_size` | `codeLens`, … | show code lenses (on); their font (the editor's; 90% of its size) |
 | `linked_editing` | `linkedEditing` | mirror edits between linked ranges, like HTML tag pairs (off) |
@@ -121,7 +121,7 @@ editor.update(cx, |editor, cx| {
 | `render_whitespace`, `render_control_characters`, `render_final_newline` | same names | whitespace as Monaco's default SVG dots and arrows (`boundary` skips single spaces between non-spaces; a tab doesn't count as a space); control characters in white on dark red, C0 controls and DEL as `␇` and the like, and bidi formatting characters (U+202A–202E, U+2066–2069, U+200E/F, U+061C) as `[U+202E]`, so they can't reorder the line; the BOM and line/paragraph separators always show as U+FFFD; the final newline's line number is `Dimmed` by default on Linux and `On` elsewhere, as in Monaco |
 | `guides`, `rulers` | `guides`, `rulers` | indent guides (with the active one highlighted: `highlight_active_indentation` is `On`, `Off` or `Always`, which also highlights it on lines with bracket pair guides), bracket pair guides (`bracket_pairs`: off, active or on, plus horizontal ones) and vertical rulers |
 | `bracket_pair_colorization` | `bracketPairColorization` | `enabled`: color brackets by nesting level (on); `independent_color_pool_per_bracket_type`: each bracket kind counts its own nesting (off) |
-| `occurrences_highlight`, `occurrences_highlight_delay` | `occurrencesHighlight`, `occurrencesHighlightDelay` | `Off`, `SingleFile` (default) or `MultiFile`, which like `SingleFile` highlights in this editor only (editors don't share highlights). Highlights are computed 50ms after the cursor rests and shown no sooner than the delay (0) after it moved |
+| `occurrences_highlight`, `occurrences_highlight_delay` | `occurrencesHighlight`, `occurrencesHighlightDelay` | `Off`, `SingleFile` (default) or `MultiFile`. With `MultiFile` and another editor showing a different model, the word's textual occurrences are highlighted in every model (standalone Monaco's only multi-document highlight provider; the document highlight providers aren't asked), and each editor shows its model's. Highlights are computed 50ms after the cursor rests and shown no sooner than the delay (0) after it moved |
 | `occurrences_highlight_from_all_providers` | `occurrencesHighlightFromAllProviders` | ask every document highlight provider at once and merge their answers (off: the first provider that answers wins, and an empty answer counts); the textual occurrences are only used when no provider is registered |
 | `selection_highlight`, `selection_highlight_max_length`, `selection_highlight_multiline` | same names | highlight other occurrences of the selection |
 | `selected_text_match_mode` | `selectedTextMatchMode` | how Cmd/Ctrl+D, select all occurrences and selection highlights match selected text: `FindOptions` (the find state's match case and whole word, open or closed; both off by default), `CaseSensitive` or `CaseInsensitive` |
@@ -143,13 +143,13 @@ Changing options takes effect on the next frame. Wrapping, folding and the minim
 
 ## Validation
 
-Like Monaco's `validate` methods, the editor clamps options to their limits and gives Monaco's sentinel values their meaning: it renders with `options.validated()`, while `editor.options()` returns the options as they were set (Monaco's `getRawOptions`). Whole-number options are truncated, as Monaco's `clampedInt` does. In particular:
+Like Monaco's `validate` methods, the editor clamps options to their limits and gives Monaco's sentinel values their meaning: it renders with `options.validated()`, while `editor.options()` returns the options as they were set (Monaco's `getRawOptions`). `editor.computed_options()` returns what it runs with (Monaco's `getOptions` and `getOption`): validated, zoomed, with `font_size` and `line_height` in pixels, and `accessibility_support` resolved to `On` or `Off`. `ConfigurationChange` carries those. `layout_info()` has the rest of Monaco's computed layout, such as `lineDecorationsWidth` in pixels. Whole-number options are truncated, as Monaco's `clampedInt` does. In particular:
 
 - `font_size` is 6–100px, and 0 means the platform default (`resolved_font_size`).
 - `line_height` is clamped to 0–150. `None` or 0 computes it from the font size (1.5× on macOS, 1.35× elsewhere), a value below 8 multiplies the font size (`Some(px(1.5))` is 1.5 lines), and the result is rounded and at least 8px (`resolved_line_height`).
 - `fast_scroll_sensitivity` of 0 or less is 5; `mouse_wheel_scroll_sensitivity` of 0 is 1.
 - `line_numbers_min_chars` is 1–300; `line_decorations_width`, `padding`, `reveal_horizontal_right_padding` and the scrollbar sizes 0–1000px; `overview_ruler_lanes` 0–3; `word_wrap_column`, `multi_cursor_limit` (to 100 000) and `accessibility_page_size` at least 1; `folding_maximum_regions` 10–65 000; `color_decorators_limit` 1–1 000 000; `code_lens_font_size` and `inlay_hints.font_size` 0–100; `suggest.font_size` and `suggest.line_height` 0–1000; ruler columns at most 10 000.
-- `minimap.scale` is 1, 2 or 3; `minimap.max_column` 1–10 000; `minimap.section_header_font_size` 4–32; `sticky_scroll.max_line_count` 1–20.
+- `minimap.scale` is 1, 2 or 3; `minimap.max_column` 1–10 000; `minimap.section_header_font_size` 4–32; `sticky_scroll.max_line_count` 1–20. A `minimap.mark_section_header_regex` that doesn't compile keeps the default.
 - `occurrences_highlight_delay` is at most 2s, `hover.delay` 10s, `hover.hiding_delay` 10 minutes and `inline_suggest.min_show_delay` 10s.
 
 `ModelOptions::validated` (applied by `TextModel`) keeps `tab_size` and `indent_size` at least 1.

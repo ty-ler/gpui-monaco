@@ -857,6 +857,9 @@ impl Render for Blank {
 #[gpui::test]
 fn mouse_target_details(cx: &mut TestAppContext) {
     let (editor, cx) = setup("short\na much longer line\nthird", cx);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.glyph_margin = true, cx)
+    });
     draw(cx);
     let zone_view = cx.update(|_, cx| {
         cx.new(|_| Blank {

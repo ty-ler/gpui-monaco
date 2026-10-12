@@ -171,7 +171,7 @@ fn mouse_down(at: gpui::Point<Pixels>, button: MouseButton, cx: &mut VisualTestC
 
 #[gpui::test]
 fn select_on_line_numbers(cx: &mut TestAppContext) {
-    let (editor, cx) = setup("one\ntwo\nthree", |_| {}, cx);
+    let (editor, cx) = setup("one\ntwo\nthree", |o| o.glyph_margin = true, cx);
     let at = line_number_point(&editor, 1, cx);
     mouse_down(at, MouseButton::Left, cx);
     // The whole line, through the next line's start.
@@ -742,6 +742,7 @@ fn screen_readers_get_wrapped_lines_without_indent(cx: &mut TestAppContext) {
         |o| {
             o.word_wrap = WordWrap::WordWrapColumn;
             o.word_wrap_column = 10;
+            o.wrapping_indent = gpui_monaco::view::line_breaks::WrappingIndent::Same;
             o.accessibility_support = AccessibilitySupport::On;
         },
         cx,
@@ -763,4 +764,107 @@ fn screen_readers_get_wrapped_lines_without_indent(cx: &mut TestAppContext) {
     // Not optimized, continuation lines keep the indentation.
     assert!(continuation_x(&editor, cx) > optimized);
     assert!(!editor.read_with(cx, |e, _| e.is_screen_reader_optimized()));
+}
+
+/// Monaco `getOptions` / `getOption` against `getRawOptions`: the computed
+/// options are validated, zoomed and resolved, the raw ones as set, and
+/// `onDidChangeConfiguration` carries the computed ones.
+#[gpui::test]
+fn computed_options(cx: &mut TestAppContext) {
+    use gpui_monaco::options::LineDecorationsWidth;
+    let (editor, cx) = setup(
+        "text",
+        |o| {
+            o.font_size = px(14.);
+            o.line_height = None;
+            o.overview_ruler_lanes = 7;
+            o.line_decorations_width = LineDecorationsWidth::Chars(2.);
+            o.minimap.mark_section_header_regex = "(".into();
+        },
+        cx,
+    );
+    let options = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, _| (e.options().clone(), e.computed_options()))
+    };
+    let (raw, computed) = options(&editor, cx);
+    assert_eq!(raw.overview_ruler_lanes, 7);
+    assert_eq!(computed.overview_ruler_lanes, 3);
+    assert_eq!(raw.minimap.mark_section_header_regex, "(");
+    assert_eq!(
+        computed.minimap.mark_section_header_regex,
+        EditorOptions::default().minimap.mark_section_header_regex
+    );
+    // Monaco `EditorLineHeight.compute`: the font's line height.
+    let font = editor.read_with(cx, |e, _| e.font_info()).unwrap();
+    assert_eq!(raw.line_height, None);
+    assert_eq!(computed.line_height, Some(font.line_height));
+    assert_eq!(computed.font_size, px(14.));
+    // Monaco's computed `lineDecorationsWidth` (`2ch` in pixels) is in the
+    // layout info.
+    assert_eq!(
+        computed.line_decorations_width,
+        LineDecorationsWidth::Chars(2.)
+    );
+    let info = editor.read_with(cx, |e, _| e.layout_info()).unwrap();
+    assert_eq!(
+        info.decorations_width,
+        px((2. * f32::from(font.typical_halfwidth_character_width)).trunc() + 16.)
+    );
+    // Monaco `EditorAccessibilitySupport.compute`: `auto` from the
+    // environment (no assistive technology in tests).
+    assert_eq!(raw.accessibility_support, AccessibilitySupport::Auto);
+    assert_eq!(computed.accessibility_support, AccessibilitySupport::Off);
+    assert_eq!(computed.wrapping_strategy, WrappingStrategy::Simple);
+
+    // Zoomed, the computed font follows; the raw options don't change.
+    let changes = Rc::new(RefCell::new(Vec::new()));
+    let sink = changes.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event, _| {
+            if let CodeEditorEvent::ConfigurationChanged(change) = event {
+                sink.borrow_mut().push(change.new_options().clone());
+            }
+        })
+        .detach();
+    });
+    cx.update(|_, cx| gpui_monaco::set_editor_zoom_level(1., cx));
+    paint(cx);
+    let (raw, computed) = options(&editor, cx);
+    assert_eq!(raw.font_size, px(14.));
+    assert!((f32::from(computed.font_size) - 15.4).abs() < 0.01);
+    let font = editor.read_with(cx, |e, _| e.font_info()).unwrap();
+    assert_eq!(computed.line_height, Some(font.line_height));
+    assert_eq!(changes.borrow().last(), Some(&computed));
+
+    // With a screen reader: advanced wrapping without indentation (Monaco
+    // `WrappingStrategy.compute` and `WrappingIndentOption.compute`).
+    set_options(
+        &editor,
+        |o| o.accessibility_support = AccessibilitySupport::On,
+        cx,
+    );
+    let (raw, computed) = options(&editor, cx);
+    assert_eq!(raw.wrapping_strategy, WrappingStrategy::Simple);
+    assert_eq!(computed.accessibility_support, AccessibilitySupport::On);
+    assert_eq!(computed.wrapping_strategy, WrappingStrategy::Advanced);
+    assert_eq!(
+        computed.wrapping_indent,
+        gpui_monaco::view::line_breaks::WrappingIndent::None
+    );
+}
+
+/// Standalone Monaco's defaults (`editor.api.ts`), not VS Code's.
+#[test]
+fn standalone_defaults() {
+    let options = EditorOptions::default();
+    assert!(!options.glyph_margin);
+    assert_eq!(options.overview_ruler_lanes, 2);
+    assert_eq!(
+        options.wrapping_indent,
+        gpui_monaco::view::line_breaks::WrappingIndent::None
+    );
+    assert_eq!(
+        options.auto_indent,
+        gpui_monaco::cursor::AutoIndent::Advanced
+    );
 }

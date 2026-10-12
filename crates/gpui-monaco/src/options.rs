@@ -155,10 +155,12 @@ pub enum OccurrencesHighlight {
     /// Highlight the symbol at the cursor in this editor (the default).
     #[default]
     SingleFile,
-    /// Monaco also highlights across the other open editors (VS Code's
-    /// experimental multi-document highlights). Here it highlights in this
-    /// editor, like `SingleFile`: there are no multi-document highlight
-    /// providers and editors don't share highlights.
+    /// Also highlight the word in the other editors' models (Monaco's
+    /// multi-document highlights). While another editor shows a different
+    /// model, the highlights are textual (standalone Monaco's only
+    /// multi-document highlight provider), in this model too, and every
+    /// editor showing one of the models shows them; otherwise it's like
+    /// `SingleFile`.
     MultiFile,
 }
 
@@ -217,7 +219,7 @@ pub struct MinimapOptions {
     /// (default `true`).
     pub show_mark_section_headers: bool,
     /// Monaco `minimap.markSectionHeaderRegex`, with `label` and
-    /// `separator` groups.
+    /// `separator` groups; one that doesn't compile keeps the default.
     pub mark_section_header_regex: SharedString,
     /// Monaco `minimap.sectionHeaderFontSize` (default 9, 4 to 32).
     pub section_header_font_size: f32,
@@ -1718,7 +1720,8 @@ pub struct EditorOptions {
     /// the folding controls add 16px.
     pub line_decorations_width: LineDecorationsWidth,
     /// Monaco `glyphMargin`: show the gutter column for glyph decorations,
-    /// a line height wide (default `true`).
+    /// a line height wide (default `false`, standalone Monaco's default;
+    /// VS Code's is `true`).
     pub glyph_margin: bool,
     /// Monaco `renderLineHighlight`.
     pub render_line_highlight: RenderLineHighlight,
@@ -1833,7 +1836,7 @@ pub struct EditorOptions {
     /// The rest of Monaco `scrollbar`.
     pub scrollbar: ScrollbarOptions,
     /// Monaco `overviewRulerLanes`: lanes in the overview ruler, 0 to hide
-    /// its marks (default 3, at most 3).
+    /// its marks (default 2, standalone Monaco's default; at most 3).
     pub overview_ruler_lanes: u32,
     /// Monaco `overviewRulerBorder`: a border on its left (default
     /// `true`).
@@ -1887,8 +1890,9 @@ pub struct EditorOptions {
     /// Monaco `wrapOnEscapedLineFeeds`: while wrapping, a line with a quote
     /// also wraps after each literal `\n` (default `false`).
     pub wrap_on_escaped_line_feeds: bool,
-    /// Monaco `wrappingIndent`: indentation of wrapped continuation lines (default
-    /// same as the first line).
+    /// Monaco `wrappingIndent`: indentation of wrapped continuation lines
+    /// (default none, standalone Monaco's default; VS Code's is same as the
+    /// first line).
     pub wrapping_indent: crate::view::line_breaks::WrappingIndent,
     /// Monaco `wrappingStrategy`: wrap by monospace columns (`Simple`, the
     /// default) or by measured widths (`Advanced`, for proportional fonts).
@@ -1928,7 +1932,9 @@ pub struct EditorOptions {
     pub auto_closing_delete: crate::cursor::AutoClosingEditStrategy,
     /// Monaco `autoSurround`.
     pub auto_surround: crate::cursor::AutoSurroundStrategy,
-    /// Monaco `autoIndent`.
+    /// Monaco `autoIndent` (default advanced, standalone Monaco's default:
+    /// brackets and onEnter rules but not indentation rules; VS Code's is
+    /// full).
     pub auto_indent: crate::cursor::AutoIndent,
     /// Monaco `matchBrackets`: highlight the bracket pair at the cursor
     /// (default `Always`).
@@ -2156,7 +2162,7 @@ impl Default for EditorOptions {
             line_numbers: LineNumbers::On,
             line_numbers_min_chars: 5,
             line_decorations_width: LineDecorationsWidth::default(),
-            glyph_margin: true,
+            glyph_margin: false,
             render_line_highlight: RenderLineHighlight::Line,
             cursor_style: CursorStyle::Line,
             cursor_width: px(0.),
@@ -2194,7 +2200,7 @@ impl Default for EditorOptions {
             vertical_scrollbar_size: px(14.),
             horizontal_scrollbar_size: px(12.),
             scrollbar: ScrollbarOptions::default(),
-            overview_ruler_lanes: 3,
+            overview_ruler_lanes: 2,
             overview_ruler_border: true,
             hide_cursor_in_overview_ruler: false,
             mouse_wheel_scroll_sensitivity: 1.0,
@@ -2213,7 +2219,7 @@ impl Default for EditorOptions {
             word_wrap_break_after_characters: crate::view::line_breaks::DEFAULT_BREAK_AFTER.into(),
             word_break: WordBreak::Normal,
             wrap_on_escaped_line_feeds: false,
-            wrapping_indent: crate::view::line_breaks::WrappingIndent::Same,
+            wrapping_indent: crate::view::line_breaks::WrappingIndent::None,
             wrapping_strategy: WrappingStrategy::Simple,
             fullwidth_character_width: FullwidthCharacterWidth::Font,
             folding: true,
@@ -2241,7 +2247,7 @@ impl Default for EditorOptions {
             auto_closing_overtype: Default::default(),
             auto_closing_delete: Default::default(),
             auto_surround: Default::default(),
-            auto_indent: Default::default(),
+            auto_indent: crate::cursor::AutoIndent::Advanced,
             match_brackets: MatchBrackets::Always,
             quick_suggestions: QuickSuggestions::default(),
             quick_suggestions_delay: std::time::Duration::from_millis(10),
@@ -2445,7 +2451,8 @@ impl EditorOptions {
     /// - `minimap.scale`: 1–3; `minimap.max_column`: 1–10 000;
     ///   `minimap.section_header_font_size`: 4–32 (9 for NaN);
     ///   `minimap.section_header_letter_spacing`: 0–5;
-    ///   `sticky_scroll.max_line_count`: 1–20.
+    ///   `minimap.mark_section_header_regex`: the default if it doesn't
+    ///   compile; `sticky_scroll.max_line_count`: 1–20.
     pub fn validated(&self) -> Self {
         let mut options = self.clone();
         options.font_size = self.resolved_font_size();
@@ -2535,6 +2542,16 @@ impl EditorOptions {
             clamped_float(self.minimap.section_header_font_size, 9., 4., 32.);
         minimap.section_header_letter_spacing =
             clamped_float(self.minimap.section_header_letter_spacing, 1., 0., 5.);
+        // Monaco `EditorMinimap.validate`: a regex that doesn't compile
+        // keeps the default.
+        let default_regex = MinimapOptions::default().mark_section_header_regex;
+        if self.minimap.mark_section_header_regex != default_regex
+            && syntax::Pattern::new(self.minimap.mark_section_header_regex.as_ref(), "")
+                .regex()
+                .is_none()
+        {
+            minimap.mark_section_header_regex = default_regex;
+        }
         options.sticky_scroll.max_line_count = self.sticky_scroll.max_line_count.clamp(1, 20);
         options
     }
@@ -2845,6 +2862,24 @@ mod validation_tests {
         assert_eq!(options.sticky_scroll.max_line_count, 20);
         assert_eq!(validated(|o| o.minimap.scale = 9.).minimap.scale, 3.);
         assert_eq!(validated(|o| o.minimap.scale = f32::NAN).minimap.scale, 1.);
+    }
+
+    /// Monaco `EditorMinimap.validate`: `new RegExp(input, 'd')` throwing
+    /// keeps the default `markSectionHeaderRegex`.
+    #[test]
+    fn mark_section_header_regex() {
+        let default = MinimapOptions::default().mark_section_header_regex;
+        let options = validated(|o| o.minimap.mark_section_header_regex = "(".into());
+        assert_eq!(options.minimap.mark_section_header_regex, default);
+        let options =
+            validated(|o| o.minimap.mark_section_header_regex = r"\bTODO:\s*(?<label>.*)$".into());
+        assert_eq!(
+            options.minimap.mark_section_header_regex,
+            r"\bTODO:\s*(?<label>.*)$"
+        );
+        // An empty regex compiles, and finds no headers.
+        let options = validated(|o| o.minimap.mark_section_header_regex = "".into());
+        assert_eq!(options.minimap.mark_section_header_regex, "");
     }
 
     #[test]

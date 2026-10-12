@@ -18,7 +18,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `monaco.editor.registerLinkOpener(opener)`, `registerEditorOpener(opener)` | `register_link_opener(cx, \|url, cx\| …)`, `register_editor_opener(cx, \|editor, uri, selection, cx\| …)`, returning a `Disposable`; they answer synchronously |
 | `monaco.editor.getModel(uri)` | `model_for_uri(cx, uri)` |
 | `monaco.editor.getModels()`, `getEditors()`, `getDiffEditors()` | `models(cx)`, `editors(cx)`, `diff_editors(cx)` (the editor's own inputs, such as find's, aren't listed, as Monaco's are DOM inputs) |
-| `monaco.editor.setModelLanguage(model, id)` | `model.set_language(id, cx)` |
+| `monaco.editor.setModelLanguage(model, id)` | `model.set_language(Some(id.into()), cx)` (`None` for plain text) |
 | `monaco.editor.setModelMarkers(model, owner, markers)` | `model.set_markers(owner, markers, cx)` |
 | `monaco.editor.getModelMarkers({ owner, resource, take })` | `model_markers(cx, &MarkerFilter { owner, resource, take })` |
 | `monaco.editor.removeAllMarkers(owner)` | `remove_all_markers(cx, owner)` |
@@ -29,7 +29,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `monaco.editor.colorizeModelLine(model, line, tabSize)` | `colorize::colorize_model_line(model.read(cx), row, tab_size, &theme, cx)` |
 | `monaco.editor.addCommand({ id, run })` | `add_command(cx, id, handler)`, returning a `Disposable` |
 | `monaco.editor.addEditorAction(descriptor)` | `add_editor_action(cx, EditorActionDescriptor::new(…))` |
-| `monaco.editor.addKeybindingRule(s)(rules)` | `add_keybinding_rule(s)(cx, KeybindingRule::new(keystrokes, command))` |
+| `monaco.editor.addKeybindingRule(rule)`, `addKeybindingRules(rules)` | `add_keybinding_rule(cx, KeybindingRule::new(keystrokes, command))`, `add_keybinding_rules(cx, vec![…])`, returning an `anyhow::Result<Disposable>` |
 | `monaco.languages.register(...)` | `set_language_registry(cx, registry)`, with grammars from `gpui-monaco-languages` |
 | `editor.dispose()` / `model.dispose()` | drop the entity |
 | `editor.layout()` | not needed: the editor lays itself out every frame |
@@ -76,10 +76,11 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 |---|---|
 | `getModel()` / `setModel(m)` / `setModel(null)` / `hasModel()` | `get_model()` (or `model()`) / `set_model(m, cx)` / `set_model(None, cx)` (the editor draws nothing and ignores input) / `has_model()` |
 | `getValue()` / `setValue(v)` | `value(eol, preserve_bom, cx)` / `set_value(v, cx)` |
-| `getOptions()` / `updateOptions(o)` | `options()` / `update_options_with(\|o\| o.read_only = true, cx)`, or `update_options(full_options, cx)` |
+| `getOptions()` / `updateOptions(o)` | `computed_options()` (validated, zoomed and resolved) / `update_options_with(\|o\| o.read_only = true, cx)`, or `update_options(full_options, cx)` |
+| `getRawOptions()` | `options()` (as set) |
+| `getOption(EditorOption.x)` | `computed_options().x`; `font_info()` and `layout_info()` for `fontInfo` and `layoutInfo` (after the first frame) |
 | `getPosition()` / `setPosition(p)`, `getSelection()` / `setSelection(s)` | `position()` / `set_position(p, cx)`, `selection()` / `set_selection(s, cx)` |
 | `getConfiguredWordAtPosition(p)` | `configured_word_at_position(p, cx)` |
-| `getOption(EditorOption.fontInfo)` | `font_info()` (after the first frame) |
 | `getSelections()` / `setSelections(s)` | `selections()` / `set_selections(&s, cx)` (as in Monaco, the setters don't scroll: `set_position(p, cx)` then `reveal_position_in_center(p, cx)`) |
 | `revealLine`, `revealLineInCenter`, `revealLines…`, `revealRange…`, `revealPosition…` | `reveal_line`, `reveal_line_in_center`, `reveal_lines…`, `reveal_range…`, `reveal_position…` |
 | `revealRange(range, ScrollType.Immediate)` | `reveal_range_with_scroll_type(range, RevealType::Simple, ScrollType::Immediate, cx)`; `reveal_lines_with_scroll_type` for lines |
@@ -88,6 +89,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `hasPendingScrollAnimation()` | `has_pending_scroll_animation()` |
 | `getLayoutInfo()` | `layout_info()` (a `LayoutInfo`, after the first frame) |
 | `getTopForLineNumber(n, includeViewZones)`, `getBottomForLineNumber(n)`, `getTopForPosition(n, c)` | `top_for_line_number(row, include_view_zones)`, `bottom_for_line_number(row, include_view_zones)`, `top_for_position(p)` |
+| `getLineHeightForPosition(p)` | `line_height_for_position(p)` (0 in a folded region) |
 | `getOffsetForColumn(n, c)`, `getWidthOfLine(n)`, `getVisibleColumnFromPosition(p)` | `offset_for_column(row, column)`, `width_of_line(row)`, `visible_column_from_position(p, cx)` (0-based) |
 | `getStatusbarColumn(p)` | `statusbar_column(p, cx)` (1-based, as in Monaco) |
 | `inComposition` | `in_composition()` |
@@ -100,7 +102,8 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `executeEdits(source, edits, endCursorState)` | `execute_edits(edits, end_selections, cx)`, or `execute_edit_operations(edits, end_cursor_state, cx)` with `SingleEditOperation`s (`force_move_markers`) and an `EndCursorState` (selections or a cursor state computer) |
 | `pushUndoStop()` / `popUndoStop()` | `push_undo_stop(cx)` / `pop_undo_stop(cx)` |
 | `trigger(source, handlerId, payload)` | `trigger(id, window, cx)` / `trigger_with_payload(id, json, window, cx)`, taking any Monaco action, command or handler id (`cursorDown`, `type`, `cursorMove`, `editor.fold`, aliases, …) with Monaco's payload, or a GPUI action name; `DiffEditor::trigger` for `diffEditor.*` ids |
-| `getAction(id).run()` | `run_action(id, window, cx)` |
+| `getAction(id)`, `getAction(id).run()` | `supported_actions(cx)` (each an `EditorActionInfo` with `id`, `label`, `alias`), `run_action(id, window, cx)` |
+| `getId()`, `getEditorType()` | `editor.entity_id()`; the type is the Rust type (`CodeEditor`, or `DiffEditor`) |
 | `addAction(descriptor)` | `add_action(EditorActionDescriptor::new(id, label, run).keybinding(…), cx)`, returning a `Disposable`; its keybindings apply in this editor only |
 | `addCommand(keybinding, handler, context)` | `add_command(keystrokes, handler, when, cx)`, returning the command's id and a `Disposable`; its keybinding applies in this editor only |
 | `createContextKey(key, defaultValue)` | `create_context_key(key, default, cx)`; `ContextKey::set`, `reset`, `get` |

@@ -404,7 +404,7 @@ fn input(
     cx.new(|cx| {
         let theme = theme.unwrap_or_else(|| {
             crate::theme::global_theme(cx)
-                .unwrap_or_else(|| std::sync::Arc::new(crate::Theme::vs_dark()))
+                .unwrap_or_else(|| std::sync::Arc::new(crate::Theme::vs()))
         });
         let mut input = CodeEditor::new_widget_input("", theme, window, cx);
         let mut options = input.options().clone();

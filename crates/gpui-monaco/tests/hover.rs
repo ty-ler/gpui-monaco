@@ -222,6 +222,9 @@ fn hovers_on_keyboard_modifier(cx: &mut TestAppContext) {
 #[gpui::test]
 fn glyph_margin_hovers(cx: &mut TestAppContext) {
     let (editor, cx) = setup(HoverOptions::default(), 1, cx);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.glyph_margin = true, cx)
+    });
     let model = editor.read_with(cx, |e, _| e.model().clone());
     let id = editor.entity_id();
     model.update(cx, |m, cx| {

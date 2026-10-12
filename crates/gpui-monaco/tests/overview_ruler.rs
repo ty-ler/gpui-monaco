@@ -291,9 +291,9 @@ fn diagnostics_use_the_overview_ruler_theme_colors(cx: &mut TestAppContext) {
             colors.overview_ruler_info,
         ]
     );
-    // In the right lane.
+    // In the right lane, the right half with the default two lanes.
     let right = ruler.marks[0].0;
-    assert!(right.left() > ruler.bounds.left() + ruler.bounds.size.width / 2.);
+    assert!(right.left() >= ruler.bounds.left() + ruler.bounds.size.width / 2.);
     assert!((right.right() - ruler.bounds.right()).abs() < px(0.01));
 }
 
@@ -395,12 +395,23 @@ fn lanes_border_and_background(cx: &mut TestAppContext) {
         ],
     );
     let pixel_ratio = scale(cx);
-    let ruler = ruler(&editor, cx);
-    // Monaco `_initLanes(1, canvasWidth, 3)`: 1px in, the sides floored
-    // thirds, the center the rest.
     let canvas_width = (14. * pixel_ratio) as i32;
-    let third = (canvas_width - 1) / 3;
     let device = |v: i32| px(v as f32 / pixel_ratio);
+    // Two lanes by default (standalone Monaco), `_initLanes(1, canvasWidth,
+    // 2)`: 1px in, the left half, which the center shares, and the right
+    // the rest.
+    let ruler = ruler(&editor, cx);
+    let half = (canvas_width - 1) / 2;
+    for color in [red(), blue()] {
+        let mark = marks_in(&editor, cx, color)[0];
+        assert_eq!(mark.left(), ruler.bounds.left() + device(1));
+        assert_eq!(mark.size.width, device(half));
+    }
+    // `_initLanes(1, canvasWidth, 3)`: the sides floored thirds, the center
+    // the rest.
+    update_options(&editor, cx, |o| o.overview_ruler_lanes = 3);
+    let ruler = self::ruler(&editor, cx);
+    let third = (canvas_width - 1) / 3;
     let left = marks_in(&editor, cx, red())[0];
     assert_eq!(left.left(), ruler.bounds.left() + device(1));
     assert_eq!(left.size.width, device(third));

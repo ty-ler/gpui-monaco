@@ -370,7 +370,7 @@ fn lenses_follow_font_zoom_and_theme(cx: &mut TestAppContext) {
     assert_eq!(style(cx).1, gpui::px(20.));
 
     editor.update(cx, |e, cx| {
-        e.set_theme(std::sync::Arc::new(gpui_monaco::Theme::vs()), cx)
+        e.set_theme(std::sync::Arc::new(gpui_monaco::Theme::hc_black()), cx)
     });
     draw(cx);
     assert_ne!(style(cx).2, color);
