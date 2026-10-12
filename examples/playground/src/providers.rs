@@ -726,10 +726,14 @@ impl InlineCompletionsProvider for DemoInlineCompletions {
         _: InlineCompletionContext,
         _: &mut App,
     ) -> Task<anyhow::Result<InlineCompletionList>> {
+        // The last with a warning (squiggled ghost text); `self.` extends
+        // the `selections` suggestion, which the suggest widget preselects.
         const LINES: &[&str] = &[
             "println!(\"{}\", total);",
             "let total = items.iter().sum::<usize>();",
             "fn render(&self) -> usize {\n    self.items.len()\n}",
+            "self.selections().len()",
+            "unsafe {\n    ptr.read()\n}",
         ];
         let line = context.snapshot.line(position.row);
         let before: String = line.chars().take(position.column as usize).collect();
@@ -744,6 +748,10 @@ impl InlineCompletionsProvider for DemoInlineCompletions {
                 .map(|l| InlineCompletion {
                     insert_text: format!("{indent}{}", l.replace('\n', &format!("\n{indent}"))),
                     range: Some(PointUtf16::new(position.row, 0)..position),
+                    warning: l.starts_with("unsafe").then(|| InlineCompletionWarning {
+                        message: "Reads through a raw pointer.".into(),
+                        icon: None,
+                    }),
                     ..Default::default()
                 })
                 .collect()
@@ -752,8 +760,9 @@ impl InlineCompletionsProvider for DemoInlineCompletions {
         items.extend(demo_inline_edit(context));
         Task::ready(Ok(InlineCompletionList {
             items,
-            suppress_suggestions: None,
-            commands: Vec::new(),
+            // What's shown stays while typing agrees with it.
+            enable_forward_stability: true,
+            ..Default::default()
         }))
     }
 }

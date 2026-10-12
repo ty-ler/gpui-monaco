@@ -2,7 +2,12 @@
 //! `InlineCompletionsSource` and `InlineCompletionsController`): requests
 //! completions while typing, keeps them through edits that match them,
 //! shows the selected one as ghost text after the cursor (extra lines in a
-//! view zone), and accepts all of it, a word or a line.
+//! view zone, with the rest of the line moved to their end as Monaco's
+//! `GhostTextView` does), at every other cursor it fits too
+//! (`getSecondaryEdits`), and accepts all of it, a word or a line at each.
+//! A list asking for forward stability keeps its shown item first while
+//! typing agrees with it, and each list is disposed once none of its
+//! items is used (Monaco's ref-counted `InlineSuggestionList`).
 //!
 //! Inline edits (items with `is_inline_edit`, a `uri`, a `jump_to_position`
 //! or a `hint`) are diffed into replacements that follow the user's typing
@@ -23,6 +28,7 @@
 
 use std::collections::HashSet;
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,8 +41,9 @@ use gpui::{
 use text::PointUtf16;
 
 use super::ghost_text::{
-    GhostText, GhostTextMode, TextReplacement, compute_ghost_text, single_text_edit_augments,
-    single_text_remove_common_prefix,
+    GhostLinePiece, GhostText, GhostTextMode, GhostTextViewData, TextReplacement,
+    compute_ghost_text, compute_ghost_text_view_data, remove_common_prefix_and_suffix,
+    secondary_edits, single_text_edit_augments, single_text_remove_common_prefix,
 };
 use super::inline_edits::{Changes, Replacements, UpdatedEdit, diffed_edits, new_ranges};
 use crate::cursor::Selection;
@@ -48,8 +55,8 @@ use crate::options::InlineSuggestMode;
 use crate::providers::{
     Command, InlineCompletion, InlineCompletionChangeHint, InlineCompletionContext,
     InlineCompletionEndOfLifeReason, InlineCompletionHint, InlineCompletionList,
-    InlineCompletionTriggerKind, InlineCompletionsProvider, Location, PartialAcceptInfo,
-    PartialAcceptTriggerKind, SelectedSuggestionInfo,
+    InlineCompletionTriggerKind, InlineCompletionsDisposeReason, InlineCompletionsProvider,
+    Location, PartialAcceptInfo, PartialAcceptTriggerKind, SelectedSuggestionInfo,
 };
 use crate::theme::TokenStyle;
 use crate::widgets::{ViewZone, WidgetId, ZoneHeight};
@@ -62,10 +69,40 @@ const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(50);
 /// ghost text.
 pub(crate) type InlineView = (Vec<(usize, TextReplacement)>, usize, GhostText);
 
+/// A provider's list, shared by its items (Monaco's ref-counted
+/// `InlineSuggestionList`): the provider's `dispose_inline_completions`
+/// runs when the last holder drops it, with the reason last set.
+pub(crate) struct ListRef {
+    provider: Arc<dyn InlineCompletionsProvider>,
+    pub(crate) list: InlineCompletionList,
+    reason: std::cell::Cell<InlineCompletionsDisposeReason>,
+}
+
+impl ListRef {
+    /// A list just returned for a request, disposed with
+    /// `TokenCancellation` unless the request gets to use it.
+    fn new(provider: Arc<dyn InlineCompletionsProvider>, list: InlineCompletionList) -> Rc<Self> {
+        Rc::new(Self {
+            provider,
+            list,
+            reason: std::cell::Cell::new(InlineCompletionsDisposeReason::TokenCancellation),
+        })
+    }
+}
+
+impl Drop for ListRef {
+    fn drop(&mut self) {
+        self.provider
+            .dispose_inline_completions(&self.list, self.reason.get());
+    }
+}
+
 /// A completion and where it applies, followed through edits.
 #[derive(Clone)]
 pub(crate) struct Item {
     pub(crate) provider: Arc<dyn InlineCompletionsProvider>,
+    /// The list it came in (Monaco `source`).
+    list: Rc<ListRef>,
     pub(crate) completion: InlineCompletion,
     /// The text it inserts: `completion.insert_text` with Monaco's
     /// `closeBrackets` when `complete_bracket_pairs` (Monaco's item
@@ -170,11 +207,19 @@ enum StopReason {
     Accepted(usize, bool),
 }
 
-/// What is rendered: the ghost text and its decorations and zone.
+/// What is rendered: the ghost texts (one per cursor that gets the
+/// completion), their decorations, the zones with their additional lines
+/// and the hidden ends of their lines.
 struct Rendered {
-    key: (text::Version, PointUtf16, usize, bool),
+    /// The text version, the cursors, the item shown (`usize::MAX` for
+    /// the suggest widget's preview) and whether it added lines.
+    key: (text::Version, Vec<PointUtf16>, usize, bool),
     decorations: Vec<DecorationId>,
-    zone: Option<WidgetId>,
+    /// The zones with additional lines, by the row they're below.
+    zones: Vec<(u32, WidgetId, gpui::Entity<GhostLines>)>,
+    /// Monaco `hiddenRange`: each ghost text's row and the column its line
+    /// is hidden from.
+    hidden: Vec<(u32, u32)>,
 }
 
 #[derive(Default)]
@@ -312,15 +357,35 @@ fn yield_order(graph: &[Vec<usize>]) -> Vec<usize> {
 /// tokens).
 type GhostSegments = Vec<(String, TokenStyle)>;
 
-/// The additional lines of a ghost text, below its line.
+/// Ghost texts with the edits they show, the primary cursor's first.
+type GhostTexts = Vec<(TextReplacement, GhostText)>;
+
+/// A piece of an additional ghost text line and its style.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GhostSegment {
+    text: String,
+    style: TokenStyle,
+    /// Suggested text (Monaco's `ghost-text` class), rather than text of
+    /// the line moved below: it's in the inline suggestion font and gets
+    /// the warning squiggle.
+    ghost: bool,
+}
+
+/// The additional lines of a ghost text, below its line (Monaco
+/// `AdditionalLinesWidget`).
 pub struct GhostLines {
-    lines: Vec<GhostSegments>,
+    lines: Vec<Vec<GhostSegment>>,
     font: SharedString,
+    /// `inline_suggest.font_family`, for the suggested text.
+    ghost_font: Option<SharedString>,
     font_size: gpui::Pixels,
     line_height: gpui::Pixels,
     left: gpui::Pixels,
     /// The editor's text color, for pieces without their own.
     foreground: gpui::Hsla,
+    /// Monaco's `warning` class: the suggested text gets the warning
+    /// squiggle in this color.
+    warning: Option<gpui::Hsla>,
 }
 
 /// `text` (a ghost text piece starting at byte `start` of the tokenized
@@ -364,16 +429,33 @@ impl Render for GhostLines {
                     .h(self.line_height)
                     .flex()
                     .whitespace_nowrap()
-                    .children(line.iter().map(|(text, style)| {
+                    .children(line.iter().map(|segment| {
+                        let style = &segment.style;
                         let mut color = style.foreground.unwrap_or(self.foreground);
                         color.a *= style.opacity.unwrap_or(1.);
-                        let span = div().text_color(color).child(text.clone());
-                        let span = if style.italic { span.italic() } else { span };
-                        if style.bold {
-                            span.font_weight(gpui::FontWeight::BOLD)
-                        } else {
-                            span
+                        let mut span = div().text_color(color).child(segment.text.clone());
+                        if segment.ghost
+                            && let Some(font) = &self.ghost_font
+                        {
+                            span = span.font_family(font.clone());
                         }
+                        if style.italic {
+                            span = span.italic();
+                        }
+                        if style.bold {
+                            span = span.font_weight(gpui::FontWeight::BOLD);
+                        }
+                        // Monaco's `.ghost-text.warning`: every line of the
+                        // suggested text gets the squiggle.
+                        if segment.ghost
+                            && let Some(warning) = self.warning
+                        {
+                            span = span
+                                .text_decoration_1()
+                                .text_decoration_wavy()
+                                .text_decoration_color(warning);
+                        }
+                        span
                     }))
             }))
     }
@@ -509,11 +591,17 @@ impl CodeEditor {
             return;
         }
         self.inline.active = true;
-        // Monaco `trigger({ explicit: true })` starts an accept flow.
+        // Monaco `trigger({ explicit: true })` starts an accept flow, and
+        // keeps the shown item ahead of the new ones
+        // (`_forceUpdateExplicitlySignal` sets `preserveCurrentCompletion`).
         self.inline.in_accept_flow = true;
+        let preserve = self.inline_preserve_candidate(cx);
         self.fetch_inline_completions(
             InlineCompletionTriggerKind::Explicit,
-            FetchOptions::default(),
+            FetchOptions {
+                preserve,
+                ..Default::default()
+            },
             cx,
         );
     }
@@ -686,6 +774,20 @@ impl CodeEditor {
         if providers.is_empty() {
             return;
         }
+        // Monaco `itemToPreserve`: the shown item also stays first when its
+        // list asked for forward stability (`enableForwardStability`).
+        let options = FetchOptions {
+            preserve: options.preserve.or_else(|| {
+                self.inline_preserve_candidate(cx).filter(|id| {
+                    self.inline
+                        .items
+                        .iter()
+                        .find(|item| item.id == *id)
+                        .is_some_and(|item| item.list.list.enable_forward_stability)
+                })
+            }),
+            ..options
+        };
         let updating = self.inline.task.is_some();
         self.inline.requested = Some((version, position, kind));
         self.inline.requested_selection = selected.clone();
@@ -769,13 +871,13 @@ impl CodeEditor {
                 this.update(cx, |this, _| this.inline.task = None).ok();
                 return;
             };
-            let mut results: Vec<Option<InlineCompletionList>> = vec![None; providers.len()];
+            let mut results: Vec<Option<Rc<ListRef>>> = vec![None; providers.len()];
             for ix in yield_order(&graph) {
                 let task = match tasks[ix].take() {
                     Some(task) => task,
                     None => {
                         let yields = graph[ix].iter().filter_map(|&j| results[j].as_ref());
-                        let lists: Vec<InlineCompletionList> = yields.cloned().collect();
+                        let lists: Vec<Rc<ListRef>> = yields.cloned().collect();
                         let Ok(Some(task)) = this.update(cx, |this, cx| {
                             if stale(this, cx) || this.yielded_list_visible(&lists, position, cx) {
                                 return None;
@@ -788,16 +890,11 @@ impl CodeEditor {
                     }
                 };
                 match task.await {
-                    Ok(list) => results[ix] = Some(list),
+                    Ok(list) => results[ix] = Some(ListRef::new(providers[ix].clone(), list)),
                     Err(err) => log::warn!("inline completions failed: {err:#}"),
                 }
             }
-            let lists: Vec<_> = providers
-                .iter()
-                .cloned()
-                .zip(results)
-                .filter_map(|(provider, list)| Some((provider, list?)))
-                .collect();
+            let lists: Vec<Rc<ListRef>> = results.into_iter().flatten().collect();
             // Monaco `minShowDelay`.
             if let Some(wait) = min_show.checked_sub(started.elapsed())
                 && !wait.is_zero()
@@ -860,7 +957,7 @@ impl CodeEditor {
     #[allow(clippy::too_many_arguments)]
     fn set_inline_completions(
         &mut self,
-        lists: Vec<(Arc<dyn InlineCompletionsProvider>, InlineCompletionList)>,
+        lists: Vec<Rc<ListRef>>,
         version: text::Version,
         position: PointUtf16,
         options: FetchOptions,
@@ -878,12 +975,21 @@ impl CodeEditor {
         let include_inline_completions = !options.only_inline_edits;
         let mut items = Vec::new();
         let mut not_shown = Vec::new();
-        for (provider, list) in lists {
+        for list_ref in &lists {
+            // Monaco: a list none of whose items are kept ends `notTaken`
+            // (`empty` without items) once the request is done with it.
+            list_ref.reason.set(if list_ref.list.items.is_empty() {
+                InlineCompletionsDisposeReason::Empty
+            } else {
+                InlineCompletionsDisposeReason::NotTaken
+            });
+            let provider = &list_ref.provider;
+            let list = &list_ref.list;
             if let Some(suppress) = list.suppress_suggestions {
                 self.inline.suppress_suggestions |= suppress;
             }
             self.inline.commands.extend(list.commands.iter().cloned());
-            for completion in list.items {
+            for completion in list.items.iter().cloned() {
                 // Monaco `notInlineEditRequested` and
                 // `notInlineCompletionRequested`.
                 let wants_edits = completion.is_inline_edit || completion.show_inline_edit_menu;
@@ -1009,6 +1115,7 @@ impl CodeEditor {
                 self.inline.next_id += 1;
                 items.push(Item {
                     provider: provider.clone(),
+                    list: list_ref.clone(),
                     completion,
                     insert_text,
                     range: start..end,
@@ -1073,6 +1180,11 @@ impl CodeEditor {
         let (kept, dropped): (Vec<Item>, Vec<Item>) = items
             .into_iter()
             .partition(|item| prefer_completions != item.edit.is_some());
+        // Monaco: a list with kept items is disposed (`other`) once the
+        // last of them goes.
+        for item in &kept {
+            item.list.reason.set(InlineCompletionsDisposeReason::Other);
+        }
         not_shown.extend(
             dropped
                 .into_iter()
@@ -1171,7 +1283,7 @@ impl CodeEditor {
     /// at `position`, or one that isn't plain text (Monaco blocks then).
     fn yielded_list_visible(
         &self,
-        lists: &[InlineCompletionList],
+        lists: &[Rc<ListRef>],
         position: PointUtf16,
         cx: &gpui::App,
     ) -> bool {
@@ -1179,7 +1291,7 @@ impl CodeEditor {
         let line = rope.line_len_utf16(position.row);
         let word_start = self.word_start_at(position);
         let line_text = |row: u32| self.snapshot.line(row);
-        lists.iter().flat_map(|list| &list.items).any(|item| {
+        lists.iter().flat_map(|list| &list.list.items).any(|item| {
             if item.is_snippet || item.is_inline_edit {
                 return true;
             }
@@ -1977,6 +2089,12 @@ impl CodeEditor {
     /// completion asked with that selection that starts with it (Monaco
     /// `_computeAugmentation`, which shows even without `suggest.preview`).
     fn suggest_preview(&self, cx: &gpui::App) -> Option<GhostText> {
+        self.suggest_preview_edit(cx).map(|(_, ghost, _)| ghost)
+    }
+
+    /// [`Self::suggest_preview`] with the edit it shows and the length of
+    /// its previewed part.
+    fn suggest_preview_edit(&self, cx: &gpui::App) -> Option<(TextReplacement, GhostText, usize)> {
         if !self.is_suggest_visible() || self.inline_shows_on_suggest_conflict(cx) {
             return None;
         }
@@ -1990,13 +2108,14 @@ impl CodeEditor {
         }
         let edit = augmentation.map_or(suggest_edit, |(_, edit)| edit);
         let length = edit.text.encode_utf16().count();
-        compute_ghost_text(
+        let ghost = compute_ghost_text(
             &edit,
             &line_text,
             Self::ghost_mode(self.options.suggest.preview_mode),
             Some(self.cursors.primary().position),
             length,
-        )
+        )?;
+        Some((edit, ghost, length))
     }
 
     /// Whether a request is in flight (Monaco's `status` is `loading`).
@@ -2052,107 +2171,182 @@ impl CodeEditor {
             && self.inline_suggestion_visible(cx)
     }
 
-    /// Monaco `syntaxHighlightingEnabled`: each part's first line and the
-    /// extra lines, split into pieces colored as code (at 70% opacity), or
-    /// one plain ghost-colored piece each. Monaco tokenizes the line with
-    /// the ghost text inserted from the line's state; this parses that line
-    /// and the extra lines on their own.
-    fn ghost_segments(
+    /// Monaco `syntaxHighlightingEnabled` with `computeGhostTextViewData`:
+    /// the injected texts and the additional lines of `ghost` (laid out as
+    /// `data`), split into pieces colored as code (at 70% opacity), or one
+    /// plain ghost-colored piece each. Monaco tokenizes the line with the
+    /// injected texts inserted, then the additional lines, from the line's
+    /// state; this parses them on their own. Text of the line moved below
+    /// keeps the line's colors (Monaco `additionalLinesOriginalSuffix`).
+    fn ghost_view_segments(
         &self,
         ghost: &GhostText,
+        data: &GhostTextViewData,
         style: impl Fn(bool) -> TokenStyle,
         cx: &gpui::App,
-    ) -> (Vec<GhostSegments>, Vec<GhostSegments>) {
-        let plain = |text: &str, preview: bool| vec![(text.to_string(), style(preview))];
-        let extra = || {
-            ghost
-                .parts
-                .iter()
-                .flat_map(|part| part.lines.iter().skip(1).map(|l| plain(l, false)))
-                .collect::<Vec<_>>()
-        };
-        let firsts = || {
-            ghost
-                .parts
-                .iter()
-                .map(|part| plain(&part.lines[0], part.preview))
-                .collect()
-        };
-        let language = self.model().read(cx).language_id().map(|l| l.to_string());
-        let spans = self
-            .options
-            .inline_suggest
-            .syntax_highlighting_enabled
-            .then_some(language)
+    ) -> (Vec<GhostSegments>, Vec<Vec<GhostSegment>>) {
+        let line = self.snapshot.line(ghost.line);
+        let byte = |column: u32| super::inline_edits::utf16_to_byte(&line, column);
+        let highlight = self.options.inline_suggest.syntax_highlighting_enabled;
+        let moves_text = data
+            .additional_lines
+            .iter()
             .flatten()
-            .and_then(|language| {
-                // The line with the parts inserted, then the extra lines.
-                let line = self.snapshot.line(ghost.line);
-                let mut text = String::new();
-                let mut starts = Vec::new();
-                let mut taken = 0;
-                for part in &ghost.parts {
-                    let at = line
-                        .char_indices()
-                        .scan(0u32, |units, (ix, ch)| {
-                            let here = *units;
-                            *units += ch.len_utf16() as u32;
-                            Some((ix, here))
-                        })
-                        .find(|(_, units)| *units >= part.column)
-                        .map_or(line.len(), |(ix, _)| ix)
-                        .max(taken);
-                    text.push_str(&line[taken..at]);
-                    taken = at;
-                    starts.push(text.len());
-                    text.push_str(&part.lines[0]);
-                }
-                text.push_str(&line[taken..]);
-                let mut extra_starts = Vec::new();
-                for part in &ghost.parts {
-                    for extra in part.lines.iter().skip(1) {
-                        text.push('\n');
-                        extra_starts.push(text.len());
-                        text.push_str(extra);
+            .any(|piece| matches!(piece, GhostLinePiece::Buffer(_)));
+        // The line with the injected texts, then the additional lines.
+        let mut text = String::new();
+        let mut inline_starts = Vec::new();
+        let mut taken = 0;
+        for (column, inline, _) in &data.inline_texts {
+            let at = byte(*column).max(taken);
+            text.push_str(&line[taken..at]);
+            taken = at;
+            inline_starts.push(text.len());
+            text.push_str(inline);
+        }
+        text.push_str(&line[taken..]);
+        // The line's text that moves is after every injected text.
+        let inserted: usize = data.inline_texts.iter().map(|(_, t, _)| t.len()).sum();
+        let mut piece_starts = Vec::new();
+        for pieces in &data.additional_lines {
+            text.push('\n');
+            let mut starts = Vec::new();
+            for piece in pieces {
+                starts.push(text.len());
+                match piece {
+                    GhostLinePiece::Ghost(ghost) => text.push_str(ghost),
+                    GhostLinePiece::Buffer(columns) => {
+                        text.push_str(&line[byte(columns.start)..byte(columns.end)])
                     }
                 }
+            }
+            piece_starts.push(starts);
+        }
+        let language = self.model().read(cx).language_id().map(|l| l.to_string());
+        let spans = language
+            .filter(|_| highlight || moves_text)
+            .and_then(|language| {
                 let registry = crate::model::language_registry(cx);
-                let spans = crate::colorize::capture_spans(&text, &language, &registry)?;
-                Some((spans, starts, extra_starts))
+                crate::colorize::capture_spans(&text, &language, &registry)
             });
-        let Some((spans, starts, extra_starts)) = spans else {
-            return (firsts(), extra());
-        };
-        let colored = |text: &str, start: usize, preview: bool| -> GhostSegments {
-            split_by_spans(text, start, &spans)
+        let colored = |piece: &str, start: usize, ghost: bool, preview: bool| -> GhostSegments {
+            let Some(spans) = spans.as_ref().filter(|_| highlight || !ghost) else {
+                let style = if ghost {
+                    style(preview)
+                } else {
+                    TokenStyle::default()
+                };
+                return vec![(piece.to_string(), style)];
+            };
+            split_by_spans(piece, start, spans)
                 .into_iter()
                 .map(|(piece, id)| {
                     let token = id.map(|id| self.theme.style_for(id)).unwrap_or_default();
-                    (
-                        piece,
+                    let style = if ghost {
                         TokenStyle {
                             italic: !preview,
                             opacity: Some(0.7),
                             ..token
-                        },
-                    )
+                        }
+                    } else {
+                        token
+                    };
+                    (piece, style)
                 })
                 .collect()
         };
-        let firsts = ghost
-            .parts
+        let inline = data
+            .inline_texts
             .iter()
-            .zip(&starts)
-            .map(|(part, &start)| colored(&part.lines[0], start, part.preview))
+            .zip(&inline_starts)
+            .map(|((_, inline, preview), &start)| colored(inline, start, true, *preview))
             .collect();
-        let extra = ghost
-            .parts
+        let additional = data
+            .additional_lines
             .iter()
-            .flat_map(|part| part.lines.iter().skip(1))
-            .zip(&extra_starts)
-            .map(|(line, &start)| colored(line, start, false))
+            .zip(&piece_starts)
+            .map(|(pieces, starts)| {
+                pieces
+                    .iter()
+                    .zip(starts)
+                    .flat_map(|(piece, &start)| {
+                        let (pieces, ghost) = match piece {
+                            GhostLinePiece::Ghost(ghost) => {
+                                (colored(ghost, start, true, false), true)
+                            }
+                            GhostLinePiece::Buffer(columns) => {
+                                let from = byte(columns.start);
+                                (
+                                    colored(
+                                        &line[from..byte(columns.end)],
+                                        from + inserted,
+                                        false,
+                                        false,
+                                    ),
+                                    false,
+                                )
+                            }
+                        };
+                        pieces.into_iter().map(move |(text, style)| GhostSegment {
+                            text,
+                            style,
+                            ghost,
+                        })
+                    })
+                    .collect()
+            })
             .collect();
-        (firsts, extra)
+        (inline, additional)
+    }
+
+    /// The ghost texts at the other cursors (Monaco `getSecondaryEdits`
+    /// with `computeGhostText` at each cursor): `primary`, the edit at the
+    /// primary cursor, repeated where it fits, with its ghost text, for the
+    /// cursors where it shows as one.
+    fn secondary_ghost_texts(
+        &self,
+        primary: &TextReplacement,
+        mode: GhostTextMode,
+        preview_length: usize,
+    ) -> Vec<(TextReplacement, GhostText)> {
+        let positions: Vec<PointUtf16> = self
+            .cursors
+            .all()
+            .iter()
+            .map(|cursor| cursor.position)
+            .collect();
+        let line_text = |row: u32| self.snapshot.line(row);
+        secondary_edits(self.snapshot.rope(), &positions, primary)
+            .into_iter()
+            .zip(&positions[positions.len().min(1)..])
+            .filter_map(|(edit, &position)| {
+                let edit = edit?;
+                let ghost =
+                    compute_ghost_text(&edit, &line_text, mode, Some(position), preview_length)?;
+                Some((edit, ghost))
+            })
+            .collect()
+    }
+
+    /// Every ghost text shown, the primary cursor's first, with the edit it
+    /// shows (Monaco `ghostTexts` and the state's `edits`): the selected
+    /// completion's, else the suggest widget's preview. The item shown is
+    /// `None` for the preview without an inline completion extending it.
+    fn ghost_texts(&self, cx: &gpui::App) -> Option<(Option<usize>, GhostTexts)> {
+        if let Some((visible, selected, ghost)) = self.inline_state(cx) {
+            let (ix, edit) = visible[selected].clone();
+            let mode = Self::ghost_mode(self.options.inline_suggest.mode);
+            let secondary = self.secondary_ghost_texts(&edit, mode, 0);
+            let mut ghosts = vec![(edit, ghost)];
+            ghosts.extend(secondary);
+            return Some((Some(ix), ghosts));
+        }
+        let (edit, ghost, preview_length) = self.suggest_preview_edit(cx)?;
+        let mode = Self::ghost_mode(self.options.suggest.preview_mode);
+        let secondary = self.secondary_ghost_texts(&edit, mode, preview_length);
+        let mut ghosts = vec![(edit, ghost)];
+        ghosts.extend(secondary);
+        Some((None, ghosts))
     }
 
     /// Renders the ghost text before painting.
@@ -2167,117 +2361,118 @@ impl CodeEditor {
         self.refresh_inline_edit(cx);
         let state = self.inline_state(cx);
         self.refresh_inline_toolbar(state.as_ref().map(|(_, _, ghost)| ghost), cx);
-        let preview = if state.is_none() {
-            self.suggest_preview(cx)
-        } else {
-            None
-        };
+        let ghosts = self.ghost_texts(cx);
         let version = self.model().read(cx).buffer().version();
-        let cursor = self.cursors.primary().position;
-        let multiline = |ghost: &GhostText| ghost.parts.iter().any(|p| p.lines.len() > 1);
-        let key = match (&state, &preview) {
-            (Some((visible, selected, ghost)), _) => {
-                Some((version, cursor, visible[*selected].0, multiline(ghost)))
-            }
-            (None, Some(ghost)) => Some((version, cursor, usize::MAX, multiline(ghost))),
-            _ => None,
-        };
+        let cursors: Vec<PointUtf16> = self
+            .cursors
+            .all()
+            .iter()
+            .map(|cursor| cursor.position)
+            .collect();
+        let key = ghosts.as_ref().map(|(shown, ghosts)| {
+            let multiline = ghosts
+                .iter()
+                .any(|(_, ghost)| ghost.parts.iter().any(|p| p.lines.len() > 1));
+            (version, cursors, shown.unwrap_or(usize::MAX), multiline)
+        });
         if key.is_some() && self.inline.rendered.as_ref().map(|r| &r.key) == key.as_ref() {
             return;
         }
         self.clear_ghost_text(cx);
-        let Some(key) = key else {
+        let (Some(key), Some((shown, ghosts))) = (key, ghosts) else {
             return;
         };
-        let (shown, ghost) = match (state, preview) {
-            (Some((visible, selected, ghost)), _) => (Some((visible, selected)), ghost),
-            (None, Some(ghost)) => (None, ghost),
-            _ => return,
-        };
-        let colors = &self.theme.colors;
         let visible_color = |c: gpui::Hsla| (c.a > 0.).then_some(c);
+        let ghost_foreground = self.theme.colors.ghost_text_foreground;
+        let ghost_background = visible_color(self.theme.colors.ghost_text_background);
+        let ghost_border = visible_color(self.theme.colors.ghost_text_border);
         let style = |preview: bool| TokenStyle {
-            foreground: Some(colors.ghost_text_foreground),
+            foreground: Some(ghost_foreground),
             italic: !preview,
             ..Default::default()
         };
         let rope = self.model().read(cx).buffer().rope().clone();
-        let (firsts, extra_lines) = self.ghost_segments(&ghost, style, cx);
         // Monaco `USE_SQUIGGLES_FOR_WARNING`: ghost text with a warning gets
-        // the warning squiggle.
-        let warning = shown
-            .as_ref()
-            .and_then(|(visible, selected)| {
-                self.inline.items[visible[*selected].0]
-                    .completion
-                    .warning
-                    .as_ref()
-            })
-            .map(|_| crate::decorations::DecorationUnderline {
-                color: self
-                    .theme
+        // the warning squiggle, on every line.
+        let warning_color = shown
+            .and_then(|ix| self.inline.items[ix].completion.warning.as_ref())
+            .map(|_| {
+                self.theme
                     .colors
-                    .marker_color(crate::MarkerSeverity::Warning),
-                wavy: true,
+                    .marker_color(crate::MarkerSeverity::Warning)
             });
-        let colors = &self.theme.colors;
+        let warning = warning_color
+            .map(|color| crate::decorations::DecorationUnderline { color, wavy: true });
         let font_family = self.options.inline_suggest.font_family.clone();
         let mut decorations = Vec::new();
-        for (part, segments) in ghost.parts.iter().zip(firsts) {
-            let offset = rope.point_utf16_to_offset(PointUtf16::new(ghost.line, part.column));
-            // One injected text per piece, in order.
-            for (text, style) in segments {
-                decorations.push((
-                    offset..offset,
-                    DecorationOptions {
-                        after: Some(InjectedText {
-                            content: text.into(),
-                            style,
-                            background: visible_color(colors.ghost_text_background),
-                            swatch: None,
-                            font_family: font_family.clone(),
-                            underline: warning,
-                            // Monaco `GhostTextView`: the cursor stays before
-                            // the suggestion.
-                            cursor_stops: crate::InjectedTextCursorStops::Left,
+        let mut zones = Vec::new();
+        let mut hidden = Vec::new();
+        for (_, ghost) in &ghosts {
+            let line = self.snapshot.line(ghost.line);
+            let data = compute_ghost_text_view_data(ghost, &line);
+            let (inline, additional) = self.ghost_view_segments(ghost, &data, style, cx);
+            for ((column, _, _), segments) in data.inline_texts.iter().zip(inline) {
+                let offset = rope.point_utf16_to_offset(PointUtf16::new(ghost.line, *column));
+                // One injected text per piece, in order.
+                for (text, style) in segments {
+                    decorations.push((
+                        offset..offset,
+                        DecorationOptions {
+                            after: Some(InjectedText {
+                                content: text.into(),
+                                style,
+                                background: ghost_background,
+                                swatch: None,
+                                font_family: font_family.clone(),
+                                underline: warning,
+                                // Monaco `GhostTextView`: the cursor stays
+                                // before the suggestion.
+                                cursor_stops: crate::InjectedTextCursorStops::Left,
+                                ..Default::default()
+                            }),
+                            border: ghost_border,
+                            show_if_collapsed: true,
                             ..Default::default()
-                        }),
-                        border: visible_color(colors.ghost_text_border),
-                        show_if_collapsed: true,
-                        ..Default::default()
-                    },
-                ));
+                        },
+                    ));
+                }
             }
+            if let Some(range) = &data.hidden_range {
+                hidden.push((ghost.line, range.start));
+            }
+            if additional.is_empty() {
+                continue;
+            }
+            let foreground = self.theme.colors.foreground;
+            let count = additional.len();
+            let view = cx.new(|_| GhostLines {
+                lines: additional,
+                foreground,
+                font: self.options.font_family.clone(),
+                ghost_font: font_family.clone(),
+                font_size: self.options.font_size,
+                line_height: self.options.resolved_line_height(),
+                left: px(0.),
+                warning: warning_color,
+            });
+            let id = self.add_view_zone(
+                ViewZone::new(
+                    ghost.line + 1,
+                    ZoneHeight::Lines(count as f32),
+                    view.clone().into(),
+                ),
+                cx,
+            );
+            zones.push((ghost.line, id, view));
         }
         let owner = Some(cx.entity_id());
         let ids = self.model().update(cx, |model, cx| {
             model.delta_decorations(owner, &[], decorations, cx)
         });
-        let zone = (!extra_lines.is_empty()).then(|| {
-            let foreground = self.theme.colors.foreground;
-            let view = cx.new(|_| GhostLines {
-                lines: extra_lines.clone(),
-                foreground,
-                font: font_family
-                    .clone()
-                    .unwrap_or_else(|| self.options.font_family.clone()),
-                font_size: self.options.font_size,
-                line_height: self.options.resolved_line_height(),
-                left: px(0.),
-            });
-            self.add_view_zone(
-                ViewZone::new(
-                    ghost.line + 1,
-                    ZoneHeight::Lines(extra_lines.len() as f32),
-                    view.into(),
-                ),
-                cx,
-            )
-        });
         // Monaco `handleItemDidShow`, once per item.
-        if let Some((visible, selected)) = shown {
-            self.inline.items[visible[selected].0].shown = true;
-            let item = &self.inline.items[visible[selected].0];
+        if let Some(ix) = shown {
+            self.inline.items[ix].shown = true;
+            let item = &self.inline.items[ix];
             // Once per item: an equal item from a newer request keeps its
             // identity (Monaco `_didShow`).
             if self.inline.shown.insert(format!("item:{}", item.id)) {
@@ -2289,8 +2484,91 @@ impl CodeEditor {
         self.inline.rendered = Some(Rendered {
             key,
             decorations: ids,
-            zone,
+            zones,
+            hidden,
         });
+    }
+
+    /// Monaco `ghost-text-hidden`: the rows whose rest moved below their
+    /// ghost text, with the column each shows up to.
+    pub(crate) fn ghost_text_hidden_rows(&self) -> Vec<(u32, u32)> {
+        self.inline
+            .rendered
+            .as_ref()
+            .map_or_else(Vec::new, |rendered| rendered.hidden.clone())
+    }
+
+    /// Monaco `ghost-text-hidden`: the column `row` shows up to, when ghost
+    /// text moved the rest of it below.
+    pub(crate) fn ghost_text_hidden_from(&self, row: u32) -> Option<u32> {
+        self.inline
+            .rendered
+            .as_ref()?
+            .hidden
+            .iter()
+            .find(|(hidden_row, _)| *hidden_row == row)
+            .map(|(_, column)| *column)
+    }
+
+    /// Every ghost text shown, the primary cursor's first, as (row, parts)
+    /// like [`Self::ghost_text_for_tests`], for tests.
+    #[doc(hidden)]
+    pub fn ghost_texts_for_tests(&self, cx: &gpui::App) -> Vec<(u32, Vec<(u32, String)>)> {
+        self.ghost_texts(cx)
+            .map(|(_, ghosts)| {
+                ghosts
+                    .into_iter()
+                    .map(|(_, ghost)| {
+                        (
+                            ghost.line,
+                            ghost.parts.iter().map(|p| (p.column, p.text())).collect(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// How the ghost texts are drawn, for tests: each one's row, the column
+    /// its line is hidden from, and its additional lines as text with
+    /// whether each line's suggested text has the warning squiggle.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    pub fn ghost_text_view_for_tests(
+        &self,
+        cx: &gpui::App,
+    ) -> Vec<(u32, Option<u32>, Vec<(String, bool)>)> {
+        let Some(rendered) = &self.inline.rendered else {
+            return Vec::new();
+        };
+        let mut rows: Vec<u32> = self
+            .ghost_texts(cx)
+            .map(|(_, ghosts)| ghosts.iter().map(|(_, ghost)| ghost.line).collect())
+            .unwrap_or_default();
+        rows.dedup();
+        rows.into_iter()
+            .map(|row| {
+                let hidden = self.ghost_text_hidden_from(row);
+                let lines = rendered
+                    .zones
+                    .iter()
+                    .filter(|(zone_row, _, _)| *zone_row == row)
+                    .flat_map(|(_, _, view)| {
+                        let view = view.read(cx);
+                        view.lines
+                            .iter()
+                            .map(|line| {
+                                let text: String = line.iter().map(|s| s.text.as_str()).collect();
+                                let squiggled = view.warning.is_some()
+                                    && line.iter().any(|segment| segment.ghost);
+                                (text, squiggled)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+                (row, hidden, lines)
+            })
+            .collect()
     }
 
     /// Monaco `InlineCompletionsHintsWidget`: with `show_toolbar: Always`,
@@ -2426,7 +2704,7 @@ impl CodeEditor {
                 model.delta_decorations(owner, &rendered.decorations, Vec::new(), cx)
             });
         }
-        if let Some(zone) = rendered.zone {
+        for (_, zone, _) in rendered.zones {
             self.remove_widget(zone, cx);
         }
     }
@@ -2601,6 +2879,24 @@ impl CodeEditor {
         };
         let (ix, edit) = visible[selected].clone();
         let item = self.inline.items[ix].clone();
+        // Monaco: the edit at every cursor showing the ghost text, and the
+        // cursors after each one's text (less what it keeps,
+        // `removeTextReplacementCommonSuffixPrefix`). Cursors without it go.
+        let mode = Self::ghost_mode(self.options.inline_suggest.mode);
+        let mut edits = vec![edit.clone()];
+        edits.extend(
+            self.secondary_ghost_texts(&edit, mode, 0)
+                .into_iter()
+                .map(|(edit, _)| edit),
+        );
+        let cursors = {
+            let line_text = |row: u32| self.snapshot.line(row);
+            let minimal: Vec<TextReplacement> = edits
+                .iter()
+                .map(|edit| remove_common_prefix_and_suffix(edit, &line_text))
+                .collect();
+            end_positions_after_applying(&minimal)
+        };
         self.inline.updating = true;
         self.stop_inline_completions(StopReason::Accepted(ix, false), cx);
         self.model()
@@ -2630,30 +2926,15 @@ impl CodeEditor {
                 model.end_transaction();
             });
         } else {
-            // The cursor goes after the inserted text, less the suffix it
-            // shares with the replaced text.
-            let replaced = self.text_range(edit.range.clone());
-            let common_suffix = edit
-                .text
-                .chars()
-                .rev()
-                .zip(replaced.chars().rev())
-                .take_while(|(a, b)| a == b)
-                .count();
-            let kept: String = {
-                let chars: Vec<char> = edit.text.chars().collect();
-                chars[..chars.len() - common_suffix.min(chars.len())]
-                    .iter()
-                    .collect()
-            };
-            self.replace_text(
-                edit.range.clone(),
-                &edit.text,
-                &item.completion.additional_text_edits,
-                cx,
-            );
-            let cursor = end_after(edit.range.start, &kept);
-            self.set_selections(&[Selection::collapsed(cursor)], cx);
+            let mut others: Vec<(Range<PointUtf16>, String)> = edits[1..]
+                .iter()
+                .map(|edit| (edit.range.clone(), edit.text.clone()))
+                .collect();
+            others.extend(item.completion.additional_text_edits.iter().cloned());
+            self.replace_text(edit.range.clone(), &edit.text, &others, cx);
+            let selections: Vec<Selection> =
+                cursors.into_iter().map(Selection::collapsed).collect();
+            self.set_selections(&selections, cx);
         }
         self.model()
             .update(cx, |model, _| model.push_stack_element());
@@ -2725,13 +3006,37 @@ impl CodeEditor {
         // The text between the cursor and the ghost text, then the part.
         let between = self.text_range(cursor..ghost_position);
         let inserted = format!("{between}{partial}");
+        // Monaco: the same at the other cursors where it fits
+        // (`getSecondaryEdits`), and every cursor after its edit.
+        let primary = TextReplacement {
+            range: cursor..ghost_position,
+            text: inserted.clone(),
+        };
+        let positions: Vec<PointUtf16> = self
+            .cursors
+            .all()
+            .iter()
+            .map(|cursor| cursor.position)
+            .collect();
+        let mut edits = vec![primary.clone()];
+        edits.extend(
+            secondary_edits(self.snapshot.rope(), &positions, &primary)
+                .into_iter()
+                .flatten(),
+        );
+        let cursors = end_positions_after_applying(&edits);
         self.inline.updating = true;
         // Monaco `pushUndoStop`: the accepted word undoes on its own.
         self.model()
             .update(cx, |model, _| model.push_stack_element());
-        self.replace_text(cursor..ghost_position, &inserted, &[], cx);
+        let others: Vec<(Range<PointUtf16>, String)> = edits[1..]
+            .iter()
+            .map(|edit| (edit.range.clone(), edit.text.clone()))
+            .collect();
+        self.replace_text(cursor..ghost_position, &inserted, &others, cx);
         let end = end_after(cursor, &inserted);
-        self.set_selections(&[Selection::collapsed(end)], cx);
+        let selections: Vec<Selection> = cursors.into_iter().map(Selection::collapsed).collect();
+        self.set_selections(&selections, cx);
         self.reveal_range(end..end, crate::RevealType::Simple, cx);
         self.inline.updating = false;
         self.inline.accepted_partially = Some(self.model().read(cx).buffer().version());
@@ -2923,6 +3228,37 @@ impl CodeEditor {
                 };
                 single_text_edit_augments(&edit, suggest_edit).then_some((ix, edit))
             })
+    }
+
+    /// The selector `SuggestWidgetAdaptor` registers with the suggest
+    /// controller (`registerSelector`, priority 100): when the suggest
+    /// widget shows or refilters its list, the suggestion the selected
+    /// inline completion extends is selected; of several, the one inserting
+    /// the most. `None` defers to the selection memory.
+    pub(crate) fn inline_suggest_preselect(&self, cx: &gpui::App) -> Option<usize> {
+        // Monaco `selectedInlineCompletion`, shown or not (the suggest
+        // widget hides it).
+        let (visible, selected, _) = self.inline_state_unchecked(cx)?;
+        let line_text = |row: u32| self.snapshot.line(row);
+        let to_preselect = single_text_remove_common_prefix(&visible[selected].1, &line_text);
+        let count = self.suggest.session.as_ref()?.model.filtered().len();
+        let mut best: Option<(usize, usize)> = None;
+        for index in 0..count {
+            let Some((range, text)) = self.suggestion_edit(index) else {
+                continue;
+            };
+            let edit =
+                single_text_remove_common_prefix(&TextReplacement { range, text }, &line_text);
+            let length = edit.text.encode_utf16().count();
+            // Monaco `findFirstMax`: the first of the longest.
+            if length > 0
+                && single_text_edit_augments(&to_preselect, &edit)
+                && best.is_none_or(|(_, best)| length > best)
+            {
+                best = Some((index, length));
+            }
+        }
+        best.map(|(index, _)| index)
     }
 
     /// Monaco `handleSuggestAccepted`: the suggestion inserting `text` over
@@ -3242,6 +3578,22 @@ fn follow_inline_edit(edit: &mut InlineEditItem, buffer: &text::Buffer, count: u
     });
     // Empty once the user typed it.
     !edit.edits.is_empty()
+}
+
+/// Monaco `getEndPositionsAfterApplying`: where each of `edits` (disjoint,
+/// in any order) ends once they're all applied, in their order.
+fn end_positions_after_applying(edits: &[TextReplacement]) -> Vec<PointUtf16> {
+    let mut order: Vec<usize> = (0..edits.len()).collect();
+    order.sort_by_key(|&ix| edits[ix].range.start);
+    let sorted: Vec<(Range<PointUtf16>, String)> = order
+        .iter()
+        .map(|&ix| (edits[ix].range.clone(), edits[ix].text.clone()))
+        .collect();
+    let mut ends = vec![PointUtf16::default(); edits.len()];
+    for (range, &ix) in new_ranges(&sorted).into_iter().zip(&order) {
+        ends[ix] = range.end;
+    }
+    ends
 }
 
 /// Where text inserted at `start` ends.

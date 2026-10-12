@@ -45,12 +45,10 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
   - Symbols are matched with the suggest widget's fuzzy scorer, not VS Code's quick open scorer.
   - The command palette has no similar-command or TF-IDF suggestions (those are VS Code workbench features), and accents aren't folded when matching.
 - **Inline completions:**
-  - Secondary cursors don't get it.
+  - At secondary cursors, each cursor's edit goes with its own ghost text; Monaco pairs them by position in a list it first drops the unfitting cursors from, which can mismatch them.
   - `completeBracketPairs` tokenizes the completed line on its own, so a completion inside a multi-line comment or string isn't recognized as such.
-  - Inline edits draw their boxes as content widgets, and they don't animate.
-  - The suggest widget doesn't preselect the suggestion an inline completion extends (Monaco's `registerSelector`).
-  - `disposeInlineCompletions`, `enableForwardStability`, `userPrompt`, the model picker (`modelInfo`) and provider options aren't ported, nor the `emptyResponseInformation` telemetry option.
-  - A multi-line completion inserted mid-line keeps the rest of the line after its first line, rather than moving it to the end of the ghost text.
+  - Inline edits draw their boxes as content widgets. Their transitions are ported but for the gutter icon's turn towards the edit (the icon is a glyph, which GPUI can't rotate; the arrow points the right way at once), the pill's transition being suspended while Shift is held, and the onboarding pulses.
+  - `userPrompt`, the model picker (`modelInfo`) and provider options aren't ported, nor the `emptyResponseInformation` telemetry option. The editor asks every provider to the end, so lists are never disposed as `LostRace`.
 - **Snippets:**
   - Transform regexes run on Rust's regex engine (via JavaScript translation), so exotic JavaScript syntax may not compile.
   - `$CURRENT_*` day and month names are English.

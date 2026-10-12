@@ -523,7 +523,18 @@ impl CodeEditor {
     /// suggest preview.
     pub(crate) fn selected_suggestion_edit(&self) -> Option<(std::ops::Range<PointUtf16>, String)> {
         let session = self.suggest.session.as_ref().filter(|s| s.focused)?;
-        let scored = session.model.filtered().get(session.selected)?;
+        self.suggestion_edit(session.selected)
+    }
+
+    /// The edit of the suggestion at `index` of the list (Monaco
+    /// `SuggestItemInfo.getSingleTextEdit`), as for
+    /// [`Self::selected_suggestion_edit`].
+    pub(crate) fn suggestion_edit(
+        &self,
+        index: usize,
+    ) -> Option<(std::ops::Range<PointUtf16>, String)> {
+        let session = self.suggest.session.as_ref()?;
+        let scored = session.model.filtered().get(index)?;
         let item = &session.model.items()[scored.index];
         let head = self.cursors.primary().position;
         let start = item
@@ -1185,6 +1196,14 @@ impl CodeEditor {
     /// Selects the item `suggest_selection` picks (Monaco's memory
     /// `select`).
     fn select_by_memory(&mut self, cx: &mut Context<Self>) {
+        // Monaco's selectors by priority: the inline completion's (100,
+        // `SuggestWidgetAdaptor`) before the memory's (0).
+        if let Some(index) = self.inline_suggest_preselect(cx)
+            && let Some(session) = self.suggest.session.as_mut()
+        {
+            session.selected = index;
+            return;
+        }
         let (language, line, column, word_until) = self.memory_context(cx);
         let mode = self.options.suggest_selection;
         let scope = self.memory_scope();
