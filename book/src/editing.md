@@ -24,7 +24,7 @@ Every feature here works out of the box. Each follows Monaco's behavior, which t
   - Cmd/Ctrl+click on a link or a symbol acts when the button comes up on the same line, so Cmd/Ctrl+drag selects as a plain drag does (see [links](providers.md#links) and [go to definition](providers.md#go-to-definition-references-and-the-peek-view)).
 - **Selection anchor:** Cmd+K Cmd+B marks the cursor's position with a thin blue bar (hover it for "Selection Anchor"), Cmd+K Cmd+K selects from there to the cursor, and Escape removes it.
 - **Clipboard:** copy, cut and paste with Monaco's multi-cursor rules. With one cursor per line, each cursor pastes its own line. With no selection, the whole line is copied (`empty_selection_clipboard`). Copies use the model's line ending (CRLF within the copied text on Windows, as Monaco). A column selection's copy pasted at a single cursor goes in as a block, with `multi_cursor_paste: Spread` (the default): each row on the next line at the cursor's visible column, short lines padded with spaces and rows past the end appended.
-- **IME:** marked text is shown inline, underlined, with the clause being converted underlined thicker, and the candidate window is positioned at the cursor. With several cursors, the composition is typed at each of them. A committed character gets the typing helpers below, so a dead-key quote auto-closes or surrounds the selection.
+- **IME:** marked text is shown inline, underlined, with the clause being converted underlined thicker, and the candidate window is positioned at the cursor. With several cursors, the composition is typed at each of them. Text the input method puts in place of the selection (the Character Viewer, say) is typed at every selection, so `(` surrounds them; text it puts around the cursor (a press-and-hold accent, autocorrect) is replaced at every cursor and undone with the typing before it. A committed character gets the typing helpers below, so a dead-key quote auto-closes or surrounds the selection.
 
 ## Typing helpers
 
@@ -47,7 +47,7 @@ Every feature here works out of the box. Each follows Monaco's behavior, which t
   - Upper, lower, title, snake, camel, Pascal and kebab case.
   - Transpose characters, duplicate the selection and move the selected text left or right.
   - Step numbers and `true`/`false` with in-place replace: Cmd+Shift+, replaces with the previous value and Cmd+Shift+. with the next. In the `vs` theme the new value flashes an outline, as in Monaco.
-  - Remove the brackets around the cursor (Cmd+Alt+Backspace).
+  - Remove the brackets around the cursor (Cmd+Alt+Backspace). With several cursors, each cursor's pair is its own undo step.
   - Go to Bracket (Cmd+Shift+\\) moves to the matching bracket, the end of the enclosing pair, or the next bracket. Select to Bracket selects the pair, backwards from a closing bracket; `trigger_with_payload` with `{ "selectBrackets": false }` selects only what's between the brackets.
 
 ## Undo
@@ -55,7 +55,7 @@ Every feature here works out of the box. Each follows Monaco's behavior, which t
 Undo is operation-based and per model.
 
 - **Grouping:** consecutive typing is grouped, and so are consecutive deletes. A cursor move or a different kind of edit starts a new group.
-- **Cursors:** undo and redo restore the cursors of the editor that made the edit.
+- **Cursors:** undo and redo restore the cursors of the editor that asked for them, and of the focused editor when the model is undone directly (`model.undo(None, cx)`). Other editors' cursors follow the text.
 - **Explicit boundaries:** `push_stack_element` adds a boundary (Monaco `pushStackElement`).
 
 ## Find and replace

@@ -1137,3 +1137,62 @@ fn editor_conveniences(cx: &mut TestAppContext) {
         "a\r\nb"
     );
 }
+
+/// Monaco `Cursor.onModelContentChanged`: `model.undo()` from outside the
+/// editor restores the undo step's selections in the focused editor (and
+/// says so with the `Undo` reason); an unfocused editor recovers its
+/// cursors from markers.
+#[gpui::test]
+fn outside_undo_restores_the_focused_editors_selections(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", cx);
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    editor.update(cx, |e, cx| e.type_text("foo bar", cx));
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[Selection {
+                anchor: p(0, 4),
+                head: p(0, 7),
+            }],
+            cx,
+        )
+    });
+    cx.dispatch_action(gpui_monaco::actions::DeleteLeft);
+    assert_eq!(model.read_with(cx, |m, _| m.text()), "foo ");
+    let reasons = Rc::new(RefCell::new(Vec::new()));
+    let sink = reasons.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event, _| {
+            if let CodeEditorEvent::SelectionsChanged(change) = event {
+                sink.borrow_mut().push(change.reason);
+            }
+        })
+        .detach()
+    });
+    model.update(cx, |m, cx| m.undo(None, cx));
+    assert_eq!(model.read_with(cx, |m, _| m.text()), "foo bar");
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.selections()),
+        vec![Selection {
+            anchor: p(0, 4),
+            head: p(0, 7),
+        }]
+    );
+    assert_eq!(reasons.borrow().last(), Some(&CursorChangeReason::Undo));
+
+    // Unfocused: from markers.
+    model.update(cx, |m, cx| m.redo(None, cx));
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    cx.update(|window, cx| window.blur(cx));
+    cx.run_until_parked();
+    model.update(cx, |m, cx| m.undo(None, cx));
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.selections()),
+        vec![Selection::collapsed(p(0, 7))]
+    );
+    assert_eq!(
+        reasons.borrow().last(),
+        Some(&CursorChangeReason::RecoverFromMarkers)
+    );
+}

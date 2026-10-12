@@ -243,6 +243,28 @@ fn removes_brackets(cx: &mut TestAppContext) {
     assert_eq!(text(&editor, cx), "var x = 3 + 5-7; y();");
 }
 
+/// Monaco `removeBrackets` pushes an undo stop around each cursor's
+/// removal: one undo restores only the last cursor's pair. A pair shared
+/// by two cursors is removed once.
+#[gpui::test]
+fn remove_brackets_undoes_each_cursor_separately(cx: &mut TestAppContext) {
+    let (editor, cx) = editor_with_brackets("a(b) c(d) e(f)", cx);
+    set_selections(
+        &editor,
+        cx,
+        &[sel(1, 4, 1, 4), sel(1, 9, 1, 9), sel(1, 8, 1, 8)],
+    );
+    editor.update(cx, |e, cx| e.remove_brackets(cx));
+    assert_eq!(text(&editor, cx), "ab cd e(f)");
+    editor.update(cx, |e, cx| e.undo(cx));
+    assert_eq!(text(&editor, cx), "ab c(d) e(f)");
+    editor.update(cx, |e, cx| e.undo(cx));
+    assert_eq!(text(&editor, cx), "a(b) c(d) e(f)");
+    editor.update(cx, |e, cx| e.redo(cx));
+    editor.update(cx, |e, cx| e.redo(cx));
+    assert_eq!(text(&editor, cx), "ab cd e(f)");
+}
+
 /// The `selectBrackets` argument through `trigger_with_payload`, and the
 /// action's default.
 #[gpui::test]

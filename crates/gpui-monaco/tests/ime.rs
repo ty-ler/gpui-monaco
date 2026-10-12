@@ -320,3 +320,75 @@ fn unmark_text_ends_the_composition(cx: &mut TestAppContext) {
     assert_eq!(text(&editor, cx), "()");
     assert_eq!(marked(&editor, cx), None);
 }
+
+fn select(anchor: PointUtf16, head: PointUtf16) -> Selection {
+    Selection { anchor, head }
+}
+
+/// Monaco `_emitTypeEvent`: inserting text over exactly the primary
+/// selection (the Character Viewer, say) has no deltas, so it's a `type`
+/// at every selection.
+#[gpui::test]
+fn replacing_the_primary_selection_types_at_every_selection(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("foo foo foo", cx);
+    set(
+        &editor,
+        &[
+            select(p(1, 1), p(1, 4)),
+            select(p(1, 5), p(1, 8)),
+            select(p(1, 9), p(1, 12)),
+        ],
+        cx,
+    );
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_text_in_range(Some(0..3), "😀", window, cx)
+    });
+    assert_eq!(text(&editor, cx), "😀 😀 😀");
+    assert_eq!(
+        selections(&editor, cx),
+        vec![
+            Selection::collapsed(p(1, 3)),
+            Selection::collapsed(p(1, 6)),
+            Selection::collapsed(p(1, 9)),
+        ]
+    );
+}
+
+/// The `type` runs the typing interceptors: an opening bracket inserted
+/// over a selection surrounds it (`autoSurround`).
+#[gpui::test]
+fn replacing_the_selection_with_a_bracket_surrounds_it(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
+    });
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = gpui::AppContext::new(cx, |_| {
+            gpui_monaco::TextModel::new("foo").with_language("rust")
+        });
+        CodeEditor::new(model, window, cx)
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    cx.run_until_parked();
+    set(&editor, &[select(p(1, 1), p(1, 4))], cx);
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_text_in_range(Some(0..3), "(", window, cx)
+    });
+    assert_eq!(text(&editor, cx), "(foo)");
+}
+
+/// Press-and-hold with one cursor is a `compositionType` too: a
+/// `TypingOther` edit that joins the typing before it, so one undo
+/// removes `café`.
+#[gpui::test]
+fn press_and_hold_accent_joins_the_typing_undo_step(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", cx);
+    editor.update(cx, |e, cx| e.type_text("cafe", cx));
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_text_in_range(Some(3..4), "é", window, cx)
+    });
+    assert_eq!(text(&editor, cx), "café");
+    assert_eq!(selections(&editor, cx), vec![Selection::collapsed(p(1, 5))]);
+    editor.update(cx, |e, cx| e.undo(cx));
+    assert_eq!(text(&editor, cx), "");
+}
