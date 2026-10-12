@@ -142,6 +142,8 @@ pub use uri::normalize_uri;
 pub mod view;
 pub mod widgets;
 
+#[doc(hidden)]
+pub use accessibility::{AriaNode, record_aria_for_tests, recorded_aria_for_tests};
 pub use api::{
     BracketPairInfo, CursorStateComputer, DecorationFilter, DecorationsCollection, EndCursorState,
     EndOfLinePreference, FindMatch, ModelDecoration, SingleEditOperation, WordAtPosition,

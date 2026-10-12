@@ -885,6 +885,8 @@ pub struct CodeEditor {
     pub(crate) contributions: std::collections::HashMap<std::any::TypeId, Box<dyn std::any::Any>>,
     /// Monaco `setAriaOptions`.
     pub(crate) aria_options: crate::editor_api::AriaOptions,
+    /// The sticky scroll rows the last render listed for screen readers.
+    pub(crate) aria_sticky_rows: Vec<u32>,
     /// The window the editor was created in, for its per-window suggestion
     /// memories (see `suggest.share_suggest_selections`).
     pub(crate) window_id: Option<gpui::WindowId>,
@@ -933,10 +935,12 @@ impl CodeEditor {
     /// rename, quick input), with its own internal model. Monaco's are
     /// plain `<input>`s, so it isn't in [`crate::editors`] or
     /// [`crate::models`] and is announced to no one; it has
-    /// [`widget_input_options`], the input background (whatever the theme)
-    /// and no font zoom.
+    /// [`widget_input_options`] with `aria_label` (the input's
+    /// `aria-label`, such as "Find"), the input background (whatever the
+    /// theme) and no font zoom.
     pub(crate) fn new_widget_input(
         text: &str,
+        aria_label: &str,
         theme: Arc<Theme>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -945,7 +949,13 @@ impl CodeEditor {
         let mut editor = Self::build(model, true, window, cx);
         editor.widget_input = true;
         editor.set_theme(theme, cx);
-        editor.update_options(widget_input_options(), cx);
+        editor.update_options(
+            EditorOptions {
+                aria_label: gpui::SharedString::from(aria_label.to_string()),
+                ..widget_input_options()
+            },
+            cx,
+        );
         editor
     }
 
@@ -1127,6 +1137,7 @@ impl CodeEditor {
             detached_widget_positions: None,
             contributions: Default::default(),
             aria_options: Default::default(),
+            aria_sticky_rows: Vec::new(),
             refocus: false,
             format_task: None,
             format_on_type_task: None,
@@ -7131,28 +7142,14 @@ impl Render for CodeEditor {
         }
         // Monaco's context keys, for keybinding rules and preconditions.
         self.render_commands(&mut key_context, window, cx);
+        let aria = self.root_aria();
+        crate::accessibility::record_aria(&aria);
         let root = div()
             .id("code-editor")
             .key_context(key_context)
             .track_focus(&self.focus_handle)
-            // Screen readers: a text input whose text runs are the lines
-            // around the selection (Monaco's screen reader content).
-            // Monaco `setAriaOptions({ role })` overrides it.
-            .role(
-                self.aria_options
-                    .role
-                    .unwrap_or(if self.options.single_line {
-                        gpui::Role::TextInput
-                    } else {
-                        gpui::Role::MultilineTextInput
-                    }),
-            )
-            // Monaco `ariaLabelForScreenReaderContent`.
-            .aria_label(if accessibility_off {
-                crate::accessibility::NOT_ACCESSIBLE_LABEL.into()
-            } else {
-                self.options.aria_label.clone()
-            })
+            .role(aria.role)
+            .when_some(aria.label, |root, label| root.aria_label(label))
             .map(|root| {
                 if !window.is_a11y_active() {
                     return root;
@@ -7164,6 +7161,7 @@ impl Render for CodeEditor {
                 let rows = self.a11y_rows.clone();
                 let (read_only, required) = (self.options.read_only, self.options.aria_required);
                 let active_descendant = self.aria_options.active_descendant;
+                let (role_description, auto_complete) = (aria.role_description, aria.auto_complete);
                 let editor = cx.entity().downgrade();
                 let action_rows = self.a11y_rows.clone();
                 root.a11y_synthetic_children(move |builder| {
@@ -7180,6 +7178,12 @@ impl Render for CodeEditor {
                     }
                     if required {
                         node.set_required();
+                    }
+                    if let Some(description) = &role_description {
+                        node.set_role_description(description.to_string());
+                    }
+                    if let Some(auto_complete) = auto_complete {
+                        node.set_auto_complete(auto_complete);
                     }
                     // Monaco `setAriaOptions({ activeDescendant })`.
                     if let Some(id) = active_descendant {
@@ -8134,6 +8138,7 @@ impl Render for CodeEditor {
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .on_pinch(cx.listener(Self::on_pinch));
         let root = crate::editor_commands::register_handlers(root, cx);
+        let root = root.children(self.sticky_scroll_aria());
         // Monaco `setBanner`: the banner takes its height off the top.
         match self.banner.clone() {
             Some((banner, height)) => root

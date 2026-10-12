@@ -16,11 +16,12 @@ use std::time::{Duration, Instant};
 use gpui::{
     AppContext as _, ClickEvent, Context, DragMoveEvent, Entity, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement,
-    PathBuilder, Pixels, Render, ScrollWheelEvent, SharedString, StatefulInteractiveElement,
+    PathBuilder, Pixels, Render, Role, ScrollWheelEvent, SharedString, StatefulInteractiveElement,
     Styled, Subscription, Task, WeakEntity, Window, canvas, div, point, px,
 };
 use text::PointUtf16;
 
+use crate::accessibility::AriaNode;
 use crate::actions::*;
 use crate::api::DecorationsCollection;
 use crate::codicons::{Codicon, icon as codicon};
@@ -262,6 +263,23 @@ fn uri_label(uri: &str) -> (String, String) {
     match path.rsplit_once('/') {
         Some((dir, name)) => (percent_decode(name), percent_decode(dir)),
         None => (percent_decode(path), String::new()),
+    }
+}
+
+/// Monaco `URI.fsPath`: the path, after the authority (kept for a `file`
+/// URI's UNC path).
+fn fs_path(uri: &str) -> String {
+    let Some((scheme, rest)) = uri.split_once("://") else {
+        return percent_decode(uri);
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(ix) => rest.split_at(ix),
+        None => (rest, ""),
+    };
+    if scheme == "file" && !authority.is_empty() && path.len() > 1 {
+        percent_decode(&format!("//{authority}{path}"))
+    } else {
+        percent_decode(path)
     }
 }
 
@@ -929,6 +947,36 @@ impl PeekView {
         }
     }
 
+    /// Monaco's `ariaMessage`s (`FileReferences` and `OneReference`): what
+    /// a screen reader reads for `row`.
+    fn row_aria_label(&self, row: Row, cx: &gpui::App) -> String {
+        match row {
+            Row::File(g) => {
+                let name = self.file_label(g).0;
+                let path = self.groups[g]
+                    .uri
+                    .as_deref()
+                    .map(fs_path)
+                    .unwrap_or_default();
+                match self.groups[g].ranges.len() {
+                    1 => format!("1 symbol in {name}, full path {path}"),
+                    n => format!("{n} symbols in {name}, full path {path}"),
+                }
+            }
+            Row::Reference(g, r) => {
+                let name = self.file_label(g).0;
+                let range = self.groups[g].range(r, cx);
+                let (line, column) = (range.start.row + 1, range.start.column + 1);
+                if self.groups[g].model.is_some() {
+                    let preview = self.row_label(row, cx);
+                    format!("{preview} in {name} on line {line} at column {column}")
+                } else {
+                    format!("in {name} on line {line} at column {column}")
+                }
+            }
+        }
+    }
+
     fn file_label(&self, g: usize) -> (String, String) {
         self.groups[g]
             .uri
@@ -1079,7 +1127,27 @@ impl PeekView {
             )
         };
         let single_file = self.groups.len() == 1;
-        let base = div()
+        // Monaco's tree items, read by their `ariaMessage`; the focused row
+        // is the focused list's active descendant. Without a file row the
+        // references are the tree's roots.
+        let level = match row {
+            Row::Reference(..) if !single_file => 2,
+            _ => 1,
+        };
+        let aria = AriaNode::new(Role::TreeItem, self.row_aria_label(row, cx))
+            .level(level)
+            .selected(focused)
+            .active_descendant(focused);
+        let aria = match row {
+            Row::File(g) => aria.expanded(!self.groups[g].collapsed),
+            Row::Reference(..) => aria,
+        };
+        let id: gpui::ElementId = match row {
+            Row::File(_) => ("peek-file", ix).into(),
+            Row::Reference(..) => ("peek-reference", ix).into(),
+        };
+        let base = aria
+            .apply(div().id(id))
             .h(ROW_HEIGHT)
             .flex()
             .items_center()
@@ -1097,8 +1165,7 @@ impl PeekView {
             Row::File(g) => {
                 let group = &self.groups[g];
                 let (name, dir) = self.file_label(g);
-                base.id(("peek-file", ix))
-                    .pl(px(0.))
+                base.pl(px(0.))
                     .text_color(
                         selection_foreground
                             .filter(|_| focused)
@@ -1175,8 +1242,7 @@ impl PeekView {
                 } else {
                     TREE_INDENT + TWISTIE_WIDTH
                 };
-                base.id(("peek-reference", ix))
-                    .pl(indent)
+                base.pl(indent)
                     .pr(px(6.))
                     .text_color(foreground)
                     .child(before)
@@ -1291,8 +1357,8 @@ impl Render for PeekView {
                 .on_drag(drag, |_, _, _, cx| cx.new(|_| gpui::Empty))
         };
         // Monaco `peekViewWidget.css`: the action bar's close action.
-        let close = div()
-            .id("peek-close")
+        let close = AriaNode::new(Role::Button, "Close")
+            .apply(div().id("peek-close"))
             .debug_selector(|| "peek-close".into())
             .flex_none()
             .p(px(3.))
@@ -1355,8 +1421,9 @@ impl Render for PeekView {
                 let kind = if side { OpenKind::Side } else { OpenKind::Open };
                 this.open_selected(kind, cx);
             }));
-        let list = div()
-            .id("peek-results")
+        // Monaco's references tree, labelled "References".
+        let list = AriaNode::new(Role::Tree, "References")
+            .apply(div().id("peek-results"))
             .debug_selector(|| "peek-results".into())
             // With the editor's keys, for its preconditions.
             .key_context(crate::context_keys::widget_key_context(

@@ -56,6 +56,147 @@ pub(crate) struct Announcement {
 /// Adds the announcement as a live region: assertive (Monaco's
 /// `role="alert"` container) or, for a status, polite (Monaco's
 /// `role="status"` container).
+/// What an element tells assistive technology: Monaco's `role`,
+/// `aria-label` and ARIA states on a widget's DOM node. GPUI makes an
+/// accessibility node only for an element with an id and a role.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AriaNode {
+    pub role: Role,
+    pub label: Option<SharedString>,
+    /// `aria-checked` (a checkbox or a checked menu item).
+    pub checked: Option<bool>,
+    /// `aria-expanded`.
+    pub expanded: Option<bool>,
+    /// `aria-selected`.
+    pub selected: Option<bool>,
+    /// `aria-level` (a tree item's depth, from 1).
+    pub level: Option<usize>,
+    /// `aria-keyshortcuts`.
+    pub keyshortcuts: Option<SharedString>,
+    /// The focused container's active descendant (`aria-activedescendant`).
+    pub active_descendant: bool,
+    /// `aria-roledescription`.
+    pub role_description: Option<SharedString>,
+    /// `aria-autocomplete` (`None` is `"none"`).
+    pub auto_complete: Option<accesskit::AutoComplete>,
+}
+
+impl AriaNode {
+    pub(crate) fn new(role: Role, label: impl Into<SharedString>) -> Self {
+        Self {
+            role,
+            label: Some(label.into()),
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn unlabelled(role: Role) -> Self {
+        Self {
+            role,
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn checked(mut self, checked: bool) -> Self {
+        self.checked = Some(checked);
+        self
+    }
+
+    pub(crate) fn expanded(mut self, expanded: bool) -> Self {
+        self.expanded = Some(expanded);
+        self
+    }
+
+    pub(crate) fn selected(mut self, selected: bool) -> Self {
+        self.selected = Some(selected);
+        self
+    }
+
+    pub(crate) fn level(mut self, level: usize) -> Self {
+        self.level = Some(level);
+        self
+    }
+
+    pub(crate) fn keyshortcuts(mut self, keys: Option<SharedString>) -> Self {
+        self.keyshortcuts = keys;
+        self
+    }
+
+    pub(crate) fn active_descendant(mut self, active: bool) -> Self {
+        self.active_descendant = active;
+        self
+    }
+
+    /// Sets the node's role, label and states on `element` (which needs an
+    /// id); recorded for tests while [`record_aria_for_tests`] is on.
+    pub(crate) fn apply<E: gpui::StatefulInteractiveElement>(self, element: E) -> E {
+        record_aria(&self);
+        let mut element = element.role(self.role);
+        if let Some(label) = self.label {
+            element = element.aria_label(label);
+        }
+        if let Some(checked) = self.checked {
+            element = element.aria_toggled(if checked {
+                accesskit::Toggled::True
+            } else {
+                accesskit::Toggled::False
+            });
+        }
+        if let Some(expanded) = self.expanded {
+            element = element.aria_expanded(expanded);
+        }
+        if let Some(selected) = self.selected {
+            element = element.aria_selected(selected);
+        }
+        if let Some(level) = self.level {
+            element = element.aria_level(level);
+        }
+        if let Some(keys) = self.keyshortcuts {
+            element = element.aria_keyshortcuts(keys);
+        }
+        if self.active_descendant {
+            element = element.aria_active_descendant();
+        }
+        element
+    }
+}
+
+thread_local! {
+    /// The nodes rendered since [`record_aria_for_tests`] (GPUI's test
+    /// platform builds no accessibility tree).
+    static RECORDED_ARIA: RefCell<Option<Vec<AriaNode>>> = const { RefCell::new(None) };
+}
+
+/// Records `node` while [`record_aria_for_tests`] is on.
+pub(crate) fn record_aria(node: &AriaNode) {
+    RECORDED_ARIA.with(|recorded| {
+        if let Some(nodes) = recorded.borrow_mut().as_mut() {
+            nodes.push(node.clone());
+        }
+    });
+}
+
+/// Starts recording the accessibility nodes rendered on this thread, for
+/// tests: [`recorded_aria_for_tests`] returns them.
+#[doc(hidden)]
+pub fn record_aria_for_tests() {
+    RECORDED_ARIA.with(|recorded| *recorded.borrow_mut() = Some(Vec::new()));
+}
+
+/// The accessibility nodes rendered since the last call or
+/// [`record_aria_for_tests`], for tests.
+#[doc(hidden)]
+pub fn recorded_aria_for_tests() -> Vec<AriaNode> {
+    RECORDED_ARIA.with(|recorded| {
+        recorded
+            .borrow_mut()
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    })
+}
+
 pub(crate) fn build_announcement(builder: &mut A11ySubtreeBuilder, announcement: &Announcement) {
     let (key, role, live) = if announcement.polite {
         ("status", Role::Status, accesskit::Live::Polite)
@@ -306,6 +447,91 @@ fn selection_from_a11y(
 }
 
 impl CodeEditor {
+    /// The editor's own node (Monaco's textarea in
+    /// `TextAreaEditContext`): a text input (or Monaco `setAriaOptions({
+    /// role })`'s role) labelled by `ariaLabelForScreenReaderContent`, with
+    /// the role description "editor" and `aria-autocomplete` "both", "none"
+    /// when read-only, or "list" while `setAriaOptions` points it at an
+    /// active descendant. A widget input is a plain `<input>` in Monaco, so
+    /// it has neither.
+    pub(crate) fn root_aria(&self) -> AriaNode {
+        let role = self
+            .aria_options
+            .role
+            .unwrap_or(if self.options.single_line {
+                Role::TextInput
+            } else {
+                Role::MultilineTextInput
+            });
+        let label = if self.options.accessibility_support == AccessibilitySupport::Off {
+            NOT_ACCESSIBLE_LABEL.into()
+        } else {
+            self.options.aria_label.clone()
+        };
+        let mut aria = AriaNode::new(role, label);
+        if !self.widget_input {
+            aria.role_description = Some("editor".into());
+            aria.auto_complete = if self.aria_options.active_descendant.is_some() {
+                Some(accesskit::AutoComplete::List)
+            } else if self.options.read_only {
+                None
+            } else {
+                Some(accesskit::AutoComplete::Both)
+            };
+        }
+        aria
+    }
+
+    /// The sticky scroll's lines for screen readers (Monaco's
+    /// `sticky-widget-lines`, a `list` of `listitem`s), where the last
+    /// frame drew them. They're painted by the editor element, so these
+    /// are empty elements over them.
+    pub(crate) fn sticky_scroll_aria(&mut self) -> Option<gpui::AnyElement> {
+        use gpui::{InteractiveElement as _, IntoElement as _, ParentElement as _, Styled as _};
+        let layout = self.layout.as_ref()?;
+        self.aria_sticky_rows = layout.sticky_lines.iter().map(|line| line.row).collect();
+        let first = layout.sticky_lines.first()?;
+        // The root's top is the banner's.
+        let banner = self
+            .banner
+            .as_ref()
+            .map_or(gpui::px(0.), |(_, height)| *height);
+        let origin = layout.bounds.origin - gpui::point(gpui::px(0.), banner);
+        let top = layout.bounds.top();
+        let bottom = layout
+            .sticky_lines
+            .iter()
+            .map(|line| line.bounds.bottom())
+            .fold(first.bounds.bottom(), gpui::Pixels::max);
+        let items = layout.sticky_lines.iter().enumerate().map(|(ix, line)| {
+            AriaNode::new(Role::ListItem, self.snapshot.line(line.row))
+                .apply(gpui::div().id(("sticky-line-aria", ix)))
+                .absolute()
+                .left(line.bounds.left() - layout.bounds.left())
+                .top(line.bounds.top() - top)
+                .w(line.bounds.size.width)
+                .h(line.bounds.size.height)
+        });
+        Some(
+            AriaNode::unlabelled(Role::List)
+                .apply(gpui::div().id("sticky-scroll-aria"))
+                .absolute()
+                .left(layout.bounds.left() - origin.x)
+                .top(top - origin.y)
+                .w(layout.bounds.size.width)
+                .h(bottom - top)
+                .children(items)
+                .into_any_element(),
+        )
+    }
+
+    /// What the editor's own node tells assistive technology, for tests
+    /// (GPUI's test platform builds no accessibility tree).
+    #[doc(hidden)]
+    pub fn aria_for_tests(&self) -> AriaNode {
+        self.root_aria()
+    }
+
     /// Whether the editor runs optimized for screen readers (Monaco's
     /// computed `accessibilitySupport` is `Enabled`): `On`, or `Auto` while
     /// assistive technology is connected.

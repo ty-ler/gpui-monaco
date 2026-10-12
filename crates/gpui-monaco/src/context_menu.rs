@@ -10,11 +10,12 @@ use std::collections::BTreeMap;
 
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, FontWeight, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Pixels, Point, Render, SharedString,
+    IntoElement, MouseButton, ParentElement, Pixels, Point, Render, Role, SharedString,
     StatefulInteractiveElement, Styled, Task, WeakEntity, Window, div, px,
 };
 use text::PointUtf16;
 
+use crate::accessibility::AriaNode;
 use crate::actions::{
     ContextMenuFirst, ContextMenuHide, ContextMenuLast, ContextMenuNext, ContextMenuPrevious,
     ContextMenuSelect, ContextMenuSubmenuClose, ContextMenuSubmenuOpen,
@@ -374,15 +375,20 @@ impl ContextMenu {
         cx.notify();
     }
 
+    /// `entries` as a menu; `claims_active` reports the active row as the
+    /// focused menu's active descendant.
+    #[allow(clippy::too_many_arguments)]
     fn render_entries(
         &self,
         entries: &[Entry],
         active: Option<usize>,
+        claims_active: bool,
         submenu_of: Option<usize>,
         width: Pixels,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let colors = &self.colors;
+        let open_submenu = self.submenu.map(|(ix, _)| ix);
         div()
             .w(width)
             .py(px(4.))
@@ -432,8 +438,23 @@ impl ContextMenu {
                             None => format!("context-menu-{ix}").into(),
                         };
                         let selector = id.to_string();
-                        div()
-                            .id(id)
+                        // Monaco's `menuitem` (`menuitemcheckbox` when
+                        // checked), named by its label, with its keys; a
+                        // submenu row is expanded while its submenu shows.
+                        let aria = if checked {
+                            AriaNode::new(Role::MenuItemCheckBox, label.clone()).checked(true)
+                        } else {
+                            AriaNode::new(Role::MenuItem, label.clone())
+                        };
+                        let aria = aria
+                            .keyshortcuts(keybinding.clone())
+                            .active_descendant(claims_active && is_active);
+                        let aria = if is_submenu {
+                            aria.expanded(submenu_of.is_none() && open_submenu == Some(ix))
+                        } else {
+                            aria
+                        };
+                        aria.apply(div().id(id))
                             .debug_selector(move || selector)
                             .relative()
                             .h(px(ROW_HEIGHT))
@@ -544,11 +565,21 @@ impl Render for ContextMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entries = self.entries.clone();
         let viewport = window.viewport_size();
+        // The menu keeps focus, so the active row is its active descendant:
+        // the submenu's while one of its rows is active.
+        let submenu_active = self.submenu.is_some_and(|(_, active)| active.is_some());
         let menu = div()
             .id("context-menu-list")
             .max_h(self.max_height)
             .overflow_y_scroll()
-            .child(self.render_entries(&entries, self.active, None, self.width, cx));
+            .child(self.render_entries(
+                &entries,
+                self.active,
+                !submenu_active,
+                None,
+                self.width,
+                cx,
+            ));
         let submenu = self.submenu.and_then(|(ix, active)| match &entries[ix] {
             Entry::Submenu { entries, .. } => {
                 // Beside its row, on the side with room for it (Monaco
@@ -561,16 +592,19 @@ impl Render for ContextMenu {
                 let left =
                     submenu_left(self.origin.x, self.width, width, viewport.width) - self.origin.x;
                 Some(
-                    div()
+                    AriaNode::unlabelled(Role::Menu)
+                        .apply(div().id("context-submenu"))
                         .absolute()
                         .left(left)
                         .top(top)
-                        .child(self.render_entries(entries, active, Some(ix), width, cx)),
+                        .child(self.render_entries(entries, active, true, Some(ix), width, cx)),
                 )
             }
             _ => None,
         });
-        div()
+        // Monaco's `role="menu"` (the editor's context menu has no label).
+        AriaNode::unlabelled(Role::Menu)
+            .apply(div().id("context-menu"))
             .relative()
             .track_focus(&self.focus)
             .key_context(CONTEXT_MENU_KEY_CONTEXT)

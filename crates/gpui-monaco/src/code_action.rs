@@ -16,11 +16,12 @@ use std::time::Duration;
 
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, FontWeight, Hsla, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
+    IntoElement, ParentElement, Render, Role, SharedString, StatefulInteractiveElement, Styled,
     Subscription, Task, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
 use text::PointUtf16;
 
+use crate::accessibility::AriaNode;
 use crate::actions::*;
 use crate::api::DecorationsCollection;
 use crate::codicons::{Codicon, icon as codicon};
@@ -596,6 +597,9 @@ const ROW_GAP: f32 = 4.;
 /// top padding and 22px labels.
 const BAR_HEIGHT: f32 = 2. + 1. + 3. + 22.;
 
+/// Monaco `customQuickFixWidget`: the action list's `aria-label`.
+const ACTION_WIDGET_ARIA_LABEL: &str = "Action Widget";
+
 impl CodeActionMenu {
     /// A row's text: the title on one line, or without headers, why a
     /// disabled action is (Monaco `toMenuItems`' `label`).
@@ -762,8 +766,17 @@ impl Render for CodeActionMenu {
                         }
                         None => format!("{accept_keys} to Apply").into(),
                     };
-                    div()
-                        .id(("code-action", row))
+                    // Monaco `ActionList`'s `option`s: the label, and why
+                    // a disabled action is; the focused one is the
+                    // listbox's active descendant.
+                    let aria_label = match &action.disabled {
+                        Some(reason) => format!("{label}, Disabled Reason: {reason}"),
+                        None => label.clone(),
+                    };
+                    AriaNode::new(Role::ListBoxOption, aria_label)
+                        .selected(focused)
+                        .active_descendant(focused)
+                        .apply(div().id(("code-action", row)))
                         .h(px(ACTION_ROW_HEIGHT))
                         .flex_none()
                         .flex()
@@ -825,8 +838,9 @@ impl Render for CodeActionMenu {
                 }
             })
             .collect();
-        div()
-            .id("code-action-menu")
+        // Monaco `ActionList`: a `listbox` labelled "Action Widget".
+        AriaNode::new(Role::ListBox, ACTION_WIDGET_ARIA_LABEL)
+            .apply(div().id("code-action-menu"))
             .debug_selector(|| "code-action-menu".into())
             .key_context(CODE_ACTION_MENU_KEY_CONTEXT)
             .track_focus(&self.focus)
