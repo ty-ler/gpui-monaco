@@ -1921,9 +1921,34 @@ pub(crate) struct EditorLayout {
     pub glyphs_drawn: Vec<(u32, usize)>,
     /// The line decorations area's bars drawn (for tests).
     pub gutter_bars: Vec<(Bounds<Pixels>, Hsla)>,
+    /// The glyph margin's lanes, line by line (Monaco
+    /// `viewModel.glyphLanes`).
+    pub glyph_lanes: crate::view::glyph_lanes::GlyphMarginLanesModel,
 }
 
 impl EditorLayout {
+    /// The glyph margin lane at `x` on model row `row` (Monaco
+    /// `HitTestContext`'s `glyphMarginLane`: the lanes in use on the line,
+    /// a lane wide each, from the margin's left); `None` off the margin or
+    /// right of the line's lanes.
+    pub fn glyph_margin_lane_at(
+        &self,
+        x: Pixels,
+        row: u32,
+    ) -> Option<crate::decorations::GlyphMarginLane> {
+        let offset = x - self.bounds.left();
+        if offset < px(0.) || offset >= self.glyph_margin_width {
+            return None;
+        }
+        let lane_width =
+            (self.glyph_margin_width / self.glyph_lanes.required_lanes() as f32).round();
+        if lane_width <= px(0.) {
+            return None;
+        }
+        let index = (offset / lane_width).floor() as usize;
+        self.glyph_lanes.lanes_at(row).get(index).copied()
+    }
+
     /// The sticky line at `position`: the topmost, as the pushed last line
     /// slides under the others.
     pub fn sticky_line_at(&self, position: gpui::Point<Pixels>) -> Option<usize> {
@@ -2614,6 +2639,7 @@ impl Element for EditorElement {
                     position,
                     stack_ordinal,
                     overflow,
+                    beside_gutter,
                 } => {
                     let mut element = match overflow {
                         Some(_) => overflowing(view, None),
@@ -2636,6 +2662,7 @@ impl Element for EditorElement {
                         position,
                         stack_ordinal,
                         overflow,
+                        beside_gutter,
                     });
                 }
             }
@@ -2663,9 +2690,19 @@ impl Element for EditorElement {
                 mut element,
                 measured,
                 overflow,
+                beside_gutter,
                 ..
             } = overlay;
             widgets.view = view;
+            // Monaco `GlyphHoverWidget._showAt`: centered on the line, kept
+            // inside the editor's height.
+            if let Some(beside) = beside_gutter {
+                let top = (beside.y - measured.height / 2.).round();
+                origin = point(
+                    beside.x,
+                    top.min(bounds.bottom() - measured.height).max(bounds.top()),
+                );
+            }
             if let Some(layer) = overflow {
                 // Kept inside the window.
                 origin.x = origin
@@ -3913,6 +3950,7 @@ fn prepaint_editor(
         line_highlights: Vec::new(),
         line_number_styles: Vec::new(),
         glyphs_drawn: Vec::new(),
+        glyph_lanes: Default::default(),
         gutter_bars: Vec::new(),
     };
 
@@ -5411,6 +5449,7 @@ fn prepaint_editor(
             }
         }
         layout.glyphs_drawn = glyphs_drawn;
+        layout.glyph_lanes = glyph_lanes;
         // Widgets across the whole gutter (the inline edit indicator), over
         // its glyphs, whenever there is a gutter (Monaco's
         // `InlineEditsGutterIndicator` overlay).
@@ -5507,11 +5546,34 @@ fn prepaint_editor(
         }
     }
     for widget in &editor.widgets.overlays {
+        // Monaco `GlyphHoverWidget._showAt`: right of the glyph margin (and
+        // the line numbers), centered on the row's line; hidden while the
+        // line isn't laid out.
+        let beside_gutter = match widget.beside_gutter {
+            Some(beside) => {
+                let Some(line) = layout
+                    .lines
+                    .iter()
+                    .find(|line| line.row == beside.row && line.columns.start == 0)
+                else {
+                    continue;
+                };
+                let mut x = layout.bounds.left() + layout.glyph_margin_width;
+                if beside.after_line_numbers {
+                    x += layout.line_numbers_width;
+                }
+                let center =
+                    layout.line_top(line.view_line) + layout.line_height_of(line.view_line) / 2.;
+                Some(point(x, center))
+            }
+            None => None,
+        };
         embedded.push(Embedded::Overlay {
             view: widget.view.clone(),
             position: widget.position,
             stack_ordinal: widget.stack_ordinal,
             overflow: widget.allow_overflow.then_some(widget.layer),
+            beside_gutter,
         });
     }
 
@@ -7101,6 +7163,9 @@ pub(crate) enum Embedded {
         stack_ordinal: Option<i32>,
         /// When it overflows the editor: its layer.
         overflow: Option<usize>,
+        /// The glyph hover's left edge and the middle of its line, in the
+        /// window, to place it by instead of `position`.
+        beside_gutter: Option<gpui::Point<Pixels>>,
     },
     Glyph {
         view: gpui::AnyView,
@@ -7261,6 +7326,7 @@ struct PendingOverlay {
     position: OverlayPosition,
     stack_ordinal: Option<i32>,
     overflow: Option<usize>,
+    beside_gutter: Option<gpui::Point<Pixels>>,
 }
 
 /// The visible parts of the embedded views, for the editor's hit testing,

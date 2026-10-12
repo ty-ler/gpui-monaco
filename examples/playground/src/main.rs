@@ -949,8 +949,11 @@ fn add_demo_decorations(editor: &Entity<CodeEditor>, cx: &mut App) {
                             error,
                             OverviewRulerLane::Right,
                         )),
-                        hover_message: Some("demo error".into()),
+                        hover_message: vec!["demo error".into()],
                         glyph: Some(("●".into(), error)),
+                        glyph_margin_hover_message: vec![
+                            "**Breakpoint** on `transform_offset`".into(),
+                        ],
                         ..Default::default()
                     },
                 ),
@@ -969,6 +972,10 @@ fn add_demo_decorations(editor: &Entity<CodeEditor>, cx: &mut App) {
                         )),
                         // Monaco `lineHeight`: a taller line.
                         line_height: Some(1.8),
+                        // Whole-line hovers (a blame annotation) and line
+                        // number hovers.
+                        hover_message: vec!["*Blame:* added in the first commit".into()],
+                        line_number_hover_message: vec!["Line changed".into()],
                         ..Default::default()
                     },
                 ),
@@ -1004,6 +1011,13 @@ fn add_demo_decorations(editor: &Entity<CodeEditor>, cx: &mut App) {
                             position: GlyphMarginLane::Left,
                             persist_lane: false,
                         }),
+                        glyph_margin_hover_message: vec![
+                            "Left lane: `impl Edit`".into(),
+                            gpui_monaco::providers::MarkdownString::new(
+                                "$(info) on every line of the range",
+                            )
+                            .with_theme_icons(true),
+                        ],
                         ..Default::default()
                     },
                 ),
@@ -1015,6 +1029,7 @@ fn add_demo_decorations(editor: &Entity<CodeEditor>, cx: &mut App) {
                             position: GlyphMarginLane::Right,
                             persist_lane: false,
                         }),
+                        glyph_margin_hover_message: vec!["Right lane: `new_len`".into()],
                         ..Default::default()
                     },
                 ),

@@ -7,7 +7,6 @@ use std::ops::RangeInclusive;
 
 use crate::decorations::GlyphMarginLane;
 
-#[cfg(test)]
 const LANES: [GlyphMarginLane; 3] = [
     GlyphMarginLane::Left,
     GlyphMarginLane::Center,
@@ -82,7 +81,6 @@ impl GlyphMarginLanesModel {
 
     /// Monaco `getLanesAtLine`: the lanes in use on `row`, left to right;
     /// the center one when none is.
-    #[cfg(test)]
     pub fn lanes_at(&self, row: u32) -> Vec<GlyphMarginLane> {
         let mask = self.mask_at(row);
         if mask == 0 {

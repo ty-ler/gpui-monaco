@@ -24,13 +24,14 @@ use crate::actions::{
 };
 use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor;
+use crate::decorations::GlyphMarginLane;
 use crate::editor::CodeEditor;
 use crate::markdown::{MarkdownStyle, render_markdown};
 use crate::options::{HoverEnabled, MultiCursorModifier};
 use crate::providers::{
     Hover, HoverContext, HoverProvider, HoverVerbosityRequest, MarkdownString, hover_providers,
 };
-use crate::widgets::{ContentWidgetPreference, WidgetId, card};
+use crate::widgets::{BesideGutter, ContentWidgetPreference, WidgetId, card};
 
 /// Monaco's default `hover.delay`.
 pub const HOVER_DELAY: Duration = Duration::from_millis(300);
@@ -44,8 +45,9 @@ pub(crate) struct HoverState {
     widget: Option<(Entity<HoverWidget>, WidgetId)>,
     /// The range the visible (or pending) hover is about.
     range: Option<Range<PointUtf16>>,
-    /// The gutter row a glyph margin hover is about.
-    gutter_row: Option<u32>,
+    /// The row and lane or line number a glyph hover is about (Monaco
+    /// `GlyphHoverWidget._hoverComputerOptions`).
+    glyph: Option<(u32, LaneOrLineNumber)>,
     /// Shown from the keyboard (Monaco `isVisibleFromKeyboard`).
     from_keyboard: bool,
     /// Monaco's `hidingDelay` grace period before reacting to the mouse.
@@ -175,10 +177,32 @@ impl ResizeEdges {
 pub(crate) enum HoverTarget {
     /// Text at a position.
     Text(PointUtf16),
-    /// The glyph margin or line numbers of a row (Monaco's glyph hover).
-    Gutter(u32),
+    /// A glyph margin lane or the line number of a row (Monaco's glyph
+    /// hover).
+    Gutter(u32, LaneOrLineNumber),
     /// Nothing that hovers.
     None,
+}
+
+/// What part of a row's gutter a glyph hover is about (Monaco
+/// `LaneOrLineNumber`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LaneOrLineNumber {
+    /// A glyph margin lane: its decorations' `glyph_margin_hover_message`.
+    Lane(GlyphMarginLane),
+    /// The line number: its decorations' `line_number_hover_message`.
+    LineNumber,
+}
+
+/// The glyph hover's widest: Monaco's markdown hover contents'
+/// `max-width: var(--vscode-hover-maxWidth, 500px)`, plus their 8px
+/// padding each side and the 1px border.
+const GLYPH_HOVER_MAX_WIDTH: f32 = 500. + 16. + 2.;
+
+/// Monaco `isEmptyMarkdownString` for `IMarkdownString | IMarkdownString[]`:
+/// no message, or only empty ones.
+fn is_empty_markdown(messages: &[MarkdownString]) -> bool {
+    messages.iter().all(|message| message.value.is_empty())
 }
 
 /// A row of the hover card (Monaco `IRenderedContentHoverPartOrStatusBar`),
@@ -218,6 +242,9 @@ pub struct HoverWidget {
     verbosity_requests: HashMap<usize, (i32, Task<()>)>,
     /// Where the card is anchored, to tell which side it's on.
     anchor: PointUtf16,
+    /// Monaco's glyph hover (`GlyphHoverWidget`), beside the gutter: a
+    /// plain hover that isn't resizable.
+    glyph: bool,
     /// The size the user resized the card to.
     size: Option<Size<Pixels>>,
     /// The largest size before a resize (Monaco `_updateMaxDimensions`).
@@ -547,7 +574,11 @@ impl Render for HoverWidget {
         }
         let bounds = self.bounds.clone();
         let line = self.line_height;
-        let resize = self.render_resize_sashes(cx);
+        let resize = if self.glyph {
+            Vec::new()
+        } else {
+            self.render_resize_sashes(cx)
+        };
         let extent = crate::scrollbars::extent(&self.scroll);
         let scroll = self.scroll.clone();
         let view = cx.entity().downgrade();
@@ -1650,7 +1681,7 @@ impl CodeEditor {
         self.hover.task = None;
         self.hover.hiding = None;
         self.hover.range = None;
-        self.hover.gutter_row = None;
+        self.hover.glyph = None;
         self.hover.from_keyboard = false;
         self.hover.inlay = None;
         if let Some(mut highlight) = self.hover.highlight.take() {
@@ -2012,7 +2043,7 @@ impl CodeEditor {
                 .range
                 .as_ref()
                 .is_some_and(|range| range.start <= position && position <= range.end),
-            HoverTarget::Gutter(row) => self.hover.gutter_row == Some(row),
+            HoverTarget::Gutter(row, lane) => self.hover.glyph == Some((row, lane)),
             HoverTarget::None => false,
         }
     }
@@ -2077,7 +2108,7 @@ impl CodeEditor {
         self.hide_hover(cx);
         match target {
             HoverTarget::None => {}
-            HoverTarget::Gutter(row) => self.schedule_gutter_hover(row, delay, cx),
+            HoverTarget::Gutter(row, lane) => self.schedule_gutter_hover(row, lane, delay, cx),
             HoverTarget::Text(position) => self.schedule_text_hover(position, delay, cx),
         }
     }
@@ -2161,7 +2192,7 @@ impl CodeEditor {
     /// doesn't make it blink. Returns whether it stayed.
     fn adopt_visible_hover(&mut self, position: PointUtf16, cx: &mut Context<Self>) -> bool {
         // The glyph and inlay hint hovers are other anchors.
-        if self.hover.gutter_row.is_some() || self.hover.inlay.is_some() {
+        if self.hover.glyph.is_some() || self.hover.inlay.is_some() {
             return false;
         }
         let Some((widget, _)) = self.hover.widget.clone() else {
@@ -2222,14 +2253,21 @@ impl CodeEditor {
         true
     }
 
-    /// Monaco `GlyphHoverController`: the glyph margin hover messages of
-    /// decorations on `row`, after `delay`.
-    fn schedule_gutter_hover(&mut self, row: u32, delay: Duration, cx: &mut Context<Self>) {
-        self.hover.gutter_row = Some(row);
+    /// Monaco `GlyphHoverWidget._startShowingAt`: after `delay`, the hover
+    /// messages for `row`'s glyph margin lane or line number, beside the
+    /// gutter.
+    fn schedule_gutter_hover(
+        &mut self,
+        row: u32,
+        target: LaneOrLineNumber,
+        delay: Duration,
+        cx: &mut Context<Self>,
+    ) {
+        self.hover.glyph = Some((row, target));
         self.hover.task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(delay).await;
             this.update(cx, |this, cx| {
-                let messages = this.glyph_margin_hover_messages(row, cx);
+                let messages = this.glyph_hover_messages(row, target, cx);
                 if messages.is_empty() {
                     return;
                 }
@@ -2238,18 +2276,26 @@ impl CodeEditor {
                     parts: messages,
                     ..Default::default()
                 };
-                this.show_hover(start, start..start, contents, cx);
+                let beside = BesideGutter {
+                    row,
+                    after_line_numbers: target == LaneOrLineNumber::LineNumber,
+                };
+                this.show_hover_card(start, start..start, contents, Some(beside), cx);
                 this.hover.range = None;
-                this.hover.gutter_row = Some(row);
+                this.hover.glyph = Some((row, target));
             })
             .ok();
         }));
     }
 
-    /// The `glyph_margin_hover_message`s of decorations starting on `row`.
-    fn glyph_margin_hover_messages(
+    /// Monaco `GlyphHoverComputer.computeSync`: of the decorations on
+    /// `row` (`getLineDecorations`, any that cover it), the
+    /// `glyph_margin_hover_message`s of those in the hovered lane, or the
+    /// `line_number_hover_message`s, a hover row per message.
+    fn glyph_hover_messages(
         &self,
         row: u32,
+        target: LaneOrLineNumber,
         cx: &mut Context<Self>,
     ) -> Vec<MarkdownHoverPart> {
         let rope = self.snapshot.rope();
@@ -2257,15 +2303,31 @@ impl CodeEditor {
             return Vec::new();
         }
         let start = rope.point_to_offset(text::Point::new(row, 0));
-        let end = rope.point_to_offset(text::Point::new(row, u32::MAX));
+        let end = rope.point_to_offset(text::Point::new(row, rope.line_len(row)));
         let editor_id = Some(cx.entity_id());
+        let validation = self.shows_validation_decorations();
         self.model().update(cx, |model, _| {
             model
                 .decorations_in_range(start..end, editor_id)
                 .into_iter()
-                .filter(|d| rope.offset_to_point(d.range.start).row == row)
-                .filter_map(|d| d.options.glyph_margin_hover_message.clone())
-                .map(|message| MarkdownHoverPart::new(vec![MarkdownString::new(message)]))
+                .filter(|d| validation || !d.options.validation)
+                .flat_map(|d| {
+                    let messages = match target {
+                        LaneOrLineNumber::Lane(lane) => {
+                            let own = d.options.glyph_margin.map(|g| g.position);
+                            if own.unwrap_or_default() != lane {
+                                return Vec::new();
+                            }
+                            &d.options.glyph_margin_hover_message
+                        }
+                        LaneOrLineNumber::LineNumber => &d.options.line_number_hover_message,
+                    };
+                    if is_empty_markdown(messages) {
+                        return Vec::new();
+                    }
+                    messages.clone()
+                })
+                .map(|message| MarkdownHoverPart::new(vec![message]))
                 .collect()
         })
     }
@@ -2369,24 +2431,8 @@ impl CodeEditor {
         // Monaco `MarkdownHoverParticipant.computeSync`: long line warnings,
         // then decoration hover messages.
         let mut parts = self.long_line_warnings(position, cx);
-        let editor_id = Some(cx.entity_id());
-        let snapshot = &self.snapshot;
-        parts.extend(self.model().update(cx, |model, _| {
-            model
-                .decorations_in_range(offset..offset, editor_id)
-                .into_iter()
-                .filter(|d| d.range.start <= offset && offset <= d.range.end)
-                .filter_map(|d| {
-                    let message = d.options.hover_message.clone()?;
-                    let range = snapshot.offset_to_point_utf16(d.range.start)
-                        ..snapshot.offset_to_point_utf16(d.range.end);
-                    Some(MarkdownHoverPart {
-                        range: Some(range),
-                        ..MarkdownHoverPart::new(vec![MarkdownString::new(message)])
-                    })
-                })
-                .collect::<Vec<_>>()
-        }));
+        let decorations = self.line_decoration_hovers(position, cx);
+        parts.extend(decorations);
         let model = self.model().read(cx);
         let context = model.provider_context();
         let providers = hover_providers(cx, self.provider_target(cx));
@@ -2398,6 +2444,69 @@ impl CodeEditor {
             })
             .collect();
         (markers, parts, tasks)
+    }
+
+    /// Monaco `ContentHoverComputer._getLineDecorations` and
+    /// `MarkdownHoverParticipant.computeSync`: the hover messages of the
+    /// decorations on `position`'s line that the mouse is in, or anywhere
+    /// on the line for a whole-line decoration; a `show_if_collapsed` one
+    /// takes a character more each side. Each message's range is the
+    /// decoration's on the line.
+    fn line_decoration_hovers(
+        &mut self,
+        position: PointUtf16,
+        cx: &mut Context<Self>,
+    ) -> Vec<MarkdownHoverPart> {
+        let row = position.row;
+        let rope = self.snapshot.rope();
+        if row >= rope.line_count() {
+            return Vec::new();
+        }
+        let line_len = rope.line_len_utf16(row);
+        let start = rope.point_to_offset(text::Point::new(row, 0));
+        let end = rope.point_to_offset(text::Point::new(row, rope.line_len(row)));
+        let editor_id = Some(cx.entity_id());
+        let validation = self.shows_validation_decorations();
+        let snapshot = &self.snapshot;
+        let column = position.column;
+        self.model().update(cx, |model, _| {
+            model
+                .decorations_in_range(start..end, editor_id)
+                .into_iter()
+                .filter(|d| validation || !d.options.validation)
+                .filter_map(|d| {
+                    if is_empty_markdown(&d.options.hover_message) {
+                        return None;
+                    }
+                    let range = snapshot.offset_to_point_utf16(d.range.start)
+                        ..snapshot.offset_to_point_utf16(d.range.end);
+                    let start = if range.start.row == row {
+                        range.start.column
+                    } else {
+                        0
+                    };
+                    let end = if range.end.row == row {
+                        range.end.column
+                    } else {
+                        line_len
+                    };
+                    if !d.options.is_whole_line {
+                        let outside = if d.options.show_if_collapsed {
+                            start > column + 1 || column.saturating_sub(1) > end
+                        } else {
+                            start > column || column > end
+                        };
+                        if outside {
+                            return None;
+                        }
+                    }
+                    Some(MarkdownHoverPart {
+                        range: Some(PointUtf16::new(row, start)..PointUtf16::new(row, end)),
+                        ..MarkdownHoverPart::new(d.options.hover_message.clone())
+                    })
+                })
+                .collect()
+        })
     }
 
     /// Monaco `HoverColorPickerParticipant`: a picker for the color at
@@ -2465,6 +2574,20 @@ impl CodeEditor {
         contents: HoverContents,
         cx: &mut Context<Self>,
     ) {
+        self.show_hover_card(anchor, range, contents, None, cx);
+    }
+
+    /// [`Self::show_hover`], or with `beside`, Monaco's glyph hover
+    /// (`GlyphHoverWidget`): an overlay beside the gutter, centered on its
+    /// row, not resizable and without a highlight.
+    fn show_hover_card(
+        &mut self,
+        anchor: PointUtf16,
+        range: Range<PointUtf16>,
+        contents: HoverContents,
+        beside: Option<BesideGutter>,
+        cx: &mut Context<Self>,
+    ) {
         let HoverContents {
             markers,
             parts,
@@ -2488,7 +2611,9 @@ impl CodeEditor {
                 (range, anchor, secondary)
             }
         };
-        let highlight = self.hover_highlight_range(anchor.row, &markers, &parts, &color_picker, cx);
+        let highlight = self
+            .hover_highlight_range(anchor.row, &markers, &parts, &color_picker, cx)
+            .filter(|_| beside.is_none());
         let style = self.markdown_style();
         let theme = self.theme.clone();
         let status_marker = most_severe(&markers).cloned();
@@ -2518,10 +2643,13 @@ impl CodeEditor {
         // Monaco `ContentHoverWidget._updateMaxDimensions`.
         let editor_size = self.layout_size().unwrap_or_default();
         let last = self.hover.last_size.get().unwrap_or_default();
-        let max_size = size(
+        let mut max_size = size(
             (editor_size.width * 0.66).max(px(750.)).max(last.width),
             (editor_size.height / 4.).max(px(250.)).max(last.height),
         );
+        if beside.is_some() {
+            max_size.width = px(GLYPH_HOVER_MAX_WIDTH);
+        }
         let uri = self.model().read(cx).uri().cloned();
         let request_quick_fixes = !matches!(quick_fix, QuickFixStatus::Hidden);
         let widget = cx.new(|cx| HoverWidget {
@@ -2535,6 +2663,7 @@ impl CodeEditor {
             part_focus: Vec::new(),
             verbosity_requests: HashMap::new(),
             anchor,
+            glyph: beside.is_some(),
             size: None,
             max_size,
             resizing: None,
@@ -2556,26 +2685,52 @@ impl CodeEditor {
         if let Some(marker) = status_marker.filter(|_| request_quick_fixes) {
             self.request_hover_quick_fixes(&widget, marker, !known_unavailable, cx);
         }
-        // Monaco `hover.above`: the preferred side first.
-        let preference = if self.options.hover.above {
-            vec![
-                ContentWidgetPreference::Above,
-                ContentWidgetPreference::Below,
-            ]
-        } else {
-            vec![
-                ContentWidgetPreference::Below,
-                ContentWidgetPreference::Above,
-            ]
+        let id = match beside {
+            // Monaco's glyph hover is an overlay widget that places itself
+            // (`allowEditorOverflow`).
+            Some(beside) => {
+                let id = self.add_overlay_widget(
+                    crate::widgets::OverlayWidget {
+                        allow_editor_overflow: true,
+                        ..crate::widgets::OverlayWidget::new(
+                            crate::widgets::OverlayPosition::Custom(gpui::Point::default()),
+                            widget.clone().into(),
+                        )
+                    },
+                    cx,
+                );
+                if let Some(overlay) = self.widgets.overlays.iter_mut().find(|w| w.id == id) {
+                    overlay.beside_gutter = Some(beside);
+                }
+                id
+            }
+            None => {
+                // Monaco `hover.above`: the preferred side first.
+                let preference = if self.options.hover.above {
+                    vec![
+                        ContentWidgetPreference::Above,
+                        ContentWidgetPreference::Below,
+                    ]
+                } else {
+                    vec![
+                        ContentWidgetPreference::Below,
+                        ContentWidgetPreference::Above,
+                    ]
+                };
+                self.add_content_widget(
+                    crate::widgets::ContentWidget {
+                        secondary_position: Some(secondary),
+                        allow_editor_overflow: true,
+                        ..crate::widgets::ContentWidget::new(
+                            anchor,
+                            preference,
+                            widget.clone().into(),
+                        )
+                    },
+                    cx,
+                )
+            }
         };
-        let id = self.add_content_widget(
-            crate::widgets::ContentWidget {
-                secondary_position: Some(secondary),
-                allow_editor_overflow: true,
-                ..crate::widgets::ContentWidget::new(anchor, preference, widget.clone().into())
-            },
-            cx,
-        );
         self.widgets.set_layer(id, crate::widgets::layer::HOVER);
         let room = self.widgets.room(id);
         widget.update(cx, |widget, _| widget.room = room);

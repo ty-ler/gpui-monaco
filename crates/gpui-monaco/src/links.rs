@@ -13,7 +13,7 @@ use text::PointUtf16;
 use crate::decorations::{DecorationId, DecorationOptions};
 use crate::editor::CodeEditor;
 use crate::options::MultiCursorModifier;
-use crate::providers::{DocumentLink, LinkProvider, link_providers};
+use crate::providers::{DocumentLink, LinkProvider, MarkdownString, link_providers};
 use crate::theme::TokenStyle;
 
 /// Monaco recomputes links this long after an edit (the minimum of its
@@ -79,8 +79,8 @@ impl CodeEditor {
     }
 
     /// Monaco `getHoverMessage`: "Follow link (cmd + click)", the label a
-    /// link to the target.
-    fn link_hover_message(&self, link: &DocumentLink) -> SharedString {
+    /// link to the target, trusted (`new MarkdownString('', true)`).
+    fn link_hover_message(&self, link: &DocumentLink) -> MarkdownString {
         let command = link
             .url
             .as_ref()
@@ -91,10 +91,11 @@ impl CodeEditor {
             None => "Follow link".to_string(),
         };
         let keys = self.link_label();
-        match &link.url {
-            Some(url) => format!("[{label}]({}) ({keys})", url.replace(' ', "%20")).into(),
-            None => format!("{label} ({keys})").into(),
-        }
+        let value = match &link.url {
+            Some(url) => format!("[{label}]({}) ({keys})", url.replace(' ', "%20")),
+            None => format!("{label} ({keys})"),
+        };
+        MarkdownString::new(value).trusted(true)
     }
 
     fn link_decoration(&self, link: &DocumentLink, active: bool) -> DecorationOptions {
@@ -104,7 +105,7 @@ impl CodeEditor {
                 foreground: active.then_some(self.theme.colors.link_active_foreground),
                 ..Default::default()
             }),
-            hover_message: Some(self.link_hover_message(link)),
+            hover_message: vec![self.link_hover_message(link)],
             stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
             ..Default::default()
         }

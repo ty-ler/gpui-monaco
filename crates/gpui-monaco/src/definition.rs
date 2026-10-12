@@ -323,7 +323,10 @@ impl CodeEditor {
                             foreground: Some(link),
                             ..Default::default()
                         }),
-                        hover_message,
+                        hover_message: hover_message
+                            .into_iter()
+                            .map(crate::providers::MarkdownString::new)
+                            .collect(),
                         ..Default::default()
                     },
                 )],
