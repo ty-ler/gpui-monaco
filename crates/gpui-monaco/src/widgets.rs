@@ -730,6 +730,10 @@ pub(crate) struct ContentWidgetState {
     /// line, for an overflowing widget (Monaco's `IAnchor`, such as the
     /// code action menu at a clicked hover link).
     pub window_anchor: Option<gpui::Bounds<Pixels>>,
+    /// Placed at its position's line once, then left there in the window
+    /// as the text scrolls (Monaco's code action menu at `toCoords`, fixed
+    /// page coordinates): its first placement becomes `window_anchor`.
+    pub pin_to_window: bool,
     /// Monaco `useDisplayNone`.
     pub display_none: bool,
     /// Monaco `beforeRender` and `afterRender`.
@@ -831,6 +835,14 @@ impl Widgets {
     pub fn set_window_anchor(&mut self, id: WidgetId, bounds: gpui::Bounds<Pixels>) {
         if let Some(widget) = self.content.iter_mut().find(|w| w.id == id) {
             widget.window_anchor = Some(bounds);
+        }
+    }
+
+    /// Pins overflowing content widget `id` where its position's line is
+    /// first laid out, so it stays there as the text scrolls.
+    pub fn pin_to_window(&mut self, id: WidgetId) {
+        if let Some(widget) = self.content.iter_mut().find(|w| w.id == id) {
+            widget.pin_to_window = true;
         }
     }
 

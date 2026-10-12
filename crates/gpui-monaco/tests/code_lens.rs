@@ -443,3 +443,82 @@ fn lenses_come_back_after_set_model(cx: &mut TestAppContext) {
     assert_eq!(zones_above(0, &editor, cx), gpui::px(0.));
     assert_eq!(zones_above(1, &editor, cx), lens_height);
 }
+
+/// Monaco `_renderCodeLensSymbols` merges new lenses into the shown ones by
+/// line: after an edit, a line that still has lenses keeps its zone and its
+/// titles until the new lenses resolve, without blanking or fading in
+/// again; lines that lost theirs drop their zone and new ones get one.
+#[gpui::test]
+fn lenses_keep_their_titles_across_edits(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_slow("fn a() {}\n\nfn b() {}\n", Duration::from_millis(100), cx);
+    cx.executor().advance_clock(Duration::from_millis(150));
+    draw(cx);
+    let shown = lines(&editor, cx);
+    assert_eq!(shown.len(), 2);
+    assert!(shown.iter().all(|(_, text, _, _)| !text.is_empty()));
+    // Past Monaco's 0.1s `fadein`.
+    std::thread::sleep(Duration::from_millis(120));
+    draw(cx);
+    assert!(lines(&editor, cx).iter().all(|(_, _, fading, _)| !fading));
+
+    // Type on the first lens's line, and turn the blank line into a third.
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| {
+            m.edit([(9..9, " "), (10..10, "fn c() {}")], cx).unwrap()
+        })
+    });
+    draw(cx);
+    // New lenses after the pause: the kept lines show their old titles
+    // while the new ones resolve, and the new line waits empty.
+    cx.executor().advance_clock(Duration::from_millis(300));
+    draw(cx);
+    let shown = lines(&editor, cx);
+    assert_eq!(
+        shown
+            .iter()
+            .map(|(row, text, fading, _)| (*row, text.as_str(), *fading))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, "$(references) 3 references", false),
+            (1, "", false),
+            (2, "$(references) 3 references", false),
+        ]
+    );
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.code_lenses_for_tests()),
+        vec![(0, vec![None]), (1, vec![None]), (2, vec![None])],
+        "the new lenses are still resolving"
+    );
+    cx.executor().advance_clock(Duration::from_millis(150));
+    draw(cx);
+    let shown = lines(&editor, cx);
+    assert!(shown.iter().all(|(_, text, _, _)| !text.is_empty()));
+    // Only the zone that was empty fades in.
+    assert_eq!(
+        shown
+            .iter()
+            .map(|(_, _, fading, _)| *fading)
+            .collect::<Vec<_>>(),
+        vec![false, true, false]
+    );
+
+    // Deleting a lens's line drops its zone.
+    editor.update(cx, |e, cx| {
+        e.model()
+            .update(cx, |m, cx| m.edit([(11..21, "")], cx).unwrap())
+    });
+    cx.executor().advance_clock(Duration::from_millis(400));
+    draw(cx);
+    cx.executor().advance_clock(Duration::from_millis(150));
+    draw(cx);
+    assert_eq!(
+        lines(&editor, cx)
+            .iter()
+            .map(|(row, text, _, _)| (*row, text.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, "$(references) 3 references".to_string()),
+            (1, "$(references) 3 references".to_string()),
+        ]
+    );
+}

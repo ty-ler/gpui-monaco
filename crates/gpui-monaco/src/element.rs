@@ -5012,12 +5012,10 @@ fn prepaint_editor(
                     )
                 })
             }
-            Some(crate::code_action::LightbulbPlacement::Gutter(row))
-            | Some(crate::code_action::LightbulbPlacement::Content(row, _)) => {
-                let column = match placement {
-                    Some(crate::code_action::LightbulbPlacement::Content(_, column)) => column,
-                    _ => 0,
-                };
+            // Monaco's gutter bulb is a glyph margin decoration: nothing
+            // draws without a glyph margin.
+            Some(crate::code_action::LightbulbPlacement::Gutter(_)) => None,
+            Some(crate::code_action::LightbulbPlacement::Content(row, column)) => {
                 at(row).map(|line| {
                     let top = layout.text_top(line.view_line) + (line_height - side) / 2.;
                     Bounds::new(
@@ -5930,6 +5928,7 @@ fn prepaint_editor(
         }
         // Monaco `ContentWidget._getAnchorsCoordinates`: hidden without a
         // position or preference, or when its line isn't laid out.
+        let mut pinned = Vec::new();
         for widget in &editor.widgets.content {
             // Against a box in the window (Monaco's `IAnchor`): below or
             // above it as below or above a line.
@@ -5982,11 +5981,16 @@ fn prepaint_editor(
                 (secondary_line.view_line == line.view_line)
                     .then(|| x_for(secondary_line, secondary.column))
             });
+            let anchor = point(x, layout.line_top(line.view_line));
+            let line_height = layout.line_height_of(line.view_line);
+            if widget.pin_to_window && widget.allow_overflow {
+                pinned.push((widget.id, Bounds::new(anchor, size(px(0.), line_height))));
+            }
             embedded.push(Embedded::Content {
                 view: widget.view.clone(),
-                anchor: point(x, layout.line_top(line.view_line)),
+                anchor,
                 secondary_x,
-                line_height: layout.line_height_of(line.view_line),
+                line_height,
                 preference: widget.preference.clone(),
                 overflow: widget
                     .allow_overflow
@@ -5994,6 +5998,9 @@ fn prepaint_editor(
                 display_none: widget.display_none,
                 hooks: widget.hooks.clone(),
             });
+        }
+        for (id, bounds) in pinned {
+            editor.widgets.set_window_anchor(id, bounds);
         }
     }
     for widget in &editor.widgets.overlays {

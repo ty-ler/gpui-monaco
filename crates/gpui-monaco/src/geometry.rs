@@ -269,8 +269,18 @@ impl CodeEditor {
         let info = layout.layout_info;
         let size = (layout.content_width, layout.content_height);
         if self.last_layout_info != Some(info) {
-            self.last_layout_info = Some(info);
+            let changed = self.last_layout_info.replace(info).is_some();
             cx.emit(CodeEditorEvent::LayoutChanged(info));
+            // Monaco `CodeActionController`: `onDidLayoutChange` hides the
+            // code action menu, which is fixed in the window.
+            if changed && self.is_code_action_menu_visible() {
+                let editor = cx.entity().downgrade();
+                cx.defer(move |cx| {
+                    editor
+                        .update(cx, |editor, cx| editor.hide_code_action_menu(cx))
+                        .ok();
+                });
+            }
         }
         if self.last_content_size != Some(size) {
             let old = self.last_content_size.replace(size);

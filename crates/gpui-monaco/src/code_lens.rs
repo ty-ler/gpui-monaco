@@ -47,6 +47,9 @@ struct Group {
     items: Vec<Item>,
     view: gpui::Entity<CodeLensLine>,
     zone: WidgetId,
+    /// Bumped when the zone is reused for a new request's lenses, so
+    /// resolves of the old ones are dropped.
+    generation: u64,
 }
 
 #[derive(Default)]
@@ -257,21 +260,28 @@ impl CodeEditor {
         (px(size), px((size * factor).floor()))
     }
 
-    /// How the lenses in `zone` are drawn now (Monaco `_updateLensStyle`,
-    /// and the content widget at the line's first non-whitespace column).
-    fn code_lens_style(&self, zone: Option<WidgetId>, cx: &App) -> Option<LensStyle> {
-        let (font_size, line_height) = self.code_lens_layout();
-        let layout = self.layout.as_ref()?;
-        let zone = self.widgets.zones.iter().find(|z| Some(z.id) == zone)?;
-        // The zone is anchored to the end of the line above the lens's.
-        let row = match &zone.anchor {
+    /// The row of the lenses in `zone` now (Monaco
+    /// `CodeLensWidget.getLineNumber`): the zone is anchored to the end of
+    /// the line above, and follows edits.
+    fn code_lens_zone_row(&self, zone: WidgetId, cx: &App) -> Option<u32> {
+        let zone = self.widgets.zones.iter().find(|z| z.id == zone)?;
+        Some(match &zone.anchor {
             Some(anchor) => {
                 let buffer = self.model().read(cx).buffer();
                 buffer.offset_to_point(buffer.resolve(anchor)).row + 1
             }
             None => 0,
-        }
-        .min(self.snapshot.max_point().row);
+        })
+    }
+
+    /// How the lenses in `zone` are drawn now (Monaco `_updateLensStyle`,
+    /// and the content widget at the line's first non-whitespace column).
+    fn code_lens_style(&self, zone: Option<WidgetId>, cx: &App) -> Option<LensStyle> {
+        let (font_size, line_height) = self.code_lens_layout();
+        let layout = self.layout.as_ref()?;
+        let row = self
+            .code_lens_zone_row(zone?, cx)?
+            .min(self.snapshot.max_point().row);
         let line = self.snapshot.line(row);
         let (column, visible) = first_non_whitespace(&line, self.cursor_config(cx).tab_size);
         // Where the text puts that column (after any inlay hints), else
@@ -431,37 +441,106 @@ impl CodeEditor {
                 _ => groups.push((item.lens.range.start.row, vec![item])),
             }
         }
-        self.clear_code_lenses(cx);
+        // Monaco: nothing to change.
+        if groups.is_empty() && self.code_lens.groups.is_empty() {
+            return;
+        }
+        // Kept zones are re-laid out with the rest if the height changed
+        // since (`update_code_lens_heights`).
         let (_, height) = self.code_lens_layout();
-        self.code_lens.height = height;
-        let editor = cx.entity().downgrade();
+        // Monaco's merge of the new groups into the shown lenses by line:
+        // a line that still has lenses keeps its zone and what it shows
+        // until they resolve (no blank, no fade); other zones go or come.
+        let old: Vec<(Option<u32>, Group)> = std::mem::take(&mut self.code_lens.groups)
+            .into_iter()
+            .map(|group| (self.code_lens_zone_row(group.zone, cx), group))
+            .collect();
+        let mut old = old.into_iter().peekable();
+        let mut merged = Vec::with_capacity(groups.len());
         for (row, items) in groups {
-            // Monaco `CodeLensWidget`: only the lenses that have commands
-            // already, without fading in; none leaves the zone empty.
-            let resolved: Vec<Shown> = items
+            while let Some((old_row, _)) = old.peek() {
+                if old_row.is_some_and(|old_row| old_row >= row) {
+                    break;
+                }
+                if let Some((_, group)) = old.next() {
+                    self.remove_widget(group.zone, cx);
+                }
+            }
+            let group = match old.next_if(|(old_row, _)| *old_row == Some(row)) {
+                Some((_, group)) => self.update_code_lens_group(group, row, items, cx),
+                None => self.new_code_lens_group(row, items, height, cx),
+            };
+            merged.push(group);
+        }
+        for (_, group) in old {
+            self.remove_widget(group.zone, cx);
+        }
+        self.code_lens.groups = merged;
+        self.resolve_visible_code_lenses(cx);
+    }
+
+    /// Monaco `new CodeLensWidget`: a zone above `row` showing the lenses
+    /// that have commands already, without fading in; none leaves it
+    /// empty.
+    fn new_code_lens_group(
+        &mut self,
+        row: u32,
+        items: Vec<Item>,
+        height: Pixels,
+        cx: &mut Context<Self>,
+    ) -> Group {
+        let resolved: Vec<Shown> = items
+            .iter()
+            .filter_map(|item| item.lens.command.clone())
+            .map(|command| Some(Some(command)))
+            .collect();
+        let editor = cx.entity().downgrade();
+        let view = cx.new(|_| CodeLensLine {
+            editor,
+            zone: None,
+            lenses: (!resolved.is_empty()).then_some(resolved),
+            fade_start: None,
+        });
+        let zone = self.add_view_zone(
+            ViewZone::new(row, ZoneHeight::Pixels(height), view.clone().into()),
+            cx,
+        );
+        view.update(cx, |view, _| view.zone = Some(zone));
+        Group {
+            row,
+            items,
+            view,
+            zone,
+            generation: 0,
+        }
+    }
+
+    /// Monaco `CodeLensWidget.updateCodeLensSymbols`: the line's new lenses,
+    /// in the same zone, which keeps showing the old ones until they
+    /// resolve. Lenses that all come with commands show right away.
+    fn update_code_lens_group(
+        &mut self,
+        mut group: Group,
+        row: u32,
+        items: Vec<Item>,
+        cx: &mut Context<Self>,
+    ) -> Group {
+        group.row = row;
+        group.items = items;
+        // Resolves still out for the old lenses don't apply to these.
+        group.generation += 1;
+        if group.items.iter().all(|item| item.lens.command.is_some()) {
+            let shown = group
+                .items
                 .iter()
-                .filter_map(|item| item.lens.command.clone())
-                .map(|command| Some(Some(command)))
+                .map(|item| Some(item.lens.command.clone()))
                 .collect();
-            let view = cx.new(|_| CodeLensLine {
-                editor: editor.clone(),
-                zone: None,
-                lenses: (!resolved.is_empty()).then_some(resolved),
-                fade_start: None,
-            });
-            let zone = self.add_view_zone(
-                ViewZone::new(row, ZoneHeight::Pixels(height), view.clone().into()),
-                cx,
-            );
-            view.update(cx, |view, _| view.zone = Some(zone));
-            self.code_lens.groups.push(Group {
-                row,
-                items,
-                view,
-                zone,
+            group.view.update(cx, |view, cx| {
+                view.set_lenses(shown, false);
+                cx.notify();
             });
         }
-        self.resolve_visible_code_lenses(cx);
+        group
     }
 
     /// Monaco `_resolveCodeLensesInViewport`: resolves the lenses without
@@ -499,7 +578,7 @@ impl CodeEditor {
                     item.provider.resolve_code_lens(&context, &item.lens, cx)
                 })
                 .collect();
-            requests.push((group.zone, tasks));
+            requests.push((group.zone, group.generation, tasks));
         }
         if requests.is_empty() {
             return;
@@ -507,7 +586,7 @@ impl CodeEditor {
         // Not cancelled by later requests (which skip these lenses); the
         // zone tells whether the line's lenses are still the same.
         cx.spawn(async move |this, cx| {
-            for (zone, tasks) in requests {
+            for (zone, generation, tasks) in requests {
                 let mut resolved = Vec::with_capacity(tasks.len());
                 for task in tasks {
                     resolved.push(match task {
@@ -518,7 +597,11 @@ impl CodeEditor {
                     });
                 }
                 let done = this.update(cx, |this, cx| {
-                    let Some(group) = this.code_lens.groups.iter_mut().find(|g| g.zone == zone)
+                    let Some(group) = this
+                        .code_lens
+                        .groups
+                        .iter_mut()
+                        .find(|g| g.zone == zone && g.generation == generation)
                     else {
                         return true;
                     };

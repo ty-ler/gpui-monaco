@@ -2060,6 +2060,7 @@ impl CodeEditor {
             layer: crate::widgets::layer::DEFAULT,
             room: Default::default(),
             window_anchor: None,
+            pin_to_window: false,
             display_none: widget.use_display_none,
             hooks,
         });
