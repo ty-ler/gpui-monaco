@@ -162,6 +162,8 @@ pub(crate) fn compute_legacy_diff(
         changes: changes
             .into_iter()
             .map(|(mut change, inner_changes)| {
+                // Monaco's `innerChanges: undefined` becomes empty (computed
+                // char changes are never empty: the lines differ).
                 change.inner_changes = inner_changes.unwrap_or_default();
                 change
             })

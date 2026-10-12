@@ -149,7 +149,9 @@ pub struct DetailedLineRangeMapping {
     /// [`Self::original`] (and each modified range within
     /// [`Self::modified`]), except that ranges may extend to the line break
     /// right after them. Never empty for mappings returned by
-    /// [`compute_diff`](super::compute_diff).
+    /// [`compute_diff`](super::compute_diff); empty where
+    /// [`compute_legacy_diff`](super::compute_legacy_diff) didn't compute
+    /// them (Monaco's `innerChanges: undefined`, for changes of 20+ lines).
     pub inner_changes: Vec<RangeMapping>,
 }
 
