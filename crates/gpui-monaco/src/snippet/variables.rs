@@ -4,8 +4,9 @@
 //! `src/vs/editor/contrib/snippet/browser/snippetVariables.ts` (MIT):
 //! selection, model, clipboard, comment, time and random based. Workspace
 //! variables (`WORKSPACE_NAME`, `WORKSPACE_FOLDER`) come from
-//! [`SnippetVariableContext::workspace`], which hosts set; there is no
-//! overtyping capture, and day and month names are English.
+//! [`SnippetVariableContext::workspace`], which hosts set; text typed over
+//! a selection comes from the snippet session's overtyping capture, and day
+//! and month names are English.
 
 use chrono::{DateTime, Datelike, Local, Timelike};
 

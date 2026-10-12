@@ -5,6 +5,11 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Differences page brought up to date (#304):** the book's differences page checked bullet by bullet against the code and Monaco's source.
+  - **Removed:** the suggest widget's details placement, keyboard focus, explain mode and glyph icons (all ported in #246 and #248), and the inline completions' secondary cursor pairing (Monaco pairs each cursor with its own edit too).
+  - **Corrected:** find replacement supports Monaco's case-changing escapes; snippet transforms run on `fancy-regex`, and case shorthands ignore the locale; folding uses tree-sitter fold queries; the diff editor has `maxFileSize`, `hideOriginalLineNumbers`, `compactMode`, `diffWordWrap` and the legacy algorithm, and the bullet now lists what isn't ported.
+  - **Parity doc:** no longer says the peek view's sash hover shows at once or that the diff editor's codicons wait on #246; the syntax folding row says where `folds.scm` comes in.
+  - **README and introduction:** the diff editor is no longer a non-goal or "not there yet"; the introduction lists the diff editors, Monarch grammars and the high contrast themes.
 - **Zone and widget API leftovers (#296):** the rest of Monaco's `IViewZone`, `IContentWidget` and `IViewZoneChangeAccessor` (`viewZones.ts`, `contentWidgets.ts`, `codeEditorWidget.ts`'s `changeViewZones`), and the sash hover delay.
   - **Zone callbacks:** `ViewZone::on_dom_node_top` and `on_computed_height` (Monaco `onDomNodeTop`, `onComputedHeight`) are told the zone's top, from the editor's top with scrolling (Monaco's -1000000 less the scroll top when out of view or hidden), and its height (0 while hidden). They run after the frame that lays the zone out, and only when the value changed; Monaco calls them on every render. Editors where no zone has them do no extra work per frame.
   - **Content widget render hooks:** `ContentWidget::before_render` (Monaco `beforeRender`) returns an optional size, used instead of the view's measured size to place the widget and lay its view out. `after_render` (Monaco `afterRender`) is told the preference the widget was placed by, or `None` when it isn't shown, after the frame and when that changes.

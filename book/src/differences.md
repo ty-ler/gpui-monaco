@@ -20,7 +20,7 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
 
 - **Find regexes:** use the Rust [`regex`](https://docs.rs/regex) crate (linear time). It has no lookahead, lookbehind or backreferences.
   - `\n` in a pattern still enables multiline search, as in Monaco.
-  - Replacement patterns support `$1`, `$&`, `$$`, `\n` and `\t`. Monaco's case-changing escapes (`\u`, `\U`, `\l`, `\L`) are not supported.
+  - Replacement patterns support `$1`, `$&`, `$$`, `\n`, `\t` and Monaco's case-changing `\u`, `\U`, `\l` and `\L`. Case changes work on whole characters rather than UTF-16 units, so letters outside the Basic Multilingual Plane change case too.
   - Language configuration patterns (`wordPattern`, `indentationRules`, …) use `fancy-regex`, so VS Code's configurations work unchanged.
 - **Cursor and scrolling:** Monaco's blinking styles are CSS animations on the compositor; here the editor repaints, but only while the caret's opacity or height is changing. `inertial_scroll` follows Monaco's `scrollableElement.ts` (not vendored here): each wheel event sets a speed that's applied every 1/60s and decays by a tenth, on top of any momentum the platform adds.
 - **Context menu:** it's drawn by the editor, in the window, flipping up or left at the window's edges, rather than as an OS-level menu. It's as wide as its widest row (130px at least), and submenus open after Monaco's 250ms delay on the side with room. The scrollbar menu and the "Copy As" and "Share" submenus aren't there. Sticky scroll lines have Monaco's own menu (Toggle Editor Sticky Scroll).
@@ -45,21 +45,21 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
   - Symbols are matched with the suggest widget's fuzzy scorer, not VS Code's quick open scorer.
   - The command palette has no similar-command or TF-IDF suggestions (those are VS Code workbench features), and accents aren't folded when matching.
 - **Inline completions:**
-  - At secondary cursors, each cursor's edit goes with its own ghost text; Monaco pairs them by position in a list it first drops the unfitting cursors from, which can mismatch them.
   - `completeBracketPairs` tokenizes the completed line on its own, so a completion inside a multi-line comment or string isn't recognized as such.
   - Inline edits draw their boxes as content widgets. Their transitions are ported but for the gutter icon's turn towards the edit (the icon is a glyph, which GPUI can't rotate; the arrow points the right way at once), the pill's transition being suspended while Shift is held, and the onboarding pulses.
   - `userPrompt`, the model picker (`modelInfo`) and provider options aren't ported, nor the `emptyResponseInformation` telemetry option. The editor asks every provider to the end, so lists are never disposed as `LostRace`.
 - **Snippets:**
-  - Transform regexes run on Rust's regex engine (via JavaScript translation), so exotic JavaScript syntax may not compile.
+  - Transform regexes run on `fancy-regex`, translated from JavaScript, so exotic JavaScript syntax may not compile.
+  - `/upcase` and `/downcase` ignore the locale (Monaco uses `toLocaleUpperCase`).
   - `$CURRENT_*` day and month names are English.
 - **Word-based suggestions:** the documents are the models registered with `register_model`.
 - **Suggestion memories:** they are kept in memory for the app's lifetime, not persisted, per window (Monaco's workspace storage) or, with `suggest.share_suggest_selections`, for every window (its profile storage). The same goes for the suggest widget's size and whether details are expanded.
-- **Suggest widget:** the details panel goes beside the list or below it, never to the left or above. Its contents can't be focused or scrolled with the keyboard, and explain mode (`toggleExplainMode`) isn't ported. Icons are glyphs, not codicons.
+- **Suggest widget:** the details panel's text can't be selected, because GPUI has no selectable text, so copying from it (`suggestWidgetCopy`) copies the whole detail and documentation.
 - **Code actions, rename, inlay hints:** there's no Refactor Preview panel: previews go to your `set_workspace_edit_preview_handler`, and apply directly without one, as in standalone Monaco. There's no `editor.rename.enablePreview` setting; previews are offered whenever a handler is set. Right-clicking injected text without a location doesn't open the editor's menu, as in Monaco. [`docs/MONACO_AUDIT.md`](https://github.com/ty-ler/gpui-monaco/blob/main/docs/MONACO_AUDIT.md) lists every known gap.
-- **Folding:** there is no folding by tree-sitter fold queries yet. Ranges come from indentation, markers and folding range providers.
+- **Folding:** with `folding_strategy: Auto`, ranges come from folding range providers, else the grammar's tree-sitter fold query (`folds.scm`), else indentation and markers. Monaco has no syntax folding, so it goes straight to indentation.
 - **Accessibility:** screen readers get the lines around the selection as AccessKit text runs, as Monaco's hidden textarea does. Monaco's `alert` (tab focus mode, inline suggestions, `CodeEditor::announce`) is an assertive AccessKit live region under the editor. `accessibility_support: Auto` follows whether assistive technology is connected to the window. The inline suggestion sound (`playSignal`) and the screen reader text in the inline suggestion hover aren't there, and Off gives no text runs (Monaco on macOS still writes the word before the cursor, for long-press input).
 - **Two-cell full-width characters:** glyphs are moved after shaping, so backgrounds of a centered character start at the glyph rather than its cell. Ghost text and the diff editor's deleted lines keep the font's width. `Simple` wrapping already counts full-width characters as two columns with either setting (Monaco uses the font's ratio for `Font`).
-- **Diff editor:** only Monaco's advanced diff algorithm exists, and there's no `maxFileSize` cut-off, `hideOriginalLineNumbers`, `compactMode` or `diffWordWrap` (#203).
+- **Diff editor:** `createViewModel` and the diff editor's own `createContextKey` aren't ported (the sides' editors have `create_context_key`). Nor are staying inline through a smooth resize that started below the inline breakpoint, or the animated realignment when comparing a moved block.
 - **Long lines:** as in Monaco, very long lines stop rendering after `stop_rendering_line_after` with a "Show more (…)" chip, and clicking at or past that column (Monaco's `longLinesHelper`) sets the option to `None`, so everything draws.
 - **Developer actions:** "Developer: Inspect Tokens" shows tree-sitter tokens: the token type is the Monaco-style name `tokenize` gives (`keyword.rust`), followed by the capture and the TextMate scopes it's matched against. Escape closes it on key down rather than key up. "Developer: Force Retokenize" reparses the whole model on the spot and logs how long it took.
 - **Icons:** the codicon font is optional (the `codicons` feature, CC-BY-4.0); without it the widgets draw Unicode stand-ins for Monaco's codicons.
