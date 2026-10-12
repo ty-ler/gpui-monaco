@@ -59,6 +59,9 @@ enum Run {
     Navigate(LocationKind, Location),
     /// A command (an inlay hint part's).
     Command(Command),
+    /// A command the inline suggestion's provider gave (Monaco's
+    /// `InlineCompletionsActions`).
+    InlineCommand(Command),
 }
 
 /// The navigation commands of Monaco's inlay hint location menu: the
@@ -331,6 +334,11 @@ impl ContextMenu {
                     }
                     Run::Command(command) => {
                         editor.run_inlay_hint_command(&command, cx);
+                    }
+                    Run::InlineCommand(command) => {
+                        if let Err(err) = crate::commands::execute_command(cx, &command) {
+                            log::warn!("{err:#}");
+                        }
                     }
                 }
             });
@@ -663,6 +671,10 @@ pub(crate) struct ContextMenuState {
     menu: Option<(Entity<ContextMenu>, WidgetId)>,
     /// Shift+F10 revealed the cursor: show the menu below it once laid out.
     pub(crate) show_at_cursor: bool,
+    /// The menu is the inline suggestion toolbar's "⋯" menu (Monaco's
+    /// `InlineSuggestionHintsContentWidget.dropDownVisible`): the hover
+    /// and the inline suggestion stay while it shows.
+    pub(crate) inline_toolbar: bool,
 }
 
 impl CodeEditor {
@@ -843,6 +855,54 @@ impl CodeEditor {
         self.show_menu(entries, Some(anchor), Some(0), window, cx);
     }
 
+    /// The inline suggestion toolbar's "⋯" menu (Monaco's
+    /// `MenuId.InlineSuggestionToolbar` secondary group, then the
+    /// provider's commands), shown as the context menu below `anchor`.
+    pub(crate) fn show_inline_toolbar_menu(
+        &mut self,
+        anchor: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.hide_context_menu(cx);
+        let keys = |action: &dyn gpui::Action| {
+            crate::keybinding_label::command_label(action, None, &self.focus_handle, window)
+        };
+        let mut entries = vec![
+            Entry::item(
+                "Accept Line".into(),
+                keys(&crate::actions::AcceptNextInlineLine),
+                Run::Action("code_editor::AcceptNextInlineLine"),
+            ),
+            Entry::Item {
+                label: "Always Show Toolbar".into(),
+                keybinding: keys(&crate::actions::ToggleAlwaysShowInlineSuggestionToolbar),
+                run: Run::Action("code_editor::ToggleAlwaysShowInlineSuggestionToolbar"),
+                // Toggled while `show_toolbar` is `Always`.
+                checked: self.options.inline_suggest.show_toolbar
+                    == crate::options::InlineSuggestShowToolbar::Always,
+            },
+        ];
+        if !self.inline.commands.is_empty() {
+            entries.push(Entry::Separator);
+            entries.extend(self.inline.commands.iter().map(|command| {
+                Entry::item(
+                    command.title.clone(),
+                    None,
+                    Run::InlineCommand(command.clone()),
+                )
+            }));
+        }
+        self.show_menu(entries, Some(anchor), None, window, cx);
+        self.context_menu.inline_toolbar = self.context_menu.menu.is_some();
+    }
+
+    /// Whether the inline suggestion toolbar's "⋯" menu shows (Monaco
+    /// `InlineSuggestionHintsContentWidget.dropDownVisible`).
+    pub(crate) fn inline_toolbar_menu_visible(&self) -> bool {
+        self.context_menu.inline_toolbar && self.context_menu.menu.is_some()
+    }
+
     /// Shows a menu of `entries` at `position` (or below the cursor), with
     /// `active` the active row: measured, in the window, flipped up or left
     /// at its edges and scrolling when it's taller than the window (Monaco's
@@ -954,6 +1014,7 @@ impl CodeEditor {
 
     /// Hides the context menu.
     pub fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.context_menu.inline_toolbar = false;
         if let Some((_, id)) = self.context_menu.menu.take() {
             self.remove_widget(id, cx);
             self.refocus = true;
@@ -987,6 +1048,16 @@ impl CodeEditor {
         if self.options.context_menu {
             self.show_context_menu(Some(point), window, cx);
         }
+    }
+
+    /// Whether the inline suggestion toolbar's "⋯" menu is open, and its
+    /// active row, for tests.
+    #[doc(hidden)]
+    pub fn inline_toolbar_menu_for_tests(&self, cx: &App) -> Option<Option<usize>> {
+        if !self.inline_toolbar_menu_visible() {
+            return None;
+        }
+        Some(self.context_menu.menu.as_ref()?.0.read(cx).active)
     }
 
     /// The open menu's measured width, for tests.

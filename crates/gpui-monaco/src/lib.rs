@@ -76,6 +76,7 @@ mod find_widget;
 mod folding_commands;
 mod font_zoom;
 mod indentation_commands;
+mod inline_progress;
 mod scrollbars;
 mod tooltip;
 pub use font_zoom::{editor_zoom_level, remeasure_fonts, set_editor_zoom_level};

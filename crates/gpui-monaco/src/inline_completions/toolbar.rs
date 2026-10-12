@@ -1,35 +1,28 @@
 //! The inline suggestion toolbar (Monaco `InlineSuggestionHintsContentWidget`
 //! and `InlineCompletionsHoverParticipant`): previous/next with the "1/3"
-//! count, Accept and Accept Word, and a menu with Accept Line, Always Show
-//! Toolbar and the provider's commands. It shows above the ghost text with
-//! `show_toolbar: Always`, or in the hover over ghost text with `OnHover`.
-//! A warning on the shown completion shows above it (Monaco's
-//! `warningMessage`). The menu takes the keyboard while open, as Monaco's
-//! context menu: Up, Down, Home and End move, Enter or Space runs, Escape
-//! closes.
+//! count, Accept and Accept Word with their keybindings, and "⋯", whose
+//! menu (Accept Line, Always Show Toolbar and the provider's commands) is
+//! the editor's context menu. It shows above the ghost text with
+//! `show_toolbar: Always`, as a hover card of its own, or in the hover
+//! over ghost text with `OnHover`. A warning on the shown completion shows
+//! above it (Monaco's `warningMessage`).
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, Entity, FocusHandle, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, WeakEntity, Window,
-    div, px,
+    AnyElement, Bounds, Context, Entity, InteractiveElement, IntoElement, KeyBinding, MouseButton,
+    ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement, Styled, WeakEntity,
+    Window, div, px,
 };
 
-use crate::actions::{
-    ContextMenuFirst, ContextMenuHide, ContextMenuLast, ContextMenuNext, ContextMenuPrevious,
-    ContextMenuSelect,
-};
 use crate::codicons::{Codicon, icon as codicon};
-use crate::context_menu::CONTEXT_MENU_KEY_CONTEXT;
 use crate::editor::CodeEditor;
-
-/// The More Actions menu paints above the editor's overflowing widgets,
-/// the hover included.
-const MENU_PRIORITY: usize = 1000;
-use crate::options::InlineSuggestShowToolbar;
+use crate::keybinding_label::{KeyLabel, KeycapStyle, command_binding, keycaps_styled};
 use crate::theme::Theme;
+use crate::widgets::card;
 
 /// What a toolbar button does to the editor.
 type ToolbarAction = Arc<dyn Fn(&mut CodeEditor, &mut Context<CodeEditor>)>;
@@ -38,36 +31,78 @@ type ToolbarAction = Arc<dyn Fn(&mut CodeEditor, &mut Context<CodeEditor>)>;
 pub struct InlineToolbar {
     editor: WeakEntity<CodeEditor>,
     theme: Arc<Theme>,
-    /// Drawn as its own card (Monaco `withBorder`), not inside a hover.
+    /// Drawn as its own hover card (Monaco `withBorder`), not inside a
+    /// hover.
     with_border: bool,
-    /// The "⋯" menu is open.
-    menu_open: bool,
-    /// The menu's keyboard-selected row.
-    active: Option<usize>,
-    /// The menu's focus, while it's open.
-    focus: FocusHandle,
-    /// The menu had the keyboard at the last frame.
-    focus_seen: bool,
+    /// Where the "⋯" button was painted, in the window: its menu shows
+    /// below it.
+    more_bounds: Rc<Cell<Bounds<Pixels>>>,
 }
 
-/// A menu row: its label, whether it's checked, and what it runs.
-type MenuItem = (SharedString, bool, ToolbarAction);
+/// The binding Monaco's `lookupKeybinding` shows for an inline suggestion
+/// command: `action`'s ([`command_binding`]), else the key of `via`, the
+/// editor action that runs the command for that key (Tab runs
+/// `inlineSuggest.commit`, Escape `inlineSuggest.hide`).
+pub(crate) fn inline_command_binding(
+    action: &dyn gpui::Action,
+    via: Option<&dyn gpui::Action>,
+    focus: &gpui::FocusHandle,
+    window: &Window,
+) -> Option<KeyBinding> {
+    command_binding(action, None, focus, window)
+        .or_else(|| via.and_then(|via| command_binding(via, None, focus, window)))
+}
 
-/// Monaco's menu navigation: the next (`delta` 1) or previous (-1) row,
-/// wrapping, or the first or last for larger steps.
-pub(crate) fn step_menu(active: Option<usize>, count: usize, delta: isize) -> Option<usize> {
-    if count == 0 {
-        return None;
+/// The toolbar's keys (Monaco `keybindingService.lookupKeybinding`): as
+/// bound now, rebinding included.
+struct ToolbarKeys {
+    previous: Option<KeyBinding>,
+    next: Option<KeyBinding>,
+    accept: Option<KeyBinding>,
+    accept_word: Option<KeyBinding>,
+}
+
+impl ToolbarKeys {
+    fn lookup(focus: &gpui::FocusHandle, window: &Window) -> Self {
+        use crate::actions::*;
+        let binding = |action: &dyn gpui::Action, via: Option<&dyn gpui::Action>| {
+            inline_command_binding(action, via, focus, window)
+        };
+        Self {
+            previous: binding(&ShowPreviousInlineSuggestion, None),
+            next: binding(&ShowNextInlineSuggestion, None),
+            accept: binding(&AcceptInlineSuggestion, Some(&Tab)),
+            accept_word: binding(&AcceptNextInlineWord, None),
+        }
     }
-    let count = count as isize;
-    let next = match (active, delta) {
-        (Some(active), 1 | -1) => (active as isize + delta).rem_euclid(count),
-        (None, 1) => 0,
-        (None, -1) => count - 1,
-        (_, delta) if delta > 0 => count - 1,
-        _ => 0,
-    };
-    Some(next as usize)
+}
+
+impl CodeEditor {
+    /// The toolbar's Previous and Next tooltips and its Accept and Accept
+    /// Word keys, as it shows them, for tests.
+    #[doc(hidden)]
+    pub fn inline_toolbar_labels_for_tests(&self, window: &Window) -> Vec<String> {
+        let keys = ToolbarKeys::lookup(&self.focus_handle, window);
+        let label = |binding: Option<KeyBinding>| {
+            binding
+                .map(|binding| KeyLabel::for_binding(&binding).text.to_string())
+                .unwrap_or_default()
+        };
+        vec![
+            append_keybinding("Previous", keys.previous.as_ref()).to_string(),
+            append_keybinding("Next", keys.next.as_ref()).to_string(),
+            label(keys.accept),
+            label(keys.accept_word),
+        ]
+    }
+}
+
+/// Monaco `appendKeybinding`: `label (keys)`, or `label` when unbound.
+fn append_keybinding(label: &str, binding: Option<&KeyBinding>) -> SharedString {
+    match binding.map(crate::keybinding_label::binding_label) {
+        Some(keys) if !keys.is_empty() => format!("{label} ({keys})").into(),
+        _ => label.to_string().into(),
+    }
 }
 
 impl InlineToolbar {
@@ -83,137 +118,72 @@ impl InlineToolbar {
             editor: editor.downgrade(),
             theme,
             with_border,
-            menu_open: false,
-            active: None,
-            focus: cx.focus_handle(),
-            focus_seen: false,
+            more_bounds: Rc::default(),
         }
     }
 
-    /// The menu's rows: Accept Line, Always Show Toolbar, then the
-    /// provider's commands.
-    fn menu_items(&self, always: bool, commands: Vec<crate::providers::Command>) -> Vec<MenuItem> {
-        let mut items: Vec<MenuItem> = vec![
-            (
-                "Accept Line".into(),
-                false,
-                Arc::new(|editor: &mut CodeEditor, cx: &mut Context<CodeEditor>| {
-                    editor.accept_next_inline_line(cx);
-                }),
-            ),
-            (
-                "Always Show Toolbar".into(),
-                always,
-                Arc::new(|editor: &mut CodeEditor, cx: &mut Context<CodeEditor>| {
-                    editor.toggle_always_show_inline_toolbar(cx)
-                }),
-            ),
-        ];
-        for command in commands {
-            let title = command.title.clone();
-            items.push((
-                title,
-                false,
-                Arc::new(move |_: &mut CodeEditor, cx: &mut Context<CodeEditor>| {
-                    if let Err(err) = crate::commands::execute_command(cx, &command) {
-                        log::warn!("{err:#}");
-                    }
-                }),
-            ));
-        }
-        items
+    /// Where the "⋯" menu shows: below the button, at its left (Monaco's
+    /// toolbar dropdown, a context menu anchored to it).
+    pub(crate) fn menu_anchor(&self) -> gpui::Point<Pixels> {
+        let bounds = self.more_bounds.get();
+        gpui::point(bounds.left(), bounds.bottom())
     }
 
-    fn current_menu_items(&self, cx: &gpui::App) -> Vec<MenuItem> {
-        let Some(editor) = self.editor.upgrade() else {
-            return Vec::new();
-        };
-        let editor = editor.read(cx);
-        self.menu_items(
-            editor.options().inline_suggest.show_toolbar == InlineSuggestShowToolbar::Always,
-            editor.inline.commands.clone(),
-        )
-    }
-
-    /// Opens or closes the menu; opened, it takes the keyboard.
-    fn set_menu_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.menu_open = open;
-        self.active = None;
-        if open {
-            window.focus(&self.focus, cx);
-        }
-        cx.notify();
-    }
-
-    /// Closes the menu and gives the editor the keyboard back.
-    fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_menu_open(false, window, cx);
+    fn open_menu(&self, window: &mut Window, cx: &mut gpui::App) {
+        let anchor = self.menu_anchor();
         if let Some(editor) = self.editor.upgrade() {
-            let focus = editor.read(cx).focus_handle.clone();
-            window.focus(&focus, cx);
+            editor.update(cx, |editor, cx| {
+                editor.show_inline_toolbar_menu(anchor, window, cx)
+            });
         }
     }
 
-    fn move_active(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let count = self.current_menu_items(cx).len();
-        self.active = step_menu(self.active, count, delta);
-        cx.notify();
-    }
-
-    /// Runs the keyboard-selected row.
-    fn run_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(active) = self.active else {
-            return;
-        };
-        let Some((_, _, run)) = self.current_menu_items(cx).into_iter().nth(active) else {
-            return;
-        };
-        self.close_menu(window, cx);
-        if let Some(editor) = self.editor.upgrade() {
-            editor.update(cx, |editor, cx| run(editor, cx));
-        }
-    }
-
-    /// Whether the menu is open, and its selected row, for tests.
-    #[doc(hidden)]
-    pub(crate) fn menu_for_tests(&self) -> Option<Option<usize>> {
-        self.menu_open.then_some(self.active)
-    }
-
-    /// Opens the menu as clicking "⋯" does, for tests.
-    #[doc(hidden)]
-    pub(crate) fn open_menu_for_tests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_menu_open(true, window, cx);
-    }
-
+    /// A toolbar button: hovered in `toolbar.hoverBackground` (Monaco's
+    /// `.action-label:hover`), and with the keys that run it as keycaps
+    /// (Monaco's `StatusBarViewItem`).
     fn button(
         &self,
         id: &'static str,
         label: impl IntoElement,
-        keys: Option<&'static str>,
+        keys: Option<KeyLabel>,
         enabled: bool,
         run: ToolbarAction,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let colors = &self.theme.colors;
+        let colors = self.theme.colors.clone();
         let editor = self.editor.clone();
+        // `.inlineSuggestionsHints .keybinding`: 4px after the label at 0.6
+        // opacity, with `unthemedKeybindingLabelOptions` keycaps (8px keys,
+        // `2px 3px` padding, borders in the text color).
+        let foreground = self.text_color();
+        let keycap_style = KeycapStyle {
+            font_size: px(8.),
+            line_height: px(10.),
+            padding: (px(2.), px(3.)),
+            margin: px(2.),
+            background: None,
+            foreground: None,
+            border: Some(foreground),
+            bottom_border: Some(foreground),
+            shadow: None,
+        };
         div()
             .id(id)
             .flex()
             .items_center()
             .px(px(3.))
             .rounded(px(3.))
+            .border_1()
+            .border_color(gpui::transparent_black())
             .when(enabled, |this| {
                 this.cursor_pointer()
-                    .hover(|style| style.bg(colors.scrollbar_slider_hover))
+                    .hover(move |style| colors.toolbar_hover(style))
             })
             .when(!enabled, |this| this.opacity(0.4))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
+                cx.listener(move |_, _, _, cx| {
                     cx.stop_propagation();
-                    this.menu_open = false;
-                    cx.notify();
                     if !enabled {
                         return;
                     }
@@ -223,54 +193,20 @@ impl InlineToolbar {
                 }),
             )
             .child(label)
-            .children(keys.map(|keys| div().ml(px(4.)).opacity(0.6).child(keys)))
+            .children(keys.filter(|keys| !keys.chords.is_empty()).map(|keys| {
+                div()
+                    .flex()
+                    .items_center()
+                    .ml(px(4.))
+                    .opacity(0.6)
+                    .child(keycaps_styled(&keys, &keycap_style))
+            }))
             .into_any_element()
     }
 
-    fn menu_item(
-        &self,
-        id: (&'static str, usize),
-        (label, checked, run): MenuItem,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let colors = &self.theme.colors;
-        let editor = self.editor.clone();
-        let ix = id.1;
-        let active = self.active == Some(ix);
-        div()
-            .id(id)
-            .flex()
-            .gap(px(6.))
-            .px(px(6.))
-            .py(px(2.))
-            .cursor_pointer()
-            .when(active, |this| {
-                this.bg(colors.menu_selection_background)
-                    .text_color(colors.menu_selection_foreground)
-            })
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                // Monaco's menus follow the mouse.
-                if *hovered && this.active != Some(ix) {
-                    this.active = Some(ix);
-                    cx.notify();
-                }
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.close_menu(window, cx);
-                    if let Some(editor) = editor.upgrade() {
-                        editor.update(cx, |editor, cx| run(editor, cx));
-                    }
-                }),
-            )
-            .child(div().w(px(16.)).when(checked, |this| {
-                // `menu-selection`: the `check` codicon.
-                this.child(codicon(Codicon::MenuSelection))
-            }))
-            .child(label)
-            .into_any_element()
+    /// The text color: the hover's, in its own card or inside the hover.
+    fn text_color(&self) -> gpui::Hsla {
+        self.theme.colors.hover_foreground
     }
 }
 
@@ -279,23 +215,21 @@ impl Render for InlineToolbar {
         let Some(editor) = self.editor.upgrade() else {
             return div().into_any_element();
         };
-        let (count, always, commands, warning, markdown_style) = {
+        let (count, warning, markdown_style, focus) = {
             let editor = editor.read(cx);
             (
                 editor.inline_suggestion_index(cx),
-                editor.options().inline_suggest.show_toolbar == InlineSuggestShowToolbar::Always,
-                editor.inline.commands.clone(),
                 editor.inline_warning(cx),
                 editor.markdown_style(),
+                editor.focus_handle.clone(),
             )
         };
-        // The menu closes once the keyboard leaves it.
-        if self.menu_open && !self.focus.contains_focused(window, cx) && self.focus_seen {
-            self.menu_open = false;
-            self.active = None;
-        }
-        self.focus_seen = self.menu_open && self.focus.contains_focused(window, cx);
-        let mac = cfg!(target_os = "macos");
+        let ToolbarKeys {
+            previous,
+            next,
+            accept,
+            accept_word,
+        } = ToolbarKeys::lookup(&focus, window);
         let colors = &self.theme.colors;
         // Monaco enables previous/next with more than one suggestion.
         let several = count.is_some_and(|(_, count)| count > 1);
@@ -304,11 +238,7 @@ impl Render for InlineToolbar {
             div()
                 .id("inline-previous")
                 .tooltip(crate::tooltip::tooltip(
-                    if mac {
-                        "Previous (⌥[)"
-                    } else {
-                        "Previous (Alt+[)"
-                    },
+                    append_keybinding("Previous", previous.as_ref()),
                     colors,
                 ))
                 .child(self.button(
@@ -332,7 +262,7 @@ impl Render for InlineToolbar {
             div()
                 .id("inline-next")
                 .tooltip(crate::tooltip::tooltip(
-                    if mac { "Next (⌥])" } else { "Next (Alt+])" },
+                    append_keybinding("Next", next.as_ref()),
                     colors,
                 ))
                 .child(self.button(
@@ -348,7 +278,7 @@ impl Render for InlineToolbar {
         bar = bar.child(self.button(
             "inline-accept",
             "Accept",
-            Some("Tab"),
+            accept.as_ref().map(KeyLabel::for_binding),
             true,
             Arc::new(|editor, cx| {
                 editor.accept_inline_suggestion(cx);
@@ -358,98 +288,55 @@ impl Render for InlineToolbar {
         bar = bar.child(self.button(
             "inline-accept-word",
             "Accept Word",
-            Some(if mac { "⌘→" } else { "Ctrl+RightArrow" }),
+            accept_word.as_ref().map(KeyLabel::for_binding),
             true,
             Arc::new(|editor, cx| {
                 editor.accept_next_inline_word(cx);
             }),
             cx,
         ));
-        // The secondary group, behind "⋯".
+        // The secondary group, behind "⋯" (a context menu below it).
+        let more_bounds = self.more_bounds.clone();
+        let hover_colors = colors.clone();
         bar = bar.child(
             div()
                 .id("inline-more")
+                .relative()
                 .px(px(3.))
                 .rounded(px(3.))
+                .border_1()
+                .border_color(gpui::transparent_black())
                 .cursor_pointer()
-                .hover(|style| style.bg(colors.scrollbar_slider_hover))
+                .hover(move |style| hover_colors.toolbar_hover(style))
                 .tooltip(crate::tooltip::tooltip("More Actions...", colors))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| {
                         cx.stop_propagation();
-                        if this.menu_open {
-                            this.close_menu(window, cx);
-                        } else {
-                            this.set_menu_open(true, window, cx);
-                        }
+                        this.open_menu(window, cx);
                     }),
                 )
                 // `toolbar-more`.
-                .child(codicon(Codicon::ToolBarMore)),
+                .child(codicon(Codicon::ToolBarMore))
+                .child(
+                    gpui::canvas(move |bounds, _, _| more_bounds.set(bounds), |_, _, _, _| {})
+                        .absolute()
+                        .size_full(),
+                ),
         );
-        let menu = self.menu_open.then(|| {
-            let mut menu = div()
-                .id("inline-menu")
-                .track_focus(&self.focus)
-                .key_context(CONTEXT_MENU_KEY_CONTEXT)
-                .on_action(cx.listener(|this, _: &ContextMenuNext, _, cx| this.move_active(1, cx)))
-                .on_action(
-                    cx.listener(|this, _: &ContextMenuPrevious, _, cx| this.move_active(-1, cx)),
-                )
-                .on_action(cx.listener(|this, _: &ContextMenuFirst, _, cx| {
-                    this.move_active(-(isize::MAX / 2), cx)
-                }))
-                .on_action(cx.listener(|this, _: &ContextMenuLast, _, cx| {
-                    this.move_active(isize::MAX / 2, cx)
-                }))
-                .on_action(cx.listener(|this, _: &ContextMenuSelect, window, cx| {
-                    this.run_active(window, cx)
-                }))
-                .on_action(
-                    cx.listener(|this, _: &ContextMenuHide, window, cx| {
-                        this.close_menu(window, cx)
-                    }),
-                )
-                .occlude()
-                .mt(px(2.))
-                .py(px(4.))
-                .min_w(px(180.))
-                .flex()
-                .flex_col()
-                .bg(colors.widget_background)
-                .border_1()
-                .border_color(colors.widget_border)
-                .shadow_md();
-            let fixed = 2;
-            for (ix, item) in self.menu_items(always, commands).into_iter().enumerate() {
-                if ix == fixed {
-                    menu = menu.child(div().my(px(4.)).h(px(1.)).bg(colors.widget_border));
-                }
-                menu = menu.child(self.menu_item(("inline-menu-item", ix), item, cx));
-            }
-            // Monaco's More Actions menu is a context menu outside the
-            // widget: a popup above everything (the hover card around an
-            // on-hover toolbar would clip it), taking the mouse.
-            div().absolute().top_full().right(px(0.)).child(
-                gpui::deferred(
-                    gpui::anchored()
-                        .anchor(gpui::Anchor::TopRight)
-                        .snap_to_window()
-                        .child(menu),
-                )
-                .with_priority(MENU_PRIORITY),
-            )
-        });
         div()
             .id("inline-toolbar")
             .relative()
             .p(px(4.))
-            .text_color(colors.widget_foreground)
+            .text_color(self.text_color())
+            // `withBorder` adds `monaco-hover`: the hover's colors, large
+            // corners and `shadow-lg`.
             .when(self.with_border, |this| {
-                this.bg(colors.widget_background)
+                this.bg(colors.hover_background)
                     .border_1()
-                    .border_color(colors.widget_border)
+                    .border_color(colors.hover_border)
+                    .rounded(card::CORNER_RADIUS)
+                    .shadow(card::shadow_lg())
             })
             // Clicks stay out of the text behind it.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -474,7 +361,22 @@ impl Render for InlineToolbar {
                     ))
             }))
             .child(bar)
-            .children(menu)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_keybinding_adds_the_keys() {
+        let binding = KeyBinding::new("alt-]", crate::actions::ShowNextInlineSuggestion, None);
+        let label = crate::keybinding_label::binding_label(&binding);
+        assert_eq!(
+            append_keybinding("Next", Some(&binding)).to_string(),
+            format!("Next ({label})")
+        );
+        assert_eq!(append_keybinding("Next", None).as_ref(), "Next");
     }
 }

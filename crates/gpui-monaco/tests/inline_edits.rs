@@ -370,6 +370,24 @@ fn the_gutter_indicator_and_its_menu(cx: &mut TestAppContext) {
             "Learn More..."
         ]
     );
+    // Monaco `lookupKeybinding`: the keys bound to each command (Tab and
+    // Escape run them through the editor's keys); none for the provider's.
+    let keys = cx.update(|window, cx| {
+        editor
+            .read(cx)
+            .inline_edit_gutter_menu_keys_for_tests(window, cx)
+    });
+    let keys: Vec<(&str, &str)> = keys.iter().map(|(t, k)| (t.as_str(), k.as_str())).collect();
+    assert_eq!(
+        keys,
+        [
+            ("Go To / Accept", "Tab"),
+            ("Reject", "Escape"),
+            ("Show Collapsed", ""),
+            ("Explain", ""),
+            ("Learn More...", "")
+        ]
+    );
     // "Show Collapsed": only a marker, and Tab jumps.
     editor.update(cx, |e, cx| {
         e.run_inline_edit_gutter_menu_item_for_tests("Show Collapsed", cx)

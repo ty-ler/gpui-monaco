@@ -540,6 +540,12 @@ fn the_toolbar_menu_takes_the_keyboard(cx: &mut TestAppContext) {
     });
     draw(cx);
     assert_eq!(menu(cx), Some(None));
+    // Monaco's toolbar dropdown is the context menu: the secondary group,
+    // Always Show Toolbar toggled on.
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.context_menu_rows_for_tests(cx)),
+        ["Accept Line", "✓ Always Show Toolbar"]
+    );
     cx.simulate_keystrokes("down down");
     assert_eq!(menu(cx), Some(Some(1)));
     cx.simulate_keystrokes("up");
@@ -559,4 +565,57 @@ fn the_toolbar_menu_takes_the_keyboard(cx: &mut TestAppContext) {
     assert_eq!(menu(cx), None);
     assert_eq!(text(&editor, cx), "let total = 1;\n");
     assert!(cx.update(|window, cx| editor.focus_handle(cx).is_focused(window)));
+}
+
+/// Monaco `lookupKeybinding`/`appendKeybinding`: the toolbar's keys come
+/// from the keymap, so rebinding shows.
+#[gpui::test]
+fn the_toolbar_shows_the_bound_keys(cx: &mut TestAppContext) {
+    let provider =
+        Recorder::new(|before, position, _| line_completion(before, position, "let total = 1;"));
+    let (editor, cx, _) = setup(
+        None,
+        vec![provider],
+        |o| o.inline_suggest.show_toolbar = InlineSuggestShowToolbar::Always,
+        cx,
+    );
+    cx.simulate_input("let");
+    draw(cx);
+    let labels = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| editor.read(cx).inline_toolbar_labels_for_tests(window))
+    };
+    let (mac, word) = if cfg!(target_os = "macos") {
+        (true, "⌘→")
+    } else {
+        (false, "Ctrl+RightArrow")
+    };
+    assert_eq!(
+        labels(cx),
+        [
+            if mac {
+                "Previous (⌥[)"
+            } else {
+                "Previous (Alt+[)"
+            },
+            if mac { "Next (⌥])" } else { "Next (Alt+])" },
+            "Tab",
+            word,
+        ]
+    );
+    let _rule = cx.update(|_, cx| {
+        gpui_monaco::add_keybinding_rule(
+            cx,
+            gpui_monaco::KeybindingRule::new(
+                "ctrl-alt-w",
+                "editor.action.inlineSuggest.acceptNextWord",
+            ),
+        )
+        .unwrap()
+    });
+    draw(cx);
+    assert_eq!(
+        labels(cx)[3],
+        if mac { "⌃⌥W" } else { "Ctrl+Alt+W" },
+        "the rule wins"
+    );
 }

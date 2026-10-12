@@ -455,8 +455,8 @@ impl Render for LongDistanceHint {
                     .justify_between()
                     .items_center()
                     .text_size(px(12.))
-                    .text_color(colors.widget_foreground)
-                    .opacity(0.8)
+                    // Monaco's `.bar`: `descriptionForeground`.
+                    .text_color(colors.description_foreground)
                     .child(
                         div()
                             .overflow_hidden()

@@ -285,6 +285,12 @@ impl Playground {
                 // Off by default in Monaco; on here to show it off in HTML.
                 options.linked_editing = true;
                 options.format_on_paste = true;
+                // `PLAYGROUND_INLINE_TOOLBAR=always`: the inline suggestion
+                // toolbar above the ghost text.
+                if std::env::var("PLAYGROUND_INLINE_TOOLBAR").as_deref() == Ok("always") {
+                    options.inline_suggest.show_toolbar =
+                        gpui_monaco::options::InlineSuggestShowToolbar::Always;
+                }
                 editor.update_options(options, cx);
             });
         }

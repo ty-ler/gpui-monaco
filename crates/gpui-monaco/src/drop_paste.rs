@@ -5,6 +5,7 @@
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::FutureExt as _;
 use gpui::{
@@ -16,6 +17,7 @@ use text::PointUtf16;
 use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
 use crate::editor::CodeEditor;
+use crate::inline_progress::{InlineProgressManager, ProgressCancel, ProgressKind, SHOW_DELAY};
 use crate::providers::{
     DataTransfer, DataTransferItem, DocumentDropEditProvider, DocumentDropOrPasteEdit,
     DocumentPasteContext, DocumentPasteEditProvider, DocumentPasteTriggerKind, EditInsertText,
@@ -438,44 +440,89 @@ pub(crate) struct DropPasteState {
     pub(crate) task: Option<Task<()>>,
     pub(crate) post_edit: Option<PostEdit>,
     /// Resolving the edit about to be applied.
-    resolve_task: Option<Task<()>>,
+    pub(crate) resolve_task: Option<Task<()>>,
+    /// The spinners of slow paste and drop providers (Monaco's
+    /// `_pasteProgressManager` and `_dropProgressManager`).
+    pub(crate) paste_progress: InlineProgressManager,
+    pub(crate) drop_progress: InlineProgressManager,
 }
 
-/// The post-edit button.
+/// The post-edit button (Monaco `PostEditWidget`): a `$(insert)` icon
+/// button whose title names the command that shows the options.
 struct PostEditButton {
     editor: gpui::WeakEntity<CodeEditor>,
-    label: SharedString,
+    /// The editor's focus, to look the command's keys up in.
+    focus: gpui::FocusHandle,
+    kind: PostEditKind,
     colors: crate::theme::EditorColors,
 }
 
+impl PostEditButton {
+    /// Monaco's `showCommand` label with its keys appended
+    /// (`appendKeybinding`), e.g. "Show paste options... (⌘.)".
+    fn title(&self, window: &Window) -> SharedString {
+        let (label, binding) = match self.kind {
+            PostEditKind::Paste => (
+                "Show paste options...",
+                crate::keybinding_label::command_binding(
+                    &crate::actions::ChangePasteType,
+                    None,
+                    &self.focus,
+                    window,
+                ),
+            ),
+            PostEditKind::Drop => (
+                "Show drop options...",
+                crate::keybinding_label::command_binding(
+                    &crate::actions::ChangeDropType,
+                    None,
+                    &self.focus,
+                    window,
+                ),
+            ),
+        };
+        match binding.map(|binding| crate::keybinding_label::binding_label(&binding)) {
+            Some(keys) if !keys.is_empty() => format!("{label} ({keys})").into(),
+            _ => label.into(),
+        }
+    }
+}
+
 impl Render for PostEditButton {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let editor = self.editor.clone();
+        let colors = &self.colors;
+        let hover = colors.button_hover_background;
+        // `.post-edit-widget`: `shadow-lg`, a `widget.border` (or clear)
+        // border, 4px corners, the button colors; its `.monaco-button` has
+        // 2px padding and `button.hoverBackground` on hover.
         div()
             .id("post-edit")
             .cursor_pointer()
-            .px(px(4.))
-            .rounded(px(3.))
-            .bg(self.colors.widget_background)
+            .p(px(2.))
+            .rounded(px(4.))
+            .shadow(crate::widgets::card::shadow_lg())
             .border_1()
-            .border_color(self.colors.widget_border)
-            .text_color(self.colors.widget_foreground)
-            .text_size(px(11.))
+            .border_color(
+                colors
+                    .widget_outline
+                    .unwrap_or_else(gpui::transparent_black),
+            )
+            .bg(colors.button_background)
+            .text_color(colors.button_foreground)
+            .hover(move |style| style.bg(hover))
+            .tooltip(crate::tooltip::tooltip(self.title(window), colors))
             .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
                 cx.stop_propagation();
                 if let Some(editor) = editor.upgrade() {
                     editor.update(cx, |editor, cx| editor.show_post_edit_selector(window, cx));
                 }
             })
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            .child(self.label.clone())
-            .child(codicon(Codicon::ChevronDown).size(px(11.)))
+            .child(codicon(Codicon::Insert))
     }
 }
 
-use gpui::InteractiveElement as _;
+use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
 
 impl CodeEditor {
     fn provider_context_now(&self, cx: &App) -> ProviderContext {
@@ -518,9 +565,19 @@ impl CodeEditor {
             .collect();
         let version = self.snapshot.version();
         self.start_cancellable(crate::editor_state::CancellableOperation::DropOrPaste);
+        // Monaco `_dropProgressManager.showWhile`.
+        let progress = self.start_inline_progress(
+            ProgressKind::Drop,
+            position,
+            "Running drop handlers. Click to cancel",
+            ProgressCancel::Drop,
+            SHOW_DELAY,
+            cx,
+        );
         self.drop_paste.task = Some(cx.spawn(async move |this, cx| {
             let edits = collect_edits(tasks).await;
             this.update(cx, |this, cx| {
+                this.end_inline_progress(ProgressKind::Drop, progress, cx);
                 // Monaco cancels when the text changed meanwhile.
                 if this.snapshot.version() != version || edits.is_empty() {
                     return;
@@ -573,6 +630,16 @@ impl CodeEditor {
         );
         let version = self.snapshot.version();
         self.start_cancellable(crate::editor_state::CancellableOperation::DropOrPaste);
+        // Monaco `_pasteProgressManager.showWhile`: clicking the spinner
+        // cancels and does the basic paste.
+        let progress = self.start_inline_progress(
+            ProgressKind::Paste,
+            ranges[0].end,
+            "Running paste handlers. Click to cancel and do basic paste",
+            ProgressCancel::Paste(fallback.clone()),
+            SHOW_DELAY,
+            cx,
+        );
         self.drop_paste.task = Some(cx.spawn(async move |this, cx| {
             let tasks = match requests {
                 PasteRequests::Started(tasks) => tasks,
@@ -597,6 +664,8 @@ impl CodeEditor {
             };
             let edits = collect_edits(tasks).await;
             this.update(cx, |this, cx| {
+                // Applying the paste changes the editor's state itself.
+                this.end_inline_progress(ProgressKind::Paste, progress, cx);
                 if this.snapshot.version() != version {
                     return;
                 }
@@ -836,9 +905,14 @@ impl CodeEditor {
     /// Resolves `edit` with its provider, if needed, then runs `apply` with
     /// it, unless the text changed meanwhile (Monaco resolves the edit it's
     /// about to apply).
+    ///
+    /// With `progress`, a spinner shows there right away while it resolves
+    /// (Monaco's paste resolve `showWhile`, with no delay); clicking it
+    /// cancels the paste.
     fn resolve_post_edit(
         &mut self,
         mut edit: ProvidedEdit,
+        progress: Option<PointUtf16>,
         apply: impl FnOnce(&mut Self, ProvidedEdit, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) {
@@ -851,12 +925,28 @@ impl CodeEditor {
             return;
         };
         let version = self.snapshot.version();
+        let progress = progress.map(|position| {
+            self.start_inline_progress(
+                ProgressKind::Paste,
+                position,
+                format!(
+                    "Resolving paste edit for '{}'. Click to cancel",
+                    edit.edit.title
+                ),
+                ProgressCancel::ResolvePaste,
+                Duration::ZERO,
+                cx,
+            )
+        });
         self.drop_paste.resolve_task = Some(cx.spawn(async move |this, cx| {
             match task.await {
                 Ok(resolved) => edit.edit = resolved,
                 Err(err) => log::warn!("resolving a drop or paste edit failed: {err:#}"),
             }
             this.update(cx, |this, cx| {
+                if let Some(progress) = progress {
+                    this.end_inline_progress(ProgressKind::Paste, progress, cx);
+                }
                 if this.snapshot.version() == version {
                     apply(this, edit, cx);
                 }
@@ -872,8 +962,10 @@ impl CodeEditor {
         edit: ProvidedEdit,
         cx: &mut Context<Self>,
     ) {
+        // "Paste As..." shows window progress in VS Code, not inline.
         self.resolve_post_edit(
             edit,
+            None,
             move |this, edit, cx| this.apply_post_edit_once(&ranges, &edit.edit, cx),
             cx,
         );
@@ -891,8 +983,12 @@ impl CodeEditor {
     ) {
         if edits[active].resolve.is_some() {
             let edit = edits[active].clone();
+            // Monaco shows progress for resolving paste edits (at the
+            // first selection's end), not drop edits.
+            let progress = (kind == PostEditKind::Paste).then(|| ranges[0].end);
             self.resolve_post_edit(
                 edit,
+                progress,
                 move |this, resolved, cx| {
                     edits[active] = resolved;
                     this.apply_post_edit(kind, ranges, edits, active, show, cx);
@@ -906,27 +1002,19 @@ impl CodeEditor {
             return;
         }
         let position = self.cursors.primary().position;
-        let label: SharedString = match kind {
-            PostEditKind::Drop => "Drop options".into(),
-            PostEditKind::Paste => "Paste options".into(),
-        };
         let editor = cx.entity().downgrade();
         let view = cx.new(|_| PostEditButton {
             editor,
-            label,
+            focus: self.focus_handle.clone(),
+            kind,
             colors: self.theme.colors.clone(),
         });
+        // Monaco places it below the edit only.
         let widget = self.add_content_widget(
             ContentWidget {
                 allow_editor_overflow: true,
-                ..ContentWidget::new(
-                    position,
-                    vec![
-                        ContentWidgetPreference::Below,
-                        ContentWidgetPreference::Above,
-                    ],
-                    view.into(),
-                )
+                suppress_mouse_down: true,
+                ..ContentWidget::new(position, vec![ContentWidgetPreference::Below], view.into())
             },
             cx,
         );
@@ -967,9 +1055,19 @@ impl CodeEditor {
         }
     }
 
-    /// Hides the button once the text changes after the edit (Monaco hides
-    /// it on content changes and cursor moves). Called before painting.
+    /// Monaco `PostEditWidget`'s `onDidChangeCursorPosition`: the cursor
+    /// moved, so the button goes.
+    pub(crate) fn post_edit_cursor_changed(&mut self, cx: &mut Context<Self>) {
+        self.clear_post_edit(cx);
+        // A pending paste or drop is cancelled by the change, too.
+        self.check_inline_progress(cx);
+    }
+
+    /// Hides the button once the text changes after the edit (Monaco's
+    /// `PostEditWidgetManager` clears it on content changes). Called before
+    /// painting.
     pub(crate) fn refresh_post_edit(&mut self, cx: &mut Context<Self>) {
+        self.check_inline_progress(cx);
         if self
             .drop_paste
             .post_edit

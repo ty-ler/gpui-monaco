@@ -335,7 +335,7 @@ To accept:
 
 Alt+] and Alt+[ show the other completions, and Alt+\\ asks explicitly. Escape or moving the cursor hides it.
 
-Hovering the ghost text shows Monaco's toolbar: previous and next with a "1/3" count, Accept, Accept Word, and a "⋯" menu with Accept Line, Always Show Toolbar and the list's `commands`. With `inline_suggest.show_toolbar: Always` it stays above the ghost text instead. The open menu takes the keyboard: Up, Down, Home and End move, Enter or Space runs, Escape closes it.
+Hovering the ghost text shows Monaco's toolbar: previous and next with a "1/3" count, Accept and Accept Word with the keys bound to them, and a "⋯" button whose context menu has Accept Line, Always Show Toolbar and the list's `commands`. With `inline_suggest.show_toolbar: Always` it stays above the ghost text instead, in a hover card of its own. The open menu takes the keyboard, as the context menu does: Up, Down, Home and End move, Enter or Space runs, Escape closes it.
 
 Ghost text is colored like code (`syntax_highlighting_enabled`, faded to 70%). The toolbar's count needs all completions, so showing it asks explicitly.
 
@@ -450,7 +450,9 @@ Monaco's `DocumentDropEditProvider` and `DocumentPasteEditProvider` decide how d
 - additional edits in the same document, and `additional_edit`, a `WorkspaceEdit` applied after it (Monaco `additionalEdit`);
 - `yield_to`, the edits it should rank below.
 
-The editor has built-in providers for plain text, paths and HTML. When other providers handle a paste, the first edit is applied. If there are alternatives, a button (or Cmd/Ctrl+.) switches between them. "Paste As..." (`paste_as`) lists every edit.
+The editor has built-in providers for plain text, paths and HTML. When other providers handle a paste, the first edit is applied. If there are alternatives, a button below the edit (or Cmd/Ctrl+.) switches between them, until the cursor moves or the text changes. "Paste As..." (`paste_as`) lists every edit.
+
+Providers that take a while show Monaco's inline progress: after 500ms, a spinner where the text goes. Clicking it cancels the providers (a paste then pastes the plain text), as Escape does. Changing the text cancels a pending paste or drop, and so does moving the selection for a paste. Resolving the paste edit shows the spinner at once.
 
 As in Monaco, the edit about to be applied is resolved first: `resolve_document_drop_edit` and `resolve_document_paste_edit` can fill in an edit's text or additional edit only for the one used. `provide_document_paste_edits_with_context` gets Monaco's `DocumentPasteContext`, with `only`, the kind "Paste As..." asks for. Providers can name themselves (`id`), and drop providers list their kinds (`provided_drop_edit_kinds`).
 

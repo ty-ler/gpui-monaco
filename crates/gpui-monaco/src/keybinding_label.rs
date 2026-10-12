@@ -351,8 +351,56 @@ pub(crate) fn binding_label(binding: &KeyBinding) -> SharedString {
 /// keycap of `keybindingLabel.*` colors, the caps of a chord joined by the
 /// platform's separator.
 pub(crate) fn keycaps(label: &KeyLabel, colors: &crate::theme::EditorColors) -> gpui::AnyElement {
+    keycaps_styled(label, &KeycapStyle::themed(colors))
+}
+
+/// How [`keycaps_styled`] draws the keys: Monaco's `IKeybindingLabelStyles`
+/// and the CSS a widget overrides `.monaco-keybinding-key` with.
+#[derive(Clone, Debug)]
+pub(crate) struct KeycapStyle {
+    /// The keys' font size and line height.
+    pub font_size: gpui::Pixels,
+    pub line_height: gpui::Pixels,
+    /// The padding inside each cap (vertical, horizontal).
+    pub padding: (gpui::Pixels, gpui::Pixels),
+    /// The margin between caps, on each side.
+    pub margin: gpui::Pixels,
+    /// `keybindingLabelBackground`; `None` leaves it clear.
+    pub background: Option<gpui::Hsla>,
+    /// `keybindingLabelForeground`; `None` inherits the text color.
+    pub foreground: Option<gpui::Hsla>,
+    /// `keybindingLabelBorder` and `keybindingLabelBottomBorder`; `None`
+    /// draws no border there.
+    pub border: Option<gpui::Hsla>,
+    pub bottom_border: Option<gpui::Hsla>,
+    /// `keybindingLabelShadow`: an inset 1px line at the bottom.
+    pub shadow: Option<gpui::Hsla>,
+}
+
+impl KeycapStyle {
+    /// `defaultKeybindingLabelStyles`: 11px keys, `3px 5px` padding, 3px
+    /// corners, `keybindingLabel.border` with the bottom in
+    /// `keybindingLabel.bottomBorder`, and an inset `widget.shadow`.
+    pub fn themed(colors: &crate::theme::EditorColors) -> Self {
+        use gpui::px;
+        Self {
+            font_size: px(11.),
+            line_height: px(10.),
+            padding: (px(3.), px(5.)),
+            margin: px(2.),
+            background: Some(colors.keybinding_label_background),
+            foreground: Some(colors.keybinding_label_foreground),
+            border: Some(colors.keybinding_label_border),
+            bottom_border: Some(colors.keybinding_label_bottom_border),
+            shadow: colors.widget_shadow,
+        }
+    }
+}
+
+/// [`keycaps`] drawn with `style`.
+pub(crate) fn keycaps_styled(label: &KeyLabel, style: &KeycapStyle) -> gpui::AnyElement {
     use gpui::{IntoElement as _, ParentElement as _, Styled as _, div, px};
-    let shadow = colors.widget_shadow.map(|color| gpui::BoxShadow {
+    let shadow = style.shadow.map(|color| gpui::BoxShadow {
         color,
         offset: gpui::point(px(0.), px(-1.)),
         blur_radius: px(0.),
@@ -363,8 +411,8 @@ pub(crate) fn keycaps(label: &KeyLabel, colors: &crate::theme::EditorColors) -> 
         .flex()
         .items_center()
         .flex_none()
-        .text_size(px(11.))
-        .line_height(px(10.));
+        .text_size(style.font_size)
+        .line_height(style.line_height);
     let last_chord = label.chords.len().saturating_sub(1);
     for (chord_ix, chord) in label.chords.iter().enumerate() {
         if chord_ix > 0 {
@@ -378,28 +426,32 @@ pub(crate) fn keycaps(label: &KeyLabel, colors: &crate::theme::EditorColors) -> 
             }
             let first = chord_ix == 0 && ix == 0;
             let last = chord_ix == last_chord && ix + 1 == chord.len();
-            // `.monaco-keybinding-key`: 11px, `3px 5px` padding, 3px
-            // corners, `keybindingLabel.border` with the bottom in
-            // `keybindingLabel.bottomBorder`, and an inset `widget.shadow`.
+            // `.monaco-keybinding-key`: the padding, 3px corners, the
+            // border with the bottom in its own color, and the shadow.
             let cap = div()
-                .px(px(5.))
-                .py(px(3.))
+                .px(style.padding.1)
+                .py(style.padding.0)
                 .rounded_t(px(3.))
-                .border_t_1()
-                .border_l_1()
-                .border_r_1()
-                .border_color(colors.keybinding_label_border)
-                .bg(colors.keybinding_label_background)
-                .text_color(colors.keybinding_label_foreground)
+                .when_some(style.border, |cap, border| {
+                    cap.border_t_1()
+                        .border_l_1()
+                        .border_r_1()
+                        .border_color(border)
+                })
+                .when_some(style.background, |cap, background| cap.bg(background))
+                .when_some(style.foreground, |cap, foreground| {
+                    cap.text_color(foreground)
+                })
                 .when_some(shadow.clone(), |cap, shadow| cap.shadow(vec![shadow]))
                 .child(SharedString::from(key.clone()));
             row = row.child(
                 div()
-                    .ml(px(if first { 0. } else { 2. }))
-                    .mr(px(if last { 0. } else { 2. }))
+                    .ml(if first { px(0.) } else { style.margin })
+                    .mr(if last { px(0.) } else { style.margin })
                     .rounded(px(3.))
-                    .border_b_1()
-                    .border_color(colors.keybinding_label_bottom_border)
+                    .when_some(style.bottom_border, |cap, border| {
+                        cap.border_b_1().border_color(border)
+                    })
                     .child(cap),
             );
         }
