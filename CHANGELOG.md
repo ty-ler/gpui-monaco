@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Find widget slide-in:** the widget now slides down from above the editor over 200ms when it opens, as Monaco's `.find-widget` transition does, and settles 4px below the editor's top (`margin-top: 4px`). The slide used to be set on the overlay's root, which the editor places by its origin, so the widget appeared at once at the editor's top. The slide follows the executor's clock, so tests can step through it, and with `App::reduce_motion` set the widget shows in place at once, like Monaco's `.monaco-reduce-motion`. The view zone stays the widget's own height, without the margin.
+  - **Tests:** the widget's top at the start, halfway through and at the end of the slide, and with reduced motion.
 - **Tab handling (#332):** Tab and Shift+Tab follow Monaco's rules: `tab` and `outdent` need `editorTextFocus`, `tabDoesNotMoveFocus` and `writable`, while the suggest, snippet and tab completion rules don't test tab focus mode.
   - **Quick input and rename box:** Tab and Shift+Tab stay in the widget. Before, they reached the editor and indented it at its hidden cursor, adding an undo step.
   - **Tab focus mode:** Tab accepts the focused suggestion, moves to a snippet's next tab stop and inserts tab completions, and Shift+Tab moves back and swaps in the previous completion, instead of moving the focus. Ghost text and inline edits still give way to the focus, as Monaco's `inlineSuggest.commit` and `inlineSuggest.jump` require `!tabMovesFocus`.
