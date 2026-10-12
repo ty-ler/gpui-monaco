@@ -869,6 +869,7 @@ impl MultiDiffEditor {
         let (original, modified) = self.empty_models.clone();
         let diff = cx.new(|cx| {
             let mut diff = DiffEditor::new(original, modified, window, cx);
+            diff.multi_diff_all_collapsed = Some(false);
             diff.update_options(options, cx);
             for editor in [
                 diff.original_editor().clone(),
@@ -1538,7 +1539,7 @@ impl MultiDiffEditor {
                 })
             };
             if has_more {
-                diff.update(cx, |diff, cx| diff.go_to_diff(next, window, cx));
+                diff.update(cx, |diff, cx| diff.go_to_diff(next, cx));
                 self.pending_reveal = Some(PendingReveal {
                     item: current,
                     target: RevealTarget::Cursor,
@@ -2939,10 +2940,28 @@ impl Render for MultiDiffEditor {
                 .text_color(colors.multi_diff_header_foreground)
                 .child(message)
         });
+        // Monaco `inMultiDiffEditor`, and `multiDiffEditorAllCollapsed`
+        // (which Monaco sets on the parent scope), for the list and its
+        // editors.
+        let all_collapsed = self.items.iter().all(|item| item.collapsed);
+        for template in &self.bound {
+            template.diff.update(cx, |diff, cx| {
+                if diff.multi_diff_all_collapsed != Some(all_collapsed) {
+                    diff.multi_diff_all_collapsed = Some(all_collapsed);
+                    cx.notify();
+                }
+            });
+        }
+        let mut key_context = gpui::KeyContext::new_with_defaults();
+        key_context.add("inMultiDiffEditor");
+        if all_collapsed {
+            key_context.add("multiDiffEditorAllCollapsed");
+        }
         let bounds_cell = self.bounds.clone();
         let this = cx.entity().downgrade();
         div()
             .id("multi-diff-editor")
+            .key_context(key_context)
             .track_focus(&self.focus_handle)
             .size_full()
             .relative()

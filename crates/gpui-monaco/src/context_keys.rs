@@ -72,7 +72,7 @@ impl From<i32> for ContextKeyValue {
 }
 
 impl ContextKeyValue {
-    fn apply(&self, key: &SharedString, context: &mut KeyContext) {
+    pub(crate) fn apply(&self, key: &SharedString, context: &mut KeyContext) {
         match self {
             Self::Bool(true) => context.add(key.clone()),
             Self::Bool(false) => {}
@@ -178,10 +178,11 @@ impl CodeEditor {
     /// context key service for this editor): the [`KEY_CONTEXT`]
     /// identifier, Monaco's keys (`editorTextFocus`, `editorReadonly`,
     /// `editorLangId`, `editorHasDefinitionProvider`, `suggestWidgetVisible`,
-    /// `inSnippetMode`, `findWidgetVisible`, …), the keys the host made with
-    /// [`CodeEditor::create_context_key`], and the editor's own snake_case
-    /// keys (`suggest_widget_visible`, `single_line`, …). Focus keys are as
-    /// of the last frame.
+    /// `inSnippetMode`, `findWidgetVisible`, …), an enclosing diff editor's
+    /// keys (see [`DiffEditor::context_keys`](crate::DiffEditor::context_keys)),
+    /// the keys the host made with [`CodeEditor::create_context_key`], and
+    /// the editor's own snake_case keys (`suggest_widget_visible`,
+    /// `single_line`, …). Focus keys are as of the last frame.
     pub fn context_keys(&self, cx: &App) -> KeyContext {
         let mut context = KeyContext::new_with_defaults();
         context.add(KEY_CONTEXT);
@@ -547,6 +548,12 @@ impl CodeEditor {
             }
         }
 
+        // An enclosing diff editor's keys (`isInDiffEditor`,
+        // `diffEditorHasChanges`, …), which Monaco's editors inherit from
+        // the diff editor's scoped context key service.
+        for (key, value) in &self.commands.parent_keys {
+            value.apply(key, context);
+        }
         // The host's keys (Monaco `createContextKey`).
         for (key, value) in &self.commands.host_keys {
             value.apply(key, context);

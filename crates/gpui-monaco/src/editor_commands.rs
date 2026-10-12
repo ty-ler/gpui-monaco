@@ -37,6 +37,9 @@ pub(crate) struct EditorCommandsState {
     pub(crate) id: u64,
     /// Keys from [`CodeEditor::create_context_key`].
     pub(crate) host_keys: HashMap<SharedString, ContextKeyValue>,
+    /// Keys an enclosing [`DiffEditor`](crate::DiffEditor) passes on (Monaco's
+    /// parent context key service).
+    pub(crate) parent_keys: Vec<(SharedString, ContextKeyValue)>,
     /// What the context keys needed a window for, last frame.
     pub(crate) focus: FocusKeys,
     /// Between `compositionStart` and `compositionEnd`.
@@ -58,6 +61,7 @@ impl Default for EditorCommandsState {
         Self {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             host_keys: HashMap::new(),
+            parent_keys: Vec::new(),
             focus: FocusKeys::default(),
             composing: false,
             handlers: HashMap::new(),

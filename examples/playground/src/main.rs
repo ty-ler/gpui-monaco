@@ -764,6 +764,10 @@ fn main() {
                 cx.new(|_| TextModel::new(&text).with_language(language))
             };
             let (original, modified) = (load(&original, cx), load(&modified, cx));
+            // `PLAYGROUND_THEME=hc-black` (a built-in theme) themes both sides.
+            if let Ok(name) = std::env::var("PLAYGROUND_THEME") {
+                gpui_monaco::set_theme(cx, &name);
+            }
             let window = cx
                 .open_window(
                     WindowOptions {

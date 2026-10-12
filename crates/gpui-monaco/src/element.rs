@@ -2294,7 +2294,11 @@ type WhitespaceMarks = Vec<(gpui::Point<Pixels>, bool)>;
 
 /// A decoration box to paint: its bounds, background, and border color and
 /// width.
-type DecorationQuad = (Bounds<Pixels>, Option<Hsla>, Option<(Hsla, Pixels)>);
+type DecorationQuad = (
+    Bounds<Pixels>,
+    Option<Hsla>,
+    Option<(Hsla, Pixels, BorderStyle)>,
+);
 
 /// One cursor to paint (Monaco `ViewCursorRenderData`).
 struct CursorPaint {
@@ -4674,12 +4678,18 @@ fn prepaint_editor(
                     // An empty piece is Monaco's 0px wide element: only its
                     // outline shows.
                     if (background.is_some() || options.border.is_some()) && to > from {
-                        let border = options.border.map(|color| (color, px(1.)));
+                        let border = options
+                            .border
+                            .map(|color| (color, px(1.), options.border_style));
                         quads.push((bounds, background, border));
                     }
                     // CSS `outline`: outside the box.
                     if let Some((color, width)) = options.outline {
-                        quads.push((bounds.dilate(width), None, Some((color, width))));
+                        quads.push((
+                            bounds.dilate(width),
+                            None,
+                            Some((color, width, BorderStyle::Solid)),
+                        ));
                     }
                 }
             }
@@ -6140,9 +6150,9 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                         *bounds,
                         Corners::default(),
                         background.unwrap_or(gpui::transparent_black()),
-                        Edges::all(border.map_or(px(0.), |(_, width)| width)),
-                        border.map_or(gpui::transparent_black(), |(color, _)| color),
-                        BorderStyle::Solid,
+                        Edges::all(border.map_or(px(0.), |(_, width, _)| width)),
+                        border.map_or(gpui::transparent_black(), |(color, _, _)| color),
+                        border.map_or(BorderStyle::Solid, |(_, _, style)| style),
                     ));
                 }
                 if let Some(marks) = &state.whitespace {
@@ -8296,7 +8306,7 @@ mod decoration_overlay_tests {
         // The final tab stop's outline: around a 0px box.
         let outlines: Vec<Pixels> = painted()
             .iter()
-            .filter(|(_, _, border)| *border == Some((red, px(1.))))
+            .filter(|(_, _, border)| *border == Some((red, px(1.), BorderStyle::Solid)))
             .map(|(bounds, _, _)| round(bounds.size.width))
             .collect();
         assert_eq!(outlines, [px(2.)]);
@@ -8436,7 +8446,7 @@ mod decoration_overlay_tests {
         let em = em_width(&editor, cx);
         let boxes: Vec<Pixels> = painted()
             .iter()
-            .filter(|(_, _, b)| *b == Some((border, px(1.))))
+            .filter(|(_, _, b)| *b == Some((border, px(1.), BorderStyle::Solid)))
             .map(|(bounds, _, _)| round(bounds.size.width))
             .collect();
         assert_eq!(boxes, [em]);

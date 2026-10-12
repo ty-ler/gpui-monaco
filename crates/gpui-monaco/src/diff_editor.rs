@@ -22,6 +22,7 @@ use gpui::{
 use text::{Point, PointUtf16};
 
 use crate::codicons::{Codicon, icon as codicon};
+use crate::context_keys::ContextKeyValue;
 use crate::cursor::Selection;
 use crate::decorations::{BlockDecoration, DecorationId, DecorationOptions, InjectedText};
 use crate::diff::{
@@ -29,7 +30,7 @@ use crate::diff::{
     compute_diff, compute_legacy_diff,
 };
 use crate::editor::{CodeEditor, CodeEditorEvent, ViewState};
-use crate::events::ContentChange;
+use crate::events::{ContentChange, ContentSizeChange};
 use crate::model::{TextModel, TextModelEvent};
 use crate::options::WordWrapOverride;
 use crate::theme::EditorColors;
@@ -45,10 +46,11 @@ use unchanged::{RevealPreference, UnchangedRegion};
 gpui::actions!(
     diff_editor,
     [
-        /// Goes to the next change (Monaco `goToDiff('next')`, Alt+F5).
+        /// Goes to the next change (Monaco `goToDiff('next')`; unbound, as
+        /// in standalone Monaco, where Alt+F5 is VS Code's workbench key).
         GoToNextDiff,
-        /// Goes to the previous change (Monaco `goToDiff('previous')`,
-        /// Shift+Alt+F5).
+        /// Goes to the previous change (Monaco `goToDiff('previous')`;
+        /// unbound, Shift+Alt+F5 in VS Code).
         GoToPreviousDiff,
         /// Hides every unchanged region again (Monaco
         /// `diffEditor.collapseAllUnchangedRegions`).
@@ -124,12 +126,6 @@ pub(crate) fn bind_keys(cx: &mut App) {
             AccessibleDiffViewerPrev,
             Some(DIFF_EDITOR_KEY_CONTEXT),
         ),
-        gpui::KeyBinding::new("alt-f5", GoToNextDiff, Some(DIFF_EDITOR_KEY_CONTEXT)),
-        gpui::KeyBinding::new(
-            "shift-alt-f5",
-            GoToPreviousDiff,
-            Some(DIFF_EDITOR_KEY_CONTEXT),
-        ),
     ]);
 }
 
@@ -138,7 +134,8 @@ pub(crate) fn bind_keys(cx: &mut App) {
 pub struct DiffEditorOptions {
     /// Let the user resize the split (default `true`).
     pub enable_split_view_resizing: bool,
-    /// The original side's share of the width (default 0.5).
+    /// The original side's share of the width (default 0.5), clamped to
+    /// 0.1–0.9 as Monaco validates it.
     pub split_view_default_ratio: f32,
     /// Ignore leading and trailing whitespace changes (default `true`).
     pub ignore_trim_whitespace: bool,
@@ -178,7 +175,9 @@ pub struct DiffEditorOptions {
     pub only_show_accessible_diff_viewer: bool,
     /// Don't compute a diff when either model is larger than this many MB
     /// (Monaco `maxFileSize`, default 50; 0 for no limit). Such models show
-    /// without changes, and [`DiffEditor::diff`] is `None`.
+    /// without changes, and [`DiffEditor::diff`] is `None`. Monaco documents
+    /// the option this way, and its earlier diff widget enforced it, but its
+    /// current widget only validates it; set 0 to match.
     pub max_file_size: u64,
     /// Optimize for small views (Monaco `compactMode`, default `false`): a
     /// diff of only insertions and deletions shows inline, and hidden
@@ -315,6 +314,13 @@ pub enum DiffEditorEvent {
     /// `IAccessibilitySignalService.playSignal`). Standalone Monaco ignores
     /// these; hosts may play a sound, as VS Code does.
     AccessibilitySignal(AccessibilitySignal),
+    /// Either editor's content size changed (Monaco
+    /// `IDiffEditor.onDidContentSizeChange`): `content_height` is
+    /// [`DiffEditor::content_height`] and `content_width`
+    /// [`DiffEditor::content_width`]; the `changed` flags are the editor's.
+    /// Reported after the frame that changed it, so a host can size an
+    /// auto-height diff editor to its content.
+    ContentSizeChanged(ContentSizeChange),
 }
 
 /// Monaco `AccessibilitySignal`s a diff editor sends.
@@ -2161,6 +2167,16 @@ const MINIMUM_EDITOR_WIDTH: f32 = 100.;
 const SASH_CURSOR: gpui::CursorStyle = gpui::CursorStyle::ResizeColumn;
 /// Monaco's sash size (`Sash` with the default `size` of 4px).
 const SASH_SIZE: f32 = 4.;
+/// Monaco `validateDiffEditorOptions`' `clampedFloat(splitViewDefaultRatio,
+/// 0.5, 0.1, 0.9)`.
+fn clamp_split_view_ratio(ratio: f32) -> f32 {
+    if ratio.is_nan() {
+        0.5
+    } else {
+        ratio.clamp(0.1, 0.9)
+    }
+}
+
 /// Monaco `OverviewRulerFeature.ENTIRE_DIFF_OVERVIEW_WIDTH`.
 const DIFF_OVERVIEW_WIDTH: f32 = 30.;
 /// Monaco `ScrollbarState`'s minimum slider size.
@@ -2259,6 +2275,8 @@ pub struct DiffEditor {
     /// Monaco's `diffViewport` being dragged: where in the slider it was
     /// grabbed.
     overview_drag: Option<Pixels>,
+    /// The mouse's y over the overview ruler, from its top.
+    overview_mouse_y: Option<Pixels>,
     syncing_scroll: bool,
     /// Whether the last render showed the diff inline.
     inline: bool,
@@ -2312,6 +2330,17 @@ pub struct DiffEditor {
     /// Collapsed regions from [`DiffEditor::restore_view_state`], applied
     /// to the next diff when there was none yet.
     pending_collapsed_regions: Option<Vec<LineRange>>,
+    /// Whether the original and the modified editor had focus in the last
+    /// frame (Monaco `isInDiffLeftEditor`/`isInDiffRightEditor`).
+    focused_sides: (bool, bool),
+    /// The context keys last passed on to the editors.
+    passed_keys: Vec<(SharedString, ContextKeyValue)>,
+    /// The theme whose colors the diff decorations have.
+    decorated_theme: Option<Arc<crate::theme::Theme>>,
+    /// Shown by a [`MultiDiffEditor`](crate::MultiDiffEditor): `Some` with
+    /// whether all its files are collapsed (Monaco `inMultiDiffEditor` and
+    /// `multiDiffEditorAllCollapsed`).
+    pub(crate) multi_diff_all_collapsed: Option<bool>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -2366,6 +2395,7 @@ impl DiffEditor {
             sash_drag: None,
             sash_hover: Default::default(),
             overview_drag: None,
+            overview_mouse_y: None,
             syncing_scroll: false,
             inline: false,
             screen_reader_mode: false,
@@ -2390,6 +2420,10 @@ impl DiffEditor {
             simple_diff: None,
             reveal_first_diff_pending: false,
             pending_collapsed_regions: None,
+            focused_sides: (false, false),
+            passed_keys: Vec::new(),
+            decorated_theme: None,
+            multi_diff_all_collapsed: None,
             focus_handle: cx.focus_handle(),
             _subscriptions: Vec::new(),
         };
@@ -2441,6 +2475,17 @@ impl DiffEditor {
                         this.apply_editor_options(cx);
                         this.schedule_alignment(cx);
                     }
+                    // Monaco `DiffEditorEditors._constructInnerEditor`.
+                    CodeEditorEvent::ContentSizeChanged(change) => {
+                        let event = ContentSizeChange {
+                            content_height: this
+                                .content_height(cx)
+                                .unwrap_or(change.content_height),
+                            content_width: this.content_width(cx),
+                            ..*change
+                        };
+                        cx.emit(DiffEditorEvent::ContentSizeChanged(event));
+                    }
                     _ => {}
                 }
             }
@@ -2491,7 +2536,8 @@ impl DiffEditor {
     }
 
     /// Replaces the options (Monaco `updateOptions`).
-    pub fn update_options(&mut self, options: DiffEditorOptions, cx: &mut Context<Self>) {
+    pub fn update_options(&mut self, mut options: DiffEditorOptions, cx: &mut Context<Self>) {
+        options.split_view_default_ratio = clamp_split_view_ratio(options.split_view_default_ratio);
         let recompute = options.ignore_trim_whitespace != self.options.ignore_trim_whitespace
             || options.max_computation_time_ms != self.options.max_computation_time_ms
             || options.show_moves != self.options.show_moves
@@ -3060,6 +3106,108 @@ impl DiffEditor {
         }
     }
 
+    /// The diff editor's context keys, which GPUI sets on its element and
+    /// which both editors inherit, as Monaco's editors inherit them from the
+    /// diff editor's scoped context key service: the
+    /// [`DIFF_EDITOR_KEY_CONTEXT`] identifier, `isInDiffEditor`,
+    /// `inDiffEditor`, `isInDiffLeftEditor`/`isInDiffRightEditor` (that
+    /// side has focus), `isEmbeddedDiffEditor`, `comparingMovedCode`,
+    /// `diffEditorRenderSideBySideInlineBreakpointReached`,
+    /// `diffEditorInlineMode`, `diffEditorAutomaticRenderSideBySide`,
+    /// `diffEditorHasChanges`, `diffEditorOriginalWritable`,
+    /// `diffEditorModifiedWritable`, the `diffEditorOriginalUri` and
+    /// `diffEditorModifiedUri` strings, and, in a
+    /// [`MultiDiffEditor`](crate::MultiDiffEditor), `inMultiDiffEditor` and
+    /// `multiDiffEditorAllCollapsed`. So `add_command`'s `when` can be
+    /// `isInDiffEditor && diffEditorHasChanges`. Focus keys are as of the
+    /// last frame.
+    pub fn context_keys(&self, cx: &App) -> gpui::KeyContext {
+        key_context_with(&self.key_values(cx))
+    }
+
+    /// Monaco's diff editor keys (`diffEditorWidget.ts`,
+    /// `DiffEditorEditors`, `MultiDiffEditorWidgetImpl`).
+    fn key_values(&self, cx: &App) -> Vec<(SharedString, ContextKeyValue)> {
+        let options = &self.options;
+        let width = self.bounds.get().size.width;
+        let breakpoint = options.render_side_by_side_inline_breakpoint;
+        let flag = |key: &'static str, on: bool| (SharedString::new_static(key), on.into());
+        let uri = |key: &'static str, editor: &Entity<CodeEditor>| {
+            let uri = if self.has_model {
+                editor.read(cx).model().read(cx).resource().clone()
+            } else {
+                SharedString::default()
+            };
+            (SharedString::new_static(key), uri.into())
+        };
+        let mut keys = vec![
+            flag("isInDiffEditor", true),
+            // Monaco's editors set it from their `inDiffEditor` option.
+            flag("inDiffEditor", true),
+            flag("isInDiffLeftEditor", self.focused_sides.0),
+            flag("isInDiffRightEditor", self.focused_sides.1),
+            flag(IS_EMBEDDED_DIFF_EDITOR, options.is_in_embedded_editor),
+            flag(COMPARING_MOVED_CODE, self.move_to_compare.is_some()),
+            // Monaco `couldShowInlineViewBecauseOfSize`.
+            flag(
+                "diffEditorRenderSideBySideInlineBreakpointReached",
+                options.render_side_by_side && width <= breakpoint,
+            ),
+            flag("diffEditorInlineMode", self.inline),
+            // Monaco `renderSideBySideInAutomaticMode`.
+            flag(
+                "diffEditorAutomaticRenderSideBySide",
+                !(options.compact_mode && self.simple_diff == Some(true)) && width > breakpoint,
+            ),
+            flag(
+                "diffEditorHasChanges",
+                self.diff.as_ref().is_some_and(|d| !d.changes.is_empty()),
+            ),
+            flag("diffEditorOriginalWritable", options.original_editable),
+            flag(
+                "diffEditorModifiedWritable",
+                !self.modified.read(cx).options().read_only,
+            ),
+            uri("diffEditorOriginalUri", &self.original),
+            uri("diffEditorModifiedUri", &self.modified),
+        ];
+        if let Some(all_collapsed) = self.multi_diff_all_collapsed {
+            keys.push(flag("inMultiDiffEditor", true));
+            keys.push(flag("multiDiffEditorAllCollapsed", all_collapsed));
+        }
+        keys
+    }
+
+    /// Notes which side has focus and passes the context keys on to both
+    /// editors when they changed (each frame).
+    fn pass_context_keys(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.focused_sides = (
+            self.original.focus_handle(cx).contains_focused(window, cx),
+            self.modified.focus_handle(cx).contains_focused(window, cx),
+        );
+        let keys = self.key_values(cx);
+        if keys == self.passed_keys {
+            return;
+        }
+        for editor in [&self.original, &self.modified] {
+            editor.update(cx, |editor, cx| {
+                editor.commands.parent_keys = keys.clone();
+                cx.notify();
+            });
+        }
+        self.passed_keys = keys;
+    }
+
+    /// The width to show everything without scrolling, as of the last
+    /// layout (Monaco `onDidContentSizeChange`'s `contentWidth`): both
+    /// editors' [`content_width`](CodeEditor::content_width) and the 30px
+    /// overview ruler.
+    pub fn content_width(&self, cx: &App) -> Pixels {
+        let width =
+            |editor: &Entity<CodeEditor>| editor.read(cx).content_width().unwrap_or_default();
+        width(&self.original) + width(&self.modified) + px(DIFF_OVERVIEW_WIDTH)
+    }
+
     /// Whether a diff is being computed, so what shows is about to change
     /// (Monaco's `isDiffUpToDate` is false meanwhile).
     pub(crate) fn is_computing_diff(&self) -> bool {
@@ -3420,7 +3568,10 @@ impl DiffEditor {
         let Some(diff) = self.diff.clone() else {
             return;
         };
-        let colors = self.modified.read(cx).colors().clone();
+        let theme = self.modified.read(cx).theme().clone();
+        let colors = theme.colors.clone();
+        let high_contrast = theme.high_contrast;
+        self.decorated_theme = Some(theme);
         // Moves aren't shown any more (inline, or `show_moves` off).
         if self
             .move_to_compare
@@ -3447,6 +3598,7 @@ impl DiffEditor {
             self.uses_true_inline_view(),
             &original_rope,
             &colors,
+            high_contrast,
         );
         let original_id = self.original.entity_id();
         let modified_id = self.modified.entity_id();
@@ -3999,7 +4151,7 @@ impl DiffEditor {
 
     /// The width the sides share (Monaco's `SashLayout.dimensions.width`):
     /// the diff editor's, less the overview ruler.
-    fn content_width(&self) -> Pixels {
+    fn sides_width(&self) -> Pixels {
         let overview = if self.options.render_overview_ruler {
             px(DIFF_OVERVIEW_WIDTH)
         } else {
@@ -4015,7 +4167,7 @@ impl DiffEditor {
             self.ratio,
             self.options.split_view_default_ratio,
             self.options.enable_split_view_resizing,
-            self.content_width(),
+            self.sides_width(),
         )
     }
 
@@ -4059,7 +4211,7 @@ impl DiffEditor {
             cx.notify();
             return;
         }
-        let width = self.content_width();
+        let width = self.sides_width();
         if width > px(0.) {
             let left = start_left + (event.position.x - start_x);
             self.ratio = left / width;
@@ -4289,8 +4441,14 @@ impl DiffEditor {
             ))
         });
         let dragging = self.overview_drag.is_some();
+        // Monaco's `.diffViewport:hover` and `:active`.
+        let hovered = slider
+            .zip(self.overview_mouse_y)
+            .is_some_and(|((top, size), y)| y >= top && y < top + size);
         let slider_color = if dragging {
             colors.scrollbar_slider_active
+        } else if hovered {
+            colors.scrollbar_slider_hover
         } else {
             colors.scrollbar_slider
         };
@@ -4345,7 +4503,6 @@ impl DiffEditor {
             .w(px(DIFF_OVERVIEW_WIDTH))
             .flex_none()
             .bg(background)
-            .hover(|style| style)
             .child(
                 canvas(
                     |_, _, _| {},
@@ -4360,6 +4517,18 @@ impl DiffEditor {
                     this.start_overview_drag(event.position.y, cx);
                 }),
             )
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                let y = Some(event.position.y - this.bounds.get().top());
+                if this.overview_mouse_y != y {
+                    this.overview_mouse_y = y;
+                    cx.notify();
+                }
+            }))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered && this.overview_mouse_y.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.delegate_wheel(event, cx)))
             .into_any_element()
     }
@@ -5773,8 +5942,8 @@ impl DiffEditor {
     }
 
     /// Monaco `goToDiff`: moves the modified editor's cursor to the next or
-    /// previous change and reveals it.
-    pub fn go_to_diff(&mut self, next: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// previous change and reveals it, leaving the focus where it is.
+    pub fn go_to_diff(&mut self, next: bool, cx: &mut Context<Self>) {
         let Some(diff) = self.diff.clone() else {
             return;
         };
@@ -5821,7 +5990,6 @@ impl DiffEditor {
             );
         });
         self.play_signal(change_signal(change), cx);
-        window.focus(&self.modified.focus_handle(cx), cx);
     }
 }
 
@@ -6090,30 +6258,43 @@ impl Side {
 type SideDecoration = (Side, DecorationOptions);
 
 /// Monaco `DiffEditorDecorations`: line backgrounds and gutter signs for
-/// changed lines, and text backgrounds for the changed characters.
+/// changed lines, and text backgrounds for the changed characters. Both
+/// get the `diffEditor.insertedTextBorder`/`removedTextBorder`, dashed in
+/// high contrast themes (Monaco's `.line-insert`, `.char-insert`, … in
+/// `style.css`).
 fn diff_decorations(
     changes: &[DetailedLineRangeMapping],
     options: &DiffEditorOptions,
     true_inline: bool,
     original_text: &text::Rope,
     colors: &EditorColors,
+    high_contrast: bool,
 ) -> (Vec<SideDecoration>, Vec<SideDecoration>) {
+    let border_style = if high_contrast {
+        gpui::BorderStyle::Dashed
+    } else {
+        gpui::BorderStyle::Solid
+    };
     let line = |inserted: bool| {
-        let (background, gutter, sign) = if inserted {
+        let (background, gutter, sign, border) = if inserted {
             (
                 colors.diff_inserted_line_background,
                 colors.diff_gutter_inserted_line_background,
                 Codicon::Add,
+                colors.diff_inserted_text_border,
             )
         } else {
             (
                 colors.diff_removed_line_background,
                 colors.diff_gutter_removed_line_background,
                 Codicon::Remove,
+                colors.diff_removed_text_border,
             )
         };
         DecorationOptions {
             background: Some(background),
+            border,
+            border_style,
             is_whole_line: true,
             margin_background: Some(gutter),
             // Monaco's `insert-sign`/`delete-sign`: 0.7 opacity.
@@ -6138,6 +6319,7 @@ fn diff_decorations(
         DecorationOptions {
             background: (background.a > 0.).then_some(background),
             border,
+            border_style,
             is_whole_line: whole_line,
             // Monaco `diffAddDecoration`/`diffDeleteDecoration`.
             should_fill_line_on_line_break: !whole_line,
@@ -6232,6 +6414,16 @@ fn diff_decorations(
     (original, modified)
 }
 
+/// The diff editor's key context with `keys`.
+fn key_context_with(keys: &[(SharedString, ContextKeyValue)]) -> gpui::KeyContext {
+    let mut context = gpui::KeyContext::new_with_defaults();
+    context.add(DIFF_EDITOR_KEY_CONTEXT);
+    for (key, value) in keys {
+        value.apply(key, &mut context);
+    }
+    context
+}
+
 impl Render for DiffEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.screen_reader_mode = self.modified.read(cx).screen_reader_optimized(window);
@@ -6242,7 +6434,16 @@ impl Render for DiffEditor {
             self.apply_word_wrap(cx);
             self.apply_editor_options(cx);
             self.apply_diff(cx);
+        } else if self
+            .decorated_theme
+            .as_ref()
+            .is_some_and(|theme| !Arc::ptr_eq(theme, self.modified.read(cx).theme()))
+        {
+            // The decorations carry the theme's colors (and its high
+            // contrast borders).
+            self.apply_diff(cx);
         }
+        self.pass_context_keys(window, cx);
         let gutter = self.render_gutter(cx);
         let gutter_width = if gutter.is_some() {
             px(GUTTER_WIDTH)
@@ -6311,7 +6512,7 @@ impl Render for DiffEditor {
         let bounds = self.bounds.clone();
         let colors = self.modified.read(cx).colors().clone();
         let resizable = self.options.enable_split_view_resizing;
-        let measured = self.content_width() > px(0.);
+        let measured = self.sides_width() > px(0.);
         let sash_left = self.sash_left();
         // Monaco's layout: side by side, the original ends at the sash less
         // the gutter and moved-lines column; inline, the original is a
@@ -6417,17 +6618,7 @@ impl Render for DiffEditor {
             .child(self.modified.clone());
         let viewer_shown = self.accessible_viewer.is_some();
         let root = div()
-            .key_context({
-                let mut context = gpui::KeyContext::new_with_defaults();
-                context.add(DIFF_EDITOR_KEY_CONTEXT);
-                if self.move_to_compare.is_some() {
-                    context.add(COMPARING_MOVED_CODE);
-                }
-                if self.options.is_in_embedded_editor {
-                    context.add(IS_EMBEDDED_DIFF_EDITOR);
-                }
-                context
-            })
+            .key_context(key_context_with(&self.passed_keys))
             .on_action(
                 cx.listener(|this, _: &ExitCompareMove, _, cx| this.set_move_to_compare(None, cx)),
             )
@@ -6446,12 +6637,8 @@ impl Render for DiffEditor {
             .flex()
             .flex_row()
             .bg(colors.background)
-            .on_action(
-                cx.listener(|this, _: &GoToNextDiff, window, cx| this.go_to_diff(true, window, cx)),
-            )
-            .on_action(cx.listener(|this, _: &GoToPreviousDiff, window, cx| {
-                this.go_to_diff(false, window, cx)
-            }))
+            .on_action(cx.listener(|this, _: &GoToNextDiff, _, cx| this.go_to_diff(true, cx)))
+            .on_action(cx.listener(|this, _: &GoToPreviousDiff, _, cx| this.go_to_diff(false, cx)))
             .on_action(cx.listener(|this, _: &CollapseAllUnchangedRegions, _, cx| {
                 this.collapse_all_unchanged_regions(cx)
             }))

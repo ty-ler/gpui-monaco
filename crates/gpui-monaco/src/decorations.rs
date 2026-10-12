@@ -332,6 +332,9 @@ pub struct DecorationOptions {
     pub background: Option<Hsla>,
     /// 1px border around the range on each line.
     pub border: Option<Hsla>,
+    /// The `border`'s style: solid (the default), or dashed as Monaco's
+    /// high contrast themes draw the diff editor's change borders.
+    pub border_style: gpui::BorderStyle,
     /// A border of this color and width drawn just outside the range on
     /// each line, over the text around it (CSS `outline`, as on Monaco's
     /// in-place replace `valueSetReplacement`).
