@@ -376,6 +376,24 @@ impl Session {
             || item.detail.as_ref() != Some(&item.label)
     }
 
+    /// Monaco's `suggestionHasInsertAndReplaceRange` for the focused item:
+    /// its insert and replace ranges end in different places. Items without
+    /// ranges get the session's (Monaco fills them in when collecting),
+    /// which do when the cursor is inside a word.
+    pub(crate) fn focused_has_insert_and_replace(&self) -> bool {
+        let Some(index) = self.focused_index() else {
+            return false;
+        };
+        let item = &self.model.items()[index];
+        let insert_end = item.range.as_ref().map_or(self.position, |r| r.end);
+        let replace_end = item
+            .replace_range
+            .as_ref()
+            .or(item.range.as_ref())
+            .map_or(PointUtf16::new(self.position.row, self.word_end), |r| r.end);
+        insert_end != replace_end
+    }
+
     /// Monaco `CompletionModel.getItemsByProvider`: the session's items by
     /// provider (word-based ones under `None`). Items without a range get
     /// the session's default ranges, as Monaco fills them in when
@@ -2117,6 +2135,19 @@ impl CodeEditor {
             };
             return self.scroll_suggestion_details(scroll, cx);
         }
+        // "Loading..." (only shown for explicit requests) and "No
+        // suggestions." keep `suggestWidgetVisible` set with nothing
+        // focused, so Monaco's select commands run and do nothing
+        // (`SuggestWidget.selectNext` in the `Loading` and `Empty` states):
+        // the keys don't move the cursor.
+        if self
+            .suggest
+            .widget
+            .as_ref()
+            .is_some_and(|(widget, _)| widget.read(cx).message().is_some())
+        {
+            return true;
+        }
         let Some(session) = self.suggest.session.as_mut() else {
             return false;
         };
@@ -2255,6 +2286,41 @@ impl CodeEditor {
                 }
             }
         }
+    }
+
+    /// Monaco's `suggestionMakesTextEdit` context key: with `smart` Enter,
+    /// [`Self::suggestion_makes_text_edit`] for the focused suggestion;
+    /// otherwise (and with none focused) true.
+    pub(crate) fn suggestion_makes_text_edit_key(&self) -> bool {
+        self.options.accept_suggestion_on_enter != AcceptSuggestionOnEnter::Smart
+            || self.selected_suggestion().is_none()
+            || self.suggestion_makes_text_edit()
+    }
+
+    /// Monaco's `SuggestContext.AcceptSuggestionsOnEnter &&
+    /// SuggestContext.MakesTextEdit`: whether Enter accepts the focused
+    /// suggestion (the status bar's "Insert" shows Enter's key, else Tab's).
+    pub(crate) fn suggestion_accepts_on_enter(&self) -> bool {
+        self.options.accept_suggestion_on_enter != AcceptSuggestionOnEnter::Off
+            && self.suggestion_makes_text_edit_key()
+    }
+
+    /// Monaco `SuggestController.forceRenderingAbove` (with `force`) and
+    /// `stopForceRenderingAbove`.
+    pub(crate) fn force_suggest_rendering_above(&mut self, force: bool, cx: &mut Context<Self>) {
+        let Some((widget, _)) = &self.suggest.widget else {
+            return;
+        };
+        if widget.read(cx).forced_above() == force {
+            return;
+        }
+        widget.update(cx, |widget, cx| {
+            if force {
+                widget.force_rendering_above(cx);
+            } else {
+                widget.stop_force_rendering_above();
+            }
+        });
     }
 
     /// Monaco's `suggestionMakesTextEdit` for `smart` Enter: false in a

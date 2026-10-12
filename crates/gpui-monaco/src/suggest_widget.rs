@@ -116,6 +116,9 @@ pub struct SuggestWidgetState {
     /// Monaco's `suggestionCanResolve` for the focused row: the status
     /// bar's "Show More".
     can_resolve: bool,
+    /// Monaco's `suggestionHasInsertAndReplaceRange` for the focused row:
+    /// the status bar's "Replace".
+    has_insert_and_replace: bool,
 }
 
 impl SuggestWidgetState {
@@ -147,6 +150,7 @@ impl SuggestWidgetState {
             resolving,
             details_loading,
             can_resolve: session.focused_can_resolve(),
+            has_insert_and_replace: session.focused_has_insert_and_replace(),
         }
     }
 
@@ -163,6 +167,7 @@ impl SuggestWidgetState {
             resolving: false,
             details_loading: false,
             can_resolve: false,
+            has_insert_and_replace: false,
         }
     }
 
@@ -422,7 +427,14 @@ pub(crate) struct ListLayoutInput {
     /// The side chosen when the session showed its list (Monaco keeps it
     /// while typing).
     pub(crate) locked: Option<ContentWidgetPreference>,
+    /// Monaco `_forceRenderingAbove`: multi-line ghost text extends the
+    /// focused suggestion, so the list goes above it when there's room.
+    pub(crate) force_above: bool,
 }
+
+/// Monaco's `forceRenderingAboveRequiredSpace`: the room above the cursor
+/// line that [`ListLayoutInput::force_above`] needs.
+const FORCE_ABOVE_REQUIRED_SPACE: f32 = 150.;
 
 /// Monaco `SuggestWidget._layout` for a list of suggestions:
 /// - The width is the wanted one (wider with `fitWidthToDetails` until the
@@ -434,6 +446,9 @@ pub(crate) struct ListLayoutInput {
 ///   more room above. That side is kept while the session lasts (unless a
 ///   row no longer fits there), so the list doesn't flip as it shrinks and
 ///   grows while typing.
+/// - Forced above (Monaco `forceRenderingAbove`, for multi-line ghost text
+///   below the cursor), it goes above whenever there's more than 150px of
+///   room there.
 /// - As in Monaco, the height needn't be whole rows: the list scrolls by
 ///   pixels, and the rows at its edges show in part.
 pub(crate) fn layout_list(input: &ListLayoutInput) -> ListLayout {
@@ -469,7 +484,12 @@ pub(crate) fn layout_list(input: &ListLayoutInput) -> ListLayout {
         ContentWidgetPreference::Above => max_above,
         _ => max_below,
     };
+    let force_above = input.force_above
+        && input
+            .room
+            .is_none_or(|room| room.above > px(FORCE_ABOVE_REQUIRED_SPACE));
     let side = match input.locked {
+        _ if force_above => ContentWidgetPreference::Above,
         Some(side) if room_on(side) >= min => side,
         _ if height > max_below && max_above > max_below => ContentWidgetPreference::Above,
         _ => ContentWidgetPreference::Below,
@@ -673,6 +693,10 @@ pub struct SuggestWidget {
     /// suggestions; kept while it lives (one session), so it doesn't flip
     /// while typing.
     side: Option<ContentWidgetPreference>,
+    /// Monaco `_forceRenderingAbove` (see [`ListLayoutInput::force_above`]).
+    force_above: bool,
+    /// The status bar's keys, as of the last render.
+    status_keys: StatusKeys,
     /// `suggest.fit_width_to_details`' measured width, for a completion
     /// model (Monaco caches it per model).
     fit_width: Option<(u64, Pixels)>,
@@ -824,6 +848,8 @@ impl SuggestWidget {
             details_scroll_top: px(0.),
             room: Default::default(),
             side: None,
+            force_above: false,
+            status_keys: StatusKeys::defaults(true),
             fit_width: None,
             details_size: None,
             details_heights: Vec::new(),
@@ -923,6 +949,27 @@ impl SuggestWidget {
         self.state.message
     }
 
+    /// Monaco `SuggestWidget.forceRenderingAbove`: puts the list above the
+    /// cursor line (with room there) until
+    /// [`Self::stop_force_rendering_above`].
+    pub(crate) fn force_rendering_above(&mut self, cx: &mut Context<Self>) {
+        if !self.force_above {
+            self.force_above = true;
+            cx.notify();
+        }
+    }
+
+    /// Monaco `SuggestWidget.stopForceRenderingAbove`: like Monaco, the list
+    /// stays where it is until it's laid out again.
+    pub(crate) fn stop_force_rendering_above(&mut self) {
+        self.force_above = false;
+    }
+
+    /// Whether the list is forced above, for tests.
+    pub(crate) fn forced_above(&self) -> bool {
+        self.force_above
+    }
+
     /// What screen readers read for the widget, and whether it's a polite
     /// status: its message (Monaco `status`), or the focused suggestion's
     /// [`aria_label`] (with docs when `resolved` and the details panel
@@ -1015,6 +1062,7 @@ impl SuggestWidget {
             status_height: status,
             room: self.room.get(),
             locked: self.side,
+            force_above: self.force_above,
         })
     }
 
@@ -1569,51 +1617,49 @@ impl SuggestWidget {
     /// The status bar's actions (Monaco's `suggestWidgetStatusbarMenu`), as
     /// (label, keybinding label, what clicking does), left then right.
     fn status_bar_actions(&self, show_details: bool) -> [Vec<StatusAction>; 2] {
-        let mac = cfg!(target_os = "macos");
-        let (primary, alternative) = match self.options.insert_mode {
-            SuggestInsertMode::Insert => ("Insert", "Replace"),
-            SuggestInsertMode::Replace => ("Replace", "Insert"),
-        };
+        let keys = &self.status_keys;
         let mut left = Vec::new();
         let mut right = Vec::new();
-        match self.state.focused_item() {
+        if self.state.focused_item().is_none() {
             // `selectNextSuggestion`'s "Select", while nothing is focused.
-            None => left.push(StatusAction {
+            left.push(StatusAction {
                 label: "Select",
-                key: if mac { "↓" } else { "DownArrow" },
+                key: keys.select.clone(),
                 run: StatusCommand::Select,
-            }),
-            Some(item) => {
+            });
+        } else {
+            // Monaco's `acceptSelectedSuggestion` menu items: "Insert"
+            // unless the item's insert and replace ranges differ
+            // (`suggestionHasInsertAndReplaceRange`), then the mode's, with
+            // `acceptAlternativeSelectedSuggestion` for the other.
+            let (primary, alternative) = match self.options.insert_mode {
+                _ if !self.state.has_insert_and_replace => ("Insert", None),
+                SuggestInsertMode::Insert => ("Insert", Some("Replace")),
+                SuggestInsertMode::Replace => ("Replace", Some("Insert")),
+            };
+            left.push(StatusAction {
+                label: primary,
+                key: keys.accept.clone(),
+                run: StatusCommand::Accept,
+            });
+            if let Some(alternative) = alternative {
                 left.push(StatusAction {
-                    label: primary,
-                    key: if mac { "⏎" } else { "Enter" },
-                    run: StatusCommand::Accept,
+                    label: alternative,
+                    key: keys.accept_alternative.clone(),
+                    run: StatusCommand::AcceptAlternative,
                 });
-                // Monaco shows the other mode only when the item's insert
-                // and replace ranges differ.
-                if item
-                    .replace_range
-                    .as_ref()
-                    .is_some_and(|replace| item.range.as_ref() != Some(replace))
-                {
-                    left.push(StatusAction {
-                        label: alternative,
-                        key: if mac { "⇧⏎" } else { "Shift+Enter" },
-                        run: StatusCommand::AcceptAlternative,
-                    });
-                }
-                // Monaco: with `suggestionCanResolve`.
-                if self.state.can_resolve {
-                    right.push(StatusAction {
-                        label: if show_details {
-                            "Show Less"
-                        } else {
-                            "Show More"
-                        },
-                        key: if mac { "⌃Space" } else { "Ctrl+Space" },
-                        run: StatusCommand::ToggleDetails,
-                    });
-                }
+            }
+            // Monaco: with `suggestionCanResolve`.
+            if self.state.can_resolve {
+                right.push(StatusAction {
+                    label: if show_details {
+                        "Show Less"
+                    } else {
+                        "Show More"
+                    },
+                    key: keys.toggle_details.clone(),
+                    run: StatusCommand::ToggleDetails,
+                });
             }
         }
         [left, right]
@@ -1874,8 +1920,110 @@ impl StatusCommand {
 /// `TextOnlyMenuEntryActionViewItem`: "Title (keybinding)").
 struct StatusAction {
     label: &'static str,
-    key: &'static str,
+    key: SharedString,
     run: StatusCommand,
+}
+
+/// The status bar's keybinding labels: Monaco's `MenuEntryActionViewItem`
+/// shows each command's keybinding (`lookupKeybinding` in the widget's
+/// context).
+#[derive(Clone, Debug, PartialEq)]
+struct StatusKeys {
+    /// `selectNextSuggestion`.
+    select: SharedString,
+    /// `acceptSelectedSuggestion`: Enter where it accepts, else Tab.
+    accept: SharedString,
+    /// `acceptAlternativeSelectedSuggestion`.
+    accept_alternative: SharedString,
+    /// `toggleSuggestionDetails`.
+    toggle_details: SharedString,
+}
+
+/// Each status bar command's default keys, Monaco's primary key first.
+/// Monaco shows the primary key while the defaults are bound; the port
+/// binds some of them elsewhere (Down and Enter in the cursor and typing
+/// handlers) and in no particular order, so its own lookup can't tell.
+const SELECT_KEYS: &[&str] = &["down", "secondary-down", "ctrl-n"];
+const ACCEPT_ON_ENTER_KEYS: &[&str] = &["enter", "tab"];
+const ACCEPT_KEYS: &[&str] = &["tab", "enter"];
+const ACCEPT_ALTERNATIVE_KEYS: &[&str] = &["shift-enter", "shift-tab"];
+const TOGGLE_DETAILS_KEYS: &[&str] = &["ctrl-space", "secondary-i"];
+
+impl StatusKeys {
+    /// Monaco's primary keys.
+    fn defaults(accepts_on_enter: bool) -> Self {
+        let primary = |keys: &[&str]| key_label(keys[0]);
+        Self {
+            select: primary(SELECT_KEYS),
+            accept: primary(if accepts_on_enter {
+                ACCEPT_ON_ENTER_KEYS
+            } else {
+                ACCEPT_KEYS
+            }),
+            accept_alternative: primary(ACCEPT_ALTERNATIVE_KEYS),
+            toggle_details: primary(TOGGLE_DETAILS_KEYS),
+        }
+    }
+
+    /// The keys bound in `editor`: a binding of the command's own (an
+    /// `add_keybinding_rules` rule naming it, or the action rebound), else
+    /// its primary key.
+    fn lookup(editor: &CodeEditor, window: &Window, cx: &App) -> Self {
+        use crate::actions::{
+            AcceptAlternativeSuggestion, AcceptSelectedSuggestion, SelectNextSuggestion,
+            ToggleSuggestionDetails,
+        };
+        let key = |action: &dyn gpui::Action, id: &str, defaults: &[&str]| {
+            let binding = crate::keybinding_label::editor_command_binding(
+                action,
+                Some(id),
+                editor,
+                window,
+                cx,
+            )
+            .filter(|binding| {
+                let keys = crate::keybinding_label::binding_keystrokes(binding);
+                !defaults.iter().any(|key| keystrokes(key) == keys)
+            });
+            binding.map_or_else(
+                || key_label(defaults[0]),
+                |binding| crate::keybinding_label::binding_label(&binding),
+            )
+        };
+        let accept_keys = if editor.suggestion_accepts_on_enter() {
+            ACCEPT_ON_ENTER_KEYS
+        } else {
+            ACCEPT_KEYS
+        };
+        Self {
+            select: key(&SelectNextSuggestion, "selectNextSuggestion", SELECT_KEYS),
+            accept: key(
+                &AcceptSelectedSuggestion,
+                "acceptSelectedSuggestion",
+                accept_keys,
+            ),
+            accept_alternative: key(
+                &AcceptAlternativeSuggestion,
+                "acceptAlternativeSelectedSuggestion",
+                ACCEPT_ALTERNATIVE_KEYS,
+            ),
+            toggle_details: key(
+                &ToggleSuggestionDetails,
+                "toggleSuggestionDetails",
+                TOGGLE_DETAILS_KEYS,
+            ),
+        }
+    }
+}
+
+/// `key`'s keystrokes, as a binding has them.
+fn keystrokes(key: &str) -> Vec<gpui::Keystroke> {
+    crate::keybinding_label::binding_keystrokes(&gpui::KeyBinding::new(key, gpui::NoAction, None))
+}
+
+/// `key`'s UI label on this platform.
+fn key_label(key: &str) -> SharedString {
+    crate::keybinding_label::binding_label(&gpui::KeyBinding::new(key, gpui::NoAction, None))
 }
 
 /// A 4px resize handle along an edge (Monaco's `Sash`). Double-clicking
@@ -1930,6 +2078,12 @@ impl Render for SuggestWidget {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !cx.has_active_drag() {
             self.slider_drag = None;
+        }
+        if self.options.show_status_bar
+            && self.state.message.is_none()
+            && let Some(editor) = self.editor.upgrade()
+        {
+            self.status_keys = StatusKeys::lookup(editor.read(cx), window, cx);
         }
         let colors = self.theme.colors.clone();
         let item_height = self.metrics.item_height;
@@ -2388,6 +2542,7 @@ mod tests {
             status_height: px(0.),
             room: Some(room),
             locked: None,
+            force_above: false,
         }
     }
 
@@ -2452,6 +2607,24 @@ mod tests {
         let mut gone = input(50, room(600., 10.));
         gone.locked = Some(Below);
         assert_eq!(layout_list(&gone).side, Above);
+    }
+
+    /// Monaco `forceRenderingAbove`: above with more than 150px there, over
+    /// the side kept while typing; otherwise as usual.
+    #[test]
+    fn list_layout_forced_above() {
+        use ContentWidgetPreference::{Above, Below};
+        let mut forced = input(50, room(200., 600.));
+        forced.force_above = true;
+        let layout = layout_list(&forced);
+        assert_eq!(layout.side, Above);
+        assert_eq!(layout.size.height, px(198.));
+        forced.locked = Some(Below);
+        assert_eq!(layout_list(&forced).side, Above);
+        // 150px isn't enough.
+        let mut tight = input(50, room(150., 600.));
+        tight.force_above = true;
+        assert_eq!(layout_list(&tight).side, Below);
     }
 
     /// `suggest.fitWidthToDetails`.

@@ -729,12 +729,15 @@ impl InlineCompletionsProvider for DemoInlineCompletions {
         _: &mut App,
     ) -> Task<anyhow::Result<InlineCompletionList>> {
         // The last with a warning (squiggled ghost text); `self.` extends
-        // the `selections` suggestion, which the suggest widget preselects.
+        // the `selections` suggestion, which the suggest widget preselects,
+        // and `self.sn` extends `snapshot` over a few lines (the suggest
+        // list then goes above the ghost text).
         const LINES: &[&str] = &[
             "println!(\"{}\", total);",
             "let total = items.iter().sum::<usize>();",
             "fn render(&self) -> usize {\n    self.items.len()\n}",
             "self.selections().len()",
+            "self.snapshot\n    .lines()\n    .count()",
             "unsafe {\n    ptr.read()\n}",
         ];
         let line = context.snapshot.line(position.row);
