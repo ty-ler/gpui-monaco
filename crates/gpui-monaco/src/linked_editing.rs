@@ -25,7 +25,8 @@ const DELAY: (Duration, Duration) = (Duration::from_millis(50), Duration::from_m
 pub(crate) struct LinkedEditingState {
     /// The ranges' decorations; the first is the reference range.
     decorations: Vec<DecorationId>,
-    /// What the reference range may contain.
+    /// What the reference range may contain; `None` is Monaco's
+    /// `DEFAULT_WORD_REGEXP`.
     word_pattern: Option<syntax::Pattern>,
     /// The position and version the last request was for.
     requested: Option<(PointUtf16, text::Version)>,
@@ -35,6 +36,9 @@ pub(crate) struct LinkedEditingState {
     syncing: bool,
     /// The average request time (Monaco's adaptive debounce).
     samples: Vec<Duration>,
+    /// Whether linked editing was on at the last
+    /// [`CodeEditor::reinitialize_linked_editing`] (Monaco `_enabled`).
+    enabled: bool,
 }
 
 impl CodeEditor {
@@ -83,6 +87,27 @@ impl CodeEditor {
             self.model().update(cx, |model, cx| {
                 model.delta_decorations(owner, &old, Vec::new(), cx)
             });
+        }
+    }
+
+    /// Monaco `reinitialize`, when the option, the providers, the model or
+    /// its language change: when linked editing turns on or off, or with
+    /// `force_refresh`, the ranges are cleared and, if it's on, asked for
+    /// at once.
+    pub(crate) fn reinitialize_linked_editing(
+        &mut self,
+        force_refresh: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let enabled = self.linked_editing_enabled(cx);
+        if enabled == self.linked.enabled && !force_refresh {
+            return;
+        }
+        self.linked.enabled = enabled;
+        self.linked.scheduled = None;
+        self.clear_linked_editing(cx);
+        if enabled {
+            self.update_linked_editing(false, cx);
         }
     }
 
@@ -182,23 +207,25 @@ impl CodeEditor {
             )
         };
         let value = text_of(reference);
-        // Text the word pattern doesn't cover (e.g. a space) ends it.
-        if let Some(regex) = self
+        // Text the word pattern doesn't cover (e.g. a space) ends it. The
+        // pattern is the provider's, else the language's word definition,
+        // which is Monaco's `DEFAULT_WORD_REGEXP` for a language without
+        // one (`getWordDefinition`).
+        let regex: &syntax::fancy_regex::Regex = self
             .linked
             .word_pattern
             .as_ref()
             .and_then(syntax::Pattern::regex)
-        {
-            let length = regex
-                .find(&value)
-                .ok()
-                .flatten()
-                .filter(|m| m.start() == 0)
-                .map_or(0, |m| m.end());
-            if length != value.len() {
-                self.clear_linked_editing(cx);
-                return;
-            }
+            .unwrap_or_else(|| crate::cursor::in_place_replace::default_word_regex());
+        let length = regex
+            .find(&value)
+            .ok()
+            .flatten()
+            .filter(|m| m.start() == 0)
+            .map_or(0, |m| m.end());
+        if length != value.len() {
+            self.clear_linked_editing(cx);
+            return;
         }
         let mut edits = Vec::new();
         for mirror in &ranges[1..] {

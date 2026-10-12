@@ -1603,7 +1603,8 @@ impl TextModel {
     ) {
         if !patch.is_empty() {
             let force = std::mem::take(&mut self.force_move_markers);
-            self.decorations.apply_patch_forcing(patch, &force);
+            self.decorations
+                .apply_patch_forcing(patch, old, self.buffer.rope(), &force);
             let force_move_markers = force.into();
             self.reparse(cx);
             let eol = self.buffer.line_ending();
@@ -1896,7 +1897,8 @@ impl TextModel {
             self.emit_eol_change(old_line_ending, kind, outcome.metadata, cx);
             return true;
         }
-        self.decorations.apply_patch(&outcome.patch);
+        self.decorations
+            .apply_patch(&outcome.patch, old, self.buffer.rope());
         let moved = !outcome.patch.is_empty();
         self.reparse(cx);
         cx.emit(TextModelEvent::Edited {

@@ -8,7 +8,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{EntityId, FontStyle, FontWeight, Hsla, Pixels, SharedString};
-use text::{Patch, Stickiness};
+use text::{Patch, Rope, Stickiness};
 
 use crate::providers::MarkdownString;
 use crate::theme::{Theme, TokenStyle};
@@ -438,6 +438,10 @@ pub struct DecorationOptions {
     pub min_width: Pixels,
     /// How the range grows when text is typed at its edges (Monaco `stickiness`).
     pub stickiness: Stickiness,
+    /// Collapses the range to the start of an edit that replaces all of it
+    /// (Monaco `collapseOnReplaceEdit`), as links and code lenses do, so
+    /// pasting over a link doesn't decorate the pasted text.
+    pub collapse_on_replace_edit: bool,
     /// Higher paints on top, among the whole-line decorations and among the
     /// others.
     pub z_index: i32,
@@ -815,18 +819,81 @@ impl DecorationSet {
         }
     }
 
-    /// Moves every decoration through `patch`, honoring stickiness.
-    pub fn apply_patch(&mut self, patch: &Patch) {
+    /// Moves every decoration through `patch`, which turned `old` into
+    /// `new`, as Monaco's `nodeAcceptEdit` does (see
+    /// [`DecorationSet::apply_patch_forcing`]).
+    pub fn apply_patch(&mut self, patch: &Patch, old: &Rope, new: &Rope) {
+        self.apply_patch_forcing(patch, old, new, &[]);
+    }
+
+    /// Moves every decoration through `patch`, which turned `old` into
+    /// `new` (Monaco `nodeAcceptEdit`, for each of the patch's edits):
+    ///
+    /// - An edge before an edit stays and one after it shifts by the
+    ///   edit's change in length.
+    /// - An edge at the start of a replace stays, and one at an insertion
+    ///   point follows its stickiness.
+    /// - An edge inside a replace stays as far into the new text as it was
+    ///   into the old while that's within both (moving past the common
+    ///   length's end only as its stickiness says, and staying when more is
+    ///   deleted than inserted), and otherwise moves to the new text's end.
+    ///   Monaco counts UTF-16 code units; an edge that would land inside a
+    ///   character moves to that character's end.
+    /// - A decoration with [`DecorationOptions::collapse_on_replace_edit`]
+    ///   that an edit covers collapses to the edit's start.
+    ///
+    /// Edges inside or at the edges of one of the `force` ranges (old byte
+    /// ranges of the patch's edits) move past that edit's new text (Monaco
+    /// `forceMoveMarkers`).
+    pub fn apply_patch_forcing(
+        &mut self,
+        patch: &Patch,
+        old: &Rope,
+        new: &Rope,
+        force: &[Range<usize>],
+    ) {
         if patch.is_empty() {
             return;
         }
+        let edits = patch.edits();
+        let forced = |offset: usize| {
+            force
+                .iter()
+                .find(|range| range.start <= offset && offset <= range.end)
+                .map(|range| patch.transform_offset(range.end, text::Bias::Right))
+        };
+        let mut spans = ReplacedSpans::new(edits, old, new);
         let mut max_len = 0;
         for decoration in &mut self.decorations {
-            let (start_bias, end_bias) = decoration.options.stickiness.biases();
-            let start = patch.transform_offset(decoration.range.start, start_bias);
-            let end = patch
-                .transform_offset(decoration.range.end, end_bias)
-                .max(start);
+            let range = &decoration.range;
+            let ix = edits.partition_point(|edit| edit.old.end < range.start);
+            let next = edits.get(ix);
+            let (start, end) = if force.is_empty()
+                && next.is_none_or(|edit| range.end < edit.old.start)
+            {
+                // Wholly between two edits: both edges shift alike.
+                let (old_end, new_end) = ix
+                    .checked_sub(1)
+                    .map_or((0, 0), |ix| (edits[ix].old.end, edits[ix].new.end));
+                (
+                    range.start - old_end + new_end,
+                    range.end - old_end + new_end,
+                )
+            } else if let Some(edit) = next.filter(|edit| {
+                decoration.options.collapse_on_replace_edit
+                    && edit.old.start <= range.start
+                    && range.end <= edit.old.end
+            }) {
+                (edit.new.start, edit.new.start)
+            } else {
+                let (start_bias, end_bias) = decoration.options.stickiness.biases();
+                let start = forced(range.start).unwrap_or_else(|| {
+                    spans.accept_edit(range.start, start_bias == text::Bias::Left)
+                });
+                let end = forced(range.end)
+                    .unwrap_or_else(|| spans.accept_edit(range.end, end_bias == text::Bias::Left));
+                (start, end.max(start))
+            };
             decoration.range = start..end;
             max_len = max_len.max(end - start);
         }
@@ -840,32 +907,6 @@ impl DecorationSet {
         self.max_len = max_len;
         self.sorted = false;
         self.version += 1;
-    }
-
-    /// [`DecorationSet::apply_patch`], except that decoration edges inside
-    /// or at the edges of one of the `force` ranges (old byte ranges of
-    /// the patch's edits) move past that edit's new text (Monaco
-    /// `forceMoveMarkers`).
-    pub fn apply_patch_forcing(&mut self, patch: &Patch, force: &[Range<usize>]) {
-        if force.is_empty() {
-            return self.apply_patch(patch);
-        }
-        let forced = |offset: usize| {
-            force
-                .iter()
-                .find(|range| range.start <= offset && offset <= range.end)
-                .map(|range| patch.transform_offset(range.end, text::Bias::Right))
-        };
-        let old: Vec<Range<usize>> = self.decorations.iter().map(|d| d.range.clone()).collect();
-        self.apply_patch(patch);
-        let mut max_len = 0;
-        for (decoration, old) in self.decorations.iter_mut().zip(old) {
-            let start = forced(old.start).unwrap_or(decoration.range.start);
-            let end = forced(old.end).unwrap_or(decoration.range.end).max(start);
-            decoration.range = start..end;
-            max_len = max_len.max(end - start);
-        }
-        self.max_len = max_len;
     }
 
     /// Decorations intersecting `range` (inclusive of touching empty ones)
@@ -921,6 +962,128 @@ impl DecorationSet {
     }
 }
 
+/// Moves a decoration edge at `offset` through `patch`, which turned `old`
+/// into `new`, as [`DecorationSet::apply_patch`] does; `bias` is the edge's
+/// side from [`Stickiness::biases`]. For ranges kept outside the model, such
+/// as the editor's auto-closed characters.
+pub(crate) fn move_edge(
+    patch: &Patch,
+    old: &Rope,
+    new: &Rope,
+    offset: usize,
+    bias: text::Bias,
+) -> usize {
+    ReplacedSpans::new(patch.edits(), old, new).accept_edit(offset, bias == text::Bias::Left)
+}
+
+/// A patch's edits, which turned `old` into `new`, measuring a replace in
+/// UTF-16 code units only once an edge falls strictly inside it, and then
+/// only once: edges outside every replace, and every edge of a pure
+/// insertion or deletion, never touch the ropes.
+struct ReplacedSpans<'a> {
+    edits: &'a [text::Edit],
+    old: &'a Rope,
+    new: &'a Rope,
+    /// Per edit, once measured: [`Utf16Span`].
+    utf16: Vec<Option<Utf16Span>>,
+}
+
+/// Where a replace's old and new text start, and their lengths, in UTF-16
+/// code units.
+#[derive(Clone, Copy)]
+struct Utf16Span {
+    old_start: usize,
+    new_start: usize,
+    deleted: usize,
+    inserted: usize,
+}
+
+impl<'a> ReplacedSpans<'a> {
+    fn new(edits: &'a [text::Edit], old: &'a Rope, new: &'a Rope) -> Self {
+        Self {
+            edits,
+            old,
+            new,
+            utf16: Vec::new(),
+        }
+    }
+
+    fn utf16(&mut self, ix: usize) -> Utf16Span {
+        if self.utf16.is_empty() {
+            self.utf16.resize(self.edits.len(), None);
+        }
+        let (edits, old, new) = (self.edits, self.old, self.new);
+        *self.utf16[ix].get_or_insert_with(|| {
+            let edit = &edits[ix];
+            let old_start = old.offset_to_offset_utf16(edit.old.start).0;
+            let new_start = new.offset_to_offset_utf16(edit.new.start).0;
+            Utf16Span {
+                old_start,
+                new_start,
+                deleted: old.offset_to_offset_utf16(edit.old.end).0 - old_start,
+                inserted: new.offset_to_offset_utf16(edit.new.end).0 - new_start,
+            }
+        })
+    }
+
+    /// Monaco `nodeAcceptEdit` for an edge at `offset` that's
+    /// `stick_to_previous` (its stickiness), without `forceMoveMarkers`.
+    fn accept_edit(&mut self, offset: usize, stick_to_previous: bool) -> usize {
+        let edits = self.edits;
+        let ix = edits.partition_point(|edit| edit.old.end < offset);
+        let Some(edit) = edits.get(ix).filter(|edit| edit.old.start <= offset) else {
+            // Before every edit from `ix` on: shift by the edits before it.
+            return match ix.checked_sub(1).map(|ix| &edits[ix]) {
+                Some(prev) => offset - prev.old.end + prev.new.end,
+                None => offset,
+            };
+        };
+        if offset == edit.old.start {
+            // Monaco: `ForceStay` at the start of a replace; the stickiness
+            // decides at an insertion point.
+            return if edit.old_len() > 0 || stick_to_previous {
+                edit.new.start
+            } else {
+                edit.new.end
+            };
+        }
+        if edit.new_len() == 0 {
+            return edit.new.start;
+        }
+        // Inside the replaced text: Monaco measures in UTF-16 code units.
+        let span = self.utf16(ix);
+        let into = self.old.offset_to_offset_utf16(offset).0 - span.old_start;
+        if !stays_in_common_prefix(into, span.deleted, span.inserted, stick_to_previous) {
+            return edit.new.end;
+        }
+        let new = self.new;
+        let target = span.new_start + into;
+        let at = new.offset_utf16_to_offset(text::OffsetUtf16(target));
+        if new.offset_to_offset_utf16(at).0 < target {
+            // Inside a surrogate pair: never split the character.
+            at + new.chars_at(at).next().map_or(0, char::len_utf8)
+        } else {
+            at
+        }
+    }
+}
+
+/// Monaco `nodeAcceptEdit`'s second check: whether an edge `into` units
+/// into a replace of `deleted` units by `inserted` (`0 < into <= deleted`)
+/// stays where it is rather than moving to the end of the new text. It
+/// stays within the first `min(deleted, inserted)` units, and at that
+/// boundary when more is deleted than inserted (`ForceStay`) or its
+/// stickiness says so.
+fn stays_in_common_prefix(
+    into: usize,
+    deleted: usize,
+    inserted: usize,
+    stick_to_previous: bool,
+) -> bool {
+    let common = deleted.min(inserted);
+    into < common || (into == common && common > 0 && (deleted > inserted || stick_to_previous))
+}
+
 /// Stickiness re-exported for decoration options.
 pub use text::Stickiness as TrackedRangeStickiness;
 
@@ -928,6 +1091,26 @@ pub use text::Stickiness as TrackedRangeStickiness;
 mod tests {
     use super::*;
     use text::Buffer;
+
+    /// Applies `edits` to `buffer` and moves `set` through them, forcing
+    /// the edits in `force` past their decorations.
+    fn edit(
+        buffer: &mut Buffer,
+        set: &mut DecorationSet,
+        edits: &[(Range<usize>, &str)],
+        force: &[Range<usize>],
+    ) {
+        let old = buffer.rope().clone();
+        let patch = buffer.edit(edits.iter().cloned()).unwrap();
+        set.apply_patch_forcing(&patch, &old, buffer.rope(), force);
+    }
+
+    fn with_stickiness(stickiness: Stickiness) -> DecorationOptions {
+        DecorationOptions {
+            stickiness,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn decorations_follow_edits_with_stickiness() {
@@ -947,8 +1130,7 @@ mod tests {
                 ),
             ],
         );
-        let patch = buffer.edit([(6..6, ">"), (11..11, "<")]).unwrap();
-        set.apply_patch(&patch);
+        edit(&mut buffer, &mut set, &[(6..6, ">"), (11..11, "<")], &[]);
         assert_eq!(set.get(ids[0]).unwrap().range, 6..13);
         assert_eq!(set.get(ids[1]).unwrap().range, 7..12);
         let found = set.in_range(0..3, None);
@@ -969,14 +1151,381 @@ mod tests {
             ..Default::default()
         };
         let ids = set.delta(None, &[], [(0..5, never_grows()), (6..11, never_grows())]);
-        let patch = buffer.edit([(5..6, "__")]).unwrap();
-        set.apply_patch_forcing(&patch, std::slice::from_ref(&(5..6)));
+        edit(
+            &mut buffer,
+            &mut set,
+            &[(5..6, "__")],
+            std::slice::from_ref(&(5..6)),
+        );
         assert_eq!(set.get(ids[0]).unwrap().range, 0..7);
         assert_eq!(set.get(ids[1]).unwrap().range, 7..12);
         // Not forced: they keep to their text.
-        let patch = buffer.edit([(7..7, "+")]).unwrap();
-        set.apply_patch_forcing(&patch, &[]);
+        edit(&mut buffer, &mut set, &[(7..7, "+")], &[]);
         assert_eq!(set.get(ids[1]).unwrap().range, 8..13);
+    }
+
+    /// Decorations wholly before, between or after a patch's edits shift by
+    /// the edits before them, as edges moved one at a time would.
+    #[test]
+    fn decorations_between_edits_shift() {
+        let mut buffer = Buffer::new("0123456789abcdefghij");
+        let mut set = DecorationSet::default();
+        let ranges = [0..2, 4..4, 7..9, 9..9, 12..15, 18..20];
+        let ids = set.delta(
+            None,
+            &[],
+            ranges
+                .iter()
+                .map(|range| (range.clone(), DecorationOptions::default())),
+        );
+        let old = buffer.rope().clone();
+        let patch = buffer
+            .edit([(2..4, "\u{1f600}\u{1f600}"), (10..10, "+"), (15..18, "")])
+            .unwrap();
+        set.apply_patch(&patch, &old, buffer.rope());
+        let moved: Vec<_> = ids
+            .iter()
+            .map(|id| set.get(*id).unwrap().range.clone())
+            .collect();
+        // 0..2 and 12..15 end where a replace starts (`ForceStay`), 4..4
+        // sits inside the first replace (2 of 2 units in, the emoji pair is
+        // 4) and 18..20 starts at a deletion's end.
+        assert_eq!(moved, [0..2, 6..10, 13..15, 15..15, 19..22, 22..24]);
+    }
+
+    /// Monaco's `nodeAcceptEdit` test (`intervalTree.test.ts`): each row is
+    /// a decoration and its stickiness, an edit replacing a range with that
+    /// many characters, whether it forces markers to move, and where the
+    /// decoration ends up.
+    #[test]
+    fn node_accept_edit() {
+        use Stickiness::{
+            AlwaysGrowsWhenTypingAtEdges as A, GrowsOnlyWhenTypingAfter as F,
+            GrowsOnlyWhenTypingBefore as B, NeverGrowsWhenTypingAtEdges as N,
+        };
+        type Row = (
+            &'static str,
+            Range<usize>,
+            Stickiness,
+            Range<usize>,
+            usize,
+            bool,
+            Range<usize>,
+        );
+        #[rustfmt::skip]
+        let rows: &[Row] = &[
+            ("A.000", 0..0, A, 0..0, 0, false, 0..0),
+            ("A.001", 0..0, N, 0..0, 0, false, 0..0),
+            ("A.002", 0..0, B, 0..0, 0, false, 0..0),
+            ("A.003", 0..0, F, 0..0, 0, false, 0..0),
+            ("A.004", 0..0, A, 0..0, 0, true, 0..0),
+            ("A.005", 0..0, N, 0..0, 0, true, 0..0),
+            ("A.006", 0..0, B, 0..0, 0, true, 0..0),
+            ("A.007", 0..0, F, 0..0, 0, true, 0..0),
+            ("A.008", 0..0, A, 0..0, 1, false, 0..1),
+            ("A.009", 0..0, N, 0..0, 1, false, 1..1),
+            ("A.010", 0..0, B, 0..0, 1, false, 0..0),
+            ("A.011", 0..0, F, 0..0, 1, false, 1..1),
+            ("A.012", 0..0, A, 0..0, 1, true, 1..1),
+            ("A.013", 0..0, N, 0..0, 1, true, 1..1),
+            ("A.014", 0..0, B, 0..0, 1, true, 1..1),
+            ("A.015", 0..0, F, 0..0, 1, true, 1..1),
+            ("B.000", 0..5, A, 0..0, 0, false, 0..5),
+            ("B.001", 0..5, N, 0..0, 0, false, 0..5),
+            ("B.002", 0..5, B, 0..0, 0, false, 0..5),
+            ("B.003", 0..5, F, 0..0, 0, false, 0..5),
+            ("B.004", 0..5, A, 0..0, 0, true, 0..5),
+            ("B.005", 0..5, N, 0..0, 0, true, 0..5),
+            ("B.006", 0..5, B, 0..0, 0, true, 0..5),
+            ("B.007", 0..5, F, 0..0, 0, true, 0..5),
+            ("B.008", 0..5, A, 0..0, 1, false, 0..6),
+            ("B.009", 0..5, N, 0..0, 1, false, 1..6),
+            ("B.010", 0..5, B, 0..0, 1, false, 0..6),
+            ("B.011", 0..5, F, 0..0, 1, false, 1..6),
+            ("B.012", 0..5, A, 0..0, 1, true, 1..6),
+            ("B.013", 0..5, N, 0..0, 1, true, 1..6),
+            ("B.014", 0..5, B, 0..0, 1, true, 1..6),
+            ("B.015", 0..5, F, 0..0, 1, true, 1..6),
+            ("B.016", 0..5, A, 2..2, 1, false, 0..6),
+            ("B.017", 0..5, N, 2..2, 1, false, 0..6),
+            ("B.018", 0..5, B, 2..2, 1, false, 0..6),
+            ("B.019", 0..5, F, 2..2, 1, false, 0..6),
+            ("B.020", 0..5, A, 2..2, 1, true, 0..6),
+            ("B.021", 0..5, N, 2..2, 1, true, 0..6),
+            ("B.022", 0..5, B, 2..2, 1, true, 0..6),
+            ("B.023", 0..5, F, 2..2, 1, true, 0..6),
+            ("B.024", 0..5, A, 5..5, 1, false, 0..6),
+            ("B.025", 0..5, N, 5..5, 1, false, 0..5),
+            ("B.026", 0..5, B, 5..5, 1, false, 0..5),
+            ("B.027", 0..5, F, 5..5, 1, false, 0..6),
+            ("B.028", 0..5, A, 5..5, 1, true, 0..6),
+            ("B.029", 0..5, N, 5..5, 1, true, 0..6),
+            ("B.030", 0..5, B, 5..5, 1, true, 0..6),
+            ("B.031", 0..5, F, 5..5, 1, true, 0..6),
+            ("B.032", 5..10, A, 4..5, 2, false, 5..11),
+            ("B.033", 5..10, N, 4..5, 2, false, 6..11),
+            ("B.034", 5..10, B, 4..5, 2, false, 5..11),
+            ("B.035", 5..10, F, 4..5, 2, false, 6..11),
+            ("B.036", 5..10, A, 4..5, 2, true, 6..11),
+            ("B.037", 5..10, N, 4..5, 2, true, 6..11),
+            ("B.038", 5..10, B, 4..5, 2, true, 6..11),
+            ("B.039", 5..10, F, 4..5, 2, true, 6..11),
+            ("B.040", 5..10, A, 3..5, 1, false, 4..9),
+            ("B.041", 5..10, N, 3..5, 1, false, 4..9),
+            ("B.042", 5..10, B, 3..5, 1, false, 4..9),
+            ("B.043", 5..10, F, 3..5, 1, false, 4..9),
+            ("B.044", 5..10, A, 3..5, 1, true, 4..9),
+            ("B.045", 5..10, N, 3..5, 1, true, 4..9),
+            ("B.046", 5..10, B, 3..5, 1, true, 4..9),
+            ("B.047", 5..10, F, 3..5, 1, true, 4..9),
+            ("B.048", 5..10, A, 4..6, 3, false, 5..11),
+            ("B.049", 5..10, N, 4..6, 3, false, 5..11),
+            ("B.050", 5..10, B, 4..6, 3, false, 5..11),
+            ("B.051", 5..10, F, 4..6, 3, false, 5..11),
+            ("B.052", 5..10, A, 4..6, 3, true, 7..11),
+            ("B.053", 5..10, N, 4..6, 3, true, 7..11),
+            ("B.054", 5..10, B, 4..6, 3, true, 7..11),
+            ("B.055", 5..10, F, 4..6, 3, true, 7..11),
+            ("B.056", 5..10, A, 4..6, 1, false, 5..9),
+            ("B.057", 5..10, N, 4..6, 1, false, 5..9),
+            ("B.058", 5..10, B, 4..6, 1, false, 5..9),
+            ("B.059", 5..10, F, 4..6, 1, false, 5..9),
+            ("B.060", 5..10, A, 4..6, 1, true, 5..9),
+            ("B.061", 5..10, N, 4..6, 1, true, 5..9),
+            ("B.062", 5..10, B, 4..6, 1, true, 5..9),
+            ("B.063", 5..10, F, 4..6, 1, true, 5..9),
+            ("B.064", 5..10, A, 5..6, 2, false, 5..11),
+            ("B.065", 5..10, N, 5..6, 2, false, 5..11),
+            ("B.066", 5..10, B, 5..6, 2, false, 5..11),
+            ("B.067", 5..10, F, 5..6, 2, false, 5..11),
+            ("B.068", 5..10, A, 5..6, 2, true, 7..11),
+            ("B.069", 5..10, N, 5..6, 2, true, 7..11),
+            ("B.070", 5..10, B, 5..6, 2, true, 7..11),
+            ("B.071", 5..10, F, 5..6, 2, true, 7..11),
+            ("B.072", 5..10, A, 5..7, 1, false, 5..9),
+            ("B.073", 5..10, N, 5..7, 1, false, 5..9),
+            ("B.074", 5..10, B, 5..7, 1, false, 5..9),
+            ("B.075", 5..10, F, 5..7, 1, false, 5..9),
+            ("B.076", 5..10, A, 5..7, 1, true, 6..9),
+            ("B.077", 5..10, N, 5..7, 1, true, 6..9),
+            ("B.078", 5..10, B, 5..7, 1, true, 6..9),
+            ("B.079", 5..10, F, 5..7, 1, true, 6..9),
+            ("B.080", 5..10, A, 9..10, 2, false, 5..11),
+            ("B.081", 5..10, N, 9..10, 2, false, 5..10),
+            ("B.082", 5..10, B, 9..10, 2, false, 5..10),
+            ("B.083", 5..10, F, 9..10, 2, false, 5..11),
+            ("B.084", 5..10, A, 9..10, 2, true, 5..11),
+            ("B.085", 5..10, N, 9..10, 2, true, 5..11),
+            ("B.086", 5..10, B, 9..10, 2, true, 5..11),
+            ("B.087", 5..10, F, 9..10, 2, true, 5..11),
+            ("B.088", 5..10, A, 8..10, 1, false, 5..9),
+            ("B.089", 5..10, N, 8..10, 1, false, 5..9),
+            ("B.090", 5..10, B, 8..10, 1, false, 5..9),
+            ("B.091", 5..10, F, 8..10, 1, false, 5..9),
+            ("B.092", 5..10, A, 8..10, 1, true, 5..9),
+            ("B.093", 5..10, N, 8..10, 1, true, 5..9),
+            ("B.094", 5..10, B, 8..10, 1, true, 5..9),
+            ("B.095", 5..10, F, 8..10, 1, true, 5..9),
+            ("B.096", 5..10, A, 9..11, 3, false, 5..10),
+            ("B.097", 5..10, N, 9..11, 3, false, 5..10),
+            ("B.098", 5..10, B, 9..11, 3, false, 5..10),
+            ("B.099", 5..10, F, 9..11, 3, false, 5..10),
+            ("B.100", 5..10, A, 9..11, 3, true, 5..12),
+            ("B.101", 5..10, N, 9..11, 3, true, 5..12),
+            ("B.102", 5..10, B, 9..11, 3, true, 5..12),
+            ("B.103", 5..10, F, 9..11, 3, true, 5..12),
+            ("B.104", 5..10, A, 9..11, 1, false, 5..10),
+            ("B.105", 5..10, N, 9..11, 1, false, 5..10),
+            ("B.106", 5..10, B, 9..11, 1, false, 5..10),
+            ("B.107", 5..10, F, 9..11, 1, false, 5..10),
+            ("B.108", 5..10, A, 9..11, 1, true, 5..10),
+            ("B.109", 5..10, N, 9..11, 1, true, 5..10),
+            ("B.110", 5..10, B, 9..11, 1, true, 5..10),
+            ("B.111", 5..10, F, 9..11, 1, true, 5..10),
+            ("B.112", 5..10, A, 10..11, 3, false, 5..10),
+            ("B.113", 5..10, N, 10..11, 3, false, 5..10),
+            ("B.114", 5..10, B, 10..11, 3, false, 5..10),
+            ("B.115", 5..10, F, 10..11, 3, false, 5..10),
+            ("B.116", 5..10, A, 10..11, 3, true, 5..13),
+            ("B.117", 5..10, N, 10..11, 3, true, 5..13),
+            ("B.118", 5..10, B, 10..11, 3, true, 5..13),
+            ("B.119", 5..10, F, 10..11, 3, true, 5..13),
+            ("B.120", 5..10, A, 10..12, 1, false, 5..10),
+            ("B.121", 5..10, N, 10..12, 1, false, 5..10),
+            ("B.122", 5..10, B, 10..12, 1, false, 5..10),
+            ("B.123", 5..10, F, 10..12, 1, false, 5..10),
+            ("B.124", 5..10, A, 10..12, 1, true, 5..11),
+            ("B.125", 5..10, N, 10..12, 1, true, 5..11),
+            ("B.126", 5..10, B, 10..12, 1, true, 5..11),
+            ("B.127", 5..10, F, 10..12, 1, true, 5..11),
+            ("B.128", 5..10, A, 4..5, 0, false, 4..9),
+            ("B.129", 5..10, N, 4..5, 0, false, 4..9),
+            ("B.130", 5..10, B, 4..5, 0, false, 4..9),
+            ("B.131", 5..10, F, 4..5, 0, false, 4..9),
+            ("B.132", 5..10, A, 4..5, 0, true, 4..9),
+            ("B.133", 5..10, N, 4..5, 0, true, 4..9),
+            ("B.134", 5..10, B, 4..5, 0, true, 4..9),
+            ("B.135", 5..10, F, 4..5, 0, true, 4..9),
+            ("B.136", 5..10, A, 4..6, 0, false, 4..8),
+            ("B.137", 5..10, N, 4..6, 0, false, 4..8),
+            ("B.138", 5..10, B, 4..6, 0, false, 4..8),
+            ("B.139", 5..10, F, 4..6, 0, false, 4..8),
+            ("B.140", 5..10, A, 4..6, 0, true, 4..8),
+            ("B.141", 5..10, N, 4..6, 0, true, 4..8),
+            ("B.142", 5..10, B, 4..6, 0, true, 4..8),
+            ("B.143", 5..10, F, 4..6, 0, true, 4..8),
+            ("B.144", 5..10, A, 5..6, 0, false, 5..9),
+            ("B.145", 5..10, N, 5..6, 0, false, 5..9),
+            ("B.146", 5..10, B, 5..6, 0, false, 5..9),
+            ("B.147", 5..10, F, 5..6, 0, false, 5..9),
+            ("B.148", 5..10, A, 5..6, 0, true, 5..9),
+            ("B.149", 5..10, N, 5..6, 0, true, 5..9),
+            ("B.150", 5..10, B, 5..6, 0, true, 5..9),
+            ("B.151", 5..10, F, 5..6, 0, true, 5..9),
+            ("B.152", 5..10, A, 9..10, 0, false, 5..9),
+            ("B.153", 5..10, N, 9..10, 0, false, 5..9),
+            ("B.154", 5..10, B, 9..10, 0, false, 5..9),
+            ("B.155", 5..10, F, 9..10, 0, false, 5..9),
+            ("B.156", 5..10, A, 9..10, 0, true, 5..9),
+            ("B.157", 5..10, N, 9..10, 0, true, 5..9),
+            ("B.158", 5..10, B, 9..10, 0, true, 5..9),
+            ("B.159", 5..10, F, 9..10, 0, true, 5..9),
+            ("B.160", 5..10, A, 9..11, 0, false, 5..9),
+            ("B.161", 5..10, N, 9..11, 0, false, 5..9),
+            ("B.162", 5..10, B, 9..11, 0, false, 5..9),
+            ("B.163", 5..10, F, 9..11, 0, false, 5..9),
+            ("B.164", 5..10, A, 9..11, 0, true, 5..9),
+            ("B.165", 5..10, N, 9..11, 0, true, 5..9),
+            ("B.166", 5..10, B, 9..11, 0, true, 5..9),
+            ("B.167", 5..10, F, 9..11, 0, true, 5..9),
+            ("B.168", 5..10, A, 10..11, 0, false, 5..10),
+            ("B.169", 5..10, N, 10..11, 0, false, 5..10),
+            ("B.170", 5..10, B, 10..11, 0, false, 5..10),
+            ("B.171", 5..10, F, 10..11, 0, false, 5..10),
+            ("B.172", 5..10, A, 10..11, 0, true, 5..10),
+            ("B.173", 5..10, N, 10..11, 0, true, 5..10),
+            ("B.174", 5..10, B, 10..11, 0, true, 5..10),
+            ("B.175", 5..10, F, 10..11, 0, true, 5..10),
+            ("B.176", 5..10, A, 5..10, 3, false, 5..8),
+            ("B.177", 5..10, N, 5..10, 3, false, 5..8),
+            ("B.178", 5..10, B, 5..10, 3, false, 5..8),
+            ("B.179", 5..10, F, 5..10, 3, false, 5..8),
+            ("B.180", 5..10, A, 5..10, 3, true, 8..8),
+            ("B.181", 5..10, N, 5..10, 3, true, 8..8),
+            ("B.182", 5..10, B, 5..10, 3, true, 8..8),
+            ("B.183", 5..10, F, 5..10, 3, true, 8..8),
+            ("B.184", 5..10, A, 5..10, 7, false, 5..12),
+            ("B.185", 5..10, N, 5..10, 7, false, 5..10),
+            ("B.186", 5..10, B, 5..10, 7, false, 5..10),
+            ("B.187", 5..10, F, 5..10, 7, false, 5..12),
+            ("B.188", 5..10, A, 5..10, 7, true, 12..12),
+            ("B.189", 5..10, N, 5..10, 7, true, 12..12),
+            ("B.190", 5..10, B, 5..10, 7, true, 12..12),
+            ("B.191", 5..10, F, 5..10, 7, true, 12..12),
+        ];
+        for (name, range, stickiness, replaced, inserted, force, expected) in rows.iter().cloned() {
+            let mut buffer = Buffer::new(&"x".repeat(20));
+            let mut set = DecorationSet::default();
+            let ids = set.delta(None, &[], [(range, with_stickiness(stickiness))]);
+            let text = "y".repeat(inserted);
+            let force = if force {
+                vec![replaced.clone()]
+            } else {
+                Vec::new()
+            };
+            edit(&mut buffer, &mut set, &[(replaced, &text)], &force);
+            assert_eq!(set.get(ids[0]).unwrap().range, expected, "{name}");
+        }
+    }
+
+    /// Edges inside a replace stay as far into the new text as they were
+    /// into the old, up to the shorter of the two (audit 4 A.1): an
+    /// equal-length replace (Transform to Uppercase) keeps a decoration on
+    /// its word, whatever its stickiness.
+    #[test]
+    fn edges_inside_a_replace_keep_their_place() {
+        for stickiness in [
+            Stickiness::AlwaysGrowsWhenTypingAtEdges,
+            Stickiness::NeverGrowsWhenTypingAtEdges,
+            Stickiness::GrowsOnlyWhenTypingBefore,
+            Stickiness::GrowsOnlyWhenTypingAfter,
+        ] {
+            let mut buffer = Buffer::new("foo bar baz");
+            let mut set = DecorationSet::default();
+            let ids = set.delta(None, &[], [(4..7, with_stickiness(stickiness))]);
+            edit(&mut buffer, &mut set, &[(0..11, "FOO BAR BAZ")], &[]);
+            assert_eq!(set.get(ids[0]).unwrap().range, 4..7, "{stickiness:?}");
+        }
+        // Shorter text: edges past its end move to it.
+        let mut buffer = Buffer::new("foo bar baz");
+        let mut set = DecorationSet::default();
+        let ids = set.delta(None, &[], [(2..9, DecorationOptions::default())]);
+        edit(&mut buffer, &mut set, &[(0..11, "abcde")], &[]);
+        assert_eq!(set.get(ids[0]).unwrap().range, 2..5);
+    }
+
+    /// Monaco measures the common length in UTF-16 code units, and the
+    /// port keeps byte offsets: an edge keeps its place in characters and
+    /// never lands inside one.
+    #[test]
+    fn edges_inside_a_replace_count_utf16_units() {
+        // `\u{e9}` is 2 bytes and 1 unit: the edge 1 unit in stays after
+        // the first accented letter.
+        let mut buffer = Buffer::new("abcd");
+        let mut set = DecorationSet::default();
+        let ids = set.delta(None, &[], [(1..3, DecorationOptions::default())]);
+        edit(
+            &mut buffer,
+            &mut set,
+            &[(0..4, "\u{e9}\u{e8}\u{ea}\u{eb}")],
+            &[],
+        );
+        assert_eq!(set.get(ids[0]).unwrap().range, 2..6);
+        // An emoji is 4 bytes and 2 units: 1 unit in would split it, so the
+        // edge moves to its end.
+        let mut buffer = Buffer::new("abcd");
+        let mut set = DecorationSet::default();
+        let ids = set.delta(None, &[], [(1..3, DecorationOptions::default())]);
+        edit(&mut buffer, &mut set, &[(0..4, "\u{1f600}\u{1f600}")], &[]);
+        assert_eq!(set.get(ids[0]).unwrap().range, 4..8);
+        // From UTF-16 units back to bytes: 2 units into the old text is
+        // past the emoji.
+        let mut buffer = Buffer::new("\u{1f600}xy");
+        let mut set = DecorationSet::default();
+        let ids = set.delta(None, &[], [(4..5, DecorationOptions::default())]);
+        edit(&mut buffer, &mut set, &[(0..6, "abcd")], &[]);
+        assert_eq!(set.get(ids[0]).unwrap().range, 2..3);
+    }
+
+    /// Monaco `issue #41492: URL highlighting persists after pasting over
+    /// url` (`modelDecorations.test.ts`): `collapseOnReplaceEdit`.
+    #[test]
+    fn collapse_on_replace_edit() {
+        let mut buffer = Buffer::new("My First Line");
+        let mut set = DecorationSet::default();
+        let collapsing = |stickiness| DecorationOptions {
+            stickiness,
+            collapse_on_replace_edit: true,
+            ..Default::default()
+        };
+        let ids = set.delta(
+            None,
+            &[],
+            [(1..13, collapsing(Stickiness::NeverGrowsWhenTypingAtEdges))],
+        );
+        let text = "Some new text that is longer than the previous one";
+        edit(&mut buffer, &mut set, &[(0..13, text)], &[]);
+        assert_eq!(set.get(ids[0]).unwrap().range, 0..0);
+        // An edit inside it moves its edges as usual.
+        let mut buffer = Buffer::new("My First Line");
+        let mut set = DecorationSet::default();
+        let ids = set.delta(
+            None,
+            &[],
+            [(3..8, collapsing(Stickiness::AlwaysGrowsWhenTypingAtEdges))],
+        );
+        edit(&mut buffer, &mut set, &[(4..6, "IR")], &[]);
+        assert_eq!(set.get(ids[0]).unwrap().range, 3..8);
     }
 
     /// Ids are unique across models (Monaco's are global), so one from

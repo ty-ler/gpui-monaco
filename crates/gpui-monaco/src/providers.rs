@@ -2132,6 +2132,15 @@ pub(crate) fn observe_language_features<V: 'static>(
     ]
 }
 
+/// Calls `f` when providers are registered or removed (Monaco's registry
+/// `onDidChange`).
+pub(crate) fn observe_provider_registry<V: 'static>(
+    cx: &mut gpui::Context<V>,
+    f: impl Fn(&mut V, &mut gpui::Context<V>) + 'static,
+) -> gpui::Subscription {
+    cx.observe_global::<LanguageFeatures>(f)
+}
+
 /// Asks every editor for semantic tokens again (Monaco's provider
 /// `onDidChange`), e.g. after `workspace/semanticTokens/refresh`.
 pub fn refresh_semantic_tokens(cx: &mut App) {

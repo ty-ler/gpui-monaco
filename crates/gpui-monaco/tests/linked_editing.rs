@@ -184,6 +184,61 @@ fn providers_supply_ranges(cx: &mut TestAppContext) {
     assert_eq!(text(&editor, cx), "$yx = $yx + $yx");
 }
 
+/// Monaco's word pattern for a language without one is
+/// `DEFAULT_WORD_REGEXP` (`getWordDefinition`), so a space ends linked
+/// editing even when neither the language nor the provider has a pattern
+/// (audit 4 A.2).
+#[gpui::test]
+fn the_default_word_pattern_ends_it(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::register_language(cx, Language::new("nowords", "nowords"));
+        register_linked_editing_range_provider(
+            cx,
+            LanguageSelector::All,
+            WordMatches { word_pattern: None },
+        );
+    });
+    let (editor, cx) = setup("<foo></foo>", "nowords", cx);
+    move_to(&editor, cx, 0, 4);
+    assert_eq!(ranges(&editor, cx), vec![(1, 4), (7, 10)]);
+    cx.simulate_input(" ");
+    cx.run_until_parked();
+    cx.simulate_input("a");
+    settle(cx);
+    assert_eq!(text(&editor, cx), "<foo a></foo>");
+}
+
+/// Monaco `reinitialize`: turning the option off removes the ranges at
+/// once, and turning it on or registering a provider asks for them
+/// without waiting for the cursor to move (audit 4 A.3).
+#[gpui::test]
+fn option_and_provider_changes_reinitialize(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("<div></div>", "html", cx);
+    move_to(&editor, cx, 0, 2);
+    assert_eq!(ranges(&editor, cx), vec![(1, 4), (7, 10)]);
+    let set_enabled = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, on: bool| {
+        editor.update(cx, |e, cx| {
+            let mut options = e.options().clone();
+            options.linked_editing = on;
+            e.update_options(options, cx);
+        });
+        cx.run_until_parked();
+    };
+    set_enabled(&editor, cx, false);
+    assert!(ranges(&editor, cx).is_empty());
+    set_enabled(&editor, cx, true);
+    assert_eq!(ranges(&editor, cx), vec![(1, 4), (7, 10)]);
+
+    // A provider registered while the caret waits in its range.
+    let (editor, cx) = setup("$x = $x", "plaintext", cx);
+    move_to(&editor, cx, 0, 1);
+    assert!(ranges(&editor, cx).is_empty());
+    cx.update(|_, cx| register_linked_editing_range_provider(cx, LanguageSelector::All, Dollars));
+    cx.run_until_parked();
+    assert_eq!(ranges(&editor, cx), vec![(1, 2), (6, 7)]);
+}
+
 // ----- Port of Monaco's `linkedEditing.test.ts` --------------------------------
 //
 // `contrib/linkedEditing/test/browser/linkedEditing.test.ts` (MIT): a
@@ -452,10 +507,8 @@ fn selection_insert_whole(cx: &mut TestAppContext) {
 
 /// Monaco's `nodeAcceptEdit` keeps a decoration edge inside a replaced
 /// span in place for the first `min(deleted, inserted)` characters, so the
-/// reference range becomes `oo`; the port's `Patch::transform_offset` moves
-/// it to the start of the new text, so the range takes in the typed `i`.
+/// reference range becomes `oo` rather than taking in the typed `i`.
 #[gpui::test]
-#[ignore = "decoration edges inside a replaced span don't follow Monaco's nodeAcceptEdit (follow-up to #357)"]
 fn selection_insert_across_boundary(cx: &mut TestAppContext) {
     let text = selection_case((1, 2), (1, 1, 1, 3), |e, cx| type_text(e, cx, "i"), cx);
     assert_eq!(text, "ioo></oo>");

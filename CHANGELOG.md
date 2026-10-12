@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Decoration tracking and linked editing (#402):** model decorations follow edits with Monaco's `nodeAcceptEdit` (audit 4 §A.1–§A.3).
+  - **Replaced spans:** a decoration edge inside a replaced span used to jump to the start or end of the new text. It now stays as far into the new text as it was into the old, up to the shorter of the two lengths, and only edges past that move to the end. For example, Transform to Uppercase keeps a decoration on its word. Monaco counts these lengths in UTF-16 code units; the port does too, and an edge that would land inside a character moves to that character's end. This applies to user decorations, linked-editing ranges, snippet placeholders, find matches and the auto-closed characters. "Selection insert - across boundary" in `tests/linked_editing.rs` now passes and is no longer ignored.
+  - **`collapse_on_replace_edit`:** new `DecorationOptions` field (Monaco `collapseOnReplaceEdit`). An edit replacing the whole range collapses it to the edit's start.
+  - **Breaking:** `DecorationSet::apply_patch` and `apply_patch_forcing` take the text before and after the edit, to measure replaced spans.
+  - **Linked editing word pattern:** without a provider or language word pattern, linked editing uses Monaco's default word pattern, so a space ends it instead of being mirrored.
+  - **Linked editing reinitialize:** turning `linked_editing` off removes the ranges at once. Turning it on, registering or removing a provider, and changing the model or language ask for the ranges at once, as Monaco's `reinitialize` does.
 - **Scrolling and mouse focus (#411):** five fixes to scrolling and clicks (audit 4 §D.5–§D.8, §H.4).
   - **Clicks reveal minimally:** a mouse click no longer scrolls sideways to put 30px of room left of the cursor or `reveal_horizontal_right_padding` right of it, so clicking a visible column near either edge keeps the view still (Monaco's `minimalReveal`). A plain click that leaves the cursor where it was doesn't reveal it at all (`_moveTo`).
   - **One-line cursor scrolls jump:** with `smooth_scrolling`, a cursor move that scrolls a line or less (Down on the last visible line) now scrolls right away instead of gliding for 135ms, so held arrow keys keep up with the caret. Longer moves still animate, and so does the horizontal part (Monaco `onRevealRangeRequest`).
