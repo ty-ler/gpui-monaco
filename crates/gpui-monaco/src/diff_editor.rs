@@ -360,6 +360,46 @@ fn allows_true_inline_diff_rendering(mapping: &DetailedLineRangeMapping) -> bool
         })
 }
 
+/// Monaco `normalizeDocumentDiff`, which the diff editor's view model runs
+/// on every computed diff: an inner change covering whole lines on both
+/// sides, from column 1 to the line end and not on the last line, takes
+/// the line break too (ends at `(end line + 1, 1)`). The change then fills
+/// to the right edge (`shouldFillLineOnLineBreak`), isn't shown by the true
+/// inline view, and reverting it restores the line break. `original` and
+/// `modified` are the texts' lines; moves are left as they are.
+pub(crate) fn normalize_document_diff<S: AsRef<str>>(
+    mut diff: LinesDiff,
+    original: &[S],
+    modified: &[S],
+) -> LinesDiff {
+    // Monaco `getLineMaxColumn` (UTF-16 columns) and `getLineCount`.
+    let max_column = |lines: &[S], line: usize| {
+        lines
+            .get(line.wrapping_sub(1))
+            .map_or(1, |l| l.as_ref().encode_utf16().count() + 1)
+    };
+    let line_count = |lines: &[S]| lines.len().max(1);
+    for change in &mut diff.changes {
+        for inner in &mut change.inner_changes {
+            let (o, m) = (&mut inner.original_range, &mut inner.modified_range);
+            if o.start_column == 1
+                && m.start_column == 1
+                && (o.end_column != 1 || m.end_column != 1)
+                && o.end_column == max_column(original, o.end_line_number)
+                && m.end_column == max_column(modified, m.end_line_number)
+                && o.end_line_number < line_count(original)
+                && m.end_line_number < line_count(modified)
+            {
+                o.end_line_number += 1;
+                o.end_column = 1;
+                m.end_line_number += 1;
+                m.end_column = 1;
+            }
+        }
+    }
+    diff
+}
+
 /// Monaco `ILineRangeAlignment`: line ranges of the two sides shown with
 /// the same height.
 #[derive(Clone, Debug, PartialEq)]
@@ -2216,6 +2256,9 @@ pub struct DiffEditor {
     /// The moved block compared with its original (Monaco
     /// `movedTextToCompare`).
     move_to_compare: Option<usize>,
+    /// Whether the original editor's cursor moved last (Monaco
+    /// `lastChangedEditor`).
+    last_cursor_original: bool,
     /// Monaco `shouldRenderInlineViewInSmartMode` for `compact_mode`:
     /// whether the first diff of these models was only insertions and
     /// deletions (decided once).
@@ -2296,6 +2339,7 @@ impl DiffEditor {
             move_decorations: Default::default(),
             active_move: None,
             move_to_compare: None,
+            last_cursor_original: false,
             simple_diff: None,
             reveal_first_diff_pending: false,
             pending_collapsed_regions: None,
@@ -2538,6 +2582,9 @@ impl DiffEditor {
                 options.code_lens = code_lens;
                 options.minimap.enabled = false;
                 options.folding = false;
+                // Monaco `_adjustOptionsForSubEditor`: alignment assumes
+                // every line is the line height.
+                options.allow_variable_line_heights = false;
                 if sticky_off {
                     if options.sticky_scroll.enabled {
                         *saved_sticky = Some(true);
@@ -2813,7 +2860,8 @@ impl DiffEditor {
             m.changes.iter_mut().all(|c| apply(c).is_some())
         });
         if new.moves.len() != move_count {
-            self.move_to_compare = None;
+            let compared = self.compared_move_range();
+            self.move_to_compare = Self::find_compared_move(&new, compared);
             self.active_move = None;
         }
         self.diff = Some(Arc::new(new));
@@ -3235,6 +3283,7 @@ impl DiffEditor {
                     // Monaco's worker: `identical` when there are no
                     // changes and the texts are equal.
                     let identical = diff.changes.is_empty() && original_lines == modified_lines;
+                    let diff = normalize_document_diff(diff, &original_lines, &modified_lines);
                     (diff, identical)
                 })
                 .await;
@@ -3250,7 +3299,17 @@ impl DiffEditor {
                             || (true_inline && allows_true_inline_diff_rendering(c))
                     }));
                 }
+                // Monaco: the compared move is looked up again by its
+                // modified range, rather than kept by index.
+                let compared = this.compared_move_range();
                 this.diff = Some(Arc::new(diff));
+                this.move_to_compare = this
+                    .diff
+                    .as_deref()
+                    .and_then(|diff| Self::find_compared_move(diff, compared));
+                // Monaco's `setActiveMovedTextFromCursor` autorun reads the
+                // diff too.
+                this.sync_active_move(this.last_cursor_original, cx);
                 this.identical = identical;
                 this.diff_versions = Some(versions);
                 this.diff_task = None;
@@ -3297,7 +3356,7 @@ impl DiffEditor {
             return;
         };
         let colors = self.modified.read(cx).colors().clone();
-        // A new diff may not have the compared move any more.
+        // Moves aren't shown any more (inline, or `show_moves` off).
         if self
             .move_to_compare
             .is_some_and(|ix| ix >= self.shown_moves(&diff).len())
@@ -3557,6 +3616,7 @@ impl DiffEditor {
                 };
                 let zones = this.alignment_zones(&diff, cx);
                 if zones != this.alignment {
+                    this.keep_modified_scroll_stable(cx);
                     this.apply_alignment_zones(&diff, zones, cx);
                     cx.notify();
                 }
@@ -3568,9 +3628,19 @@ impl DiffEditor {
     /// Monaco `DiffEditorViewZones`: zones where one side has fewer lines
     /// (or less height), so the sides line up.
     fn apply_alignment(&mut self, diff: &LinesDiff, cx: &mut Context<Self>) {
+        self.keep_modified_scroll_stable(cx);
         self.apply_move_captions(diff, cx);
         let zones = self.alignment_zones(diff, cx);
         self.apply_alignment_zones(diff, zones, cx);
+    }
+
+    /// Monaco's `StableEditorScrollState` around applying the modified
+    /// editor's view zones: its first visible line stays put on screen
+    /// while the zones above it change (the original side follows with
+    /// the scroll sync).
+    fn keep_modified_scroll_stable(&self, cx: &mut Context<Self>) {
+        self.modified
+            .update(cx, |editor, _| editor.keep_scroll_stable());
     }
 
     /// Replaces the alignment zones with `zones`.
@@ -3802,8 +3872,27 @@ impl DiffEditor {
     }
 
     /// Monaco `setActiveMovedTextFromCursor`: the moved block under the
-    /// cursor of the editor whose cursor moved last.
+    /// cursor of the editor whose cursor moved last. Moving off the
+    /// compared block stops comparing it.
     fn update_active_move(&mut self, original: bool, cx: &mut Context<Self>) {
+        let comparing = self.move_to_compare;
+        let active = self.active_move;
+        self.sync_active_move(original, cx);
+        if self.move_to_compare != comparing {
+            self.apply_diff(cx);
+            self.sync_scroll(false, cx);
+            cx.notify();
+        } else if self.active_move != active {
+            self.apply_move_decorations(cx);
+            cx.notify();
+        }
+    }
+
+    /// [`Self::update_active_move`] without applying: sets the active move
+    /// and stops comparing a move the cursor isn't in (Monaco
+    /// `movedText !== movedTextToCompare`).
+    fn sync_active_move(&mut self, original: bool, cx: &App) {
+        self.last_cursor_original = original;
         let Some(diff) = self.diff.clone() else {
             return;
         };
@@ -3820,11 +3909,26 @@ impl DiffEditor {
                 m.line_range_mapping.modified.contains(line)
             }
         });
-        if active != self.active_move {
-            self.active_move = active;
-            self.apply_move_decorations(cx);
-            cx.notify();
+        if active != self.move_to_compare {
+            self.move_to_compare = None;
         }
+        self.active_move = active;
+    }
+
+    /// The compared move's modified lines, to find it in a new diff.
+    fn compared_move_range(&self) -> Option<LineRange> {
+        let diff = self.diff.as_deref()?;
+        let m = self.shown_moves(diff).get(self.move_to_compare?)?;
+        Some(m.line_range_mapping.modified)
+    }
+
+    /// Monaco `moves.find(m => m.lineRangeMapping.modified.intersect(...))`:
+    /// the move in `diff` where the compared one (`compared`) is now.
+    fn find_compared_move(diff: &LinesDiff, compared: Option<LineRange>) -> Option<usize> {
+        let compared = compared?;
+        diff.moves
+            .iter()
+            .position(|m| m.line_range_mapping.modified.intersect(&compared).is_some())
     }
 
     /// The width the sides share (Monaco's `SashLayout.dimensions.width`):
@@ -4799,8 +4903,11 @@ impl DiffEditor {
         self.revert_edits(edits, cx);
     }
 
-    /// Monaco `revertFocusedRangeMappings`: reverts the changes touching
-    /// the modified editor's selection, when it has focus.
+    /// Monaco `revertFocusedRangeMappings`: reverts the changes whose
+    /// modified lines intersect or touch the modified editor's selection
+    /// lines (`[start line, end line)`, empty for a cursor), when it has
+    /// focus. So a cursor on the line below a deletion, or on the line
+    /// after a change, reverts it.
     pub fn revert_focused_range_mappings(&mut self, window: &Window, cx: &mut Context<Self>) {
         let Some(diff) = self.diff.clone() else {
             return;
@@ -4814,9 +4921,10 @@ impl DiffEditor {
             return;
         }
         let selection = self.modified.read(cx).selections()[0];
+        // Monaco `LineRange.fromRange(selection)`.
         let selected = LineRange::new(
             selection.start().row as usize + 1,
-            selection.end().row as usize + 2,
+            selection.end().row as usize + 1,
         );
         let original = self
             .original
@@ -4837,18 +4945,16 @@ impl DiffEditor {
         let edits = diff
             .changes
             .iter()
-            .filter(|c| {
-                c.modified
-                    .intersect(&selected)
-                    .is_some_and(|r| !r.is_empty())
-            })
+            .filter(|c| c.modified.intersect(&selected).is_some())
             .map(|c| revert_points(&original, &modified, &c.line_range_mapping()))
             .collect();
         self.revert_edits(edits, cx);
     }
 
     /// Monaco `_selectedDiffs`: the inner changes the modified editor's
-    /// selections touch, and the indices of their changes.
+    /// selections intersect (`Range.areIntersecting`, which touching
+    /// ranges don't), and the indices of the changes on the selected
+    /// lines; nothing when no inner change is selected.
     fn selected_changes(&self, cx: &App) -> (Vec<RangeMapping>, Vec<usize>) {
         let Some(diff) = self.diff.as_ref() else {
             return Default::default();
@@ -4857,19 +4963,33 @@ impl DiffEditor {
         if selections.iter().all(|s| s.is_empty()) {
             return Default::default();
         }
-        let selected_lines: Vec<LineRange> = selections
+        // Monaco's `LineRangeSet` of `LineRange.fromRangeInclusive`: the
+        // selected lines, touching ranges joined.
+        let mut selected_lines: Vec<LineRange> = selections
             .iter()
             .map(|s| LineRange::new(s.start().row as usize + 1, s.end().row as usize + 2))
             .collect();
+        selected_lines.sort_by_key(|l| l.start_line_number);
+        selected_lines.dedup_by(|next, joined| {
+            let touches = next.start_line_number <= joined.end_line_number_exclusive;
+            if touches {
+                *joined = joined.join(next);
+            }
+            touches
+        });
+        // Monaco `LineRangeSet.intersects`.
+        let lines_intersect = |change: &LineRange| {
+            selected_lines.iter().any(|l| {
+                l.start_line_number < change.end_line_number_exclusive
+                    && l.end_line_number_exclusive > change.start_line_number
+            })
+        };
         let intersects =
-            |a: &Range<PointUtf16>, b: &Range<PointUtf16>| a.start <= b.end && b.start <= a.end;
+            |a: &Range<PointUtf16>, b: &Range<PointUtf16>| a.end > b.start && b.end > a.start;
         let mut selected = Vec::new();
         let mut changes = Vec::new();
         for (ix, change) in diff.changes.iter().enumerate() {
-            if !selected_lines
-                .iter()
-                .any(|l| change.modified.intersect(l).is_some_and(|r| !r.is_empty()))
-            {
+            if change.inner_changes.is_empty() || !lines_intersect(&change.modified) {
                 continue;
             }
             let inner: Vec<RangeMapping> = change
@@ -4883,10 +5003,13 @@ impl DiffEditor {
                 })
                 .cloned()
                 .collect();
-            if !inner.is_empty() {
-                changes.push(ix);
-                selected.extend(inner);
-            }
+            // Monaco keeps the change even when none of its characters
+            // are selected, so it gets no button of its own.
+            changes.push(ix);
+            selected.extend(inner);
+        }
+        if selected.is_empty() {
+            return Default::default();
         }
         (selected, changes)
     }
@@ -6269,6 +6392,96 @@ use gpui::{AnimationExt as _, anchored, deferred};
 mod tests {
     use super::*;
     use crate::diff::compute_diff;
+
+    /// The inner changes of the normalized diff, as Monaco prints ranges.
+    fn normalized(original: &str, modified: &str) -> (Vec<String>, LinesDiff) {
+        let original: Vec<&str> = original.split('\n').collect();
+        let modified: Vec<&str> = modified.split('\n').collect();
+        let options = DiffOptions {
+            ignore_trim_whitespace: false,
+            ..Default::default()
+        };
+        let diff = normalize_document_diff(
+            compute_diff(&original, &modified, &options),
+            &original,
+            &modified,
+        );
+        let inner = diff
+            .changes
+            .iter()
+            .flat_map(|c| &c.inner_changes)
+            .map(|i| format!("{} {}", i.original_range, i.modified_range))
+            .collect();
+        (inner, diff)
+    }
+
+    #[test]
+    fn normalizing_fills_whole_line_changes_to_the_next_line() {
+        // Monaco `normalizeRangeMapping`: column 1 to the line end on both
+        // sides takes the line break.
+        let (inner, diff) = normalized("a\nfoo\nb", "a\nbar\nb");
+        assert_eq!(inner, ["[2,1 -> 3,1] [2,1 -> 3,1]"]);
+        // So the true inline view doesn't show it.
+        assert!(!allows_true_inline_diff_rendering(&diff.changes[0]));
+        // Two whole lines.
+        let (inner, _) = normalized("a\nfoo\nfoo\nb", "a\nbar\nbar\nb");
+        assert_eq!(inner, ["[2,1 -> 4,1] [2,1 -> 4,1]"]);
+    }
+
+    #[test]
+    fn the_compared_move_is_found_by_its_modified_lines() {
+        let moved = |original: usize, modified: usize| crate::diff::MovedText {
+            line_range_mapping: LineRangeMapping::new(
+                LineRange::new(original, original + 3),
+                LineRange::new(modified, modified + 3),
+            ),
+            changes: Vec::new(),
+        };
+        // A move above the compared one (modified lines 20-22) appeared:
+        // it's now the second.
+        let diff = LinesDiff {
+            moves: vec![moved(1, 40), moved(5, 21)],
+            ..Default::default()
+        };
+        let compared = Some(LineRange::new(20, 23));
+        assert_eq!(DiffEditor::find_compared_move(&diff, compared), Some(1));
+        // Gone.
+        let diff = LinesDiff {
+            moves: vec![moved(1, 40)],
+            ..Default::default()
+        };
+        assert_eq!(DiffEditor::find_compared_move(&diff, compared), None);
+        assert_eq!(DiffEditor::find_compared_move(&diff, None), None);
+    }
+
+    #[test]
+    fn normalizing_keeps_partial_and_last_line_changes() {
+        // Not from column 1.
+        let (inner, diff) = normalized("a\nlet x\nb", "a\nlet y\nb");
+        assert_eq!(inner, ["[2,5 -> 2,6] [2,5 -> 2,6]"]);
+        assert!(allows_true_inline_diff_rendering(&diff.changes[0]));
+        // Not to the line end on both sides.
+        let (inner, _) = normalized("a\nfoo x\nb", "a\nbar x\nb");
+        assert_eq!(inner, ["[2,1 -> 2,4] [2,1 -> 2,4]"]);
+        // On the last line there is no next line to end on.
+        let (inner, _) = normalized("a\nfoo", "a\nbar");
+        assert_eq!(inner, ["[2,1 -> 2,4] [2,1 -> 2,4]"]);
+        // Both ranges empty at column 1 stay empty.
+        let mapping = RangeMapping::new(
+            crate::diff::Range::new(2, 1, 2, 1),
+            crate::diff::Range::new(2, 1, 2, 1),
+        );
+        let diff = LinesDiff {
+            changes: vec![DetailedLineRangeMapping::new(
+                LineRange::new(2, 3),
+                LineRange::new(2, 3),
+                vec![mapping],
+            )],
+            ..Default::default()
+        };
+        let diff = normalize_document_diff(diff, &["a", "", "b"], &["a", "", "b"]);
+        assert_eq!(diff.changes[0].inner_changes, [mapping]);
+    }
 
     fn alignments(original: &str, modified: &str) -> Vec<(String, String, f32, f32)> {
         let original: Vec<&str> = original.split('\n').collect();
