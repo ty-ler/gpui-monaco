@@ -44,6 +44,10 @@ pub const QUICK_INPUT_KEY_CONTEXT: &str = "QuickInput";
 const ROW_HEIGHT: f32 = 22.;
 /// The list's vertical scrollbar (Monaco's list `verticalScrollbarSize`).
 const SCROLLBAR_WIDTH: f32 = 10.;
+/// The input box's height, border included.
+const INPUT_HEIGHT: f32 = 24.;
+/// VS Code's `.quick-input-widget { border-radius: 6px }`.
+const CORNER_RADIUS: f32 = 6.;
 
 /// What choosing an item does.
 #[derive(Clone, Debug, PartialEq)]
@@ -133,6 +137,9 @@ pub(crate) struct QuickAccessState {
     /// Monaco's "Go to Match..." input box instead of the providers; the
     /// view isn't restored when it closes.
     go_to_match: bool,
+    /// Go to Line switched `line_numbers` from relative to absolute, to be
+    /// switched back when it ends.
+    relative_line_numbers: bool,
 }
 
 /// The quick input: an input box and a list (an overlay widget at the top
@@ -202,43 +209,15 @@ fn kind_group(kind: SymbolKind) -> &'static str {
     }
 }
 
-/// The visible column of UTF-16 `column` in `line` (tabs expand).
+/// Monaco `CursorColumns.visibleColumnFromColumn` (0-based).
 fn visible_column(line: &str, column: u32, tab_size: u32) -> u32 {
-    let mut visible = 0;
-    for (units, ch) in line.chars().scan(0u32, |units, ch| {
-        let at = *units;
-        *units += ch.len_utf16() as u32;
-        Some((at, ch))
-    }) {
-        if units >= column {
-            break;
-        }
-        visible = if ch == '\t' {
-            visible + tab_size - visible % tab_size
-        } else {
-            visible + 1
-        };
-    }
-    visible
+    crate::cursor::strings::visible_column_from_column(line, column, tab_size)
 }
 
-/// The UTF-16 column at visible column `visible` in `line`.
+/// Monaco `CursorColumns.columnFromVisibleColumn` (0-based): the nearest
+/// column, the earlier one on a tie.
 fn column_from_visible(line: &str, visible: u32, tab_size: u32) -> u32 {
-    let mut current = 0;
-    let mut column = 0;
-    for ch in line.chars() {
-        let next = if ch == '\t' {
-            current + tab_size - current % tab_size
-        } else {
-            current + 1
-        };
-        if next > visible {
-            break;
-        }
-        current = next;
-        column += ch.len_utf16() as u32;
-    }
-    column
+    crate::cursor::strings::column_from_visible_column(line, visible as i64, tab_size)
 }
 
 impl QuickInput {
@@ -254,6 +233,8 @@ impl QuickInput {
         let colors = theme.colors.clone();
         let input = cx.new(|cx| {
             let mut input = CodeEditor::new_widget_input(value, theme, window, cx);
+            // One line filling the box inside its border.
+            input.update_options_with(|o| o.line_height = Some(px(INPUT_HEIGHT - 2.)), cx);
             let end = PointUtf16::new(0, value.encode_utf16().count() as u32);
             input.set_selections(&[Selection::collapsed(end)], cx);
             input
@@ -746,8 +727,9 @@ fn slider_geometry(visible: Pixels, content: Pixels, scroll_top: Pixels) -> (Pix
 }
 
 impl Render for QuickInput {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors.clone();
+        let input_focused = self.input.read(cx).focus_handle.is_focused(window);
         // The editor's size as last laid out, so the list follows resizes.
         let (width, max_list_height) = self.size(cx);
         self.max_list_height = max_list_height;
@@ -773,6 +755,15 @@ impl Render for QuickInput {
         let scrollbar = self.render_scrollbar(cx);
         let drag = self.slider_drag_listener(cx);
         let list_top = self.list_top.clone();
+        // VS Code's `QuickInputController.applyStyles`: `widget.shadow`
+        // as `0 0 8px 2px`, none in high contrast.
+        let shadow = colors.widget_shadow.map(|color| gpui::BoxShadow {
+            color,
+            offset: gpui::point(px(0.), px(0.)),
+            blur_radius: px(8.),
+            spread_radius: px(2.),
+            inset: false,
+        });
         div()
             .key_context(QUICK_INPUT_KEY_CONTEXT)
             .w(width)
@@ -781,7 +772,8 @@ impl Render for QuickInput {
             .bg(colors.quick_input_background)
             .border_1()
             .border_color(colors.widget_border)
-            .shadow_md()
+            .rounded(px(CORNER_RADIUS))
+            .shadow(shadow.into_iter().collect())
             .text_size(px(13.))
             .text_color(colors.quick_input_foreground)
             .on_action(cx.listener(|this, _: &QuickInputNext, _, cx| this.move_active(1, cx)))
@@ -808,6 +800,7 @@ impl Render for QuickInput {
                 this.child(
                     div()
                         .pt(px(6.))
+                        .rounded_t(px(CORNER_RADIUS))
                         .flex()
                         .justify_center()
                         .text_size(px(11.))
@@ -818,14 +811,23 @@ impl Render for QuickInput {
             .child(
                 div().p(px(6.)).child(
                     div()
-                        .h(px(24.))
+                        .h(px(INPUT_HEIGHT))
                         .px(px(4.))
                         .flex()
                         .items_center()
                         .bg(colors.input_background)
+                        // VS Code's input box: `input.border`, and the
+                        // `focusBorder` outline while it has focus.
                         .border_1()
-                        .border_color(colors.input_option_active_border)
-                        .child(div().flex_1().min_w_0().child(self.input.clone()))
+                        .border_color(if input_focused {
+                            colors.focus_border
+                        } else {
+                            colors.input_border.unwrap_or_else(gpui::transparent_black)
+                        })
+                        // The editor element fills its parent, so the
+                        // parent needs a height: an auto one is 0 and the
+                        // text isn't painted.
+                        .child(div().flex_1().min_w_0().h_full().child(self.input.clone()))
                         // Monaco's "Toggle Zero-Based Offset" button, shown
                         // in `::` mode.
                         .when(self.value(cx).trim_start().starts_with("::"), |this| {
@@ -993,6 +995,7 @@ impl CodeEditor {
             action_keys: self.action_keybindings(window, cx),
             pick,
             go_to_match,
+            relative_line_numbers: false,
         });
         // The first rows come from here: the widget can't update this
         // editor while it's being updated.
@@ -1035,6 +1038,12 @@ impl CodeEditor {
             self.model().update(cx, |model, cx| {
                 model.delta_decorations(owner, &state.decorations, Vec::new(), cx)
             });
+        }
+        if state.relative_line_numbers {
+            self.update_options_with(
+                |options| options.line_numbers = crate::options::LineNumbers::Relative,
+                cx,
+            );
         }
         if !accepted && !state.go_to_match {
             self.restore_view_state(&state.view_state, cx);
@@ -1087,7 +1096,7 @@ impl CodeEditor {
                 // Monaco `editorOverviewRuler.rangeHighlightForeground`.
                 overview_ruler: Some(OverviewRulerDecoration::new(
                     self.theme.colors.range_highlight_overview,
-                    OverviewRulerLane::Right,
+                    OverviewRulerLane::Full,
                 )),
                 ..Default::default()
             },
@@ -1146,6 +1155,7 @@ impl CodeEditor {
                 .filter(|&ix| value.is_empty() && ix < rows.len());
             return (rows, active);
         }
+        self.goto_line_numbers(trimmed.starts_with(':'), cx);
         if let Some(rest) = trimmed.strip_prefix("::") {
             (vec![QuickRow::Item(self.goto_offset_item(rest, cx))], None)
         } else if let Some(rest) = trimmed.strip_prefix(':') {
@@ -1157,6 +1167,28 @@ impl CodeEditor {
         } else {
             (help_rows(), None)
         }
+    }
+
+    /// Monaco `AbstractGotoLineQuickAccessProvider.provideWithTextEditor`:
+    /// while Go to Line (`:` or `::`) is the provider, relative line
+    /// numbers show absolute ones; they're relative again when another
+    /// provider takes over or the input closes.
+    fn goto_line_numbers(&mut self, goto_line: bool, cx: &mut Context<Self>) {
+        let Some(switched) = self.quick.as_ref().map(|q| q.relative_line_numbers) else {
+            return;
+        };
+        let relative = self.options().line_numbers == crate::options::LineNumbers::Relative;
+        let to = if goto_line && !switched && relative {
+            crate::options::LineNumbers::On
+        } else if !goto_line && switched {
+            crate::options::LineNumbers::Relative
+        } else {
+            return;
+        };
+        if let Some(quick) = self.quick.as_mut() {
+            quick.relative_line_numbers = goto_line;
+        }
+        self.update_options_with(|options| options.line_numbers = to, cx);
     }
 
     /// The "Go to Match..." input's message: Monaco's placeholder, or its
@@ -1182,11 +1214,12 @@ impl CodeEditor {
         let rope = self.model().read(cx).buffer().rope().clone();
         let line_count = rope.max_point().row + 1;
         let tab_size = self.model().read(cx).options().tab_size;
+        // Monaco `parsePosition`: `line,col`, `line:col` or `line#col`,
+        // each read with `parseInt`, so `12.` is line 12.
         let mut parts = query.split([',', ':', '#']);
         let line_part = parts.next().unwrap_or("").trim();
         let column_part = parts.next();
-        let Ok(line) = line_part
-            .parse::<i64>()
+        let Some(line) = crate::find::parse_int(line_part)
             .map(|l| if l < 0 { line_count as i64 + 1 + l } else { l })
         else {
             return QuickItem::message(
@@ -1209,8 +1242,8 @@ impl CodeEditor {
                 ),
                 go(0),
             ),
-            Some(column) => match column.parse::<i64>() {
-                Ok(column) => {
+            Some(column) => match crate::find::parse_int(column) {
+                Some(column) => {
                     let column = if column < 0 {
                         max_visible as i64 + column
                     } else {
@@ -1222,7 +1255,7 @@ impl CodeEditor {
                         go(column_from_visible(&text, column - 1, tab_size)),
                     )
                 }
-                Err(_) => QuickItem::message(
+                None => QuickItem::message(
                     format!(
                         "Press 'Enter' to go to line {line} or enter a column number (from 1 to {max_visible})."
                     ),
@@ -1239,7 +1272,7 @@ impl CodeEditor {
         let length = rope.len_utf16().0 as i64;
         let tab_size = self.model().read(cx).options().tab_size;
         let zero_based = goto_offset_zero_based(cx);
-        let Ok(mut offset) = query.trim().parse::<i64>() else {
+        let Some(mut offset) = crate::find::parse_int(query) else {
             return QuickItem::message(
                 if zero_based {
                     format!(
@@ -1252,10 +1285,13 @@ impl CodeEditor {
                 QuickAction::None,
             );
         };
+        // Monaco: a negative offset counts back from the end, `-1` being
+        // the last character.
+        let reverse = offset < 0;
         if !zero_based {
             offset -= offset.signum();
         }
-        if offset < 0 {
+        if reverse {
             offset += length;
         }
         let offset =
@@ -1290,36 +1326,49 @@ impl CodeEditor {
         };
         let by_category = query.starts_with(':');
         let query = query.trim_start_matches(':').trim();
-        // The first word matches the name, the rest the container.
-        let mut words = query.split_whitespace();
-        let symbol_query = words.next().unwrap_or("");
-        let container_query: String = words.collect::<Vec<_>>().join(" ");
+        // With several words, the first matches the name and the rest the
+        // container, unless the whole query matches the name.
+        let pieces = query_pieces(query);
+        let (symbol_query, container_query) = match pieces.split_first() {
+            Some((first, rest)) if !rest.is_empty() => (*first, Some(rest.join(" "))),
+            _ => (query, None),
+        };
         // Monaco: sorted by start, then end descending.
         let mut flat: Vec<(Option<String>, DocumentSymbol)> = flatten_symbols(&symbols)
             .into_iter()
             .map(|(_, container, symbol)| (container, symbol.clone()))
             .collect();
         flat.sort_by_key(|(_, s)| (s.range.start, std::cmp::Reverse(s.range.end)));
-        let options = crate::suggest::FuzzyScoreOptions::MONACO_DEFAULT;
         let mut items: Vec<(i32, usize, SymbolKind, QuickItem)> = Vec::new();
         for (ix, (container, symbol)) in flat.iter().enumerate() {
             let mut score = 0;
             let mut highlights = Vec::new();
-            if !symbol_query.is_empty() {
-                let Some(found) = crate::suggest::fuzzy_score(symbol_query, &symbol.name, options)
+            if !query.is_empty() {
+                // Monaco: first the whole query against the name (so
+                // "change log" finds "Change Log"), which then skips the
+                // container.
+                let whole = container_query
+                    .is_some()
+                    .then(|| score_fuzzy2_single(&symbol.name, query))
+                    .flatten();
+                let skip_container = whole.is_some();
+                let Some((symbol_score, matches)) =
+                    whole.or_else(|| score_fuzzy2(&symbol.name, symbol_query))
                 else {
                     continue;
                 };
-                score = found.score;
-                highlights = utf16_matches_to_bytes(&symbol.name, &found.matches);
-                if !container_query.is_empty() {
-                    let Some(container_score) = container
+                score = symbol_score;
+                highlights = utf16_matches_to_bytes(&symbol.name, &matches);
+                if let Some(container_query) = container_query.as_deref()
+                    && !skip_container
+                {
+                    let Some((container_score, _)) = container
                         .as_deref()
-                        .and_then(|c| crate::suggest::fuzzy_score(&container_query, c, options))
+                        .and_then(|c| score_fuzzy2(c, container_query))
                     else {
                         continue;
                     };
-                    score += container_score.score;
+                    score += container_score;
                 }
             }
             items.push((
@@ -1472,6 +1521,16 @@ impl CodeEditor {
         ))
     }
 
+    /// The quick input's text box bounds as last laid out (for tests).
+    #[doc(hidden)]
+    pub fn quick_access_input_bounds_for_tests(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<gpui::Bounds<Pixels>> {
+        let input = self.quick_access_input_for_tests(cx)?;
+        input.read(cx).layout.as_ref().map(|layout| layout.bounds)
+    }
+
     /// Types `text` into the quick access input (for tests).
     #[doc(hidden)]
     pub fn quick_access_input_for_tests(&self, cx: &gpui::App) -> Option<Entity<CodeEditor>> {
@@ -1572,6 +1631,74 @@ fn help_rows() -> Vec<QuickRow> {
         })
     })
     .collect()
+}
+
+/// Monaco `normalizeQuery` (`fuzzyScorer.ts`): the query without
+/// wildcards, ellipses, whitespace and quotes, or a trailing `#` after
+/// something.
+fn normalize_query(query: &str) -> String {
+    let mut normalized: String = query
+        .chars()
+        .filter(|&c| !matches!(c, '*' | '\u{2026}' | '"') && !c.is_whitespace())
+        .collect();
+    if normalized.len() > 1 && normalized.ends_with('#') {
+        normalized.pop();
+    }
+    normalized
+}
+
+/// Monaco `prepareQuery(query).values`: the space-separated pieces that
+/// keep something once normalized, when there's more than one piece.
+fn query_pieces(query: &str) -> Vec<&str> {
+    if !query.contains(' ') {
+        return Vec::new();
+    }
+    query
+        .split(' ')
+        .filter(|piece| !normalize_query(piece).is_empty())
+        .collect()
+}
+
+/// Monaco `doScoreFuzzy2Single`: the normalized query fuzzily against
+/// `target`, as a score and UTF-16 match ranges.
+fn score_fuzzy2_single(target: &str, query: &str) -> Option<(i32, Vec<Range<usize>>)> {
+    let options = crate::suggest::FuzzyScoreOptions {
+        first_match_can_be_weak: true,
+        boost_full_match: true,
+    };
+    crate::suggest::fuzzy_score(&normalize_query(query), target, options)
+        .map(|found| (found.score, found.matches))
+}
+
+/// Monaco `scoreFuzzy2` (the symbol scorer): with several pieces, each
+/// must match and the scores add up.
+fn score_fuzzy2(target: &str, query: &str) -> Option<(i32, Vec<Range<usize>>)> {
+    let pieces = query_pieces(query);
+    if pieces.len() <= 1 {
+        return score_fuzzy2_single(target, query);
+    }
+    let mut total = 0;
+    let mut matches = Vec::new();
+    for piece in pieces {
+        let (score, piece_matches) = score_fuzzy2_single(target, piece)?;
+        total += score;
+        matches.extend(piece_matches);
+    }
+    Some((total, normalize_matches(matches)))
+}
+
+/// Monaco `normalizeMatches`: sorted, with overlapping and touching
+/// ranges merged.
+fn normalize_matches(mut matches: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    matches.sort_by_key(|m| m.start);
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(matches.len());
+    for m in matches {
+        match merged.last_mut() {
+            Some(last) if m.start <= last.end => last.end = last.end.max(m.end),
+            _ => merged.push(m),
+        }
+    }
+    merged
 }
 
 /// UTF-16 match ranges (from the fuzzy scorer) as byte ranges.
@@ -1858,6 +1985,26 @@ mod tests {
         assert_eq!(slider_geometry(px(100.), px(4000.), px(0.)).1, px(20.));
     }
 
+    /// VS Code's `fuzzyScorer.ts` query preparation and `scoreFuzzy2`.
+    #[test]
+    fn symbol_queries_like_the_fuzzy_scorer() {
+        assert_eq!(normalize_query(" a*b\u{2026}\"c# "), "abc");
+        assert_eq!(normalize_query("#"), "#");
+        assert_eq!(query_pieces("change  log"), vec!["change", "log"]);
+        assert!(query_pieces("change").is_empty());
+        // The whole query, spaces removed, against one name.
+        assert!(score_fuzzy2_single("Change Log", "change log").is_some());
+        // Each piece must match.
+        assert!(score_fuzzy2("Change Log", "log change").is_some());
+        assert!(score_fuzzy2("Change", "change log").is_none());
+        // Monaco scores symbols with `firstMatchCanBeWeak`.
+        assert!(score_fuzzy2("Point", "oint").is_some());
+        assert_eq!(
+            normalize_matches(vec![5..6, 0..2, 2..3, 1..2]),
+            vec![0..3, 5..6]
+        );
+    }
+
     #[test]
     fn visible_columns() {
         assert_eq!(visible_column("\tab", 1, 4), 4);
@@ -1865,6 +2012,12 @@ mod tests {
         assert_eq!(column_from_visible("\tab", 4, 4), 1);
         assert_eq!(column_from_visible("\tab", 5, 4), 2);
         assert_eq!(column_from_visible("ab", 1, 4), 1);
+        // Monaco rounds to the nearest column: three columns into a tab
+        // is after it, two before it.
+        assert_eq!(column_from_visible("\tab", 3, 4), 1);
+        assert_eq!(column_from_visible("\tab", 2, 4), 0);
+        // Full-width characters are two columns wide.
+        assert_eq!(visible_column("\u{4e00}a", 1, 4), 2);
     }
 }
 

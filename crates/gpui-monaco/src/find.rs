@@ -2388,7 +2388,7 @@ impl CodeEditor {
 
 /// JavaScript's `parseInt(value)` for base 10: an optional sign and the
 /// digits that follow, after leading whitespace; `None` without digits.
-fn parse_int(value: &str) -> Option<i64> {
+pub(crate) fn parse_int(value: &str) -> Option<i64> {
     let value = value.trim_start();
     let (sign, rest) = match value.strip_prefix('-') {
         Some(rest) => (-1, rest),

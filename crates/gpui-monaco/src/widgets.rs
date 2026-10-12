@@ -498,7 +498,8 @@ pub enum OverlayPosition {
     /// Bottom right: as `TopRight`, and twice the horizontal scrollbar's
     /// height above the editor's bottom (`BOTTOM_RIGHT_CORNER`).
     BottomRight,
-    /// Top, centered over the text area.
+    /// Top, centered on the editor (its gutter and minimap included), as
+    /// Monaco's quick input.
     TopCenter,
     /// Offset from the editor's top-left corner (Monaco
     /// `IOverlayWidgetPositionCoordinates`).
@@ -545,7 +546,7 @@ impl OverlayWidget {
 
 /// Monaco `OverlayWidgets._renderWidget`'s corners, laid out in stacking
 /// order (Monaco sorts by `stackOrdinal`, missing ones as 0): each widget's
-/// origin within `editor`, the text area being `text`. `sizes[i]` is
+/// origin within `editor`. `sizes[i]` is
 /// widget `i`'s measured size. Right-corner widgets keep `right_inset`
 /// (twice the vertical scrollbar width plus the minimap's) from the
 /// editor's right edge; bottom ones keep `bottom_inset` (twice the
@@ -554,7 +555,6 @@ pub(crate) fn place_overlay_widgets(
     widgets: &[(OverlayPosition, Option<i32>)],
     sizes: &[Size<Pixels>],
     editor: gpui::Bounds<Pixels>,
-    text: gpui::Bounds<Pixels>,
     right_inset: Pixels,
     bottom_inset: Pixels,
 ) -> Vec<Point<Pixels>> {
@@ -590,8 +590,10 @@ pub(crate) fn place_overlay_widgets(
                 if stacked {
                     stack[2] += size.height;
                 }
+                // Monaco's quick input centers itself on the whole
+                // editor, gutter and minimap included.
                 gpui::point(
-                    text.left() + (text.size.width - size.width) / 2.,
+                    editor.left() + (editor.size.width - size.width) / 2.,
                     editor.top() + top,
                 )
             }
@@ -935,14 +937,12 @@ mod tests {
     fn overlay_corners_and_stacking() {
         use gpui::{Bounds, point, size};
         let editor = Bounds::new(point(px(100.), px(50.)), size(px(600.), px(400.)));
-        let text = Bounds::new(point(px(160.), px(50.)), size(px(400.), px(400.)));
         let w = size(px(80.), px(20.));
         let place = |widgets: &[(OverlayPosition, Option<i32>)]| {
             place_overlay_widgets(
                 widgets,
                 &vec![w; widgets.len()],
                 editor,
-                text,
                 px(28.) + px(40.),
                 px(24.),
             )
@@ -969,7 +969,7 @@ mod tests {
         );
         assert_eq!(
             place(&[(TopCenter, Some(0)), (TopCenter, Some(0))]),
-            vec![point(px(320.), px(50.)), point(px(320.), px(70.))]
+            vec![point(px(360.), px(50.)), point(px(360.), px(70.))]
         );
         // Custom and manual positions are relative to the editor.
         assert_eq!(

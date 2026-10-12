@@ -209,3 +209,58 @@ fn dragging_a_strip_keeps_grabbing_everywhere(cx: &mut TestAppContext) {
         assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));
     }
 }
+
+/// The standalone picker's bounds and the cursor line's top and bottom,
+/// with the picker shown at row 20.
+fn standalone_placement(
+    above: bool,
+    cx: &mut TestAppContext,
+) -> (gpui::Bounds<gpui::Pixels>, gpui::Pixels, gpui::Pixels) {
+    let text = format!("{}a {{ color: ; }}\n{}", "\n".repeat(20), "\n".repeat(20));
+    let (editor, cx) = setup(&text, cx);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.hover.above = above, cx)
+    });
+    put_cursor(&editor, 20, 11, cx);
+    cx.dispatch_action(ShowOrFocusStandaloneColorPicker);
+    settle(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_standalone_color_picker_visible()));
+    let line = editor
+        .read_with(cx, |e, _| {
+            e.scrolled_visible_position(PointUtf16::new(20, 11))
+        })
+        .unwrap();
+    let (_, line_height) = editor.read_with(cx, |e, _| e.layout_for_tests()).unwrap();
+    let (_, widgets) = editor.read_with(cx, |e, _| e.widget_bounds_for_tests());
+    let picker = widgets.last().unwrap().0;
+    (picker, line.y, line.y + line_height)
+}
+
+/// Monaco `StandaloneColorPickerWidget.getPosition`: below first when
+/// `hover.above` is off, above first otherwise.
+#[gpui::test]
+fn standalone_picker_follows_hover_above(cx: &mut TestAppContext) {
+    let (picker, _, bottom) = standalone_placement(false, cx);
+    assert!(picker.top() >= bottom, "{picker:?} {bottom:?}");
+}
+
+#[gpui::test]
+fn standalone_picker_shows_above_by_default(cx: &mut TestAppContext) {
+    let (picker, top, _) = standalone_placement(true, cx);
+    assert!(picker.bottom() <= top, "{picker:?} {top:?}");
+}
+
+/// Monaco sizes the standalone header from the body: the original color
+/// is the body less the saturation box, the close button and 8px; the
+/// hover's keeps its 74px.
+#[gpui::test]
+fn standalone_header_boxes_follow_the_body(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("a { color: ; }", cx);
+    cx.dispatch_action(ShowOrFocusStandaloneColorPicker);
+    settle(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_standalone_color_picker_visible()));
+    let original = cx
+        .debug_bounds("color-picker-original")
+        .expect("the original color");
+    assert_eq!(original.size.width, gpui::px(52.));
+}

@@ -99,7 +99,7 @@ Monaco's render hooks are fields too:
 
 ## Overlay widgets
 
-An overlay widget (Monaco `IOverlayWidget`) is pinned to the editor's viewport and doesn't scroll. Monaco's find widget is one. Positions are `TopRight`, `BottomRight`, `TopCenter`, `Custom(point)` or `Manual` (Monaco's `null`: the view is given the editor's area and places itself).
+An overlay widget (Monaco `IOverlayWidget`) is pinned to the editor's viewport and doesn't scroll. Monaco's find widget is one. Positions are `TopRight`, `BottomRight`, `TopCenter` (centered on the whole editor, like the quick input), `Custom(point)` or `Manual` (Monaco's `null`: the view is given the editor's area and places itself).
 
 ```rust,ignore
 use gpui_monaco::{OverlayPosition, OverlayWidget};
