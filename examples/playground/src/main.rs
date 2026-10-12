@@ -743,6 +743,14 @@ fn main() {
                             let mut multi =
                                 gpui_monaco::MultiDiffEditor::new(documents, window, cx);
                             multi.set_variant(variant, cx);
+                            // `PLAYGROUND_MULTI_DIFF_SCROLL=<px>` starts
+                            // scrolled, e.g. to see a stuck header.
+                            if let Some(top) = std::env::var("PLAYGROUND_MULTI_DIFF_SCROLL")
+                                .ok()
+                                .and_then(|top| top.parse::<f32>().ok())
+                            {
+                                multi.set_scroll_top(px(top), cx);
+                            }
                             multi
                         })
                     },

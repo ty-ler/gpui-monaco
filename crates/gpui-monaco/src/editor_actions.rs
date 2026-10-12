@@ -884,8 +884,10 @@ fn action_key_bindings(descriptor: &EditorActionDescriptor, context: &str) -> Ve
 /// [`add_keybinding_rules`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeybindingRule {
-    /// The keystrokes, in GPUI syntax (e.g. `"cmd-k cmd-m"`), where Monaco
-    /// takes a `KeyMod | KeyCode` number.
+    /// The keystrokes, in GPUI syntax, where Monaco takes a
+    /// `KeyMod | KeyCode` number: `secondary-` is `KeyMod.CtrlCmd` (Cmd on
+    /// macOS, Ctrl elsewhere), `ctrl-` is `KeyMod.WinCtrl`, and a chord is
+    /// space-separated keystrokes (e.g. `"secondary-k secondary-m"`).
     pub keystrokes: SharedString,
     /// The command: an editor action id (built-in or added), a Monaco
     /// command such as `"cursorDown"`, a command from [`crate::add_command`]

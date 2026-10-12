@@ -55,6 +55,14 @@ struct TokenizerFactories {
 
 impl Global for TokenizerFactories {}
 
+/// The tokenizer set at runtime per language and the language's own
+/// highlighting under it (what it had before any runtime tokenizer), which
+/// disposing the tokenizer restores.
+#[derive(Default)]
+struct RuntimeHighlighters(HashMap<String, (HighlighterFactory, Option<HighlighterFactory>)>);
+
+impl Global for RuntimeHighlighters {}
+
 /// Layers `config` over the configuration of the registered language
 /// `language_id` at runtime (Monaco `languages.setLanguageConfiguration`).
 /// Each field `config` sets replaces the language's, and fields it leaves
@@ -130,8 +138,11 @@ pub(crate) fn languages_changed(cx: &mut App) {
 ///
 /// As in Monaco, the language needn't be registered yet: the grammar
 /// applies once it is. Fails, as Monaco throws, for an invalid grammar.
-/// Disposing the result restores the previous highlighting, unless another
-/// tokenizer replaced this one since.
+/// Disposing the result restores the language's own highlighting (its
+/// [`Language::with_highlighter`](syntax::Language::with_highlighter) or
+/// tree-sitter grammar, if any), not a tokenizer this one replaced, as
+/// Monaco doesn't bring that back; it does nothing once another tokenizer
+/// replaced this one.
 ///
 /// [`colorize`]: crate::colorize::colorize
 /// [`tokenize`]: crate::colorize::tokenize
@@ -158,8 +169,7 @@ pub fn set_monarch_tokens_provider(
 /// Fails, as Monaco throws, for an unknown language. For a provider
 /// that's only available later (Monaco's `Thenable` providers), use
 /// [`register_tokens_provider_factory`]. Disposing the result restores the
-/// previous highlighting, unless another tokenizer replaced this one
-/// since.
+/// language's own highlighting, as for [`set_monarch_tokens_provider`].
 pub fn set_tokens_provider<P: TokensProvider>(
     cx: &mut App,
     language_id: &str,
@@ -218,8 +228,8 @@ impl LanguageTokenizer {
 /// its task's result is dropped and the tokenizer it installed removed).
 ///
 /// Disposing the result drops the factory if it wasn't called yet, and
-/// otherwise restores the previous highlighting, unless another tokenizer
-/// replaced this one since.
+/// otherwise restores the language's own highlighting, as for
+/// [`set_monarch_tokens_provider`].
 pub fn register_tokens_provider_factory(
     cx: &mut App,
     language_id: impl Into<SharedString>,
@@ -309,11 +319,32 @@ fn current_highlighter(
 }
 
 /// Sets the highlighter of `language_id` (registered or not yet), re-tokenizing
-/// affected models; disposing restores the previous one if this one is still
-/// set (Monaco's tokenization registry).
+/// affected models. Disposing it, while it's still set, restores the
+/// language's own highlighting (its [`Language::with_highlighter`] or
+/// tree-sitter grammar), not a tokenizer it replaced: Monaco's
+/// `TokenizationRegistry.register` doesn't bring back the support it
+/// replaced either.
+///
+/// [`Language::with_highlighter`]: syntax::Language::with_highlighter
 fn install_highlighter(cx: &mut App, language_id: &str, factory: HighlighterFactory) -> Disposable {
     let registry = language_registry(cx);
-    let previous = current_highlighter(&registry, language_id);
+    let current = current_highlighter(&registry, language_id);
+    let runtime = cx.default_global::<RuntimeHighlighters>();
+    // Under another runtime tokenizer still set, the language's own
+    // highlighting is the one that tokenizer replaced.
+    let own = match runtime.0.get(language_id) {
+        Some((installed, own))
+            if current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, installed)) =>
+        {
+            own.clone()
+        }
+        _ => current,
+    };
+    runtime
+        .0
+        .insert(language_id.to_string(), (factory.clone(), own.clone()));
     registry.set_highlighter(language_id, Some(factory.clone()));
     refresh_highlighting(cx, language_id);
     let language_id = language_id.to_string();
@@ -322,7 +353,10 @@ fn install_highlighter(cx: &mut App, language_id: &str, factory: HighlighterFact
         let ours = current_highlighter(&registry, &language_id)
             .is_some_and(|current| Arc::ptr_eq(&current, &factory));
         if ours {
-            registry.set_highlighter(&language_id, previous);
+            cx.default_global::<RuntimeHighlighters>()
+                .0
+                .remove(&language_id);
+            registry.set_highlighter(&language_id, own);
             refresh_highlighting(cx, &language_id);
         }
     })

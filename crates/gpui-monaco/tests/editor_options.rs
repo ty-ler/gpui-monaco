@@ -104,6 +104,21 @@ fn interval_line_numbers(cx: &mut TestAppContext) {
     assert_eq!(rows, vec![4, 9, 19, 24]);
 }
 
+/// Monaco `_getLineRenderLineNumber` numbers the model line equal to the
+/// *view* line count, so with lines 2-10 hidden (16 view lines) it numbers
+/// line 16 and leaves line 25 blank.
+#[gpui::test]
+fn interval_line_numbers_use_the_view_line_count(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&lines(25), |o| o.line_numbers = LineNumbers::Interval, cx);
+    editor.update(cx, |e, cx| {
+        #[allow(clippy::single_range_in_vec_init)]
+        e.set_hidden_areas(vec![1..10], cx);
+        e.set_selections(&[Selection::collapsed(p(0, 0))], cx)
+    });
+    let rows: Vec<u32> = labels(&editor, cx).into_iter().map(|(r, _)| r).collect();
+    assert_eq!(rows, vec![0, 15, 19]);
+}
+
 #[gpui::test]
 fn block_outline_and_underline_thin_cursors(cx: &mut TestAppContext) {
     let (editor, cx) = setup("abc", |o| o.cursor_style = CursorStyle::Block, cx);

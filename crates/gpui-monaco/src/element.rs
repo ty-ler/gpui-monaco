@@ -5821,12 +5821,16 @@ fn prepaint_editor(
             {
                 continue;
             }
-            // Monaco `_getLineRenderLineNumber`.
+            // Monaco `_getLineRenderLineNumber`. With `interval`, the
+            // always-numbered "final" line is the model line whose number
+            // equals the *view* line count (`viewModel.getLineCount()`), a
+            // Monaco quirk kept on purpose: with folded or wrapped lines it
+            // isn't the last model line.
             let label = match &options.line_numbers {
                 LineNumbers::Custom(render) => render.render(row + 1).to_string(),
                 LineNumbers::Relative if !is_active => primary.row.abs_diff(row).to_string(),
                 LineNumbers::Interval
-                    if !is_active && (row + 1) % 10 != 0 && row + 1 != snapshot.line_count() =>
+                    if !is_active && (row + 1) % 10 != 0 && row + 1 != view_line_count =>
                 {
                     continue;
                 }

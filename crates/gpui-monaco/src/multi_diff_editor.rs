@@ -719,6 +719,8 @@ pub struct MultiDiffEditor {
     /// The scroll position last drawn, to reveal the scrollbars when it
     /// changes.
     drawn_scroll: Point<Pixels>,
+    /// The files whose header was last drawn with a shadow, for tests.
+    shadowed_headers: Vec<usize>,
     scrollbars: [Option<ScrollbarState>; 2],
     scrollbar_drag: Option<ScrollbarDrag>,
     scrollbar_fade: ScrollbarFade,
@@ -796,6 +798,7 @@ impl MultiDiffEditor {
             smooth_scroll: None,
             anchoring: ScrollAnchoring::default(),
             drawn_scroll: Point::default(),
+            shadowed_headers: Vec::new(),
             scrollbars: [None, None],
             scrollbar_drag: None,
             scrollbar_fade: ScrollbarFade::default(),
@@ -2279,6 +2282,13 @@ impl MultiDiffEditor {
         }
     }
 
+    /// The files whose header was last drawn floating with a shadow, for
+    /// tests.
+    #[doc(hidden)]
+    pub fn shadowed_headers_for_tests(&self) -> Vec<usize> {
+        self.shadowed_headers.clone()
+    }
+
     /// The vertical scroll position last drawn and the anchoring's room
     /// above and below the files, for tests.
     #[doc(hidden)]
@@ -2325,8 +2335,9 @@ impl MultiDiffEditor {
             // `.multiDiffEditor-standard`: an 8px margin above the content,
             // a border above it (`focusBorder` when active) and one below
             // (a header pushed up by the next file, or a collapsed file's,
-            // has none). Monaco's `.header-content.shadow` once the file is
-            // scrolled under its header.
+            // has none). No shadow when the file is scrolled under it:
+            // Monaco toggles `shadow` on `.header`, but its rule targets
+            // `.header-content.shadow`, so only the cards variant's applies.
             let border = if state.active {
                 colors.focus_border
             } else {
@@ -2369,9 +2380,6 @@ impl MultiDiffEditor {
                                     .h(px(1.))
                                     .bg(bottom),
                             )
-                        })
-                        .when(stuck, |header| {
-                            header.shadow(header_shadow(colors.scrollbar_shadow))
                         }),
                 )
                 .into_any_element();
@@ -2463,7 +2471,7 @@ impl MultiDiffEditor {
             colors.multi_diff_card_border
         };
         let border_color = border.unwrap_or_else(gpui::transparent_black);
-        let floating = stuck && !collapsed;
+        let floating = header_floats(&config, stuck, collapsed);
         let radius = px(CORNER_RADIUS_MEDIUM);
         let content = content
             .mx(px(CARD_PADDING_X))
@@ -2903,6 +2911,14 @@ fn tab_moves_focus(event: &KeyDownEvent, window: &mut Window, cx: &mut App) {
     }
 }
 
+/// Whether a header floats over its file with a shadow: Monaco's
+/// `.header.shadow[aria-expanded='true'] .header-content`, which only the
+/// cards variant has (the standard variant's `.header-content.shadow`
+/// never matches).
+fn header_floats(config: &VariantConfiguration, stuck: bool, collapsed: bool) -> bool {
+    config.card && stuck && !collapsed
+}
+
 /// `box-shadow: var(--vscode-scrollbar-shadow) 0 6px 6px -6px`, under a
 /// header with its file scrolled under it.
 fn header_shadow(color: Hsla) -> Vec<BoxShadow> {
@@ -3202,6 +3218,7 @@ impl Render for MultiDiffEditor {
 
         let colors = list_colors(self, cx);
         let mut children = Vec::new();
+        self.shadowed_headers.clear();
         for (position, &(index, item_top)) in visible.iter().enumerate() {
             let height = heights[index];
             let collapsed = self.items[index].collapsed;
@@ -3236,10 +3253,14 @@ impl Render for MultiDiffEditor {
                 let next = self.entry_state(next, list_focused, window);
                 next.header_highlighted || next.selected
             });
+            let stuck = visible_start > item_top;
+            if header_floats(&config, stuck, collapsed) {
+                self.shadowed_headers.push(index);
+            }
             let header = self.render_header(
                 index,
                 header_top,
-                visible_start > item_top,
+                stuck,
                 delta >= height - config.header_height,
                 state,
                 &colors,

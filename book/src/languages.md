@@ -152,7 +152,8 @@ let grammar = json!({
         ],
     },
 });
-// Returns a `Disposable`; disposing it restores the previous highlighting.
+// Returns a `Disposable`; disposing it restores the language's own
+// highlighting (not a tokenizer this one replaced).
 let provider = gpui_monaco::set_monarch_tokens_provider(cx, "mylang", &grammar)?;
 ```
 

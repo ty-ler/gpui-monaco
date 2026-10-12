@@ -808,6 +808,38 @@ fn minus_rules_remove_default_bindings(cx: &mut TestAppContext) {
     assert_eq!(bound(cx), 1);
 }
 
+/// Insert toggling overtype mode is a VS Code workbench binding standalone
+/// Monaco doesn't have; one `-editor.action.toggleOvertypeInsertMode` rule
+/// takes it away, and the command still runs.
+#[gpui::test]
+fn the_insert_overtype_binding_can_be_removed(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("abc", cx);
+    let overtype = |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.is_overtype());
+    cx.simulate_keystrokes("insert");
+    assert!(overtype(cx));
+    cx.simulate_keystrokes("insert");
+    assert!(!overtype(cx));
+
+    let removal = cx.update(|_, cx| {
+        gpui_monaco::add_keybinding_rule(
+            cx,
+            KeybindingRule::remove("insert", "editor.action.toggleOvertypeInsertMode"),
+        )
+        .unwrap()
+    });
+    cx.simulate_keystrokes("insert");
+    assert!(!overtype(cx));
+    editor.update_in(cx, |e, window, cx| {
+        e.trigger("editor.action.toggleOvertypeInsertMode", window, cx)
+            .unwrap()
+    });
+    assert!(overtype(cx));
+
+    cx.update(|_, cx| removal.dispose(cx));
+    cx.simulate_keystrokes("insert");
+    assert!(!overtype(cx));
+}
+
 // ----- colorizeModelLine ----------------------------------------------------------
 
 #[gpui::test]
