@@ -1943,6 +1943,10 @@ impl IntoElement for EditorElement {
 /// text top), and whether it's a tab.
 type WhitespaceMarks = Vec<(gpui::Point<Pixels>, bool)>;
 
+/// A decoration box to paint: its bounds, background, and border color and
+/// width.
+type DecorationQuad = (Bounds<Pixels>, Option<Hsla>, Option<(Hsla, Pixels)>);
+
 /// One cursor to paint (Monaco `ViewCursorRenderData`).
 struct CursorPaint {
     /// Its box, after `cursorSmoothCaretAnimation`.
@@ -1984,7 +1988,7 @@ pub struct PrepaintState {
     /// The expanded regions' folding controls' opacity (collapsed ones always
     /// show).
     fold_controls_opacity: f32,
-    decoration_quads: Vec<(Bounds<Pixels>, Option<Hsla>, Option<Hsla>)>,
+    decoration_quads: Vec<DecorationQuad>,
     /// Block decorations' boxes, colors and border widths.
     block_borders: Vec<(Bounds<Pixels>, Hsla, Pixels)>,
     decoration_underlines: Vec<(gpui::Point<Pixels>, Pixels, UnderlineStyle)>,
@@ -4009,7 +4013,7 @@ fn prepaint_editor(
     let numbers_right = bounds.left() + glyph_width + numbers_width;
 
     // Decoration geometry.
-    let mut decoration_quads: Vec<(Bounds<Pixels>, Option<Hsla>, Option<Hsla>)> = Vec::new();
+    let mut decoration_quads: Vec<DecorationQuad> = Vec::new();
     // Monaco `BlockDecorations`: from above the first line's view zones to
     // after the last line's.
     let mut block_borders: Vec<(Bounds<Pixels>, Hsla, Pixels)> = Vec::new();
@@ -4097,7 +4101,7 @@ fn prepaint_editor(
                     .severity
                     .and_then(|severity| colors.marker_background(severity))
             });
-            if background.is_some() || options.border.is_some() {
+            if background.is_some() || options.border.is_some() || options.outline.is_some() {
                 let range = if options.is_whole_line {
                     Some((px(0.) - layout.scroll_left, text_width + layout.scroll_left))
                 } else {
@@ -4121,7 +4125,14 @@ fn prepaint_editor(
                         point(origin_x + from, top),
                         size((to - from).max(px(2.)), height),
                     );
-                    decoration_quads.push((bounds, background, options.border));
+                    if background.is_some() || options.border.is_some() {
+                        let border = options.border.map(|color| (color, px(1.)));
+                        decoration_quads.push((bounds, background, border));
+                    }
+                    // CSS `outline`: outside the box.
+                    if let Some((color, width)) = options.outline {
+                        decoration_quads.push((bounds.dilate(width), None, Some((color, width))));
+                    }
                 }
             }
             // Monaco's `border-left` on an inline decoration: at its start.
@@ -5504,8 +5515,8 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                         *bounds,
                         Corners::default(),
                         background.unwrap_or(gpui::transparent_black()),
-                        Edges::all(if border.is_some() { px(1.) } else { px(0.) }),
-                        border.unwrap_or(gpui::transparent_black()),
+                        Edges::all(border.map_or(px(0.), |(_, width)| width)),
+                        border.map_or(gpui::transparent_black(), |(color, _)| color),
                         BorderStyle::Solid,
                     ));
                 }

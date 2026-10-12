@@ -331,6 +331,10 @@ pub struct DecorationOptions {
     pub background: Option<Hsla>,
     /// 1px border around the range on each line.
     pub border: Option<Hsla>,
+    /// A border of this color and width drawn just outside the range on
+    /// each line, over the text around it (CSS `outline`, as on Monaco's
+    /// in-place replace `valueSetReplacement`).
+    pub outline: Option<(Hsla, Pixels)>,
     /// An underline under the range (e.g. diagnostic squiggles).
     pub underline: Option<DecorationUnderline>,
     /// Text color and font style for the range (Monaco `inlineClassName`).

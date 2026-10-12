@@ -142,6 +142,24 @@ fn sort_descending_should_sort_multiple_selections() {
     editor.assert_selections(&[sel(1, 1, 3, 5), sel(5, 1, 7, 5)]);
 }
 
+/// Monaco sorts with the default `Intl.Collator`: punctuation, then
+/// symbols, digits and letters, with case and accents only breaking ties.
+#[test]
+fn sort_follows_the_default_collator() {
+    let mut editor = TestEditor::lines(&["b", "_a", "1", "}", "é", "f", "e", "+", "B", "a"]);
+    editor.set_selection(sel(1, 1, 10, 2));
+    sort(&mut editor, false);
+    assert_lines(
+        &editor,
+        &["_a", "}", "+", "1", "a", "b", "B", "e", "é", "f"],
+    );
+    sort(&mut editor, true);
+    assert_lines(
+        &editor,
+        &["f", "é", "e", "B", "b", "a", "1", "+", "}", "_a"],
+    );
+}
+
 // ---------------------------------------------------------------------------
 // sortLinesCommand.test.ts
 
@@ -1250,4 +1268,52 @@ fn trim_trailing_whitespace_command() {
         ],
         &[(1, 10, 1, 11), (3, 1, 3, 4), (4, 15, 4, 17), (5, 15, 5, 20)],
     );
+}
+
+/// Monaco `trimTrailingWhitespaceCommand.test.ts`: skips strings and regex
+/// if configured. Its tokenizer's tokens, as [`LanguageContext`] token
+/// types (Monaco's `trimInRegexesAndStrings: false`, as standalone runs).
+///
+/// [`LanguageContext`]: crate::cursor::LanguageContext
+#[test]
+fn trim_trailing_whitespace_skips_strings_and_regex() {
+    use crate::cursor::{LanguageContext, Position, StandardTokenType};
+    let editor = TestEditor::lines(&["const a = `  ", "  a string  ", "`;  "]);
+    // The token of the character before `p` (0-based rows and columns).
+    let token_type_at = |p: Position| {
+        let offset = p.column.saturating_sub(1);
+        let string = match p.row {
+            // `0, otherMetadata, 10, stringMetadata`
+            0 => offset >= 10,
+            // `0, stringMetadata`
+            1 => true,
+            // `0, stringMetadata, 1, otherMetadata`
+            _ => offset < 1,
+        };
+        if string {
+            StandardTokenType::String
+        } else {
+            StandardTokenType::Other
+        }
+    };
+    let config = syntax::LanguageConfiguration::default();
+    let language = LanguageContext::new(&config, &token_type_at);
+    let op = crate::cursor::trim_trailing_whitespace_with_language(
+        &editor.config,
+        &editor.buffer,
+        &editor.cursors,
+        Some(&language),
+    );
+    let actual: Vec<_> = op
+        .edits
+        .iter()
+        .map(|(range, text)| {
+            (
+                range.start.to_monaco(),
+                range.end.to_monaco(),
+                text.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(actual, vec![((3, 3), (3, 5), "")]);
 }

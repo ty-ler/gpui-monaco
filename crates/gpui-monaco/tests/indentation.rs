@@ -291,3 +291,56 @@ fn choosing_the_indent_size(cx: &mut TestAppContext) {
         assert_eq!((o.insert_spaces, o.tab_size, o.indent_size), (false, 8, 2));
     });
 }
+
+/// Monaco's tab size pickers start on the current size (`activeItem`), so
+/// Enter keeps it.
+#[gpui::test]
+fn the_tab_size_pickers_start_on_the_current_size(cx: &mut TestAppContext) {
+    use gpui_monaco::actions::{ChangeTabDisplaySize, IndentUsingSpaces, IndentUsingTabs};
+    let (editor, cx) = editor("a\n\tb\n", cx);
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    let set_tab_size = |size: u32, cx: &mut VisualTestContext| {
+        model.update(cx, |m, cx| {
+            let mut options = m.options().clone();
+            options.tab_size = size;
+            m.update_options(options, cx);
+        })
+    };
+    let active_rows = |cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, cx| {
+            e.quick_access_rows_for_tests(cx)
+                .into_iter()
+                .filter(|row| row.starts_with("> "))
+                .collect::<Vec<_>>()
+        })
+    };
+    set_tab_size(3, cx);
+    cx.dispatch_action(IndentUsingSpaces);
+    cx.run_until_parked();
+    assert_eq!(active_rows(cx), vec!["> 3  Current Tab Size"]);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    model.read_with(cx, |m, _| {
+        let o = m.options();
+        assert_eq!((o.insert_spaces, o.tab_size, o.indent_size), (true, 3, 3));
+    });
+    let actions: [Box<dyn gpui::Action>; 2] =
+        [Box::new(IndentUsingTabs), Box::new(ChangeTabDisplaySize)];
+    for action in actions {
+        cx.update(|window, cx| {
+            window.focus(&editor.read(cx).focus_handle(cx), cx);
+            window.dispatch_action(action, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(active_rows(cx), vec!["> 3  Current Tab Size"]);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        model.read_with(cx, |m, _| assert_eq!(m.options().tab_size, 3));
+    }
+    // A size above 8 starts on 8, as in Monaco.
+    set_tab_size(12, cx);
+    cx.update(|window, cx| window.focus(&editor.read(cx).focus_handle(cx), cx));
+    cx.dispatch_action(ChangeTabDisplaySize);
+    cx.run_until_parked();
+    assert_eq!(active_rows(cx), vec!["> 8"]);
+}

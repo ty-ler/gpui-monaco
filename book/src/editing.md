@@ -34,16 +34,17 @@ Every feature here works out of the box. Each follows Monaco's behavior, which t
 - **Comments:** Cmd+/ toggles line comments, Cmd+K Cmd+C adds them, Cmd+K Cmd+U removes them, and Shift+Alt+A toggles a block comment. The language at the cursor decides the tokens, so a Rust fence in Markdown gets `//` and Markdown text gets `<!-- -->`. Languages without a line comment fall back to block comments. `EditorOptions::comments` sets `insert_space` and `ignore_empty_lines`.
 - **Line operations:**
   - Move, copy and delete lines, insert a line above or below, indent and outdent.
-  - Join lines, sort, reverse and delete duplicate lines.
-  - Trim trailing whitespace, reindent, and insert a final new line ("Insert Final New Line").
+  - Join lines, sort, reverse and delete duplicate lines. Sorting orders lines as Monaco's default `Intl.Collator` does: punctuation, symbols, digits, then letters, with case and accents breaking ties (the Unicode root collation, whatever the locale).
+  - Trim trailing whitespace, reindent, and insert a final new line ("Insert Final New Line"). Trimming leaves whitespace that starts in a string or regular expression, such as a template literal's, as standalone Monaco does.
 - **Indentation:**
   - Models detect their indentation from their text when created (`detect_indentation`).
-  - The commands "Convert Indentation to Spaces"/"to Tabs", "Indent Using Spaces"/"Tabs", "Change Tab Display Size" (a 1–8 picker) and "Detect Indentation from Content" change it, as in Monaco.
+  - The commands "Convert Indentation to Spaces"/"to Tabs", "Indent Using Spaces"/"Tabs", "Change Tab Display Size" (a 1–8 picker that starts on the current size) and "Detect Indentation from Content" change it, as in Monaco.
 - **Text transforms:**
   - Upper, lower, title, snake, camel, Pascal and kebab case.
   - Transpose characters, duplicate the selection and move the selected text left or right.
-  - Step numbers and `true`/`false` with in-place replace (Cmd+Shift+, / .).
+  - Step numbers and `true`/`false` with in-place replace: Cmd+Shift+, replaces with the previous value and Cmd+Shift+. with the next. In the `vs` theme the new value flashes an outline, as in Monaco.
   - Remove the brackets around the cursor (Cmd+Alt+Backspace).
+  - Go to Bracket (Cmd+Shift+\\) moves to the matching bracket, the end of the enclosing pair, or the next bracket. Select to Bracket selects the pair, backwards from a closing bracket; `trigger_with_payload` with `{ "selectBrackets": false }` selects only what's between the brackets.
 
 ## Undo
 

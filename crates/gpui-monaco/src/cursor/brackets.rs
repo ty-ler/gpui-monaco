@@ -3,7 +3,8 @@
 //!
 //! Ports the bracket queries the cursor logic needs from Monaco's
 //! `src/vs/editor/common/model/bracketPairsTextModelPart/bracketPairsImpl.ts`
-//! (`matchBracket`, `findMatchingBracketUp`, the fallback
+//! (`matchBracket`, `findEnclosingBrackets`, `findNextBracket`,
+//! `findMatchingBracketUp`, the fallback
 //! `_findMatchingBracketUp`) and `hasUnmatchedClosingBracketAfter` from
 //! `bracketPairsTree/bracketPairsTree.ts`, plus the bracket regexes of
 //! `src/vs/editor/common/languages/supports/richEditBrackets.ts` (MIT).
@@ -210,14 +211,12 @@ pub(crate) fn find_matching_bracket_up(
     while row >= 0 && scanned <= MAX_SCAN_UNITS * 50 {
         let r = row as u32;
         let window = if r == position.row {
-            position.column.saturating_sub(WINDOW)..position.column
+            Window::Columns(position.column.saturating_sub(WINDOW)..position.column)
         } else {
-            tail(model, r)
+            Window::Tail
         };
-        let found = found_in(model, brackets, r, window.clone(), skip);
-        scanned += (window.end.min(model.line_max_column(r))
-            - window.start.min(model.line_max_column(r))) as usize
-            + 1;
+        let (found, len) = scan_row(model, brackets, r, window, skip);
+        scanned += len as usize + 1;
         for f in found.iter().rev() {
             if r == position.row && f.start + f.len > position.column {
                 continue;
@@ -248,22 +247,38 @@ fn found_in(
     columns: Range<u32>,
     skip: &dyn Fn(Position) -> bool,
 ) -> Vec<Found> {
+    scan_row(model, brackets, row, Window::Columns(columns), skip).0
+}
+
+/// Which columns of a row [`scan_row`] scans.
+enum Window {
+    /// These, clamped to the row.
+    Columns(Range<u32>),
+    /// The last `WINDOW` columns.
+    Tail,
+}
+
+/// [`found_in`] for `window`, with how many columns it scanned. Looks the
+/// row's length up once: the scans visit many rows, and each lookup seeks
+/// the rope.
+fn scan_row(
+    model: &dyn CursorModel,
+    brackets: &Brackets,
+    row: u32,
+    window: Window,
+    skip: &dyn Fn(Position) -> bool,
+) -> (Vec<Found>, u32) {
     let max = model.line_max_column(row);
-    let from = columns.start.min(max);
-    let units: Vec<u16> = model
-        .line_slice(row, from..columns.end.min(max))
-        .encode_utf16()
-        .collect();
+    let (from, to) = match window {
+        Window::Columns(columns) => (columns.start.min(max), columns.end.min(max)),
+        Window::Tail => (max.saturating_sub(WINDOW), max),
+    };
+    let units: Vec<u16> = model.line_slice(row, from..to).encode_utf16().collect();
     let mut found = brackets.in_line(&units, &|i| skip(Position::new(row, from + i)));
     for f in &mut found {
         f.start += from;
     }
-    found
-}
-
-/// The last `MAX_SCAN_UNITS` columns of `row`.
-fn tail(model: &dyn CursorModel, row: u32) -> Range<u32> {
-    model.line_max_column(row).saturating_sub(WINDOW)..u32::MAX
+    (found, to.saturating_sub(from))
 }
 
 /// How far from a position long lines are scanned.
@@ -288,9 +303,8 @@ fn find_close_forward(
         } else {
             0..WINDOW
         };
-        let len = window.end.min(model.line_max_column(row))
-            - window.start.min(model.line_max_column(row));
-        for f in found_in(model, brackets, row, window, skip) {
+        let (found, len) = scan_row(model, brackets, row, Window::Columns(window), skip);
+        for f in found {
             if row == from.row && f.start < from.column {
                 continue;
             }
@@ -330,13 +344,12 @@ fn find_open_backward(
     let close = brackets.close_text(pair);
     for row in (0..=to.row).rev() {
         let window = if row == to.row {
-            to.column.saturating_sub(WINDOW)..to.column
+            Window::Columns(to.column.saturating_sub(WINDOW)..to.column)
         } else {
-            tail(model, row)
+            Window::Tail
         };
-        let len = window.end.min(model.line_max_column(row))
-            - window.start.min(model.line_max_column(row));
-        for f in found_in(model, brackets, row, window, skip).iter().rev() {
+        let (found, len) = scan_row(model, brackets, row, window, skip);
+        for f in found.iter().rev() {
             if row == to.row && f.start + f.len > to.column {
                 continue;
             }
@@ -363,10 +376,9 @@ fn find_open_backward(
 }
 
 /// The bracket pair to highlight or jump between for a cursor at `position`
-/// (Monaco `matchBracket`, extended to enclosing pairs): the pair of the
-/// bracket right after the cursor, else of the bracket right before it, else
-/// the nearest pair enclosing the cursor. Returns the opening and closing
-/// bracket ranges.
+/// (Monaco `matchBracket`, extended to enclosing pairs): [`match_bracket`],
+/// else [`enclosing_brackets`]. Returns the opening and closing bracket
+/// ranges.
 ///
 /// Brackets come from `config.brackets` (Monaco's `()`, `[]`, `{}` if
 /// empty). `is_skippable` tells whether the bracket starting at a position
@@ -378,52 +390,129 @@ pub fn matching_bracket(
     position: Position,
     is_skippable: &dyn Fn(Position) -> bool,
 ) -> Option<(Range<Position>, Range<Position>)> {
+    match_or_enclosing(model, config, position, is_skippable, true)
+        .map(|(open, close, _)| (open, close))
+}
+
+/// [`match_bracket`], else with `enclosing` [`enclosing_brackets`], and
+/// whether the pair is next to `position` (the first). Scans the cursor's
+/// row once for both.
+pub(crate) fn match_or_enclosing(
+    model: &impl CursorModel,
+    config: &LanguageConfiguration,
+    position: Position,
+    is_skippable: &dyn Fn(Position) -> bool,
+    enclosing: bool,
+) -> Option<(Range<Position>, Range<Position>, bool)> {
     let model: &dyn CursorModel = model;
     if position.row >= model.line_count() {
         return None;
     }
     let brackets = Brackets::configured_or_default(config);
-    let found = found_in(
+    let found = found_around(model, &brackets, position, is_skippable);
+    if let Some((open, close)) = adjacent_pair(model, &brackets, position, &found, is_skippable) {
+        return Some((open, close, true));
+    }
+    if !enclosing {
+        return None;
+    }
+    let (open, close) = enclosing_pair(model, &brackets, position, found, is_skippable)?;
+    Some((open, close, false))
+}
+
+/// The brackets of `position`'s row within a window around it.
+fn found_around(
+    model: &dyn CursorModel,
+    brackets: &Brackets,
+    position: Position,
+    is_skippable: &dyn Fn(Position) -> bool,
+) -> Vec<Found> {
+    found_in(
         model,
-        &brackets,
+        brackets,
         position.row,
         position.column.saturating_sub(WINDOW)..position.column.saturating_add(WINDOW),
         is_skippable,
-    );
+    )
+}
 
+/// Monaco `matchBracket`: the pair of the bracket right after `position`,
+/// else of the bracket right before it, as the opening and closing bracket
+/// ranges. `None` when neither is a bracket with a match. Takes the same
+/// arguments as [`matching_bracket`].
+pub fn match_bracket(
+    model: &impl CursorModel,
+    config: &LanguageConfiguration,
+    position: Position,
+    is_skippable: &dyn Fn(Position) -> bool,
+) -> Option<(Range<Position>, Range<Position>)> {
+    match_or_enclosing(model, config, position, is_skippable, false)
+        .map(|(open, close, _)| (open, close))
+}
+
+/// [`match_bracket`] with the brackets of `position`'s row ([`found_around`]).
+fn adjacent_pair(
+    model: &dyn CursorModel,
+    brackets: &Brackets,
+    position: Position,
+    found: &[Found],
+    is_skippable: &dyn Fn(Position) -> bool,
+) -> Option<(Range<Position>, Range<Position>)> {
     let after = found.iter().find(|f| f.start == position.column);
     let before = found.iter().find(|f| f.start + f.len == position.column);
     for f in after.into_iter().chain(before) {
         let range = found_range(position.row, f);
-        if f.is_open {
-            if let Some(close) =
-                find_close_forward(model, &brackets, f.pair, range.end, is_skippable)
-            {
-                return Some((range, close));
-            }
-        } else if let Some(open) =
-            find_open_backward(model, &brackets, f.pair, range.start, is_skippable)
-        {
-            return Some((open, range));
+        let pair = if f.is_open {
+            find_close_forward(model, brackets, f.pair, range.end, is_skippable)
+                .map(|close| (range, close))
+        } else {
+            find_open_backward(model, brackets, f.pair, range.start, is_skippable)
+                .map(|open| (open, range))
+        };
+        if pair.is_some() {
+            return pair;
         }
     }
+    None
+}
 
-    // The nearest enclosing pair: the first opening bracket before the cursor
-    // that is not closed before it.
+/// Monaco `findEnclosingBrackets`: the nearest pair around `position`, the
+/// first opening bracket before it that isn't closed before it, with its
+/// closing bracket. Takes the same arguments as [`matching_bracket`].
+pub fn enclosing_brackets(
+    model: &impl CursorModel,
+    config: &LanguageConfiguration,
+    position: Position,
+    is_skippable: &dyn Fn(Position) -> bool,
+) -> Option<(Range<Position>, Range<Position>)> {
+    let model: &dyn CursorModel = model;
+    if position.row >= model.line_count() {
+        return None;
+    }
+    let brackets = Brackets::configured_or_default(config);
+    let found = found_around(model, &brackets, position, is_skippable);
+    enclosing_pair(model, &brackets, position, found, is_skippable)
+}
+
+/// [`enclosing_brackets`], given the brackets of `position`'s row
+/// ([`found_around`]).
+fn enclosing_pair(
+    model: &dyn CursorModel,
+    brackets: &Brackets,
+    position: Position,
+    row_found: Vec<Found>,
+    is_skippable: &dyn Fn(Position) -> bool,
+) -> Option<(Range<Position>, Range<Position>)> {
     let mut pending_closes: Vec<usize> = Vec::new();
     let mut scanned = 0usize;
+    let mut row_found = Some(row_found);
     for row in (0..=position.row).rev() {
-        let window = if row == position.row {
-            position.column.saturating_sub(WINDOW)..position.column
-        } else {
-            tail(model, row)
+        let (found, len) = match row_found.take() {
+            // The cursor's row, scanned up to the cursor.
+            Some(found) => (found, position.column.min(WINDOW)),
+            None => scan_row(model, brackets, row, Window::Tail, is_skippable),
         };
-        let len = window.end.min(model.line_max_column(row))
-            - window.start.min(model.line_max_column(row));
-        for f in found_in(model, &brackets, row, window, is_skippable)
-            .iter()
-            .rev()
-        {
+        for f in found.iter().rev() {
             if row == position.row && f.start + f.len > position.column {
                 continue;
             }
@@ -436,8 +525,47 @@ pub fn matching_bracket(
                 pending_closes.truncate(index);
             } else {
                 let open = found_range(row, f);
-                let close = find_close_forward(model, &brackets, f.pair, open.end, is_skippable)?;
+                let close = find_close_forward(model, brackets, f.pair, open.end, is_skippable)?;
                 return Some((open, close));
+            }
+        }
+        scanned += len as usize + 1;
+        if scanned > MAX_SCAN_UNITS {
+            break;
+        }
+    }
+    None
+}
+
+/// Monaco `findNextBracket`: the range of the first bracket ending after
+/// `position`, skipping closing brackets with no opening one (Monaco's
+/// bracket pair tree leaves those out). Takes the same arguments as
+/// [`matching_bracket`]; scans at most about 20 000 characters.
+pub fn next_bracket(
+    model: &impl CursorModel,
+    config: &LanguageConfiguration,
+    position: Position,
+    is_skippable: &dyn Fn(Position) -> bool,
+) -> Option<Range<Position>> {
+    let model: &dyn CursorModel = model;
+    let brackets = Brackets::configured_or_default(config);
+    let mut scanned = 0usize;
+    for row in position.row..model.line_count() {
+        let window = if row == position.row {
+            position.column.saturating_sub(WINDOW)..position.column.saturating_add(WINDOW)
+        } else {
+            0..WINDOW
+        };
+        let (found, len) = scan_row(model, &brackets, row, Window::Columns(window), is_skippable);
+        for f in found {
+            if row == position.row && f.start + f.len <= position.column {
+                continue;
+            }
+            let range = found_range(row, &f);
+            if f.is_open
+                || find_open_backward(model, &brackets, f.pair, range.start, is_skippable).is_some()
+            {
+                return Some(range);
             }
         }
         scanned += len as usize + 1;

@@ -355,11 +355,15 @@ actions!(
         /// Guesses the indentation from the text (Monaco
         /// `editor.action.detectIndentation`).
         DetectIndentation,
-        /// Steps the number or value at the cursor up: `1` → `2`, `true` →
-        /// `false` (Monaco `editor.action.inPlaceReplace.up`, Cmd/Ctrl+Shift+,).
+        /// Replaces the number or value at the cursor with the previous one:
+        /// `1` → `0`, `false` → `true` (Monaco
+        /// `editor.action.inPlaceReplace.up`, "Replace with Previous Value",
+        /// Cmd/Ctrl+Shift+,).
         InPlaceReplaceUp,
-        /// Steps the number or value at the cursor down (Monaco
-        /// `editor.action.inPlaceReplace.down`, Cmd/Ctrl+Shift+.).
+        /// Replaces the number or value at the cursor with the next one: `1`
+        /// → `2`, `true` → `false` (Monaco
+        /// `editor.action.inPlaceReplace.down`, "Replace with Next Value",
+        /// Cmd/Ctrl+Shift+.).
         InPlaceReplaceDown,
         /// Removes the brackets around the cursor (Monaco
         /// `editor.action.removeBrackets`, Cmd/Ctrl+Alt+Backspace).
@@ -589,12 +593,10 @@ actions!(
         /// Selects every occurrence of the selection or the word at the cursor (Monaco
         /// `editor.action.selectHighlights`).
         SelectAllOccurrences,
-        /// Moves each cursor to the matching bracket (Monaco
+        /// Moves each cursor to the matching bracket, the end of the
+        /// enclosing pair or the next bracket (Monaco
         /// `editor.action.jumpToBracket`).
         JumpToBracket,
-        /// Selects to the matching bracket, brackets included (Monaco
-        /// `editor.action.selectToBracket`). Unbound by default.
-        SelectToBracket,
         /// Moves to the next marker and shows it inline (Monaco
         /// `editor.action.marker.next`, Alt+F8).
         GoToNextMarker,
@@ -1439,6 +1441,17 @@ command_action! {
     pub struct SetSelection {
         /// The new selection.
         pub selection: Option<CommandSelection>,
+    }
+}
+
+command_action! {
+    /// Selects each cursor's bracket pair: the one at the cursor, around it
+    /// or after it, backwards from a closing bracket (Monaco
+    /// `editor.action.selectToBracket`). Unbound by default.
+    pub struct SelectToBracket {
+        /// Whether the brackets are selected too, not only what's between
+        /// them; unset is `true` (Monaco `selectBrackets`).
+        pub select_brackets: Option<bool>,
     }
 }
 

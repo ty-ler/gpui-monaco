@@ -3617,8 +3617,11 @@ impl CodeEditor {
         }
     }
 
-    /// Steps the number or value at the cursor up or down (Monaco
-    /// `editor.action.inPlaceReplace.up` / `.down`), briefly highlighting it.
+    /// Replaces the number or value at the cursor with the next one (`up`,
+    /// Monaco `editor.action.inPlaceReplace.down`) or the previous one
+    /// (`.up`), briefly outlining it in the `vs` theme. `up` is Monaco's
+    /// `InPlaceReplaceController.run` argument, which the actions pass
+    /// crossed: "Replace with Previous Value" (`.up`) passes `false`.
     pub fn in_place_replace(&mut self, up: bool, cx: &mut Context<Self>) {
         let config = self.cursor_config(cx);
         let word_pattern = self
@@ -3636,12 +3639,17 @@ impl CodeEditor {
             return;
         };
         self.apply(operation, cx);
-        // Monaco flashes the new value for 350ms.
+        // Monaco decorates the new value with `valueSetReplacement` for
+        // 350ms, styled only in the `vs` theme: a 2px
+        // `editorBracketMatch.border` outline (`inPlaceReplace.css`).
+        if self.theme.kind != crate::theme::ThemeKind::Light || self.theme.high_contrast {
+            return;
+        }
         let rope = self.snapshot.rope();
         let range =
             rope.point_utf16_to_offset(highlight.start)..rope.point_utf16_to_offset(highlight.end);
         let options = crate::decorations::DecorationOptions {
-            border: Some(self.theme.colors.input_option_active_border),
+            outline: Some((self.theme.colors.bracket_match_border, px(2.))),
             ..Default::default()
         };
         let owner = Some(cx.entity_id());
@@ -6598,10 +6606,10 @@ impl Render for CodeEditor {
                 }),
             )
             .on_action(
-                cx.listener(|this, _: &InPlaceReplaceUp, _, cx| this.in_place_replace(true, cx)),
+                cx.listener(|this, _: &InPlaceReplaceUp, _, cx| this.in_place_replace(false, cx)),
             )
             .on_action(
-                cx.listener(|this, _: &InPlaceReplaceDown, _, cx| this.in_place_replace(false, cx)),
+                cx.listener(|this, _: &InPlaceReplaceDown, _, cx| this.in_place_replace(true, cx)),
             )
             .on_action(cx.listener(|this, _: &RemoveBrackets, _, cx| this.remove_brackets(cx)))
             .on_action(cx.listener(|this, _: &ReindentLines, _, cx| {
@@ -6637,7 +6645,10 @@ impl Render for CodeEditor {
                 }),
             )
             .on_action(cx.listener(|this, _: &TrimTrailingWhitespace, _, cx| {
-                this.run_edit(cx, cursor::trim_trailing_whitespace)
+                let operation = this.with_language(cx, |config, rope, cursors, lang| {
+                    cursor::trim_trailing_whitespace_with_language(config, rope, cursors, lang)
+                });
+                this.apply(operation, cx);
             }))
             .on_action(cx.listener(|this, _: &DeleteAllRight, _, cx| {
                 this.run_edit(cx, cursor::delete_all_right)
@@ -6908,7 +6919,9 @@ impl Render for CodeEditor {
                 }),
             )
             .on_action(cx.listener(|this, _: &JumpToBracket, _, cx| this.jump_to_bracket(cx)))
-            .on_action(cx.listener(|this, _: &SelectToBracket, _, cx| this.select_to_bracket(cx)))
+            .on_action(cx.listener(|this, action: &SelectToBracket, _, cx| {
+                this.select_to_bracket(action.select_brackets != Some(false), cx)
+            }))
             .on_action(cx.listener(|this, _: &GoToNextMarker, _, cx| this.go_to_marker(true, cx)))
             .on_action(
                 cx.listener(|this, _: &GoToNextMarkerInFiles, _, cx| this.go_to_marker(true, cx)),

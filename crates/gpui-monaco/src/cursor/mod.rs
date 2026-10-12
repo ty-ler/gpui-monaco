@@ -49,7 +49,8 @@ use std::ops::Range;
 
 pub use auto_closed::{AutoClosedPair, AutoClosedRanges};
 pub use auto_indent_paste::auto_indent_on_paste;
-pub use brackets::matching_bracket;
+pub(crate) use brackets::match_or_enclosing;
+pub use brackets::{enclosing_brackets, match_bracket, matching_bracket, next_bracket};
 pub use collection::{CursorCollection, SelectionStartKind, SingleCursorState};
 pub use column::{ColumnSelectCommand, ColumnSelectData, column_select, column_select_to};
 pub use comment::{CommentOptions, CommentsAt, LineCommentType, block_comment, line_comment};
@@ -80,7 +81,7 @@ pub use text::PointUtf16 as Position;
 pub use transforms::{
     CaseTransform, delete_all_right, delete_duplicate_lines, duplicate_selection, join_lines,
     move_caret, reverse_lines, sort_lines, transform_case, transform_text_case, transpose,
-    transpose_letters, trim_trailing_whitespace,
+    transpose_letters, trim_trailing_whitespace, trim_trailing_whitespace_with_language,
 };
 pub use typing::{
     composition_type, copy_text, cut, delete_all_left, delete_inside_word, delete_left,

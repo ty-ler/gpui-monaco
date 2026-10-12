@@ -43,11 +43,11 @@ Issues are linked by number.
 | Auto-closing, overtype, auto-surround | `cursor` | ✅ | |
 | Auto-indent (`onEnterRules`, `indentationRules`, electric characters) | `indentation` | ✅ | |
 | Reindent lines | `indentation` | ✅ | #80 |
-| Indentation detection and conversion commands | `indentation` | ✅ | #197 |
+| Indentation detection and conversion commands, tab size pickers starting on the current size | `indentation` | ✅ | #197, #328 |
 | Line operations: move (reindenting with `autoIndent: full`), copy, delete, insert, indent | `linesOperations`, `moveLinesCommand` | ✅ | #260 |
-| Sort, join, reverse, transpose, case transforms, delete duplicates, trim whitespace | `linesOperations`, `caretOperations` | ✅ | #80 |
+| Sort (the root collation, as the default `Intl.Collator`), join, reverse, transpose, case transforms, delete duplicates, trim whitespace (skipping strings and regular expressions) | `linesOperations`, `caretOperations` | ✅ sorting ignores the locale | #80, #328 |
 | Insert final new line | `insertFinalNewLine` | ✅ | #202 |
-| In-place replace | `inPlaceReplace` | ✅ | #80 |
+| In-place replace, with the `vs` theme's outline flash | `inPlaceReplace` | ✅ | #80, #328 |
 | Toggle line and block comments | `comment` | ✅ | #79 |
 | Smart select (expand and shrink) | `smartSelect` | ✅ | #82 |
 | Linked editing (HTML tags) | `linkedEditing` | ✅ | #101 |
@@ -64,7 +64,7 @@ Issues are linked by number.
 | Multi-line search and replace inputs (Ctrl+Enter, growing inputs), global find clipboard | `findWidget`, `find.globalFindClipboard` | ✅ the find pasteboard on macOS, an app-wide find string elsewhere | #226 |
 | Find widget layout: toggles in the inputs, replace toggle column, reduced/narrow/collapsed widths, measured view zone, placeholders, titles with keybindings, disabled states, regex error message, theme colors, slide-in, sash, Tab order, screen-reader status | `findWidget` | ✅ no reduced-motion setting; titles use Monaco's keybinding labels | #250, #251 |
 | Find commands from the editor and the find inputs: Alt+Enter, Cmd/Ctrl+D and Cmd/Ctrl+Shift+L acting on the editor, Cmd/Ctrl+D seeding the search string (with Monaco's whole-word, match-case and regex overrides), session-aware selection highlights, per-input Shift+Enter, Cmd+Enter and Cmd/Ctrl+Down | `findController`, `multicursor` | ✅ | #250 |
-| Bracket matching and jump | `bracketMatching` | ✅ `always`/`near`/`never`, overview ruler mark | #195 |
+| Bracket matching and jump | `bracketMatching` | ✅ `always`/`near`/`never`, overview ruler mark, `editorBracketMatch.foreground`, up to 100 cursors; Go to and Select to Bracket fall back to the next bracket, select backwards from a closing bracket and take `selectBrackets` | #195, #328 |
 
 ## View
 

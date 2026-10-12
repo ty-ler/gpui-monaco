@@ -69,6 +69,14 @@ pub(crate) enum QuickAction {
 /// What happens when a quick pick item is chosen.
 type PickHandler = Box<dyn FnOnce(&mut CodeEditor, usize, &mut Window, &mut Context<CodeEditor>)>;
 
+/// A [`CodeEditor::show_quick_pick`] list.
+struct QuickPick {
+    items: Vec<SharedString>,
+    /// The item active while the input is empty (Monaco `activeItem`).
+    active: Option<usize>,
+    on_pick: Option<PickHandler>,
+}
+
 /// One row of the list.
 #[derive(Clone, Debug)]
 pub(crate) enum QuickRow {
@@ -121,7 +129,7 @@ pub(crate) struct QuickAccessState {
     /// The keys bound to each action, looked up when it opened.
     action_keys: HashMap<SharedString, crate::keybinding_label::KeyLabel>,
     /// A [`CodeEditor::show_quick_pick`] list instead of the providers.
-    pick: Option<(Vec<SharedString>, Option<PickHandler>)>,
+    pick: Option<QuickPick>,
     /// Monaco's "Go to Match..." input box instead of the providers; the
     /// view isn't restored when it closes.
     go_to_match: bool,
@@ -453,7 +461,7 @@ impl QuickInput {
                                 .quick
                                 .as_mut()
                                 .and_then(|state| state.pick.as_mut())
-                                .and_then(|(_, handler)| handler.take());
+                                .and_then(|pick| pick.on_pick.take());
                             editor.close_quick_access(true, cx);
                             if let Some(handler) = handler {
                                 handler(editor, ix, window, cx);
@@ -937,21 +945,34 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_quick_input(
-            "",
-            title,
-            Some((items, Some(Box::new(on_pick)))),
-            false,
-            window,
-            cx,
-        );
+        self.show_quick_pick_with_active_item(title, items, None, on_pick, window, cx);
+    }
+
+    /// [`CodeEditor::show_quick_pick`] with item `active_item` active, not
+    /// the first, until the input is typed in (Monaco's `activeItem` pick
+    /// option).
+    pub fn show_quick_pick_with_active_item(
+        &mut self,
+        title: Option<SharedString>,
+        items: Vec<SharedString>,
+        active_item: Option<usize>,
+        on_pick: impl FnOnce(&mut CodeEditor, usize, &mut Window, &mut Context<CodeEditor>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pick = QuickPick {
+            items,
+            active: active_item,
+            on_pick: Some(Box::new(on_pick)),
+        };
+        self.open_quick_input("", title, Some(pick), false, window, cx);
     }
 
     fn open_quick_input(
         &mut self,
         value: &str,
         title: Option<SharedString>,
-        pick: Option<(Vec<SharedString>, Option<PickHandler>)>,
+        pick: Option<QuickPick>,
         go_to_match: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1098,8 +1119,9 @@ impl CodeEditor {
         if self.quick.as_ref().is_some_and(|state| state.go_to_match) {
             return (vec![QuickRow::Item(self.go_to_match_item(value))], None);
         }
-        if let Some((items, _)) = self.quick.as_ref().and_then(|state| state.pick.as_ref()) {
-            let rows: Vec<QuickRow> = items
+        if let Some(pick) = self.quick.as_ref().and_then(|state| state.pick.as_ref()) {
+            let rows: Vec<QuickRow> = pick
+                .items
                 .iter()
                 .enumerate()
                 .filter_map(|(ix, label)| {
@@ -1113,7 +1135,10 @@ impl CodeEditor {
                     Some(QuickRow::Item(item))
                 })
                 .collect();
-            return (rows, None);
+            let active = pick
+                .active
+                .filter(|&ix| value.is_empty() && ix < rows.len());
+            return (rows, active);
         }
         if let Some(rest) = trimmed.strip_prefix("::") {
             (vec![QuickRow::Item(self.goto_offset_item(rest, cx))], None)
