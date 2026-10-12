@@ -58,13 +58,14 @@ Undo is operation-based and per model.
 
 ## Find and replace
 
-Cmd+F opens the find widget, and Cmd+Alt+F (Ctrl+H elsewhere) opens it with replace. The query starts as the selection or the word at the cursor (`options.find.seed_search_string_from_selection`). Selections can turn on find in selection (`auto_find_in_selection`). The widget slides down from above the editor as it opens, unless `App::reduce_motion` is set.
+Cmd+F opens the find widget, and Cmd+Alt+F (Ctrl+H elsewhere) opens it with replace. The query starts as the selection or the word at the cursor (`options.find.seed_search_string_from_selection`), escaped as Monaco does when regex is on (`a.b` becomes `a\.b`, `a-b` stays). Selections can turn on find in selection (`auto_find_in_selection`). When the widget would cover the selection it was seeded from (one spanning lines, or reaching under the widget on the first lines), the text moves down below it instead of staying put. The widget slides down from above the editor as it opens, unless `App::reduce_motion` is set.
 
 - **Search modes:**
   - case sensitive
   - whole word, using `word_separators`
   - regular expression
-  - find in selection
+  - find in selection. As in Monaco, focusing the find or replace input takes the selections as the scope again, but a scope that's set only changes when one of the selections equals all of its ranges (so for a one-range scope, when the selections include it).
+  - With find closed, Cmd+Alt+C, W, R and P (Alt+C, W, R and P elsewhere) still flip the toggles, and Monaco's small options widget shows the case, word and regex toggles at the top right for two seconds (longer while the pointer is over it).
 - **Results:**
   - Every match is highlighted and marked in the overview ruler.
   - "N of M" counts up to 19,999 matches.

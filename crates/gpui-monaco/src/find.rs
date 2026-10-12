@@ -17,7 +17,7 @@ use crate::decorations::{
 };
 use crate::editor::CodeEditor;
 use crate::events::CursorChangeReason;
-use crate::find_widget::FindWidget;
+use crate::find_widget::{FindOptionsWidget, FindWidget};
 use crate::replace_pattern::{ReplacePattern, parse_replace_string};
 use crate::search::{self, SearchData, SearchParams};
 use crate::widgets::{OverlayPosition, OverlayWidget, WidgetId};
@@ -27,6 +27,9 @@ pub const MATCHES_LIMIT: usize = 19_999;
 
 /// Monaco's `_updateDecorationsScheduler` delay after an edit.
 const RESEARCH_AFTER_EDIT: Duration = Duration::from_millis(100);
+
+/// How long the options widget shows (Monaco `FindOptionsWidget._hideSoon`).
+const FIND_OPTIONS_HIDE_DELAY: Duration = Duration::from_millis(2000);
 
 /// The find widget's inputs and toggles (Monaco `FindReplaceState`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -98,6 +101,15 @@ pub(crate) struct FindState {
     /// The widget's height as last painted, with the height it was laid
     /// out for.
     measured: Option<(gpui::Pixels, gpui::Pixels)>,
+    /// Whether adding the view zone scrolls the text with it (Monaco
+    /// `_showViewZone(adjustScroll)`): `_reveal` leaves the text to shift
+    /// down when the widget would cover the selection.
+    zone_adjusts_scroll: Option<bool>,
+    /// Monaco's `FindOptionsWidget`, made with the find widget, and its
+    /// overlay while it shows.
+    options_widget: Option<(Entity<FindOptionsWidget>, Option<WidgetId>)>,
+    /// Monaco's `_hideSoon` for the options widget.
+    options_hide: Option<Task<()>>,
 }
 
 /// How `find_start` seeds the search string (Monaco
@@ -267,39 +279,46 @@ impl FindState {
     }
 }
 
+/// A text color decoration (Monaco's `inlineClassName` with a `color` rule).
+fn text_color(foreground: Option<gpui::Hsla>) -> Option<crate::theme::TokenStyle> {
+    foreground.map(|foreground| crate::theme::TokenStyle {
+        foreground: Some(foreground),
+        ..Default::default()
+    })
+}
+
+/// Monaco `_FIND_MATCH_DECORATION`, or `_FIND_MATCH_NO_OVERVIEW_DECORATION`
+/// without `overview` (over 1000 matches): no overview or minimap mark, no
+/// text color and z-index 0.
 fn match_options(colors: &crate::theme::EditorColors, overview: bool) -> DecorationOptions {
     DecorationOptions {
         background: Some(colors.find_match_highlight_background),
-        // High contrast outlines matches; `findMatch*Foreground` recolors
-        // their text.
+        // High contrast outlines matches.
         border: colors.find_match_highlight_border,
-        text: colors
-            .find_match_highlight_foreground
-            .map(|foreground| crate::theme::TokenStyle {
-                foreground: Some(foreground),
-                ..Default::default()
-            }),
+        // Monaco's theming colors `.findMatchInline` with
+        // `editor.findMatchForeground` and `.currentFindMatchInline` with
+        // `editor.findMatchHighlightForeground` (`findWidget.ts`), the
+        // reverse of the colors' descriptions.
+        text: overview
+            .then(|| text_color(colors.find_match_foreground))
+            .flatten(),
         overview_ruler: overview.then(|| {
             OverviewRulerDecoration::new(colors.find_match_overview, OverviewRulerLane::Center)
         }),
-        // Monaco's `_FIND_MATCH_NO_OVERVIEW_DECORATION` has no minimap mark.
         minimap: overview.then(|| find_match_minimap(colors)),
         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
-        z_index: 10,
+        z_index: if overview { 10 } else { 0 },
         ..Default::default()
     }
 }
 
+/// Monaco `_CURRENT_FIND_MATCH_DECORATION`.
 fn current_match_options(colors: &crate::theme::EditorColors) -> DecorationOptions {
     DecorationOptions {
         background: Some(colors.find_match_background),
         border: colors.find_match_border,
-        text: colors
-            .find_match_foreground
-            .map(|foreground| crate::theme::TokenStyle {
-                foreground: Some(foreground),
-                ..Default::default()
-            }),
+        // `.currentFindMatchInline` (see `match_options`).
+        text: text_color(colors.find_match_highlight_foreground),
         overview_ruler: Some(OverviewRulerDecoration::new(
             colors.find_match_overview,
             OverviewRulerLane::Center,
@@ -571,7 +590,13 @@ impl CodeEditor {
         let query_changed = new.query != old.query;
         let replace_changed = new.replace != old.replace;
         let toggles_changed = new.match_case != old.match_case || new.whole_word != old.whole_word;
-        let research = query_changed || new.is_regex != old.is_regex || toggles_changed;
+        let toggled = new.is_regex != old.is_regex || toggles_changed;
+        let research = query_changed || toggled;
+        // Monaco's `FindOptionsWidget` shows the toggles that changed while
+        // find is closed, once it exists.
+        if toggled && !self.find.visible && self.find.options_widget.is_some() {
+            self.reveal_find_options_temporarily(cx);
+        }
         if research || scope_changed {
             let scope = scope_changed.then(|| self.find.search_scope.clone());
             self.find_research(move_cursor, scope, cx);
@@ -653,6 +678,121 @@ impl CodeEditor {
         self.find.search_scope = scope.clone();
         self.find_research(move_cursor, Some(scope), cx);
         cx.notify();
+    }
+
+    /// Monaco `FindReplaceState.change` for `searchScope`: whether `new`
+    /// replaces the scope. Monaco keeps the scope when every new range
+    /// differs from one of the current ranges, so a scope that's set only
+    /// changes when a new range equals all of its ranges (a one-range
+    /// scope the selections include, set again when equal); clearing it or
+    /// setting it from none always changes it.
+    fn search_scope_changes(&self, new: Option<&[Range<PointUtf16>]>) -> bool {
+        let old = self.find.search_scope.as_deref();
+        !new.is_some_and(|new| {
+            new.iter()
+                .all(|new| old.is_some_and(|old| old.iter().any(|old| old != new)))
+        })
+    }
+
+    /// Monaco `FindWidget._updateSearchScope`, when the find or replace
+    /// input gets the focus: with find in selection on, the selections
+    /// become the scope (as they are; Monaco drops the line-end and current
+    /// match adjustments it computes), moving the cursor to its first
+    /// match.
+    pub(crate) fn find_input_focused(&mut self, cx: &mut Context<Self>) {
+        if !self.find.visible || !self.find.options.in_selection {
+            return;
+        }
+        let scope: Vec<_> = self
+            .cursors
+            .selections()
+            .iter()
+            .map(|s| s.start()..s.end())
+            .collect();
+        if self.search_scope_changes(Some(&scope)) {
+            self.set_find_search_scope(Some(scope), true, cx);
+        }
+    }
+
+    /// Monaco's controller `toggleCaseSensitive`, `toggleWholeWords`,
+    /// `toggleRegex` and `togglePreserveCase` (Alt+C, W, R and P): flips
+    /// the option without moving the cursor and, while find is closed,
+    /// shows the options widget.
+    pub(crate) fn toggle_find_option(
+        &mut self,
+        toggle: impl FnOnce(&mut FindOptions),
+        cx: &mut Context<Self>,
+    ) {
+        let mut options = self.find.options.clone();
+        toggle(&mut options);
+        self.change_find_options(options, false, cx);
+        if !self.find.visible {
+            self.highlight_find_options(cx);
+        }
+    }
+
+    /// Monaco `FindController.highlightFindOptions`, while find is closed:
+    /// makes the options widget if needed and shows it for a moment.
+    fn highlight_find_options(&mut self, cx: &mut Context<Self>) {
+        self.ensure_find_options_widget(cx);
+        self.reveal_find_options_temporarily(cx);
+    }
+
+    /// Monaco `_createFindWidget`'s `FindOptionsWidget`.
+    fn ensure_find_options_widget(&mut self, cx: &mut Context<Self>) {
+        if self.find.options_widget.is_none() {
+            let editor = cx.entity().downgrade();
+            let widget = cx.new(|_| FindOptionsWidget::new(editor));
+            self.find.options_widget = Some((widget, None));
+        }
+    }
+
+    /// Monaco `FindOptionsWidget._revealTemporarily`: shows the options
+    /// widget at the editor's top right and hides it in 2s.
+    fn reveal_find_options_temporarily(&mut self, cx: &mut Context<Self>) {
+        let Some((widget, None)) = &self.find.options_widget else {
+            self.schedule_find_options_hide(cx);
+            return;
+        };
+        let widget = widget.clone();
+        let id = self.add_overlay_widget(
+            OverlayWidget::new(OverlayPosition::TopRight, widget.clone().into()),
+            cx,
+        );
+        self.find.options_widget = Some((widget, Some(id)));
+        self.schedule_find_options_hide(cx);
+    }
+
+    /// Monaco `_hideSoon.schedule()` (also on the pointer leaving the
+    /// options widget).
+    pub(crate) fn schedule_find_options_hide(&mut self, cx: &mut Context<Self>) {
+        self.find.options_hide = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(FIND_OPTIONS_HIDE_DELAY)
+                .await;
+            this.update(cx, |this, cx| this.hide_find_options(cx)).ok();
+        }));
+    }
+
+    /// Monaco `_hideSoon.cancel()`, on the pointer over the options widget.
+    pub(crate) fn cancel_find_options_hide(&mut self) {
+        self.find.options_hide = None;
+    }
+
+    /// Monaco `FindOptionsWidget._hide`.
+    fn hide_find_options(&mut self, cx: &mut Context<Self>) {
+        self.find.options_hide = None;
+        if let Some((_, shown)) = self.find.options_widget.as_mut()
+            && let Some(id) = shown.take()
+        {
+            self.remove_widget(id, cx);
+        }
+    }
+
+    /// Whether the find options widget shows, for tests.
+    #[doc(hidden)]
+    pub fn is_find_options_widget_visible_for_tests(&self) -> bool {
+        matches!(self.find.options_widget, Some((_, Some(_))))
     }
 
     /// The non-empty selections as find scopes (Monaco's controller: a
@@ -1677,7 +1817,7 @@ impl CodeEditor {
                 {
                     // Monaco escapes for the regex toggle as it was.
                     options.query = if self.find.options.is_regex {
-                        regex::escape(&seed)
+                        search::escape_regexp_characters(&seed)
                     } else {
                         seed
                     };
@@ -1699,6 +1839,9 @@ impl CodeEditor {
             }
         }
         let was_visible = self.find.visible;
+        if !was_visible {
+            self.find.zone_adjusts_scroll = Some(self.find_reveal_adjusts_scroll());
+        }
         if start.force_reveal_replace {
             self.find.replace_visible = true;
         } else if !was_visible {
@@ -1738,6 +1881,7 @@ impl CodeEditor {
                     cx,
                 );
                 self.find.widget = Some((widget.clone(), id));
+                self.ensure_find_options_widget(cx);
                 widget
             }
         };
@@ -1751,6 +1895,7 @@ impl CodeEditor {
         });
         // After the inputs show the search string, which sizes them.
         self.update_find_view_zone(cx);
+        self.find.zone_adjusts_scroll = None;
         self.alert_find_status(cx);
         cx.notify();
     }
@@ -2003,7 +2148,7 @@ impl CodeEditor {
             // Monaco `setSearchString`, escaped in regex mode.
             let mut options = self.find.options.clone();
             options.query = if options.is_regex {
-                regex::escape(&search)
+                search::escape_regexp_characters(&search)
             } else {
                 search
             };
@@ -2086,28 +2231,74 @@ impl CodeEditor {
                 height - self.options.padding.top
             })
             .filter(|height| *height > gpui::px(0.));
-        let current = self.find.zone.map(|(_, height)| height);
-        if wanted == current {
-            return;
-        }
-        if let Some((id, height)) = self.find.zone.take() {
-            self.remove_widget(id, cx);
-            self.scroll_top = (self.scroll_top - height).max(gpui::px(0.));
-        }
-        if let Some(height) = wanted {
-            let view = cx.new(|_| FindZoneSpacer);
-            let id = self.add_view_zone(
-                crate::widgets::ViewZone::new(
-                    0,
-                    crate::widgets::ZoneHeight::Pixels(height),
-                    view.into(),
-                ),
-                cx,
-            );
-            self.find.zone = Some((id, height));
-            self.scroll_top += height;
+        match (self.find.zone, wanted) {
+            (Some((_, height)), Some(wanted)) if height == wanted => return,
+            (None, None) => return,
+            // Monaco `layoutZone`, scrolling by the difference.
+            (Some((id, height)), Some(wanted)) => {
+                self.set_view_zone_height(id, crate::widgets::ZoneHeight::Pixels(wanted), cx);
+                self.find.zone = Some((id, wanted));
+                self.scroll_top = (self.scroll_top + wanted - height).max(gpui::px(0.));
+            }
+            (Some((id, height)), None) => {
+                self.find.zone = None;
+                self.remove_widget(id, cx);
+                self.scroll_top = (self.scroll_top - height).max(gpui::px(0.));
+            }
+            (None, Some(height)) => {
+                let view = cx.new(|_| FindZoneSpacer);
+                let id = self.add_view_zone(
+                    crate::widgets::ViewZone::new(
+                        0,
+                        crate::widgets::ZoneHeight::Pixels(height),
+                        view.into(),
+                    ),
+                    cx,
+                );
+                self.find.zone = Some((id, height));
+                if self.find.zone_adjusts_scroll.take().unwrap_or(true) {
+                    self.scroll_top += height;
+                }
+            }
         }
         cx.notify();
+    }
+
+    /// Monaco `FindWidget._reveal`'s `adjustEditorScrollTop`: whether the
+    /// view zone scrolls with the text as find opens. When seeding from the
+    /// selection, a selection starting where the widget will be (above the
+    /// zone's initial 33px) that spans lines or reaches under the widget
+    /// lets the zone push the text down instead, so it shows below the
+    /// widget. Positions not laid out count as the editor's top-left, as
+    /// Monaco's `null` coordinates do.
+    fn find_reveal_adjusts_scroll(&self) -> bool {
+        use crate::options::SeedSearchString;
+        if self.options.find.seed_search_string_from_selection == SeedSearchString::Never
+            || !self.options.find.add_extra_space_on_top
+        {
+            return true;
+        }
+        let Some(layout_info) = self.layout_info() else {
+            return true;
+        };
+        let selection = self.cursors.primary().selection();
+        let (start, end) = (selection.start(), selection.end());
+        let position = |point| {
+            self.scrolled_visible_position_in_editor(point)
+                .map_or((gpui::px(0.), gpui::px(0.)), |p| (p.top, p.left))
+        };
+        let (start_top, start_left) = position(start);
+        if start_top >= gpui::px(crate::find_widget::FIND_INPUT_AREA_HEIGHT) {
+            return true;
+        }
+        // The widget's left edge: right-aligned like Monaco's
+        // `TOP_RIGHT_CORNER` overlays, at its width on opening.
+        let widget_left = layout_info.width
+            - layout_info.vertical_scrollbar_width * 2.
+            - layout_info.minimap.minimap_width
+            - crate::find_widget::opening_width(&layout_info);
+        let (_, end_left) = position(end);
+        end.row == start.row && start_left <= widget_left && end_left <= widget_left
     }
 
     /// The height of the space kept above the text for the find widget

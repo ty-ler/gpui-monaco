@@ -295,6 +295,20 @@ impl FindWidgetLayout {
     }
 }
 
+/// The widget's width as it opens in an editor laid out as `layout_info`
+/// (Monaco `_tryUpdateWidgetWidth` before any resize or matches count).
+pub(crate) fn opening_width(layout_info: &crate::LayoutInfo) -> Pixels {
+    FindWidgetLayout::compute(
+        layout_info.width,
+        layout_info.content_width,
+        layout_info.minimap.minimap_width,
+        px(FIND_WIDGET_INITIAL_WIDTH),
+        false,
+        px(MATCHES_COUNT_MIN_WIDTH),
+    )
+    .width
+}
+
 /// An input's box height (Monaco `inputBox.height` plus its border): a row
 /// per line of its text in its own line height, up to Monaco's
 /// `flexibleMaxHeight`, plus the box's padding and border.
@@ -415,7 +429,7 @@ impl FindWidget {
         // `NLS_REPLACE_INPUT_PLACEHOLDER`.
         let find_input = input("Find", window, cx, theme.clone());
         let replace_input = input("Replace", window, cx, theme);
-        let subscriptions = [&find_input, &replace_input]
+        let mut subscriptions: Vec<_> = [&find_input, &replace_input]
             .into_iter()
             .map(|input| {
                 let model = input.read(cx).model().clone();
@@ -426,6 +440,13 @@ impl FindWidget {
                 })
             })
             .collect();
+        // Monaco's focus trackers on the inputs run `_updateSearchScope`.
+        for input in [&find_input, &replace_input] {
+            let focus = input.focus_handle(cx);
+            subscriptions.push(cx.on_focus(&focus, window, |this, _, cx| {
+                this.with_editor(cx, |editor, cx| editor.find_input_focused(cx));
+            }));
+        }
         Self {
             editor,
             find_input,
@@ -1154,7 +1175,8 @@ struct ControlLook<'a> {
     colors: &'a EditorColors,
     focused: bool,
     title: String,
-    focus: FocusHandle,
+    /// The control's focus, if it takes it.
+    focus: Option<FocusHandle>,
 }
 
 /// A find option toggle (Monaco's `Toggle`: a 16px codicon in a 20px
@@ -1166,13 +1188,13 @@ fn toggle(
     enabled: bool,
     size: f32,
     look: ControlLook,
-    cx: &mut Context<FindWidget>,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     let colors = look.colors;
     let tooltip = crate::tooltip::tooltip(look.title, colors);
     div()
         .id(control.id())
-        .track_focus(&look.focus)
+        .when_some(look.focus, |this, focus| this.track_focus(&focus))
         .size(px(size))
         .ml(px(TOGGLE_MARGIN))
         .flex()
@@ -1200,7 +1222,15 @@ fn toggle(
         .child(codicon(icon))
         .tooltip(tooltip)
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(move |this, _, window, cx| this.activate(control, window, cx)))
+        .on_click(on_click)
+}
+
+/// Clicking `control` activates it.
+fn activate_on_click(
+    control: Control,
+    cx: &mut Context<FindWidget>,
+) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static {
+    cx.listener(move |this, _, window, cx| this.activate(control, window, cx))
 }
 
 /// A find widget button (Monaco's `SimpleButton`: a 16px codicon in a
@@ -1217,7 +1247,7 @@ fn button(
     let hover = colors.clone();
     div()
         .id(control.id())
-        .track_focus(&look.focus)
+        .when_some(look.focus, |this, focus| this.track_focus(&focus))
         .size(px(BUTTON_SIZE))
         .ml(px(BUTTON_MARGIN))
         .flex()
@@ -1330,7 +1360,7 @@ impl Render for FindWidget {
             colors: &colors,
             focused: focused == Some(control),
             title: titles[control.index()].clone(),
-            focus: handles[control.index()].clone(),
+            focus: Some(handles[control.index()].clone()),
         };
 
         // Monaco's `InputBox`: `input.background`, `input.border` (or
@@ -1401,7 +1431,7 @@ impl Render for FindWidget {
                                 true,
                                 TOGGLE_SIZE,
                                 look(Control::MatchCase),
-                                cx,
+                                activate_on_click(Control::MatchCase, cx),
                             ))
                             .child(toggle(
                                 Control::WholeWord,
@@ -1410,7 +1440,7 @@ impl Render for FindWidget {
                                 true,
                                 TOGGLE_SIZE,
                                 look(Control::WholeWord),
-                                cx,
+                                activate_on_click(Control::WholeWord, cx),
                             ))
                             .child(toggle(
                                 Control::Regex,
@@ -1419,7 +1449,7 @@ impl Render for FindWidget {
                                 true,
                                 TOGGLE_SIZE,
                                 look(Control::Regex),
-                                cx,
+                                activate_on_click(Control::Regex, cx),
                             )),
                     )
                 }),
@@ -1481,7 +1511,7 @@ impl Render for FindWidget {
                         state.can_find_in_selection,
                         BUTTON_SIZE,
                         look(Control::InSelection),
-                        cx,
+                        activate_on_click(Control::InSelection, cx),
                     )),
             );
 
@@ -1506,7 +1536,7 @@ impl Render for FindWidget {
                         true,
                         TOGGLE_SIZE,
                         look(Control::PreserveCase),
-                        cx,
+                        activate_on_click(Control::PreserveCase, cx),
                     ))),
                 )
                 .child(
@@ -1541,7 +1571,7 @@ impl Render for FindWidget {
             let look = look(control);
             div()
                 .id(control.id())
-                .track_focus(&look.focus)
+                .when_some(look.focus, |this, focus| this.track_focus(&focus))
                 .absolute()
                 .left(px(0.))
                 .top(px(0.))
@@ -1797,6 +1827,113 @@ impl Render for FindWidget {
                     .child(measure)
                     .children(message),
             )
+            .into_any_element()
+    }
+}
+
+/// Monaco's `FindOptionsWidget` (`findOptionsWidget.ts`): the match case,
+/// whole word and regex toggles, shown at the editor's top right for 2s
+/// when they change while find is closed (Alt+C, W, R and P), and kept
+/// while the pointer is over it. The editor shows and hides it.
+pub(crate) struct FindOptionsWidget {
+    editor: WeakEntity<CodeEditor>,
+}
+
+/// The options widget's toggles, in Monaco's order.
+const OPTION_CONTROLS: [(Control, Codicon); 3] = [
+    (Control::MatchCase, Codicon::CaseSensitive),
+    (Control::WholeWord, Codicon::WholeWord),
+    (Control::Regex, Codicon::Regex),
+];
+
+impl FindOptionsWidget {
+    pub(crate) fn new(editor: WeakEntity<CodeEditor>) -> Self {
+        Self { editor }
+    }
+
+    fn with_editor(
+        &self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut CodeEditor, &mut Context<CodeEditor>),
+    ) {
+        if let Some(editor) = self.editor.upgrade() {
+            editor.update(cx, f);
+        }
+    }
+
+    /// A toggle's `onChange`: `state.change({ … }, false)`.
+    fn toggle(&mut self, control: Control, cx: &mut Context<Self>) {
+        self.with_editor(cx, |editor, cx| {
+            let mut options = editor.find_options().clone();
+            match control {
+                Control::MatchCase => options.match_case = !options.match_case,
+                Control::WholeWord => options.whole_word = !options.whole_word,
+                Control::Regex => options.is_regex = !options.is_regex,
+                _ => return,
+            }
+            editor.change_find_options(options, false, cx);
+        });
+    }
+}
+
+impl Render for FindOptionsWidget {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(editor) = self.editor.upgrade() else {
+            return div().into_any_element();
+        };
+        let (colors, options, editor_focus) = {
+            let editor = editor.read(cx);
+            (
+                editor.colors().clone(),
+                editor.find_options().clone(),
+                editor.focus_handle(cx),
+            )
+        };
+        let checked = |control: Control| match control {
+            Control::MatchCase => options.match_case,
+            Control::WholeWord => options.whole_word,
+            _ => options.is_regex,
+        };
+        // `findOptionsWidget.css`: the widget's colors, `shadow-lg` and a
+        // 2px `contrastBorder`.
+        div()
+            .id("find-options-widget")
+            .debug_selector(|| "find-options-widget".into())
+            .flex()
+            .bg(colors.widget_background)
+            .text_color(colors.widget_foreground)
+            .shadow(crate::widgets::card::shadow_lg())
+            .when_some(colors.contrast_border, |this, border| {
+                this.border_2().border_color(border)
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            // Monaco `mouseover` cancels the hiding, `mouseleave`
+            // schedules it again.
+            .on_mouse_move(cx.listener(|this, _: &gpui::MouseMoveEvent, _, cx| {
+                this.with_editor(cx, |editor, _| editor.cancel_find_options_hide());
+            }))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered {
+                    this.with_editor(cx, |editor, cx| editor.schedule_find_options_hide(cx));
+                }
+            }))
+            .children(OPTION_CONTROLS.map(|(control, icon)| {
+                let look = ControlLook {
+                    colors: &colors,
+                    focused: false,
+                    title: FindWidget::title(control, &editor_focus, window),
+                    focus: None,
+                };
+                toggle(
+                    control,
+                    icon,
+                    checked(control),
+                    true,
+                    TOGGLE_SIZE,
+                    look,
+                    cx.listener(move |this, _, _, cx| this.toggle(control, cx)),
+                )
+            }))
             .into_any_element()
     }
 }
