@@ -151,14 +151,16 @@ Results from every matching provider are merged, sorted by uri and position, and
 - **Escape** while a request is pending cancels it (Monaco's `editor.cancelOperation`, also for format, rename, paste and drop requests); `has_cancellable_operation` says whether one is.
 - **Definition preview:** resting the mouse on a Cmd/Ctrl+hover link shows the definition's code in the hover, in the target model's language (Monaco's `goToDefinitionAtPosition`). It's the location's range, or for 8 lines or more the lines up to the next one indented like the first, without their common indentation. Several definitions say "Click to show N definitions." Locations in other models need `model_for_uri` to find them. Show Definition Preview Hover (`editor.action.showDefinitionPreviewHover`, `show_definition_preview_hover`, unbound) shows the same at the cursor until it moves or a key is pressed.
 
-The peek view (Monaco's references widget) opens under the cursor's line:
+The peek view (Monaco's references widget) opens under the selection's line. A command that would show one where the open one is (the selection contains its position) closes it instead.
 
 - **Preview:** an editable preview of the selected result, with every match in that file highlighted.
 - **Results list:** grouped by file, with the match in each line highlighted.
-- **List keys:** Up and Down (or F4 and Shift+F4, and F12) move through results, Left and Right collapse and expand files, Enter goes to the result and Escape closes the view.
+- **List keys:** Up and Down move through results, Left and Right collapse and expand files, Enter goes to the result and Escape closes the view.
+- **F4 and Shift+F4** (F12 and Shift+F12 in the list), in the editor, the preview or the list: go to the result after or before the one nearest the view, moving the cursor and the view there and keeping the focus where it was. `peek_select_relative` does the same.
 - **Focus:** the list has focus when it opens, or the preview with `peek_widget_default_focus: Editor`. Cmd/Ctrl+K F2 moves focus between them.
 - **Resizing:** drag the line between the preview and the list, or the view's bottom edge (between 5 and 35 lines). The next peek view, in any editor, keeps the size.
-- **Going to a result:** a result in this model moves the peek view there; one elsewhere closes it and emits `OpenLocation`. Double-clicking in the preview always closes it.
+- **Going to a result:** after a Peek command (Peek Definition, Peek References, `peek_locations`, …), Enter or a double click on a result in this model moves the peek view there. Otherwise (Go to References and the other "Go to" commands showing a peek view, `go_to_locations`, `editor.action.findReferences`), they close it and select the result. A click on the title also closes it and selects the result, and a double click in the preview goes to the clicked place (unless `stable_peek`). A result elsewhere closes the view and goes to the editor openers, else emits `OpenLocation`; with Ctrl, Cmd or Alt, the result opens to the side and the view stays.
+- **`editor.action.findReferences`** (`FindReferences`, with Monaco's `uri` and `position`) opens the peek view at once, titled "Loading..." until the references come, and says "No results" in it without any.
 
 Hosts with locations of their own, such as a test explorer or a code lens that lists usages, show them the same way with Monaco's API commands:
 

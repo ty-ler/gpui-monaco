@@ -17,7 +17,7 @@ use gpui::{
     AppContext as _, ClickEvent, Context, DragMoveEvent, Entity, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement,
     PathBuilder, Pixels, Render, ScrollWheelEvent, SharedString, StatefulInteractiveElement,
-    Styled, Subscription, WeakEntity, Window, canvas, div, point, px,
+    Styled, Subscription, Task, WeakEntity, Window, canvas, div, point, px,
 };
 use text::PointUtf16;
 
@@ -96,6 +96,47 @@ enum PeekDrag {
 pub(crate) struct PeekState {
     zone: Option<WidgetId>,
     view: Option<Entity<PeekView>>,
+    /// The references request of `editor.action.findReferences`, whose
+    /// peek view shows "Loading..." until it's done (Monaco
+    /// `toggleWidget`'s `modelPromise`, cancelled when the view closes).
+    task: Option<Task<()>>,
+}
+
+/// Where the focus goes after F4 moves the peek view (Monaco
+/// `goToNextOrPreviousReference`): back to the editor or the preview if
+/// one of them had it, else the results list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PeekFocus {
+    Editor,
+    Preview,
+    List,
+}
+
+/// The peek view's results, handed to its editor (which can't read the
+/// view while the view is calling it).
+pub(crate) struct PeekResults {
+    kind: Option<LocationKind>,
+    /// Where the view is (Monaco `ZoneWidget.position`).
+    anchor: PointUtf16,
+    locations: Vec<Location>,
+    /// The selected result's index in `locations`.
+    selected: usize,
+    peek_mode: bool,
+}
+
+/// How the peek view goes to a result (Monaco `ReferenceWidget`'s
+/// `SelectionEvent.kind`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenKind {
+    /// Enter or a double click in the list: in peek mode the view moves to
+    /// it, else it closes and the result is selected.
+    Goto,
+    /// A click on the title or a double click in the preview: the view
+    /// closes and the result is selected.
+    Open,
+    /// The same with Ctrl, Cmd or Alt: the host opens it beside this
+    /// editor and the view stays.
+    Side,
 }
 
 /// The results in one document.
@@ -131,6 +172,13 @@ pub(crate) struct PeekView {
     /// The command that found the results, for the title; `None` for
     /// locations given to `goToLocations`.
     kind: Option<LocationKind>,
+    /// Monaco `ReferencesController._peekMode`: opened by a Peek command,
+    /// so going to a result in this model moves the view there instead of
+    /// closing it.
+    peek_mode: bool,
+    /// The results are still being found: no list or preview yet, and the
+    /// title says "Loading..." (Monaco `toggleWidget`).
+    loading: bool,
     anchor: PointUtf16,
     groups: Vec<Group>,
     /// The result shown in the preview: (group, reference).
@@ -393,34 +441,7 @@ impl PeekView {
         selected: usize,
         cx: &mut Context<Self>,
     ) -> Self {
-        let main_uri = main_model.read(cx).uri().cloned();
-        let mut groups: Vec<Group> = Vec::new();
-        let mut selected_pos = (0, 0);
-        for (ix, location) in locations.into_iter().enumerate() {
-            if groups.last().is_none_or(|g| g.uri != location.uri) {
-                let model = if location.uri.is_none() || location.uri == main_uri {
-                    Some(main_model.clone())
-                } else {
-                    location
-                        .uri
-                        .as_deref()
-                        .and_then(|uri| model_for_uri(cx, uri))
-                };
-                groups.push(Group {
-                    uri: location.uri.clone(),
-                    model,
-                    ranges: Vec::new(),
-                    highlights: None,
-                    collapsed: false,
-                });
-            }
-            let group = groups.len() - 1;
-            if ix == selected {
-                selected_pos = (group, groups[group].ranges.len());
-            }
-            // Monaco `OneReference.range`: a link's target selection range.
-            groups[group].ranges.push(location.selection_range());
-        }
+        let (groups, selected_pos) = Self::groups(&main_model, locations, selected, cx);
         let mut preview_theme = (*theme).clone();
         preview_theme.colors.background = theme.colors.peek_view_editor_background;
         // Monaco `peekViewEditorGutter.background` and the sticky scroll's
@@ -457,6 +478,8 @@ impl PeekView {
         Self {
             editor: editor.downgrade(),
             kind,
+            peek_mode: false,
+            loading: false,
             anchor,
             groups,
             selected: selected_pos,
@@ -483,6 +506,89 @@ impl PeekView {
             zone_top: Default::default(),
             rendered: 0..0,
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// `locations` grouped by model, with the position of `selected`.
+    fn groups(
+        main_model: &Entity<TextModel>,
+        locations: Vec<Location>,
+        selected: usize,
+        cx: &mut gpui::App,
+    ) -> (Vec<Group>, (usize, usize)) {
+        let main_uri = main_model.read(cx).uri().cloned();
+        let mut groups: Vec<Group> = Vec::new();
+        let mut selected_pos = (0, 0);
+        for (ix, location) in locations.into_iter().enumerate() {
+            if groups.last().is_none_or(|g| g.uri != location.uri) {
+                let model = if location.uri.is_none() || location.uri == main_uri {
+                    Some(main_model.clone())
+                } else {
+                    location
+                        .uri
+                        .as_deref()
+                        .and_then(|uri| model_for_uri(cx, uri))
+                };
+                groups.push(Group {
+                    uri: location.uri.clone(),
+                    model,
+                    ranges: Vec::new(),
+                    highlights: None,
+                    collapsed: false,
+                });
+            }
+            let group = groups.len() - 1;
+            if ix == selected {
+                selected_pos = (group, groups[group].ranges.len());
+            }
+            // Monaco `OneReference.range`: a link's target selection range.
+            groups[group].ranges.push(location.selection_range());
+        }
+        (groups, selected_pos)
+    }
+
+    /// The results of a view opened while loading (Monaco `toggleWidget`
+    /// once its `modelPromise` resolves): the list and the preview with
+    /// the result nearest the anchor selected and focused, or "No results".
+    fn set_results(
+        &mut self,
+        main_model: &Entity<TextModel>,
+        locations: Vec<Location>,
+        cx: &mut Context<Self>,
+    ) {
+        let uri = main_model.read(cx).uri().cloned();
+        let selected = nearest(&locations, uri.as_ref(), self.anchor);
+        let (groups, selected) = Self::groups(main_model, locations, selected, cx);
+        self.focus_pending = !groups.is_empty();
+        self.groups = groups;
+        self.selected = selected;
+        self.focused = Row::Reference(selected.0, selected.1);
+        self.loading = false;
+        cx.notify();
+    }
+
+    /// The results, for the editor (which can't read this view while it's
+    /// calling the editor).
+    fn results(&self, cx: &gpui::App) -> PeekResults {
+        let references = self.references();
+        let selected = references
+            .iter()
+            .position(|r| *r == self.selected)
+            .unwrap_or(0);
+        let locations = references
+            .into_iter()
+            .map(|(g, r)| Location {
+                uri: self.groups[g].uri.clone(),
+                range: self.groups[g].range(r, cx),
+                ..Default::default()
+            })
+            .collect();
+        PeekResults {
+            kind: self.kind,
+            anchor: self.anchor,
+            locations,
+            selected,
+            peek_mode: self.peek_mode,
         }
     }
 
@@ -564,7 +670,8 @@ impl PeekView {
 
     /// Creates the preview editor (it needs a window) and its highlights.
     fn ensure_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.preview.is_some() {
+        // Monaco shows the preview once there are results.
+        if self.preview.is_some() || self.groups.is_empty() {
             return;
         }
         let model = self.groups[self.selected.0]
@@ -600,18 +707,29 @@ impl PeekView {
                 group.highlights = Some(highlights);
             }
         }
-        // A double click in the preview opens the result (Monaco), unless
-        // `stablePeek`; with Ctrl, Cmd or Alt, to the side.
+        // A double click in the preview opens the clicked place, selecting
+        // the mouse target's range (Monaco `_onNewModel`'s `onMouseDown`),
+        // unless `stablePeek`; with Ctrl, Cmd or Alt, to the side.
         self._subscriptions
             .push(cx.subscribe(&preview, |this, _, event, cx| {
                 if let CodeEditorEvent::MouseDown(mouse) = event
                     && mouse.click_count == 2
                     && mouse.target.kind == MouseTargetKind::ContentText
-                    && !this.stable_peek(cx)
+                    && let Some(range) = mouse.target.range.clone()
+                    && let Some(group) = this.groups.get(this.selected.0)
                 {
                     let side =
                         mouse.modifiers.control || mouse.modifiers.platform || mouse.modifiers.alt;
-                    this.open_selected(true, side, cx);
+                    if !side && this.stable_peek(cx) {
+                        return;
+                    }
+                    let location = Location {
+                        uri: group.uri.clone(),
+                        range,
+                        ..Default::default()
+                    };
+                    let kind = if side { OpenKind::Side } else { OpenKind::Open };
+                    this.open(location, kind, cx);
                 }
             }));
         self.preview = Some(preview);
@@ -676,19 +794,16 @@ impl PeekView {
         self.focus_row(Row::Reference(selected.0, selected.1), cx);
     }
 
-    /// Selects the next (or previous) result, wrapping (Monaco
-    /// `goToNextReference`, F4, and `goToPreviousReference`, Shift+F4).
-    pub(crate) fn select_relative(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let references = self.references();
-        if references.is_empty() {
-            return;
+    /// F4 / Shift+F4 (F12 / Shift+F12) in the list: goes to the next (or
+    /// previous) result, keeping the focus in the list (Monaco
+    /// `goToNextOrPreviousReference`).
+    fn go_to_relative(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let results = self.results(cx);
+        if let Some(editor) = self.editor.upgrade() {
+            editor.update(cx, |editor, cx| {
+                editor.peek_go_to_relative(results, delta, PeekFocus::List, cx)
+            });
         }
-        let ix = references
-            .iter()
-            .position(|r| *r == self.selected)
-            .unwrap_or(0) as isize;
-        let next = (ix + delta).rem_euclid(references.len() as isize) as usize;
-        self.select(references[next], cx);
     }
 
     /// The focused row's index among `rows`.
@@ -768,7 +883,7 @@ impl PeekView {
     fn open_focused(&mut self, cx: &mut Context<Self>) {
         match self.focused {
             Row::File(g) => self.toggle_group(g, cx),
-            Row::Reference(..) => self.open_selected(false, false, cx),
+            Row::Reference(..) => self.open_selected(OpenKind::Goto, cx),
         }
     }
 
@@ -839,32 +954,25 @@ impl PeekView {
         }
     }
 
-    /// Enter or a double click: go to the selected result (Monaco
-    /// `_gotoReference`). In this editor's model the peek view moves to it;
-    /// elsewhere it closes and the host is asked to open it. A double click
-    /// in the preview and a click on the title (`close`) always close it
-    /// (Monaco `openReference`); with `side`, the host opens it to the side.
-    fn open_selected(&mut self, close: bool, side: bool, cx: &mut Context<Self>) {
+    /// Goes to the selected result as `kind` says (Monaco
+    /// `onDidSelectReference`).
+    fn open_selected(&mut self, kind: OpenKind, cx: &mut Context<Self>) {
+        // Monaco's title click needs the preview's model: nothing found,
+        // nothing to open.
+        if self.groups.is_empty() {
+            return;
+        }
         let location = self.selected_location(cx);
-        let references = self.references();
-        let selected = references
-            .iter()
-            .position(|r| *r == self.selected)
-            .unwrap_or(0);
-        let locations = references
-            .into_iter()
-            .map(|(g, r)| Location {
-                uri: self.groups[g].uri.clone(),
-                range: self.groups[g].range(r, cx),
-                ..Default::default()
-            })
-            .collect();
-        let results = (self.kind, locations, selected);
+        self.open(location, kind, cx);
+    }
+
+    fn open(&mut self, location: Location, kind: OpenKind, cx: &mut Context<Self>) {
+        let results = self.results(cx);
         let Some(editor) = self.editor.upgrade() else {
             return;
         };
         editor.update(cx, |editor, cx| {
-            editor.peek_open_location(location, close, side, results, cx)
+            editor.peek_open_location(location, kind, results, cx)
         });
     }
 
@@ -891,8 +999,27 @@ impl PeekView {
         cx.notify();
     }
 
+    /// The meta title, after the title: the kind and the count, none while
+    /// loading or without results (Monaco `setMetaTitle`).
+    fn meta(&self) -> Option<String> {
+        (!self.groups.is_empty())
+            .then(|| format!("{} ({})", kind_title(self.kind), self.reference_count()))
+    }
+
+    /// The body's message, which Monaco shows instead of the preview and
+    /// the list once nothing was found.
+    fn message(&self) -> Option<&'static str> {
+        (self.groups.is_empty() && !self.loading).then_some("No results")
+    }
+
+    /// The title and its description: "Loading..." until the results come,
+    /// nothing without results (Monaco `toggleWidget`, `_onNewModel`).
     fn title(&self) -> (String, String) {
-        peek_title(self.groups[self.selected.0].uri.as_deref())
+        match self.groups.get(self.selected.0) {
+            Some(group) => peek_title(group.uri.as_deref()),
+            None if self.loading => ("Loading...".into(), String::new()),
+            None => Default::default(),
+        }
     }
 
     /// The list's wheel: always consumed (Monaco's list has
@@ -1070,7 +1197,7 @@ impl PeekView {
                         window.focus(&this.focus, cx);
                         this.select((g, r), cx);
                         if event.click_count() == 2 {
-                            this.open_selected(false, false, cx);
+                            this.open_selected(OpenKind::Goto, cx);
                         }
                     }))
                     .into_any_element()
@@ -1121,7 +1248,8 @@ impl Render for PeekView {
         let border = colors.peek_view_border;
         let zone_top = self.zone_top.clone();
         let (title, description) = self.title();
-        let meta = format!("{} ({})", kind_title(self.kind), self.reference_count());
+        let meta = self.meta();
+        let message = self.message();
         // The visible rows only (Monaco's list is virtualized).
         let rows = self.rows();
         let row_count = rows.len();
@@ -1210,18 +1338,22 @@ impl Render for PeekView {
                         .child(description),
                 )
             })
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .text_color(colors.peek_view_title_description_foreground)
-                    .child(div().px(px(3.9)).child("-"))
-                    .child(meta),
-            )
+            // Monaco sets no meta title while loading or without results.
+            .when_some(meta, |title, meta| {
+                title.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .text_color(colors.peek_view_title_description_foreground)
+                        .child(div().px(px(3.9)).child("-"))
+                        .child(meta),
+                )
+            })
             .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
                 let modifiers = event.modifiers();
                 let side = modifiers.control || modifiers.platform || modifiers.alt;
-                this.open_selected(true, side, cx);
+                let kind = if side { OpenKind::Side } else { OpenKind::Open };
+                this.open_selected(kind, cx);
             }));
         let list = div()
             .id("peek-results")
@@ -1257,7 +1389,7 @@ impl Render for PeekView {
             .on_action(cx.listener(|this, _: &PeekOpen, _, cx| this.open_focused(cx)))
             .on_action(cx.listener(|this, _: &PeekOpenToSide, _, cx| {
                 if matches!(this.focused, Row::Reference(..)) {
-                    this.open_selected(true, true, cx);
+                    this.open_selected(OpenKind::Side, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &PeekToggle, _, cx| {
@@ -1275,11 +1407,9 @@ impl Render for PeekView {
                     this.close(cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &GoToNextReference, _, cx| this.go_to_relative(1, cx)))
             .on_action(
-                cx.listener(|this, _: &GoToNextReference, _, cx| this.select_relative(1, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &GoToPreviousReference, _, cx| this.select_relative(-1, cx)),
+                cx.listener(|this, _: &GoToPreviousReference, _, cx| this.go_to_relative(-1, cx)),
             )
             .child(
                 div()
@@ -1425,23 +1555,42 @@ impl Render for PeekView {
                             .border_color(border)
                             .relative()
                             .flex()
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(gpui::relative(self.ratio))
-                                    .overflow_hidden()
-                                    .children(preview),
-                            )
-                            .child(
-                                sash("peek-sash-split", PeekDrag::Split, cx)
-                                    .top_0()
-                                    .bottom_0()
-                                    .left(gpui::relative(self.ratio))
-                                    .ml(px(-2.))
-                                    .w(px(4.))
-                                    .cursor_col_resize(),
-                            )
-                            .child(list),
+                            .map(|body| {
+                                if self.groups.is_empty() {
+                                    // Monaco hides the preview and the list
+                                    // until there are results, and shows
+                                    // "No results" without (`.messages`:
+                                    // centered, `3em` down).
+                                    return body.child(
+                                        div()
+                                            .debug_selector(|| "peek-messages".into())
+                                            .size_full()
+                                            .pt(px(39.))
+                                            .flex()
+                                            .justify_center()
+                                            .text_size(px(13.))
+                                            .text_color(colors.foreground)
+                                            .children(message),
+                                    );
+                                }
+                                body.child(
+                                    div()
+                                        .h_full()
+                                        .w(gpui::relative(self.ratio))
+                                        .overflow_hidden()
+                                        .children(preview),
+                                )
+                                .child(
+                                    sash("peek-sash-split", PeekDrag::Split, cx)
+                                        .top_0()
+                                        .bottom_0()
+                                        .left(gpui::relative(self.ratio))
+                                        .ml(px(-2.))
+                                        .w(px(4.))
+                                        .cursor_col_resize(),
+                                )
+                                .child(list)
+                            }),
                     ),
             )
             .child(
@@ -1538,23 +1687,53 @@ impl PeekView {
 use gpui::prelude::FluentBuilder as _;
 
 impl CodeEditor {
-    /// Opens the peek view under the cursor's line with `locations` (Monaco
-    /// `ReferencesController.toggleWidget`). `selected` defaults to the
-    /// result nearest the cursor.
+    /// Opens the peek view with `locations` under the selection's start
+    /// (Monaco `ReferencesController.toggleWidget`), or only closes the
+    /// open one when the selection contains its position. `selected`
+    /// defaults to the result nearest the selection's start. In
+    /// `peek_mode` (a Peek command), going to a result in this model moves
+    /// the view there instead of closing it.
     pub(crate) fn open_peek(
         &mut self,
         kind: Option<LocationKind>,
         locations: Vec<Location>,
         selected: Option<usize>,
+        peek_mode: bool,
         cx: &mut Context<Self>,
     ) {
-        self.close_peek(cx);
-        if locations.is_empty() {
+        if self.close_peek_at_selection(cx) {
             return;
         }
-        let anchor = self.cursors.primary().position;
+        let anchor = self.cursors.primary().selection().start();
         let uri = self.model().read(cx).uri().cloned();
         let selected = selected.unwrap_or_else(|| nearest(&locations, uri.as_ref(), anchor));
+        self.show_peek(kind, anchor, locations, selected, peek_mode, false, cx);
+    }
+
+    /// Monaco `toggleWidget`'s start: closes the peek view, returning
+    /// whether the selection contains its position.
+    fn close_peek_at_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        let position = self.peek.view.as_ref().map(|view| view.read(cx).anchor);
+        self.close_peek(cx);
+        let selection = self.cursors.primary().selection();
+        position
+            .is_some_and(|position| selection.start() <= position && position <= selection.end())
+    }
+
+    /// Shows a peek view under `anchor` (Monaco `ReferenceWidget.show`),
+    /// replacing the open one; `loading` until its results are set.
+    #[allow(clippy::too_many_arguments)]
+    fn show_peek(
+        &mut self,
+        kind: Option<LocationKind>,
+        anchor: PointUtf16,
+        locations: Vec<Location>,
+        selected: usize,
+        peek_mode: bool,
+        loading: bool,
+        cx: &mut Context<Self>,
+    ) -> Entity<PeekView> {
+        self.close_peek(cx);
         let editor = cx.entity();
         let model = self.model().clone();
         let theme = self.theme().clone();
@@ -1566,6 +1745,10 @@ impl CodeEditor {
                 &editor, model, theme, options, kind, anchor, locations, selected, cx,
             );
             view.focus_preview = focus_preview;
+            view.peek_mode = peek_mode;
+            view.loading = loading;
+            // Monaco focuses the list once there are results.
+            view.focus_pending = !view.groups.is_empty();
             view
         });
         // Monaco: the last height (18 lines at first), at most 80% of the
@@ -1593,12 +1776,71 @@ impl CodeEditor {
         self.widgets.set_zone_captures_wheel(id);
         self.peek = PeekState {
             zone: Some(id),
-            view: Some(view),
+            view: Some(view.clone()),
+            task: None,
         };
-        // Monaco reveals the anchor line and the line after the zone.
-        let start = PointUtf16::new(anchor.row, 0);
-        let end = PointUtf16::new(anchor.row + 1, 0);
-        self.reveal_range(start..end, RevealType::Simple, cx);
+        // Monaco `ZoneWidget._showImpl` reveals the anchor line and the
+        // line after the zone, or puts the last line near the top.
+        if anchor.row + 1 >= self.model().read(cx).line_count() {
+            self.reveal_line_near_top(anchor.row, cx);
+        } else {
+            let start = PointUtf16::new(anchor.row, 0);
+            let end = PointUtf16::new(anchor.row + 1, 0);
+            self.reveal_range(start..end, RevealType::Simple, cx);
+        }
+        view
+    }
+
+    /// Peeks the references at `position`, else the cursor's (Monaco
+    /// `editor.action.findReferences`): the peek view opens at once,
+    /// "Loading..." until the references come and "No results" without
+    /// any, not in peek mode. Run again at the open view's position, it
+    /// closes it.
+    pub(crate) fn find_references(&mut self, position: Option<PointUtf16>, cx: &mut Context<Self>) {
+        if self.in_peek {
+            return;
+        }
+        if let Some(position) = position {
+            let position = self.model().read(cx).validate_position(position);
+            self.set_selections(&[crate::cursor::Selection::collapsed(position)], cx);
+        }
+        if self.close_peek_at_selection(cx) {
+            return;
+        }
+        let position = self.cursors.primary().position;
+        let anchor = self.cursors.primary().selection().start();
+        let model = self.model().clone();
+        // Not compact, as Monaco's `getReferencesAtPosition(.., false, ..)`.
+        let tasks = Self::request_locations(&model, LocationKind::References, position, false, cx);
+        let view = self.show_peek(
+            Some(LocationKind::References),
+            anchor,
+            Vec::new(),
+            0,
+            false,
+            true,
+            cx,
+        );
+        let uri = model.read(cx).uri().cloned();
+        self.peek.task = Some(cx.spawn(async move |this, cx| {
+            let mut locations = Vec::new();
+            for task in tasks {
+                match task.await {
+                    Ok(found) => locations.extend(found),
+                    Err(err) => log::warn!("finding references failed: {err:#}"),
+                }
+            }
+            let locations = crate::goto::sorted_locations(locations, uri.as_ref());
+            this.update(cx, |this, cx| {
+                // Monaco drops the results of a request whose view closed.
+                if this.peek.view.as_ref() != Some(&view) {
+                    return;
+                }
+                let model = this.model().clone();
+                view.update(cx, |view, cx| view.set_results(&model, locations, cx));
+            })
+            .ok();
+        }));
     }
 
     /// Whether a peek view is open.
@@ -1676,6 +1918,16 @@ impl CodeEditor {
         ))
     }
 
+    /// The peek view's title, meta title and body message, for tests.
+    #[doc(hidden)]
+    pub fn peek_title_for_tests(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<(String, Option<String>, Option<&'static str>)> {
+        let view = self.peek.view.as_ref()?.read(cx);
+        Some((view.title().0, view.meta(), view.message()))
+    }
+
     /// Whether the peek view's sash `id` (`peek-sash-split` or
     /// `peek-sash-height`) shows `sash.hoverBorder` for the mouse resting
     /// on it, for tests.
@@ -1700,6 +1952,7 @@ impl CodeEditor {
         };
         // The view clears its highlights when it's released.
         self.peek.view = None;
+        self.peek.task = None;
         self.remove_widget(zone, cx);
         // Monaco focuses the editor again.
         if !self.in_peek {
@@ -1708,59 +1961,141 @@ impl CodeEditor {
         true
     }
 
-    /// F4 / Shift+F4 (F12 / Shift+F12 in the list) with the peek view open: the next or previous result.
-    /// Returns whether a peek view was open.
+    /// F4 / Shift+F4 with the peek view open: goes to the result after (or
+    /// before) the one nearest the view, wrapping, like Enter in peek mode
+    /// (Monaco `goToNextReference`, `goToPreviousReference`): the cursor
+    /// and the view move there, and the results list gets the focus. In
+    /// another model, the view closes and the host's
+    /// [editor openers](crate::register_editor_opener) get it. Returns
+    /// whether a peek view was open.
     pub fn peek_select_relative(&mut self, delta: isize, cx: &mut Context<Self>) -> bool {
+        self.peek_step(delta, PeekFocus::List, cx)
+    }
+
+    /// [`CodeEditor::peek_select_relative`], giving the focus back to
+    /// `focus` (Monaco gives it back to the editor or the preview if one of
+    /// them had it).
+    pub(crate) fn peek_step(
+        &mut self,
+        delta: isize,
+        focus: PeekFocus,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(view) = self.peek.view.clone() else {
             return false;
         };
-        view.update(cx, |view, cx| view.select_relative(delta, cx));
+        let results = view.read(cx).results(cx);
+        self.peek_go_to_relative(results, delta, focus, cx);
         true
     }
 
-    /// Monaco `ReferencesController._gotoReference` / `openReference`.
+    /// Where F4 from the editor gives the focus back: the preview if it has
+    /// it, else this editor (the list handles its own F4).
+    pub(crate) fn peek_focus(&self, window: &Window, cx: &gpui::App) -> PeekFocus {
+        if self.is_peek_preview_focused(window, cx) {
+            PeekFocus::Preview
+        } else {
+            PeekFocus::Editor
+        }
+    }
+
+    /// Monaco `goToNextOrPreviousReference`: from the result nearest the
+    /// view's position.
+    fn peek_go_to_relative(
+        &mut self,
+        results: PeekResults,
+        delta: isize,
+        focus: PeekFocus,
+        cx: &mut Context<Self>,
+    ) {
+        let count = results.locations.len();
+        if count == 0 {
+            return;
+        }
+        let uri = self.model().read(cx).uri().cloned();
+        let source = nearest(&results.locations, uri.as_ref(), results.anchor);
+        let target = (source as isize + delta).rem_euclid(count as isize) as usize;
+        self.peek_go_to_reference(results, target, focus, cx);
+    }
+
+    /// Monaco `ReferencesController._gotoReference`: the cursor goes to the
+    /// start of result `target` and the peek view moves under it. Standalone
+    /// Monaco opens no other model; the view closes and the host's openers
+    /// get it.
+    fn peek_go_to_reference(
+        &mut self,
+        results: PeekResults,
+        target: usize,
+        focus: PeekFocus,
+        cx: &mut Context<Self>,
+    ) {
+        let location = results.locations[target].clone();
+        if !self.model().read(cx).is_at(location.uri.as_deref()) {
+            self.close_peek(cx);
+            self.open_location_with_openers(location, false, cx);
+            return;
+        }
+        // Monaco `OneReference.range`: a link's target selection range.
+        let start = location.selection_range().start;
+        self.set_selections(&[crate::cursor::Selection::collapsed(start)], cx);
+        let view = self.show_peek(
+            results.kind,
+            start,
+            results.locations,
+            target,
+            results.peek_mode,
+            false,
+            cx,
+        );
+        view.update(cx, |view, _| match focus {
+            // `close_peek` gives it back to the editor.
+            PeekFocus::Editor => view.focus_pending = false,
+            PeekFocus::Preview => view.focus_preview = true,
+            PeekFocus::List => view.focus_preview = false,
+        });
+    }
+
+    /// Goes to a result from the peek view (Monaco
+    /// `onDidSelectReference`): `Goto` in peek mode moves the view
+    /// (`_gotoReference`); otherwise it closes and the result's whole range
+    /// is selected (`openReference`), or the host opens it.
     fn peek_open_location(
         &mut self,
         location: Location,
-        close: bool,
-        side: bool,
-        (kind, locations, selected): (Option<LocationKind>, Vec<Location>, usize),
+        kind: OpenKind,
+        results: PeekResults,
         cx: &mut Context<Self>,
     ) {
-        // Monaco `openReference` to the side: the peek view stays open and
-        // the host opens the result beside this editor.
-        if side {
-            self.open_location_with_openers(location, true, cx);
-            return;
-        }
-        let here = self.model().read(cx).is_at(location.uri.as_deref());
-        // Monaco `OneReference.range`: a link's target selection range.
-        let range = location.selection_range();
-        if here && !close {
-            // Move the peek view to the result, keeping its list (Monaco
-            // focuses the list then).
-            let start = range.start;
-            self.set_selections(&[crate::cursor::Selection::collapsed(start)], cx);
-            self.open_peek(kind, locations, Some(selected), cx);
-            if let Some(view) = &self.peek.view {
-                view.update(cx, |view, _| view.focus_preview = false);
+        match kind {
+            // The peek view stays open and the host opens the result
+            // beside this editor.
+            OpenKind::Side => self.open_location_with_openers(location, true, cx),
+            OpenKind::Goto if results.peek_mode => {
+                let target = results.selected;
+                self.peek_go_to_reference(results, target, PeekFocus::List, cx);
             }
-            return;
-        }
-        self.close_peek(cx);
-        if here {
-            let start = range.start;
-            self.set_selections(&[crate::cursor::Selection::collapsed(start)], cx);
-            // Standalone Monaco's `openCodeEditor` centers the selection
-            // at once (`StandaloneCodeEditorService.doOpenEditor`).
-            self.reveal_range_with_scroll_type(
-                range,
-                RevealType::Center,
-                ScrollType::Immediate,
-                cx,
-            );
-        } else {
-            self.open_location_with_openers(location, false, cx);
+            OpenKind::Goto | OpenKind::Open => {
+                self.close_peek(cx);
+                if self.model().read(cx).is_at(location.uri.as_deref()) {
+                    // Monaco `OneReference.range`: a link's target
+                    // selection range, selected whole.
+                    let range = location.selection_range();
+                    self.set_selections(
+                        &[crate::cursor::Selection::new(range.start, range.end)],
+                        cx,
+                    );
+                    // Standalone Monaco's `openCodeEditor` centers the
+                    // selection at once (`StandaloneCodeEditorService.doOpenEditor`).
+                    self.reveal_range_with_scroll_type(
+                        range,
+                        RevealType::Center,
+                        ScrollType::Immediate,
+                        cx,
+                    );
+                } else {
+                    self.open_location_with_openers(location, false, cx);
+                }
+            }
         }
     }
 }

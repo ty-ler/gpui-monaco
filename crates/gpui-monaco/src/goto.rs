@@ -182,7 +182,7 @@ impl CodeEditor {
     /// finds exactly two references is asked again without the declaration,
     /// and that answer is used if it has exactly one (Monaco
     /// `getReferencesAtPosition`).
-    fn request_locations(
+    pub(crate) fn request_locations(
         model: &Entity<crate::TextModel>,
         kind: LocationKind,
         position: PointUtf16,
@@ -496,7 +496,7 @@ impl CodeEditor {
         if !self.in_peek
             && (open_in_peek || (preference == GoToLocation::Peek && locations.len() > 1))
         {
-            self.open_peek(kind, locations, None, cx);
+            self.open_peek(kind, locations, None, open_in_peek, cx);
             return;
         }
         let first = locations[0].clone();
@@ -509,7 +509,7 @@ impl CodeEditor {
             self.open_location(&first, !peek, cx)
         };
         if peek && opened_here {
-            self.open_peek(kind, locations.clone(), Some(0), cx);
+            self.open_peek(kind, locations.clone(), Some(0), open_in_peek, cx);
         }
         if preference == GoToLocation::Goto {
             self.put_symbol_navigation(locations, 0, cx);

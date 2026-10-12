@@ -296,38 +296,54 @@ fn several_results_open_a_peek_view(cx: &mut TestAppContext) {
         p(3, 4)
     );
 
-    // The list has focus: arrows move through results, F4 and Shift+F4 too.
+    // The list has focus: arrows move through results.
+    let selected =
+        |cx: &mut VisualTestContext| editor.read_with(cx, |e, cx| e.peek_results(cx)).unwrap().1;
     cx.simulate_keystrokes("up");
     draw(cx);
-    assert_eq!(
-        editor.read_with(cx, |e, cx| e.peek_results(cx)).unwrap().1,
-        2
-    );
-    cx.simulate_keystrokes("f4");
-    cx.simulate_keystrokes("f4");
-    draw(cx);
-    // Wraps around to the first.
-    assert_eq!(
-        editor.read_with(cx, |e, cx| e.peek_results(cx)).unwrap().1,
-        0
-    );
-    // A file that can't be opened has no preview.
-    let preview_text = preview.read_with(cx, |p, cx| p.model().read(cx).text());
-    assert_eq!(preview_text, "no preview available");
+    assert_eq!(selected(cx), 2);
+    // F4 and Shift+F4 go from the result nearest the view (still the
+    // last), moving the cursor and the view there, the list keeping the
+    // focus (Monaco `goToNextOrPreviousReference`).
     cx.simulate_keystrokes("shift-f4");
     draw(cx);
-    assert_eq!(
-        editor.read_with(cx, |e, cx| e.peek_results(cx)).unwrap().1,
-        3
-    );
-
-    // Enter on a result in this model moves the peek view there.
-    cx.simulate_keystrokes("up enter");
-    draw(cx);
+    assert_eq!(selected(cx), 2);
     assert_eq!(head(&editor, cx), p(2, 4));
     assert!(editor.read_with(cx, |e, _| e.is_peek_visible()));
+    cx.simulate_keystrokes("shift-f4");
+    draw(cx);
+    assert_eq!(selected(cx), 1);
+    assert_eq!(head(&editor, cx), p(0, 3));
+    cx.simulate_keystrokes("f4");
+    draw(cx);
+    assert_eq!(selected(cx), 2);
+    assert_eq!(head(&editor, cx), p(2, 4));
+    // A file that can't be opened has no preview.
+    cx.simulate_keystrokes("up up up");
+    draw(cx);
+    assert_eq!(selected(cx), 0);
+    let preview = editor.read_with(cx, |e, cx| e.peek_preview(cx)).unwrap();
+    let preview_text = preview.read_with(cx, |p, cx| p.model().read(cx).text());
+    assert_eq!(preview_text, "no preview available");
+
+    // Enter on a result after Go to References (not a Peek command)
+    // closes the view and selects the result (Monaco `openReference`).
+    cx.simulate_keystrokes("down down down");
+    draw(cx);
+    assert_eq!(selected(cx), 2);
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.selections()[0]),
+        Selection::new(p(2, 4), p(2, 7))
+    );
+    assert!(cx.update(|window, cx| editor.focus_handle(cx).is_focused(window)));
 
     // Escape closes it and the editor gets focus back.
+    cx.simulate_keystrokes("shift-f12");
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_peek_visible()));
     cx.simulate_keystrokes("escape");
     draw(cx);
     assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
