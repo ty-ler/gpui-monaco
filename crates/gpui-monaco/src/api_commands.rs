@@ -19,8 +19,10 @@ use crate::providers::{
 };
 use crate::providers::{ProviderContext, ProviderTarget};
 
-/// What the providers are looked up and asked with.
-fn target(model: &Entity<TextModel>, cx: &App) -> (ProviderTarget, ProviderContext) {
+/// What the providers are looked up and asked with, resolving the model's
+/// language first if it hasn't been.
+fn target(model: &Entity<TextModel>, cx: &mut App) -> (ProviderTarget, ProviderContext) {
+    model.update(cx, |model, cx| model.resolve_language(cx));
     let model = model.read(cx);
     (model.into(), model.provider_context())
 }

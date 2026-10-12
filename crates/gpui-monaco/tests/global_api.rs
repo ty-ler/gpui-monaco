@@ -234,14 +234,14 @@ fn language_changes_report_the_old_language(cx: &mut TestAppContext) {
     assert_eq!(
         *global.borrow(),
         vec![
-            (model.entity_id(), None),
+            (model.entity_id(), Some("plaintext".into())),
             (model.entity_id(), Some("rust".into()))
         ]
     );
     assert_eq!(
         *local.borrow(),
         vec![
-            (None, Some("rust".into())),
+            (Some("plaintext".into()), Some("rust".into())),
             (Some("rust".into()), Some("plaintext".into()))
         ]
     );

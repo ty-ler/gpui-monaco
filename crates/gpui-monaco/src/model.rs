@@ -63,28 +63,34 @@ fn plain_text_language(registry: &LanguageRegistry) -> Arc<Language> {
 }
 
 /// What the language id `id` resolves to (Monaco
-/// `_createAndGetLanguageIdentifier`): the registered language with that
-/// id, name or MIME type, with the id the model then has (a MIME type gives
-/// its language's), or plain text, keeping the id, for no language or an
-/// unregistered one.
+/// `_createAndGetLanguageIdentifier`), with the id the model then has: the
+/// registered language with that id; the one with that name, alias,
+/// extension or MIME type, giving its id (Monaco takes a MIME type, and
+/// gives `plaintext` for the rest); plain text, keeping the id, for an
+/// unregistered one; and `plaintext` for no language.
 fn resolve_language(
     registry: &LanguageRegistry,
     id: Option<&SharedString>,
-) -> (Option<SharedString>, Arc<Language>) {
+) -> (SharedString, Arc<Language>) {
     let Some(id) = id else {
-        return (None, plain_text_language(registry));
+        return (
+            SharedString::new_static(Language::PLAIN_TEXT_ID),
+            plain_text_language(registry),
+        );
     };
-    if let Some(language) = registry
-        .language_for_id(id)
-        .or_else(|| registry.language_for_name(id))
-    {
-        return (Some(id.clone()), language);
+    if let Some(language) = registry.language_for_id(id) {
+        return (id.clone(), language);
     }
     // Monaco `createModel` and `setModelLanguage` also take a MIME type
-    // (`getLanguageIdByMimeType`): the model gets that language's id.
-    match registry.language_for_mime_type(id) {
-        Some(language) => (Some(SharedString::from(language.id.to_string())), language),
-        None => (Some(id.clone()), plain_text_language(registry)),
+    // (`getLanguageIdByMimeType`): the model gets that language's id, as
+    // it does for a language's name, alias or extension, so its providers,
+    // `editorLangId` and configuration apply.
+    match registry
+        .language_for_mime_type(id)
+        .or_else(|| registry.language_for_name(id))
+    {
+        Some(language) => (SharedString::from(language.id.to_string()), language),
+        None => (id.clone(), plain_text_language(registry)),
     }
 }
 
@@ -197,10 +203,12 @@ pub fn register_model(cx: &mut App, model: &gpui::Entity<TextModel>) {
     if model.read(cx).is_internal() {
         return;
     }
-    // A model made before `init` gets the markers set on its uri.
+    // A model made before `init` gets the markers set on its uri, and its
+    // language (Monaco resolves it in the `TextModel` constructor).
     if crate::registry::track_model(model, cx) {
         model.update(cx, |model, cx| model.update_marker_decorations(cx));
     }
+    model.update(cx, |model, cx| model.resolve_language(cx));
     if model.read(cx).uri().is_some() {
         let resource = model.read(cx).resource().clone();
         let models = cx.default_global::<Models>();
@@ -258,6 +266,9 @@ fn live_model_for_uri(cx: &mut App, uri: &str) -> Option<gpui::Entity<TextModel>
 
 /// Creates a model holding `value`, in `language` (a language id or a MIME
 /// type) and with `uri`, and registers it (Monaco `editor.createModel`).
+/// Its language is resolved right away, guessed from `uri` and the first
+/// line without `language`, so [`TextModel::language_id`] is set (`plaintext`
+/// for none) and [`on_language`](crate::on_language) callbacks run.
 /// As in Monaco, it fails when a live model already has `uri`; then
 /// [`model_for_uri`] finds that one. The builder methods
 /// ([`TextModel::new`], [`TextModel::with_language`],
@@ -280,6 +291,10 @@ pub fn create_model(
         }
         if let Some(uri) = uri {
             model = model.with_uri(uri.to_string());
+        } else if language.is_none() {
+            // Monaco `createTextModel`: guessed from the first line alone.
+            model.guess_language = true;
+            model.language_guessed = true;
         }
         model
     });
@@ -566,8 +581,11 @@ pub struct TextModel {
     pub(crate) markers: Vec<crate::markers::DecoratedMarker>,
     /// Set when `language_id` hasn't been resolved against the registry yet.
     language_pending: bool,
+    /// Parse the text: set once [`TextModel::ensure_syntax`] runs, when an
+    /// editor first shows the model.
+    parse_requested: bool,
     /// No language was given: guess one from the uri and first line when
-    /// first shown (Monaco `createByFilepathOrFirstLine`).
+    /// resolved (Monaco `createByFilepathOrFirstLine`).
     guess_language: bool,
     /// The language is guessed, so registering languages guesses again,
     /// until one is set explicitly.
@@ -668,8 +686,9 @@ impl TextModel {
             decorations: DecorationSet::default(),
             ignore_unusual_line_terminators: false,
             markers: Vec::new(),
-            // Plain text, resolved when first shown.
+            // Plain text, resolved when created (once `init` has run).
             language_pending: true,
+            parse_requested: false,
             guess_language: false,
             language_guessed: false,
             auto_whitespace: AutoWhitespaceLines::default(),
@@ -755,10 +774,10 @@ impl TextModel {
         self.update_options(options, cx);
     }
 
-    /// Sets the language id, resolved against the registry the first time the
-    /// model is shown (see [`TextModel::ensure_syntax`]). A MIME type works
+    /// Sets the language id, resolved against the registry when the model is
+    /// created (see [`TextModel::resolve_language`]). A MIME type works
     /// too, as in Monaco's `createModel`: the model then gets its
-    /// language's id. An id that isn't registered yet gives plain text
+    /// language's id, as it does for a language's name, alias or extension. An id that isn't registered yet gives plain text
     /// until it is (see [`register_language`](crate::register_language)).
     pub fn with_language(mut self, language_id: impl Into<SharedString>) -> Self {
         self.language_id = Some(language_id.into());
@@ -771,7 +790,7 @@ impl TextModel {
     /// Identifies the document for providers (Monaco model uris).
     ///
     /// Without a language, the model's language is then guessed from the
-    /// uri's file name and the first line when it's first shown, as Monaco's
+    /// uri's file name and the first line when it's resolved, as Monaco's
     /// `createModel` does (see
     /// [`LanguageRegistry::language_for_path_or_first_line`]), and guessed
     /// again when languages are registered, until one is set.
@@ -980,8 +999,14 @@ impl TextModel {
         }
     }
 
-    /// The language id set with [`TextModel::with_language`] or
-    /// [`TextModel::set_language`].
+    /// The model's language id (Monaco `getLanguageId`): the one set with
+    /// [`TextModel::with_language`] or [`TextModel::set_language`], or
+    /// guessed from the uri, once resolved (see
+    /// [`TextModel::resolve_language`]). A MIME type, or a language's name,
+    /// alias or extension, gives that language's id, and a model without a
+    /// language is `plaintext`. An id that isn't registered is kept (Monaco
+    /// reports `plaintext`), so the model takes the language when it's
+    /// registered. `None` before the model is resolved.
     pub fn language_id(&self) -> Option<&SharedString> {
         self.language_id.as_ref()
     }
@@ -989,8 +1014,8 @@ impl TextModel {
     /// The resolved language: the registered language of
     /// [`language_id`](Self::language_id), with or without a grammar, else
     /// plain text (Monaco's `plaintext`, see [`Language::plain_text`]), as
-    /// for a model without a language. `None` until the model is first
-    /// shown (see [`TextModel::ensure_syntax`]).
+    /// for a model without a language. `None` until the model is resolved
+    /// (see [`TextModel::resolve_language`]).
     pub fn language(&self) -> Option<&Arc<Language>> {
         self.language.as_ref()
     }
@@ -1031,9 +1056,31 @@ impl TextModel {
         }
     }
 
-    /// Resolves a pending language id against the global registry and starts
-    /// parsing. Editors call this when they start showing the model.
+    /// Resolves a pending language id (see
+    /// [`TextModel::resolve_language`]) and starts parsing, if the model
+    /// hasn't been parsed yet. Editors call this when they start showing
+    /// the model.
     pub fn ensure_syntax(&mut self, cx: &mut Context<Self>) {
+        self.parse_requested = true;
+        self.resolve_language(cx);
+        if self
+            .syntax
+            .as_ref()
+            .is_some_and(|syntax| syntax.latest.is_none() && syntax.task.is_none())
+        {
+            self.reparse(cx);
+        }
+    }
+
+    /// Resolves a pending language id against the global registry, as
+    /// Monaco's `TextModel` does when it's created: guesses it from the uri
+    /// and first line when none was given, takes the registered language
+    /// (`plaintext` without one), and requests its features, running its
+    /// [`on_language`](crate::on_language) callbacks. Models resolve when
+    /// they're created once [`crate::init`] has run, and in
+    /// [`create_model`] and [`register_model`]; parsing waits until an
+    /// editor shows them (see [`TextModel::ensure_syntax`]).
+    pub fn resolve_language(&mut self, cx: &mut Context<Self>) {
         if !self.language_pending {
             return;
         }
@@ -1050,10 +1097,8 @@ impl TextModel {
             return;
         }
         let (language_id, language) = resolve_language(&registry, self.language_id.as_ref());
-        self.language_id = language_id;
-        if let Some(id) = &self.language_id {
-            crate::languages::language_requested(id, cx);
-        }
+        crate::languages::language_requested(&language_id, cx);
+        self.language_id = Some(language_id);
         // The configuration applies with or without a grammar (Monaco's
         // `LanguageConfigurationRegistry` doesn't need a tokenizer).
         self.syntax = language.has_highlighter().then(|| Syntax {
@@ -1092,7 +1137,7 @@ impl TextModel {
             self.language_id.clone()
         };
         let (id, language) = resolve_language(&registry, id.as_ref());
-        if id == self.language_id
+        if self.language_id.as_ref() == Some(&id)
             && self
                 .language
                 .as_ref()
@@ -1100,9 +1145,9 @@ impl TextModel {
         {
             return;
         }
-        let old_language = std::mem::replace(&mut self.language_id, id);
+        let old_language = self.language_id.replace(id);
         self.language_pending = true;
-        self.ensure_syntax(cx);
+        self.resolve_language(cx);
         if self.language_id == old_language {
             cx.emit(TextModelEvent::LanguageConfigurationChanged);
         } else {
@@ -1123,7 +1168,7 @@ impl TextModel {
     /// emitting [`TextModelEvent::LanguageConfigurationChanged`].
     pub(crate) fn refresh_language(&mut self, cx: &mut Context<Self>) {
         self.language_pending = true;
-        self.ensure_syntax(cx);
+        self.resolve_language(cx);
         cx.emit(TextModelEvent::LanguageConfigurationChanged);
         cx.notify();
     }
@@ -1137,7 +1182,7 @@ impl TextModel {
             return;
         }
         self.language_pending = true;
-        self.ensure_syntax(cx);
+        self.resolve_language(cx);
         cx.notify();
     }
 
@@ -1394,8 +1439,9 @@ impl TextModel {
 
     /// Starts (or queues) a background parse of the current text.
     fn reparse(&mut self, cx: &mut Context<Self>) {
-        // Monaco never tokenizes models too large at creation.
-        if self.too_large_for_tokenization {
+        // Monaco never tokenizes models too large at creation, and leaves
+        // the rest until an editor shows them.
+        if self.too_large_for_tokenization || !self.parse_requested {
             return;
         }
         let Some(syntax) = self.syntax.as_mut() else {

@@ -797,9 +797,17 @@ fn definitions_in_other_models_are_previewed(cx: &mut TestAppContext) {
             .with_uri(uri)
             .with_language("rust")
     });
-    cx.update(|cx| gpui_monaco::register_model(cx, &lib));
+    cx.update(|cx| {
+        gpui_monaco::register_language(
+            cx,
+            syntax::Language::new("rust", "Rust").with_extensions(&["rs"]),
+        );
+        gpui_monaco::register_model(cx, &lib);
+    });
     let (editor, cx) = setup(fixed, cx);
-    // In that model's language, without the common indentation.
+    // In the language its uri guesses (Monaco
+    // `guessLanguageIdByFilepathOrFirstLine`), without the common
+    // indentation.
     assert_eq!(
         definition_hover(&editor, cx, p(2, 5)),
         ["\n```rust\npub fn add() {\n    1\n}\n}\n```\n"]

@@ -114,7 +114,7 @@ fn model_language_and_configuration_events(cx: &mut TestAppContext) {
         events
             .borrow()
             .contains(&CodeEditorEvent::ModelLanguageChanged {
-                old_language: None,
+                old_language: Some("plaintext".into()),
                 new_language: Some("rust".into()),
                 source: "api".into(),
             })

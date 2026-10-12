@@ -288,9 +288,12 @@ impl CodeEditor {
             .map(|line| line.trim_end_matches('\r'))
             .collect();
         let preview = definition_preview(&lines, &location.range)?;
-        let language = model
-            .language_id()
-            .map(|id| id.to_string())
+        // Monaco guesses the fence's language from the target's uri alone
+        // (`guessLanguageIdByFilepathOrFirstLine(uri)`), not its model's.
+        let path = crate::languages::uri_path(model.resource());
+        let language = crate::language_registry(cx)
+            .language_for_path_or_first_line(path.as_deref().map(std::path::Path::new), None)
+            .map(|language| language.id.to_string())
             .unwrap_or_default();
         Some(markdown_code_block(&language, &preview).into())
     }

@@ -17,7 +17,13 @@ Models without a language, or with one that isn't registered, are plain text: `m
 - surrounding pairs for the brackets, `<>` and the three quotes, so typing `"` over a selection wraps it (but doesn't auto-close);
 - no bracket pair colorization, and off-side indentation folding.
 
-`set_language_configuration(cx, "plaintext", config)` changes it for every plain text model, when the registry has `plaintext`. A model with an unregistered id keeps that id in `language_id()`, where Monaco reports `plaintext`.
+A model without a language has the id `plaintext` too, as Monaco's `getLanguageId()`: `language_id()` is `plaintext`, so providers registered for `plaintext` and `editorLangId == plaintext` apply to it. Provider selectors also see its `resource()`, `inmemory://model/N` without a uri, so a `{ scheme: "inmemory" }` filter matches models without one.
+
+`set_language_configuration(cx, "plaintext", config)` changes it for every plain text model, when the registry has `plaintext`. A model with an unregistered id keeps that id in `language_id()`, where Monaco reports `plaintext`, so it takes the language once it's registered.
+
+### When the language is resolved
+
+As Monaco's `TextModel` constructor does, a model resolves its language when it's created, once `gpui_monaco::init` has run, and in `create_model` and `register_model` otherwise: `language_id()` and `language()` are set, a language guessed from the uri is picked, and `on_language` callbacks run. The model is parsed for highlighting only once an editor shows it (or `ensure_syntax` is called). Besides an id or a MIME type, a model takes a language's name, alias or extension (`"Rust"`, `"rs"`), and its `language_id()` is then the language's id, `rust`; Monaco gives `plaintext` for those.
 
 Install the registry once per app:
 
@@ -94,7 +100,7 @@ gpui_monaco::set_language_registry(cx, registry);
 
 ### File associations
 
-A model created with `with_uri` and no language gets one from the uri when it's first shown, as Monaco's `createModel` does (`LanguageRegistry::language_for_path_or_first_line`):
+A model created with `with_uri` and no language gets one from the uri when it's created, as Monaco's `createModel` does (`LanguageRegistry::language_for_path_or_first_line`), and `create_model` without a uri or a language guesses from the first line alone:
 
 1. an exact file name (`with_file_names`), ignoring case;
 2. the longest matching `with_filename_patterns` glob, matched against the whole path when it contains a `/`;

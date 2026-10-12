@@ -250,10 +250,7 @@ impl InlineCompletionsProvider for SuggestInlineCompletions {
             // Quick suggestions are off for this token.
             return empty();
         }
-        let target = ProviderTarget {
-            language_id: context.language_id.clone(),
-            uri: context.uri.clone(),
-        };
+        let target = ProviderTarget::from(model.read(cx));
         let all_providers = completion_providers(cx, target.clone());
         // A word, or else a trigger character (word characters win over
         // trigger characters).
