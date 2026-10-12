@@ -527,7 +527,8 @@ fn set_theme_applies_to_every_editor(cx: &mut TestAppContext) {
     let theme_name = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
         editor.read_with(cx, |e, _| e.theme().name.clone())
     };
-    assert_eq!(theme_name(&editor, cx), "vs-dark");
+    // Monaco's default theme.
+    assert_eq!(theme_name(&editor, cx), "vs");
     cx.update(|_, cx| gpui_monaco::set_theme(cx, "hc-black"));
     assert_eq!(theme_name(&editor, cx), "hc-black");
 

@@ -40,6 +40,8 @@ fn setup<'a>(
         let mut editor = CodeEditor::new(model, window, cx);
         let mut options = editor.options().clone();
         options.minimap.enabled = false;
+        // For the glyph margin widgets.
+        options.glyph_margin = true;
         editor.update_options(options, cx);
         editor
     });

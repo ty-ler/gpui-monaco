@@ -25,6 +25,16 @@ fn paint(cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// Gives the modified editor a glyph margin (off by default, as in
+/// standalone Monaco), where the margin revert arrows go.
+fn with_glyph_margin(diff: &Entity<DiffEditor>, cx: &mut VisualTestContext) {
+    let modified = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    modified.update(cx, |e, cx| {
+        e.update_options_with(|o| o.glyph_margin = true, cx)
+    });
+    paint(cx);
+}
+
 #[gpui::test]
 fn computes_and_aligns_changes(cx: &mut TestAppContext) {
     let (diff, cx) = setup("a\nb\nc\nd", "a\nx\ny\nb\nc", cx);
@@ -530,6 +540,7 @@ fn dragging_hidden_lines_bars(cx: &mut TestAppContext) {
 #[gpui::test]
 fn margin_revert_arrows(cx: &mut TestAppContext) {
     let (diff, cx) = setup("a\nb\nc\nd\ne", "a\nB\nc\nd\ne", cx);
+    with_glyph_margin(&diff, cx);
     diff.update(cx, |d, cx| {
         let mut options = d.options().clone();
         options.render_gutter_menu = false;
@@ -1614,6 +1625,7 @@ fn hidden_region_breadcrumbs(cx: &mut TestAppContext) {
 #[gpui::test]
 fn margin_arrows_with_selection_and_compare(cx: &mut TestAppContext) {
     let (diff, cx) = setup("a\nb\nc\nd\ne", "a\nB\nc\nD\ne", cx);
+    with_glyph_margin(&diff, cx);
     update_options(&diff, cx, |o| o.render_gutter_menu = false);
     assert_eq!(
         diff.read_with(cx, |d, cx| d.revert_arrow_bounds_for_tests(cx))
@@ -1976,6 +1988,7 @@ fn the_revert_action_reverts_a_change_ending_at_the_cursor(cx: &mut TestAppConte
 #[gpui::test]
 fn the_revert_selection_arrow_needs_a_real_intersection(cx: &mut TestAppContext) {
     let (diff, cx) = setup("x\none two\n", "x\none TWO\n", cx);
+    with_glyph_margin(&diff, cx);
     update_options(&diff, cx, |o| o.render_gutter_menu = false);
     let modified = diff.read_with(cx, |d, _| d.modified_editor().clone());
     // Selected backwards from `one |TWO` up to the first line, so the

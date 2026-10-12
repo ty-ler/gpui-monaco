@@ -136,7 +136,7 @@ These answer from the last frame, so they return `None` until the editor was pai
 | `offset_for_column(row, column)`, `width_of_line(row)` | `getOffsetForColumn`, `getWidthOfLine` (rendered lines only) |
 | `visible_column_from_position(p, cx)` | `getVisibleColumnFromPosition`, 0-based |
 | `statusbar_column(p, cx)` | `getStatusbarColumn`: 1-based, tabs expanded, every other character one column |
-| `content_width()`, `content_height()`, `scroll_width()`, `scroll_height()` | `getContentWidth`, `getContentHeight` (the lines and view zones, without the `scroll_beyond_last_line` room or horizontal scrollbar Monaco adds), `getScrollWidth`, `getScrollHeight` |
+| `content_width()`, `content_height()`, `scroll_width()`, `scroll_height()` | `getContentWidth`, `getContentHeight` (the lines and view zones, plus a shown horizontal scrollbar without `scroll_beyond_last_line` as in Monaco, but without the `scroll_beyond_last_line` room Monaco adds), `getScrollWidth`, `getScrollHeight` |
 | `scrolled_visible_position_in_editor(p)` (`top`, `left`, `height` from the editor's top-left); `scrolled_visible_position(p)` in window coordinates | `getScrolledVisiblePosition` |
 | `font_info()` | `getOption(EditorOption.fontInfo)` |
 | `visible_ranges_plus_viewport_above_below(cx)` | `getVisibleRangesPlusViewportAboveBelow` |

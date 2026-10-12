@@ -195,16 +195,18 @@ fn layout_and_content_size_events(cx: &mut TestAppContext) {
     assert!(!info.is_viewport_wrapping);
     assert_eq!(info.wrapping_column, None);
 
-    // Turning the glyph margin off moves everything left.
-    let mut no_glyphs = options.clone();
-    no_glyphs.glyph_margin = false;
-    editor.update(cx, |e, cx| e.update_options(no_glyphs, cx));
+    // Turning the glyph margin on (it's off by default, as in standalone
+    // Monaco) moves everything right.
+    assert_eq!(info.glyph_margin_width, px(0.));
+    let mut glyphs = options.clone();
+    glyphs.glyph_margin = true;
+    editor.update(cx, |e, cx| e.update_options(glyphs, cx));
     draw(cx);
     let changed = layouts(&events);
     assert_eq!(changed.len(), 1);
-    assert_eq!(changed[0].glyph_margin_width, px(0.));
-    assert_eq!(changed[0].line_numbers_left, px(0.));
-    assert!(changed[0].content_left < info.content_left);
+    assert!(changed[0].glyph_margin_width > px(0.));
+    assert_eq!(changed[0].line_numbers_left, changed[0].glyph_margin_width);
+    assert!(changed[0].content_left > info.content_left);
 
     // Resizing the window reports the new size.
     events.borrow_mut().clear();

@@ -1068,7 +1068,7 @@ impl CodeEditor {
             },
             inertial_scroll_task: None,
             smooth_scroll_task: None,
-            theme: crate::theme::global_theme(cx).unwrap_or_else(|| Arc::new(Theme::vs_dark())),
+            theme: crate::theme::global_theme(cx).unwrap_or_else(|| Arc::new(Theme::vs())),
             scroll_top: px(0.),
             scroll_left: px(0.),
             layout: None,
@@ -1418,7 +1418,7 @@ impl CodeEditor {
     }
 
     /// The editor options, as set (Monaco `getRawOptions`); the editor uses
-    /// them [validated](EditorOptions::validated) and zoomed.
+    /// them as [`computed_options`](Self::computed_options) returns them.
     #[expect(
         clippy::misnamed_getters,
         reason = "`options` holds the validated, zoomed values; hosts get theirs back"
@@ -1427,12 +1427,28 @@ impl CodeEditor {
         &self.user_options
     }
 
+    /// The options the editor runs with (Monaco `getOptions`, and
+    /// `getOption` for one): [validated](EditorOptions::validated), with
+    /// the font zoom applied, `font_size` and `line_height` in pixels, and
+    /// an `Auto` `accessibility_support` resolved to `On` or `Off` (whether
+    /// the last frame was [optimized for screen readers](Self::is_screen_reader_optimized)).
+    /// Optimized, `wrapping_strategy` is `Advanced` and `wrapping_indent`
+    /// `None`. [`ConfigurationChange`] carries these. Monaco's computed
+    /// `layoutInfo` (with `lineDecorationsWidth` in pixels) and `fontInfo`
+    /// are [`layout_info`](Self::layout_info) and
+    /// [`font_info`](Self::font_info), and its `wrappingInfo`
+    /// [`EditorOptions::effective_word_wrap`].
+    pub fn computed_options(&self) -> EditorOptions {
+        computed_options(&self.options, self.screen_reader.optimized)
+    }
+
     /// Replaces the editor options (Monaco `updateOptions`, but with a full set).
     ///
     /// The editor uses them [validated](EditorOptions::validated) as
     /// Monaco does; [`options`](Self::options) returns them as given.
     pub fn update_options(&mut self, options: EditorOptions, cx: &mut Context<Self>) {
         let old_from_all_providers = self.options.occurrences_highlight_from_all_providers;
+        let old_occurrences = self.options.occurrences_highlight;
         let old_match_mode = self.options.selected_text_match_mode;
         let old_folding = (
             self.options.folding,
@@ -1459,9 +1475,10 @@ impl CodeEditor {
         }
         // Monaco `onDidChangeConfiguration` fires when an option changed.
         let change = (old != self.options).then(|| {
+            let screen_reader = self.screen_reader.optimized;
             CodeEditorEvent::ConfigurationChanged(ConfigurationChange::new(
-                old,
-                self.options.clone(),
+                computed_options(&old, screen_reader),
+                computed_options(&self.options, screen_reader),
             ))
         });
         if options.unusual_line_terminators != self.user_options.unusual_line_terminators {
@@ -1478,9 +1495,11 @@ impl CodeEditor {
         if !self.options.parameter_hints.enabled {
             self.hide_signature_help(cx);
         }
-        // Monaco `WordHighlighter`: changing how providers are asked stops
-        // the highlights and asks again.
-        if old_from_all_providers != self.options.occurrences_highlight_from_all_providers {
+        // Monaco `WordHighlighter`: changing how providers are asked, or
+        // `occurrencesHighlight`, stops the highlights and asks again.
+        if old_from_all_providers != self.options.occurrences_highlight_from_all_providers
+            || old_occurrences != self.options.occurrences_highlight
+        {
             self.restart_word_highlights(cx);
         }
         // Monaco: changing `selectedTextMatchMode` ends the Cmd/Ctrl+D
@@ -1505,7 +1524,7 @@ impl CodeEditor {
     }
 
     /// The current theme. Defaults to the one set with
-    /// [`crate::set_theme`], else [`Theme::vs_dark`].
+    /// [`crate::set_theme`], else [`Theme::vs`] (Monaco's default theme).
     pub fn theme(&self) -> &Arc<Theme> {
         &self.theme
     }
@@ -1747,12 +1766,12 @@ impl CodeEditor {
     }
 
     /// The height of the lines and view zones as of the last layout
-    /// (Monaco `getContentHeight`). Unlike Monaco's, it leaves out what
-    /// Monaco adds to the lines' height: with `scroll_beyond_last_line`,
-    /// the editor's height less a line and `padding.bottom`; without it,
-    /// the horizontal scrollbar's height when that shows. The scrollable
-    /// height, with the `scroll_beyond_last_line` room, is
-    /// [`CodeEditor::scroll_height`].
+    /// (Monaco `getContentHeight`). Without `scroll_beyond_last_line` it
+    /// adds the horizontal scrollbar's height when that shows, as Monaco
+    /// does (unless `scrollbar.ignore_horizontal_scrollbar_in_content_height`).
+    /// Unlike Monaco's, it leaves out the room `scroll_beyond_last_line`
+    /// adds (the editor's height less a line and `padding.bottom`); the
+    /// scrollable height, with that room, is [`CodeEditor::scroll_height`].
     pub fn content_height(&self) -> Option<Pixels> {
         self.layout.as_ref().map(|layout| layout.content_height)
     }
@@ -8000,6 +8019,33 @@ impl Render for CodeEditor {
                 .into_any_element(),
         }
     }
+}
+
+/// Monaco's computed options (`EditorOptionsUtil.computeOptions`) from the
+/// validated, zoomed `options`: `EditorFontSize` and `EditorLineHeight`
+/// take the font's pixels, `EditorAccessibilitySupport` resolves `auto`
+/// from the environment (`screen_reader`), which also makes
+/// `WrappingStrategy` advanced and `WrappingIndent` none.
+fn computed_options(options: &EditorOptions, screen_reader: bool) -> EditorOptions {
+    use crate::options::{AccessibilitySupport, WrappingStrategy};
+    let mut computed = options.clone();
+    computed.font_size = options.resolved_font_size();
+    computed.line_height = Some(options.resolved_line_height());
+    let screen_reader = match options.accessibility_support {
+        AccessibilitySupport::On => true,
+        AccessibilitySupport::Off => false,
+        AccessibilitySupport::Auto => screen_reader,
+    };
+    computed.accessibility_support = if screen_reader {
+        AccessibilitySupport::On
+    } else {
+        AccessibilitySupport::Off
+    };
+    if screen_reader {
+        computed.wrapping_strategy = WrappingStrategy::Advanced;
+        computed.wrapping_indent = crate::view::line_breaks::WrappingIndent::None;
+    }
+    computed
 }
 
 /// Options for an input in one of the editor's widgets (find, replace,

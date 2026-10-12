@@ -1438,9 +1438,12 @@ fn monaco_leaves_the_rightmost_column_for_the_word_wrap_indicator() {
 }
 
 /// The options and environment of a default editor 1000x800 wide, with
-/// 18px lines and 7px characters.
+/// 18px lines and 7px characters, and a glyph margin (VS Code's default).
 fn default_layout(change: impl FnOnce(&mut EditorOptions)) -> LayoutInfo {
-    let mut options = EditorOptions::default();
+    let mut options = EditorOptions {
+        glyph_margin: true,
+        ..EditorOptions::default()
+    };
     change(&mut options);
     let env = LayoutEnv {
         outer_width: 1000.,
@@ -1482,6 +1485,7 @@ fn folding_controls_add_16px_unless_never_shown() {
 fn glyph_margin_is_a_line_height_per_lane() {
     let options = EditorOptions {
         folding: false,
+        glyph_margin: true,
         ..EditorOptions::default()
     };
     let mut env = LayoutEnv {
@@ -1593,11 +1597,14 @@ fn fill_remembers_its_scale_while_wrapping() {
 }
 
 /// Monaco `editorConfiguration.test.ts`'s `TestWrappingConfiguration`: a
-/// 1000x100 editor with the default options and `TestConfiguration`'s font
-/// (19px lines, 10px characters), returning `(isViewportWrapping,
-/// wrappingColumn)`.
+/// 1000x100 editor with the default options (VS Code's, so with a glyph
+/// margin) and `TestConfiguration`'s font (19px lines, 10px characters),
+/// returning `(isViewportWrapping, wrappingColumn)`.
 fn wrapping(change: impl FnOnce(&mut EditorOptions)) -> (bool, Option<u32>) {
-    let mut options = EditorOptions::default();
+    let mut options = EditorOptions {
+        glyph_margin: true,
+        ..EditorOptions::default()
+    };
     change(&mut options);
     let env = LayoutEnv {
         outer_width: 1000.,

@@ -68,7 +68,7 @@ fn on_os_scheme_changed(cx: &mut App) {
         return;
     }
     let wants_high_contrast = state.os_high_contrast;
-    let current = global_theme(cx).unwrap_or_else(|| std::sync::Arc::new(crate::Theme::vs_dark()));
+    let current = global_theme(cx).unwrap_or_else(|| std::sync::Arc::new(crate::Theme::vs()));
     if wants_high_contrast == current.high_contrast {
         return;
     }

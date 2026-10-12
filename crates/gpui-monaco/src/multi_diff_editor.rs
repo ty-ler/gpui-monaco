@@ -2599,7 +2599,7 @@ fn list_colors(this: &MultiDiffEditor, cx: &App) -> EditorColors {
         Some(diff) => diff.read(cx).modified_editor().read(cx).colors().clone(),
         None => crate::theme::global_theme(cx)
             .map(|theme| theme.colors.clone())
-            .unwrap_or_else(|| crate::theme::Theme::vs_dark().colors),
+            .unwrap_or_else(|| crate::theme::Theme::vs().colors),
     }
 }
 

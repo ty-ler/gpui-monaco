@@ -824,6 +824,9 @@ fn the_lightbulb_on_the_last_line_goes_in_the_gutter(cx: &mut TestAppContext) {
         ..Default::default()
     };
     let (editor, cx) = setup(provider, cx);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.glyph_margin = true, cx)
+    });
     set_text(&editor, cx, "let a = 1;\nlet b = 2;");
     editor.update(cx, |e, cx| {
         e.set_selections(&[Selection::collapsed(p(1, 4))], cx)

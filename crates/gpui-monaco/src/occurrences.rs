@@ -6,8 +6,8 @@
 use std::ops::Range;
 use std::time::Duration;
 
-use gpui::{Context, Task};
-use text::PointUtf16;
+use gpui::{Context, EntityId, Task, WeakEntity};
+use text::{PointUtf16, Rope};
 
 use crate::cursor::{self, Selection};
 use crate::decorations::{
@@ -24,6 +24,31 @@ const SELECTION_UPDATE_DELAY: Duration = Duration::from_millis(300);
 /// once the cursor has rested this long.
 const WORD_HIGHLIGHT_RUN_DELAY: Duration = Duration::from_millis(50);
 
+/// Monaco `TextModel._MODEL_SYNC_LIMIT`: `multiFile` leaves out other
+/// models longer than this (`shouldSynchronizeModel`).
+const MODEL_SYNC_LIMIT: usize = 50 * 1024 * 1024;
+
+/// Monaco's `TextualDocumentHighlightProvider`: case-sensitive, whole-word
+/// matches of `word` in `rope`.
+fn textual_highlights(rope: &Rope, word: &str) -> Vec<DocumentHighlight> {
+    let Some(data) = SearchParams::new(
+        word.to_string(),
+        false,
+        true,
+        Some(cursor::USUAL_WORD_SEPARATORS),
+    )
+    .parse() else {
+        return Vec::new();
+    };
+    search::find_matches(rope, &data, 0..rope.len(), crate::find::MATCHES_LIMIT)
+        .into_iter()
+        .map(|m| DocumentHighlight {
+            range: rope.offset_to_point_utf16(m.start)..rope.offset_to_point_utf16(m.end),
+            kind: DocumentHighlightKind::Text,
+        })
+        .collect()
+}
+
 /// Monaco `mergeHighlights`: the answers in provider order, keeping the
 /// first highlight of each range.
 fn merge_highlights(answers: Vec<Vec<DocumentHighlight>>) -> Vec<DocumentHighlight> {
@@ -34,6 +59,10 @@ fn merge_highlights(answers: Vec<Vec<DocumentHighlight>>) -> Vec<DocumentHighlig
         .filter(|h| seen.insert((h.range.start, h.range.end)))
         .collect()
 }
+
+/// Another editor's model for a `multiFile` query: its id, text and the
+/// text's version.
+type OtherModel = (EntityId, Rope, text::Version);
 
 #[derive(Default)]
 pub(crate) struct OccurrenceHighlights {
@@ -49,6 +78,12 @@ pub(crate) struct OccurrenceHighlights {
     /// don't start word highlights, like Monaco's non-explicit cursor
     /// changes) from cursor moves.
     seen_version: Option<text::Version>,
+    /// The editor whose `multiFile` query put up these word highlights,
+    /// when it's another one.
+    placed_by: Option<EntityId>,
+    /// The other editors this editor's last `multiFile` query highlighted
+    /// in (Monaco `WordHighlighter.storedDecorationIDs`).
+    placed_in: Vec<WeakEntity<CodeEditor>>,
 }
 
 impl CodeEditor {
@@ -129,11 +164,90 @@ impl CodeEditor {
         cx.notify();
     }
 
+    /// Drops the word highlights, and those this editor's `multiFile`
+    /// query put up in other editors (Monaco `_stopAll`).
     fn clear_word_highlights(&mut self, cx: &mut Context<Self>) {
         self.occurrences.word_task = None;
+        self.occurrences.placed_by = None;
         if !self.occurrences.word.is_empty() {
             self.set_word_highlights(Vec::new(), cx);
         }
+        let id = cx.entity_id();
+        for editor in std::mem::take(&mut self.occurrences.placed_in) {
+            let Some(editor) = editor.upgrade().filter(|e| e.entity_id() != id) else {
+                continue;
+            };
+            editor.update(cx, |editor, cx| {
+                if editor.occurrences.placed_by == Some(id) {
+                    editor.occurrences.placed_by = None;
+                    editor.occurrences.word_version = None;
+                    editor.set_word_highlights(Vec::new(), cx);
+                }
+            });
+        }
+    }
+
+    /// Monaco `WordHighlighter.getOtherModelsToHighlight` with
+    /// `multiFile`: the models of the other editors (each once, not this
+    /// editor's), with their text and its version.
+    fn other_models_to_highlight(&self, cx: &Context<Self>) -> Vec<OtherModel> {
+        let (id, own_model) = (cx.entity_id(), self.model().entity_id());
+        let mut models: Vec<OtherModel> = Vec::new();
+        for editor in crate::editors(cx) {
+            if editor.entity_id() == id {
+                continue;
+            }
+            let Some(model) = editor.read(cx).get_model() else {
+                continue;
+            };
+            let model_id = model.entity_id();
+            if model_id == own_model || models.iter().any(|(m, _, _)| *m == model_id) {
+                continue;
+            }
+            let buffer = model.read(cx).buffer();
+            let rope = buffer.rope();
+            if rope.len() > MODEL_SYNC_LIMIT {
+                continue;
+            }
+            models.push((model_id, rope.clone(), buffer.version()));
+        }
+        models
+    }
+
+    /// Monaco `WordHighlighter.renderDecorations` for a `multiFile` query:
+    /// every other editor showing one of the models gets its highlights.
+    fn place_multi_file_highlights(
+        &mut self,
+        highlights: &[(EntityId, text::Version, Vec<DocumentHighlight>)],
+        cx: &mut Context<Self>,
+    ) {
+        let id = cx.entity_id();
+        let mut placed_in = Vec::new();
+        for editor in crate::editors(cx) {
+            if editor.entity_id() == id {
+                continue;
+            }
+            let Some(model) = editor.read(cx).get_model().map(|m| m.entity_id()) else {
+                continue;
+            };
+            let Some((_, version, found)) = highlights.iter().find(|(m, _, _)| *m == model) else {
+                continue;
+            };
+            let placed = editor.update(cx, |editor, cx| {
+                if editor.snapshot.version() != *version {
+                    return false;
+                }
+                editor.occurrences.word_task = None;
+                editor.occurrences.placed_by = Some(id);
+                editor.occurrences.word_version = Some(*version);
+                editor.set_word_highlights(found.clone(), cx);
+                true
+            });
+            if placed {
+                placed_in.push(editor.downgrade());
+            }
+        }
+        self.occurrences.placed_in = placed_in;
     }
 
     /// Whether symbol occurrences are highlighted (Monaco
@@ -223,6 +337,54 @@ impl CodeEditor {
         };
         let moved = cx.background_executor().now();
         let merge = self.options.occurrences_highlight_from_all_providers;
+        // Monaco `multiFile`: with other models open, the multi-document
+        // providers (standalone Monaco has only the textual one) highlight
+        // the word in this model and theirs.
+        let other_models = if self.options.occurrences_highlight
+            == crate::options::OccurrencesHighlight::MultiFile
+        {
+            self.other_models_to_highlight(cx)
+        } else {
+            Vec::new()
+        };
+        if !other_models.is_empty() {
+            let own_model = self.model().entity_id();
+            self.occurrences.word_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(run_delay).await;
+                let (own, others) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let own = textual_highlights(&rope, &text);
+                        let others: Vec<_> = other_models
+                            .into_iter()
+                            .map(|(model, rope, version)| {
+                                (model, version, textual_highlights(&rope, &text))
+                            })
+                            .collect();
+                        (own, others)
+                    })
+                    .await;
+                let elapsed = cx.background_executor().now() - moved;
+                if let Some(wait) = render_delay.checked_sub(elapsed)
+                    && !wait.is_zero()
+                {
+                    cx.background_executor().timer(wait).await;
+                }
+                this.update(cx, |this, cx| {
+                    if this.snapshot.version() != version || this.model().entity_id() != own_model {
+                        return;
+                    }
+                    this.occurrences.word_version = Some(version);
+                    this.set_word_highlights(own.clone(), cx);
+                    // Editors sharing this model show its highlights too.
+                    let mut all = others;
+                    all.push((own_model, version, own));
+                    this.place_multi_file_highlights(&all, cx);
+                })
+                .ok();
+            }));
+            return;
+        }
         self.occurrences.word_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(run_delay).await;
             let highlights = if merge && !providers.is_empty() {
@@ -268,30 +430,7 @@ impl CodeEditor {
                 Some(highlights) => highlights,
                 None => {
                     cx.background_executor()
-                        .spawn(async move {
-                            let Some(data) = SearchParams::new(
-                                text,
-                                false,
-                                true,
-                                Some(cursor::USUAL_WORD_SEPARATORS),
-                            )
-                            .parse() else {
-                                return Vec::new();
-                            };
-                            search::find_matches(
-                                &rope,
-                                &data,
-                                0..rope.len(),
-                                crate::find::MATCHES_LIMIT,
-                            )
-                            .into_iter()
-                            .map(|m| DocumentHighlight {
-                                range: rope.offset_to_point_utf16(m.start)
-                                    ..rope.offset_to_point_utf16(m.end),
-                                kind: DocumentHighlightKind::Text,
-                            })
-                            .collect()
-                        })
+                        .spawn(async move { textual_highlights(&rope, &text) })
                         .await
                 }
             };

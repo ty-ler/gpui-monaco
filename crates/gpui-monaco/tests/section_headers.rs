@@ -74,3 +74,23 @@ fn regions_and_marks_in_comments(cx: &mut TestAppContext) {
     });
     assert!(headers(&editor, cx).is_empty());
 }
+
+/// Monaco `EditorMinimap.validate`: a `markSectionHeaderRegex` that doesn't
+/// compile keeps the default, so `MARK:` headers still show.
+#[gpui::test]
+fn an_invalid_mark_regex_keeps_the_default(cx: &mut TestAppContext) {
+    let text = "// MARK: - Helpers\nfn b() {}\n// TODO: Later\n";
+    let (editor, cx) = setup(text, cx);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.minimap.mark_section_header_regex = "(".into(), cx);
+    });
+    assert_eq!(headers(&editor, cx), vec![(0, "Helpers".to_string(), true)]);
+    // A valid one replaces it.
+    editor.update(cx, |e, cx| {
+        e.update_options_with(
+            |o| o.minimap.mark_section_header_regex = r"\bTODO:\s*(?<label>.*)$".into(),
+            cx,
+        );
+    });
+    assert_eq!(headers(&editor, cx), vec![(2, "Later".to_string(), false)]);
+}

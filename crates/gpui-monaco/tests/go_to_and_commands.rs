@@ -366,9 +366,9 @@ fn inspect_tokens_follows_the_cursor(cx: &mut TestAppContext) {
     assert_eq!(info.token, "keyword.rust");
     assert_eq!(info.token_type, "Other");
     assert_eq!(info.font_style, "---");
-    // vs-dark's keyword and background colors.
-    assert_eq!(info.foreground, "#569cd6");
-    assert_eq!(info.background, "#1e1e1e");
+    // vs's keyword and background colors.
+    assert_eq!(info.foreground, "#0000ff");
+    assert_eq!(info.background, "#fffffe");
     assert!(info.capture.is_some());
     // Moving the cursor inspects the token there.
     set_cursor(&editor, cx, p(1, 10));
@@ -414,23 +414,23 @@ fn theme_name(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> String
 #[gpui::test]
 fn toggle_high_contrast_and_back(cx: &mut TestAppContext) {
     let (editor, cx) = setup(cx);
-    assert_eq!(theme_name(&editor, cx), "vs-dark");
-    run(&editor, cx, "editor.action.toggleHighContrast");
-    assert_eq!(theme_name(&editor, cx), "hc-black");
-    assert!(editor.read_with(cx, |e, _| e.theme().high_contrast));
-    run(&editor, cx, "editor.action.toggleHighContrast");
-    assert_eq!(theme_name(&editor, cx), "vs-dark");
-    // A light theme toggles to hc-light, and back to the same theme.
-    cx.update(|_, cx| {
-        let colors = std::collections::HashMap::new();
-        let theme = Theme::define("my-light", &Theme::vs(), true, Vec::new(), &colors);
-        gpui_monaco::define_theme(cx, theme).unwrap();
-        gpui_monaco::set_theme(cx, "my-light");
-    });
+    assert_eq!(theme_name(&editor, cx), "vs");
     run(&editor, cx, "editor.action.toggleHighContrast");
     assert_eq!(theme_name(&editor, cx), "hc-light");
+    assert!(editor.read_with(cx, |e, _| e.theme().high_contrast));
     run(&editor, cx, "editor.action.toggleHighContrast");
-    assert_eq!(theme_name(&editor, cx), "my-light");
+    assert_eq!(theme_name(&editor, cx), "vs");
+    // A dark theme toggles to hc-black, and back to the same theme.
+    cx.update(|_, cx| {
+        let colors = std::collections::HashMap::new();
+        let theme = Theme::define("my-dark", &Theme::vs_dark(), true, Vec::new(), &colors);
+        gpui_monaco::define_theme(cx, theme).unwrap();
+        gpui_monaco::set_theme(cx, "my-dark");
+    });
+    run(&editor, cx, "editor.action.toggleHighContrast");
+    assert_eq!(theme_name(&editor, cx), "hc-black");
+    run(&editor, cx, "editor.action.toggleHighContrast");
+    assert_eq!(theme_name(&editor, cx), "my-dark");
 }
 
 #[gpui::test]

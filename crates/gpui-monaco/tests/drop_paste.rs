@@ -159,6 +159,8 @@ fn auto_indent_on_paste(cx: &mut TestAppContext) {
         let mut editor = CodeEditor::new(model, window, cx);
         let mut options = editor.options().clone();
         options.auto_indent_on_paste = true;
+        // Paste reindents with the indentation rules (VS Code's default).
+        options.auto_indent = gpui_monaco::cursor::AutoIndent::Full;
         editor.update_options(options, cx);
         editor
     });

@@ -16,9 +16,12 @@ fn setup(
     cx: &mut TestAppContext,
 ) -> (Entity<CodeEditor>, &mut VisualTestContext) {
     cx.update(gpui_monaco::init);
+    // With a glyph margin, a line height wide, to measure line heights.
     let (editor, cx) = cx.add_window_view(|window, cx| {
         let model = cx.new(|_| model());
-        CodeEditor::new(model, window, cx)
+        let mut editor = CodeEditor::new(model, window, cx);
+        editor.update_options_with(|o| o.glyph_margin = true, cx);
+        editor
     });
     cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
     paint(cx);
@@ -314,24 +317,25 @@ fn high_contrast_follows_the_os(cx: &mut TestAppContext) {
     let theme = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
         editor.read_with(cx, |e, _| e.theme().name.clone())
     };
-    assert_eq!(theme(&editor, cx), "vs-dark");
+    // Monaco's default theme.
+    assert_eq!(theme(&editor, cx), "vs");
     assert!(cx.update(|_, cx| gpui_monaco::auto_detect_high_contrast(cx)));
     // Monaco `autoDetectHighContrast`: the OS's high contrast mode switches
     // to the high contrast theme, staying dark or light.
     cx.update(|_, cx| gpui_monaco::set_os_high_contrast(cx, true));
-    assert_eq!(theme(&editor, cx), "hc-black");
-    cx.update(|_, cx| gpui_monaco::set_os_high_contrast(cx, false));
-    assert_eq!(theme(&editor, cx), "vs-dark");
-    cx.update(|_, cx| gpui_monaco::set_theme(cx, "vs"));
-    cx.update(|_, cx| gpui_monaco::set_os_high_contrast(cx, true));
     assert_eq!(theme(&editor, cx), "hc-light");
+    cx.update(|_, cx| gpui_monaco::set_os_high_contrast(cx, false));
+    assert_eq!(theme(&editor, cx), "vs");
+    cx.update(|_, cx| gpui_monaco::set_theme(cx, "vs-dark"));
+    cx.update(|_, cx| gpui_monaco::set_os_high_contrast(cx, true));
+    assert_eq!(theme(&editor, cx), "hc-black");
     // Off: the theme stays; turning it on again applies the OS state.
     cx.update(|_, cx| {
         gpui_monaco::set_os_high_contrast(cx, false);
         gpui_monaco::set_auto_detect_high_contrast(cx, false);
         gpui_monaco::set_os_high_contrast(cx, true);
     });
-    assert_eq!(theme(&editor, cx), "vs");
+    assert_eq!(theme(&editor, cx), "vs-dark");
     cx.update(|_, cx| gpui_monaco::set_auto_detect_high_contrast(cx, true));
-    assert_eq!(theme(&editor, cx), "hc-light");
+    assert_eq!(theme(&editor, cx), "hc-black");
 }

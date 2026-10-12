@@ -289,8 +289,9 @@ pub struct ModelChange {
 }
 
 /// The details of a [`CodeEditorEvent::ConfigurationChanged`](crate::CodeEditorEvent)
-/// (Monaco `ConfigurationChangedEvent`): the options before and after, with
-/// the font zoom applied (Monaco's computed options).
+/// (Monaco `ConfigurationChangedEvent`): the computed options before and
+/// after, as [`CodeEditor::computed_options`](crate::CodeEditor::computed_options)
+/// returns them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConfigurationChange {
     old: Arc<EditorOptions>,
