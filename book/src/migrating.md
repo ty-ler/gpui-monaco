@@ -51,6 +51,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `getLinesContent()`, `getValueLength()`, `getFullModelRange()` | `lines_content()`, `value_length()`, `full_model_range()` |
 | `modifyPosition(pos, offset)` | `modify_position(point, offset)` |
 | `applyEdits(edits, true)` | `apply_edits(edits, cx)`, returning the undo edits (also recorded for undo) |
+| `applyEdits` with `forceMoveMarkers` | `apply_edit_operations(edits, cx)` with `SingleEditOperation::force_move_markers` |
 | `pushEditOperations(before, edits, computer)` | `push_edit_operations(before, edits, computer, cx)`, or `edit(edits, cx)` grouped with `start_transaction`/`end_transaction` |
 | `pushStackElement()` / `popStackElement()` | `push_stack_element()` / `pop_stack_element()` |
 | `getAlternativeVersionId()` | `alternative_version_id()` |

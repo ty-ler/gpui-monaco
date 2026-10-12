@@ -593,7 +593,8 @@ pub struct FindMatch {
 /// edits that undo it.
 pub type CursorStateComputer = dyn Fn(&[(Range<PointUtf16>, String)]) -> Option<Vec<Selection>>;
 
-/// An edit for [`CodeEditor::execute_edit_operations`] (Monaco
+/// An edit for [`CodeEditor::execute_edit_operations`] and
+/// [`TextModel::apply_edit_operations`] (Monaco
 /// `IIdentifiedSingleEditOperation`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SingleEditOperation {
@@ -653,27 +654,51 @@ impl TextModel {
         edits: Vec<(Range<PointUtf16>, String)>,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(Range<PointUtf16>, String)>, text::EditError> {
+        let edits = edits
+            .into_iter()
+            .map(|(range, text)| SingleEditOperation::new(range, text))
+            .collect();
+        self.apply_edits_in(edits, None, cx)
+    }
+
+    /// [`TextModel::apply_edits`] with Monaco's `forceMoveMarkers` per
+    /// edit (Monaco `applyEdits(operations)`): decorations, and the cursors
+    /// of the editors showing the model, in or at the edges of a forced
+    /// edit move past its new text.
+    pub fn apply_edit_operations(
+        &mut self,
+        edits: Vec<SingleEditOperation>,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(Range<PointUtf16>, String)>, text::EditError> {
         self.apply_edits_in(edits, None, cx)
     }
 
     fn apply_edits_in(
         &mut self,
-        edits: Vec<(Range<PointUtf16>, String)>,
+        edits: Vec<SingleEditOperation>,
         group: Option<u64>,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(Range<PointUtf16>, String)>, text::EditError> {
         let old = self.buffer().rope().clone();
+        let mut force = Vec::new();
         let edits: Vec<(Range<usize>, String)> = edits
             .into_iter()
-            .map(|(range, text)| {
-                let range = self.validate_range(range);
-                (
-                    old.point_utf16_to_offset(range.start)..old.point_utf16_to_offset(range.end),
-                    text,
-                )
+            .map(|edit| {
+                let range = self.validate_range(edit.range);
+                let range =
+                    old.point_utf16_to_offset(range.start)..old.point_utf16_to_offset(range.end);
+                if edit.force_move_markers {
+                    force.push(range.clone());
+                }
+                (range, edit.text)
             })
             .collect();
-        let patch = self.edit_from(edits, group, None, cx)?;
+        if !force.is_empty() {
+            self.force_move_markers_on_next_edit(force);
+        }
+        let patch = self.edit_from(edits, group, None, cx);
+        self.force_move_markers_on_next_edit(Vec::new());
+        let patch = patch?;
         let new = self.buffer().rope();
         Ok(patch
             .edits()
@@ -700,6 +725,10 @@ impl TextModel {
         cursor_state_computer: Option<&CursorStateComputer>,
         cx: &mut Context<Self>,
     ) -> Result<Option<Vec<Selection>>, text::EditError> {
+        let edits = edits
+            .into_iter()
+            .map(|(range, text)| SingleEditOperation::new(range, text))
+            .collect();
         let undo_edits = self.apply_edits_in(edits, Some(text::JOIN_OPEN_UNDO_STEP), cx)?;
         let after = cursor_state_computer.and_then(|compute| compute(&undo_edits));
         let metadata = |selections: Option<Vec<Selection>>| {

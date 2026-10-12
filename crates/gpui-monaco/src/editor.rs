@@ -2718,6 +2718,7 @@ impl CodeEditor {
                 version,
                 eol,
                 is_eol_change,
+                force_move_markers,
                 ..
             } => {
                 // Monaco's view model forwards the content change before
@@ -2785,7 +2786,7 @@ impl CodeEditor {
                         .and_then(|meta| meta.downcast_ref::<Vec<Selection>>())
                         .map(|selections| self.cursors.set_selections(selections))
                         .is_some();
-                if !restored {
+                if *kind == EditKind::SetValue {
                     let selections: Vec<Selection> = self
                         .cursors
                         .selections()
@@ -2795,6 +2796,15 @@ impl CodeEditor {
                             head: transform(s.head, Bias::Left),
                         })
                         .collect();
+                    self.cursors.set_selections(&selections);
+                } else if !restored {
+                    let selections = selections_from_markers(
+                        old,
+                        &latest,
+                        &patch,
+                        force_move_markers,
+                        &self.cursors.selections(),
+                    );
                     self.cursors.set_selections(&selections);
                 }
                 self.snapshot = latest;
@@ -3420,8 +3430,24 @@ impl CodeEditor {
                     (map_state(&moved, to_model), Some(moved))
                 })
                 .collect(),
-            // Monaco `cursorLineStart`/`cursorLineEnd` move on model lines.
-            MoveCommand::LineStart | MoveCommand::LineEnd => {
+            // Monaco `cursorLineStart`/`cursorLineEnd`, the word and word
+            // part moves (`WordCommand`, on the model's selections) and
+            // `cursorTop`/`cursorBottom` move on model lines, so wrapping
+            // doesn't change where they stop.
+            MoveCommand::LineStart
+            | MoveCommand::LineEnd
+            | MoveCommand::WordLeft
+            | MoveCommand::WordRight
+            | MoveCommand::WordStartLeft
+            | MoveCommand::WordStartRight
+            | MoveCommand::WordEndLeft
+            | MoveCommand::WordEndRight
+            | MoveCommand::WordPartLeft
+            | MoveCommand::WordPartRight
+            | MoveCommand::Top
+            | MoveCommand::Bottom
+            | MoveCommand::PrevBlankLine
+            | MoveCommand::NextBlankLine => {
                 let mut model_cursors = self.cursors.clone();
                 cursor::move_cursors(
                     &config,
@@ -3458,40 +3484,6 @@ impl CodeEditor {
                     .all()
                     .iter()
                     .map(|state| (map_state(state, to_model), Some(state.clone())))
-                    .collect()
-            }
-            // Word and buffer moves step over the text, not injected text:
-            // they run on the view lines' model text (segment columns).
-            _ => {
-                let segment_model = SegmentCursorModel(&lines);
-                let to_segment = |p: PointUtf16| {
-                    PointUtf16::new(p.row, lines.view_to_segment_column(p.row, p.column))
-                };
-                let from_segment = |p: PointUtf16| {
-                    PointUtf16::new(p.row, lines.segment_to_view_column(p.row, p.column))
-                };
-                let mut segment_cursors = self.cursors.clone();
-                segment_cursors.set_states(
-                    view_states
-                        .iter()
-                        .map(|state| map_state(state, to_segment))
-                        .collect(),
-                );
-                cursor::move_cursors(
-                    &config,
-                    &segment_model,
-                    &mut segment_cursors,
-                    command,
-                    select,
-                    page,
-                );
-                segment_cursors
-                    .all()
-                    .iter()
-                    .map(|state| {
-                        let view = map_state(state, from_segment);
-                        (map_state(&view, to_model), Some(view))
-                    })
                     .collect()
             }
         };
@@ -5115,7 +5107,7 @@ impl CodeEditor {
                 return;
             }
         }
-        let position = self.position_for_point(event.position, window, cx);
+        let position = self.mouse_position_for_point(event.position, window, cx);
         // Monaco `dispatchMouse`: with the selection clipboard (Linux) a
         // middle click is a click, and the platform pastes the primary
         // selection there; otherwise it column-selects.
@@ -5457,7 +5449,7 @@ impl CodeEditor {
         {
             return;
         }
-        let position = self.position_for_point(event.position, window, cx);
+        let position = self.mouse_position_for_point(event.position, window, cx);
         // Monaco: Cmd/Ctrl+click follows a link, else a definition.
         if self.is_definition_modifier(&event.modifiers)
             && (self.follow_link_at(position, cx)
@@ -6029,7 +6021,7 @@ impl CodeEditor {
                     cx,
                 );
                 cx.emit(CodeEditorEvent::MouseDrag(mouse));
-                let position = self.position_for_point(event.position, window, cx);
+                let position = self.mouse_position_for_point(event.position, window, cx);
                 self.dnd_mouse_drag(Some(position), &event.modifiers, cx);
             } else {
                 self.dnd_cancel(cx);
@@ -6060,7 +6052,7 @@ impl CodeEditor {
             return;
         }
         self.drag_scroll = None;
-        let position = self.position_for_point(event.position, window, cx);
+        let position = self.mouse_position_for_point(event.position, window, cx);
         self.dispatch_mouse(position, event.position, true, true, cx);
     }
 
@@ -8031,6 +8023,36 @@ fn validate_view_state(lines: &ViewLines, state: &SingleCursorState) -> SingleCu
     }
 }
 
+/// Monaco `readSelectionFromMarkers`: `selections` carried through
+/// `patch`, edits this editor didn't make (from `old` to `new`), as tracked
+/// ranges that grow when typing at their edges, so text inserted at a
+/// cursor goes before it. Edits whose old range is in `forced` were made
+/// with `forceMoveMarkers`.
+#[inline(never)]
+fn selections_from_markers(
+    old: &BufferSnapshot,
+    new: &BufferSnapshot,
+    patch: &text::Patch,
+    forced: &[Range<usize>],
+    selections: &[Selection],
+) -> Vec<Selection> {
+    let edits: Vec<(Range<PointUtf16>, String, bool)> = patch
+        .edits()
+        .iter()
+        .map(|edit| {
+            let force = forced
+                .iter()
+                .any(|range| edit.old.start <= range.start && range.end <= edit.old.end);
+            (
+                old.offset_to_point_utf16(edit.old.start)..old.offset_to_point_utf16(edit.old.end),
+                new.text_for_range(edit.new.clone()),
+                force,
+            )
+        })
+        .collect();
+    cursor::selections_from_markers(old.rope(), selections, &edits)
+}
+
 /// Applies `f` to every position in a cursor state.
 pub(crate) fn map_state(
     state: &SingleCursorState,
@@ -8078,25 +8100,6 @@ impl cursor::CursorModel for ViewCursorModel<'_> {
 
     fn normalize_position(&self, position: PointUtf16, affinity: PositionAffinity) -> PointUtf16 {
         self.0.normalize_position(position, affinity)
-    }
-}
-
-/// The view lines without their injected text (see
-/// [`ViewLines::segment_content`]), for the moves that step over the text
-/// only: Monaco runs word moves on the model.
-struct SegmentCursorModel<'a>(&'a ViewLines);
-
-impl cursor::CursorModel for SegmentCursorModel<'_> {
-    fn line_count(&self) -> u32 {
-        self.0.line_count().max(1)
-    }
-
-    fn line_content(&self, row: u32) -> String {
-        self.0.segment_content(row)
-    }
-
-    fn line_max_column(&self, row: u32) -> u32 {
-        self.0.segment_max_column(row)
     }
 }
 

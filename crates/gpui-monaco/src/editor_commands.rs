@@ -528,15 +528,17 @@ impl CodeEditor {
                     state.move_to(select, column, 0)
                 })
                 .collect(),
+            // Monaco `viewportMove`: within the lines that show in full.
             "viewPortTop" | "viewPortBottom" | "viewPortCenter" => {
-                let Some((first, last)) = self.visible_rows(cx) else {
+                let Some(visible) = self.completely_visible_range() else {
                     return;
                 };
-                let row = match args.to.as_str() {
-                    "viewPortTop" => (first + value - 1).min(last),
-                    "viewPortBottom" => last.saturating_sub(value - 1).max(first),
-                    _ => (first + last).div_ceil(2),
+                let target = match args.to.as_str() {
+                    "viewPortTop" => cursor::ViewportTarget::Top,
+                    "viewPortBottom" => cursor::ViewportTarget::Bottom,
+                    _ => cursor::ViewportTarget::Center,
                 };
+                let row = cursor::viewport_row(visible, target, value);
                 let column = cursor::first_non_whitespace_column(&rope, row).unwrap_or(0);
                 vec![
                     self.cursors
@@ -544,31 +546,46 @@ impl CodeEditor {
                         .move_to(select, PointUtf16::new(row, column), 0),
                 ]
             }
+            // Monaco `findPositionInViewportIfOutside`, on view lines: a
+            // cursor outside the lines that show in full, or on the last
+            // of them, moves vertically onto the nearest of the others.
             "viewPortIfOutside" => {
-                let Some((first, last)) = self.visible_rows(cx) else {
+                let Some((first, last)) = self
+                    .layout
+                    .as_ref()
+                    .and_then(|layout| layout.completely_visible_view_lines())
+                else {
                     return;
                 };
-                let last = last.saturating_sub(1).max(first);
-                states
+                let lines = self.view_lines.clone();
+                let model = ViewCursorModel(&lines);
+                let to_model = |p: PointUtf16| lines.to_model(p.row, p.column);
+                let moved = states
                     .iter()
-                    .map(|state| {
-                        let row = state.position.row;
-                        if (first..=last).contains(&row) {
-                            return state.clone();
+                    .zip(self.cursor_view_states())
+                    .map(|(state, view)| {
+                        let line = i64::from(view.position.row);
+                        let (first, last) = (i64::from(first), i64::from(last));
+                        if first <= line && line < last {
+                            return (state.clone(), Some(view));
                         }
-                        let target = row.clamp(first, last);
-                        let mut cursors = cursor::CursorCollection::new(state.clone());
-                        let command = if target < row {
-                            cursor::MoveCommand::Up
-                        } else {
-                            cursor::MoveCommand::Down
-                        };
-                        for _ in 0..target.abs_diff(row) {
-                            cursor::move_cursors(&config, &rope, &mut cursors, command, select, 1);
-                        }
-                        cursors.primary().clone()
+                        let target = if line >= last { last - 1 } else { first };
+                        let (position, leftover) = cursor::vertical(
+                            &config,
+                            &model,
+                            view.position.row,
+                            view.position.column,
+                            view.leftover_visible_columns,
+                            target,
+                            false,
+                            None,
+                        );
+                        let moved = view.move_to(select, position, leftover);
+                        (map_state(&moved, to_model), Some(moved))
                     })
-                    .collect()
+                    .collect();
+                self.set_cursor_states_with_views(moved, true, cx);
+                return;
             }
             // Monaco ignores other values.
             _ => return,
@@ -628,10 +645,12 @@ impl CodeEditor {
         lines.to_model(line, column.min(max))
     }
 
-    /// The first and last model rows that show.
-    fn visible_rows(&self, cx: &gpui::App) -> Option<(u32, u32)> {
-        let ranges = self.visible_ranges(cx);
-        Some((ranges.first()?.start.row, ranges.last()?.end.row))
+    /// The model range of the view lines that show in full (Monaco
+    /// `getCompletelyVisibleViewRange`, converted to the model).
+    fn completely_visible_range(&self) -> Option<Range<PointUtf16>> {
+        let (start, end) = self.layout.as_ref()?.completely_visible_view_lines()?;
+        let lines = &self.view_lines;
+        Some(lines.to_model(start, 0)..lines.to_model(end, lines.line_max_column(end)))
     }
 
     /// Monaco `editorScroll`.
@@ -649,7 +668,8 @@ impl CodeEditor {
                 match by {
                     Some("line") => {
                         // By model lines, from the first visible one.
-                        let Some((first, _)) = self.visible_rows(cx) else {
+                        let Some(first) = self.visible_ranges(cx).first().map(|r| r.start.row)
+                        else {
                             return;
                         };
                         let last = self.snapshot.rope().max_point().row;

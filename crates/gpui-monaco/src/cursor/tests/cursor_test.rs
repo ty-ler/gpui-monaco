@@ -10,8 +10,8 @@
 //!   events, which live in the GPUI view.
 //! - `saveState & restoreState`: view state serialization is a view concern.
 //! - `Independent model edit 1`: carrying cursors through edits made by
-//!   others is done by the view with text anchors; `CursorCollection` only
-//!   validates.
+//!   others is done by the view (`readSelectionFromMarkers`); it's in
+//!   `tests/cursor_movement.rs`, with `sideEditing.test.ts`.
 
 use super::harness::{TestEditor, pos, sel};
 use crate::cursor::{ColumnSelectCommand, column_select, column_select_to};

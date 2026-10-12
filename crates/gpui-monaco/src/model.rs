@@ -430,6 +430,10 @@ pub enum TextModelEvent {
         /// or undoing or redoing such a step. `changes` then replaces the
         /// whole text with itself, as Monaco's does, and `patch` is empty.
         is_eol_change: bool,
+        /// The old ranges (byte offsets of the previous text) of the edits
+        /// made with `forceMoveMarkers`: other editors' cursors in or at
+        /// the edges of one move past its new text.
+        force_move_markers: Arc<[Range<usize>]>,
     },
     /// [`TextModel::update_options`] changed the options (Monaco
     /// `onDidChangeOptions`), and which.
@@ -739,6 +743,7 @@ impl TextModel {
             restore,
             eol: self.buffer.line_ending(),
             is_eol_change: true,
+            force_move_markers: Arc::default(),
         });
         cx.emit(TextModelEvent::LineEndingChanged);
         cx.notify();
@@ -1234,6 +1239,7 @@ impl TextModel {
             restore: None,
             eol: line_ending,
             is_eol_change: false,
+            force_move_markers: Arc::default(),
         });
         if line_ending_changed {
             cx.emit(TextModelEvent::LineEndingChanged);
@@ -1310,6 +1316,7 @@ impl TextModel {
         if !patch.is_empty() {
             let force = std::mem::take(&mut self.force_move_markers);
             self.decorations.apply_patch_forcing(patch, &force);
+            let force_move_markers = force.into();
             self.reparse(cx);
             let eol = self.buffer.line_ending();
             cx.emit(TextModelEvent::Edited {
@@ -1321,6 +1328,7 @@ impl TextModel {
                 restore: None,
                 eol,
                 is_eol_change: false,
+                force_move_markers,
             });
             cx.notify();
         }
@@ -1533,6 +1541,7 @@ impl TextModel {
             restore: outcome.metadata,
             eol,
             is_eol_change: false,
+            force_move_markers: Arc::default(),
         });
         // Monaco `_applyUndoRedoEdits` sets the step's line ending.
         if eol != old_line_ending {
