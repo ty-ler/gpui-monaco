@@ -196,11 +196,13 @@ fn edits_intersect(a: &[TextEdit], b: &[TextEdit]) -> bool {
 }
 
 impl CodeEditor {
-    /// The model's indentation, for formatters.
+    /// The model's indentation, for formatters. As in Monaco's
+    /// `TextModel.getFormattingOptions`, `tab_size` is the model's
+    /// resolved indentation size, not its tab size.
     pub fn formatting_options(&self, cx: &App) -> FormattingOptions {
         let options = self.model().read(cx).options();
         FormattingOptions {
-            tab_size: options.tab_size,
+            tab_size: options.indent_size,
             insert_spaces: options.insert_spaces,
         }
     }

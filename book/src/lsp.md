@@ -57,7 +57,7 @@ Positions need no conversion: both the editor and LSP use 0-based lines and UTF-
 | `definitionProvider` | Go to definition. Locations in other documents come back with their uri, as `OpenLocation`. |
 | `referencesProvider`, `declarationProvider`, `typeDefinitionProvider`, `implementationProvider` | Go to and peek references, declarations, type definitions and implementations. |
 | `documentHighlightProvider` | Occurrence highlights, with read and write kinds. |
-| `signatureHelpProvider` | Parameter hints, with the server's trigger and retrigger characters. |
+| `signatureHelpProvider` | Parameter hints, with the server's trigger and retrigger characters. The request's context has the editor's `isRetrigger` (hints showing or pending) and `activeSignatureHelp` (with the overload the user chose). |
 | `documentFormattingProvider`, `documentRangeFormattingProvider` | Format Document, Format Selection and format on paste, with the model's tab size and spaces setting. |
 | `documentOnTypeFormattingProvider` | Format on type, with the server's trigger characters. |
 | `codeActionProvider`, `executeCommandProvider` | Code actions and the lightbulb, with `codeAction/resolve` for edits when the server supports it. The server's commands are registered with `register_command` and run with `workspace/executeCommand`. |

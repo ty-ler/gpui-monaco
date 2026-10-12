@@ -13,7 +13,7 @@ use gpui_monaco::providers::{
     DocumentFormattingProvider, DocumentHighlight, DocumentHighlightProvider,
     DocumentRangeFormattingProvider, FormattingEdits, FormattingOptions, Hover, HoverProvider,
     LanguageSelector, Location, OnTypeFormattingProvider, ProviderContext, ProviderRegistration,
-    SignatureHelp, SignatureHelpProvider, SignatureHelpTrigger, TextEdit,
+    SignatureHelp, SignatureHelpContext, SignatureHelpProvider, SignatureHelpTrigger, TextEdit,
     register_completion_provider, register_definition_provider,
     register_document_formatting_provider, register_document_highlight_provider,
     register_document_range_formatting_provider, register_hover_provider,
@@ -527,18 +527,42 @@ impl SignatureHelpProvider for LspFeatures {
         trigger: SignatureHelpTrigger,
         cx: &mut App,
     ) -> Task<Result<Option<SignatureHelp>>> {
+        // Without the editor's state, a retrigger character or a content
+        // change means hints are showing.
+        let is_retrigger = match &trigger {
+            SignatureHelpTrigger::Invoke => false,
+            SignatureHelpTrigger::TriggerCharacter(c) => self.signature_retriggers.contains(c),
+            SignatureHelpTrigger::ContentChange => true,
+        };
+        let help_context = SignatureHelpContext {
+            trigger,
+            is_retrigger,
+            active_signature_help: None,
+        };
+        self.provide_signature_help_with_context(context, position, &help_context, cx)
+    }
+
+    /// `monaco-languageclient`'s `asSignatureHelpContext`: the editor's
+    /// `isRetrigger` and `activeSignatureHelp` (with the overload the user
+    /// chose) go to the server as they are.
+    fn provide_signature_help_with_context(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        help_context: &SignatureHelpContext,
+        cx: &mut App,
+    ) -> Task<Result<Option<SignatureHelp>>> {
         let Some((connection, position)) = self.prepare(context, position, cx) else {
             return Task::ready(Ok(None));
         };
-        let (trigger_kind, trigger_character, is_retrigger) = match trigger {
-            SignatureHelpTrigger::Invoke => (lsp::SignatureHelpTriggerKind::INVOKED, None, false),
+        let (trigger_kind, trigger_character) = match &help_context.trigger {
+            SignatureHelpTrigger::Invoke => (lsp::SignatureHelpTriggerKind::INVOKED, None),
             SignatureHelpTrigger::TriggerCharacter(c) => (
                 lsp::SignatureHelpTriggerKind::TRIGGER_CHARACTER,
                 Some(c.to_string()),
-                self.signature_retriggers.contains(&c),
             ),
             SignatureHelpTrigger::ContentChange => {
-                (lsp::SignatureHelpTriggerKind::CONTENT_CHANGE, None, true)
+                (lsp::SignatureHelpTriggerKind::CONTENT_CHANGE, None)
             }
         };
         let request =
@@ -546,8 +570,11 @@ impl SignatureHelpProvider for LspFeatures {
                 context: Some(lsp::SignatureHelpContext {
                     trigger_kind,
                     trigger_character,
-                    is_retrigger,
-                    active_signature_help: None,
+                    is_retrigger: help_context.is_retrigger,
+                    active_signature_help: help_context
+                        .active_signature_help
+                        .as_ref()
+                        .map(convert::lsp_signature_help),
                 }),
                 text_document_position_params: position,
                 work_done_progress_params: Default::default(),

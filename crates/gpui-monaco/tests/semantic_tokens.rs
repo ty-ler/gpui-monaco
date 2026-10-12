@@ -321,3 +321,96 @@ fn providers_registered_later_are_asked(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(requests.borrow().len(), 2);
 }
+
+/// Answers every request with no tokens.
+#[derive(Clone, Default)]
+struct NoTokens {
+    requests: Rc<RefCell<usize>>,
+}
+
+impl DocumentSemanticTokensProvider for NoTokens {
+    fn legend(&self) -> SemanticTokensLegend {
+        legend()
+    }
+
+    fn provide_document_semantic_tokens(
+        &self,
+        _: &ProviderContext,
+        _: Option<SharedString>,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Option<SemanticTokensResult>>> {
+        *self.requests.borrow_mut() += 1;
+        Task::ready(Ok(None))
+    }
+}
+
+impl DocumentRangeSemanticTokensProvider for NoTokens {
+    fn legend(&self) -> SemanticTokensLegend {
+        legend()
+    }
+
+    fn provide_document_range_semantic_tokens(
+        &self,
+        _: &ProviderContext,
+        _: std::ops::Range<PointUtf16>,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Option<SemanticTokens>>> {
+        *self.requests.borrow_mut() += 1;
+        Task::ready(Ok(None))
+    }
+}
+
+#[gpui::test]
+fn only_the_best_scoring_document_providers_are_asked(cx: &mut TestAppContext) {
+    // Monaco `_getDocumentSemanticTokensProviderHighestGroup`: a `*`
+    // provider isn't asked when a better-scoring one exists, even if that
+    // one has no tokens.
+    let fallback = Words::default();
+    let fallback_requests = fallback.requests.clone();
+    let best = NoTokens::default();
+    let best_requests = best.requests.clone();
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_document_semantic_tokens_provider(cx, LanguageSelector::All, fallback);
+        register_document_semantic_tokens_provider(cx, LanguageSelector::language("demo"), best);
+    });
+    let (editor, cx) = setup("let value = run(1);\n", Some(THEME), |_| {}, cx);
+    assert!(colors(&editor, cx, 0).is_empty());
+    assert_eq!(*best_requests.borrow(), 1);
+    assert!(fallback_requests.borrow().is_empty());
+}
+
+#[gpui::test]
+fn every_best_scoring_range_provider_is_asked(cx: &mut TestAppContext) {
+    // Monaco `getDocumentRangeSemanticTokens`: the newest of two
+    // equal-score providers has no tokens, so the other's are used.
+    let ranges = Rc::new(RefCell::new(Vec::new()));
+    let older = FirstWords {
+        ranges: ranges.clone(),
+    };
+    let newer = NoTokens::default();
+    let newer_requests = newer.requests.clone();
+    let worse = NoTokens::default();
+    let worse_requests = worse.requests.clone();
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_document_range_semantic_tokens_provider(cx, LanguageSelector::All, worse);
+        register_document_range_semantic_tokens_provider(
+            cx,
+            LanguageSelector::language("demo"),
+            older,
+        );
+        register_document_range_semantic_tokens_provider(
+            cx,
+            LanguageSelector::language("demo"),
+            newer,
+        );
+    });
+    let (editor, cx) = setup("w0 x\nw1 x\n", Some(THEME), |_| {}, cx);
+    cx.executor().advance_clock(Duration::from_millis(200));
+    assert_eq!(colors(&editor, cx, 0), vec![(0..2, 0xff0000)]);
+    assert_eq!(*newer_requests.borrow(), 1);
+    assert_eq!(ranges.borrow().len(), 1);
+    // A lower-scoring provider isn't asked.
+    assert_eq!(*worse_requests.borrow(), 0);
+}

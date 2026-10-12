@@ -709,6 +709,103 @@ async fn dropped_requests_are_cancelled(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn signature_help_context_reaches_the_server(cx: &mut TestAppContext) {
+    // Monaco `ParameterHintsModel.doTrigger`: `isRetrigger` is whether
+    // hints show or are pending, and `activeSignatureHelp` carries the
+    // overload the user chose.
+    let (client, server) = start(cx, |method, _| {
+        (method == "textDocument/signatureHelp").then(|| {
+            json!({
+                "signatures": [{ "label": "f(a)" }, { "label": "f(a, b)" }],
+                "activeSignature": 0,
+            })
+        })
+    })
+    .await;
+    let model = model(cx, "f(1, 2)\n");
+    client
+        .update(cx, |client, cx| client.attach(&model, cx))
+        .unwrap();
+    let features =
+        cx.update(|cx| LspFeatures::new(client.downgrade(), client.read(cx).capabilities()));
+    let context = model.read_with(cx, |m, _| m.provider_context());
+    let showing = SignatureHelp {
+        signatures: vec![
+            SignatureInformation {
+                label: "f(a)".into(),
+                documentation: Some(Documentation::PlainText("one".into())),
+                parameters: vec![ParameterInformation {
+                    label: ParameterLabel::Range(2..3),
+                    documentation: None,
+                }],
+                active_parameter: None,
+            },
+            SignatureInformation {
+                label: "f(a, b)".into(),
+                documentation: Some(Documentation::Markdown("**two**".into())),
+                parameters: vec![ParameterInformation {
+                    label: ParameterLabel::Text("b".into()),
+                    documentation: None,
+                }],
+                active_parameter: Some(1),
+            },
+        ],
+        active_signature: 1,
+        active_parameter: 0,
+    };
+    // `(` isn't a retrigger character, but hints are showing.
+    let help_context = SignatureHelpContext {
+        trigger: SignatureHelpTrigger::TriggerCharacter('('),
+        is_retrigger: true,
+        active_signature_help: Some(showing),
+    };
+    let help = cx
+        .update(|cx| {
+            features.provide_signature_help_with_context(&context, p(0, 5), &help_context, cx)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(help.signatures.len(), 2);
+    let sent = &server.messages("textDocument/signatureHelp")[0]["params"]["context"];
+    assert_eq!(sent["triggerKind"], 2);
+    assert_eq!(sent["triggerCharacter"], "(");
+    assert_eq!(sent["isRetrigger"], true);
+    assert_eq!(
+        sent["activeSignatureHelp"],
+        json!({
+            "signatures": [
+                { "label": "f(a)", "documentation": "one", "parameters": [{ "label": [2, 3] }] },
+                {
+                    "label": "f(a, b)",
+                    "documentation": { "kind": "markdown", "value": "**two**" },
+                    "parameters": [{ "label": "b" }],
+                    "activeParameter": 1,
+                },
+            ],
+            "activeSignature": 1,
+            "activeParameter": 0,
+        })
+    );
+
+    // An explicit request with nothing showing.
+    let help_context = SignatureHelpContext {
+        trigger: SignatureHelpTrigger::Invoke,
+        is_retrigger: false,
+        active_signature_help: None,
+    };
+    cx.update(|cx| {
+        features.provide_signature_help_with_context(&context, p(0, 5), &help_context, cx)
+    })
+    .await
+    .unwrap();
+    let sent = &server.messages("textDocument/signatureHelp")[1]["params"]["context"];
+    assert_eq!(sent["triggerKind"], 1);
+    assert_eq!(sent["isRetrigger"], false);
+    assert!(sent.get("activeSignatureHelp").is_none_or(Value::is_null));
+}
+
+#[gpui::test]
 async fn shutdown_and_exit(cx: &mut TestAppContext) {
     let (client, server) = start(cx, |_, _| None).await;
     let registered =

@@ -479,8 +479,9 @@ pub struct CompletionItem {
     /// Insert the text's indentation as is (Monaco's `KeepWhitespace`
     /// rule) instead of indenting its lines like the cursor's line.
     pub keep_whitespace: bool,
-    /// The single-line range to replace; defaults to the word before the
-    /// cursor.
+    /// The single-line range to replace, on the cursor's line; defaults to
+    /// the word before the cursor. Items with other ranges are skipped
+    /// (Monaco `CompletionItem.isInvalid`).
     pub range: Option<Range<PointUtf16>>,
     /// Prefer selecting this item when it ties for the best filter score.
     pub preselect: bool,
@@ -489,8 +490,10 @@ pub struct CompletionItem {
     /// Edits applied elsewhere (e.g. imports) when accepted.
     pub additional_text_edits: Vec<(Range<PointUtf16>, String)>,
     /// The range replaced in replace mode (Monaco `range.replace`, e.g.
-    /// the whole word); `range` is then the insert-mode range, which must
-    /// start at the same position. See `suggest.insert_mode`.
+    /// the whole word); `range` is then the insert-mode range. It must be
+    /// single-line, on the cursor's line, and start where the insert range
+    /// does (the word's start without a `range`), or the item is skipped
+    /// (Monaco `CompletionItem.isInvalid`). See `suggest.insert_mode`.
     pub replace_range: Option<Range<PointUtf16>>,
     /// Tags, such as [`CompletionItemTag::Deprecated`] (shown struck out).
     pub tags: Vec<CompletionItemTag>,
@@ -2423,7 +2426,9 @@ impl FormattingEdits {
 /// How the model is indented, for formatters (Monaco `FormattingOptions`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FormattingOptions {
-    /// Spaces per indentation level (and per tab).
+    /// Columns per indentation level: the model's resolved
+    /// [`indent_size`](crate::ModelOptions::indent_size), as Monaco passes
+    /// `indentSize` here (the name follows Monaco's `tabSize` field).
     pub tab_size: u32,
     /// Indent with spaces rather than tabs.
     pub insert_spaces: bool,
@@ -3600,6 +3605,30 @@ pub fn document_semantic_tokens_providers(
 ) -> Vec<Arc<dyn DocumentSemanticTokensProvider>> {
     cx.try_global::<LanguageFeatures>()
         .map(|f| matching(&f.semantic_tokens, &target.into()))
+        .unwrap_or_default()
+}
+
+/// [`document_semantic_tokens_providers`] in groups of equal score, best
+/// first (Monaco `orderedGroups`). The editor asks only the first group,
+/// as Monaco's `getDocumentSemanticTokens` does.
+pub fn document_semantic_tokens_provider_groups(
+    cx: &App,
+    target: impl Into<ProviderTarget>,
+) -> Vec<Vec<Arc<dyn DocumentSemanticTokensProvider>>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching_groups(&f.semantic_tokens, &target.into()))
+        .unwrap_or_default()
+}
+
+/// [`document_range_semantic_tokens_providers`] in groups of equal score,
+/// best first (Monaco `orderedGroups`). The editor asks every provider of
+/// the first group, as Monaco's `getDocumentRangeSemanticTokens` does.
+pub fn document_range_semantic_tokens_provider_groups(
+    cx: &App,
+    target: impl Into<ProviderTarget>,
+) -> Vec<Vec<Arc<dyn DocumentRangeSemanticTokensProvider>>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching_groups(&f.range_semantic_tokens, &target.into()))
         .unwrap_or_default()
 }
 

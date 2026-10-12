@@ -352,14 +352,22 @@ fn prepare(item: &CompletionItem, position: PointUtf16, word_start_column: u32) 
     let overwrite_before = if item.label.is_empty() {
         None
     } else {
-        match &item.range {
-            // Monaco: ranges must be single-line, on the cursor's line.
-            Some(range) if range.start.row != position.row || range.end.row != range.start.row => {
-                None
-            }
-            Some(range) => Some(position.column.saturating_sub(range.start.column) as usize),
-            None => Some(position.column.saturating_sub(word_start_column) as usize),
-        }
+        // Monaco `CompletionItem`'s range validation: the insert and
+        // replace ranges are single-line, on the cursor's line, and start
+        // at the same column. Without a `range`, the insert range starts
+        // at the word's start.
+        let on_cursor_line = |range: &Range<PointUtf16>| {
+            range.start.row == position.row && range.end.row == range.start.row
+        };
+        let insert_start = item
+            .range
+            .as_ref()
+            .map_or(word_start_column, |range| range.start.column);
+        let valid = item.range.as_ref().is_none_or(on_cursor_line)
+            && item.replace_range.as_ref().is_none_or(|replace| {
+                on_cursor_line(replace) && replace.start.column == insert_start
+            });
+        valid.then(|| position.column.saturating_sub(insert_start) as usize)
     };
     PreparedItem {
         label,
