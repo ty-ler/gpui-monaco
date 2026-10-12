@@ -431,6 +431,154 @@ fn only_showing_the_accessible_diff_viewer(cx: &mut TestAppContext) {
     assert!(diff.read_with(cx, |d, _| d.is_accessible_diff_viewer_visible()));
 }
 
+/// Two changes far apart: line 6 replaced, line 31 deleted.
+fn two_change_texts() -> (String, String) {
+    let original: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    let modified = original
+        .replace("line 5\n", "five\n")
+        .replace("line 30\n", "");
+    (original, modified)
+}
+
+/// Monaco focuses the viewer's current row, so screen readers read it
+/// (audit 4 §E.1): the focus is on the line list, which has a role, and the
+/// current row is its active descendant.
+#[gpui::test]
+fn screen_readers_read_the_accessible_diff_viewer(cx: &mut TestAppContext) {
+    use gpui_monaco::diff_editor::AccessibleDiffViewerAria;
+    let (original, modified) = two_change_texts();
+    let (diff, cx) = setup(&original, &modified, cx);
+    let editor = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    cx.update(|window, cx| window.focus(&editor.read(cx).focus_handle(cx), cx));
+    cx.simulate_keystrokes("f7");
+    paint(cx);
+    let aria = |cx: &mut VisualTestContext| -> AccessibleDiffViewerAria {
+        diff.read_with(cx, |d, cx| d.accessible_viewer_aria_for_tests(cx))
+            .expect("the viewer shows")
+    };
+    let state = aria(cx);
+    assert_eq!(
+        state.focused,
+        (
+            gpui::Role::List,
+            "Accessible Diff Viewer. Use arrow up and down to navigate.".into()
+        )
+    );
+    assert_eq!(
+        state.active_descendant.as_deref(),
+        Some("Difference 1 of 2: original line 6, 1 line changed, modified line 6, 1 line changed")
+    );
+    assert!(
+        state
+            .rows
+            .iter()
+            .all(|(role, _, _)| *role == gpui::Role::ListItem)
+    );
+    assert_eq!(
+        state
+            .rows
+            .iter()
+            .filter(|(_, _, selected)| *selected)
+            .count(),
+        1
+    );
+    assert!(state.rows[0].2);
+    // Each Down makes the new row the one read.
+    let expected = [
+        "line 2 unchanged line 3",
+        "line 3 unchanged line 4",
+        "line 4 unchanged line 5",
+        "- line 5 original line 6",
+        "+ five modified line 6",
+        "line 6 unchanged line 7",
+    ];
+    for (ix, label) in expected.into_iter().enumerate() {
+        cx.simulate_keystrokes("down");
+        let state = aria(cx);
+        assert_eq!(state.active_descendant.as_deref(), Some(label));
+        let selected: Vec<_> = state.rows.iter().map(|(_, _, s)| *s).collect();
+        assert!(selected[ix + 1] && selected.iter().filter(|s| **s).count() == 1);
+    }
+    // F7: the next group's header.
+    cx.simulate_keystrokes("f7");
+    assert_eq!(
+        aria(cx).active_descendant.as_deref(),
+        Some(
+            "Difference 2 of 2: original line 31, 1 line changed, modified line 31, no lines changed"
+        )
+    );
+}
+
+/// Monaco rebuilds the viewer's groups only for a new diff, and keeps the
+/// current line (audit 4 §E.2).
+#[gpui::test]
+fn the_accessible_diff_viewer_keeps_its_place_across_re_applies(cx: &mut TestAppContext) {
+    let (original, modified) = two_change_texts();
+    let (diff, cx) = setup(&original, &modified, cx);
+    cx.simulate_resize(gpui::size(px(1200.), px(600.)));
+    paint(cx);
+    let editor = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    cx.update(|window, cx| window.focus(&editor.read(cx).focus_handle(cx), cx));
+    cx.simulate_keystrokes("f7");
+    // The first group's last line, after the change: the modified cursor
+    // follows it to line 9, past the change.
+    cx.simulate_keystrokes("down down down down down down down down");
+    let state = |cx: &mut VisualTestContext| {
+        diff.read_with(cx, |d, cx| d.accessible_viewer_state_for_tests(cx))
+    };
+    assert_eq!(state(cx), Some((2, 0, 8)));
+    // A theme change, an options change and a layout switch re-apply the
+    // same diff.
+    cx.update(|_, cx| gpui_monaco::set_theme(cx, "hc-black"));
+    paint(cx);
+    assert_eq!(state(cx), Some((2, 0, 8)));
+    update_options(&diff, cx, |o| o.render_indicators = false);
+    assert_eq!(state(cx), Some((2, 0, 8)));
+    cx.simulate_resize(gpui::size(px(600.), px(600.)));
+    paint(cx);
+    assert!(!diff.read_with(cx, |d, _| d.renders_side_by_side()));
+    assert_eq!(state(cx), Some((2, 0, 8)));
+}
+
+/// Monaco's `setModel`: new models start with no groups, and no models
+/// close the viewer (audit 4 §E.2).
+#[gpui::test]
+fn the_accessible_diff_viewer_follows_the_models(cx: &mut TestAppContext) {
+    let (original, modified) = two_change_texts();
+    let (diff, cx) = setup(&original, &modified, cx);
+    let editor = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    cx.update(|window, cx| window.focus(&editor.read(cx).focus_handle(cx), cx));
+    cx.simulate_keystrokes("f7");
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.accessible_viewer_state_for_tests(cx)),
+        Some((2, 0, 0))
+    );
+    // Other models: the old groups go at once, the new diff's come.
+    let groups = diff.update(cx, |d, cx| {
+        let original = cx.new(|_| TextModel::new("a\nb"));
+        let modified = cx.new(|_| TextModel::new("a\nc"));
+        d.set_models(original, modified, cx);
+        d.accessible_viewer_state_for_tests(cx)
+    });
+    assert_eq!(groups.map(|(groups, _, _)| groups), Some(0));
+    paint(cx);
+    assert!(diff.read_with(cx, |d, _| d.is_accessible_diff_viewer_visible()));
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.accessible_viewer_state_for_tests(cx)),
+        Some((1, 0, 0))
+    );
+    assert_eq!(
+        diff.read_with(cx, |d, cx| d.accessible_viewer_aria_for_tests(cx))
+            .and_then(|aria| aria.active_descendant)
+            .as_deref(),
+        Some("Difference 1 of 1: original line 2, 1 line changed, modified line 2, 1 line changed")
+    );
+    // No models: it closes.
+    diff.update(cx, |d, cx| d.set_model(None, cx));
+    paint(cx);
+    assert!(!diff.read_with(cx, |d, _| d.is_accessible_diff_viewer_visible()));
+}
+
 #[gpui::test]
 fn moved_blocks(cx: &mut TestAppContext) {
     let block: String = (0..6)
@@ -988,6 +1136,15 @@ fn screen_readers_keep_narrow_diffs_side_by_side(cx: &mut TestAppContext) {
     paint(cx);
     paint(cx);
     assert!(diff.read_with(cx, |d, _| d.renders_side_by_side()));
+    // Monaco `renderSideBySideInAutomaticMode` is true with a screen reader
+    // at any width (audit 4 §E.3).
+    let keys = diff.read_with(cx, |d, cx| d.context_keys(cx));
+    assert!(
+        keys.contains("diffEditorAutomaticRenderSideBySide"),
+        "{keys:?}"
+    );
+    assert!(keys.contains("diffEditorRenderSideBySideInlineBreakpointReached"));
+    assert!(!keys.contains("diffEditorInlineMode"));
 }
 
 #[gpui::test]

@@ -40,6 +40,8 @@ mod accessible;
 mod unchanged;
 
 use accessible::AccessibleDiffViewer;
+#[doc(hidden)]
+pub use accessible::AccessibleDiffViewerAria;
 
 use unchanged::{RevealPreference, UnchangedRegion};
 
@@ -2595,6 +2597,10 @@ impl DiffEditor {
     /// Shows other models, or none (Monaco `setModel`, with `null`): without
     /// a model the editors show empty text and there's no diff.
     pub fn set_model(&mut self, model: Option<DiffEditorModel>, cx: &mut Context<Self>) {
+        // Monaco closes the accessible diff viewer when the models go.
+        if model.is_none() && self.has_model {
+            self.set_accessible_viewer_visible(false, cx);
+        }
         self.clear_diff(cx);
         self.simple_diff = None;
         self.has_model = model.is_some();
@@ -3154,10 +3160,12 @@ impl DiffEditor {
                 options.render_side_by_side && width <= breakpoint,
             ),
             flag("diffEditorInlineMode", self.inline),
-            // Monaco `renderSideBySideInAutomaticMode`.
+            // Monaco `renderSideBySideInAutomaticMode`: wide enough, or a
+            // screen reader.
             flag(
                 "diffEditorAutomaticRenderSideBySide",
-                !(options.compact_mode && self.simple_diff == Some(true)) && width > breakpoint,
+                !(options.compact_mode && self.simple_diff == Some(true))
+                    && (width > breakpoint || self.screen_reader_mode),
             ),
             flag(
                 "diffEditorHasChanges",
@@ -3561,6 +3569,10 @@ impl DiffEditor {
         self.active_move = None;
         self.move_to_compare = None;
         self.apply_move_decorations(cx);
+        // Monaco's viewer has no groups while there's no diff.
+        if let Some(viewer) = self.accessible_viewer.clone() {
+            viewer.update(cx, |viewer, cx| viewer.set_diff(None, cx));
+        }
     }
 
     /// Decorates both sides and aligns them with view zones.
@@ -3625,8 +3637,7 @@ impl DiffEditor {
         self.apply_revert_arrows(cx);
         self.update_unchanged_regions(&diff, cx);
         if let Some(viewer) = self.accessible_viewer.clone() {
-            let mappings = diff_mappings(&diff);
-            viewer.update(cx, |viewer, cx| viewer.set_diffs(&mappings, cx));
+            viewer.update(cx, |viewer, cx| viewer.set_diff(Some(&diff), cx));
         }
     }
 
@@ -5605,10 +5616,10 @@ impl DiffEditor {
             let this = cx.entity().downgrade();
             let (original, modified) = (self.original.clone(), self.modified.clone());
             let can_close = !self.options.only_show_accessible_diff_viewer;
-            let mappings = self.diff.as_deref().map(diff_mappings).unwrap_or_default();
+            let diff = self.diff.clone();
             self.accessible_viewer = Some(cx.new(|cx| {
                 let mut viewer = AccessibleDiffViewer::new(this, original, modified, can_close, cx);
-                viewer.set_diffs(&mappings, cx);
+                viewer.set_diff(diff.as_ref(), cx);
                 viewer
             }));
         } else {
@@ -5655,6 +5666,13 @@ impl DiffEditor {
     #[doc(hidden)]
     pub fn accessible_viewer_state_for_tests(&self, cx: &App) -> Option<(usize, usize, usize)> {
         Some(self.accessible_viewer.as_ref()?.read(cx).state_for_tests())
+    }
+
+    /// What the accessible diff viewer tells assistive technology, for
+    /// tests (GPUI's test platform builds no accessibility tree).
+    #[doc(hidden)]
+    pub fn accessible_viewer_aria_for_tests(&self, cx: &App) -> Option<AccessibleDiffViewerAria> {
+        Some(self.accessible_viewer.as_ref()?.read(cx).aria_for_tests(cx))
     }
 
     /// The accessible diff viewer's current line, for tests: its kind
