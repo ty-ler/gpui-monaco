@@ -16,12 +16,14 @@ gpui-monaco is a code editor component for [GPUI](https://github.com/zed-industr
 - **Languages:**
   - Incremental tree-sitter highlighting off the main thread, with injections such as fenced code in Markdown and `<script>` in HTML.
   - VS Code `language-configuration.json` editing rules.
+  - Monarch grammars given as JSON, as in Monaco.
   - Bundled grammars for Rust, JavaScript/TypeScript/TSX, JSON, YAML, TOML, Markdown, HTML and CSS.
-- **Themes:** Monaco's `vs` and `vs-dark`, and VS Code color theme JSON files.
+- **Themes:** Monaco's `vs`, `vs-dark`, `hc-black` and `hc-light`, and VS Code color theme JSON files.
 - **IDE widgets:** completion, hover, diagnostics, go to definition and signature help. Your app supplies the data through provider traits.
 - **Extensibility:**
   - Decorations: backgrounds, underlines, gutter glyphs, and inline text before or after a range.
   - View zones, content widgets and overlay widgets, which can be any GPUI view.
+- **Diff editors:** a side-by-side or inline [diff editor](diff-editor.md), and a multi-file diff editor.
 - **Large files:** 100k+ lines stay responsive. See [Performance](performance.md).
 
 ## Design
@@ -37,4 +39,4 @@ The editor also [runs in a browser](web.md) through gpui's web platform, on a ni
 
 ## Not there yet
 
-The diff editor's inline view and extras and collaborative editing (CRDT). Each one has a `post-mvp` issue in the [issue tracker](https://github.com/ty-ler/gpui-monaco/issues?q=label%3Apost-mvp).
+Collaborative editing (CRDT) and a crates.io release. Each one has a `post-mvp` issue in the [issue tracker](https://github.com/ty-ler/gpui-monaco/issues?q=label%3Apost-mvp).

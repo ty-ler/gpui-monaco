@@ -19,7 +19,7 @@ A Monaco-like code editor component for [GPUI](https://github.com/zed-industries
 
 ## Non-goals (for the MVP)
 
-Diff editor and CRDT collaboration. See the `post-mvp` issues.
+CRDT collaboration. See the `post-mvp` issues.
 
 ## Crates
 
