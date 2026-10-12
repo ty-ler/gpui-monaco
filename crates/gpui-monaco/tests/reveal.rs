@@ -497,3 +497,26 @@ fn move_to_view_top_line_moves_to_nth_line_from_top(cx: &mut TestAppContext) {
     );
     assert_eq!(scroll_top(&editor, cx), px(0.));
 }
+
+/// Monaco `FoldingAction.runEditorCommand`: Go to Parent Fold reveals the
+/// fold's start centered when it's off screen.
+#[gpui::test]
+fn go_to_parent_fold_centers_a_far_parent(cx: &mut TestAppContext) {
+    let body = "    x\n".repeat(400);
+    let text = format!("{}fn a() {{\n{body}}}\n", lines(200) + "\n");
+    let (editor, cx) = setup(&text, |_| {}, cx);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(500));
+    cx.run_until_parked();
+    draw(cx);
+    let (lh, height) = metrics(&editor, cx);
+    select(&editor, cx, &[Selection::collapsed(p(590, 0))]);
+    set_scroll_top(&editor, cx, lh * 580.);
+    editor.update(cx, |e, cx| e.go_to_parent_fold(cx));
+    draw(cx);
+    assert_eq!(rows(&editor, cx), [200]);
+    // Centered: the line's middle at the viewport's.
+    let middle = scroll_top(&editor, cx) + height / 2.;
+    let y = lh * 200.;
+    assert!(y <= middle && middle <= y + lh, "{middle:?} {y:?}");
+}

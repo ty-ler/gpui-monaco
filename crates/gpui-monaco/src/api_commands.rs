@@ -1,10 +1,11 @@
 //! Monaco's internal API commands that ask a model's providers and return
 //! what they answer (`_executeLinkProvider`,
 //! `_executeSignatureHelpProvider`, `_executeSelectionRangeProvider`,
-//! `_executeCompletionItemProvider`, `_provideDocumentSemanticTokens` and
-//! the rest). Monaco runs them through `commandService.executeCommand`
-//! with a uri; here they're functions taking the model, since commands
-//! return nothing (see [`crate::execute_command`]).
+//! `_executeCompletionItemProvider`, `_executeFoldingRangeProvider`,
+//! `_provideDocumentSemanticTokens` and the rest). Monaco runs them through
+//! `commandService.executeCommand` with a uri; here they're functions
+//! taking the model, since commands return nothing (see
+//! [`crate::execute_command`]).
 
 use std::ops::Range;
 
@@ -91,6 +92,40 @@ pub fn execute_signature_help_provider(
             }
         }
         None
+    })
+}
+
+/// The model's folding ranges as an editor with `options` computes them
+/// (Monaco `_executeFoldingRangeProvider`): none with `folding` off, else
+/// from the folding range providers with `folding_strategy: Auto`, then
+/// the syntax tree, then indentation, keeping at most
+/// `folding_maximum_regions`.
+pub fn execute_folding_range_provider(
+    model: &Entity<TextModel>,
+    options: &crate::options::EditorOptions,
+    cx: &mut App,
+) -> Task<Vec<providers::FoldingRange>> {
+    if !options.folding {
+        return Task::ready(Vec::new());
+    }
+    let (snapshot, _, requests, compute) = crate::editor::fold_inputs(
+        model,
+        options.folding_strategy,
+        options.folding_maximum_regions,
+        cx,
+    );
+    cx.background_executor().spawn(async move {
+        let line_count = snapshot.rope().line_count();
+        let provided = crate::editor::collect_provided_folding_ranges(requests, line_count).await;
+        compute(provided)
+            .0
+            .into_iter()
+            .map(|range| providers::FoldingRange {
+                start_row: range.start_row,
+                end_row: range.end_row,
+                kind: range.kind,
+            })
+            .collect()
     })
 }
 

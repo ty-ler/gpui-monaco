@@ -778,6 +778,8 @@ pub(crate) fn prepaint(
     };
     let mut headers: Vec<(u32, Option<String>, bool)> = Vec::new();
     let mut inline = Vec::new();
+    // Where the decorations with a z-index above 0 start.
+    let mut above_zero = 0;
     for decoration in &decorations {
         let Some(minimap) = &decoration.options.minimap else {
             continue;
@@ -797,7 +799,37 @@ pub(crate) fn prepaint(
         let Some(color) = decoration_color(decoration) else {
             continue;
         };
+        if decoration.options.z_index <= 0 {
+            above_zero = inline.len() + 1;
+        }
         inline.push((range, color, minimap.position));
+    }
+    // Monaco's folding decorations: with `foldingHighlight`, a collapsed
+    // region's `editor.foldBackground` shows inline in the minimap
+    // (`foldedBackgroundMinimap`). Its range runs from the end of the
+    // header to the end of the last hidden line, so it covers the header's
+    // line, where the hidden lines start.
+    if options.folding
+        && options.folding_highlight
+        && editor.folds.has_collapsed()
+        && colors.fold_background.a > 0.
+    {
+        let folds: Vec<_> = editor
+            .folds
+            .collapsed_rows()
+            .into_iter()
+            .filter(|(start, _)| !editor.folds.is_hidden(*start))
+            .map(|(start, _)| {
+                let end = rope.clip_point_utf16(PointUtf16::new(start, u32::MAX), text::Bias::Left);
+                let line = to_view(end, false);
+                (
+                    to_minimap_range((line, line)),
+                    colors.fold_background,
+                    MinimapPosition::Inline,
+                )
+            })
+            .collect();
+        inline.splice(above_zero..above_zero, folds);
     }
     // Monaco `_renderDecorationsLineHighlights`: one band per line, the
     // highest z-index first, none on selected lines.

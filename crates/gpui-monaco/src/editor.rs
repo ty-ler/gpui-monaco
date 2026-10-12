@@ -33,7 +33,8 @@ use crate::options::EditorOptions;
 use crate::options::LocationKind;
 use crate::theme::{EditorColors, Theme};
 use crate::view::folding::{
-    FoldState, FoldingRangeData, compute_indent_ranges_limited, marker_ranges, sanitize_ranges,
+    FoldState, FoldingLimit, FoldingRangeData, compute_indent_ranges_limited, marker_ranges,
+    sanitize_ranges,
 };
 use crate::view::injected_text::PositionAffinity;
 use crate::view::view_lines::{ViewLines, WrapSettings, normalize_hidden};
@@ -182,6 +183,10 @@ pub enum CodeEditorEvent {
     /// The IME composition ended (Monaco `onDidCompositionEnd`): it was
     /// committed, cancelled or unmarked.
     CompositionEnded,
+    /// The number of folding ranges found, or the limit they were cut to,
+    /// changed (Monaco `FoldingController.limitReporter.onDidChange`); see
+    /// [`CodeEditor::folding_limit`].
+    FoldingLimitChanged,
     /// The hidden lines changed (Monaco `onDidChangeHiddenAreas`): folding
     /// or [`CodeEditor::set_hidden_areas`], reported when the next frame
     /// applies them.
@@ -243,6 +248,10 @@ impl ViewZoneChangeAccessor<'_, '_> {
     }
 }
 
+/// Monaco's `FoldingController.onEditorMouseDown` ignores presses this
+/// close to a folding control's left edge.
+const FOLD_CONTROL_DEAD_ZONE: Pixels = px(4.);
+
 /// Monaco's folding update scheduler waits at least this long.
 const FOLD_UPDATE_DELAY: Duration = Duration::from_millis(200);
 
@@ -272,6 +281,129 @@ pub(crate) async fn collect_provided_folding_ranges(
         }
     }
     provided
+}
+
+/// What a folding range computation found besides the ranges.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct FoldComputed {
+    /// Monaco `FoldingRegions.hasTypes`: providers gave the ranges, some
+    /// with a kind.
+    pub has_types: bool,
+    /// For Monaco's `RangesLimitReporter`.
+    pub limit: FoldingLimit,
+}
+
+/// The rest of a folding range computation, for a background thread: the
+/// providers' ranges in, the ranges out.
+pub(crate) type FoldCompute = Box<
+    dyn FnOnce(
+            Option<Vec<FoldingRangeData>>,
+        ) -> (Vec<crate::view::folding::FoldRange>, FoldComputed)
+        + Send,
+>;
+
+/// What computing `model`'s fold ranges with `strategy`, keeping at most
+/// `limit`, needs: the text, provider requests, and the rest of the
+/// computation (Monaco's `SyntaxRangeProvider`, falling back to the syntax
+/// tree's `folds.scm` ranges plus region markers, then to the
+/// `IndentRangeProvider`).
+#[allow(clippy::type_complexity)]
+pub(crate) fn fold_inputs(
+    model: &Entity<TextModel>,
+    strategy: crate::options::FoldingStrategy,
+    limit: usize,
+    cx: &mut App,
+) -> (
+    BufferSnapshot,
+    text::Version,
+    Vec<Task<anyhow::Result<Option<Vec<crate::providers::FoldingRange>>>>>,
+    FoldCompute,
+) {
+    let model = model.read(cx);
+    let snapshot = model.snapshot();
+    let version = snapshot.version();
+    let tab_size = model.options().tab_size;
+    let config = model
+        .language()
+        .map(|language| language.config.folding.clone());
+    let auto = strategy == crate::options::FoldingStrategy::Auto;
+    let context = model.provider_context();
+    let syntax = if auto { model.syntax_snapshot() } else { None };
+    let target: crate::providers::ProviderTarget = model.into();
+    // Monaco's `syntaxRangeProvider.ts` passes the same empty context.
+    let folding_context = crate::providers::FoldingContext::default();
+    let providers: Vec<_> = if auto {
+        crate::providers::folding_range_providers(cx, target)
+            .into_iter()
+            .map(|provider| provider.provide_folding_ranges(&context, &folding_context, cx))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let text = snapshot.clone();
+    let compute: FoldCompute = Box::new(move |provided: Option<Vec<FoldingRangeData>>| {
+        let line_count = text.rope().line_count();
+        let folding = config.flatten();
+        let markers = folding.as_ref().and_then(|f| f.markers.as_ref());
+        if let Some(data) = provided {
+            // Monaco `FoldingRegions.fromFoldRanges` drops the types when
+            // no range has one.
+            let has_types = data.iter().any(|range| range.kind.is_some());
+            let (ranges, limit) = sanitize_ranges(data, limit);
+            return (ranges, FoldComputed { has_types, limit });
+        }
+        let syntax_ranges = syntax.and_then(|syntax| {
+            syntax
+                .highlighter
+                .fold_ranges(&syntax.state, syntax.text.rope())
+        });
+        if let Some(folds) = syntax_ranges {
+            let mut data: Vec<FoldingRangeData> = folds
+                .into_iter()
+                .filter(|(_, end)| *end < line_count)
+                .map(|(start, end)| FoldingRangeData {
+                    start,
+                    end,
+                    rank: 0,
+                    kind: None,
+                    manual: false,
+                })
+                .collect();
+            if let Some(markers) = markers {
+                data.extend(
+                    marker_ranges(text.rope(), &markers.start, &markers.end)
+                        .into_iter()
+                        .map(|(start, end)| FoldingRangeData {
+                            start,
+                            end,
+                            rank: 1,
+                            kind: Some(crate::providers::FoldingRangeKind::Region),
+                            manual: false,
+                        }),
+                );
+            }
+            let (ranges, limit) = sanitize_ranges(data, limit);
+            return (
+                ranges,
+                FoldComputed {
+                    has_types: false,
+                    limit,
+                },
+            );
+        }
+        let off_side = folding.as_ref().is_some_and(|f| f.off_side);
+        let markers = markers.map(|m| (&m.start, &m.end));
+        let (ranges, limit) =
+            compute_indent_ranges_limited(text.rope(), tab_size, off_side, markers, limit);
+        (
+            ranges,
+            FoldComputed {
+                has_types: false,
+                limit,
+            },
+        )
+    });
+    (snapshot, version, providers, compute)
 }
 
 /// Saved per-model view state (Monaco `ICodeEditorViewState`, from
@@ -307,6 +439,9 @@ pub struct FoldingViewState {
     pub regions: Vec<FoldingRegionState>,
     /// The model's line count when saved (Monaco `lineCount`).
     pub line_count: u32,
+    /// `folding_imports_by_default` already folded the imports (Monaco
+    /// `foldedImports`), so they aren't folded again once restored.
+    pub folded_imports: bool,
 }
 
 /// One saved folding region (Monaco `ILineMemento`).
@@ -615,20 +750,33 @@ pub struct CodeEditor {
     /// The pointer is over the minimap's slider (`minimapSlider.hoverBackground`).
     pub(crate) minimap_slider_hovered: bool,
     pub(crate) minimap_drag: Option<crate::minimap::MinimapDrag>,
-    fold_task: Option<Task<()>>,
+    pub(crate) fold_task: Option<Task<()>>,
     /// The editor has focus (Monaco `hasWidgetFocus`, for bracket matching).
     pub(crate) has_focus: bool,
     /// Rows hidden by [`CodeEditor::set_hidden_areas`], besides folds, by
     /// source (Monaco keeps them per source).
     hidden_areas: Vec<(Option<gpui::SharedString>, Vec<Range<u32>>)>,
     /// The version `fold_task` was started for.
-    fold_requested: Option<text::Version>,
+    pub(crate) fold_requested: Option<text::Version>,
     /// The `refresh_folding_ranges` count the ranges were computed at.
     fold_epoch: u64,
     /// A background fold computation is running (dropping `fold_task`
     /// wouldn't stop it), and whether a newer version waits for it.
-    fold_computing: bool,
-    fold_rerun: bool,
+    pub(crate) fold_computing: bool,
+    pub(crate) fold_rerun: bool,
+    /// The ranges are to be computed again for the same text (Monaco
+    /// `triggerFoldingModelChanged` after an option, language
+    /// configuration or provider change).
+    pub(crate) fold_stale: bool,
+    /// Imports were folded by `folding_imports_by_default` (Monaco
+    /// `_currentModelHasFoldedImports`).
+    pub(crate) folded_imports: bool,
+    /// What the last computation found (Monaco `RangesLimitReporter`).
+    pub(crate) folding_limit: FoldingLimit,
+    /// The line, and whether a folding control was pressed, of a mouse
+    /// down the folding contribution may act on at mouse up (Monaco
+    /// `FoldingController.mouseDownInfo`).
+    pub(crate) fold_mouse_down: Option<(u32, bool)>,
     /// Expands the folds around hidden cursors after a cursor change
     /// (Monaco `FoldingController.cursorChangedScheduler`).
     pub(crate) fold_reveal_task: Option<Task<()>>,
@@ -1007,6 +1155,10 @@ impl CodeEditor {
             hidden_areas: Vec::new(),
             fold_computing: false,
             fold_rerun: false,
+            fold_stale: false,
+            folded_imports: false,
+            folding_limit: FoldingLimit::default(),
+            fold_mouse_down: None,
             fold_reveal_task: None,
             _blink_task: None,
             _subscriptions: subscriptions,
@@ -1152,13 +1304,8 @@ impl CodeEditor {
             self.snapshot.version(),
         ));
         self.injected_text_key = None;
-        self.folds = FoldState::default();
-        self.fold_task = None;
-        self.fold_requested = None;
+        self.reset_folding();
         self.hidden_areas.clear();
-        self.fold_computing = false;
-        self.fold_rerun = false;
-        self.fold_reveal_task = None;
         *self.shared_model.borrow_mut() = model.downgrade();
         self.model = model;
         self.reanchor_widgets(widget_positions, cx);
@@ -1194,17 +1341,9 @@ impl CodeEditor {
     /// Captures the selections, the scroll position and the folded regions
     /// (Monaco `saveViewState`).
     pub fn save_view_state(&self, cx: &App) -> ViewState {
-        // Monaco `ViewModel.saveState`: the first visible line and how far
-        // above the viewport its top is.
-        let (first_position, first_position_delta_top) = match self.layout.as_ref() {
-            Some(layout) => {
-                let line_height = layout.metrics.line_height;
-                let count = self.view_lines.line_count().max(1);
-                let line = layout.zones.line_at(self.scroll_top, line_height, count);
-                let position = self.view_lines.to_model(line, 0);
-                let top = layout.zones.line_y(line, line_height);
-                (Some(position), top - self.scroll_top)
-            }
+        let (first_position, first_position_delta_top) = match self.first_visible_position_anchor()
+        {
+            Some((position, delta)) => (Some(position), delta),
             None => (None, px(0.)),
         };
         ViewState {
@@ -1215,6 +1354,22 @@ impl CodeEditor {
             first_position_delta_top,
             folding: self.save_folding_state(cx),
         }
+    }
+
+    /// Monaco `ViewModel.saveState`: the first visible line and how far
+    /// above the viewport its top is, once laid out; a scroll anchor not
+    /// applied yet wins.
+    pub(crate) fn first_visible_position_anchor(&self) -> Option<(PointUtf16, Pixels)> {
+        if let Some(anchor) = self.pending_scroll_anchor {
+            return Some(anchor);
+        }
+        let layout = self.layout.as_ref()?;
+        let line_height = layout.metrics.line_height;
+        let count = self.view_lines.line_count().max(1);
+        let line = layout.zones.line_at(self.scroll_top, line_height, count);
+        let position = self.view_lines.to_model(line, 0);
+        let top = layout.zones.line_y(line, line_height);
+        Some((position, top - self.scroll_top))
     }
 
     /// Restores a [`ViewState`] from [`CodeEditor::save_view_state`] (Monaco
@@ -1265,6 +1420,11 @@ impl CodeEditor {
     pub fn update_options(&mut self, options: EditorOptions, cx: &mut Context<Self>) {
         let old_from_all_providers = self.options.occurrences_highlight_from_all_providers;
         let old_match_mode = self.options.selected_text_match_mode;
+        let old_folding = (
+            self.options.folding,
+            self.options.folding_maximum_regions,
+            self.options.folding_strategy,
+        );
         let zoomed = crate::font_zoom::zoomed_options(&options, self.zoom_level(cx));
         let old = std::mem::replace(&mut self.options, zoomed);
         // Monaco `ContentHoverController._hookListeners`: turning
@@ -1318,6 +1478,7 @@ impl CodeEditor {
         if !self.options.inertial_scroll {
             self.stop_inertial_scroll();
         }
+        self.folding_options_changed(&old_folding, cx);
         if let Some(change) = change {
             cx.emit(change);
         }
@@ -2688,6 +2849,9 @@ impl CodeEditor {
                 self.reset_inlay_hints(cx);
                 // The brackets are the new language's, grammar or not.
                 self.bracket_colors = Default::default();
+                // Monaco `onDidChangeModelLanguageConfiguration`, which a
+                // language change fires too.
+                self.refresh_folding(cx);
                 cx.emit(CodeEditorEvent::ModelLanguageChanged {
                     old_language: old_language.clone(),
                     new_language: new_language.clone(),
@@ -2702,6 +2866,8 @@ impl CodeEditor {
             TextModelEvent::LanguageConfigurationChanged => {
                 // Brackets may have changed: find the pairs again.
                 self.bracket_colors = Default::default();
+                // As may the folding markers and `offSide`.
+                self.refresh_folding(cx);
                 cx.emit(CodeEditorEvent::ModelLanguageConfigurationChanged);
                 cx.notify();
             }
@@ -4651,10 +4817,12 @@ impl CodeEditor {
             && !self.model.read(cx).is_too_large_for_tokenization()
             && ((self.folds.ranges_version() != Some(version)
                 && self.fold_requested.as_ref() != Some(&version))
-                || epoch != self.fold_epoch)
+                || epoch != self.fold_epoch
+                || self.fold_stale)
         {
             self.fold_epoch = epoch;
             self.fold_requested = Some(version);
+            self.fold_stale = false;
             self.compute_fold_ranges(cx);
         }
     }
@@ -4695,10 +4863,10 @@ impl CodeEditor {
                 .spawn(async move { compute(provided) })
                 .await;
             this.update(cx, |this, cx| {
-                let (ranges, has_types) = ranges;
+                let (ranges, computed) = ranges;
                 let model = this.model.clone();
-                let first = this.folds.ranges_version().is_none();
-                this.folds.set_has_types(has_types);
+                this.folds.set_has_types(computed.has_types);
+                this.set_folding_limit(computed.limit, cx);
                 // Monaco `FoldingModel.update`: cursors starting in a
                 // collapsed region whose lines changed expand it.
                 let selection: Vec<u32> = this
@@ -4707,27 +4875,37 @@ impl CodeEditor {
                     .iter()
                     .map(|s| s.start().row)
                     .collect();
-                let mut hidden_changed = this.folds.set_ranges(
-                    ranges,
-                    version,
-                    &rope,
-                    model.read(cx).buffer(),
-                    &selection,
-                );
-                // Monaco `foldingImportsByDefault`: imports start folded.
-                if first && this.options.folding_imports_by_default {
-                    let imports: Vec<usize> = this
-                        .folds
-                        .ranges()
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, r)| {
-                            r.kind == Some(crate::providers::FoldingRangeKind::Imports)
-                        })
-                        .map(|(ix, _)| ix)
-                        .collect();
-                    hidden_changed |= this.folds.toggle(imports);
-                }
+                // Monaco `foldingImportsByDefault`: until imports have been
+                // folded, each computation's import ranges start collapsed,
+                // keeping the first visible line where it is
+                // (`StableEditorScrollState`).
+                let hidden_changed =
+                    if this.options.folding_imports_by_default && !this.folded_imports {
+                        let anchor = this.first_visible_position_anchor();
+                        let (hidden_changed, found) = this.folds.set_ranges_collapsing(
+                            ranges,
+                            &crate::providers::FoldingRangeKind::Imports,
+                            version,
+                            &rope,
+                            model.read(cx).buffer(),
+                            &selection,
+                        );
+                        if found {
+                            this.folded_imports = true;
+                            if hidden_changed && let Some(anchor) = anchor {
+                                this.pending_scroll_anchor = Some(anchor);
+                            }
+                        }
+                        hidden_changed
+                    } else {
+                        this.folds.set_ranges(
+                            ranges,
+                            version,
+                            &rope,
+                            model.read(cx).buffer(),
+                            &selection,
+                        )
+                    };
                 // Monaco `onHiddenRangesChanges`: cursors move out of the
                 // hidden lines.
                 if hidden_changed {
@@ -4757,82 +4935,10 @@ impl CodeEditor {
         BufferSnapshot,
         text::Version,
         Vec<Task<anyhow::Result<Option<Vec<crate::providers::FoldingRange>>>>>,
-        Box<
-            dyn FnOnce(
-                    Option<Vec<FoldingRangeData>>,
-                ) -> (Vec<crate::view::folding::FoldRange>, bool)
-                + Send,
-        >,
+        FoldCompute,
     ) {
-        let snapshot = self.model.read(cx).snapshot();
-        let version = snapshot.version();
-        let model = self.model.read(cx);
-        let tab_size = model.options().tab_size;
-        let config = model
-            .language()
-            .map(|language| language.config.folding.clone());
-        let auto = strategy == crate::options::FoldingStrategy::Auto;
-        let limit = self.options.folding_maximum_regions;
-        let context = model.provider_context();
-        let syntax = if auto { model.syntax_snapshot() } else { None };
-        // Monaco's `syntaxRangeProvider.ts` passes the same empty context.
-        let folding_context = crate::providers::FoldingContext::default();
-        let providers: Vec<_> = if auto {
-            crate::providers::folding_range_providers(cx, self.provider_target(cx))
-                .into_iter()
-                .map(|provider| provider.provide_folding_ranges(&context, &folding_context, cx))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let text = snapshot.clone();
-        let compute = Box::new(move |provided: Option<Vec<FoldingRangeData>>| {
-            let line_count = text.rope().line_count();
-            let folding = config.flatten();
-            let markers = folding.as_ref().and_then(|f| f.markers.as_ref());
-            if let Some(data) = provided {
-                return (sanitize_ranges(data, limit).0, true);
-            }
-            let syntax_ranges = syntax.and_then(|syntax| {
-                syntax
-                    .highlighter
-                    .fold_ranges(&syntax.state, syntax.text.rope())
-            });
-            if let Some(folds) = syntax_ranges {
-                let mut data: Vec<FoldingRangeData> = folds
-                    .into_iter()
-                    .filter(|(_, end)| *end < line_count)
-                    .map(|(start, end)| FoldingRangeData {
-                        start,
-                        end,
-                        rank: 0,
-                        kind: None,
-                        manual: false,
-                    })
-                    .collect();
-                if let Some(markers) = markers {
-                    data.extend(
-                        marker_ranges(text.rope(), &markers.start, &markers.end)
-                            .into_iter()
-                            .map(|(start, end)| FoldingRangeData {
-                                start,
-                                end,
-                                rank: 1,
-                                kind: Some(crate::providers::FoldingRangeKind::Region),
-                                manual: false,
-                            }),
-                    );
-                }
-                return (sanitize_ranges(data, limit).0, false);
-            }
-            let off_side = folding.as_ref().is_some_and(|f| f.off_side);
-            let markers = markers.map(|m| (&m.start, &m.end));
-            (
-                compute_indent_ranges_limited(text.rope(), tab_size, off_side, markers, limit),
-                false,
-            )
-        });
-        (snapshot, version, providers, compute)
+        let model = self.model.clone();
+        fold_inputs(&model, strategy, self.options.folding_maximum_regions, cx)
     }
 
     /// The current folding ranges, as of the last computation.
@@ -4897,6 +5003,41 @@ impl CodeEditor {
 
     /// Monaco `scrollOnMiddleClick`: a middle click starts scrolling
     /// toward the mouse; another click ends it.
+    /// The row of the folding control at `position`, outside the 4px at
+    /// its left that Monaco leaves to the dirty diff's gutter decorations
+    /// (`FoldingController.onEditorMouseDown`).
+    fn fold_control_at(&self, position: Point<Pixels>) -> Option<u32> {
+        let layout = self.layout.as_ref()?;
+        if layout.sticky_line_at(position).is_some() {
+            return None;
+        }
+        layout
+            .fold_controls
+            .iter()
+            .find(|control| control.bounds.contains(&position))
+            .filter(|control| position.x - control.bounds.left() >= FOLD_CONTROL_DEAD_ZONE)
+            .map(|control| control.row)
+    }
+
+    /// Monaco `FoldingController.onEditorMouseUp` for `mouse`, a release.
+    fn folding_mouse_up_on(
+        &mut self,
+        mouse: &crate::mouse_target::EditorMouseEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let position = mouse.target.position;
+        let at_line_end = position
+            .is_some_and(|position| position.column == self.snapshot.line_len_utf16(position.row));
+        self.folding_mouse_up(
+            position.map(|position| position.row),
+            mouse.target.kind == crate::mouse_target::MouseTargetKind::GutterLineDecorations,
+            at_line_end,
+            mouse.modifiers.shift || mouse.button == Some(MouseButton::Middle),
+            mouse.modifiers.alt,
+            cx,
+        );
+    }
+
     fn on_middle_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -4922,6 +5063,13 @@ impl CodeEditor {
             return;
         }
         cx.stop_propagation();
+        // Monaco `FoldingController.onEditorMouseDown` takes middle presses
+        // on folding controls too: recursive toggles.
+        self.folding_mouse_down(None, false);
+        if let Some(row) = self.fold_control_at(event.position) {
+            self.folding_mouse_down(Some(row), true);
+            return;
+        }
         if self.options.scroll_on_middle_click {
             self.animation.middle_scroll =
                 Some(crate::view::animation::MiddleScroll::new(event.position));
@@ -5257,25 +5405,36 @@ impl CodeEditor {
             return;
         }
 
-        if let Some(control) = layout
-            .fold_controls
-            .iter()
-            .find(|control| control.bounds.contains(&event.position))
-        {
-            let recursive = event.modifiers.shift || event.button == MouseButton::Middle;
-            self.click_fold(control.row, true, recursive, event.modifiers.alt, cx);
+        // Monaco `FoldingController.onEditorMouseDown`: a left or middle
+        // press on a folding control, or at the end of a line's text while
+        // lines are hidden, toggles the region when released on the same
+        // line (see `on_mouse_up`).
+        self.folding_mouse_down(None, false);
+        if let Some(row) = self.fold_control_at(event.position) {
+            self.folding_mouse_down(Some(row), true);
             return;
         }
-        // The `⋯` after a collapsed line unfolds it, as does empty space
+        // The `⋯` after a collapsed line ends its text, as does empty space
         // after the line with `unfold_on_click_after_end_of_line`.
-        let recursive = event.modifiers.shift || event.button == MouseButton::Middle;
-        if let Some((row, _)) = layout
+        let placeholder = layout
             .fold_placeholders
             .iter()
             .find(|(_, bounds)| bounds.contains(&event.position))
-        {
-            self.click_fold(*row, false, recursive, event.modifiers.alt, cx);
-            return;
+            .map(|(row, _)| *row);
+        let at_end = mouse
+            .target
+            .position
+            .filter(|position| match mouse.target.kind {
+                crate::mouse_target::MouseTargetKind::ContentEmpty { after_lines: false } => {
+                    self.options.unfold_on_click_after_end_of_line
+                }
+                crate::mouse_target::MouseTargetKind::ContentText => {
+                    position.column == self.snapshot.line_len_utf16(position.row)
+                }
+                _ => false,
+            });
+        if let Some(row) = placeholder.or(at_end.map(|position| position.row)) {
+            self.folding_mouse_down(Some(row), false);
         }
         // Clicking a color swatch opens the color picker.
         if event.button == MouseButton::Left
@@ -5283,18 +5442,6 @@ impl CodeEditor {
         {
             self.show_color_picker_hover(position, cx);
         }
-        if self.options.unfold_on_click_after_end_of_line
-            && matches!(
-                mouse.target.kind,
-                crate::mouse_target::MouseTargetKind::ContentEmpty { after_lines: false }
-            )
-            && let Some(position) = mouse.target.position
-            && self.folds.is_collapsed(position.row)
-        {
-            self.click_fold(position.row, false, recursive, event.modifiers.alt, cx);
-            return;
-        }
-
         // Monaco: Cmd/Ctrl+click on an inlay hint part opens its location or
         // runs its command.
         if event.button == MouseButton::Left
@@ -6178,8 +6325,10 @@ impl CodeEditor {
                 cx,
             );
             drop_target = mouse.target.position.map(|p| (mouse.target.kind, p));
+            self.folding_mouse_up_on(&mouse, cx);
             cx.emit(CodeEditorEvent::MouseUp(mouse));
         }
+        self.fold_mouse_down = None;
         if self.dnd.active && event.button == MouseButton::Left {
             // Monaco `onMouseDrop`.
             let mouse = self.emit_mouse(
@@ -7721,7 +7870,18 @@ impl Render for CodeEditor {
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_middle_mouse_down))
             .on_mouse_up(
                 MouseButton::Middle,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    if this.fold_mouse_down.is_some() {
+                        let mouse = this.emit_mouse(
+                            event.position,
+                            Some(event.button),
+                            event.modifiers,
+                            event.click_count,
+                            window,
+                            cx,
+                        );
+                        this.folding_mouse_up_on(&mouse, cx);
+                    }
                     // Releasing ends it only after it scrolled (Monaco).
                     if this.animation.middle_scroll.is_some_and(|s| s.did_scroll) {
                         this.end_middle_scroll(cx);

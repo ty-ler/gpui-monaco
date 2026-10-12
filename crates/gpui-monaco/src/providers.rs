@@ -3003,13 +3003,26 @@ register_fn!(
     selection_range,
     SelectionRangeProvider
 );
-register_fn!(
-    /// Registers a folding range provider for the models `selector` matches (Monaco
-    /// `registerFoldingRangeProvider`). Results from all matching providers are merged.
-    register_folding_range_provider,
-    folding,
-    FoldingRangeProvider
-);
+/// Registers a folding range provider for the models `selector` matches (Monaco
+/// `registerFoldingRangeProvider`). Results from all matching providers are merged.
+/// Editors compute their ranges again, as they do when one is unregistered (Monaco
+/// `foldingRangeProvider.onDidChange`).
+pub fn register_folding_range_provider(
+    cx: &mut App,
+    selector: LanguageSelector,
+    provider: impl FoldingRangeProvider,
+) -> ProviderRegistration {
+    let features = features(cx);
+    features.next_id += 1;
+    let id = ProviderRegistration(features.next_id);
+    features.folding.push(Entry {
+        id,
+        selector,
+        provider: Arc::new(provider),
+    });
+    refresh_folding_ranges(cx);
+    id
+}
 register_fn!(
     /// Registers a document symbol provider for the models `selector`
     /// matches (Monaco `registerDocumentSymbolProvider`).
@@ -3191,7 +3204,9 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features
         .range_semantic_tokens
         .retain(|e| e.id != registration);
+    let folding_providers = features.folding.len();
     features.folding.retain(|e| e.id != registration);
+    let folding_changed = features.folding.len() != folding_providers;
     features.selection_range.retain(|e| e.id != registration);
     features.type_definition.retain(|e| e.id != registration);
     features.implementation.retain(|e| e.id != registration);
@@ -3199,6 +3214,9 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.on_type_formatting.retain(|e| e.id != registration);
     features.drop_edits.retain(|e| e.id != registration);
     features.paste_edits.retain(|e| e.id != registration);
+    if folding_changed {
+        refresh_folding_ranges(cx);
+    }
 }
 
 /// The registered drop edit providers whose selector matches
