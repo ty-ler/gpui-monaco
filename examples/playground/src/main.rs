@@ -847,12 +847,27 @@ impl Render for DemoLabel {
     }
 }
 
-/// A view zone, a content widget and an overlay widget.
+/// A glyph margin widget's view: a dot.
+struct DemoGlyph;
+
+impl Render for DemoGlyph {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(div().size(px(8.)).rounded_full().bg(gpui::rgb(0xe51400)))
+    }
+}
+
+/// A view zone, a content widget, an overlay widget and a glyph margin
+/// widget.
 fn add_demo_widgets(editor: &Entity<CodeEditor>, cx: &mut App) {
     use gpui::{hsla, rgb};
     use gpui_monaco::{
-        ContentWidget, ContentWidgetPreference, OverlayPosition, OverlayWidget, ViewZone,
-        ZoneHeight,
+        ContentWidget, ContentWidgetPreference, GlyphMarginWidget, OverlayPosition, OverlayWidget,
+        ViewZone, ZoneHeight,
     };
     let zone = cx.new(|_| DemoLabel {
         text: "A view zone between lines 4 and 5 — any GPUI view".into(),
@@ -888,6 +903,16 @@ fn add_demo_widgets(editor: &Entity<CodeEditor>, cx: &mut App) {
         );
         editor.add_overlay_widget(
             OverlayWidget::new(OverlayPosition::TopRight, overlay.into()),
+            cx,
+        );
+        // For lines 21 to 30: beside line 21, or the first line in view
+        // while it's scrolled past.
+        editor.add_glyph_margin_widget(
+            GlyphMarginWidget::with_range(
+                gpui_monaco::text::PointUtf16::new(20, 0)
+                    ..gpui_monaco::text::PointUtf16::new(29, 0),
+                cx.new(|_| DemoGlyph),
+            ),
             cx,
         );
     });

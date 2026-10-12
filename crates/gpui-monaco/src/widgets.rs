@@ -2,6 +2,7 @@
 //! overlay widgets).
 
 use std::cell::Cell;
+use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{AnyView, Pixels, Point, px};
@@ -362,7 +363,7 @@ pub(crate) fn place_content_widget(
     line_top: Pixels,
     line_height: Pixels,
     height: Pixels,
-    viewport: std::ops::Range<Pixels>,
+    viewport: Range<Pixels>,
 ) -> Option<Pixels> {
     let above = line_top - height;
     let below = line_top + line_height;
@@ -494,12 +495,16 @@ pub(crate) fn place_overlay_widgets(
     origins
 }
 
-/// A host view in the glyph margin beside a line (Monaco
+/// A host view in the glyph margin beside a range's lines (Monaco
 /// `IGlyphMarginWidget`), such as a breakpoint or a revert button.
 #[derive(Clone)]
 pub struct GlyphMarginWidget {
-    /// The 0-based line; it follows edits.
-    pub row: u32,
+    /// The range it's for (Monaco `IGlyphMarginWidgetPosition.range`); it
+    /// follows edits. Monaco shows the widget once, on the range's first
+    /// line, or on the first line in view while the range starts above
+    /// the viewport (`_collectWidgetBasedGlyphRenderRequest`); its lane is
+    /// taken on every line of the range.
+    pub range: Range<PointUtf16>,
     /// The view to render, laid out a lane wide (the line height) and the
     /// line's height.
     pub view: AnyView,
@@ -511,10 +516,18 @@ pub struct GlyphMarginWidget {
 }
 
 impl GlyphMarginWidget {
-    /// A widget in the center lane at z-index 0.
+    /// A widget beside line `row` (an empty range at its start), in the
+    /// center lane at z-index 0.
     pub fn new(row: u32, view: impl Into<AnyView>) -> Self {
+        let start = PointUtf16::new(row, 0);
+        Self::with_range(start..start, view)
+    }
+
+    /// A widget for `range` (Monaco `getPosition().range`), in the center
+    /// lane at z-index 0.
+    pub fn with_range(range: Range<PointUtf16>, view: impl Into<AnyView>) -> Self {
         Self {
-            row,
+            range,
             view: view.into(),
             lane: Default::default(),
             z_index: 0,
@@ -522,11 +535,25 @@ impl GlyphMarginWidget {
     }
 }
 
+/// Where a glyph margin widget goes (Monaco `IGlyphMarginWidgetPosition`),
+/// for [`CodeEditor::layout_glyph_margin_widget`](crate::CodeEditor::layout_glyph_margin_widget).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GlyphMarginWidgetPosition {
+    /// The range it's for.
+    pub range: Range<PointUtf16>,
+    /// Its glyph margin lane.
+    pub lane: crate::decorations::GlyphMarginLane,
+    /// Its z-index.
+    pub z_index: i32,
+}
+
 #[derive(Clone)]
 pub(crate) struct GlyphWidgetState {
     pub id: WidgetId,
-    /// The line's start.
+    /// The range's start (the line's, for gutter widgets).
     pub anchor: Anchor,
+    /// The range's end (`anchor` for gutter widgets).
+    pub end: Anchor,
     pub view: AnyView,
     pub lane: crate::decorations::GlyphMarginLane,
     pub z_index: i32,
@@ -598,10 +625,10 @@ pub(crate) struct OverlayWidgetState {
 
 /// Widget positions carried from one model to the next: each content
 /// widget's (position, secondary position) and each glyph margin widget's
-/// row, in widget order.
+/// range, in widget order.
 pub(crate) struct WidgetPositions {
     pub content: Vec<(Option<PointUtf16>, Option<PointUtf16>)>,
-    pub glyphs: Vec<u32>,
+    pub glyphs: Vec<Range<PointUtf16>>,
     /// Widgets across the gutter (the inline edit indicator).
     pub gutter: Vec<u32>,
 }

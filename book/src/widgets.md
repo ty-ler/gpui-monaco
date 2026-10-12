@@ -91,9 +91,10 @@ Widgets get their own clicks: the editor doesn't take focus, move the cursor, op
 
 ## Glyph margin widgets
 
-A glyph margin widget (Monaco `IGlyphMarginWidget`) sits in the glyph margin beside a line, such as a breakpoint or a revert button. It follows its line through edits, gets a lane's width (the line height) and the line's height, and receives its own clicks.
+A glyph margin widget (Monaco `IGlyphMarginWidget`) sits in the glyph margin beside a line, such as a breakpoint or a revert button. Like Monaco's `getPosition()`, it has a range, a lane and a z-index: it shows once, beside the range's first line, or the first line in view while the range starts above the viewport, and its lane is taken on every line of the range. It follows its range through edits, gets a lane's width (the line height) and the line's height, and receives its own clicks. `layout_glyph_margin_widget` moves it (Monaco `layoutGlyphMarginWidget`).
 
 ```rust,ignore
+use gpui_monaco::text::PointUtf16;
 use gpui_monaco::{GlyphMarginLane, GlyphMarginWidget};
 
 editor.update(cx, |editor, cx| {
@@ -102,7 +103,9 @@ editor.update(cx, |editor, cx| {
     editor.add_glyph_margin_widget(
         GlyphMarginWidget { lane: GlyphMarginLane::Left, z_index: 10, ..GlyphMarginWidget::new(41, marker) },
         cx,
-    )
+    );
+    // Beside lines 10 to 20, pinned to the top while they're scrolled past.
+    editor.add_glyph_margin_widget(GlyphMarginWidget::with_range(PointUtf16::new(10, 0)..PointUtf16::new(20, 0), region), cx)
 });
 ```
 

@@ -1055,3 +1055,81 @@ impl FoldState {
         !self.collapsed.is_empty()
     }
 }
+
+/// The folding controls' icons (Monaco `foldingDecorations.ts`'s
+/// `registerIcon`s): manual ranges ("Create Folding Range from Selection")
+/// get their own, which default to the others' codicons, as Monaco's
+/// `foldingManualCollapsedIcon` and `foldingManualExpandedIcon` do. A host
+/// can change any of them with [`set_folding_icon`], as a product icon
+/// theme does in VS Code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FoldingIcon {
+    /// `folding-expanded` (Monaco `foldingExpandedIcon`).
+    Expanded,
+    /// `folding-collapsed` (Monaco `foldingCollapsedIcon`).
+    Collapsed,
+    /// `folding-manual-expanded` (Monaco `foldingManualExpandedIcon`).
+    ManualExpanded,
+    /// `folding-manual-collapsed` (Monaco `foldingManualCollapsedIcon`).
+    ManualCollapsed,
+}
+
+impl FoldingIcon {
+    /// The icon of a region's control (Monaco
+    /// `FoldingDecorationProvider.getDecorationOption`).
+    pub fn for_region(collapsed: bool, manual: bool) -> Self {
+        match (collapsed, manual) {
+            (false, false) => Self::Expanded,
+            (true, false) => Self::Collapsed,
+            (false, true) => Self::ManualExpanded,
+            (true, true) => Self::ManualCollapsed,
+        }
+    }
+
+    /// Monaco's icon id (the `codicon-<id>` class name).
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Expanded => "folding-expanded",
+            Self::Collapsed => "folding-collapsed",
+            Self::ManualExpanded => "folding-manual-expanded",
+            Self::ManualCollapsed => "folding-manual-collapsed",
+        }
+    }
+
+    /// The codicon Monaco registers it with: `chevron-down` when expanded
+    /// and `chevron-right` when collapsed, manual or not.
+    pub const fn default_codicon(self) -> crate::codicons::Codicon {
+        match self {
+            Self::Expanded | Self::ManualExpanded => crate::codicons::Codicon::ChevronDown,
+            Self::Collapsed | Self::ManualCollapsed => crate::codicons::Codicon::ChevronRight,
+        }
+    }
+
+    /// The codicon drawn: the one [`set_folding_icon`] gave, else the
+    /// default.
+    pub fn codicon(self, cx: &gpui::App) -> crate::codicons::Codicon {
+        cx.try_global::<FoldingIcons>()
+            .and_then(|icons| icons.0[self as usize])
+            .unwrap_or(self.default_codicon())
+    }
+}
+
+/// The codicons [`set_folding_icon`] gave, by [`FoldingIcon`].
+#[derive(Default)]
+struct FoldingIcons([Option<crate::codicons::Codicon>; 4]);
+
+impl gpui::Global for FoldingIcons {}
+
+/// Draws `icon` as `codicon` in every editor (`None` restores Monaco's
+/// default), as a product icon theme's `folding-*` icons do in VS Code.
+pub fn set_folding_icon(
+    icon: FoldingIcon,
+    codicon: Option<crate::codicons::Codicon>,
+    cx: &mut gpui::App,
+) {
+    let icons = cx.default_global::<FoldingIcons>();
+    if icons.0[icon as usize] != codicon {
+        icons.0[icon as usize] = codicon;
+        cx.refresh_windows();
+    }
+}

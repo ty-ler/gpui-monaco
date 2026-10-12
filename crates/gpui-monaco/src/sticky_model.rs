@@ -425,21 +425,16 @@ impl CodeEditor {
 // ----- the widget (Monaco `StickyScrollController`) --------------------------------
 
 impl CodeEditor {
-    /// Scrolls so sticky line `ix`'s row sits where it's shown and moves
-    /// the cursor to `position` on it (Monaco `_revealPosition` from a
-    /// sticky line).
-    fn reveal_sticky_row(&mut self, position: PointUtf16, ix: usize, cx: &mut Context<Self>) {
-        let Some(layout) = self.layout.clone() else {
-            return;
-        };
-        let line = self.view_lines.first_view_line_of_row(position.row);
-        let line_height = layout.metrics.line_height;
-        self.scroll_top =
-            (layout.zones.line_y(line, line_height) - line_height * ix as f32).max(gpui::px(0.));
+    /// Monaco `StickyScrollController._revealPosition` (a sticky line's
+    /// click, `goToFocused`): a plain `revealPosition` (the least scrolling
+    /// that shows it, with the cursor's surrounding lines), then the cursor
+    /// goes to `position`.
+    fn reveal_sticky_position(&mut self, position: PointUtf16, cx: &mut Context<Self>) {
         self.sticky.focused = None;
+        // `setSelection` doesn't reveal in Monaco: the reveal below replaces
+        // the cursor's.
         self.set_selections(&[Selection::collapsed(position)], cx);
-        self.autoscroll_requested = false;
-        cx.notify();
+        self.reveal_position(position, cx);
     }
 
     /// A mouse down on sticky line `ix`: Monaco acts on the click, so this
@@ -475,7 +470,7 @@ impl CodeEditor {
     /// and go-to-definition gesture): Cmd/Ctrl follows the definition link
     /// under the mouse, Shift reveals the row after the scope, the folding
     /// control folds or unfolds without moving the cursor, otherwise the
-    /// cursor goes to the clicked column.
+    /// cursor goes to the clicked column, revealed as by `revealPosition`.
     pub(crate) fn sticky_click(
         &mut self,
         ix: usize,
@@ -520,7 +515,7 @@ impl CodeEditor {
             return;
         }
         let target = text_position.unwrap_or(PointUtf16::new(line.row, 0));
-        self.reveal_sticky_row(target, ix, cx);
+        self.reveal_sticky_position(target, cx);
     }
 
     /// Monaco `_toggleFoldingRegionForLine`: folds or unfolds the region,
@@ -624,7 +619,7 @@ impl CodeEditor {
             .as_ref()
             .and_then(|l| l.sticky_lines.get(ix).copied())
         {
-            self.reveal_sticky_row(PointUtf16::new(line.row, 0), ix, cx);
+            self.reveal_sticky_position(PointUtf16::new(line.row, 0), cx);
         }
     }
 
