@@ -1,8 +1,8 @@
 //! Font zoom (Monaco `editorZoom.ts`, `contrib/fontZoom`) and font options.
 
 use gpui::{
-    Entity, Focusable, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext,
-    point, px,
+    Entity, Focusable, Modifiers, PinchEvent, ScrollDelta, ScrollWheelEvent, TestAppContext,
+    VisualTestContext, point, px,
 };
 use gpui_monaco::CodeEditor;
 
@@ -87,4 +87,58 @@ fn mouse_wheel_zoom(cx: &mut TestAppContext) {
     // Without the modifier the wheel scrolls.
     wheel(cx, Modifiers::default());
     assert_eq!(cx.update(|_, cx| gpui_monaco::editor_zoom_level(cx)), 1.);
+}
+
+/// Monaco zooms on a trackpad pinch, which browsers deliver as a Ctrl+wheel
+/// of one notch per update: a level per five updates, as one gesture.
+#[gpui::test]
+fn pinch_zoom(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(cx);
+    let pinch = |cx: &mut VisualTestContext, delta: f32, modifiers: Modifiers| {
+        cx.simulate_event(PinchEvent {
+            position: point(px(100.), px(10.)),
+            delta,
+            modifiers,
+            ..Default::default()
+        });
+    };
+    let level = |cx: &mut VisualTestContext| cx.update(|_, cx| gpui_monaco::editor_zoom_level(cx));
+    // Off by default.
+    pinch(cx, 0.1, Modifiers::default());
+    assert_eq!(level(cx), 0.);
+
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.mouse_wheel_zoom = true;
+        e.update_options(options, cx);
+    });
+    paint(cx);
+    for _ in 0..5 {
+        pinch(cx, 0.03, Modifiers::default());
+    }
+    assert!((level(cx) - 1.).abs() < 1e-4);
+    assert_eq!(line_height(&editor, cx), 22.);
+    for _ in 0..10 {
+        pinch(cx, -0.5, Modifiers::default());
+    }
+    assert!((level(cx) + 1.).abs() < 1e-4);
+}
+
+/// Like the wheel, a pinch with Shift or Alt held doesn't zoom.
+#[gpui::test]
+fn pinch_with_shift_does_not_zoom(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(cx);
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.mouse_wheel_zoom = true;
+        e.update_options(options, cx);
+    });
+    paint(cx);
+    cx.simulate_event(PinchEvent {
+        position: point(px(100.), px(10.)),
+        delta: 0.5,
+        modifiers: Modifiers::shift(),
+        ..Default::default()
+    });
+    assert_eq!(cx.update(|_, cx| gpui_monaco::editor_zoom_level(cx)), 0.);
 }

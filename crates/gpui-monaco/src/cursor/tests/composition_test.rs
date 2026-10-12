@@ -173,3 +173,29 @@ fn composing_skips_the_interceptors_until_the_composition_ends() {
     assert_eq!(ed.value(), "()");
     ed.assert_cursor(1, 3);
 }
+
+/// Monaco `textAreaInput.test.ts` `macOS - Firefox - long press with
+/// mouse`: press-and-hold `e` types `e`, then picking `è` is a
+/// `compositionType` replacing one character, without a composition. Its
+/// recorded events, replayed with two cursors: each cursor's `e` becomes
+/// `è` (`TypeOperations.compositionType` maps every selection).
+#[test]
+fn long_press_accent_replaces_at_every_cursor() {
+    let mut ed = using_cursor(&["aaaa", "aaaa"]);
+    ed.set_selections(&[sel(1, 3, 1, 3), sel(2, 3, 2, 3)]);
+    ed.type_keyboard("e");
+    assert_eq!(ed.value(), "aaeaa\naaeaa");
+    ed.composition_type("è", 1, 0, 0);
+    assert_eq!(ed.value(), "aaèaa\naaèaa");
+    ed.assert_selections(&[sel(1, 4, 1, 4), sel(2, 4, 2, 4)]);
+}
+
+/// `replaceNextCharCnt` replaces after each cursor too, clamped to its line.
+#[test]
+fn composition_type_replaces_next_characters_at_every_cursor() {
+    let mut ed = using_cursor(&["ab", "a"]);
+    ed.set_selections(&[sel(1, 2, 1, 2), sel(2, 2, 2, 2)]);
+    ed.composition_type("X", 1, 1, 0);
+    assert_eq!(ed.value(), "X\nX");
+    ed.assert_selections(&[sel(1, 2, 1, 2), sel(2, 2, 2, 2)]);
+}
