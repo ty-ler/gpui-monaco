@@ -2504,3 +2504,72 @@ fn status_bar_insert_label_and_keys(cx: &mut TestAppContext) {
     assert_eq!(status(cx).1, format!("Show More ({ctrl_k})"));
     cx.update(|_, cx| rule.dispose(cx));
 }
+
+/// An item with long docs whose detail changes in a 100ms resolve.
+struct LongDocsOnResolve;
+impl CompletionProvider for LongDocsOnResolve {
+    fn provide_completions(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        _: CompletionTrigger,
+        _: &mut App,
+    ) -> Task<anyhow::Result<CompletionList>> {
+        let docs = format!("Prints.{}", "\n\nMore.".repeat(100));
+        Task::ready(Ok(CompletionList {
+            items: vec![CompletionItem {
+                detail: Some("fn print()".into()),
+                documentation: Some(docs.into()),
+                ..CompletionItem::new("print", CompletionItemKind::Function)
+            }],
+            incomplete: false,
+        }))
+    }
+
+    fn resolve_completion_item(
+        &self,
+        item: &CompletionItem,
+        cx: &mut App,
+    ) -> Option<Task<anyhow::Result<CompletionItem>>> {
+        let item = item.clone();
+        let timer = cx.background_executor().timer(Duration::from_millis(100));
+        Some(cx.background_executor().spawn(async move {
+            timer.await;
+            Ok(CompletionItem {
+                detail: Some("fn print(text: &str)".into()),
+                ..item
+            })
+        }))
+    }
+}
+
+/// Monaco `SuggestDetailsWidget.renderItem` sets `scrollTop = 0`, also
+/// when the focused item renders again after it resolves (#423).
+#[gpui::test]
+fn the_details_scroll_to_the_top_when_the_item_resolves(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    cx.update(|_, cx| register_completion_provider(cx, LanguageSelector::All, LongDocsOnResolve));
+    let scroll = |cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, cx| e.suggest_details_scroll_for_tests(cx))
+    };
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    // Scrolled while the item resolves.
+    cx.simulate_keystrokes("ctrl-alt-space down");
+    assert_eq!(scroll(cx), Some(gpui::px(8.)));
+    cx.executor().advance_clock(Duration::from_millis(100));
+    cx.run_until_parked();
+    assert_eq!(
+        editor
+            .read_with(cx, |e, cx| e.suggest_details_for_tests(cx))
+            .and_then(|(detail, _)| detail)
+            .as_deref(),
+        Some("fn print(text: &str)")
+    );
+    assert_eq!(scroll(cx), Some(gpui::px(0.)));
+    // Scrolling the resolved item's details stays.
+    cx.simulate_keystrokes("down");
+    cx.executor().advance_clock(Duration::from_millis(100));
+    cx.run_until_parked();
+    assert_eq!(scroll(cx), Some(gpui::px(8.)));
+}
