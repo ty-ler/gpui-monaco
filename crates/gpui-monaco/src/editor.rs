@@ -7970,14 +7970,14 @@ impl Render for CodeEditor {
             .on_action(cx.listener(|this, _: &PeekReferences, _, cx| {
                 this.peek(LocationKind::References, cx)
             }))
-            .on_action(cx.listener(|this, _: &GoToNextReference, _, cx| {
+            .on_action(cx.listener(|this, _: &GoToNextReference, window, cx| {
                 // A preview editor leaves F4 to the editor around it.
-                if this.in_peek || !this.peek_select_relative(1, cx) {
+                if this.in_peek || !this.peek_step(1, this.peek_focus(window, cx), cx) {
                     cx.propagate();
                 }
             }))
-            .on_action(cx.listener(|this, _: &GoToPreviousReference, _, cx| {
-                if this.in_peek || !this.peek_select_relative(-1, cx) {
+            .on_action(cx.listener(|this, _: &GoToPreviousReference, window, cx| {
+                if this.in_peek || !this.peek_step(-1, this.peek_focus(window, cx), cx) {
                     cx.propagate();
                 }
             }))

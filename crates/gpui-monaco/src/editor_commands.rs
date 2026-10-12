@@ -233,10 +233,7 @@ pub(crate) fn register_handlers(
             if args.uri.as_deref().is_some_and(|wanted| uri.as_deref() != Some(wanted)) {
                 return;
             }
-            if let Some(position) = args.position {
-                this.set_selections(&[Selection::collapsed(position.to_point())], cx);
-            }
-            this.peek(crate::options::LocationKind::References, cx);
+            this.find_references(args.position.map(|position| position.to_point()), cx);
         },
         Fold => |this, args, _, cx| this.fold_with_args(args.levels, args.direction.as_deref(), args.selection_lines.clone(), true, cx),
         Unfold => |this, args, _, cx| this.fold_with_args(args.levels, args.direction.as_deref(), args.selection_lines.clone(), false, cx),

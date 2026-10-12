@@ -2,14 +2,23 @@
 //! `ReferenceWidget`, `PeekViewWidget` and `ZoneWidget`, and the workbench
 //! list behind the references tree.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
 use gpui::{
-    AppContext as _, Entity, Focusable as _, Modifiers, MouseButton, Pixels, ScrollDelta,
-    ScrollWheelEvent, TestAppContext, VisualTestContext, point, px,
+    App, AppContext as _, Entity, Focusable as _, Modifiers, MouseButton, MouseDownEvent,
+    MouseUpEvent, Pixels, ScrollDelta, ScrollWheelEvent, Task, TestAppContext, VisualTestContext,
+    point, px,
 };
+use gpui_monaco::actions::FindReferences;
+use gpui_monaco::cursor::Selection;
 use gpui_monaco::mouse_target::EmbeddedKind;
-use gpui_monaco::providers::Location;
+use gpui_monaco::options::GoToLocation;
+use gpui_monaco::providers::*;
 use gpui_monaco::text::PointUtf16;
-use gpui_monaco::{CodeEditor, TextModel};
+use gpui_monaco::{CodeEditor, CodeEditorEvent, TextModel};
 
 fn p(row: u32, column: u32) -> PointUtf16 {
     PointUtf16::new(row, column)
@@ -251,7 +260,11 @@ fn the_title_opens_the_result_and_the_close_action_closes(cx: &mut TestAppContex
     cx.simulate_click(title.center(), Modifiers::default());
     draw(cx);
     assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
-    assert_eq!(editor.read_with(cx, |e, _| e.selections()[0].head), p(2, 4));
+    // Monaco `openReference` selects the whole result.
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.selections()[0]),
+        Selection::new(p(2, 4), p(2, 8))
+    );
 
     peek(&editor, cx, vec![here(1, 4, 9), here(2, 4, 8)]);
     let close = cx.debug_bounds("peek-close").unwrap();
@@ -348,8 +361,11 @@ fn the_preview_uses_monaco_options(cx: &mut TestAppContext) {
     assert_eq!(options.sticky_scroll.enabled, outer);
 }
 
+/// Monaco `goToNextOrPreviousReference`: F4 and Shift+F4 go from the
+/// result nearest the view to the next or previous one, moving the cursor
+/// and the view there, and give the focus back to where it was.
 #[gpui::test]
-fn f4_only_moves_through_results_while_a_peek_view_is_open(cx: &mut TestAppContext) {
+fn f4_moves_the_cursor_and_the_view_while_a_peek_view_is_open(cx: &mut TestAppContext) {
     let (editor, cx) = setup("one\ntwo\nthree\nfour", cx);
     peek(
         &editor,
@@ -358,24 +374,293 @@ fn f4_only_moves_through_results_while_a_peek_view_is_open(cx: &mut TestAppConte
     );
     let selected =
         |cx: &mut VisualTestContext| editor.read_with(cx, |e, cx| e.peek_results(cx)).unwrap().1;
-    let start = selected(cx);
+    let head = |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.selections()[0].head);
+    let editor_focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| editor.focus_handle(cx).is_focused(window))
+    };
+    assert_eq!(selected(cx), 0);
     // In the editor (not the list), F4 and Shift+F4 step through the
-    // results (Monaco `goToNextReference` with `referenceSearchVisible`).
+    // results (with `referenceSearchVisible`), and the editor keeps focus.
     cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
     draw(cx);
     cx.simulate_keystrokes("f4");
     draw(cx);
-    assert_eq!(selected(cx), (start + 1) % 3);
+    assert_eq!(selected(cx), 1);
+    assert_eq!(head(cx), p(2, 0));
+    assert!(editor.read_with(cx, |e, _| e.is_peek_visible()));
+    assert!(editor_focused(cx));
+    cx.simulate_keystrokes("f4");
+    draw(cx);
+    cx.simulate_keystrokes("f4");
+    draw(cx);
+    // Wrapping.
+    assert_eq!(selected(cx), 0);
+    assert_eq!(head(cx), p(1, 0));
     cx.simulate_keystrokes("shift-f4");
     draw(cx);
-    assert_eq!(selected(cx), start);
+    assert_eq!(selected(cx), 2);
+    assert_eq!(head(cx), p(3, 0));
+    assert!(editor_focused(cx));
+    // The view moved: its zone is under the new line.
+    let zone_top = |cx: &mut VisualTestContext| cx.debug_bounds("peek-title").unwrap().top();
+    let at_last = zone_top(cx);
+    cx.simulate_keystrokes("shift-f4");
+    draw(cx);
+    assert!(zone_top(cx) < at_last);
+    // From the list, the list keeps focus. (From the editor, the toggle
+    // focuses the preview, then the list.)
+    cx.update(|window, cx| editor.update(cx, |e, cx| e.toggle_peek_widget_focus(window, cx)));
+    draw(cx);
+    cx.update(|window, cx| editor.update(cx, |e, cx| e.toggle_peek_widget_focus(window, cx)));
+    draw(cx);
+    assert!(!editor_focused(cx));
+    cx.simulate_keystrokes("shift-f4");
+    draw(cx);
+    assert_eq!(head(cx), p(1, 0));
+    assert!(!editor_focused(cx));
+    assert!(!cx.update(|window, cx| editor.read(cx).is_peek_preview_focused(window, cx)));
     // With the peek view closed, F4 does nothing.
     editor.update(cx, |e, cx| e.close_peek(cx));
     draw(cx);
-    let head = editor.read_with(cx, |e, _| e.selections()[0].head);
+    let before = head(cx);
     cx.simulate_keystrokes("f4");
     draw(cx);
-    assert_eq!(editor.read_with(cx, |e, _| e.selections()[0].head), head);
+    assert_eq!(head(cx), before);
+}
+
+/// F4 to a result in another model closes the view and asks the host to
+/// open it (standalone Monaco's `openCodeEditor` opens no other model).
+#[gpui::test]
+fn f4_to_another_model_closes_the_view(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("one\ntwo", cx);
+    let opened = Rc::new(RefCell::new(None));
+    let sink = opened.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event: &CodeEditorEvent, _| {
+            if let CodeEditorEvent::OpenLocation(location) = event {
+                *sink.borrow_mut() = Some(location.clone());
+            }
+        })
+        .detach();
+    });
+    peek(&editor, cx, vec![here(1, 0, 3), elsewhere(1, 7, 11)]);
+    // From the result in this model (the nearest), Shift+F4 wraps to
+    // lib.rs's.
+    cx.simulate_keystrokes("shift-f4");
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
+    let location = opened.borrow().clone().unwrap();
+    assert_eq!(location.uri.as_deref(), Some("file:///src/lib.rs"));
+    assert_eq!(location.range.start, p(1, 7));
+}
+
+/// Monaco `peekMode`: Enter or a double click on a result in this model
+/// moves the view there after a Peek command, but closes it and selects
+/// the result after a "Go to" command that showed a peek view.
+#[gpui::test]
+fn enter_moves_the_view_only_in_peek_mode(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("one\ntwo\nthree\nfour", cx);
+    let results = vec![here(1, 0, 3), here(2, 0, 5)];
+    // `peekLocations` is a Peek command.
+    peek(&editor, cx, results.clone());
+    cx.simulate_keystrokes("down enter");
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_peek_visible()));
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.selections()[0]),
+        Selection::collapsed(p(2, 0))
+    );
+    // A double click on a result too (the tree's `goto`).
+    let rows = cx.debug_bounds("peek-results").unwrap();
+    let first = point(rows.left() + px(40.), rows.top() + px(11.));
+    cx.simulate_event(MouseDownEvent {
+        position: first,
+        button: MouseButton::Left,
+        modifiers: Modifiers::default(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    cx.simulate_event(MouseUpEvent {
+        position: first,
+        button: MouseButton::Left,
+        modifiers: Modifiers::default(),
+        click_count: 2,
+    });
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_peek_visible()));
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.selections()[0]),
+        Selection::collapsed(p(1, 0))
+    );
+    editor.update(cx, |e, cx| e.close_peek(cx));
+    draw(cx);
+
+    // `goToLocations` with `peek` isn't.
+    editor.update(cx, |e, cx| {
+        e.go_to_locations(p(0, 0), results, Some(GoToLocation::Peek), None, cx)
+    });
+    draw(cx);
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_peek_visible()));
+    cx.simulate_keystrokes("down enter");
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.selections()[0]),
+        Selection::new(p(2, 0), p(2, 5))
+    );
+}
+
+/// Monaco `ZoneWidget._showImpl`: a peek view on the last line puts the
+/// line near the top, so the view shows below it.
+#[gpui::test]
+fn a_peek_view_on_the_last_line_is_revealed(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&numbered(200), cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(199, 0))], cx);
+        e.reveal_lines(199, 199, cx);
+    });
+    draw(cx);
+    let line_height = editor.read_with(cx, |e, _| e.options().resolved_line_height());
+    let before = editor.read_with(cx, |e, _| e.scroll_position().y);
+    editor.update(cx, |e, cx| {
+        e.peek_locations(p(199, 0), vec![here(0, 0, 4), here(199, 0, 4)], None, cx)
+    });
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_peek_visible()));
+    let after = editor.read_with(cx, |e, _| e.scroll_position().y);
+    // Near the top: Monaco `revealLineNearTop` leaves a fifth of the
+    // viewport above, and the scroll-off lines (the line was at the
+    // bottom).
+    let viewport = line_height * 200. - before;
+    assert!(after > before, "{after:?} > {before:?}");
+    assert!(
+        line_height * 199. - after < viewport * 0.4,
+        "{after:?} (viewport {viewport:?})"
+    );
+}
+
+/// Monaco `editor.action.findReferences`: the peek view opens at once,
+/// "Loading..." until the references come, then "No results" without any;
+/// run again at the view's position, it closes it.
+#[gpui::test]
+fn find_references_always_opens_a_peek_view(cx: &mut TestAppContext) {
+    struct Slow(Arc<Mutex<Vec<Location>>>);
+    impl ReferenceProvider for Slow {
+        fn provide_references(
+            &self,
+            _: &ProviderContext,
+            _: PointUtf16,
+            _: ReferenceContext,
+            cx: &mut App,
+        ) -> Task<anyhow::Result<Vec<Location>>> {
+            let found = self.0.lock().unwrap().clone();
+            let timer = cx.background_executor().timer(Duration::from_millis(100));
+            cx.background_executor().spawn(async move {
+                timer.await;
+                Ok(found)
+            })
+        }
+    }
+    let (editor, cx) = setup("fn alpha() {}\nalpha();", cx);
+    let found = Arc::new(Mutex::new(Vec::new()));
+    let provider = Slow(found.clone());
+    cx.update(|_, cx| register_reference_provider(cx, LanguageSelector::All, provider));
+    let find = |cx: &mut VisualTestContext| {
+        cx.dispatch_action(FindReferences {
+            uri: None,
+            position: None,
+        });
+        draw(cx);
+    };
+    let title =
+        |cx: &mut VisualTestContext| editor.read_with(cx, |e, cx| e.peek_title_for_tests(cx));
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    find(cx);
+    assert_eq!(title(cx), Some(("Loading...".into(), None, None)));
+    cx.executor().advance_clock(Duration::from_millis(100));
+    draw(cx);
+    assert_eq!(title(cx), Some((String::new(), None, Some("No results"))));
+    // The editor keeps focus; the title opens nothing.
+    assert!(cx.update(|window, cx| editor.focus_handle(cx).is_focused(window)));
+    let bounds = cx.debug_bounds("peek-title").unwrap();
+    cx.simulate_click(bounds.center(), Modifiers::default());
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_peek_visible()));
+    // Again at the same place: Monaco `toggleWidget` closes it.
+    find(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
+
+    // With references: the list, not in peek mode, so Enter closes.
+    *found.lock().unwrap() = vec![here(0, 3, 8), here(1, 0, 5)];
+    find(cx);
+    cx.executor().advance_clock(Duration::from_millis(100));
+    draw(cx);
+    assert_eq!(
+        title(cx),
+        Some(("main.rs".into(), Some("References (2)".into()), None))
+    );
+    assert_eq!(list(&editor, cx).1, 0);
+    cx.simulate_keystrokes("down enter");
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.selections()[0]),
+        Selection::new(p(1, 0), p(1, 5))
+    );
+}
+
+/// Monaco `toggleWidget`: a peek command again where the open view is
+/// closes it; elsewhere it opens a new one.
+#[gpui::test]
+fn peeking_again_at_the_view_closes_it(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("one\ntwo\nthree", cx);
+    let results = vec![here(1, 0, 3), here(2, 0, 5)];
+    peek(&editor, cx, results.clone());
+    editor.update(cx, |e, cx| {
+        e.peek_locations(p(0, 0), results.clone(), None, cx)
+    });
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
+    peek(&editor, cx, results.clone());
+    editor.update(cx, |e, cx| e.peek_locations(p(0, 2), results, None, cx));
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_peek_visible()));
+}
+
+/// Monaco's preview double click opens the clicked place, not the result
+/// (`_onNewModel`'s `onMouseDown` passes the mouse target's range).
+#[gpui::test]
+fn a_double_click_in_the_preview_opens_the_clicked_place(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("fn main() {\n    alpha();\n    beta();\n}", cx);
+    peek(&editor, cx, vec![here(1, 4, 9), here(2, 4, 8)]);
+    let preview = editor.read_with(cx, |e, cx| e.peek_preview(cx)).unwrap();
+    let line_height = editor.read_with(cx, |e, _| e.options().resolved_line_height());
+    let position = preview
+        .read_with(cx, |preview, _| preview.scrolled_visible_position(p(2, 6)))
+        .unwrap();
+    let position = point(position.x + px(1.), position.y + line_height / 2.);
+    cx.simulate_event(MouseDownEvent {
+        position,
+        button: MouseButton::Left,
+        modifiers: Modifiers::default(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    cx.simulate_event(MouseUpEvent {
+        position,
+        button: MouseButton::Left,
+        modifiers: Modifiers::default(),
+        click_count: 2,
+    });
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.selections()[0]),
+        Selection::collapsed(p(2, 6))
+    );
 }
 
 /// Monaco captures the pointer on a sash: the height sash's `ns-resize`
