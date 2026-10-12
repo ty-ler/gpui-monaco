@@ -2762,6 +2762,17 @@ impl DiffEditor {
         !self.inline
     }
 
+    /// Monaco `renderSideBySideInAutomaticMode`: whether the automatic view
+    /// mode shows the sides next to each other at this width (the
+    /// `diffEditorAutomaticRenderSideBySide` key).
+    pub fn renders_side_by_side_in_automatic_mode(&self) -> bool {
+        if self.options.compact_mode && self.simple_diff == Some(true) {
+            return false;
+        }
+        self.bounds.get().size.width > self.options.render_side_by_side_inline_breakpoint
+            || self.screen_reader_mode
+    }
+
     /// Whether `options` and the width call for side by side.
     fn side_by_side_for(&self, options: &DiffEditorOptions) -> bool {
         // Monaco `compactMode`: only insertions and deletions show inline.

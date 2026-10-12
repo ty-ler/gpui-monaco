@@ -60,9 +60,9 @@ pub use diff_editor::{
     DiffHunkToolbar, HideUnchangedRegions, LineChange,
 };
 pub use multi_diff_editor::{
-    MultiDiffDocState, MultiDiffDocument, MultiDiffDocumentKey, MultiDiffEditor,
-    MultiDiffEditorEvent, MultiDiffEditorVariant, MultiDiffEditorViewState, MultiDiffFileAction,
-    MultiDiffFileHandler,
+    DiffEditorViewMode, MultiDiffDocState, MultiDiffDocument, MultiDiffDocumentEditorOptions,
+    MultiDiffDocumentKey, MultiDiffEditor, MultiDiffEditorEvent, MultiDiffEditorVariant,
+    MultiDiffEditorViewState, MultiDiffFileAction, MultiDiffFileHandler, MultiDiffLayoutOptions,
 };
 mod dnd;
 mod drop_paste;
