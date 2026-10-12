@@ -2633,3 +2633,159 @@ fn split_view_default_ratio_is_clamped(cx: &mut TestAppContext) {
         );
     }
 }
+
+// ----- Hidden unchanged regions (#404) --------------------------------------
+
+/// `count` lines `line N` (1-based), with `changed N` at `changed`.
+fn numbered_lines(count: usize, changed: &[usize]) -> String {
+    (1..=count)
+        .map(|i| {
+            if changed.contains(&i) {
+                format!("changed {i}\n")
+            } else {
+                format!("line {i}\n")
+            }
+        })
+        .collect()
+}
+
+/// Replaces what `edit` picks in the modified text and recomputes the diff.
+fn edit_modified(
+    diff: &Entity<DiffEditor>,
+    cx: &mut VisualTestContext,
+    edit: impl FnOnce(&str) -> (std::ops::Range<usize>, String),
+) {
+    let (_, modified) = editors(diff, cx);
+    let model = modified.read_with(cx, |e, _| e.model().clone());
+    model.update(cx, |m, cx| {
+        let (range, text) = edit(&m.text());
+        m.edit([(range, text)], cx).unwrap();
+    });
+    recompute(cx);
+}
+
+/// Monaco `filterWithPrevious` and `LineRangeMapping.clip`: an edit that
+/// collapses the last two regions onto one line drops the second, rather
+/// than building an inverted range (which panicked in debug builds).
+#[gpui::test]
+fn edits_collapsing_unchanged_regions_onto_one_line(cx: &mut TestAppContext) {
+    let (diff, cx) = setup(
+        &numbered_lines(100, &[]),
+        &numbered_lines(100, &[30, 70]),
+        cx,
+    );
+    hide_unchanged(&diff, cx);
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests()),
+        vec![1..27, 34..67, 74..102]
+    );
+    // Line 32 to the end becomes `x`.
+    edit_modified(&diff, cx, |text| {
+        (text.find("line 32\n").unwrap()..text.len(), "x".into())
+    });
+    // Only the first region is left (the edit's cursor at line 1 shows that
+    // line).
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests()),
+        vec![2..27]
+    );
+}
+
+/// Monaco: once a diff showed everything, new regions start revealed, with
+/// only the fold glyph; only the first diff's regions start collapsed.
+#[gpui::test]
+fn new_regions_after_none_start_revealed(cx: &mut TestAppContext) {
+    let (diff, cx) = setup(
+        &numbered_lines(29, &[]),
+        &numbered_lines(29, &[5, 10, 15, 20, 25]),
+        cx,
+    );
+    hide_unchanged(&diff, cx);
+    // 30 lines (with the last, empty one): every gap is too short to hide.
+    assert!(diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests().is_empty()));
+    for line in [10, 15, 20] {
+        edit_modified(&diff, cx, |text| {
+            let changed = format!("changed {line}\n");
+            let start = text.find(&changed).unwrap();
+            (start..start + changed.len(), format!("line {line}\n"))
+        });
+    }
+    // The new region, lines 9 to 21, stays shown.
+    assert!(diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests().is_empty()));
+    assert_eq!(diff.read_with(cx, |d, _| d.fold_glyphs_for_tests()), (1, 1));
+    diff.update(cx, |d, cx| d.collapse_all_unchanged_regions(cx));
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests()),
+        vec![9..22]
+    );
+}
+
+/// Monaco: identical models keep their whole-file region, which the view
+/// skips, and its state carries over to the next diff's regions.
+#[gpui::test]
+fn the_whole_file_region_keeps_its_state(cx: &mut TestAppContext) {
+    let text = numbered_lines(100, &[]);
+    let (diff, cx) = setup(&text, &text, cx);
+    hide_unchanged(&diff, cx);
+    assert!(diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests().is_empty()));
+    assert_eq!(diff.read_with(cx, |d, _| d.fold_glyphs_for_tests()), (0, 0));
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.unchanged_bars_for_tests()),
+        (0, 0)
+    );
+    // The cursor reveals line 40 in it.
+    let (_, modified) = editors(&diff, cx);
+    modified.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                39, 0,
+            ))],
+            cx,
+        )
+    });
+    // After a change at line 80, line 40 still shows; the rest started
+    // hidden.
+    edit_modified(&diff, cx, |text| {
+        let start = text.find("line 80\n").unwrap();
+        (start..start + 4, "changed".into())
+    });
+    let hidden = diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests());
+    assert!(hidden.iter().all(|r| !r.contains(&40)), "{hidden:?}");
+    assert_eq!(hidden.last(), Some(&(84..102)), "{hidden:?}");
+}
+
+/// Monaco `_hide = !sideBySide`: inline, the original column's bars have no
+/// unfold button or label.
+#[gpui::test]
+fn inline_original_bars_hide_their_controls(cx: &mut TestAppContext) {
+    let (diff, cx) = setup(&numbered_lines(100, &[]), &numbered_lines(100, &[50]), cx);
+    cx.simulate_resize(gpui::size(px(1230.), px(600.)));
+    hide_unchanged(&diff, cx);
+    assert!(cx.debug_bounds("unchanged-unfold-original").is_some());
+    assert!(cx.debug_bounds("unchanged-unfold-modified").is_some());
+    update_options(&diff, cx, |o| o.render_side_by_side = false);
+    paint(cx);
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.unchanged_bars_for_tests()),
+        (2, 2)
+    );
+    assert!(cx.debug_bounds("unchanged-unfold-original").is_none());
+    assert!(cx.debug_bounds("unchanged-unfold-modified").is_some());
+}
+
+/// Monaco skips the "Fold Unchanged Region" glyph only in its multi diff
+/// `compact` variant, not with `compactMode`.
+#[gpui::test]
+fn compact_mode_keeps_the_fold_glyph(cx: &mut TestAppContext) {
+    let (diff, cx) = setup(&numbered_lines(100, &[]), &numbered_lines(100, &[50]), cx);
+    update_options(&diff, cx, |o| o.compact_mode = true);
+    hide_unchanged(&diff, cx);
+    diff.update(cx, |d, cx| d.show_all_unchanged_regions(cx));
+    paint(cx);
+    assert_eq!(diff.read_with(cx, |d, _| d.fold_glyphs_for_tests()), (2, 2));
+    diff.update(cx, |d, cx| d.fold_unchanged_for_tests(0, cx));
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests()),
+        vec![1..47]
+    );
+}

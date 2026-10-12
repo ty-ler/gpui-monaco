@@ -294,28 +294,68 @@ pub(crate) fn merge_touching(regions: &[UnchangedRegion]) -> Option<Vec<Unchange
     Some(result)
 }
 
+/// Monaco's `filterWithPrevious` in `updateUnchangedRegions`: the tracked
+/// regions without those overlapping the region before them (in `regions`,
+/// dropped or not), which edits can collapse onto the same lines.
+pub(crate) fn drop_overlapping(regions: Vec<UnchangedRegion>) -> Vec<UnchangedRegion> {
+    let mut result = Vec::with_capacity(regions.len());
+    let mut previous: Option<(usize, usize)> = None;
+    for r in regions {
+        let ends = (
+            r.original_line_number + r.line_count,
+            r.modified_line_number + r.line_count,
+        );
+        let keep = previous.is_none_or(|(original_end, modified_end)| {
+            r.modified_line_number >= modified_end && r.original_line_number >= original_end
+        });
+        previous = Some(ends);
+        if keep {
+            result.push(r);
+        }
+    }
+    result
+}
+
+/// Monaco `LineRangeMapping.clip`: the mappings within the models, without
+/// those that end up empty on either side.
+fn clip(
+    mappings: impl IntoIterator<Item = LineRangeMapping>,
+    original_line_count: usize,
+    modified_line_count: usize,
+) -> Vec<LineRangeMapping> {
+    let original_range = LineRange::new(1, original_line_count + 1);
+    let modified_range = LineRange::new(1, modified_line_count + 1);
+    mappings
+        .into_iter()
+        .filter_map(|m| {
+            let original = m.original.intersect(&original_range)?;
+            let modified = m.modified.intersect(&modified_range)?;
+            (!original.is_empty() && !modified.is_empty())
+                .then(|| LineRangeMapping::new(original, modified))
+        })
+        .collect()
+}
+
 /// Monaco's state transfer in `updateUnchangedRegions`: new regions keep
 /// what the user revealed in `previous` (with their ranges as of now).
+/// `None` before the first diff, when the new regions start collapsed; an
+/// empty `previous` shows everything, so the new regions start revealed.
 pub(crate) fn transfer_state(
     regions: Vec<UnchangedRegion>,
-    previous: &[UnchangedRegion],
+    previous: Option<&[UnchangedRegion]>,
     original_line_count: usize,
     modified_line_count: usize,
 ) -> Vec<UnchangedRegion> {
-    if previous.is_empty() {
+    let Some(previous) = previous else {
         return regions;
-    }
-    let clip = |range: LineRange, count: usize| {
-        range
-            .intersect(&LineRange::new(1, count + 1))
-            .unwrap_or(LineRange::new(1, 1))
     };
-    let hidden = previous.iter().map(|r| {
-        LineRangeMapping::new(
-            clip(r.hidden_original_range(), original_line_count),
-            clip(r.hidden_modified_range(), modified_line_count),
-        )
-    });
+    let hidden = clip(
+        previous
+            .iter()
+            .map(|r| LineRangeMapping::new(r.hidden_original_range(), r.hidden_modified_range())),
+        original_line_count,
+        modified_line_count,
+    );
     let visible = inverse(hidden, original_line_count, modified_line_count);
     let mut result = Vec::new();
     for r in regions {
@@ -402,6 +442,58 @@ mod tests {
         assert_eq!(r.hidden_modified_range().to_string(), "[16,40)");
     }
 
+    /// Monaco's `filterWithPrevious`: edits collapsed the last two regions
+    /// onto line 32; only the first stays.
+    #[test]
+    fn overlapping_tracked_regions_drop() {
+        let regions = vec![
+            UnchangedRegion::new(1, 1, 26, 0, 0),
+            UnchangedRegion::new(34, 32, 33, 0, 0),
+            UnchangedRegion::new(74, 32, 1, 0, 0),
+            // Compared with the dropped region before it.
+            UnchangedRegion::new(80, 33, 2, 0, 0),
+        ];
+        assert_eq!(
+            serialize(&drop_overlapping(regions)),
+            ["[1,27) - [1,27)", "[34,67) - [32,65)", "[80,82) - [33,35)"]
+        );
+    }
+
+    /// Monaco `LineRangeMapping.clip`: a previous region now past the end of
+    /// the models is dropped, not moved to line 1.
+    #[test]
+    fn regions_past_the_end_drop() {
+        let previous = [
+            UnchangedRegion::new(5, 5, 10, 0, 0),
+            UnchangedRegion::new(40, 40, 10, 0, 0),
+        ];
+        let regions = UnchangedRegion::from_diffs(&[change((20, 21), (20, 21))], 30, 30, 3, 3);
+        let regions = transfer_state(regions, Some(&previous), 30, 30);
+        assert_eq!(
+            serialize(&regions),
+            ["[1,17) - [1,17)", "[24,31) - [24,31)"]
+        );
+        // Lines 1 to 4 were visible, and everything after line 14.
+        assert_eq!(regions[0].hidden_modified_range().to_string(), "[5,15)");
+        assert!(regions[1].should_hide_controls());
+    }
+
+    /// Monaco: after a diff without hideable regions everything was
+    /// visible, so new regions start revealed; only the first diff's
+    /// regions start collapsed.
+    #[test]
+    fn regions_after_none_start_revealed() {
+        let regions = UnchangedRegion::from_diffs(&[change((15, 16), (15, 16))], 30, 30, 3, 3);
+        let revealed = transfer_state(regions.clone(), Some(&[]), 30, 30);
+        assert_eq!(
+            serialize(&revealed),
+            ["[1,12) - [1,12)", "[19,31) - [19,31)"]
+        );
+        assert!(revealed.iter().all(UnchangedRegion::should_hide_controls));
+        let collapsed = transfer_state(regions, None, 30, 30);
+        assert_eq!(collapsed[0].hidden_modified_range().to_string(), "[1,12)");
+    }
+
     #[test]
     fn revealed_lines_survive_new_diffs() {
         let mut previous =
@@ -417,7 +509,7 @@ mod tests {
             3,
             3,
         );
-        let regions = transfer_state(regions, &previous, 100, 100);
+        let regions = transfer_state(regions, Some(&previous), 100, 100);
         assert_eq!(regions[0].hidden_modified_range().to_string(), "[1,37)");
     }
 
@@ -429,7 +521,7 @@ mod tests {
         // visible: the new region splits around them.
         let previous = UnchangedRegion::from_diffs(&[change((50, 51), (50, 51))], 100, 100, 3, 3);
         let regions = UnchangedRegion::from_diffs(&[], 100, 100, 3, 3);
-        let mut regions = transfer_state(regions, &previous, 100, 100);
+        let mut regions = transfer_state(regions, Some(&previous), 100, 100);
         assert_eq!(
             serialize(&regions),
             ["[1,47) - [1,47)", "[47,101) - [47,101)"]
