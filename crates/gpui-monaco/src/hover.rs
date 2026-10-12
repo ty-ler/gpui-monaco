@@ -738,15 +738,25 @@ impl HoverWidget {
                     .rounded(px(3.))
                     .cursor_pointer()
                     .opacity(if focused { 1. } else { 0. })
-                    .group_hover(group, |style| style.opacity(1.))
+                    .group_hover(group.clone(), |style| style.opacity(1.))
                     .hover(|style| colors.toolbar_hover(style))
                     .tooltip(crate::tooltip::tooltip("Copy", colors))
+                    .debug_selector({
+                        let group = group.clone();
+                        move || format!("hover-copy-{group}")
+                    })
                     .on_mouse_down(
                         gpui::MouseButton::Left,
-                        cx.listener(move |_, _, _, cx| {
+                        cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             if !text.is_empty() {
                                 cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                // Monaco `_copyContent`'s `status`.
+                                if let Some(editor) = this.editor.upgrade() {
+                                    editor.update(cx, |editor, cx| {
+                                        editor.announce_status("Copied to clipboard", cx)
+                                    });
+                                }
                             }
                         }),
                     )

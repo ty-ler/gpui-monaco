@@ -1524,11 +1524,15 @@ impl CodeEditor {
                 .get(session.selected)
                 .is_some_and(|scored| session.resolved[scored.index])
         });
-        let Some(text) = widget.read(cx).announcement(resolved, cx) else {
+        let Some((text, status)) = widget.read(cx).announcement(resolved, cx) else {
             return;
         };
         if self.suggest.announced.as_ref() != Some(&text) {
-            self.announce(text.clone(), cx);
+            if status {
+                self.announce_status(text.clone(), cx);
+            } else {
+                self.announce(text.clone(), cx);
+            }
             self.suggest.announced = Some(text);
         }
     }
@@ -2381,6 +2385,17 @@ impl CodeEditor {
             } else if let Err(err) = crate::commands::execute_command(cx, command) {
                 log::warn!("{err:#}");
             }
+        }
+        // Monaco `_alertCompletionItem`.
+        if !item.additional_text_edits.is_empty() {
+            self.announce(
+                format!(
+                    "Accepting '{}' made {} additional edits",
+                    item.label,
+                    item.additional_text_edits.len()
+                ),
+                cx,
+            );
         }
         true
     }

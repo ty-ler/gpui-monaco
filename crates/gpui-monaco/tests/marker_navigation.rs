@@ -239,6 +239,8 @@ fn the_zone_follows_marker_changes(cx: &mut TestAppContext) {
         editor.read_with(cx, |e, _| e.last_announcement_for_tests()),
         Some("let a = 1;, Error: new message at 1:5. ".into())
     );
+    // Monaco `aria.status`: polite.
+    assert!(editor.read_with(cx, |e, _| e.last_announcement_is_status_for_tests()));
     // The host clears them: the zone stays, stale.
     set_markers(&editor, cx, Vec::new());
     let state = zone(&editor, cx);

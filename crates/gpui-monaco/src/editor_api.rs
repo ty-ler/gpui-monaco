@@ -70,7 +70,7 @@ impl CodeEditor {
 
     /// Has screen readers read the editor's content again (Monaco
     /// `writeScreenReaderContent`); `reason` is for logging, as in Monaco.
-    /// The content (the lines around the selection, see
+    /// The content (the pages of lines holding the selection, see
     /// [`EditorOptions::accessibility_page_size`](crate::EditorOptions::accessibility_page_size))
     /// is rebuilt on the next frame.
     pub fn write_screen_reader_content(&mut self, _reason: &str, cx: &mut Context<Self>) {

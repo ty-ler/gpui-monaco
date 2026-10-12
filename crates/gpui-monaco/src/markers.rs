@@ -1283,7 +1283,7 @@ impl CodeEditor {
             );
         }
         // Monaco `MessageWidget.update`'s `aria.status`.
-        self.announce(label, cx);
+        self.announce_status(label, cx);
         // And `showAtMarker` focuses the editor.
         self.refocus = true;
     }
@@ -1344,7 +1344,7 @@ impl CodeEditor {
             cx.notify();
         });
         if let Some(label) = announce {
-            self.announce(label, cx);
+            self.announce_status(label, cx);
         }
     }
 

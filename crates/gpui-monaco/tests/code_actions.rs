@@ -920,6 +920,8 @@ fn focusing_an_action_highlights_its_ranges(cx: &mut TestAppContext) {
             .as_deref(),
         Some("Context: x at line 1 and column 5.")
     );
+    // Monaco `aria.status`: polite.
+    assert!(editor.read_with(cx, |e, _| e.last_announcement_is_status_for_tests()));
     cx.simulate_keystrokes("down");
     draw(cx);
     assert_eq!(

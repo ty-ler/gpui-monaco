@@ -5,6 +5,13 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Accessibility (#347):** the screen reader content is windowed like Monaco's `SimplePagedScreenReaderStrategy`, and the missing announcements are made, polite for Monaco's `status` and assertive for its `alert`.
+  - **Screen reader content:** the AccessKit text runs are the `accessibility_page_size` page holding the selection's start and the page holding its end, with a `…` run for the pages between, so Select All in a 100k-line file reads two pages instead of putting every line in the tree. Pages are view lines: folded lines are left out and each wrapped segment is a line. The content is kept until the view lines, the selection or the page size change, instead of being rebuilt every frame.
+  - **Polite status messages:** `CodeEditor::announce_status` announces in a polite live region (role `Status`); `announce` stays assertive. The marker zone, added and removed cursors, suggest's "Loading..." and "No suggestions.", and code action context are now polite, as Monaco's `status`. Live regions also set their value, which AccessKit's macOS adapter announces.
+  - **Navigation results:** Go to Definition and the other navigation commands (and `editor.action.goToLocations`) alert Monaco's `ariaMessage`: "Found 3 symbols in 2 files", "Found 1 symbol in /src/a.rs", "No results found".
+  - **Other announcements:** "Line {n}, column {c}: {text}" after quick access goes to a line or symbol, "Anchor set at {line}:{column}", "Accepting '{label}' made {n} additional edits", "Copied to clipboard" from the hover copy button, and "Received {n} rename suggestions".
+  - **Docs:** the book's differences and options pages, and the parity doc.
+  - **Tests:** Monaco's `textAreaState.test.ts` paged strategy cases, plus GPUI tests for Select All, folded and wrapped view lines, and each announcement and its politeness.
 - **Diff editor unchanged regions (#352):** hidden unchanged regions merge, drag and keep the scroll position like Monaco's (audit 3 §E.7–§E.10).
   - **Merging:** regions whose hidden lines touch become one region with one "N hidden lines" bar, as Monaco's "collapse touching unchanged ranges" does. Before, reverting a change and then collapsing all regions could stack two bars.
   - **Dragging:** a bar stays while its edge is dragged, even once every line shows, and goes when the mouse is released (Monaco `shouldHideControls` with `isDragged`).

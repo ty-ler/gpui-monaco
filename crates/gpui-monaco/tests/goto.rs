@@ -148,6 +148,12 @@ fn set_cursor(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, at: Point
     });
 }
 
+fn announcement(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Option<String> {
+    editor.read_with(cx, |e, _| {
+        e.last_announcement_for_tests().map(|m| m.to_string())
+    })
+}
+
 fn set_goto(
     editor: &Entity<CodeEditor>,
     cx: &mut VisualTestContext,
@@ -171,6 +177,11 @@ fn a_single_result_is_selected_and_highlighted(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("f12");
     cx.run_until_parked();
     assert_eq!(head(&editor, cx), p(0, 3));
+    // Monaco alerts the results' `ariaMessage`.
+    assert_eq!(
+        announcement(&editor, cx).as_deref(),
+        Some("Found 1 symbol in /src/main.rs")
+    );
     let id = editor.entity_id();
     let model = editor.read_with(cx, |e, _| e.model().clone());
     let color = editor.read_with(cx, |e, _| e.colors().symbol_highlight_background);
@@ -195,6 +206,11 @@ fn no_results_show_a_message(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("shift-f12");
     cx.run_until_parked();
     assert!(editor.read_with(cx, |e, _| e.is_message_visible()));
+    // "No results found", then the message, as Monaco alerts both.
+    assert_eq!(
+        announcement(&editor, cx).as_deref(),
+        Some("No references found for 'add'")
+    );
     // Moving the cursor closes it.
     cx.simulate_keystrokes("right");
     assert!(!editor.read_with(cx, |e, _| e.is_message_visible()));

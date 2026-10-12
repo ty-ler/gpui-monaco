@@ -280,8 +280,13 @@ impl RenameInput {
         if let Some(focused) = &mut self.focused {
             *focused += added.len();
         }
+        let count = added.len();
         added.append(&mut self.candidates);
         self.candidates = added;
+        // Monaco `setCandidates`'s `aria.status`.
+        self.with_editor(cx, move |editor, cx| {
+            editor.announce_status(format!("Received {count} rename suggestions"), cx)
+        });
         cx.notify();
     }
 

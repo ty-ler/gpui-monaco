@@ -620,6 +620,36 @@ fn screen_readers_read_the_hover_when_it_takes_focus(cx: &mut TestAppContext) {
     );
 }
 
+/// Monaco `HoverCopyButton`: copying a row tells screen readers, politely.
+#[gpui::test]
+fn the_copy_button_announces_the_copy(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("let x = 1;\n", |_| {}, cx);
+    set_markers(
+        &editor,
+        cx,
+        vec![marker(MarkerSeverity::Error, p(0, 4)..p(0, 5))],
+    );
+    show_at(&editor, cx, p(0, 4));
+    rest(cx, 0);
+    paint(cx);
+    let bounds = cx
+        .debug_bounds("hover-copy-marker-row-0")
+        .expect("copy button");
+    cx.simulate_mouse_down(bounds.center(), gpui::MouseButton::Left, Modifiers::none());
+    editor.read_with(cx, |e, _| {
+        assert_eq!(
+            e.last_announcement_for_tests().as_deref(),
+            Some("Copied to clipboard")
+        );
+        assert!(e.last_announcement_is_status_for_tests());
+    });
+    assert!(
+        cx.read_from_clipboard()
+            .and_then(|item| item.text())
+            .is_some_and(|text| text.contains("Error here"))
+    );
+}
+
 #[gpui::test]
 fn with_a_screen_reader_keyboard_hovers_take_focus_and_are_read(cx: &mut TestAppContext) {
     let (editor, cx) = setup(
