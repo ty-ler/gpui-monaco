@@ -740,24 +740,92 @@ fn in_place_replace_and_remove_brackets(cx: &mut TestAppContext) {
     editor.update(cx, |e, cx| {
         e.set_selections(&[Selection::collapsed(p(1, 13))], cx)
     });
-    // Monaco: `inPlaceReplace.up` (+1) is Cmd/Ctrl+Shift+, and `.down` is
+    // Monaco: `inPlaceReplace.up` ("Replace with Previous Value", -1) is
+    // Cmd/Ctrl+Shift+, and `.down` ("Replace with Next Value", +1) is
     // Cmd/Ctrl+Shift+.
     cx.simulate_keystrokes("secondary-shift-,");
-    assert_eq!(text(&editor, cx), "let x = foo(2, true);");
-    cx.simulate_keystrokes("secondary-shift-. secondary-shift-.");
     assert_eq!(text(&editor, cx), "let x = foo(0, true);");
+    cx.simulate_keystrokes("secondary-shift-. secondary-shift-.");
+    assert_eq!(text(&editor, cx), "let x = foo(2, true);");
     editor.update(cx, |e, cx| {
         e.set_selections(&[Selection::collapsed(p(1, 16))], cx)
     });
+    // The previous value of `true` wraps around to `false`.
     cx.dispatch_action(InPlaceReplaceUp);
-    assert_eq!(text(&editor, cx), "let x = foo(0, false);");
+    assert_eq!(text(&editor, cx), "let x = foo(2, false);");
     // Inside the parentheses: the enclosing pair goes.
     editor.update(cx, |e, cx| {
         e.set_selections(&[Selection::collapsed(p(1, 14))], cx)
     });
     cx.dispatch_action(RemoveBrackets);
     cx.run_until_parked();
-    assert_eq!(text(&editor, cx), "let x = foo0, false;");
+    assert_eq!(text(&editor, cx), "let x = foo2, false;");
+}
+
+/// Monaco's `valueSetReplacement` flash is styled only in the `vs` theme: a
+/// 2px `editorBracketMatch.border` outline, for 350ms.
+#[gpui::test]
+fn in_place_replace_flash_only_in_vs(cx: &mut TestAppContext) {
+    use gpui_monaco::Theme;
+    use gpui_monaco::actions::InPlaceReplaceDown;
+    use std::sync::Arc;
+    let (editor, cx) = rust_editor("let x = 1;", cx);
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    let id = editor.entity_id();
+    let outlines = |cx: &mut VisualTestContext| {
+        model.update(cx, |m, _| {
+            m.all_decorations(Some(id))
+                .into_iter()
+                .filter_map(|d| d.options.outline.map(|outline| (d.range, outline)))
+                .collect::<Vec<_>>()
+        })
+    };
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 9))], cx)
+    });
+    for theme in [Theme::vs_dark(), Theme::hc_black(), Theme::hc_light()] {
+        editor.update(cx, |e, cx| e.set_theme(Arc::new(theme), cx));
+        cx.dispatch_action(InPlaceReplaceDown);
+        assert!(outlines(cx).is_empty());
+    }
+    assert_eq!(text(&editor, cx), "let x = 4;");
+    let vs = Theme::vs();
+    let border = vs.colors.bracket_match_border;
+    editor.update(cx, |e, cx| e.set_theme(Arc::new(vs), cx));
+    cx.dispatch_action(InPlaceReplaceDown);
+    assert_eq!(text(&editor, cx), "let x = 5;");
+    assert_eq!(outlines(cx), vec![(8..9, (border, gpui::px(2.)))]);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(350));
+    cx.run_until_parked();
+    assert!(outlines(cx).is_empty());
+}
+
+/// Trim Trailing Whitespace leaves whitespace that starts in a string, as
+/// standalone Monaco does (`files.trimTrailingWhitespaceInRegexAndStrings`
+/// unset).
+#[gpui::test]
+fn trim_trailing_whitespace_skips_strings(cx: &mut TestAppContext) {
+    use gpui_monaco::actions::TrimTrailingWhitespace;
+    let (editor, cx) = language_editor(
+        "const a = `x  \n  y  \n`;  \nlet b = 1;  ",
+        "javascript",
+        cx,
+    );
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(200));
+    cx.run_until_parked();
+    cx.dispatch_action(TrimTrailingWhitespace);
+    assert_eq!(text(&editor, cx), "const a = `x  \n  y  \n`;\nlet b = 1;");
+}
+
+/// Without a language, Trim Trailing Whitespace trims every line.
+#[gpui::test]
+fn trim_trailing_whitespace_without_a_language(cx: &mut TestAppContext) {
+    use gpui_monaco::actions::TrimTrailingWhitespace;
+    let (editor, cx) = editor_with_text("a = `x  \n`;  ", cx);
+    cx.dispatch_action(TrimTrailingWhitespace);
+    assert_eq!(text(&editor, cx), "a = `x\n`;");
 }
 
 #[gpui::test]

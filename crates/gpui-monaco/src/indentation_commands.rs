@@ -125,9 +125,12 @@ impl CodeEditor {
                 SharedString::from(format!("{n}{note}"))
             })
             .collect();
-        self.show_quick_pick(
+        // Monaco focuses the current size (`activeItem`).
+        let active = current.clamp(1, 8) as usize - 1;
+        self.show_quick_pick_with_active_item(
             Some("Select Tab Size for Current File".into()),
             items,
+            Some(active),
             move |editor, index, _, cx| {
                 let size = index as u32 + 1;
                 editor.model().clone().update(cx, |model, cx| {

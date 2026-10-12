@@ -48,6 +48,10 @@ unicode-segmentation.workspace = true
 uuid = { version = "1", features = ["v4"] }
 icu_segmenter = { version = "2.3", optional = true }
 icu_locale_core = { version = "2.3", optional = true, default-features = false }
+# Sort Lines orders lines as the default `Intl.Collator` Monaco uses: the
+# Unicode root collation (CLDR). `unstable` is for `new_root`, which links
+# only the root data, not every locale's tailoring; hence the `~` pin.
+icu_collator = { version = "~2.3", features = ["unstable"] }
 gpui-monaco-codicons = { workspace = true, optional = true }
 
 [dev-dependencies]

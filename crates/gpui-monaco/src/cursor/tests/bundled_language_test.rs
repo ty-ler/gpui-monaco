@@ -169,3 +169,32 @@ fn matching_bracket_finds_adjacent_and_enclosing_pairs() {
         None
     );
 }
+
+#[test]
+fn next_bracket_skips_skippable_and_unmatched_closing_brackets() {
+    use crate::cursor::{enclosing_brackets, match_bracket, next_bracket};
+    let ed = TestEditor::lines(&["a ) \"(\" b", "  [c] (d"]);
+    let config = gpui_monaco_languages::rust().config;
+    let skip = |p: Position| p.row == 0 && p.column == 5;
+    // Not next to a bracket, and nothing encloses it.
+    assert_eq!(match_bracket(&ed.buffer, &config, pos(1, 2), &skip), None);
+    assert_eq!(
+        enclosing_brackets(&ed.buffer, &config, pos(1, 2), &skip),
+        None
+    );
+    // The unmatched `)` and the `(` in the string are passed over.
+    assert_eq!(
+        next_bracket(&ed.buffer, &config, pos(1, 2), &skip),
+        Some(pos(2, 3)..pos(2, 4))
+    );
+    // A matched closing bracket counts, and so does an unclosed opening one.
+    assert_eq!(
+        next_bracket(&ed.buffer, &config, pos(2, 5), &skip),
+        Some(pos(2, 5)..pos(2, 6))
+    );
+    assert_eq!(
+        next_bracket(&ed.buffer, &config, pos(2, 7), &skip),
+        Some(pos(2, 7)..pos(2, 8))
+    );
+    assert_eq!(next_bracket(&ed.buffer, &config, pos(2, 8), &skip), None);
+}

@@ -12,9 +12,12 @@ use crate::cursor::{self, Selection};
 use crate::decorations::{DecorationOptions, OverviewRulerDecoration, OverviewRulerLane};
 use crate::editor::CodeEditor;
 use crate::options::MatchBrackets;
+use crate::theme::TokenStyle;
+use crate::view::reveal::RevealType;
 
-/// Bracket highlighting is skipped with more cursors than this.
-const MAX_CURSORS: usize = 32;
+/// Bracket highlighting is skipped with more cursors than this (Monaco
+/// `_recomputeBrackets`).
+const MAX_CURSORS: usize = 100;
 
 fn contains(range: &Range<PointUtf16>, p: PointUtf16) -> bool {
     range.start <= p && p <= range.end
@@ -57,6 +60,7 @@ impl CodeEditor {
         Some(f(rope, &language.config, &skippable))
     }
 
+    /// Monaco `matchBracket`, else `findEnclosingBrackets`.
     fn bracket_pair(
         &self,
         position: PointUtf16,
@@ -91,22 +95,26 @@ impl CodeEditor {
     /// `BracketMatchingController._recomputeBrackets`): the pair next to a
     /// cursor, with an overview ruler mark, or with `matchBrackets:
     /// "always"` the pair enclosing it. Only while the editor has focus.
+    /// Matched brackets take `editorBracketMatch.foreground` when the theme
+    /// sets it, over their pair colorization (Monaco's
+    /// `bracket-match-inline`).
     pub(crate) fn update_bracket_highlights(&mut self, cx: &mut Context<Self>) {
         // (open, close, whether it's next to the cursor).
         let mut pairs: Vec<(Range<PointUtf16>, Range<PointUtf16>, bool)> = Vec::new();
         let selections = self.cursors.selections();
+        let always = self.options.match_brackets == MatchBrackets::Always;
         if self.options.match_brackets != MatchBrackets::Never
             && self.has_focus
             && !self.options.single_line
             && selections.len() <= MAX_CURSORS
         {
             for selection in selections.iter().filter(|s| s.is_empty()) {
-                let Some((open, close)) = self.bracket_pair(selection.head, cx) else {
-                    continue;
-                };
-                let near = contains(&open, selection.head) || contains(&close, selection.head);
-                if near || self.options.match_brackets == MatchBrackets::Always {
-                    pairs.push((open, close, near));
+                let position = selection.head;
+                let found = self.with_bracket_context(cx, |rope, config, skippable| {
+                    cursor::match_or_enclosing(rope, config, position, skippable, always)
+                });
+                if let Some(Some(pair)) = found {
+                    pairs.push(pair);
                 }
             }
         }
@@ -121,6 +129,10 @@ impl CodeEditor {
             return;
         }
         let colors = self.theme.colors.clone();
+        let foreground = colors.bracket_match_foreground.map(|color| TokenStyle {
+            foreground: Some(color),
+            ..Default::default()
+        });
         let rope = self.snapshot.rope();
         let new = ranges
             .into_iter()
@@ -130,6 +142,7 @@ impl CodeEditor {
                     DecorationOptions {
                         background: Some(colors.bracket_match_background),
                         border: Some(colors.bracket_match_border),
+                        text: foreground,
                         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
                         // Monaco marks only a pair next to the cursor.
                         overview_ruler: near.then(|| {
@@ -149,8 +162,9 @@ impl CodeEditor {
         });
     }
 
-    /// Moves each cursor to the matching bracket, or to the end of the
-    /// enclosing pair (Monaco `editor.action.jumpToBracket`).
+    /// Moves each cursor to the matching bracket, to the end of the
+    /// enclosing pair, or else to the next bracket (Monaco
+    /// `editor.action.jumpToBracket`), and reveals the first.
     pub fn jump_to_bracket(&mut self, cx: &mut Context<Self>) {
         let selections: Vec<Selection> = self
             .cursors
@@ -158,47 +172,77 @@ impl CodeEditor {
             .into_iter()
             .map(|selection| {
                 let position = selection.start();
-                let target = self.bracket_pair(position, cx).map(|(open, close)| {
-                    if contains(&open, position) && !contains(&close, position) {
-                        close.start
-                    } else if contains(&close, position) {
-                        open.start
-                    } else {
-                        close.start
+                let target = self.with_bracket_context(cx, |rope, config, skippable| {
+                    match cursor::match_or_enclosing(rope, config, position, skippable, true) {
+                        Some((open, close, true)) => {
+                            if contains(&open, position) && !contains(&close, position) {
+                                Some(close.start)
+                            } else if contains(&close, position) {
+                                Some(open.start)
+                            } else {
+                                None
+                            }
+                        }
+                        Some((_, close, false)) => Some(close.start),
+                        None => cursor::next_bracket(rope, config, position, skippable)
+                            .map(|next| next.start),
                     }
                 });
-                Selection::collapsed(target.unwrap_or(position))
+                Selection::collapsed(target.flatten().unwrap_or(position))
             })
             .collect();
         self.set_selections(&selections, cx);
         // Monaco `revealRange(newSelections[0])`.
         self.reveal_range(
             selections[0].start()..selections[0].end(),
-            crate::view::reveal::RevealType::Simple,
+            RevealType::Simple,
             cx,
         );
     }
 
-    /// Selects to the matching bracket, including the brackets (Monaco
-    /// `editor.action.selectToBracket`).
-    pub fn select_to_bracket(&mut self, cx: &mut Context<Self>) {
+    /// Selects each cursor's bracket pair (Monaco
+    /// `editor.action.selectToBracket`): the pair at the cursor, else around
+    /// it, else of the next bracket, from the opening bracket to the
+    /// closing one, or the other way when the cursor is at the closing
+    /// bracket. With `select_brackets` the brackets are selected too,
+    /// without it only what's between them. Cursors with no pair are
+    /// dropped, and with none at all nothing changes. Reveals the first.
+    pub fn select_to_bracket(&mut self, select_brackets: bool, cx: &mut Context<Self>) {
         let selections: Vec<Selection> = self
             .cursors
             .selections()
             .into_iter()
-            .map(|selection| match self.bracket_pair(selection.start(), cx) {
-                Some((open, close)) => Selection {
-                    anchor: open.start,
-                    head: close.end,
-                },
-                None => selection,
+            .filter_map(|selection| {
+                let position = selection.start();
+                let (open, close) = self
+                    .with_bracket_context(cx, |rope, config, skippable| {
+                        cursor::matching_bracket(rope, config, position, skippable).or_else(|| {
+                            let next = cursor::next_bracket(rope, config, position, skippable)?;
+                            cursor::match_bracket(rope, config, next.start, skippable)
+                        })
+                    })
+                    .flatten()?;
+                let (from, to) = if select_brackets {
+                    (open.start, close.end)
+                } else {
+                    (open.end, close.start)
+                };
+                // Backwards from a closing bracket.
+                Some(if contains(&close, position) {
+                    Selection::new(to, from)
+                } else {
+                    Selection::new(from, to)
+                })
             })
             .collect();
+        if selections.is_empty() {
+            return;
+        }
         self.set_selections(&selections, cx);
         // Monaco `revealRange(newSelections[0])`.
         self.reveal_range(
             selections[0].start()..selections[0].end(),
-            crate::view::reveal::RevealType::Simple,
+            RevealType::Simple,
             cx,
         );
     }

@@ -128,8 +128,10 @@ impl Command for InPlaceReplaceCommand {
 
 /// Replaces the selected text, or the number or value at the primary cursor,
 /// with the next (`up`) or previous one in its set: `1` → `2`, `1.5` →
-/// `2.5`, `true` → `false`, `public` → `protected` (Monaco
-/// `editor.action.inPlaceReplace.up` / `.down`, Cmd/Ctrl+Shift+. / ,).
+/// `2.5`, `true` → `false`, `public` → `protected`. `up` is Monaco's
+/// `InplaceReplaceSupport` argument: `editor.action.inPlaceReplace.down`
+/// ("Replace with Next Value", Cmd/Ctrl+Shift+.) passes `true` and `.up`
+/// ("Replace with Previous Value", Cmd/Ctrl+Shift+,) `false`.
 /// `word_pattern` is the language's `wordPattern`. Also returns the
 /// replaced range, which Monaco briefly highlights.
 pub fn in_place_replace(

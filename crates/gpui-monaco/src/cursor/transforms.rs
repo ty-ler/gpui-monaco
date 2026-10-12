@@ -21,7 +21,10 @@ use super::lines::copy_lines_command;
 use super::movement::{left_position, right_position};
 use super::strings::{self, utf16};
 use super::word;
-use super::{CursorCollection, CursorConfig, CursorModel, Position, Selection};
+use super::{
+    CursorCollection, CursorConfig, CursorModel, LanguageContext, Position, Selection,
+    StandardTokenType,
+};
 
 type Commands<'a> = Vec<Option<Box<dyn Command + 'a>>>;
 
@@ -84,24 +87,17 @@ fn intersects(a: &Range<Position>, b: &Range<Position>) -> bool {
 // ---------------------------------------------------------------------------
 // Sort
 
-/// Unicode-aware, case-insensitive-first ordering, like the default
-/// `Intl.Collator` Monaco sorts with: base letters first, then lowercase
-/// before uppercase.
+/// The Unicode root collation (CLDR's), with the default options: what
+/// the default `Intl.Collator` Monaco sorts with uses for English and most
+/// locales.
+static ROOT_COLLATOR: icu_collator::CollatorBorrowed<'static> =
+    icu_collator::CollatorBorrowed::new_root(icu_collator::options::CollatorOptions::default());
+
+/// Monaco's `Intl.Collator().compare`: whitespace, punctuation, symbols,
+/// digits, then letters, case and accents only breaking ties (`e` < `é` <
+/// `f`, `a` < `A`).
 fn collate(a: &str, b: &str) -> std::cmp::Ordering {
-    a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| {
-        let flip = |s: &str| -> String {
-            s.chars()
-                .map(|c| {
-                    if c.is_lowercase() {
-                        c.to_uppercase().next().unwrap_or(c)
-                    } else {
-                        c.to_lowercase().next().unwrap_or(c)
-                    }
-                })
-                .collect()
-        };
-        flip(a).cmp(&flip(b))
-    })
+    ROOT_COLLATOR.compare(a, b)
 }
 
 /// Monaco `getSortData`: the rows to sort and their sorted text, or `None`
@@ -293,25 +289,15 @@ pub fn reverse_lines(
 /// Monaco `TrimTrailingWhitespaceCommand` for the primary selection.
 struct TrimTrailingWhitespaceCommand {
     selection: Selection,
+    /// The trailing whitespace to delete.
+    ranges: Vec<Range<Position>>,
     tracked: Option<TrackedId>,
 }
 
 impl Command for TrimTrailingWhitespaceCommand {
-    fn edit_operations(&mut self, model: &dyn CursorModel, builder: &mut EditBuilder) {
-        for row in 0..model.line_count() {
-            let line = utf16(&model.line_content(row));
-            if line.is_empty() {
-                continue;
-            }
-            let from = match strings::last_non_whitespace_index(&line, None) {
-                None => 0,
-                Some(last) if last + 1 != line.len() => last as u32 + 1,
-                Some(_) => continue,
-            };
-            builder.add_edit(
-                Position::new(row, from)..Position::new(row, line.len() as u32),
-                "",
-            );
+    fn edit_operations(&mut self, _: &dyn CursorModel, builder: &mut EditBuilder) {
+        for range in &self.ranges {
+            builder.add_edit(range.clone(), "");
         }
         self.tracked = Some(builder.track_selection(self.selection, None));
     }
@@ -321,17 +307,68 @@ impl Command for TrimTrailingWhitespaceCommand {
     }
 }
 
+/// Monaco `trimTrailingWhitespace`: each line's trailing whitespace, except
+/// where `language` says it starts in a string or regular expression
+/// (standalone Monaco never sets
+/// `files.trimTrailingWhitespaceInRegexAndStrings`).
+fn trailing_whitespace(
+    model: &dyn CursorModel,
+    language: Option<&LanguageContext>,
+) -> Vec<Range<Position>> {
+    let mut ranges = Vec::new();
+    for row in 0..model.line_count() {
+        let line = utf16(&model.line_content(row));
+        if line.is_empty() {
+            continue;
+        }
+        let from = match strings::last_non_whitespace_index(&line, None) {
+            None => 0,
+            Some(last) if last + 1 != line.len() => last as u32 + 1,
+            Some(_) => continue,
+        };
+        let len = line.len() as u32;
+        if let Some(language) = language
+            && len < language.max_tokenization_line_length
+        {
+            // Monaco looks up the token at offset `fromColumn`, its 1-based
+            // column: the character after the first whitespace one, or the
+            // line's last (`findTokenIndexAtOffset` past the end).
+            let offset = (from + 1).min(len - 1);
+            let token = (language.token_type_at)(Position::new(row, offset + 1));
+            if matches!(token, StandardTokenType::String | StandardTokenType::RegEx) {
+                continue;
+            }
+        }
+        ranges.push(Position::new(row, from)..Position::new(row, len));
+    }
+    ranges
+}
+
 /// Removes trailing whitespace from every line (Monaco
-/// `editor.action.trimTrailingWhitespace`, Cmd/Ctrl+K Cmd/Ctrl+X).
+/// `editor.action.trimTrailingWhitespace`, Cmd/Ctrl+K Cmd/Ctrl+X), without
+/// token information: see [`trim_trailing_whitespace_with_language`].
 pub fn trim_trailing_whitespace(
+    config: &CursorConfig,
+    model: &impl CursorModel,
+    cursors: &CursorCollection,
+) -> EditOperation {
+    trim_trailing_whitespace_with_language(config, model, cursors, None)
+}
+
+/// [`trim_trailing_whitespace`], leaving the lines alone whose trailing
+/// whitespace `language` says starts in a string or regular expression
+/// (such as a template literal's first line), as standalone Monaco does.
+pub fn trim_trailing_whitespace_with_language(
     _config: &CursorConfig,
     model: &impl CursorModel,
     cursors: &CursorCollection,
+    language: Option<&LanguageContext>,
 ) -> EditOperation {
     let model: &dyn CursorModel = model;
     let selections = cursors.selections();
     let mut commands: Commands = vec![Some(Box::new(TrimTrailingWhitespaceCommand {
         selection: selections[0],
+        ranges: trailing_whitespace(model, language),
         tracked: None,
     }))];
     commands.resize_with(selections.len(), || None);
