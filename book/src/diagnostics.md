@@ -73,6 +73,22 @@ As in Monaco, markers belong to the uri rather than the model. A model without a
 
 ## Navigation
 
-F8 and Shift+F8 (`GoToNextMarker` and `GoToPreviousMarker`) move to the next or previous problem. They show it in an inline zone below the line with "1 of 3 problems", the message and its related information, scrolled into view. Escape closes the zone.
+Alt+F8 and Shift+Alt+F8 (`GoToNextMarker` and `GoToPreviousMarker`, or `CodeEditor::go_to_marker`) move to the next or previous problem in the model. They show it in an inline zone below the line with "1 of 3 problems", the message and its related information, scrolled into view. The zone's header has the next and previous buttons (these two actions) and close. Escape closes the zone.
+
+F8 and Shift+F8 (`GoToNextMarkerInFiles` and `GoToPreviousMarkerInFiles`, or `CodeEditor::go_to_marker_in_files`) do the same over every uri's markers, as Monaco's "in Files" actions do: by uri, then as below, and the zone counts them all. When the next one is in another uri, the zone closes and the location goes to your editor openers (`register_editor_opener`, see [Events](./model-and-view.md#events)) with the marker's range, or to `CodeEditorEvent::OpenLocation` when none opens it. If the opener sets the editor's model to that uri, the zone opens there on the marker:
+
+```rust,ignore
+// Keep the `Disposable` to unregister it.
+let opener = gpui_monaco::register_editor_opener(cx, move |editor, uri, selection, cx| {
+    let Some(model) = models.get(uri).cloned() else { return false };
+    editor.update(cx, |editor, cx| {
+        editor.set_model(model, cx);
+        if let Some(range) = selection {
+            editor.set_selections(&[Selection::collapsed(range.start)], cx);
+        }
+    });
+    true
+});
+```
 
 As in Monaco, they visit errors, warnings and infos (not hints), most severe first and then by position. The first move takes the marker under the cursor, or the next one; later moves step through the list, so markers starting at the same place are each visited. When the host changes the markers while the zone is open, it shows the marker now at its place, or fades to italic when there's none.

@@ -7662,11 +7662,11 @@ impl Render for CodeEditor {
                 this.select_to_bracket(action.select_brackets != Some(false), cx)
             }))
             .on_action(cx.listener(|this, _: &GoToNextMarker, _, cx| this.go_to_marker(true, cx)))
-            .on_action(
-                cx.listener(|this, _: &GoToNextMarkerInFiles, _, cx| this.go_to_marker(true, cx)),
-            )
+            .on_action(cx.listener(|this, _: &GoToNextMarkerInFiles, _, cx| {
+                this.go_to_marker_in_files(true, cx)
+            }))
             .on_action(cx.listener(|this, _: &GoToPreviousMarkerInFiles, _, cx| {
-                this.go_to_marker(false, cx)
+                this.go_to_marker_in_files(false, cx)
             }))
             .on_action(
                 cx.listener(|this, _: &GoToPreviousMarker, _, cx| this.go_to_marker(false, cx)),

@@ -768,10 +768,12 @@ impl MarkerZone {
         run: fn(&mut CodeEditor, &mut Context<CodeEditor>),
     ) -> gpui::AnyElement {
         let editor = self.editor.clone();
+        // Monaco's `.action-label`: 3px padding, 5px corners.
         div()
             .id(id)
-            .px(px(4.))
-            .rounded(px(3.))
+            .debug_selector(move || id.into())
+            .p(px(3.))
+            .rounded(px(5.))
             .cursor_pointer()
             .text_color(self.colors.peek_view_title_foreground)
             .hover(|style| self.colors.toolbar_hover(style))
@@ -910,57 +912,99 @@ impl Render for MarkerZone {
                 ))
         });
 
-        let header = div()
-            .h((line_height * 1.2).ceil())
-            .flex_none()
+        // Monaco `PeekViewWidget`'s head: `ceil(lineHeight * 1.2)` tall, its
+        // line height.
+        let head_height = (line_height * 1.2).ceil();
+        // `.peekview-title`: 13px, 20px in; the severity icon 4px before the
+        // file name, and "1 of 2 problems" (`.dirname`) at `.9em` with a
+        // `.5em` margin of its own size.
+        let title = div()
+            .id("marker-title")
+            .debug_selector(|| "marker-title".into())
             .flex()
-            .items_center()
-            .gap(px(6.))
-            .px(px(8.))
-            .bg(header_background)
+            .items_baseline()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .ml(px(20.))
             .text_size(px(13.))
             .child(
                 div()
+                    .debug_selector(|| "marker-severity-icon".into())
+                    .flex_none()
+                    .self_center()
+                    .mr(px(4.))
                     .text_color(icon)
                     .child(codicon(Self::severity_icon(self.severity))),
             )
             .when(!title.is_empty(), |this| {
                 this.child(
                     div()
+                        .flex_none()
                         .text_color(colors.peek_view_title_foreground)
                         .child(title),
                 )
             })
             .child(
                 div()
-                    .flex_1()
+                    .debug_selector(|| "marker-detail".into())
+                    .ml(px(13. * 0.9 * 0.5))
+                    .text_size(px(13. * 0.9))
+                    .flex_shrink_1()
+                    .min_w_0()
+                    .text_ellipsis()
                     .text_color(colors.peek_view_title_description_foreground)
                     .child(detail),
-            )
-            .child(self.header_action(
-                "marker-next",
-                // `marker-navigation-next` / `-previous`: `arrow-down` and
-                // `arrow-up`.
-                Codicon::ArrowDown,
-                "Go to Next Problem (Error, Warning, Info)",
-                |editor, cx| editor.go_to_marker(true, cx),
-            ))
-            .child(self.header_action(
-                "marker-previous",
-                Codicon::ArrowUp,
-                "Go to Previous Problem (Error, Warning, Info)",
-                |editor, cx| editor.go_to_marker(false, cx),
-            ))
+            );
+        let header = div()
+            .id("marker-head")
+            .debug_selector(|| "marker-head".into())
+            .h(head_height)
+            .line_height(head_height)
+            .overflow_hidden()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_between()
+            .bg(header_background)
+            .child(title)
+            // `.peekview-actions`: 2px from the right.
             .child(
-                self.header_action("marker-close", Codicon::Close, "Close", |editor, cx| {
-                    editor.close_marker_zone(cx);
-                }),
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .mr(px(2.))
+                    .child(self.header_action(
+                        "marker-next",
+                        // `marker-navigation-next` / `-previous`: `arrow-down` and
+                        // `arrow-up`.
+                        Codicon::ArrowDown,
+                        "Go to Next Problem (Error, Warning, Info)",
+                        |editor, cx| editor.go_to_marker(true, cx),
+                    ))
+                    .child(self.header_action(
+                        "marker-previous",
+                        Codicon::ArrowUp,
+                        "Go to Previous Problem (Error, Warning, Info)",
+                        |editor, cx| editor.go_to_marker(false, cx),
+                    ))
+                    .child(self.header_action(
+                        "marker-close",
+                        Codicon::Close,
+                        "Close",
+                        |editor, cx| {
+                            editor.close_marker_zone(cx);
+                        },
+                    )),
             );
 
         // Monaco's `ScrollableElement` around the description: both axes,
         // since lines don't wrap.
         let body = div()
             .id("marker-body")
+            .debug_selector(|| "marker-body".into())
             // Monaco `.marker-widget`: `tabIndex = 0`, `role="tooltip"`.
             .track_focus(&self.focus_handle)
             .role(gpui::Role::Tooltip)
@@ -1030,10 +1074,13 @@ impl Render for MarkerZone {
                     .border_color(frame)
                     .child(header)
                     .child(
-                        // Monaco's 6px scrollbars.
+                        // Monaco's 6px scrollbars, and `.peekview-widget >
+                        // .body { border-top: 1px }` in the frame color.
                         div()
                             .flex_1()
                             .min_h_0()
+                            .border_t_1()
+                            .border_color(frame)
                             .relative()
                             .group(MARKER_BODY_GROUP)
                             .child(body)
@@ -1077,17 +1124,22 @@ fn aria_label(model: &TextModel, marker: &Marker) -> SharedString {
     }
 }
 
-/// Monaco `MarkerList` for the editor's model: the markers F8 visits and
-/// the one shown.
+/// A marker F8 visits, with its uri (Monaco `IMarker.resource`).
+type ListedMarker = (SharedString, Marker);
+
+/// Monaco `MarkerList`: the markers F8 visits and the one shown.
 struct MarkerList {
-    markers: Vec<Marker>,
+    markers: Vec<ListedMarker>,
     /// Monaco `_nextIdx`, `None` for `-1`: the next move starts from the
     /// cursor.
     next: Option<usize>,
+    /// Monaco's `undefined` resource filter: every uri's markers (F8,
+    /// "in Files"), not only the model's (Alt+F8).
+    in_files: bool,
 }
 
 impl MarkerList {
-    fn selected(&self) -> Option<&Marker> {
+    fn selected(&self) -> Option<&ListedMarker> {
         self.markers.get(self.next?)
     }
 
@@ -1103,21 +1155,46 @@ impl MarkerList {
         });
     }
 
-    /// Monaco `_initIdx` in one model: the first marker, in severity
-    /// order, containing `position` (an empty one as its word) or after
-    /// it.
+    /// Monaco `_initIdx`: from the model's first marker, the first one
+    /// containing `position` (an empty one as its word) or after it. As
+    /// in Monaco, the search goes on to the first marker of the next uri,
+    /// compared with `position` too. Without markers in the model, the
+    /// first marker of the uris after its own (backwards, the last one
+    /// before).
     fn initial_index(&self, forward: bool, model: &TextModel, position: PointUtf16) -> usize {
-        let last = self.markers.len() - 1;
-        let found = self.markers.iter().enumerate().find_map(|(ix, marker)| {
+        let len = self.markers.len();
+        let last = len - 1;
+        let resource = model.resource();
+        let Some(first) = self.markers.iter().position(|(r, _)| r == resource) else {
+            // Monaco `binarySearch2` for where the uri would sort. Monaco
+            // goes nowhere when it sorts last; this wraps to the first.
+            let ix = self
+                .markers
+                .partition_point(|(r, _)| r.as_ref() < resource.as_ref());
+            return if forward {
+                ix % len
+            } else {
+                (ix + len - 1) % len
+            };
+        };
+        let mut found = None;
+        for (ix, (r, marker)) in self.markers.iter().enumerate().skip(first) {
             let mut range = marker.range.clone();
-            if range.is_empty()
+            if r == resource
+                && range.is_empty()
                 && let Some(word) = model.word_at_position(range.start)
             {
                 range = word.range;
             }
             let inside = contains(&range, position);
-            (inside || position <= range.start).then_some((ix, !inside))
-        });
+            if inside || position <= range.start {
+                found = Some((ix, !inside));
+                break;
+            }
+            if r != resource {
+                break;
+            }
+        }
         match found {
             None if forward => 0,
             None => last,
@@ -1139,11 +1216,22 @@ pub(crate) struct MarkerNavigation {
 }
 
 /// Monaco `MarkerList`'s `updateMarker` comparison.
-fn same_markers(a: &[Marker], b: &[Marker]) -> bool {
+fn same_markers(a: &[ListedMarker], b: &[ListedMarker]) -> bool {
     a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(a, b)| a.range == b.range && a.severity == b.severity && a.message == b.message)
+        && a.iter().zip(b).all(|((ra, a), (rb, b))| {
+            ra == rb && a.range == b.range && a.severity == b.severity && a.message == b.message
+        })
+}
+
+/// Monaco `MarkerList`'s `compareMarker`: by uri, then most severe first
+/// (`problems.sortOrder: 'severity'`, as standalone Monaco has no such
+/// setting), then by range.
+fn compare_listed(a: &ListedMarker, b: &ListedMarker) -> std::cmp::Ordering {
+    let ((ra, a), (rb, b)) = (a, b);
+    ra.cmp(rb)
+        .then_with(|| b.severity.cmp(&a.severity))
+        .then_with(|| a.range.start.cmp(&b.range.start))
+        .then_with(|| a.range.end.cmp(&b.range.end))
 }
 
 impl CodeEditor {
@@ -1156,20 +1244,74 @@ impl CodeEditor {
         }
     }
 
-    /// Moves to the next (or previous) error, warning or info and shows it
-    /// below its line (Monaco `editor.action.marker.next`, F8). Markers go
-    /// most severe first, then by position; the first move takes the one
-    /// at the cursor.
+    /// Moves to the next (or previous) error, warning or info of the model
+    /// and shows it below its line (Monaco `editor.action.marker.next`,
+    /// Alt+F8). Markers go most severe first, then by position; the first
+    /// move takes the one at the cursor.
     pub fn go_to_marker(&mut self, next: bool, cx: &mut Context<Self>) {
-        let model = self.model().clone();
-        let model = model.read(cx);
-        let markers = model.navigable_markers();
+        self.navigate_markers(next, false, cx);
+    }
+
+    /// Moves to the next (or previous) error, warning or info of every uri
+    /// (Monaco `editor.action.marker.nextInFiles`, F8): markers go by uri,
+    /// then as [`CodeEditor::go_to_marker`]'s, and "2 of 5 problems"
+    /// counts them all. A marker of another uri closes the zone and goes
+    /// to the host's [editor openers](crate::register_editor_opener)
+    /// (else [`CodeEditorEvent::OpenLocation`](crate::CodeEditorEvent::OpenLocation)),
+    /// selecting its range; once an opener has set the editor's model to
+    /// that uri, the editor shows the marker there.
+    pub fn go_to_marker_in_files(&mut self, next: bool, cx: &mut Context<Self>) {
+        self.navigate_markers(next, true, cx);
+    }
+
+    /// The markers a [`MarkerList`] visits (Monaco `MarkerList`'s
+    /// `updateMarker`): the model's errors, warnings and infos with their
+    /// current ranges and, `in_files`, other uris' as they were set.
+    fn listed_markers(&self, in_files: bool, cx: &App) -> Vec<ListedMarker> {
+        let model = self.model().read(cx);
+        let resource = model.resource().clone();
+        let mut markers: Vec<ListedMarker> = model
+            .navigable_markers()
+            .into_iter()
+            .map(|marker| (resource.clone(), marker))
+            .collect();
+        if in_files && let Some(service) = cx.try_global::<MarkerService>() {
+            markers.extend(
+                service
+                    .read(&MarkerFilter::default())
+                    .into_iter()
+                    .filter(|(_, r, marker)| {
+                        **r != resource && marker.severity >= MarkerSeverity::Info
+                    })
+                    .map(|(_, r, marker)| (r.clone(), (**marker).clone())),
+            );
+            markers.sort_by(compare_listed);
+        }
+        markers
+    }
+
+    /// Monaco `MarkerController.navigate`.
+    fn navigate_markers(&mut self, next: bool, in_files: bool, cx: &mut Context<Self>) {
+        // Monaco `_getOrCreateModel`: a list of the other kind is replaced,
+        // and the new one first moves from the cursor.
+        let replaced = self
+            .marker_navigation
+            .list
+            .as_ref()
+            .is_some_and(|list| list.in_files != in_files);
+        if replaced {
+            self.close_marker_zone(cx);
+        }
+        let markers = self.listed_markers(in_files, cx);
         if markers.is_empty() {
             return;
         }
+        let model = self.model().clone();
+        let model = model.read(cx);
         let list = self.marker_navigation.list.get_or_insert(MarkerList {
             markers: Vec::new(),
             next: None,
+            in_files,
         });
         // Ranges follow edits; other changes reset the list when they come.
         if list.markers.len() != markers.len() {
@@ -1177,23 +1319,48 @@ impl CodeEditor {
         }
         list.markers = markers;
         let head = self.cursors.primary().position;
-        list.step(next, model, head);
-        if let Some(index) = list.next {
-            self.show_marker_at(index, cx);
+        if replaced {
+            list.step(true, model, head);
         }
+        list.step(next, model, head);
+        let Some(index) = list.next else {
+            return;
+        };
+        let (resource, marker) = list.markers[index].clone();
+        if &resource == model.resource() {
+            self.show_marker_at(index, cx);
+            return;
+        }
+        // Monaco: in another editor, opened at the marker, which then
+        // closes its zone and navigates again.
+        self.close_marker_zone(cx);
+        let location = crate::providers::Location::new(Some(resource.clone()), marker.range);
+        self.open_location_with_openers_then(
+            location,
+            false,
+            move |editor, cx| {
+                // Only once the opener showed the uri here: navigating
+                // again from the old model would open it again.
+                if *editor.model().read(cx).resource() == resource {
+                    editor.close_marker_zone(cx);
+                    editor.navigate_markers(next, in_files, cx);
+                }
+            },
+            cx,
+        );
     }
 
     /// Selects `marker` and shows it in the marker zone (Monaco's "View
     /// Problem" hover action). A hint shows the marker F8 would go to from
     /// its start.
     pub fn show_marker(&mut self, marker: &Marker, cx: &mut Context<Self>) {
-        let model = self.model().clone();
-        let model = model.read(cx);
-        let markers = model.navigable_markers();
+        let markers = self.listed_markers(false, cx);
         if markers.is_empty() {
             return;
         }
-        let same = |m: &Marker| {
+        let model = self.model().clone();
+        let model = model.read(cx);
+        let same = |(_, m): &ListedMarker| {
             m.range.start == marker.range.start
                 && m.severity == marker.severity
                 && m.message == marker.message
@@ -1201,6 +1368,7 @@ impl CodeEditor {
         let mut list = MarkerList {
             next: markers.iter().position(same),
             markers,
+            in_files: false,
         };
         if list.next.is_none() {
             list.step(true, model, marker.range.start);
@@ -1217,7 +1385,7 @@ impl CodeEditor {
         let Some(list) = &self.marker_navigation.list else {
             return;
         };
-        let marker = list.markers[index].clone();
+        let (_, marker) = list.markers[index].clone();
         let total = list.markers.len();
         // The cursor, if it's in the marker, else its start.
         let head = self.cursors.primary().position;
@@ -1302,7 +1470,7 @@ impl CodeEditor {
         if let Some(list) = &mut self.marker_navigation.list
             && !list
                 .selected()
-                .is_some_and(|m| contains(&m.range, position))
+                .is_some_and(|(_, m)| contains(&m.range, position))
         {
             list.next = None;
         }
@@ -1312,16 +1480,16 @@ impl CodeEditor {
     /// change, the zone shows the marker now at its position, or turns
     /// stale (faded and italic) when there's none.
     pub(crate) fn marker_navigation_markers_changed(&mut self, cx: &mut Context<Self>) {
-        if self.marker_navigation.list.is_none() {
+        let Some(in_files) = self.marker_navigation.list.as_ref().map(|l| l.in_files) else {
             return;
-        }
+        };
+        let markers = self.listed_markers(in_files, cx);
         let model = self.model().clone();
         let model = model.read(cx);
         let navigation = &mut self.marker_navigation;
         let Some(list) = &mut navigation.list else {
             return;
         };
-        let markers = model.navigable_markers();
         if same_markers(&list.markers, &markers) {
             return;
         }
@@ -1332,10 +1500,13 @@ impl CodeEditor {
         };
         let buffer = model.buffer();
         let position = buffer.offset_to_point_utf16(buffer.resolve(anchor));
+        // Monaco `MarkerList.find`: the model's marker there.
+        let resource = model.resource();
         let found = list
             .markers
             .iter()
-            .find(|m| contains(&m.range, position))
+            .find(|(r, m)| r == resource && contains(&m.range, position))
+            .map(|(_, marker)| marker)
             .map(|marker| (marker.clone(), aria_label(model, marker)));
         let zone = zone.clone();
         let announce = found.as_ref().map(|(_, label)| label.clone());
