@@ -608,7 +608,10 @@ impl CodeEditor {
         let visible = |color: gpui::Hsla| (color.a > 0.).then_some(color);
         DecorationOptions {
             background: visible(background),
-            border: visible(border),
+            // `snippetSession.css`: a 1px outline, which an empty final tab
+            // stop shows too, and the placeholders' `min-width: 2px`.
+            outline: visible(border).map(|color| (color, gpui::px(1.))),
+            min_width: if is_final { gpui::px(0.) } else { gpui::px(2.) },
             stickiness: if active && !is_final {
                 TrackedRangeStickiness::AlwaysGrowsWhenTypingAtEdges
             } else {

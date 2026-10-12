@@ -58,10 +58,14 @@ Ranges are byte offsets. To convert from `PointUtf16`, use `model.buffer().point
 
 | Field | Monaco | Effect |
 |---|---|---|
-| `background`, `border` | `className` styling | fills or outlines the range |
+| `background`, `border` | `className` styling | fills or outlines the range; an empty piece (an empty range, or an empty line inside one) draws nothing |
+| `outline` | CSS `outline` | a border just outside the range, shown on an empty range too |
+| `min_width` | CSS `min-width` | the smallest width of the background on a line, as Monaco's snippet placeholders' 2px |
 | `underline` | `inlineClassName` with `text-decoration` | straight or wavy underline |
 | `text` | `inlineClassName` | overrides the text's color, bold or italic |
-| `is_whole_line` | `isWholeLine` | the background spans the full line width |
+| `is_whole_line` | `isWholeLine` | the background spans the full line width, under every decoration that isn't whole-line |
+| `should_fill_line_on_line_break` | `shouldFillLineOnLineBreak` | where the range goes past a line break, the background fills to the line's right edge |
+| `include_new_lines` | `includeNewLines` (find matches) | where the range goes past a line break, the background covers it, half a character wide |
 | `margin_background` | `marginClassName` | a background across the gutter on the decorated lines |
 | `lines_decoration_text` | `linesDecorationsClassName` (icons) | text such as `+` in the line decorations area on each decorated line |
 | `block` | `blockClassName` + `blockPadding` | a bordered box around the decorated lines and the view zones above them |
@@ -76,11 +80,11 @@ Ranges are byte offsets. To convert from `PointUtf16`, use `model.buffer().point
 | `overview_ruler` (`OverviewRulerDecoration`) | `overviewRuler` | a mark in the scrollbar's overview ruler, in a color (`dark_color` in dark themes) and lane, spanning the range's lines |
 | `minimap` (`MinimapDecoration`) | `minimap` | a mark in the minimap: `Inline` over the characters with a half-color band across the line, or a 2px `Gutter` bar; or a section header (`section_header_style`, `section_header_text`) |
 | `before`, `after` | `before`, `after` | text injected before or after the range (see below) |
-| `show_if_collapsed` | `showIfCollapsed` | an empty range still shows: its injected text only shows with it, and its background is widened to a character's width |
+| `show_if_collapsed` | `showIfCollapsed` | an empty range still shows: its injected text only shows with it, its background is widened to a character's width (so are narrower ones, such as a zero-width space's), and a range ending at a line's start stops at the end of the line before |
 | `font_family`, `font_weight`, `font_style` | `fontFamily`, `fontWeight`, `fontStyle` | the decorated text's font; line wrapping still measures the editor's font |
 | `hover_message` | `hoverMessage` | markdown (`Vec<MarkdownString>`) shown in the hover over the range, or anywhere on its lines with `is_whole_line`; `show_if_collapsed` ones take a character more each side |
 | `stickiness` | `stickiness` | whether typing at the edges grows the range |
-| `z_index` | `zIndex` | paint order for overlapping decorations |
+| `z_index` | `zIndex` | paint order for overlapping decorations: among the whole-line ones, painted first (the fold background is one, at 0), then among the others |
 
 Monaco's class names become styles here, so `className` effects beyond these fields can't be expressed. `inlineClassNameAffectsLetterSpacing` has no equivalent: it tells Monaco's DOM renderer to measure again, and text here is always shaped with its styles. A decoration doesn't change the font size (`fontSize`); `get_font_size_at_position` is the editor's.
 

@@ -1264,9 +1264,6 @@ pub(crate) fn hide_segment_from(segment: &RowSegment, from: u32) -> Option<RowSe
     })
 }
 
-/// Monaco `_renderNormalDecoration` with `showIfCollapsed`: a range
-/// narrower than a typical (half-width) character is widened to that,
-/// around its center (rounded, and not left of the line's start).
 /// The marks a marker draws besides its squiggle, between `left` and
 /// `right` above `bottom`, clipped to them as CSS clips a background:
 /// Monaco `squiggly-hint`'s three dots (`editorHint.foreground`, a 12×3
@@ -1326,13 +1323,56 @@ pub(crate) fn marker_marks_for(
     marks
 }
 
+/// Monaco `_renderNormalDecoration` with `showIfCollapsed`: a range
+/// narrower than a typical (half-width) character is widened to that,
+/// around its center (rounded, and not left of the line's start).
 pub(crate) fn widen_collapsed(from: Pixels, to: Pixels, half_width: Pixels) -> (Pixels, Pixels) {
-    if to - from >= half_width {
+    // A character a float's error narrower (shaped advances against the
+    // measured `em_width`) isn't moved.
+    if to - from >= half_width - px(0.01) {
         return (from, to);
     }
     let center = ((from + to) / 2.).round();
     let from = (center - half_width / 2.).round().max(px(0.));
     (from, from + half_width)
+}
+
+/// Monaco `_renderNormalDecoration` on one view line: the x range a
+/// decoration that isn't whole-line paints, from its text's x range there.
+/// `continues` says the range goes on past this line's end, `ends_row`
+/// that the view line is the last of its model line, `line_end` is the
+/// x of the line's right edge and `half_width` a typical character's width.
+pub(crate) fn normal_decoration_range(
+    (from, mut to): (Pixels, Pixels),
+    options: &crate::decorations::DecorationOptions,
+    continues: bool,
+    ends_row: bool,
+    line_end: Pixels,
+    half_width: Pixels,
+) -> (Pixels, Pixels) {
+    // Monaco `linesVisibleRangesForRange` with `includeNewLines`: the line
+    // break, half a character wide, at the end of each model line.
+    if options.include_new_lines && continues && ends_row {
+        to += half_width;
+    }
+    let (from, mut to) = if options.show_if_collapsed {
+        widen_collapsed(from, to, half_width)
+    } else {
+        (from, to)
+    };
+    // Monaco `shouldFillLineOnLineBreak`: a range going on past the line
+    // break fills to the line's end.
+    if options.should_fill_line_on_line_break && continues {
+        to = to.max(line_end);
+    }
+    (from, to.max(from + options.min_width))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The last frame's decoration quads, in paint order.
+    pub(crate) static DECORATION_QUADS: std::cell::RefCell<Vec<DecorationQuad>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The style of bytes `range` of injected `text`: the token there (Monaco's
@@ -2206,7 +2246,6 @@ pub struct PrepaintState {
     gutter_numbers: Vec<(Pixels, ShapedLine, Pixels)>,
     /// (x after the text, top) of rows whose region is collapsed.
     fold_placeholders: Vec<(Pixels, Pixels)>,
-    fold_highlights: Vec<Bounds<Pixels>>,
     /// The expanded regions' folding controls' opacity (collapsed ones always
     /// show).
     fold_controls_opacity: f32,
@@ -3879,7 +3918,7 @@ fn prepaint_editor(
     let mut fold_controls = Vec::new();
     let mut fold_placeholders = Vec::new();
     let mut fold_placeholder_bounds = Vec::new();
-    let mut fold_highlights = Vec::new();
+    let mut fold_highlights: Vec<DecorationQuad> = Vec::new();
     if options.folding {
         let collapsed = editor.folds.collapsed_rows();
         // Monaco draws the control as a line decoration (`.cldr`): the
@@ -3922,17 +3961,22 @@ fn prepaint_editor(
                 ));
             }
         }
-        // Monaco `foldingHighlight`: the collapsed regions' first lines.
+        // Monaco `foldingHighlight`: the collapsed regions' first lines, a
+        // whole-line `folded-background` decoration painted with the others.
         if options.folding_highlight {
             for line in lines.iter() {
                 if collapsed.iter().any(|(start, _)| *start == line.row) {
                     let top = bounds.top() + zones.line_y(line.view_line, line_height) - scroll_top;
-                    fold_highlights.push(Bounds::new(
-                        point(text_bounds.left(), top),
-                        size(
-                            text_bounds.size.width,
-                            zones.height(line.view_line, line_height),
+                    fold_highlights.push((
+                        Bounds::new(
+                            point(text_bounds.left(), top),
+                            size(
+                                text_bounds.size.width,
+                                zones.height(line.view_line, line_height),
+                            ),
                         ),
+                        Some(colors.fold_background),
+                        None,
                     ));
                 }
             }
@@ -4418,15 +4462,30 @@ fn prepaint_editor(
     let mut glyph_requests: Vec<GlyphRequest> = Vec::new();
     let mut line_number_colors: Vec<(u32, Hsla)> = Vec::new();
     let origin_x = layout.text_origin_x();
+    // Monaco `DecorationsOverlay.prepareRender`: whole-line decorations
+    // first, then the others, each in z-index order. The fold background
+    // (`folded-background`, z-index 0) is a whole-line one.
+    let mut whole_line_quads: Vec<DecorationQuad> = Vec::new();
+    let mut fold_highlights = Some(fold_highlights);
     for (start, end, decoration) in &decoration_points {
         let options = &decoration.options;
         // Monaco `_renderNormalDecorations`: with `showIfCollapsed`, a range
         // ending at the start of a line ends at the end of the line before.
-        let end = &if options.show_if_collapsed && end.column == 0 && end.row > start.row {
+        let end = &if options.show_if_collapsed
+            && !options.is_whole_line
+            && end.column == 0
+            && end.row > start.row
+        {
             PointUtf16::new(end.row - 1, snapshot.line_len_utf16(end.row - 1))
         } else {
             *end
         };
+        if options.is_whole_line
+            && options.z_index > 0
+            && let Some(fold_highlights) = fold_highlights.take()
+        {
+            whole_line_quads.extend(fold_highlights);
+        }
         for line in layout.lines.iter() {
             if line.row < start.row || line.row > end.row {
                 continue;
@@ -4441,36 +4500,37 @@ fn prepaint_editor(
                     .and_then(|severity| colors.marker_background(severity))
             });
             if background.is_some() || options.border.is_some() || options.outline.is_some() {
-                let range = if options.is_whole_line {
-                    Some((px(0.) - layout.scroll_left, text_width + layout.scroll_left))
+                let (range, quads) = if options.is_whole_line {
+                    (
+                        Some((px(0.) - layout.scroll_left, text_width + layout.scroll_left)),
+                        &mut whole_line_quads,
+                    )
                 } else {
-                    // Monaco `shouldFillLineOnLineBreak`: a range going on
-                    // past the line break fills to the line's end.
-                    decoration_x_range(line, *start, *end).map(|(from, to)| {
-                        if options.should_fill_line_on_line_break && end.row > line.row {
-                            (from, to.max(text_width + layout.scroll_left))
-                        } else {
-                            (from, to)
-                        }
-                    })
+                    (
+                        decoration_x_range(line, *start, *end).map(|range| {
+                            normal_decoration_range(
+                                range,
+                                options,
+                                end.row > line.row,
+                                line.is_last_segment,
+                                text_width + layout.scroll_left,
+                                metrics.em_width,
+                            )
+                        }),
+                        &mut decoration_quads,
+                    )
                 };
-                if let Some((mut from, mut to)) = range {
-                    if options.show_if_collapsed && !options.is_whole_line {
-                        (from, to) = widen_collapsed(from, to, metrics.em_width);
-                    }
-                    // Monaco gives empty ranges (e.g. a snippet's final tab
-                    // stop) a 2px minimum width.
-                    let bounds = Bounds::new(
-                        point(origin_x + from, top),
-                        size((to - from).max(px(2.)), height),
-                    );
-                    if background.is_some() || options.border.is_some() {
+                if let Some((from, to)) = range {
+                    let bounds = Bounds::new(point(origin_x + from, top), size(to - from, height));
+                    // An empty piece is Monaco's 0px wide element: only its
+                    // outline shows.
+                    if (background.is_some() || options.border.is_some()) && to > from {
                         let border = options.border.map(|color| (color, px(1.)));
-                        decoration_quads.push((bounds, background, border));
+                        quads.push((bounds, background, border));
                     }
                     // CSS `outline`: outside the box.
                     if let Some((color, width)) = options.outline {
-                        decoration_quads.push((bounds.dilate(width), None, Some((color, width))));
+                        quads.push((bounds.dilate(width), None, Some((color, width))));
                     }
                 }
             }
@@ -4598,6 +4658,13 @@ fn prepaint_editor(
             }
         }
     }
+    if let Some(fold_highlights) = fold_highlights {
+        whole_line_quads.extend(fold_highlights);
+    }
+    whole_line_quads.append(&mut decoration_quads);
+    let decoration_quads = whole_line_quads;
+    #[cfg(test)]
+    DECORATION_QUADS.with(|quads| *quads.borrow_mut() = decoration_quads.clone());
     // Inlay hints follow the viewport.
     if let (Some(first), Some(last)) = (layout.lines.first(), layout.lines.last()) {
         editor.inlay_hints_viewport(first.row..last.row + 1, cx);
@@ -5744,7 +5811,6 @@ fn prepaint_editor(
         cursor_outline: cursor_style == CursorStyle::BlockOutline,
         gutter_numbers,
         fold_placeholders,
-        fold_highlights,
         fold_controls_opacity,
         decoration_quads,
         block_borders,
@@ -5822,10 +5888,6 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
         for (bounds, color) in &state.margin_backgrounds {
             window.paint_quad(fill(*bounds, *color));
         }
-        // Monaco `foldingHighlight` (`editor.foldBackground`).
-        for highlight in &state.fold_highlights {
-            window.paint_quad(fill(*highlight, colors.fold_background));
-        }
 
         // Gutter numbers.
         for (top, shaped, x) in &state.gutter_numbers {
@@ -5885,8 +5947,9 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                 };
                 let origin_x = layout.text_origin_x();
                 // Monaco's content overlays, bottom to top (`view.ts`):
-                // selections, indent guides, decorations, whitespace and the
-                // wrap indicator; then the rulers, the text and the cursors.
+                // selections, indent guides, decorations (whole-line ones and
+                // the fold background first), whitespace and the wrap
+                // indicator; then the rulers, the text and the cursors.
                 // High contrast themes have square selections.
                 paint_selections(
                     layout,
@@ -7754,5 +7817,354 @@ mod marker_mark_tests {
             hint.iter()
                 .all(|(b, c, _)| b.top() == px(18.) && Some(*c) == colors.editor_hint_border)
         );
+    }
+}
+
+#[cfg(test)]
+mod decoration_overlay_tests {
+    //! Monaco's `DecorationsOverlay` (`decorations.ts`): the pieces each
+    //! decoration paints on a line, and their order.
+
+    use gpui::{AppContext as _, Entity, Hsla, TestAppContext, VisualTestContext, px};
+
+    use super::*;
+    use crate::decorations::DecorationOptions;
+    use crate::{CodeEditor, TextModel};
+
+    fn options(f: impl FnOnce(&mut DecorationOptions)) -> DecorationOptions {
+        let mut options = DecorationOptions::default();
+        f(&mut options);
+        options
+    }
+
+    /// `_renderNormalDecoration` without the line layout: the line break's
+    /// half character, `showIfCollapsed`, `shouldFillLineOnLineBreak` and
+    /// the minimum width.
+    #[test]
+    fn normal_decoration_ranges() {
+        let half = px(8.);
+        let end = px(500.);
+        let range = |x, options: &DecorationOptions, continues, ends_row| {
+            normal_decoration_range(x, options, continues, ends_row, end, half)
+        };
+        // An empty piece stays empty: Monaco's 0px element.
+        let plain = DecorationOptions::default();
+        assert_eq!(
+            range((px(10.), px(10.)), &plain, true, true),
+            (px(10.), px(10.))
+        );
+        // `includeNewLines`: on a model line's last view line only, and not
+        // on the range's last line.
+        let find = options(|o| o.include_new_lines = true);
+        assert_eq!(
+            range((px(10.), px(40.)), &find, true, true),
+            (px(10.), px(48.))
+        );
+        assert_eq!(
+            range((px(10.), px(40.)), &find, true, false),
+            (px(10.), px(40.))
+        );
+        assert_eq!(
+            range((px(10.), px(40.)), &find, false, true),
+            (px(10.), px(40.))
+        );
+        // An empty line inside a match: half a character, then not widened
+        // again.
+        let find = options(|o| {
+            o.include_new_lines = true;
+            o.show_if_collapsed = true;
+        });
+        assert_eq!(range((px(0.), px(0.)), &find, true, true), (px(0.), px(8.)));
+        // An empty match is widened around its center.
+        assert_eq!(
+            range((px(20.), px(20.)), &find, false, true),
+            (px(16.), px(24.))
+        );
+        let fill = options(|o| o.should_fill_line_on_line_break = true);
+        assert_eq!(range((px(10.), px(40.)), &fill, true, true), (px(10.), end));
+        assert_eq!(
+            range((px(10.), px(40.)), &fill, false, true),
+            (px(10.), px(40.))
+        );
+        // CSS `min-width`.
+        let snippet = options(|o| o.min_width = px(2.));
+        assert_eq!(
+            range((px(10.), px(10.)), &snippet, false, true),
+            (px(10.), px(12.))
+        );
+        assert_eq!(
+            range((px(10.), px(30.)), &snippet, false, true),
+            (px(10.), px(30.))
+        );
+    }
+
+    fn setup<'a>(
+        text: &str,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<CodeEditor>, &'a mut VisualTestContext) {
+        cx.update(crate::init);
+        let text = text.to_string();
+        let (editor, cx) = cx.add_window_view(|window, cx| {
+            let model = cx.new(|_| TextModel::new(&text));
+            CodeEditor::new(model, window, cx)
+        });
+        draw(cx);
+        (editor, cx)
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        for _ in 0..3 {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(300));
+        }
+        cx.run_until_parked();
+    }
+
+    fn decorate(
+        editor: &Entity<CodeEditor>,
+        decorations: Vec<(Range<usize>, DecorationOptions)>,
+        cx: &mut VisualTestContext,
+    ) {
+        editor.update(cx, |e, cx| {
+            e.model().update(cx, |model, cx| {
+                model.delta_decorations(None, &[], decorations, cx)
+            });
+        });
+        draw(cx);
+    }
+
+    /// The last frame's quads, in paint order.
+    fn painted() -> Vec<DecorationQuad> {
+        DECORATION_QUADS.with(|quads| quads.borrow().clone())
+    }
+
+    /// The painted quads with `background`, in paint order, as x ranges
+    /// from the text's origin.
+    fn quads(
+        editor: &Entity<CodeEditor>,
+        background: Hsla,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(Pixels, Pixels)> {
+        draw(cx);
+        let origin = editor.read_with(cx, |e, _| e.layout.as_ref().unwrap().text_origin_x());
+        painted()
+            .iter()
+            .filter(|(_, b, _)| *b == Some(background))
+            .map(|(bounds, _, _)| {
+                (
+                    round(bounds.left() - origin),
+                    round(bounds.right() - origin),
+                )
+            })
+            .collect()
+    }
+
+    /// To a hundredth of a pixel.
+    fn round(x: Pixels) -> Pixels {
+        (x * 100.).round() / 100.
+    }
+
+    /// The painted backgrounds among `colors`, in paint order.
+    fn order(colors: &[Hsla], cx: &mut VisualTestContext) -> Vec<Hsla> {
+        draw(cx);
+        painted()
+            .iter()
+            .filter_map(|(_, background, _)| *background)
+            .filter(|b| colors.contains(b))
+            .collect()
+    }
+
+    fn em_width(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Pixels {
+        round(editor.read_with(cx, |e, _| e.layout.as_ref().unwrap().metrics.em_width))
+    }
+
+    fn x(editor: &Entity<CodeEditor>, row: u32, column: u32, cx: &mut VisualTestContext) -> Pixels {
+        editor.read_with(cx, |e, _| {
+            let layout = e.layout.as_ref().unwrap();
+            let line = layout.lines.iter().find(|line| line.row == row).unwrap();
+            round(line.x_for_column(column))
+        })
+    }
+
+    /// Monaco paints a 0px element for an empty piece: an empty decoration,
+    /// an empty line inside a range or a range's end at column 1. Only a
+    /// `min-width` (the snippet placeholder's) or an outline shows.
+    #[gpui::test]
+    fn empty_pieces_draw_nothing(cx: &mut TestAppContext) {
+        let (editor, cx) = setup("abc\n\ndef\n", cx);
+        let red = gpui::red();
+        let green = gpui::green();
+        let blue = gpui::blue();
+        decorate(
+            &editor,
+            vec![
+                (1..1, options(|o| o.background = Some(red))),
+                // "abc\n\n": rows 0 and 1, and the end at row 2 column 0.
+                (0..5, options(|o| o.background = Some(green))),
+                (
+                    6..6,
+                    options(|o| {
+                        o.background = Some(blue);
+                        o.min_width = px(2.);
+                    }),
+                ),
+                (2..2, options(|o| o.outline = Some((red, px(1.))))),
+            ],
+            cx,
+        );
+        assert_eq!(quads(&editor, red, cx), []);
+        let abc = x(&editor, 0, 3, cx);
+        assert_eq!(quads(&editor, green, cx), [(px(0.), abc)]);
+        let blue_x = x(&editor, 2, 1, cx);
+        assert_eq!(quads(&editor, blue, cx), [(blue_x, blue_x + px(2.))]);
+        // The final tab stop's outline: around a 0px box.
+        let outlines: Vec<Pixels> = painted()
+            .iter()
+            .filter(|(_, _, border)| *border == Some((red, px(1.))))
+            .map(|(bounds, _, _)| round(bounds.size.width))
+            .collect();
+        assert_eq!(outlines, [px(2.)]);
+    }
+
+    /// Monaco `prepareRender`: whole-line decorations first, then the
+    /// others, each in z-index order.
+    #[gpui::test]
+    fn whole_line_decorations_paint_first(cx: &mut TestAppContext) {
+        let (editor, cx) = setup("abc\ndef\n", cx);
+        let red = gpui::red();
+        let green = gpui::green();
+        let blue = gpui::blue();
+        decorate(
+            &editor,
+            vec![
+                (1..2, options(|o| o.background = Some(red))),
+                (
+                    0..1,
+                    options(|o| {
+                        o.background = Some(green);
+                        o.is_whole_line = true;
+                        o.z_index = 20;
+                    }),
+                ),
+                (
+                    2..3,
+                    options(|o| {
+                        o.background = Some(blue);
+                        o.z_index = -5;
+                    }),
+                ),
+            ],
+            cx,
+        );
+        assert_eq!(order(&[red, green, blue], cx), [green, blue, red]);
+    }
+
+    /// Monaco's `folded-background` is a whole-line decoration (z-index 0)
+    /// in the decorations overlay: over the selections and guides, under
+    /// the other decorations and the whole-line ones above z-index 0.
+    #[gpui::test]
+    fn fold_background_is_a_whole_line_decoration(cx: &mut TestAppContext) {
+        let (editor, cx) = setup("a {\n    b\n}\nc\n", cx);
+        draw(cx);
+        editor.update(cx, |e, cx| e.fold(cx));
+        let fold = editor.read_with(cx, |e, _| e.theme().colors.fold_background);
+        let red = gpui::red();
+        let green = gpui::green();
+        let blue = gpui::blue();
+        decorate(
+            &editor,
+            vec![
+                (0..1, options(|o| o.background = Some(red))),
+                (
+                    0..1,
+                    options(|o| {
+                        o.background = Some(green);
+                        o.is_whole_line = true;
+                        o.z_index = 1;
+                    }),
+                ),
+                (
+                    0..1,
+                    options(|o| {
+                        o.background = Some(blue);
+                        o.is_whole_line = true;
+                    }),
+                ),
+            ],
+            cx,
+        );
+        assert_eq!(
+            order(&[red, green, blue, fold], cx),
+            [blue, fold, green, red]
+        );
+    }
+
+    /// Monaco `findDecorations.ts`: find matches have `showIfCollapsed`, so
+    /// an empty regex match is a character wide and a match ending at
+    /// column 1 stops at the line before; `findMatch` adds the line breaks.
+    #[gpui::test]
+    fn find_matches_show_if_collapsed(cx: &mut TestAppContext) {
+        let (editor, cx) = setup("ab;\ncd\n\nef", cx);
+        let find = |query: &str, cx: &mut VisualTestContext| {
+            editor.update(cx, |e, cx| {
+                let mut options = e.find_options().clone();
+                options.query = query.into();
+                options.is_regex = true;
+                e.change_find_options(options, false, cx);
+                e.start_find_model_for_tests(cx);
+            });
+        };
+        let (current, other) = editor.read_with(cx, |e, _| {
+            let colors = &e.theme().colors;
+            (
+                colors.find_match_background,
+                colors.find_match_highlight_background,
+            )
+        });
+        let em = em_width(&editor, cx);
+        let all = |cx: &mut VisualTestContext| {
+            let mut all = quads(&editor, current, cx);
+            all.extend(quads(&editor, other, cx));
+            all
+        };
+
+        // An empty match on the empty line: a character wide.
+        find("^$", cx);
+        assert_eq!(all(cx), [(px(0.), em)]);
+
+        // `;\n`: to the end of the line, nothing on the next.
+        find(";\\n", cx);
+        let semicolon = x(&editor, 0, 2, cx);
+        let line_end = x(&editor, 0, 3, cx);
+        assert_eq!(all(cx), [(semicolon, line_end)]);
+
+        // `d\n\ne`: each line break half a character wide, the empty
+        // line's included.
+        find("d\\n\\ne", cx);
+        let d = x(&editor, 1, 1, cx);
+        let d_end = x(&editor, 1, 2, cx);
+        let e_end = x(&editor, 3, 1, cx);
+        assert_eq!(
+            all(cx),
+            [(d, round(d_end + em)), (px(0.), em), (px(0.), e_end)]
+        );
+    }
+
+    /// Monaco `unicodeHighlighter.ts`: `showIfCollapsed`, so a zero-width
+    /// space is a character wide.
+    #[gpui::test]
+    fn unicode_highlights_show_if_collapsed(cx: &mut TestAppContext) {
+        let (editor, cx) = setup("a\u{200b}b\n", cx);
+        draw(cx);
+        let border = editor.read_with(cx, |e, _| e.theme().colors.unicode_highlight_border);
+        let em = em_width(&editor, cx);
+        let boxes: Vec<Pixels> = painted()
+            .iter()
+            .filter(|(_, _, b)| *b == Some((border, px(1.))))
+            .map(|(bounds, _, _)| round(bounds.size.width))
+            .collect();
+        assert_eq!(boxes, [em]);
     }
 }

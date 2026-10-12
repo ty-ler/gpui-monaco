@@ -340,7 +340,10 @@ pub struct DecorationOptions {
     pub underline: Option<DecorationUnderline>,
     /// Text color and font style for the range (Monaco `inlineClassName`).
     pub text: Option<TokenStyle>,
-    /// Paint `background`/`border` across the whole line(s).
+    /// Paint `background`/`border` across the whole line(s), under every
+    /// decoration that isn't whole-line, whatever their
+    /// [`z_index`](Self::z_index) (Monaco's `DecorationsOverlay` renders
+    /// whole-line decorations first).
     pub is_whole_line: bool,
     /// Where the range goes on past a line break, paint `background` and
     /// `border` to the right edge of that line (Monaco
@@ -406,9 +409,21 @@ pub struct DecorationOptions {
     /// centered, and a range ending at the start of a line stops at the
     /// end of the line before.
     pub show_if_collapsed: bool,
+    /// Where the range goes on past a line break, widen
+    /// [`background`](Self::background) by half a typical character's width
+    /// past the end of that line (Monaco's `includeNewLines`, which it
+    /// passes for find matches, the `findMatch` class name).
+    pub include_new_lines: bool,
+    /// The smallest width of [`background`](Self::background) and
+    /// [`border`](Self::border) on a line (CSS `min-width`, as Monaco's
+    /// `snippet-placeholder` has 2px). Otherwise an empty piece draws
+    /// nothing, as Monaco's 0px wide `className` element, though its
+    /// [`outline`](Self::outline) shows.
+    pub min_width: Pixels,
     /// How the range grows when text is typed at its edges (Monaco `stickiness`).
     pub stickiness: Stickiness,
-    /// Higher paints on top.
+    /// Higher paints on top, among the whole-line decorations and among the
+    /// others.
     pub z_index: i32,
     /// A diagnostic's decoration (Monaco `isForValidation`), hidden as the
     /// editor's `render_validation_decorations` says.

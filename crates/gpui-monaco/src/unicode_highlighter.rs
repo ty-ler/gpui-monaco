@@ -216,8 +216,10 @@ impl CodeEditor {
             return;
         }
         let colors = &self.theme.colors;
-        // Monaco `.unicode-highlight`: a border and background.
+        // Monaco `.unicode-highlight`: a border and background, widened
+        // around invisible and narrow characters (`showIfCollapsed`).
         let options = DecorationOptions {
+            show_if_collapsed: true,
             border: Some(colors.unicode_highlight_border),
             background: (colors.unicode_highlight_background.a > 0.)
                 .then_some(colors.unicode_highlight_background),
