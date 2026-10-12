@@ -113,3 +113,50 @@ fn providers_replace_tags(cx: &mut TestAppContext) {
         ]
     );
 }
+
+/// Monaco `OutlineModel._flattenDocumentSymbols`: a symbol's own
+/// `containerName` wins over its parent's name; an empty one doesn't.
+#[test]
+fn flattening_prefers_the_symbols_own_container() {
+    let symbols = vec![
+        DocumentSymbol {
+            name: "run".into(),
+            container_name: Some("Server".into()),
+            ..Default::default()
+        },
+        DocumentSymbol {
+            name: "Outer".into(),
+            children: vec![
+                DocumentSymbol {
+                    name: "own".into(),
+                    container_name: Some("Elsewhere".into()),
+                    ..Default::default()
+                },
+                DocumentSymbol {
+                    name: "empty".into(),
+                    container_name: Some("".into()),
+                    ..Default::default()
+                },
+                DocumentSymbol {
+                    name: "inherited".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+    ];
+    let containers: Vec<(String, Option<String>)> = flatten_symbols(&symbols)
+        .into_iter()
+        .map(|(_, container, s)| (s.name.to_string(), container))
+        .collect();
+    assert_eq!(
+        containers,
+        vec![
+            ("run".into(), Some("Server".into())),
+            ("Outer".into(), None),
+            ("own".into(), Some("Elsewhere".into())),
+            ("empty".into(), Some("Outer".into())),
+            ("inherited".into(), Some("Outer".into())),
+        ]
+    );
+}

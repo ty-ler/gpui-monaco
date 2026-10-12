@@ -80,7 +80,9 @@ pub(crate) fn symbols_from_tags(tags: Vec<syntax::Tag>, rope: &Rope) -> Vec<Docu
     nest(flat)
 }
 
-/// Every symbol, depth first, with its depth and container's name.
+/// Every symbol, depth first, with its depth and container's name: its own
+/// `container_name`, else its parent's name (Monaco
+/// `OutlineModel._flattenDocumentSymbols`).
 pub fn flatten_symbols(
     symbols: &[DocumentSymbol],
 ) -> Vec<(usize, Option<String>, &DocumentSymbol)> {
@@ -91,7 +93,8 @@ pub fn flatten_symbols(
         out: &mut Vec<(usize, Option<String>, &'a DocumentSymbol)>,
     ) {
         for symbol in symbols {
-            out.push((depth, container.map(str::to_string), symbol));
+            let own = symbol.container_name.as_deref().filter(|c| !c.is_empty());
+            out.push((depth, own.or(container).map(str::to_string), symbol));
             walk(&symbol.children, depth + 1, Some(&symbol.name), out);
         }
     }

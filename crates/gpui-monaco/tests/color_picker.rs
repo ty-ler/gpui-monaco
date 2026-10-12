@@ -264,3 +264,171 @@ fn standalone_header_boxes_follow_the_body(cx: &mut TestAppContext) {
         .expect("the original color");
     assert_eq!(original.size.width, gpui::px(52.));
 }
+
+/// A color at a fixed range whose presentations add an import line above
+/// it, or are written over two lines.
+struct ImportingProvider {
+    range: std::ops::Range<PointUtf16>,
+    multiline: bool,
+}
+
+impl gpui_monaco::providers::DocumentColorProvider for ImportingProvider {
+    fn provide_document_colors(
+        &self,
+        _: &gpui_monaco::providers::ProviderContext,
+        _: &mut gpui::App,
+    ) -> gpui::Task<anyhow::Result<Vec<gpui_monaco::providers::ColorInformation>>> {
+        gpui::Task::ready(Ok(vec![gpui_monaco::providers::ColorInformation {
+            range: self.range.clone(),
+            color: gpui_monaco::color::ColorF {
+                red: 1.,
+                green: 0.,
+                blue: 0.,
+                alpha: 1.,
+            },
+        }]))
+    }
+
+    fn provide_color_presentations(
+        &self,
+        _: &gpui_monaco::providers::ProviderContext,
+        info: &gpui_monaco::providers::ColorInformation,
+        _: &mut gpui::App,
+    ) -> gpui::Task<anyhow::Result<Vec<gpui_monaco::providers::ColorPresentation>>> {
+        let c = |v: f64| (v * 255.).round() as u8;
+        let hex = format!(
+            "#{:02x}{:02x}{:02x}",
+            c(info.color.red),
+            c(info.color.green),
+            c(info.color.blue)
+        );
+        let presentation = if self.multiline {
+            gpui_monaco::providers::ColorPresentation {
+                label: format!("color(\n{hex})").into(),
+                ..Default::default()
+            }
+        } else {
+            gpui_monaco::providers::ColorPresentation {
+                label: hex.into(),
+                additional_text_edits: vec![(
+                    PointUtf16::new(0, 0)..PointUtf16::new(0, 0),
+                    "use x;\n".to_string(),
+                )],
+                ..Default::default()
+            }
+        };
+        gpui::Task::ready(Ok(vec![presentation]))
+    }
+}
+
+fn setup_provider<'a>(
+    text: &str,
+    provider: ImportingProvider,
+    cx: &'a mut TestAppContext,
+) -> (Entity<CodeEditor>, &'a mut VisualTestContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::providers::register_color_provider(
+            cx,
+            gpui_monaco::providers::LanguageSelector::All,
+            provider,
+        );
+    });
+    setup(text, cx)
+}
+
+/// Monaco `updateEditorModel` tracks the replaced range with a
+/// `GrowsOnlyWhenTypingAfter` decoration: an additional edit above the
+/// color moves it, and the next write replaces the color where it is now.
+#[gpui::test]
+fn the_picker_tracks_the_color_through_additional_edits(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_provider(
+        "a\n#ff0000\n",
+        ImportingProvider {
+            range: PointUtf16::new(1, 0)..PointUtf16::new(1, 7),
+            multiline: false,
+        },
+        cx,
+    );
+    put_cursor(&editor, 1, 3, cx);
+    cx.dispatch_action(ShowHover::default());
+    cx.run_until_parked();
+    let widget = picker(&editor, cx);
+    widget.update(cx, |w, cx| w.pick_css_for_tests("#00ff00", cx));
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "use x;\na\n#00ff00\n");
+    let (_, _, range) = state(&editor, cx).unwrap();
+    assert_eq!(range, PointUtf16::new(2, 0)..PointUtf16::new(2, 7));
+    widget.update(cx, |w, cx| w.pick_css_for_tests("#0000ff", cx));
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "use x;\nuse x;\na\n#0000ff\n");
+    let (_, _, range) = state(&editor, cx).unwrap();
+    assert_eq!(range, PointUtf16::new(3, 0)..PointUtf16::new(3, 7));
+}
+
+/// The tracked range covers a presentation written over several lines.
+#[gpui::test]
+fn the_picker_tracks_a_multi_line_presentation(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_provider(
+        "#ff0000;\n",
+        ImportingProvider {
+            range: PointUtf16::new(0, 0)..PointUtf16::new(0, 7),
+            multiline: true,
+        },
+        cx,
+    );
+    put_cursor(&editor, 0, 3, cx);
+    cx.dispatch_action(ShowHover::default());
+    cx.run_until_parked();
+    let widget = picker(&editor, cx);
+    widget.update(cx, |w, cx| w.pick_css_for_tests("#00ff00", cx));
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "color(\n#00ff00);\n");
+    let (_, _, range) = state(&editor, cx).unwrap();
+    assert_eq!(range, PointUtf16::new(0, 0)..PointUtf16::new(1, 8));
+    widget.update(cx, |w, cx| w.pick_css_for_tests("#0000ff", cx));
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "color(\n#0000ff);\n");
+}
+
+/// Monaco's standalone picker hides when the mouse moves onto a color
+/// swatch, not when it moves over other text.
+#[gpui::test]
+fn the_standalone_picker_hides_over_a_swatch(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, point, px};
+    let text = format!(
+        "a {{ color: #00f; }}\n{}b {{ color: ; }}\n",
+        "\n".repeat(30)
+    );
+    let (editor, cx) = setup(&text, cx);
+    put_cursor(&editor, 31, 11, cx);
+    cx.dispatch_action(ShowOrFocusStandaloneColorPicker);
+    settle(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_standalone_color_picker_visible()));
+    let (_, line_height) = editor.read_with(cx, |e, _| e.layout_for_tests()).unwrap();
+    let at = |column, cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, _| {
+                e.scrolled_visible_position(PointUtf16::new(0, column))
+            })
+            .unwrap()
+    };
+    // Over `a`: stays.
+    let text_at = at(0, cx);
+    cx.simulate_mouse_move(
+        point(text_at.x + px(2.), text_at.y + line_height / 2.),
+        None,
+        Modifiers::default(),
+    );
+    cx.run_until_parked();
+    assert!(editor.read_with(cx, |e, _| e.is_standalone_color_picker_visible()));
+    // Over the swatch before `#00f`: hides.
+    let color_at = at(11, cx);
+    cx.simulate_mouse_move(
+        point(color_at.x - px(5.), color_at.y + line_height / 2.),
+        None,
+        Modifiers::default(),
+    );
+    cx.run_until_parked();
+    assert!(!editor.read_with(cx, |e, _| e.is_standalone_color_picker_visible()));
+}
