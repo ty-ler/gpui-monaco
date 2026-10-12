@@ -10,7 +10,12 @@ use crate::cursor::Selection;
 use crate::editor::{CodeEditor, FoldingRegionState, FoldingViewState};
 use crate::providers::FoldingRangeKind;
 use crate::view::fold_model::{self as fm, FoldingModel, SelectedRows};
+use crate::view::folding::{FoldSource, MergeRange};
 use crate::view::reveal::RevealType;
+
+/// Monaco's `cursorChangedScheduler` delay before
+/// [`CodeEditor::reveal_cursor_in_folds`].
+const REVEAL_CURSOR_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl CodeEditor {
     /// Monaco `FoldingAction.getSelectedLines`: each selection's first row.
@@ -20,6 +25,14 @@ impl CodeEditor {
             .iter()
             .map(|s| s.start().row)
             .collect()
+    }
+
+    /// Brings the folding regions up to date with the text, so commands
+    /// right after an edit act on the lines the regions moved to (Monaco's
+    /// folding decorations follow edits).
+    pub(crate) fn sync_folds(&mut self, cx: &App) {
+        let model = self.model().clone();
+        self.folds.sync(model.read(cx).buffer());
     }
 
     /// Computes the ranges to toggle from the model, toggles them and moves
@@ -32,12 +45,12 @@ impl CodeEditor {
         if !self.options.folding {
             return;
         }
-        let buffer = self.model().read(cx).buffer().clone();
+        self.sync_folds(cx);
         let rows = self.selected_rows();
-        let collapsed = self.folds.collapsed_flags(&buffer);
+        let collapsed = self.folds.collapsed_flags();
         let ranges = self.folds.ranges().to_vec();
         let toggle = command(&FoldingModel::new(&ranges, collapsed), &rows);
-        self.folds.toggle(&buffer, toggle);
+        self.folds.toggle(toggle);
         self.after_fold_command(cx);
     }
 
@@ -64,8 +77,8 @@ impl CodeEditor {
             return;
         }
         let rows = lines.unwrap_or_else(|| self.selected_rows());
-        let buffer = self.model().read(cx).buffer().clone();
-        let collapsed = self.folds.collapsed_flags(&buffer);
+        self.sync_folds(cx);
+        let collapsed = self.folds.collapsed_flags();
         let ranges = self.folds.ranges().to_vec();
         let model = FoldingModel::new(&ranges, collapsed);
         let up = direction == Some("up");
@@ -79,7 +92,7 @@ impl CodeEditor {
                 fm::set_collapse_state_levels_down(&model, collapse, levels, Some(&rows))
             }
         };
-        self.folds.toggle(&buffer, toggle);
+        self.folds.toggle(toggle);
         self.after_fold_command(cx);
     }
 
@@ -232,8 +245,8 @@ impl CodeEditor {
         cx: &mut Context<Self>,
         find: impl FnOnce(u32, &FoldingModel) -> Option<u32>,
     ) {
-        let buffer = self.model().read(cx).buffer().clone();
-        let collapsed = self.folds.collapsed_flags(&buffer);
+        self.sync_folds(cx);
+        let collapsed = self.folds.collapsed_flags();
         let ranges = self.folds.ranges().to_vec();
         let row = self.cursors.selections()[0].start().row;
         if let Some(target) = find(row, &FoldingModel::new(&ranges, collapsed)) {
@@ -266,7 +279,7 @@ impl CodeEditor {
         if !self.options.folding {
             return;
         }
-        let buffer = self.model().read(cx).buffer().clone();
+        let mut rows = Vec::new();
         let mut cursor = None;
         for selection in self.cursors.selections() {
             let (start, end) = (selection.start(), selection.end());
@@ -276,20 +289,21 @@ impl CodeEditor {
                 end.row
             };
             if last > start.row {
-                self.folds.add_manual(&buffer, start.row, last);
+                rows.push((start.row, last));
                 cursor = Some(PointUtf16::new(start.row, 0));
             }
         }
         if let Some(cursor) = cursor {
             self.set_selections(&[Selection::collapsed(cursor)], cx);
         }
+        let model = self.model().clone();
+        self.folds.add_manual(model.read(cx).buffer(), &rows);
         self.after_fold_command(cx);
     }
 
     /// Removes manual folding ranges around the cursors or touching the
     /// selections (Monaco `editor.removeManualFoldingRanges`).
     pub fn remove_manual_folding_ranges(&mut self, cx: &mut Context<Self>) {
-        let buffer = self.model().read(cx).buffer().clone();
         let selections: Vec<SelectedRows> = self
             .cursors
             .selections()
@@ -300,7 +314,9 @@ impl CodeEditor {
                 empty: s.is_empty(),
             })
             .collect();
-        self.folds.remove_manual(&buffer, &selections);
+        let model = self.model().clone();
+        self.folds
+            .remove_manual(model.read(cx).buffer(), &selections);
         self.after_fold_command(cx);
     }
 
@@ -316,8 +332,8 @@ impl CodeEditor {
         surrounding: bool,
         cx: &mut Context<Self>,
     ) {
-        let buffer = self.model().read(cx).buffer().clone();
-        let collapsed = self.folds.collapsed_flags(&buffer);
+        self.sync_folds(cx);
+        let collapsed = self.folds.collapsed_flags();
         let ranges = self.folds.ranges().to_vec();
         let model = FoldingModel::new(&ranges, collapsed);
         let Some(region) = model
@@ -361,18 +377,56 @@ impl CodeEditor {
             }
             toggle
         };
-        self.folds.toggle(&buffer, toggle);
+        self.folds.toggle(toggle);
         self.after_fold_change(cx);
         // Monaco `FoldingController.onEditorMouseUp`: the clicked line shows
         // (`revealPositionInCenterIfOutsideViewport`), not the cursor.
         self.reveal_position_in_center_if_outside_viewport(PointUtf16::new(row, 0), cx);
     }
 
-    /// Moves cursors out of hidden rows to the end of their fold's start row.
+    /// Monaco `FoldingController.onCursorPositionChanged`: while lines are
+    /// hidden, a cursor change (re)schedules
+    /// [`Self::reveal_cursor_in_folds`] after Monaco's delay.
+    pub(crate) fn folding_cursor_changed(&mut self, cx: &mut Context<Self>) {
+        if !self.options.folding || !self.folds.has_hidden() {
+            return;
+        }
+        self.fold_reveal_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(REVEAL_CURSOR_DELAY).await;
+            this.update(cx, |this, cx| this.reveal_cursor_in_folds(cx))
+                .ok();
+        }));
+    }
+
+    /// Monaco `FoldingController.revealCursor`: expands every collapsed
+    /// region hiding a selection's start (its anchor), wherever the
+    /// selection came from (find, go to line or definition, jump to
+    /// bracket, add selection to next find match, the API), and reveals
+    /// the primary cursor centered if it's off screen.
+    fn reveal_cursor_in_folds(&mut self, cx: &mut Context<Self>) {
+        self.fold_reveal_task = None;
+        if !self.options.folding {
+            return;
+        }
+        self.sync_folds(cx);
+        let rows: Vec<u32> = self
+            .cursors
+            .selections()
+            .iter()
+            .map(|s| s.anchor.row)
+            .collect();
+        if self.folds.reveal_rows(&rows) {
+            let position = self.cursors.primary().position;
+            self.reveal_position_in_center_if_outside_viewport(position, cx);
+            cx.notify();
+        }
+    }
+
+    /// Moves cursors out of hidden rows to the end of the line above them.
     /// Like Monaco's line mapping change (`Cursor.onLineMappingChanged`), it
     /// doesn't scroll.
     pub(crate) fn after_fold_change(&mut self, cx: &mut Context<Self>) {
-        self.move_cursors_out_of_folds(cx);
+        self.move_cursors_out_of_folds();
         self.cursors_changed(false, cx);
     }
 
@@ -385,15 +439,19 @@ impl CodeEditor {
         self.reveal_position_in_center_if_outside_viewport(start, cx);
     }
 
-    fn move_cursors_out_of_folds(&mut self, cx: &mut Context<Self>) {
-        let buffer = self.model().read(cx).buffer().clone();
-        let collapsed = self.folds.collapsed_rows(&buffer);
-        let fix = |p: PointUtf16| match collapsed
-            .iter()
-            .find(|(start, end)| *start < p.row && p.row <= *end)
-        {
-            Some((start, _)) => PointUtf16::new(*start, self.snapshot.line_len_utf16(*start)),
-            None => p,
+    /// Monaco `HiddenRangeModel.adjustSelections`: a selection end in
+    /// hidden lines moves to the end of the line above them.
+    fn move_cursors_out_of_folds(&mut self) {
+        let hidden = self.folds.hidden_rows();
+        let fix = |p: PointUtf16| {
+            let ix = hidden.partition_point(|rows| rows.start <= p.row);
+            match ix.checked_sub(1).map(|ix| &hidden[ix]) {
+                Some(rows) if rows.contains(&p.row) && rows.start > 0 => {
+                    let row = rows.start - 1;
+                    PointUtf16::new(row, self.snapshot.line_len_utf16(row))
+                }
+                _ => p,
+            }
         };
         let selections: Vec<Selection> = self
             .cursors
@@ -408,48 +466,28 @@ impl CodeEditor {
     }
 
     /// Monaco `FoldingController.saveViewState` (`FoldingModel.getMemento`):
-    /// the collapsed regions and the manual ranges, with a checksum of
-    /// their lines.
+    /// the collapsed regions and those not from the provider, with a
+    /// checksum of their lines.
     pub(crate) fn save_folding_state(&self, cx: &App) -> FoldingViewState {
         let model = self.model().read(cx);
         if !self.options.folding || model.is_too_large_for_tokenization() {
             return FoldingViewState::default();
         }
-        let buffer = model.buffer();
-        let line_count = buffer.rope().line_count();
-        let manual = self.folds.manual_rows(buffer);
-        let collapsed = self.folds.collapsed_rows(buffer);
-        let mut regions: Vec<FoldingRegionState> = collapsed
-            .iter()
-            .map(|&(start_row, end_row)| FoldingRegionState {
-                start_row,
-                end_row,
-                is_collapsed: true,
-                manual: manual.contains(&(start_row, end_row)),
-                checksum: None,
+        let rope = model.buffer().rope();
+        let line_count = rope.line_count();
+        let regions = self
+            .folds
+            .memento()
+            .into_iter()
+            .filter(|r| r.start < r.end && r.end < line_count)
+            .map(|r| FoldingRegionState {
+                start_row: r.start,
+                end_row: r.end,
+                is_collapsed: r.collapsed,
+                manual: r.source == FoldSource::UserDefined,
+                checksum: Some(lines_checksum(rope, r.start, r.end)),
             })
             .collect();
-        regions.extend(
-            manual
-                .iter()
-                .filter(|range| !collapsed.contains(range))
-                .map(|&(start_row, end_row)| FoldingRegionState {
-                    start_row,
-                    end_row,
-                    is_collapsed: false,
-                    manual: true,
-                    checksum: None,
-                }),
-        );
-        regions.retain(|r| r.start_row < r.end_row && r.end_row < line_count);
-        regions.sort_by_key(|r| (r.start_row, std::cmp::Reverse(r.end_row)));
-        for region in &mut regions {
-            region.checksum = Some(lines_checksum(
-                buffer.rope(),
-                region.start_row,
-                region.end_row,
-            ));
-        }
         FoldingViewState {
             regions,
             line_count,
@@ -458,44 +496,46 @@ impl CodeEditor {
 
     /// Monaco `FoldingController.restoreViewState`
     /// (`FoldingModel.applyMemento`): the regions whose lines still match
-    /// their checksum fold again, without revealing the cursor.
+    /// their checksum are merged in, without revealing the cursor.
     pub(crate) fn restore_folding_state(
         &mut self,
         state: &FoldingViewState,
         cx: &mut Context<Self>,
     ) {
-        let model = self.model().read(cx);
+        let model = self.model().clone();
+        let model = model.read(cx);
         if !self.options.folding
             || model.is_too_large_for_tokenization()
             || state.regions.is_empty()
         {
             return;
         }
-        let buffer = model.buffer().clone();
+        let buffer = model.buffer();
         let line_count = buffer.rope().line_count();
-        for region in &state.regions {
-            let (start, end) = (region.start_row, region.end_row);
-            if start >= end || end >= line_count {
-                continue;
-            }
-            if region
-                .checksum
-                .is_some_and(|checksum| checksum != lines_checksum(buffer.rope(), start, end))
-            {
-                continue;
-            }
-            if region.manual {
-                if !self.folds.manual_rows(&buffer).contains(&(start, end)) {
-                    self.folds.add_manual(&buffer, start, end);
-                }
-                if !region.is_collapsed {
-                    self.folds.expand(&buffer, start);
-                }
-            } else if region.is_collapsed {
-                self.folds.collapse(&buffer, start, end);
-            }
-        }
-        self.move_cursors_out_of_folds(cx);
+        let saved: Vec<MergeRange> = state
+            .regions
+            .iter()
+            .filter(|region| {
+                region.start_row < region.end_row
+                    && region.end_row < line_count
+                    && region.checksum.is_none_or(|checksum| {
+                        checksum == lines_checksum(buffer.rope(), region.start_row, region.end_row)
+                    })
+            })
+            .map(|region| MergeRange {
+                start: region.start_row,
+                end: region.end_row,
+                kind: None,
+                collapsed: region.is_collapsed,
+                source: if region.manual {
+                    FoldSource::UserDefined
+                } else {
+                    FoldSource::Provider
+                },
+            })
+            .collect();
+        self.folds.apply_memento(buffer, saved);
+        self.move_cursors_out_of_folds();
         cx.notify();
     }
 }

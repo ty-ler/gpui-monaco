@@ -3704,9 +3704,7 @@ fn prepaint_editor(
     let mut fold_placeholder_bounds = Vec::new();
     let mut fold_highlights = Vec::new();
     if options.folding {
-        let model = editor.model().clone();
-        let buffer = model.read(cx).buffer();
-        let collapsed = editor.folds.collapsed_rows(buffer);
+        let collapsed = editor.folds.collapsed_rows();
         // Monaco draws the control as a line decoration (`.cldr`): the
         // whole line decorations column, its codicon centered, with
         // `folding.css`'s 2px left margin.
@@ -3727,7 +3725,7 @@ fn prepaint_editor(
                     row: line.row,
                     bounds: Bounds::new(point(left, top), size(control_width, height)),
                     collapsed: is_collapsed,
-                    manual: range.is_some_and(|range| range.manual),
+                    manual: range.is_some_and(|range| !range.is_provided()),
                 });
             }
         }
@@ -3933,9 +3931,7 @@ fn prepaint_editor(
             &top_of,
             &bottom_of,
         );
-        let collapsed_rows = editor
-            .folds
-            .collapsed_rows(editor.model().read(cx).buffer());
+        let collapsed_rows = editor.folds.collapsed_rows();
         let editor_id = cx.entity_id();
         let show_validation = editor.shows_validation_decorations();
         let count = state.start_rows.len();

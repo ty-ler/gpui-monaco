@@ -55,8 +55,7 @@ pub(crate) struct StickyModelState {
     /// The scopes, or `None` to use the editor's folding ranges.
     elements: Option<Arc<Vec<StickyElement>>>,
     /// The folding ranges as scopes, and what they were converted from.
-    #[allow(clippy::type_complexity)]
-    fold_elements: Option<((Option<text::Version>, usize), Arc<Vec<StickyElement>>)>,
+    fold_elements: Option<(u64, Arc<Vec<StickyElement>>)>,
     /// The keyboard-focused sticky line (Monaco `focusStickyScroll`).
     pub focused: Option<usize>,
     /// The sticky line under the mouse.
@@ -308,7 +307,7 @@ impl CodeEditor {
         if let Some(elements) = &self.sticky.elements {
             return elements.clone();
         }
-        let key = (self.folds.ranges_version(), self.folds.ranges().len());
+        let key = self.folds.generation();
         if let Some((cached, elements)) = &self.sticky.fold_elements
             && *cached == key
         {

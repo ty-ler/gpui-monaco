@@ -91,7 +91,9 @@ Fold ranges come from these sources, in order (Monaco's `foldingStrategy: auto`)
 2. **Syntax tree:** the language's tree-sitter `folds.scm` query. Each `@fold` node folds from its first line to the line before its closing bracket or tag. Every bundled language has one. Region markers are added to these ranges.
 3. **Indentation:** indentation plus `#region` / `#endregion` markers, where the language defines them.
 
-`folding_strategy: Indentation` uses only the last source. Provider and syntax ranges are capped at `folding_maximum_regions` (5000); the most deeply nested are dropped first, as in Monaco. Recomputing waits for a 200ms pause in edits. `editor.folding_ranges()` and `editor.collapsed_folds(cx)` read the current state.
+`folding_strategy: Indentation` uses only the last source. Provider and syntax ranges are capped at `folding_maximum_regions` (5000); the most deeply nested are dropped first, as in Monaco. Recomputing waits for a 200ms pause in edits. In the meantime the regions move with the text, so the chevrons and the folding commands stay on the right lines. Folded regions stay folded through edits, lines typed into them included, and keep their state when the new ranges arrive, unless their lines changed with a cursor in them. `editor.folding_ranges()` and `editor.collapsed_folds(cx)` read the current state.
+
+- **Cursors:** 200ms after a cursor lands in a folded region, from find, Go to Line, Go to Definition, Jump to Bracket, Cmd+D or `set_selections`, the region unfolds and the cursor shows.
 
 - **Gutter:** chevrons fade in on hover, or show always with `show_folding_controls: Always`; `Never` drops the column. A folded region ends with a grey "⋯"; click it to unfold.
   - Manual ranges have their own icons (Monaco's `folding-manual-collapsed` and `folding-manual-expanded`). They look like the others unless the host changes them with `view::folding::set_folding_icon(FoldingIcon::ManualCollapsed, Some(codicon), cx)`, as a VS Code product icon theme does.

@@ -6,6 +6,8 @@ pub mod bracket_pairs;
 pub mod fold_model;
 #[cfg(test)]
 mod fold_model_tests;
+#[cfg(test)]
+mod fold_state_tests;
 pub mod folding;
 pub(crate) mod glyph_lanes;
 pub mod guides;
