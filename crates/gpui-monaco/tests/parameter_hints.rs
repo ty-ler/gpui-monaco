@@ -144,7 +144,7 @@ fn up_and_down_cycle_through_overloads(cx: &mut TestAppContext) {
     );
     assert_eq!(
         editor.read_with(cx, |e, cx| e.model().read(cx).text()),
-        "f(\nnext line"
+        "f()\nnext line"
     );
     // Monaco's ids run them too.
     editor.update_in(cx, |e, window, cx| {
@@ -196,7 +196,7 @@ fn one_signature_leaves_the_keys_alone(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("alt-up");
     assert_eq!(
         editor.read_with(cx, |e, cx| e.model().read(cx).text()),
-        "f(\nfirst"
+        "f()\nfirst"
     );
 }
 

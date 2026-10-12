@@ -7,6 +7,18 @@ A language is a `Language` in a `LanguageRegistry`. It has:
 - editing rules from VS Code's `language-configuration.json`
 - optionally, a tree-sitter `Grammar` with queries
 
+The grammar only adds highlighting and tree-based features. A language registered with just a configuration still gets auto-closing, surround, bracket matching, comment toggling, its word pattern and folding markers, as in Monaco.
+
+## Plain text
+
+Models without a language, or with one that isn't registered, are plain text: `model.language()` is Monaco's `plaintext` language (`Language::plain_text()`), the registry's if it has one (`gpui_monaco_languages::registry()` does), else a built-in copy. Its configuration (`LanguageConfiguration::plain_text()`) is Monaco's:
+
+- the brackets `()`, `[]` and `{}`, which auto-close and are matched, and which Enter splits onto an indented middle line;
+- surrounding pairs for the brackets, `<>` and the three quotes, so typing `"` over a selection wraps it (but doesn't auto-close);
+- no bracket pair colorization, and off-side indentation folding.
+
+`set_language_configuration(cx, "plaintext", config)` changes it for every plain text model, when the registry has `plaintext`. A model with an unregistered id keeps that id in `language_id()`, where Monaco reports `plaintext`.
+
 Install the registry once per app:
 
 ```rust,ignore
@@ -89,12 +101,13 @@ A model created with `with_uri` and no language gets one from the uri when it's 
 3. the longest matching extension, so `.d.ts` beats `.ts`;
 4. the first line's `with_first_line` regex, e.g. `^#!.*\bnode`.
 
-Among equal matches, the language registered last wins. `with_mimetypes` sets MIME types for `language_for_mime_type`. The bundled languages use VS Code's associations.
+Among equal matches, the language registered last wins. `with_mimetypes` sets MIME types for `language_for_mime_type`; a registration without any gets `text/x-<id>`, as in Monaco, and when two languages claim a MIME type the one registered last wins. Models (`with_language`, `set_language`) and `colorize` take a MIME type wherever they take a language id. The bundled languages use VS Code's associations.
 
 ### At runtime
 
 - `gpui_monaco::set_language_configuration(cx, "rust", config)` layers a configuration over a language's (Monaco `setLanguageConfiguration`): the fields it sets replace the language's, the others stay, and later ones win. Models of that language pick it up and emit `TextModelEvent::LanguageConfigurationChanged`. It fails for an unknown language, and disposing the returned `Disposable` removes it again.
 - `gpui_monaco::on_language(cx, "rust", |cx| …)` runs once, the first time a model uses the language (Monaco `onLanguage`), for example to register providers lazily. `on_language_encountered` (Monaco `onLanguageEncountered`) also runs when the language is met inside another, like a Monarch grammar's `nextEmbedded`: the place to set an embedded language's tokenizer lazily. Both return a `Disposable` that cancels them.
+- `gpui_monaco::register_language(cx, language)` registers a language after models exist (Monaco `languages.register`), and updates them as Monaco's language service does: a model created with the language's id or MIME type before it was registered, or whose uri now guesses it, takes the language (emitting `TextModelEvent::LanguageChanged` when its id changes, `LanguageConfigurationChanged` otherwise), and highlights with its grammar. Models don't notice languages added to the `LanguageRegistry` directly; `set_language_registry` also updates every model.
 - Registering a language whose id is already registered merges into it, as Monaco's `languages.register`: its extensions, file names, patterns, aliases and MIME types are added, and its grammar, highlighter, name and configuration fields replace the existing ones only where it has them.
 
 ### Highlighting rules
@@ -166,7 +179,7 @@ impl TokensProvider for Comments {
 let provider = gpui_monaco::set_tokens_provider(cx, "mylang", Comments)?;
 ```
 
-`register_tokens_provider_factory` (Monaco `registerTokensProviderFactory`) creates the tokenizer when the language is first needed, by a model or as an embedded language, from a task resolving to a `LanguageTokenizer` (a tokens provider, any highlighter, or a Monarch grammar); that also covers Monaco's providers given as a promise. Like `set_monarch_tokens_provider`, both return a `Disposable` that restores the previous highlighting. Monaco's `EncodedTokensProvider`, which returns tokens with encoded color indices, has no equivalent.
+`register_tokens_provider_factory` (Monaco `registerTokensProviderFactory`) creates the tokenizer when the language is first needed, by a model or as an embedded language, from a task resolving to a `LanguageTokenizer` (a tokens provider, any highlighter, or a Monarch grammar); that also covers Monaco's providers given as a promise. As in Monaco, a factory isn't called when the language already has a tokenizer (from `set_monarch_tokens_provider`, `set_tokens_provider` or `with_highlighter`); a tree-sitter grammar doesn't count, so a factory can replace it. Like `set_monarch_tokens_provider`, both return a `Disposable` that restores the previous highlighting. Monaco's `EncodedTokensProvider`, which returns tokens with encoded color indices, has no equivalent.
 
 ### Custom highlighters
 
@@ -183,6 +196,6 @@ A `Highlighter` has two methods:
 - **`update(previous, text) -> HighlightState`:** runs on a background thread after edits. `previous` holds the last state and the edits since it, for incremental work. `HighlightState` wraps any `Send + Sync` value you choose.
 - **`highlights(state, text, range)`:** returns sorted, non-overlapping spans for a range. It runs every frame for the visible lines, so it must be fast.
 
-Spans carry `HighlightId`s, which are capture-style names such as `keyword` and `string`, and the theme maps them to colors. Bracket matching and auto-closing use names that start with `string` or `comment` to know what to skip.
+Spans carry `HighlightId`s, which are capture-style names such as `keyword` and `string`, and the theme maps them to colors. Bracket matching and auto-closing find strings, comments and regexes by Monaco's rule: the first whole word (between dots or other non-word characters) that is `comment`, `string`, `regex` or `regexp`, so `string.regexp` and `invalid.string` are strings and `meta.comment` is a comment. A tree-sitter `character` capture counts as a string.
 
 A grammar can also have a `tags.scm` query (`Grammar::with_tags_query`, tree-sitter's code navigation format: `@definition.<kind>` with `@name`). It gives the document symbols used by go to symbol when no provider is registered.

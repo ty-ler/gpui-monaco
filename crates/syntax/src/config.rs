@@ -84,6 +84,40 @@ static NO_COMMENTS: Comments = Comments {
 };
 
 impl LanguageConfiguration {
+    /// Monaco's built-in `plaintext` configuration
+    /// (`LanguageConfigurationRegistry`'s constructor): the brackets `()`,
+    /// `[]` and `{}`, which auto-close as no `autoClosingPairs` is set;
+    /// surrounding pairs for them, `<>` and the three quotes; no bracket
+    /// pair colorization; and off-side folding.
+    pub fn plain_text() -> Self {
+        let pair = |open: &str, close: &str| SurroundingPair {
+            open: open.into(),
+            close: close.into(),
+        };
+        LanguageConfiguration {
+            brackets: Some(
+                [("(", ")"), ("[", "]"), ("{", "}")]
+                    .map(|(open, close)| (open.to_string(), close.to_string()))
+                    .to_vec(),
+            ),
+            surrounding_pairs: Some(vec![
+                pair("{", "}"),
+                pair("[", "]"),
+                pair("(", ")"),
+                pair("<", ">"),
+                pair("\"", "\""),
+                pair("'", "'"),
+                pair("`", "`"),
+            ]),
+            colorized_bracket_pairs: Some(Vec::new()),
+            folding: Some(Folding {
+                off_side: true,
+                markers: None,
+            }),
+            ..Default::default()
+        }
+    }
+
     /// [`comments`](Self::comments), or none.
     pub fn comments(&self) -> &Comments {
         self.comments.as_ref().unwrap_or(&NO_COMMENTS)
