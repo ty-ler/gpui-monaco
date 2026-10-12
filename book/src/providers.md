@@ -111,7 +111,7 @@ Which item is selected first follows `suggest_selection`: the best match, or the
 
 Filtering and ranking use Monaco's `fuzzyScore`, and the editor re-filters as you type without asking the provider again. If you return `incomplete: true`, the editor asks again as the word grows: only the providers whose lists were incomplete are asked, and the others' items are kept. A trigger character asks only the providers that declare it, keeping the open list's items from the others, as Monaco does.
 
-On accept, the editor inserts `insert_text`, falling back to the label. It is expanded as a [snippet](editing.md#snippets) if `insert_text_is_snippet` is set, and its lines are indented like the cursor's line unless `keep_whitespace` is set. In insert mode it replaces `range` (by default the word before the cursor); in replace mode (`suggest.insert_mode`) it replaces `replace_range` (by default the whole word). Shift+Enter and Shift+Tab accept in the other mode. The editor applies any `additional_text_edits`, then runs the item's `command`. Typing a character in `commit_characters` accepts the item and inserts the character.
+On accept, the editor inserts `insert_text`, falling back to the label. It is expanded as a [snippet](editing.md#snippets) if `insert_text_is_snippet` is set, and its lines are indented like the cursor's line unless `keep_whitespace` is set. In insert mode it replaces `range` (by default the word before the cursor); in replace mode (`suggest.insert_mode`) it replaces `replace_range` (by default the whole word). Both ranges must be on a single line, the cursor's, and `replace_range` must start where the insert range does; items with other ranges aren't shown (Monaco `CompletionItem.isInvalid`). Shift+Enter and Shift+Tab accept in the other mode. The editor applies any `additional_text_edits`, then runs the item's `command`. Typing a character in `commit_characters` accepts the item and inserts the character.
 
 `resolve_completion_item` fills in an item lazily, e.g. its docs or an import. The editor resolves the focused item. Meanwhile the details panel keeps what it showed, and shows "Loading..." if resolving takes over 250ms. If you accept an item before it resolves, additional edits that arrive later are still applied, unless the text changed before them. Items tagged `CompletionItemTag::Deprecated` are struck through, or hidden with `suggest.show_deprecated: false`.
 
@@ -181,6 +181,8 @@ Return a `SignatureHelp` with:
 The widget highlights the active parameter (a text label matches whole words only) and re-queries as the cursor moves, 120ms after typing stops, as Monaco does. It stays at the cursor meanwhile, following it as you type. As in Monaco, a provider has no trigger characters by default, so it only answers Cmd/Ctrl+Shift+Space; return them from `trigger_characters` (e.g. `(` and `,`), and `retrigger_characters` for characters that re-query while the hints show. With several signatures, Up/Down or the widget's arrows go through them. `options.parameter_hints` turns opening while typing off (`enabled`) and stops them wrapping around (`cycle`).
 
 ## Formatting
+
+Formatters get `FormattingOptions` with the model's indentation: `tab_size` is the model's resolved `indent_size` (the tab size when `indent_size_is_tab_size`), as Monaco's `getFormattingOptions` passes `indentSize`, and `insert_spaces`.
 
 Formatters return `FormattingEdits`: `TextEdit`s, which are `(Range<PointUtf16>, String)` pairs in the text's current coordinates, and an optional line ending (Monaco's `TextEdit.eol`). A `Vec<TextEdit>` converts with `.into()`. The editor applies them the way Monaco does:
 
@@ -396,6 +398,8 @@ Undo and redo work as in Monaco: undoing an inline edit you just accepted doesn'
 ## Semantic tokens
 
 A `DocumentSemanticTokensProvider` colors identifiers by meaning, such as parameters, read-only variables and macros. It works as in LSP: a legend of token types and modifiers, plus five numbers per token. It can return all tokens, or edits against the result it returned last (`last_result_id`). A `DocumentRangeSemanticTokensProvider` colors the visible lines until a full result arrives.
+
+Only the best-scoring providers are asked, as in Monaco: for the whole document, the first of them with tokens wins (an error or no tokens from all of them leaves the tokens as they are), and a `*` provider isn't asked when a language's own provider exists. For the visible lines, every best-scoring range provider is asked and the first result with tokens is used.
 
 The editor asks for the whole document right away, and again after a pause in typing. Meanwhile the tokens move with the text, as in Monaco. Call `refresh_semantic_tokens` when they change without an edit.
 

@@ -27,7 +27,8 @@ use crate::events::ContentChange;
 use crate::options::SemanticHighlighting;
 use crate::providers::{
     DocumentSemanticTokensProvider, SemanticTokensEpoch, SemanticTokensLegend,
-    SemanticTokensResult, document_range_semantic_tokens_providers,
+    SemanticTokensResult, document_range_semantic_tokens_provider_groups,
+    document_range_semantic_tokens_providers, document_semantic_tokens_provider_groups,
     document_semantic_tokens_providers,
 };
 use crate::semantic_theme::SemanticStyle;
@@ -230,8 +231,12 @@ impl CodeEditor {
         }
         let model = self.model().read(cx);
         let context = model.provider_context();
-        // Best first: by selector score, then newest (Monaco `ordered`).
-        let providers = document_semantic_tokens_providers(cx, self.provider_target(cx));
+        // Only the best-scoring group, newest first (Monaco
+        // `_getDocumentSemanticTokensProviderHighestGroup`).
+        let providers = document_semantic_tokens_provider_groups(cx, self.provider_target(cx))
+            .into_iter()
+            .next()
+            .unwrap_or_default();
         if providers.is_empty() {
             if !self.semantic.store.is_empty() {
                 self.semantic.store.set(None, false);
@@ -428,27 +433,42 @@ impl CodeEditor {
                 let range = PointUtf16::new(rows.start.min(max_row), 0)
                     ..PointUtf16::new(end_row, model.buffer().line_len_utf16(end_row));
                 let version = model.buffer().version();
-                let provider =
-                    document_range_semantic_tokens_providers(cx, this.provider_target(cx))
+                // Every provider of the best-scoring group (Monaco
+                // `getDocumentRangeSemanticTokens`).
+                let providers =
+                    document_range_semantic_tokens_provider_groups(cx, this.provider_target(cx))
                         .into_iter()
                         .next()?;
-                let task =
-                    provider.provide_document_range_semantic_tokens(&context, range.clone(), cx);
-                Some((provider, task, range, version))
+                let tasks: Vec<_> = providers
+                    .iter()
+                    .map(|provider| {
+                        provider.provide_document_range_semantic_tokens(&context, range.clone(), cx)
+                    })
+                    .collect();
+                Some((providers, tasks, range, version))
             }) else {
                 return;
             };
-            let Some((provider, task, range, version)) = requests else {
+            let Some((providers, tasks, range, version)) = requests else {
                 return;
             };
             let started = Instant::now();
-            let result = task.await;
+            // The first result with tokens; a failed request counts as none.
+            let mut found = None;
+            for (provider, task) in providers.into_iter().zip(tasks) {
+                match task.await {
+                    Ok(Some(tokens)) => {
+                        if found.is_none() {
+                            found = Some((provider, tokens));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => log::warn!("range semantic tokens failed: {err:#}"),
+                }
+            }
             this.update(cx, |this, cx| {
                 this.semantic.viewport_debounce.update(started.elapsed());
-                let Ok(Some(tokens)) = result else {
-                    if let Err(err) = result {
-                        log::warn!("range semantic tokens failed: {err:#}");
-                    }
+                let Some((provider, tokens)) = found else {
                     return;
                 };
                 if this.model().read(cx).buffer().version() != version

@@ -400,6 +400,53 @@ pub fn signature_help(help: lsp::SignatureHelp) -> SignatureHelp {
     }
 }
 
+/// Signature help as LSP's, for `SignatureHelpContext.activeSignatureHelp`
+/// (`monaco-languageclient`'s `asSignatureHelp`).
+pub fn lsp_signature_help(help: &SignatureHelp) -> lsp::SignatureHelp {
+    let documentation = |documentation: &Documentation| match documentation {
+        Documentation::PlainText(text) => lsp::Documentation::String(text.to_string()),
+        Documentation::Markdown(markdown) => {
+            lsp::Documentation::MarkupContent(lsp::MarkupContent {
+                kind: lsp::MarkupKind::Markdown,
+                value: markdown.value.to_string(),
+            })
+        }
+    };
+    lsp::SignatureHelp {
+        signatures: help
+            .signatures
+            .iter()
+            .map(|signature| lsp::SignatureInformation {
+                label: signature.label.to_string(),
+                documentation: signature.documentation.as_ref().map(documentation),
+                parameters: Some(
+                    signature
+                        .parameters
+                        .iter()
+                        .map(|parameter| lsp::ParameterInformation {
+                            label: match &parameter.label {
+                                ParameterLabel::Text(text) => {
+                                    lsp::ParameterLabel::Simple(text.to_string())
+                                }
+                                ParameterLabel::Range(range) => {
+                                    lsp::ParameterLabel::LabelOffsets([
+                                        range.start as u32,
+                                        range.end as u32,
+                                    ])
+                                }
+                            },
+                            documentation: parameter.documentation.as_ref().map(documentation),
+                        })
+                        .collect(),
+                ),
+                active_parameter: signature.active_parameter.map(|p| p as u32),
+            })
+            .collect(),
+        active_signature: Some(help.active_signature as u32),
+        active_parameter: Some(help.active_parameter as u32),
+    }
+}
+
 /// A diagnostic as a marker.
 pub fn marker(diagnostic: lsp::Diagnostic) -> Marker {
     Marker {

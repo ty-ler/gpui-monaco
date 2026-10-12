@@ -187,7 +187,7 @@ Issues are linked by number.
 | Provider | Monaco | Status | Issue |
 |---|---|---|---|
 | Completion: fuzzy filter, docs, commit characters, additional edits | `suggest` | ✅ | |
-| Completion: resolve, tags, insert/replace modes, word suggestions, accept and selection options | `suggest` | ✅ | #103 |
+| Completion: resolve, tags, insert/replace modes (items with invalid insert or replace ranges skipped), word suggestions, accept and selection options | `suggest` | ✅ | #103, #417 |
 | Completion: tab completion, locality bonus (`WordDistance`, word-based suggestions included), retrigger rules | `suggest`, `wordDistance` | ✅ | #103, #302 |
 | Completion widget: details toggle, side docs, resizing, status bar, loading and empty messages | `suggest` | ✅ | #103 |
 | Completion widget layout: sized to the room above and below without flipping while typing, north sash, Monaco's list scrollbar, details placed east, west, below or above and resizable, clickable status bar, ellipsis, the details type line in the editor font, `fitWidthToDetails`, screen reader announcements | `SuggestWidget._layout`, `SuggestDetailsOverlay._placeAtAnchor`, `SuggestWidgetStatus` | ✅ | #248 |
@@ -209,7 +209,7 @@ Issues are linked by number.
 | Diagnostics: squiggles, hint dots, high contrast double and dotted underlines, ruler, hover, F8 | `gotoError` | ✅ F8 visits errors, warnings and infos most severe first (Monaco's default `problems.sortOrder`), starting at the marker under the cursor and stepping through same-start markers; the zone follows marker changes or turns stale, reveals its line, zone and position, and reads its message (`role="alert"`, focusable tooltip body); "View Problem" shows the clicked marker rather than searching from its start | #244, #330, #342 |
 | Diagnostic tags (unused, deprecated), related information, code links (`code: { value, target }` as `Marker::code_target`) | `gotoError` | ✅ | #90, #247 |
 | Document highlights | `wordHighlighter` | ✅ 50ms after the cursor rests, then `occurrencesHighlightDelay` (0) from the move | #83, #262 |
-| Formatting: document, range, on type, on paste (with a single cursor); edits with `replaceMove` (`replace` for one whole-text edit); the formatter's line ending (`TextEdit.eol`) | `format` | ✅ the line ending comes as `FormattingEdits::eol` rather than on each edit | #94, #351 |
+| Formatting: document, range, on type, on paste (with a single cursor); edits with `replaceMove` (`replace` for one whole-text edit); the formatter's line ending (`TextEdit.eol`); `FormattingOptions` with the model's indent size (`getFormattingOptions`) | `format` | ✅ the line ending comes as `FormattingEdits::eol` rather than on each edit | #94, #351, #417 |
 | Choosing between formatters (`FormattingConflicts.setFormatterSelector`, `displayName`) | `format` | ✅ the first by default, as standalone Monaco; no built-in picker (`formatDocument.multiple` is VS Code workbench) | #229 |
 | Rename | `rename` | ✅ measured input width, line-height input and candidates, scrolling suggestions in the editor's font, `widget.shadow`, the symbol's line revealed first (`revealLineInCenterIfOutsideViewport`), cancelled when scrolled out of view | #56, #251, #325, #343 |
 | Rename preview (`acceptRenameInputWithPreview`, through a host preview handler) | `rename` | ✅ | #225 |
@@ -222,13 +222,13 @@ Issues are linked by number.
 | Color decorators (providers, default finder) | `colorDecorators` | ✅ | #97 |
 | Color picker (hover and standalone) | `colorPicker` | ✅ `editorHoverWidget.*` chrome, `color-mode` header icon and title, hover states, grab cursors; the standalone picker follows `hover.above` and sizes its header from the body | #97, #251, #343 |
 | Links, opened by Cmd/Ctrl+click and the `openLink` middle click on mouse-up (`ClickLinkGesture`) | `links` | ✅ | #93, #350 |
-| Semantic tokens | `semanticTokens` | ✅ | #98 |
+| Semantic tokens, from the best-scoring providers only (the first document result with tokens, every range provider of the group) | `semanticTokens`, `getSemanticTokens` | ✅ | #98, #417 |
 | Inline completions (ghost text, inline edits) | `inlineCompletions` | 🟡 ghost text (at every cursor it fits, `getSecondaryEdits`; a multi-line one mid-line moves the rest of the line below, `ghost-text-hidden`), toolbar (hover or always, as a hover card; keys from the keymap as keycaps; its "⋯" menu is the context menu, and the gutter menu, with Monaco's icons, header and footer, works from the keyboard), commands, options (`triggerCommandOnProviderChange`, `experimental.suppressInlineSuggestions` and `showOnSuggestConflict`, `inlineCompletionsAccessibilityVerbose`), lifetime hooks, partial accept kinds, provider groups with `excludesGroupIds`, provider refresh with a change hint (`onDidChangeInlineCompletions`), `completeBracketPairs`, `warning` (on every line), `shownCommand`, `enableForwardStability`, `disposeInlineCompletions` and the full request context; the suggest widget's selection is passed to providers and its preview extended (`_computeAugmentation`, `handleSuggestAccepted`), it preselects the suggestion the inline completion extends (`registerSelector`), and inline edits hide while it has one; inline edits with Monaco's word, line, insertion, deletion, side-by-side, collapsed, custom (`hint`) and jump-to views, the gutter indicator (line number, pulse, color, width and icon transitions; across the whole gutter, so without a glyph margin too) and its menu (kept in the window, closed on scroll), the long-distance hint (fading in and out), cross-file edits (through `OpenLocation`), `jumpToPosition` items, alternative actions (Shift+Tab; supplied by the provider), `showInlineEditMenu`, undo/redo special cases and the fade-out; no snooze, model picker, onboarding or icon rotation | #99, #201, #216, #230, #249, #297, #341 |
 | Document symbols | `documentSymbols` | ✅ | #100 |
 | Selection ranges | `smartSelect` | ✅ | #82 |
 | Folding ranges | `folding` | ✅ | #102 |
 | Linked editing ranges | `linkedEditing` | ✅ | #101 |
-| LSP bridge (`gpui-monaco-lsp`: sync, diagnostics, completion, hover, definition, highlights, signature help) | `monaco-languageclient` | ✅ | #54 |
+| LSP bridge (`gpui-monaco-lsp`: sync, diagnostics, completion, hover, definition, highlights, signature help with the editor's `isRetrigger` and `activeSignatureHelp`) | `monaco-languageclient` | ✅ | #54, #417 |
 
 ## Other
 

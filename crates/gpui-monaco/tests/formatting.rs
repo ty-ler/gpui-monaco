@@ -657,3 +657,69 @@ fn format_on_paste_needs_a_single_cursor(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(text(&editor, cx), "x  y\na  =  1\na  =  1");
 }
+
+/// Records the options it was given.
+struct RecordOptions(Rc<RefCell<Vec<FormattingOptions>>>);
+impl DocumentFormattingProvider for RecordOptions {
+    fn provide_document_formatting_edits(
+        &self,
+        _: &ProviderContext,
+        options: FormattingOptions,
+        _: &mut App,
+    ) -> Task<anyhow::Result<FormattingEdits>> {
+        self.0.borrow_mut().push(options);
+        Task::ready(Ok(Vec::new().into()))
+    }
+}
+
+#[gpui::test]
+fn formatters_get_the_indent_size(cx: &mut TestAppContext) {
+    // Monaco `TextModel.getFormattingOptions`: `{ tabSize: indentSize,
+    // insertSpaces }`.
+    let (editor, cx) = setup("a", cx);
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        register_document_formatting_provider(
+            cx,
+            LanguageSelector::All,
+            RecordOptions(seen.clone()),
+        )
+    });
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    model.update(cx, |m, cx| {
+        let options = gpui_monaco::ModelOptions {
+            tab_size: 8,
+            indent_size: 2,
+            indent_size_is_tab_size: false,
+            insert_spaces: true,
+            ..m.options().clone()
+        };
+        m.update_options(options, cx);
+    });
+    assert!(editor.update(cx, |e, cx| e.format_document(cx)));
+    cx.run_until_parked();
+    // `indentSize: 'tabSize'` resolves to the tab size.
+    model.update(cx, |m, cx| {
+        let options = gpui_monaco::ModelOptions {
+            indent_size_is_tab_size: true,
+            insert_spaces: false,
+            ..m.options().clone()
+        };
+        m.update_options(options, cx);
+    });
+    assert!(editor.update(cx, |e, cx| e.format_document(cx)));
+    cx.run_until_parked();
+    assert_eq!(
+        *seen.borrow(),
+        [
+            FormattingOptions {
+                tab_size: 2,
+                insert_spaces: true
+            },
+            FormattingOptions {
+                tab_size: 8,
+                insert_spaces: false
+            },
+        ]
+    );
+}

@@ -344,6 +344,35 @@ fn invalid_ranges_are_skipped() {
 }
 
 #[test]
+fn invalid_replace_ranges_are_skipped() {
+    // Monaco `CompletionItem`: the replace range is single-line, on the
+    // cursor's line, and starts where the insert range does.
+    let replace = |label: &str, range: std::ops::Range<PointUtf16>| {
+        let mut item = item(label, 2);
+        item.replace_range = Some(range);
+        item
+    };
+    let p = PointUtf16::new;
+    let items = vec![
+        replace("oa_multi", p(0, 18)..p(1, 2)),
+        replace("ob_other", p(2, 18)..p(2, 22)),
+        replace("oc_start", p(0, 16)..p(0, 22)),
+        replace("od_ok", p(0, 18)..p(0, 22)),
+        item("oe_none", 2),
+    ];
+    let model = model(items, ctx("oo", 0));
+    assert_eq!(labels(&model), ["od_ok", "oe_none"]);
+
+    // Without a `range`, the insert range starts at the word's start.
+    let mut defaulted = CompletionItem::new("print", CompletionItemKind::Function);
+    defaulted.replace_range = Some(p(0, 4)..p(0, 9));
+    let mut off = CompletionItem::new("parse", CompletionItemKind::Function);
+    off.replace_range = Some(p(0, 5)..p(0, 9));
+    let model = CompletionModel::new(vec![defaulted, off], p(0, 5), 4, ctx("    p", 0));
+    assert_eq!(labels(&model), ["print"]);
+}
+
+#[test]
 fn filter_text_ranks_label_highlights() {
     let model = model(
         vec![item_with(
