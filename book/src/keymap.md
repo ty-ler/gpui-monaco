@@ -14,7 +14,7 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **Alt+Backspace:** delete the word to the left, or both characters of an auto-closed pair around the cursor
 - **F7 / Shift+F7:** move to the next / previous highlighted occurrence
 - **Cmd+Alt+[ / Cmd+Alt+]:** fold and unfold
-- **Alt+F8 / F8:** next problem (Monaco's `marker.next` and `marker.nextInFiles`, which act the same within one model)
+- **Alt+F8 / F8:** next problem in the model (Monaco's `marker.next`) / in every uri (`marker.nextInFiles`, which opens another uri's through the editor openers)
 - **Cmd+Shift+, / Cmd+Shift+.:** replace the value at the cursor with the previous or next one (`1` → `2`, `true` → `false`)
 - **Ctrl+B / Ctrl+F / Ctrl+P / Ctrl+N, Ctrl+A / Ctrl+E (with Shift to select), Ctrl+H / Ctrl+D:** Monaco's Emacs-style keys
 - **F12:** go to definition

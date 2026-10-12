@@ -624,10 +624,12 @@ actions!(
         /// Moves to the previous marker and shows it inline (Monaco
         /// `editor.action.marker.prev`, Shift+Alt+F8).
         GoToPreviousMarker,
-        /// Monaco `editor.action.marker.nextInFiles` (F8): the next marker,
-        /// which in a single model is [`GoToNextMarker`].
+        /// Monaco `editor.action.marker.nextInFiles` (F8): the next marker
+        /// of every uri, opening another uri's through the editor openers
+        /// (see [`CodeEditor::go_to_marker_in_files`](crate::CodeEditor::go_to_marker_in_files)).
         GoToNextMarkerInFiles,
-        /// Monaco `editor.action.marker.prevInFiles` (Shift+F8).
+        /// Monaco `editor.action.marker.prevInFiles` (Shift+F8): the
+        /// previous marker of every uri.
         GoToPreviousMarkerInFiles,
         /// Goes to the definition of the symbol at the cursor (Monaco
         /// `editor.action.revealDefinition`).

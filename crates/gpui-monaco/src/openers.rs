@@ -129,6 +129,19 @@ impl CodeEditor {
         to_side: bool,
         cx: &mut Context<Self>,
     ) {
+        self.open_location_with_openers_then(location, to_side, |_, _| {}, cx);
+    }
+
+    /// [`Self::open_location_with_openers`], then `opened` on this editor
+    /// when an opener opened it (Monaco's `openCodeEditor` resolving to
+    /// the source editor).
+    pub(crate) fn open_location_with_openers_then(
+        &mut self,
+        location: Location,
+        to_side: bool,
+        opened: impl FnOnce(&mut CodeEditor, &mut Context<CodeEditor>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
         let event = move |location| {
             if to_side {
                 CodeEditorEvent::OpenLocationToSide(location)
@@ -148,10 +161,12 @@ impl CodeEditor {
         let selection = location.selection_range();
         let editor = cx.entity();
         cx.defer(move |cx| {
-            let opened = editor_openers(cx)
+            let handled = editor_openers(cx)
                 .iter()
                 .any(|open| open(&editor, &uri, Some(selection.clone()), cx));
-            if !opened {
+            if handled {
+                editor.update(cx, opened);
+            } else {
                 editor.update(cx, |_, cx| cx.emit(event(location)));
             }
         });
