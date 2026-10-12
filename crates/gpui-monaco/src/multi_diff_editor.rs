@@ -58,9 +58,10 @@ use scroll_layout::ScrollAnchoring;
 /// Space above the standard variant's header content (its `.header-content`
 /// margin).
 const HEADER_MARGIN_TOP: f32 = 8.;
-/// The height assumed for a diff editor before it's laid out (Monaco's
-/// initial `editorContentHeight`).
-const INITIAL_CONTENT_HEIGHT: f32 = 500.;
+/// The height assumed for a file before its diff editor is laid out,
+/// header and bottom padding included (Monaco's initial
+/// `lastTemplateData.expandedContentHeight`).
+const INITIAL_EXPANDED_HEIGHT: f32 = 500.;
 /// The list's scrollbars' size (Monaco `ScrollableElement`'s default
 /// `verticalScrollbarSize` and `horizontalScrollbarSize`).
 const SCROLLBAR_SIZE: f32 = 10.;
@@ -180,7 +181,9 @@ pub struct MultiDiffDocument {
     /// The header's title, usually the modified file's path. The part
     /// after the last `/` shows as the name, the rest as its description.
     pub label: SharedString,
-    /// The original file's path when it differs (a rename).
+    /// The original file's path when it differs (a rename). The header
+    /// shows `R` and this path only when both sides exist and it isn't
+    /// `label` (Monaco compares the two uris' paths).
     pub original_label: Option<SharedString>,
     /// The original text; `None` if the file was created.
     pub original: Option<Entity<TextModel>>,
@@ -382,8 +385,9 @@ struct Item {
     modified: Entity<TextModel>,
     collapsed: bool,
     /// The diff editor's content height, as last measured (Monaco
-    /// `expandedContentHeight`, less the header and bottom padding).
-    content_height: Pixels,
+    /// `expandedContentHeight`, less the header and bottom padding);
+    /// `None` until then.
+    content_height: Option<Pixels>,
     /// The view state its editor had when it was given back to the pool
     /// (Monaco keeps the selections).
     view_state: Option<DiffEditorViewState>,
@@ -393,6 +397,9 @@ struct Item {
     /// The header, which takes focus in the variants that collapse on a
     /// header click (Monaco's `tabIndex = 0`).
     header_focus: FocusHandle,
+    /// The header's chevron, a button in every variant (Monaco's
+    /// `collapseButton`).
+    chevron_focus: FocusHandle,
     /// A binary file's placeholder, or its "Open Diff" button.
     placeholder_focus: FocusHandle,
 }
@@ -407,11 +414,12 @@ impl Item {
             original,
             modified,
             collapsed: false,
-            content_height: px(INITIAL_CONTENT_HEIGHT),
+            content_height: None,
             view_state: None,
             selections: None,
-            header_focus: cx.focus_handle(),
-            placeholder_focus: cx.focus_handle(),
+            header_focus: cx.focus_handle().tab_stop(true),
+            chevron_focus: cx.focus_handle().tab_stop(true),
+            placeholder_focus: cx.focus_handle().tab_stop(true),
         }
     }
 
@@ -420,7 +428,13 @@ impl Item {
         match (&document.original, &document.modified) {
             (None, _) => FileStatus::Added,
             (_, None) => FileStatus::Deleted,
-            _ if document.original_label.is_some() => FileStatus::Renamed,
+            _ if document
+                .original_label
+                .as_ref()
+                .is_some_and(|original| *original != document.label) =>
+            {
+                FileStatus::Renamed
+            }
             _ => FileStatus::Modified,
         }
     }
@@ -463,8 +477,24 @@ impl Item {
         } else if self.document.binary {
             config.header_height + config.content_bottom_padding + px(BINARY_PLACEHOLDER_HEIGHT)
         } else {
-            config.header_height + self.content_height + config.content_bottom_padding
+            config.header_height + self.content_height(config) + config.content_bottom_padding
         }
+    }
+
+    /// The diff editor's content height: as measured, else Monaco's
+    /// 500px for the whole file less the header and bottom padding
+    /// (`DiffEditorItemTemplate.setItem`'s `editorContentHeight`).
+    fn content_height(&self, config: &VariantConfiguration) -> Pixels {
+        self.content_height.unwrap_or_else(|| {
+            (px(INITIAL_EXPANDED_HEIGHT) - config.header_height - config.content_bottom_padding)
+                .max(px(0.))
+        })
+    }
+
+    /// Whether the header or its chevron has focus (Monaco's `trackFocus`
+    /// on the header, which sees its chevron's focus too).
+    fn header_has_focus(&self, window: &Window) -> bool {
+        self.header_focus.is_focused(window) || self.chevron_focus.is_focused(window)
     }
 
     /// Whether both sides exist (Monaco: the "Open Diff" button shows).
@@ -719,6 +749,9 @@ pub struct MultiDiffEditor {
     diff_layout: MultiDiffLayoutOptions,
     /// The diff editor last reported by `ActiveControlChanged`.
     reported_active_control: Option<EntityId>,
+    /// The files in view when last drawn (Monaco's bound items, binary
+    /// files included).
+    drawn_items: Vec<usize>,
 }
 
 impl EventEmitter<MultiDiffEditorEvent> for MultiDiffEditor {}
@@ -777,6 +810,7 @@ impl MultiDiffEditor {
             pending_focus: None,
             diff_layout: MultiDiffLayoutOptions::default(),
             reported_active_control: None,
+            drawn_items: Vec::new(),
         };
         this.set_documents(documents, window, cx);
         this
@@ -1451,10 +1485,39 @@ impl MultiDiffEditor {
     }
 
     /// The active file's diff editor (Monaco `getActiveControl`), if it
-    /// has one: only files in view (and a focused one) do, and binary
-    /// files never do.
+    /// has one: only files in view (and a focused one) do, collapsed or
+    /// not, and binary files never do.
     pub fn active_control(&self) -> Option<&Entity<DiffEditor>> {
         self.diff_editor(self.active?)
+    }
+
+    /// Focuses the active file (Monaco `focus`): its modified editor, or a
+    /// binary file's placeholder (or "Open Diff" button). `false`, leaving
+    /// the focus, when there's no active file or it isn't in view. A
+    /// collapsed file's editor is hidden and can't take the focus, as in
+    /// Monaco, but it still returns `true`.
+    pub fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(index) = self.active.filter(|&index| index < self.items.len()) else {
+            return false;
+        };
+        let item = &self.items[index];
+        if item.document.binary {
+            if !self.drawn_items.contains(&index) {
+                return false;
+            }
+            if !item.collapsed {
+                window.focus(&item.placeholder_focus, cx);
+            }
+            return true;
+        }
+        let Some(diff) = self.diff_editor(index) else {
+            return false;
+        };
+        if !item.collapsed {
+            let modified = diff.read(cx).modified_editor().focus_handle(cx);
+            window.focus(&modified, cx);
+        }
+        true
     }
 
     /// The list's context keys, which GPUI sets on its element and its
@@ -1502,8 +1565,8 @@ impl MultiDiffEditor {
     }
 
     /// The diff editor showing file `index`, if one does: only the files in
-    /// view (and a focused one) have an editor, and binary files never do
-    /// (Monaco `tryGetCodeEditor`).
+    /// view (and a focused one) have an editor, collapsed or not (hidden
+    /// then), and binary files never do (Monaco `tryGetCodeEditor`).
     pub fn diff_editor(&self, index: usize) -> Option<&Entity<DiffEditor>> {
         self.bound.iter().find(|t| t.item == index).map(|t| &t.diff)
     }
@@ -2055,6 +2118,11 @@ impl MultiDiffEditor {
     fn measure(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut redraw = false;
         for template in &mut self.bound {
+            // A collapsed file's editor isn't laid out: measure it once
+            // it shows.
+            if self.items[template.item].collapsed {
+                continue;
+            }
             if std::mem::take(&mut template.stale) {
                 // Laid out before the diff changed: measure after the next
                 // layout.
@@ -2067,9 +2135,11 @@ impl MultiDiffEditor {
             }
             let item = &mut self.items[template.item];
             if let Some(height) = diff.content_height(cx)
-                && (height - item.content_height).abs() > px(0.5)
+                && item
+                    .content_height
+                    .is_none_or(|measured| (height - measured).abs() > px(0.5))
             {
-                item.content_height = height;
+                item.content_height = Some(height);
                 redraw = true;
             }
         }
@@ -2095,7 +2165,8 @@ impl MultiDiffEditor {
         // line's place in the list, is about to change.
         if diff
             .content_height(cx)
-            .is_none_or(|height| (height - self.items[pending.item].content_height).abs() > px(0.5))
+            .zip(self.items[pending.item].content_height)
+            .is_none_or(|(height, measured)| (height - measured).abs() > px(0.5))
         {
             return;
         }
@@ -2222,8 +2293,8 @@ impl MultiDiffEditor {
     /// The per-file state the header and borders are drawn with.
     fn entry_state(&self, index: usize, list_focused: bool, window: &Window) -> EntryState {
         let active = self.active == Some(index);
-        let header_focused = self.config().header_click_to_collapse
-            && self.items[index].header_focus.is_focused(window);
+        let header_focused =
+            self.config().header_click_to_collapse && self.items[index].header_has_focus(window);
         EntryState {
             active,
             focused: self.focused_item == Some(index),
@@ -2312,7 +2383,7 @@ impl MultiDiffEditor {
         let header = div()
             .id(("multi-diff-header", index))
             .debug_selector(move || format!("multi-diff-header-{index}"))
-            .track_focus(&item.header_focus)
+            .track_focus(&item.header_focus.clone().tab_index(header_tab_index(index)))
             .role(gpui::Role::Button)
             .aria_label(label)
             .aria_expanded(!collapsed)
@@ -2332,10 +2403,12 @@ impl MultiDiffEditor {
                 cx.notify();
             }))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_from_header(index, cx)))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                     cx.stop_propagation();
                     this.toggle_from_header(index, cx);
+                } else {
+                    tab_moves_focus(event, window, cx);
                 }
             }));
         let hover_background = colors.list_hover_background;
@@ -2491,9 +2564,16 @@ impl MultiDiffEditor {
                     cx.notify();
                 }))
         });
+        let focus_border = colors.focus_border;
         let chevron_button = div()
             .id(("multi-diff-collapse", index))
             .debug_selector(|| format!("multi-diff-collapse-{index}"))
+            .track_focus(
+                &item
+                    .chevron_focus
+                    .clone()
+                    .tab_index(header_tab_index(index)),
+            )
             .role(gpui::Role::Button)
             .aria_label(SharedString::from(format!(
                 "{}, {}",
@@ -2522,12 +2602,22 @@ impl MultiDiffEditor {
                     button.w(px(16.)).h(px(22.))
                 }
             })
+            .focus_visible(move |style| style.border_1().border_color(focus_border))
             .child(chevron)
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 // Monaco `activateItem`.
                 this.active = Some(index);
                 this.set_collapsed(index, !collapsed, cx)
+            }))
+            // Monaco's `Button`: Enter or Space clicks it.
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    this.toggle_from_header(index, cx);
+                } else {
+                    tab_moves_focus(event, window, cx);
+                }
             }));
         div()
             .id(("multi-diff-header-content", index))
@@ -2559,6 +2649,7 @@ impl MultiDiffEditor {
                             // decoration colors.
                             path.child(
                                 div()
+                                    .debug_selector(move || format!("multi-diff-status-{index}"))
                                     .flex()
                                     .flex_none()
                                     .items_center()
@@ -2574,6 +2665,7 @@ impl MultiDiffEditor {
                             // Monaco's `.status`: semibold at 0.75 opacity.
                             path.child(
                                 div()
+                                    .debug_selector(move || format!("multi-diff-status-{index}"))
                                     .flex_none()
                                     .mx(px(10.))
                                     .font_weight(FontWeight::SEMIBOLD)
@@ -2582,9 +2674,21 @@ impl MultiDiffEditor {
                             )
                         }
                     })
-                    .when_some(item.document.original_label.clone(), |path, original| {
-                        path.child(resource_label(&original, true, false, colors))
-                    }),
+                    // Monaco's second label: the original path, struck
+                    // through, for a rename.
+                    .when_some(
+                        item.document
+                            .original_label
+                            .clone()
+                            .filter(|_| item.status == FileStatus::Renamed),
+                        |path, original| {
+                            path.child(
+                                resource_label(&original, true, false, colors).debug_selector(
+                                    move || format!("multi-diff-original-label-{index}"),
+                                ),
+                            )
+                        },
+                    ),
             )
             .when(!self.file_actions.is_empty() && show_actions, |header| {
                 header.child(
@@ -2631,8 +2735,16 @@ impl MultiDiffEditor {
             .child("Binary file changed");
         let Some(handler) = open_diff else {
             return placeholder
-                .track_focus(&item.placeholder_focus)
-                .focus_visible(move |style| style.border_1().border_color(focus_border));
+                .track_focus(
+                    &item
+                        .placeholder_focus
+                        .clone()
+                        .tab_index(header_tab_index(index) + 1),
+                )
+                .focus_visible(move |style| style.border_1().border_color(focus_border))
+                .on_key_down(|event: &KeyDownEvent, window, cx| {
+                    tab_moves_focus(event, window, cx)
+                });
         };
         let document = item.document.clone();
         let run = {
@@ -2648,7 +2760,12 @@ impl MultiDiffEditor {
         let button = div()
             .id(("multi-diff-open-binary-diff", index))
             .debug_selector(move || format!("multi-diff-open-binary-diff-{index}"))
-            .track_focus(&item.placeholder_focus)
+            .track_focus(
+                &item
+                    .placeholder_focus
+                    .clone()
+                    .tab_index(header_tab_index(index) + 1),
+            )
             .role(gpui::Role::Button)
             .px(px(14.))
             .py(px(4.))
@@ -2671,6 +2788,8 @@ impl MultiDiffEditor {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                     cx.stop_propagation();
                     run_on_key(this, window, cx);
+                } else {
+                    tab_moves_focus(event, window, cx);
                 }
             }));
         placeholder.child(button)
@@ -2760,6 +2879,30 @@ impl MultiDiffEditor {
     }
 }
 
+/// File `index`'s header and chevron tab stops' index in the list's tab
+/// group, so a file's header, chevron and editor (`+ 1`) come in that
+/// order, then the next file's (Monaco's DOM order).
+fn header_tab_index(index: usize) -> isize {
+    isize::try_from(index).unwrap_or(isize::MAX / 2) * 2
+}
+
+/// The browser's Tab and Shift+Tab on a header, chevron or binary
+/// placeholder, which the editor's keymap doesn't reach: they move the
+/// focus to the next or previous tab stop.
+fn tab_moves_focus(event: &KeyDownEvent, window: &mut Window, cx: &mut App) {
+    let keystroke = &event.keystroke;
+    let modifiers = keystroke.modifiers;
+    if keystroke.key != "tab" || modifiers.control || modifiers.alt || modifiers.platform {
+        return;
+    }
+    cx.stop_propagation();
+    if modifiers.shift {
+        window.focus_prev(cx);
+    } else {
+        window.focus_next(cx);
+    }
+}
+
 /// `box-shadow: var(--vscode-scrollbar-shadow) 0 6px 6px -6px`, under a
 /// header with its file scrolled under it.
 fn header_shadow(color: Hsla) -> Vec<BoxShadow> {
@@ -2841,7 +2984,7 @@ fn resource_label(
     strikethrough: bool,
     primary: bool,
     colors: &EditorColors,
-) -> impl IntoElement {
+) -> gpui::Div {
     let (folder, name) = match path.rsplit_once('/') {
         Some((folder, name)) => (Some(folder.to_string()), name.to_string()),
         None => (None, path.to_string()),
@@ -2983,11 +3126,14 @@ impl Render for MultiDiffEditor {
                 visible.push((index, item_top));
             }
         }
+        // Monaco binds every file in view, collapsed or not; a collapsed
+        // file's editor is hidden.
         let wanted: Vec<usize> = visible
             .iter()
             .map(|&(index, _)| index)
-            .filter(|&index| !self.items[index].collapsed && !self.items[index].document.binary)
+            .filter(|&index| !self.items[index].document.binary)
             .collect();
+        self.drawn_items = visible.iter().map(|&(index, _)| index).collect();
         self.update_bindings(&wanted, window, cx);
         // A restored active file takes the focus (Monaco
         // `DiffEditorItemBinding.focus`), with an editor if it has none.
@@ -3018,7 +3164,7 @@ impl Render for MultiDiffEditor {
             .or_else(|| {
                 self.items.iter().position(|item| {
                     item.placeholder_focus.is_focused(window)
-                        || (config.header_click_to_collapse && item.header_focus.is_focused(window))
+                        || (config.header_click_to_collapse && item.header_has_focus(window))
                 })
             });
         if focused != self.focused_item {
@@ -3131,6 +3277,11 @@ impl Render for MultiDiffEditor {
                             item_div.child(
                                 div()
                                     .debug_selector(move || format!("multi-diff-editor-{index}"))
+                                    // After its header's tab stops (an
+                                    // element without an id: a group
+                                    // only, not focusable).
+                                    .tab_group()
+                                    .tab_index(header_tab_index(index) + 1)
                                     .absolute()
                                     .top(config.editor_top)
                                     .left(config.horizontal_inset)
@@ -3272,6 +3423,9 @@ impl Render for MultiDiffEditor {
             .id("multi-diff-editor")
             .key_context(key_context)
             .track_focus(&self.focus_handle)
+            // The files' tab stops (`header_tab_index`) are ordered within
+            // the list.
+            .tab_group()
             .size_full()
             .relative()
             .overflow_hidden()
