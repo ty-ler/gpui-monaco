@@ -21,6 +21,8 @@ Every feature here works out of the box. Each follows Monaco's behavior, which t
   - Clicking the line numbers selects the line; Shift+click and dragging there extend by lines.
   - Alt+click adds a cursor, or removes the one clicked; Alt+double-click and Alt+triple-click select the new cursor's word or line.
   - Dragging past the editor's edge scrolls, faster the farther away the mouse is.
+  - Cmd/Ctrl+click on a link or a symbol acts when the button comes up on the same line, so Cmd/Ctrl+drag selects as a plain drag does (see [links](providers.md#links) and [go to definition](providers.md#go-to-definition-references-and-the-peek-view)).
+- **Selection anchor:** Cmd+K Cmd+B marks the cursor's position with a thin blue bar (hover it for "Selection Anchor"), Cmd+K Cmd+K selects from there to the cursor, and Escape removes it.
 - **Clipboard:** copy, cut and paste with Monaco's multi-cursor rules. With one cursor per line, each cursor pastes its own line. With no selection, the whole line is copied (`empty_selection_clipboard`). Copies use the model's line ending (CRLF within the copied text on Windows, as Monaco). A column selection's copy pasted at a single cursor goes in as a block, with `multi_cursor_paste: Spread` (the default): each row on the next line at the cursor's visible column, short lines padded with spaces and rows past the end appended.
 - **IME:** marked text is shown inline, underlined, with the clause being converted underlined thicker, and the candidate window is positioned at the cursor. With several cursors, the composition is typed at each of them. A committed character gets the typing helpers below, so a dead-key quote auto-closes or surrounds the selection.
 

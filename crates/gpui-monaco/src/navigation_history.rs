@@ -12,6 +12,12 @@ use crate::editor::CodeEditor;
 /// Monaco keeps this many cursor states.
 const MAX_CURSOR_UNDO: usize = 50;
 
+/// Monaco's `.selection-anchor` color (`anchorSelect.css`), not a theme
+/// color.
+fn selection_anchor_color() -> gpui::Hsla {
+    gpui::rgb(0x007acc).into()
+}
+
 #[derive(Clone)]
 struct CursorStackElement {
     selections: Vec<Selection>,
@@ -137,13 +143,7 @@ impl CodeEditor {
     /// `editor.action.setSelectionAnchor`, Cmd+K Cmd+B).
     pub fn set_selection_anchor(&mut self, cx: &mut Context<Self>) {
         let position = self.cursors.primary().position;
-        let rope = self.snapshot.rope();
-        let start = rope.point_utf16_to_offset(position);
-        // A one-character box, or an empty range at the end of a line.
-        let end = rope
-            .clip_offset(start + 1, text::Bias::Right)
-            .min(rope.line_range(position.row).end);
-        let cursor = self.theme.colors.cursor;
+        let offset = self.snapshot.rope().point_utf16_to_offset(position);
         let old: Vec<DecorationId> = self.navigation.anchor.take().into_iter().collect();
         let owner = Some(cx.entity_id());
         let ids = self.model().update(cx, |model, cx| {
@@ -151,9 +151,16 @@ impl CodeEditor {
                 owner,
                 &old,
                 vec![(
-                    start..end.max(start),
+                    offset..offset,
+                    // Monaco's `.selection-anchor`: a 2px `#007ACC` bar
+                    // (`width: 2px !important` on the empty range).
                     DecorationOptions {
-                        border: Some(cursor),
+                        background: Some(selection_anchor_color()),
+                        min_width: px(2.),
+                        // Monaco `MarkdownString.appendText`.
+                        hover_message: vec![crate::providers::MarkdownString::from_plain_text(
+                            "Selection Anchor",
+                        )],
                         stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
                         ..Default::default()
                     },

@@ -61,4 +61,4 @@ Demo providers are registered by default:
 | `PLAYGROUND_ZOOM=2` | Start at a font zoom level (Cmd+wheel zooms too) |
 | `PLAYGROUND_DEBUG=1` | Log selection changes |
 | `PLAYGROUND_SCREENSHOT=out.png` | Save a screenshot and exit (needs `--features screenshot`) |
-| `PLAYGROUND_KEYS="cmd-down text:hi wait"` | Keystrokes to play before the screenshot (`text:` types, `_` is a space, `mouse:x,y` moves the mouse, `wheel:x,y,dy` scrolls there, `wait` pauses 150ms) |
+| `PLAYGROUND_KEYS="cmd-down text:hi wait"` | Keystrokes to play before the screenshot (`text:` types, `_` is a space, `mouse:x,y` moves the mouse and `mouse:x,y,secondary` holds Cmd/Ctrl, `click:x,y` clicks, `wheel:x,y,dy` scrolls there, `wait` pauses 150ms) |

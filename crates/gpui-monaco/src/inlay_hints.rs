@@ -1044,6 +1044,14 @@ impl CodeEditor {
         self.inlay.active.is_some_and(|(_, modifier)| modifier)
     }
 
+    /// Monaco's link gesture `onCancel`: the hovered label part's styling
+    /// goes.
+    pub(crate) fn cancel_inlay_hint_link(&mut self, cx: &mut Context<Self>) {
+        if self.inlay.active.is_some() {
+            self.set_active_inlay_part(None, cx);
+        }
+    }
+
     /// Cmd/Ctrl+click on `part` (Monaco's link gesture `onExecute`): opens
     /// its location like go to definition, else runs its command. Returns
     /// whether it had either.

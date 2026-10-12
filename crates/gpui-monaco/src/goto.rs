@@ -487,7 +487,8 @@ impl CodeEditor {
         let index = (nav.index + 1) % nav.locations.len();
         let location = nav.locations[index].clone();
         cx.global_mut::<SymbolNavigation>().index = index;
-        self.open_location(&location, true, cx);
+        // Monaco `SymbolNavigationService.revealNext`: no highlight.
+        self.open_location(&location, false, cx);
         true
     }
 

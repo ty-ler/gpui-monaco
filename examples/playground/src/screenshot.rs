@@ -5,7 +5,8 @@
 //! `text:abc` types `abc` character by character (`_` types a space),
 //! `wheel:x,y,dy` moves the mouse to `x, y` (window pixels) and turns the
 //! wheel by `dy` pixels there, `click:x,y` clicks there with the left
-//! button, `mouse:x,y` moves the mouse to `x, y`, and `wait` pauses 150ms
+//! button, `mouse:x,y` moves the mouse to `x, y` (`mouse:x,y,secondary`
+//! with Cmd/Ctrl held, as for a Cmd/Ctrl+hover link), and `wait` pauses 150ms
 //! and draws a frame.
 
 use gpui::{AnyWindowHandle, App};
@@ -39,16 +40,24 @@ pub fn capture_if_requested(window: AnyWindowHandle, cx: &mut App) {
                 continue;
             }
             if let Some(args) = token.strip_prefix("mouse:") {
-                let [x, y]: [f32; 2] = args
-                    .split(',')
-                    .map(|n| n.parse().expect("invalid mouse number"))
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .expect("mouse:x,y");
+                let mut parts = args.split(',');
+                let mut number = || -> f32 {
+                    parts
+                        .next()
+                        .and_then(|n| n.parse().ok())
+                        .expect("mouse:x,y[,secondary]")
+                };
+                let position = gpui::point(gpui::px(number()), gpui::px(number()));
+                let modifiers = match parts.next() {
+                    Some("secondary") => gpui::Modifiers::secondary_key(),
+                    Some(other) => panic!("unknown mouse modifier {other}"),
+                    None => gpui::Modifiers::default(),
+                };
                 cx.update_window(window, |_, window, cx| {
                     window.dispatch_event(
                         gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
-                            position: gpui::point(gpui::px(x), gpui::px(y)),
+                            position,
+                            modifiers,
                             ..Default::default()
                         }),
                         cx,

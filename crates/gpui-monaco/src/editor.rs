@@ -718,6 +718,8 @@ pub struct CodeEditor {
     pub(crate) hover: crate::hover::HoverState,
     pub(crate) marker_navigation: crate::markers::MarkerNavigation,
     pub(crate) definition: crate::definition::DefinitionLink,
+    /// Monaco's `ClickLinkGesture`: Cmd/Ctrl+click runs on mouse-up.
+    pub(crate) click_link: crate::click_link::ClickLinkGesture,
     pub(crate) signature_help: crate::signature_help::SignatureHelpState,
     pub(crate) suggest: crate::completion::SuggestState,
     pub(crate) snippet: crate::snippet_session::SnippetState,
@@ -1128,6 +1130,7 @@ impl CodeEditor {
             hover: Default::default(),
             marker_navigation: Default::default(),
             definition: Default::default(),
+            click_link: Default::default(),
             signature_help: Default::default(),
             suggest: Default::default(),
             snippet: Default::default(),
@@ -1250,7 +1253,7 @@ impl CodeEditor {
         self.reset_inlay_hints(cx);
         self.reset_code_lenses(cx);
         self.close_marker_zone(cx);
-        self.clear_definition_link(cx);
+        self.reset_click_link(cx);
         self.detach_find_from_model(cx);
         let brackets = std::mem::take(&mut self.bracket_decorations);
         if !brackets.is_empty() {
@@ -1641,6 +1644,7 @@ impl CodeEditor {
         let changed = |i: usize| old.is_none_or(|old| old[i] != state[i]);
         if old.is_some_and(|old| old[0] != state[0] || old[1] != state[1]) {
             self.hover_scrolled(cx);
+            self.reset_click_link(cx);
         }
         let event = ScrollEvent {
             scroll_top: state[0],
@@ -2723,6 +2727,7 @@ impl CodeEditor {
             } => {
                 // Monaco's view model forwards the content change before
                 // the cursors react to it.
+                self.reset_click_link(cx);
                 cx.emit(CodeEditorEvent::ModelContentChanged(ModelContentChange {
                     changes: changes.clone(),
                     eol: *eol,
@@ -3080,6 +3085,8 @@ impl CodeEditor {
         self.inspect_tokens_cursor_changed(cx);
         self.check_rename(cx);
         self.dismiss_keyboard_definition_link(cx);
+        let primary = self.cursors.primary().selection();
+        self.click_link_selection_changed(primary.start()..primary.end(), cx);
         self.smart_select_cursor_changed();
         self.schedule_auto_code_actions(cx);
         self.update_bracket_highlights(cx);
@@ -5042,6 +5049,7 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.click_link = Default::default();
         self.hover_mouse_down(event.position, cx);
         if self.end_middle_scroll(cx) {
             return;
@@ -5075,38 +5083,17 @@ impl CodeEditor {
             return;
         }
         window.focus(&self.focus_handle, cx);
-        // Monaco `mouseMiddleClickAction`: a middle click on text opens a
-        // link, or with `ctrlLeftClick` acts like a Cmd/Ctrl+click.
-        if let Some(position) = self.text_position_under_mouse(event.position, window, cx) {
-            use crate::options::MouseMiddleClickAction;
-            let handled = match self.options.mouse_middle_click_action {
-                MouseMiddleClickAction::Default => false,
-                MouseMiddleClickAction::OpenLink => self.follow_link_at(position, cx),
-                MouseMiddleClickAction::CtrlLeftClick => {
-                    if !self.follow_link_at(position, cx) {
-                        // Monaco's gesture runs go to definition there,
-                        // quietly, like a Cmd/Ctrl+click.
-                        self.clear_definition_link(cx);
-                        self.set_selections(&[Selection::collapsed(position)], cx);
-                        let open_in_peek =
-                            self.options.definition_link_opens_in_peek && !self.in_peek;
-                        self.navigate(
-                            LocationKind::Definition,
-                            crate::goto::Navigation {
-                                open_in_peek,
-                                mute_message: true,
-                                ..Default::default()
-                            },
-                            cx,
-                        );
-                    }
-                    true
-                }
-            };
-            if handled {
-                return;
-            }
-        }
+        // Monaco `mouseMiddleClickAction`: the link gesture notes the click,
+        // to open a link (or act like a Cmd/Ctrl+click) on mouse-up.
+        let mouse = self.emit_mouse(
+            event.position,
+            Some(event.button),
+            event.modifiers,
+            event.click_count,
+            window,
+            cx,
+        );
+        self.click_link_mouse_down(&mouse);
         let position = self.mouse_position_for_point(event.position, window, cx);
         // Monaco `dispatchMouse`: with the selection clipboard (Linux) a
         // middle click is a click, and the platform pastes the primary
@@ -5256,6 +5243,7 @@ impl CodeEditor {
         // `multiCursorModifier`); the `contextmenu` event that follows it
         // opens the context menu, as a right-click does. The folding
         // contribution still takes it on a folding control.
+        self.click_link = Default::default();
         if cfg!(target_os = "macos")
             && event.modifiers.control
             && !self.layout.as_ref().is_some_and(|layout| {
@@ -5282,6 +5270,10 @@ impl CodeEditor {
             cx,
         );
         cx.emit(CodeEditorEvent::MouseDown(mouse.clone()));
+        // Monaco `ClickLinkGesture`: a Cmd/Ctrl+click follows a link or a
+        // definition on mouse-up; the mouse-down goes on as usual, so
+        // Cmd/Ctrl+drag selects.
+        self.click_link_mouse_down(&mouse);
         self.long_lines_mouse_down(&mouse, cx);
         // Embedded views (zones and widgets) handle their own clicks and
         // focus, except those with Monaco's `suppressMouseDown`.
@@ -5440,27 +5432,7 @@ impl CodeEditor {
         {
             self.show_color_picker_hover(position, cx);
         }
-        // Monaco: Cmd/Ctrl+click on an inlay hint part opens its location or
-        // runs its command.
-        if event.button == MouseButton::Left
-            && self.is_definition_modifier(&event.modifiers)
-            && let Some(part) = self.inlay_hint_part_at(event.position)
-            && self.inlay_hint_link_click(part, cx)
-        {
-            return;
-        }
         let position = self.mouse_position_for_point(event.position, window, cx);
-        // Monaco: Cmd/Ctrl+click follows a link, else a definition.
-        if self.is_definition_modifier(&event.modifiers)
-            && (self.follow_link_at(position, cx)
-                || self.follow_definition_link(
-                    position,
-                    self.is_side_by_side_modifier(&event.modifiers),
-                    cx,
-                ))
-        {
-            return;
-        }
         self.hide_suggest(cx);
         let count = self.count_mouse_down(event.click_count, position, cx);
         // Monaco: a click on the selection may start dragging it.
@@ -6011,7 +5983,8 @@ impl CodeEditor {
         }
         if self.dnd.active {
             if event.pressed_button == Some(MouseButton::Left) {
-                // Monaco `onMouseDrag`.
+                // Monaco `onMouseDrag`, which cancels the link gesture.
+                self.reset_click_link(cx);
                 let mouse = self.emit_mouse(
                     event.position,
                     Some(MouseButton::Left),
@@ -6044,8 +6017,10 @@ impl CodeEditor {
         }
         // Monaco `_onMouseDownThenMove`: the modifiers follow the mouse;
         // outside the text, scroll towards the mouse every frame; inside,
-        // dispatch the gesture to the mouse.
+        // dispatch the gesture to the mouse. Its `onMouseDrag` cancels the
+        // link gesture.
         drag.modifiers = event.modifiers;
+        self.reset_click_link(cx);
         if let Some((outside, distance)) = self.drag_outside(event.position) {
             let row = self.position_for_point(event.position, window, cx).row;
             self.start_drag_scroll(outside, distance, event.position, row, window, cx);
@@ -6309,6 +6284,7 @@ impl CodeEditor {
         self.scrollbar_arrow_task = None;
         self.sticky_mouse_up(event.position, event.button, event.modifiers, cx);
         let mut drop_target = None;
+        let mut mouse_up = None;
         if self
             .layout
             .as_ref()
@@ -6324,7 +6300,8 @@ impl CodeEditor {
             );
             drop_target = mouse.target.position.map(|p| (mouse.target.kind, p));
             self.folding_mouse_up_on(&mouse, cx);
-            cx.emit(CodeEditorEvent::MouseUp(mouse));
+            cx.emit(CodeEditorEvent::MouseUp(mouse.clone()));
+            mouse_up = Some(mouse);
         }
         self.fold_mouse_down = None;
         if self.dnd.active && event.button == MouseButton::Left {
@@ -6352,6 +6329,13 @@ impl CodeEditor {
         self.mouse_selection = None;
         self.drag_scroll = None;
         self.scrollbar_drag = None;
+        // Monaco `ClickLinkGesture._onEditorMouseUp`.
+        match mouse_up {
+            Some(mouse) => {
+                self.click_link_mouse_up(&mouse, cx);
+            }
+            None => self.click_link = Default::default(),
+        }
     }
 
     /// Monaco `ScrollbarArrow`: one wheel step now, then repeating after
@@ -7869,21 +7853,23 @@ impl Render for CodeEditor {
             .on_mouse_up(
                 MouseButton::Middle,
                 cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    let mouse = this.emit_mouse(
+                        event.position,
+                        Some(event.button),
+                        event.modifiers,
+                        event.click_count,
+                        window,
+                        cx,
+                    );
                     if this.fold_mouse_down.is_some() {
-                        let mouse = this.emit_mouse(
-                            event.position,
-                            Some(event.button),
-                            event.modifiers,
-                            event.click_count,
-                            window,
-                            cx,
-                        );
                         this.folding_mouse_up_on(&mouse, cx);
                     }
                     // Releasing ends it only after it scrolled (Monaco).
                     if this.animation.middle_scroll.is_some_and(|s| s.did_scroll) {
                         this.end_middle_scroll(cx);
                     }
+                    // Monaco `mouseMiddleClickAction`: the link gesture.
+                    this.click_link_mouse_up(&mouse, cx);
                 }),
             )
             .on_key_down(cx.listener(|this, _: &gpui::KeyDownEvent, _, cx| {

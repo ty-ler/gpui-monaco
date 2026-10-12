@@ -141,12 +141,12 @@ Results from every matching provider are merged, sorted by uri and position, and
 - **Several results:** `options.goto_location` decides, per command, as in Monaco's `gotoLocation.multiple*`:
   - **`Peek`** (the default) opens the peek view.
   - **`GotoAndPeek`** goes to the first result and opens the peek view.
-  - **`Goto`** goes to the first; F4 steps through the rest.
+  - **`Goto`** goes to the first; F4 steps through the rest, selecting each without the highlight (Monaco `gotoNextSymbolFromResult`).
 - **No results:** an inline message such as "No definition found for 'foo'".
 - **Already there:** if the only result is where the cursor is, the command's alternative runs instead. Definition, declaration and type definition fall back to references, so F12 on a definition shows its references.
 - **Stale results:** they're dropped if the text or the cursor changed in the meantime.
 - **To the side:** Open Definition to the Side emits `CodeEditorEvent::OpenLocationToSide(location)` for the first result, even in this model, so the host can open it in an editor beside this one. (Standalone Monaco has no side-by-side editors and opens it in place; `go_to_location` does that.)
-- **Cmd/Ctrl+click:** with `definition_link_opens_in_peek`, the definitions show in a peek view instead.
+- **Cmd/Ctrl+click:** the Cmd/Ctrl+hover link is underlined in `editorLink.activeForeground`. A click goes there when the button comes up on the line it went down on, with Cmd/Ctrl held since the press (Monaco's `ClickLinkGesture`); the press itself places the cursor, so Cmd/Ctrl+drag selects, and a drag, a selection, a scroll or an edit in between cancels it. With `definition_link_opens_in_peek`, the definitions show in a peek view instead.
 - **Escape** while a request is pending cancels it (Monaco's `editor.cancelOperation`, also for format, rename, paste and drop requests); `has_cancellable_operation` says whether one is.
 - **Definition preview:** resting the mouse on a Cmd/Ctrl+hover link shows the definition's code in the hover, in the target model's language (Monaco's `goToDefinitionAtPosition`). It's the location's range, or for 8 lines or more the lines up to the next one indented like the first, without their common indentation. Several definitions say "Click to show N definitions." Locations in other models need `model_for_uri` to find them. Show Definition Preview Hover (`editor.action.showDefinitionPreviewHover`, `show_definition_preview_hover`, unbound) shows the same at the cursor until it moves or a key is pressed.
 
@@ -417,7 +417,7 @@ impl LinkProvider for Issues {
 }
 ```
 
-Holding Cmd/Ctrl over a link highlights it. Cmd/Ctrl+click, or the `OpenLink` action, emits `CodeEditorEvent::OpenLink(url)`; the editor never opens anything itself. Links are recomputed a second after edits. Turn them off with the `links` option.
+Holding Cmd/Ctrl over a link highlights it. Cmd/Ctrl+click (on the button coming up, like go to definition's), a middle click with `mouse_middle_click_action: OpenLink`, or the `OpenLink` action emits `CodeEditorEvent::OpenLink(url)`; the editor never opens anything itself. Links are recomputed a second after edits. Turn them off with the `links` option.
 
 ## Colors
 

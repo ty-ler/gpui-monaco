@@ -373,11 +373,30 @@ fn goto_mode_steps_through_results(cx: &mut TestAppContext) {
         cx.dispatch_action(gpui_monaco::actions::GoToNextSymbolFromResult);
         cx.run_until_parked();
     };
+    // Only the first result is highlighted: Monaco
+    // `SymbolNavigationService.revealNext` doesn't highlight the others.
+    let id = editor.entity_id();
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    let color = editor.read_with(cx, |e, _| e.colors().symbol_highlight_background);
+    let highlighted = |cx: &mut VisualTestContext| {
+        model.update(cx, |m, _| {
+            m.all_decorations(Some(id))
+                .iter()
+                .filter(|d| d.options.background == Some(color))
+                .count()
+        })
+    };
+    assert_eq!(highlighted(cx), 1);
+    cx.executor().advance_clock(Duration::from_millis(400));
+    cx.run_until_parked();
+    assert_eq!(highlighted(cx), 0);
     next(cx);
     assert_eq!(head(&editor, cx), p(2, 4));
+    assert_eq!(highlighted(cx), 0);
     next(cx);
     next(cx);
     assert_eq!(head(&editor, cx), p(0, 3));
+    assert_eq!(highlighted(cx), 0);
     // Leaving the results ends it.
     set_cursor(&editor, cx, p(1, 0));
     assert!(!cx.update(|_, cx| gpui_monaco::has_symbol_navigation(cx)));
@@ -540,6 +559,92 @@ fn definition_links_open_in_peek_or_to_the_side(cx: &mut TestAppContext) {
     definition_click(&editor, cx, p(3, 5), side);
     assert!(!editor.read_with(cx, |e, _| e.is_peek_visible()));
     assert_eq!(to_side(&events).len(), 1);
+}
+
+/// Monaco `ClickLinkGesture`: Cmd/Ctrl+click goes to the definition on
+/// mouse-up, on the row the mouse went down on with the modifier held; the
+/// mouse-down places the cursor as usual, so Cmd/Ctrl+drag selects.
+#[gpui::test]
+fn definition_clicks_run_on_mouse_up(cx: &mut TestAppContext) {
+    let fixed = Fixed {
+        definitions: vec![here(0, 3, 6)],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(fixed, cx);
+    let cmd = gpui::Modifiers::secondary_key();
+    let left = gpui::MouseButton::Left;
+    let at = mouse_at(&editor, cx, p(2, 5));
+    cx.simulate_mouse_move(at, None, cmd);
+    cx.executor().advance_clock(Duration::from_millis(60));
+    cx.run_until_parked();
+    cx.simulate_mouse_down(at, left, cmd);
+    draw(cx);
+    assert_eq!(head(&editor, cx), p(2, 5));
+    cx.simulate_mouse_up(at, left, cmd);
+    draw(cx);
+    assert_eq!(head(&editor, cx), p(0, 3));
+
+    // Cmd/Ctrl+drag selects: the drag cancels the gesture.
+    let to = mouse_at(&editor, cx, p(2, 7));
+    cx.simulate_mouse_move(at, None, cmd);
+    cx.executor().advance_clock(Duration::from_millis(60));
+    cx.run_until_parked();
+    cx.simulate_mouse_down(at, left, cmd);
+    cx.simulate_mouse_move(to, left, cmd);
+    cx.simulate_mouse_up(to, left, cmd);
+    draw(cx);
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.selections()[0]),
+        Selection {
+            anchor: p(2, 5),
+            head: p(2, 7)
+        }
+    );
+
+    // Released on another row: nothing.
+    set_cursor(&editor, cx, p(1, 0));
+    let other_row = mouse_at(&editor, cx, p(3, 5));
+    cx.simulate_mouse_down(at, left, cmd);
+    cx.simulate_mouse_up(other_row, left, cmd);
+    draw(cx);
+    assert_eq!(head(&editor, cx), p(2, 5));
+
+    // The modifier pressed after the mouse went down doesn't count (to copy
+    // a selection, say).
+    cx.simulate_mouse_down(at, left, gpui::Modifiers::default());
+    cx.simulate_mouse_up(at, left, cmd);
+    draw(cx);
+    assert_eq!(head(&editor, cx), p(2, 5));
+
+    // A Cmd/Ctrl+click before the link shows still goes there.
+    let quick = mouse_at(&editor, cx, p(3, 5));
+    cx.simulate_click(quick, cmd);
+    draw(cx);
+    assert_eq!(head(&editor, cx), p(0, 3));
+}
+
+/// Monaco's `.goto-definition-link`: `editorLink.activeForeground`.
+#[gpui::test]
+fn definition_links_use_the_link_color(cx: &mut TestAppContext) {
+    let fixed = Fixed {
+        definitions: vec![here(0, 3, 6)],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(fixed, cx);
+    let at = mouse_at(&editor, cx, p(2, 5));
+    cx.simulate_mouse_move(at, None, gpui::Modifiers::secondary_key());
+    cx.executor().advance_clock(Duration::from_millis(60));
+    cx.run_until_parked();
+    let id = editor.entity_id();
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    let link = editor.read_with(cx, |e, _| e.colors().link_active_foreground);
+    let styles: Vec<_> = model.update(cx, |m, _| {
+        m.all_decorations(Some(id))
+            .into_iter()
+            .filter_map(|d| Some((d.options.text?.foreground, d.options.underline?.color)))
+            .collect()
+    });
+    assert_eq!(styles, vec![(Some(link), link)]);
 }
 
 #[gpui::test]
