@@ -106,7 +106,7 @@ Fold ranges come from these sources, in order (Monaco's `foldingStrategy: auto`)
   - Alt-click it to fold the regions around it instead (or unfold them if any are folded).
   - A click keeps the view on the clicked line rather than scrolling back to the cursor. The folding commands, Go to Parent/Previous/Next Fold included, show the cursor, centered if it was off screen.
   - A collapsed region the ranges no longer include stays folded, with the manual icons.
-- **Placeholder:** a collapsed region shows `⋯` after its first line. Clicking it, or at the end of the line's text, unfolds the region and puts the cursor there, and so does clicking after the end of the line with `unfold_on_click_after_end_of_line`. With `folding_highlight` (the default), the line gets the `editor.foldBackground` color, in the minimap too.
+- **Placeholder:** a collapsed region shows `⋯` after its first line. Clicking it, or at the end of the line's text, unfolds the region and puts the cursor there, and so does clicking after the end of the line with `unfold_on_click_after_end_of_line`. With `folding_highlight` (the default), the line gets the `editor.foldBackground` color, in the minimap too: a half-color band on every wrapped piece of the line and the full color over its text.
 - **Commands:** Monaco's, with Cmd on macOS and Ctrl elsewhere:
 
 | Keys | Command |

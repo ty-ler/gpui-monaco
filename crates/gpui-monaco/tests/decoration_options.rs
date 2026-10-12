@@ -286,7 +286,9 @@ fn mouse_targets_carry_injected_text_data(cx: &mut TestAppContext) {
 }
 
 /// Monaco `firstLineDecorationClassName`: only on the first view line of a
-/// wrapped line, while `linesDecorationsClassName` is on every one.
+/// wrapped line, while `linesDecorationsClassName` is on every view line
+/// of the decoration's view range: all of a whole-line decoration's, only
+/// the first of one on the line's first columns.
 #[gpui::test]
 fn first_line_decorations_skip_wrapped_lines(cx: &mut TestAppContext) {
     let text = "word ".repeat(60);
@@ -299,6 +301,7 @@ fn first_line_decorations_skip_wrapped_lines(cx: &mut TestAppContext) {
     assert!(view_lines > 1);
     let red = gpui::red();
     let blue = gpui::blue();
+    let green = gpui::green();
     decorate(
         &editor,
         vec![
@@ -316,6 +319,14 @@ fn first_line_decorations_skip_wrapped_lines(cx: &mut TestAppContext) {
                 0..1,
                 DecorationOptions {
                     gutter_bar: Some(blue),
+                    is_whole_line: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                0..5,
+                DecorationOptions {
+                    gutter_bar: Some(green),
                     ..Default::default()
                 },
             ),
@@ -324,13 +335,91 @@ fn first_line_decorations_skip_wrapped_lines(cx: &mut TestAppContext) {
     );
     let bars = editor.read_with(cx, |e, _| e.gutter_bars_for_tests());
     assert_eq!(bars.iter().filter(|(_, c)| *c == red).count(), 1);
-    // `gutter_bar` is on every view line of the row.
+    // A whole-line `gutter_bar` is on every view line of the row.
     assert_eq!(bars.iter().filter(|(_, c)| *c == blue).count(), view_lines);
+    // One on columns 0..5 only on the first.
+    assert_eq!(bars.iter().filter(|(_, c)| *c == green).count(), 1);
     let first_top = bars.iter().find(|(_, c)| *c == red).unwrap().0.top();
     assert_eq!(
         bars.iter().find(|(_, c)| *c == blue).unwrap().0.top(),
         first_top
     );
+    assert_eq!(
+        bars.iter().find(|(_, c)| *c == green).unwrap().0.top(),
+        first_top
+    );
+}
+
+/// Monaco `LinesDecorationsOverlay._getDecorations`: a
+/// `firstLineDecorationClassName` is on its range's start line only, even
+/// when the range spans several rows.
+#[gpui::test]
+fn first_line_decorations_are_on_the_start_line_only(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("a\nb\nc\nd\ne\nf\n", cx);
+    let red = gpui::red();
+    let blue = gpui::blue();
+    // Rows 1 to 4.
+    let options = |first: bool| DecorationOptions {
+        first_line_decoration: first.then_some(LinesDecoration {
+            bar: Some(red),
+            text: None,
+        }),
+        gutter_bar: (!first).then_some(blue),
+        ..Default::default()
+    };
+    decorate(
+        &editor,
+        vec![(2..9, options(true)), (2..9, options(false))],
+        cx,
+    );
+    let bars = editor.read_with(cx, |e, _| e.gutter_bars_for_tests());
+    let tops = |color| {
+        bars.iter()
+            .filter(|(_, c)| *c == color)
+            .map(|(b, _)| b.top())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(tops(red).len(), 1);
+    assert_eq!(tops(blue).len(), 4);
+    assert_eq!(tops(red)[0], tops(blue)[0]);
+}
+
+/// Monaco converts a range's start to its view line with
+/// `PositionAffinity.Right` and its end with `Left`: at a wrap point, a
+/// range starting there is on the later view line only, one ending there
+/// on the earlier one only.
+#[gpui::test]
+fn line_decorations_follow_the_view_range_at_wrap_points(cx: &mut TestAppContext) {
+    let text = "word ".repeat(60);
+    let (editor, cx) = setup(&text, cx);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.word_wrap = WordWrap::On, cx)
+    });
+    draw(cx);
+    let segments = editor.read_with(cx, |e, _| e.view_line_segments_for_tests());
+    assert!(segments.len() > 1);
+    let wrap = segments[1].1.start as usize;
+    let red = gpui::red();
+    let blue = gpui::blue();
+    let bar = |color| DecorationOptions {
+        gutter_bar: Some(color),
+        ..Default::default()
+    };
+    decorate(
+        &editor,
+        vec![(wrap..wrap + 1, bar(red)), (0..wrap, bar(blue))],
+        cx,
+    );
+    let bars = editor.read_with(cx, |e, _| e.gutter_bars_for_tests());
+    let tops = |color| {
+        bars.iter()
+            .filter(|(_, c)| *c == color)
+            .map(|(b, _)| b.top())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(tops(red).len(), 1);
+    assert_eq!(tops(blue).len(), 1);
+    assert!(tops(red)[0] > tops(blue)[0]);
 }
 
 /// Monaco `ThemeColor` in `overviewRuler.color`: looked up in the theme,

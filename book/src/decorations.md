@@ -67,18 +67,18 @@ Ranges are byte offsets. To convert from `PointUtf16`, use `model.buffer().point
 | `is_whole_line` | `isWholeLine` | the background spans the full line width, under every decoration that isn't whole-line |
 | `should_fill_line_on_line_break` | `shouldFillLineOnLineBreak` | where the range goes past a line break, the background fills to the line's right edge |
 | `include_new_lines` | `includeNewLines` (find matches) | where the range goes past a line break, the background covers it, half a character wide |
-| `margin_background` | `marginClassName` | a background across the gutter on the decorated lines |
-| `lines_decoration_text` | `linesDecorationsClassName` (icons) | text such as `+` in the line decorations area on each decorated line |
-| `lines_decorations_tooltip` | `linesDecorationsTooltip` | a tooltip over what `gutter_bar`, `lines_decoration_text` and `first_line_decoration` draw |
+| `margin_background` | `marginClassName` | a background across the gutter on the view lines of the range |
+| `lines_decoration_text` | `linesDecorationsClassName` (icons) | text such as `+` in the line decorations area on each view line of the range |
+| `lines_decorations_tooltip` | `linesDecorationsTooltip` | a tooltip over the line decorations area and the folding column on the lines `gutter_bar`, `lines_decoration_text` and `first_line_decoration` draw on |
 | `block` (`BlockDecoration`) | `blockClassName` + `blockPadding`, `blockIsAfterEnd`, `blockDoesNotCollapse` | a bordered box around the decorated lines and the view zones around them; on an empty range just the zones above its line unless `does_not_collapse`, and with `is_after_end` just the zones below the last line |
 | `line_height` | `lineHeight` | the covered lines' height, as a multiple of the line height; text stays centered |
-| `glyph` | `glyphMarginClassName` | a short glyph in the glyph margin, on every line of the range; the highest `z_index` wins a lane |
+| `glyph` | `glyphMarginClassName` | a short glyph in the glyph margin, on every view line of the range; the highest `z_index` wins a lane. A codicon is 16px (Monaco's `codicon.css`), centered in its lane, whatever the font size; other text is in the editor's font |
 | `glyph_margin` | `glyphMargin` | the glyph's lane (`GlyphMarginLane::Left`, `Center` or `Right`), and `persist_lane` to keep the lane on every line; the margin is a line height wide per lane in use |
 | `glyph_margin_hover_message` | `glyphMarginHoverMessage` | markdown (`Vec<MarkdownString>`, a hover row each) shown beside the gutter when the mouse rests on the glyph margin of any row the decoration covers, in its `glyph_margin` lane |
 | `line_number_hover_message` | `lineNumberHoverMessage` | markdown (`Vec<MarkdownString>`, a hover row each) shown beside the gutter when the mouse rests on the line number of any row the decoration covers |
 | `line_number_color` | `lineNumberClassName` | colors the line number |
-| `gutter_bar` | `linesDecorationsClassName` | a bar between the line numbers and the text |
-| `first_line_decoration` (`LinesDecoration`) | `firstLineDecorationClassName` | a bar or text in the line decorations area, only on the first view line of a wrapped line |
+| `gutter_bar` | `linesDecorationsClassName` | a bar between the line numbers and the text, on each view line of the range |
+| `first_line_decoration` (`LinesDecoration`) | `firstLineDecorationClassName` | a bar or text in the line decorations area, only on the range's first view line |
 | `overview_ruler` (`OverviewRulerDecoration`) | `overviewRuler` | a mark in the scrollbar's overview ruler, in a color (`dark_color` in dark themes) and lane, spanning the range's lines |
 | `minimap` (`MinimapDecoration`) | `minimap` | a mark in the minimap: `Inline` over the characters with a half-color band across the line, or a 2px `Gutter` bar; or a section header (`section_header_style`, `section_header_text`) |
 | `before`, `after` | `before`, `after` | text injected before or after the range (see below) |

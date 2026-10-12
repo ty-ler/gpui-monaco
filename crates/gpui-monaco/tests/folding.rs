@@ -1050,6 +1050,56 @@ fn the_fold_highlight_shades_the_minimap(cx: &mut TestAppContext) {
     assert!(shaded(cx).is_empty());
 }
 
+/// Monaco's fold decoration is whole-line on the header, so its minimap
+/// view range covers every wrapped piece of the header from its first
+/// column: a half-color band on each piece (`_renderDecorationsLineHighlights`)
+/// and the full color over the header's text (`_renderDecorationsHighlights`).
+#[gpui::test]
+fn the_minimap_fold_highlight_covers_the_wrapped_header(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "fn header(first: u32, second: u32, third: u32) {\n    z();\n}\n",
+        cx,
+    );
+    editor.update(cx, |e, cx| {
+        e.update_options_with(
+            |o| {
+                o.minimap.enabled = true;
+                o.word_wrap = gpui_monaco::options::WordWrap::WordWrapColumn;
+                o.word_wrap_column = 16;
+            },
+            cx,
+        )
+    });
+    draw(cx);
+    let fold = editor.read_with(cx, |e, _| e.colors().fold_background);
+    // Off the header, so no selection band covers it.
+    cursor(&editor, cx, 2);
+    editor.update(cx, |e, cx| e.fold_all(cx));
+    draw(cx);
+    assert_eq!(collapsed(&editor, cx), [(0, 1)]);
+    let marks: Vec<_> = editor.read_with(cx, |e, _| {
+        e.minimap_marks_for_tests()
+            .into_iter()
+            .filter(|(_, color)| (color.h, color.s, color.l) == (fold.h, fold.s, fold.l))
+            .collect()
+    });
+    let tops = |alpha: f32| {
+        let mut tops: Vec<_> = marks
+            .iter()
+            .filter(|(_, c)| (c.a - alpha).abs() < 1e-4)
+            .map(|(b, _)| b.top())
+            .collect();
+        tops.sort();
+        tops.dedup();
+        tops
+    };
+    let bands = tops(fold.a * 0.5 * 0.9);
+    let inline = tops(fold.a * 0.9);
+    // The header wraps into at least three pieces, each shaded.
+    assert!(bands.len() >= 3, "{marks:?}");
+    assert_eq!(bands, inline, "{marks:?}");
+}
+
 /// Ranges a test changes.
 struct Changing(std::rc::Rc<std::cell::RefCell<Vec<FoldingRange>>>);
 impl FoldingRangeProvider for Changing {
