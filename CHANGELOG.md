@@ -5,6 +5,13 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Suggest and parameter hints styling (#423):** ported Monaco's suggest and parameter hints styling details (audit 4 §C.15–§C.20).
+  - **High contrast borders:** `hc-black` and `hc-light` give the suggest list, the details panel and parameter hints Monaco's 2px borders, also in the list's and details' layout (`SuggestDetailsWidget.getLayoutInfo`'s `borderWidth`).
+  - **Row text:** the right-hand `.details-label` is no longer dimmed; a deprecated item dims only its label, not its `label_detail`; `detail`, `label_detail` and `label_description` lose their line breaks (`stripNewLines`) instead of clipping or turning them into spaces.
+  - **Read-more chevron:** the focused row shows it under the mouse while the details panel is open too, so clicking it closes the panel.
+  - **Icon metrics:** with `suggest.show_icons` off, rows keep the codicon's 4px margin (`.no-icons` hides only the glyph); a color item's swatch box is as wide as the row is tall.
+  - **Parameter hints scrollbar:** the body is a `DomScrollableElement` again, with the 10px scrollbar shown while the mouse is over it.
+  - **Details scroll:** the details panel goes back to the top when the focused item resolves or shows "Loading..." (Monaco's `renderItem` and `renderLoading` set `scrollTop = 0`).
 - **View lines and cursors (#426):** Ported Monaco's blink reset, grapheme-wide block cursor, off-screen active bracket guide, advanced wrap indent, whitespace with injected text and NUL rendering (audit 4 §B.5–§B.10).
   - **Blink reset:** changing the options restarts the cursor blink (Monaco `ViewCursors.onConfigurationChanged` → `_updateBlinking`), so turning on `read_only` or `cursor_blinking: Solid` shows a solid cursor at once instead of blinking (or staying hidden) until the next cursor move.
   - **Grapheme-wide block cursor:** the block, outline and underline cursors cover the whole grapheme after the cursor, and the block draws all of it in the cursor text color (Monaco `_getGraphemeAwarePosition`), so a decomposed `é` keeps its accent and ZWJ emoji and flags get a full-width block. Inside a grapheme the cursor draws at its start.

@@ -67,6 +67,17 @@ pub struct SignatureHelpWidget {
     max_height: gpui::Pixels,
     /// The room it has in the window (it overflows the editor).
     room: crate::widgets::OverflowRoomCell,
+    /// The body's scroll position, for its scrollbar.
+    scroll: gpui::ScrollHandle,
+}
+
+/// The body's group, whose hover shows its scrollbar.
+const BODY_SCROLL_GROUP: &str = "parameter-hints-scrollable";
+
+/// Monaco's `.parameter-hints-widget` border: 2px in high contrast themes
+/// (`parameterHints.css`), else 1px.
+pub(crate) fn border_width(high_contrast: bool) -> gpui::Pixels {
+    px(if high_contrast { 2. } else { 1. })
 }
 
 impl SignatureHelpWidget {
@@ -223,6 +234,9 @@ fn has_docs(signature: &SignatureInformation, active: usize) -> bool {
 impl Render for SignatureHelpWidget {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors.clone();
+        let extent = crate::scrollbars::extent(&self.scroll);
+        let scroll = self.scroll.clone();
+        let view = cx.entity().downgrade();
         let Some((signature, active)) = self.active() else {
             return div();
         };
@@ -258,15 +272,11 @@ impl Render for SignatureHelpWidget {
             .map(|doc| render_documentation(&doc, &self.style, &self.theme, cx));
         let body = div()
             .id("parameter-hints-body")
-            // Monaco's body is a scrollable element.
+            .track_scroll(&self.scroll)
             .overflow_y_scroll()
-            .flex_1()
-            .min_w_0()
+            .size_full()
             .flex()
             .flex_col()
-            // `.multiple .body::before`: a rule between the controls and
-            // the body.
-            .when(multiple, |this| this.border_l_1().border_color(rule))
             .child(
                 // `.signature { padding: 4px 5px }` in the editor font;
                 // `.signature.has-docs::after` rules it off from the docs.
@@ -290,6 +300,38 @@ impl Render for SignatureHelpWidget {
                         .children(docs),
                 )
             });
+        // Monaco's body is a `DomScrollableElement`: its 10px scrollbar
+        // shows while the mouse is over it and the content doesn't fit.
+        let scrollbars = crate::scrollbars::scrollbars(
+            "parameter-hints",
+            BODY_SCROLL_GROUP.into(),
+            &self.scroll,
+            px(10.),
+            px(0.),
+            &colors,
+        );
+        let body = div()
+            .group(BODY_SCROLL_GROUP)
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .flex()
+            // `.multiple .body::before`: a rule between the controls and
+            // the body.
+            .when(multiple, |this| this.border_l_1().border_color(rule))
+            .child(
+                gpui::canvas(
+                    |_, _, _| {},
+                    move |_, _, window, cx| {
+                        crate::scrollbars::follow_extent(&scroll, extent, view, window, cx)
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(body)
+            .children(scrollbars);
         div()
             // Monaco `.phwrapper { max-width: 440px }`, and `updateMaxHeight`
             // capped to the room in the window.
@@ -301,7 +343,7 @@ impl Render for SignatureHelpWidget {
             .rounded(crate::widgets::card::CORNER_RADIUS)
             .shadow(crate::widgets::card::shadow_lg())
             .bg(colors.hover_background)
-            .border_1()
+            .border(border_width(self.theme.high_contrast))
             .border_color(colors.hover_border)
             .text_color(colors.hover_foreground)
             .text_size(self.style.font_size)
@@ -524,6 +566,7 @@ impl CodeEditor {
             theme,
             max_height,
             room: Default::default(),
+            scroll: gpui::ScrollHandle::new(),
         });
         let (id, room) = self.add_overflow_content_widget(
             position,
@@ -641,6 +684,13 @@ impl CodeEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `parameterHints.css`: `.hc-black`/`.hc-light` borders are 2px.
+    #[test]
+    fn high_contrast_border() {
+        assert_eq!(border_width(false), px(1.));
+        assert_eq!(border_width(true), px(2.));
+    }
 
     #[test]
     fn parameter_ranges() {

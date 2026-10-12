@@ -564,6 +564,59 @@ fn parameter_hints_have_a_maximum_height(cx: &mut TestAppContext) {
     assert!(editor.read_with(cx, |e, _| e.is_signature_help_visible()));
 }
 
+/// Monaco's parameter hints body is a `DomScrollableElement`: a 10px
+/// scrollbar whose slider follows the scrolling (#423).
+#[gpui::test]
+fn parameter_hints_have_a_scrollbar(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&lines(60), None, |_| {}, cx);
+    cx.update(|_, cx| register_signature_help_provider(cx, LanguageSelector::All, LongDocs));
+    set_cursor(&editor, cx, 20, 0);
+    cx.simulate_input("(");
+    rest(cx, 120);
+    draw(cx);
+    let slider = |cx: &mut VisualTestContext| {
+        cx.debug_bounds("parameter-hints-vertical-slider")
+            .expect("a scrollbar")
+    };
+    let before = slider(cx);
+    assert_eq!(before.size.width, px(10.));
+    assert!(before.size.height < px(200.), "{before:?}");
+    wheel(cx, before.center() - point(px(100.), px(0.)), -100.);
+    draw(cx);
+    assert!(slider(cx).top() > before.top(), "{:?}", slider(cx));
+}
+
+/// Monaco `suggest.css` and `SuggestDetailsWidget.getLayoutInfo`: 2px
+/// borders in high contrast themes, which the details overlap (#423).
+#[gpui::test]
+fn high_contrast_borders_are_2px(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&lines(30), None, |_| {}, cx);
+    provide(cx, 5);
+    set_cursor(&editor, cx, 2, 0);
+    let details = |cx: &mut VisualTestContext| {
+        cx.simulate_keystrokes("ctrl-space");
+        draw(cx);
+        cx.simulate_keystrokes("ctrl-space");
+        draw(cx);
+        let (_, list) = editor
+            .read_with(cx, |e, cx| e.suggest_list_layout_for_tests(cx))
+            .unwrap();
+        let (side, bounds) = editor
+            .read_with(cx, |e, cx| e.suggest_details_placement_for_tests(cx))
+            .expect("details shown");
+        assert_eq!(side, "east");
+        cx.simulate_keystrokes("ctrl-space escape");
+        draw(cx);
+        list.width - bounds.left()
+    };
+    assert_eq!(details(cx), px(1.));
+    editor.update(cx, |e, cx| {
+        e.set_theme(std::sync::Arc::new(gpui_monaco::Theme::hc_black()), cx)
+    });
+    draw(cx);
+    assert_eq!(details(cx), px(2.));
+}
+
 /// The suggest list's scroll position in pixels.
 fn list_scroll_top(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Pixels {
     editor
