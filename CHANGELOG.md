@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Suggest widget scrolling and details (#292):** the suggest list scrolls by pixels, its scrollbars fade, and the details panel is sized to its content without lagging a frame, as with Monaco's `ListView`, `ScrollableElement` and `SuggestDetailsWidget`.
+  - **Pixel scrolling:** the list scrolls by the wheel's pixels (smoothly with a trackpad) instead of by whole rows, and the rows at its top and bottom show in part. Only the rows in view are rendered. Moving the focus scrolls the focused row fully into view, as little as it takes (Monaco's `List.reveal`), and a new list shows its focused row near the top, with a third of a row above it (`showSuggestions`). Resolving an item no longer scrolls the list back to it.
+  - **List height:** like Monaco's, the list's height is no longer cut to whole rows when the room around the cursor caps it.
+  - **Scrollbar fade:** the list's and the details panel's scrollbars fade in over 100ms while the mouse is over them, and out over 800ms after the mouse leaves or 500ms after scrolling, from wherever they were (`.monaco-scrollable-element`'s `.visible` and `.invisible.fade`). The widget repaints every frame only while one is fading.
+  - **Details height:** the details panel's type and docs are measured, at the width the panel gets, before it's placed, so the panel fits new content in the same frame instead of the next.
+  - **Click-through corners:** the empty corners of the box around the list and the details panel let clicks, the wheel and hovers through to the editor, as Monaco's separate list and details widgets do.
+  - **Playground:** `PLAYGROUND_KEYS` takes `wheel:x,y,dy`, which turns the wheel at a point of the window, for screenshots of scrolled widgets.
+  - **Tests:** GPUI tests for pixel scrolling and revealing the focused row, the scrollbar fading in and out, the details panel's height in the frame its content changes, and clicks through the empty corners; the details tests no longer draw twice.
 - **Keybinding labels follow the host's keybinding rules (#294):** labels look up keys as Monaco's `lookupKeybinding` does. A rule from `add_keybinding_rule(s)` naming a command's Monaco id now shows instead of the default binding, as Monaco's dynamic keybindings come after the defaults. Before, rules were bound as `RunCommand` and labels only found the default.
   - This applies to the command palette, the context menu, the lightbulb, the code action menu's Organize Imports and Fix All rows, the find widget's titles, and the hover's status bar.
   - **Hover status bar:** "View Problem" and "Quick Fix..." keys are looked up through the shared formatter instead of being hard-coded.

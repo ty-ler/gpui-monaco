@@ -4,6 +4,12 @@
 //! "Loading..." and "No suggestions." messages, the details panel (toggled
 //! with Ctrl+Space, east or west of the list when it fits, else above or
 //! below it), the clickable status bar, and resizing both.
+//!
+//! The list scrolls by pixels, as Monaco's `ListView` does, rendering only
+//! the rows in view (partly shown at the edges). Its scrollbars fade in and
+//! out like `.monaco-scrollable-element`'s. The details panel is measured
+//! before it's placed, so it's sized to its content in the frame that
+//! content changes.
 
 use std::cell::Cell;
 use std::ops::Range;
@@ -12,11 +18,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext as _, Bounds, Context, DragMoveEvent, FontWeight, Global, HighlightStyle, Hsla,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString,
-    Size, StatefulInteractiveElement, Styled, StyledText, Task, WeakEntity, Window, div, point, px,
-    rgb, size,
+    App, AppContext as _, AvailableSpace, Bounds, Context, DragMoveEvent, FontWeight, Global,
+    HighlightStyle, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels,
+    Render, SharedString, Size, StatefulInteractiveElement, Styled, StyledText, Task, WeakEntity,
+    Window, div, point, px, rgb, size,
 };
+use web_time::Instant;
 
 use crate::codicons::{Codicon, icon as codicon};
 use crate::completion::Session;
@@ -52,9 +59,14 @@ const MIN_SLIDER: f32 = 20.;
 /// How long Monaco's `ScrollbarVisibility.Auto` scrollbars stay after
 /// scrolling (`HIDE_TIMEOUT`).
 const SCROLLBAR_HIDE: Duration = Duration::from_millis(500);
-/// Measuring the details panel's content may take a few frames when its
-/// placement changes its width; give up after this many.
-const MAX_DETAILS_MEASURES: u8 = 4;
+/// `.monaco-scrollable-element > .visible { transition: opacity 100ms }`.
+const SCROLLBAR_FADE_IN: Duration = Duration::from_millis(100);
+/// `.monaco-scrollable-element > .invisible.fade { transition: opacity
+/// 800ms }`.
+const SCROLLBAR_FADE_OUT: Duration = Duration::from_millis(800);
+/// Monaco `SuggestWidget.showSuggestions` reveals the focused row of a new
+/// list at the top, with a third of the row above it showing.
+const REVEAL_PADDING_ROWS: f32 = 0.33;
 
 /// How the focused details panel scrolls (Monaco `SuggestDetailsWidget`'s
 /// `scrollUp`, `scrollDown`, `pageUp`, `pageDown`, `scrollTop` and
@@ -272,12 +284,83 @@ enum ScrollbarTarget {
     Details,
 }
 
+impl ScrollbarTarget {
+    fn index(self) -> usize {
+        match self {
+            ScrollbarTarget::List => 0,
+            ScrollbarTarget::Details => 1,
+        }
+    }
+}
+
 /// A scrollbar slider being dragged, and where in the slider it was
 /// grabbed.
 #[derive(Clone)]
 struct SliderDrag {
     target: ScrollbarTarget,
     grab: Rc<Cell<Pixels>>,
+}
+
+/// The mouse is over the scrollable element (for [`ScrollbarFade::hover`]).
+const HOVER_AREA: u8 = 1;
+/// The mouse is over the slider, which takes the mouse from the area
+/// under it.
+const HOVER_SLIDER: u8 = 2;
+
+/// Monaco `ScrollableElement`'s `ScrollbarVisibility.Auto` and its
+/// `ScrollbarVisibilityController`: a scrollbar shows while the mouse is
+/// over its `.monaco-scrollable-element` or its slider is dragged, and
+/// for `HIDE_TIMEOUT` after scrolling. It fades in over 100ms (`.visible`)
+/// and out over 800ms (`.invisible.fade`), from wherever it was.
+#[derive(Clone, Copy, Debug, Default)]
+struct ScrollbarFade {
+    /// What the mouse is over ([`HOVER_AREA`], [`HOVER_SLIDER`]); Monaco's
+    /// `_mouseIsOver`.
+    hover: u8,
+    /// When it last scrolled (Monaco `_reveal`, then `_scheduleHide`).
+    revealed_at: Option<Instant>,
+    /// Whether it's showing (or fading in), since when, and its opacity
+    /// then.
+    visible: bool,
+    changed_at: Option<Instant>,
+    from: f32,
+}
+
+impl ScrollbarFade {
+    /// Whether it should show at `now`, the mouse aside: dragged, or just
+    /// scrolled.
+    fn revealed(&self, dragging: bool, now: Instant) -> bool {
+        dragging || self.revealed_at.is_some_and(|at| now < at + SCROLLBAR_HIDE)
+    }
+
+    /// The opacity at `now` of the transition under way.
+    fn current(&self, now: Instant) -> f32 {
+        let Some(at) = self.changed_at else {
+            return if self.visible { 1. } else { 0. };
+        };
+        let elapsed = now.saturating_duration_since(at).as_secs_f32();
+        if self.visible {
+            let t = (elapsed / SCROLLBAR_FADE_IN.as_secs_f32()).min(1.);
+            self.from + (1. - self.from) * t
+        } else {
+            let t = (elapsed / SCROLLBAR_FADE_OUT.as_secs_f32()).min(1.);
+            self.from * (1. - t)
+        }
+    }
+
+    /// The opacity at `now`, starting a fade when whether it should show
+    /// changed, and whether it's still fading.
+    fn opacity(&mut self, dragging: bool, now: Instant) -> (f32, bool) {
+        let show = self.hover != 0 || self.revealed(dragging, now);
+        if show != self.visible {
+            self.from = self.current(now);
+            self.visible = show;
+            self.changed_at = Some(now);
+        }
+        let opacity = self.current(now);
+        let target = if self.visible { 1. } else { 0. };
+        (opacity, opacity != target)
+    }
 }
 
 /// The list's size and side (Monaco `SuggestWidget._layout`).
@@ -322,7 +405,8 @@ pub(crate) struct ListLayoutInput {
 ///   more room above. That side is kept while the session lasts (unless a
 ///   row no longer fits there), so the list doesn't flip as it shrinks and
 ///   grows while typing.
-/// - Whole rows show.
+/// - As in Monaco, the height needn't be whole rows: the list scrolls by
+///   pixels, and the rows at its edges show in part.
 pub(crate) fn layout_list(input: &ListLayoutInput) -> ListLayout {
     let border = px(2. * BORDER);
     let item = input.item_height;
@@ -361,10 +445,8 @@ pub(crate) fn layout_list(input: &ListLayoutInput) -> ListLayout {
         _ if height > max_below && max_above > max_below => ContentWidgetPreference::Above,
         _ => ContentWidgetPreference::Below,
     };
-    let height = height.min(room_on(side));
-    let rows = ((height - input.status_height) / item).floor().max(1.);
     ListLayout {
-        size: size(width, input.status_height + item * rows),
+        size: size(width, height.min(room_on(side)).max(min)),
         side,
     }
 }
@@ -549,16 +631,15 @@ pub struct SuggestWidget {
     style: MarkdownStyle,
     options: SuggestOptions,
     metrics: SuggestWidgetMetrics,
-    /// First visible row.
-    scroll: usize,
+    /// The list's scroll position, in whole pixels (Monaco `ListView`'s
+    /// `scrollTop`, with `forceIntegerValues`).
+    scroll_top: Pixels,
     /// The details panel's scroll position (Monaco's `_body.scrollTop`).
     details_scroll: gpui::ScrollHandle,
     /// The scroll position asked for, kept until layout can clamp it.
     details_scroll_top: Pixels,
     /// The room it has in the window (it overflows the editor).
     pub(crate) room: crate::widgets::OverflowRoomCell,
-    /// Wheel movement not yet a whole row.
-    wheel_remainder: Pixels,
     /// The side of the cursor line the list went on when it first showed
     /// suggestions; kept while it lives (one session), so it doesn't flip
     /// while typing.
@@ -569,16 +650,16 @@ pub struct SuggestWidget {
     /// The size the details panel was resized to (Monaco
     /// `SuggestDetailsOverlay._userSize`, kept while the session lasts).
     details_size: Option<Size<Pixels>>,
-    /// The details panel's content height, measured when it was last
-    /// painted.
-    details_content: Rc<Cell<Option<Pixels>>>,
-    /// Measurements since the content last changed.
-    details_measures: Rc<Cell<u8>>,
+    /// The details panel's content height at a width (inside its border),
+    /// measured since the content last changed.
+    details_heights: Vec<(Pixels, Pixels)>,
     /// Where the rows were last painted, for clicks on the scrollbar.
     rows_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// Monaco's `ScrollbarVisibility.Auto`: the scrollbars show for a
-    /// while after scrolling (and while the mouse is over them).
-    scrollbars_revealed: bool,
+    /// The list's and the details panel's scrollbar visibility.
+    fades: [ScrollbarFade; 2],
+    /// Their opacity when last rendered, and whether either was fading.
+    opacities: [f32; 2],
+    fading: bool,
     hide_scrollbars: Option<Task<()>>,
     /// The scrollbar whose slider is being dragged.
     slider_drag: Option<ScrollbarTarget>,
@@ -702,23 +783,23 @@ impl SuggestWidget {
             style,
             options,
             metrics,
-            scroll: 0,
+            scroll_top: px(0.),
             details_scroll: gpui::ScrollHandle::new(),
             details_scroll_top: px(0.),
             room: Default::default(),
-            wheel_remainder: px(0.),
             side: None,
             fit_width: None,
             details_size: None,
-            details_content: Default::default(),
-            details_measures: Default::default(),
+            details_heights: Vec::new(),
             rows_bounds: Default::default(),
-            scrollbars_revealed: false,
+            fades: Default::default(),
+            opacities: [0.; 2],
+            fading: false,
             hide_scrollbars: None,
             slider_drag: None,
             details_layout: None,
         };
-        this.keep_selected_visible(cx);
+        this.reveal_selected_at_top(cx);
         this
     }
 
@@ -736,13 +817,30 @@ impl SuggestWidget {
             self.scroll_details(DetailsScroll::Top);
         }
         // The details panel's content may have changed: measure it again.
-        self.details_measures.set(0);
+        self.details_heights.clear();
+        // Monaco `showSuggestions` reveals the focused row of a new list
+        // near the top; moving the focus (`_onListFocus`) reveals it just
+        // enough. Resolving an item or explaining it leaves the scrolling
+        // alone.
+        let same_rows = state.rows.len() == self.state.rows.len()
+            && state
+                .rows
+                .iter()
+                .zip(&self.state.rows)
+                .all(|((a, _), (b, _))| a.label == b.label);
+        let moved = state.selected != self.state.selected || state.focused != self.state.focused;
         self.state = state;
         self.metrics = metrics;
-        let scroll = self.scroll;
-        self.keep_selected_visible(cx);
-        if self.scroll != scroll {
-            self.reveal_scrollbars(cx);
+        let scroll_top = self.scroll_top;
+        if !same_rows {
+            self.reveal_selected_at_top(cx);
+        } else if moved {
+            self.reveal_selected(cx);
+        } else {
+            self.clamp_list_scroll(cx);
+        }
+        if self.scroll_top != scroll_top {
+            self.reveal_scrollbar(ScrollbarTarget::List, cx);
         }
         cx.notify();
     }
@@ -869,6 +967,13 @@ impl SuggestWidget {
         Some((rows, details))
     }
 
+    /// The details panel's content height as last painted.
+    pub(crate) fn details_content_height(&self) -> Option<Pixels> {
+        self.details_scroll
+            .bounds_for_item(0)
+            .map(|bounds| bounds.size.height)
+    }
+
     /// Where the details panel was last placed: its side and its border
     /// box relative to the list's.
     pub(crate) fn details_placement(&self) -> Option<(DetailsSide, Bounds<Pixels>)> {
@@ -911,56 +1016,92 @@ impl SuggestWidget {
     }
 
     /// Monaco's list consumes the wheel (`alwaysConsumeMouseWheel`) and
-    /// scrolls by it.
+    /// scrolls by its pixels. `ListView` doesn't animate it
+    /// (`smoothScrolling` is off), so each wheel event moves the list at
+    /// once: smoothly with a trackpad, a row or so per notch with a wheel.
     fn scroll_wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
         cx.stop_propagation();
-        let item_height = self.metrics.item_height;
-        let delta = event.delta.pixel_delta(item_height).y + self.wheel_remainder;
-        let rows = (delta / item_height).trunc();
-        self.wheel_remainder = delta - item_height * rows;
-        let max = self.state.rows.len().saturating_sub(self.visible_rows(cx));
-        let scroll = (self.scroll as f32 - rows).clamp(0., max as f32) as usize;
-        if scroll != self.scroll {
-            self.scroll = scroll;
-            self.reveal_scrollbars(cx);
+        let delta = event.delta.pixel_delta(self.metrics.item_height).y;
+        self.set_list_scroll_top(self.scroll_top - delta, cx);
+    }
+
+    /// Scrolls the list to `top` (clamped and rounded), showing its
+    /// scrollbar if it moved.
+    fn set_list_scroll_top(&mut self, top: Pixels, cx: &mut Context<Self>) {
+        let before = self.scroll_top;
+        self.scroll_top = top;
+        self.clamp_list_scroll(cx);
+        if self.scroll_top != before {
+            self.reveal_scrollbar(ScrollbarTarget::List, cx);
             cx.notify();
         }
     }
 
-    /// Shows the scrollbars for a while (Monaco `ScrollableElement._reveal`
-    /// on scrolling, then hiding after `HIDE_TIMEOUT`).
-    fn reveal_scrollbars(&mut self, cx: &mut Context<Self>) {
-        self.scrollbars_revealed = true;
+    /// The list's height without its status bar: Monaco's `ListView`
+    /// viewport.
+    fn list_viewport(&self, cx: &App) -> Pixels {
+        self.list_size(cx).height - self.status_bar_height()
+    }
+
+    /// Keeps the list's scroll position within its rows, in whole pixels.
+    fn clamp_list_scroll(&mut self, cx: &App) {
+        let content = self.metrics.item_height * self.state.rows.len() as f32;
+        let max = (content - self.list_viewport(cx)).max(px(0.));
+        self.scroll_top = self.scroll_top.round().clamp(px(0.), max.ceil());
+    }
+
+    /// Shows a scrollbar for a while (Monaco `ScrollableElement._reveal`
+    /// on scrolling, then `_hide` after `HIDE_TIMEOUT`).
+    fn reveal_scrollbar(&mut self, target: ScrollbarTarget, cx: &mut Context<Self>) {
+        self.fades[target.index()].revealed_at = Some(cx.background_executor().now());
         self.hide_scrollbars = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SCROLLBAR_HIDE).await;
-            this.update(cx, |this, cx| {
-                this.scrollbars_revealed = false;
-                cx.notify();
-            })
-            .ok();
+            // Rendering starts the fade out.
+            this.update(cx, |_, cx| cx.notify()).ok();
         }));
     }
 
-    /// Whether the scrollbars show without the mouse over them.
-    pub(crate) fn scrollbars_revealed(&self) -> bool {
-        self.scrollbars_revealed || self.slider_drag.is_some()
+    /// Whether the list's scrollbar shows without the mouse over it: just
+    /// scrolled, or its slider dragged.
+    pub(crate) fn scrollbars_revealed(&self, cx: &App) -> bool {
+        let now = cx.background_executor().now();
+        self.fades[ScrollbarTarget::List.index()]
+            .revealed(self.slider_drag == Some(ScrollbarTarget::List), now)
     }
 
-    /// Scrolls the list to put the slider's top at `slider_top` along a
-    /// track `visible` tall.
-    fn scroll_list_to_slider(&mut self, slider_top: Pixels, cx: &mut Context<Self>) {
-        let item_height = self.metrics.item_height;
-        let visible_rows = self.visible_rows(cx);
-        let visible = item_height * visible_rows as f32;
-        let content = item_height * self.state.rows.len() as f32;
-        let position = slider_position(visible, content, slider_top);
-        let max = self.state.rows.len().saturating_sub(visible_rows);
-        let scroll = ((position / item_height).round() as usize).min(max);
-        if scroll != self.scroll {
-            self.scroll = scroll;
+    /// The list's and the details panel's scrollbar opacity as last
+    /// rendered, and whether either is fading (and so repainting).
+    pub(crate) fn scrollbar_opacities(&self) -> ([f32; 2], bool) {
+        (self.opacities, self.fading)
+    }
+
+    /// Notes the mouse entering or leaving `part` of a scrollbar's area.
+    fn set_hover(
+        &mut self,
+        target: ScrollbarTarget,
+        part: u8,
+        hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let fade = &mut self.fades[target.index()];
+        let before = fade.hover;
+        if hovered {
+            fade.hover |= part;
+        } else {
+            fade.hover &= !part;
+        }
+        if fade.hover != before {
             cx.notify();
         }
-        self.reveal_scrollbars(cx);
+    }
+
+    /// Scrolls the list to put the slider's top at `slider_top`.
+    fn scroll_list_to_slider(&mut self, slider_top: Pixels, cx: &mut Context<Self>) {
+        let visible = self.list_viewport(cx);
+        let content = self.metrics.item_height * self.state.rows.len() as f32;
+        let position = slider_position(visible, content, slider_top);
+        self.set_list_scroll_top(position, cx);
+        self.reveal_scrollbar(ScrollbarTarget::List, cx);
     }
 
     /// Scrolls the details panel to put its slider's top at `slider_top`.
@@ -969,23 +1110,23 @@ impl SuggestWidget {
         let content = visible + self.details_scroll.max_offset().y;
         let position = slider_position(visible, content, slider_top);
         self.set_details_scroll_top(position);
-        self.reveal_scrollbars(cx);
+        self.reveal_scrollbar(ScrollbarTarget::Details, cx);
         cx.notify();
     }
 
     /// A Monaco scrollbar along a track `visible` tall at the right edge:
     /// a slider in `scrollbarSlider.background` (`.hoverBackground` under
     /// the mouse, `.activeBackground` while dragged) that can be dragged,
-    /// and a track that scrolls to where it's clicked. Like Monaco's
-    /// `ScrollbarVisibility.Auto`, it shows while the mouse is over `group`
-    /// or for a while after scrolling.
+    /// and a track that scrolls to where it's clicked. It shows at
+    /// `opacity` (see [`ScrollbarFade`]), and like Monaco's `.invisible`
+    /// scrollbar, lets the mouse through once faded out.
     fn render_scrollbar(
         &self,
         target: ScrollbarTarget,
-        group: &'static str,
         visible: Pixels,
         content: Pixels,
         position: Pixels,
+        opacity: f32,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
         let (top, length) = slider(visible, content, position)?;
@@ -996,7 +1137,6 @@ impl SuggestWidget {
             ScrollbarTarget::List => ("suggest-scrollbar", "suggest-slider"),
             ScrollbarTarget::Details => ("suggest-details-scrollbar", "suggest-details-slider"),
         };
-        let shown = self.scrollbars_revealed();
         Some(
             div()
                 .id(track_id)
@@ -1005,9 +1145,8 @@ impl SuggestWidget {
                 .right_0()
                 .w(px(SCROLLBAR_WIDTH))
                 .h(visible)
-                .when(!shown, |this| {
-                    this.invisible().group_hover(group, |style| style.visible())
-                })
+                .opacity(opacity)
+                .when(opacity <= 0., |this| this.invisible())
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
@@ -1051,6 +1190,9 @@ impl SuggestWidget {
                             this.hover(move |style| style.bg(hover))
                         })
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                            this.set_hover(target, HOVER_SLIDER, *hovered, cx)
+                        }))
                         .on_drag(
                             SliderDrag {
                                 target,
@@ -1082,28 +1224,48 @@ impl SuggestWidget {
         }
     }
 
-    /// The first row shown.
+    /// The first row shown, in full or in part.
     pub(crate) fn first_visible_row(&self) -> usize {
-        self.scroll
+        (self.scroll_top / self.metrics.item_height).floor() as usize
     }
 
-    /// Rows that fit in the list.
+    /// The list's scroll position in pixels.
+    pub(crate) fn list_scroll_top(&self) -> Pixels {
+        self.scroll_top
+    }
+
+    /// Whole rows that fit in the list.
     pub(crate) fn visible_rows(&self, cx: &App) -> usize {
-        let height = self.list_size(cx).height - self.status_bar_height();
-        ((height / self.metrics.item_height).floor() as usize).max(1)
+        ((self.list_viewport(cx) / self.metrics.item_height).floor() as usize).max(1)
     }
 
-    fn keep_selected_visible(&mut self, cx: &App) {
-        let visible = self.visible_rows(cx);
-        let selected = self.state.selected;
-        if selected < self.scroll {
-            self.scroll = selected;
-        } else if selected >= self.scroll + visible {
-            self.scroll = selected + 1 - visible;
+    /// Monaco `List.reveal(index)`: scrolls the focused row fully into
+    /// view, as little as it takes.
+    fn reveal_selected(&mut self, cx: &App) {
+        let item_height = self.metrics.item_height;
+        let top = item_height * self.state.selected as f32;
+        let viewport = self.list_viewport(cx);
+        if top < self.scroll_top {
+            self.scroll_top = top;
+        } else if top + item_height > self.scroll_top + viewport {
+            self.scroll_top = top + item_height - viewport;
         }
-        self.scroll = self
-            .scroll
-            .min(self.state.rows.len().saturating_sub(visible));
+        self.clamp_list_scroll(cx);
+    }
+
+    /// Monaco `showSuggestions`' `reveal(index, 0, padding)`: the focused
+    /// row of a new list at the top, with a third of a row above it (none
+    /// for the first row).
+    fn reveal_selected_at_top(&mut self, cx: &App) {
+        let item_height = self.metrics.item_height;
+        let selected = self.state.selected;
+        let padding = if selected == 0 {
+            px(0.)
+        } else {
+            item_height * REVEAL_PADDING_ROWS
+        };
+        self.scroll_top = item_height * selected as f32 - padding;
+        self.clamp_list_scroll(cx);
     }
 
     fn render_row(&self, ix: usize, show_details: bool) -> impl IntoElement + use<> {
@@ -1564,7 +1726,7 @@ impl SuggestWidget {
                     ),
                 };
                 cx.default_global::<SuggestUi>().size = Some(size);
-                self.keep_selected_visible(cx);
+                self.clamp_list_scroll(cx);
             }
             _ => {
                 let current = bounds.size;
@@ -1677,6 +1839,7 @@ impl Render for SuggestWidget {
             self.room.set_anchor(Some(WidgetAnchor {
                 preference: ContentWidgetPreference::Below,
                 anchor_box: Bounds::new(point(px(0.), px(0.)), message_size),
+                beside: None,
             }));
             self.details_layout = None;
             return div()
@@ -1700,28 +1863,55 @@ impl Render for SuggestWidget {
         let layout = self.list_layout(cx);
         self.side = Some(layout.side);
         let list_outer = size(layout.size.width, layout.size.height + border2);
-        let visible = self.visible_rows(cx);
         let count = self.state.rows.len();
-        self.scroll = self.scroll.min(count.saturating_sub(visible));
+        self.clamp_list_scroll(cx);
         let show_details = self.details_shown(cx);
-        let end = (self.scroll + visible).min(count);
-        let rows: Vec<_> = (self.scroll..end)
+        // Monaco's `ScrollbarVisibility.Auto` scrollbars, fading (and only
+        // then repainting every frame).
+        let now = cx.background_executor().now();
+        // A part that's gone can't tell the mouse left it.
+        if !show_details {
+            self.fades[ScrollbarTarget::Details.index()].hover = 0;
+        } else if self.details_scroll.max_offset().y <= px(0.) {
+            self.fades[ScrollbarTarget::Details.index()].hover &= !HOVER_SLIDER;
+        }
+        let mut fading = false;
+        for target in [ScrollbarTarget::List, ScrollbarTarget::Details] {
+            let dragging = self.slider_drag == Some(target);
+            let (opacity, animating) = self.fades[target.index()].opacity(dragging, now);
+            self.opacities[target.index()] = opacity;
+            fading |= animating;
+        }
+        self.fading = fading;
+        if fading {
+            window.request_animation_frame();
+        }
+        // Monaco `ListView.render`: only the rows in the viewport, the
+        // first and last in part, moved up by the scrolled part of the
+        // first.
+        let viewport = self.list_viewport(cx);
+        let first = self.first_visible_row().min(count);
+        let end = (((self.scroll_top + viewport) / item_height).ceil() as usize).min(count);
+        let rows: Vec<_> = (first..end)
             .map(|ix| self.render_row(ix, show_details).into_any_element())
             .collect();
+        let rows_top = item_height * first as f32 - self.scroll_top;
         let list_scrollbar = self.render_scrollbar(
             ScrollbarTarget::List,
-            "suggest-list",
-            item_height * visible as f32,
+            viewport,
             item_height * count as f32,
-            item_height * self.scroll as f32,
+            self.scroll_top,
+            self.opacities[ScrollbarTarget::List.index()],
             cx,
         );
+        if list_scrollbar.is_none() {
+            self.fades[ScrollbarTarget::List.index()].hover &= !HOVER_SLIDER;
+        }
         let rows_bounds = self.rows_bounds.clone();
         let list = base
             // The rows' bounds, for clicks on the scrollbar's track.
             .on_children_prepainted(move |bounds, _, _| rows_bounds.set(bounds.first().copied()))
             .id("suggest-list")
-            .group("suggest-list")
             .flex_none()
             .w(list_outer.width)
             .h(list_outer.height)
@@ -1736,6 +1926,11 @@ impl Render for SuggestWidget {
                     // The rows use the editor's font (`ItemRenderer`'s
                     // `configureFont`).
                     .font_family(self.style.code_font.clone())
+                    // Monaco's `.monaco-scrollable-element` shows its
+                    // scrollbar while the mouse is over it.
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        this.set_hover(ScrollbarTarget::List, HOVER_AREA, *hovered, cx)
+                    }))
                     .on_scroll_wheel(cx.listener(|this, event, _, cx| this.scroll_wheel(event, cx)))
                     .on_drag_move(
                         cx.listener(|this, event: &DragMoveEvent<SliderDrag>, _, cx| {
@@ -1745,7 +1940,14 @@ impl Render for SuggestWidget {
                             }
                         }),
                     )
-                    .children(rows)
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .top(rows_top)
+                            .children(rows),
+                    )
                     .children(list_scrollbar),
             )
             .when(self.options.show_status_bar, |this| {
@@ -1768,9 +1970,9 @@ impl Render for SuggestWidget {
         let details = show_details
             .then(|| self.render_details_body(cx))
             .flatten()
-            .map(|body| {
-                let placement = self.place_details(list_outer, layout.side);
-                (body.into_any_element(), placement)
+            .and_then(|body| {
+                let placement = self.place_details(list_outer, layout.side, window, cx)?;
+                Some((body.into_any_element(), placement))
             });
         self.details_layout = details.as_ref().map(|(_, placement)| *placement);
         let root = match &details {
@@ -1778,9 +1980,15 @@ impl Render for SuggestWidget {
             None => list_rect,
         };
         let list_origin = list_rect.origin - root.origin;
+        // The list and the details panel take the mouse; the rest of the
+        // box around both lets it through to the editor (in Monaco, they're
+        // separate widgets).
         self.room.set_anchor(Some(WidgetAnchor {
             preference: layout.side,
             anchor_box: Bounds::new(list_origin, list_outer),
+            beside: details.as_ref().map(|(_, placement)| {
+                Bounds::new(placement.bounds.origin - root.origin, placement.bounds.size)
+            }),
         }));
         let details = details.map(|(body, placement)| {
             self.render_details(body, placement, placement.bounds.origin - root.origin, cx)
@@ -1798,24 +2006,86 @@ impl Render for SuggestWidget {
 impl SuggestWidget {
     /// Places the details panel around a list of border box size `list`
     /// on `side` of the cursor line (see [`place_details`]), relative to the
-    /// list's top left: at its measured size, or the size it was resized
-    /// to.
-    fn place_details(&self, list: Size<Pixels>, side: ContentWidgetPreference) -> DetailsLayout {
+    /// list's top left: at the size it was resized to, or else 330px wide
+    /// and as tall as its content (Monaco `SuggestDetailsWidget.layout`
+    /// with the type and docs' height). The content is measured first, at
+    /// the width the panel gets, so the panel fits it in this frame.
+    fn place_details(
+        &mut self,
+        list: Size<Pixels>,
+        side: ContentWidgetPreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<DetailsLayout> {
         let border2 = px(2. * BORDER);
-        let content = self
-            .details_content
-            .get()
-            .map_or(list.height, |height| height + border2);
-        let wanted = self
-            .details_size
-            .unwrap_or_else(|| size(px(DETAILS_WIDTH), content));
+        if let Some(wanted) = self.details_size {
+            return Some(self.place_details_at(list, side, wanted));
+        }
+        let width = px(DETAILS_WIDTH);
+        let content = self.measure_details(width - border2, window, cx)?;
+        let placement = self.place_details_at(list, side, size(width, content + border2));
+        // Narrower or wider there (below or above the list, or capped to
+        // the room): measured again at that width.
+        let placed = placement.bounds.size.width;
+        if (placed - width).abs() < px(0.5) {
+            return Some(placement);
+        }
+        let content = self.measure_details(placed - border2, window, cx)?;
+        Some(self.place_details_at(list, side, size(width, content + border2)))
+    }
+
+    /// The details panel's content height at `width` (inside its border):
+    /// laid out on its own, with the panel's text style, and kept until the
+    /// content changes.
+    fn measure_details(
+        &mut self,
+        width: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Pixels> {
+        if let Some((_, height)) = self
+            .details_heights
+            .iter()
+            .find(|(measured, _)| (*measured - width).abs() < px(0.5))
+        {
+            return Some(*height);
+        }
+        let body = self.render_details_body(cx)?;
+        let mut element = self
+            .details_text_style(div())
+            .w(width)
+            .child(body)
+            .into_any_element();
+        let height = element
+            .layout_as_root(
+                size(AvailableSpace::Definite(width), AvailableSpace::MinContent),
+                window,
+                cx,
+            )
+            .height;
+        self.details_heights.push((width, height));
+        Some(height)
+    }
+
+    /// The details panel's text: the suggest font size and row height.
+    fn details_text_style(&self, element: gpui::Div) -> gpui::Div {
+        element
+            .text_color(self.theme.colors.suggest_foreground)
+            .text_size(self.metrics.font_size)
+            .line_height(self.metrics.item_height)
+    }
+
+    /// [`Self::place_details`] at the `wanted` size.
+    fn place_details_at(
+        &self,
+        list: Size<Pixels>,
+        side: ContentWidgetPreference,
+        wanted: Size<Pixels>,
+    ) -> DetailsLayout {
         let Some(room) = self.room.get() else {
-            // Not laid out in a window yet: east, as tall as the list.
+            // Not laid out in a window yet: east.
             return DetailsLayout {
-                bounds: Bounds::new(
-                    point(list.width - px(BORDER), px(0.)),
-                    size(wanted.width, list.height),
-                ),
+                bounds: Bounds::new(point(list.width - px(BORDER), px(0.)), wanted),
                 side: DetailsSide::East,
                 sashes: [false, true, true, false],
             };
@@ -1861,20 +2131,15 @@ impl SuggestWidget {
         let visible = self.details_scroll.bounds().size.height;
         let scrollbar = self.render_scrollbar(
             ScrollbarTarget::Details,
-            "suggest-details",
             visible,
             visible + self.details_scroll.max_offset().y,
             -self.details_scroll.offset().y,
+            self.opacities[ScrollbarTarget::Details.index()],
             cx,
         );
-        let content = self.details_content.clone();
-        let measures = self.details_measures.clone();
-        let handle = self.details_scroll.clone();
-        let entity = cx.entity_id();
         let [north, east, south, west] = placement.sashes;
-        div()
+        self.details_text_style(div())
             .id("suggest-details")
-            .group("suggest-details")
             .absolute()
             .left(origin.x)
             .top(origin.y)
@@ -1890,34 +2155,25 @@ impl SuggestWidget {
             } else {
                 colors.suggest_border
             })
-            .text_color(colors.suggest_foreground)
-            .text_size(self.metrics.font_size)
-            .line_height(self.metrics.item_height)
             .child(
                 div()
-                    // Measures the content, which sizes the panel next frame
-                    // (Monaco lays the panel out at its content's height).
-                    // (A scroll container reports its children through its
-                    // handle.)
-                    .on_children_prepainted(move |_, _, cx| {
-                        let Some(height) = handle.bounds_for_item(0).map(|b| b.size.height) else {
-                            return;
-                        };
-                        let changed = content
-                            .get()
-                            .is_none_or(|last| (last - height).abs() > px(0.5));
-                        if changed && measures.get() < MAX_DETAILS_MEASURES {
-                            measures.set(measures.get() + 1);
-                            content.set(Some(height));
-                            cx.notify(entity);
-                        }
-                    })
                     .id("suggest-details-body")
                     .size_full()
                     .flex()
                     .flex_col()
                     .overflow_y_scroll()
                     .track_scroll(&self.details_scroll)
+                    // Its `DomScrollableElement` shows the scrollbar while
+                    // the mouse is over it and after the wheel scrolls it.
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        this.set_hover(ScrollbarTarget::Details, HOVER_AREA, *hovered, cx)
+                    }))
+                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                        if this.details_scroll.max_offset().y > px(0.) {
+                            this.reveal_scrollbar(ScrollbarTarget::Details, cx);
+                            cx.notify();
+                        }
+                    }))
                     .child(body),
             )
             .children(scrollbar)
@@ -2030,10 +2286,11 @@ mod tests {
         let layout = layout_list(&input(50, room(600., 100.)));
         assert_eq!(layout.side, Above);
         assert_eq!(layout.size.height, px(240.));
-        // Little room either way: the bigger side, capped to whole rows.
+        // Little room either way: the bigger side, capped to the room (the
+        // last row shows in part).
         let layout = layout_list(&input(50, room(150., 90.)));
         assert_eq!(layout.side, Above);
-        assert_eq!(layout.size.height, px(140.));
+        assert_eq!(layout.size.height, px(148.));
         // Few rows fit below even with more room above.
         let layout = layout_list(&input(3, room(600., 100.)));
         assert_eq!(layout.side, Below);
@@ -2073,7 +2330,7 @@ mod tests {
         below.locked = Some(Below);
         let layout = layout_list(&below);
         assert_eq!(layout.side, Below);
-        assert_eq!(layout.size.height, px(80.));
+        assert_eq!(layout.size.height, px(98.));
         // Unless not even a row fits there anymore.
         let mut gone = input(50, room(600., 10.));
         gone.locked = Some(Below);
