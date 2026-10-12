@@ -286,10 +286,12 @@ impl CodeEditor {
     ) -> Option<Entity<crate::TextModel>> {
         match &location.uri {
             None => Some(self.model().clone()),
-            Some(uri) if Some(uri) == self.model().read(cx).uri() => Some(self.model().clone()),
-            Some(uri) => crate::registry::models(cx)
+            Some(_) if self.model().read(cx).is_at(location.uri.as_deref()) => {
+                Some(self.model().clone())
+            }
+            Some(_) => crate::registry::models(cx)
                 .into_iter()
-                .find(|model| model.read(cx).uri() == Some(uri)),
+                .find(|model| model.read(cx).is_at(location.uri.as_deref())),
         }
     }
 
@@ -445,7 +447,7 @@ impl CodeEditor {
         highlight: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        let here = location.uri.is_none() || location.uri.as_ref() == self.model().read(cx).uri();
+        let here = self.model().read(cx).is_at(location.uri.as_deref());
         if !here {
             self.open_location_with_openers(location.clone(), false, cx);
             return false;
@@ -627,7 +629,9 @@ fn editor_for_uri(uri: &str, cx: &App) -> Option<Entity<CodeEditor>> {
         .into_iter()
         .filter(|editor| {
             let editor = editor.read(cx);
-            !editor.in_peek && editor.model().read(cx).uri().map(|u| u.as_ref()) == Some(uri)
+            !editor.in_peek
+                && editor.model().read(cx).uri().is_some()
+                && editor.model().read(cx).is_at(Some(uri))
         })
         .collect();
     editors

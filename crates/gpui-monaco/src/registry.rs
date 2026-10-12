@@ -343,8 +343,9 @@ pub fn on_did_change_model_language(
 
 /// Calls `listener` with the uris of the models whose markers changed
 /// (Monaco `editor.onDidChangeMarkers`). Changes made in one update arrive
-/// together, after it, each uri once. A model without a uri is reported by
-/// its [`TextModel::resource`], `inmemory://model/N`.
+/// together, after it, each uri once. Uris are the models'
+/// [`TextModel::resource`]s: normalized (see [`crate::normalize_uri`]), and
+/// `inmemory://model/N` for a model without a uri.
 pub fn on_did_change_markers(
     cx: &mut App,
     listener: impl Fn(&[SharedString], &mut App) + 'static,

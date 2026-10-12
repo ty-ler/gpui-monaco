@@ -813,9 +813,18 @@ fn percent_decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Opens a clicked link: web and mail links, and `command:` links of
-/// trusted strings.
+/// Opens a clicked link as Monaco's `openLinkFromMarkdown` does, through
+/// the opener service: the [link openers](crate::register_link_opener)
+/// first, then web and mail links in the browser, and `command:` links of
+/// trusted strings. `internal:` links aren't openable.
 fn open_link(url: &str, trusted: bool, cx: &mut App) {
+    let scheme = url.split_once(':').map(|(scheme, _)| scheme);
+    if scheme.is_some_and(|scheme| scheme.eq_ignore_ascii_case("internal")) {
+        return;
+    }
+    if crate::openers::offer_link(url, cx) {
+        return;
+    }
     if is_openable(url) {
         cx.open_url(url);
     } else if trusted
@@ -1396,6 +1405,41 @@ mod tests {
         assert!(!is_openable("command:editor.action.format"));
         assert!(!is_openable("javascript:alert(1)"));
         assert!(!is_openable("file:///etc/passwd"));
+    }
+
+    /// Monaco `openLinkFromMarkdown`: every clicked link goes through the
+    /// opener service, so the host's link openers see `file:`, custom and
+    /// untrusted `command:` links too (#353).
+    #[gpui::test]
+    fn links_go_through_the_link_openers(cx: &mut gpui::TestAppContext) {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        cx.update(|cx| {
+            let _opener = crate::register_link_opener(cx, move |url, _| {
+                sink.borrow_mut().push(url.to_string());
+                !url.starts_with("x-unhandled:")
+            });
+            for url in [
+                "file:///a/b.rs#L3",
+                "x-custom:thing",
+                "command:editor.action.format",
+                "https://example.com",
+                "internal:x",
+                "x-unhandled:y",
+            ] {
+                open_link(url, false, cx);
+            }
+        });
+        assert_eq!(
+            *seen.borrow(),
+            [
+                "file:///a/b.rs#L3",
+                "x-custom:thing",
+                "command:editor.action.format",
+                "https://example.com",
+                "x-unhandled:y",
+            ]
+        );
     }
 
     #[test]

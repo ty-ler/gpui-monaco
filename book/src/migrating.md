@@ -15,8 +15,9 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 |---|---|
 | `monaco.editor.create(el, { value, language })` | `cx.new(\|cx\| TextModel::new(value).with_language(language))`, then `CodeEditor::new(model, window, cx)` |
 | `monaco.editor.createModel(value, language, uri)` | `create_model(cx, value, language, uri)`, which fails like Monaco's for a uri a live model has; or `TextModel::new(value).with_language(language).with_uri(uri)` (a language id or MIME type), then `register_model` so providers can find it |
-| `monaco.editor.registerLinkOpener(opener)`, `registerEditorOpener(opener)` | `register_link_opener(cx, \|url, cx\| …)`, `register_editor_opener(cx, \|editor, uri, selection, cx\| …)`, returning a `Disposable`; they answer synchronously |
-| `monaco.editor.getModel(uri)` | `model_for_uri(cx, uri)` |
+| `monaco.editor.registerLinkOpener(opener)`, `registerEditorOpener(opener)` | `register_link_opener(cx, \|url, cx\| …)`, `register_editor_opener(cx, \|editor, uri, selection, cx\| …)`, returning a `Disposable`; they answer synchronously. Link openers also get the links clicked in markdown (hovers, suggest details, parameter hints, messages), as Monaco's opener service does |
+| `monaco.editor.getModel(uri)` | `model_for_uri(cx, uri)`, comparing normalized uris as Monaco does |
+| `URI.parse(s).toString()` | `normalize_uri(s)`; a model's `resource()` is its uri in this form |
 | `monaco.editor.getModels()`, `getEditors()`, `getDiffEditors()` | `models(cx)`, `editors(cx)`, `diff_editors(cx)` (the editor's own inputs, such as find's, aren't listed, as Monaco's are DOM inputs) |
 | `monaco.editor.setModelLanguage(model, id)` | `model.set_language(Some(id.into()), cx)` (`None` for plain text) |
 | `monaco.editor.setModelMarkers(model, owner, markers)` | `model.set_markers(owner, markers, cx)` |
@@ -44,15 +45,17 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `getOffsetAt(pos)` / `getPositionAt(offset)` | `get_offset_at(point)` / `get_position_at(offset)` (Monaco's: UTF-16 units, line breaks as the model's line ending); `offset_at` / `position_at` are byte offsets into the stored `\n` text |
 | `getValueInRange(range, eol)` | `value_in_range(range, EndOfLinePreference::TextDefined)` |
 | `getValueLength(eol, preserveBOM)`, `getValueLengthInRange(range, eol)`, `getCharacterCountInRange(range, eol)` | `value_length_with(eol, preserve_bom)`, `value_length_in_range(range, eol)`, `character_count_in_range(range, eol)` |
-| `validatePosition`, `validateRange` | `validate_position`, `validate_range` |
-| `getWordAtPosition`, `getWordUntilPosition` | `word_at_position`, `word_until_position` |
+| `validatePosition`, `validateRange`, `isValidRange(range)` | `validate_position`, `validate_range`, `is_valid_range(&range)` |
+| `getLineMinColumn(n)`, `getLineMaxColumn(n)` | `line_min_column(row)`, `line_max_column(row)` (0-based: `0` and the line's UTF-16 length) |
+| `getLanguageIdAtPosition(line, column)` | `language_id_at_position(point)` (`language_at(offset)` returns the `Language`) |
+| `getWordAtPosition`, `getWordUntilPosition` | `word_at_position`, `word_until_position`, by the word pattern of the (embedded) language at the position |
 | `findMatches(...)` | `find_matches(query, is_regex, match_case, whole_word, …)`, or `find_matches_in(query, scope, …, capture_matches, limit)` |
 | `findNextMatch(...)` / `findPreviousMatch(...)` | `find_next_match(...)` / `find_previous_match(...)`, returning a `FindMatch` |
 | `getLinesContent()`, `getValueLength()`, `getFullModelRange()` | `lines_content()`, `value_length()`, `full_model_range()` |
 | `modifyPosition(pos, offset)` | `modify_position(point, offset)` |
 | `applyEdits(edits, true)` | `apply_edits(edits, cx)`, returning the undo edits (also recorded for undo) |
 | `applyEdits` with `forceMoveMarkers` | `apply_edit_operations(edits, cx)` with `SingleEditOperation::force_move_markers` |
-| `pushEditOperations(before, edits, computer)` | `push_edit_operations(before, edits, computer, cx)`, or `edit(edits, cx)` grouped with `start_transaction`/`end_transaction` |
+| `pushEditOperations(before, edits, computer)` | `push_edit_operations(before, edits, computer, cx)` with `SingleEditOperation`s (`(range, text).into()`, or `force_move_markers()`), or `edit(edits, cx)` grouped with `start_transaction`/`end_transaction` |
 | `pushStackElement()` / `popStackElement()` | `push_stack_element()` / `pop_stack_element()` |
 | `getAlternativeVersionId()` | `alternative_version_id()` |
 | `bracketPairs.getBracketPairsInRange`, `matchBracket`, `findEnclosingBrackets` | `bracket_pairs_in_range`, `match_bracket`, `find_enclosing_brackets` |

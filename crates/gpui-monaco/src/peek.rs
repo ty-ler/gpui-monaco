@@ -1732,7 +1732,7 @@ impl CodeEditor {
             self.open_location_with_openers(location, true, cx);
             return;
         }
-        let here = location.uri.is_none() || location.uri.as_ref() == self.model().read(cx).uri();
+        let here = self.model().read(cx).is_at(location.uri.as_deref());
         if here && !close {
             // Move the peek view to the result, keeping its list (Monaco
             // focuses the list then).

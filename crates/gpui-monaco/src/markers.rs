@@ -626,8 +626,8 @@ pub struct ModelMarker {
     /// Who set it (Monaco `owner`).
     pub owner: SharedString,
     /// The uri of the model it was set on (Monaco `resource`): its
-    /// [`TextModel::resource`], `inmemory://model/N` for a model without
-    /// a uri.
+    /// [`TextModel::resource`] (the normalized uri), `inmemory://model/N`
+    /// for a model without a uri.
     pub resource: SharedString,
     /// The marker as it was set: its range doesn't follow edits, as in
     /// Monaco's marker service (see [`TextModel::markers`] for the current
@@ -641,7 +641,8 @@ pub struct ModelMarker {
 pub struct MarkerFilter {
     /// Only this owner's.
     pub owner: Option<SharedString>,
-    /// Only those of this uri (a model's [`TextModel::resource`]).
+    /// Only those of this uri (a model's [`TextModel::resource`]), compared
+    /// in [`normalize_uri`](crate::normalize_uri)'s form.
     pub resource: Option<SharedString>,
     /// At most this many; `None` or `Some(0)` for all.
     pub take: Option<usize>,
@@ -654,8 +655,15 @@ pub fn model_markers(cx: &App, filter: &MarkerFilter) -> Vec<ModelMarker> {
     let Some(service) = cx.try_global::<MarkerService>() else {
         return Vec::new();
     };
+    let filter = MarkerFilter {
+        resource: filter
+            .resource
+            .as_ref()
+            .map(|resource| crate::normalize_uri(resource).into()),
+        ..filter.clone()
+    };
     service
-        .read(filter)
+        .read(&filter)
         .into_iter()
         .map(|(owner, resource, marker)| ModelMarker {
             owner: owner.clone(),
