@@ -1758,3 +1758,49 @@ fn old_insert_snippet_twice_19449(cx: &mut TestAppContext) {
         "for (let i=0; i<len; i++) {  }for (var i=0; i<len; i++) {  }"
     );
 }
+
+// Monaco `snippetVariables.test.ts`, "editor variables, selection": the
+// selection variables from the editor's cursor (the rest of the suite is
+// `src/snippet/variables_tests.rs`).
+
+const VARIABLES_TEXT: &str = "this is line one\nthis is line two\n    this is line three";
+
+/// What `$variable` inserts at `selection` in Monaco's model: empty when it
+/// has no value.
+fn resolved(ed: &mut Ed, selection: Selection, variable: &str) -> String {
+    ed.cancel(false);
+    ed.set_value(VARIABLES_TEXT);
+    ed.select(&[selection]);
+    ed.insert(&format!("<${{{variable}}}>"));
+    let text = ed.text();
+    text[text.find('<').unwrap() + 1..text.find('>').unwrap()].to_string()
+}
+
+#[gpui::test]
+fn editor_variables_selection(cx: &mut TestAppContext) {
+    let mut ed = setup(VARIABLES_TEXT, cx);
+    let selection = s(1, 2, 2, 3);
+    let mut check = |selection: Selection, variable: &str, expected: &str| {
+        assert_eq!(
+            resolved(&mut ed, selection, variable),
+            expected,
+            "{variable}"
+        );
+    };
+    check(selection, "TM_SELECTED_TEXT", "his is line one\nth");
+    check(selection, "TM_CURRENT_LINE", "this is line two");
+    check(selection, "TM_LINE_INDEX", "1");
+    check(selection, "TM_LINE_NUMBER", "2");
+    check(selection, "CURSOR_INDEX", "0");
+    check(selection, "CURSOR_NUMBER", "1");
+
+    let reversed = s(2, 3, 1, 2);
+    check(reversed, "TM_SELECTED_TEXT", "his is line one\nth");
+    check(reversed, "TM_CURRENT_LINE", "this is line one");
+    check(reversed, "TM_LINE_INDEX", "0");
+    check(reversed, "TM_LINE_NUMBER", "1");
+
+    check(p(1, 2), "TM_SELECTED_TEXT", "");
+    check(p(1, 2), "TM_CURRENT_WORD", "this");
+    check(p(3, 1), "TM_CURRENT_WORD", "");
+}
