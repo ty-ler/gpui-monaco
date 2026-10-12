@@ -99,7 +99,7 @@ fn files_in_view(multi: &Entity<MultiDiffEditor>, cx: &mut VisualTestContext) ->
         (0..m.len())
             .filter(|&i| {
                 let (start, height) = m.item_bounds_for_tests(i);
-                start < top + px(800.) && start + height > top && !m.is_collapsed(i)
+                start < top + px(800.) && start + height > top
             })
             .collect()
     })
@@ -151,8 +151,9 @@ fn collapsing_files(cx: &mut TestAppContext) {
         multi.read_with(cx, |m, _| m.item_bounds_for_tests(0).1),
         px(40.)
     );
-    // A collapsed file has no editor.
-    assert!(multi.read_with(cx, |m, _| m.diff_editor(0).is_none()));
+    // A collapsed file in view keeps its (hidden) editor, as in Monaco.
+    assert!(multi.read_with(cx, |m, _| m.diff_editor(0).is_some()));
+    assert!(cx.debug_bounds("multi-diff-editor-0").is_none());
     multi.update(cx, |m, cx| m.set_all_collapsed(true, cx));
     paint(cx);
     // Everything fits: scrolling clamps to the top, and there's no
@@ -335,7 +336,11 @@ fn scrollbar_wheel_and_drag(cx: &mut TestAppContext) {
     let grab = moved.center();
     cx.simulate_mouse_down(grab, MouseButton::Left, Modifiers::default());
     paint(cx);
-    assert_eq!(scroll_top(&multi, cx), px(300.), "grabbing doesn't jump");
+    let grabbed = scroll_top(&multi, cx);
+    assert!(
+        (grabbed - px(300.)).abs() < px(0.01),
+        "grabbing doesn't jump"
+    );
     cx.simulate_mouse_move(
         point(px(1500.), grab.y + px(100.)),
         Some(MouseButton::Left),
@@ -1500,7 +1505,7 @@ fn saved_state(
 fn a_view_state_restored_while_loading_waits_for_the_files(cx: &mut TestAppContext) {
     let (multi, cx, mut saved) = saved_state(1, cx);
     // In file 1 while the new files have Monaco's initial 500px height.
-    saved.scroll_top = px(1000.);
+    saved.scroll_top = px(960.);
     multi.update(cx, |m, cx| {
         m.set_documents_loading(cx);
         m.restore_view_state(&saved, cx);
@@ -1775,4 +1780,191 @@ fn a_kept_file_with_new_models_drops_its_revealed_regions(cx: &mut TestAppContex
     assert!(!hidden(cx).is_empty());
     assert_eq!(cursor(&multi, 1, cx), PointUtf16::new(20, 3));
     assert!(multi.read_with(cx, |m, _| m.is_collapsed(2)));
+}
+
+/// Monaco binds every file in view, collapsed or not, so collapsing the
+/// active file keeps `getActiveControl` and fires no
+/// `onDidChangeActiveControl` (audit 4 §E.25).
+#[gpui::test]
+fn collapsed_files_in_view_keep_their_editor(cx: &mut TestAppContext) {
+    let (multi, cx) = setup(cx);
+    let events = Rc::new(RefCell::new(0));
+    let log = events.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&multi, move |_, event: &MultiDiffEditorEvent, _| {
+            if *event == MultiDiffEditorEvent::ActiveControlChanged {
+                *log.borrow_mut() += 1;
+            }
+        })
+        .detach()
+    });
+    let active = multi.read_with(cx, |m, _| m.active_control().cloned());
+    assert!(active.is_some());
+    multi.update(cx, |m, cx| m.set_collapsed(0, true, cx));
+    paint(cx);
+    assert_eq!(
+        multi.read_with(cx, |m, _| m.active_control().cloned()),
+        active
+    );
+    multi.update(cx, |m, cx| m.set_collapsed(0, false, cx));
+    paint(cx);
+    assert_eq!(
+        multi.read_with(cx, |m, _| m.active_control().cloned()),
+        active
+    );
+    assert_eq!(*events.borrow(), 0);
+    // Expanded again, it shows at its measured height.
+    assert!(cx.debug_bounds("multi-diff-editor-0").is_some());
+    let (_, height) = multi.read_with(cx, |m, _| m.item_bounds_for_tests(0));
+    assert!(height < px(200.), "{height:?}");
+
+    // Collapsing everything binds every file in view.
+    multi.update(cx, |m, cx| m.set_all_collapsed(true, cx));
+    paint(cx);
+    assert_eq!(
+        multi.read_with(cx, |m, _| m.bound_items_for_tests()),
+        vec![0, 1, 2]
+    );
+}
+
+/// Monaco's `expandedContentHeight` starts at 500 for the whole file,
+/// header and padding included (the vendored test's
+/// `firstObservedLastItemHeight: 500`; audit 4 §E.26).
+#[gpui::test]
+fn an_unmeasured_file_is_500px_in_all(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    for variant in [
+        MultiDiffEditorVariant::NoCardsNonCompact,
+        MultiDiffEditorVariant::NoCards,
+        MultiDiffEditorVariant::Cards,
+    ] {
+        // Before the first frame, so before any file is measured.
+        cx.add_window_view(|window, cx| {
+            let documents = many_documents(20, cx);
+            let mut m = MultiDiffEditor::new(documents, window, cx);
+            m.set_variant(variant, cx);
+            for index in [0, 10, 19] {
+                assert_eq!(
+                    m.item_bounds_for_tests(index),
+                    (px(500.) * index as f32, px(500.)),
+                    "{variant:?}"
+                );
+            }
+            m.reveal(10, cx);
+            assert_eq!(m.scroll_top(), px(5000.), "{variant:?}");
+            m
+        });
+    }
+}
+
+/// Monaco's chevron is a focusable `Button` in every variant, clicked by
+/// Enter or Space (audit 4 §E.27).
+#[gpui::test]
+fn the_chevron_takes_the_keyboard_focus(cx: &mut TestAppContext) {
+    let (multi, cx) = setup(cx);
+    // The first tab stop is the first file's chevron: Enter collapses it.
+    cx.update(|window, cx| window.focus_next(cx));
+    paint(cx);
+    cx.simulate_keystrokes("enter");
+    paint(cx);
+    assert!(multi.read_with(cx, |m, _| m.is_collapsed(0)));
+    cx.simulate_keystrokes("space");
+    paint(cx);
+    assert!(!multi.read_with(cx, |m, _| m.is_collapsed(0)));
+    cx.simulate_keystrokes("enter");
+    paint(cx);
+    // Its editor is hidden: Tab goes on to the next file's chevron, whose
+    // Space collapses and activates its file.
+    cx.simulate_keystrokes("tab");
+    paint(cx);
+    cx.simulate_keystrokes("space");
+    paint(cx);
+    assert!(multi.read_with(cx, |m, _| m.is_collapsed(1)));
+    assert_eq!(multi.read_with(cx, |m, _| m.active_item()), Some(1));
+    // Expanded, Tab goes from the chevron into its file's editor.
+    cx.simulate_keystrokes("space");
+    paint(cx);
+    cx.simulate_keystrokes("tab");
+    paint(cx);
+    let in_editor = cx.update(|window, cx| {
+        let diff = multi.read(cx).diff_editor(1).unwrap().read(cx);
+        [diff.original_editor(), diff.modified_editor()]
+            .iter()
+            .any(|editor| editor.focus_handle(cx).is_focused(window))
+    });
+    assert!(in_editor);
+}
+
+/// The compact variants' headers take the focus too: Tab reaches the
+/// header, then its chevron (Monaco's `tabIndex = 0` and `Button`).
+#[gpui::test]
+fn compact_headers_and_chevrons_are_tab_stops(cx: &mut TestAppContext) {
+    let (multi, cx) = setup(cx);
+    set_variant(&multi, MultiDiffEditorVariant::NoCards, cx);
+    blur(cx);
+    // The header: Enter toggles the file.
+    cx.update(|window, cx| window.focus_next(cx));
+    paint(cx);
+    cx.simulate_keystrokes("enter");
+    paint(cx);
+    assert!(multi.read_with(cx, |m, _| m.is_collapsed(0)));
+    // The chevron, once: its Space doesn't reach the header too.
+    cx.simulate_keystrokes("tab");
+    paint(cx);
+    cx.simulate_keystrokes("space");
+    paint(cx);
+    assert!(!multi.read_with(cx, |m, _| m.is_collapsed(0)));
+}
+
+/// Monaco `focus()`: the active file's editor, `false` without one
+/// (audit 4 §E.28).
+#[gpui::test]
+fn focusing_the_active_file(cx: &mut TestAppContext) {
+    let (multi, cx) = setup_many(20, cx);
+    assert!(!modified_focused(&multi, 0, cx));
+    assert!(cx.update(|window, cx| multi.update(cx, |m, cx| m.focus_active(window, cx))));
+    paint(cx);
+    assert!(modified_focused(&multi, 0, cx));
+    blur(cx);
+    // Out of view, the file has no editor to focus.
+    multi.update(cx, |m, cx| m.set_scroll_top(px(5000.), cx));
+    paint(cx);
+    assert!(multi.read_with(cx, |m, _| m.diff_editor(0).is_none()));
+    assert!(!cx.update(|window, cx| multi.update(cx, |m, cx| m.focus_active(window, cx))));
+    assert!(cx.update(|window, cx| window.focused(cx).is_none()));
+
+    // No active file.
+    cx.update(|window, cx| multi.update(cx, |m, cx| m.set_documents(Vec::new(), window, cx)));
+    paint(cx);
+    assert!(!cx.update(|window, cx| multi.update(cx, |m, cx| m.focus_active(window, cx))));
+}
+
+/// Monaco's `R` flag and struck-through original path show only when the
+/// two paths differ (audit 4 §E.28).
+#[gpui::test]
+fn the_rename_flag_needs_different_paths(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let (_multi, cx) = cx.add_window_view(|window, cx| {
+        let model = |text: &str, cx: &mut gpui::Context<MultiDiffEditor>| {
+            let text = text.to_string();
+            cx.new(|_| TextModel::new(&text))
+        };
+        let documents = vec![
+            MultiDiffDocument {
+                original_label: Some("same.rs".into()),
+                ..MultiDiffDocument::new("same.rs", model("a", cx), model("b", cx))
+            },
+            MultiDiffDocument {
+                original_label: Some("old.rs".into()),
+                ..MultiDiffDocument::new("new.rs", model("a", cx), model("b", cx))
+            },
+        ];
+        MultiDiffEditor::new(documents, window, cx)
+    });
+    cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+    paint(cx);
+    assert!(cx.debug_bounds("multi-diff-status-0").is_none());
+    assert!(cx.debug_bounds("multi-diff-status-1").is_some());
+    assert!(cx.debug_bounds("multi-diff-original-label-0").is_none());
+    assert!(cx.debug_bounds("multi-diff-original-label-1").is_some());
 }
