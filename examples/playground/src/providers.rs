@@ -768,7 +768,8 @@ impl InlineCompletionsProvider for DemoInlineCompletions {
 }
 
 /// Offers pasting text as a quoted string literal, from the "Paste
-/// options" button after a paste.
+/// options" button after a paste. `PLAYGROUND_SLOW_PASTE=<seconds>` makes
+/// it that slow, to show the inline progress.
 struct DemoPasteAsString;
 
 impl DocumentPasteEditProvider for DemoPasteAsString {
@@ -786,19 +787,34 @@ impl DocumentPasteEditProvider for DemoPasteAsString {
         _: &[std::ops::Range<PointUtf16>],
         data: &DataTransfer,
         _: DocumentPasteTriggerKind,
-        _: &mut App,
+        cx: &mut App,
     ) -> Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>> {
         let Some(text) = data.text("text/plain") else {
             return Task::ready(Ok(Vec::new()));
         };
-        Task::ready(Ok(vec![DocumentDropOrPasteEdit {
+        let edits = vec![DocumentDropOrPasteEdit {
             title: "Insert as String Literal".into(),
             kind: Some("text.string-literal".into()),
             insert_text: EditInsertText::Text(format!("{text:?}")),
             // Plain text first; this one is in the options.
             yield_to: vec![EditYieldTo::MimeType("text/plain".into())],
             ..Default::default()
-        }]))
+        }];
+        let delay = std::env::var("PLAYGROUND_SLOW_PASTE")
+            .ok()
+            .and_then(|seconds| seconds.parse::<f32>().ok());
+        match delay {
+            Some(seconds) => {
+                let timer = cx
+                    .background_executor()
+                    .timer(std::time::Duration::from_secs_f32(seconds));
+                cx.background_executor().spawn(async move {
+                    timer.await;
+                    Ok(edits)
+                })
+            }
+            None => Task::ready(Ok(edits)),
+        }
     }
 }
 

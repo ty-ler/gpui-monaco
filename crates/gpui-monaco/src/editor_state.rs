@@ -81,7 +81,12 @@ impl CodeEditor {
             CancellableOperation::Navigation => self.goto.task = None,
             CancellableOperation::Format => self.format_task = None,
             CancellableOperation::Rename => self.rename.task = None,
-            CancellableOperation::DropOrPaste => self.drop_paste.task = None,
+            CancellableOperation::DropOrPaste => {
+                self.drop_paste.task = None;
+                // Their spinners go with them.
+                self.clear_inline_progress(crate::inline_progress::ProgressKind::Paste, cx);
+                self.clear_inline_progress(crate::inline_progress::ProgressKind::Drop, cx);
+            }
         }
         cx.notify();
         true

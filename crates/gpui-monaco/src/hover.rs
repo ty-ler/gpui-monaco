@@ -1692,6 +1692,16 @@ impl CodeEditor {
         }
     }
 
+    /// Monaco `ContentHoverController.hideContentHover`: hides the hover
+    /// for mouse moves, clicks, scrolls and keys, unless the inline
+    /// suggestion toolbar's "⋯" menu shows (`dropDownVisible`).
+    fn hide_content_hover(&mut self, cx: &mut Context<Self>) {
+        if self.inline_toolbar_menu_visible() {
+            return;
+        }
+        self.hide_hover(cx);
+    }
+
     /// Whether a hover shows or is on its way.
     fn hover_active(&self) -> bool {
         self.hover.widget.is_some() || self.hover.task.is_some()
@@ -1722,7 +1732,7 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         if self.hover_active() && !self.mouse_keeps_hover(Some(position), cx) {
-            self.hide_hover(cx);
+            self.hide_content_hover(cx);
         }
     }
 
@@ -1738,7 +1748,7 @@ impl CodeEditor {
         // A drag (the card's scrollbar, say) has the pointer captured, which
         // Monaco's editor doesn't see leave.
         if self.hover_active() && !cx.has_active_drag() && !self.mouse_keeps_hover(position, cx) {
-            self.hide_hover(cx);
+            self.hide_content_hover(cx);
         }
     }
 
@@ -1749,7 +1759,9 @@ impl CodeEditor {
         if self.hover_active() {
             let editor = cx.weak_entity();
             cx.defer(move |cx| {
-                editor.update(cx, |this, cx| this.hide_hover(cx)).ok();
+                editor
+                    .update(cx, |this, cx| this.hide_content_hover(cx))
+                    .ok();
             });
         }
     }
@@ -1805,7 +1817,7 @@ impl CodeEditor {
         {
             return;
         }
-        self.hide_hover(cx);
+        self.hide_content_hover(cx);
     }
 
     /// Monaco `editor.action.showHover` ("Show or Focus Hover", Cmd/Ctrl+K
@@ -2092,7 +2104,7 @@ impl CodeEditor {
             return;
         }
         if !self.hover_enabled_for(&modifiers) {
-            self.hide_hover(cx);
+            self.hide_content_hover(cx);
             return;
         }
         if self.mouse_in_hover(target) {
@@ -2105,7 +2117,7 @@ impl CodeEditor {
             self.schedule_text_hover(position, delay, cx);
             return;
         }
-        self.hide_hover(cx);
+        self.hide_content_hover(cx);
         match target {
             HoverTarget::None => {}
             HoverTarget::Gutter(row, lane) => self.schedule_gutter_hover(row, lane, delay, cx),

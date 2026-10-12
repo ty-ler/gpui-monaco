@@ -195,6 +195,17 @@ fn nearest(locations: &[Location], uri: Option<&SharedString>, position: PointUt
         .unwrap_or(0)
 }
 
+/// The peek title and its description for a reference in `uri` (Monaco
+/// `ReferenceWidget._revealReference`): its name and folder, but
+/// "References" whatever the kind for an `inmemory:` model, which a model
+/// without a URI is in Monaco.
+fn peek_title(uri: Option<&str>) -> (String, String) {
+    match uri {
+        Some(uri) if !uri.starts_with("inmemory:") => uri_label(uri),
+        _ => ("References".to_string(), String::new()),
+    }
+}
+
 /// The last path segment of `uri` and the folder before it.
 fn uri_label(uri: &str) -> (String, String) {
     let path = uri.split_once("://").map_or(uri, |(_, rest)| rest);
@@ -880,10 +891,7 @@ impl PeekView {
     }
 
     fn title(&self) -> (String, String) {
-        match &self.groups[self.selected.0].uri {
-            Some(uri) => uri_label(uri),
-            None => (kind_title(self.kind).to_string(), String::new()),
-        }
+        peek_title(self.groups[self.selected.0].uri.as_deref())
     }
 
     /// The list's wheel: always consumed (Monaco's list has
@@ -1772,6 +1780,19 @@ mod tests {
         );
         // Multi-line matches run to the end of the first line.
         assert_eq!(line_preview("fn f() {", 3, None).1, "f() {");
+    }
+
+    #[test]
+    fn in_memory_models_are_titled_references() {
+        // Monaco `_revealReference`: `inmemory:` models (and so models
+        // without a URI) are "References", whatever the kind.
+        let references = ("References".to_string(), String::new());
+        assert_eq!(peek_title(None), references);
+        assert_eq!(peek_title(Some("inmemory://model/1")), references);
+        assert_eq!(
+            peek_title(Some("file:///src/lib.rs")),
+            ("lib.rs".to_string(), "/src".to_string())
+        );
     }
 
     #[test]

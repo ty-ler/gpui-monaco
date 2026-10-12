@@ -2752,8 +2752,8 @@ impl CodeEditor {
         Some((warning.message.as_str().to_string(), squiggled))
     }
 
-    /// Opens the always-shown toolbar's "⋯" menu, which takes the
-    /// keyboard, for tests.
+    /// Opens the always-shown toolbar's "⋯" menu (the context menu), which
+    /// takes the keyboard, for tests.
     #[doc(hidden)]
     pub fn open_inline_toolbar_menu_for_tests(
         &mut self,
@@ -2761,16 +2761,9 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         if let Some((toolbar, _)) = self.inline.toolbar.clone() {
-            toolbar.update(cx, |toolbar, cx| toolbar.open_menu_for_tests(window, cx));
+            let anchor = toolbar.read(cx).menu_anchor();
+            self.show_inline_toolbar_menu(anchor, window, cx);
         }
-    }
-
-    /// Whether the always-shown toolbar's menu is open, and its selected
-    /// row, for tests.
-    #[doc(hidden)]
-    pub fn inline_toolbar_menu_for_tests(&self, cx: &gpui::App) -> Option<Option<usize>> {
-        let (toolbar, _) = self.inline.toolbar.as_ref()?;
-        toolbar.read(cx).menu_for_tests()
     }
 
     fn clear_ghost_text(&mut self, cx: &mut Context<Self>) {
@@ -2863,6 +2856,10 @@ impl CodeEditor {
     /// edit asked for explicitly shows (Monaco).
     pub(crate) fn inline_blurred(&mut self, cx: &mut Context<Self>) {
         if self.inline.explicit && self.inline_edit_visible(cx) {
+            return;
+        }
+        // Nor while the toolbar's "⋯" menu shows (Monaco `dropDownVisible`).
+        if self.inline_toolbar_menu_visible() {
             return;
         }
         if !self.options.inline_suggest.keep_on_blur && self.inline.active {

@@ -46,6 +46,7 @@ use crate::codicons::{Codicon, icon as codicon};
 use crate::context_menu::CONTEXT_MENU_KEY_CONTEXT;
 use crate::decorations::{BlockDecoration, DecorationId, DecorationOptions, InjectedText};
 use crate::editor::CodeEditor;
+use crate::keybinding_label::{KeyLabel, KeycapStyle, keycaps_styled};
 use crate::options::LineNumbers;
 use crate::providers::{Command, InlineCompletionHintStyle};
 use crate::theme::{Theme, TokenStyle};
@@ -281,8 +282,47 @@ pub(crate) enum GutterMenuAction {
     Link(Command),
 }
 
-/// A menu entry: its title, keybinding hint and action.
-type GutterMenuItem = (SharedString, Option<&'static str>, GutterMenuAction);
+impl GutterMenuAction {
+    /// The keys Monaco's `_getKeybinding` shows for the entry's command
+    /// (none for commands with arguments, as the provider's are).
+    fn binding(&self, focus: &FocusHandle, window: &Window) -> Option<gpui::KeyBinding> {
+        use crate::actions::*;
+        let binding = |action: &dyn gpui::Action, via: Option<&dyn gpui::Action>| {
+            super::toolbar::inline_command_binding(action, via, focus, window)
+        };
+        match self {
+            // Tab, Shift+Tab and Escape run these through the editor's own
+            // actions.
+            Self::Accept => binding(&AcceptInlineSuggestion, Some(&Tab)),
+            Self::AcceptAlternative => {
+                binding(&AcceptInlineSuggestionAlternativeAction, Some(&Outdent))
+            }
+            Self::Reject => binding(&HideInlineSuggestion, Some(&RemoveSecondaryCursors)),
+            Self::ToggleShowCollapsed => binding(&ToggleInlineSuggestionShowCollapsed, None),
+            Self::Command(_) | Self::Link(_) => None,
+        }
+    }
+}
+
+/// A menu entry: its title, its 16px codicon and its action.
+type GutterMenuItem = (SharedString, Option<Codicon>, GutterMenuAction);
+
+/// Monaco's menu navigation: the next (`delta` 1) or previous (-1) row,
+/// wrapping, or the first or last for larger steps.
+fn step_menu(active: Option<usize>, count: usize, delta: isize) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    let count = count as isize;
+    let next = match (active, delta) {
+        (Some(active), 1 | -1) => (active as isize + delta).rem_euclid(count),
+        (None, 1) => 0,
+        (None, -1) => count - 1,
+        (_, delta) if delta > 0 => count - 1,
+        _ => 0,
+    };
+    Some(next as usize)
+}
 
 /// A piece of a previewed line.
 #[derive(Clone, Debug, PartialEq)]
@@ -604,7 +644,7 @@ impl GutterIndicator {
     }
 
     fn move_active(&mut self, delta: isize, cx: &mut Context<Self>) {
-        self.active = super::toolbar::step_menu(self.active, self.menu.len(), delta);
+        self.active = step_menu(self.active, self.menu.len(), delta);
         cx.notify();
     }
 
@@ -684,7 +724,12 @@ impl GutterIndicator {
 }
 
 impl Render for GutterIndicator {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The menu's keys are looked up in the editor's context.
+        let focus = self
+            .editor
+            .upgrade()
+            .map(|editor| editor.read(cx).focus_handle.clone());
         let colors = &self.theme.colors;
         let editor = self.editor.clone();
         let docked = matches!(self.placement, IndicatorPlacement::Docked(_));
@@ -802,17 +847,20 @@ impl Render for GutterIndicator {
                 .on_action(cx.listener(|this, _: &ContextMenuHide, window, cx| {
                     this.close_menu(true, window, cx)
                 }))
+                // `hoverContent`: a 4px margin, at least 180px wide, in the
+                // hover service's card (the hover's colors and shape).
                 .p(px(4.))
-                .min_w(px(180.))
+                .min_w(px(180. + 8.))
                 .flex()
                 .flex_col()
                 .occlude()
-                .bg(colors.widget_background)
+                .bg(colors.hover_background)
                 .border_1()
-                .border_color(colors.widget_border)
-                .text_color(colors.widget_foreground)
+                .border_color(colors.hover_border)
+                .rounded(crate::widgets::card::CORNER_RADIUS)
+                .shadow(crate::widgets::card::shadow_lg())
+                .text_color(colors.hover_foreground)
                 .text_size(px(13.))
-                .shadow_md()
                 .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
                     this.menu_hovered = *hovered;
                     this.hover_changed(window, cx);
@@ -825,56 +873,146 @@ impl Render for GutterIndicator {
                         window.focus(&this.focus, cx);
                     }),
                 )
+                // `header`: `descriptionForeground`, 13px, 600, `0 4px`
+                // padding, 28px lines.
                 .child(
                     div()
                         .px(px(4.))
-                        .py(px(4.))
+                        .line_height(px(28.))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .opacity(0.8)
+                        .text_color(colors.description_foreground)
                         .child(self.header.clone()),
                 );
-            for (ix, (title, keys, action)) in self.menu.iter().enumerate() {
-                let separator = matches!(action, GutterMenuAction::Link(_))
-                    || (matches!(action, GutterMenuAction::Command(_))
-                        && !matches!(
-                            self.menu.get(ix.wrapping_sub(1)),
-                            Some((_, _, GutterMenuAction::Command(_)))
-                        ));
-                if separator {
-                    menu = menu.child(div().my(px(4.)).h(px(1.)).bg(colors.widget_border));
-                }
+            // `separator`: `2px 0` padding around a 1px `editorHoverBorder`
+            // line.
+            let separator = || {
+                div()
+                    .py(px(2.))
+                    .child(div().h(px(1.)).bg(colors.hover_border))
+            };
+            for (ix, (title, icon, action)) in self.menu.iter().enumerate() {
                 let active = self.active == Some(ix);
+                let on_hover = cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered && this.active != Some(ix) {
+                        this.active = Some(ix);
+                        cx.notify();
+                    }
+                });
+                let on_click = cx.listener(move |this, _: &gpui::MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.run(ix, window, cx);
+                });
+                // The link is the footer's action bar (`actionBarFooter`,
+                // `3px 24px` padding) after a separator: a label, hovered
+                // (or active) in `toolbar.hoverBackground`.
+                if matches!(action, GutterMenuAction::Link(_)) {
+                    let hover_colors = colors.clone();
+                    let label = div()
+                        .id(("inline-edit-gutter-menu-item", ix))
+                        .px(px(4.))
+                        .rounded(px(3.))
+                        .border_1()
+                        .border_color(gpui::transparent_black())
+                        .cursor_pointer()
+                        .hover(move |style| hover_colors.toolbar_hover(style))
+                        .when(active, |label| {
+                            let label = match colors.toolbar_hover_background {
+                                Some(background) => label.bg(background),
+                                None => label,
+                            };
+                            match colors.toolbar_hover_outline {
+                                Some(outline) => label.border_color(outline),
+                                None => label,
+                            }
+                        })
+                        .on_hover(on_hover)
+                        .on_mouse_down(MouseButton::Left, on_click)
+                        .child(title.clone());
+                    menu = menu
+                        .child(separator())
+                        .child(div().px(px(24.)).py(px(3.)).flex().child(label));
+                    continue;
+                }
+                // Each group of the provider's commands starts with a
+                // separator.
+                if matches!(action, GutterMenuAction::Command(_))
+                    && !matches!(
+                        self.menu.get(ix.wrapping_sub(1)),
+                        Some((_, _, GutterMenuAction::Command(_)))
+                    )
+                {
+                    menu = menu.child(separator());
+                }
+                let keys = focus
+                    .as_ref()
+                    .and_then(|focus| action.binding(focus, window))
+                    .map(|binding| KeyLabel::for_binding(&binding))
+                    .filter(|keys| !keys.chords.is_empty());
+                // `.monaco-menu-option .monaco-keybinding-key`: 13px, no
+                // border, padding or margin, in `descriptionForeground` (the
+                // focus foreground while active), at 0.7 opacity.
+                let keycap_style = KeycapStyle {
+                    font_size: px(13.),
+                    line_height: px(28.),
+                    padding: (px(0.), px(0.)),
+                    margin: px(0.),
+                    background: None,
+                    foreground: Some(if active {
+                        colors
+                            .action_list_focus_foreground
+                            .unwrap_or(colors.action_list_foreground)
+                    } else {
+                        colors.description_foreground
+                    }),
+                    border: None,
+                    bottom_border: None,
+                    shadow: None,
+                };
                 menu = menu.child(
+                    // `.monaco-menu-option`: `editorActionList.foreground`,
+                    // `0 4px` padding, 28px lines, a 4px gap, 3px corners.
                     div()
                         .id(("inline-edit-gutter-menu-item", ix))
                         .flex()
-                        .justify_between()
-                        .gap(px(12.))
-                        .px(px(6.))
-                        .py(px(3.))
+                        .items_center()
+                        .gap(px(4.))
+                        .px(px(4.))
+                        .line_height(px(28.))
                         .rounded(px(3.))
                         .cursor_pointer()
-                        // Monaco's `.monaco-menu-option.active`, set by the
-                        // mouse or the keyboard.
-                        .when(active, |this| {
-                            this.bg(colors.menu_selection_background)
-                                .text_color(colors.menu_selection_foreground)
-                        })
-                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                            if *hovered && this.active != Some(ix) {
-                                this.active = Some(ix);
-                                cx.notify();
+                        .text_color(colors.action_list_foreground)
+                        // `.active`, set by the mouse or the keyboard:
+                        // `editorActionList.focus*`, outlined with
+                        // `menu.selectionBorder`.
+                        .when(active, |row| {
+                            let row = colors.focused_list_row(
+                                row,
+                                colors.action_list_focus_background,
+                                colors.action_list_focus_foreground,
+                            );
+                            match colors.menu_selection_border {
+                                Some(border) => row.border_1().border_color(border),
+                                None => row,
                             }
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.run(ix, window, cx);
-                            }),
+                        })
+                        .on_hover(on_hover)
+                        .on_mouse_down(MouseButton::Left, on_click)
+                        // The 16px codicon.
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(16.))
+                                .flex()
+                                .children(icon.map(|icon| codicon(icon).size(px(16.)))),
                         )
                         .child(title.clone())
-                        .children(keys.map(|keys| div().opacity(0.6).child(keys))),
+                        .children(keys.map(|keys| {
+                            div()
+                                .ml_auto()
+                                .pl(px(4.))
+                                .opacity(0.7)
+                                .child(keycaps_styled(&keys, &keycap_style))
+                        })),
                 );
             }
             // Monaco shows it with the hover service, kept in the window:
@@ -995,30 +1133,41 @@ impl CodeEditor {
             .unwrap_or_else(|| "Inline Suggestion".into());
         let mut menu: Vec<GutterMenuItem> = vec![(
             "Go To / Accept".into(),
-            Some("Tab"),
+            Some(Codicon::Check),
             GutterMenuAction::Accept,
         )];
         if let Some(alternative) = &item.completion.alternative_action {
             menu.push((
                 alternative.command.title.clone(),
-                Some("Shift+Tab"),
+                // Monaco's alternative action icon, which the port's
+                // alternative actions don't have.
+                None,
                 GutterMenuAction::AcceptAlternative,
             ));
         }
-        menu.push(("Reject".into(), Some("Escape"), GutterMenuAction::Reject));
+        menu.push((
+            "Reject".into(),
+            Some(Codicon::Close),
+            GutterMenuAction::Reject,
+        ));
         menu.push((
             if self.options.inline_suggest.edits.show_collapsed {
                 "Show Expanded".into()
             } else {
                 "Show Collapsed".into()
             },
-            None,
+            Some(if self.options.inline_suggest.edits.show_collapsed {
+                Codicon::ExpandAll
+            } else {
+                Codicon::CollapseAll
+            }),
             GutterMenuAction::ToggleShowCollapsed,
         ));
         for command in &item.commands {
             menu.push((
                 command.title.clone(),
-                None,
+                // Monaco's default for extension commands.
+                Some(Codicon::SymbolEvent),
                 GutterMenuAction::Command(command.clone()),
             ));
         }
@@ -1061,6 +1210,25 @@ impl CodeEditor {
         let (header, menu) = self.inline_edit_gutter_menu(cx);
         std::iter::once(header.to_string())
             .chain(menu.into_iter().map(|(title, _, _)| title.to_string()))
+            .collect()
+    }
+
+    /// The gutter menu's titles with the keys it shows for them, for tests.
+    #[doc(hidden)]
+    pub fn inline_edit_gutter_menu_keys_for_tests(
+        &self,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> Vec<(String, String)> {
+        let (_, menu) = self.inline_edit_gutter_menu(cx);
+        menu.into_iter()
+            .map(|(title, _, action)| {
+                let keys = action
+                    .binding(&self.focus_handle, window)
+                    .map(|binding| KeyLabel::for_binding(&binding).text.to_string())
+                    .unwrap_or_default();
+                (title.to_string(), keys)
+            })
             .collect()
     }
 

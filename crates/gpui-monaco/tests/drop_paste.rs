@@ -272,3 +272,234 @@ fn paste_edits_are_resolved_before_applying(cx: &mut TestAppContext) {
     assert_eq!(text(&editor, cx), "// pasted\nresolved");
     assert_eq!(*asked.borrow(), [None, Some("text.lazy".to_string())]);
 }
+
+/// Monaco `PostEditWidget`: the options button goes when the cursor moves
+/// (`onDidChangeCursorPosition`), and the command with it.
+#[gpui::test]
+fn the_options_button_goes_when_the_cursor_moves(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", cx);
+    cx.update(|_, cx| {
+        register_document_paste_edit_provider(cx, LanguageSelector::All, Shout);
+    });
+    cx.write_to_clipboard(ClipboardItem::new_string("hi".into()));
+    cx.dispatch_action(Paste);
+    paint(cx);
+    assert_eq!(text(&editor, cx), "HI");
+    assert!(editor.read_with(cx, |e, _| e.is_post_edit_widget_visible()));
+    cx.simulate_keystrokes("left");
+    paint(cx);
+    assert!(editor.read_with(cx, |e, _| !e.is_post_edit_widget_visible()));
+    // Cmd/Ctrl+. no longer shows the paste options.
+    cx.dispatch_action(ChangePasteType);
+    paint(cx);
+    let rows = editor.read_with(cx, |e, cx| e.quick_access_rows_for_tests(cx));
+    assert!(rows.is_empty(), "{rows:?}");
+}
+
+/// A provider that takes `delay` to paste the text upper-cased, or, with
+/// `resolve`, as long to resolve its edit.
+struct Slow {
+    delay: std::time::Duration,
+    resolve: bool,
+}
+
+impl Slow {
+    fn edit(text: String) -> DocumentDropOrPasteEdit {
+        DocumentDropOrPasteEdit {
+            title: "Slow".into(),
+            kind: Some("text.slow".into()),
+            insert_text: EditInsertText::Text(text),
+            ..Default::default()
+        }
+    }
+}
+
+impl DocumentPasteEditProvider for Slow {
+    fn paste_mime_types(&self) -> Vec<SharedString> {
+        vec!["text/plain".into()]
+    }
+
+    fn provide_document_paste_edits(
+        &self,
+        _: &ProviderContext,
+        _: &[std::ops::Range<PointUtf16>],
+        data: &DataTransfer,
+        _: DocumentPasteTriggerKind,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>> {
+        let text = data.text("text/plain").unwrap_or_default().to_uppercase();
+        let delay = if self.resolve {
+            std::time::Duration::ZERO
+        } else {
+            self.delay
+        };
+        let timer = cx.background_executor().timer(delay);
+        cx.background_executor().spawn(async move {
+            timer.await;
+            Ok(vec![Slow::edit(text)])
+        })
+    }
+
+    fn resolve_document_paste_edit(
+        &self,
+        edit: &DocumentDropOrPasteEdit,
+        cx: &mut App,
+    ) -> Option<Task<anyhow::Result<DocumentDropOrPasteEdit>>> {
+        if !self.resolve {
+            return None;
+        }
+        let edit = edit.clone();
+        let timer = cx.background_executor().timer(self.delay);
+        Some(cx.background_executor().spawn(async move {
+            timer.await;
+            Ok(edit)
+        }))
+    }
+}
+
+impl gpui_monaco::providers::DocumentDropEditProvider for Slow {
+    fn provide_document_drop_edits(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        _: &DataTransfer,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>> {
+        let timer = cx.background_executor().timer(self.delay);
+        cx.background_executor().spawn(async move {
+            timer.await;
+            Ok(vec![Slow::edit("dropped".into())])
+        })
+    }
+}
+
+/// Registers a provider that takes 3s (to resolve, with `resolve`), and
+/// pastes "hi".
+fn slow_paste(
+    resolve: bool,
+    cx: &mut TestAppContext,
+) -> (Entity<CodeEditor>, &mut VisualTestContext) {
+    let (editor, cx) = setup("", cx);
+    cx.update(|_, cx| {
+        register_document_paste_edit_provider(
+            cx,
+            LanguageSelector::All,
+            Slow {
+                delay: std::time::Duration::from_secs(3),
+                resolve,
+            },
+        );
+    });
+    cx.write_to_clipboard(ClipboardItem::new_string("hi".into()));
+    cx.dispatch_action(Paste);
+    paint(cx);
+    (editor, cx)
+}
+
+/// Whether the paste (or drop) progress's operation runs, and whether its
+/// spinner shows.
+fn progress(editor: &Entity<CodeEditor>, paste: bool, cx: &mut VisualTestContext) -> Option<bool> {
+    editor.update(cx, |e, _| e.inline_progress_for_tests(paste))
+}
+
+fn advance(ms: u64, cx: &mut VisualTestContext) {
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(ms));
+    paint(cx);
+}
+
+/// Monaco `InlineProgressManager.showWhile`: slow paste providers show a
+/// spinner after 500ms, which goes when they're done.
+#[gpui::test]
+fn slow_paste_providers_show_progress(cx: &mut TestAppContext) {
+    let (editor, cx) = slow_paste(false, cx);
+    assert_eq!(progress(&editor, true, cx), Some(false));
+    advance(499, cx);
+    assert_eq!(progress(&editor, true, cx), Some(false));
+    advance(1, cx);
+    assert_eq!(progress(&editor, true, cx), Some(true));
+    advance(2500, cx);
+    assert_eq!(progress(&editor, true, cx), None);
+    assert_eq!(text(&editor, cx), "HI");
+}
+
+/// Clicking the spinner cancels the providers and does the basic paste
+/// ("Click to cancel and do basic paste").
+#[gpui::test]
+fn clicking_the_paste_progress_does_a_basic_paste(cx: &mut TestAppContext) {
+    let (editor, cx) = slow_paste(false, cx);
+    advance(500, cx);
+    editor.update(cx, |e, cx| e.click_inline_progress_for_tests(true, cx));
+    paint(cx);
+    assert_eq!(progress(&editor, true, cx), None);
+    assert_eq!(text(&editor, cx), "hi");
+    advance(3000, cx);
+    assert_eq!(text(&editor, cx), "hi");
+}
+
+/// Escape cancels the paste (Monaco `editor.cancelOperation`), and so does
+/// moving the cursor (Monaco's `EditorStateCancellationTokenSource`): the
+/// spinner goes and nothing is pasted.
+#[gpui::test]
+fn cancelled_pastes_drop_their_progress(cx: &mut TestAppContext) {
+    let (editor, cx) = slow_paste(false, cx);
+    advance(500, cx);
+    cx.simulate_keystrokes("escape");
+    paint(cx);
+    assert_eq!(progress(&editor, true, cx), None);
+    advance(3000, cx);
+    assert_eq!(text(&editor, cx), "");
+
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| m.set_value("ab", cx))
+    });
+    cx.dispatch_action(Paste);
+    paint(cx);
+    assert_eq!(progress(&editor, true, cx), Some(false));
+    cx.simulate_keystrokes("right");
+    paint(cx);
+    assert_eq!(progress(&editor, true, cx), None);
+    advance(3000, cx);
+    assert_eq!(text(&editor, cx), "ab");
+}
+
+/// Resolving the paste edit shows the spinner right away; clicking it
+/// cancels the paste.
+#[gpui::test]
+fn resolving_a_paste_edit_shows_progress_at_once(cx: &mut TestAppContext) {
+    let (editor, cx) = slow_paste(true, cx);
+    advance(0, cx);
+    assert_eq!(progress(&editor, true, cx), Some(true));
+    editor.update(cx, |e, cx| e.click_inline_progress_for_tests(true, cx));
+    paint(cx);
+    assert_eq!(progress(&editor, true, cx), None);
+    advance(3000, cx);
+    assert_eq!(text(&editor, cx), "");
+}
+
+/// Slow drop providers show the spinner too; clicking it cancels the drop.
+#[gpui::test]
+fn slow_drop_providers_show_progress(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("ab", cx);
+    cx.update(|_, cx| {
+        gpui_monaco::providers::register_document_drop_edit_provider(
+            cx,
+            LanguageSelector::All,
+            Slow {
+                delay: std::time::Duration::from_secs(3),
+                resolve: false,
+            },
+        );
+    });
+    editor.update(cx, |e, cx| {
+        e.drop_files(&[PathBuf::from("/tmp/a.txt")], PointUtf16::new(0, 1), cx)
+    });
+    paint(cx);
+    advance(500, cx);
+    assert_eq!(progress(&editor, false, cx), Some(true));
+    editor.update(cx, |e, cx| e.click_inline_progress_for_tests(false, cx));
+    paint(cx);
+    assert_eq!(progress(&editor, false, cx), None);
+    advance(3000, cx);
+    assert_eq!(text(&editor, cx), "ab");
+}

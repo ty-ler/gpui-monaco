@@ -44,6 +44,8 @@ Demo providers are registered by default:
 | `PLAYGROUND_WRAP=on\|<column>` | Start with word wrap on, or wrapped at a column |
 | `PLAYGROUND_DEMO=1` | Add the demo decorations and widgets at startup |
 | `PLAYGROUND_PLAIN=1` | Don't register the demo providers or markers |
+| `PLAYGROUND_INLINE_TOOLBAR=always` | Show the inline suggestion toolbar above ghost text, not only on hover |
+| `PLAYGROUND_SLOW_PASTE=3` | Make the demo paste provider take that many seconds (shows the inline progress) |
 | `PLAYGROUND_LSP="rust-analyzer"` | Start a language server for `PLAYGROUND_FILE`, rooted at the nearest project directory, instead of the demo providers |
 | `PLAYGROUND_DIFF=old.rs` | Open a diff editor comparing `old.rs` with `PLAYGROUND_FILE` |
 | `PLAYGROUND_DIFF_INLINE=1` | Show that diff inline |

@@ -2896,6 +2896,7 @@ impl CodeEditor {
         }
         self.record_cursor_change();
         self.close_message(cx);
+        self.post_edit_cursor_changed(cx);
         self.check_symbol_navigation(cx);
         self.inspect_tokens_cursor_changed(cx);
         self.check_rename(cx);
