@@ -1,6 +1,7 @@
 //! gpui-monaco in the browser: an editor in a canvas through gpui's web
 //! platform (`gpui-pre-web`). See `www/` and README.md for building it.
 //!
+//! It opens the playground's sample (`examples/playground/samples/sample.rs`).
 //! The web platform ships no fonts, so the page passes one in: `run(font,
 //! family)` registers the font's bytes and uses `family` for the editor.
 
@@ -13,8 +14,8 @@ mod web {
     use gpui_monaco::{CodeEditor, TextModel};
     use wasm_bindgen::prelude::*;
 
-    const SAMPLE: &str =
-        "// gpui-monaco on the web\nfn main() {\n    println!(\"Hello from the browser\");\n}\n";
+    /// The playground's sample, so the browser shows what the desktop demo does.
+    const SAMPLE: &str = include_str!("../../playground/samples/sample.rs");
 
     thread_local! {
         /// Keeps the application alive after `run` returns.

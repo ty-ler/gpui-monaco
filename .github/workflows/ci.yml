@@ -70,6 +70,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --target wasm32-unknown-unknown -p gpui-monaco -p gpui-monaco-languages
 
+  # The browser runner (#303): examples/web built and bound with wasm-bindgen.
+  # gpui's web platform needs nightly (wasm_thread), so this is best-effort too.
+  build-web:
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install nightly --profile minimal --target wasm32-unknown-unknown --component llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the wasm-bindgen CLI matching Cargo.lock
+        run: |
+          version="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)"
+          cargo install wasm-bindgen-cli --locked --version "$version"
+      - run: examples/web/build.sh --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: examples/web/www
+          if-no-files-found: error
+
   # Linux and Windows are best-effort: they must build, but are not release blockers.
   build-linux:
     runs-on: ubuntu-latest

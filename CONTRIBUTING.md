@@ -63,7 +63,8 @@ Linking (a real build, not `cargo check`) also archives those objects through
 `script/wasm/ar`, because macOS's `ar` silently drops WebAssembly objects. It uses the
 toolchain's `llvm-ar` (`rustup component add llvm-tools`), `llvm-ar` on the PATH, or
 `WASM_AR`. [`examples/web`](examples/web/README.md) runs the editor in a browser through
-gpui's web platform, which needs a nightly toolchain.
+gpui's web platform, which needs a nightly toolchain; CI's `build-web` job builds it with
+`examples/web/build.sh --release`.
 
 ## Releasing
 

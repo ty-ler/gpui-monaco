@@ -16,5 +16,6 @@
 - [Language servers (LSP)](lsp.md)
 - [Editing features](editing.md)
 - [Performance](performance.md)
+- [Running in a browser](web.md)
 - [Differences from Monaco](differences.md)
 - [Migrating from Monaco](migrating.md)
