@@ -800,6 +800,9 @@ impl CodeEditor {
             cx.on_blur(&focus_handle, window, |this, _, cx| {
                 this.has_focus = false;
                 this.update_bracket_highlights(cx);
+                // Monaco disposes the sticky scroll's focus when its DOM
+                // node blurs.
+                this.sticky.focused = None;
                 // Drags end, and the pointer they captured with them.
                 this.mouse_selection = None;
                 this.drag_scroll = None;
@@ -840,6 +843,15 @@ impl CodeEditor {
                         let keystroke = event.keystroke.clone();
                         editor
                             .update(cx, |this, cx| {
+                                // Monaco's focused sticky line has the
+                                // keyboard, not the text: only its own keys
+                                // and the editor's modified shortcuts act.
+                                if this.sticky.focused.is_some()
+                                    && crate::sticky_model::sticky_swallows(&keystroke)
+                                {
+                                    cx.stop_propagation();
+                                    return;
+                                }
                                 this.dismiss_keyboard_definition_link(cx);
                                 this.hover_key_down(event, window, cx);
                                 // Monaco `InspectTokensController`: Escape
@@ -1099,6 +1111,11 @@ impl CodeEditor {
         });
         self.minimap_cache = Default::default();
         self.overview_ruler_cache = Default::default();
+        // Monaco rebuilds the sticky scroll provider and recomputes the
+        // section headers for the new model (their keys also name the
+        // model: two unedited models share a text version).
+        self.sticky = Default::default();
+        self.section_headers = Default::default();
         self.cancel_selection_anchor(cx);
         self.reset_navigation_history();
         self.clear_occurrence_highlights(cx);
@@ -5139,7 +5156,7 @@ impl CodeEditor {
             return;
         }
         if let Some(ix) = layout.sticky_line_at(event.position) {
-            self.sticky_mouse_down(ix, event);
+            self.sticky_mouse_down(ix, event, cx);
             return;
         }
         for (vertical, bar) in [
@@ -6474,6 +6491,10 @@ impl EntityInputHandler for CodeEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A focused sticky line has the keyboard, not the text.
+        if self.sticky.focused.is_some() {
+            return;
+        }
         if self.options.read_only {
             self.read_only_edit_attempt(cx);
             return;
@@ -6518,6 +6539,9 @@ impl EntityInputHandler for CodeEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.sticky.focused.is_some() {
+            return;
+        }
         if self.options.read_only {
             self.read_only_edit_attempt(cx);
             return;

@@ -5,6 +5,15 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Sticky scroll and section headers (#337):** state follows the model, and sticky clicks, pointer and keyboard focus match Monaco's `StickyScrollController`, `StickyScrollWidget` and `SectionHeaderDetector`.
+  - **Switching models:** `set_model` resets the sticky scroll model and the minimap section headers, and their caches key on the model as well as its text version, so an unedited model no longer shows the previous model's sticky lines or `MARK:` labels.
+  - **Stale sticky lines:** while the sticky model is recomputed after an edit, the widget keeps the lines it last drew (Monaco renders only when the model's version is the text's), instead of drawing old rows over new text.
+  - **Clicks:** a click on a sticky line's number does nothing, a click right of its text goes to column 0, and a click needs the mouse down and up on the same part (text, number or chevron) of the same line, as a DOM `click` does.
+  - **Pointer:** a hand over sticky text and shown chevrons, the arrow over the rest of the sticky gutter; the gutter's folding controls under the sticky lines no longer show their hand or tooltip.
+  - **Keyboard focus:** sticky focus ends when the editor loses focus or a sticky line is pressed, and while it's focused typed text and unmodified keys other than Up, Down, Enter and Escape don't reach the text.
+  - **Folding model:** sticky scopes come from the folding ranges without manual ("Create Folding Range from Selection") or recovered regions, as Monaco's sticky model computes its own.
+  - **Minimap:** section headers follow edits until they're found again (Monaco tracks them as decorations), and `minimap.autohide: "scroll"` shows the minimap when the scroll top or scroll height changes, not on horizontal scrolling.
+  - **Tests:** GPUI tests in `tests/sticky_scroll.rs` and `tests/minimap.rs` for each item.
 - **Diff editor (#338):** diff results, revert, moved-block compare and alignment follow Monaco's diff editor (audit 3 §E.1–§E.6).
   - **Normalized diffs:** each computed diff goes through Monaco's `normalizeDocumentDiff`: a character change from column 1 to the line end on both sides, not on the last line, ends at the start of the next line. Its highlight fills to the right edge (`shouldFillLineOnLineBreak`), the true inline view shows such lines as deleted lines instead of striking them through, `compact_mode` doesn't count them as simple, and reverting them restores the line break.
   - **Revert at the cursor:** the `Revert` action (`diffEditor.revert`) reverts the changes whose modified lines overlap or touch the selection's `[start line, end line)`, as Monaco's `revertFocusedRangeMappings` does. So a cursor right below a deleted block, or on the line after a change, reverts it; before, deletions could never be reverted this way.

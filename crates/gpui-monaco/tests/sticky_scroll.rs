@@ -553,3 +553,216 @@ fn a_sticky_click_reveals_the_position(cx: &mut TestAppContext) {
     // Not where the line showed (its top minus one line).
     assert_ne!(clicked, px(100. * lh));
 }
+
+// ----- #337: state after set_model, clicks, pointer and focus -----
+
+/// Sticky rows after scrolling to `y`, painting without letting the
+/// delayed sticky model recompute.
+fn sticky_rows_now(editor: &Entity<CodeEditor>, y: f32, cx: &mut VisualTestContext) -> Vec<u32> {
+    editor.update(cx, |e, cx| {
+        e.set_scroll_position(gpui::point(px(0.), px(y)), cx)
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    editor.read_with(cx, |e, _| e.sticky_rows_for_tests().0)
+}
+
+/// Monaco rebuilds the sticky model for a new model: two unedited models
+/// share a text version, which mustn't keep the old model's scopes.
+#[gpui::test]
+fn set_model_drops_the_old_models_sticky_lines(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("rust", StickyScrollModel::Outline, cx);
+    assert_eq!(sticky_rows_at(&editor, 1000., cx), vec![0, 1]);
+    let flat: String = (0..300).map(|i| format!("// line {i}\n")).collect();
+    let other = cx.new(|_| TextModel::new(&flat).with_language("rust"));
+    // Parsed already, as a model open elsewhere is.
+    other.update(cx, |m, cx| m.ensure_syntax(cx));
+    cx.run_until_parked();
+    editor.update(cx, |e, cx| e.set_model(other, cx));
+    assert!(sticky_rows_at(&editor, 1000., cx).is_empty());
+}
+
+/// Monaco `_renderStickyScroll` renders only while the sticky model is
+/// for the current text: until it's recomputed after an edit, the widget
+/// keeps what it showed, wherever the view scrolls.
+#[gpui::test]
+fn stale_sticky_lines_stay_until_the_model_is_recomputed(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("rust", StickyScrollModel::Outline, cx);
+    let lh = line_height(&editor, cx);
+    assert_eq!(sticky_rows_at(&editor, 1000., cx), vec![0, 1]);
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| {
+            let end = m.buffer().rope().len();
+            let comments: String = (0..300).map(|i| format!("// {i}\n")).collect();
+            m.edit([(end..end, comments.as_str())], cx).unwrap();
+        })
+    });
+    // Scrolled past every scope: the widget keeps `impl` and `fn`.
+    assert_eq!(sticky_rows_now(&editor, 400. * lh, cx), vec![0, 1]);
+    // Recomputed after Monaco's delay.
+    assert!(sticky_rows_at(&editor, 400. * lh, cx).is_empty());
+}
+
+/// Monaco's sticky folding model runs the folding providers itself, so a
+/// manual folding range isn't a scope.
+#[gpui::test]
+fn manual_folding_ranges_are_not_sticky_scopes(cx: &mut TestAppContext) {
+    use gpui_monaco::cursor::Selection;
+    let (editor, cx) = setup("rust", StickyScrollModel::FoldingProvider, cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[Selection {
+                anchor: PointUtf16::new(50, 0),
+                head: PointUtf16::new(80, 0),
+            }],
+            cx,
+        );
+        e.create_fold_from_selection(cx);
+        e.unfold_all(cx);
+    });
+    let lh = line_height(&editor, cx);
+    assert_eq!(sticky_rows_at(&editor, 60. * lh, cx), vec![0, 1, 2]);
+}
+
+/// Monaco acts only on clicks on a sticky line's text
+/// (`data-sticky-is-line`): its line number does nothing.
+#[gpui::test]
+fn a_click_on_a_sticky_line_number_does_nothing(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("rust", StickyScrollModel::FoldingProvider, cx);
+    let lh = line_height(&editor, cx);
+    assert_eq!(sticky_rows_at(&editor, 100. * lh, cx), vec![0, 1, 2]);
+    let before = editor.read_with(cx, |e, _| (e.selections()[0].head, e.scroll_position().y));
+    let (lines, _) = editor.read_with(cx, |e, _| e.sticky_lines_for_tests());
+    click(
+        cx,
+        gpui::point(lines[1].1.left() + px(4.), lines[1].1.center().y),
+        gpui::Modifiers::default(),
+    );
+    assert_eq!(
+        editor.read_with(cx, |e, _| (e.selections()[0].head, e.scroll_position().y)),
+        before
+    );
+}
+
+/// A DOM `click` targets the nodes both the mouse down and up are in:
+/// down on the text and up on the line number isn't a click on the text.
+#[gpui::test]
+fn a_sticky_click_needs_the_mouse_down_and_up_on_the_text(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("rust", StickyScrollModel::FoldingProvider, cx);
+    let lh = line_height(&editor, cx);
+    assert_eq!(sticky_rows_at(&editor, 100. * lh, cx), vec![0, 1, 2]);
+    let before = editor.read_with(cx, |e, _| e.selections()[0].head);
+    let (lines, _) = editor.read_with(cx, |e, _| e.sticky_lines_for_tests());
+    let content_left = editor.read_with(cx, |e, _| e.layout_info().unwrap().content_left);
+    let y = lines[1].1.center().y;
+    cx.simulate_event(gpui::MouseDownEvent {
+        position: gpui::point(lines[1].1.left() + content_left + px(20.), y),
+        button: gpui::MouseButton::Left,
+        modifiers: gpui::Modifiers::default(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    cx.simulate_event(gpui::MouseUpEvent {
+        position: gpui::point(lines[1].1.left() + px(4.), y),
+        button: gpui::MouseButton::Left,
+        modifiers: gpui::Modifiers::default(),
+        click_count: 1,
+    });
+    cx.run_until_parked();
+    assert_eq!(editor.read_with(cx, |e, _| e.selections()[0].head), before);
+}
+
+/// Monaco: right of a sticky line's text there's no leaf node, so the
+/// click goes to the line's first column.
+#[gpui::test]
+fn a_click_past_a_sticky_lines_end_goes_to_its_start(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("rust", StickyScrollModel::FoldingProvider, cx);
+    let lh = line_height(&editor, cx);
+    assert_eq!(sticky_rows_at(&editor, 100. * lh, cx), vec![0, 1, 2]);
+    let (lines, _) = editor.read_with(cx, |e, _| e.sticky_lines_for_tests());
+    click(
+        cx,
+        gpui::point(lines[1].1.right() - px(40.), lines[1].1.center().y),
+        gpui::Modifiers::default(),
+    );
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.selections()[0].head),
+        PointUtf16::new(1, 0)
+    );
+}
+
+/// Monaco's pointer over sticky lines: a hand over the text
+/// (`.sticky-line-content:hover`) and the shown folding controls, the
+/// arrow over the rest of their gutter; the gutter's folding controls
+/// under them don't show theirs.
+#[gpui::test]
+fn sticky_lines_show_their_own_pointer(cx: &mut TestAppContext) {
+    use gpui::CursorStyle as MouseCursor;
+    let (editor, cx) = setup_with(
+        "rust",
+        |o| o.show_folding_controls = gpui_monaco::options::ShowFoldingControls::Mouseover,
+        cx,
+    );
+    // Scrolled a pixel: each header sticks over its own line, and over
+    // its gutter folding control.
+    assert_eq!(sticky_rows_at(&editor, 1., cx), vec![0, 1, 2]);
+    let (lines, _) = editor.read_with(cx, |e, _| e.sticky_lines_for_tests());
+    let content_left = editor.read_with(cx, |e, _| e.layout_info().unwrap().content_left);
+    let pointer = |at, cx: &mut VisualTestContext| {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        editor.read_with(cx, |e, _| e.mouse_cursor_at_for_tests(at))
+    };
+    let line = lines[2].1;
+    assert_eq!(
+        pointer(
+            gpui::point(line.left() + content_left + px(20.), line.center().y),
+            cx
+        ),
+        Some(MouseCursor::PointingHand)
+    );
+    assert_eq!(
+        pointer(gpui::point(line.left() + px(4.), line.center().y), cx),
+        Some(MouseCursor::Arrow)
+    );
+    // The hidden chevron and the gutter's under it: the arrow.
+    let fold = lines[2].2.expect("the `if` header has a folding control");
+    let over_both = fold.center();
+    assert_eq!(pointer(over_both, cx), Some(MouseCursor::Arrow));
+    // Over the sticky gutter the chevrons show, with the hand.
+    cx.simulate_mouse_move(over_both, None, gpui::Modifiers::default());
+    assert_eq!(pointer(fold.center(), cx), Some(MouseCursor::PointingHand));
+}
+
+/// Monaco disposes the sticky scroll's focus when it blurs, and while it
+/// has the keyboard, typing doesn't reach the text.
+#[gpui::test]
+fn sticky_focus_ends_on_blur_and_keeps_typing_out(cx: &mut TestAppContext) {
+    use gpui::Focusable;
+    use gpui_monaco::actions::*;
+    let (editor, cx) = setup("rust", StickyScrollModel::Outline, cx);
+    // Focus events need an active window.
+    cx.update(|window, cx| {
+        window.activate_window();
+        window.focus(&editor.focus_handle(cx), cx);
+    });
+    assert_eq!(sticky_rows_at(&editor, 1000., cx), vec![0, 1]);
+    let text = |cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, cx| e.model().read(cx).buffer().rope().to_string())
+    };
+    let before = text(cx);
+    cx.dispatch_action(FocusStickyScroll);
+    cx.simulate_keystrokes("x backspace shift-a");
+    cx.run_until_parked();
+    assert_eq!(text(cx), before);
+    assert!(editor.read_with(cx, |e, _| e.is_sticky_scroll_focused()));
+
+    // Focus leaves the editor.
+    cx.update(|window, cx| window.blur(cx));
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+    });
+    cx.run_until_parked();
+    assert!(!editor.read_with(cx, |e, _| e.is_sticky_scroll_focused()));
+}

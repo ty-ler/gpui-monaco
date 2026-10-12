@@ -854,8 +854,9 @@ pub(crate) fn prepaint(
     // Section headers (Monaco `_renderSectionHeaders`): the built-in
     // `#region` and `MARK:` headers, and decorations' (Monaco's detector
     // adds them as decorations).
-    for header in &editor.section_headers.headers {
-        let line = to_minimap_line(view_lines.to_view(header.range.start, false).0 + 1);
+    for (row, header) in editor.section_headers_with_rows(cx) {
+        let start = PointUtf16::new(row, header.range.start.column);
+        let line = to_minimap_line(view_lines.to_view(start, false).0 + 1);
         headers.push((
             line,
             (!header.text.is_empty()).then(|| header.text.clone()),
