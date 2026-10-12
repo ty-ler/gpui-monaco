@@ -130,6 +130,66 @@ fn composition_over_multiple_selections(cx: &mut TestAppContext) {
     assert_eq!(text(&editor, cx), "下 下");
 }
 
+/// macOS press-and-hold: holding `e` types `e`, and picking `é` from the
+/// accent menu replaces the `e` before the cursor without marked text.
+/// Monaco sees `compositionType("é", 1, 0, 0)` (`nativeEditContext.ts`
+/// `_emitTypeEvent`), which replaces it at every cursor.
+#[gpui::test]
+fn press_and_hold_accent_replaces_at_every_cursor(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "ae
+be", cx,
+    );
+    set(
+        &editor,
+        &[Selection::collapsed(p(1, 3)), Selection::collapsed(p(2, 3))],
+        cx,
+    );
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_text_in_range(Some(1..2), "é", window, cx)
+    });
+    assert_eq!(
+        text(&editor, cx),
+        "aé
+bé"
+    );
+    assert_eq!(marked(&editor, cx), None);
+    assert_eq!(
+        selections(&editor, cx),
+        vec![Selection::collapsed(p(1, 3)), Selection::collapsed(p(2, 3))]
+    );
+    // One undo restores both.
+    editor.update(cx, |e, cx| e.undo(cx));
+    assert_eq!(
+        text(&editor, cx),
+        "ae
+be"
+    );
+}
+
+/// A replacement away from the primary cursor isn't a `compositionType`:
+/// it replaces that range only.
+#[gpui::test]
+fn replacing_text_away_from_the_cursors_replaces_it_once(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "abc
+abc", cx,
+    );
+    set(
+        &editor,
+        &[Selection::collapsed(p(1, 4)), Selection::collapsed(p(2, 4))],
+        cx,
+    );
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_text_in_range(Some(0..1), "X", window, cx)
+    });
+    assert_eq!(
+        text(&editor, cx),
+        "Xbc
+abc"
+    );
+}
+
 /// The IME's selected range within the composition is its active clause
 /// (Monaco's thick `edit-context-composition-primary` underline); the rest
 /// of the composition is underlined thin.

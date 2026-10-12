@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use web_time::Instant;
 
-use gpui::{App, Context, Global, ScrollDelta, ScrollWheelEvent, px};
+use gpui::{App, Context, Global, Modifiers, PinchEvent, ScrollDelta, ScrollWheelEvent, px};
 
 use crate::editor::CodeEditor;
 use crate::options::EditorOptions;
@@ -69,8 +69,7 @@ pub(crate) struct ZoomGesture {
 
 /// Monaco `hasMouseWheelZoomModifiers`: Cmd or Ctrl on macOS (pinching
 /// sets Ctrl), Ctrl elsewhere; never with Shift or Alt.
-fn has_zoom_modifiers(event: &ScrollWheelEvent) -> bool {
-    let m = &event.modifiers;
+fn has_zoom_modifiers(m: &Modifiers) -> bool {
     if cfg!(target_os = "macos") {
         (m.platform || m.control) && !m.shift && !m.alt
     } else {
@@ -92,7 +91,7 @@ impl CodeEditor {
         match event.delta {
             // A physical wheel steps one level per event.
             ScrollDelta::Lines(delta) => {
-                if !has_zoom_modifiers(event) {
+                if !has_zoom_modifiers(&event.modifiers) {
                     return false;
                 }
                 let step = if delta.y > 0. { 1. } else { -1. };
@@ -101,27 +100,59 @@ impl CodeEditor {
             }
             // Trackpads accumulate the gesture's delta, a level per five
             // wheel notches (Monaco's 120 pixels).
-            ScrollDelta::Pixels(delta) => {
-                let now = Instant::now();
-                let gesture = match &mut self.zoom_gesture {
-                    Some(gesture) if now - gesture.last <= Duration::from_millis(50) => gesture,
-                    gesture => gesture.insert(ZoomGesture {
-                        last: now,
-                        start_level: editor_zoom_level(cx),
-                        has_modifiers: has_zoom_modifiers(event),
-                        accumulated: 0.,
-                    }),
-                };
-                gesture.last = now;
-                gesture.accumulated += f32::from(delta.y) / f32::from(px(120.));
-                if !gesture.has_modifiers {
-                    return false;
-                }
-                let level = gesture.start_level + gesture.accumulated / 5.;
-                set_editor_zoom_level(level, cx);
-                true
-            }
+            ScrollDelta::Pixels(delta) => self.zoom_gesture_delta(
+                f32::from(delta.y) / f32::from(px(120.)),
+                &event.modifiers,
+                cx,
+            ),
         }
+    }
+
+    /// Monaco `mouseWheelZoom` for a trackpad pinch. Browsers deliver a
+    /// pinch as a Ctrl+wheel event of one wheel notch per update (Chromium's
+    /// synthetic pinch wheel has `wheelDeltaY` ±120, positive when spreading
+    /// the fingers), which Monaco accumulates like any trackpad gesture: a
+    /// zoom level per five updates. GPUI delivers the pinch itself, so this
+    /// adds Ctrl to its modifiers and accumulates the same notches.
+    pub(crate) fn mouse_pinch_zoom(&mut self, event: &PinchEvent, cx: &mut Context<Self>) -> bool {
+        if !self.options.mouse_wheel_zoom || event.delta == 0. {
+            return false;
+        }
+        let modifiers = Modifiers {
+            control: true,
+            ..event.modifiers
+        };
+        self.zoom_gesture_delta(event.delta.signum(), &modifiers, cx)
+    }
+
+    /// Adds a trackpad wheel delta (in wheel notches) to the zoom gesture,
+    /// starting a new gesture after 50ms without events (Monaco
+    /// `onMouseWheel`'s `gestureAccumulatedDelta`). Returns whether it
+    /// zoomed: whether the gesture began with the zoom modifiers held.
+    fn zoom_gesture_delta(
+        &mut self,
+        delta: f32,
+        modifiers: &Modifiers,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let now = Instant::now();
+        let gesture = match &mut self.zoom_gesture {
+            Some(gesture) if now - gesture.last <= Duration::from_millis(50) => gesture,
+            gesture => gesture.insert(ZoomGesture {
+                last: now,
+                start_level: editor_zoom_level(cx),
+                has_modifiers: has_zoom_modifiers(modifiers),
+                accumulated: 0.,
+            }),
+        };
+        gesture.last = now;
+        gesture.accumulated += delta;
+        if !gesture.has_modifiers {
+            return false;
+        }
+        let level = gesture.start_level + gesture.accumulated / 5.;
+        set_editor_zoom_level(level, cx);
+        true
     }
 
     /// Re-applies the zoom after it changes.

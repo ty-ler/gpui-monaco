@@ -33,7 +33,8 @@ Issues are linked by number.
 | Word segmentation for languages without spaces (Japanese, Chinese, Thai) in word movement, deletion and selection | `wordSegmenterLocales` | ✅ ICU4X's segmenter instead of `Intl.Segmenter`, with the first valid locale only; needs the `word-segmenter` cargo feature (on by default) | #234 |
 | Multi-cursor: add above/below (`logicalLine`), Cmd+D and previous-match variants, select all occurrences, cursors at line ends/top/bottom, Alt+click, box select by mouse and keyboard on view lines (folds skipped, wrapped segments each a line), undo stops, read-only no-ops, options | `multicursor`, `cursorColumnSelection` | ✅ | #81, #260, #334 |
 | Mouse gestures: click counting, quadruple-click select all, Shift+double/triple-click and line-number Shift+click extension, `createCursor` toggle, column select following `multiCursorModifier`, middle-drag, drag autoscroll | `mouseHandler`, `viewController.dispatchMouse`, `dragScrolling` | ✅ | #245, #260 |
-| IME composition at every cursor, active-clause underline | `compositionType`, `nativeEditContext` | 🟡 GPUI passes the IME's selected range but not its clause boundaries or underline styles, so only the selected clause is drawn thick | #260 |
+| Touch: tap places the cursor, pan scrolls, long press opens the context menu | `pointerHandler`, `touch.ts` | ❌ GPUI 0.3.8 declares `TouchEvent` but doesn't dispatch it yet | #356 |
+| IME composition at every cursor, active-clause underline, replacements around the cursor without a composition (macOS press-and-hold accents) at every cursor | `compositionType`, `nativeEditContext` | 🟡 GPUI passes the IME's selected range but not its clause boundaries or underline styles, so only the selected clause is drawn thick | #260, #356 |
 | Cursor undo, selection anchor (the 2px `#007ACC` bar with its "Selection Anchor" hover), overtype mode | `cursorUndo`, `anchorSelect` | ✅ | #81, #350 |
 | Scroll commands (Ctrl+Up/Down, …) | `coreCommands` | ✅ | #81 |
 | Clipboard with multi-cursor distribution, column-selection (block) paste (`ColumnSelectionPasteCommand`), copies in the model's line ending | `clipboard`, `columnSelectionPasteCommand` | ✅ CRLF within copied pieces on Windows, as Monaco | #351 |
@@ -109,7 +110,7 @@ Issues are linked by number.
 | Occurrence and selection highlight, `selectedTextMatchMode` (`findOptions` uses the find state's toggles, open or closed), `occurrencesHighlightFromAllProviders` | `wordHighlighter`, `multicursor` | ✅ `multiFile` highlights the textual occurrences in every open model, as standalone Monaco's only multi-document provider does | #83, #203, #228, #334, #348 |
 | Unicode highlighting, unusual line terminators | `unicodeHighlighter`, `unusualLineTerminators` | ✅ | #86 |
 | Unicode highlighter "too many characters" banner, `disableHighlightingOf*` commands | `unicodeHighlighter`, `setBanner` | ✅ the commands change the editor's options, not user settings; the banner is a tab stop labelled with its message | #227, #335 |
-| Font weight, ligatures, zoom, mouse wheel zoom | `fontZoom`, options | ✅ | #87 |
+| Font weight, ligatures, zoom, mouse wheel and trackpad pinch zoom | `fontZoom`, options, `mouseHandler` | ✅ GPUI delivers the pinch itself (`PinchEvent`); it zooms like the Ctrl+wheel browsers send for it | #87, #356 |
 | Variable line heights (`lineHeight` decorations, `allowVariableLineHeights`) | decorations | ✅ | #87 |
 | Per-decoration fonts (`fontFamily`, `fontWeight`, `fontStyle`) | decorations | ✅ wrapping measures the editor's font; no per-decoration `fontSize` | #272 |
 | Letter spacing, font variations | options | ❌ | #87 |

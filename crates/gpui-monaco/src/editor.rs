@@ -8,9 +8,9 @@ use std::time::Duration;
 use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, Context, CursorStyle as MouseCursor, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
-    Point, Render, ScrollWheelEvent, Size, StatefulInteractiveElement as _, Styled, Subscription,
-    Task, UTF16Selection, Window, div, point, px, size,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
+    PinchEvent, Pixels, Point, Render, ScrollWheelEvent, Size, StatefulInteractiveElement as _,
+    Styled, Subscription, Task, UTF16Selection, Window, div, point, px, size,
 };
 use serde::{Deserialize, Serialize};
 use text::{Bias, BufferSnapshot, OffsetUtf16, PointUtf16};
@@ -6579,6 +6579,17 @@ impl CodeEditor {
         self.scroll_by_wheel(event, cx);
     }
 
+    /// A trackpad pinch: Monaco sees it as a Ctrl+wheel, which zooms with
+    /// `mouse_wheel_zoom` (see [`Self::mouse_pinch_zoom`]).
+    fn on_pinch(&mut self, event: &PinchEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.wheel_over_widget(event.position) {
+            return;
+        }
+        if self.mouse_pinch_zoom(event, cx) {
+            cx.stop_propagation();
+        }
+    }
+
     /// Scrolls by a wheel event, as over the text (Monaco
     /// `delegateScrollFromMouseWheelEvent`, e.g. for the diff editor's
     /// gutter).
@@ -6851,16 +6862,22 @@ impl EntityInputHandler for CodeEditor {
         let explicit = range_utf16
             .map(|r| self.range_from_utf16(&r))
             .or(marked.clone());
-        // Monaco commits a composition at every cursor.
-        if marked.is_some()
-            && self.cursors.all().len() > 1
+        // Monaco commits a composition at every cursor. Replacing text
+        // around the cursor without one (macOS press-and-hold swapping `e`
+        // for `é`, or autocorrect) is also a `compositionType` with
+        // `replacePrevCharCnt`/`replaceNextCharCnt`, at every cursor
+        // (`nativeEditContext.ts` `_emitTypeEvent`).
+        if self.cursors.all().len() > 1
             && let Some(range) = explicit.clone()
+            && (marked.is_some() || !range.is_empty())
             && self
                 .composition_type_at_cursors(range, text, 0, cx)
                 .is_some()
         {
-            self.end_composition(cx);
-            cx.emit(CodeEditorEvent::CompositionEnded);
+            if marked.is_some() {
+                self.end_composition(cx);
+                cx.emit(CodeEditorEvent::CompositionEnded);
+            }
             return;
         }
         match explicit {
@@ -8083,7 +8100,8 @@ impl Render for CodeEditor {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             // Mouse moves are `EditorElement`'s, to follow drags out of the
             // editor.
-            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel));
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_pinch(cx.listener(Self::on_pinch));
         let root = crate::editor_commands::register_handlers(root, cx);
         // Monaco `setBanner`: the banner takes its height off the top.
         match self.banner.clone() {

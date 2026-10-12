@@ -16,7 +16,7 @@ editor.update(cx, |editor, cx| {
 |---|---|---|
 | `font_family`, `font_size`, `line_height` | `fontFamily`, `fontSize`, `lineHeight` | `line_height: None` derives it from the font size, as Monaco does; see [Validation](#validation) |
 | `font_weight`, `font_ligatures` | `fontWeight`, `fontLigatures` | weights 1–1000; ligatures are `Off` (default), `On`, or CSS `font-feature-settings` |
-| `mouse_wheel_zoom` | `mouseWheelZoom` | Cmd+wheel (Ctrl elsewhere) zooms every editor's font; see `set_editor_zoom_level` |
+| `mouse_wheel_zoom` | `mouseWheelZoom` | Cmd+wheel (Ctrl elsewhere) and trackpad pinch zoom every editor's font; see `set_editor_zoom_level` |
 | `line_numbers` | `lineNumbers` | `On`, `Off`, `Relative`, `Interval` (every 10th, the current and the last line), or `LineNumbers::custom(\|n\| …)` for Monaco's function: a label per 1-based line, empty for none |
 | `select_on_line_numbers` | `selectOnLineNumbers` | clicking a line number selects the line (on); other gutter clicks never select |
 | `line_numbers_min_chars`, `line_decorations_width`, `glyph_margin` | same names | gutter layout (see [Layout](#layout)); `glyph_margin` is off by default, as in standalone Monaco; `line_decorations_width` takes pixels (`px(10.).into()`) or `LineDecorationsWidth::Chars(1.5)` for Monaco's `"1.5ch"` |

@@ -1847,7 +1847,7 @@ pub struct EditorOptions {
     /// (Monaco `mouseWheelScrollSensitivity`, default 1; 0 means 1).
     pub mouse_wheel_scroll_sensitivity: f32,
     /// Monaco `mouseWheelZoom`: the wheel zooms the font while Cmd (macOS)
-    /// or Ctrl is held (default `false`). See
+    /// or Ctrl is held, and so does a trackpad pinch (default `false`). See
     /// [`set_editor_zoom_level`](crate::set_editor_zoom_level).
     pub mouse_wheel_zoom: bool,
     /// Monaco `emptySelectionClipboard`: copy and cut with an empty selection act on
