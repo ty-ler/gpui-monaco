@@ -1760,13 +1760,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-shift-f3", PreviousSelectionMatch, ctx),
         KeyBinding::new("alt-f8", GoToNextMarker, ctx),
         KeyBinding::new("f8", GoToNextMarkerInFiles, ctx),
-        // Monaco `goToNextReference`'s and `goToPreviousReference`'s
-        // secondary keys (weight `EditorContrib - 10`), then
         // `editor.gotoNextSymbolFromResult` (`EditorContrib`): Go to
-        // Definition and Go to References come later and win while their
-        // preconditions hold, as in Monaco.
-        KeyBinding::new("f12", GoToNextReference, REFERENCE_SEARCH),
-        KeyBinding::new("shift-f12", GoToPreviousReference, REFERENCE_SEARCH),
+        // Definition comes later and wins while its precondition holds.
         KeyBinding::new("f12", GoToNextSymbolFromResult, ctx),
         KeyBinding::new("f12", GoToDefinition, ctx),
         KeyBinding::new("shift-f12", GoToReferences, ctx),
@@ -1803,6 +1798,9 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-shift-o", QuickOutline, ctx),
         KeyBinding::new("f1", QuickCommand, ctx),
         KeyBinding::new("shift-f10", ShowContextMenu, ctx),
+        // Monaco's `KeyCode.ContextMenu` (`contextmenu.ts`): GPUI calls the
+        // Menu (Apps) key `menu` on Windows and Linux.
+        KeyBinding::new("menu", ShowContextMenu, ctx),
         KeyBinding::new(
             if cfg!(target_os = "macos") {
                 "ctrl-shift-m"
@@ -1842,15 +1840,21 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             InsertColorWithStandaloneColorPicker,
             STANDALONE_COLOR_PICKER,
         ),
-        // In the quick access input (the list's keys win over the input's).
+        // In the quick access input (the list's keys win over the input's;
+        // more below).
         KeyBinding::new("down", QuickInputNext, QUICK_INPUT),
         KeyBinding::new("up", QuickInputPrevious, QUICK_INPUT),
         KeyBinding::new("pagedown", QuickInputPageNext, QUICK_INPUT),
         KeyBinding::new("pageup", QuickInputPagePrevious, QUICK_INPUT),
-        KeyBinding::new("secondary-home", QuickInputFirst, QUICK_INPUT),
-        KeyBinding::new("secondary-end", QuickInputLast, QUICK_INPUT),
-        KeyBinding::new("ctrl-n", QuickInputNext, QUICK_INPUT),
-        KeyBinding::new("ctrl-p", QuickInputPrevious, QUICK_INPUT),
+        // VS Code `quickInput.first`/`last` (`quickInputActions.ts`):
+        // Ctrl+Home/End on every platform (WinCtrl on macOS), also with Alt;
+        // `next`/`previous` also with Ctrl.
+        KeyBinding::new("ctrl-home", QuickInputFirst, QUICK_INPUT),
+        KeyBinding::new("ctrl-end", QuickInputLast, QUICK_INPUT),
+        KeyBinding::new("ctrl-alt-home", QuickInputFirst, QUICK_INPUT),
+        KeyBinding::new("ctrl-alt-end", QuickInputLast, QUICK_INPUT),
+        KeyBinding::new("ctrl-down", QuickInputNext, QUICK_INPUT),
+        KeyBinding::new("ctrl-up", QuickInputPrevious, QUICK_INPUT),
         // Monaco's quick input closes on Escape only.
         KeyBinding::new("shift-escape", gpui::NoAction, QUICK_INPUT),
         KeyBinding::new("alt-]", ShowNextInlineSuggestion, INLINE),
@@ -1862,7 +1866,10 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
                 "ctrl-right"
             },
             AcceptNextInlineWord,
-            Some("CodeEditor && inline_suggestion_visible && cursor_before_ghost_text"),
+            // Monaco leaves the key to word navigation for screen readers.
+            Some(
+                "CodeEditor && inline_suggestion_visible && cursor_before_ghost_text && !accessibilityModeEnabled",
+            ),
         ),
         KeyBinding::new(
             if cfg!(target_os = "macos") {
@@ -1905,6 +1912,20 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         BlockComment,
         ctx,
     ));
+
+    if cfg!(target_os = "macos") {
+        // The quick input's macOS keys: `quickInput.first`/`last` with Cmd
+        // added (`withCmdMod`), and VS Code's `quickOpenSelectNext` and
+        // `quickOpenSelectPrevious` (Ctrl+N/P, macOS only).
+        bindings.extend([
+            KeyBinding::new("cmd-ctrl-home", QuickInputFirst, QUICK_INPUT),
+            KeyBinding::new("cmd-ctrl-end", QuickInputLast, QUICK_INPUT),
+            KeyBinding::new("cmd-ctrl-alt-home", QuickInputFirst, QUICK_INPUT),
+            KeyBinding::new("cmd-ctrl-alt-end", QuickInputLast, QUICK_INPUT),
+            KeyBinding::new("ctrl-n", QuickInputNext, QUICK_INPUT),
+            KeyBinding::new("ctrl-p", QuickInputPrevious, QUICK_INPUT),
+        ]);
+    }
 
     if cfg!(target_os = "macos") {
         bindings.extend([
@@ -2291,7 +2312,33 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         ]);
     }
     // Monaco folds an action's precondition into its keybindings' `when`.
-    crate::editor_actions::with_preconditions(bindings)
+    crate::editor_actions::with_preconditions(by_precedence(bindings))
+}
+
+/// `bindings` in the order that gives Monaco's precedence.
+///
+/// Monaco runs the matching rule with the highest weight, and its widget
+/// and state rules (`EditorContrib` and up) outweigh the core keys
+/// (`EditorCore`) they share keys with. GPUI runs, of the bindings that
+/// match at the same depth, the one added last. So the plain
+/// [`KEY_CONTEXT`] bindings, the platform blocks included, go first and
+/// every binding with a more specific context after them, each group in
+/// the order it was listed in. Before both come the few rules Monaco
+/// weighs below the editor's own keys.
+fn by_precedence(bindings: Vec<KeyBinding>) -> Vec<KeyBinding> {
+    let plain = gpui::KeyBindingContextPredicate::Identifier(KEY_CONTEXT.into());
+    let (plain, contextual): (Vec<_>, Vec<_>) = bindings
+        .into_iter()
+        .partition(|binding| binding.predicate().is_some_and(|p| *p == plain));
+    // Monaco `goToNextReference`'s and `goToPreviousReference`'s secondary
+    // keys (weight `EditorContrib - 10`): Go to Definition, Go to References
+    // and `editor.gotoNextSymbolFromResult` (`EditorContrib`) win while
+    // their preconditions hold.
+    let weaker = [
+        KeyBinding::new("f12", GoToNextReference, REFERENCE_SEARCH),
+        KeyBinding::new("shift-f12", GoToPreviousReference, REFERENCE_SEARCH),
+    ];
+    weaker.into_iter().chain(plain).chain(contextual).collect()
 }
 
 /// Binds [`default_key_bindings`].

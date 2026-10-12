@@ -3432,8 +3432,8 @@ impl CodeEditor {
     }
 
     /// Escape while parameter hints show (Monaco `closeParameterHints`):
-    /// Monaco weighs drag-and-drop, linked editing, the suggest widget and
-    /// ghost text higher, so those go first.
+    /// Monaco weighs drag-and-drop, the reference peek, linked editing, the
+    /// suggest widget and ghost text higher, so those go first.
     fn close_parameter_hints(
         &mut self,
         _: &CloseParameterHints,
@@ -3441,6 +3441,7 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         if self.dnd.active
+            || (!self.options.stable_peek && self.is_peek_visible())
             || self.linked_editing_active()
             || self.is_suggest_visible()
             || self.inline_suggestion_visible(cx)
@@ -3473,6 +3474,16 @@ impl CodeEditor {
             cx.propagate();
             return;
         }
+        // Then Monaco's rules by weight: `closeReferenceSearch`
+        // (`WorkbenchContrib + 50`; off with `stablePeek`),
+        // `cancelLinkedEditingInput` (+99), `hideSuggestWidget` and
+        // `inlineSuggest.hide` (+90), `closeParameterHints` (+75),
+        // `closeMarkersNavigation` (+50), `leaveSnippet` and
+        // `leaveEditorMessage` (+30), `closeFindWidget` (+5), then the
+        // `EditorContrib` rules and the core commands.
+        if !self.options.stable_peek && self.close_peek(cx) {
+            return;
+        }
         if self.linked_editing_active() {
             self.clear_linked_editing(cx);
             return;
@@ -3485,15 +3496,15 @@ impl CodeEditor {
             self.hide_inline_suggestion(cx);
             return;
         }
-        if self.in_snippet_mode() {
-            self.cancel_snippet(true, cx);
+        if self.is_signature_help_visible() {
+            self.hide_signature_help(cx);
             return;
         }
         if self.close_marker_zone(cx) {
             return;
         }
-        if self.is_signature_help_visible() {
-            self.hide_signature_help(cx);
+        if self.in_snippet_mode() {
+            self.cancel_snippet(true, cx);
             return;
         }
         if !secondary && self.is_hover_visible() {
@@ -3504,18 +3515,11 @@ impl CodeEditor {
             self.close_message(cx);
             return;
         }
-        // Monaco's `closeReferenceSearch` outranks closing find; its
-        // Escape keybinding is off with `stablePeek`.
-        if !self.options.stable_peek && self.close_peek(cx) {
+        if self.find.visible {
+            self.close_find(window, cx);
             return;
         }
         if !secondary && self.cancel_symbol_navigation(cx) {
-            return;
-        }
-        // Monaco's `closeFindWidget` and `cancelSelectionAnchor` outrank
-        // `removeSecondaryCursors`.
-        if self.find.visible {
-            self.close_find(window, cx);
             return;
         }
         // Monaco `editor.cancelOperation` (weight `EditorContrib`) outranks
