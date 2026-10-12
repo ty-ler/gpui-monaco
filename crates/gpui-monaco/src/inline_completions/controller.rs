@@ -2168,12 +2168,18 @@ impl CodeEditor {
     /// completion asked with that selection that starts with it (Monaco
     /// `_computeAugmentation`, which shows even without `suggest.preview`).
     fn suggest_preview(&self, cx: &gpui::App) -> Option<GhostText> {
-        self.suggest_preview_edit(cx).map(|(_, ghost, _)| ghost)
+        self.suggest_preview_edit(cx)
+            .and_then(|(_, ghost, _)| ghost)
     }
 
     /// [`Self::suggest_preview`] with the edit it shows and the length of
-    /// its previewed part.
-    fn suggest_preview_edit(&self, cx: &gpui::App) -> Option<(TextReplacement, GhostText, usize)> {
+    /// its previewed part. Like Monaco's state for the suggest widget's
+    /// selection, it's there without ghost text when none can show at the
+    /// cursor.
+    fn suggest_preview_edit(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<(TextReplacement, Option<GhostText>, usize)> {
         if !self.is_suggest_visible() || self.inline_shows_on_suggest_conflict(cx) {
             return None;
         }
@@ -2193,8 +2199,27 @@ impl CodeEditor {
             Self::ghost_mode(self.options.suggest.preview_mode),
             Some(self.cursors.primary().position),
             length,
-        )?;
+        );
         Some((edit, ghost, length))
+    }
+
+    /// Monaco `InlineCompletionsController`'s `forceRenderingAbove` autorun:
+    /// once the suggest widget's selection previews as ghost text of two or
+    /// more lines (its own, or an inline completion extending it), the list
+    /// goes above the cursor line, so it doesn't cover them; once nothing is
+    /// previewed, it no longer has to.
+    fn refresh_suggest_rendering_above(&mut self, cx: &mut Context<Self>) {
+        if !self.is_suggest_visible() {
+            return;
+        }
+        match self.suggest_preview_edit(cx) {
+            Some((_, ghost, _)) => {
+                if ghost.is_some_and(|ghost| ghost.line_count() >= 2) {
+                    self.force_suggest_rendering_above(true, cx);
+                }
+            }
+            None => self.force_suggest_rendering_above(false, cx),
+        }
     }
 
     /// Whether a request is in flight (Monaco's `status` is `loading`).
@@ -2421,6 +2446,7 @@ impl CodeEditor {
             return Some((Some(ix), ghosts));
         }
         let (edit, ghost, preview_length) = self.suggest_preview_edit(cx)?;
+        let ghost = ghost?;
         let mode = Self::ghost_mode(self.options.suggest.preview_mode);
         let secondary = self.secondary_ghost_texts(&edit, mode, preview_length);
         let mut ghosts = vec![(edit, ghost)];
@@ -2432,6 +2458,7 @@ impl CodeEditor {
     pub(crate) fn refresh_ghost_text(&mut self, cx: &mut Context<Self>) {
         self.take_pending_inline_edit(cx);
         self.refresh_inline_suggest_item(cx);
+        self.refresh_suggest_rendering_above(cx);
         // The jump resets once the cursor leaves the edit (Monaco
         // `jumpToReset`).
         if self.inline.jumped_to.is_some() && !self.cursor_at_inline_edit(cx) {

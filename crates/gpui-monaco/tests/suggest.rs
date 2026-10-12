@@ -1927,8 +1927,10 @@ fn status_bar_actions(cx: &mut TestAppContext) {
             .unwrap()
     };
     let mac = cfg!(target_os = "macos");
+    // Monaco's UI labels (`KeyCodeUtils.toString`): "Enter" on every
+    // platform.
     let (enter, shift_enter, space) = if mac {
-        ("⏎", "⇧⏎", "⌃Space")
+        ("Enter", "⇧Enter", "⌃Space")
     } else {
         ("Enter", "Shift+Enter", "Ctrl+Space")
     };
@@ -2322,4 +2324,183 @@ fn snippet_choices_are_offered_again(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-space");
     cx.run_until_parked();
     assert_eq!(labels(&editor, cx), Some(vec!["print".into()]));
+}
+
+/// Monaco's select commands need only `suggestWidgetVisible` (and several
+/// suggestions or none focused), which "No suggestions." sets: Down, Up,
+/// PageDown and PageUp do nothing then, instead of moving the cursor
+/// (audit 4 §C.13).
+#[gpui::test]
+fn keys_do_nothing_while_no_suggestions_shows(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "ab\ncd\nef",
+        |o| o.word_based_suggestions = WordBasedSuggestions::Off,
+        cx,
+    );
+    provide(cx, |_| Vec::new());
+    move_to(&editor, cx, 1, 1);
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert_eq!(message(&editor, cx), Some("No suggestions."));
+    for key in ["down", "up", "pagedown", "pageup"] {
+        cx.simulate_keystrokes(key);
+        cx.run_until_parked();
+        assert_eq!(cursor(&editor, cx), PointUtf16::new(1, 1), "{key}");
+        assert_eq!(message(&editor, cx), Some("No suggestions."), "{key}");
+    }
+}
+
+/// "Loading..." too (audit 4 §C.13).
+#[gpui::test]
+fn keys_do_nothing_while_loading_shows(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("\n\n", |_| {}, cx);
+    cx.update(|_, cx| register_completion_provider(cx, LanguageSelector::All, Slow));
+    move_to(&editor, cx, 1, 0);
+    cx.simulate_keystrokes("ctrl-space");
+    cx.executor().advance_clock(Duration::from_millis(60));
+    cx.run_until_parked();
+    assert_eq!(message(&editor, cx), Some("Loading..."));
+    cx.simulate_keystrokes("down");
+    assert_eq!(cursor(&editor, cx), PointUtf16::new(1, 0));
+    cx.executor().advance_clock(Duration::from_millis(300));
+    cx.run_until_parked();
+    assert_eq!(labels(&editor, cx), Some(vec!["print".to_string()]));
+}
+
+fn has_key(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, key: &str) -> bool {
+    editor.read_with(cx, |e, cx| e.context_keys(cx).contains(key))
+}
+
+/// Monaco `suggestionCanResolve`: the provider resolves items, or the item
+/// has docs, or a detail other than its label (audit 4 §C.12). A word-based
+/// suggestion has no detail, which differs from its label.
+#[gpui::test]
+fn suggestion_can_resolve_context_key(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("hello\n", |_| {}, cx);
+    move_to(&editor, cx, 1, 0);
+    cx.simulate_input("he");
+    settle(cx);
+    assert_eq!(labels(&editor, cx), Some(vec!["hello".to_string()]));
+    assert!(has_key(&editor, cx, "suggestionCanResolve"));
+    // With the label as its detail, and nothing else, it can't.
+    cx.simulate_keystrokes("escape");
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.word_based_suggestions = WordBasedSuggestions::Off;
+        e.update_options(options, cx);
+    });
+    provide(cx, |_| {
+        vec![CompletionItem {
+            detail: Some("hello".into()),
+            ..CompletionItem::new("hello", CompletionItemKind::Text)
+        }]
+    });
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert_eq!(labels(&editor, cx), Some(vec!["hello".to_string()]));
+    assert!(!has_key(&editor, cx, "suggestionCanResolve"));
+}
+
+/// Monaco `suggestionMakesTextEdit`: false only with `smart` Enter, in a
+/// session that opened by itself, for an item without other edits that
+/// isn't a snippet, once its insert text is typed (audit 4 §C.12).
+#[gpui::test]
+fn suggestion_makes_text_edit_context_key(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "",
+        |o| o.accept_suggestion_on_enter = AcceptSuggestionOnEnter::Smart,
+        cx,
+    );
+    provide(cx, foo_items);
+    cx.simulate_input("foo");
+    settle(cx);
+    assert_eq!(focused(&editor, cx).as_deref(), Some("foo"));
+    // `smart`: typed already, so Enter makes no edit.
+    assert!(!has_key(&editor, cx, "suggestionMakesTextEdit"));
+    // `on`: Enter always accepts.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.accept_suggestion_on_enter = AcceptSuggestionOnEnter::On;
+        e.update_options(options, cx);
+    });
+    assert!(has_key(&editor, cx, "suggestionMakesTextEdit"));
+}
+
+/// Monaco's status bar: "Insert" unless the focused item's insert and
+/// replace ranges end apart (`suggestionHasInsertAndReplaceRange`), and
+/// each command's own keybinding (audit 4 §C.14).
+#[gpui::test]
+fn status_bar_insert_label_and_keys(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "abc",
+        |o| {
+            o.suggest.show_status_bar = true;
+            o.suggest.insert_mode = SuggestInsertMode::Replace;
+            o.quick_suggestions = QuickSuggestions::OFF;
+            o.word_based_suggestions = WordBasedSuggestions::Off;
+        },
+        cx,
+    );
+    provide(cx, |_| {
+        vec![CompletionItem {
+            documentation: Some("Docs.".to_string().into()),
+            ..CompletionItem::new("abcd", CompletionItemKind::Property)
+        }]
+    });
+    let status = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        editor
+            .read_with(cx, |e, cx| e.suggest_status_bar_for_tests(cx))
+            .unwrap()
+    };
+    let mac = cfg!(target_os = "macos");
+    let (enter, shift_enter, tab, space, ctrl_k) = if mac {
+        ("Enter", "⇧Enter", "Tab", "⌃Space", "⌃K")
+    } else {
+        ("Enter", "Shift+Enter", "Tab", "Ctrl+Space", "Ctrl+K")
+    };
+    // At the word's end, the session's insert and replace ranges end
+    // together: "Insert", whatever the mode.
+    move_to(&editor, cx, 0, 3);
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert_eq!(
+        status(cx),
+        (format!("Insert ({enter})"), format!("Show More ({space})"))
+    );
+    assert!(!has_key(&editor, cx, "suggestionHasInsertAndReplaceRange"));
+    cx.simulate_keystrokes("escape");
+    // Inside it they don't: the mode's, and the other.
+    move_to(&editor, cx, 0, 1);
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert_eq!(
+        status(cx).0,
+        format!("Replace ({enter}), Insert ({shift_enter})")
+    );
+    assert!(has_key(&editor, cx, "suggestionHasInsertAndReplaceRange"));
+    // Without Enter accepting, the key is Tab's.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.accept_suggestion_on_enter = AcceptSuggestionOnEnter::Off;
+        e.update_options(options, cx);
+    });
+    assert_eq!(
+        status(cx).0,
+        format!("Replace ({tab}), Insert ({shift_enter})")
+    );
+    // A rebound command shows its key.
+    let rule = cx.update(|_, cx| {
+        gpui_monaco::add_keybinding_rules(
+            cx,
+            vec![gpui_monaco::KeybindingRule::new(
+                "ctrl-k",
+                "toggleSuggestionDetails",
+            )],
+        )
+        .unwrap()
+    });
+    assert_eq!(status(cx).1, format!("Show More ({ctrl_k})"));
+    cx.update(|_, cx| rule.dispose(cx));
 }

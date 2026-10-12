@@ -407,25 +407,24 @@ impl CodeEditor {
         flag(
             context,
             "suggestionMakesTextEdit",
-            self.selected_suggestion_edit().is_none_or(|(range, text)| {
-                let rope = self.snapshot.rope();
-                rope.text_for_range(
-                    rope.point_utf16_to_offset(range.start)..rope.point_utf16_to_offset(range.end),
-                ) != text
-            }),
+            self.suggestion_makes_text_edit_key(),
         );
         flag(
             context,
             "acceptSuggestionOnEnter",
             self.options.accept_suggestion_on_enter != crate::options::AcceptSuggestionOnEnter::Off,
         );
-        if let Some((_, item)) = &selected {
+        if let Some(session) = selected.as_ref().and(self.suggest.session.as_ref()) {
             flag(
                 context,
                 "suggestionHasInsertAndReplaceRange",
-                item.replace_range.is_some() && item.replace_range != item.range,
+                session.focused_has_insert_and_replace(),
             );
-            flag(context, "suggestionCanResolve", item.data.is_some());
+            flag(
+                context,
+                "suggestionCanResolve",
+                session.focused_can_resolve(),
+            );
             context.set(
                 "suggestionInsertMode",
                 match self.options.suggest.insert_mode {

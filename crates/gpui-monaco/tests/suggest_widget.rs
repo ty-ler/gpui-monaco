@@ -992,3 +992,69 @@ fn parameter_hints_follow_the_caret(cx: &mut TestAppContext) {
         "{after_offset:?} {offset:?}"
     );
 }
+
+/// An inline completion extending `item00` over `lines` lines at the
+/// cursor (which is at a line's start).
+struct ExtendsItem(&'static str);
+impl InlineCompletionsProvider for ExtendsItem {
+    fn provide_inline_completions(
+        &self,
+        _: &ProviderContext,
+        position: PointUtf16,
+        _: InlineCompletionContext,
+        _: &mut App,
+    ) -> Task<anyhow::Result<InlineCompletionList>> {
+        Task::ready(Ok(InlineCompletionList {
+            items: vec![InlineCompletion {
+                insert_text: self.0.to_string(),
+                range: Some(PointUtf16::new(position.row, 0)..position),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+    }
+}
+
+/// The list's side with the focused `item00` extended by `extension`, on
+/// a line with room below and over 150px above.
+fn side_with_ghost_text(
+    extension: &'static str,
+    cx: &mut TestAppContext,
+) -> ContentWidgetPreference {
+    let (editor, cx) = setup(&format!("\n\n\n\n{}", lines(30)), None, |_| {}, cx);
+    provide(cx, 5);
+    cx.update(|_, cx| {
+        register_inline_completions_provider(cx, LanguageSelector::All, ExtendsItem(extension))
+    });
+    set_cursor(&editor, cx, 3, 0);
+    cx.simulate_keystrokes("ctrl-space");
+    draw(cx);
+    rest(cx, 100);
+    let ghost = editor.read_with(cx, |e, cx| e.ghost_text_for_tests(cx));
+    assert!(ghost.is_some(), "the extension shows as ghost text");
+    editor
+        .read_with(cx, |e, cx| e.suggest_list_layout_for_tests(cx))
+        .unwrap()
+        .0
+}
+
+/// Monaco `InlineCompletionsController`'s `forceRenderingAbove`: an inline
+/// completion extending the focused suggestion over two or more lines puts
+/// the list above the cursor line (with more than 150px there), so it
+/// doesn't cover the ghost text (audit 4 §C.11).
+#[gpui::test]
+fn multi_line_ghost_text_puts_the_list_above(cx: &mut TestAppContext) {
+    assert_eq!(
+        side_with_ghost_text("item00(\n    a,\n)", cx),
+        ContentWidgetPreference::Above
+    );
+}
+
+/// One line of ghost text leaves the list below, where there's room.
+#[gpui::test]
+fn single_line_ghost_text_leaves_the_list_below(cx: &mut TestAppContext) {
+    assert_eq!(
+        side_with_ghost_text("item00()", cx),
+        ContentWidgetPreference::Below
+    );
+}
