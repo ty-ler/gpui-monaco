@@ -2383,6 +2383,36 @@ pub struct SignatureHelpContext {
 /// them, and they must not overlap.
 pub type TextEdit = (Range<PointUtf16>, String);
 
+/// What a formatter returns (Monaco's `TextEdit[]` from a formatting
+/// provider, whose edits may also carry an `eol`).
+///
+/// A plain list of edits converts with `.into()`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FormattingEdits {
+    /// The edits, as for [`TextEdit`].
+    pub edits: Vec<TextEdit>,
+    /// The line ending to switch the model to (Monaco `TextEdit.eol`, the
+    /// last one given). It's set in the same undo step as the edits, before
+    /// them (Monaco `pushEOL`).
+    pub eol: Option<text::LineEnding>,
+}
+
+impl From<Vec<TextEdit>> for FormattingEdits {
+    fn from(edits: Vec<TextEdit>) -> Self {
+        Self { edits, eol: None }
+    }
+}
+
+impl FormattingEdits {
+    /// Appends `other`'s edits; its line ending, if it has one, wins.
+    pub fn extend(&mut self, other: FormattingEdits) {
+        self.edits.extend(other.edits);
+        if other.eol.is_some() {
+            self.eol = other.eol;
+        }
+    }
+}
+
 /// How the model is indented, for formatters (Monaco `FormattingOptions`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FormattingOptions {
@@ -2404,7 +2434,7 @@ pub trait DocumentFormattingProvider: 'static {
         context: &ProviderContext,
         options: FormattingOptions,
         cx: &mut App,
-    ) -> Task<anyhow::Result<Vec<TextEdit>>>;
+    ) -> Task<anyhow::Result<FormattingEdits>>;
 
     /// The name to show when choosing between formatters (Monaco
     /// `displayName`).
@@ -2433,7 +2463,7 @@ pub trait DocumentRangeFormattingProvider: 'static {
         range: Range<PointUtf16>,
         options: FormattingOptions,
         cx: &mut App,
-    ) -> Task<anyhow::Result<Vec<TextEdit>>>;
+    ) -> Task<anyhow::Result<FormattingEdits>>;
 
     /// The edits that format all of `ranges` at once (Monaco
     /// `provideDocumentRangesFormattingEdits`), for several selections.
@@ -2444,7 +2474,7 @@ pub trait DocumentRangeFormattingProvider: 'static {
         _ranges: &[Range<PointUtf16>],
         _options: FormattingOptions,
         _cx: &mut App,
-    ) -> Option<Task<anyhow::Result<Vec<TextEdit>>>> {
+    ) -> Option<Task<anyhow::Result<FormattingEdits>>> {
         None
     }
 
@@ -2576,7 +2606,7 @@ pub trait OnTypeFormattingProvider: 'static {
         ch: char,
         options: FormattingOptions,
         cx: &mut App,
-    ) -> Task<anyhow::Result<Vec<TextEdit>>>;
+    ) -> Task<anyhow::Result<FormattingEdits>>;
 }
 
 // ----- drop and paste ------------------------------------------------------------

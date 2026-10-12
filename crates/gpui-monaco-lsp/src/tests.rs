@@ -570,7 +570,7 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
         .await
         .unwrap();
     assert_eq!(
-        edits,
+        edits.edits,
         vec![(p(0, 0)..p(0, 0), "textDocument/formatting".to_string())]
     );
     let edits = cx
@@ -584,12 +584,12 @@ async fn features_forward_requests(cx: &mut TestAppContext) {
         })
         .await
         .unwrap();
-    assert_eq!(edits[0].0, p(0, 2)..p(0, 2));
+    assert_eq!(edits.edits[0].0, p(0, 2)..p(0, 2));
     let edits = cx
         .update(|cx| features.provide_on_type_formatting_edits(&context, p(1, 3), ';', options, cx))
         .await
         .unwrap();
-    assert_eq!(edits[0].1, "textDocument/onTypeFormatting");
+    assert_eq!(edits.edits[0].1, "textDocument/onTypeFormatting");
 
     // Models that aren't attached get nothing, without asking the server.
     let other = cx.new(|_| TextModel::new("x").with_uri("file:///elsewhere.rs"));

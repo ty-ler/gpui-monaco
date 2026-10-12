@@ -2,13 +2,16 @@
 //! routing, keymap, model synchronisation, undo cursor restore, clipboard and
 //! IME composition.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use gpui::{
     AppContext as _, ClipboardItem, Entity, EntityInputHandler, Focusable, TestAppContext,
     VisualTestContext,
 };
 use gpui_monaco::cursor::Selection;
 use gpui_monaco::text::PointUtf16;
-use gpui_monaco::{CodeEditor, EditorOptions, TextModel};
+use gpui_monaco::{CodeEditor, CodeEditorEvent, EditorOptions, TextModel};
 
 fn p(line: u32, column: u32) -> PointUtf16 {
     PointUtf16::from_monaco(line, column)
@@ -936,4 +939,120 @@ fn insert_final_new_line(cx: &mut TestAppContext) {
     });
     run(&editor, cx);
     assert_eq!(text(&editor, cx), "a\nbc\n");
+}
+
+/// Monaco `columnSelectionPaste.test.ts`, "copy retains rectangular
+/// identity" and "pastes a copied rectangle into another editor": a
+/// column selection's copy pastes as a block at one cursor (audit 3
+/// §A.17). A copy of the same ranges selected otherwise pastes as text, as
+/// does any paste with `multi_cursor_paste: Full`.
+#[gpui::test]
+fn column_selection_copies_paste_as_a_block(cx: &mut TestAppContext) {
+    use gpui_monaco::actions::{CursorColumnSelectDown, CursorColumnSelectRight};
+    let source = "<AA>\n<BB>\n<CC>\n";
+    let target = "left--right\nleft--right\nleft--right";
+    let (editor, cx) = editor_with_text(&format!("{source}{target}"), cx);
+    let pasted = Rc::new(RefCell::new(Vec::new()));
+    let sink = pasted.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event: &CodeEditorEvent, _| {
+            if let CodeEditorEvent::DidPaste(paste) = event {
+                sink.borrow_mut().push(paste.range.clone());
+            }
+        })
+        .detach()
+    });
+    let select_block = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        editor.update(cx, |e, cx| {
+            e.set_selections(&[Selection::collapsed(p(1, 2))], cx)
+        });
+        cx.dispatch_action(CursorColumnSelectRight);
+        cx.dispatch_action(CursorColumnSelectRight);
+        cx.dispatch_action(CursorColumnSelectDown);
+        cx.dispatch_action(CursorColumnSelectDown);
+    };
+    let paste_at = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, line, column| {
+        editor.update(cx, |e, cx| {
+            e.set_selections(&[Selection::collapsed(p(line, column))], cx)
+        });
+        cx.simulate_keystrokes("secondary-v");
+    };
+    let target_lines = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        text(editor, cx)
+            .lines()
+            .skip(3)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    select_block(&editor, cx);
+    cx.simulate_keystrokes("secondary-c");
+    let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
+    assert_eq!(clipboard.as_deref(), Some("AA\nBB\nCC"));
+    paste_at(&editor, cx, 4, 5);
+    assert_eq!(
+        target_lines(&editor, cx),
+        "leftAA--right\nleftBB--right\nleftCC--right"
+    );
+    assert_eq!(heads(&editor, cx), vec![(6, 7)]);
+    // Monaco `onDidPaste`: from the cursor to the end of the last row.
+    assert_eq!(pasted.borrow().as_slice(), &[p(4, 5)..p(6, 7)]);
+    cx.simulate_keystrokes("secondary-z");
+    assert_eq!(target_lines(&editor, cx), target);
+
+    // The same selections made otherwise aren't a block.
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[
+                Selection::new(p(1, 2), p(1, 4)),
+                Selection::new(p(2, 2), p(2, 4)),
+                Selection::new(p(3, 2), p(3, 4)),
+            ],
+            cx,
+        )
+    });
+    cx.simulate_keystrokes("secondary-c");
+    paste_at(&editor, cx, 4, 5);
+    assert_eq!(
+        target_lines(&editor, cx),
+        "leftAA\nBB\nCC--right\nleft--right\nleft--right"
+    );
+    cx.simulate_keystrokes("secondary-z");
+
+    // Nor with `multi_cursor_paste: Full`.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.multi_cursor_paste = gpui_monaco::cursor::MultiCursorPaste::Full;
+        e.update_options(options, cx);
+    });
+    select_block(&editor, cx);
+    cx.simulate_keystrokes("secondary-c");
+    paste_at(&editor, cx, 4, 5);
+    assert_eq!(
+        target_lines(&editor, cx),
+        "leftAA\nBB\nCC--right\nleft--right\nleft--right"
+    );
+}
+
+/// Monaco `getPlainTextToCopy`: copies use the model's line ending (audit
+/// 3 §A.18).
+#[gpui::test]
+fn copies_use_the_models_line_ending(cx: &mut TestAppContext) {
+    let (editor, cx) = editor_with_text("one\r\ntwo\r\nthree", cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::new(p(1, 2), p(2, 3))], cx)
+    });
+    cx.simulate_keystrokes("secondary-c");
+    let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
+    assert_eq!(clipboard.as_deref(), Some("ne\r\ntw"));
+    // A whole line copied from an empty selection.
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(3, 1))], cx)
+    });
+    cx.simulate_keystrokes("secondary-c");
+    let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
+    assert_eq!(clipboard.as_deref(), Some("three\r\n"));
+    // Pasting it back still inserts a line above.
+    cx.simulate_keystrokes("secondary-v");
+    assert_eq!(text(&editor, cx), "one\r\ntwo\r\nthree\r\nthree");
 }

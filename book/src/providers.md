@@ -179,14 +179,15 @@ The widget highlights the active parameter (a text label matches whole words onl
 
 ## Formatting
 
-Formatters return `TextEdit`s, which are `(Range<PointUtf16>, String)` pairs in the text's current coordinates. The editor applies them the way Monaco does:
+Formatters return `FormattingEdits`: `TextEdit`s, which are `(Range<PointUtf16>, String)` pairs in the text's current coordinates, and an optional line ending (Monaco's `TextEdit.eol`). A `Vec<TextEdit>` converts with `.into()`. The editor applies them the way Monaco does:
 
 - **Minimal edits:** each edit is reduced to the characters that actually change (Monaco `computeMoreMinimalEdits`). A formatter can return a whole-document replacement and cursors, decorations and markers in unchanged text stay put.
-- **One undo step:** the edits are applied as a single undo step, and the primary cursor keeps its place on screen.
+- **One undo step:** the edits, and the line ending change before them, are applied as a single undo step, and the primary cursor keeps its place on screen.
+- **Cursors at the edges:** cursors and decorations at an edit's edges move past its new text (Monaco `replaceMove`), so a cursor before reformatted indentation stays before the code. A single edit replacing the whole text leaves them where they are.
 - **Cancellation:** if the text or the cursors change before a Format Document or Format Selection result arrives, it's dropped.
 - **Format Selection:** formats each selection, and an empty selection formats its line. Ranges whose edits would collide are formatted again as one.
 - **Format on type:** with `options.format_on_type`, typing one of `auto_format_trigger_characters` formats at the cursor. It needs a single empty selection, and is dropped if the text at or above the cursor's line changes first.
-- **Format on paste:** `options.format_on_paste` formats the pasted range with the range formatter.
+- **Format on paste:** `options.format_on_paste` formats the pasted range with the range formatter, only with a single cursor.
 
 Both options are off by default, as in Monaco. You can also call `editor.format_document(cx)` and `editor.format_selection(cx)` directly.
 

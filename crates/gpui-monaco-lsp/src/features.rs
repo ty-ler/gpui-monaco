@@ -11,13 +11,13 @@ use gpui_monaco::providers::{
 use gpui_monaco::providers::{
     CompletionItem, CompletionList, CompletionProvider, CompletionTrigger, DefinitionProvider,
     DocumentFormattingProvider, DocumentHighlight, DocumentHighlightProvider,
-    DocumentRangeFormattingProvider, FormattingOptions, Hover, HoverProvider, LanguageSelector,
-    Location, OnTypeFormattingProvider, ProviderContext, ProviderRegistration, SignatureHelp,
-    SignatureHelpProvider, SignatureHelpTrigger, TextEdit, register_completion_provider,
-    register_definition_provider, register_document_formatting_provider,
-    register_document_highlight_provider, register_document_range_formatting_provider,
-    register_hover_provider, register_on_type_formatting_provider,
-    register_signature_help_provider,
+    DocumentRangeFormattingProvider, FormattingEdits, FormattingOptions, Hover, HoverProvider,
+    LanguageSelector, Location, OnTypeFormattingProvider, ProviderContext, ProviderRegistration,
+    SignatureHelp, SignatureHelpProvider, SignatureHelpTrigger, TextEdit,
+    register_completion_provider, register_definition_provider,
+    register_document_formatting_provider, register_document_highlight_provider,
+    register_document_range_formatting_provider, register_hover_provider,
+    register_on_type_formatting_provider, register_signature_help_provider,
 };
 use gpui_monaco::providers::{
     DeclarationProvider, ImplementationProvider, ReferenceContext, ReferenceProvider,
@@ -583,9 +583,9 @@ impl DocumentFormattingProvider for LspFeatures {
         context: &ProviderContext,
         options: FormattingOptions,
         cx: &mut App,
-    ) -> Task<Result<Vec<TextEdit>>> {
+    ) -> Task<Result<FormattingEdits>> {
         let Some((connection, position)) = self.prepare(context, PointUtf16::zero(), cx) else {
-            return Task::ready(Ok(Vec::new()));
+            return Task::ready(Ok(FormattingEdits::default()));
         };
         let request =
             connection.request::<lsp::request::Formatting>(lsp::DocumentFormattingParams {
@@ -594,7 +594,7 @@ impl DocumentFormattingProvider for LspFeatures {
                 work_done_progress_params: Default::default(),
             });
         cx.background_executor()
-            .spawn(async move { Ok(text_edits(request.await?)) })
+            .spawn(async move { Ok(text_edits(request.await?).into()) })
     }
 }
 
@@ -605,9 +605,9 @@ impl DocumentRangeFormattingProvider for LspFeatures {
         range: Range<PointUtf16>,
         options: FormattingOptions,
         cx: &mut App,
-    ) -> Task<Result<Vec<TextEdit>>> {
+    ) -> Task<Result<FormattingEdits>> {
         let Some((connection, position)) = self.prepare(context, range.start, cx) else {
-            return Task::ready(Ok(Vec::new()));
+            return Task::ready(Ok(FormattingEdits::default()));
         };
         let request = connection.request::<lsp::request::RangeFormatting>(
             lsp::DocumentRangeFormattingParams {
@@ -618,7 +618,7 @@ impl DocumentRangeFormattingProvider for LspFeatures {
             },
         );
         cx.background_executor()
-            .spawn(async move { Ok(text_edits(request.await?)) })
+            .spawn(async move { Ok(text_edits(request.await?).into()) })
     }
 }
 
@@ -634,9 +634,9 @@ impl OnTypeFormattingProvider for LspFeatures {
         ch: char,
         options: FormattingOptions,
         cx: &mut App,
-    ) -> Task<Result<Vec<TextEdit>>> {
+    ) -> Task<Result<FormattingEdits>> {
         let Some((connection, position)) = self.prepare(context, position, cx) else {
-            return Task::ready(Ok(Vec::new()));
+            return Task::ready(Ok(FormattingEdits::default()));
         };
         let request = connection.request::<lsp::request::OnTypeFormatting>(
             lsp::DocumentOnTypeFormattingParams {
@@ -646,7 +646,7 @@ impl OnTypeFormattingProvider for LspFeatures {
             },
         );
         cx.background_executor()
-            .spawn(async move { Ok(text_edits(request.await?)) })
+            .spawn(async move { Ok(text_edits(request.await?).into()) })
     }
 }
 

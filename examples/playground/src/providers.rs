@@ -473,9 +473,9 @@ impl DocumentFormattingProvider for DemoFormatter {
         context: &ProviderContext,
         _: FormattingOptions,
         _: &mut App,
-    ) -> Task<anyhow::Result<Vec<TextEdit>>> {
+    ) -> Task<anyhow::Result<FormattingEdits>> {
         let last = context.snapshot.max_point().row;
-        Task::ready(Ok(tidy_rows(context, 0..=last)))
+        Task::ready(Ok(tidy_rows(context, 0..=last).into()))
     }
 }
 
@@ -486,8 +486,10 @@ impl DocumentRangeFormattingProvider for DemoFormatter {
         range: std::ops::Range<PointUtf16>,
         _: FormattingOptions,
         _: &mut App,
-    ) -> Task<anyhow::Result<Vec<TextEdit>>> {
-        Task::ready(Ok(tidy_rows(context, range.start.row..=range.end.row)))
+    ) -> Task<anyhow::Result<FormattingEdits>> {
+        Task::ready(Ok(
+            tidy_rows(context, range.start.row..=range.end.row).into()
+        ))
     }
 }
 
@@ -503,8 +505,8 @@ impl OnTypeFormattingProvider for DemoFormatter {
         _: char,
         _: FormattingOptions,
         _: &mut App,
-    ) -> Task<anyhow::Result<Vec<TextEdit>>> {
-        Task::ready(Ok(tidy_rows(context, position.row..=position.row)))
+    ) -> Task<anyhow::Result<FormattingEdits>> {
+        Task::ready(Ok(tidy_rows(context, position.row..=position.row).into()))
     }
 }
 

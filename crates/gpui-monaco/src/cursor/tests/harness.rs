@@ -561,7 +561,15 @@ impl TestEditor {
     }
 
     pub fn copy(&self) -> (String, bool, Vec<String>) {
-        cursor::copy_text(&self.config, &self.buffer, &self.cursors)
+        self.copy_with_eol(text::LineEnding::Lf, false)
+    }
+
+    pub fn copy_with_eol(
+        &self,
+        eol: text::LineEnding,
+        force_crlf: bool,
+    ) -> (String, bool, Vec<String>) {
+        cursor::copy_text(&self.config, &self.buffer, &self.cursors, eol, force_crlf)
     }
 
     pub fn paste(
@@ -569,6 +577,17 @@ impl TestEditor {
         text: &str,
         pasted_from_empty_selection: bool,
         multicursor_text: Option<&[String]>,
+    ) {
+        self.paste_block(text, pasted_from_empty_selection, multicursor_text, false);
+    }
+
+    /// [`Self::paste`] with Monaco's `isBlock` paste payload.
+    pub fn paste_block(
+        &mut self,
+        text: &str,
+        pasted_from_empty_selection: bool,
+        multicursor_text: Option<&[String]>,
+        is_block: bool,
     ) {
         let buffer = &self.buffer;
         let op = cursor::paste(
@@ -578,6 +597,7 @@ impl TestEditor {
             text,
             pasted_from_empty_selection,
             multicursor_text,
+            is_block,
         );
         self.apply(op);
     }

@@ -36,7 +36,7 @@ Issues are linked by number.
 | IME composition at every cursor, active-clause underline | `compositionType`, `nativeEditContext` | 🟡 GPUI passes the IME's selected range but not its clause boundaries or underline styles, so only the selected clause is drawn thick | #260 |
 | Cursor undo, selection anchor, overtype mode | `cursorUndo`, `anchorSelect` | ✅ | #81 |
 | Scroll commands (Ctrl+Up/Down, …) | `coreCommands` | ✅ | #81 |
-| Clipboard with multi-cursor distribution | `clipboard` | ✅ | |
+| Clipboard with multi-cursor distribution, column-selection (block) paste (`ColumnSelectionPasteCommand`), copies in the model's line ending | `clipboard`, `columnSelectionPasteCommand` | ✅ CRLF within copied pieces on Windows, as Monaco | #351 |
 | Paste as, Linux primary selection, reindent on paste | `clipboard`, `dropOrPasteInto`, `autoIndentOnPaste` | ✅ | #107 |
 | Copy with syntax highlighting | `copyWithSyntaxHighlighting` | ❌ (GPUI's clipboard has no HTML) | #107 |
 | Undo/redo with grouping, cursor restore | model | ✅ | |
@@ -51,8 +51,8 @@ Issues are linked by number.
 | Toggle line and block comments | `comment` | ✅ | #79 |
 | Smart select (expand and shrink) | `smartSelect` | ✅ | #82 |
 | Linked editing (HTML tags) | `linkedEditing` | ✅ | #101 |
-| Snippet syntax: parser, variables, transforms | `snippet` | ✅ | #55 |
-| Snippet sessions: tab stops, choices, nesting, completion integration, `$SELECTION` from text typed over a selection (`OvertypingCapturer`) | `snippet`, `suggestOvertypingCapturer` | ✅ | #55, #302 |
+| Snippet syntax: parser, variables (path variables of non-`file:` URIs from their path), transforms | `snippet` | ✅ | #55, #351 |
+| Snippet sessions: tab stops, choices (offered again while active, as the exclusive `snippetChoiceCompletions` provider), nesting, completion integration, `overwriteBefore`/`overwriteAfter` from the head of a selection, `$SELECTION` from text typed over a selection (`OvertypingCapturer`) | `snippet`, `suggestOvertypingCapturer` | ✅ | #55, #302, #351 |
 | Drag and drop text, double-click block selection | `dnd`, `doubleClickSelectsBlock` | ✅ | #92 |
 | External drops, paste as | `dropOrPasteInto` | ✅ | #92 |
 | Copy-time paste data (`prepareDocumentPaste`, `copyMimeTypes`) | `dropOrPasteInto` | ✅ | #227 |
@@ -158,7 +158,7 @@ Issues are linked by number.
 | Language extras: `register` file associations (patterns, first line, mimetypes), merged on repeat registration, `onLanguage` and `onLanguageEncountered` (cancellable), runtime `setLanguageConfiguration` (layered, disposable), `LanguageFilter` scheme, pattern and `exclusive`, `score`, `SignatureHelpContext`, folding and code lens `onDidChange`, multi-range formatting, `FoldingContext` | `monaco.languages` | ✅ `hasAccessToAllModels` and `notebookType` don't apply | #206, #229, #265 |
 | Language configuration without a grammar or tokenizer (auto-close, surround, brackets, comments, word pattern, folding markers); `plaintext` with its built-in configuration for models with no language or an unregistered one; models re-resolved when languages are registered (by id, MIME type or uri guess); `text/x-<id>` MIME types, the last registration winning; `toStandardTokenType`'s word-boundary match | `LanguageConfigurationRegistry`, `LanguageService`, `LanguagesRegistry`, `tokenization.ts` | ✅ an unregistered id stays the model's `language_id` (Monaco reports `plaintext`) while `language()` is plain text; models see languages registered with `register_language` or a new `set_language_registry`, not ones added to the registry directly; a tree-sitter `character` capture counts as a string | #326 |
 | Provider ranking: score, then newest first; completion groups stopping at the first with items; trigger characters and incomplete lists asking only their providers | `LanguageFeatureRegistry.ordered`, `orderedGroups`, `provideSuggestionItems`, `SuggestModel` | ✅ | #265 |
-| `LocationLink` origin and target selection ranges; `WorkspaceEdit` file operations, snippet edits, versions and `needsConfirmation` | `languages.ts`, `IBulkEditService` | ✅ file operations go to a host handler (standalone Monaco rejects them), before the text edits | #265 |
+| `LocationLink` origin and target selection ranges; `WorkspaceEdit` file operations, snippet edits, versions and `needsConfirmation`; text edits with `replaceMove` | `languages.ts`, `IBulkEditService` | ✅ file operations go to a host handler (standalone Monaco rejects them), before the text edits | #265, #351 |
 | Custom highlighter | tokenization support | ✅ (`Language::with_highlighter`) | |
 | Monarch tokenizer | `setMonarchTokensProvider`, `monarchCompile`, `monarchLexer` | ✅ JSON grammars, also before the language is registered; JavaScript regexes run by `fancy-regex` (Unicode `\b`, code points rather than UTF-16 units); only Monarch languages can be embedded | #235, #265 |
 | Line-state tokens providers | `setTokensProvider`, `registerTokensProviderFactory` | ✅ (`syntax::TokensProvider`, byte offsets rather than UTF-16 `startIndex`); a factory isn't called when a tokenizer is already set (a tree-sitter grammar doesn't count); no `EncodedTokensProvider` | #265, #326 |
@@ -201,7 +201,7 @@ Issues are linked by number.
 | Diagnostics: squiggles, hint dots, high contrast double and dotted underlines, ruler, hover, F8 | `gotoError` | ✅ F8 visits errors, warnings and infos most severe first (Monaco's default `problems.sortOrder`), starting at the marker under the cursor and stepping through same-start markers; the zone follows marker changes or turns stale, reveals its line, zone and position, and reads its message (`role="alert"`, focusable tooltip body); "View Problem" shows the clicked marker rather than searching from its start | #244, #330, #342 |
 | Diagnostic tags (unused, deprecated), related information, code links (`code: { value, target }` as `Marker::code_target`) | `gotoError` | ✅ | #90, #247 |
 | Document highlights | `wordHighlighter` | ✅ 50ms after the cursor rests, then `occurrencesHighlightDelay` (0) from the move | #83, #262 |
-| Formatting: document, range, on type, on paste | `format` | ✅ | #94 |
+| Formatting: document, range, on type, on paste (with a single cursor); edits with `replaceMove` (`replace` for one whole-text edit); the formatter's line ending (`TextEdit.eol`) | `format` | ✅ the line ending comes as `FormattingEdits::eol` rather than on each edit | #94, #351 |
 | Choosing between formatters (`FormattingConflicts.setFormatterSelector`, `displayName`) | `format` | ✅ the first by default, as standalone Monaco; no built-in picker (`formatDocument.multiple` is VS Code workbench) | #229 |
 | Rename | `rename` | ✅ measured input width, line-height input and candidates, scrolling suggestions in the editor's font, `widget.shadow`, the symbol's line revealed first (`revealLineInCenterIfOutsideViewport`), cancelled when scrolled out of view | #56, #251, #325, #343 |
 | Rename preview (`acceptRenameInputWithPreview`, through a host preview handler) | `rename` | ✅ | #225 |
