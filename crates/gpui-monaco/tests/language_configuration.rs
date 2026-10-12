@@ -288,7 +288,7 @@ fn registering_a_language_later_updates_models_guessing_it(cx: &mut TestAppConte
                 ..
             } = event
             {
-                assert_eq!(old_language, &None);
+                assert_eq!(old_language.as_deref(), Some("plaintext"));
                 assert_eq!(new_language.as_deref(), Some("mylang"));
                 count.set(count.get() + 1);
             }
@@ -299,7 +299,12 @@ fn registering_a_language_later_updates_models_guessing_it(cx: &mut TestAppConte
         m.ensure_syntax(cx);
         m.set_language(None, cx);
     });
-    assert_eq!(guessed.read_with(cx, |m, _| m.language_id().cloned()), None);
+    assert_eq!(
+        guessed
+            .read_with(cx, |m, _| m.language_id().cloned())
+            .as_deref(),
+        Some("plaintext")
+    );
     cx.update(|cx| gpui_monaco::register_language(cx, mylang().with_extensions(&["my"])));
     cx.run_until_parked();
     assert_eq!(changes.get(), 1);

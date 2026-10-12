@@ -50,7 +50,7 @@ fn models_guess_their_language_from_the_uri_and_first_line(cx: &mut TestAppConte
     });
     assert_eq!(language_of(&explicit, cx).as_deref(), Some("css"));
     let unknown = cx.new(|_| TextModel::new("x").with_uri("file:///a.unknown"));
-    assert_eq!(language_of(&unknown, cx), None);
+    assert_eq!(language_of(&unknown, cx).as_deref(), Some("plaintext"));
 }
 
 #[gpui::test]

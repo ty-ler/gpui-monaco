@@ -93,7 +93,12 @@ impl LanguageFilter {
 }
 
 /// The model a provider lookup is for: its language id and uri (what
-/// Monaco's selectors score).
+/// Monaco's selectors score). From a [`TextModel`](crate::TextModel), it's
+/// the model's [`language_id`](crate::TextModel::language_id) (`plaintext`
+/// for a model without a language) and its
+/// [`resource`](crate::TextModel::resource) (`inmemory://model/N` without a
+/// uri), so `plaintext` selectors and `{ scheme: "inmemory" }` filters
+/// apply as in Monaco.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProviderTarget {
     /// The model's language id.
@@ -115,7 +120,7 @@ impl From<&crate::TextModel> for ProviderTarget {
     fn from(model: &crate::TextModel) -> Self {
         Self {
             language_id: model.language_id().cloned(),
-            uri: model.uri().cloned(),
+            uri: Some(model.resource().clone()),
         }
     }
 }
@@ -126,9 +131,10 @@ impl LanguageSelector {
         Self::Languages(vec![id.into()])
     }
 
-    /// Whether a model with `language_id` is selected. Models without a
-    /// language only match [`LanguageSelector::All`], `*`, and filters on
-    /// the scheme or path.
+    /// Whether a model with `language_id` and no uri is selected. `None`
+    /// only matches [`LanguageSelector::All`], `*`, and filters on the
+    /// scheme or path; a model without a language is `plaintext` (see
+    /// [`ProviderTarget`]).
     pub fn matches(&self, language_id: Option<&str>) -> bool {
         self.matches_target(&language_id.into())
     }
@@ -189,7 +195,8 @@ pub struct ProviderContext {
     /// The model's uri, if the host gave it one (Monaco models always have
     /// one); LSP bridges use it to identify the document.
     pub uri: Option<SharedString>,
-    /// The model's language id, if any.
+    /// The model's [language id](crate::TextModel::language_id):
+    /// `plaintext` for a model without one.
     pub language_id: Option<SharedString>,
     /// The model's text at the time of the request.
     pub snapshot: BufferSnapshot,

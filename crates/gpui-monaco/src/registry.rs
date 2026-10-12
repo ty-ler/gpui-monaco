@@ -116,6 +116,9 @@ pub(crate) fn ensure(cx: &mut App) {
             return;
         }
         track_model(&cx.entity(), cx);
+        // Monaco's `TextModel` constructor resolves its language and
+        // requests its features (`requestRichLanguageFeatures`).
+        model.resolve_language(cx);
         // Monaco `MarkerDecorationsService._onModelAdded`: markers set on
         // its uri before decorate it.
         model.update_marker_decorations(cx);
