@@ -10,6 +10,7 @@ use std::sync::Arc;
 use gpui::{EntityId, FontStyle, FontWeight, Hsla, Pixels, SharedString};
 use text::{Patch, Stickiness};
 
+use crate::providers::MarkdownString;
 use crate::theme::{Theme, TokenStyle};
 
 /// Identifies a decoration returned by `TextModel::delta_decorations`.
@@ -355,9 +356,14 @@ pub struct DecorationOptions {
     /// The glyph margin lane [`glyph`](Self::glyph) goes in (Monaco
     /// `glyphMargin`); `None` is the center lane.
     pub glyph_margin: Option<GlyphMarginOptions>,
-    /// Markdown shown when the mouse rests on the start row's glyph margin
-    /// or line number (Monaco `glyphMarginHoverMessage`).
-    pub glyph_margin_hover_message: Option<SharedString>,
+    /// Markdown shown when the mouse rests on the glyph margin of a row the
+    /// decoration covers, in its [`glyph_margin`](Self::glyph_margin) lane
+    /// (Monaco `glyphMarginHoverMessage`), one hover row per string.
+    pub glyph_margin_hover_message: Vec<MarkdownString>,
+    /// Markdown shown when the mouse rests on the line number of a row the
+    /// decoration covers (Monaco `lineNumberHoverMessage`), one hover row
+    /// per string.
+    pub line_number_hover_message: Vec<MarkdownString>,
     /// Line number color on the decorated rows (Monaco
     /// `lineNumberClassName`).
     pub line_number_color: Option<Hsla>,
@@ -388,8 +394,10 @@ pub struct DecorationOptions {
     pub before: Option<InjectedText>,
     /// Text shown after the range end (Monaco `after`).
     pub after: Option<InjectedText>,
-    /// Shown when hovering the range.
-    pub hover_message: Option<SharedString>,
+    /// Markdown shown when hovering the range, or anywhere on its lines
+    /// with [`is_whole_line`](Self::is_whole_line) (Monaco `hoverMessage`),
+    /// one hover row per string.
+    pub hover_message: Vec<MarkdownString>,
     /// Draws the decoration when its range is empty too (Monaco
     /// `showIfCollapsed`): on an empty range, its [`before`](Self::before)
     /// and [`after`](Self::after) text only shows with this, and with it an

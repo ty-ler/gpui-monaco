@@ -462,7 +462,7 @@ register_document_paste_edit_provider(cx, LanguageSelector::All, MyProvider);
 
 ## Hover from decorations and markers
 
-The hover also shows `hover_message` text from [decorations](decorations.md) and messages from [diagnostics](diagnostics.md) under the mouse, with no provider needed.
+The hover also shows `hover_message` markdown from [decorations](decorations.md) under the mouse (anywhere on the line for whole-line ones) and messages from [diagnostics](diagnostics.md), with no provider needed. Decorations' `glyph_margin_hover_message` and `line_number_hover_message` show beside the gutter (see [decorations](decorations.md#hover-messages)).
 
 Each part of the hover has a copy button, and the hover can be resized from its corner.
 

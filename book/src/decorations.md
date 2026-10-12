@@ -28,7 +28,7 @@ let ids = model.update(cx, |model, cx| {
                     DecorationColor::theme("editorOverviewRuler.findMatchForeground"),
                     OverviewRulerLane::Center,
                 )),
-                hover_message: Some("**Note:** found here".into()),
+                hover_message: vec!["**Note:** found here".into()],
                 ..Default::default()
             }),
             (line_range, DecorationOptions {
@@ -68,7 +68,8 @@ Ranges are byte offsets. To convert from `PointUtf16`, use `model.buffer().point
 | `line_height` | `lineHeight` | the covered lines' height, as a multiple of the line height; text stays centered |
 | `glyph` | `glyphMarginClassName` | a short glyph in the glyph margin, on every line of the range; the highest `z_index` wins a lane |
 | `glyph_margin` | `glyphMargin` | the glyph's lane (`GlyphMarginLane::Left`, `Center` or `Right`), and `persist_lane` to keep the lane on every line; the margin is a line height wide per lane in use |
-| `glyph_margin_hover_message` | `glyphMarginHoverMessage` | markdown shown when the mouse rests on the row's glyph margin or line number |
+| `glyph_margin_hover_message` | `glyphMarginHoverMessage` | markdown (`Vec<MarkdownString>`, a hover row each) shown beside the gutter when the mouse rests on the glyph margin of any row the decoration covers, in its `glyph_margin` lane |
+| `line_number_hover_message` | `lineNumberHoverMessage` | markdown (`Vec<MarkdownString>`, a hover row each) shown beside the gutter when the mouse rests on the line number of any row the decoration covers |
 | `line_number_color` | `lineNumberClassName` | colors the line number |
 | `gutter_bar` | `linesDecorationsClassName` | a bar between the line numbers and the text |
 | `first_line_decoration` (`LinesDecoration`) | `firstLineDecorationClassName` | a bar or text in the line decorations area, only on the first view line of a wrapped line |
@@ -77,11 +78,35 @@ Ranges are byte offsets. To convert from `PointUtf16`, use `model.buffer().point
 | `before`, `after` | `before`, `after` | text injected before or after the range (see below) |
 | `show_if_collapsed` | `showIfCollapsed` | an empty range still shows: its injected text only shows with it, and its background is widened to a character's width |
 | `font_family`, `font_weight`, `font_style` | `fontFamily`, `fontWeight`, `fontStyle` | the decorated text's font; line wrapping still measures the editor's font |
-| `hover_message` | `hoverMessage` | markdown shown in the hover |
+| `hover_message` | `hoverMessage` | markdown (`Vec<MarkdownString>`) shown in the hover over the range, or anywhere on its lines with `is_whole_line`; `show_if_collapsed` ones take a character more each side |
 | `stickiness` | `stickiness` | whether typing at the edges grows the range |
 | `z_index` | `zIndex` | paint order for overlapping decorations |
 
 Monaco's class names become styles here, so `className` effects beyond these fields can't be expressed. `inlineClassNameAffectsLetterSpacing` has no equivalent: it tells Monaco's DOM renderer to measure again, and text here is always shaped with its styles. A decoration doesn't change the font size (`fontSize`); `get_font_size_at_position` is the editor's.
+
+### Hover messages
+
+`hover_message`, `glyph_margin_hover_message` and `line_number_hover_message` take Monaco's `IMarkdownString | IMarkdownString[]` as a `Vec<MarkdownString>`, so they can be trusted (`command:` links run), use `$(icon)`s or HTML, and give several messages; an empty `Vec` (or only empty strings) shows nothing.
+
+```rust,ignore
+use gpui_monaco::providers::MarkdownString;
+
+DecorationOptions {
+    // A blame annotation: hovers anywhere on the line.
+    is_whole_line: true,
+    hover_message: vec![
+        MarkdownString::new("$(git-commit) [abc123](command:myExt.showCommit)")
+            .trusted(true)
+            .with_theme_icons(true),
+    ],
+    // A row each in the card beside the gutter.
+    glyph_margin_hover_message: vec!["**Breakpoint**".into(), "Condition: `x > 3`".into()],
+    line_number_hover_message: vec!["Changed in the last commit".into()],
+    ..Default::default()
+}
+```
+
+The glyph margin and line number hovers show in a card just right of the glyph margin (or of the line numbers), centered on the hovered line, as Monaco's glyph hover does. In the glyph margin only the decorations in the hovered lane count; a decoration covering several rows hovers on each of them.
 
 ### Theme colors
 

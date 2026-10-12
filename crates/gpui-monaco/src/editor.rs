@@ -1891,6 +1891,7 @@ impl CodeEditor {
             view: widget.view,
             allow_overflow: widget.allow_editor_overflow,
             layer: crate::widgets::layer::DEFAULT,
+            beside_gutter: None,
         });
         cx.notify();
         id
@@ -5808,19 +5809,31 @@ impl CodeEditor {
                         cx,
                     );
                 } else {
-                    // Monaco's glyph hover: the glyph margin and line numbers.
-                    let gutter_row = self.layout.as_ref().and_then(|layout| {
-                        let gutter = layout.bounds.contains(&event.position)
-                            && event.position.x
-                                < layout.bounds.left()
-                                    + layout.glyph_margin_width
-                                    + layout.line_numbers_width;
-                        gutter.then(|| self.position_for_point(event.position, window, cx).row)
+                    // Monaco's glyph hover (`GlyphHoverWidget.showsOrWillShow`):
+                    // a glyph margin lane in use on the line, or the line
+                    // number. Right of the line's lanes, nothing hovers.
+                    let gutter = self.layout.as_ref().and_then(|layout| {
+                        let x = event.position.x - layout.bounds.left();
+                        if !layout.bounds.contains(&event.position)
+                            || x >= layout.glyph_margin_width + layout.line_numbers_width
+                        {
+                            return None;
+                        }
+                        let row = self.position_for_point(event.position, window, cx).row;
+                        Some(if x < layout.glyph_margin_width {
+                            layout
+                                .glyph_margin_lane_at(event.position.x, row)
+                                .map(|lane| (row, crate::hover::LaneOrLineNumber::Lane(lane)))
+                        } else {
+                            Some((row, crate::hover::LaneOrLineNumber::LineNumber))
+                        })
                     });
-                    let target = match (position, gutter_row) {
-                        (_, Some(row)) => crate::hover::HoverTarget::Gutter(row),
+                    let target = match (position, gutter) {
+                        (_, Some(Some((row, lane)))) => {
+                            crate::hover::HoverTarget::Gutter(row, lane)
+                        }
+                        (_, Some(None)) | (None, None) => crate::hover::HoverTarget::None,
                         (Some(position), None) => crate::hover::HoverTarget::Text(position),
-                        (None, None) => crate::hover::HoverTarget::None,
                     };
                     self.hover_mouse_move(target, false, hover_focused, event.modifiers, cx);
                 }

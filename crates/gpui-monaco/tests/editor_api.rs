@@ -952,7 +952,8 @@ fn mouse_target_details(cx: &mut TestAppContext) {
     else {
         panic!("{t:?}");
     };
-    assert_eq!((glyph_margin_lane, is_after_lines), (Some(1), false));
+    // Monaco: the one center lane.
+    assert_eq!((glyph_margin_lane, is_after_lines), (Some(2), false));
     assert_eq!(
         offset_x,
         px(2.) - editor.read_with(cx, |e, _| e.widget_bounds_for_tests().0.left())

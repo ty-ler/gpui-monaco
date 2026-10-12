@@ -80,8 +80,9 @@ pub enum MouseTargetDetail {
         glyph_margin_left: Pixels,
         /// The glyph margin's width (Monaco `glyphMarginWidth`).
         glyph_margin_width: Pixels,
-        /// Over the glyph margin, its lane, from 1 (Monaco
-        /// `glyphMarginLane`); there's one lane.
+        /// Over the glyph margin, its lane among those in use on the line,
+        /// as a [`GlyphMarginLane`](crate::GlyphMarginLane) number: 1 left,
+        /// 2 center, 3 right (Monaco `glyphMarginLane`).
         glyph_margin_lane: Option<u32>,
         /// The line numbers' width (Monaco `lineNumbersWidth`).
         line_numbers_width: Pixels,
@@ -284,12 +285,15 @@ impl CodeEditor {
             detail,
             injected_text: None,
         };
-        let margin = |is_after_lines, widget| MouseTargetDetail::Margin {
+        // Monaco `_hitTestMargin`: over the glyph margin, the lane among
+        // those in use on `row`'s line.
+        let margin = |is_after_lines, widget, row: Option<u32>| MouseTargetDetail::Margin {
             is_after_lines,
             glyph_margin_left: px(0.),
             glyph_margin_width: layout.glyph_margin_width,
-            glyph_margin_lane: (point.x - layout.bounds.left() < layout.glyph_margin_width)
-                .then_some(1),
+            glyph_margin_lane: row
+                .and_then(|row| layout.glyph_margin_lane_at(point.x, row))
+                .map(|lane| lane as u32),
             line_numbers_width: layout.line_numbers_width,
             offset_x: point.x - layout.bounds.left(),
             widget,
@@ -325,7 +329,11 @@ impl CodeEditor {
                     return target(kind, position, detail);
                 }
                 EmbeddedKind::GlyphMarginWidget => {
-                    (MouseTargetKind::GutterGlyphMargin, margin(false, id))
+                    let row = self.position_for_point(point, window, cx).row;
+                    (
+                        MouseTargetKind::GutterGlyphMargin,
+                        margin(false, id, Some(row)),
+                    )
                 }
             };
             return target(kind, None, detail);
@@ -376,7 +384,7 @@ impl CodeEditor {
             let position = below.then(|| self.position_for_point(point, window, cx));
             if below {
                 let detail = if in_gutter {
-                    margin(true, None)
+                    margin(true, None, position.map(|position| position.row))
                 } else {
                     MouseTargetDetail::ContentEmpty {
                         is_after_lines: true,
@@ -418,7 +426,7 @@ impl CodeEditor {
                 MouseTargetKind::GutterLineDecorations
             };
             let start = PointUtf16::new(line.row, line.columns.start);
-            let mut target = target(kind, Some(start), margin(false, None));
+            let mut target = target(kind, Some(start), margin(false, None, Some(line.row)));
             // Monaco: the whole line.
             let end = self.model().read(cx).line_len_utf16(line.row);
             target.range = Some(PointUtf16::new(line.row, 0)..PointUtf16::new(line.row, end));

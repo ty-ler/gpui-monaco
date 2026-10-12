@@ -744,6 +744,20 @@ pub(crate) struct OverlayWidgetState {
     pub allow_overflow: bool,
     /// Paint order among overflowing widgets (a [`layer`]).
     pub layer: usize,
+    /// Placed beside the gutter, centered on a row, by the glyph hover
+    /// (Monaco `GlyphHoverWidget._showAt`) instead of by `position`.
+    pub beside_gutter: Option<BesideGutter>,
+}
+
+/// Where the glyph hover goes (Monaco `GlyphHoverWidget._showAt`): right of
+/// the glyph margin, or of the line numbers, vertically centered on a
+/// model row's first view line and kept inside the editor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BesideGutter {
+    /// The 0-based model row.
+    pub row: u32,
+    /// Right of the line numbers too (Monaco's `'lineNo'`).
+    pub after_line_numbers: bool,
 }
 
 /// Widget positions carried from one model to the next: each content

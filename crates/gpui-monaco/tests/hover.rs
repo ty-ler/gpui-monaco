@@ -232,7 +232,7 @@ fn glyph_margin_hovers(cx: &mut TestAppContext) {
                 17..17,
                 DecorationOptions {
                     glyph: Some(("●".into(), gpui::red())),
-                    glyph_margin_hover_message: Some("Breakpoint".into()),
+                    glyph_margin_hover_message: vec!["Breakpoint".into()],
                     ..Default::default()
                 },
             )],
