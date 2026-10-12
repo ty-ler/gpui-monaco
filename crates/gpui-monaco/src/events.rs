@@ -364,6 +364,9 @@ pub struct ClipboardCopyEvent {
     pub is_from_empty_selection: bool,
     /// With several cursors, each one's text.
     pub multicursor_text: Option<Vec<String>>,
+    /// The selections are a column selection's (Monaco `dataToCopy.isBlock`),
+    /// so pasting them at one cursor pastes a block.
+    pub is_block: bool,
     /// The model's language (Monaco `dataToCopy.mode`).
     pub language_id: Option<SharedString>,
 }
@@ -379,6 +382,9 @@ pub struct ClipboardPasteEvent {
     pub is_from_empty_selection: bool,
     /// The metadata's text per cursor.
     pub multicursor_text: Option<Vec<String>>,
+    /// The metadata says it was copied from a column selection (Monaco
+    /// `metadata.isBlock`).
+    pub is_block: bool,
     /// The metadata's language id (Monaco `metadata.mode`).
     pub language_id: Option<SharedString>,
 }

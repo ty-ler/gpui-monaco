@@ -496,6 +496,9 @@ pub(crate) struct HorizontalReveal {
 pub(crate) struct ClipboardMetadata {
     is_from_empty_selection: bool,
     multicursor_text: Option<Vec<String>>,
+    /// Copied from a column selection (Monaco `isBlock`).
+    #[serde(default)]
+    is_block: bool,
     /// The language id of the editor it was copied from (Monaco `mode`).
     #[serde(default)]
     mode: Option<String>,
@@ -4222,12 +4225,23 @@ impl CodeEditor {
 
     fn write_selection_to_clipboard(&mut self, is_cut: bool, cx: &mut Context<Self>) -> bool {
         let config = self.cursor_config(cx);
-        let (text, is_from_empty_selection, per_cursor) =
-            cursor::copy_text(&config, self.snapshot.rope(), &self.cursors);
+        // Monaco `getPlainTextToCopy`: the model's line ending, or CRLF on
+        // Windows.
+        let eol = self.model.read(cx).line_ending();
+        let (text, is_from_empty_selection, per_cursor) = cursor::copy_text(
+            &config,
+            self.snapshot.rope(),
+            &self.cursors,
+            eol,
+            cfg!(windows),
+        );
         if text.is_empty() && !is_from_empty_selection {
             return false;
         }
         let multicursor_text = (per_cursor.len() > 1).then_some(per_cursor);
+        // Monaco `getCursorColumnSelectData().isReal`: the cursors come from
+        // a column selection.
+        let is_block = self.cursors.column_select_data().is_some();
         let mode = self.model.read(cx).language_id().cloned();
         // Monaco `onWillCopy`/`onWillCut`, before the clipboard is written.
         let event = ClipboardCopyEvent {
@@ -4235,6 +4249,7 @@ impl CodeEditor {
             text: text.clone(),
             is_from_empty_selection,
             multicursor_text: multicursor_text.clone(),
+            is_block,
             language_id: mode.clone(),
         };
         cx.emit(if is_cut {
@@ -4250,6 +4265,7 @@ impl CodeEditor {
             ClipboardMetadata {
                 is_from_empty_selection,
                 multicursor_text,
+                is_block,
                 mode: mode.map(|mode| mode.to_string()),
                 id,
                 provider_copy_mime_types,
@@ -4297,6 +4313,7 @@ impl CodeEditor {
                 .as_ref()
                 .and_then(|meta| meta.mode.clone())
                 .map(Into::into),
+            is_block: metadata.as_ref().is_some_and(|meta| meta.is_block),
             multicursor_text: metadata.and_then(|meta| meta.multicursor_text),
         }));
         // Monaco `CopyPasteController`: providers may handle it.
@@ -4311,13 +4328,6 @@ impl CodeEditor {
     pub(crate) fn paste_item_inner(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
         let version = self.snapshot.version();
         let primary_start = self.cursors.primary().selection().start();
-        let start = self
-            .cursors
-            .selections()
-            .iter()
-            .map(|s| s.start())
-            .min()
-            .unwrap_or_default();
         let language_id = Self::clipboard_metadata(&item)
             .and_then(|meta| meta.mode)
             .map(Into::into);
@@ -4328,20 +4338,12 @@ impl CodeEditor {
         if self.snapshot.version() != version {
             // Monaco `onDidPaste`: from the primary selection's start before
             // to its start after.
+            let range = primary_start..self.cursors.primary().selection().start();
             cx.emit(CodeEditorEvent::DidPaste(PasteEvent {
-                range: primary_start..self.cursors.primary().selection().start(),
+                range: range.clone(),
                 language_id,
             }));
-            // Format from the first selection's start to the last cursor,
-            // which covers every cursor's pasted text.
-            let end = self
-                .cursors
-                .selections()
-                .iter()
-                .map(|s| s.head)
-                .max()
-                .unwrap_or(start);
-            self.format_on_paste(start..end, cx);
+            self.format_on_paste(range, cx);
             // Monaco `AutoIndentOnPaste`: from the primary selection's
             // start before the paste to its start after.
             if self.options.auto_indent_on_paste {
@@ -4366,12 +4368,16 @@ impl CodeEditor {
                 .trim_end_matches(['\r', '\n'])
                 .replace(['\r', '\n'], " ");
         }
-        let (from_empty, multicursor) = match Self::clipboard_metadata(&item) {
-            Some(meta) => (meta.is_from_empty_selection, meta.multicursor_text),
-            None => (false, None),
+        let (from_empty, multicursor, is_block) = match Self::clipboard_metadata(&item) {
+            Some(meta) => (
+                meta.is_from_empty_selection,
+                meta.multicursor_text,
+                meta.is_block && !self.options.single_line,
+            ),
+            None => (false, None, false),
         };
         self.run_edit(cx, |c, m, s| {
-            cursor::paste(c, m, s, &text, from_empty, multicursor.as_deref())
+            cursor::paste(c, m, s, &text, from_empty, multicursor.as_deref(), is_block)
         });
     }
 

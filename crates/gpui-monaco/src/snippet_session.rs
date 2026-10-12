@@ -31,9 +31,13 @@ pub(crate) const NEXT_PLACEHOLDER_COMMAND: &str = "jumpToNextSnippetPlaceholder"
 /// `ISnippetInsertOptions`).
 #[derive(Clone, Debug)]
 pub struct SnippetInsertOptions {
-    /// UTF-16 columns before each cursor to replace.
+    /// UTF-16 columns before each cursor to replace, counted from the
+    /// selection's head. As in Monaco, a selection's start is replaced from
+    /// there when this isn't 0, and its end to `overwrite_after` columns
+    /// after the head when that isn't 0.
     pub overwrite_before: u32,
-    /// UTF-16 columns after each cursor to replace.
+    /// UTF-16 columns after each cursor to replace, counted from the
+    /// selection's head.
     pub overwrite_after: u32,
     /// Re-indent the snippet's lines to the cursor's line.
     pub adjust_whitespace: bool,
@@ -435,17 +439,14 @@ impl CodeEditor {
         let first_line_first_non_whitespace = first_non_whitespace(primary.head.row);
         let now = chrono::Local::now();
         let workspace = cx.try_global::<Workspace>().and_then(|w| w.0.clone());
-        let (path, uri, line_comment, block_comment) = {
+        let (path, line_comment, block_comment) = {
             let model = self.model().read(cx);
-            let uri = model.uri().map(|uri| uri.to_string());
-            let path = uri
-                .as_deref()
-                .and_then(|uri| uri.strip_prefix("file://"))
-                .map(str::to_string);
+            // Monaco's standalone label service: a file URI's `fsPath`, or
+            // another URI's `path`.
+            let path = model.uri().and_then(|uri| crate::languages::uri_path(uri));
             let config = model.language().map(|language| language.config.clone());
             (
-                path.clone(),
-                uri.filter(|_| path.is_none()),
+                path,
                 config
                     .as_ref()
                     .and_then(|c| c.comments().line_comment.clone()),
@@ -467,7 +468,11 @@ impl CodeEditor {
             if self.text_in(range_of(after)) != first_after {
                 after = selection;
             }
-            let range = before.start().min(selection.start())..after.end().max(selection.end());
+            // Monaco `selection.setStartPosition(before.start)
+            // .setEndPosition(after.end)`: the overwrites are measured from
+            // the head, so with a selection they replace from `before`'s
+            // start to `after`'s end, not the whole selection.
+            let range = before.start()..after.end();
             let mut snippet = SnippetParser::new().parse(template, true, enforce_final_tabstop);
             let adjust = options.adjust_whitespace
                 || (ix > 0
@@ -508,7 +513,6 @@ impl CodeEditor {
                 cursor_index: ix,
                 cursor_count: count,
                 path: path.clone(),
-                uri: uri.clone(),
                 workspace: workspace.clone(),
                 clipboard: options.clipboard_text.clone(),
                 clipboard_spread: self.options.multi_cursor_paste
@@ -1142,32 +1146,56 @@ impl CodeEditor {
         let Some(&placeholder) = one.active_group().first() else {
             return;
         };
-        let Some(choice) = one.snippet.choice(placeholder) else {
+        if one.snippet.choice(placeholder).is_none() {
             self.snippet
                 .session
                 .as_mut()
                 .expect("checked")
                 .current_choice = None;
             return;
-        };
-        if session.current_choice == Some(placeholder) || choice.options.is_empty() {
+        }
+        if session.current_choice == Some(placeholder) {
             return;
         }
-        let Some(range) = one
-            .decorations
-            .as_ref()
-            .and_then(|d| d.get(&placeholder))
-            .and_then(|&id| self.placeholder_range(id, cx))
-        else {
+        let Some((items, range)) = self.snippet_choice_completions(cx) else {
             return;
         };
-        let options: Vec<String> = choice.options.iter().map(|o| o.value.clone()).collect();
+        if items.is_empty() {
+            return;
+        }
         self.snippet
             .session
             .as_mut()
             .expect("checked")
             .current_choice = Some(placeholder);
-        let rope = self.model().read(cx).buffer().rope().clone();
+        // Monaco shows them on the next microtask.
+        cx.spawn(async move |this, cx| {
+            this.update(cx, |this, cx| {
+                this.show_simple_suggestions(items, range, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The active choice's options as completion items over its range
+    /// (Monaco's `snippetChoiceCompletions` provider), or `None` without an
+    /// active choice. While there is one, Monaco registers the provider as
+    /// exclusive, so asking for suggestions lists only these.
+    pub(crate) fn snippet_choice_completions(
+        &self,
+        cx: &App,
+    ) -> Option<(Vec<CompletionItem>, Range<PointUtf16>)> {
+        let one = &self.snippet.session.as_ref()?.snippets[0];
+        let &placeholder = one.active_group().first()?;
+        let choice = one.snippet.choice(placeholder)?;
+        let range = one
+            .decorations
+            .as_ref()
+            .and_then(|d| d.get(&placeholder))
+            .and_then(|&id| self.placeholder_range(id, cx))?;
+        let options: Vec<String> = choice.options.iter().map(|o| o.value.clone()).collect();
+        let rope = self.model().read(cx).buffer().rope();
         let range = rope.offset_to_point_utf16(range.start)..rope.offset_to_point_utf16(range.end);
         let word = self.text_in(range.clone());
         let is_any_option = options.contains(&word);
@@ -1188,14 +1216,7 @@ impl CodeEditor {
                 ..CompletionItem::new(option.clone(), CompletionItemKind::Value)
             })
             .collect();
-        // Monaco shows them on the next microtask.
-        cx.spawn(async move |this, cx| {
-            this.update(cx, |this, cx| {
-                this.show_simple_suggestions(items, range, cx)
-            })
-            .ok();
-        })
-        .detach();
+        Some((items, range))
     }
 }
 

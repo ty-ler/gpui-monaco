@@ -13,8 +13,8 @@ use crate::cursor::{EditOperation, EditOperationType, Selection, StandardTokenTy
 use crate::editor::CodeEditor;
 use crate::options::{AcceptSuggestionOnEnter, SuggestInsertMode, WordBasedSuggestions};
 use crate::providers::{
-    CompletionItem, CompletionItemKind, CompletionItemTag, CompletionProvider, CompletionTrigger,
-    completion_provider_groups, completion_providers,
+    CompletionItem, CompletionItemKind, CompletionItemTag, CompletionList, CompletionProvider,
+    CompletionTrigger, completion_provider_groups, completion_providers,
 };
 use crate::suggest::memory::{Candidate, MemoryContext, SuggestMemories};
 use crate::suggest::{CompletionModel, CompletionModelOptions, LineContext};
@@ -80,6 +80,29 @@ pub(crate) struct ProviderItems {
     pub(crate) items: Vec<CompletionItem>,
     /// The provider's list was incomplete.
     pub(crate) incomplete: bool,
+}
+
+/// Monaco's `snippetChoiceCompletions` provider: the active snippet
+/// choice's options (see `CodeEditor::snippet_choice_completions`).
+struct SnippetChoiceCompletions(Vec<CompletionItem>);
+
+impl CompletionProvider for SnippetChoiceCompletions {
+    fn provide_completions(
+        &self,
+        _: &crate::providers::ProviderContext,
+        _: PointUtf16,
+        _: CompletionTrigger,
+        _: &mut gpui::App,
+    ) -> Task<anyhow::Result<CompletionList>> {
+        Task::ready(Ok(CompletionList {
+            items: self.0.clone(),
+            incomplete: false,
+        }))
+    }
+
+    fn debug_display_name(&self) -> SharedString {
+        "snippetChoiceCompletions".into()
+    }
 }
 
 /// Monaco `CompletionOptions.providerFilter` and `providerItemsToReuse`.
@@ -753,7 +776,18 @@ impl CodeEditor {
         }
         let position = self.cursors.primary().position;
         let context = self.model().read(cx).provider_context();
-        let groups = completion_provider_groups(cx, self.provider_target(cx));
+        // Monaco's snippet controller registers its choice provider as
+        // exclusive while a choice is active, so it's the only one asked,
+        // word-based suggestions included.
+        let choice = self.snippet_choice_completions(cx);
+        let groups = match &choice {
+            Some((items, _)) => {
+                options = SuggestRequestOptions::default();
+                vec![vec![Arc::new(SnippetChoiceCompletions(items.clone()))
+                    as Arc<dyn CompletionProvider>]]
+            }
+            None => completion_provider_groups(cx, self.provider_target(cx)),
+        };
         // Word-based suggestions are the lowest group here (Monaco
         // registers them as a `*` provider): reused ones only show when
         // no provider has items.
@@ -767,15 +801,19 @@ impl CodeEditor {
         let word_end = self.word_end_at(position);
         // Monaco `offWithInlineSuggestions`: off while an inline
         // completions provider serves this language and they're enabled.
-        let words_enabled = match self.options.word_based_suggestions {
-            WordBasedSuggestions::Off => false,
-            WordBasedSuggestions::OffWithInlineSuggestions => {
-                !self.options.inline_suggest.enabled
-                    || crate::providers::inline_completions_providers(cx, self.provider_target(cx))
+        let words_enabled = choice.is_none()
+            && match self.options.word_based_suggestions {
+                WordBasedSuggestions::Off => false,
+                WordBasedSuggestions::OffWithInlineSuggestions => {
+                    !self.options.inline_suggest.enabled
+                        || crate::providers::inline_completions_providers(
+                            cx,
+                            self.provider_target(cx),
+                        )
                         .is_empty()
-            }
-            _ => true,
-        };
+                }
+                _ => true,
+            };
         let words = words_enabled.then(|| {
             let (documents, regex) = self.word_sources(cx);
             let current: String = self

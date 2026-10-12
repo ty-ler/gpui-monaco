@@ -83,10 +83,10 @@ pub struct SnippetVariableContext {
     pub cursor_index: usize,
     /// How many cursors there are (for the clipboard spread).
     pub cursor_count: usize,
-    /// The document's path, if it has a `file://` URI.
+    /// The document's path: a `file:` URI's file path, or another URI's
+    /// path, so `http://host/a/b` gives `/a/b` (Monaco's standalone
+    /// `getUriLabel`, and `fsPath` for the file name and directory).
     pub path: Option<String>,
-    /// The document's URI, if it has one that isn't a file.
-    pub uri: Option<String>,
     /// The workspace, if the host set one.
     pub workspace: Option<SnippetWorkspace>,
     /// The clipboard text (`CLIPBOARD`).
@@ -234,14 +234,14 @@ impl SnippetVariableContext {
         }
     }
 
-    /// Monaco `ModelBasedVariableResolver`, with paths labelled as plain
-    /// paths (or the URI for documents that aren't files).
+    /// Monaco `ModelBasedVariableResolver`, with paths labelled as the
+    /// standalone label service labels them: as plain paths.
     fn resolve_model(&self, name: &str) -> Option<String> {
         let path = self.path.as_deref();
         match name {
-            "TM_FILENAME" => Some(basename(path.or(self.uri.as_deref())?).to_string()),
+            "TM_FILENAME" => Some(basename(path?).to_string()),
             "TM_FILENAME_BASE" => {
-                let name = basename(path.or(self.uri.as_deref())?);
+                let name = basename(path?);
                 Some(match name.rfind('.') {
                     Some(ix) if ix > 0 => name[..ix].to_string(),
                     _ => name.to_string(),
@@ -263,9 +263,9 @@ impl SnippetVariableContext {
                     basename(dir).to_string()
                 })
             }
-            "TM_FILEPATH" => path.or(self.uri.as_deref()).map(str::to_string),
+            "TM_FILEPATH" => path.map(str::to_string),
             "RELATIVE_FILEPATH" => {
-                let path = path.or(self.uri.as_deref())?;
+                let path = path?;
                 let relative = self.workspace.as_ref().and_then(|workspace| {
                     path.strip_prefix(&workspace.folder)
                         .map(|rest| rest.trim_start_matches('/').to_string())
@@ -429,6 +429,36 @@ mod tests {
         assert_eq!(
             SnippetVariableContext::default().resolve("TM_FILENAME", None),
             None
+        );
+    }
+
+    /// Monaco `snippetVariables.test.ts`, "editor variables, file/dir":
+    /// URIs that aren't files use their path.
+    #[test]
+    fn model_variables_of_other_uris() {
+        let resolve = |uri: &str, name: &str| {
+            SnippetVariableContext {
+                path: crate::languages::uri_path(uri),
+                ..Default::default()
+            }
+            .resolve(name, None)
+        };
+        let uri = "http://www.pb.o/abc/def/ghi";
+        assert_eq!(resolve(uri, "TM_FILENAME").as_deref(), Some("ghi"));
+        assert_eq!(resolve(uri, "TM_DIRECTORY").as_deref(), Some("/abc/def"));
+        assert_eq!(resolve(uri, "TM_DIRECTORY_BASE").as_deref(), Some("def"));
+        assert_eq!(resolve(uri, "TM_FILEPATH").as_deref(), Some("/abc/def/ghi"));
+        let uri = "mem:fff.ts";
+        assert_eq!(resolve(uri, "TM_DIRECTORY").as_deref(), Some(""));
+        assert_eq!(resolve(uri, "TM_DIRECTORY_BASE").as_deref(), Some(""));
+        assert_eq!(resolve(uri, "TM_FILEPATH").as_deref(), Some("fff.ts"));
+        let uri = "file:///foo/files/text.txt";
+        assert_eq!(resolve(uri, "TM_FILENAME").as_deref(), Some("text.txt"));
+        assert_eq!(resolve(uri, "TM_DIRECTORY").as_deref(), Some("/foo/files"));
+        assert_eq!(resolve(uri, "TM_DIRECTORY_BASE").as_deref(), Some("files"));
+        assert_eq!(
+            resolve(uri, "TM_FILEPATH").as_deref(),
+            Some("/foo/files/text.txt")
         );
     }
 

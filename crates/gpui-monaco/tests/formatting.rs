@@ -7,7 +7,7 @@ use std::rc::Rc;
 use gpui::{App, AppContext as _, Entity, Focusable, Task, TestAppContext, VisualTestContext};
 use gpui_monaco::cursor::Selection;
 use gpui_monaco::providers::*;
-use gpui_monaco::text::PointUtf16;
+use gpui_monaco::text::{LineEnding, PointUtf16};
 use gpui_monaco::{CodeEditor, TextModel};
 
 fn p(row: u32, column: u32) -> PointUtf16 {
@@ -50,12 +50,12 @@ impl DocumentFormattingProvider for WholeDocument {
         context: &ProviderContext,
         _: FormattingOptions,
         _: &mut App,
-    ) -> Task<anyhow::Result<Vec<TextEdit>>> {
+    ) -> Task<anyhow::Result<FormattingEdits>> {
         // A whole-text replacement, like many formatters return.
         let text = context.snapshot.rope().to_string();
         let tidy: Vec<String> = text.split('\n').map(tidy).collect();
         let end = context.snapshot.max_point_utf16();
-        Task::ready(Ok(vec![(p(0, 0)..end, tidy.join("\n"))]))
+        Task::ready(Ok(vec![(p(0, 0)..end, tidy.join("\n"))].into()))
     }
 }
 
@@ -67,9 +67,11 @@ impl DocumentRangeFormattingProvider for Lines {
         range: Range<PointUtf16>,
         _: FormattingOptions,
         _: &mut App,
-    ) -> Task<anyhow::Result<Vec<TextEdit>>> {
+    ) -> Task<anyhow::Result<FormattingEdits>> {
         let text = context.snapshot.rope().to_string();
-        Task::ready(Ok(line_edits(&text, range.start.row..range.end.row + 1)))
+        Task::ready(Ok(
+            line_edits(&text, range.start.row..range.end.row + 1).into()
+        ))
     }
 }
 
@@ -86,10 +88,10 @@ impl OnTypeFormattingProvider for OnSemicolon {
         ch: char,
         _: FormattingOptions,
         _: &mut App,
-    ) -> Task<anyhow::Result<Vec<TextEdit>>> {
+    ) -> Task<anyhow::Result<FormattingEdits>> {
         assert_eq!(ch, ';');
         let text = context.snapshot.rope().to_string();
-        Task::ready(Ok(line_edits(&text, position.row..position.row + 1)))
+        Task::ready(Ok(line_edits(&text, position.row..position.row + 1).into()))
     }
 }
 
@@ -101,12 +103,12 @@ impl DocumentFormattingProvider for Slow {
         context: &ProviderContext,
         _: FormattingOptions,
         cx: &mut App,
-    ) -> Task<anyhow::Result<Vec<TextEdit>>> {
+    ) -> Task<anyhow::Result<FormattingEdits>> {
         let release = self.0.clone();
         let end = context.snapshot.max_point_utf16();
         cx.background_executor().spawn(async move {
             release.recv().await.ok();
-            Ok(vec![(p(0, 0)..end, "formatted".to_string())])
+            Ok(vec![(p(0, 0)..end, "formatted".to_string())].into())
         })
     }
 }
@@ -307,9 +309,9 @@ impl DocumentFormattingProvider for Named {
         context: &ProviderContext,
         _: FormattingOptions,
         _: &mut App,
-    ) -> Task<anyhow::Result<Vec<TextEdit>>> {
+    ) -> Task<anyhow::Result<FormattingEdits>> {
         let end = context.snapshot.max_point_utf16();
-        Task::ready(Ok(vec![(p(0, 0)..end, self.0.to_string())]))
+        Task::ready(Ok(vec![(p(0, 0)..end, self.0.to_string())].into()))
     }
 
     fn display_name(&self) -> Option<gpui::SharedString> {
@@ -330,8 +332,8 @@ impl DocumentRangeFormattingProvider for NamedRange {
         range: Range<PointUtf16>,
         _: FormattingOptions,
         _: &mut App,
-    ) -> Task<anyhow::Result<Vec<TextEdit>>> {
-        Task::ready(Ok(vec![(range, self.0.to_string())]))
+    ) -> Task<anyhow::Result<FormattingEdits>> {
+        Task::ready(Ok(vec![(range, self.0.to_string())].into()))
     }
 
     fn display_name(&self) -> Option<gpui::SharedString> {
@@ -536,4 +538,122 @@ fn choosing_between_range_formatters(cx: &mut TestAppContext) {
         ]
     );
     cx.update(|_, cx| disposable.dispose(cx));
+}
+
+/// Returns fixed edits and line ending.
+struct Fixed(Vec<TextEdit>, Option<LineEnding>);
+impl DocumentFormattingProvider for Fixed {
+    fn provide_document_formatting_edits(
+        &self,
+        _: &ProviderContext,
+        _: FormattingOptions,
+        _: &mut App,
+    ) -> Task<anyhow::Result<FormattingEdits>> {
+        Task::ready(Ok(FormattingEdits {
+            edits: self.0.clone(),
+            eol: self.1,
+        }))
+    }
+}
+
+/// Monaco `FormattingEdit.execute`: `EditOperation.replaceMove`, so a
+/// cursor at an edit's start ends after its text, except for a single
+/// whole-text replacement (audit 3 §A.19).
+#[gpui::test]
+fn format_edits_move_cursors_past_their_text(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("\tfoo", cx);
+    cx.update(|_, cx| {
+        register_document_formatting_provider(
+            cx,
+            LanguageSelector::All,
+            Fixed(vec![(p(0, 0)..p(0, 1), "    ".into())], None),
+        )
+    });
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 0))], cx)
+    });
+    editor.update(cx, |e, cx| e.format_document(cx));
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "    foo");
+    assert_eq!(editor.read_with(cx, |e, _| e.selections()[0].head), p(0, 4));
+}
+
+/// Monaco `FormattingEdit.execute`: "replace semantics" for one edit
+/// replacing the whole text.
+#[gpui::test]
+fn whole_text_format_edits_keep_cursors(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("a", cx);
+    cx.update(|_, cx| {
+        register_document_formatting_provider(cx, LanguageSelector::All, Named("b", None))
+    });
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 0))], cx)
+    });
+    editor.update(cx, |e, cx| e.format_document(cx));
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "b");
+    assert_eq!(editor.read_with(cx, |e, _| e.selections()[0].head), p(0, 0));
+}
+
+/// Monaco `FormattingEdit._handleEolEdits`: a formatter's line ending is
+/// pushed with its edits, in one undo step (audit 3 §A.21).
+#[gpui::test]
+fn formatters_change_the_line_ending(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("x\ny", cx);
+    cx.update(|_, cx| {
+        register_document_formatting_provider(
+            cx,
+            LanguageSelector::All,
+            Fixed(vec![(p(0, 0)..p(0, 1), "z".into())], Some(LineEnding::Crlf)),
+        )
+    });
+    let eol = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, cx| e.model().read(cx).line_ending())
+    };
+    editor.update(cx, |e, cx| e.format_document(cx));
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "z\r\ny");
+    assert_eq!(eol(&editor, cx), LineEnding::Crlf);
+    editor.update(cx, |e, cx| e.undo(cx));
+    assert_eq!(text(&editor, cx), "x\ny");
+    assert_eq!(eol(&editor, cx), LineEnding::Lf);
+}
+
+/// A formatter's line ending alone is applied too.
+#[gpui::test]
+fn formatters_change_only_the_line_ending(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("x\ny", cx);
+    cx.update(|_, cx| {
+        register_document_formatting_provider(
+            cx,
+            LanguageSelector::All,
+            Fixed(Vec::new(), Some(LineEnding::Crlf)),
+        )
+    });
+    editor.update(cx, |e, cx| e.format_document(cx));
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "x\r\ny");
+}
+
+/// Monaco `FormatOnPaste._trigger`: nothing is formatted with several
+/// cursors (audit 3 §A.20).
+#[gpui::test]
+fn format_on_paste_needs_a_single_cursor(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("x  y\n\n", cx);
+    cx.update(|_, cx| {
+        register_document_range_formatting_provider(cx, LanguageSelector::All, Lines)
+    });
+    set_options(&editor, cx, |o| o.format_on_paste = true);
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[Selection::collapsed(p(1, 0)), Selection::collapsed(p(2, 0))],
+            cx,
+        )
+    });
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("a  =  1".into()));
+    editor.update_in(cx, |e, window, cx| {
+        e.trigger("code_editor::Paste", window, cx).unwrap()
+    });
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "x  y\na  =  1\na  =  1");
 }

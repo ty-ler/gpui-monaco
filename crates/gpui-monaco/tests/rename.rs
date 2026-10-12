@@ -781,3 +781,39 @@ fn f2_off_screen_reveals_the_symbol(cx: &mut TestAppContext) {
     draw(cx);
     assert!(text(&editor, cx).starts_with("fn bar() {}"));
 }
+
+/// Monaco's `StandaloneBulkEditService` applies text edits with
+/// `EditOperation.replaceMove`: cursors and decorations at an edit's edges
+/// move past its text, here and in other models (audit 3 §A.19).
+#[gpui::test]
+fn workspace_edits_move_markers_past_their_text(cx: &mut TestAppContext) {
+    let (editor, lib, cx) = setup(Vec::new(), cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 3))], cx)
+    });
+    let marker = lib.update(cx, |model, cx| {
+        model.delta_decorations(
+            None,
+            &[],
+            vec![(7..7, gpui_monaco::DecorationOptions::default())],
+            cx,
+        )[0]
+    });
+    let edit = WorkspaceEdit {
+        edits: vec![
+            (None, vec![(p(0, 3)..p(0, 6), "bar".into())]),
+            (
+                Some("file:///lib.rs".into()),
+                vec![(p(0, 7)..p(0, 10), "bar".into())],
+            ),
+        ],
+        ..Default::default()
+    };
+    apply(&editor, edit, cx).unwrap();
+    assert_eq!(text(&editor, cx), TEXT.replacen("foo", "bar", 1));
+    assert_eq!(editor.read_with(cx, |e, _| e.selections()[0].head), p(0, 6));
+    lib.read_with(cx, |model, _| {
+        assert_eq!(model.text(), "pub fn bar() {}");
+        assert_eq!(model.decoration(marker).unwrap().range, 10..10);
+    });
+}

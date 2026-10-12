@@ -3,7 +3,9 @@
 //! on a code action) and `acceptRenameInputWithPreview`.
 //!
 //! Applying follows standalone Monaco's `StandaloneBulkEditService`: text
-//! edits go to models found by uri, after checking their versions.
+//! edits go to models found by uri, after checking their versions, and
+//! move the cursors and decorations at their edges past their text
+//! (`replaceMove`).
 //! Standalone Monaco rejects file operations; here they go to the host's
 //! [file edit handler](set_workspace_file_edit_handler) when one is set.
 //!
@@ -18,6 +20,7 @@ use std::rc::Rc;
 use gpui::{App, Context, Global, SharedString, Task};
 use text::PointUtf16;
 
+use crate::api::SingleEditOperation;
 use crate::editor::CodeEditor;
 use crate::model::model_for_uri;
 use crate::providers::{TextEdit, WorkspaceEdit, WorkspaceFileEdit};
@@ -281,7 +284,13 @@ impl CodeEditor {
                         })
                         .collect();
                     edits.sort_by_key(|(range, _)| range.start);
-                    model.edit(edits, cx).map(|_| ())
+                    // Monaco `EditOperation.replaceMove`.
+                    model.force_move_markers_on_next_edit(
+                        edits.iter().map(|(range, _)| range.clone()).collect(),
+                    );
+                    let result = model.edit(edits, cx).map(|_| ());
+                    model.force_move_markers_on_next_edit(Vec::new());
+                    result
                 })
                 .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         }
@@ -315,7 +324,13 @@ impl CodeEditor {
                 .update(cx, |model, _| model.start_transaction());
         }
         if !here.is_empty() {
-            self.execute_edits(here, None, cx);
+            // Monaco's `StandaloneBulkEditService` uses
+            // `EditOperation.replaceMove`.
+            let here = here
+                .into_iter()
+                .map(|(range, text)| SingleEditOperation::new(range, text).force_move_markers())
+                .collect();
+            self.execute_edit_operations(here, None, cx);
         }
         if let (Some(snippet), Some(range)) = (session, snippet_range) {
             let rope = self.snapshot.rope();

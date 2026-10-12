@@ -1974,7 +1974,8 @@ pub struct EditorOptions {
     /// Monaco `formatOnType`: format with the on-type formatter when one of
     /// its trigger characters is typed.
     pub format_on_type: bool,
-    /// Monaco `formatOnPaste`: format pasted text with the range formatter.
+    /// Monaco `formatOnPaste`: format pasted text with the range formatter
+    /// (with a single cursor).
     pub format_on_paste: bool,
     /// Monaco `minimap`.
     pub minimap: MinimapOptions,
@@ -2032,7 +2033,8 @@ pub struct EditorOptions {
     /// Monaco `hover`.
     pub hover: HoverOptions,
     /// Monaco `multiCursorPaste`: how pasting with several cursors splits
-    /// the text.
+    /// the text. With `Spread`, a column selection's copy pasted at one
+    /// cursor goes in as a block.
     pub multi_cursor_paste: crate::cursor::MultiCursorPaste,
     /// Monaco `inlineSuggest`.
     pub inline_suggest: InlineSuggestOptions,

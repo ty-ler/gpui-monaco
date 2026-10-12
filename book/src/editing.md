@@ -21,7 +21,7 @@ Every feature here works out of the box. Each follows Monaco's behavior, which t
   - Clicking the line numbers selects the line; Shift+click and dragging there extend by lines.
   - Alt+click adds a cursor, or removes the one clicked; Alt+double-click and Alt+triple-click select the new cursor's word or line.
   - Dragging past the editor's edge scrolls, faster the farther away the mouse is.
-- **Clipboard:** copy, cut and paste with Monaco's multi-cursor rules. With one cursor per line, each cursor pastes its own line. With no selection, the whole line is copied (`empty_selection_clipboard`).
+- **Clipboard:** copy, cut and paste with Monaco's multi-cursor rules. With one cursor per line, each cursor pastes its own line. With no selection, the whole line is copied (`empty_selection_clipboard`). Copies use the model's line ending (CRLF within the copied text on Windows, as Monaco). A column selection's copy pasted at a single cursor goes in as a block, with `multi_cursor_paste: Spread` (the default): each row on the next line at the cursor's visible column, short lines padded with spaces and rows past the end appended.
 - **IME:** marked text is shown inline, underlined, with the clause being converted underlined thicker, and the candidate window is positioned at the cursor. With several cursors, the composition is typed at each of them. A committed character gets the typing helpers below, so a dead-key quote auto-closes or surrounds the selection.
 
 ## Typing helpers
@@ -185,13 +185,13 @@ editor.update(cx, |editor, cx| {
 
 The supported syntax is Monaco's:
 - Tab stops (`$1`, `$0`), placeholders (`${1:default}`) and mirrors (the same index used twice).
-- Choices (`${1|one,two|}`), whose options show in the suggest widget.
-- Variables (`$TM_FILENAME`, `$CURRENT_YEAR`, `$CLIPBOARD`, …).
+- Choices (`${1|one,two|}`), whose options show in the suggest widget. While a choice is active, Ctrl+Space shows its options again, and only them.
+- Variables (`$TM_FILENAME`, `$CURRENT_YEAR`, `$CLIPBOARD`, …). The path variables use a `file:` URI's path, or another URI's path, as standalone Monaco does: `$TM_DIRECTORY` of `http://host/a/b` is `/a`.
 - Transforms (`${1/(.*)/${1:/upcase}/}`).
 
 Tab and Shift+Tab move between tab stops and Escape leaves the snippet. Snippet mode also ends at the last tab stop, when the cursor leaves the placeholders, or when the insertion is undone. Inserting a snippet inside an active one nests it into the current placeholder.
 
-Lines are indented like the cursor's line unless `adjust_whitespace` is off. `set_snippet_workspace` sets what `$WORKSPACE_NAME` and `$WORKSPACE_FOLDER` refer to.
+Lines are indented like the cursor's line unless `adjust_whitespace` is off. `overwrite_before` and `overwrite_after` count from the cursor, so with a selection the snippet replaces only those characters around its head. `set_snippet_workspace` sets what `$WORKSPACE_NAME` and `$WORKSPACE_FOLDER` refer to.
 
 ## Brackets
 

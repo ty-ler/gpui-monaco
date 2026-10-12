@@ -10,10 +10,11 @@ use std::sync::Arc;
 use gpui::{App, Context, Task};
 use text::{Bias, PointUtf16, Rope};
 
+use crate::api::SingleEditOperation;
 use crate::editor::CodeEditor;
 use crate::providers::{
     DocumentFormattingProvider, DocumentRangeFormattingProvider, FormatterInfo, FormatterSelection,
-    FormattingKind, FormattingMode, FormattingOptions, ProviderTarget, TextEdit,
+    FormattingEdits, FormattingKind, FormattingMode, FormattingOptions, ProviderTarget, TextEdit,
     document_formatting_providers, document_range_formatting_providers,
     on_type_formatting_providers, select_formatter,
 };
@@ -375,7 +376,7 @@ impl CodeEditor {
             }));
             return;
         }
-        let requests: Vec<Task<anyhow::Result<Vec<TextEdit>>>> = ranges
+        let requests: Vec<Task<anyhow::Result<FormattingEdits>>> = ranges
             .iter()
             .map(|range| {
                 provider.provide_document_range_formatting_edits(
@@ -403,7 +404,7 @@ impl CodeEditor {
             'merge: loop {
                 for i in 0..results.len() {
                     for j in i + 1..results.len() {
-                        if !edits_intersect(&results[i], &results[j]) {
+                        if !edits_intersect(&results[i].edits, &results[j].edits) {
                             continue;
                         }
                         let merged =
@@ -432,9 +433,13 @@ impl CodeEditor {
                 }
                 break;
             }
+            let mut edits = FormattingEdits::default();
+            for result in results {
+                edits.extend(result);
+            }
             this.update(cx, |this, cx| {
                 if this.format_state(cx) == state {
-                    this.apply_format_edits(results.concat(), explicit, cx);
+                    this.apply_format_edits(edits, explicit, cx);
                 }
                 this.format_task = None;
             })
@@ -447,14 +452,14 @@ impl CodeEditor {
     /// Position`).
     fn finish_format(
         &mut self,
-        tasks: Vec<Task<anyhow::Result<Vec<TextEdit>>>>,
+        tasks: Vec<Task<anyhow::Result<FormattingEdits>>>,
         explicit: bool,
         cx: &mut Context<Self>,
     ) {
         let state = self.format_state(cx);
         self.start_cancellable(crate::editor_state::CancellableOperation::Format);
         self.format_task = Some(cx.spawn(async move |this, cx| {
-            let mut edits = Vec::new();
+            let mut edits = FormattingEdits::default();
             for task in tasks {
                 match task.await {
                     Ok(result) => edits.extend(result),
@@ -481,16 +486,46 @@ impl CodeEditor {
         )
     }
 
-    /// Monaco `FormattingEdit.execute`: one undo step, cursors following
-    /// the edits, the primary cursor kept at the same height on screen.
-    fn apply_format_edits(&mut self, edits: Vec<TextEdit>, explicit: bool, cx: &mut Context<Self>) {
-        let edits = minimal_edits(self.snapshot.rope(), edits);
-        if edits.is_empty() || self.options.read_only {
+    /// Monaco `FormattingEdit.execute`: one undo step, with the line ending
+    /// change first, cursors and decorations at the edges of an edit moved
+    /// past its text (except for a single edit replacing the whole text),
+    /// and the primary cursor kept at the same height on screen.
+    fn apply_format_edits(
+        &mut self,
+        edits: FormattingEdits,
+        explicit: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let eol = edits.eol;
+        let edits = minimal_edits(self.snapshot.rope(), edits.edits);
+        if (edits.is_empty() && eol.is_none()) || self.options.read_only {
             return;
         }
         self.keep_cursor_on_screen();
         self.push_undo_stop(cx);
-        self.execute_edits(edits, None, cx);
+        // Monaco `_handleEolEdits`, in the same undo step as the edits.
+        if let Some(eol) = eol {
+            self.model().update(cx, |model, cx| {
+                model.start_transaction();
+                model.push_line_ending(eol, cx);
+            });
+        }
+        // Monaco: "replace semantics" for a whole-text replacement, "hoping
+        // markers stay put"; `replaceMove` otherwise.
+        let full = PointUtf16::zero()..self.snapshot.max_point_utf16();
+        let force_move_markers = !(edits.len() == 1 && edits[0].0 == full);
+        let edits = edits
+            .into_iter()
+            .map(|(range, text)| SingleEditOperation {
+                range,
+                text,
+                force_move_markers,
+            })
+            .collect();
+        self.execute_edit_operations(edits, None, cx);
+        if eol.is_some() {
+            self.model().update(cx, |model, _| model.end_transaction());
+        }
         self.push_undo_stop(cx);
         if explicit {
             let head = self.cursors.primary().position;
@@ -546,6 +581,7 @@ impl CodeEditor {
                 this.format_on_type_task = None;
                 let buffer = this.model().read(cx).buffer();
                 let current = buffer.snapshot();
+                let FormattingEdits { edits, eol } = edits;
                 let edits = if current.version() == requested.version() {
                     edits
                 } else {
@@ -575,17 +611,18 @@ impl CodeEditor {
                         })
                         .collect()
                 };
-                this.apply_format_edits(edits, false, cx);
+                this.apply_format_edits(FormattingEdits { edits, eol }, false, cx);
             })
             .ok();
         }));
     }
 
-    /// After a paste of `range`: formats it with the selected range
-    /// formatter (silently), with the `format_on_paste` option (Monaco
-    /// `FormatOnPaste`).
+    /// After a paste of `range` (the paste event's range): formats it with
+    /// the selected range formatter (silently), with the `format_on_paste`
+    /// option (Monaco `FormatOnPaste`). Not with several cursors.
     pub(crate) fn format_on_paste(&mut self, range: Range<PointUtf16>, cx: &mut Context<Self>) {
-        if self.options.format_on_paste && !self.options.read_only {
+        if self.options.format_on_paste && !self.options.read_only && self.cursors.all().len() == 1
+        {
             self.format_ranges(vec![range], false, cx);
         }
     }

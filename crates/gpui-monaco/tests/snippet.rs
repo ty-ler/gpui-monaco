@@ -891,6 +891,29 @@ fn selecting_left_to_right_and_choosing_item_31199(cx: &mut TestAppContext) {
     assert_eq!(ed.text(), "console.far");
 }
 
+/// Monaco `createEditsAndSnippetsFromSelections`: `overwrite_before` and
+/// `overwrite_after` are measured from the head, so with a selection the
+/// snippet replaces from there, not the whole selection (audit 3 §A.22).
+#[gpui::test]
+fn overwrite_with_a_selection_replaces_from_the_head(cx: &mut TestAppContext) {
+    let mut ed = session_setup(cx);
+    ed.set_value("console.log");
+    ed.select(&[s(1, 1, 1, 12)]);
+    ed.insert_with("far", before(3));
+    assert_eq!(ed.text(), "console.far");
+    // Right to left, the head is at the start.
+    ed.set_value("console.log");
+    ed.select(&[s(1, 12, 1, 1)]);
+    ed.insert_with(
+        "far",
+        SnippetInsertOptions {
+            overwrite_after: 3,
+            ..Default::default()
+        },
+    );
+    assert_eq!(ed.text(), "farsole.log");
+}
+
 #[gpui::test]
 fn tabs_dont_get_replaced_with_spaces_in_transformations_103818(cx: &mut TestAppContext) {
     let mut ed = session_setup(cx);

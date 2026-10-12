@@ -416,7 +416,7 @@ impl DocumentRangeFormattingProvider for AllAtOnce {
         _: Range<PointUtf16>,
         _: FormattingOptions,
         _: &mut App,
-    ) -> Task<anyhow::Result<Vec<TextEdit>>> {
+    ) -> Task<anyhow::Result<FormattingEdits>> {
         unreachable!("formats all ranges at once")
     }
 
@@ -426,13 +426,13 @@ impl DocumentRangeFormattingProvider for AllAtOnce {
         ranges: &[Range<PointUtf16>],
         _: FormattingOptions,
         _: &mut App,
-    ) -> Option<Task<anyhow::Result<Vec<TextEdit>>>> {
+    ) -> Option<Task<anyhow::Result<FormattingEdits>>> {
         self.0.borrow_mut().push(ranges.to_vec());
-        let edits = ranges
+        let edits: Vec<TextEdit> = ranges
             .iter()
             .map(|range| (range.start..range.start, "> ".to_string()))
             .collect();
-        Some(Task::ready(Ok(edits)))
+        Some(Task::ready(Ok(edits.into())))
     }
 }
 

@@ -2203,3 +2203,34 @@ fn only_tab_and_enter_keep_the_alternatives(cx: &mut TestAppContext) {
     insert_next_suggestion(&editor, cx);
     assert_eq!(text(&editor, cx), "println print print;");
 }
+
+/// Monaco `SnippetController2`: while a snippet choice is active, its
+/// options are the only suggestions (an exclusive provider), so they show
+/// again after the list is dismissed (audit 3 §A.23).
+#[gpui::test]
+fn snippet_choices_are_offered_again(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |_| {}, cx);
+    provide(cx, |_| {
+        vec![CompletionItem::new("print", CompletionItemKind::Function)]
+    });
+    editor.update(cx, |e, cx| {
+        e.insert_snippet("${1|one,two,three|} $2", Default::default(), cx)
+    });
+    cx.run_until_parked();
+    let choices = Some(vec!["one".into(), "two".into(), "three".into()]);
+    assert_eq!(labels(&editor, cx), choices);
+    cx.simulate_keystrokes("escape");
+    assert!(!visible(&editor, cx));
+    assert!(editor.read_with(cx, |e, _| e.in_snippet_mode()));
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert_eq!(labels(&editor, cx), choices);
+    // Choosing one goes on to the next placeholder, where the other
+    // providers are asked again.
+    cx.simulate_keystrokes("down enter");
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "two ");
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert_eq!(labels(&editor, cx), Some(vec!["print".into()]));
+}

@@ -20,6 +20,9 @@
 
 use std::ops::Range;
 
+use text::LineEnding;
+
+use super::column_selection_paste::ColumnSelectionPasteCommand;
 use super::edit::{
     Command, CursorStateHelper, EditBuilder, EditOperation, EditOperationType, ReplaceCommand,
     ReplaceCommandThatPreservesSelection, ReplaceOvertypeCommand, TrackedId, auto_whitespace,
@@ -1044,12 +1047,28 @@ pub fn cut(
 /// passed back to [`paste`] as `pasted_from_empty_selection`), and the
 /// per-cursor pieces when several pieces were copied (empty otherwise; pass
 /// them back to [`paste`] as `multicursor_text`).
+///
+/// Line breaks are the model's `eol`: inside each piece, after a whole
+/// line and between pieces. With `force_crlf` (Monaco sets it on Windows),
+/// the pieces use `\r\n` instead and only the joins use `eol`.
 pub fn copy_text(
     config: &CursorConfig,
     model: &impl CursorModel,
     cursors: &CursorCollection,
+    eol: LineEnding,
+    force_crlf: bool,
 ) -> (String, bool, Vec<String>) {
     let model: &dyn CursorModel = model;
+    let newline = if force_crlf { "\r\n" } else { eol.as_str() };
+    // Monaco `getValueInRange` with the EOL preference.
+    let value_in_range = |range: Range<Position>| {
+        let text = value_in_range(model, range);
+        if newline == "\n" {
+            text
+        } else {
+            text.replace('\n', newline)
+        }
+    };
     let selections = cursors.selections();
     let is_from_empty_selection =
         config.empty_selection_clipboard && selections.len() == 1 && selections[0].is_empty();
@@ -1068,17 +1087,17 @@ pub fn copy_text(
             let row = range.start.row;
             if range.start == range.end {
                 if Some(row) != prev_row {
-                    result.push(format!("{}\n", model.line_content(row)));
+                    result.push(format!("{}{newline}", model.line_content(row)));
                 }
             } else {
-                result.push(value_in_range(model, range.clone()));
+                result.push(value_in_range(range.clone()));
             }
             prev_row = Some(row);
         }
     } else {
         for range in &ranges {
             if range.start != range.end {
-                result.push(value_in_range(model, range.clone()));
+                result.push(value_in_range(range.clone()));
             }
         }
     }
@@ -1089,7 +1108,7 @@ pub fn copy_text(
             Vec::new(),
         )
     } else {
-        (result.join("\n"), is_from_empty_selection, result)
+        (result.join(eol.as_str()), is_from_empty_selection, result)
     }
 }
 
@@ -1139,6 +1158,13 @@ fn distribute_paste_to_cursors(
 /// distributed over the cursors when the counts match. With
 /// [`MultiCursorPaste::Spread`], text whose line count equals the cursor
 /// count is spread one line per cursor.
+///
+/// `is_block` says the text was copied from a column selection (see
+/// [`CursorCollection::column_select_data`]). With
+/// [`MultiCursorPaste::Spread`] and a single cursor, its lines are then
+/// pasted as a block: each on the next line at the same visible column,
+/// padded to the block's width, with lines appended past the end of the
+/// text (Monaco `ColumnSelectionPasteCommand`).
 pub fn paste(
     config: &CursorConfig,
     model: &impl CursorModel,
@@ -1146,11 +1172,29 @@ pub fn paste(
     text: &str,
     pasted_from_empty_selection: bool,
     multicursor_text: Option<&[String]>,
+    is_block: bool,
 ) -> EditOperation {
     let model: &dyn CursorModel = model;
     let mut paste_on_new_line = config.empty_selection_clipboard && pasted_from_empty_selection;
     let mut selections = cursors.selections();
     let text = text::normalize_line_endings(text).into_owned();
+    if is_block && config.multi_cursor_paste == MultiCursorPaste::Spread && selections.len() == 1 {
+        // Monaco `_blockPaste`.
+        let command = ColumnSelectionPasteCommand {
+            selection: selections[0],
+            text: text.split('\n').map(str::to_string).collect(),
+            tab_size: config.tab_size,
+            overtype: config.overtype && config.overtype_on_paste,
+        };
+        return execute_commands(
+            model,
+            &selections,
+            vec![Some(Box::new(command) as Box<dyn Command>)],
+            EditOperationType::Other,
+            true,
+            true,
+        );
+    }
     if let Some(distributed) = distribute_paste_to_cursors(
         config,
         &selections,

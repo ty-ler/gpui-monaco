@@ -30,6 +30,7 @@ mod auto_indent_paste;
 mod brackets;
 mod collection;
 mod column;
+mod column_selection_paste;
 mod comment;
 mod composition;
 mod edit;

@@ -257,11 +257,12 @@ impl DocumentRangeFormattingProvider for RangeFormatter {
         range: Range<PointUtf16>,
         _: FormattingOptions,
         _: &mut App,
-    ) -> Task<anyhow::Result<Vec<TextEdit>>> {
+    ) -> Task<anyhow::Result<FormattingEdits>> {
         Task::ready(Ok(vec![(
             range.start..range.start,
             "// formatted\n".into(),
-        )]))
+        )]
+        .into()))
     }
 }
 
