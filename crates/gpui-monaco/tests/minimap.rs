@@ -595,3 +595,125 @@ fn lines_recolored_by_the_parser_are_redrawn(cx: &mut TestAppContext) {
     assert_ne!(kept, before);
     assert_eq!(kept, fresh);
 }
+
+// ----- #337: section headers after set_model and edits, autohide -----
+
+/// A Rust editor (for comments) with the minimap's section headers found.
+fn setup_rust<'a>(
+    text: &str,
+    cx: &'a mut TestAppContext,
+) -> (Entity<CodeEditor>, &'a mut VisualTestContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
+    });
+    use gpui::AppContext as _;
+    let text = text.to_string();
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| gpui_monaco::TextModel::new(&text).with_language("rust"));
+        CodeEditor::new(model, window, cx)
+    });
+    settle(cx);
+    (editor, cx)
+}
+
+/// Paints, letting the delayed section header search run.
+fn settle(cx: &mut VisualTestContext) {
+    for _ in 0..3 {
+        paint(cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+    }
+    paint(cx);
+}
+
+fn section_headers(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+) -> Vec<(u32, String, bool)> {
+    editor.read_with(cx, |e, cx| e.section_headers_for_tests(cx))
+}
+
+/// Monaco recomputes the section headers for a new model: two unedited
+/// models share a text version, which mustn't keep the old model's.
+#[gpui::test]
+fn set_model_finds_the_new_models_section_headers(cx: &mut TestAppContext) {
+    use gpui::AppContext as _;
+    let (editor, cx) = setup_rust("// MARK: Alpha\nfn a() {}\n", cx);
+    assert_eq!(
+        section_headers(&editor, cx),
+        vec![(0, "Alpha".to_string(), false)]
+    );
+    let other = cx.new(|_| gpui_monaco::TextModel::new("fn b() {}\n").with_language("rust"));
+    // Parsed already, as a model open elsewhere is.
+    other.update(cx, |m, cx| m.ensure_syntax(cx));
+    cx.run_until_parked();
+    editor.update(cx, |e, cx| e.set_model(other, cx));
+    settle(cx);
+    assert!(section_headers(&editor, cx).is_empty());
+    assert!(editor.read_with(cx, |e, _| e.minimap_section_headers_for_tests().is_empty()));
+
+    let third = cx.new(|_| {
+        gpui_monaco::TextModel::new("fn c() {}\n// MARK: - Gamma\n").with_language("rust")
+    });
+    editor.update(cx, |e, cx| e.set_model(third, cx));
+    settle(cx);
+    assert_eq!(
+        section_headers(&editor, cx),
+        vec![(1, "Gamma".to_string(), true)]
+    );
+}
+
+/// Monaco's section headers are decorations, so they move with edits
+/// before they're found again.
+#[gpui::test]
+fn section_headers_move_with_edits(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_rust("fn a() {}\n// MARK: Alpha\nfn b() {}\n", cx);
+    assert_eq!(
+        section_headers(&editor, cx),
+        vec![(1, "Alpha".to_string(), false)]
+    );
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| {
+            m.edit([(0..0, "\n\n\n")], cx).unwrap();
+        })
+    });
+    // Before the delayed search.
+    paint(cx);
+    assert_eq!(
+        section_headers(&editor, cx),
+        vec![(4, "Alpha".to_string(), false)]
+    );
+    settle(cx);
+    assert_eq!(
+        section_headers(&editor, cx),
+        vec![(4, "Alpha".to_string(), false)]
+    );
+}
+
+/// Monaco `minimap.autohide: scroll` shows the minimap when the scroll
+/// top or the scroll height changes, not on horizontal scrolling.
+#[gpui::test]
+fn autohide_scroll_follows_the_scroll_top_and_height(cx: &mut TestAppContext) {
+    use gpui_monaco::options::MinimapAutohide;
+    let long: String = (0..100)
+        .map(|i| format!("{i} {}\n", "x".repeat(400)))
+        .collect();
+    let (editor, cx) = setup(&long, |o| o.minimap.autohide = MinimapAutohide::Scroll, cx);
+    // Takes the mouse only while shown.
+    let shown = |cx: &mut VisualTestContext| {
+        paint(cx);
+        editor.read_with(cx, |e, _| e.minimap_visibility_for_tests().unwrap().1)
+    };
+    assert!(!shown(cx));
+    editor.update(cx, |e, cx| {
+        e.set_scroll_position(point(px(300.), px(0.)), cx)
+    });
+    assert!(!shown(cx));
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| {
+            m.edit([(0..0, "\n\n\n\n\n\n\n\n\n\n")], cx).unwrap();
+        })
+    });
+    assert!(shown(cx));
+}

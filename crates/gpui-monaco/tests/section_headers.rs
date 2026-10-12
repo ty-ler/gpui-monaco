@@ -34,7 +34,7 @@ fn paint(cx: &mut VisualTestContext) {
 
 fn headers(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<(u32, String, bool)> {
     paint(cx);
-    editor.read_with(cx, |e, _| e.section_headers_for_tests())
+    editor.read_with(cx, |e, cx| e.section_headers_for_tests(cx))
 }
 
 #[gpui::test]

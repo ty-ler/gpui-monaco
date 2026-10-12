@@ -1854,6 +1854,9 @@ pub(crate) struct EditorLayout {
     /// The lines' and view zones' height, without scrolling beyond the
     /// last line (Monaco `getContentHeight`).
     pub content_height: Pixels,
+    /// The scrollable height (Monaco `scrollHeight`): the content's, with
+    /// scrolling beyond the last line, and at least the viewport's.
+    pub scroll_height: Pixels,
     /// The content's width, the vertical scrollbar included (Monaco
     /// `getContentWidth`).
     pub content_width: Pixels,
@@ -1887,9 +1890,16 @@ pub(crate) struct EditorLayout {
     pub sticky_lines: Vec<StickyLine>,
     /// The sticky lines' shaped text, for clicks.
     pub sticky_layouts: Vec<LineLayout>,
+    /// The sticky lines' shaped line numbers.
+    pub sticky_numbers: Vec<Option<ShapedLine>>,
+    /// The sticky scroll widget's height.
+    pub sticky_height: Pixels,
     /// The sticky lines' expanded folding controls' opacity (collapsed ones
     /// always show).
     pub sticky_fold_controls_opacity: f32,
+    /// Whether the sticky lines' expanded folding controls show (Monaco
+    /// `StickyFoldingIcon.setVisible`), for their pointer.
+    pub sticky_fold_controls_shown: bool,
     pub vertical_scrollbar: Option<ScrollbarLayout>,
     pub horizontal_scrollbar: Option<ScrollbarLayout>,
     /// The line number labels drawn, by row (for tests).
@@ -1922,18 +1932,44 @@ impl EditorLayout {
             .position(|line| line.bounds.contains(&position))
     }
 
+    /// The part of sticky line `ix` under `position`: its folding control,
+    /// its line number (the rest of the gutter) or its text.
+    pub fn sticky_part_at(
+        &self,
+        ix: usize,
+        position: gpui::Point<Pixels>,
+    ) -> Option<crate::sticky_model::StickyPart> {
+        use crate::sticky_model::StickyPart;
+        let line = self.sticky_lines.get(ix)?;
+        if !line.bounds.contains(&position) {
+            return None;
+        }
+        Some(if position.x >= self.text_bounds.left() {
+            StickyPart::Content
+        } else if line
+            .fold
+            .is_some_and(|control| control.bounds.contains(&position))
+        {
+            StickyPart::Fold
+        } else {
+            StickyPart::Number
+        })
+    }
+
     /// The text position on sticky line `ix` under `position`, if it's over
-    /// the line's text area (Monaco `getEditorPositionFromNode`).
+    /// the line's text (Monaco `getEditorPositionFromNode`: past the text's
+    /// end there's no leaf node, so no position).
     pub fn sticky_position(&self, ix: usize, position: gpui::Point<Pixels>) -> Option<PointUtf16> {
         let line = self.sticky_lines.get(ix)?;
         let text = self.sticky_layouts.get(ix)?;
         if position.x < self.text_bounds.left() || !line.bounds.contains(&position) {
             return None;
         }
-        Some(PointUtf16::new(
-            line.row,
-            text.column_for_x(position.x - line.origin_x),
-        ))
+        let x = position.x - line.origin_x;
+        if x >= text.width() {
+            return None;
+        }
+        Some(PointUtf16::new(line.row, text.column_for_x(x)))
     }
 
     /// Visible view lines that fit fully.
@@ -2253,6 +2289,38 @@ impl Element for EditorElement {
                 cursor_areas.push((
                     MouseCursor::PointingHand,
                     window.insert_hitbox(area, HitboxBehavior::Normal),
+                ));
+            }
+            // The sticky scroll is above the gutter and the text: a hand
+            // over its lines' text (`.sticky-line-content:hover`) and its
+            // shown folding controls (`StickyFoldingIcon.setVisible`), the
+            // arrow over the rest of its gutter.
+            for line in &layout.sticky_lines {
+                let split = layout.text_bounds.left().min(line.bounds.right());
+                let number =
+                    Bounds::from_corners(line.bounds.origin, point(split, line.bounds.bottom()));
+                let content = Bounds::from_corners(
+                    point(split, line.bounds.top()),
+                    line.bounds.bottom_right(),
+                );
+                cursor_areas.push((
+                    MouseCursor::Arrow,
+                    window.insert_hitbox(number, HitboxBehavior::Normal),
+                ));
+                if let Some(control) = line.fold
+                    && (control.collapsed || layout.sticky_fold_controls_shown)
+                {
+                    cursor_areas.push((
+                        MouseCursor::PointingHand,
+                        window.insert_hitbox(
+                            control.bounds.intersect(&line.bounds),
+                            HitboxBehavior::Normal,
+                        ),
+                    ));
+                }
+                cursor_areas.push((
+                    MouseCursor::PointingHand,
+                    window.insert_hitbox(content, HitboxBehavior::Normal),
                 ));
             }
         }
@@ -2642,7 +2710,10 @@ impl Element for EditorElement {
             .iter()
             .find(|control| control.bounds.contains(&mouse))
             .copied()
-            .filter(|_| state.layout.bounds.contains(&mouse))
+            // Not under the sticky scroll, which is above the gutter.
+            .filter(|_| {
+                state.layout.bounds.contains(&mouse) && state.layout.sticky_line_at(mouse).is_none()
+            })
         {
             let text = if control.collapsed {
                 "Click to expand the range."
@@ -3694,7 +3765,15 @@ fn prepaint_editor(
         .is_some_and(|l| l.scroll_top != scroll_top || l.scroll_left != scroll_left)
     {
         editor.animation.scrollbars.revealed_at = Some(web_time::Instant::now());
-        // Monaco `minimap.autohide: scroll` shows it while scrolling.
+    }
+    // Monaco `minimap.autohide: scroll` shows it while scrolling: when the
+    // scroll top or the scroll height changes (`onScrollChanged`).
+    let scroll_height = content_height.max(viewport_height);
+    if editor
+        .layout
+        .as_ref()
+        .is_some_and(|l| l.scroll_top != scroll_top || l.scroll_height != scroll_height)
+    {
         editor.animation.minimap.scrolled_at = Some(web_time::Instant::now());
     }
 
@@ -3803,6 +3882,7 @@ fn prepaint_editor(
         scroll_left,
         max_scroll: point(max_scroll_left, max_scroll_top),
         content_height: lines_height,
+        scroll_height,
         // Monaco counts the vertical scrollbar in (`_computeContentWidth`).
         content_width: content_width + vbar,
         layout_info,
@@ -3820,7 +3900,10 @@ fn prepaint_editor(
         minimap_paint: None,
         sticky_lines: Vec::new(),
         sticky_layouts: Vec::new(),
+        sticky_numbers: Vec::new(),
+        sticky_height: px(0.),
         sticky_fold_controls_opacity: 0.,
+        sticky_fold_controls_shown: false,
         vertical_scrollbar,
         horizontal_scrollbar,
         line_number_labels: Vec::new(),
@@ -3888,161 +3971,198 @@ fn prepaint_editor(
     let mut sticky_height = px(0.);
     // Monaco: no sticky scroll for models too large to tokenize.
     if options.sticky_scroll.enabled && !options.single_line && !too_large && scroll_top > px(0.) {
-        let elements = editor.sticky_elements();
-        let first_row = view_lines
-            .view_line(zones.line_at(scroll_top, line_height, view_line_count))
-            .row;
-        let last_row = view_lines
-            .view_line(zones.line_at(scroll_top + viewport_height, line_height, view_line_count))
-            .row;
-        let line_count = snapshot.line_count();
-        let lh = f32::from(line_height);
-        let candidates = crate::sticky_model::candidates_intersecting(
-            &elements,
-            (first_row, last_row),
-            view_lines.hidden(),
-            line_count,
-            &|_| lh,
-        );
-        // Monaco `getTopForLineNumber` and `getBottomForLineNumber`: a
-        // hidden row is where the line it's folded into ends.
-        let view_line_count = view_lines.line_count();
-        let top_of = |row: u32| {
-            let line = view_lines.first_view_line_of_row(row);
-            let line = if view_lines.is_row_hidden(row) {
-                line.saturating_sub(1)
-            } else {
-                line.min(view_line_count.saturating_sub(1))
-            };
-            f32::from(zones.line_y(line, line_height))
-        };
-        let bottom_of = |row: u32| {
-            let line = view_lines.first_view_line_of_row(row + 1).saturating_sub(1);
-            f32::from(zones.line_y(line, line_height) + zones.height(line, line_height))
-        };
-        let state = crate::sticky_model::find_scroll_widget_state(
-            &candidates,
-            crate::sticky_model::max_sticky_lines(
-                f32::from(viewport_height),
-                lh,
-                options.sticky_scroll.max_line_count,
-            ),
-            f32::from(scroll_top),
-            &top_of,
-            &bottom_of,
-        );
-        let collapsed_rows = editor.folds.collapsed_rows();
-        let editor_id = cx.entity_id();
-        let show_validation = editor.shows_validation_decorations();
-        let count = state.start_rows.len();
-        // Monaco's sticky widget clips its lines to its height, which the
-        // pushed last line shrinks (`_renderRootNode`).
-        sticky_height = line_height * count as f32 + px(state.last_line_relative_position);
-        for (ix, start_row) in state.start_rows.iter().enumerate() {
-            // Monaco: Shift over a sticky line shows the scope's end.
-            let row = match editor.sticky.show_end {
-                Some(end) if end == ix => state.end_rows[ix],
-                _ => *start_row,
-            };
-            if row >= line_count {
-                continue;
+        // Monaco `_renderStickyScroll` renders only while the sticky model
+        // is for the current text: until it's recomputed after an edit, the
+        // widget keeps what it last drew (rows and text), wherever it
+        // scrolls.
+        let stale = !editor.sticky_model_is_current(cx);
+        if stale && let Some(previous) = editor.layout.as_ref() {
+            let shift = bounds.origin - previous.bounds.origin;
+            for (ix, (line, shaped)) in previous
+                .sticky_lines
+                .iter()
+                .zip(&previous.sticky_layouts)
+                .enumerate()
+            {
+                let top = line.bounds.top() - previous.bounds.top();
+                let mut line = *line;
+                line.bounds.origin += shift;
+                if let Some(fold) = line.fold.as_mut() {
+                    fold.bounds.origin += shift;
+                }
+                line.origin_x = if options.sticky_scroll.scroll_with_editor {
+                    layout.text_origin_x()
+                } else {
+                    text_bounds.left()
+                };
+                let number = previous.sticky_numbers.get(ix).cloned().flatten();
+                layout.sticky_lines.push(line);
+                layout.sticky_layouts.push(shaped.clone());
+                layout.sticky_numbers.push(number.clone());
+                sticky_shaped.push((ix, top, shaped.clone(), number));
             }
-            let collapsed = collapsed_rows.iter().any(|(start, _)| *start == row);
-            // Monaco `_updatePosition`: the last line slides up under the
-            // ones above as its scope scrolls out (a collapsed one a pixel
-            // less).
-            let top = if ix + 1 == count {
-                line_height * ix as f32
-                    + px(state.last_line_relative_position)
-                    + if collapsed { px(1.) } else { px(0.) }
-            } else {
-                line_height * ix as f32
+            sticky_height = previous.sticky_height;
+        } else {
+            let elements = editor.sticky_elements();
+            let first_row = view_lines
+                .view_line(zones.line_at(scroll_top, line_height, view_line_count))
+                .row;
+            let last_row = view_lines
+                .view_line(zones.line_at(
+                    scroll_top + viewport_height,
+                    line_height,
+                    view_line_count,
+                ))
+                .row;
+            let line_count = snapshot.line_count();
+            let lh = f32::from(line_height);
+            let candidates = crate::sticky_model::candidates_intersecting(
+                &elements,
+                (first_row, last_row),
+                view_lines.hidden(),
+                line_count,
+                &|_| lh,
+            );
+            // Monaco `getTopForLineNumber` and `getBottomForLineNumber`: a
+            // hidden row is where the line it's folded into ends.
+            let view_line_count = view_lines.line_count();
+            let top_of = |row: u32| {
+                let line = view_lines.first_view_line_of_row(row);
+                let line = if view_lines.is_row_hidden(row) {
+                    line.saturating_sub(1)
+                } else {
+                    line.min(view_line_count.saturating_sub(1))
+                };
+                f32::from(zones.line_y(line, line_height))
             };
-            let segment = row_segment(&view_lines, view_lines.first_view_line_of_row(row));
-            let line_range = snapshot.line_range(row);
-            // Monaco renders sticky lines with their inline decorations and
-            // injected text (`RenderedStickyLine`), so they line up with the
-            // real lines.
-            let (row_highlights, injections, fonts) = {
-                let row_highlights: Vec<(Range<usize>, TokenStyle)> = {
-                    let model = editor.model().read(cx);
-                    current_highlights(model, &theme, line_range.clone())
+            let bottom_of = |row: u32| {
+                let line = view_lines.first_view_line_of_row(row + 1).saturating_sub(1);
+                f32::from(zones.line_y(line, line_height) + zones.height(line, line_height))
+            };
+            let state = crate::sticky_model::find_scroll_widget_state(
+                &candidates,
+                crate::sticky_model::max_sticky_lines(
+                    f32::from(viewport_height),
+                    lh,
+                    options.sticky_scroll.max_line_count,
+                ),
+                f32::from(scroll_top),
+                &top_of,
+                &bottom_of,
+            );
+            let collapsed_rows = editor.folds.collapsed_rows();
+            let editor_id = cx.entity_id();
+            let show_validation = editor.shows_validation_decorations();
+            let count = state.start_rows.len();
+            // Monaco's sticky widget clips its lines to its height, which the
+            // pushed last line shrinks (`_renderRootNode`).
+            sticky_height = line_height * count as f32 + px(state.last_line_relative_position);
+            for (ix, start_row) in state.start_rows.iter().enumerate() {
+                // Monaco: Shift over a sticky line shows the scope's end.
+                let row = match editor.sticky.show_end {
+                    Some(end) if end == ix => state.end_rows[ix],
+                    _ => *start_row,
+                };
+                if row >= line_count {
+                    continue;
+                }
+                let collapsed = collapsed_rows.iter().any(|(start, _)| *start == row);
+                // Monaco `_updatePosition`: the last line slides up under the
+                // ones above as its scope scrolls out (a collapsed one a pixel
+                // less).
+                let top = if ix + 1 == count {
+                    line_height * ix as f32
+                        + px(state.last_line_relative_position)
+                        + if collapsed { px(1.) } else { px(0.) }
+                } else {
+                    line_height * ix as f32
+                };
+                let segment = row_segment(&view_lines, view_lines.first_view_line_of_row(row));
+                let line_range = snapshot.line_range(row);
+                // Monaco renders sticky lines with their inline decorations and
+                // injected text (`RenderedStickyLine`), so they line up with the
+                // real lines.
+                let (row_highlights, injections, fonts) = {
+                    let row_highlights: Vec<(Range<usize>, TokenStyle)> = {
+                        let model = editor.model().read(cx);
+                        current_highlights(model, &theme, line_range.clone())
+                            .into_iter()
+                            .map(|(range, style)| {
+                                (
+                                    range.start.max(line_range.start) - line_range.start
+                                        ..range.end.min(line_range.end) - line_range.start,
+                                    style,
+                                )
+                            })
+                            .collect()
+                    };
+                    let row_decorations: Vec<_> = editor
+                        .model()
+                        .update(cx, |model, _| {
+                            model.decorations_in_range(line_range.clone(), Some(editor_id))
+                        })
                         .into_iter()
-                        .map(|(range, style)| {
+                        .filter(|d| show_validation || !d.options.validation)
+                        .collect();
+                    let points: Vec<_> = row_decorations
+                        .iter()
+                        .map(|d| {
                             (
-                                range.start.max(line_range.start) - line_range.start
-                                    ..range.end.min(line_range.end) - line_range.start,
-                                style,
+                                snapshot.offset_to_point_utf16(d.range.start),
+                                snapshot.offset_to_point_utf16(d.range.end),
+                                d,
                             )
                         })
-                        .collect()
+                        .collect();
+                    let brackets = editor.bracket_colors_in(line_range.clone(), cx);
+                    let (styles, injections, fonts) = decoration_styles_and_injections(
+                        row,
+                        line_range.clone(),
+                        &brackets,
+                        &points,
+                        &editor.options,
+                        &colors,
+                    );
+                    let row_highlights = if styles.is_empty() {
+                        row_highlights
+                    } else {
+                        overlay_styles(&row_highlights, &styles)
+                    };
+                    (row_highlights, injections, fonts)
                 };
-                let row_decorations: Vec<_> = editor
-                    .model()
-                    .update(cx, |model, _| {
-                        model.decorations_in_range(line_range.clone(), Some(editor_id))
-                    })
-                    .into_iter()
-                    .filter(|d| show_validation || !d.options.validation)
-                    .collect();
-                let points: Vec<_> = row_decorations
-                    .iter()
-                    .map(|d| {
-                        (
-                            snapshot.offset_to_point_utf16(d.range.start),
-                            snapshot.offset_to_point_utf16(d.range.end),
-                            d,
-                        )
-                    })
-                    .collect();
-                let brackets = editor.bracket_colors_in(line_range.clone(), cx);
-                let (styles, injections, fonts) = decoration_styles_and_injections(
-                    row,
-                    line_range.clone(),
-                    &brackets,
-                    &points,
-                    &editor.options,
-                    &colors,
-                );
-                let row_highlights = if styles.is_empty() {
-                    row_highlights
-                } else {
-                    overlay_styles(&row_highlights, &styles)
-                };
-                (row_highlights, injections, fonts)
-            };
-            let shaped = layout_segment(
-                &snapshot,
-                &segment,
-                tab_size,
-                &metrics,
-                colors.foreground,
-                &row_highlights,
-                &fonts,
-                &injections,
-                None,
-                window,
-            );
-            // Monaco's sticky line numbers: absolute (every 10th with
-            // `interval`), relative, or none for `off` and custom labels.
-            let label = match &options.line_numbers {
-                LineNumbers::On => Some((row + 1).to_string()),
-                LineNumbers::Interval if (row + 1) % 10 == 0 => Some((row + 1).to_string()),
-                LineNumbers::Relative => Some(primary.row.abs_diff(row).to_string()),
-                _ => None,
-            };
-            let number = label.map(|label| {
-                window.text_system().shape_line(
-                    label.clone().into(),
-                    metrics.font_size,
-                    &[run(label.len(), &metrics.font, colors.line_number)],
+                let shaped = layout_segment(
+                    &snapshot,
+                    &segment,
+                    tab_size,
+                    &metrics,
+                    colors.foreground,
+                    &row_highlights,
+                    &fonts,
+                    &injections,
                     None,
-                )
-            });
-            // Monaco `_renderFoldingIconForLine`: with folding on and
-            // `showFoldingControls` not `never`, on a folding range's
-            // header, 26px wide after the line numbers (with a 2px margin).
-            let fold = (folding_width > px(0.) && editor.folds.range_starting_at(row).is_some())
+                    window,
+                );
+                // Monaco's sticky line numbers: absolute (every 10th with
+                // `interval`), relative, or none for `off` and custom labels.
+                let label = match &options.line_numbers {
+                    LineNumbers::On => Some((row + 1).to_string()),
+                    LineNumbers::Interval if (row + 1) % 10 == 0 => Some((row + 1).to_string()),
+                    LineNumbers::Relative => Some(primary.row.abs_diff(row).to_string()),
+                    _ => None,
+                };
+                let number = label.map(|label| {
+                    window.text_system().shape_line(
+                        label.clone().into(),
+                        metrics.font_size,
+                        &[run(label.len(), &metrics.font, colors.line_number)],
+                        None,
+                    )
+                });
+                // Monaco `_renderFoldingIconForLine`: with folding on and
+                // `showFoldingControls` not `never`, on a folding range's
+                // header, 26px wide after the line numbers (with a 2px margin).
+                let fold = (folding_width > px(0.)
+                    && editor.folds.range_starting_at(row).is_some())
                 .then(|| FoldControl {
                     row,
                     bounds: Bounds::new(
@@ -4056,32 +4176,35 @@ fn prepaint_editor(
                     // Monaco's `StickyFoldingIcon` has only the plain icons.
                     manual: false,
                 });
-            // The pushed last line only shows above the widget's bottom.
-            let line_bounds = Bounds::new(
-                point(bounds.left(), bounds.top() + top),
-                size(gutter_width + text_width, line_height),
-            );
-            let line_bounds = Bounds::from_corners(
-                line_bounds.origin,
-                point(
-                    line_bounds.right(),
-                    line_bounds.bottom().min(bounds.top() + sticky_height),
-                ),
-            );
-            layout.sticky_lines.push(StickyLine {
-                end_row: state.end_rows[ix],
-                row,
-                bounds: line_bounds,
-                fold,
-                origin_x: if options.sticky_scroll.scroll_with_editor {
-                    layout.text_origin_x()
-                } else {
-                    text_bounds.left()
-                },
-            });
-            layout.sticky_layouts.push(shaped.clone());
-            sticky_shaped.push((ix, top, shaped, number));
+                // The pushed last line only shows above the widget's bottom.
+                let line_bounds = Bounds::new(
+                    point(bounds.left(), bounds.top() + top),
+                    size(gutter_width + text_width, line_height),
+                );
+                let line_bounds = Bounds::from_corners(
+                    line_bounds.origin,
+                    point(
+                        line_bounds.right(),
+                        line_bounds.bottom().min(bounds.top() + sticky_height),
+                    ),
+                );
+                layout.sticky_lines.push(StickyLine {
+                    end_row: state.end_rows[ix],
+                    row,
+                    bounds: line_bounds,
+                    fold,
+                    origin_x: if options.sticky_scroll.scroll_with_editor {
+                        layout.text_origin_x()
+                    } else {
+                        text_bounds.left()
+                    },
+                });
+                layout.sticky_layouts.push(shaped.clone());
+                layout.sticky_numbers.push(number.clone());
+                sticky_shaped.push((ix, top, shaped, number));
+            }
         }
+        layout.sticky_height = sticky_height;
         // Monaco keeps the focused sticky line focused while it shows, else
         // focuses the last one (`_renderStickyScroll`).
         if let Some(focused) = editor.sticky.focused {
@@ -4104,6 +4227,13 @@ fn prepaint_editor(
         // `mouseover`, the expanded regions' controls fade in (0.5s) while
         // the mouse is over the sticky line numbers and out after, as the
         // gutter's do; with `always` they show.
+        // Monaco `StickyFoldingIcon.setVisible`, which also gives a shown
+        // control the hand.
+        layout.sticky_fold_controls_shown = match options.show_folding_controls {
+            ShowFoldingControls::Always => true,
+            ShowFoldingControls::Mouseover => editor.sticky.gutter_hovered,
+            ShowFoldingControls::Never => false,
+        };
         layout.sticky_fold_controls_opacity = match options.show_folding_controls {
             ShowFoldingControls::Always => 1.,
             ShowFoldingControls::Mouseover => {

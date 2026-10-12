@@ -164,13 +164,19 @@ fn collect_mark_headers(rope: &Rope, source: &str) -> Vec<SectionHeader> {
     headers
 }
 
+/// What section headers were found for: the text model and its text
+/// (versions start over in each model), the parsed text (Monaco recomputes
+/// when tokens change, for the comment check), and a hash of the options
+/// and language.
+type SectionHeaderKey = (gpui::EntityId, text::Version, Option<text::Version>, u64);
+
 #[derive(Default)]
 pub(crate) struct SectionHeaderState {
     pub headers: Vec<SectionHeader>,
-    /// What they were found for: the text, the parsed text (Monaco
-    /// recomputes when tokens change, for the comment check), and a hash
-    /// of the options and language.
-    key: Option<(text::Version, Option<text::Version>, u64)>,
+    /// Where each header starts, following edits until they're found
+    /// again (Monaco's decorations, `GrowsOnlyWhenTypingAfter`).
+    anchors: Vec<text::Anchor>,
+    key: Option<SectionHeaderKey>,
     task: Option<Task<()>>,
 }
 
@@ -199,7 +205,12 @@ impl CodeEditor {
             hasher.finish()
         };
         let parsed = model.syntax_snapshot().map(|syntax| syntax.text.version());
-        let key = (model.buffer().version(), parsed, options_hash);
+        let key: SectionHeaderKey = (
+            self.model().entity_id(),
+            model.buffer().version(),
+            parsed,
+            options_hash,
+        );
         if self.section_headers.key.as_ref() == Some(&key) {
             return;
         }
@@ -235,21 +246,28 @@ impl CodeEditor {
                 })
                 .await;
             this.update(cx, |this, cx| {
+                if this.model().entity_id() != key.0 {
+                    return;
+                }
                 let model = this.model().read(cx);
-                if model.buffer().version() != key.0 {
+                if model.buffer().version() != key.1 {
                     return;
                 }
                 // Monaco keeps mark headers only inside comments.
-                let rope = model.buffer().rope();
-                let headers = headers
+                let buffer = model.buffer();
+                let rope = buffer.rope();
+                let (headers, anchors) = headers
                     .into_iter()
-                    .filter(|header| {
-                        !header.should_be_in_comments
-                            || model.token_type_at(rope.point_utf16_to_offset(header.range.start))
-                                == crate::cursor::StandardTokenType::Comment
+                    .filter_map(|header| {
+                        let start = rope.point_utf16_to_offset(header.range.start);
+                        (!header.should_be_in_comments
+                            || model.token_type_at(start)
+                                == crate::cursor::StandardTokenType::Comment)
+                            .then(|| (header, buffer.anchor_after(start)))
                     })
-                    .collect();
+                    .unzip();
                 this.section_headers.headers = headers;
+                this.section_headers.anchors = anchors;
                 this.section_headers.task = None;
                 cx.notify();
             })
@@ -257,13 +275,28 @@ impl CodeEditor {
         }));
     }
 
-    /// The minimap's section headers: (row, label, separator), for tests.
-    #[doc(hidden)]
-    pub fn section_headers_for_tests(&self) -> Vec<(u32, String, bool)> {
+    /// The section headers, each with the row it's on now: found for an
+    /// older text, they follow the edits since.
+    pub(crate) fn section_headers_with_rows(
+        &self,
+        cx: &gpui::App,
+    ) -> impl Iterator<Item = (u32, &SectionHeader)> {
+        let buffer = self.model().read(cx).buffer();
         self.section_headers
             .headers
             .iter()
-            .map(|h| (h.range.start.row, h.text.clone(), h.has_separator_line))
+            .zip(&self.section_headers.anchors)
+            .map(move |(header, anchor)| {
+                let row = buffer.offset_to_point(buffer.resolve(anchor)).row;
+                (row, header)
+            })
+    }
+
+    /// The minimap's section headers: (row, label, separator), for tests.
+    #[doc(hidden)]
+    pub fn section_headers_for_tests(&self, cx: &gpui::App) -> Vec<(u32, String, bool)> {
+        self.section_headers_with_rows(cx)
+            .map(|(row, h)| (row, h.text.clone(), h.has_separator_line))
             .collect()
     }
 }

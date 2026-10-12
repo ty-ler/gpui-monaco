@@ -35,10 +35,12 @@ pub(crate) struct StickyElement {
     pub children: Vec<StickyElement>,
 }
 
-/// What the model was computed for: the text, the parsed text (for the
-/// tags query), the model kind, the language, the symbol and folding range
-/// providers, and whether folding is on.
+/// What the model was computed for: the text model and its text (versions
+/// start over in each model), the parsed text (for the tags query), the
+/// model kind, the language, the symbol and folding range providers, and
+/// whether folding is on.
 type StickyKey = (
+    gpui::EntityId,
     text::Version,
     Option<text::Version>,
     StickyScrollModel,
@@ -66,8 +68,22 @@ pub(crate) struct StickyModelState {
     pub gutter_hovered: bool,
     /// The line showing its scope's end while Shift is held over it.
     pub show_end: Option<usize>,
-    /// The sticky line a mouse button went down on, for the click.
-    pressed: Option<(usize, gpui::MouseButton)>,
+    /// The sticky line and part of it a mouse button went down on, for
+    /// the click.
+    pressed: Option<(usize, StickyPart, gpui::MouseButton)>,
+}
+
+/// The part of a sticky line under the mouse (Monaco's sticky DOM nodes):
+/// a click acts only when it goes down and up on the same one, as a DOM
+/// `click` targets the nodes both are in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StickyPart {
+    /// The line number, outside the folding control (`.sticky-line-number`).
+    Number,
+    /// The folding control (`data-sticky-is-folding-icon`).
+    Fold,
+    /// The text (`.sticky-line-content`, `data-sticky-is-line`).
+    Content,
 }
 
 /// Monaco's comparator: by start, longer first.
@@ -117,7 +133,9 @@ pub(crate) fn from_symbols(symbols: &[DocumentSymbol]) -> Vec<StickyElement> {
 }
 
 /// Folding ranges (nested by `parent`) as scopes; a range's end is already
-/// the last row it covers.
+/// the last row it covers. Manual and recovered regions are left out
+/// (Monaco's sticky model computes its own ranges from the providers), their
+/// children going to the nearest region kept around them.
 pub(crate) fn from_fold_ranges(ranges: &[FoldRange]) -> Vec<StickyElement> {
     fn build(ranges: &[FoldRange], children: &[Vec<usize>], ix: usize) -> StickyElement {
         StickyElement {
@@ -129,10 +147,18 @@ pub(crate) fn from_fold_ranges(ranges: &[FoldRange]) -> Vec<StickyElement> {
                 .collect(),
         }
     }
+    let kept = |range: &FoldRange| !range.manual && !range.recovered;
     let mut children = vec![Vec::new(); ranges.len()];
     let mut roots = Vec::new();
     for (ix, range) in ranges.iter().enumerate() {
-        match range.parent {
+        if !kept(range) {
+            continue;
+        }
+        let mut parent = range.parent;
+        while let Some(p) = parent.filter(|&p| !kept(&ranges[p])) {
+            parent = ranges[p].parent;
+        }
+        match parent {
             Some(parent) => children[parent].push(ix),
             None => roots.push(ix),
         }
@@ -293,6 +319,22 @@ pub(crate) fn find_scroll_widget_state(
     state
 }
 
+/// Whether a keystroke stops at a focused sticky line. Monaco focuses its
+/// DOM node, so typing and the text's own keys (which need
+/// `editorTextFocus`) don't reach the text; its keys (Up, Down, Enter,
+/// Escape), function keys and shortcuts with Ctrl, Alt or Cmd go on.
+pub(crate) fn sticky_swallows(keystroke: &gpui::Keystroke) -> bool {
+    let modifiers = &keystroke.modifiers;
+    if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
+        return false;
+    }
+    let key = keystroke.key.as_str();
+    let sticky_key = !modifiers.shift && matches!(key, "up" | "down" | "enter" | "escape");
+    let function_key =
+        key.len() > 1 && key.starts_with('f') && key[1..].chars().all(|c| c.is_ascii_digit());
+    !sticky_key && !function_key
+}
+
 /// Monaco's cap on the sticky lines: a quarter of the editor's height
 /// (`_onDidResize`), and `stickyScroll.maxLineCount`.
 pub(crate) fn max_sticky_lines(height: f32, line_height: f32, max_line_count: u32) -> usize {
@@ -302,7 +344,9 @@ pub(crate) fn max_sticky_lines(height: f32, line_height: f32, max_line_count: u3
 
 impl CodeEditor {
     /// The sticky scroll model: the computed one, else the folding ranges
-    /// (Monaco's folding provider model), converted once per change.
+    /// (Monaco's folding provider model, which runs the providers itself,
+    /// so manual and recovered regions aren't scopes), converted once per
+    /// change.
     pub(crate) fn sticky_elements(&mut self) -> Arc<Vec<StickyElement>> {
         if let Some(elements) = &self.sticky.elements {
             return elements.clone();
@@ -316,6 +360,19 @@ impl CodeEditor {
         let elements = Arc::new(from_fold_ranges(self.folds.ranges()));
         self.sticky.fold_elements = Some((key, elements.clone()));
         elements
+    }
+
+    /// Whether the sticky scroll model is for the current text (Monaco
+    /// `_renderStickyScroll` renders only when the candidate provider's
+    /// version is the model's): the computed model's text, else the
+    /// folding ranges'. Neither computed yet counts as current.
+    pub(crate) fn sticky_model_is_current(&self, cx: &gpui::App) -> bool {
+        let version = if self.sticky.elements.is_some() {
+            self.sticky.key.as_ref().map(|key| key.1)
+        } else {
+            self.folds.ranges_version()
+        };
+        version.is_none_or(|version| version == self.model().read(cx).buffer().version())
     }
 
     /// The sticky headers' scopes enclosing `row`, outermost first.
@@ -342,6 +399,7 @@ impl CodeEditor {
         );
         let parsed = model.syntax_snapshot().map(|syntax| syntax.text.version());
         let key: StickyKey = (
+            self.model().entity_id(),
             model.buffer().version(),
             parsed,
             options.default_model,
@@ -360,8 +418,8 @@ impl CodeEditor {
             Duration::ZERO
         };
         self.sticky.pending = Some(key.clone());
-        let default_model = key.2;
-        let folding = key.5;
+        let default_model = key.3;
+        let folding = key.6;
         self.sticky.task = Some(cx.spawn(async move |this, cx| {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
@@ -405,8 +463,11 @@ impl CodeEditor {
             this.update(cx, |this, cx| {
                 this.sticky.pending = None;
                 this.sticky.task = None;
-                if this.model().read(cx).buffer().version() != key.0 {
-                    // Edited meanwhile: the next paint asks again.
+                if this.model().entity_id() != key.0
+                    || this.model().read(cx).buffer().version() != key.1
+                {
+                    // Edited (or another model) meanwhile: the next paint
+                    // asks again.
                     cx.notify();
                     return;
                 }
@@ -437,13 +498,30 @@ impl CodeEditor {
     }
 
     /// A mouse down on sticky line `ix`: Monaco acts on the click, so this
-    /// waits for the mouse up on the same line ([`Self::sticky_mouse_up`]).
-    pub(crate) fn sticky_mouse_down(&mut self, ix: usize, event: &gpui::MouseDownEvent) {
-        self.sticky.pressed = Some((ix, event.button));
+    /// waits for the mouse up on the same part of the same line
+    /// ([`Self::sticky_mouse_up`]). The text takes the keyboard back
+    /// (Monaco focuses the editor on a sticky mouse down).
+    pub(crate) fn sticky_mouse_down(
+        &mut self,
+        ix: usize,
+        event: &gpui::MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(part) = self
+            .layout
+            .as_ref()
+            .and_then(|layout| layout.sticky_part_at(ix, event.position))
+        else {
+            return;
+        };
+        self.sticky.pressed = Some((ix, part, event.button));
+        if self.sticky.focused.take().is_some() {
+            cx.notify();
+        }
     }
 
     /// The mouse up after [`Self::sticky_mouse_down`]: a click if it's on
-    /// the same line.
+    /// the same part of the same line.
     pub(crate) fn sticky_mouse_up(
         &mut self,
         position: gpui::Point<gpui::Pixels>,
@@ -451,15 +529,14 @@ impl CodeEditor {
         modifiers: gpui::Modifiers,
         cx: &mut Context<Self>,
     ) {
-        let Some((ix, pressed)) = self.sticky.pressed.take() else {
+        let Some((ix, part, pressed)) = self.sticky.pressed.take() else {
             return;
         };
         if pressed == button
-            && self
-                .layout
-                .as_ref()
-                .and_then(|layout| layout.sticky_line_at(position))
-                == Some(ix)
+            && self.layout.as_ref().is_some_and(|layout| {
+                layout.sticky_line_at(position) == Some(ix)
+                    && layout.sticky_part_at(ix, position) == Some(part)
+            })
         {
             self.sticky_click(ix, position, button, modifiers, cx);
         }
@@ -468,8 +545,10 @@ impl CodeEditor {
     /// A click on sticky line `ix` (Monaco's sticky scroll click handler
     /// and go-to-definition gesture): Cmd/Ctrl follows the definition link
     /// under the mouse, Shift reveals the row after the scope, the folding
-    /// control folds or unfolds without moving the cursor, otherwise the
-    /// cursor goes to the clicked column, revealed as by `revealPosition`.
+    /// control folds or unfolds without moving the cursor, and a click on
+    /// the text moves the cursor to the clicked column (column 0 past the
+    /// text's end), revealed as by `revealPosition`. A click on the line
+    /// number does nothing (Monaco acts only on `data-sticky-is-line`).
     pub(crate) fn sticky_click(
         &mut self,
         ix: usize,
@@ -511,6 +590,9 @@ impl CodeEditor {
             && control.bounds.contains(&position)
         {
             self.toggle_sticky_fold(control.row, ix, cx);
+            return;
+        }
+        if layout.sticky_part_at(ix, position) != Some(StickyPart::Content) {
             return;
         }
         let target = text_position.unwrap_or(PointUtf16::new(line.row, 0));
