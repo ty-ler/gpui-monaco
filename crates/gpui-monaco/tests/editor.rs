@@ -615,6 +615,26 @@ fn selection_anchor(cx: &mut TestAppContext) {
         editor.read_with(cx, |e, cx| e.selection_anchor(cx)),
         Some(p(1, 3))
     );
+    // Monaco's `.selection-anchor`: an empty range drawn as a 2px #007ACC
+    // bar, with a hover message.
+    let id = editor.entity_id();
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    let anchors: Vec<_> = model.update(cx, |m, _| {
+        m.all_decorations(Some(id))
+            .into_iter()
+            .filter(|d| {
+                d.options.hover_message.first().map(|m| m.as_str()) == Some("Selection Anchor")
+            })
+            .map(|d| {
+                let o = &d.options;
+                (d.range, o.background, o.border, o.min_width)
+            })
+            .collect()
+    });
+    assert_eq!(
+        anchors,
+        vec![(2..2, Some(gpui::rgb(0x007acc).into()), None, gpui::px(2.))]
+    );
     cx.simulate_keystrokes("end secondary-k secondary-k");
     let selection = editor.read_with(cx, |e, _| e.selections()[0]);
     assert_eq!((selection.anchor, selection.head), (p(1, 3), p(1, 12)));

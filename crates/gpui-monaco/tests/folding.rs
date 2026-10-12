@@ -966,6 +966,55 @@ fn a_click_at_the_end_of_a_collapsed_line_unfolds_it(cx: &mut TestAppContext) {
     assert_eq!(collapsed(&editor, cx), [(0, 3), (1, 2), (5, 6)]);
 }
 
+/// Monaco's folding and link gestures both act on mouse-up, independently:
+/// a Cmd/Ctrl+click on a chevron folds without going to a definition (the
+/// gutter isn't text), and one at the end of a collapsed line's text
+/// unfolds it and asks for the definition there.
+#[gpui::test]
+fn cmd_clicks_on_folding_targets_keep_folding(cx: &mut TestAppContext) {
+    use gpui::Modifiers;
+    use std::cell::Cell;
+    use std::rc::Rc;
+    struct Counted(Rc<Cell<usize>>);
+    impl DefinitionProvider for Counted {
+        fn provide_definition(
+            &self,
+            _: &ProviderContext,
+            _: PointUtf16,
+            _: &mut App,
+        ) -> Task<anyhow::Result<Vec<Location>>> {
+            self.0.set(self.0.get() + 1);
+            Task::ready(Ok(Vec::new()))
+        }
+    }
+    let asked = Rc::new(Cell::new(0));
+    let provider = Counted(asked.clone());
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_definition_provider(cx, LanguageSelector::All, provider);
+    });
+    let (editor, cx) = setup(NESTED, cx);
+    let cmd = Modifiers::secondary_key();
+    let bounds = control(&editor, cx, 0);
+    let at = gpui::point(bounds.right() - gpui::px(4.), bounds.center().y);
+    cx.simulate_click(at, cmd);
+    draw(cx);
+    assert_eq!(collapsed(&editor, cx), [(0, 3)]);
+    assert_eq!(asked.get(), 0);
+
+    cursor(&editor, cx, 9);
+    editor.update(cx, |e, cx| e.fold_all(cx));
+    draw(cx);
+    let end = editor.read_with(cx, |e, _| {
+        e.scrolled_visible_position(PointUtf16::new(7, 8)).unwrap()
+    });
+    let at = gpui::point(end.x - gpui::px(2.), end.y + gpui::px(8.));
+    cx.simulate_click(at, cmd);
+    draw(cx);
+    assert_eq!(collapsed(&editor, cx), [(0, 3), (1, 2), (5, 6)]);
+    assert_eq!(asked.get(), 1);
+}
+
 /// Monaco's collapsed region decorations shade the minimap
 /// (`foldedBackgroundMinimap`): the header's line, at half the color.
 #[gpui::test]

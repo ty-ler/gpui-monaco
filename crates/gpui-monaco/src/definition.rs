@@ -305,7 +305,9 @@ impl CodeEditor {
         let hover_message = self.definition_hover_message(&locations, cx);
         let rope = self.snapshot.rope();
         let bytes = rope.point_utf16_to_offset(range.start)..rope.point_utf16_to_offset(range.end);
-        let link = self.theme.colors.input_option_active_border;
+        // Monaco's `.goto-definition-link`: underlined, in
+        // `editorLink.activeForeground`.
+        let link = self.theme.colors.link_active_foreground;
         let old = std::mem::take(&mut self.definition.decorations);
         let owner = Some(cx.entity_id());
         self.definition.decorations = self.model().update(cx, |model, cx| {
@@ -357,9 +359,9 @@ impl CodeEditor {
         self.definition.link.is_some()
     }
 
-    /// Follows the link under the mouse (Cmd/Ctrl+click; with Alt, or Cmd/Ctrl
-    /// when Alt adds cursors, `open_to_side`). Returns whether there was
-    /// one.
+    /// Follows the link under the mouse (a Cmd/Ctrl+click on a sticky
+    /// line; with Alt, or Cmd/Ctrl when Alt adds cursors, `open_to_side`).
+    /// Returns whether there was one.
     pub(crate) fn follow_definition_link(
         &mut self,
         position: PointUtf16,
@@ -372,9 +374,25 @@ impl CodeEditor {
         if !(range.start <= position && position <= range.end) {
             return false;
         }
+        self.go_to_definition_from_mouse(position, open_to_side, cx);
+        true
+    }
+
+    /// Whether a definition provider applies to this editor's model.
+    pub(crate) fn has_definition_providers(&self, cx: &gpui::App) -> bool {
+        !definition_providers(cx, self.provider_target(cx)).is_empty()
+    }
+
+    /// Monaco `GotoDefinitionAtPositionEditorContribution.gotoDefinition`:
+    /// moves the cursor to `position` and runs go to definition there,
+    /// without a message when nothing is found, then removes the link.
+    pub(crate) fn go_to_definition_from_mouse(
+        &mut self,
+        position: PointUtf16,
+        open_to_side: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.clear_definition_link(cx);
-        // Monaco moves the cursor there and runs go to definition, without
-        // a message when nothing is found.
         self.set_selections(&[Selection::collapsed(position)], cx);
         // Monaco `definitionLinkOpensInPeek`, except in a peek view.
         let open_in_peek =
@@ -389,7 +407,6 @@ impl CodeEditor {
             },
             cx,
         );
-        true
     }
 
     /// Selects `location` if it's in this model, else asks the host to open

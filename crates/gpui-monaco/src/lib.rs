@@ -30,6 +30,7 @@ pub mod api_commands;
 mod bracket_colors;
 mod bracket_matching;
 mod bulk_edit;
+mod click_link;
 pub mod code_action;
 mod code_lens;
 pub mod codicons;

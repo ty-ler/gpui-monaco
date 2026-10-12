@@ -201,3 +201,68 @@ fn opening_links(cx: &mut TestAppContext) {
         ]
     );
 }
+
+/// Monaco `ClickLinkGesture`: Cmd/Ctrl+click and the `openLink` middle
+/// click open a link on mouse-up, on the row the mouse went down on; a
+/// drag or a scroll in between cancels it.
+#[gpui::test]
+fn links_open_on_mouse_up(cx: &mut TestAppContext) {
+    let text = format!("see https://a.io now\n{}", "line\n".repeat(100));
+    let (editor, cx) = setup(&text, "file:///main.rs", |_| {}, cx);
+    let opened = opened(&editor, cx);
+    let draw = |cx: &mut VisualTestContext| {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+    };
+    draw(cx);
+    let point = |column: u32, cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, _| {
+                e.scrolled_visible_position(PointUtf16::new(0, column))
+            })
+            .unwrap()
+            + gpui::point(gpui::px(1.), gpui::px(2.))
+    };
+    let at = point(8, cx);
+    let cmd = gpui::Modifiers::secondary_key();
+    let left = gpui::MouseButton::Left;
+    cx.simulate_mouse_down(at, left, cmd);
+    assert!(opened.borrow().is_empty());
+    cx.simulate_mouse_up(at, left, cmd);
+    assert_eq!(*opened.borrow(), vec!["https://a.io".to_string()]);
+
+    // Pressed, dragged away and released: a selection, not a link.
+    let away = point(18, cx);
+    cx.simulate_mouse_down(at, left, cmd);
+    cx.simulate_mouse_move(away, left, cmd);
+    cx.simulate_mouse_up(away, left, cmd);
+    assert_eq!(opened.borrow().len(), 1);
+    assert!(!editor.read_with(cx, |e, _| e.selections()[0].is_empty()));
+
+    // Scrolling in between cancels it too.
+    draw(cx);
+    cx.simulate_mouse_down(at, left, cmd);
+    editor.update(cx, |e, cx| {
+        e.set_scroll_position(gpui::point(gpui::px(0.), gpui::px(5.)), cx)
+    });
+    cx.simulate_mouse_up(at, left, cmd);
+    assert_eq!(opened.borrow().len(), 1);
+
+    // Monaco `mouseMiddleClickAction: openLink`: on mouse-up too.
+    editor.update(cx, |e, cx| {
+        e.set_scroll_position(gpui::point(gpui::px(0.), gpui::px(0.)), cx);
+        let mut options = e.options().clone();
+        options.mouse_middle_click_action = gpui_monaco::options::MouseMiddleClickAction::OpenLink;
+        e.update_options(options, cx);
+    });
+    draw(cx);
+    let middle = gpui::MouseButton::Middle;
+    let none = gpui::Modifiers::default();
+    cx.simulate_mouse_down(at, middle, none);
+    assert_eq!(opened.borrow().len(), 1);
+    cx.simulate_mouse_up(at, middle, none);
+    assert_eq!(opened.borrow().len(), 2);
+}
