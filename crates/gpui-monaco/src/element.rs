@@ -6091,6 +6091,18 @@ fn prepaint_editor(
     );
     layout.view_selections = view_selections;
     layout.gutter_bars = gutter_bars.clone();
+    // The render listed last frame's sticky lines for screen readers: list
+    // these in the next one.
+    if window.is_a11y_active()
+        && !layout
+            .sticky_lines
+            .iter()
+            .map(|line| line.row)
+            .eq(editor.aria_sticky_rows.iter().copied())
+    {
+        let entity = cx.entity();
+        window.defer(cx, move |_, cx| entity.update(cx, |_, cx| cx.notify()));
+    }
     editor.layout = Some(layout.clone());
     editor.report_layout(cx);
     // Monaco `RenameWidget.afterRender(null)`: the box's line scrolled out

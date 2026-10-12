@@ -1436,6 +1436,39 @@ pub enum SymbolKind {
 }
 
 impl SymbolKind {
+    /// The kind's name for screen readers (Monaco `symbolKindNames`).
+    pub(crate) fn aria_name(self) -> &'static str {
+        use SymbolKind::*;
+        match self {
+            Array => "array",
+            Boolean => "boolean",
+            Class => "class",
+            Constant => "constant",
+            Constructor => "constructor",
+            Enum => "enumeration",
+            EnumMember => "enumeration member",
+            Event => "event",
+            Field => "field",
+            File => "file",
+            Function => "function",
+            Interface => "interface",
+            Key => "key",
+            Method => "method",
+            Module => "module",
+            Namespace => "namespace",
+            Null => "null",
+            Number => "number",
+            Object => "object",
+            Operator => "operator",
+            Package => "package",
+            Property => "property",
+            String => "string",
+            Struct => "struct",
+            TypeParameter => "type parameter",
+            Variable => "variable",
+        }
+    }
+
     /// The kind's codicon (Monaco `SymbolKinds.toIcon`).
     pub fn icon(self) -> Codicon {
         use SymbolKind::*;

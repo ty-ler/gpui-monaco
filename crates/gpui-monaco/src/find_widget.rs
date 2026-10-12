@@ -15,11 +15,12 @@ use std::time::Duration;
 
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyDownEvent, MouseButton, ParentElement, Pixels, Render, SharedString,
+    KeyDownEvent, MouseButton, ParentElement, Pixels, Render, Role, SharedString,
     StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px,
 };
 
+use crate::accessibility::AriaNode;
 use crate::actions::{
     FindHistoryNext, FindHistoryPrevious, FindInputFocusEditor, FindInputNewline, FocusNextElement,
     FocusPreviousElement, Newline, NextMatch, Outdent, Paste, PreviousMatch,
@@ -36,6 +37,9 @@ use crate::theme::EditorColors;
 
 /// Monaco `FIND_WIDGET_INITIAL_WIDTH`.
 const FIND_WIDGET_INITIAL_WIDTH: f32 = 419.;
+
+/// Monaco `NLS_FIND_DIALOG_LABEL`: the widget's `aria-label`.
+const FIND_DIALOG_ARIA_LABEL: &str = "Find / Replace";
 /// The `narrow-find-widget` and `collapsed-find-widget` maximum widths.
 const NARROW_WIDTH: f32 = 257.;
 const COLLAPSED_WIDTH: f32 = 170.;
@@ -401,7 +405,9 @@ impl Focusable for FindWidget {
 }
 
 /// A find or replace input: Monaco's 13px UI font in the widget's 19px
-/// lines, with a placeholder.
+/// lines, with a placeholder that's also its `aria-label` (Monaco's
+/// `label.find` and `placeholder.find`, `label.replace` and
+/// `placeholder.replace`, are the same words).
 fn input(
     placeholder: &'static str,
     window: &mut Window,
@@ -413,7 +419,7 @@ fn input(
             crate::theme::global_theme(cx)
                 .unwrap_or_else(|| std::sync::Arc::new(crate::Theme::vs()))
         });
-        let mut input = CodeEditor::new_widget_input("", theme, window, cx);
+        let mut input = CodeEditor::new_widget_input("", placeholder, theme, window, cx);
         let mut options = input.options().clone();
         options.line_height = Some(px(INPUT_LINE_HEIGHT));
         options.placeholder = Some(placeholder.into());
@@ -1193,10 +1199,11 @@ fn toggle(
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     let colors = look.colors;
+    // Monaco's `Toggle`: a checkbox named by its title.
+    let aria = AriaNode::new(Role::CheckBox, look.title.clone()).checked(checked);
     let tooltip = crate::tooltip::tooltip(look.title, colors);
     let find_selection = control == Control::InSelection;
-    div()
-        .id(control.id())
+    aria.apply(div().id(control.id()))
         .when_some(look.focus, |this, focus| this.track_focus(&focus))
         .size(px(size))
         .ml(px(TOGGLE_MARGIN))
@@ -1255,10 +1262,11 @@ fn button(
     cx: &mut Context<FindWidget>,
 ) -> gpui::Stateful<gpui::Div> {
     let colors = look.colors;
+    // Monaco `SimpleButton`: `role="button"` labelled by its title.
+    let aria = AriaNode::new(Role::Button, look.title.clone());
     let tooltip = crate::tooltip::tooltip(look.title, colors);
     let hover = colors.clone();
-    div()
-        .id(control.id())
+    aria.apply(div().id(control.id()))
         .debug_selector(|| control.id().into())
         .when_some(look.focus, |this, focus| this.track_focus(&focus))
         .size(px(BUTTON_SIZE))
@@ -1591,8 +1599,11 @@ impl Render for FindWidget {
             let hover = colors.clone();
             let control = Control::ToggleReplace;
             let look = look(control);
-            div()
-                .id(control.id())
+            // Monaco `setExpanded`: `aria-expanded` follows the replace
+            // part.
+            AriaNode::new(Role::Button, look.title.clone())
+                .expanded(replace_visible)
+                .apply(div().id(control.id()))
                 .debug_selector(|| control.id().into())
                 .when_some(look.focus, |this, focus| this.track_focus(&focus))
                 .absolute()
@@ -1730,8 +1741,9 @@ impl Render for FindWidget {
         .absolute()
         .size_full();
 
-        let widget = div()
-            .id("find-widget")
+        // Monaco: `role="dialog"` labelled "Find / Replace".
+        let widget = AriaNode::new(Role::Dialog, FIND_DIALOG_ARIA_LABEL)
+            .apply(div().id("find-widget"))
             .debug_selector(|| "find-widget".into())
             .relative()
             .flex_none()

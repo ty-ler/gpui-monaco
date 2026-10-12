@@ -37,6 +37,9 @@ use crate::widgets::{ContentWidget, ContentWidgetPreference, WidgetId};
 /// at once.
 const MAX_VISIBLE_CANDIDATES: usize = 7;
 
+/// Monaco `renameAriaLabel`: the rename input's `aria-label`.
+const RENAME_ARIA_LABEL: &str = "Rename input. Type new name and press Enter to commit.";
+
 #[derive(Default)]
 pub(crate) struct RenameState {
     pub(crate) task: Option<Task<()>>,
@@ -119,7 +122,8 @@ impl RenameInput {
             (options.font_family.clone(), options.font_size)
         });
         let input = cx.new(|cx| {
-            let mut editor = CodeEditor::new_widget_input(&name, theme, window, cx);
+            let mut editor =
+                CodeEditor::new_widget_input(&name, RENAME_ARIA_LABEL, theme, window, cx);
             if let Some((family, size)) = font {
                 let mut options = editor.options().clone();
                 options.font_family = family;

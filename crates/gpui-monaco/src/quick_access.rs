@@ -15,12 +15,13 @@ use std::ops::Range;
 
 use gpui::{
     AppContext as _, Context, Entity, FontWeight, HighlightStyle, Hsla, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString,
+    IntoElement, MouseButton, ParentElement, Pixels, Render, Role, SharedString,
     StatefulInteractiveElement as _, Styled, StyledText, Subscription, Task, WeakEntity, Window,
     div, px,
 };
 use text::PointUtf16;
 
+use crate::accessibility::AriaNode;
 use crate::actions::{
     Newline, Outdent, QuickInputFirst, QuickInputLast, QuickInputNext, QuickInputPageNext,
     QuickInputPagePrevious, QuickInputPrevious, RemoveSecondaryCursors, Tab,
@@ -42,6 +43,17 @@ pub const QUICK_INPUT_KEY_CONTEXT: &str = "QuickInput";
 
 /// Row height (Monaco's quick input list, `QuickInputListDelegate`).
 const ROW_HEIGHT: f32 = 22.;
+
+/// Monaco `QuickPick.DEFAULT_ARIA_LABEL`: the input's `aria-label` without
+/// a provider's.
+const QUICK_INPUT_ARIA_LABEL: &str = "Type to narrow down results.";
+
+/// Monaco `gotoLine.ariaLabel`.
+const GOTO_LINE_ARIA_LABEL: &str =
+    "Go to line. Type a line number, optionally followed by colon and column number.";
+
+/// Monaco `QuickInputList`'s `getWidgetAriaLabel`.
+const QUICK_INPUT_LIST_ARIA_LABEL: &str = "Quick Input";
 /// The list's vertical scrollbar (Monaco's list `verticalScrollbarSize`).
 const SCROLLBAR_WIDTH: f32 = 10.;
 /// The input box's height, border included.
@@ -82,6 +94,8 @@ struct QuickPick {
 }
 
 /// One row of the list.
+// Separators are few and short-lived, so items aren't boxed.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub(crate) enum QuickRow {
     /// A labelled separator.
@@ -103,6 +117,9 @@ pub(crate) struct QuickItem {
     /// The label of the separator this item starts (Monaco
     /// `IQuickPickItem.separator`), set by the widget.
     pub separator: Option<SharedString>,
+    /// Monaco `IQuickPickItem.ariaLabel`: what a screen reader reads
+    /// instead of the label and description.
+    pub aria_label: Option<SharedString>,
     pub action: QuickAction,
 }
 
@@ -116,6 +133,7 @@ impl QuickItem {
             strikethrough: false,
             keybinding: None,
             separator: None,
+            aria_label: None,
             action,
         }
     }
@@ -221,9 +239,11 @@ fn column_from_visible(line: &str, visible: u32, tab_size: u32) -> u32 {
 }
 
 impl QuickInput {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         editor: WeakEntity<CodeEditor>,
         value: &str,
+        aria_label: &str,
         (rows, active): (Vec<QuickRow>, Option<usize>),
         max_list_height: Pixels,
         theme: std::sync::Arc<crate::Theme>,
@@ -232,7 +252,7 @@ impl QuickInput {
     ) -> Self {
         let colors = theme.colors.clone();
         let input = cx.new(|cx| {
-            let mut input = CodeEditor::new_widget_input(value, theme, window, cx);
+            let mut input = CodeEditor::new_widget_input(value, aria_label, theme, window, cx);
             // One line filling the box inside its border.
             input.update_options_with(|o| o.line_height = Some(px(INPUT_HEIGHT - 2.)), cx);
             let end = PointUtf16::new(0, value.encode_utf16().count() as u32);
@@ -291,7 +311,16 @@ impl QuickInput {
         let Some(editor) = self.editor.upgrade() else {
             return;
         };
-        let rows = editor.update(cx, |editor, cx| editor.quick_access_rows(&value, cx));
+        let (rows, aria_label) = editor.update(cx, |editor, cx| {
+            let rows = editor.quick_access_rows(&value, cx);
+            let aria_label = editor.quick_input_aria_label(&value, &rows.0);
+            (rows, aria_label)
+        });
+        self.input.update(cx, |input, cx| {
+            if input.options().aria_label != aria_label {
+                input.update_options_with(|options| options.aria_label = aria_label, cx);
+            }
+        });
         let (items, active) = items_from_rows(rows.0, rows.1);
         self.items = items;
         self.active = active.or((!self.items.is_empty()).then_some(0));
@@ -521,8 +550,11 @@ impl QuickInput {
         };
         // `.quick-input-list-separator-border`, except on the first row.
         let border = item.separator.is_some() && ix > 0;
-        div()
-            .id(("quick-item", ix))
+        // Monaco's list `option`s. The input keeps focus, and GPUI can only
+        // report an active descendant under the focused element, so the
+        // active row is just `aria-selected`.
+        let aria = AriaNode::new(Role::ListBoxOption, item_aria_label(item)).selected(is_active);
+        aria.apply(div().id(("quick-item", ix)))
             .h(px(ROW_HEIGHT))
             .px(px(8.))
             .flex()
@@ -833,8 +865,9 @@ impl Render for QuickInput {
                         .when(self.value(cx).trim_start().starts_with("::"), |this| {
                             let checked = goto_offset_zero_based(cx);
                             this.child(
-                                div()
-                                    .id("quick-zero-based-offset")
+                                AriaNode::new(Role::CheckBox, "Toggle Zero-Based Offset")
+                                    .checked(checked)
+                                    .apply(div().id("quick-zero-based-offset"))
                                     .flex_none()
                                     .px(px(4.))
                                     .rounded(px(3.))
@@ -868,8 +901,8 @@ impl Render for QuickInput {
             )
             .child(
                 div().pb(px(4.)).child(
-                    div()
-                        .id("quick-rows")
+                    AriaNode::new(Role::ListBox, QUICK_INPUT_LIST_ARIA_LABEL)
+                        .apply(div().id("quick-rows"))
                         .relative()
                         .h(list_height)
                         .overflow_hidden()
@@ -1000,12 +1033,23 @@ impl CodeEditor {
         // The first rows come from here: the widget can't update this
         // editor while it's being updated.
         let rows = self.quick_access_rows(value, cx);
+        let aria_label = self.quick_input_aria_label(value, &rows.0);
         let (_, max_list_height) =
             quick_input_size(self.layout.as_ref().map(|layout| layout.bounds.size));
         let editor = cx.entity().downgrade();
         let theme = self.theme.clone();
-        let widget =
-            cx.new(|cx| QuickInput::new(editor, value, rows, max_list_height, theme, window, cx));
+        let widget = cx.new(|cx| {
+            QuickInput::new(
+                editor,
+                value,
+                &aria_label,
+                rows,
+                max_list_height,
+                theme,
+                window,
+                cx,
+            )
+        });
         widget.update(cx, |widget, _| widget.title = title);
         if let Some(action) = widget.read(cx).active_action() {
             self.quick_access_preview(&action, cx);
@@ -1181,6 +1225,31 @@ impl CodeEditor {
         }
     }
 
+    /// The input's `aria-label` (Monaco's quick pick `ariaLabel`, else its
+    /// placeholder, else "Type to narrow down results."): Go to Line's
+    /// instructions, Go to Symbol's message when it has nothing to list,
+    /// and "Go to Match..."'s placeholder.
+    fn quick_input_aria_label(&self, value: &str, rows: &[QuickRow]) -> SharedString {
+        let quick = self.quick.as_ref();
+        if quick.is_some_and(|state| state.go_to_match) {
+            return self.go_to_match_placeholder().into();
+        }
+        let trimmed = value.trim();
+        if quick.is_none_or(|state| state.pick.is_none()) {
+            if trimmed.starts_with(':') {
+                return GOTO_LINE_ARIA_LABEL.into();
+            }
+            // Monaco `provideLabelPick`.
+            if trimmed.starts_with('@')
+                && let [QuickRow::Item(item)] = rows
+                && matches!(item.action, QuickAction::None)
+            {
+                return item.label.clone();
+            }
+        }
+        QUICK_INPUT_ARIA_LABEL.into()
+    }
+
     /// Monaco `AbstractGotoLineQuickAccessProvider.provideWithTextEditor`:
     /// while Go to Line (`:` or `::`) is the provider, relative line
     /// numbers show absolute ones; they're relative again when another
@@ -1203,12 +1272,17 @@ impl CodeEditor {
         self.update_options_with(|options| options.line_numbers = to, cx);
     }
 
+    /// The "Go to Match..." input's placeholder.
+    fn go_to_match_placeholder(&self) -> String {
+        let count = self.find_matches_count();
+        format!("Type a number to go to a specific match (between 1 and {count})")
+    }
+
     /// The "Go to Match..." input's message: Monaco's placeholder, or its
     /// validation message for a number out of range.
     fn go_to_match_item(&self, value: &str) -> QuickItem {
         let count = self.find_matches_count();
-        let placeholder =
-            format!("Type a number to go to a specific match (between 1 and {count})");
+        let placeholder = self.go_to_match_placeholder();
         if value.is_empty() {
             return QuickItem::message(placeholder, QuickAction::None);
         }
@@ -1247,12 +1321,12 @@ impl CodeEditor {
             selection: PointUtf16::new(row, column),
             highlight: PointUtf16::new(row, 0)..PointUtf16::new(row, 0),
         };
-        match column_part.map(str::trim) {
-            None => QuickItem::message(
+        let (label, column) = match column_part.map(str::trim) {
+            None => (
                 format!(
                     "Press 'Enter' to go to line {line} or enter colon : to add a column number."
                 ),
-                go(0),
+                None,
             ),
             Some(column) => match crate::find::parse_int(column) {
                 Some(column) => {
@@ -1262,19 +1336,23 @@ impl CodeEditor {
                         column
                     }
                     .clamp(1, max_visible as i64) as u32;
-                    QuickItem::message(
+                    (
                         format!("Press 'Enter' to go to line {line} at column {column}."),
-                        go(column_from_visible(&text, column - 1, tab_size)),
+                        Some(column),
                     )
                 }
-                None => QuickItem::message(
+                None => (
                     format!(
                         "Press 'Enter' to go to line {line} or enter a column number (from 1 to {max_visible})."
                     ),
-                    go(0),
+                    None,
                 ),
             },
-        }
+        };
+        let selection = column.map_or(0, |column| column_from_visible(&text, column - 1, tab_size));
+        let mut item = QuickItem::message(label, go(selection));
+        item.aria_label = Some(goto_line_aria_label(line, column.unwrap_or(1)));
+        item
     }
 
     /// Monaco's `::offset` mode: character offsets from 1, or from 0 with
@@ -1310,17 +1388,19 @@ impl CodeEditor {
             rope.offset_utf16_to_offset(text::OffsetUtf16(offset.clamp(0, length) as usize));
         let point = rope.offset_to_point_utf16(offset);
         let text = self.snapshot.line(point.row);
-        QuickItem::message(
+        let column = visible_column(&text, point.column, tab_size) + 1;
+        let mut item = QuickItem::message(
             format!(
-                "Press 'Enter' to go to line {} at column {}.",
+                "Press 'Enter' to go to line {} at column {column}.",
                 point.row + 1,
-                visible_column(&text, point.column, tab_size) + 1
             ),
             QuickAction::GoTo {
                 selection: point,
                 highlight: PointUtf16::new(point.row, 0)..PointUtf16::new(point.row, 0),
             },
-        )
+        );
+        item.aria_label = Some(goto_line_aria_label(point.row + 1, column));
+        item
     }
 
     /// Monaco `AbstractGotoSymbolQuickAccessProvider`.
@@ -1395,6 +1475,10 @@ impl CodeEditor {
                     strikethrough: symbol.deprecated,
                     keybinding: None,
                     separator: None,
+                    // Monaco `getAriaLabelForSymbol`.
+                    aria_label: Some(
+                        format!("{} ({})", symbol.name, symbol.kind.aria_name()).into(),
+                    ),
                     action: QuickAction::GoTo {
                         selection: symbol.selection_range.start,
                         highlight: symbol.range.clone(),
@@ -1613,10 +1697,32 @@ impl CodeEditor {
                 strikethrough: false,
                 keybinding: keys.and_then(|keys| keys.get(&action.id).cloned()),
                 separator: None,
+                aria_label: None,
                 action: QuickAction::Run(action.id),
             }));
         }
         rows
+    }
+}
+
+/// Monaco `gotoLine.itemAriaLabel`: a Go to Line item's `ariaLabel`.
+fn goto_line_aria_label(line: u32, column: u32) -> SharedString {
+    format!("Go to line {line}, column {column}. Press Enter to navigate.").into()
+}
+
+/// Monaco `QuickPickItemElement.saneAriaLabel`, after its separator's
+/// label (`QuickInputAccessibilityProvider.getAriaLabel`): the item's
+/// `ariaLabel`, or its label and description.
+fn item_aria_label(item: &QuickItem) -> SharedString {
+    let label = item.aria_label.clone().unwrap_or_else(|| {
+        match item.description.as_ref().filter(|d| !d.is_empty()) {
+            Some(description) => format!("{}, {description}", item.label).into(),
+            None => item.label.clone(),
+        }
+    });
+    match &item.separator {
+        Some(separator) if !separator.is_empty() => format!("{label}, {separator}").into(),
+        _ => label,
     }
 }
 
@@ -1639,6 +1745,7 @@ fn help_rows() -> Vec<QuickRow> {
             strikethrough: false,
             keybinding: None,
             separator: None,
+            aria_label: None,
             action: QuickAction::SetValue(prefix.to_string()),
         })
     })
