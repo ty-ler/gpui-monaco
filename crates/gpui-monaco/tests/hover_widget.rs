@@ -571,7 +571,7 @@ fn the_hovered_range_is_highlighted(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn hovers_without_a_range_highlight_nothing(cx: &mut TestAppContext) {
+fn hovers_without_a_range_highlight_the_word(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_monaco::init(cx);
         register_hover_provider(cx, LanguageSelector::All, RangedHover(None));
@@ -580,10 +580,10 @@ fn hovers_without_a_range_highlight_nothing(cx: &mut TestAppContext) {
     show_at(&editor, cx, p(0, 6));
     cx.run_until_parked();
     assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));
-    // Monaco's anchor is the empty range at the position.
+    // Monaco's standalone `registerHoverProvider` gives it the word's range.
     assert_eq!(
         editor.read_with(cx, |e, cx| e.hover_highlight_for_tests(cx)),
-        None
+        Some(p(0, 4)..p(0, 9))
     );
 }
 

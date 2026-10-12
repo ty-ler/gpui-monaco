@@ -3051,6 +3051,7 @@ impl CodeEditor {
                 cx.notify();
             }
             TextModelEvent::DecorationsChanged(change) => {
+                self.hover_decorations_changed(cx);
                 cx.emit(CodeEditorEvent::ModelDecorationsChanged(*change));
                 cx.notify();
             }

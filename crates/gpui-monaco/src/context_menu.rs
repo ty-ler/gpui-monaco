@@ -893,6 +893,8 @@ impl CodeEditor {
                 )
             }));
         }
+        // Set first, so showing it keeps the hover the toolbar is in.
+        self.context_menu.inline_toolbar = true;
         self.show_menu(entries, Some(anchor), None, window, cx);
         self.context_menu.inline_toolbar = self.context_menu.menu.is_some();
     }
@@ -966,6 +968,10 @@ impl CodeEditor {
             cx,
         );
         self.context_menu.menu = Some((menu, id));
+        // Monaco `ContentHoverController`'s `onDidShowContextMenu`: the
+        // hover goes (unless the menu is the inline suggestion toolbar's,
+        // in it), and ignores the mouse while the menu shows.
+        self.hide_content_hover(cx);
         window.focus(&focus, cx);
         // It takes the focus from a menu it replaces.
         self.refocus = false;

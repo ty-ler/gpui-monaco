@@ -468,6 +468,8 @@ register_document_paste_edit_provider(cx, LanguageSelector::All, MyProvider);
 
 The hover also shows `hover_message` markdown from [decorations](decorations.md) under the mouse (anywhere on the line for whole-line ones) and messages from [diagnostics](diagnostics.md), with no provider needed. Decorations' `glyph_margin_hover_message` and `line_number_hover_message` show beside the gutter (see [decorations](decorations.md#hover-messages)).
 
+The hover asks the providers at half the `hover.delay`, shows the decoration and diagnostic messages at the delay, and adds each provider's answer as it arrives, before the decoration messages in provider order (Monaco's `HoverOperation`). While a provider is still working at three times the delay, a "Loading..." part shows until it answers. A hover with no `range` highlights the word at the position, as Monaco's standalone `registerHoverProvider` does. Opening a context menu hides the hover, and none shows until the menu closes.
+
 Each part of the hover has a copy button, and the hover can be resized from its corner.
 
 ## Hover verbosity

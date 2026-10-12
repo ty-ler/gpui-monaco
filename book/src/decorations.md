@@ -112,7 +112,7 @@ DecorationOptions {
 }
 ```
 
-The glyph margin and line number hovers show in a card just right of the glyph margin (or of the line numbers), centered on the hovered line, as Monaco's glyph hover does. In the glyph margin only the decorations in the hovered lane count; a decoration covering several rows hovers on each of them.
+The glyph margin and line number hovers show in a card just right of the glyph margin (or of the line numbers), centered on the hovered line, as Monaco's glyph hover does. In the glyph margin only the decorations in the hovered lane count; a decoration covering several rows hovers on each of them. While the card shows, a decoration change computes it again after the hover delay, and it closes once nothing is left to show. Moving to another row or lane closes it at once, without the content hover's `hiding_delay`.
 
 ### Theme colors
 
