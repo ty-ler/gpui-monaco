@@ -35,6 +35,8 @@ pub(crate) struct UnicodeHighlightState {
     model: Option<gpui::EntityId>,
     /// What the "too many characters" banner is about, while it shows.
     banner: Option<BannerKind>,
+    /// The banner's focus: Monaco's banner is in the tab order.
+    banner_focus: Option<gpui::FocusHandle>,
     /// Its close button was clicked (Monaco `_bannerClosed`), until the
     /// model changes.
     banner_closed: bool,
@@ -419,6 +421,7 @@ impl CodeEditor {
     ) {
         let Some(result) = result.filter(|result| result.has_more) else {
             if self.unicode_highlights.banner.take().is_some() {
+                self.unicode_highlights.banner_focus = None;
                 self.set_banner(None, gpui::px(0.), cx);
             }
             return;
@@ -428,12 +431,16 @@ impl CodeEditor {
         }
         let kind = BannerKind::for_result(result);
         let editor = cx.weak_entity();
+        // Monaco `Banner`: `tabIndex = 0`.
+        let focus = cx.focus_handle().tab_stop(true);
         let view = cx.new(|_| UnicodeBanner {
             editor,
             kind,
             colors: self.theme.colors.clone(),
+            focus: focus.clone(),
         });
         self.unicode_highlights.banner = Some(kind);
+        self.unicode_highlights.banner_focus = Some(focus);
         self.set_banner(Some(view.into()), gpui::px(BANNER_HEIGHT), cx);
     }
 
@@ -453,6 +460,15 @@ impl CodeEditor {
         self.unicode_highlights.banner_closed = true;
         self.update_unicode_banner(None, cx);
         true
+    }
+
+    /// Whether the unicode highlighter banner has keyboard focus.
+    #[doc(hidden)]
+    pub fn is_unicode_banner_focused_for_tests(&self, window: &Window) -> bool {
+        self.unicode_highlights
+            .banner_focus
+            .as_ref()
+            .is_some_and(|focus| focus.is_focused(window))
     }
 }
 
@@ -516,6 +532,7 @@ struct UnicodeBanner {
     editor: gpui::WeakEntity<CodeEditor>,
     kind: BannerKind,
     colors: crate::theme::EditorColors,
+    focus: gpui::FocusHandle,
 }
 
 impl gpui::Render for UnicodeBanner {
@@ -529,6 +546,10 @@ impl gpui::Render for UnicodeBanner {
         let close_editor = self.editor.clone();
         div()
             .id("unicode-highlight-banner")
+            // Monaco `Banner`: focusable, its message its `aria-label`.
+            .track_focus(&self.focus)
+            .role(gpui::Role::Group)
+            .aria_label(SharedString::from(kind.message()))
             .size_full()
             .flex()
             .items_center()

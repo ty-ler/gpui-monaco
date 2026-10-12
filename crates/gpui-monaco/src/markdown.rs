@@ -896,7 +896,13 @@ struct Renderer<'a> {
     trusted: bool,
     /// Ids for interactive text.
     next_id: usize,
+    /// Takes a clicked link first; it's opened as usual unless this says
+    /// it handled it.
+    on_link: Option<LinkHandler>,
 }
+
+/// Handles a clicked markdown link's URL; returns whether it did.
+pub(crate) type LinkHandler = std::rc::Rc<dyn Fn(&str, &mut gpui::Window, &mut App) -> bool>;
 
 impl Renderer<'_> {
     fn inline(&mut self, inline: Inline, font_size: Pixels) -> AnyElement {
@@ -1014,9 +1020,18 @@ impl Renderer<'_> {
         } else {
             self.next_id += 1;
             let trusted = self.trusted;
+            let on_link = self.on_link.clone();
             let (ranges, urls): (Vec<_>, Vec<_>) = inline.links.into_iter().unzip();
             InteractiveText::new(("markdown-links", self.next_id), text)
-                .on_click(ranges, move |ix, _, cx| open_link(&urls[ix], trusted, cx))
+                .on_click(ranges, move |ix, window, cx| {
+                    if on_link
+                        .as_ref()
+                        .is_some_and(|on_link| on_link(&urls[ix], window, cx))
+                    {
+                        return;
+                    }
+                    open_link(&urls[ix], trusted, cx)
+                })
                 .into_any_element()
         };
         div()
@@ -1288,6 +1303,18 @@ pub fn render_markdown(
     theme: &Theme,
     cx: &App,
 ) -> AnyElement {
+    render_markdown_with_links(markdown, style, theme, None, cx)
+}
+
+/// Renders `markdown` as [`render_markdown`] does, giving clicked links to
+/// `on_link` first.
+pub(crate) fn render_markdown_with_links(
+    markdown: &MarkdownString,
+    style: &MarkdownStyle,
+    theme: &Theme,
+    on_link: Option<LinkHandler>,
+    cx: &App,
+) -> AnyElement {
     let blocks = parse(markdown, codicons::codicons_available(cx));
     let registry = crate::model::language_registry(cx);
     let mut renderer = Renderer {
@@ -1296,6 +1323,7 @@ pub fn render_markdown(
         registry: &registry,
         trusted: markdown.is_trusted,
         next_id: 0,
+        on_link,
     };
     let children = renderer.blocks(blocks, 0);
     // Monaco's `p, .code, ul, ol, h1…h6 { margin: 8px 0 }`, without the

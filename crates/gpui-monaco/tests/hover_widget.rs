@@ -1025,3 +1025,280 @@ fn a_lone_row_takes_the_focus_and_clicks_focus_rows(cx: &mut TestAppContext) {
     assert_eq!(focused(cx), Some(0));
     assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));
 }
+
+// ----- Stability and anchoring (#335) ----------------------------------------
+
+fn mouse_at(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+    at: PointUtf16,
+) -> gpui::Point<gpui::Pixels> {
+    let origin = editor
+        .read_with(cx, |e, _| e.scrolled_visible_position(at))
+        .expect("laid out");
+    gpui::point(origin.x + px(1.), origin.y + px(2.))
+}
+
+fn move_to(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, at: PointUtf16) {
+    let position = mouse_at(editor, cx, at);
+    cx.simulate_mouse_move(position, None, Modifiers::default());
+}
+
+fn x_of(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, at: PointUtf16) -> gpui::Pixels {
+    editor
+        .read_with(cx, |e, _| e.scrolled_visible_position(at))
+        .expect("laid out")
+        .x
+}
+
+fn messages(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<String> {
+    editor.read_with(cx, |e, cx| {
+        e.hover_markers_for_tests(cx)
+            .into_iter()
+            .map(|m| m.message.to_string())
+            .collect()
+    })
+}
+
+/// Monaco `canAdoptVisibleHover`: moving along a long squiggle keeps the
+/// hover, anchored at the squiggle's start, with the parts still valid.
+#[gpui::test]
+fn moving_along_a_squiggle_keeps_the_hover(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("foo.bar(baz)\nnext line\n", |_| {}, cx);
+    set_markers(
+        &editor,
+        cx,
+        vec![
+            Marker {
+                message: "long".into(),
+                ..marker(MarkerSeverity::Warning, p(0, 0)..p(0, 12))
+            },
+            Marker {
+                message: "short".into(),
+                ..marker(MarkerSeverity::Error, p(0, 4)..p(0, 7))
+            },
+        ],
+    );
+    rest(cx, 0);
+    move_to(&editor, cx, p(0, 5));
+    rest(cx, 400);
+    assert_eq!(messages(&editor, cx), ["short", "long"]);
+    // Anchored at the parts' start on the line, the long squiggle's, not
+    // at the word under the mouse.
+    let left = card(&editor, cx).left();
+    assert_eq!(left, x_of(&editor, cx, p(0, 0)));
+    // To `baz`: after the hiding delay the hover stays, with the part that
+    // still applies, while the hover there is asked for...
+    move_to(&editor, cx, p(0, 9));
+    rest(cx, 0);
+    rest(cx, 350);
+    assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));
+    assert_eq!(messages(&editor, cx), ["long"]);
+    assert_eq!(card(&editor, cx).left(), left);
+    // ...and then shows it, in the same place.
+    rest(cx, 400);
+    assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));
+    assert_eq!(messages(&editor, cx), ["long"]);
+    assert_eq!(card(&editor, cx).left(), left);
+}
+
+#[gpui::test]
+fn another_line_or_no_valid_part_hides_the_hover(cx: &mut TestAppContext) {
+    let text = format!("foo.bar(baz) tail\n{}", "next line\n".repeat(12));
+    let (editor, cx) = setup(&text, |_| {}, cx);
+    set_markers(
+        &editor,
+        cx,
+        vec![marker(MarkerSeverity::Warning, p(0, 0)..p(0, 12))],
+    );
+    rest(cx, 0);
+    let on_marker = mouse_at(&editor, cx, p(0, 5));
+    cx.simulate_mouse_move(on_marker, None, Modifiers::default());
+    rest(cx, 400);
+    assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));
+    // Off the squiggle on its line: nothing applies there.
+    move_to(&editor, cx, p(0, 15));
+    rest(cx, 0);
+    rest(cx, 350);
+    assert!(!editor.read_with(cx, |e, _| e.is_hover_visible()));
+    // Another line (clear of the card) isn't adopted.
+    cx.simulate_mouse_move(on_marker, None, Modifiers::default());
+    rest(cx, 400);
+    assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));
+    move_to(&editor, cx, p(10, 2));
+    rest(cx, 0);
+    rest(cx, 350);
+    assert!(!editor.read_with(cx, |e, _| e.is_hover_visible()));
+}
+
+/// Monaco's participants by `hoverOrdinal`: markers, markdown, then the
+/// unicode highlighter's, whose "Adjust settings" link follows the reason.
+#[gpui::test]
+fn unicode_parts_come_after_markdown(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_hover_provider(cx, LanguageSelector::All, RangedHover(None));
+    });
+    let (editor, cx) = setup("let p\u{430}ss = 1;\n", |_| {}, cx);
+    rest(cx, 300);
+    rest(cx, 300);
+    set_markers(
+        &editor,
+        cx,
+        vec![marker(MarkerSeverity::Warning, p(0, 4)..p(0, 8))],
+    );
+    show_at(&editor, cx, p(0, 5));
+    rest(cx, 0);
+    let rows: Vec<String> = editor.read_with(cx, |e, cx| {
+        (0..e.hover_part_count(cx))
+            .filter_map(|ix| e.hover_part_accessible_content(ix, cx))
+            .collect()
+    });
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    assert_eq!(rows[0], "Warning here");
+    assert_eq!(rows[1], "docs");
+    assert!(rows[2].starts_with("The character `U+0430`"), "{rows:?}");
+    assert!(
+        rows[3].starts_with("This is a hover status bar."),
+        "{rows:?}"
+    );
+}
+
+/// Monaco's `ScrollableElement`: a hover taller than its maximum shows a
+/// scrollbar while the mouse is over it, and its track scrolls.
+#[gpui::test]
+fn a_tall_hover_has_a_scrollbar(cx: &mut TestAppContext) {
+    struct Tall;
+    impl HoverProvider for Tall {
+        fn provide_hover(
+            &self,
+            _: &ProviderContext,
+            _: PointUtf16,
+            _: &mut App,
+        ) -> Task<anyhow::Result<Option<Hover>>> {
+            let text: String = (0..60).map(|i| format!("line {i}\n\n")).collect();
+            Task::ready(Ok(Some(Hover {
+                contents: vec![text.into()],
+                ..Default::default()
+            })))
+        }
+    }
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_hover_provider(cx, LanguageSelector::All, Tall);
+    });
+    let (editor, cx) = setup("alpha beta\n", |_| {}, cx);
+    show_at(&editor, cx, p(0, 1));
+    rest(cx, 0);
+    rest(cx, 0);
+    let card = card(&editor, cx);
+    cx.simulate_mouse_move(card.center(), None, Modifiers::default());
+    rest(cx, 0);
+    let slider = cx
+        .debug_bounds("hover-vertical-slider")
+        .expect("a vertical slider");
+    // 10px wide, inside the right border, at the top.
+    assert_eq!(slider.size.width, px(10.));
+    assert_eq!(slider.right(), card.right() - px(1.));
+    assert_eq!(slider.top(), card.top() + px(1.));
+    assert!(cx.debug_bounds("hover-horizontal-slider").is_none());
+    // A click low on the track scrolls down.
+    let track = gpui::point(slider.center().x, card.bottom() - px(20.));
+    cx.simulate_click(track, Modifiers::default());
+    rest(cx, 0);
+    let offset = editor
+        .read_with(cx, |e, cx| e.hover_scroll_offset_for_tests(cx))
+        .unwrap();
+    assert!(offset.y < px(-100.), "{offset:?}");
+    assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));
+}
+
+#[gpui::test]
+fn a_short_hover_has_no_scrollbar(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_hover_provider(cx, LanguageSelector::All, RangedHover(None));
+    });
+    let (editor, cx) = setup("alpha beta\n", |_| {}, cx);
+    show_at(&editor, cx, p(0, 1));
+    rest(cx, 0);
+    rest(cx, 0);
+    let card = card(&editor, cx);
+    cx.simulate_mouse_move(card.center(), None, Modifiers::default());
+    rest(cx, 0);
+    assert!(cx.debug_bounds("hover-vertical-slider").is_none());
+}
+
+#[gpui::test]
+fn the_marker_zone_has_a_scrollbar(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("let x = 1;\n", |_| {}, cx);
+    let message: Vec<String> = (0..40).map(|i| format!("line {i}")).collect();
+    let marker = Marker {
+        message: message.join("\n").into(),
+        ..marker(MarkerSeverity::Warning, p(0, 4)..p(0, 5))
+    };
+    set_markers(&editor, cx, vec![marker.clone()]);
+    editor.update(cx, |e, cx| e.show_marker(&marker, cx));
+    rest(cx, 0);
+    rest(cx, 0);
+    let slider = cx
+        .debug_bounds("marker-body-vertical-slider")
+        .expect("a vertical slider");
+    // Monaco's 6px marker zone scrollbars.
+    assert_eq!(slider.size.width, px(6.));
+}
+
+/// Monaco `onDidSelectRelatedInformation`: the link (in
+/// `textLink.activeForeground`) opens the location and closes the zone.
+#[gpui::test]
+fn related_information_in_the_marker_zone_closes_it(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("fn a() {}\nfn b() { a(1) }\n", |_| {}, cx);
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let sink = opened.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event, _| {
+            if let CodeEditorEvent::OpenLocation(location) = event {
+                sink.borrow_mut()
+                    .push(format!("{:?}", location.uri.as_deref()));
+            }
+        })
+        .detach()
+    });
+    let marker = Marker {
+        related_information: vec![RelatedInformation {
+            uri: Some("file:///src/lib.rs".into()),
+            range: p(2, 3)..p(2, 4),
+            message: "defined here".into(),
+        }],
+        ..marker(MarkerSeverity::Error, p(1, 9)..p(1, 13))
+    };
+    set_markers(&editor, cx, vec![marker.clone()]);
+    editor.update(cx, |e, cx| e.show_marker(&marker, cx));
+    rest(cx, 0);
+    let link = cx.debug_bounds("marker-related-0").expect("related link");
+    cx.simulate_click(link.center(), Modifiers::default());
+    rest(cx, 0);
+    assert_eq!(*opened.borrow(), ["Some(\"file:///src/lib.rs\")"]);
+    assert!(
+        editor
+            .read_with(cx, |e, cx| e.marker_zone_for_tests(cx))
+            .is_none()
+    );
+}
+
+/// Monaco's banner is focusable and labelled with its message.
+#[gpui::test]
+fn the_unicode_banner_takes_the_focus(cx: &mut TestAppContext) {
+    let text = "a\u{200b}".repeat(1_100);
+    let (editor, cx) = setup(&text, |_| {}, cx);
+    rest(cx, 300);
+    rest(cx, 300);
+    assert!(editor.read_with(cx, |e, _| e.has_banner()));
+    let focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| editor.read(cx).is_unicode_banner_focused_for_tests(window))
+    };
+    assert!(!focused(cx));
+    cx.update(|window, cx| window.focus_next(cx));
+    rest(cx, 0);
+    assert!(focused(cx));
+}
