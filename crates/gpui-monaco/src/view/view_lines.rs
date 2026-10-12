@@ -583,6 +583,49 @@ impl ViewLines {
             })
     }
 
+    /// Monaco `getViewLinesIndentGuides`: the number of indent guides on
+    /// each view line of `lines`, given `row_guides`, the number on each
+    /// model row from `first_row` on (`getLinesIndentGuides`). A wrapped
+    /// row's continuation lines get none when they have no wrapping
+    /// indentation (`wrappingIndent: none`), so the guides don't cross
+    /// their text. As in Monaco, this looks at the row's view lines from
+    /// the first one in `lines` to its last: when that's only the last
+    /// continuation line (the row's other lines are scrolled off), it keeps
+    /// the row's guides.
+    pub fn indent_guides(&self, lines: Range<u32>, first_row: u32, row_guides: &[u32]) -> Vec<u32> {
+        let end = lines.end.min(self.line_count());
+        let mut result = Vec::with_capacity(end.saturating_sub(lines.start) as usize);
+        let mut line = lines.start;
+        while line < end {
+            let ViewLine { row, segment } = self.view_line(line);
+            let (segments, continuation_indent) = match self.projection(row) {
+                Some(projection) => {
+                    let segments = projection.output_line_count();
+                    (segments, projection.min_output_offset(segments - 1))
+                }
+                None => (1, 0),
+            };
+            let count = segments.saturating_sub(segment).max(1);
+            // Monaco `IndentGuideRepeatOption`: `BlockSubsequent` when the
+            // row's first line is shown, else `BlockAll`; `BlockNone` when
+            // continuation lines are indented.
+            let block_at = if count > 1 && continuation_indent == 0 {
+                u32::from(segment == 0)
+            } else {
+                count
+            };
+            let guides = row
+                .checked_sub(first_row)
+                .and_then(|ix| row_guides.get(ix as usize))
+                .copied()
+                .unwrap_or(0);
+            let shown = count.min(end - line);
+            result.extend((0..shown).map(|j| if j >= block_at { 0 } else { guides }));
+            line += shown;
+        }
+        result
+    }
+
     /// The largest view column on view line `line` (Monaco
     /// `getLineMaxColumn` on the view model): its continuation indentation
     /// plus the text and injected text it shows. The end of a wrapped
@@ -759,6 +802,67 @@ mod tests {
         assert_eq!(lines.view_line(2), ViewLine { row: 3, segment: 0 });
         assert!(lines.is_row_hidden(2));
         assert_eq!(lines.to_view(PointUtf16::new(2, 3), false), (1, 4));
+    }
+
+    /// Monaco `modelLineProjection.test.ts` "Invalid line numbers" (the
+    /// indent guides; view lines are 0-based and ranges are clamped).
+    #[test]
+    fn invalid_line_numbers_indent_guides() {
+        let text = "int main() {\n\tprintf(\"Hello world!\");\n}\nint main() {\n\tprintf(\"Hello world!\");\n}";
+        let rope = Rope::from(text);
+        let ctx = crate::view::guides::GuideContext {
+            tab_size: 4,
+            indent_size: 4,
+            off_side: false,
+        };
+        let row_guides = crate::view::guides::lines_indent_guides(&rope, 0..6, ctx);
+        let lines = ViewLines::new(rope, 0);
+        assert_eq!(lines.line_count(), 6);
+        for (line, expected) in [0, 1, 0, 0, 1, 0].into_iter().enumerate() {
+            let line = line as u32;
+            let rows = &row_guides[line as usize..];
+            assert_eq!(lines.indent_guides(line..line + 1, line, rows), [expected]);
+        }
+        assert_eq!(
+            lines.indent_guides(0..6, 0, &row_guides),
+            [0, 1, 0, 0, 1, 0]
+        );
+        // Past the last view line.
+        assert_eq!(lines.indent_guides(5..8, 0, &row_guides), [0]);
+    }
+
+    /// Monaco `getViewLinesIndentGuides`: a wrapped row's continuation
+    /// lines without wrapping indentation have no indent guides.
+    #[test]
+    fn wrapped_lines_without_indentation_block_indent_guides() {
+        let rope = Rope::from("        aaaa bbbb cccc dddd eeee\nx");
+        let mut lines = ViewLines::new(rope, 0);
+        lines.set_wrap(Some(WrapSettings {
+            indent: WrappingIndent::None,
+            ..wrap(14).unwrap()
+        }));
+        // "        aaaa |bbbb cccc |dddd eeee", "x"
+        assert_eq!(lines.line_count(), 4);
+        assert_eq!(lines.line_min_column(1), 0);
+        let row_guides = [2, 0];
+        // `BlockSubsequent`: the row's first line keeps its guides.
+        assert_eq!(lines.indent_guides(0..4, 0, &row_guides), [2, 0, 0, 0]);
+        // `BlockAll`: the first line is scrolled off.
+        assert_eq!(lines.indent_guides(1..4, 0, &row_guides), [0, 0, 0]);
+        // Monaco looks only at the row's lines from the first shown, so
+        // its last continuation line alone keeps the guides.
+        assert_eq!(lines.indent_guides(2..4, 0, &row_guides), [2, 0]);
+
+        // With wrapping indentation, every line keeps them.
+        lines.set_wrap(Some(WrapSettings {
+            indent: WrappingIndent::Same,
+            ..wrap(20).unwrap()
+        }));
+        assert!(lines.line_min_column(1) > 0);
+        let count = lines.line_count();
+        let mut expected = vec![2; count as usize - 1];
+        expected.push(0);
+        assert_eq!(lines.indent_guides(0..count, 0, &row_guides), expected);
     }
 
     #[test]
