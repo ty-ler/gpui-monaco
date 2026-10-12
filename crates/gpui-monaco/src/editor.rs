@@ -98,10 +98,14 @@ pub enum CodeEditorEvent {
     /// model: the host should open it in an editor beside this one. Not
     /// emitted when an editor opener opened it.
     OpenLocationToSide(crate::providers::Location),
-    /// A link was followed (Cmd/Ctrl+click or `editor.action.openLink`):
-    /// the host opens it. Relative `file://./` links are resolved against
-    /// the model's URI. Not emitted when an opener from
-    /// [`register_link_opener`](crate::register_link_opener) opened it.
+    /// A followed link (Cmd/Ctrl+click or `editor.action.openLink`, or a
+    /// marker's code link) that nothing opened: no
+    /// [link opener](crate::register_link_opener) took it, it isn't a web,
+    /// mail or `command:` link (which the editor opens, as Monaco's opener
+    /// service does), and it's a link to another model no
+    /// [editor opener](crate::register_editor_opener) took. The host may
+    /// open it. Relative `file://./` links are resolved against the
+    /// model's URI.
     OpenLink(gpui::SharedString),
     /// A command no handler is registered for was run (e.g. by clicking a
     /// code lens): the host runs it.

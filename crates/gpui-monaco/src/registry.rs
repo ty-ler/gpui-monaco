@@ -260,6 +260,23 @@ pub fn editors(cx: &App) -> Vec<Entity<CodeEditor>> {
         .unwrap_or_default()
 }
 
+/// Monaco `ICodeEditorService.getFocusedCodeEditor`: the editor whose text
+/// has focus in `window`, else the last one with focus in one of its
+/// widgets (a hover, the find widget).
+pub(crate) fn focused_editor(window: &gpui::Window, cx: &App) -> Option<Entity<CodeEditor>> {
+    let mut widget_focus = None;
+    for editor in editors(cx) {
+        let focus = &editor.read(cx).focus_handle;
+        if focus.is_focused(window) {
+            return Some(editor);
+        }
+        if focus.contains_focused(window, cx) {
+            widget_focus = Some(editor);
+        }
+    }
+    widget_focus
+}
+
 /// Every live diff editor, in creation order (Monaco
 /// `editor.getDiffEditors`).
 pub fn diff_editors(cx: &App) -> Vec<Entity<DiffEditor>> {

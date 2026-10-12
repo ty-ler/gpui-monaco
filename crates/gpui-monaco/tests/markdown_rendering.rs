@@ -183,6 +183,7 @@ fn rounded_inline_code_wraps(cx: &mut TestAppContext) {
         separator: colors.text_separator_foreground,
         quote_background: None,
         quote_border: colors.text_block_quote_border,
+        code_language: None,
     };
     let markdown = MarkdownString::new("call `a_rather_long_function_name()` then `b`");
     let (view, cx) = cx.add_window_view(|_, _| Narrow(markdown, style));

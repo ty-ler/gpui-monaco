@@ -6,14 +6,17 @@
 //! code (`textCodeBlock.background`, padded), fenced and indented code
 //! blocks (syntax highlighted with the registered languages and theme, in
 //! the editor font, with no background, as Monaco's tokenized `div.code`),
-//! links (`textLink.foreground`; web and mail links open, `command:` links
-//! run commands when [`MarkdownString::is_trusted`]), block quotes, nested
-//! lists with hanging markers (`padding-left: 20px`), GFM tables, rules,
+//! links (`textLink.foreground`, opened through Monaco's opener service:
+//! see [`crate::register_link_opener`]; `command:` links run commands when
+//! [`MarkdownString::is_trusted`]), block quotes, nested lists with
+//! hanging markers (`padding-left: 20px`), GFM task lists (a checkbox
+//! instead of the marker) and tables, rules,
 //! images (`http(s):` and base64 `data:` URIs load through GPUI's `img`,
 //! anything else shows its alt text), `$(icon)` codicons when
 //! [`MarkdownString::support_theme_icons`], and with
 //! [`MarkdownString::support_html`] a sanitized HTML subset (see
-//! [`HTML_TAGS`]).
+//! [`HTML_TAGS`]; `<kbd>` is a keycap). Code blocks without a language are
+//! in [`MarkdownStyle::code_language`].
 //!
 //! The text is laid out by GPUI's `StyledText`, which can't be selected:
 //! hovers copy through their copy button, and suggest details through
@@ -27,16 +30,21 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, BorderStyle, Bounds, Corners, Edges, FontStyle, FontWeight, HighlightStyle,
-    Hsla, Image, ImageFormat, ImageSource, InteractiveText, IntoElement, ParentElement, Pixels,
-    Point, SharedString, SharedUri, StrikethroughStyle, Styled, StyledImage as _, StyledText,
-    UnderlineStyle, canvas, div, img, point, px, quad, relative,
+    AnyElement, App, BorderStyle, Bounds, Corners, Edges, Entity, FontStyle, FontWeight,
+    HighlightStyle, Hsla, Image, ImageFormat, ImageSource, InteractiveText, IntoElement,
+    ParentElement, Pixels, Point, SharedString, SharedUri, StrikethroughStyle, Styled,
+    StyledImage as _, StyledText, UnderlineStyle, canvas, div, img, point, px, quad, relative,
 };
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 use crate::codicons::{self, Codicon, LabelPart};
+use crate::editor::CodeEditor;
 use crate::providers::{Command, Documentation, MarkdownString};
 use crate::theme::Theme;
+
+/// A keycap's horizontal padding, inside its background: a three-per-em
+/// space, about Monaco's 3px and 1px border.
+const KBD_PADDING: &str = "\u{2004}";
 
 /// Colors and fonts for rendered markdown.
 #[derive(Clone, Debug)]
@@ -65,6 +73,11 @@ pub struct MarkdownStyle {
     pub quote_background: Option<Hsla>,
     /// Block quote left border (`textBlockQuote.border`).
     pub quote_border: Hsla,
+    /// The language id of code blocks that don't name one: Monaco's
+    /// `EditorMarkdownCodeBlockRenderer` uses the editor's model language
+    /// when the markdown is rendered for an editor (hovers, suggest
+    /// details, parameter hints), and plain text otherwise (`None`).
+    pub code_language: Option<SharedString>,
 }
 
 /// The HTML tags rendered when [`MarkdownString::support_html`] is set
@@ -114,6 +127,10 @@ pub(crate) struct SpanStyle {
     pub strikethrough: bool,
     pub underline: bool,
     pub code: bool,
+    /// The HTML `<kbd>` the run is in, numbered from 1 (0 outside one): a
+    /// keycap (Monaco's `.rendered-markdown kbd`). Numbered so that
+    /// adjacent keycaps stay apart.
+    pub kbd: usize,
     pub color: Option<Hsla>,
     pub background: Option<Hsla>,
 }
@@ -162,6 +179,9 @@ pub(crate) enum Block {
         height: Option<f32>,
     },
     Rule,
+    /// A GFM task list item's checkbox, checked or not (the first block of
+    /// its item).
+    Task(bool),
 }
 
 /// A container being built.
@@ -192,8 +212,12 @@ struct Builder<'a> {
     italic: usize,
     strikethrough: usize,
     underline: usize,
-    /// HTML `<code>`, `<kbd>`, ... nesting.
+    /// HTML `<code>`, `<samp>`, ... nesting.
     html_code: usize,
+    /// HTML `<kbd>` nesting.
+    kbd: usize,
+    /// How many `<kbd>`s were opened.
+    kbd_count: usize,
     /// HTML `<span style>` colors (innermost last).
     colors: Vec<(Option<Hsla>, Option<Hsla>)>,
     /// Open HTML tags that pushed a color, a link or nothing.
@@ -222,6 +246,7 @@ impl Builder<'_> {
             strikethrough: self.strikethrough > 0,
             underline: self.underline > 0,
             code: code || self.html_code > 0,
+            kbd: if self.kbd > 0 { self.kbd_count } else { 0 },
             color,
             background,
         }
@@ -480,6 +505,11 @@ impl Builder<'_> {
                 self.push_block(Block::Rule);
             }
             Event::Html(html) | Event::InlineHtml(html) => self.html(&html),
+            // marked's GFM task list item: a disabled checkbox.
+            Event::TaskListMarker(checked) => {
+                self.flush_inline();
+                self.push_block(Block::Task(checked));
+            }
             _ => {}
         }
     }
@@ -529,7 +559,15 @@ impl Builder<'_> {
             "i" | "em" => self.italic += 1,
             "s" | "del" | "strike" => self.strikethrough += 1,
             "u" | "ins" => self.underline += 1,
-            "code" | "kbd" | "samp" | "tt" => self.html_code += 1,
+            "code" | "samp" | "tt" => self.html_code += 1,
+            // `padding: 1px 3px` inside the keycap.
+            "kbd" => {
+                self.kbd += 1;
+                if self.kbd == 1 {
+                    self.kbd_count += 1;
+                    self.push_text(KBD_PADDING, false);
+                }
+            }
             "br" => self.push_text("\n", false),
             "p" | "div" | "blockquote" => self.flush_inline(),
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
@@ -568,7 +606,13 @@ impl Builder<'_> {
             "i" | "em" => self.italic = self.italic.saturating_sub(1),
             "s" | "del" | "strike" => self.strikethrough = self.strikethrough.saturating_sub(1),
             "u" | "ins" => self.underline = self.underline.saturating_sub(1),
-            "code" | "kbd" | "samp" | "tt" => self.html_code = self.html_code.saturating_sub(1),
+            "code" | "samp" | "tt" => self.html_code = self.html_code.saturating_sub(1),
+            "kbd" if self.kbd > 0 => {
+                if self.kbd == 1 {
+                    self.push_text(KBD_PADDING, false);
+                }
+                self.kbd -= 1;
+            }
             "p" | "div" | "blockquote" => self.flush_inline(),
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                 self.flush_inline();
@@ -710,7 +754,7 @@ fn decode_entities(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// Parses `markdown` into blocks (marked with GFM: tables and
+/// Parses `markdown` into blocks (marked with GFM: tables, task lists and
 /// strikethrough). `icons_available` says whether `$(icon)`s become
 /// codicon characters or their Unicode stand-ins.
 pub(crate) fn parse(markdown: &MarkdownString, icons_available: bool) -> Vec<Block> {
@@ -732,6 +776,8 @@ pub(crate) fn parse(markdown: &MarkdownString, icons_available: bool) -> Vec<Blo
         strikethrough: 0,
         underline: 0,
         html_code: 0,
+        kbd: 0,
+        kbd_count: 0,
         colors: Vec::new(),
         html_stack: Vec::new(),
         links: Vec::new(),
@@ -741,7 +787,7 @@ pub(crate) fn parse(markdown: &MarkdownString, icons_available: bool) -> Vec<Blo
     };
     let parser = Parser::new_ext(
         &source,
-        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES,
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS,
     );
     for event in parser {
         builder.event(event);
@@ -756,19 +802,10 @@ pub(crate) fn parse(markdown: &MarkdownString, icons_available: bool) -> Vec<Blo
     }
 }
 
-/// Whether a link may be opened: Monaco's markdown renderer opens web and
-/// mail links by default (`command:` links need a trusted string).
-fn is_openable(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    ["http://", "https://", "mailto:"]
-        .iter()
-        .any(|scheme| lower.starts_with(scheme))
-}
-
 /// A `command:id?args` link's command (Monaco's `command:` links in trusted
 /// markdown): `args` is URI-encoded JSON, an array of arguments or a single
 /// one.
-fn command_link(url: &str) -> Option<Command> {
+pub(crate) fn command_link(url: &str) -> Option<Command> {
     let rest = url.strip_prefix("command:")?;
     let (id, query) = match rest.split_once('?') {
         Some((id, query)) => (id, Some(query)),
@@ -814,25 +851,14 @@ fn percent_decode(text: &str) -> String {
 }
 
 /// Opens a clicked link as Monaco's `openLinkFromMarkdown` does, through
-/// the opener service: the [link openers](crate::register_link_opener)
-/// first, then web and mail links in the browser, and `command:` links of
-/// trusted strings. `internal:` links aren't openable.
-fn open_link(url: &str, trusted: bool, cx: &mut App) {
-    let scheme = url.split_once(':').map(|(scheme, _)| scheme);
-    if scheme.is_some_and(|scheme| scheme.eq_ignore_ascii_case("internal")) {
-        return;
-    }
-    if crate::openers::offer_link(url, cx) {
-        return;
-    }
-    if is_openable(url) {
-        cx.open_url(url);
-    } else if trusted
-        && let Some(command) = command_link(url)
-        && let Err(error) = crate::execute_command(cx, &command)
-    {
-        log::warn!("markdown command link: {error}");
-    }
+/// the opener service ([`crate::openers::open_url`]): the
+/// [link openers](crate::register_link_opener) first, then web and mail
+/// links in the browser, `command:` links of trusted strings, and links
+/// into `editor`'s model (Monaco's focused editor) or, through the
+/// [editor openers](crate::register_editor_opener), other models.
+/// `internal:` links aren't openable.
+fn open_link(url: &str, trusted: bool, editor: Option<&Entity<CodeEditor>>, cx: &mut App) {
+    crate::openers::open_url(url, trusted, editor, cx);
 }
 
 /// Decodes a base64 `data:image/...` URI.
@@ -897,12 +923,55 @@ fn code_background_bounds(
     boxes
 }
 
+/// Monaco's `.rendered-markdown kbd` over a line's `bounds`: the
+/// `keybindingLabel.background`, a 1px `keybindingLabel.border` with a
+/// `keybindingLabel.bottomBorder` bottom, rounded by 3px, and with
+/// `padding: 1px 3px` and `vertical-align: middle` 2px taller than the
+/// line on each side. (Its inset `widget.shadow` isn't drawn.)
+fn paint_keycap(
+    bounds: Bounds<Pixels>,
+    (background, border, bottom_border): (Hsla, Hsla, Hsla),
+    window: &mut gpui::Window,
+) {
+    let bounds = Bounds::from_corners(
+        point(bounds.left(), bounds.top() - px(2.)),
+        point(bounds.right(), bounds.bottom() + px(2.)),
+    );
+    window.paint_quad(quad(
+        bounds,
+        Corners::all(px(3.)),
+        background,
+        Edges::all(px(1.)),
+        bottom_border,
+        BorderStyle::Solid,
+    ));
+    let top = Bounds::from_corners(
+        bounds.origin,
+        point(bounds.right(), bounds.bottom() - px(1.)),
+    );
+    window.paint_quad(quad(
+        top,
+        Corners::all(px(3.)),
+        gpui::transparent_black(),
+        Edges {
+            top: px(1.),
+            right: px(1.),
+            bottom: px(0.),
+            left: px(1.),
+        },
+        border,
+        BorderStyle::Solid,
+    ));
+}
+
 /// Renders blocks with a style.
 struct Renderer<'a> {
     style: &'a MarkdownStyle,
     theme: &'a Theme,
     registry: &'a syntax::LanguageRegistry,
     trusted: bool,
+    /// Whether codicons are drawn with their font.
+    icons_available: bool,
     /// Ids for interactive text.
     next_id: usize,
     /// Takes a clicked link first; it's opened as usual unless this says
@@ -934,6 +1003,25 @@ impl Renderer<'_> {
         } else {
             Vec::new()
         };
+        // Keycaps likewise, one per `<kbd>` (its runs may differ in style).
+        let mut keycaps: Vec<(usize, Range<usize>)> = Vec::new();
+        for (range, span) in inline.spans.iter().filter(|(_, span)| span.kbd > 0) {
+            match keycaps.last_mut() {
+                Some((kbd, keycap)) if *kbd == span.kbd => keycap.end = range.end,
+                _ => keycaps.push((span.kbd, range.clone())),
+            }
+        }
+        let keycaps: Vec<Vec<usize>> = keycaps
+            .into_iter()
+            .map(|(_, range)| {
+                inline.text[range.clone()]
+                    .char_indices()
+                    .map(|(ix, _)| range.start + ix)
+                    .chain([range.end])
+                    .collect()
+            })
+            .collect();
+        let colors = &self.theme.colors;
         let mut highlights: Vec<(Range<usize>, HighlightStyle)> = inline
             .spans
             .iter()
@@ -958,7 +1046,9 @@ impl Renderer<'_> {
                         wavy: false,
                     });
                 }
-                highlight.color = span.color;
+                highlight.color = span
+                    .color
+                    .or_else(|| (span.kbd > 0).then_some(colors.keybinding_label_foreground));
                 highlight.background_color = span
                     .background
                     .or((span.code && rounded_code.is_empty()).then_some(style.code_background));
@@ -979,10 +1069,11 @@ impl Renderer<'_> {
             highlights.push((range.clone(), HighlightStyle::default()));
         }
         let highlights = merge_highlights(highlights);
+        // Keycaps are monospace, the browser's `kbd` font.
         let code_ranges = inline
             .spans
             .iter()
-            .filter(|(_, span)| span.code)
+            .filter(|(_, span)| span.code || span.kbd > 0)
             .map(|(range, _)| (range.clone(), style.code_font.clone()));
         let icon_ranges = inline.icons.iter().map(|range| {
             (
@@ -995,29 +1086,38 @@ impl Renderer<'_> {
         let text = StyledText::new(inline.text)
             .with_highlights(highlights)
             .with_font_family_overrides(overrides);
-        let code_backgrounds = (!rounded_code.is_empty()).then(|| {
+        let code_backgrounds = (!rounded_code.is_empty() || !keycaps.is_empty()).then(|| {
             let layout = text.layout().clone();
             let (radius, color) = (style.code_corner_radius, style.code_background);
+            let keycap = (
+                colors.keybinding_label_background,
+                colors.keybinding_label_border,
+                colors.keybinding_label_bottom_border,
+            );
             canvas(
                 |_, _, _| {},
                 move |_, _, window, _| {
                     let line_height = layout.line_height();
                     let left = layout.bounds().left();
-                    for boundaries in &rounded_code {
+                    let boxes = |boundaries: &Vec<usize>| {
                         let points: Vec<_> = boundaries
                             .iter()
                             .filter_map(|ix| layout.position_for_index(*ix))
                             .collect();
-                        for bounds in code_background_bounds(&points, left, line_height) {
-                            window.paint_quad(quad(
-                                bounds,
-                                Corners::all(radius),
-                                color,
-                                Edges::default(),
-                                gpui::transparent_black(),
-                                BorderStyle::Solid,
-                            ));
-                        }
+                        code_background_bounds(&points, left, line_height)
+                    };
+                    for bounds in rounded_code.iter().flat_map(boxes) {
+                        window.paint_quad(quad(
+                            bounds,
+                            Corners::all(radius),
+                            color,
+                            Edges::default(),
+                            gpui::transparent_black(),
+                            BorderStyle::Solid,
+                        ));
+                    }
+                    for bounds in keycaps.iter().flat_map(boxes) {
+                        paint_keycap(bounds, keycap, window);
                     }
                 },
             )
@@ -1039,7 +1139,8 @@ impl Renderer<'_> {
                     {
                         return;
                     }
-                    open_link(&urls[ix], trusted, cx)
+                    let editor = crate::registry::focused_editor(window, cx);
+                    open_link(&urls[ix], trusted, editor.as_ref(), cx)
                 })
                 .into_any_element()
         };
@@ -1050,6 +1151,59 @@ impl Renderer<'_> {
             })
             .child(element)
             .into_any_element()
+    }
+
+    /// marked's `<input type="checkbox" disabled>` for a task list item:
+    /// 13px, with `margin: 3px 3px 3px 4px` and the space after it, on the
+    /// first line.
+    fn checkbox(&self, checked: bool) -> AnyElement {
+        let style = self.style;
+        let line_height = style.font_size * style.line_height;
+        let size = px(13.);
+        let check = checked.then(|| {
+            if self.icons_available {
+                div()
+                    .font_family(codicons::CODICON_FONT_FAMILY)
+                    .child(Codicon::Check.char().to_string())
+            } else {
+                div().child(Codicon::Check.fallback())
+            }
+        });
+        div()
+            .flex_none()
+            .h(line_height)
+            .flex()
+            .items_center()
+            .ml(px(4.))
+            .mr(px(3.) + style.font_size * 0.25)
+            .child(
+                div()
+                    .size(size)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(2.))
+                    .border_1()
+                    .border_color(style.foreground.opacity(0.5))
+                    .text_size(px(11.))
+                    .line_height(size)
+                    .text_color(style.foreground.opacity(0.7))
+                    .children(check),
+            )
+            .into_any_element()
+    }
+
+    /// Monaco `EditorMarkdownCodeBlockRenderer.renderCodeBlock`: a code
+    /// block's language id is the named language's, else the editor's
+    /// ([`MarkdownStyle::code_language`]), else plain text (`None`).
+    fn code_block_language(&self, name: Option<&str>) -> Option<SharedString> {
+        match name {
+            Some(name) => self
+                .registry
+                .language_for_name(name)
+                .map(|language| SharedString::from(language.id.to_string())),
+            None => self.style.code_language.clone(),
+        }
     }
 
     fn blocks(&mut self, blocks: Vec<Block>, depth: usize) -> Vec<AnyElement> {
@@ -1072,16 +1226,10 @@ impl Renderer<'_> {
                 self.inline(inline, size)
             }
             Block::Code { language, code } => {
-                let highlights = language
-                    .as_deref()
-                    .and_then(|name| self.registry.language_for_name(name))
-                    .map(|language| {
-                        crate::colorize::colorize_highlights(
-                            &code,
-                            &language.id,
-                            self.theme,
-                            self.registry,
-                        )
+                let highlights = self
+                    .code_block_language(language.as_deref())
+                    .map(|id| {
+                        crate::colorize::colorize_highlights(&code, &id, self.theme, self.registry)
                     })
                     .unwrap_or_default();
                 // Monaco's tokenized `div.code`: the editor font,
@@ -1109,7 +1257,7 @@ impl Renderer<'_> {
                 let mut number = start;
                 let rows: Vec<AnyElement> = items
                     .into_iter()
-                    .map(|item| {
+                    .map(|mut item| {
                         let marker: SharedString = match number.as_mut() {
                             Some(n) => {
                                 let marker = format!("{n}.");
@@ -1117,6 +1265,18 @@ impl Renderer<'_> {
                                 marker.into()
                             }
                             None => ["•", "◦", "▪"][depth % 3].into(),
+                        };
+                        // Monaco `li:has(input[type=checkbox])`: no marker,
+                        // the checkbox before the item's text.
+                        let task = match item.first() {
+                            Some(Block::Task(checked)) => Some(*checked),
+                            _ => None,
+                        };
+                        let marker = if task.is_some() {
+                            item.remove(0);
+                            SharedString::default()
+                        } else {
+                            marker
                         };
                         // `ul, ol { padding-left: 20px }`: the marker hangs
                         // in the padding, and wrapped lines and nested
@@ -1132,6 +1292,7 @@ impl Renderer<'_> {
                                     .justify_end()
                                     .child(marker),
                             )
+                            .when_some(task, |row, checked| row.child(self.checkbox(checked)))
                             .child(
                                 div()
                                     .flex_1()
@@ -1157,6 +1318,8 @@ impl Renderer<'_> {
                 height,
             } => image_element(url, alt, width, height, style),
             Block::Rule => div().h(px(1.)).bg(style.separator).into_any_element(),
+            // Only at the start of a list item.
+            Block::Task(checked) => self.checkbox(checked),
         }
     }
 
@@ -1324,13 +1487,15 @@ pub(crate) fn render_markdown_with_links(
     on_link: Option<LinkHandler>,
     cx: &App,
 ) -> AnyElement {
-    let blocks = parse(markdown, codicons::codicons_available(cx));
+    let icons_available = codicons::codicons_available(cx);
+    let blocks = parse(markdown, icons_available);
     let registry = crate::model::language_registry(cx);
     let mut renderer = Renderer {
         style,
         theme,
         registry: &registry,
         trusted: markdown.is_trusted,
+        icons_available,
         next_id: 0,
         on_link,
     };
@@ -1397,14 +1562,40 @@ mod tests {
             .unwrap_or_default()
     }
 
-    #[test]
-    fn openable_links() {
-        assert!(is_openable("https://example.com"));
-        assert!(is_openable("HTTP://example.com"));
-        assert!(is_openable("mailto:someone@example.com"));
-        assert!(!is_openable("command:editor.action.format"));
-        assert!(!is_openable("javascript:alert(1)"));
-        assert!(!is_openable("file:///etc/passwd"));
+    /// Monaco's default openers: web and mail links open in the browser,
+    /// `command:` links run only for trusted strings, and other links
+    /// need an editor (Monaco's `EditorOpener`).
+    #[gpui::test]
+    fn default_openers(cx: &mut gpui::TestAppContext) {
+        let ran = std::rc::Rc::new(std::cell::Cell::new(0));
+        let sink = ran.clone();
+        cx.update(|cx| {
+            let _command =
+                crate::register_command(cx, "test.run", move |_, _| sink.set(sink.get() + 1));
+        });
+        for (url, opened) in [
+            ("https://example.com", Some("https://example.com")),
+            ("HTTP://example.com/x", Some("HTTP://example.com/x")),
+            (
+                "mailto:someone@example.com",
+                Some("mailto:someone@example.com"),
+            ),
+            ("javascript:alert(1)", None),
+            ("file:///etc/passwd", None),
+        ] {
+            let before = cx.opened_url();
+            cx.update(|cx| open_link(url, false, None, cx));
+            let after = cx.opened_url();
+            assert_eq!(
+                (after != before).then_some(after).flatten().as_deref(),
+                opened,
+                "{url}"
+            );
+        }
+        cx.update(|cx| open_link("command:test.run", false, None, cx));
+        assert_eq!(ran.get(), 0);
+        cx.update(|cx| open_link("command:test.run", true, None, cx));
+        assert_eq!(ran.get(), 1);
     }
 
     /// Monaco `openLinkFromMarkdown`: every clicked link goes through the
@@ -1427,7 +1618,7 @@ mod tests {
                 "internal:x",
                 "x-unhandled:y",
             ] {
-                open_link(url, false, cx);
+                open_link(url, false, None, cx);
             }
         });
         assert_eq!(
@@ -1692,6 +1883,91 @@ mod tests {
                 height: None
             }
         );
+    }
+
+    /// Monaco's `.rendered-markdown kbd`: keycaps, numbered apart.
+    #[test]
+    fn kbd_is_a_keycap() {
+        let markdown = MarkdownString::new("<kbd>Ctrl</kbd><kbd>K</kbd> or `x`").with_html(true);
+        let result = parse(&markdown, true);
+        let inline = paragraph(&result[0]);
+        let pad = KBD_PADDING;
+        assert_eq!(
+            inline.text,
+            format!("{pad}Ctrl{pad}{pad}K{pad} or \u{2004}x\u{2004}")
+        );
+        let ctrl = style_at(inline, pad.len());
+        assert_eq!((ctrl.kbd, ctrl.code), (1, false));
+        let k = style_at(inline, format!("{pad}Ctrl{pad}{pad}").len());
+        assert_eq!(k.kbd, 2);
+        let code = style_at(inline, inline.text.len() - 2);
+        assert_eq!((code.kbd, code.code), (0, true));
+    }
+
+    /// GFM task lists (marked's checkboxes) without their `[ ]` text.
+    #[test]
+    fn task_lists() {
+        let result = blocks("- [ ] todo\n- [x] done\n- plain");
+        let [Block::List { items, .. }] = result.as_slice() else {
+            panic!("{result:?}")
+        };
+        assert_eq!(items[0][0], Block::Task(false));
+        assert_eq!(text(paragraph(&items[0][1])), "todo");
+        assert_eq!(items[1][0], Block::Task(true));
+        assert_eq!(text(paragraph(&items[1][1])), "done");
+        assert_eq!(text(paragraph(&items[2][0])), "plain");
+    }
+
+    /// Monaco `renderCodeBlock`: an unlabeled block is in the editor's
+    /// language; a named one in the language with that name, if any.
+    #[gpui::test]
+    fn unlabeled_code_blocks_use_the_editor_language(cx: &mut gpui::TestAppContext) {
+        let colors = crate::theme::EditorColors::vs_dark();
+        let style = MarkdownStyle {
+            foreground: colors.foreground,
+            link: colors.text_link_foreground,
+            code_background: colors.text_code_block_background,
+            code_corner_radius: px(0.),
+            code_font: "Menlo".into(),
+            font_size: px(13.),
+            line_height: 1.4,
+            separator: colors.text_separator_foreground,
+            quote_background: None,
+            quote_border: colors.text_block_quote_border,
+            code_language: Some("rust".into()),
+        };
+        let theme = Theme::vs_dark();
+        let registry = cx.update(|cx| crate::model::language_registry(cx));
+        let renderer = Renderer {
+            style: &style,
+            theme: &theme,
+            registry: &registry,
+            trusted: false,
+            icons_available: false,
+            next_id: 0,
+            on_link: None,
+        };
+        assert_eq!(renderer.code_block_language(None), Some("rust".into()));
+        // No such language registered: plain text.
+        assert_eq!(renderer.code_block_language(Some("nope")), None);
+        let style = MarkdownStyle {
+            code_language: None,
+            ..style.clone()
+        };
+        let renderer = Renderer {
+            style: &style,
+            ..renderer
+        };
+        assert_eq!(renderer.code_block_language(None), None);
+
+        // The editor's widgets render with its model's language.
+        use gpui::AppContext as _;
+        let (editor, cx) = cx.add_window_view(|window, cx| {
+            let model = cx.new(|_| crate::TextModel::new("").with_language("rust"));
+            CodeEditor::new(model, window, cx)
+        });
+        let language = editor.read_with(cx, |e, cx| e.markdown_style(cx).code_language);
+        assert_eq!(language, Some("rust".into()));
     }
 
     #[test]

@@ -27,30 +27,26 @@ fn target(model: &Entity<TextModel>, cx: &mut App) -> (ProviderTarget, ProviderC
     (model.into(), model.provider_context())
 }
 
-/// The model's links from every link provider, the first `resolve_count`
-/// of them resolved (Monaco `_executeLinkProvider`).
+/// The model's links (Monaco `_executeLinkProvider`, `getLinks`): the
+/// built-in URL links and every link provider's, merged as the editor
+/// merges them (a better-ranked provider's links replace those they
+/// overlap) and sorted by position; the first `resolve_count` are
+/// resolved.
 pub fn execute_link_provider(
     model: &Entity<TextModel>,
     resolve_count: usize,
     cx: &mut App,
 ) -> Task<Vec<DocumentLink>> {
-    let (model, context) = target(model, cx);
-    let providers = providers::link_providers(cx, model.clone());
-    let requests: Vec<_> = providers
-        .iter()
-        .map(|provider| provider.provide_links(&context, cx))
-        .collect();
+    let links = crate::links::get_links(model, cx);
     cx.spawn(async move |cx| {
-        let mut links: Vec<(usize, DocumentLink)> = Vec::new();
-        for (ix, request) in requests.into_iter().enumerate() {
-            if let Ok(found) = request.await {
-                links.extend(found.into_iter().map(|link| (ix, link)));
-            }
-        }
+        let links = links.await;
         let mut resolved = Vec::with_capacity(links.len());
-        for (n, (ix, link)) in links.into_iter().enumerate() {
+        for (n, (link, provider)) in links.into_iter().enumerate() {
+            // Monaco `Link.resolve`: a link with a url is resolved already.
             let resolve = (n < resolve_count && link.url.is_none())
-                .then(|| cx.update(|cx| providers[ix].resolve_link(&link, cx)))
+                .then(|| {
+                    provider.and_then(|provider| cx.update(|cx| provider.resolve_link(&link, cx)))
+                })
                 .flatten();
             match resolve {
                 Some(task) => resolved.push(task.await.unwrap_or(link)),

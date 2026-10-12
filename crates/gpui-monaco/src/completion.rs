@@ -1504,7 +1504,7 @@ impl CodeEditor {
             None => {
                 let editor = cx.entity().downgrade();
                 let theme = self.theme.clone();
-                let style = self.markdown_style();
+                let style = self.markdown_style(cx);
                 let options = self.options.suggest.clone();
                 let widget = cx.new(|cx| {
                     SuggestWidget::new(editor, state, theme, style, options, metrics, cx)

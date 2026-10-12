@@ -222,13 +222,11 @@ fn middle_click_opens_links(cx: &mut TestAppContext) {
     let (editor, cx) = setup("see https://a.io now", |_| {}, cx);
     let opened = Rc::new(RefCell::new(Vec::new()));
     let sink = opened.clone();
-    cx.update(|_, cx| {
-        cx.subscribe(&editor, move |_, event, _| {
-            if let CodeEditorEvent::OpenLink(url) = event {
-                sink.borrow_mut().push(url.to_string());
-            }
+    let _opener = cx.update(|_, cx| {
+        gpui_monaco::register_link_opener(cx, move |url, _| {
+            sink.borrow_mut().push(url.to_string());
+            true
         })
-        .detach()
     });
     paint(cx);
     let at = editor

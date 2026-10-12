@@ -54,6 +54,7 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
   - Transform regexes run on `fancy-regex`, translated from JavaScript, so exotic JavaScript syntax may not compile.
   - `/upcase` and `/downcase` ignore the locale (Monaco uses `toLocaleUpperCase`).
   - `$CURRENT_*` day and month names are English.
+- **Openers:** a followed link into the editor's own model moves the editor without asking the `register_editor_opener` openers, as go to definition does; Monaco asks them first. What nothing opens is still reported as `CodeEditorEvent::OpenLink` or `OpenLocation`, which Monaco doesn't have.
 - **Word-based suggestions:** the documents are the models registered with `register_model`.
 - **Suggestion memories:** they are kept in memory for the app's lifetime, not persisted, per window (Monaco's workspace storage) or, with `suggest.share_suggest_selections`, for every window (its profile storage). The same goes for the suggest widget's size and whether details are expanded.
 - **Suggest widget:** the details panel's text can't be selected, because GPUI has no selectable text, so copying from it (`suggestWidgetCopy`) copies the whole detail and documentation.

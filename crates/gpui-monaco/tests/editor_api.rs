@@ -997,7 +997,7 @@ fn global_openers(cx: &mut TestAppContext) {
         gpui_monaco::init(cx);
         register_definition_provider(cx, LanguageSelector::All, Definitions(vec![elsewhere]));
     });
-    let (editor, cx) = setup("https://handled.io https://other.io\nword", cx);
+    let (editor, cx) = setup("https://handled.io file:///nowhere.txt\nword", cx);
     let reported = record(
         &editor,
         |e| {
@@ -1041,11 +1041,13 @@ fn global_openers(cx: &mut TestAppContext) {
     open_link_at(3, cx);
     assert_eq!(*links.borrow(), ["https://handled.io"]);
     assert!(reported.borrow().is_empty());
-    // Not opened: the editor reports it.
+    // A link to another model goes to the editor openers (Monaco's
+    // `EditorOpener`).
     open_link_at(22, cx);
+    assert!(reported.borrow().is_empty());
     assert_eq!(
-        reported.borrow().as_slice(),
-        [CodeEditorEvent::OpenLink("https://other.io".into())]
+        *opened.borrow(),
+        [("file:///nowhere.txt".to_string(), None)]
     );
 
     // Go to definition in another model.
@@ -1056,17 +1058,24 @@ fn global_openers(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert_eq!(
-        *opened.borrow(),
+        opened.borrow()[1..],
         [("file:///other.txt".to_string(), Some(p(3, 1)..p(3, 4)))]
     );
-    assert_eq!(reported.borrow().len(), 1);
-    // Without openers, the events again.
+    assert!(reported.borrow().is_empty());
+    // Without openers, the events again for what the editor can't open;
+    // web links open in the browser.
     cx.update(|_, cx| {
         link_opener.dispose(cx);
         editor_opener.dispose(cx);
     });
+    open_link_at(22, cx);
+    assert_eq!(
+        reported.borrow().as_slice(),
+        [CodeEditorEvent::OpenLink("file:///nowhere.txt".into())]
+    );
     open_link_at(3, cx);
-    assert_eq!(reported.borrow().len(), 2);
+    assert_eq!(reported.borrow().len(), 1);
+    assert_eq!(cx.opened_url().as_deref(), Some("https://handled.io"));
 }
 
 /// Monaco `createModel` and `setModelLanguage` take a MIME type too.

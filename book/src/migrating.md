@@ -155,7 +155,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `onDidChangeHiddenAreas`, `onDidChangeViewZones` | `HiddenAreasChanged` (after the next frame), `ViewZonesChanged` |
 | `onBeginUpdate` / `onEndUpdate` | `BeginUpdate` / `EndUpdate` |
 | `onDidChangeModelContent`, `onDidChangeModelDecorations`, `onDidChangeModelOptions`, `onDidChangeModelTokens`, `onDidChangeModelLanguageConfiguration` | `ModelContentChanged(ModelContentChange)`, `ModelDecorationsChanged`, `ModelOptionsChanged`, `ModelTokensChanged { ranges }`, `ModelLanguageConfigurationChanged` |
-| opener service | `OpenLocation(location)` and `OpenLink(url)`, for what no `register_editor_opener`/`register_link_opener` opener opened |
+| opener service | the editor opens web and mail links in the browser, runs `command:` links and follows links into its own model; `OpenLocation(location)` and `OpenLink(url)` report what no `register_editor_opener`/`register_link_opener` opener, nor the editor, opened |
 | `commandService.executeCommand` from providers | `ExecuteCommand(command)`, or `register_command` |
 
 ### Global events
@@ -208,7 +208,7 @@ Monaco's `monaco.languages.register…Provider(selector, provider)` functions be
 | `Location`, `LocationLink` | `Location`, with `origin_selection_range` and `target_selection_range` for a link |
 | `WorkspaceEdit` (text, file and snippet edits, `versionId`, `metadata`) | `WorkspaceEdit` with `edits`, `file_edits` (applied by `set_workspace_file_edit_handler`), `snippet_edits`, `versions` and `metadata` |
 | `editor.remeasureFonts` | `remeasure_fonts(cx)`, a no-op: GPUI measures text every frame |
-| `executeCommand('_executeLinkProvider', uri)`, `_executeSignatureHelpProvider`, `_executeSelectionRangeProvider`, `_executeCompletionItemProvider`, `_provideDocument(Range)SemanticTokens(Legend)` | `api_commands::execute_link_provider(&model, resolve_count, cx)` and the others, returning a `Task` with the providers' answers |
+| `executeCommand('_executeLinkProvider', uri)`, `_executeSignatureHelpProvider`, `_executeSelectionRangeProvider`, `_executeCompletionItemProvider`, `_provideDocument(Range)SemanticTokens(Legend)` | `api_commands::execute_link_provider(&model, resolve_count, cx)` (the built-in URL links included, merged and sorted as Monaco's `getLinks`) and the others, returning a `Task` with the providers' answers |
 | `editor.setColorMap`, `languages.getEncodedLanguageId`, `EncodedTokensProvider` | none: there are no encoded tokens; themes resolve token names |
 
 The `gpui-monaco-lsp` bridge registers these providers from a language server (see [Language servers](lsp.md)).

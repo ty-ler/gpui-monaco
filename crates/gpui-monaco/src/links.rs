@@ -1,17 +1,22 @@
 //! Links (Monaco's `contrib/links`): URLs found by the link computer and
 //! link providers are underlined; Cmd/Ctrl+hover highlights one and
-//! Cmd/Ctrl+click follows it: the host's link openers get it, else the
-//! editor emits [`CodeEditorEvent::OpenLink`](crate::CodeEditorEvent::OpenLink).
+//! Cmd/Ctrl+click follows it: the host's link openers get it, else web and
+//! mail links open in the browser, `command:` links run and links into the
+//! model select their `#L<line>,<col>` fragment, as Monaco's opener service
+//! does; the editor emits
+//! [`CodeEditorEvent::OpenLink`](crate::CodeEditorEvent::OpenLink) for
+//! what nothing opened.
 
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{App, Context, SharedString, Task};
+use gpui::{App, Context, Entity, SharedString, Task};
 use text::PointUtf16;
 
 use crate::decorations::{DecorationId, DecorationOptions};
 use crate::editor::CodeEditor;
+use crate::model::TextModel;
 use crate::options::MultiCursorModifier;
 use crate::providers::{DocumentLink, LinkProvider, MarkdownString, link_providers};
 use crate::theme::TokenStyle;
@@ -28,25 +33,37 @@ struct Occurrence {
     provider: Option<Arc<dyn LinkProvider>>,
 }
 
+/// What the links were computed from: the text, the language and the
+/// providers (Monaco recomputes on content, language and provider
+/// changes).
+#[derive(Clone, PartialEq)]
+struct LinksKey {
+    version: text::Version,
+    language: Option<SharedString>,
+    /// The link providers, by address.
+    providers: Vec<usize>,
+}
+
 #[derive(Default)]
 pub(crate) struct LinksState {
     occurrences: Vec<Occurrence>,
-    /// The text version the links were computed for.
-    version: Option<text::Version>,
-    /// The version being computed.
-    pending: Option<text::Version>,
+    /// What the links were computed for.
+    key: Option<LinksKey>,
+    /// What's being computed.
+    pending: Option<LinksKey>,
     task: Option<Task<()>>,
     /// The link Cmd/Ctrl is held over.
     active: Option<DecorationId>,
     resolve: Option<Task<()>>,
 }
 
+/// A link and the provider that can resolve it (`None` for the link
+/// computer's).
+pub(crate) type ProvidedLink = (DocumentLink, Option<Arc<dyn LinkProvider>>);
+
 /// Monaco `LinksList._union`: links from `new` replace the old ones they
 /// overlap or touch.
-fn union(
-    old: Vec<(DocumentLink, Option<Arc<dyn LinkProvider>>)>,
-    new: Vec<(DocumentLink, Option<Arc<dyn LinkProvider>>)>,
-) -> Vec<(DocumentLink, Option<Arc<dyn LinkProvider>>)> {
+fn union(old: Vec<ProvidedLink>, new: Vec<ProvidedLink>) -> Vec<ProvidedLink> {
     let touching =
         |a: &Range<PointUtf16>, b: &Range<PointUtf16>| a.start <= b.end && b.start <= a.end;
     let mut result = Vec::with_capacity(old.len() + new.len());
@@ -64,6 +81,60 @@ fn union(
     result.extend(old);
     result.extend(new);
     result
+}
+
+/// Monaco `getLinks`: the model's links from the link computer (Monaco's
+/// built-in `*` link provider, ranked below every registered one) and
+/// each link provider, worst-ranked first, each list replacing the links
+/// it overlaps or touches, so the best-ranked provider wins. The link
+/// computer runs off the main thread, alongside the providers.
+pub(crate) fn get_links(model: &Entity<TextModel>, cx: &mut App) -> Task<Vec<ProvidedLink>> {
+    let rope = model.read(cx).buffer().rope().clone();
+    let computed = cx.background_executor().spawn(async move {
+        let text = rope.to_string();
+        crate::link_computer::compute_links(text.split('\n'))
+    });
+    let context = model.read(cx).provider_context();
+    // `ordered(model).reverse()`.
+    let requests: Vec<_> = link_providers(cx, model.read(cx))
+        .into_iter()
+        .rev()
+        .map(|provider| {
+            let task = provider.provide_links(&context, cx);
+            (provider, task)
+        })
+        .collect();
+    // The providers' answers aren't `Send`: merged on the main thread.
+    cx.spawn(async move |_| {
+        let mut links: Vec<ProvidedLink> = computed
+            .await
+            .into_iter()
+            .map(|link| {
+                (
+                    DocumentLink {
+                        range: link.range,
+                        url: Some(link.url.into()),
+                        tooltip: None,
+                    },
+                    None,
+                )
+            })
+            .collect();
+        for (provider, task) in requests {
+            match task.await {
+                Ok(mut found) => {
+                    found.sort_by_key(|l| (l.range.start, l.range.end));
+                    let found = found
+                        .into_iter()
+                        .map(|link| (link, Some(provider.clone())))
+                        .collect();
+                    links = union(links, found);
+                }
+                Err(err) => log::warn!("links failed: {err:#}"),
+            }
+        }
+        links
+    })
 }
 
 impl CodeEditor {
@@ -111,8 +182,10 @@ impl CodeEditor {
         }
     }
 
-    /// Recomputes links when the text changed: right away the first time,
-    /// else after a pause in typing. Called before painting.
+    /// Recomputes links when the text, the language or the link providers
+    /// changed: after a pause in typing for an edit, right away otherwise
+    /// (Monaco's `computeLinks.schedule(0)` for a new model, language or
+    /// provider). Called before painting.
     pub(crate) fn refresh_links(&mut self, cx: &mut Context<Self>) {
         if !self.options.links {
             if !self.links.occurrences.is_empty() || self.links.task.is_some() {
@@ -121,89 +194,46 @@ impl CodeEditor {
             return;
         }
         let model = self.model().read(cx);
-        let version = model.buffer().version();
-        if self.links.version.as_ref() == Some(&version)
-            || self.links.pending.as_ref() == Some(&version)
-        {
+        let key = LinksKey {
+            version: model.buffer().version(),
+            language: model.language_id().cloned(),
+            providers: link_providers(cx, model)
+                .iter()
+                .map(|provider| Arc::as_ptr(provider) as *const () as usize)
+                .collect(),
+        };
+        if self.links.key.as_ref() == Some(&key) || self.links.pending.as_ref() == Some(&key) {
             return;
         }
-        let delay = if self.links.version.is_some() {
+        // Only an edit waits; a pending one restarts after the delay, so
+        // typing doesn't rescan the text on every keystroke.
+        let edited = |k: &LinksKey| k.version != key.version;
+        let delay = if self.links.key.as_ref().is_some_and(edited)
+            || self.links.pending.as_ref().is_some_and(edited)
+        {
             RECOMPUTE_DELAY
         } else {
             Duration::ZERO
         };
-        let rope = model.buffer().rope().clone();
-        self.links.pending = Some(version);
+        self.links.pending = Some(key.clone());
         self.links.task = Some(cx.spawn(async move |this, cx| {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
             }
-            // The link computer runs off the main thread.
-            let computed = cx
-                .background_executor()
-                .spawn(async move {
-                    let text = rope.to_string();
-                    crate::link_computer::compute_links(text.split('\n'))
-                })
-                .await;
-            let Ok(requests) = this.update(cx, |this, cx| {
-                let context = this.model().read(cx).provider_context();
-                // Monaco `getLinks`: `ordered(model).reverse()`, so the
-                // best-ranked provider's links win.
-                link_providers(cx, this.provider_target(cx))
-                    .into_iter()
-                    .rev()
-                    .map(|provider| {
-                        let task = provider.provide_links(&context, cx);
-                        (provider, task)
-                    })
-                    .collect::<Vec<_>>()
-            }) else {
+            let Ok(links) = this.update(cx, |this, cx| get_links(&this.model().clone(), cx)) else {
                 return;
             };
-            // Monaco: the built-in links first (lowest priority), then each
-            // provider's, later ones replacing those they overlap.
-            let mut links: Vec<(DocumentLink, Option<Arc<dyn LinkProvider>>)> = computed
-                .into_iter()
-                .map(|link| {
-                    (
-                        DocumentLink {
-                            range: link.range,
-                            url: Some(link.url.into()),
-                            tooltip: None,
-                        },
-                        None,
-                    )
-                })
-                .collect();
-            for (provider, task) in requests {
-                match task.await {
-                    Ok(mut found) => {
-                        found.sort_by_key(|l| (l.range.start, l.range.end));
-                        let found = found
-                            .into_iter()
-                            .map(|link| (link, Some(provider.clone())))
-                            .collect();
-                        links = union(links, found);
-                    }
-                    Err(err) => log::warn!("links failed: {err:#}"),
-                }
-            }
-            this.update(cx, |this, cx| this.set_links(links, version, cx))
+            let links = links.await;
+            this.update(cx, |this, cx| this.set_links(links, key, cx))
                 .ok();
         }));
     }
 
-    fn set_links(
-        &mut self,
-        links: Vec<(DocumentLink, Option<Arc<dyn LinkProvider>>)>,
-        version: text::Version,
-        cx: &mut Context<Self>,
-    ) {
+    fn set_links(&mut self, links: Vec<ProvidedLink>, key: LinksKey, cx: &mut Context<Self>) {
         let model = self.model().clone();
         let buffer = model.read(cx).buffer();
         // Links computed for an older text are moved through the edits since.
-        let patch = (buffer.version() != version).then(|| buffer.edits_since(version));
+        let patch = (buffer.version() != key.version).then(|| buffer.edits_since(key.version));
         let rope = buffer.rope().clone();
         let decorations: Vec<_> = links
             .iter()
@@ -241,7 +271,7 @@ impl CodeEditor {
             })
             .collect();
         self.links.active = None;
-        self.links.version = Some(version);
+        self.links.key = Some(key);
         self.links.pending = None;
         self.links.task = None;
         cx.notify();
@@ -335,8 +365,9 @@ impl CodeEditor {
         }
     }
 
-    /// Monaco `openLinkOccurrence`: resolves the link if needed, then asks
-    /// the host to open it.
+    /// Monaco `openLinkOccurrence`: resolves the link if needed, then opens
+    /// it through the opener service, `command:` links included
+    /// (`allowCommands: true`).
     fn open_link_occurrence(&mut self, ix: usize, cx: &mut Context<Self>) {
         let occurrence = &self.links.occurrences[ix];
         if let Some(url) = occurrence.link.url.clone() {
@@ -361,7 +392,7 @@ impl CodeEditor {
         }));
     }
 
-    /// Offers the link to the link openers, else emits
+    /// Opens the link with [`crate::openers::open_url`], else emits
     /// [`CodeEditorEvent::OpenLink`](crate::CodeEditorEvent::OpenLink),
     /// resolving `file://./relative` links against a `file://` model's
     /// directory as Monaco does.
@@ -385,7 +416,7 @@ impl CodeEditor {
             }
             _ => url,
         };
-        self.open_link_with_openers(url, cx);
+        self.open_link_with_openers(url, true, cx);
     }
 
     /// The links found, with their current ranges (for tests).
