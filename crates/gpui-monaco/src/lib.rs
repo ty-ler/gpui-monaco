@@ -183,6 +183,8 @@ pub use languages::{
     set_language_configuration, set_monarch_tokens_provider, set_tokens_provider,
 };
 pub use layout_info::{LayoutInfo, MinimapLayoutInfo, OverviewRulerPosition, RenderMinimap};
+#[doc(hidden)]
+pub use markers::MarkerZoneState;
 pub use markers::{
     Marker, MarkerFilter, MarkerSeverity, MarkerTag, MarkerZone, ModelMarker, RelatedInformation,
     model_markers, remove_all_markers,

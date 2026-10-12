@@ -66,4 +66,6 @@ Unlike `model.markers()`, `model_markers` returns markers as they were set, as M
 
 ## Navigation
 
-F8 and Shift+F8 (`GoToNextMarker` and `GoToPreviousMarker`) move to the next or previous problem. They show it in an inline zone below the line with "1 of 3 problems", the message and its related information. Escape closes the zone.
+F8 and Shift+F8 (`GoToNextMarker` and `GoToPreviousMarker`) move to the next or previous problem. They show it in an inline zone below the line with "1 of 3 problems", the message and its related information, scrolled into view. Escape closes the zone.
+
+As in Monaco, they visit errors, warnings and infos (not hints), most severe first and then by position. The first move takes the marker under the cursor, or the next one; later moves step through the list, so markers starting at the same place are each visited. When the host changes the markers while the zone is open, it shows the marker now at its place, or fades to italic when there's none.

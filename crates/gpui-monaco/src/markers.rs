@@ -341,6 +341,38 @@ impl TextModel {
         all.sort_by_key(|m| (m.range.start, std::cmp::Reverse(m.severity)));
         all
     }
+
+    /// The markers F8 visits (Monaco `MarkerList`): errors, warnings and
+    /// infos, not hints, most severe first and then by range (Monaco's
+    /// `problems.sortOrder: 'severity'`, as standalone Monaco has no such
+    /// setting). Ranges follow edits; an empty one stays empty (not widened
+    /// as its decoration is).
+    pub(crate) fn navigable_markers(&self) -> Vec<Marker> {
+        let buffer = self.buffer();
+        let mut all: Vec<Marker> = self
+            .markers
+            .by_owner
+            .iter()
+            .flat_map(|(_, markers, ids)| markers.iter().zip(ids))
+            .filter(|(marker, _)| marker.severity >= MarkerSeverity::Info)
+            .map(|(marker, id)| {
+                let mut marker = marker.clone();
+                if let Some(decoration) = self.decoration(*id) {
+                    let start = buffer.offset_to_point_utf16(decoration.range.start);
+                    let end = if marker.range.is_empty() {
+                        start
+                    } else {
+                        buffer.offset_to_point_utf16(decoration.range.end)
+                    };
+                    marker.range = start..end;
+                }
+                marker
+            })
+            .collect();
+        // Monaco `MarkerSeverity.compare`, then `compareRangesUsingStarts`.
+        all.sort_by_key(|m| (std::cmp::Reverse(m.severity), m.range.start, m.range.end));
+        all
+    }
 }
 
 /// Monaco `IMarker`: a marker with its owner and the uri of its model.
@@ -432,6 +464,23 @@ const MAX_BODY_LINES: usize = 17;
 /// information.
 pub struct MarkerZone {
     marker: Marker,
+    /// Monaco `_severity`: the frame, header and icon's, set when shown
+    /// (`updateMarker` leaves them, and the title).
+    severity: MarkerSeverity,
+    /// Where the zone shows: the cursor, if it's in the marker, or its start.
+    position: PointUtf16,
+    /// Monaco `showStale`: the markers changed and none is at the zone's
+    /// position any more.
+    stale: bool,
+    /// Monaco `MessageWidget.getAriaLabel`, the message's label.
+    aria_label: SharedString,
+    /// Monaco's `tabIndex = 0` body.
+    focus_handle: gpui::FocusHandle,
+    /// Whether the body had focus at the last render.
+    body_focused: bool,
+    /// Monaco `showAtMarker`'s `revealPositionInCenterIfOutsideViewport`,
+    /// run once the zone is laid out, after `ZoneWidget.show`'s reveal.
+    reveal: Option<PointUtf16>,
     index: usize,
     total: usize,
     /// The model's uri, for the title and same-file related information.
@@ -501,12 +550,25 @@ impl MarkerZone {
 }
 
 impl Render for MarkerZone {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.body_focused = self.focus_handle.is_focused(window);
+        // The second of Monaco's two reveals, from where the first left the
+        // scroll position.
+        if let Some(position) = self.reveal.take() {
+            let editor = self.editor.clone();
+            cx.defer(move |cx| {
+                editor
+                    .update(cx, |editor, cx| {
+                        editor.reveal_position_in_center_if_outside_viewport(position, cx)
+                    })
+                    .ok();
+            });
+        }
         let colors = self.colors.clone();
         // Monaco `editorMarkerNavigation{Error,Warning,Info}.background` and
         // `.headerBackground`.
-        let (frame, header_background) = colors.marker_navigation_colors(self.marker.severity);
-        let icon = colors.marker_color(self.marker.severity);
+        let (frame, header_background) = colors.marker_navigation_colors(self.severity);
+        let icon = colors.marker_color(self.severity);
         let line_height = self.line_height;
         // Monaco: the arrow is a third of a line tall, under the marker.
         let arrow_height = (line_height / 3.).round();
@@ -516,7 +578,7 @@ impl Render for MarkerZone {
             .and_then(|editor| {
                 let editor = editor.read(cx);
                 let left = editor.layout.as_ref()?.bounds.left();
-                let position = editor.scrolled_visible_position(self.marker.range.start)?;
+                let position = editor.scrolled_visible_position(self.position)?;
                 Some(position.x - left)
             })
             .unwrap_or(px(30.));
@@ -539,7 +601,14 @@ impl Render for MarkerZone {
             .map(str::to_string)
             .collect();
         let last = lines.len() - 1;
-        let mut message = div().flex().flex_col();
+        // Monaco's `.message`: `role="alert"` (whose live region is
+        // assertive, Monaco's `aria-live`), labelled for screen readers.
+        let mut message = div()
+            .id("marker-message")
+            .role(gpui::Role::Alert)
+            .aria_label(self.aria_label.clone())
+            .flex()
+            .flex_col();
         for (ix, line) in lines.into_iter().enumerate() {
             let mut row = div().h(line_height).flex().whitespace_nowrap().child(line);
             if ix == last && (self.marker.source.is_some() || self.marker.code.is_some()) {
@@ -606,7 +675,7 @@ impl Render for MarkerZone {
             .child(
                 div()
                     .text_color(icon)
-                    .child(codicon(Self::severity_icon(self.marker.severity))),
+                    .child(codicon(Self::severity_icon(self.severity))),
             )
             .when(!title.is_empty(), |this| {
                 this.child(
@@ -645,6 +714,9 @@ impl Render for MarkerZone {
         // since lines don't wrap.
         let body = div()
             .id("marker-body")
+            // Monaco `.marker-widget`: `tabIndex = 0`, `role="tooltip"`.
+            .track_focus(&self.focus_handle)
+            .role(gpui::Role::Tooltip)
             .flex_1()
             .min_h_0()
             .overflow_scroll()
@@ -663,6 +735,8 @@ impl Render for MarkerZone {
                     .pl(px(20.))
                     .flex()
                     .flex_col()
+                    // Monaco `.marker-widget > .stale`.
+                    .when(self.stale, |this| this.opacity(0.6).italic())
                     .child(message)
                     .children(related),
             );
@@ -713,10 +787,100 @@ impl Render for MarkerZone {
     }
 }
 
+/// Monaco `Range.containsPosition`: both ends included.
+fn contains(range: &Range<PointUtf16>, position: PointUtf16) -> bool {
+    range.start <= position && position <= range.end
+}
+
+/// Monaco `MessageWidget.getAriaLabel`: `"<line>, Error: msg at 3:5. "`.
+fn aria_label(model: &TextModel, marker: &Marker) -> SharedString {
+    let severity = match marker.severity {
+        MarkerSeverity::Error => "Error",
+        MarkerSeverity::Warning => "Warning",
+        MarkerSeverity::Info => "Info",
+        MarkerSeverity::Hint => "Hint",
+    };
+    let start = marker.range.start;
+    let label = format!(
+        "{severity}: {} at {}:{}. ",
+        marker.message,
+        start.row + 1,
+        start.column + 1
+    );
+    if start.row < model.line_count() {
+        format!("{}, {label}", model.line_content(start.row)).into()
+    } else {
+        label.into()
+    }
+}
+
+/// Monaco `MarkerList` for the editor's model: the markers F8 visits and
+/// the one shown.
+struct MarkerList {
+    markers: Vec<Marker>,
+    /// Monaco `_nextIdx`, `None` for `-1`: the next move starts from the
+    /// cursor.
+    next: Option<usize>,
+}
+
+impl MarkerList {
+    fn selected(&self) -> Option<&Marker> {
+        self.markers.get(self.next?)
+    }
+
+    /// Monaco `MarkerList.move`: the first move takes the marker at or
+    /// after `position` (before it, backwards), later ones step, so
+    /// markers starting at the same place are each visited.
+    fn step(&mut self, forward: bool, model: &TextModel, position: PointUtf16) {
+        let len = self.markers.len();
+        self.next = Some(match self.next {
+            None => self.initial_index(forward, model, position),
+            Some(ix) if forward => (ix + 1) % len,
+            Some(ix) => (ix + len - 1) % len,
+        });
+    }
+
+    /// Monaco `_initIdx` in one model: the first marker, in severity
+    /// order, containing `position` (an empty one as its word) or after
+    /// it.
+    fn initial_index(&self, forward: bool, model: &TextModel, position: PointUtf16) -> usize {
+        let last = self.markers.len() - 1;
+        let found = self.markers.iter().enumerate().find_map(|(ix, marker)| {
+            let mut range = marker.range.clone();
+            if range.is_empty()
+                && let Some(word) = model.word_at_position(range.start)
+            {
+                range = word.range;
+            }
+            let inside = contains(&range, position);
+            (inside || position <= range.start).then_some((ix, !inside))
+        });
+        match found {
+            None if forward => 0,
+            None => last,
+            // Went past it: backwards, the one before.
+            Some((ix, true)) if !forward => ix.checked_sub(1).unwrap_or(last),
+            Some((ix, _)) => ix,
+        }
+    }
+}
+
+/// Monaco `MarkerController`'s session: from the first move until the zone
+/// closes.
 #[derive(Default)]
 pub(crate) struct MarkerNavigation {
     zone: Option<(Entity<MarkerZone>, WidgetId)>,
-    index: Option<usize>,
+    list: Option<MarkerList>,
+    /// Monaco `ZoneWidget.position`: where the zone shows, following edits.
+    position: Option<text::Anchor>,
+}
+
+/// Monaco `MarkerList`'s `updateMarker` comparison.
+fn same_markers(a: &[Marker], b: &[Marker]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(a, b)| a.range == b.range && a.severity == b.severity && a.message == b.message)
 }
 
 impl CodeEditor {
@@ -729,50 +893,79 @@ impl CodeEditor {
         }
     }
 
-    /// Moves to the next (or previous) marker and shows it below its line
-    /// (Monaco `editor.action.marker.next`, F8).
+    /// Moves to the next (or previous) error, warning or info and shows it
+    /// below its line (Monaco `editor.action.marker.next`, F8). Markers go
+    /// most severe first, then by position; the first move takes the one
+    /// at the cursor.
     pub fn go_to_marker(&mut self, next: bool, cx: &mut Context<Self>) {
-        let markers = self.model().read(cx).markers();
+        let model = self.model().clone();
+        let model = model.read(cx);
+        let markers = model.navigable_markers();
         if markers.is_empty() {
-            self.close_marker_zone(cx);
             return;
         }
+        let list = self.marker_navigation.list.get_or_insert(MarkerList {
+            markers: Vec::new(),
+            next: None,
+        });
+        // Ranges follow edits; other changes reset the list when they come.
+        if list.markers.len() != markers.len() {
+            list.next = None;
+        }
+        list.markers = markers;
         let head = self.cursors.primary().position;
-        let index = if next {
-            markers
-                .iter()
-                .position(|m| m.range.start > head)
-                .unwrap_or(0)
-        } else {
-            markers
-                .iter()
-                .rposition(|m| m.range.start < head)
-                .unwrap_or(markers.len() - 1)
-        };
-        self.show_marker_at(markers, index, cx);
+        list.step(next, model, head);
+        if let Some(index) = list.next {
+            self.show_marker_at(index, cx);
+        }
     }
 
     /// Selects `marker` and shows it in the marker zone (Monaco's "View
-    /// Problem" hover action).
+    /// Problem" hover action). A hint shows the marker F8 would go to from
+    /// its start.
     pub fn show_marker(&mut self, marker: &Marker, cx: &mut Context<Self>) {
-        let markers = self.model().read(cx).markers();
-        let index = markers.iter().position(|m| m == marker).or_else(|| {
-            markers
-                .iter()
-                .position(|m| m.range.start == marker.range.start && m.message == marker.message)
-        });
+        let model = self.model().clone();
+        let model = model.read(cx);
+        let markers = model.navigable_markers();
+        if markers.is_empty() {
+            return;
+        }
+        let same = |m: &Marker| {
+            m.range.start == marker.range.start
+                && m.severity == marker.severity
+                && m.message == marker.message
+        };
+        let mut list = MarkerList {
+            next: markers.iter().position(same),
+            markers,
+        };
+        if list.next.is_none() {
+            list.step(true, model, marker.range.start);
+        }
+        let index = list.next;
+        self.marker_navigation.list = Some(list);
         if let Some(index) = index {
-            self.show_marker_at(markers, index, cx);
+            self.show_marker_at(index, cx);
         }
     }
 
-    fn show_marker_at(&mut self, markers: Vec<Marker>, index: usize, cx: &mut Context<Self>) {
-        let marker = markers[index].clone();
-        self.close_marker_zone(cx);
-        self.set_selections(
-            &[crate::cursor::Selection::collapsed(marker.range.start)],
-            cx,
-        );
+    /// Monaco `MarkerNavigationWidget.showAtMarker`.
+    fn show_marker_at(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(list) = &self.marker_navigation.list else {
+            return;
+        };
+        let marker = list.markers[index].clone();
+        let total = list.markers.len();
+        // The cursor, if it's in the marker, else its start.
+        let head = self.cursors.primary().position;
+        let position = if contains(&marker.range, head) {
+            head
+        } else {
+            marker.range.start
+        };
+        self.remove_marker_zone(cx);
+        // `ZoneWidget.show` selects the position.
+        self.set_selections(&[crate::cursor::Selection::collapsed(position)], cx);
         // Monaco `ZoneWidget._getMaximumHeightInLines`: 80% of the editor,
         // at least 12 lines.
         let line_height = self.options.resolved_line_height();
@@ -782,11 +975,26 @@ impl CodeEditor {
         let max_lines = (editor_lines * 0.8).max(12.);
         let lines = MarkerZone::required_height_in_lines(&marker).min(max_lines);
         let editor = cx.entity().downgrade();
-        let uri = self.model().read(cx).uri().cloned();
-        let zone = cx.new(|_| MarkerZone {
+        let model = self.model().read(cx);
+        let uri = model.uri().cloned();
+        let line_count = model.line_count();
+        let label = aria_label(model, &marker);
+        let anchor = {
+            let buffer = model.buffer();
+            let position = buffer.clip_point_utf16(position, text::Bias::Left);
+            buffer.anchor_before(buffer.point_utf16_to_offset(position))
+        };
+        let zone = cx.new(|cx| MarkerZone {
             marker: marker.clone(),
+            severity: marker.severity,
+            position,
+            stale: false,
+            aria_label: label.clone(),
+            focus_handle: cx.focus_handle(),
+            body_focused: false,
+            reveal: Some(position),
             index,
-            total: markers.len(),
+            total,
             uri,
             colors: self.theme.colors.clone(),
             font_family: self.options.font_family.clone(),
@@ -796,18 +1004,93 @@ impl CodeEditor {
             scroll: ScrollHandle::new(),
             bounds: Default::default(),
         });
-        let id = self.add_view_zone(
-            ViewZone::new(
-                marker.range.start.row + 1,
-                ZoneHeight::Lines(lines),
-                zone.clone().into(),
-            ),
-            cx,
+        // Monaco `ViewZoneDelegate`: after the position's line and column.
+        let mut view_zone = ViewZone::new(
+            position.row + 1,
+            ZoneHeight::Lines(lines),
+            zone.clone().into(),
         );
+        view_zone.after_column = Some(position.column);
+        let id = self.add_view_zone(view_zone, cx);
         // A zone widget in Monaco, outside the scrollable element.
         self.widgets.set_zone_captures_wheel(id);
         self.marker_navigation.zone = Some((zone, id));
-        self.marker_navigation.index = Some(index);
+        self.marker_navigation.position = Some(anchor);
+        // `ZoneWidget.show` reveals the line and the zone under it (the last
+        // line near the top); the zone then reveals the position.
+        if position.row + 1 >= line_count {
+            self.reveal_line_near_top(position.row, cx);
+        } else {
+            self.reveal_range(
+                PointUtf16::new(position.row, 0)..PointUtf16::new(position.row + 1, 0),
+                crate::RevealType::Simple,
+                cx,
+            );
+        }
+        // Monaco `MessageWidget.update`'s `aria.status`.
+        self.announce(label, cx);
+        // And `showAtMarker` focuses the editor.
+        self.refocus = true;
+    }
+
+    /// Monaco `MarkerController`'s cursor listener: moving off the shown
+    /// marker makes the next move start from the cursor again.
+    pub(crate) fn marker_navigation_cursor_moved(&mut self, position: PointUtf16) {
+        if let Some(list) = &mut self.marker_navigation.list
+            && !list
+                .selected()
+                .is_some_and(|m| contains(&m.range, position))
+        {
+            list.next = None;
+        }
+    }
+
+    /// Monaco `MarkerController`'s marker listener: when the markers
+    /// change, the zone shows the marker now at its position, or turns
+    /// stale (faded and italic) when there's none.
+    pub(crate) fn marker_navigation_markers_changed(&mut self, cx: &mut Context<Self>) {
+        if self.marker_navigation.list.is_none() {
+            return;
+        }
+        let model = self.model().clone();
+        let model = model.read(cx);
+        let navigation = &mut self.marker_navigation;
+        let Some(list) = &mut navigation.list else {
+            return;
+        };
+        let markers = model.navigable_markers();
+        if same_markers(&list.markers, &markers) {
+            return;
+        }
+        list.markers = markers;
+        list.next = None;
+        let (Some((zone, _)), Some(anchor)) = (&navigation.zone, &navigation.position) else {
+            return;
+        };
+        let buffer = model.buffer();
+        let position = buffer.offset_to_point_utf16(buffer.resolve(anchor));
+        let found = list
+            .markers
+            .iter()
+            .find(|m| contains(&m.range, position))
+            .map(|marker| (marker.clone(), aria_label(model, marker)));
+        let zone = zone.clone();
+        let announce = found.as_ref().map(|(_, label)| label.clone());
+        zone.update(cx, |zone, cx| {
+            match found {
+                // Monaco `updateMarker`: the message only.
+                Some((marker, label)) => {
+                    zone.marker = marker;
+                    zone.aria_label = label;
+                    zone.stale = false;
+                }
+                None => zone.stale = true,
+            }
+            cx.notify();
+        });
+        if let Some(label) = announce {
+            self.announce(label, cx);
+        }
     }
 
     /// The marker zone's painted bounds, its height in lines and its body's
@@ -828,21 +1111,60 @@ impl CodeEditor {
         ))
     }
 
+    /// The marker zone's message, "1 of 2" (1-based), whether it's stale,
+    /// its message's accessible label and its body's focus handle, for
+    /// tests.
+    #[doc(hidden)]
+    pub fn marker_zone_state_for_tests(&self, cx: &App) -> Option<MarkerZoneState> {
+        let (zone, _) = self.marker_navigation.zone.as_ref()?;
+        let zone = zone.read(cx);
+        Some(MarkerZoneState {
+            message: zone.marker.message.clone(),
+            index: zone.index + 1,
+            total: zone.total,
+            stale: zone.stale,
+            aria_label: zone.aria_label.clone(),
+            focus_handle: zone.focus_handle.clone(),
+        })
+    }
+
     /// Whether the marker zone shows (Monaco `markersNavigationVisible`).
     pub(crate) fn is_marker_zone_visible(&self) -> bool {
         self.marker_navigation.zone.is_some()
     }
 
-    /// Closes the marker zone opened by [`CodeEditor::go_to_marker`]. Returns
-    /// whether one was open.
-    pub fn close_marker_zone(&mut self, cx: &mut Context<Self>) -> bool {
-        self.marker_navigation.index = None;
+    /// Removes the zone, keeping the session; the editor gets the focus
+    /// back from its body.
+    fn remove_marker_zone(&mut self, cx: &mut Context<Self>) -> bool {
+        self.marker_navigation.position = None;
         match self.marker_navigation.zone.take() {
-            Some((_, id)) => {
+            Some((zone, id)) => {
+                if zone.read(cx).body_focused {
+                    self.refocus = true;
+                }
                 self.remove_widget(id, cx);
                 true
             }
             None => false,
         }
     }
+
+    /// Closes the marker zone opened by [`CodeEditor::go_to_marker`]. Returns
+    /// whether one was open.
+    pub fn close_marker_zone(&mut self, cx: &mut Context<Self>) -> bool {
+        self.marker_navigation.list = None;
+        self.remove_marker_zone(cx)
+    }
+}
+
+/// What [`CodeEditor::marker_zone_state_for_tests`] reports.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct MarkerZoneState {
+    pub message: SharedString,
+    pub index: usize,
+    pub total: usize,
+    pub stale: bool,
+    pub aria_label: SharedString,
+    pub focus_handle: gpui::FocusHandle,
 }

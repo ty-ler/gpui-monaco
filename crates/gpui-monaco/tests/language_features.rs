@@ -125,33 +125,20 @@ fn markers_follow_edits_and_f8_navigates(cx: &mut TestAppContext) {
         m.markers().iter().map(|m| m.range.start.row).collect()
     });
     assert_eq!(rows, vec![2, 3]);
+    // Most severe first (Monaco `MarkerList`): the error, then the warning.
+    let head = |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.selections()[0].head);
     cx.simulate_keystrokes("f8");
-    assert_eq!(
-        editor.read_with(cx, |e, _| e.selections()[0].head),
-        PointUtf16::new(2, 0)
-    );
+    assert_eq!(head(cx), PointUtf16::new(3, 0));
     cx.simulate_keystrokes("f8");
-    assert_eq!(
-        editor.read_with(cx, |e, _| e.selections()[0].head),
-        PointUtf16::new(3, 0)
-    );
+    assert_eq!(head(cx), PointUtf16::new(2, 0));
     cx.simulate_keystrokes("shift-f8");
-    assert_eq!(
-        editor.read_with(cx, |e, _| e.selections()[0].head),
-        PointUtf16::new(2, 0)
-    );
+    assert_eq!(head(cx), PointUtf16::new(3, 0));
     // Monaco's `marker.next`/`prev` are on Alt+F8 (F8 is `nextInFiles`,
     // the same within one model).
     cx.simulate_keystrokes("alt-f8");
-    assert_eq!(
-        editor.read_with(cx, |e, _| e.selections()[0].head),
-        PointUtf16::new(3, 0)
-    );
+    assert_eq!(head(cx), PointUtf16::new(2, 0));
     cx.simulate_keystrokes("shift-alt-f8");
-    assert_eq!(
-        editor.read_with(cx, |e, _| e.selections()[0].head),
-        PointUtf16::new(2, 0)
-    );
+    assert_eq!(head(cx), PointUtf16::new(3, 0));
     model.update(cx, |m, cx| m.set_markers("lint", vec![], cx));
     assert!(model.read_with(cx, |m, _| m.markers().is_empty()));
 }

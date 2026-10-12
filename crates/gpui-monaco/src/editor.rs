@@ -2597,6 +2597,7 @@ impl CodeEditor {
             }
             TextModelEvent::MarkersChanged => {
                 self.schedule_auto_code_actions(cx);
+                self.marker_navigation_markers_changed(cx);
                 cx.notify();
             }
             TextModelEvent::LanguageConfigurationChanged => {
@@ -2847,6 +2848,7 @@ impl CodeEditor {
         if old.as_ref().is_some_and(|(old, _)| *old == selections) {
             return;
         }
+        self.marker_navigation_cursor_moved(selections[0].head);
         let (old_selections, old_model_version_id) = match old {
             Some((selections, version)) => (Some(selections), version),
             None => (None, 0),
