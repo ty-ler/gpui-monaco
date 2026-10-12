@@ -108,6 +108,7 @@ mod openers;
 pub mod options;
 pub mod outline;
 mod peek;
+mod pointer_capture;
 pub mod providers;
 pub mod quick_access;
 mod registry;

@@ -345,6 +345,12 @@ impl CodeEditor {
         &self.find
     }
 
+    /// The pointer the find widget shows over the whole window during a
+    /// drag of its sash.
+    pub(crate) fn find_widget_captured_cursor(&self, cx: &gpui::App) -> Option<gpui::CursorStyle> {
+        self.find_widget()?.read(cx).captured_cursor()
+    }
+
     fn find_widget(&self) -> Option<&Entity<FindWidget>> {
         self.find.widget.as_ref().map(|(widget, _)| widget)
     }

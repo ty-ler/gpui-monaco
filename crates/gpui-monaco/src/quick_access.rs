@@ -656,34 +656,18 @@ impl QuickInput {
     /// window, until the button is released.
     fn slider_drag_listener(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         self.slider_drag?;
-        let entity = cx.entity().downgrade();
+        // With the slider's arrow over the whole window (Monaco's pointer
+        // capture).
         Some(
-            gpui::canvas(
-                |_, _, _| (),
-                move |_, _, window, _| {
-                    let moved = entity.clone();
-                    window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
-                        if phase == gpui::DispatchPhase::Capture
-                            && let Some(entity) = moved.upgrade()
-                        {
-                            entity.update(cx, |this, cx| this.drag_slider(event.position.y, cx));
-                        }
-                    });
-                    let released = entity.clone();
-                    window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
-                        if phase == gpui::DispatchPhase::Capture
-                            && let Some(entity) = released.upgrade()
-                        {
-                            entity.update(cx, |this, cx| {
-                                this.slider_drag = None;
-                                cx.notify();
-                            });
-                        }
-                    });
+            crate::pointer_capture::capture(
+                cx.entity().downgrade(),
+                Some(gpui::CursorStyle::Arrow),
+                |this: &mut Self, event, cx| this.drag_slider(event.position.y, cx),
+                |this, cx| {
+                    this.slider_drag = None;
+                    cx.notify();
                 },
             )
-            .absolute()
-            .size_0()
             .into_any_element(),
         )
     }

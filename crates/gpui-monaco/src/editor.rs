@@ -667,6 +667,9 @@ pub struct CodeEditor {
     /// Scrolling while drag-selecting outside the text.
     drag_scroll: Option<DragScroll>,
     pub(crate) scrollbar_drag: Option<ScrollbarDrag>,
+    /// The pointers painted over the areas other than the text in the last
+    /// frame, for [`Self::mouse_cursor_at_for_tests`].
+    pub(crate) painted_cursor_areas: std::cell::RefCell<Vec<(MouseCursor, Bounds<Pixels>)>>,
     /// A held scrollbar arrow's repeat.
     scrollbar_arrow_task: Option<Task<()>>,
     blink_epoch: usize,
@@ -743,8 +746,12 @@ impl CodeEditor {
             cx.on_blur(&focus_handle, window, |this, _, cx| {
                 this.has_focus = false;
                 this.update_bracket_highlights(cx);
+                // Drags end, and the pointer they captured with them.
                 this.mouse_selection = None;
                 this.drag_scroll = None;
+                this.scrollbar_drag = None;
+                this.scrollbar_arrow_task = None;
+                this.minimap_drag = None;
                 this.dnd_cancel(cx);
                 this.message_blurred(cx);
                 cx.emit(CodeEditorEvent::Blurred);
@@ -876,6 +883,7 @@ impl CodeEditor {
             mouse_down_count: MouseDownCount::default(),
             drag_scroll: None,
             scrollbar_drag: None,
+            painted_cursor_areas: Default::default(),
             scrollbar_arrow_task: None,
             blink_epoch: 0,
             view_lines: Arc::new(ViewLines::new(snapshot.rope().clone(), snapshot.version())),
@@ -5237,11 +5245,19 @@ impl CodeEditor {
                 }
             }
         }
+        if self.scrollbar_arrow_task.is_some() && event.pressed_button.is_none() {
+            // Released where the window didn't see it.
+            self.scrollbar_arrow_task = None;
+            cx.notify();
+        }
         if self.scrollbar_drag.is_some() {
             if event.pressed_button == Some(MouseButton::Left) {
                 self.drag_scrollbar(event.position, cx);
             } else {
+                // Released where the window didn't see it: the pointer
+                // isn't captured any more.
                 self.scrollbar_drag = None;
+                cx.notify();
             }
             return;
         }
@@ -5275,6 +5291,7 @@ impl CodeEditor {
         if event.pressed_button != Some(button) {
             self.mouse_selection = None;
             self.drag_scroll = None;
+            cx.notify();
             return;
         }
         // Monaco `_onMouseDownThenMove`: the modifiers follow the mouse;
@@ -5291,12 +5308,102 @@ impl CodeEditor {
         self.dispatch_mouse(position, event.position, true, true, cx);
     }
 
+    /// The pointer for the whole window during a drag that started outside
+    /// the text: Monaco's `GlobalPointerMoveMonitor` captures the pointer on
+    /// the element the drag started on, so a scrollbar or minimap slider
+    /// drag, a held scrollbar arrow, or a line selection started on the
+    /// line numbers, keeps the arrow over the text, the minimap and outside
+    /// the editor until the button is released. A drag started on the text
+    /// captures nothing: the I-beam stays over the text and every other
+    /// area keeps its own pointer (see `PrepaintState::cursor_areas`).
+    pub(crate) fn drag_mouse_cursor(&self) -> Option<MouseCursor> {
+        (self.scrollbar_drag.is_some()
+            || self.scrollbar_arrow_task.is_some()
+            || self.minimap_drag.is_some()
+            || self
+                .mouse_selection
+                .as_ref()
+                .is_some_and(|drag| drag.started_on_line_numbers))
+        .then_some(MouseCursor::Arrow)
+    }
+
+    /// [`Self::drag_mouse_cursor`], for tests.
+    #[doc(hidden)]
+    pub fn drag_mouse_cursor_for_tests(&self) -> Option<MouseCursor> {
+        self.drag_mouse_cursor()
+    }
+
+    /// The pointer the editor and its widgets show over the whole window in
+    /// the last frame, during a drag that captured it: the editor's own
+    /// ([`Self::drag_mouse_cursor`]), the hover's, find widget's or color
+    /// picker's, else a GPUI drag's (the suggest widget's and peek view's
+    /// sashes and sliders). For tests: GPUI's test platform doesn't keep
+    /// the cursor.
+    #[doc(hidden)]
+    pub fn captured_cursor_for_tests(&self, cx: &App) -> Option<MouseCursor> {
+        self.drag_mouse_cursor()
+            .or_else(|| self.hover_captured_cursor(cx))
+            .or_else(|| self.find_widget_captured_cursor(cx))
+            .or_else(|| {
+                self.color_picker_for_tests(cx)
+                    .and_then(|picker| picker.read(cx).captured_cursor())
+            })
+            .or_else(|| cx.active_drag_cursor_style())
+    }
+
+    /// The pointer the editor's root shows (where no area or widget shows
+    /// its own): the I-beam (`mouseStyle`) for the text, a hand over a
+    /// link, or `mouseStyle` while dragging the selection.
+    pub(crate) fn root_mouse_cursor(&self) -> MouseCursor {
+        if self.dnd.target.is_some() || self.dnd.copy {
+            // Monaco's `mouseStyle` while dragging the selection.
+            if self.dnd.copy {
+                MouseCursor::DragCopy
+            } else {
+                MouseCursor::Arrow
+            }
+        } else if self.has_definition_link()
+            || self.has_active_link()
+            || self.has_active_inlay_hint_link()
+        {
+            MouseCursor::PointingHand
+        } else {
+            self.text_mouse_cursor()
+        }
+    }
+
+    /// The pointer the editor showed at `position` in the last frame: the
+    /// captured one during a drag, else the area's there (the gutter,
+    /// scrollbars, minimap, widgets, folding controls), else the root's.
+    /// `None` outside the editor. For tests: GPUI's test platform doesn't
+    /// keep the cursor.
+    #[doc(hidden)]
+    pub fn mouse_cursor_at_for_tests(&self, position: Point<Pixels>) -> Option<MouseCursor> {
+        if let Some(cursor) = self.drag_mouse_cursor() {
+            return Some(cursor);
+        }
+        let area = self
+            .painted_cursor_areas
+            .borrow()
+            .iter()
+            .rev()
+            .find(|(_, bounds)| bounds.contains(&position))
+            .map(|(cursor, _)| *cursor);
+        area.or_else(|| {
+            self.layout
+                .as_ref()
+                .filter(|layout| layout.bounds.contains(&position))
+                .map(|_| self.root_mouse_cursor())
+        })
+    }
+
     /// Whether a mouse drag that started in the editor is going on, so it
     /// follows the mouse anywhere in the window (Monaco's global pointer
     /// monitor).
     pub(crate) fn is_mouse_dragging(&self) -> bool {
         self.mouse_selection.is_some()
             || self.scrollbar_drag.is_some()
+            || self.scrollbar_arrow_task.is_some()
             || self.minimap_drag.is_some()
             || self.dnd.active
     }
@@ -5446,6 +5553,10 @@ impl CodeEditor {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The pointer goes back to each area's own.
+        if self.drag_mouse_cursor().is_some() {
+            cx.notify();
+        }
         self.scrollbar_arrow_task = None;
         self.sticky_mouse_up(event.position, event.button, event.modifiers, cx);
         let mut drop_target = None;
@@ -6120,21 +6231,7 @@ impl Render for CodeEditor {
                 )
             })
             .size_full()
-            .cursor(if self.dnd.target.is_some() || self.dnd.copy {
-                // Monaco's `mouseStyle` while dragging the selection.
-                if self.dnd.copy {
-                    MouseCursor::DragCopy
-                } else {
-                    MouseCursor::Arrow
-                }
-            } else if self.has_definition_link()
-                || self.has_active_link()
-                || self.has_active_inlay_hint_link()
-            {
-                MouseCursor::PointingHand
-            } else {
-                self.text_mouse_cursor()
-            });
+            .cursor(self.root_mouse_cursor());
         let root = move_action!(root, cx,
             CursorLeft => (MoveCommand::Left, false),
             CursorLeftSelect => (MoveCommand::Left, true),

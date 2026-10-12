@@ -675,6 +675,76 @@ fn resizing_from_the_full_edges(cx: &mut TestAppContext) {
     assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));
 }
 
+/// Monaco captures the pointer on a sash: its resize cursor stays over the
+/// whole window, off the sash and over the text, until the release (or a
+/// move without the button, the release having been missed).
+#[gpui::test]
+fn a_resize_keeps_the_sash_pointer_everywhere(cx: &mut TestAppContext) {
+    use gpui::CursorStyle;
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_hover_provider(cx, LanguageSelector::All, RangedHover(None));
+    });
+    let (editor, cx) = setup("alpha beta\n", |_| {}, cx);
+    show_at(&editor, cx, p(0, 1));
+    cx.run_until_parked();
+    paint(cx);
+    let captured =
+        |cx: &mut VisualTestContext| editor.read_with(cx, |e, cx| e.captured_cursor_for_tests(cx));
+    assert_eq!(captured(cx), None);
+    let before = card(&editor, cx);
+    let east = cx.debug_bounds("hover-resize-east").expect("east sash");
+    let from = gpui::point(east.center().x, before.top() + px(3.));
+    cx.simulate_mouse_move(from, None, Modifiers::default());
+    cx.simulate_mouse_down(from, gpui::MouseButton::Left, Modifiers::default());
+    paint(cx);
+    assert_eq!(captured(cx), Some(CursorStyle::ResizeLeftRight));
+    // Off the sash: over the card, the text, and outside the editor.
+    for to in [
+        before.center(),
+        gpui::point(px(5.), px(5.)),
+        from + gpui::point(px(60.), px(200.)),
+    ] {
+        cx.simulate_mouse_move(to, gpui::MouseButton::Left, Modifiers::default());
+        paint(cx);
+        assert_eq!(captured(cx), Some(CursorStyle::ResizeLeftRight));
+    }
+    cx.simulate_mouse_up(from, gpui::MouseButton::Left, Modifiers::default());
+    paint(cx);
+    assert_eq!(captured(cx), None);
+
+    // The south sash's `ns-resize`, given back by a move without the
+    // button.
+    let after = card(&editor, cx);
+    let south = cx.debug_bounds("hover-resize-south").expect("south sash");
+    let from = gpui::point(after.left() + px(10.), south.center().y);
+    cx.simulate_mouse_move(from, None, Modifiers::default());
+    cx.simulate_mouse_down(from, gpui::MouseButton::Left, Modifiers::default());
+    paint(cx);
+    cx.simulate_mouse_move(
+        gpui::point(px(5.), px(5.)),
+        gpui::MouseButton::Left,
+        Modifiers::default(),
+    );
+    paint(cx);
+    assert_eq!(captured(cx), Some(CursorStyle::ResizeUpDown));
+    cx.simulate_mouse_move(gpui::point(px(5.), px(5.)), None, Modifiers::default());
+    paint(cx);
+    assert_eq!(captured(cx), None);
+    assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));
+
+    // The hover closing mid-drag takes its capture with it.
+    let east = cx.debug_bounds("hover-resize-east").expect("east sash");
+    let from = east.center();
+    cx.simulate_mouse_move(from, None, Modifiers::default());
+    cx.simulate_mouse_down(from, gpui::MouseButton::Left, Modifiers::default());
+    paint(cx);
+    assert_eq!(captured(cx), Some(CursorStyle::ResizeLeftRight));
+    editor.update(cx, |e, cx| e.hide_hover(cx));
+    paint(cx);
+    assert_eq!(captured(cx), None);
+}
+
 #[gpui::test]
 fn rows_and_the_status_bar_span_the_card(cx: &mut TestAppContext) {
     let (editor, cx) = setup("let x = 1;\n", |_| {}, cx);

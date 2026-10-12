@@ -73,6 +73,8 @@ const CORNER_RADIUS_SMALL: f32 = 4.;
 const INPUT_RADIUS: f32 = 2.;
 const BUTTON_RADIUS: f32 = 5.;
 const TOGGLE_RADIUS: f32 = 3.;
+/// The sash's pointer (Monaco's vertical `Sash`: `ew-resize`).
+const SASH_CURSOR: gpui::CursorStyle = gpui::CursorStyle::ResizeLeftRight;
 /// The sash: Monaco's vertical `Sash` (`size: 2`), and a wider grab area.
 const SASH_SIZE: f32 = 2.;
 const SASH_HIT_SIZE: f32 = 4.;
@@ -1053,6 +1055,12 @@ impl FindWidget {
         }
     }
 
+    /// The pointer over the whole window while the sash is dragged
+    /// (Monaco's pointer capture on the sash).
+    pub(crate) fn captured_cursor(&self) -> Option<gpui::CursorStyle> {
+        self.resize.map(|_| SASH_CURSOR)
+    }
+
     /// The widget's layout in the last frame, for tests: (width, input
     /// width, reduced, narrow, collapsed).
     pub(crate) fn layout_for_tests(&self) -> (Pixels, Pixels, bool, bool, bool) {
@@ -1543,17 +1551,17 @@ impl Render for FindWidget {
         // Monaco's sash: dragging the left edge resizes the widget; a
         // double click switches between the initial and widest widths
         // (`onDidReset`). Drawn in `editorWidget.resizeBorder`.
-        let entity = cx.entity().downgrade();
         let resizing = self.resize;
         let max_width = editor_width - px(28.) - minimap_width - px(15.);
         let sash = div()
             .id("find-sash")
+            .debug_selector(|| "find-sash".into())
             .absolute()
             .left(px(0.))
             .top(px(0.))
             .bottom(px(0.))
             .w(px(SASH_HIT_SIZE))
-            .cursor(gpui::CursorStyle::ResizeLeftRight)
+            .cursor(SASH_CURSOR)
             .child(
                 div()
                     .absolute()
@@ -1586,43 +1594,28 @@ impl Render for FindWidget {
                     cx.notify();
                 }),
             )
-            .child(gpui::canvas(
-                |_, _, _| (),
-                move |_, _, window, _| {
-                    let Some((start_x, start_width)) = resizing else {
-                        return;
-                    };
-                    let moved = entity.clone();
-                    window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
-                        if phase == gpui::DispatchPhase::Capture
-                            && let Some(this) = moved.upgrade()
-                        {
-                            this.update(cx, |this, cx| {
-                                // Monaco `onDidChange`: narrower than the
-                                // initial width or wider than the maximum
-                                // is ignored.
-                                let width = start_width + (start_x - event.position.x);
-                                if width >= px(FIND_WIDGET_INITIAL_WIDTH) && width <= max_width {
-                                    this.width = width;
-                                    this.resized = true;
-                                    cx.notify();
-                                }
-                            });
+            // While dragging: follow the mouse anywhere in the window, with
+            // the sash's pointer.
+            .children(resizing.map(|(start_x, start_width)| {
+                crate::pointer_capture::capture(
+                    cx.entity().downgrade(),
+                    self.captured_cursor(),
+                    move |this: &mut Self, event, cx| {
+                        // Monaco `onDidChange`: narrower than the initial
+                        // width or wider than the maximum is ignored.
+                        let width = start_width + (start_x - event.position.x);
+                        if width >= px(FIND_WIDGET_INITIAL_WIDTH) && width <= max_width {
+                            this.width = width;
+                            this.resized = true;
+                            cx.notify();
                         }
-                    });
-                    let released = entity.clone();
-                    window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
-                        if phase == gpui::DispatchPhase::Capture
-                            && let Some(this) = released.upgrade()
-                        {
-                            this.update(cx, |this, cx| {
-                                this.resize = None;
-                                cx.notify();
-                            });
-                        }
-                    });
-                },
-            ));
+                    },
+                    |this, cx| {
+                        this.resize = None;
+                        cx.notify();
+                    },
+                )
+            }));
 
         // Measures the painted height for the editor's view zone.
         let measured = self.measured.clone();

@@ -377,3 +377,43 @@ fn f4_only_moves_through_results_while_a_peek_view_is_open(cx: &mut TestAppConte
     draw(cx);
     assert_eq!(editor.read_with(cx, |e, _| e.selections()[0].head), head);
 }
+
+/// Monaco captures the pointer on a sash: the height sash's `ns-resize`
+/// and the split sash's `ew-resize` stay over the whole window, over the
+/// text too, until the release (GPUI's drags keep the dragged element's
+/// cursor).
+#[gpui::test]
+fn dragging_a_sash_keeps_its_pointer_everywhere(cx: &mut TestAppContext) {
+    use gpui::CursorStyle;
+    let (editor, cx) = setup(&numbered(100), cx);
+    peek(&editor, cx, vec![here(1, 0, 4), here(5, 0, 4)]);
+    let captured =
+        |cx: &mut VisualTestContext| editor.read_with(cx, |e, cx| e.captured_cursor_for_tests(cx));
+    assert_eq!(captured(cx), None);
+    for (id, cursor) in [
+        ("peek-sash-height", CursorStyle::ResizeRow),
+        ("peek-sash-split", CursorStyle::ResizeColumn),
+    ] {
+        let start = cx.debug_bounds(id).unwrap().center();
+        cx.simulate_mouse_move(start, None, Modifiers::default());
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        // The drag starts once the mouse moves; then off the sash, over
+        // the text above the peek view and outside the editor.
+        for to in [
+            start + point(px(3.), px(3.)),
+            point(px(80.), px(5.)),
+            point(px(-20.), px(-20.)),
+        ] {
+            cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::default());
+            draw(cx);
+            assert_eq!(captured(cx), Some(cursor), "{id}");
+        }
+        cx.simulate_mouse_up(
+            point(px(80.), px(5.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        draw(cx);
+        assert_eq!(captured(cx), None, "{id}");
+    }
+}

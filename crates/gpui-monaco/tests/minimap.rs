@@ -126,6 +126,11 @@ fn dragging_the_slider_follows_the_pointer(cx: &mut TestAppContext) {
     cx.simulate_mouse_down(grab, MouseButton::Left, Modifiers::default());
     paint(cx);
     assert_eq!(scroll_top(&editor, cx), px(400.), "no jump");
+    // Monaco captures the pointer on the slider: the arrow for the whole
+    // drag, over the text too.
+    let drag_cursor =
+        |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.drag_mouse_cursor_for_tests());
+    assert_eq!(drag_cursor(cx), Some(gpui::CursorStyle::Arrow));
     // Active while dragging.
     let colors = editor.read_with(cx, |e, _| e.theme().colors.clone());
     // (Fading in over 100ms: compare the color without its alpha.)
@@ -164,6 +169,7 @@ fn dragging_the_slider_follows_the_pointer(cx: &mut TestAppContext) {
     assert_eq!(scroll_top(&editor, cx), px(400.));
     cx.simulate_mouse_up(grab, MouseButton::Left, Modifiers::default());
     paint(cx);
+    assert_eq!(drag_cursor(cx), None);
 }
 
 /// Monaco `revealLineNumber`: a click off the slider centers the clicked

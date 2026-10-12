@@ -21,9 +21,9 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Bounds, BoxShadow, Context, DispatchPhase, Entity, EventEmitter,
     FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    WeakEntity, Window, canvas, div, point, px, size,
+    MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels, Point, Render, ScrollWheelEvent,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, canvas, div,
+    point, px, size,
 };
 use text::PointUtf16;
 
@@ -879,6 +879,20 @@ impl MultiDiffEditor {
         self.drag_scrollbar(position, cx);
     }
 
+    /// The pointer over the whole window during a scrollbar drag (Monaco's
+    /// pointer capture on the slider): the arrow, over the editors' text
+    /// too.
+    pub(crate) fn captured_cursor(&self) -> Option<gpui::CursorStyle> {
+        self.scrollbar_drag.map(|_| gpui::CursorStyle::Arrow)
+    }
+
+    /// [`Self::captured_cursor`], for tests: GPUI's test platform doesn't
+    /// keep the cursor.
+    #[doc(hidden)]
+    pub fn captured_cursor_for_tests(&self) -> Option<gpui::CursorStyle> {
+        self.captured_cursor()
+    }
+
     /// Monaco `_sliderMouseDown`'s move handler.
     fn drag_scrollbar(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(drag) = self.scrollbar_drag else {
@@ -1259,8 +1273,21 @@ impl MultiDiffEditor {
                     .into_any_element(),
             );
         }
+        // While dragging: follow the mouse anywhere in the window, with the
+        // slider's arrow (Monaco's pointer capture).
         if self.scrollbar_drag.is_some() {
-            elements.push(window_drag_listener(cx.entity().downgrade()).into_any_element());
+            elements.push(
+                crate::pointer_capture::capture(
+                    cx.entity().downgrade(),
+                    self.captured_cursor(),
+                    |this: &mut Self, event, cx| this.drag_scrollbar(event.position, cx),
+                    |this, cx| {
+                        this.scrollbar_drag = None;
+                        cx.notify();
+                    },
+                )
+                .into_any_element(),
+            );
         }
         elements
     }
@@ -1330,37 +1357,6 @@ fn resource_label(
                     .child(folder),
             )
         })
-}
-
-/// A canvas that listens to the window's mouse moves and ups while a
-/// scrollbar drag goes on, wherever the mouse is (Monaco's global pointer
-/// monitor).
-fn window_drag_listener(this: WeakEntity<MultiDiffEditor>) -> impl IntoElement {
-    canvas(
-        |_, _, _| {},
-        move |_, _, window, _| {
-            let moves = this.clone();
-            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                if phase == DispatchPhase::Capture {
-                    moves
-                        .update(cx, |this, cx| this.drag_scrollbar(event.position, cx))
-                        .ok();
-                }
-            });
-            let ups = this.clone();
-            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-                if phase == DispatchPhase::Capture {
-                    ups.update(cx, |this, cx| {
-                        this.scrollbar_drag = None;
-                        cx.notify();
-                    })
-                    .ok();
-                }
-            });
-        },
-    )
-    .absolute()
-    .size_0()
 }
 
 /// The background, `colors` of any editor, the first bound one's if any.
