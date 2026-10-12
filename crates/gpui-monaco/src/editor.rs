@@ -833,6 +833,7 @@ impl CodeEditor {
                         editor
                             .update(cx, |this, cx| {
                                 this.dismiss_keyboard_definition_link(cx);
+                                this.hover_key_down(event, window, cx);
                                 // Monaco `InspectTokensController`: Escape
                                 // closes it, whatever else it does.
                                 if keystroke.key == "escape" {
@@ -1236,6 +1237,13 @@ impl CodeEditor {
         let old_from_all_providers = self.options.occurrences_highlight_from_all_providers;
         let zoomed = crate::font_zoom::zoomed_options(&options, self.zoom_level(cx));
         let old = std::mem::replace(&mut self.options, zoomed);
+        // Monaco `ContentHoverController._hookListeners`: turning
+        // `hover.enabled` off hides the hover.
+        if old.hover != self.options.hover
+            && self.options.hover.enabled == crate::options::HoverEnabled::Off
+        {
+            self.hide_hover(cx);
+        }
         // Monaco `tabIndex`.
         if old.tab_index != self.options.tab_index {
             let tab_index = self.options.tab_index;
@@ -1431,6 +1439,9 @@ impl CodeEditor {
         ];
         let old = self.last_scroll_state.replace(state);
         let changed = |i: usize| old.is_none_or(|old| old[i] != state[i]);
+        if old.is_some_and(|old| old[0] != state[0] || old[1] != state[1]) {
+            self.hover_scrolled(cx);
+        }
         let event = ScrollEvent {
             scroll_top: state[0],
             scroll_left: state[1],
@@ -4527,6 +4538,7 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.hover_mouse_down(event.position, cx);
         if self.end_middle_scroll(cx) {
             return;
         }
@@ -4667,6 +4679,7 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.hover_mouse_down(event.position, cx);
         if self.end_middle_scroll(cx) {
             return;
         }
@@ -4745,6 +4758,7 @@ impl CodeEditor {
             self.on_right_mouse_down(event, window, cx);
             return;
         }
+        self.hover_mouse_down(event.position, cx);
         if self.end_middle_scroll(cx) {
             return;
         }
@@ -5489,6 +5503,8 @@ impl CodeEditor {
                     self.hover_mouse_move(target, false, hover_focused, event.modifiers, cx);
                 }
             }
+        } else if self.mouse_selection.is_some() || self.dnd.active {
+            self.hover_mouse_down(event.position, cx);
         }
         if self.scrollbar_arrow_task.is_some() && event.pressed_button.is_none() {
             // Released where the window didn't see it.
@@ -5968,7 +5984,6 @@ impl CodeEditor {
         } else {
             self.animation.cancel_scroll();
         }
-        self.hide_hover(cx);
         let before = (self.scroll_top, self.scroll_left);
         self.scroll_top -= delta.y;
         self.scroll_left -= delta.x;
@@ -7373,7 +7388,7 @@ impl Render for CodeEditor {
                     cx.emit(CodeEditorEvent::KeyUp(event.keystroke.clone()));
                 }
             }))
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
                 // Monaco reveals `auto` scrollbars while the mouse is over.
                 let scrollbars = &mut this.animation.scrollbars;
                 scrollbars.mouse_over = *hovered;
@@ -7384,6 +7399,11 @@ impl Render for CodeEditor {
                 }
                 cx.notify();
                 if !*hovered {
+                    // GPUI unhovers everything on keyboard input; that's
+                    // no mouse leave.
+                    if !window.last_input_was_keyboard() {
+                        this.hover_mouse_leave(Some(window.mouse_position()), cx);
+                    }
                     this.sticky_mouse_leave(cx);
                     cx.emit(CodeEditorEvent::MouseLeave);
                 }

@@ -425,3 +425,219 @@ fn resizing_the_hover(cx: &mut TestAppContext) {
     assert_eq!(after.size.height, before.size.height + px(40.));
     assert_eq!(after.origin, before.origin);
 }
+
+// ----- Dismissal (#335): Monaco `ContentHoverController` ---------------------
+
+/// Rests the mouse on `beta` until the hover shows.
+fn hover_beta(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) {
+    let p = mouse_at(editor, cx, 0, 7);
+    cx.simulate_mouse_move(p, None, Modifiers::default());
+    rest(cx, 400);
+    assert!(visible(editor, cx));
+}
+
+fn head(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> PointUtf16 {
+    editor.read_with(cx, |e, _| e.selections()[0].head)
+}
+
+#[gpui::test]
+fn keys_hide_the_hover_and_still_run(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(HoverOptions::default(), 1, cx);
+    hover_beta(&editor, cx);
+    // A lone modifier keeps it.
+    cx.simulate_modifiers_change(Modifiers::shift());
+    cx.simulate_modifiers_change(Modifiers::default());
+    rest(cx, 0);
+    assert!(visible(&editor, cx));
+    // Any other key hides it, and its command runs.
+    cx.simulate_keystrokes("right");
+    rest(cx, 0);
+    assert!(!visible(&editor, cx));
+    assert_eq!(head(&editor, cx), PointUtf16::new(0, 1));
+}
+
+#[gpui::test]
+fn chord_prefixes_and_hover_commands_keep_the_hover(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(HoverOptions::default(), 1, cx);
+    hover_beta(&editor, cx);
+    let (prefix, show) = if cfg!(target_os = "macos") {
+        ("cmd-k", "cmd-i")
+    } else {
+        ("ctrl-k", "ctrl-i")
+    };
+    // The first key of Cmd/Ctrl+K Cmd/Ctrl+I keeps it, and the second (Show
+    // or Focus Hover) focuses it.
+    cx.simulate_keystrokes(prefix);
+    rest(cx, 0);
+    assert!(visible(&editor, cx));
+    cx.simulate_keystrokes(show);
+    rest(cx, 0);
+    assert!(visible(&editor, cx));
+    assert!(cx.update(|window, cx| editor.read(cx).is_hover_focused(window, cx)));
+}
+
+#[gpui::test]
+fn a_keyboard_hover_goes_with_the_arrow_keys(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(HoverOptions::default(), 1, cx);
+    cx.dispatch_action(gpui_monaco::actions::ShowHover::default());
+    rest(cx, 0);
+    assert!(visible(&editor, cx));
+    cx.simulate_keystrokes("down");
+    rest(cx, 0);
+    assert!(!visible(&editor, cx));
+    assert_eq!(head(&editor, cx), PointUtf16::new(1, 0));
+}
+
+#[gpui::test]
+fn one_escape_hides_the_hover_and_the_other_cursors(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(HoverOptions::default(), 1, cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[
+                Selection::collapsed(PointUtf16::new(1, 0)),
+                Selection::collapsed(PointUtf16::new(2, 0)),
+            ],
+            cx,
+        )
+    });
+    hover_beta(&editor, cx);
+    cx.simulate_keystrokes("escape");
+    rest(cx, 0);
+    assert!(!visible(&editor, cx));
+    assert_eq!(editor.read_with(cx, |e, _| e.selections().len()), 1);
+}
+
+#[gpui::test]
+fn clicks_off_the_card_hide_the_hover(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(HoverOptions::default(), 1, cx);
+    hover_beta(&editor, cx);
+    // On the card: it stays.
+    let card = editor
+        .read_with(cx, |e, cx| e.hover_card_bounds_for_tests(cx))
+        .expect("painted");
+    cx.simulate_mouse_move(card.center(), None, Modifiers::default());
+    cx.simulate_click(card.center(), Modifiers::default());
+    rest(cx, 0);
+    assert!(visible(&editor, cx));
+    // On the word it's about: it goes.
+    let p = mouse_at(&editor, cx, 0, 7);
+    cx.simulate_mouse_move(p, None, Modifiers::default());
+    rest(cx, 0);
+    assert!(visible(&editor, cx));
+    cx.simulate_click(p, Modifiers::default());
+    rest(cx, 0);
+    assert!(!visible(&editor, cx));
+    // A right click too.
+    hover_beta(&editor, cx);
+    cx.simulate_mouse_down(p, gpui::MouseButton::Right, Modifiers::default());
+    cx.simulate_mouse_up(p, gpui::MouseButton::Right, Modifiers::default());
+    rest(cx, 0);
+    assert!(!visible(&editor, cx));
+}
+
+#[gpui::test]
+fn leaving_the_editor_hides_and_cancels_the_hover(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(HoverOptions::default(), 1, cx);
+    let outside = gpui::point(px(-20.), px(-20.));
+    // Shown: it goes.
+    hover_beta(&editor, cx);
+    cx.simulate_mouse_move(outside, None, Modifiers::default());
+    rest(cx, 0);
+    assert!(!visible(&editor, cx));
+    // Pending: it never shows.
+    let p = mouse_at(&editor, cx, 0, 7);
+    cx.simulate_mouse_move(p, None, Modifiers::default());
+    rest(cx, 100);
+    cx.simulate_mouse_move(outside, None, Modifiers::default());
+    rest(cx, 1000);
+    assert!(!visible(&editor, cx));
+}
+
+#[gpui::test]
+fn a_drag_select_hides_the_hover_and_shows_none(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(HoverOptions::default(), 1, cx);
+    let from = mouse_at(&editor, cx, 0, 1);
+    let to = mouse_at(&editor, cx, 0, 13);
+    cx.simulate_mouse_move(from, None, Modifiers::default());
+    cx.simulate_mouse_down(from, gpui::MouseButton::Left, Modifiers::default());
+    rest(cx, 0);
+    // A hover shown from the keyboard meanwhile goes as the drag moves.
+    editor.update(cx, |e, cx| e.show_hover_at_cursor(cx));
+    rest(cx, 0);
+    assert!(visible(&editor, cx));
+    cx.simulate_mouse_move(to, gpui::MouseButton::Left, Modifiers::default());
+    rest(cx, 0);
+    assert!(!visible(&editor, cx));
+    // Resting on a word mid-drag shows nothing.
+    rest(cx, 1000);
+    assert!(!visible(&editor, cx));
+    cx.simulate_mouse_up(to, gpui::MouseButton::Left, Modifiers::default());
+    rest(cx, 0);
+    assert!(!visible(&editor, cx));
+}
+
+fn wheel(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, dy: f32) {
+    let at = mouse_at(editor, cx, 1, 2);
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: at,
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(dy))),
+        ..Default::default()
+    });
+    rest(cx, 0);
+}
+
+#[gpui::test]
+fn only_wheels_that_scroll_hide_the_hover(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(HoverOptions::default(), 1, cx);
+    hover_beta(&editor, cx);
+    // At the top, up scrolls nothing.
+    wheel(&editor, cx, 40.);
+    assert!(visible(&editor, cx));
+    // Down does.
+    wheel(&editor, cx, -10.);
+    assert!(editor.read_with(cx, |e, _| e.scroll_top()) > px(0.));
+    assert!(!visible(&editor, cx));
+    // With the wheel off nothing scrolls.
+    editor.update(cx, |e, cx| {
+        e.set_scroll_position(gpui::point(px(0.), px(0.)), cx);
+        let mut options = e.options().clone();
+        options.scrollbar.handle_mouse_wheel = false;
+        e.update_options(options, cx);
+    });
+    rest(cx, 0);
+    hover_beta(&editor, cx);
+    wheel(&editor, cx, -10.);
+    assert!(visible(&editor, cx));
+}
+
+#[gpui::test]
+fn scrolling_from_the_api_hides_the_hover(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(HoverOptions::default(), 1, cx);
+    hover_beta(&editor, cx);
+    editor.update(cx, |e, cx| {
+        e.set_scroll_top(px(5.), gpui_monaco::ScrollType::Immediate, cx)
+    });
+    rest(cx, 0);
+    assert!(!visible(&editor, cx));
+}
+
+#[gpui::test]
+fn turning_hovers_off_hides_the_hover(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(HoverOptions::default(), 1, cx);
+    hover_beta(&editor, cx);
+    // Another hover option leaves it.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.hover.above = false;
+        e.update_options(options, cx);
+    });
+    rest(cx, 0);
+    assert!(visible(&editor, cx));
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.hover.enabled = HoverEnabled::Off;
+        e.update_options(options, cx);
+    });
+    rest(cx, 0);
+    assert!(!visible(&editor, cx));
+}

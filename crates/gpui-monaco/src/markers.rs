@@ -457,6 +457,9 @@ pub fn remove_all_markers(cx: &mut App, owner: &str) {
 /// many lines and scrolls the rest.
 const MAX_BODY_LINES: usize = 17;
 
+/// The marker zone's body, whose hover shows its scrollbars.
+const MARKER_BODY_GROUP: &str = "marker-body";
+
 /// The inline problem view shown by F8 / Alt+F8 and "View Problem" (Monaco
 /// `MarkerNavigationWidget`, a peek view below the marker's line): a header
 /// with the file name, "2 of 4 problems" and next/previous/close, and a
@@ -589,8 +592,13 @@ impl Render for MarkerZone {
             if self.total > 1 { "s" } else { "" }
         );
         let title = self.uri.as_deref().map(basename).unwrap_or_default();
-        let link = colors.text_link_foreground;
+        // Monaco's `.marker-widget .descriptioncontainer .filename`:
+        // `textLink.activeForeground`.
+        let link = colors.text_link_active_foreground;
         let painted = self.bounds.clone();
+        let extent = crate::scrollbars::extent(&self.scroll);
+        let scroll = self.scroll.clone();
+        let view = cx.entity().downgrade();
 
         // Monaco `MessageWidget`: one row per message line, the source and
         // code after the last, dimmed.
@@ -646,13 +654,17 @@ impl Render for MarkerZone {
                             .child(
                                 div()
                                     .id(("marker-related", ix))
+                                    .debug_selector(move || format!("marker-related-{ix}"))
                                     .cursor_pointer()
                                     .text_color(link)
                                     .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                         cx.stop_propagation();
+                                        // Monaco `onDidSelectRelatedInformation`:
+                                        // opens it, then closes the zone.
                                         if let Some(editor) = editor.upgrade() {
                                             editor.update(cx, |editor, cx| {
                                                 editor.open_location(&location, true, cx);
+                                                editor.close_marker_zone(cx);
                                             });
                                         }
                                     })
@@ -717,8 +729,7 @@ impl Render for MarkerZone {
             // Monaco `.marker-widget`: `tabIndex = 0`, `role="tooltip"`.
             .track_focus(&self.focus_handle)
             .role(gpui::Role::Tooltip)
-            .flex_1()
-            .min_h_0()
+            .size_full()
             .overflow_scroll()
             .track_scroll(&self.scroll)
             .bg(colors.marker_navigation_background)
@@ -749,7 +760,7 @@ impl Render for MarkerZone {
             .child(
                 canvas(
                     |_, _, _| {},
-                    move |bounds, _, window, _| {
+                    move |bounds, _, window, cx| {
                         painted.set(Some(bounds));
                         let x = bounds.left() + arrow_x;
                         let top = bounds.top();
@@ -761,6 +772,7 @@ impl Render for MarkerZone {
                         if let Ok(path) = path.build() {
                             window.paint_path(path, frame);
                         }
+                        crate::scrollbars::follow_extent(&scroll, extent, view, window, cx);
                     },
                 )
                 .absolute()
@@ -782,7 +794,23 @@ impl Render for MarkerZone {
                     .border_b_1()
                     .border_color(frame)
                     .child(header)
-                    .child(body),
+                    .child(
+                        // Monaco's 6px scrollbars.
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .relative()
+                            .group(MARKER_BODY_GROUP)
+                            .child(body)
+                            .children(crate::scrollbars::scrollbars(
+                                "marker-body",
+                                MARKER_BODY_GROUP.into(),
+                                &self.scroll,
+                                px(6.),
+                                px(0.),
+                                &colors,
+                            )),
+                    ),
             )
     }
 }
