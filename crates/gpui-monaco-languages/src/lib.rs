@@ -324,11 +324,10 @@ pub fn css() -> Language {
         ))
 }
 
-/// A plain-text language with no grammar.
+/// Monaco's plain-text language, with no grammar and Monaco's `plaintext`
+/// configuration (see [`Language::plain_text`]).
 pub fn plain_text() -> Language {
-    Language::new("plaintext", "Plain Text")
-        .with_aliases(&["text", "txt"])
-        .with_extensions(&["txt"])
+    Language::plain_text()
 }
 
 /// Registers every language enabled by cargo features, plus plain text.

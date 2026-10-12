@@ -73,14 +73,39 @@ pub fn set_language_configuration(
 }
 
 /// Re-resolves the language of models in `language_id` after its
-/// configuration changed.
+/// configuration changed, including plain text models for `plaintext`.
 fn refresh_configuration(cx: &mut App, language_id: &str) {
     for model in crate::registry::models(cx) {
         model.update(cx, |model, cx| {
-            if model.language_id().is_some_and(|id| id == language_id) {
+            if model.language_id().is_some_and(|id| id == language_id)
+                || model
+                    .language()
+                    .is_some_and(|language| &*language.id == language_id)
+            {
                 model.refresh_language(cx);
             }
         });
+    }
+}
+
+/// Registers `language` in the [language registry](crate::language_registry)
+/// (Monaco `languages.register`), as
+/// [`LanguageRegistry::register`](syntax::LanguageRegistry::register) does,
+/// merging into an existing registration of its id, then updates models
+/// as Monaco's language service does: a model whose id is the new
+/// language's (or its name or MIME type), or whose uri now guesses it,
+/// takes it, and so do models already in it. Sets an empty registry first
+/// if there's none.
+pub fn register_language(cx: &mut App, language: syntax::Language) -> Arc<syntax::Language> {
+    let language = crate::model::language_registry_mut(cx).register(language);
+    languages_changed(cx);
+    language
+}
+
+/// Re-resolves the language of every model after registrations changed.
+pub(crate) fn languages_changed(cx: &mut App) {
+    for model in crate::registry::models(cx) {
+        model.update(cx, |model, cx| model.languages_changed(cx));
     }
 }
 
@@ -171,6 +196,11 @@ impl LanguageTokenizer {
 /// another (see [`on_language_encountered`]), or right away if that
 /// already happened. Its task's tokenizer then replaces the language's
 /// highlighting, like [`set_tokens_provider`]; `None` leaves it as is.
+/// As in Monaco, a tokenizer already set for the language then (with
+/// [`set_monarch_tokens_provider`], [`set_tokens_provider`] or
+/// [`Language::with_highlighter`](syntax::Language::with_highlighter))
+/// wins, and the factory isn't called; a tree-sitter grammar doesn't
+/// count, so a factory can replace it.
 ///
 /// Disposing the result drops the factory if it wasn't called yet, and
 /// otherwise restores the previous highlighting, unless another tokenizer
@@ -188,6 +218,11 @@ pub fn register_tokens_provider_factory(
         let installed = installed.clone();
         let disposed = disposed.clone();
         move |cx: &mut App| {
+            // Monaco `TokenizationRegistry.getOrCreate`: a tokenizer
+            // already set wins, and the factory is never called.
+            if current_highlighter(&language_registry(cx), &language_id).is_some() {
+                return;
+            }
             let task = factory(cx);
             cx.spawn(async move |cx| {
                 let result = task.await.and_then(|tokenizer| {
@@ -218,25 +253,32 @@ pub fn register_tokens_provider_factory(
     })
 }
 
+/// The tokenizer set for `language_id`, registered or not yet: its
+/// [`highlighter`](syntax::Language::highlighter), not its tree-sitter
+/// grammar.
+fn current_highlighter(
+    registry: &syntax::LanguageRegistry,
+    language_id: &str,
+) -> Option<HighlighterFactory> {
+    registry
+        .language_for_id(language_id)
+        .map(|language| language.highlighter.clone())
+        .unwrap_or_else(|| registry.pending_highlighter(language_id))
+}
+
 /// Sets the highlighter of `language_id` (registered or not yet), re-tokenizing
 /// affected models; disposing restores the previous one if this one is still
 /// set (Monaco's tokenization registry).
 fn install_highlighter(cx: &mut App, language_id: &str, factory: HighlighterFactory) -> Disposable {
     let registry = language_registry(cx);
-    let current = |registry: &syntax::LanguageRegistry, id: &str| {
-        registry
-            .language_for_id(id)
-            .map(|language| language.highlighter.clone())
-            .unwrap_or_else(|| registry.pending_highlighter(id))
-    };
-    let previous = current(&registry, language_id);
+    let previous = current_highlighter(&registry, language_id);
     registry.set_highlighter(language_id, Some(factory.clone()));
     refresh_highlighting(cx, language_id);
     let language_id = language_id.to_string();
     Disposable::new(move |cx| {
         let registry = language_registry(cx);
-        let ours =
-            current(&registry, &language_id).is_some_and(|current| Arc::ptr_eq(&current, &factory));
+        let ours = current_highlighter(&registry, &language_id)
+            .is_some_and(|current| Arc::ptr_eq(&current, &factory));
         if ours {
             registry.set_highlighter(&language_id, previous);
             refresh_highlighting(cx, &language_id);

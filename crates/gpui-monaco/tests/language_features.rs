@@ -351,7 +351,7 @@ fn completion_filters_navigates_and_accepts(cx: &mut TestAppContext) {
     cx.simulate_input("(");
     assert_eq!(
         editor.read_with(cx, |e, cx| e.model().read(cx).text()),
-        "println.length("
+        "println.length()"
     );
     // Escape closes; Ctrl+Space reopens.
     cx.simulate_input(" pri");

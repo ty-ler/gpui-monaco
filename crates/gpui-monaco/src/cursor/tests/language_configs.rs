@@ -97,21 +97,10 @@ pub fn on_enter(
 // ---------------------------------------------------------------------------
 // cursor.test.ts, suite 'Editor Controller'
 
-/// Monaco's built-in `plaintext` configuration.
+/// Monaco's built-in `plaintext` configuration, as the editor ships it for
+/// plain text and models without a language.
 pub fn plaintext() -> LanguageConfiguration {
-    LanguageConfiguration {
-        brackets: Some(brackets(&[("(", ")"), ("[", "]"), ("{", "}")])),
-        surrounding_pairs: Some(vec![
-            surround("{", "}"),
-            surround("[", "]"),
-            surround("(", ")"),
-            surround("<", ">"),
-            surround("\"", "\""),
-            surround("'", "'"),
-            surround("`", "`"),
-        ]),
-        ..Default::default()
-    }
+    LanguageConfiguration::plain_text()
 }
 
 /// `surroundingLanguage`.

@@ -2603,6 +2603,8 @@ impl CodeEditor {
                 // And the inspect tokens widget.
                 self.stop_inspect_tokens(cx);
                 self.reset_inlay_hints(cx);
+                // The brackets are the new language's, grammar or not.
+                self.bracket_colors = Default::default();
                 cx.emit(CodeEditorEvent::ModelLanguageChanged {
                     old_language: old_language.clone(),
                     new_language: new_language.clone(),

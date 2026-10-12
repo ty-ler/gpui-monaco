@@ -20,6 +20,7 @@ use text::{
 /// The process-wide language registry used to resolve [`TextModel`] language
 /// ids. Set it with [`set_language_registry`] (e.g. to
 /// `gpui_monaco_languages::registry()`).
+#[derive(Default)]
 struct Languages(Arc<LanguageRegistry>);
 
 impl Global for Languages {}
@@ -27,10 +28,12 @@ impl Global for Languages {}
 /// Sets the process-wide language registry that [`TextModel`] language ids are
 /// resolved against (e.g. `gpui_monaco_languages::registry()`).
 ///
-/// Models that already resolved their language keep it; set the registry before
-/// showing any model.
+/// Models that already resolved their language resolve it again against the
+/// new registry, as they do after
+/// [`register_language`](crate::register_language).
 pub fn set_language_registry(cx: &mut App, registry: Arc<LanguageRegistry>) {
     cx.set_global(Languages(registry));
+    crate::languages::languages_changed(cx);
 }
 
 /// The registry set with [`set_language_registry`], or an empty one.
@@ -38,6 +41,88 @@ pub fn language_registry(cx: &App) -> Arc<LanguageRegistry> {
     cx.try_global::<Languages>()
         .map(|languages| languages.0.clone())
         .unwrap_or_default()
+}
+
+/// The registry set with [`set_language_registry`], setting an empty one
+/// first if there's none, so what's registered in it stays.
+pub(crate) fn language_registry_mut(cx: &mut App) -> Arc<LanguageRegistry> {
+    cx.default_global::<Languages>().0.clone()
+}
+
+/// Monaco's `plaintext` language: the registry's if it has one (with any
+/// configuration layered over it), else [`Language::plain_text`].
+fn plain_text_language(registry: &LanguageRegistry) -> Arc<Language> {
+    static PLAIN_TEXT: std::sync::OnceLock<Arc<Language>> = std::sync::OnceLock::new();
+    registry
+        .language_for_id(Language::PLAIN_TEXT_ID)
+        .unwrap_or_else(|| {
+            PLAIN_TEXT
+                .get_or_init(|| Arc::new(Language::plain_text()))
+                .clone()
+        })
+}
+
+/// What the language id `id` resolves to (Monaco
+/// `_createAndGetLanguageIdentifier`): the registered language with that
+/// id, name or MIME type, with the id the model then has (a MIME type gives
+/// its language's), or plain text, keeping the id, for no language or an
+/// unregistered one.
+fn resolve_language(
+    registry: &LanguageRegistry,
+    id: Option<&SharedString>,
+) -> (Option<SharedString>, Arc<Language>) {
+    let Some(id) = id else {
+        return (None, plain_text_language(registry));
+    };
+    if let Some(language) = registry
+        .language_for_id(id)
+        .or_else(|| registry.language_for_name(id))
+    {
+        return (Some(id.clone()), language);
+    }
+    // Monaco `createModel` and `setModelLanguage` also take a MIME type
+    // (`getLanguageIdByMimeType`): the model gets that language's id.
+    match registry.language_for_mime_type(id) {
+        Some(language) => (Some(SharedString::from(language.id.to_string())), language),
+        None => (Some(id.clone()), plain_text_language(registry)),
+    }
+}
+
+/// Monaco's standard token type of a token or capture name
+/// (`toStandardTokenType`): the first whole word, between dots or other
+/// non-word characters, that is `comment`, `string`, `regex` or `regexp`,
+/// so `string.regexp` is a string and `meta.comment` a comment. A
+/// tree-sitter `character` capture (a character literal) counts as a
+/// string.
+fn standard_token_type(name: &str) -> crate::cursor::StandardTokenType {
+    use crate::cursor::StandardTokenType;
+    if name == "character" || name.starts_with("character.") {
+        return StandardTokenType::String;
+    }
+    name.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .find_map(|word| match word {
+            "comment" => Some(StandardTokenType::Comment),
+            "string" => Some(StandardTokenType::String),
+            "regex" | "regexp" => Some(StandardTokenType::RegEx),
+            _ => None,
+        })
+        .unwrap_or(StandardTokenType::Other)
+}
+
+/// Monaco `guessLanguageIdByFilepathOrFirstLine` for a model with this uri
+/// and first line.
+fn guess_language_id(
+    registry: &LanguageRegistry,
+    uri: Option<&str>,
+    first_line: &str,
+) -> Option<SharedString> {
+    let path = uri.and_then(crate::languages::uri_path);
+    registry
+        .language_for_path_or_first_line(
+            path.as_deref().map(std::path::Path::new),
+            Some(first_line),
+        )
+        .map(|language| SharedString::from(language.id.to_string()))
 }
 
 /// Models by uri (Monaco `editor.getModel(uri)`), held weakly, plus the
@@ -202,7 +287,6 @@ pub struct SyntaxSnapshot {
 }
 
 struct Syntax {
-    language: Arc<Language>,
     highlighter: Arc<dyn Highlighter>,
     latest: Option<(HighlightState, BufferSnapshot)>,
     task: Option<Task<()>>,
@@ -380,7 +464,11 @@ pub struct TextModel {
     buffer: Buffer,
     options: ModelOptions,
     language_id: Option<SharedString>,
+    /// What `language_id` resolved to: its registered language, grammar
+    /// or not, else plain text. `None` until first resolved.
+    language: Option<Arc<Language>>,
     uri: Option<SharedString>,
+    /// Highlighting, for a language with a grammar or highlighter.
     syntax: Option<Syntax>,
     decorations: DecorationSet,
     /// The user chose to keep this model's unusual line terminators
@@ -392,6 +480,9 @@ pub struct TextModel {
     /// No language was given: guess one from the uri and first line when
     /// first shown (Monaco `createByFilepathOrFirstLine`).
     guess_language: bool,
+    /// The language is guessed, so registering languages guesses again,
+    /// until one is set explicitly.
+    language_guessed: bool,
     auto_whitespace: AutoWhitespaceLines,
     /// Decided from the creation options and text, then kept (Monaco
     /// `_isTooLargeForTokenization`).
@@ -421,13 +512,16 @@ impl TextModel {
             buffer: Buffer::new(text),
             options: ModelOptions::default(),
             language_id: None,
+            language: None,
             uri: None,
             syntax: None,
             decorations: DecorationSet::default(),
             ignore_unusual_line_terminators: false,
             markers: Default::default(),
-            language_pending: false,
+            // Plain text, resolved when first shown.
+            language_pending: true,
             guess_language: false,
+            language_guessed: false,
             auto_whitespace: AutoWhitespaceLines::default(),
             too_large_for_tokenization: false,
             attached_editors: 0,
@@ -507,11 +601,13 @@ impl TextModel {
     /// Sets the language id, resolved against the registry the first time the
     /// model is shown (see [`TextModel::ensure_syntax`]). A MIME type works
     /// too, as in Monaco's `createModel`: the model then gets its
-    /// language's id.
+    /// language's id. An id that isn't registered yet gives plain text
+    /// until it is (see [`register_language`](crate::register_language)).
     pub fn with_language(mut self, language_id: impl Into<SharedString>) -> Self {
         self.language_id = Some(language_id.into());
         self.language_pending = true;
         self.guess_language = false;
+        self.language_guessed = false;
         self
     }
 
@@ -520,12 +616,14 @@ impl TextModel {
     /// Without a language, the model's language is then guessed from the
     /// uri's file name and the first line when it's first shown, as Monaco's
     /// `createModel` does (see
-    /// [`LanguageRegistry::language_for_path_or_first_line`]).
+    /// [`LanguageRegistry::language_for_path_or_first_line`]), and guessed
+    /// again when languages are registered, until one is set.
     pub fn with_uri(mut self, uri: impl Into<SharedString>) -> Self {
         self.uri = Some(uri.into());
         if self.language_id.is_none() {
             self.language_pending = true;
             self.guess_language = true;
+            self.language_guessed = true;
         }
         self
     }
@@ -708,9 +806,13 @@ impl TextModel {
         self.language_id.as_ref()
     }
 
-    /// The resolved language, if it has a registered definition.
+    /// The resolved language: the registered language of
+    /// [`language_id`](Self::language_id), with or without a grammar, else
+    /// plain text (Monaco's `plaintext`, see [`Language::plain_text`]), as
+    /// for a model without a language. `None` until the model is first
+    /// shown (see [`TextModel::ensure_syntax`]).
     pub fn language(&self) -> Option<&Arc<Language>> {
-        self.syntax.as_ref().map(|syntax| &syntax.language)
+        self.language.as_ref()
     }
 
     /// Changes the language id (Monaco `setModelLanguage`), resolving it right away
@@ -718,6 +820,7 @@ impl TextModel {
     /// [`on_did_change_model_language`](crate::on_did_change_model_language))
     /// if it differs. A MIME type gives its language's id, as in Monaco.
     pub fn set_language(&mut self, language_id: Option<SharedString>, cx: &mut Context<Self>) {
+        self.language_guessed = false;
         if self.language_id != language_id {
             let old_language = std::mem::replace(&mut self.language_id, language_id);
             self.language_pending = true;
@@ -744,53 +847,85 @@ impl TextModel {
         self.language_pending = false;
         let registry = language_registry(cx);
         if std::mem::take(&mut self.guess_language) && self.language_id.is_none() {
-            let path = self.uri.as_deref().and_then(crate::languages::uri_path);
-            let first_line = self.buffer.rope().line(0);
-            self.language_id = registry
-                .language_for_path_or_first_line(
-                    path.as_deref().map(std::path::Path::new),
-                    Some(&first_line),
-                )
-                .map(|language| SharedString::from(language.id.to_string()));
+            self.language_id = self.guessed_language_id(&registry);
         }
+        // The editor's own inputs stand in for Monaco's HTML inputs, which
+        // don't auto-close or match brackets: no plain text for them.
+        if self.internal && self.language_id.is_none() {
+            self.syntax = None;
+            self.language = None;
+            return;
+        }
+        let (language_id, language) = resolve_language(&registry, self.language_id.as_ref());
+        self.language_id = language_id;
         if let Some(id) = &self.language_id {
             crate::languages::language_requested(id, cx);
         }
-        let language = self.language_id.as_ref().and_then(|id| {
-            registry
-                .language_for_id(id)
-                .or_else(|| registry.language_for_name(id))
+        // The configuration applies with or without a grammar (Monaco's
+        // `LanguageConfigurationRegistry` doesn't need a tokenizer).
+        self.syntax = language.has_highlighter().then(|| Syntax {
+            highlighter: match &language.highlighter {
+                Some(factory) => factory(&language, &registry),
+                None => Arc::new(TreeSitterHighlighter::new(language.clone(), registry)),
+            },
+            latest: None,
+            task: None,
+            dirty: false,
         });
-        // Monaco `createModel` and `setModelLanguage` also take a MIME type
-        // (`getLanguageIdByMimeType`): the model gets that language's id.
-        let language = language.or_else(|| {
-            let language = registry.language_for_mime_type(self.language_id.as_deref()?)?;
-            self.language_id = Some(SharedString::from(language.id.to_string()));
-            crate::languages::language_requested(self.language_id.as_ref()?, cx);
-            Some(language)
-        });
-        self.syntax = language
-            .filter(|l| l.has_highlighter())
-            .map(|language| Syntax {
-                highlighter: match &language.highlighter {
-                    Some(factory) => factory(&language, &registry),
-                    None => Arc::new(TreeSitterHighlighter::new(language.clone(), registry)),
-                },
-                language,
-                latest: None,
-                task: None,
-                dirty: false,
-            });
+        self.language = Some(language);
         self.reparse(cx);
+    }
+
+    /// The language guessed from the uri and first line.
+    fn guessed_language_id(&self, registry: &LanguageRegistry) -> Option<SharedString> {
+        guess_language_id(registry, self.uri.as_deref(), &self.buffer.rope().line(0))
+    }
+
+    /// Resolves the language again after languages were registered (Monaco's
+    /// `LanguageSelection`, re-evaluated when registrations change): a model
+    /// whose id wasn't registered, or whose guessed language changes, gets
+    /// the new language, emitting [`TextModelEvent::LanguageChanged`] if its
+    /// id changes and [`TextModelEvent::LanguageConfigurationChanged`]
+    /// otherwise. Models that haven't resolved their language yet, and
+    /// those whose language is unchanged, are left alone.
+    pub(crate) fn languages_changed(&mut self, cx: &mut Context<Self>) {
+        if self.language_pending {
+            return;
+        }
+        let registry = language_registry(cx);
+        let id = if self.language_guessed {
+            self.guessed_language_id(&registry)
+        } else {
+            self.language_id.clone()
+        };
+        let (id, language) = resolve_language(&registry, id.as_ref());
+        if id == self.language_id
+            && self
+                .language
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &language))
+        {
+            return;
+        }
+        let old_language = std::mem::replace(&mut self.language_id, id);
+        self.language_pending = true;
+        self.ensure_syntax(cx);
+        if self.language_id == old_language {
+            cx.emit(TextModelEvent::LanguageConfigurationChanged);
+        } else {
+            cx.emit(TextModelEvent::LanguageChanged {
+                old_language: old_language.clone(),
+                new_language: self.language_id.clone(),
+            });
+            crate::registry::model_language_changed(cx.weak_entity(), old_language, cx);
+        }
+        cx.notify();
     }
 
     /// Resolves the language again after its configuration changed (see
     /// [`set_language_configuration`](crate::set_language_configuration)),
     /// emitting [`TextModelEvent::LanguageConfigurationChanged`].
     pub(crate) fn refresh_language(&mut self, cx: &mut Context<Self>) {
-        if self.language_id.is_none() {
-            return;
-        }
         self.language_pending = true;
         self.ensure_syntax(cx);
         cx.emit(TextModelEvent::LanguageConfigurationChanged);
@@ -802,7 +937,7 @@ impl TextModel {
     /// re-tokenizing from scratch. Models that haven't resolved their
     /// language yet pick it up when they do.
     pub(crate) fn refresh_highlighter(&mut self, cx: &mut Context<Self>) {
-        if self.language_id.is_none() || self.language_pending {
+        if self.language_pending {
             return;
         }
         self.language_pending = true;
@@ -853,8 +988,9 @@ impl TextModel {
             .map(|span| span.highlight.name())
     }
 
-    /// Byte ranges of strings and comments intersecting `range` (Monaco's
-    /// tokens that bracket matching skips), from one highlights query.
+    /// Byte ranges of strings, comments and regexes intersecting `range`
+    /// (Monaco's tokens that bracket matching skips, `ignoreBracketsInToken`),
+    /// from one highlights query.
     pub fn string_and_comment_ranges(&self, range: Range<usize>) -> Vec<Range<usize>> {
         let Some(syntax) = self.syntax_snapshot() else {
             return Vec::new();
@@ -882,10 +1018,7 @@ impl TextModel {
                 .highlights(&syntax.state, syntax.text.rope(), old_range)
         })
         .filter(|span| {
-            let name = span.highlight.name();
-            name.starts_with("comment")
-                || name.starts_with("string")
-                || name.starts_with("character")
+            standard_token_type(&span.highlight.name()) != crate::cursor::StandardTokenType::Other
         })
         .filter_map(|span| match &patch {
             Some(patch) => {
@@ -946,17 +1079,10 @@ impl TextModel {
 
     /// Monaco's standard token type of the character at byte `offset`.
     pub fn token_type_at(&self, offset: usize) -> crate::cursor::StandardTokenType {
-        use crate::cursor::StandardTokenType;
-        match self.highlight_name_at(offset) {
-            Some(name) if name.starts_with("comment") => StandardTokenType::Comment,
-            Some(name) if name.contains("regex") || name.contains("regexp") => {
-                StandardTokenType::RegEx
-            }
-            Some(name) if name.starts_with("string") || name.starts_with("character") => {
-                StandardTokenType::String
-            }
-            _ => StandardTokenType::Other,
-        }
+        self.highlight_name_at(offset)
+            .map_or(crate::cursor::StandardTokenType::Other, |name| {
+                standard_token_type(&name)
+            })
     }
 
     /// Throws away the syntax state and parses the whole text again, right

@@ -179,8 +179,9 @@ pub use goto::has_symbol_navigation;
 pub use hover::{HOVER_DELAY, HoverWidget};
 pub use inline_completions::inline_edits::InlineEditViewKind;
 pub use languages::{
-    LanguageTokenizer, on_language, on_language_encountered, register_tokens_provider_factory,
-    set_language_configuration, set_monarch_tokens_provider, set_tokens_provider,
+    LanguageTokenizer, on_language, on_language_encountered, register_language,
+    register_tokens_provider_factory, set_language_configuration, set_monarch_tokens_provider,
+    set_tokens_provider,
 };
 pub use layout_info::{LayoutInfo, MinimapLayoutInfo, OverviewRulerPosition, RenderMinimap};
 #[doc(hidden)]

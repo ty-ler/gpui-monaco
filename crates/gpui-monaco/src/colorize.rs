@@ -58,11 +58,13 @@ fn split_lines(text: &str) -> Vec<&str> {
     lines
 }
 
-/// The registered language `language_id` (by id, else by name).
+/// The registered language `language_id` (by id, else by name, else by MIME
+/// type, as Monaco's `colorizeElement` takes `getLanguageIdByMimeType`).
 fn find_language(language_id: &str, registry: &LanguageRegistry) -> Option<Arc<Language>> {
     registry
         .language_for_id(language_id)
         .or_else(|| registry.language_for_name(language_id))
+        .or_else(|| registry.language_for_mime_type(language_id))
 }
 
 /// A shared copy of `registry`, for a [`syntax::HighlighterFactory`].
@@ -313,6 +315,7 @@ pub(crate) fn expand_tabs(line: &str, tab_size: usize) -> (String, Vec<usize>) {
 
 /// Monaco `colorize`: `text` highlighted line by line, with tabs expanded
 /// (Monaco renders HTML; this returns the lines for any element).
+/// `language_id` can also be a MIME type, such as `text/x-rust`.
 pub fn colorize(
     text: &str,
     language_id: &str,
@@ -526,6 +529,7 @@ impl crate::TextModel {
 
 /// Monaco `colorizeElement`: `text` highlighted, one line per row, in the
 /// theme's editor font color. The host chooses the font and size.
+/// `language_id` can be a MIME type, as Monaco's `data-lang` can.
 pub fn colorize_element(
     text: &str,
     language_id: &str,

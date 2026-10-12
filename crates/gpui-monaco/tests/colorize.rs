@@ -42,3 +42,18 @@ fn colorize_rust() {
     assert_eq!(*range, 2..5);
     assert!(style.color.is_some());
 }
+
+/// Monaco `colorizeElement` takes a MIME type too
+/// (`getLanguageIdByMimeType`), including the `text/x-<id>` of languages
+/// registered without one.
+#[test]
+fn colorize_by_mime_type() {
+    let registry = gpui_monaco_languages::registry();
+    let theme = Theme::vs_dark();
+    let text = "fn main() {}";
+    let options = ColorizeOptions::default();
+    let by_id = colorize(text, "rust", &theme, &registry, options);
+    let by_mime = colorize(text, "text/x-rust", &theme, &registry, options);
+    assert!(!by_id[0].highlights.is_empty());
+    assert_eq!(by_mime, by_id);
+}

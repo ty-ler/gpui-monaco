@@ -271,6 +271,21 @@ impl Language {
         }
     }
 
+    /// Monaco's `plaintext` language (`modesRegistry.ts`): `.txt` files,
+    /// the alias `text`, the MIME type `text/plain`, no grammar, and
+    /// [`LanguageConfiguration::plain_text`]. Models without a language,
+    /// or with one that isn't registered, use it.
+    pub fn plain_text() -> Self {
+        Self::new(Self::PLAIN_TEXT_ID, "Plain Text")
+            .with_aliases(&["text"])
+            .with_extensions(&["txt"])
+            .with_mimetypes(&["text/plain"])
+            .with_config(LanguageConfiguration::plain_text())
+    }
+
+    /// The id of [`Language::plain_text`] (Monaco `PLAINTEXT_LANGUAGE_ID`).
+    pub const PLAIN_TEXT_ID: &'static str = "plaintext";
+
     /// Sets [`Language::aliases`].
     pub fn with_aliases(mut self, aliases: &[&str]) -> Self {
         self.aliases = aliases.iter().map(|a| a.to_string()).collect();
@@ -456,10 +471,18 @@ impl LanguageRegistry {
     /// existing ones only when it has them, and configuration fields it
     /// sets replace those it was registered with (configurations added
     /// with [`register_configuration`](Self::register_configuration) still
-    /// apply on top). A highlighter set with
+    /// apply on top). A registration without MIME types adds
+    /// `text/x-<id>`, as in Monaco. A highlighter set with
     /// [`set_highlighter`](Self::set_highlighter) before the language was
     /// registered applies now.
-    pub fn register(&self, language: Language) -> Arc<Language> {
+    ///
+    /// Models that already resolved their language don't see a language
+    /// registered here; `gpui_monaco::register_language` updates them.
+    pub fn register(&self, mut language: Language) -> Arc<Language> {
+        // Monaco `_mergeLanguage`'s primary MIME type.
+        if language.mimetypes.is_empty() {
+            language.mimetypes.push(format!("text/x-{}", language.id));
+        }
         let mut languages = self.languages.write().unwrap_or_else(|e| e.into_inner());
         let mut configurations = self
             .configurations
@@ -634,11 +657,14 @@ impl LanguageRegistry {
         true
     }
 
-    /// The language with this MIME type (Monaco `getLanguageIdByMimeType`).
+    /// The language with this MIME type (Monaco `getLanguageIdByMimeType`),
+    /// including the `text/x-<id>` of registrations without MIME types.
+    /// When several languages claim it, the one registered last wins.
     pub fn language_for_mime_type(&self, mime_type: &str) -> Option<Arc<Language>> {
         let languages = self.languages.read().unwrap_or_else(|e| e.into_inner());
         languages
             .iter()
+            .rev()
             .find(|language| language.mimetypes.iter().any(|m| m == mime_type))
             .cloned()
     }
