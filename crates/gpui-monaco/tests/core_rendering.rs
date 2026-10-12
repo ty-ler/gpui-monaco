@@ -356,3 +356,69 @@ fn control_characters(cx: &mut TestAppContext) {
     paint(cx);
     assert!(x(3, cx) - x(2, cx) < char_width * 8.);
 }
+
+/// Monaco `_renderLine` (issue #22832): a full-width character takes two
+/// visible columns and other characters one per UTF-16 unit (an astral
+/// emoji two), so the tabs after them stop at the tab stops.
+#[gpui::test]
+fn tabs_after_wide_characters(cx: &mut TestAppContext) {
+    let text = "abcd\tX\n中\tX\nab\tX\n😀\tX\nasd = \"擦\"\t\t#asd";
+    let (editor, cx) = setup(text, |_| {}, cx);
+    let x = |line: u32, column: u32, cx: &mut VisualTestContext| {
+        position_of(&editor, p(line, column), cx).x
+    };
+    let char_width = x(1, 2, cx) - x(1, 1, cx);
+    // After 4 columns: to column 8.
+    assert_px(x(1, 6, cx) - x(1, 5, cx), char_width * 4.);
+    // After 2 columns (`中`, `ab` and `😀`): to column 4.
+    assert_px(x(2, 3, cx) - x(2, 2, cx), char_width * 2.);
+    assert_px(x(3, 4, cx) - x(3, 3, cx), char_width * 2.);
+    assert_px(x(4, 4, cx) - x(4, 3, cx), char_width * 2.);
+    // Monaco `issue-22832-1`: `asd = "擦"` is 10 columns, so the tabs
+    // are 2 and 4 wide.
+    assert_px(x(5, 11, cx) - x(5, 10, cx), char_width * 2.);
+    assert_px(x(5, 12, cx) - x(5, 11, cx), char_width * 4.);
+}
+
+/// Monaco `ViewLayout._computeContentWidth`: wrapping at the viewport, the
+/// content is as wide as its widest line (no `scrollBeyondLastColumn`), so
+/// neither End nor a sideways wheel scrolls the wrapped text.
+#[gpui::test]
+fn word_wrap_doesnt_scroll_horizontally(cx: &mut TestAppContext) {
+    let text = "a".repeat(300);
+    let (editor, cx) = setup(&text, |o| o.word_wrap = WordWrap::On, cx);
+    let scroll_left = |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.scroll_left());
+    // End on each wrapped segment, to the end of the line.
+    for _ in 0..10 {
+        keys("end", cx);
+        assert_eq!(scroll_left(cx), px(0.));
+        keys("right", cx);
+    }
+    assert_eq!(head(&editor, cx), p(1, 301));
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: point(px(200.), px(20.)),
+        delta: gpui::ScrollDelta::Pixels(point(px(-40.), px(0.))),
+        ..Default::default()
+    });
+    paint(cx);
+    assert_eq!(scroll_left(cx), px(0.));
+    let (content, viewport) = editor.read_with(cx, |e, _| {
+        (
+            e.content_width().unwrap(),
+            e.layout_info().unwrap().content_width,
+        )
+    });
+    assert!(content <= viewport, "{content:?} > {viewport:?}");
+
+    // Wrapping at a column isn't viewport wrapping: the content keeps
+    // `scrollBeyondLastColumn` and scrolls when the column doesn't fit.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.word_wrap = WordWrap::WordWrapColumn;
+        options.word_wrap_column = 290;
+        e.update_options(options, cx);
+    });
+    set(&editor, &[Selection::collapsed(p(1, 1))], cx);
+    keys("end", cx);
+    assert!(scroll_left(cx) > px(0.), "viewport {viewport:?}");
+}

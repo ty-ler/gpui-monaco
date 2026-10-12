@@ -28,7 +28,7 @@ editor.update(cx, |editor, cx| {
 | `cursor_smooth_caret_animation` | `cursorSmoothCaretAnimation` | `Off`, `Explicit` (keys and clicks, not typing), `On`; every cursor slides |
 | `cursor_surrounding_lines`, `cursor_surrounding_lines_style` | same names | lines kept around the cursor; `All` applies them to mouse moves too |
 | `smooth_scrolling` | `smoothScrolling` | animate reveals, cursor moves, mouse wheels and the scroll commands (off) |
-| `scroll_beyond_last_column`, `reveal_horizontal_right_padding` | same names | room past the longest line (4 columns) and right of revealed positions (15px) |
+| `scroll_beyond_last_column`, `reveal_horizontal_right_padding` | same names | room past the longest line (4 columns; none when wrapping at the viewport, which doesn't scroll horizontally) and right of revealed positions (15px) |
 | `fast_scroll_sensitivity`, `scroll_predominant_axis` | same names | Alt+wheel speed (5); scroll along the main axis only (on) |
 | `scroll_on_middle_click` | `scrollOnMiddleClick` | a middle click scrolls toward the mouse until the next click (off) |
 | `inertial_scroll` | `inertialScroll` | wheel and trackpad scrolling keeps going and slows down after the events stop, as Monaco's scrollable element does (off; mostly for Linux touchpads, since macOS and Windows already add momentum) |
@@ -54,7 +54,7 @@ editor.update(cx, |editor, cx| {
 | `unusual_line_terminators` | `unusualLineTerminators` | `Prompt` (default), `Auto` or `Off` for LS and PS characters |
 | `word_separators` | `wordSeparators` | used by word movement and whole-word find |
 | `word_segmenter_locales` | `wordSegmenterLocales` | BCP 47 tags (`ja`, `zh-CN`, `th`, …) whose words word movement, deletion and double-click selection find with ICU4X's word segmenter, for languages written without spaces (empty by default). The first valid tag is used; invalid ones are ignored. Needs the `word-segmenter` cargo feature (on by default) |
-| `word_wrap`, `word_wrap_column`, `wrapping_indent` | `wordWrap`, `wordWrapColumn`, `wrappingIndent` | `Off`, `On`, `WordWrapColumn`, `Bounded`; continuation lines are indented `None` (default), `Same`, `Indent` or `DeepIndent` |
+| `word_wrap`, `word_wrap_column`, `wrapping_indent` | `wordWrap`, `wordWrapColumn`, `wrappingIndent` | `Off`, `On`, `WordWrapColumn`, `Bounded`; continuation lines are indented `None` (default, and they have no indent guides), `Same`, `Indent` or `DeepIndent` |
 | `word_wrap_indicator` | `wordWrapIndicator` | a `↩` (theme color `editorWordWrapIndicator.foreground`, defaulting to the whitespace color) at the wrapping column of each soft-wrapped line; wrapping at the viewport then stops a column earlier (off) |
 | `word_wrap_override1`, `word_wrap_override2` | `wordWrapOverride1`, `wordWrapOverride2` | `On`, `Off` or `Inherit` (default); the second overrides the first, which overrides `word_wrap`. `EditorOptions::effective_word_wrap` resolves them. The diff editor sets the first from `diff_word_wrap` |
 | `word_wrap_break_before_characters`, `word_wrap_break_after_characters` | `wordWrapBreakBeforeCharacters`, `wordWrapBreakAfterCharacters` | where wrapping may break (Monaco's defaults) |

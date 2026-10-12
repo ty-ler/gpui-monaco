@@ -145,8 +145,8 @@ impl CodeEditor {
     }
 
     /// The width of the content: the longest line laid out, plus
-    /// `scroll_beyond_last_column` and the vertical scrollbar, or the text
-    /// area's width when wrapping (Monaco `getContentWidth`).
+    /// `scroll_beyond_last_column` and the vertical scrollbar, or, wrapping
+    /// at the viewport, just the widest line (Monaco `getContentWidth`).
     pub fn content_width(&self) -> Option<Pixels> {
         Some(self.layout.as_ref()?.content_width)
     }

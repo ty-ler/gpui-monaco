@@ -759,6 +759,29 @@ fn fit_full_width_to_cells(shaped: &mut ShapedLine, cell: Pixels) -> Vec<(Range<
     cells
 }
 
+/// Monaco `ViewLayout._computeContentWidth` when wrapping at the viewport:
+/// the widest line, plus the vertical scrollbar's width when a line is
+/// wider than the viewport by more than a character and the minimap is on
+/// the right. Returned less the vertical scrollbar (the text area's width
+/// doesn't include it), so lines that fit the wrapping column leave nothing
+/// to scroll.
+fn wrapped_content_width(
+    max_line_width: Pixels,
+    text_width: Pixels,
+    vertical_scrollbar_width: Pixels,
+    em_width: Pixels,
+    minimap_right: bool,
+) -> Pixels {
+    // Monaco's `layoutInfo.contentWidth` includes the vertical scrollbar.
+    let viewport_width = text_width + vertical_scrollbar_width;
+    let scroll_width = if minimap_right && max_line_width > viewport_width + em_width {
+        max_line_width + vertical_scrollbar_width
+    } else {
+        max_line_width
+    };
+    scroll_width - vertical_scrollbar_width
+}
+
 /// Monaco `renderOverflowingCharCount`.
 fn overflow_size(units: u32) -> String {
     let n = units as f64;
@@ -768,6 +791,20 @@ fn overflow_size(units: u32) -> String {
         format!("{:.1} KB", n / 1024.)
     } else {
         format!("{:.1} MB", n / 1024. / 1024.)
+    }
+}
+
+/// The visible columns `ch` takes at `visible_column`, as Monaco's
+/// `_renderLine` counts them: a tab to the next tab stop, a full-width
+/// character 2, and anything else one per UTF-16 unit (an astral emoji 2).
+#[inline]
+fn char_visible_columns(ch: char, visible_column: usize, tab_size: usize) -> usize {
+    if ch == '\t' {
+        tab_size - visible_column % tab_size
+    } else if crate::cursor::strings::is_full_width_character(ch as u32) {
+        2
+    } else {
+        ch.len_utf16()
     }
 }
 
@@ -908,11 +945,7 @@ pub(crate) fn layout_segment<'a>(
                 for _ in 0..ch.len_utf16() {
                     view_index.push(display_start + byte);
                 }
-                if ch == '\t' {
-                    *visible_column += tab_size - *visible_column % tab_size;
-                } else {
-                    *visible_column += 1;
-                }
+                *visible_column += char_visible_columns(ch, *visible_column, tab_size);
             }
             display.push_str(&content[byte_from..byte_to]);
             injected.push((display_start..display.len(), injection, byte_from));
@@ -974,7 +1007,7 @@ pub(crate) fn layout_segment<'a>(
             visible_column += substitute.columns();
         } else {
             display.push(ch);
-            visible_column += 1;
+            visible_column += char_visible_columns(ch, visible_column, tab_size);
         }
     }
     let end_position = inject_at(
@@ -3368,8 +3401,14 @@ fn prepaint_editor(
             Vec::new()
         });
 
-    // Rough content width from the longest row; refined by shaped lines below.
-    let mut content_width = if wrap_column.is_some() {
+    // Monaco `ViewLayout._computeContentWidth`: wrapping at the viewport,
+    // the content is as wide as its widest line, without
+    // `scrollBeyondLastColumn` or the view zones' and overlay widgets' min
+    // widths, so there's no horizontal scrolling.
+    let viewport_wrapping = layout_info.is_viewport_wrapping;
+    // Rough content width from the longest row (at most the wrapping
+    // column's); refined by shaped lines below.
+    let mut content_width = if viewport_wrapping {
         text_width
     } else {
         metrics.em_width
@@ -3377,16 +3416,19 @@ fn prepaint_editor(
                 .summary()
                 .longest_row_chars
                 // Lines stop rendering after the limit.
-                .min(options.stop_rendering_line_after.unwrap_or(u32::MAX)) as f32
+                .min(options.stop_rendering_line_after.unwrap_or(u32::MAX))
+                .min(wrap_column.unwrap_or(u32::MAX)) as f32
                 + options.scroll_beyond_last_column as f32)
     };
     // Monaco `minWidthInPx` and `getMinContentWidthInPx`: view zones and
     // overlay widgets that need a wider scroll range.
-    for zone in &editor.widgets.zones {
-        content_width = content_width.max(zone.min_width);
-    }
-    for widget in &editor.widgets.overlays {
-        content_width = content_width.max(widget.min_content_width);
+    if !viewport_wrapping {
+        for zone in &editor.widgets.zones {
+            content_width = content_width.max(zone.min_width);
+        }
+        for widget in &editor.widgets.overlays {
+            content_width = content_width.max(widget.min_content_width);
+        }
     }
     let show_hbar = content_width > text_width;
 
@@ -3700,6 +3742,9 @@ fn prepaint_editor(
         .collect();
     let mut highlight_ix = 0;
     let mut lines = Vec::with_capacity(segments.len());
+    // The widest shaped line (Monaco `_maxLineWidth`), when wrapping at the
+    // viewport.
+    let mut max_line_width = px(0.);
     for segment in &segments {
         let line_range = snapshot.line_range(segment.row);
         while highlight_ix < highlights.len() && highlights[highlight_ix].0.end <= line_range.start
@@ -3839,10 +3884,24 @@ fn prepaint_editor(
             marked_cols,
             window,
         );
-        // Monaco `scrollBeyondLastColumn`.
-        content_width = content_width
-            .max(line.width() + metrics.em_width * options.scroll_beyond_last_column as f32);
+        // Monaco `scrollBeyondLastColumn`, when not wrapping at the
+        // viewport.
+        if viewport_wrapping {
+            max_line_width = max_line_width.max(line.width());
+        } else {
+            content_width = content_width
+                .max(line.width() + metrics.em_width * options.scroll_beyond_last_column as f32);
+        }
         lines.push(line);
+    }
+    if viewport_wrapping {
+        content_width = wrapped_content_width(
+            max_line_width,
+            text_width,
+            vbar,
+            metrics.em_width,
+            options.minimap.enabled && !minimap_left,
+        );
     }
 
     // Horizontal autoscroll to the cursor (several cursors reveal through
@@ -5227,10 +5286,12 @@ fn prepaint_editor(
                 .is_some_and(|f| f.off_side),
         };
         let rows = first.row..last.row + 1;
+        // Per view line: wrapped lines without indentation have none.
         let counts = if options.guides.indentation {
-            crate::view::guides::lines_indent_guides(rope, rows.clone(), ctx)
+            let row_counts = crate::view::guides::lines_indent_guides(rope, rows.clone(), ctx);
+            view_lines.indent_guides(first.view_line..last.view_line + 1, rows.start, &row_counts)
         } else {
-            vec![0; rows.len()]
+            Vec::new()
         };
         let highlight_active = options.guides.highlight_active_indentation;
         let active = (options.guides.indentation
@@ -5265,7 +5326,12 @@ fn prepaint_editor(
         let max_indent_left = wrap_column.map(|column| metrics.em_width * column as f32);
         for line in &layout.lines {
             let ix = (line.row - rows.start) as usize;
-            let count = counts[ix];
+            let count = line
+                .view_line
+                .checked_sub(first.view_line)
+                .and_then(|ix| counts.get(ix as usize))
+                .copied()
+                .unwrap_or(0);
             let top = layout.line_top(line.view_line);
             let line_height = layout.line_height_of(line.view_line);
             // Monaco: on wrapped lines, the opening line's guide shows after
