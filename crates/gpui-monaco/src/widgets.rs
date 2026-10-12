@@ -5,8 +5,20 @@ use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
 
-use gpui::{AnyView, Pixels, Point, px};
+use gpui::{AnyView, App, Pixels, Point, Size, Window, px};
 use text::{Anchor, PointUtf16};
+
+/// A view zone callback given a length in pixels (Monaco `IViewZone`'s
+/// `onDomNodeTop` and `onComputedHeight`).
+pub type ZoneCallback = Rc<dyn Fn(Pixels, &mut Window, &mut App)>;
+
+/// Monaco `IContentWidget.beforeRender`: the size to place the widget by,
+/// or `None` to measure its view.
+pub type BeforeRender = Rc<dyn Fn(&mut Window, &mut App) -> Option<Size<Pixels>>>;
+
+/// Monaco `IContentWidget.afterRender`: the preference the widget was
+/// placed by, or `None` when it isn't shown.
+pub type AfterRender = Rc<dyn Fn(Option<ContentWidgetPreference>, &mut Window, &mut App)>;
 
 /// Identifies a view zone, content widget or overlay widget added to a
 /// [`CodeEditor`](crate::CodeEditor), e.g. for
@@ -88,6 +100,14 @@ pub struct ViewZone {
     /// out at the gutter's width and the zone's height. It doesn't scroll
     /// horizontally.
     pub margin_view: Option<AnyView>,
+    /// Monaco `onDomNodeTop`: told the zone's top relative to the editor's
+    /// top, scrolling included, when the zone is laid out with a new top.
+    /// A zone out of view or hidden is at Monaco's -1000000 less the scroll
+    /// top.
+    pub on_dom_node_top: Option<ZoneCallback>,
+    /// Monaco `onComputedHeight`: told the zone's height in pixels (0 while
+    /// it's hidden) when the zone is laid out with a new height.
+    pub on_computed_height: Option<ZoneCallback>,
 }
 
 impl ViewZone {
@@ -105,6 +125,8 @@ impl ViewZone {
             min_width: px(0.),
             view,
             margin_view: None,
+            on_dom_node_top: None,
+            on_computed_height: None,
         }
     }
 
@@ -162,6 +184,19 @@ pub struct ContentWidget {
     /// Monaco `suppressMouseDown`: a mouse down on the widget focuses the
     /// editor rather than the widget.
     pub suppress_mouse_down: bool,
+    /// Monaco `useDisplayNone`: the widget has no visual representation.
+    /// Its view is never laid out or painted and takes no mouse; it's
+    /// still placed (by `before_render`'s size, else as an empty box) and
+    /// `after_render` is told where.
+    pub use_display_none: bool,
+    /// Monaco `beforeRender`: called before the widget is placed, each
+    /// frame its line is in view. A size it returns is used instead of the
+    /// view's measured size, to place the widget and lay its view out.
+    pub before_render: Option<BeforeRender>,
+    /// Monaco `afterRender`: told the preference the widget was placed by,
+    /// or `None` when it isn't shown (no position or preference, or its
+    /// line out of view). Called after the frame, when that changes.
+    pub after_render: Option<AfterRender>,
 }
 
 impl ContentWidget {
@@ -180,8 +215,78 @@ impl ContentWidget {
             view,
             allow_editor_overflow: false,
             suppress_mouse_down: false,
+            use_display_none: false,
+            before_render: None,
+            after_render: None,
         }
     }
+
+    /// The render hooks to keep with the widget, if it has any.
+    pub(crate) fn hooks(&self) -> Option<Rc<ContentWidgetHooks>> {
+        (self.before_render.is_some() || self.after_render.is_some()).then(|| {
+            Rc::new(ContentWidgetHooks {
+                before_render: self.before_render.clone(),
+                after_render: self.after_render.clone(),
+                reported: Cell::new(None),
+            })
+        })
+    }
+}
+
+/// A content widget's `beforeRender` and `afterRender`.
+pub(crate) struct ContentWidgetHooks {
+    before_render: Option<BeforeRender>,
+    after_render: Option<AfterRender>,
+    /// What `after_render` was last told (`None`: nothing yet).
+    reported: Cell<Option<Option<ContentWidgetPreference>>>,
+}
+
+impl ContentWidgetHooks {
+    /// The size `before_render` asks for.
+    pub fn size(&self, window: &mut Window, cx: &mut App) -> Option<Size<Pixels>> {
+        self.before_render
+            .as_ref()
+            .and_then(|before| before(window, cx))
+    }
+
+    /// Queues `after_render` with where the widget went this frame, unless
+    /// that's what it was told last.
+    pub fn report(&self, placed: Option<ContentWidgetPreference>, pending: &mut PendingCallbacks) {
+        if let Some(after) = &self.after_render
+            && self.reported.get() != Some(placed)
+        {
+            self.reported.set(Some(placed));
+            pending.push(PendingCallback::AfterRender(after.clone(), placed));
+        }
+    }
+}
+
+/// A host callback due after this frame. Monaco calls them while it
+/// renders; here they run once the frame is drawn, so they may update the
+/// editor.
+pub(crate) enum PendingCallback {
+    /// A view zone's `onDomNodeTop` or `onComputedHeight`.
+    Zone(ZoneCallback, Pixels),
+    /// A content widget's `afterRender`.
+    AfterRender(AfterRender, Option<ContentWidgetPreference>),
+}
+
+/// The callbacks due after a frame (empty, and unallocated, without any).
+pub(crate) type PendingCallbacks = Vec<PendingCallback>;
+
+/// Runs `pending` once the current frame is drawn.
+pub(crate) fn run_after_frame(pending: PendingCallbacks, window: &mut Window, cx: &mut App) {
+    if pending.is_empty() {
+        return;
+    }
+    window.defer(cx, move |window, cx| {
+        for callback in pending {
+            match callback {
+                PendingCallback::Zone(callback, value) => callback(value, window, cx),
+                PendingCallback::AfterRender(callback, placed) => callback(placed, window, cx),
+            }
+        }
+    });
 }
 
 /// Where a content widget shows, for
@@ -354,17 +459,17 @@ impl OverflowRoomCell {
 }
 
 /// The top of a content widget `height` tall anchored to the line at
-/// `line_top`, within the editor's `viewport` (Monaco
-/// `ContentWidget._prepareRenderWidget`): the first preference that fits,
-/// else the first preference. `Exact` always fits; an empty list hides the
-/// widget.
+/// `line_top`, within the editor's `viewport`, and the preference used
+/// (Monaco `ContentWidget._prepareRenderWidget`): the first preference that
+/// fits, else the first preference. `Exact` always fits; an empty list
+/// hides the widget.
 pub(crate) fn place_content_widget(
     preference: &[ContentWidgetPreference],
     line_top: Pixels,
     line_height: Pixels,
     height: Pixels,
     viewport: Range<Pixels>,
-) -> Option<Pixels> {
+) -> Option<(Pixels, ContentWidgetPreference)> {
     let above = line_top - height;
     let below = line_top + line_height;
     let fits_above = above >= viewport.start;
@@ -374,11 +479,13 @@ pub(crate) fn place_content_widget(
         ContentWidgetPreference::Below => fits_below,
         ContentWidgetPreference::Exact => true,
     });
-    Some(match fitting.or(preference.first())? {
+    let used = *fitting.or(preference.first())?;
+    let top = match used {
         ContentWidgetPreference::Above => above,
         ContentWidgetPreference::Below => below,
         ContentWidgetPreference::Exact => line_top,
-    })
+    };
+    Some((top, used))
 }
 
 /// Where an overlay widget is pinned (Monaco
@@ -445,7 +552,7 @@ impl OverlayWidget {
 /// horizontal scrollbar height) from its bottom.
 pub(crate) fn place_overlay_widgets(
     widgets: &[(OverlayPosition, Option<i32>)],
-    sizes: &[gpui::Size<Pixels>],
+    sizes: &[Size<Pixels>],
     editor: gpui::Bounds<Pixels>,
     text: gpui::Bounds<Pixels>,
     right_inset: Pixels,
@@ -587,6 +694,18 @@ pub(crate) struct ZoneState {
     /// scroll range to at least this (the diff editor's inline deleted
     /// lines).
     pub min_width: Pixels,
+    /// Monaco `onDomNodeTop`, and the top it was last told.
+    pub on_dom_node_top: Option<ZoneCallback>,
+    pub reported_top: Option<Pixels>,
+    /// Monaco `onComputedHeight`, and the height it was last told.
+    pub on_computed_height: Option<ZoneCallback>,
+    pub reported_height: Option<Pixels>,
+}
+
+impl ZoneState {
+    fn has_callbacks(&self) -> bool {
+        self.on_dom_node_top.is_some() || self.on_computed_height.is_some()
+    }
 }
 
 #[derive(Clone)]
@@ -609,6 +728,10 @@ pub(crate) struct ContentWidgetState {
     /// line, for an overflowing widget (Monaco's `IAnchor`, such as the
     /// code action menu at a clicked hover link).
     pub window_anchor: Option<gpui::Bounds<Pixels>>,
+    /// Monaco `useDisplayNone`.
+    pub display_none: bool,
+    /// Monaco `beforeRender` and `afterRender`.
+    pub hooks: Option<Rc<ContentWidgetHooks>>,
 }
 
 #[derive(Clone)]
@@ -633,9 +756,10 @@ pub(crate) struct WidgetPositions {
     pub gutter: Vec<u32>,
 }
 
-/// What cached zone rows were computed for: the view lines (pointer), the
+/// What cached zone rows were computed for: the view lines (their
+/// generation, which changes with every fold, unlike a pointer to them), the
 /// text version and the zones generation.
-pub(crate) type ZoneRowsKey = (usize, text::Version, u64);
+pub(crate) type ZoneRowsKey = (u64, text::Version, u64);
 
 /// All embedded views of one editor.
 #[derive(Clone, Default)]
@@ -652,6 +776,9 @@ pub(crate) struct Widgets {
     next_id: u64,
     /// Bumped when zones are added or removed.
     pub zones_generation: u64,
+    /// How many zones have `onDomNodeTop` or `onComputedHeight`: layout
+    /// reports nothing without any.
+    pub zone_callbacks: usize,
     /// Each zone's view line (`None` when folded away), cached for
     /// (`view_lines`, text version, `zones_generation`): editors can have
     /// thousands of zones (code lenses).
@@ -704,11 +831,7 @@ impl Widgets {
             + self.overlays.len()
             + self.glyphs.len()
             + self.gutter.len();
-        let zones = self.zones.len();
-        self.zones.retain(|z| z.id != id);
-        if self.zones.len() != zones {
-            self.zones_generation += 1;
-        }
+        self.remove_zone(id);
         self.content.retain(|w| w.id != id);
         self.overlays.retain(|w| w.id != id);
         self.glyphs.retain(|w| w.id != id);
@@ -721,6 +844,24 @@ impl Widgets {
                 + self.gutter.len()
     }
 
+    /// Adds a view zone.
+    pub fn push_zone(&mut self, zone: ZoneState) {
+        self.zone_callbacks += usize::from(zone.has_callbacks());
+        self.zones.push(zone);
+        self.zones_generation += 1;
+    }
+
+    /// Removes view zone `id`; returns whether there was one.
+    pub fn remove_zone(&mut self, id: WidgetId) -> bool {
+        let Some(ix) = self.zones.iter().position(|z| z.id == id) else {
+            return false;
+        };
+        let zone = self.zones.remove(ix);
+        self.zone_callbacks -= usize::from(zone.has_callbacks());
+        self.zones_generation += 1;
+        true
+    }
+
     /// Drops every view zone (Monaco's go with the old view when the model
     /// changes). Returns whether there were any.
     pub fn clear_zones(&mut self) -> bool {
@@ -728,6 +869,7 @@ impl Widgets {
             return false;
         }
         self.zones.clear();
+        self.zone_callbacks = 0;
         self.zones_generation += 1;
         self.zone_rows = None;
         true
@@ -743,6 +885,7 @@ mod tests {
     fn place(preference: &[ContentWidgetPreference], line_top: f32) -> Option<Pixels> {
         // 20px lines, a 50px widget, a 0..200 viewport.
         place_content_widget(preference, px(line_top), px(20.), px(50.), px(0.)..px(200.))
+            .map(|(top, _)| top)
     }
 
     #[test]
@@ -754,7 +897,11 @@ mod tests {
         // Nothing fits: the first preference, not always below.
         let tight =
             place_content_widget(&[Above, Below], px(30.), px(20.), px(50.), px(0.)..px(90.));
-        assert_eq!(tight, Some(px(-20.)));
+        assert_eq!(tight, Some((px(-20.), Above)));
+        // The preference used, for `afterRender`.
+        let below =
+            place_content_widget(&[Above, Below], px(10.), px(20.), px(50.), px(0.)..px(200.));
+        assert_eq!(below, Some((px(30.), Below)));
         // Exact always fits.
         assert_eq!(place(&[Exact, Below], 0.), Some(px(0.)));
         // No preference: hidden.

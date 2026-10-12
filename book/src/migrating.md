@@ -110,7 +110,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `deltaDecorations(old, new)`, `removeDecorations(ids)` | `delta_decorations(&old, new, cx)`, `remove_decorations(&ids, cx)` (editor-owned) |
 | `getLineDecorations(n)`, `getDecorationsInRange(range)` | `line_decorations(row, cx)`, `decorations_in_range(range, cx)` |
 | `setHiddenAreas(ranges, source)` | `set_hidden_areas(rows, cx)`, `set_hidden_areas_from(source, rows, cx)` (0-based rows, end exclusive) |
-| `changeViewZones(a => a.addZone(z))` | `add_view_zone(zone, cx)`, `set_view_zone_height`, `remove_widget` |
+| `changeViewZones(a => …)` | `change_view_zones(\|zones\| …, cx)` with `add_zone`, `remove_zone`, `layout_zone`, `set_zone_height`; or one at a time: `add_view_zone(zone, cx)`, `layout_view_zone`, `set_view_zone_height`, `remove_widget` |
 | `addContentWidget(w)` / `layoutContentWidget(w)` | `add_content_widget(w, cx)` / `set_content_widget_position(…)` |
 | `addOverlayWidget(w)` | `add_overlay_widget(w, cx)` |
 | `addGlyphMarginWidget(w)` / `layoutGlyphMarginWidget(w)` | `add_glyph_margin_widget(GlyphMarginWidget { range, view, lane, z_index }, cx)` (`GlyphMarginWidget::new(row, view)` for a line) / `layout_glyph_margin_widget(id, GlyphMarginWidgetPosition { range, lane, z_index }, cx)` |

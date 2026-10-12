@@ -1,4 +1,4 @@
-//! Monaco's view zone, content widget and overlay widget API (#252):
+//! Monaco's view zone, content widget and overlay widget API (#252, #296):
 //! `IViewZone`'s fields, `IContentWidget`'s and `IOverlayWidget`'s, and
 //! what happens to them when the model changes. Every test draws frames,
 //! since zones and widgets are laid out while painting.
@@ -692,4 +692,232 @@ fn widgets_wait_for_a_model_after_set_model_none(cx: &mut TestAppContext) {
     assert_near(content.left(), expected.x);
     assert_eq!(content.top(), expected.y);
     assert_eq!(glyph_bounds.get().unwrap().top(), line_top(&editor, cx, 6));
+}
+
+/// What a callback was told, in order.
+type Told<T> = Rc<std::cell::RefCell<Vec<T>>>;
+
+fn recorder(told: &Told<Pixels>) -> gpui_monaco::ZoneCallback {
+    let told = told.clone();
+    Rc::new(move |value, _, _| told.borrow_mut().push(value))
+}
+
+fn editor_top(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Pixels {
+    editor.read_with(cx, |e, _| e.widget_bounds_for_tests().0.top())
+}
+
+/// Monaco `IViewZone.onComputedHeight` and `onDomNodeTop`: told the zone's
+/// height (0 while hidden) and its scrolled top (Monaco's -1000000 less
+/// the scroll top out of view) as it's laid out, only when they change.
+#[gpui::test]
+fn zone_callbacks_report_the_top_and_height(cx: &mut TestAppContext) {
+    let text: Vec<String> = (0..300).map(|i| format!("line {i}")).collect();
+    let (editor, cx) = setup(&text.join("\n"), cx);
+    let (zone, zone_bounds) = Probe::new(cx);
+    let (far, _) = Probe::new(cx);
+    let tops: Told<Pixels> = Default::default();
+    let heights: Told<Pixels> = Default::default();
+    let far_tops: Told<Pixels> = Default::default();
+    let id = editor.update(cx, |e, cx| {
+        let mut near = ViewZone::new(3, ZoneHeight::Pixels(px(40.)), zone.into());
+        near.on_dom_node_top = Some(recorder(&tops));
+        near.on_computed_height = Some(recorder(&heights));
+        let id = e.add_view_zone(near, cx);
+        let mut far_zone = ViewZone::new(290, ZoneHeight::Lines(1.), far.into());
+        far_zone.on_dom_node_top = Some(recorder(&far_tops));
+        e.add_view_zone(far_zone, cx);
+        id
+    });
+    draw(cx);
+    let top = zone_bounds.get().unwrap().top() - editor_top(&editor, cx);
+    assert_eq!(*heights.borrow(), vec![px(40.)]);
+    assert_eq!(*tops.borrow(), vec![top]);
+    assert_eq!(
+        top,
+        line_top(&editor, cx, 3) - px(40.) - editor_top(&editor, cx)
+    );
+    assert_eq!(*far_tops.borrow(), vec![px(-1_000_000.)]);
+
+    // Nothing changed: nothing is told again.
+    draw(cx);
+    draw(cx);
+    assert_eq!(tops.borrow().len(), 1);
+    assert_eq!(heights.borrow().len(), 1);
+    assert_eq!(far_tops.borrow().len(), 1);
+
+    // Scrolling moves both tops (Monaco `getScrolledTopFromAbsoluteTop`).
+    editor.update(cx, |e, cx| {
+        e.set_scroll_top(px(10.), ScrollType::Immediate, cx)
+    });
+    draw(cx);
+    assert_eq!(tops.borrow().last(), Some(&(top - px(10.))));
+    assert_eq!(far_tops.borrow().last(), Some(&px(-1_000_010.)));
+    assert_eq!(heights.borrow().len(), 1);
+
+    // A new height.
+    editor.update(cx, |e, cx| {
+        e.set_view_zone_height(id, ZoneHeight::Pixels(px(60.)), cx)
+    });
+    draw(cx);
+    assert_eq!(heights.borrow().last(), Some(&px(60.)));
+
+    // Hidden with the line after it: 0 tall and out of view. (Folding
+    // changes the view lines in place; the zone hides in the same frame.)
+    editor.update(cx, |e, cx| {
+        e.set_hidden_areas(std::iter::once(3..5).collect(), cx)
+    });
+    draw(cx);
+    assert!(
+        !widget_bounds(&editor, EmbeddedKind::ViewZone, cx)
+            .iter()
+            .any(|zone| zone.size.height == px(60.))
+    );
+    assert_eq!(heights.borrow().last(), Some(&px(0.)));
+    assert_eq!(tops.borrow().last(), Some(&px(-1_000_010.)));
+}
+
+/// Monaco `IContentWidget.beforeRender` and `afterRender`: the size it
+/// returns places the widget, and `afterRender` is told the preference
+/// used, or null when the widget isn't shown.
+#[gpui::test]
+fn content_widget_render_hooks(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("zero\none\ntwo\nthree", cx);
+    let (view, bounds) = Probe::new(cx);
+    let told: Told<Option<ContentWidgetPreference>> = Default::default();
+    let before_calls = Rc::new(Cell::new(0));
+    let id = editor.update(cx, |e, cx| {
+        let mut widget = ContentWidget::new(
+            p(0, 2),
+            vec![
+                ContentWidgetPreference::Above,
+                ContentWidgetPreference::Below,
+            ],
+            view.into(),
+        );
+        let calls = before_calls.clone();
+        widget.before_render = Some(Rc::new(move |_, _| {
+            calls.set(calls.get() + 1);
+            Some(size(px(30.), px(7.)))
+        }));
+        let after = told.clone();
+        widget.after_render = Some(Rc::new(move |placed, _, _| after.borrow_mut().push(placed)));
+        e.add_content_widget(widget, cx)
+    });
+    draw(cx);
+    // No room above the first line: below it, at `beforeRender`'s size.
+    assert!(before_calls.get() > 0);
+    assert_eq!(*told.borrow(), vec![Some(ContentWidgetPreference::Below)]);
+    let shown = widget_bounds(&editor, EmbeddedKind::ContentWidget, cx);
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].size, size(px(30.), px(7.)));
+    assert_eq!(bounds.get().unwrap().size, size(px(30.), px(7.)));
+    let lh = line_height(&editor, cx);
+    assert_eq!(shown[0].top(), line_top(&editor, cx, 0) + lh);
+    draw(cx);
+    assert_eq!(told.borrow().len(), 1);
+
+    // On a lower line it fits above.
+    editor.update(cx, |e, cx| e.set_content_widget_position(id, p(2, 1), cx));
+    draw(cx);
+    assert_eq!(
+        told.borrow().last(),
+        Some(&Some(ContentWidgetPreference::Above))
+    );
+    // Hidden: told null.
+    editor.update(cx, |e, cx| {
+        e.layout_content_widget(id, ContentWidgetPosition::default(), cx)
+    });
+    draw(cx);
+    assert_eq!(told.borrow().last(), Some(&None));
+    assert_eq!(told.borrow().len(), 3);
+}
+
+/// Monaco `IContentWidget.useDisplayNone`: the widget is placed (and
+/// `afterRender` told where) but never shown.
+#[gpui::test]
+fn use_display_none_places_but_never_shows(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("zero\none\ntwo", cx);
+    let (view, bounds) = Probe::sized(cx, 20., 10.);
+    let told: Told<Option<ContentWidgetPreference>> = Default::default();
+    editor.update(cx, |e, cx| {
+        let mut widget =
+            ContentWidget::new(p(1, 1), vec![ContentWidgetPreference::Exact], view.into());
+        widget.use_display_none = true;
+        let after = told.clone();
+        widget.after_render = Some(Rc::new(move |placed, _, _| after.borrow_mut().push(placed)));
+        e.add_content_widget(widget, cx)
+    });
+    draw(cx);
+    assert_eq!(*told.borrow(), vec![Some(ContentWidgetPreference::Exact)]);
+    assert!(bounds.get().is_none());
+    assert!(widget_bounds(&editor, EmbeddedKind::ContentWidget, cx).is_empty());
+}
+
+/// Monaco `changeViewZones`: adds, removes and layouts in one accessor
+/// make one `onDidChangeViewZones`, and none without a change.
+#[gpui::test]
+fn change_view_zones_batches_one_event(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("0\n1\n2\n3\n4\n5\n6", cx);
+    let changes = Rc::new(Cell::new(0));
+    let counter = changes.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event: &CodeEditorEvent, _| {
+            if matches!(event, CodeEditorEvent::ViewZonesChanged) {
+                counter.set(counter.get() + 1);
+            }
+        })
+        .detach();
+    });
+    let views: Vec<_> = (0..3).map(|_| Probe::new(cx)).collect();
+    let mut views = views.into_iter();
+    let (a, a_bounds) = views.next().unwrap();
+    let (b, _) = views.next().unwrap();
+    let (c, c_bounds) = views.next().unwrap();
+    let (first, second) = editor.update(cx, |e, cx| {
+        e.change_view_zones(
+            |zones| {
+                let first = zones.add_zone(ViewZone::new(1, ZoneHeight::Pixels(px(10.)), a.into()));
+                let second =
+                    zones.add_zone(ViewZone::new(2, ZoneHeight::Pixels(px(10.)), b.into()));
+                zones.layout_zone(first, 4, None);
+                zones.set_zone_height(first, ZoneHeight::Pixels(px(20.)));
+                (first, second)
+            },
+            cx,
+        )
+    });
+    assert_eq!(changes.get(), 1);
+    draw(cx);
+    assert_eq!(widget_bounds(&editor, EmbeddedKind::ViewZone, cx).len(), 2);
+    // `first` was moved after line 4 and resized.
+    let a = a_bounds.get().unwrap();
+    assert_eq!(a.bottom(), line_top(&editor, cx, 4));
+    assert_eq!(a.size.height, px(20.));
+
+    editor.update(cx, |e, cx| {
+        e.change_view_zones(
+            |zones| {
+                zones.remove_zone(second);
+                zones.add_zone(ViewZone::new(6, ZoneHeight::Pixels(px(10.)), c.into()));
+            },
+            cx,
+        )
+    });
+    assert_eq!(changes.get(), 2);
+    draw(cx);
+    assert_eq!(widget_bounds(&editor, EmbeddedKind::ViewZone, cx).len(), 2);
+    assert!(c_bounds.get().is_some());
+
+    // Nothing to change: no event (Monaco's `zonesHaveChanged`).
+    editor.update(cx, |e, cx| {
+        e.change_view_zones(
+            |zones| {
+                zones.remove_zone(second);
+                zones.layout_zone(second, 2, None);
+                zones.set_zone_height(first, ZoneHeight::Pixels(px(20.)));
+            },
+            cx,
+        )
+    });
+    assert_eq!(changes.get(), 2);
 }

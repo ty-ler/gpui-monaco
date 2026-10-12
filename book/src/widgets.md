@@ -33,8 +33,32 @@ let id = editor.update(cx, |editor, cx| {
 | `suppress_mouse_down` | `suppressMouseDown` | A click on the zone places the cursor before it (upper half) or after it (lower half), as on text, instead of going to the zone's view. |
 | `min_width` | `minWidthInPx` | Widens the horizontal scroll range. |
 | `margin_view` | `marginDomNode` | A view in the gutter beside the zone. |
+| `on_dom_node_top` | `onDomNodeTop` | Told the zone's top, from the editor's top and with scrolling, when it changes. Out of view, or hidden, it's Monaco's -1000000 less the scroll top. |
+| `on_computed_height` | `onComputedHeight` | Told the zone's height in pixels (0 while hidden) when it changes. |
 
 A zone's view is laid out at the scroll width and scrolls horizontally with the text; the margin view stays in the gutter. Zones follow edits: the line is tracked with an anchor. A zone is hidden while the line after it is inside a folded region (unless `show_in_hidden_areas`). To resize a zone, call `set_view_zone_height(id, height, cx)`; to move it, `layout_view_zone(id, after_line, after_column, cx)` (Monaco `layoutZone`).
+
+The two callbacks run after the frame that lays the zone out, so they may update the editor. Monaco calls them on every render; here they're called only when the value changes, since the editor lays out every frame:
+
+```rust,ignore
+zone.on_dom_node_top = Some(Rc::new(|top, _window, _cx| println!("zone at {top:?}")));
+zone.on_computed_height = Some(Rc::new(|height, _window, _cx| println!("{height:?} tall")));
+```
+
+To change several zones at once, use `change_view_zones` (Monaco `changeViewZones`). Its accessor adds, removes, moves and resizes zones, and the editor emits one `ViewZonesChanged` for all of them, or none if nothing changed. It returns what the closure returns:
+
+```rust,ignore
+let ids = editor.update(cx, |editor, cx| {
+    editor.change_view_zones(|zones| {
+        zones.remove_zone(old);
+        zones.layout_zone(moved, 12, None);
+        zones.set_zone_height(moved, ZoneHeight::Lines(3.));
+        [zones.add_zone(first), zones.add_zone(second)]
+    }, cx)
+});
+```
+
+`add_view_zone`, `layout_view_zone` and `set_view_zone_height` are the same changes one at a time, each with its own event.
 
 As in Monaco, view zones belong to the model's view: `set_model` removes them all (and emits `ViewZonesChanged`). Content, overlay and glyph margin widgets stay, at the same positions in the new model.
 
@@ -62,6 +86,12 @@ The other fields are Monaco `IContentWidget`'s: `secondary_position` (a position
 A content widget is clipped to the text area and paints under the sticky scroll, as in Monaco. With `allow_editor_overflow` (Monaco `allowEditorOverflow`), it can extend past the editor into the rest of the window instead: it paints above everything else, fits above or below its line against the window, and takes the mouse from whatever is under it. The editor's hover, suggest widget, parameter hints, code action menu, rename box and messages work this way, so they show in full in a short editor.
 
 To move a widget, call `set_content_widget_position(id, position, cx)`. `layout_content_widget(id, ContentWidgetPosition { .. }, cx)` (Monaco `layoutContentWidget`) also changes its secondary position, preference and affinity; a `None` position or an empty preference hides it.
+
+Monaco's render hooks are fields too:
+
+- `before_render` (Monaco `beforeRender`) is called before the widget is placed, each frame its line is in view. A size it returns is used instead of the view's measured size: the widget is placed by it and its view is laid out at it.
+- `after_render` (Monaco `afterRender`) is told the preference the widget was placed by, or `None` when it isn't shown (no position or preference, or its line out of view). It runs after the frame, only when that changes.
+- `use_display_none` (Monaco `useDisplayNone`) is for a widget with no visual representation. Its view is never laid out or painted and takes no clicks, but the widget is still placed (by `before_render`'s size, else as an empty box) and `after_render` is told where.
 
 ## Messages
 
