@@ -855,35 +855,7 @@ pub(crate) fn execute_edits_forcing(
     edits.sort_by(|a, b| cmp_using_ends(&a.0, &b.0));
     let selections_after = match end_state {
         Some(selections) if !selections.is_empty() => selections,
-        _ => {
-            let applied: Vec<AppliedOp> = edits
-                .iter()
-                .map(|(range, text, force)| AppliedOp {
-                    start: range.start,
-                    end: range.end,
-                    text,
-                    deleting: offset_between(model, range.start, range.end),
-                    inserting: text.encode_utf16().count() as u64,
-                    force_move_markers: *force,
-                })
-                .collect();
-            selections_before
-                .iter()
-                .map(|s| {
-                    let range = adjust_range(
-                        model,
-                        s.range(),
-                        Stickiness::AlwaysGrowsWhenTypingAtEdges,
-                        &applied,
-                    );
-                    if s.is_empty() {
-                        Selection::collapsed(range.end)
-                    } else {
-                        Selection::from_range(range, s.is_reversed())
-                    }
-                })
-                .collect()
-        }
+        _ => selections_from_markers(model, selections_before, &edits),
     };
     EditOperation {
         edits: edits
@@ -898,6 +870,46 @@ pub(crate) fn execute_edits_forcing(
         follow_up: None,
         auto_whitespace: Vec::new(),
     }
+}
+
+/// Carries `selections` through `edits` (in pre-edit coordinates, sorted
+/// by [`cmp_using_ends`] and not overlapping, each saying whether it forces
+/// markers to move) the way Monaco's cursors follow edits they didn't make
+/// (`readSelectionFromMarkers`): each is a range that grows when typing at
+/// its edges (`AlwaysGrowsWhenTypingAtEdges`), and an empty selection that
+/// grew collapses to its end, so text inserted at a cursor goes before it.
+pub(crate) fn selections_from_markers(
+    model: &dyn CursorModel,
+    selections: &[Selection],
+    edits: &[(Range<Position>, String, bool)],
+) -> Vec<Selection> {
+    let applied: Vec<AppliedOp> = edits
+        .iter()
+        .map(|(range, text, force)| AppliedOp {
+            start: range.start,
+            end: range.end,
+            text,
+            deleting: offset_between(model, range.start, range.end),
+            inserting: text.encode_utf16().count() as u64,
+            force_move_markers: *force,
+        })
+        .collect();
+    selections
+        .iter()
+        .map(|s| {
+            let range = adjust_range(
+                model,
+                s.range(),
+                Stickiness::AlwaysGrowsWhenTypingAtEdges,
+                &applied,
+            );
+            if s.is_empty() {
+                Selection::collapsed(range.end)
+            } else {
+                Selection::from_range(range, s.is_reversed())
+            }
+        })
+        .collect()
 }
 
 /// Carries `ranges` (in pre-edit coordinates) through `edits` (a batch as in

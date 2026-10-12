@@ -2101,6 +2101,26 @@ impl EditorLayout {
         ((self.text_bounds.size.height / self.metrics.line_height).floor() as u32).max(1)
     }
 
+    /// The first and last view lines that show in full (Monaco
+    /// `getCompletelyVisibleViewRange`): the laid-out lines without a
+    /// partly visible first or last one, unless that leaves none. As in
+    /// Monaco, the viewport is the editor's height, the horizontal
+    /// scrollbar's included.
+    pub fn completely_visible_view_lines(&self) -> Option<(u32, u32)> {
+        let mut start = self.lines.first()?.view_line;
+        let mut end = self.lines.last()?.view_line;
+        let line_height = self.metrics.line_height;
+        let top = self.scroll_top;
+        let bottom = top + self.bounds.size.height;
+        if start < end && self.zones.line_y(start, line_height) < top {
+            start += 1;
+        }
+        if start < end && self.zones.line_y(end, line_height) + self.line_height_of(end) > bottom {
+            end -= 1;
+        }
+        Some((start, end))
+    }
+
     /// The lines PageUp/PageDown and the page scrolls move (Monaco
     /// `CursorConfiguration.pageSize`): the lines the editor's height holds,
     /// less two, so two lines stay in view.

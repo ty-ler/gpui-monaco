@@ -520,3 +520,60 @@ fn go_to_parent_fold_centers_a_far_parent(cx: &mut TestAppContext) {
     let y = lh * 200.;
     assert!(y <= middle && middle <= y + lh, "{middle:?} {y:?}");
 }
+
+/// Monaco's viewport targets count only the lines that show in full
+/// (`getCompletelyVisibleViewRange`, #333): with half a line cut off at
+/// the top and bottom, neither is a target.
+#[gpui::test]
+fn viewport_targets_skip_partly_visible_lines(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&viewport_text(), |_| {}, cx);
+    let (lh, height) = metrics(&editor, cx);
+    let top = lh * 10.5;
+    set_scroll_top(&editor, cx, top);
+    let (first, last) = (11, ((top + height) / lh).floor() as u32 - 1);
+    // Rows 10 and `last + 1` show in part.
+    assert_eq!(visible(&editor, cx), (10, last + 1));
+    assert!(!fully_visible(&editor, cx, 10) && !fully_visible(&editor, cx, last + 1));
+    assert!(fully_visible(&editor, cx, first) && fully_visible(&editor, cx, last));
+
+    for (args, row) in [
+        (json!({ "to": "viewPortTop" }), first),
+        (json!({ "to": "viewPortTop", "value": 2 }), first + 1),
+        (json!({ "to": "viewPortBottom" }), last),
+        (json!({ "to": "viewPortBottom", "value": 2 }), last - 1),
+        (
+            json!({ "to": "viewPortCenter" }),
+            (first + last).div_ceil(2),
+        ),
+    ] {
+        set_scroll_top(&editor, cx, top);
+        select(&editor, cx, &[Selection::collapsed(p(0, 0))]);
+        cursor_move(&editor, cx, args.clone());
+        assert_eq!(rows(&editor, cx), [row], "{args}");
+        // The reveal that follows keeps a line below the cursor (Monaco
+        // `_computeScrollTopToRevealRange`), so only the bottom scrolls.
+        if args["to"] != "viewPortBottom" {
+            assert_eq!(scroll_top(&editor, cx), top, "{args}");
+        }
+    }
+
+    // Monaco `findPositionInViewportIfOutside`: a cursor on a partly
+    // visible line moves onto the nearest line in full view (the last of
+    // which Monaco counts as outside), keeping its column.
+    for (from, to) in [
+        (10, first),
+        (last + 1, last - 1),
+        (last, last - 1),
+        (12, 12),
+    ] {
+        set_scroll_top(&editor, cx, top);
+        select(&editor, cx, &[Selection::collapsed(p(from, 2))]);
+        cursor_move(&editor, cx, json!({ "to": "viewPortIfOutside" }));
+        assert_eq!(
+            editor.read_with(cx, |e, _| e.selections()),
+            [Selection::collapsed(p(to, 2))],
+            "from {from}"
+        );
+        assert_eq!(scroll_top(&editor, cx), top, "from {from}");
+    }
+}

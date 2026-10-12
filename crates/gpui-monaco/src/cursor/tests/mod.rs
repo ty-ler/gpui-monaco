@@ -7,6 +7,7 @@ mod comment_test;
 mod composition_test;
 mod cursor_editing_test;
 mod cursor_language_test;
+mod cursor_move_command_test;
 mod cursor_test;
 mod harness;
 mod indentation_test;

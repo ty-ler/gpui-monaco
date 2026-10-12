@@ -110,7 +110,7 @@ editor.update(cx, |editor, cx| {
 | `format_on_type` | `formatOnType` | format with the on-type formatter after its trigger characters (off) |
 | `format_on_paste` | `formatOnPaste` | format pasted text with the range formatter (off) |
 | `empty_selection_clipboard` | `emptySelectionClipboard` | copying with no selection copies the line |
-| `sticky_tab_stops` | `stickyTabStops` | |
+| `sticky_tab_stops` | `stickyTabStops` | Left and Right move over indentation spaces a tab stop at a time, and clicks in such indentation land on the nearest tab stop |
 | `use_tab_stops` | `useTabStops` | Backspace in indentation deletes to the previous indent stop (on) |
 | `trim_whitespace_on_delete` | `trimWhitespaceOnDelete` | deleting a line break also deletes the next line's leading whitespace (off) |
 | `multi_cursor_modifier`, `multi_cursor_paste`, `multi_cursor_limit`, `multi_cursor_merge_overlapping` | `multiCursorModifier`, … | Alt or Cmd/Ctrl to add cursors; spread or full paste |

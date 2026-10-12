@@ -251,6 +251,44 @@ impl CodeEditor {
         })
     }
 
+    /// Monaco `MouseTargetFactory._snapToSoftTabBoundary`: `position` moved
+    /// to the nearest tab stop when it's inside indentation that is a
+    /// whole number of tab stops (`Direction.Nearest`), on its view line.
+    pub(crate) fn snap_to_soft_tab_boundary(&self, position: PointUtf16, cx: &App) -> PointUtf16 {
+        let (line, column) = self.view_lines.to_view(position, false);
+        let content: Vec<u16> = self.view_lines.line_content(line).encode_utf16().collect();
+        let tab_size = self.model().read(cx).options().tab_size;
+        crate::cursor::strings::atomic_position(
+            &content,
+            column as usize,
+            tab_size,
+            crate::cursor::strings::AtomicDirection::Nearest,
+        )
+        .map_or(position, |column| {
+            self.view_lines.to_model(line, column as u32)
+        })
+    }
+
+    /// Where a click or drag at `point` puts the cursor: the mouse
+    /// target's position over text, snapped with `stickyTabStops`, else
+    /// the closest position.
+    pub(crate) fn mouse_position_for_point(
+        &self,
+        point: Point<Pixels>,
+        window: &mut Window,
+        cx: &App,
+    ) -> PointUtf16 {
+        if self.options.sticky_tab_stops {
+            let target = self.mouse_target(point, window, cx);
+            if target.kind == MouseTargetKind::ContentText
+                && let Some(position) = target.position
+            {
+                return position;
+            }
+        }
+        self.position_for_point(point, window, cx)
+    }
+
     /// What's under `point` (window coordinates) as of the last frame
     /// (Monaco's mouse target).
     pub fn mouse_target(&self, point: Point<Pixels>, window: &mut Window, cx: &App) -> MouseTarget {
@@ -449,6 +487,14 @@ impl CodeEditor {
                 Some(position),
                 MouseTargetDetail::None,
             );
+            // Monaco `createMouseTarget`: with `stickyTabStops`, text in
+            // soft-tab indentation snaps to the nearest tab stop, and the
+            // range spans both positions.
+            if self.options.sticky_tab_stops {
+                let snapped = self.snap_to_soft_tab_boundary(position, cx);
+                target.position = Some(snapped);
+                target.range = Some(snapped.min(position)..snapped.max(position));
+            }
             // Monaco `getInjectedTextAt`: strictly inside injected text.
             let x = point.x - layout.text_origin_x() - line.indent_x;
             let index = line.shaped.closest_index_for_x(x);

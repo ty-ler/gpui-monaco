@@ -6,6 +6,8 @@
 //! view model here (no word wrap, folding or injected text), so Monaco's
 //! "view" and "model" variants of each move coincide.
 
+use std::ops::Range;
+
 use super::word::{self, WordClassifier, WordNavigationType};
 use super::{
     CursorCollection, CursorConfig, CursorModel, Position, SelectionStartKind, SingleCursorState,
@@ -784,5 +786,31 @@ pub(crate) fn line_state(
         } else {
             cursor.move_to(true, cursor.selection_start.end, 0)
         }
+    }
+}
+
+/// Where `cursorMove`'s viewport targets go (Monaco
+/// `CursorMove.Direction.ViewPortTop`/`ViewPortCenter`/`ViewPortBottom`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ViewportTarget {
+    Top,
+    Center,
+    Bottom,
+}
+
+/// Monaco `CursorMoveCommands.viewportMove`: the row `target` names,
+/// `count` lines in from the top or bottom of `visible`, the model range
+/// of the lines that show in full (`getCompletelyVisibleViewRange`). A
+/// first line whose start is wrapped off screen doesn't count for the top
+/// and bottom (`_firstLineNumberInRange`).
+pub(crate) fn viewport_row(visible: Range<Position>, target: ViewportTarget, count: u32) -> u32 {
+    let count = count.max(1);
+    let first = visible.start.row + u32::from(visible.start.column != 0);
+    match target {
+        ViewportTarget::Top => (first + count - 1).min(visible.end.row),
+        ViewportTarget::Bottom => {
+            (i64::from(visible.end.row) - i64::from(count) + 1).max(i64::from(first)) as u32
+        }
+        ViewportTarget::Center => (visible.start.row + visible.end.row).div_ceil(2),
     }
 }

@@ -354,11 +354,10 @@ pub(crate) fn splits_surrogate_pair(line: &str, column: u32) -> bool {
 // ---------------------------------------------------------------------------
 // cursorAtomicMoveOperations.ts
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AtomicDirection {
     Left,
     Right,
-    #[allow(dead_code)]
     Nearest,
 }
 
@@ -528,5 +527,101 @@ mod tests {
         assert_eq!(left_delete_offset(2, "👍🏻"), 0);
         assert_eq!(left_delete_offset(4, "👍🏻"), 0);
         assert_eq!(left_delete_offset(1, "ab"), 0);
+    }
+
+    /// A line and three expected values per position, -1 for none.
+    type AtomicCase = (&'static str, &'static [i64], &'static [i64], &'static [i64]);
+
+    /// Monaco `cursorAtomicMoveOperations.test.ts` "Test
+    /// whitespaceVisibleColumn".
+    #[test]
+    fn atomic_whitespace_visible_column() {
+        // (line, prevTabStopPosition, prevTabStopVisibleColumn, visibleColumn)
+        let cases: &[AtomicCase] = &[
+            (
+                "        ",
+                &[-1, 0, 0, 0, 0, 4, 4, 4, 4, -1],
+                &[-1, 0, 0, 0, 0, 4, 4, 4, 4, -1],
+                &[0, 1, 2, 3, 4, 5, 6, 7, 8, -1],
+            ),
+            ("  ", &[-1, 0, 0, -1], &[-1, 0, 0, -1], &[0, 1, 2, -1]),
+            ("\t", &[-1, 0, -1], &[-1, 0, -1], &[0, 4, -1]),
+            ("\t ", &[-1, 0, 1, -1], &[-1, 0, 4, -1], &[0, 4, 5, -1]),
+            (
+                " \t\t ",
+                &[-1, 0, 0, 2, 3, -1],
+                &[-1, 0, 0, 4, 8, -1],
+                &[0, 1, 4, 8, 9, -1],
+            ),
+            (
+                " \tA",
+                &[-1, 0, 0, -1, -1],
+                &[-1, 0, 0, -1, -1],
+                &[0, 1, 4, -1, -1],
+            ),
+            ("A", &[-1, -1, -1], &[-1, -1, -1], &[0, -1, -1]),
+            ("", &[-1, -1], &[-1, -1], &[0, -1]),
+        ];
+        for (line, positions, visible_columns, columns) in cases {
+            let units = utf16(line);
+            for position in 0..columns.len() {
+                assert_eq!(
+                    whitespace_visible_column(&units, position, 4),
+                    (
+                        positions[position],
+                        visible_columns[position],
+                        columns[position]
+                    ),
+                    "{line:?} at {position}"
+                );
+            }
+        }
+    }
+
+    /// Monaco `cursorAtomicMoveOperations.test.ts` "Test atomicPosition".
+    #[test]
+    fn atomic_positions() {
+        // (line, left, right, nearest), -1 for none.
+        let cases: &[AtomicCase] = &[
+            (
+                "        ",
+                &[-1, 0, 0, 0, 0, 4, 4, 4, 4, -1],
+                &[4, 4, 4, 4, 8, 8, 8, 8, -1, -1],
+                &[0, 0, 0, 4, 4, 4, 4, 8, 8, -1],
+            ),
+            (" \t", &[-1, 0, 0, -1], &[2, 2, -1, -1], &[0, 0, 2, -1]),
+            ("\t ", &[-1, 0, -1, -1], &[1, -1, -1, -1], &[0, 1, -1, -1]),
+            (
+                " \t ",
+                &[-1, 0, 0, -1, -1],
+                &[2, 2, -1, -1, -1],
+                &[0, 0, 2, -1, -1],
+            ),
+            (
+                "        A",
+                &[-1, 0, 0, 0, 0, 4, 4, 4, 4, -1, -1],
+                &[4, 4, 4, 4, 8, 8, 8, 8, -1, -1, -1],
+                &[0, 0, 0, 4, 4, 4, 4, 8, 8, -1, -1],
+            ),
+            (
+                "      foo",
+                &[-1, 0, 0, 0, 0, -1, -1, -1, -1, -1, -1],
+                &[4, 4, 4, 4, -1, -1, -1, -1, -1, -1, -1],
+                &[0, 0, 0, 4, 4, -1, -1, -1, -1, -1, -1],
+            ),
+        ];
+        for (line, left, right, nearest) in cases {
+            let units = utf16(line);
+            for (direction, expected) in [
+                (AtomicDirection::Left, left),
+                (AtomicDirection::Right, right),
+                (AtomicDirection::Nearest, nearest),
+            ] {
+                let actual: Vec<i64> = (0..expected.len())
+                    .map(|i| atomic_position(&units, i, 4, direction).map_or(-1, |p| p as i64))
+                    .collect();
+                assert_eq!(&actual, expected, "{line:?} {direction:?}");
+            }
+        }
     }
 }

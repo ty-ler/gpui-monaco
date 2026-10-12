@@ -60,9 +60,9 @@ pub use collection::{CursorCollection, SelectionStartKind, SingleCursorState};
 pub use column::{ColumnSelectCommand, ColumnSelectData, column_select, column_select_to};
 pub use comment::{CommentOptions, CommentsAt, LineCommentType, block_comment, line_comment};
 pub use composition::{CompositionOutcome, CompositionState, composition_end_with_language};
-pub(crate) use edit::execute_edits_forcing;
 pub(crate) use edit::{Command, CursorStateHelper, EditBuilder, TrackedId, execute_commands};
 pub use edit::{EditOperation, EditOperationType};
+pub(crate) use edit::{execute_edits_forcing, selections_from_markers};
 pub use in_place_replace::in_place_replace;
 pub use language::{LanguageContext, StandardTokenType};
 pub use language_typing::{
@@ -81,8 +81,8 @@ pub use movement::{
     select_all, select_line, select_word,
 };
 pub(crate) use movement::{
-    add_cursors, line_state, move_left, move_right, move_to_beginning_of_line, move_to_end_of_line,
-    move_to_state, vertical, word_state,
+    ViewportTarget, add_cursors, line_state, move_left, move_right, move_to_beginning_of_line,
+    move_to_end_of_line, move_to_state, vertical, viewport_row, word_state,
 };
 pub use reindent::{reindent_lines, reindent_selected_lines};
 pub use text::PointUtf16 as Position;
