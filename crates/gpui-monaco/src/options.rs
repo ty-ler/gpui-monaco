@@ -1387,6 +1387,108 @@ pub enum LocationKind {
     References,
 }
 
+/// A symbol navigation command that `gotoLocation`'s alternative commands
+/// can name (the command ids Monaco's `alternative*Command` options
+/// accept). Each runs with its own configuration, as Monaco's registered
+/// `SymbolNavigationAction`s do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NavigationCommand {
+    /// `editor.action.revealDefinition` (F12).
+    RevealDefinition,
+    /// `editor.action.revealDefinitionAside`: in an editor beside this one.
+    RevealDefinitionAside,
+    /// `editor.action.peekDefinition`.
+    PeekDefinition,
+    /// `editor.action.revealDeclaration`.
+    RevealDeclaration,
+    /// `editor.action.peekDeclaration`.
+    PeekDeclaration,
+    /// `editor.action.goToTypeDefinition`.
+    GoToTypeDefinition,
+    /// `editor.action.peekTypeDefinition`.
+    PeekTypeDefinition,
+    /// `editor.action.goToImplementation`.
+    GoToImplementation,
+    /// `editor.action.peekImplementation`.
+    PeekImplementation,
+    /// `editor.action.goToReferences` (Shift+F12).
+    GoToReferences,
+    /// `editor.action.referenceSearch.trigger` (Peek References).
+    PeekReferences,
+}
+
+impl NavigationCommand {
+    /// Every command, in Monaco's `alternativeCommandOptions` order.
+    pub const ALL: [Self; 11] = [
+        Self::PeekReferences,
+        Self::GoToReferences,
+        Self::PeekImplementation,
+        Self::GoToImplementation,
+        Self::PeekTypeDefinition,
+        Self::GoToTypeDefinition,
+        Self::PeekDeclaration,
+        Self::RevealDeclaration,
+        Self::PeekDefinition,
+        Self::RevealDefinitionAside,
+        Self::RevealDefinition,
+    ];
+
+    /// What the command looks for.
+    pub fn kind(self) -> LocationKind {
+        match self {
+            Self::RevealDefinition | Self::RevealDefinitionAside | Self::PeekDefinition => {
+                LocationKind::Definition
+            }
+            Self::RevealDeclaration | Self::PeekDeclaration => LocationKind::Declaration,
+            Self::GoToTypeDefinition | Self::PeekTypeDefinition => LocationKind::TypeDefinition,
+            Self::GoToImplementation | Self::PeekImplementation => LocationKind::Implementation,
+            Self::GoToReferences | Self::PeekReferences => LocationKind::References,
+        }
+    }
+
+    /// Whether it always shows its results in a peek view (Monaco
+    /// `SymbolNavigationActionConfig.openInPeek`).
+    pub fn open_in_peek(self) -> bool {
+        matches!(
+            self,
+            Self::PeekDefinition
+                | Self::PeekDeclaration
+                | Self::PeekTypeDefinition
+                | Self::PeekImplementation
+                | Self::PeekReferences
+        )
+    }
+
+    /// Whether it opens its result beside this editor (Monaco
+    /// `SymbolNavigationActionConfig.openToSide`).
+    pub fn open_to_side(self) -> bool {
+        self == Self::RevealDefinitionAside
+    }
+
+    /// The Monaco command id.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::RevealDefinition => "editor.action.revealDefinition",
+            Self::RevealDefinitionAside => "editor.action.revealDefinitionAside",
+            Self::PeekDefinition => "editor.action.peekDefinition",
+            Self::RevealDeclaration => "editor.action.revealDeclaration",
+            Self::PeekDeclaration => "editor.action.peekDeclaration",
+            Self::GoToTypeDefinition => "editor.action.goToTypeDefinition",
+            Self::PeekTypeDefinition => "editor.action.peekTypeDefinition",
+            Self::GoToImplementation => "editor.action.goToImplementation",
+            Self::PeekImplementation => "editor.action.peekImplementation",
+            Self::GoToReferences => "editor.action.goToReferences",
+            Self::PeekReferences => "editor.action.referenceSearch.trigger",
+        }
+    }
+
+    /// The command with Monaco command id `id`, if it's one of them (an
+    /// empty id, Monaco's "no alternative", is none).
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|command| command.id() == id)
+    }
+}
+
 /// Monaco `gotoLocation`: what each navigation command does with several
 /// results, and what it runs instead when its only result is where the
 /// cursor already is.
@@ -1407,18 +1509,18 @@ pub struct GotoLocationOptions {
     /// `multiple` to [`CodeEditor::go_to_locations`](crate::CodeEditor::go_to_locations).
     pub multiple_tests: GoToLocation,
     /// `alternativeDefinitionCommand` (go to references by default).
-    pub alternative_definition_command: Option<LocationKind>,
+    pub alternative_definition_command: Option<NavigationCommand>,
     /// `alternativeTypeDefinitionCommand` (go to references by default).
-    pub alternative_type_definition_command: Option<LocationKind>,
+    pub alternative_type_definition_command: Option<NavigationCommand>,
     /// `alternativeDeclarationCommand` (go to references by default).
-    pub alternative_declaration_command: Option<LocationKind>,
+    pub alternative_declaration_command: Option<NavigationCommand>,
     /// `alternativeImplementationCommand` (none by default).
-    pub alternative_implementation_command: Option<LocationKind>,
+    pub alternative_implementation_command: Option<NavigationCommand>,
     /// `alternativeReferenceCommand` (none by default).
-    pub alternative_reference_command: Option<LocationKind>,
+    pub alternative_reference_command: Option<NavigationCommand>,
     /// `alternativeTestsCommand` (none by default): like `multiple_tests`,
     /// for a host's go to test commands.
-    pub alternative_tests_command: Option<LocationKind>,
+    pub alternative_tests_command: Option<NavigationCommand>,
 }
 
 impl Default for GotoLocationOptions {
@@ -1430,9 +1532,9 @@ impl Default for GotoLocationOptions {
             multiple_implementations: GoToLocation::Peek,
             multiple_references: GoToLocation::Peek,
             multiple_tests: GoToLocation::Peek,
-            alternative_definition_command: Some(LocationKind::References),
-            alternative_type_definition_command: Some(LocationKind::References),
-            alternative_declaration_command: Some(LocationKind::References),
+            alternative_definition_command: Some(NavigationCommand::GoToReferences),
+            alternative_type_definition_command: Some(NavigationCommand::GoToReferences),
+            alternative_declaration_command: Some(NavigationCommand::GoToReferences),
             alternative_implementation_command: None,
             alternative_reference_command: None,
             alternative_tests_command: None,
@@ -1468,7 +1570,7 @@ impl GotoLocationOptions {
     }
 
     /// What `kind` runs instead when its only result is at the cursor.
-    pub fn alternative(&self, kind: LocationKind) -> Option<LocationKind> {
+    pub fn alternative(&self, kind: LocationKind) -> Option<NavigationCommand> {
         match kind {
             LocationKind::Definition => self.alternative_definition_command,
             LocationKind::Declaration => self.alternative_declaration_command,
@@ -2897,8 +2999,41 @@ mod validation_tests {
         assert_eq!(options.multiple_tests, GoToLocation::Goto);
         assert_eq!(
             options.alternative_definition_command,
-            Some(LocationKind::References)
+            Some(NavigationCommand::GoToReferences)
         );
         assert_eq!(options.alternative_tests_command, None);
+    }
+
+    /// Monaco's `alternativeCommandOptions` ids, and the configuration of
+    /// the actions they name (`goToCommands.ts`).
+    #[test]
+    fn navigation_commands() {
+        let ids: Vec<_> = NavigationCommand::ALL.iter().map(|c| c.id()).collect();
+        assert_eq!(
+            ids,
+            [
+                "editor.action.referenceSearch.trigger",
+                "editor.action.goToReferences",
+                "editor.action.peekImplementation",
+                "editor.action.goToImplementation",
+                "editor.action.peekTypeDefinition",
+                "editor.action.goToTypeDefinition",
+                "editor.action.peekDeclaration",
+                "editor.action.revealDeclaration",
+                "editor.action.peekDefinition",
+                "editor.action.revealDefinitionAside",
+                "editor.action.revealDefinition",
+            ]
+        );
+        for command in NavigationCommand::ALL {
+            assert_eq!(NavigationCommand::from_id(command.id()), Some(command));
+        }
+        assert_eq!(NavigationCommand::from_id(""), None);
+        let peek = NavigationCommand::PeekReferences;
+        assert!(peek.open_in_peek() && !peek.open_to_side());
+        assert_eq!(peek.kind(), LocationKind::References);
+        let aside = NavigationCommand::RevealDefinitionAside;
+        assert!(!aside.open_in_peek() && aside.open_to_side());
+        assert!(!NavigationCommand::GoToReferences.open_in_peek());
     }
 }

@@ -137,13 +137,14 @@ The commands are Monaco's:
 
 Results from every matching provider are merged, sorted by uri and position, and deduplicated. Then:
 
-- **One result:** it's selected, revealed near the top and briefly highlighted (`editor.symbolHighlightBackground`). In another model, the editor emits `CodeEditorEvent::OpenLocation(location)`; open that model in an editor and call `go_to_location(location, cx)` there.
+- **One result:** it's selected, centered at once (standalone Monaco's editor service centers every jump, without a smooth scroll) and briefly highlighted (`editor.symbolHighlightBackground`). In another model, the editor emits `CodeEditorEvent::OpenLocation(location)`; open that model in an editor and call `go_to_location(location, cx)` there.
 - **Several results:** `options.goto_location` decides, per command, as in Monaco's `gotoLocation.multiple*`:
   - **`Peek`** (the default) opens the peek view.
   - **`GotoAndPeek`** goes to the first result and opens the peek view.
   - **`Goto`** goes to the first; F4 steps through the rest, selecting each without the highlight (Monaco `gotoNextSymbolFromResult`).
 - **No results:** an inline message such as "No definition found for 'foo'".
-- **Already there:** if the only result is where the cursor is, the command's alternative runs instead. Definition, declaration and type definition fall back to references, so F12 on a definition shows its references.
+- **Already there:** if the only result is where the cursor is, the command's alternative runs instead. "Where" is a `LocationLink`'s `target_selection_range` (the symbol's name), else its range, so F12 inside a recursive function's body still goes to its name. Definition, declaration and type definition fall back to Go to References, so F12 on a definition shows its references. `goto_location.alternative_*_command` names a `NavigationCommand` (Monaco's command ids, `NavigationCommand::from_id`), which runs as that command does: `PeekReferences` always opens a peek view, `GoToReferences` only for several results.
+- **Compact references:** Go to References (not Peek References) asks a provider that finds exactly two references again without the declaration (`ReferenceContext { include_declaration: false }`) and uses that answer if it has one result, so Shift+F12 on a variable used once jumps to the use (Monaco's `compact` `getReferencesAtPosition`).
 - **Stale results:** they're dropped if the text or the cursor changed in the meantime.
 - **To the side:** Open Definition to the Side emits `CodeEditorEvent::OpenLocationToSide(location)` for the first result, even in this model, so the host can open it in an editor beside this one. (Standalone Monaco has no side-by-side editors and opens it in place; `go_to_location` does that.)
 - **Cmd/Ctrl+click:** the Cmd/Ctrl+hover link is underlined in `editorLink.activeForeground`. A click goes there when the button comes up on the line it went down on, with Cmd/Ctrl held since the press (Monaco's `ClickLinkGesture`); the press itself places the cursor, so Cmd/Ctrl+drag selects, and a drag, a selection, a scroll or an edit in between cancels it. With `definition_link_opens_in_peek`, the definitions show in a peek view instead.
