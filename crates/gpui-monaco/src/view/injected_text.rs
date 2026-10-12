@@ -5,11 +5,14 @@
 //! around injected text (`InjectedTextCursorStops`).
 //!
 //! Offsets are UTF-16 units. "Input" offsets are the model line's;
-//! "offsets in input with injections" count the injected text too; output
-//! positions are a view line and an offset in it. The editor wraps lines
-//! separately (`view_lines`), so it uses this with a single output line,
-//! for the cursor's place around injected text.
+//! "offsets in input with injections" count the injected text too (Monaco's
+//! `applyInjectedText`); output positions are a view line and an offset in
+//! it, the view column. [`ViewLines`](super::view_lines::ViewLines) keeps
+//! one projection per model row with injected text or wrap points.
 
+use gpui::SharedString;
+
+use super::line_breaks::LineBreakData;
 use crate::decorations::InjectedTextCursorStops;
 
 /// Monaco `PositionAffinity`: which way to go when a position is ambiguous
@@ -56,6 +59,60 @@ pub struct Injection {
     pub cursor_stops: InjectedTextCursorStops,
 }
 
+/// Text injected into a model line (Monaco `LineInjectedText`): a
+/// decoration's `before` or `after` text, as the view lines see it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineInjectedText {
+    /// The UTF-16 column of the model line it's injected at.
+    pub column: u32,
+    /// The text.
+    pub content: SharedString,
+    /// Where the cursor may stop around it.
+    pub cursor_stops: InjectedTextCursorStops,
+}
+
+impl LineInjectedText {
+    /// Its length in UTF-16 units.
+    pub fn len(&self) -> u32 {
+        self.content.encode_utf16().count() as u32
+    }
+
+    /// Whether it has no text (Monaco leaves such text out,
+    /// `occupiesHorizontalSpace`).
+    pub fn is_empty(&self) -> bool {
+        self.content.is_empty()
+    }
+
+    /// Monaco `LineInjectedText.applyInjectedText`: `line` with `injected`
+    /// (sorted by column) inserted.
+    pub fn apply(line: &str, injected: &[LineInjectedText]) -> String {
+        let mut result = String::with_capacity(
+            line.len() + injected.iter().map(|t| t.content.len()).sum::<usize>(),
+        );
+        let mut last = 0;
+        for text in injected {
+            let at = super::view_lines::utf16_to_byte(line, text.column).max(last);
+            result.push_str(&line[last..at]);
+            last = at;
+            result.push_str(&text.content);
+        }
+        result.push_str(&line[last..]);
+        result
+    }
+
+    /// The projection's view of `injected`: offsets, lengths and stops.
+    pub fn injections(injected: &[LineInjectedText]) -> Vec<Injection> {
+        injected
+            .iter()
+            .map(|text| Injection {
+                offset: text.column,
+                length: text.len(),
+                cursor_stops: text.cursor_stops,
+            })
+            .collect()
+    }
+}
+
 /// Monaco `ModelLineProjectionData`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelLineProjectionData {
@@ -65,6 +122,10 @@ pub struct ModelLineProjectionData {
     /// Where each view line ends, in offsets in input with injections; the
     /// last is the length of the line with its injections.
     break_offsets: Vec<u32>,
+    /// The visible column (with injected text, without continuation
+    /// indentation) of each break offset (Monaco
+    /// `breakOffsetsVisibleColumn`); empty when the line isn't wrapped.
+    break_offsets_visible_column: Vec<u32>,
     /// The indent of wrapped view lines.
     wrapped_text_indent_length: u32,
 }
@@ -77,16 +138,18 @@ struct InjectedTextAt {
 }
 
 impl ModelLineProjectionData {
-    /// A projection with `injections` (sorted by offset), `break_offsets`
-    /// and `wrapped_text_indent_length`.
+    /// A projection with `injections` (sorted by offset), `break_offsets`,
+    /// `break_offsets_visible_column` and `wrapped_text_indent_length`.
     pub fn new(
         injections: Vec<Injection>,
         break_offsets: Vec<u32>,
+        break_offsets_visible_column: Vec<u32>,
         wrapped_text_indent_length: u32,
     ) -> Self {
         Self {
             injections,
             break_offsets,
+            break_offsets_visible_column,
             wrapped_text_indent_length,
         }
     }
@@ -94,12 +157,76 @@ impl ModelLineProjectionData {
     /// An unwrapped line of `line_length` UTF-16 units with `injections`.
     pub fn unwrapped(line_length: u32, injections: Vec<Injection>) -> Self {
         let total = line_length + injections.iter().map(|i| i.length).sum::<u32>();
-        Self::new(injections, vec![total], 0)
+        Self::new(injections, vec![total], Vec::new(), 0)
+    }
+
+    /// The projection of a line wrapped at `breaks`, whose offsets count
+    /// `injections` (sorted by offset).
+    pub fn from_line_breaks(injections: Vec<Injection>, breaks: LineBreakData) -> Self {
+        Self::new(
+            injections,
+            breaks.break_offsets,
+            breaks.break_offsets_visible_column,
+            breaks.wrapped_text_indent_length,
+        )
     }
 
     /// The injected text.
     pub fn injections(&self) -> &[Injection] {
         &self.injections
+    }
+
+    /// Where each view line ends, in offsets in input with injections.
+    pub fn break_offsets(&self) -> &[u32] {
+        &self.break_offsets
+    }
+
+    /// Monaco `wrappedTextIndentLength`: the indentation of continuation
+    /// view lines.
+    pub fn wrapped_text_indent_length(&self) -> u32 {
+        self.wrapped_text_indent_length
+    }
+
+    /// The offsets in input with injections that view line
+    /// `output_line_index` shows.
+    pub fn output_range(&self, output_line_index: u32) -> std::ops::Range<u32> {
+        let ix = output_line_index as usize;
+        let start = if ix > 0 {
+            self.break_offsets[ix - 1]
+        } else {
+            0
+        };
+        start..self.break_offsets[ix]
+    }
+
+    /// The visible column (injected text included) at which view line
+    /// `output_line_index` starts, for tab stops.
+    pub fn start_visible_column(&self, output_line_index: u32) -> u32 {
+        match output_line_index {
+            0 => 0,
+            ix => self
+                .break_offsets_visible_column
+                .get(ix as usize - 1)
+                .copied()
+                .unwrap_or(0),
+        }
+    }
+
+    /// The input offset of an offset in input with injections: inside
+    /// injected text, the offset it's injected at.
+    pub fn input_offset(&self, offset_in_input_with_injections: u32) -> u32 {
+        let mut offset = offset_in_input_with_injections;
+        for injection in &self.injections {
+            if offset > injection.offset {
+                if offset < injection.offset + injection.length {
+                    return injection.offset;
+                }
+                offset -= injection.length;
+            } else {
+                break;
+            }
+        }
+        offset
     }
 
     /// Monaco `getOutputLineCount`.
@@ -144,24 +271,12 @@ impl ModelLineProjectionData {
         } else {
             output_offset
         };
-        let mut offset_in_input = if output_line_index == 0 {
+        let offset_in_input_with_injections = if output_line_index == 0 {
             output_offset
         } else {
             self.break_offsets[output_line_index as usize - 1] + output_offset
         };
-        for injection in &self.injections {
-            if offset_in_input > injection.offset {
-                if offset_in_input < injection.offset + injection.length {
-                    // Inside the injected text.
-                    offset_in_input = injection.offset;
-                } else {
-                    offset_in_input -= injection.length;
-                }
-            } else {
-                break;
-            }
-        }
-        offset_in_input
+        self.input_offset(offset_in_input_with_injections)
     }
 
     /// Monaco `translateToOutputPosition`: the view position of a model
@@ -389,54 +504,6 @@ impl ModelLineProjectionData {
     }
 }
 
-/// The cursor around the injected text at one model offset of an unwrapped
-/// line: where Monaco's cursor shows after moving onto it, in UTF-16 units
-/// into the injected text there (0 is before it all).
-pub(crate) fn cursor_offset_after_move(
-    projection: &ModelLineProjectionData,
-    input_offset: u32,
-    affinity: PositionAffinity,
-) -> u32 {
-    let before = projection
-        .translate_to_output_position(input_offset, PositionAffinity::None)
-        .output_offset;
-    // Monaco `MoveOperations.right`/`left`: the view position next to the
-    // character moved over is after the injected text (`rightPosition`
-    // normalizes `Right`; `leftPosition` lands after it), above or below it
-    // is as `vertical`'s affinity says; then the cursor state validates it
-    // (`normalizePosition` with `None`).
-    let landed = match affinity {
-        PositionAffinity::Left | PositionAffinity::LeftOfInjectedText => before,
-        _ => {
-            projection
-                .translate_to_output_position(input_offset, PositionAffinity::Right)
-                .output_offset
-        }
-    };
-    validated_offset(projection, before, landed)
-}
-
-/// The cursor at `injected` UTF-16 units into the injected text at
-/// `input_offset` (e.g. where a click landed), moved to a cursor stop
-/// (Monaco `_validateViewState`, `normalizePosition` with `None`).
-pub(crate) fn validate_cursor_offset(
-    projection: &ModelLineProjectionData,
-    input_offset: u32,
-    injected: u32,
-) -> u32 {
-    let before = projection
-        .translate_to_output_position(input_offset, PositionAffinity::None)
-        .output_offset;
-    validated_offset(projection, before, before + injected)
-}
-
-fn validated_offset(projection: &ModelLineProjectionData, before: u32, view_offset: u32) -> u32 {
-    projection
-        .normalize_output_position(0, view_offset, PositionAffinity::None)
-        .output_offset
-        .saturating_sub(before)
-}
-
 #[cfg(test)]
 mod tests {
     //! Ports of Monaco's `lineBreakData.test.ts` (`Editor ViewModel -
@@ -490,7 +557,7 @@ mod tests {
 
     #[test]
     fn basic() {
-        let data = ModelLineProjectionData::new(Vec::new(), vec![100], 10);
+        let data = ModelLineProjectionData::new(Vec::new(), vec![100], Vec::new(), 10);
         assert_eq!(data.translate_to_input_offset(0, 50), 50);
         assert_eq!(data.translate_to_input_offset(1, 60), 150);
     }
@@ -499,6 +566,7 @@ mod tests {
         ModelLineProjectionData::new(
             injections(&[2, 3, 10], &["1", "22", "333"]),
             vec![10, 100],
+            Vec::new(),
             10,
         )
     }
@@ -579,6 +647,7 @@ mod tests {
         let data = ModelLineProjectionData::new(
             injections(&[2, 2, 6], &["1", "22", "333"]),
             vec![10, 100],
+            Vec::new(),
             0,
         );
         assert_eq!(
@@ -601,6 +670,7 @@ mod tests {
         let data = ModelLineProjectionData::new(
             injections(&[2, 2, 7], &["1", "22", "333"]),
             vec![10, 100],
+            Vec::new(),
             0,
         );
         assert_eq!(
@@ -678,36 +748,36 @@ mod tests {
         assert_eq!([1, 2, 3].map(|o| normalize(&stops(None), o)), [1, 1, 1]);
     }
 
-    /// Where the cursor shows after moving onto the injected text's offset.
+    /// Where the cursor shows after Monaco's `MoveOperations.right` steps
+    /// onto the injected text's offset: `rightPosition` normalizes with
+    /// `Right`, then the cursor validates it (`normalizePosition` with
+    /// `None`).
     #[test]
-    fn cursor_offset_after_moving() {
+    fn cursor_after_moving_onto_injected_text() {
         use InjectedTextCursorStops::*;
-        // Left and right moves land after the text, then validate.
-        for (stops_, expected) in [(Both, 2), (Right, 2), (Left, 0), (None, 0)] {
-            assert_eq!(
-                cursor_offset_after_move(&stops(stops_), 1, PositionAffinity::Right),
-                expected,
-                "{stops_:?}"
-            );
+        let after_right = |data: &ModelLineProjectionData| {
+            let landed = data.normalize_output_position(0, 1, PositionAffinity::Right);
+            data.normalize_output_position(0, landed.output_offset, PositionAffinity::None)
+                .output_offset
+        };
+        for (stops_, expected) in [(Both, 3), (Right, 3), (Left, 1), (None, 1)] {
+            assert_eq!(after_right(&stops(stops_)), expected, "{stops_:?}");
         }
         // Moving up lands before it.
         assert_eq!(
-            cursor_offset_after_move(&stops(Both), 1, PositionAffinity::LeftOfInjectedText),
-            0
-        );
-        // Elsewhere there's nothing to step over.
-        assert_eq!(
-            cursor_offset_after_move(&stops(Both), 0, PositionAffinity::Right),
-            0
-        );
-        assert_eq!(
-            cursor_offset_after_move(&stops(Both), 2, PositionAffinity::Right),
-            0
+            stops(Both)
+                .normalize_output_position(0, 2, PositionAffinity::LeftOfInjectedText)
+                .output_offset,
+            1
         );
         // A click in the text goes to a stop.
-        assert_eq!(validate_cursor_offset(&stops(Both), 1, 1), 0);
-        assert_eq!(validate_cursor_offset(&stops(Both), 1, 2), 2);
-        assert_eq!(validate_cursor_offset(&stops(Left), 1, 2), 0);
+        let click = |data: &ModelLineProjectionData, offset| {
+            data.normalize_output_position(0, offset, PositionAffinity::None)
+                .output_offset
+        };
+        assert_eq!(click(&stops(Both), 2), 1);
+        assert_eq!(click(&stops(Both), 3), 3);
+        assert_eq!(click(&stops(Left), 3), 1);
     }
 
     /// Touching injected text (inlay hint parts): with `None` stops between
@@ -731,13 +801,32 @@ mod tests {
                 },
             ],
         );
-        assert_eq!(
-            cursor_offset_after_move(&data, 1, PositionAffinity::Right),
-            5
-        );
+        let normalize = |offset, affinity| {
+            data.normalize_output_position(0, offset, affinity)
+                .output_offset
+        };
+        assert_eq!(normalize(1, PositionAffinity::Right), 6);
+        assert_eq!(normalize(6, PositionAffinity::None), 6);
         // Between the parts goes back to before them.
-        assert_eq!(validate_cursor_offset(&data, 1, 2), 0);
-        assert_eq!(validate_cursor_offset(&data, 1, 4), 0);
-        assert_eq!(validate_cursor_offset(&data, 1, 5), 5);
+        assert_eq!(normalize(3, PositionAffinity::None), 1);
+        assert_eq!(normalize(5, PositionAffinity::None), 1);
+    }
+
+    /// Monaco `LineInjectedText.applyInjectedText`.
+    #[test]
+    fn apply_injected_text() {
+        let text = |column, content: &str| LineInjectedText {
+            column,
+            content: content.to_string().into(),
+            cursor_stops: InjectedTextCursorStops::Both,
+        };
+        assert_eq!(
+            LineInjectedText::apply("just some text", &[text(7, "bar"), text(7, "bz")]),
+            "just sobarbzme text"
+        );
+        assert_eq!(
+            LineInjectedText::apply("a\u{1f600}b", &[text(3, "X"), text(4, "Y")]),
+            "a\u{1f600}XbY"
+        );
     }
 }

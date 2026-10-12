@@ -63,18 +63,21 @@ pub(crate) struct LineLayout {
     pub controls: Vec<Range<usize>>,
     /// Injected (decoration before/after) text.
     pub injected: Vec<InjectedLayout>,
+    /// The smallest view column (the continuation indent).
+    pub view_start: u32,
+    /// Byte index into the shaped text for each view column from
+    /// `view_start` (Monaco's view columns, injected text included),
+    /// inclusive of the end; empty when the line shows no injected text,
+    /// where it's `display_index` (see [`LineLayout::view_index`]).
+    pub view_index: Vec<usize>,
 }
 
 /// Injected text on a laid out line.
 #[derive(Clone)]
 pub(crate) struct InjectedLayout {
-    /// The model column it's injected at.
-    pub column: u32,
-    /// Its text.
-    pub content: SharedString,
     /// Its host data (Monaco `attachedData`).
     pub attached_data: Option<crate::decorations::AttachedData>,
-    /// Display byte range.
+    /// Display byte range (of the part shown, when it wraps).
     pub range: Range<usize>,
     pub background: Option<Hsla>,
     pub swatch: Option<Hsla>,
@@ -145,67 +148,44 @@ impl LineLayout {
         self.columns.start + col as u32
     }
 
-    /// The injected text at `column`, in display order.
-    fn injected_at(&self, column: u32) -> impl Iterator<Item = &InjectedLayout> {
-        self.injected
-            .iter()
-            .filter(move |injected| injected.column == column && !injected.chip)
+    /// The x of view column `column` (Monaco's view columns, injected text
+    /// included; clamped to the line).
+    pub fn x_for_view_column(&self, column: u32) -> Pixels {
+        let view_index = self.view_index();
+        let ix = (column.saturating_sub(self.view_start) as usize).min(view_index.len() - 1);
+        self.indent_x + self.shaped.x_for_index(view_index[ix])
     }
 
-    /// The caret's x at `column`, `injected` UTF-16 units into the
-    /// injected text there (Monaco's view column: 0 is before it all).
-    pub fn x_for_caret(&self, column: u32, injected: u32) -> Pixels {
-        let mut group = self.injected_at(column).peekable();
-        let Some(first) = group.peek() else {
-            return self.x_for_column(column);
-        };
-        let mut index = first.range.start;
-        let mut left = injected as usize;
-        for text in group {
-            let len = text.content.encode_utf16().count();
-            if left <= len {
-                let byte = utf16_to_byte(&text.content, left as u32);
-                index = if left == len {
-                    text.range.end
-                } else {
-                    text.range.start + byte
-                };
-                break;
-            }
-            left -= len;
-            index = text.range.end;
-        }
-        self.indent_x + self.shaped.x_for_index(index)
-    }
-
-    /// The column and UTF-16 offset into its injected text closest to `x`
-    /// (Monaco's view position under the mouse, before normalizing); the
-    /// offset is `None` off injected text.
-    pub fn position_for_x(&self, x: Pixels) -> (u32, Option<u32>) {
-        if self.injected.is_empty() {
-            return (self.column_for_x(x), None);
-        }
+    /// The view column closest to `x` (Monaco's view position under the
+    /// mouse, before normalizing): it may be in injected text.
+    pub fn view_column_for_x(&self, x: Pixels) -> u32 {
         let ix = self.shaped.closest_index_for_x(x - self.indent_x);
-        let hit = self
-            .injected
-            .iter()
-            .find(|text| !text.chip && text.range.start <= ix && ix <= text.range.end);
-        let Some(hit) = hit else {
-            return (self.column_for_x(x), None);
+        let view_index = self.view_index();
+        let col = view_index.partition_point(|&d| d < ix);
+        let col = col.min(view_index.len() - 1);
+        // Never land between the halves of a surrogate pair.
+        let col = if col > 0 && view_index[col] == view_index[col - 1] {
+            col - 1
+        } else {
+            col
         };
-        let mut offset = 0;
-        for text in self.injected_at(hit.column) {
-            if std::ptr::eq(text, hit) {
-                let mut end = (ix - text.range.start).min(text.content.len());
-                while !text.content.is_char_boundary(end) {
-                    end -= 1;
-                }
-                offset += text.content[..end].encode_utf16().count() as u32;
-                break;
-            }
-            offset += text.content.encode_utf16().count() as u32;
+        self.view_start + col as u32
+    }
+
+    /// The largest view column on this line.
+    pub fn view_end(&self) -> u32 {
+        self.view_start + self.view_index().len() as u32 - 1
+    }
+
+    /// Byte index into the shaped text for each view column from
+    /// `view_start`, inclusive of the end. Without injected text, view
+    /// columns are the model columns shown.
+    pub fn view_index(&self) -> &[usize] {
+        if self.view_index.is_empty() {
+            &self.display_index
+        } else {
+            &self.view_index
         }
-        (hit.column, Some(offset))
     }
 
     /// Width up to the end of the text on this line.
@@ -802,10 +782,15 @@ pub(crate) struct RowSegment {
     pub is_last_segment: bool,
     /// UTF-16 units past Monaco's `stopRenderingLineAfter`, not shown.
     pub overflow: u32,
+    /// The offsets of the row with its injected text on this view line
+    /// (see [`SegmentInfo::offsets`](crate::view::view_lines::SegmentInfo)).
+    pub offsets: Range<u32>,
 }
 
-/// Injected text being laid out: display range and its injection.
-type Injected<'a> = (Range<usize>, &'a Injection);
+/// Injected text being laid out: display range, its injection and the
+/// byte offset in its content of the part shown (all of it unless it
+/// wraps).
+type Injected<'a> = (Range<usize>, &'a Injection, usize);
 
 /// Text to inject on a row: UTF-16 column, whether it's `after` a range
 /// (else `before` one), the text, and its decoration.
@@ -836,49 +821,135 @@ pub(crate) fn layout_segment<'a>(
     let tab_size = tab_size.max(1) as usize;
     let mut display = String::with_capacity(line.len());
     let mut display_index = Vec::with_capacity(line.len() + 1);
+    // Only lines showing injected text (not just the overflow chip) need
+    // their own view column index.
+    let has_injected = injections.len() > usize::from(segment.overflow > 0);
+    let mut view_index = Vec::with_capacity(if has_injected { line.len() + 1 } else { 0 });
     // (row byte offset, display offset) for each char start.
     let mut char_starts = Vec::with_capacity(line.len());
     let mut visible_column = segment.start_visible_column as usize;
-    // (display range, injection) of injected text.
+    // (display range, injection, byte offset of the shown part in its
+    // content) of injected text.
     let mut injected: Vec<Injected> = Vec::new();
     // Display ranges of control characters (Monaco `mtkcontrol`).
     let mut controls: Vec<Range<usize>> = Vec::new();
+    // The overflow chip ("Show more") is the last injection, and isn't in
+    // the view columns.
+    let chip = (segment.overflow > 0).then(|| injections.len().saturating_sub(1));
+    // Where each injection starts in the row with its injected text (Monaco's
+    // offsets in input with injections), in display order.
+    let mut injection_starts = Vec::with_capacity(injections.len());
+    let mut injected_before = 0;
+    for (ix, (column, _, text, _)) in injections.iter().enumerate() {
+        injection_starts.push(column + injected_before);
+        if chip != Some(ix) {
+            injected_before += text.content.encode_utf16().count() as u32;
+        }
+    }
+    // Injected text is clipped to the view line's offsets when the row
+    // wraps (it may wrap mid-text).
+    let whole_row = segment.offsets.start == 0 && segment.is_last_segment;
+    let shown = if whole_row {
+        0..u32::MAX
+    } else {
+        segment.offsets.clone()
+    };
     let mut injection_ix = 0;
-    // Emits injections at `column` (`after` ones first) and returns where the
-    // column itself displays: before `after` text (it ends a decorated range)
-    // or after `before` text (it starts one).
-    let mut inject_at =
-        |column: u32, display: &mut String, injected: &mut Vec<Injected<'a>>| -> usize {
-            let first = injection_ix;
-            while injection_ix < injections.len() && injections[injection_ix].0 <= column {
-                injection_ix += 1;
+    let mut chip_start = None;
+    // Emits the injections at `column` (in display order: `after` ones
+    // first) shown on this view line and returns where the column itself
+    // displays: before `after` text (it ends a decorated range) or after
+    // `before` text (it starts one).
+    let mut inject_at = |column: u32,
+                         injection_ix: &mut usize,
+                         display: &mut String,
+                         view_index: &mut Vec<usize>,
+                         visible_column: &mut usize,
+                         injected: &mut Vec<Injected<'a>>|
+     -> usize {
+        let position_before = display.len();
+        let mut has_after = false;
+        while *injection_ix < injections.len() && injections[*injection_ix].0 <= column {
+            let ix = *injection_ix;
+            *injection_ix += 1;
+            let injection = &injections[ix];
+            let (at, after, text, _) = injection;
+            if *at != column {
+                continue;
             }
-            let position_before = display.len();
-            let mut has_after = false;
-            for is_after in [true, false] {
-                for injection in &injections[first..injection_ix] {
-                    let (at, after, text, _) = injection;
-                    if *at == column && *after == is_after {
-                        has_after |= *after;
-                        let start = display.len();
-                        display.push_str(&text.content);
-                        injected.push((start..display.len(), injection));
-                    }
+            if chip == Some(ix) {
+                chip_start = Some(display.len());
+                let start = display.len();
+                display.push_str(&text.content);
+                injected.push((start..display.len(), injection, 0));
+                has_after = true;
+                continue;
+            }
+            let start = injection_starts[ix];
+            let len = text.content.encode_utf16().count() as u32;
+            let from = start.max(shown.start);
+            let to = (start + len).min(shown.end);
+            let empty_here = len == 0 && shown.contains(&start)
+                || len == 0 && start == shown.end && segment.is_last_segment;
+            if from >= to && !empty_here {
+                continue;
+            }
+            let (from, to) = if from >= to {
+                (start, start)
+            } else {
+                (from, to)
+            };
+            let content = &text.content;
+            let byte_from = utf16_to_byte(content, from - start);
+            let byte_to = utf16_to_byte(content, to - start);
+            has_after |= *after;
+            let display_start = display.len();
+            for (byte, ch) in content[byte_from..byte_to].char_indices() {
+                for _ in 0..ch.len_utf16() {
+                    view_index.push(display_start + byte);
+                }
+                if ch == '\t' {
+                    *visible_column += tab_size - *visible_column % tab_size;
+                } else {
+                    *visible_column += 1;
                 }
             }
-            if has_after {
-                position_before
-            } else {
-                display.len()
-            }
-        };
+            display.push_str(&content[byte_from..byte_to]);
+            injected.push((display_start..display.len(), injection, byte_from));
+        }
+        if has_after {
+            position_before
+        } else {
+            display.len()
+        }
+    };
     let mut column = segment.columns.start;
     for (byte, ch) in line.char_indices() {
-        let position = inject_at(column, &mut display, &mut injected);
+        // Most characters have no injected text before them.
+        let position = if injections
+            .get(injection_ix)
+            .is_some_and(|(at, ..)| *at <= column)
+        {
+            inject_at(
+                column,
+                &mut injection_ix,
+                &mut display,
+                &mut view_index,
+                &mut visible_column,
+                &mut injected,
+            )
+        } else {
+            display.len()
+        };
         column += ch.len_utf16() as u32;
         display_index.push(position);
         for _ in 1..ch.len_utf16() {
             display_index.push(display.len());
+        }
+        if has_injected {
+            for _ in 0..ch.len_utf16() {
+                view_index.push(display.len());
+            }
         }
         char_starts.push((byte_start + byte, display.len()));
         if ch == '\t' {
@@ -906,12 +977,18 @@ pub(crate) fn layout_segment<'a>(
             visible_column += 1;
         }
     }
-    let end_position = if segment.is_last_segment {
-        inject_at(column, &mut display, &mut injected)
-    } else {
-        display.len()
-    };
+    let end_position = inject_at(
+        column,
+        &mut injection_ix,
+        &mut display,
+        &mut view_index,
+        &mut visible_column,
+        &mut injected,
+    );
     display_index.push(end_position);
+    if has_injected {
+        view_index.push(chip_start.unwrap_or(display.len()));
+    }
     let display_len = display.len();
     let to_display = |byte: usize| -> usize {
         if byte >= byte_end {
@@ -956,14 +1033,14 @@ pub(crate) fn layout_segment<'a>(
     for (range, _) in &fonts {
         bounds.extend([range.start, range.end]);
     }
-    for (range, (_, _, text, _)) in &injected {
+    for (range, (_, _, text, _), content_start) in &injected {
         bounds.extend([range.start, range.end]);
         // Monaco's injected text `tokens`.
         for (token, _) in text.tokens.iter().flat_map(|tokens| tokens.iter()) {
-            bounds.extend([
-                (range.start + token.start).min(range.end),
-                (range.start + token.end).min(range.end),
-            ]);
+            let at = |offset: usize| {
+                (range.start + offset.saturating_sub(*content_start)).clamp(range.start, range.end)
+            };
+            bounds.extend([at(token.start), at(token.end)]);
         }
     }
     for range in &controls {
@@ -990,11 +1067,12 @@ pub(crate) fn layout_segment<'a>(
         }
         let injected_at = injected
             .iter()
-            .find(|(range, _)| range.start <= start && end <= range.end);
-        let injected_text = injected_at.map(|(_, (_, _, text, _))| text);
+            .find(|(range, _, _)| range.start <= start && end <= range.end);
+        let injected_text = injected_at.map(|(_, (_, _, text, _), _)| text);
         let style = injected_at
-            .map(|(range, (_, _, text, _))| {
-                injected_text_style(text, start - range.start..end - range.start)
+            .map(|(range, (_, _, text, _), content_start)| {
+                let from = content_start + start - range.start;
+                injected_text_style(text, from..from + end - start)
             })
             .or_else(|| {
                 styled
@@ -1086,11 +1164,28 @@ pub(crate) fn layout_segment<'a>(
     }
     // Injected text in its own font size, or with room around it, is
     // shaped on its own.
+    // An injected text's box, less its sides where it wraps.
+    let text_box = |(range, (_, _, text, _), content_start): &Injected| {
+        text.text_box.map(|mut text_box| {
+            if *content_start > 0 {
+                text_box.margin.0 = px(0.);
+                text_box.padding.0 = px(0.);
+                text_box.corner_radius.0 = px(0.);
+            }
+            if content_start + range.len() < text.content.len() {
+                text_box.margin.1 = px(0.);
+                text_box.padding.1 = px(0.);
+                text_box.corner_radius.1 = px(0.);
+            }
+            text_box
+        })
+    };
     let boxes: Vec<ShapeBox> = injected
         .iter()
-        .filter_map(|(range, (_, _, text, _))| {
+        .filter_map(|shown| {
+            let (range, (_, _, text, _), _) = shown;
             let size = text.font_size.filter(|size| *size != metrics.font_size);
-            let (lead, trail) = text.text_box.map_or((px(0.), px(0.)), |b| {
+            let (lead, trail) = text_box(shown).map_or((px(0.), px(0.)), |b| {
                 (b.margin.0 + b.padding.0, b.padding.1 + b.margin.1)
             });
             (!range.is_empty() && (size.is_some() || lead > px(0.) || trail > px(0.))).then(|| {
@@ -1122,26 +1217,27 @@ pub(crate) fn layout_segment<'a>(
         display_index,
         controls,
         injected: injected
-            .into_iter()
-            .map(|(range, injection)| {
-                let (column, _, text, decoration) = injection;
+            .iter()
+            .map(|shown| {
+                let (range, injection, _) = shown;
+                let (_, _, text, decoration) = injection;
                 InjectedLayout {
-                    column: *column,
-                    content: text.content.clone(),
                     attached_data: text.attached_data.clone(),
-                    range,
+                    range: range.clone(),
                     background: text.background,
                     swatch: text.swatch,
-                    text_box: text.text_box,
+                    text_box: text_box(shown),
                     decoration: *decoration,
                     // The overflow chip is always the last injection.
                     chip: segment.overflow > 0
                         && injections
                             .last()
-                            .is_some_and(|last| std::ptr::eq(last, injection)),
+                            .is_some_and(|last| std::ptr::eq(last, *injection)),
                 }
             })
             .collect(),
+        view_start: segment.indent,
+        view_index,
     }
 }
 
@@ -1202,6 +1298,7 @@ pub(crate) fn row_segment(view_lines: &ViewLines, view_line: u32) -> RowSegment 
         indent: info.indent,
         is_last_segment: info.is_last,
         overflow: 0,
+        offsets: info.offsets,
     }
 }
 
@@ -1307,14 +1404,16 @@ pub(crate) fn decoration_styles_and_injections(
             }
         }
     }
-    injections.sort_by_key(|(column, _, _, _)| *column);
+    injections.sort_by_key(|(column, after, _, _)| (*column, !*after));
     (decoration_styles, injections, fonts)
 }
 
 /// The injected text on row `row` (Monaco `LineInjectedText.fromDecorations`),
-/// by column: a decoration's `before` text at its start and `after` text at
-/// its end, on an empty range only with `show_if_collapsed`. At one column
-/// it's drawn `after` texts first, then `before` ones, in this order.
+/// in display order: by column, a decoration's `before` text at its start
+/// and `after` text at its end, on an empty range only with
+/// `show_if_collapsed`. At one column `after` texts come first (they end a
+/// decorated range), then `before` ones.
+#[cfg(test)]
 pub(crate) fn row_injections(
     row: u32,
     decoration_points: &[(PointUtf16, PointUtf16, &crate::decorations::Decoration)],
@@ -1325,7 +1424,7 @@ pub(crate) fn row_injections(
             push_injections(row, *start, *end, decoration, &mut injections);
         }
     }
-    injections.sort_by_key(|(column, _, _, _)| *column);
+    injections.sort_by_key(|(column, after, _, _)| (*column, !*after));
     injections
 }
 
@@ -1797,6 +1896,9 @@ pub(crate) struct EditorLayout {
     pub line_number_labels: Vec<(u32, String)>,
     /// The cursors drawn, and whether they're outlined (for tests).
     pub cursors: (Vec<Bounds<Pixels>>, bool),
+    /// The selections in view positions (view line, view column; Monaco's
+    /// view selections), as they're drawn.
+    pub view_selections: Vec<Selection>,
     /// The rows and left edges of the `wordWrapIndicator` glyphs drawn (for
     /// tests).
     pub wrap_indicators: Vec<(u32, Pixels)>,
@@ -3048,7 +3150,12 @@ fn prepaint_editor(
     let selections = editor.cursors.selections();
     let primary = selections[0].head;
     // The cursors' view positions (Monaco `CursorState.viewState`).
-    let cursor_views = editor.cursor_view_positions();
+    let view_selections: Vec<Selection> = editor
+        .cursor_view_states()
+        .iter()
+        .map(|state| state.selection())
+        .collect();
+    let cursor_views: Vec<PointUtf16> = view_selections.iter().map(|s| s.head).collect();
     let primary_view_line = cursor_views[0].row;
     if let Some(offset) = editor.pending_cursor_offset.take() {
         editor.scroll_top = zones.line_y(primary_view_line, line_height) - offset;
@@ -3278,6 +3385,11 @@ fn prepaint_editor(
     editor.refresh_unicode_highlights(cx);
     editor.refresh_post_edit(cx);
     editor.resolve_visible_code_lenses(cx);
+    // Injected text these added (ghost text) is in the view lines' columns
+    // from the next frame.
+    if editor.sync_injected_text(&[], cx) {
+        window.request_animation_frame();
+    }
     // Only the drawn parts of lines (long ones stop rendering early).
     let mut rendered: Vec<Range<usize>> = Vec::new();
     for segment in &segments {
@@ -3715,6 +3827,7 @@ fn prepaint_editor(
         horizontal_scrollbar,
         line_number_labels: Vec::new(),
         cursors: (Vec::new(), false),
+        view_selections: Vec::new(),
         wrap_indicators: Vec::new(),
         line_highlights: Vec::new(),
         line_number_styles: Vec::new(),
@@ -4536,51 +4649,49 @@ fn prepaint_editor(
         )
     };
     let rope = snapshot.rope();
-    let cursor_injected = editor.cursor_injected_offsets();
     let mut cursor_view_lines = Vec::with_capacity(selections.len());
     // (bounds, the character inside, colors) of each cursor on screen.
     let mut cursor_targets = Vec::with_capacity(selections.len());
     let mut cursor_parts = Vec::with_capacity(selections.len());
-    for (ix, (selection, view)) in selections.iter().zip(&cursor_views).enumerate() {
+    for (ix, view) in cursor_views.iter().enumerate() {
         cursor_view_lines.push(view.row);
         let Some(line) = layout.view_line(view.row) else {
             cursor_targets.push(None);
             cursor_parts.push(None);
             continue;
         };
-        let column = selection
-            .head
-            .column
-            .clamp(line.columns.start, line.columns.end);
         // Monaco's view column: before injected text there, or as far into
         // it as the cursor stops let a move or click take it.
-        let injected = cursor_injected.get(ix).copied().unwrap_or(0);
-        let x = layout.text_origin_x() + line.x_for_caret(column, injected);
+        let column = view.column.clamp(line.view_start, line.view_end());
+        let x = layout.text_origin_x() + line.x_for_view_column(column);
         let y = layout.line_top(line.view_line);
         // Monaco's cursor fills a taller line.
         let line_height = layout.line_height_of(line.view_line);
         // Monaco `_getGraphemeAwarePosition`: the character after the
-        // cursor on its view line, if any.
-        let next = (column < line.columns.end).then(|| {
-            let ix = (column - line.columns.start) as usize;
+        // cursor on its view line (text or injected text), if any.
+        let next = (column < line.view_end()).then(|| {
+            let ix = (column - line.view_start) as usize;
             // A surrogate pair's halves display at the same index.
-            let len = if line.display_index.get(ix + 1) == line.display_index.get(ix) {
+            let len = if line.view_index().get(ix + 1) == line.view_index().get(ix) {
                 2
             } else {
                 1
             };
-            let end = (column + len).min(line.columns.end);
-            let is_tab = rope
-                .chars_at(rope.point_utf16_to_offset(PointUtf16::new(line.row, column)))
-                .next()
-                == Some('\t');
+            let end = (column + len).min(line.view_end());
+            // A tab of the text (where its character shows: after any
+            // injected text at its column).
+            let model = view_lines.to_model(view.row, column);
+            let is_tab = view_lines
+                .to_view_with_affinity(model, crate::view::injected_text::PositionAffinity::Right)
+                == (view.row, column)
+                && rope.chars_at(rope.point_utf16_to_offset(model)).next() == Some('\t');
             (end, is_tab)
         });
         // Monaco: a tab, the line end or a zero-width character are a
         // half-width character wide.
         let char_width = match next {
             Some((end, false)) => {
-                let width = line.x_for_column(end) - line.x_for_column(column);
+                let width = line.x_for_view_column(end) - line.x_for_view_column(column);
                 if width < px(1.) { em_width } else { width }
             }
             _ => em_width,
@@ -4628,8 +4739,8 @@ fn prepaint_editor(
         let glyph = next
             .filter(|(_, is_tab)| shows_character && !is_tab)
             .map(|(end, _)| {
-                let start = line.display_index[(column - line.columns.start) as usize];
-                let end = line.display_index[(end - line.columns.start) as usize];
+                let start = line.view_index()[(column - line.view_start) as usize];
+                let end = line.view_index()[(end - line.view_start) as usize];
                 (line.view_line, start..end)
             });
         cursor_targets.push(Some(bounds));
@@ -5324,6 +5435,7 @@ fn prepaint_editor(
         cursors.iter().map(|cursor| cursor.bounds).collect(),
         cursor_style == CursorStyle::BlockOutline,
     );
+    layout.view_selections = view_selections;
     layout.gutter_bars = gutter_bars.clone();
     editor.layout = Some(layout.clone());
     editor.report_layout(cx);
@@ -5500,7 +5612,7 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                 // High contrast themes have square selections.
                 paint_selections(
                     layout,
-                    &state.selections,
+                    &layout.view_selections,
                     origin_x,
                     selection_color,
                     colors.background,
@@ -6562,8 +6674,50 @@ fn paint_cursors(state: &PrepaintState, window: &mut Window) {
     }
 }
 
-/// Monaco `SelectionsOverlay`: each selection's rectangle on each view
-/// line, extended by a character where it continues on the next model line,
+/// The x range (from the text's start) of `selection`, in view positions,
+/// on each laid out view line it covers: Monaco's `SelectionsOverlay`
+/// visible ranges, extended by a character where it continues on the next
+/// model line.
+pub(crate) fn selection_rows<'a>(
+    layout: &'a EditorLayout,
+    selection: &Selection,
+) -> Vec<(Pixels, Pixels, &'a LineLayout)> {
+    // Monaco `typicalHalfwidthCharacterWidth`, added where the selection
+    // continues on the next model line.
+    let eol_width = layout.metrics.em_width;
+    let start: PointUtf16 = selection.start();
+    let end: PointUtf16 = selection.end();
+    let mut rows = Vec::new();
+    for line in &layout.lines {
+        let view_line = line.view_line;
+        if view_line < start.row || view_line > end.row {
+            continue;
+        }
+        // Selected view columns of this view line.
+        let from = if view_line == start.row {
+            line.x_for_view_column(start.column)
+        } else {
+            line.x_for_view_column(line.view_start)
+        };
+        let to = if view_line < end.row {
+            // Continues past this view line.
+            line.width()
+                + if line.is_last_segment {
+                    eol_width
+                } else {
+                    px(0.)
+                }
+        } else {
+            line.x_for_view_column(end.column)
+        };
+        rows.push((from, to.max(from), line));
+    }
+    rows
+}
+
+/// Monaco `SelectionsOverlay`: each selection (in view positions, so it
+/// covers the injected text inside it) as a rectangle on each view line,
+/// extended by a character where it continues on the next model line,
 /// with `roundedSelection`'s outer corners rounded and its inner corners
 /// joined by reverse-rounded pieces, and 1px insets between several
 /// selections. Every selection's inner-corner pieces are painted before the
@@ -6587,36 +6741,8 @@ fn paint_selections(
     // (bounds, corners) of every selection's rectangles, for the second
     // pass.
     let mut rects: Vec<(Bounds<Pixels>, Corners<Pixels>)> = Vec::new();
-    let mut rows: Vec<(Pixels, Pixels, &LineLayout)> = Vec::new();
     for selection in selections.iter().filter(|s| !s.is_empty()) {
-        rows.clear();
-        let start: PointUtf16 = selection.start();
-        let end: PointUtf16 = selection.end();
-        for line in &layout.lines {
-            let row = line.row;
-            if row < start.row || row > end.row {
-                continue;
-            }
-            // Selected columns of this row, clipped to this view line.
-            let sel_start = if row == start.row { start.column } else { 0 };
-            let sel_end = if row == end.row { end.column } else { u32::MAX };
-            if sel_end < line.columns.start || sel_start > line.columns.end {
-                continue;
-            }
-            let from = line.x_for_column(sel_start.max(line.columns.start));
-            let to = if sel_end > line.columns.end {
-                // Continues past this view line.
-                line.width()
-                    + if line.is_last_segment {
-                        eol_width
-                    } else {
-                        px(0.)
-                    }
-            } else {
-                line.x_for_column(sel_end)
-            };
-            rows.push((from, to.max(from), line));
-        }
+        let rows = selection_rows(layout, selection);
         let styles = (rounded && !rows.is_empty()).then(|| {
             let spans: Vec<(f32, f32)> = rows
                 .iter()

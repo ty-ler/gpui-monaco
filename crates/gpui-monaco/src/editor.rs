@@ -35,6 +35,7 @@ use crate::theme::{EditorColors, Theme};
 use crate::view::folding::{
     FoldState, FoldingRangeData, compute_indent_ranges_limited, marker_ranges, sanitize_ranges,
 };
+use crate::view::injected_text::PositionAffinity;
 use crate::view::view_lines::{ViewLines, WrapSettings, normalize_hidden};
 use crate::widgets::{
     ContentWidget, ContentWidgetState, OverlayPosition, OverlayWidget, OverlayWidgetState,
@@ -546,6 +547,10 @@ pub struct CodeEditor {
     /// Shared with in-flight background work (the minimap) and the frame
     /// being painted, so changes go through `Arc::make_mut`.
     pub view_lines: Arc<ViewLines>,
+    /// The model's injected text version and whether validation
+    /// decorations showed when the view lines' injected text was last
+    /// gathered from every decoration.
+    injected_text_key: Option<(u64, bool)>,
     pub(crate) folds: FoldState,
     pub(crate) gutter_hovered: bool,
     /// The row of the folding control under the mouse, for its tooltip.
@@ -934,6 +939,7 @@ impl CodeEditor {
             scrollbar_arrow_task: None,
             blink_epoch: 0,
             view_lines: Arc::new(ViewLines::new(snapshot.rope().clone(), snapshot.version())),
+            injected_text_key: None,
             folds: FoldState::default(),
             gutter_hovered: false,
             fold_control_hovered: None,
@@ -1124,6 +1130,7 @@ impl CodeEditor {
             self.snapshot.rope().clone(),
             self.snapshot.version(),
         ));
+        self.injected_text_key = None;
         self.folds = FoldState::default();
         self.fold_task = None;
         self.fold_requested = None;
@@ -2266,6 +2273,24 @@ impl CodeEditor {
             .map_or_else(|| (Vec::new(), false), |l| l.cursors.clone())
     }
 
+    /// The selections drawn in the last frame: (view line, left, right) of
+    /// each one's rectangle on each view line, in window coordinates (empty
+    /// selections draw none), for tests.
+    #[doc(hidden)]
+    pub fn selection_spans_for_tests(&self) -> Vec<(u32, Pixels, Pixels)> {
+        let Some(layout) = self.layout.as_ref() else {
+            return Vec::new();
+        };
+        let origin = layout.text_origin_x();
+        layout
+            .view_selections
+            .iter()
+            .filter(|s| !s.is_empty())
+            .flat_map(|selection| crate::element::selection_rows(layout, selection))
+            .map(|(from, to, line)| (line.view_line, origin + from, origin + to))
+            .collect()
+    }
+
     /// Each cursor's (view line, view column), Monaco's
     /// `CursorState.viewState.position`, for tests.
     #[doc(hidden)]
@@ -3038,151 +3063,15 @@ impl CodeEditor {
         let view = views
             .into_iter()
             .zip(self.cursors.all())
-            .map(|(view, model)| view.unwrap_or_else(|| map_state(model, to_view)))
+            .map(|(view, model)| match view {
+                Some(view) => validate_view_state(lines, &view),
+                None => map_state(model, to_view),
+            })
             .collect();
         self.cursor_views = Some(CursorViewStates {
             model: self.cursors.all().to_vec(),
             view,
-            injected: Vec::new(),
         });
-    }
-
-    /// How far into the injected text at each cursor's head it shows, in
-    /// UTF-16 units (Monaco's view column); empty when every cursor shows
-    /// before the injected text there (where a model position puts it).
-    pub(crate) fn cursor_injected_offsets(&self) -> Vec<u32> {
-        match &self.cursor_views {
-            Some(views) if views.model.as_slice() == self.cursors.all() => views.injected.clone(),
-            _ => Vec::new(),
-        }
-    }
-
-    /// Records where each cursor shows in the injected text at its head,
-    /// keeping the view states.
-    fn set_cursor_injected_offsets(&mut self, injected: Vec<u32>) {
-        let none = injected.iter().all(|offset| *offset == 0);
-        if self.cursor_views.is_none() {
-            if none {
-                return;
-            }
-            let count = self.cursors.all().len();
-            let views = self.cursor_view_states().into_iter().map(Some).collect();
-            self.set_cursor_view_states(views);
-            if self.cursor_views.is_none() || injected.len() != count {
-                return;
-            }
-        }
-        if let Some(views) = &mut self.cursor_views {
-            views.injected = if none { Vec::new() } else { injected };
-        }
-    }
-
-    /// The injected text on `row` (Monaco's line projection data), for the
-    /// cursor stops; `None` without any.
-    pub(crate) fn injected_text_projection(
-        &self,
-        row: u32,
-        cx: &mut Context<Self>,
-    ) -> Option<crate::view::injected_text::ModelLineProjectionData> {
-        use crate::view::injected_text::{Injection, ModelLineProjectionData};
-        let rope = self.snapshot.rope();
-        if row > rope.max_point().row {
-            return None;
-        }
-        let range = rope.point_to_offset(text::Point::new(row, 0))
-            ..rope.point_to_offset(text::Point::new(row, rope.line_len(row)));
-        let editor_id = Some(cx.entity_id());
-        let decorations = self
-            .model
-            .update(cx, |model, _| model.decorations_in_range(range, editor_id));
-        if decorations
-            .iter()
-            .all(|d| d.options.before.is_none() && d.options.after.is_none())
-        {
-            return None;
-        }
-        let show_validation = self.shows_validation_decorations();
-        let decorations: Vec<_> = decorations
-            .into_iter()
-            .filter(|d| show_validation || !d.options.validation)
-            .collect();
-        let points: Vec<_> = decorations
-            .iter()
-            .map(|d| {
-                (
-                    rope.offset_to_point_utf16(d.range.start),
-                    rope.offset_to_point_utf16(d.range.end),
-                    d,
-                )
-            })
-            .collect();
-        let injections: Vec<Injection> = crate::element::row_injections(row, &points)
-            .into_iter()
-            .map(|(column, _, text, _)| Injection {
-                offset: column,
-                length: text.content.encode_utf16().count() as u32,
-                cursor_stops: text.cursor_stops,
-            })
-            .collect();
-        (!injections.is_empty())
-            .then(|| ModelLineProjectionData::unwrapped(rope.line_len_utf16(row), injections))
-    }
-
-    /// Where each cursor shows in the injected text at its head after
-    /// `command` (Monaco's moves on view positions, then
-    /// `_validateViewState`): next to the character moved over, after it;
-    /// above, before it; below, after it; as its cursor stops allow.
-    fn update_cursor_injected_after_move(
-        &mut self,
-        command: MoveCommand,
-        select: bool,
-        before: &[Selection],
-        cx: &mut Context<Self>,
-    ) {
-        use crate::view::injected_text::{PositionAffinity, cursor_offset_after_move};
-        let affinity = match command {
-            MoveCommand::Left | MoveCommand::Right | MoveCommand::End | MoveCommand::LineEnd => {
-                PositionAffinity::Right
-            }
-            MoveCommand::Down | MoveCommand::PageDown => PositionAffinity::RightOfInjectedText,
-            _ => {
-                self.set_cursor_injected_offsets(Vec::new());
-                return;
-            }
-        };
-        let horizontal = matches!(command, MoveCommand::Left | MoveCommand::Right);
-        let heads: Vec<(PointUtf16, bool)> = self
-            .cursors
-            .all()
-            .iter()
-            .enumerate()
-            .map(|(ix, state)| {
-                let head = state.selection().head;
-                let before = before.get(ix);
-                // Collapsing a selection, or Left at the start of the text,
-                // leaves the cursor at a model position (before the text).
-                let collapsed = horizontal && !select && before.is_some_and(|b| !b.is_empty());
-                let stayed_left =
-                    command == MoveCommand::Left && before.is_some_and(|b| b.head == head);
-                (head, collapsed || stayed_left)
-            })
-            .collect();
-        let mut projections: std::collections::HashMap<u32, Option<_>> = Default::default();
-        let injected = heads
-            .into_iter()
-            .map(|(head, model_position)| {
-                if model_position {
-                    return 0;
-                }
-                let projection = projections
-                    .entry(head.row)
-                    .or_insert_with(|| self.injected_text_projection(head.row, cx));
-                projection.as_ref().map_or(0, |projection| {
-                    cursor_offset_after_move(projection, head.column, affinity)
-                })
-            })
-            .collect();
-        self.set_cursor_injected_offsets(injected);
     }
 
     /// The view position of the cursors' heads (view line, view column).
@@ -3304,40 +3193,16 @@ impl CodeEditor {
             }
             // Monaco `MoveOperations.moveLeft`/`moveRight` on the view model:
             // positions are normalized (`normalizePosition`) so a step over
-            // a wrap point, where two view positions are one model
-            // position, moves the cursor. Moving right never ends at a wrapped
-            // segment's end.
+            // injected text, or over a wrap point (where two view positions
+            // are one model position), moves the cursor past it. Moving
+            // right never ends at a wrapped segment's end.
             MoveCommand::Left | MoveCommand::Right => view_states
                 .iter()
                 .map(|view_state| {
-                    let right = command == MoveCommand::Right;
-                    let moved = if view_state.has_selection() && !select {
-                        if right {
-                            cursor::move_right(&config, &model, view_state, select, 1)
-                        } else {
-                            cursor::move_left(&config, &model, view_state, select, 1)
-                        }
+                    let moved = if command == MoveCommand::Right {
+                        cursor::move_right(&config, &model, view_state, select, 1)
                     } else {
-                        // Monaco normalizes just the position it moves
-                        // from; the selection start stays (and is the same
-                        // position when not selecting).
-                        let position = lines.normalize_view_position(view_state.position, right);
-                        let state = SingleCursorState {
-                            selection_start: if select {
-                                view_state.selection_start.clone()
-                            } else {
-                                position..position
-                            },
-                            position,
-                            ..view_state.clone()
-                        };
-                        if right {
-                            let moved = cursor::move_right(&config, &model, &state, select, 1);
-                            let position = lines.normalize_view_position(moved.position, true);
-                            state.move_to(select, position, 0)
-                        } else {
-                            cursor::move_left(&config, &model, &state, select, 1)
-                        }
+                        cursor::move_left(&config, &model, view_state, select, 1)
                     };
                     (map_state(&moved, to_model), Some(moved))
                 })
@@ -3353,13 +3218,26 @@ impl CodeEditor {
                     select,
                     page,
                 );
+                // As since #272, LineEnd shows the cursor after injected
+                // text at the line's end when its stops allow, as End does.
+                let after = |p: PointUtf16| {
+                    let (line, column) = lines.to_view_with_affinity(p, PositionAffinity::Right);
+                    PointUtf16::new(line, column)
+                };
                 model_cursors
                     .all()
                     .iter()
-                    .map(|state| (state.clone(), None))
+                    .map(|state| {
+                        let view = (command == MoveCommand::LineEnd && !select)
+                            .then(|| map_state(state, after));
+                        (state.clone(), view)
+                    })
                     .collect()
             }
-            _ => {
+            // Monaco `MoveOperations.moveUp`/`moveDown` on the view model:
+            // the visible column counts injected text (`CursorColumns` on
+            // view lines).
+            MoveCommand::Up | MoveCommand::Down | MoveCommand::PageUp | MoveCommand::PageDown => {
                 let mut view_cursors = self.cursors.clone();
                 view_cursors.set_states(view_states);
                 cursor::move_cursors(&config, &model, &mut view_cursors, command, select, page);
@@ -3369,12 +3247,56 @@ impl CodeEditor {
                     .map(|state| (map_state(state, to_model), Some(state.clone())))
                     .collect()
             }
+            // Word and buffer moves step over the text, not injected text:
+            // they run on the view lines' model text (segment columns).
+            _ => {
+                let segment_model = SegmentCursorModel(&lines);
+                let to_segment = |p: PointUtf16| {
+                    PointUtf16::new(p.row, lines.view_to_segment_column(p.row, p.column))
+                };
+                let from_segment = |p: PointUtf16| {
+                    PointUtf16::new(p.row, lines.segment_to_view_column(p.row, p.column))
+                };
+                let mut segment_cursors = self.cursors.clone();
+                segment_cursors.set_states(
+                    view_states
+                        .iter()
+                        .map(|state| map_state(state, to_segment))
+                        .collect(),
+                );
+                cursor::move_cursors(
+                    &config,
+                    &segment_model,
+                    &mut segment_cursors,
+                    command,
+                    select,
+                    page,
+                );
+                segment_cursors
+                    .all()
+                    .iter()
+                    .map(|state| {
+                        let view = map_state(state, from_segment);
+                        (map_state(&view, to_model), Some(view))
+                    })
+                    .collect()
+            }
         };
-        let (model_states, view_states): (Vec<_>, Vec<_>) = moved.into_iter().unzip();
+        // Monaco `Cursor._setState` with a view state: it's validated
+        // (moved to a cursor stop) before the model state is derived.
+        let (model_states, view_states): (Vec<_>, Vec<_>) = moved
+            .into_iter()
+            .map(|(model, view)| match view {
+                Some(view) => {
+                    let view = validate_view_state(&lines, &view);
+                    (map_state(&view, to_model), Some(view))
+                }
+                None => (model, None),
+            })
+            .unzip();
         self.cursors.set_states(model_states);
         self.cursors.validate(self.snapshot.rope());
         self.set_cursor_view_states(view_states);
-        self.update_cursor_injected_after_move(command, select, &before, cx);
         // Paging doesn't scroll by itself: like every cursor move, Monaco's
         // `cursorPageDown` only reveals the cursors (`revealAllCursors`).
         self.prev_edit_kind = None;
@@ -4174,37 +4096,64 @@ impl CodeEditor {
         window: &mut Window,
         cx: &App,
     ) -> PointUtf16 {
-        self.view_position_for_point(position, window, cx).0
+        if let Some(layout) = self.layout.as_ref() {
+            let y = position.y - layout.bounds.top() + layout.scroll_top;
+            let count = self.view_lines.line_count();
+            if y >= layout.zones.line_y(count, layout.metrics.line_height) {
+                return self.snapshot.max_point_utf16();
+            }
+        }
+        let view = self.view_position_for_point(position, window, cx);
+        self.view_lines.to_model(view.row, view.column)
     }
 
-    /// [`Self::position_for_point`], and how far into the injected text at
-    /// that position the point is, in UTF-16 units (Monaco's view column),
-    /// when it's on injected text.
+    /// [`Self::view_position_for_point`] on a laid out view line; `None`
+    /// off the text's lines or on one not laid out.
+    fn laid_out_view_position(&self, position: Point<Pixels>) -> Option<PointUtf16> {
+        let layout = self.layout.as_ref()?;
+        let line_height = layout.metrics.line_height;
+        let y = position.y - layout.bounds.top() + layout.scroll_top;
+        let count = self.view_lines.line_count();
+        if y < px(0.) || y >= layout.zones.line_y(count, line_height) {
+            return None;
+        }
+        let view_line = layout.zones.line_at(y, line_height, count);
+        let line = layout.view_line(view_line)?;
+        Some(PointUtf16::new(
+            view_line,
+            line.view_column_for_x(position.x - layout.text_origin_x()),
+        ))
+    }
+
+    /// The view position (view line, view column; Monaco's mouse target
+    /// position) under a window point, clamped to the text. On injected
+    /// text it's in the text, before the cursor stops apply.
     pub(crate) fn view_position_for_point(
         &self,
         position: Point<Pixels>,
         window: &mut Window,
         cx: &App,
-    ) -> (PointUtf16, Option<u32>) {
+    ) -> PointUtf16 {
         let Some(layout) = self.layout.as_ref() else {
-            return (PointUtf16::zero(), None);
+            return PointUtf16::zero();
         };
         let line_height = layout.metrics.line_height;
         let y = position.y - layout.bounds.top() + layout.scroll_top;
         if y < px(0.) {
-            return (PointUtf16::zero(), None);
+            return PointUtf16::zero();
         }
         let count = self.view_lines.line_count();
         if y >= layout.zones.line_y(count, line_height) {
-            return (self.snapshot.max_point_utf16(), None);
+            let last = count.saturating_sub(1);
+            return PointUtf16::new(last, self.view_lines.line_max_column(last));
+        }
+        if let Some(view) = self.laid_out_view_position(position) {
+            return view;
         }
         let view_line = layout.zones.line_at(y, line_height, count);
         let x = position.x - layout.text_origin_x();
         match layout.view_line(view_line) {
-            Some(line) => {
-                let (column, injected) = line.position_for_x(x);
-                (PointUtf16::new(line.row, column), injected)
-            }
+            Some(line) => PointUtf16::new(view_line, line.view_column_for_x(x)),
             None => {
                 let segment = row_segment(&self.view_lines, view_line);
                 let tab_size = self.cursor_config(cx).tab_size;
@@ -4220,13 +4169,278 @@ impl CodeEditor {
                     None,
                     window,
                 );
-                (PointUtf16::new(line.row, line.column_for_x(x)), None)
+                let column = line.column_for_x(x);
+                PointUtf16::new(
+                    view_line,
+                    self.view_lines.segment_to_view_column(
+                        view_line,
+                        segment.indent + column - segment.columns.start,
+                    ),
+                )
             }
         }
     }
 
-    /// Brings the view lines up to date with the text, wrap settings and
-    /// folds, and (re)computes fold ranges in the background when stale.
+    /// Brings the view lines' injected text up to date with the
+    /// decorations (Monaco's view model on `onDidChangeContentOrInjectedText`):
+    /// the `edited_rows`, whose injected text an edit may have moved, and
+    /// the rows of the decorations whose injected text changed (every row
+    /// when those aren't known). Returns whether the view lines changed.
+    pub(crate) fn sync_injected_text(
+        &mut self,
+        edited_rows: &[Range<u32>],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::view::injected_text::LineInjectedText;
+        let editor_id = cx.entity_id();
+        let show_validation = self.shows_validation_decorations();
+        if edited_rows.is_empty()
+            && self.injected_text_key
+                == Some((
+                    self.model.read(cx).decoration_set().injected_text_version(),
+                    show_validation,
+                ))
+        {
+            // Nothing changed (most frames).
+            return false;
+        }
+        let rope = self.snapshot.rope().clone();
+        let max_row = rope.max_point().row;
+        let (version, any, changes) = {
+            let set = self.model.read(cx).decoration_set();
+            let version = set.injected_text_version();
+            // The rows whose decorations' injected text changed since the
+            // last time, if known.
+            let changes = match self.injected_text_key {
+                Some((seen, shown)) if shown == show_validation => {
+                    set.injected_text_changes_since(seen)
+                }
+                _ => None,
+            };
+            (version, set.has_injected_text(), changes)
+        };
+        self.injected_text_key = Some((version, show_validation));
+        if !any && self.view_lines.rows_with_injected_text().next().is_none() {
+            return false;
+        }
+        let all_rows = changes.is_none();
+        let mut edited_rows = edited_rows.to_vec();
+        edited_rows.extend(changes.into_iter().flatten().map(|range| {
+            rope.offset_to_point(range.start.min(rope.len())).row
+                ..rope.offset_to_point(range.end.min(rope.len())).row + 1
+        }));
+        if !all_rows && edited_rows.is_empty() {
+            return false;
+        }
+        // Disjoint, so each decoration is found once.
+        edited_rows.sort_by_key(|rows| rows.start);
+        let mut merged: Vec<Range<u32>> = Vec::with_capacity(edited_rows.len());
+        for rows in edited_rows {
+            match merged.last_mut() {
+                Some(last) if last.end >= rows.start => last.end = last.end.max(rows.end),
+                _ => merged.push(rows),
+            }
+        }
+        let edited_rows = merged;
+        // The decorations with injected text the editor shows, in the rows
+        // to update (a scan, which doesn't sort the decorations).
+        let byte_ranges: Vec<Range<usize>> = edited_rows
+            .iter()
+            .map(|rows| {
+                rope.point_to_offset(text::Point::new(rows.start.min(max_row), 0))
+                    ..rope.point_to_offset(text::Point::new(
+                        rows.end.saturating_sub(1).min(max_row),
+                        u32::MAX,
+                    ))
+            })
+            .collect();
+        let shown = |d: &crate::decorations::Decoration| {
+            d.options.has_injected_text() && (show_validation || !d.options.validation)
+        };
+        // A range query for edited rows (the decorations get sorted for
+        // the frame's own query anyway); every one otherwise.
+        let found: Vec<crate::decorations::Decoration> = if any && !all_rows {
+            let mut found: Vec<_> = self.model.update(cx, |model, _| {
+                byte_ranges
+                    .iter()
+                    .flat_map(|range| model.decorations_in_range(range.clone(), Some(editor_id)))
+                    .filter(|d| shown(d))
+                    .collect()
+            });
+            if byte_ranges.len() > 1 {
+                // One spanning several ranges is found in each.
+                found.sort_by_key(|d| d.id.0);
+                found.dedup_by_key(|d| d.id.0);
+            }
+            found
+        } else {
+            Vec::new()
+        };
+        let model = self.model.read(cx);
+        let decorations: Vec<&crate::decorations::Decoration> = if !any {
+            Vec::new()
+        } else if all_rows {
+            model
+                .decoration_set()
+                .iter()
+                .filter(|d| d.owner.is_none() || d.owner == Some(editor_id))
+                .filter(|d| shown(d))
+                .collect()
+        } else {
+            found.iter().collect()
+        };
+        if decorations.is_empty()
+            && !all_rows
+            && edited_rows.iter().all(|rows| {
+                rows.clone()
+                    .all(|row| self.view_lines.injected_text(row).is_empty())
+            })
+        {
+            // Typing on a row without injected text.
+            return false;
+        }
+        // Their ends in UTF-16 points: for many, one forward pass through
+        // the text, then the line's text before each.
+        let mut to_point: Box<dyn FnMut(usize) -> PointUtf16> = if decorations.len() <= 32 {
+            Box::new(|offset| rope.offset_to_point_utf16(offset))
+        } else {
+            let mut offsets: Vec<usize> = decorations
+                .iter()
+                .flat_map(|d| [d.range.start, d.range.end])
+                .collect();
+            offsets.sort_unstable();
+            offsets.dedup();
+            let byte_points = rope.offsets_to_points(&offsets);
+            let rope = &rope;
+            Box::new(move |offset| {
+                let point = byte_points[offsets.binary_search(&offset).unwrap_or(0)];
+                if point.column == 0 {
+                    return PointUtf16::new(point.row, 0);
+                }
+                // The line's text before it, in UTF-16 units.
+                let column = rope
+                    .chunks_in_range(offset - point.column as usize..offset)
+                    .map(|chunk| {
+                        if chunk.is_ascii() {
+                            chunk.len() as u32
+                        } else {
+                            chunk.encode_utf16().count() as u32
+                        }
+                    })
+                    .sum();
+                PointUtf16::new(point.row, column)
+            })
+        };
+        // Monaco `LineInjectedText.fromDecorations`, in the order the view
+        // lines draw it (`row_injections` on decorations in z-index then
+        // range order): (row, column, `before` after `after`, z-index,
+        // range, id) and the text.
+        type Order = (u32, u32, bool, i32, usize, usize, u64);
+        let mut texts: Vec<(Order, LineInjectedText)> = Vec::new();
+        for d in decorations {
+            let options = &d.options;
+            if !options.shows_injected_text(&d.range) {
+                continue;
+            }
+            let order = |point: PointUtf16, after: bool| {
+                (
+                    point.row,
+                    point.column,
+                    !after,
+                    options.z_index,
+                    d.range.start,
+                    d.range.end,
+                    d.id.0,
+                )
+            };
+            let text = |text: &crate::decorations::InjectedText| LineInjectedText {
+                column: 0,
+                content: text.content.clone(),
+                cursor_stops: text.cursor_stops,
+            };
+            if let Some(before) = options.before.as_ref().filter(|t| !t.content.is_empty()) {
+                let at = to_point(d.range.start);
+                texts.push((
+                    order(at, false),
+                    LineInjectedText {
+                        column: at.column,
+                        ..text(before)
+                    },
+                ));
+            }
+            if let Some(after) = options.after.as_ref().filter(|t| !t.content.is_empty()) {
+                let at = to_point(d.range.end);
+                texts.push((
+                    order(at, true),
+                    LineInjectedText {
+                        column: at.column,
+                        ..text(after)
+                    },
+                ));
+            }
+        }
+        drop(to_point);
+        texts.sort_by_key(|(order, _)| *order);
+        // Each row's texts, in order.
+        let mut by_row: Vec<(u32, Arc<[LineInjectedText]>)> = Vec::new();
+        let mut ix = 0;
+        while ix < texts.len() {
+            let row = texts[ix].0.0;
+            let end = ix + texts[ix..].partition_point(|(order, _)| order.0 == row);
+            by_row.push((
+                row,
+                texts[ix..end]
+                    .iter()
+                    .map(|(_, text)| text.clone())
+                    .collect(),
+            ));
+            ix = end;
+        }
+        let injected_text = |row: u32| -> Option<Arc<[LineInjectedText]>> {
+            by_row
+                .binary_search_by_key(&row, |(r, _)| *r)
+                .ok()
+                .map(|ix| by_row[ix].1.clone())
+        };
+        let rows: Vec<(u32, Option<Arc<[LineInjectedText]>>)> = if all_rows {
+            let mut rows: Vec<u32> = by_row.iter().map(|(row, _)| *row).collect();
+            rows.extend(self.view_lines.rows_with_injected_text());
+            rows.sort_unstable();
+            rows.dedup();
+            rows.into_iter()
+                .map(|row| (row, injected_text(row)))
+                .collect()
+        } else {
+            edited_rows
+                .iter()
+                .flat_map(|rows| rows.clone())
+                .filter(|row| *row <= max_row)
+                .map(|row| (row, injected_text(row)))
+                .collect()
+        };
+        // Only touch the view lines when a row changed, so a clone held
+        // elsewhere (the frame, the minimap) isn't copied every keystroke.
+        let lines = &self.view_lines;
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|(row, text)| {
+                *row < lines.rope().line_count()
+                    && lines.injected_text(*row) != text.as_deref().unwrap_or(&[])
+            })
+            .collect();
+        if rows.is_empty() {
+            return false;
+        }
+        let changed = Arc::make_mut(&mut self.view_lines).set_injected_text(rows);
+        if changed && self.cursor_views.is_some() {
+            // Monaco `Cursor.onLineMappingChanged`: the view states are
+            // validated again.
+            let views = self.cursor_view_states().into_iter().map(Some).collect();
+            self.set_cursor_view_states(views);
+        }
+        changed
+    }
+
     /// The mouse cursor over the text for `mouse_style` (Monaco's
     /// `mouse-default` and `mouse-copy` editor classes).
     pub(crate) fn text_mouse_cursor(&self) -> MouseCursor {
@@ -4253,7 +4467,11 @@ impl CodeEditor {
         classifier
     }
 
+    /// Brings the view lines up to date with the text, injected text, wrap
+    /// settings and folds, and (re)computes fold ranges in the background
+    /// when stale.
     pub(crate) fn sync_view_lines(&mut self, wrap: Option<WrapSettings>, cx: &mut Context<Self>) {
+        let mut edited_rows = Vec::new();
         if self.view_lines.version() != self.snapshot.version() {
             // Monaco `onModelContentChanged`: the cursors' view states come
             // from their model states again.
@@ -4266,6 +4484,7 @@ impl CodeEditor {
                 let start = self.snapshot.offset_to_point(edit.new.start).row;
                 let end = self.snapshot.offset_to_point(edit.new.end).row;
                 self.folds.expand_intersecting(buffer, start..end + 1);
+                edited_rows.push(start..end + 1);
             }
             Arc::make_mut(&mut self.view_lines).apply_edits(
                 self.snapshot.rope().clone(),
@@ -4278,6 +4497,7 @@ impl CodeEditor {
         if self.view_lines.wrap() != wrap.as_ref() {
             Arc::make_mut(&mut self.view_lines).set_wrap(wrap);
         }
+        self.sync_injected_text(&edited_rows, cx);
         let mut hidden = if self.options.folding {
             self.folds.hidden_rows(self.model.read(cx).buffer())
         } else {
@@ -5217,8 +5437,7 @@ impl CodeEditor {
         if let Some(index) = keep_on_wrapped
             && index < self.cursors.all().len()
         {
-            self.keep_mouse_on_wrapped_line(index, mouse);
-            self.keep_mouse_on_injected_text(index, mouse, cx);
+            self.keep_mouse_view_position(index, mouse);
         }
         self.model.update(cx, |model, _| model.push_stack_element());
         self.next_selection_change = CursorChangeCause {
@@ -5237,82 +5456,34 @@ impl CodeEditor {
         }
     }
 
-    /// Monaco's mouse targets are view positions: a click past the end of a
-    /// wrapped segment puts cursor `index` at the end of that view line, not
-    /// the start of the next one (the same model position).
-    fn keep_mouse_on_wrapped_line(&mut self, index: usize, mouse: Point<Pixels>) {
-        let Some(layout) = self.layout.as_ref() else {
+    /// Monaco's mouse targets are view positions (`moveTo` with the view
+    /// position): cursor `index`, at the model position under `mouse`,
+    /// shows at the view position there. A click past the end of a wrapped
+    /// segment stays at the end of that view line, not the start of the
+    /// next one (the same model position), and a click on or next to
+    /// injected text puts it on the side of the text the click was closest
+    /// to, as the text's cursor stops allow (`_validateViewState`).
+    fn keep_mouse_view_position(&mut self, index: usize, mouse: Point<Pixels>) {
+        let Some(view) = self.laid_out_view_position(mouse) else {
             return;
         };
-        let y = mouse.y - layout.bounds.top() + layout.scroll_top;
-        if y < px(0.) {
-            return;
-        }
-        let count = self.view_lines.line_count();
-        let view_line = layout.zones.line_at(y, layout.metrics.line_height, count);
-        let Some(line) = layout.view_line(view_line) else {
-            return;
-        };
-        if line.is_last_segment
-            || line.column_for_x(mouse.x - layout.text_origin_x()) != line.columns.end
-        {
-            return;
-        }
-        let view = PointUtf16::new(view_line, self.view_lines.line_max_column(view_line));
         let mut views = self.cursor_view_states();
         let Some(state) = views.get_mut(index) else {
             return;
         };
-        if self.view_lines.to_model(view.row, view.column) != self.cursors.all()[index].position {
+        let model_state = &self.cursors.all()[index];
+        if self.view_lines.to_model(view.row, view.column) != model_state.position
+            || state.position == view
+        {
             return;
         }
         state.position = view;
-        if self.cursors.all()[index].selection_start.is_empty()
-            && self.cursors.all()[index].selection_start.start == self.cursors.all()[index].position
+        if model_state.selection_start.is_empty()
+            && model_state.selection_start.start == model_state.position
         {
             state.selection_start = view..view;
         }
         self.set_cursor_view_states(views.into_iter().map(Some).collect());
-    }
-
-    /// Monaco's mouse targets are view positions: a click on or next to
-    /// injected text puts cursor `index` on the side of it the click was
-    /// closest to, as the text's cursor stops allow (`_validateViewState`).
-    fn keep_mouse_on_injected_text(
-        &mut self,
-        index: usize,
-        mouse: Point<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(layout) = self.layout.as_ref() else {
-            return;
-        };
-        let y = mouse.y - layout.bounds.top() + layout.scroll_top;
-        if y < px(0.) {
-            return;
-        }
-        let count = self.view_lines.line_count();
-        let view_line = layout.zones.line_at(y, layout.metrics.line_height, count);
-        let Some(line) = layout.view_line(view_line) else {
-            return;
-        };
-        let (column, Some(injected)) = line.position_for_x(mouse.x - layout.text_origin_x()) else {
-            return;
-        };
-        let row = line.row;
-        let state = &self.cursors.all()[index];
-        if state.position != PointUtf16::new(row, column) {
-            return;
-        }
-        let Some(projection) = self.injected_text_projection(row, cx) else {
-            return;
-        };
-        let offset =
-            crate::view::injected_text::validate_cursor_offset(&projection, column, injected);
-        let mut offsets = self.cursor_injected_offsets();
-        offsets.resize(self.cursors.all().len(), 0);
-        offsets[index] = offset;
-        self.set_cursor_injected_offsets(offsets);
     }
 
     /// The text position under the mouse, or `None` when the mouse isn't
@@ -7501,6 +7672,25 @@ pub(crate) fn widget_input_options() -> EditorOptions {
     }
 }
 
+/// Monaco `Cursor._validateViewState`: a view state's positions in injected
+/// text go to a cursor stop (`normalizePosition` with `None`), the columns
+/// skipped kept as leftover visible columns.
+fn validate_view_state(lines: &ViewLines, state: &SingleCursorState) -> SingleCursorState {
+    let normalize = |p: PointUtf16| lines.normalize_position(p, PositionAffinity::None);
+    let position = normalize(state.position);
+    let start = normalize(state.selection_start.start);
+    let end = normalize(state.selection_start.end);
+    let delta = |from: PointUtf16, to: PointUtf16| from.column as i32 - to.column as i32;
+    SingleCursorState {
+        selection_start: start..end,
+        selection_start_leftover_visible_columns: state.selection_start_leftover_visible_columns
+            + delta(state.selection_start.start, start),
+        position,
+        leftover_visible_columns: state.leftover_visible_columns + delta(state.position, position),
+        ..state.clone()
+    }
+}
+
 /// Applies `f` to every position in a cursor state.
 pub(crate) fn map_state(
     state: &SingleCursorState,
@@ -7526,13 +7716,11 @@ struct DetachedWidgetPositions {
 struct CursorViewStates {
     model: Vec<SingleCursorState>,
     view: Vec<SingleCursorState>,
-    /// How far into the injected text at each cursor's head it shows, in
-    /// UTF-16 units (Monaco's view column there); empty when every cursor
-    /// is before it.
-    injected: Vec<u32>,
 }
 
-/// The cursor core's view of the view lines (Monaco's view model lines).
+/// The cursor core's view of the view lines (Monaco's view model lines):
+/// their content has the injected text, and positions normalize around it
+/// and wrap points.
 pub(crate) struct ViewCursorModel<'a>(pub(crate) &'a ViewLines);
 
 impl cursor::CursorModel for ViewCursorModel<'_> {
@@ -7546,6 +7734,29 @@ impl cursor::CursorModel for ViewCursorModel<'_> {
 
     fn line_max_column(&self, row: u32) -> u32 {
         self.0.line_max_column(row)
+    }
+
+    fn normalize_position(&self, position: PointUtf16, affinity: PositionAffinity) -> PointUtf16 {
+        self.0.normalize_position(position, affinity)
+    }
+}
+
+/// The view lines without their injected text (see
+/// [`ViewLines::segment_content`]), for the moves that step over the text
+/// only: Monaco runs word moves on the model.
+struct SegmentCursorModel<'a>(&'a ViewLines);
+
+impl cursor::CursorModel for SegmentCursorModel<'_> {
+    fn line_count(&self) -> u32 {
+        self.0.line_count().max(1)
+    }
+
+    fn line_content(&self, row: u32) -> String {
+        self.0.segment_content(row)
+    }
+
+    fn line_max_column(&self, row: u32) -> u32 {
+        self.0.segment_max_column(row)
     }
 }
 

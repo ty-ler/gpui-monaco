@@ -1,9 +1,11 @@
 //! Soft-wrap break computation for monospace text.
 //!
 //! Ported from Monaco's `common/viewModel/monospaceLineBreaksComputer.ts`
-//! (MIT) and `modelLineProjectionData.ts`, minus injected text. Offsets are UTF-16 code units within the line,
+//! (MIT) and `modelLineProjectionData.ts`. Offsets are UTF-16 code units
+//! within the line (with its injected text, in [`create_line_breaks`]),
 //! widths are visible columns (full-width characters take two).
 
+use super::injected_text::{LineInjectedText, ModelLineProjectionData};
 use crate::cursor::strings::is_full_width_character;
 
 /// Monaco `wordWrapBreakBeforeCharacters` default.
@@ -258,9 +260,90 @@ pub fn compute_measured_line_breaks(
     wrap_on_escaped_line_feeds: bool,
     measure: Option<&dyn MeasureChar>,
 ) -> Option<LineBreakData> {
-    let first_break_column = wrapping_column?;
     let wrap_on_escaped_line_feeds =
         wrap_on_escaped_line_feeds && line.contains('"') && line.contains("\\n");
+    line_breaks(
+        classifier,
+        line,
+        tab_size,
+        wrapping_column?,
+        wrapping_indent,
+        keep_all,
+        wrap_on_escaped_line_feeds,
+        measure,
+    )
+}
+
+/// Monaco `createLineBreaks`: where `line` wraps with `injected` text (sorted
+/// by column) in it, as the projection of the line with its injected text
+/// (break offsets count the injected text, which may wrap mid-text), or
+/// `None` if it fits without any. Whether a literal `\n` breaks the line
+/// (`wrap_on_escaped_line_feeds`) is decided on the model line, as in
+/// Monaco. With `wrapping_column == None` only the injected text is
+/// projected.
+#[allow(clippy::too_many_arguments)]
+pub fn create_line_breaks(
+    classifier: &WrapClassifier,
+    line: &str,
+    injected: &[LineInjectedText],
+    tab_size: u32,
+    wrapping_column: Option<u32>,
+    wrapping_indent: WrappingIndent,
+    keep_all: bool,
+    wrap_on_escaped_line_feeds: bool,
+    measure: Option<&dyn MeasureChar>,
+) -> Option<ModelLineProjectionData> {
+    if injected.is_empty() {
+        return compute_measured_line_breaks(
+            classifier,
+            line,
+            tab_size,
+            wrapping_column,
+            wrapping_indent,
+            keep_all,
+            wrap_on_escaped_line_feeds,
+            measure,
+        )
+        .map(|breaks| ModelLineProjectionData::from_line_breaks(Vec::new(), breaks));
+    }
+    let injections = LineInjectedText::injections(injected);
+    let line_length = line.encode_utf16().count() as u32;
+    let Some(wrapping_column) = wrapping_column else {
+        return Some(ModelLineProjectionData::unwrapped(line_length, injections));
+    };
+    let wrap_on_escaped_line_feeds =
+        wrap_on_escaped_line_feeds && line.contains('"') && line.contains("\\n");
+    let text = LineInjectedText::apply(line, injected);
+    match line_breaks(
+        classifier,
+        &text,
+        tab_size,
+        wrapping_column,
+        wrapping_indent,
+        keep_all,
+        wrap_on_escaped_line_feeds,
+        measure,
+    ) {
+        Some(breaks) => Some(ModelLineProjectionData::from_line_breaks(
+            injections, breaks,
+        )),
+        None => Some(ModelLineProjectionData::unwrapped(line_length, injections)),
+    }
+}
+
+/// [`compute_measured_line_breaks`] at `first_break_column`, with
+/// `wrap_on_escaped_line_feeds` already decided for the line.
+#[allow(clippy::too_many_arguments)]
+fn line_breaks(
+    classifier: &WrapClassifier,
+    line: &str,
+    tab_size: u32,
+    first_break_column: u32,
+    wrapping_indent: WrappingIndent,
+    keep_all: bool,
+    wrap_on_escaped_line_feeds: bool,
+    measure: Option<&dyn MeasureChar>,
+) -> Option<LineBreakData> {
     // Fast path for the common short line: without tabs or other control
     // characters (2 columns wide) no character is wider than its UTF-8
     // length (or the widest ASCII character), so it fits.
@@ -384,7 +467,8 @@ pub fn compute_measured_line_breaks(
 mod tests {
     //! Ported from Monaco's
     //! `test/common/viewModel/monospaceLineBreaksComputer.test.ts`. Skipped:
-    //! injected-text cases (not ported), incremental
+    //! the injected-text cases, which are all about `widthInEm` (not
+    //! ported; injected text with content is tested below), incremental
     //! re-wrapping (we always recompute), and fractional full-width ratios
     //! (we assume two-cell full-width characters).
     use super::*;
@@ -747,5 +831,67 @@ mod tests {
             .map(|d| d.break_offsets),
             Some(vec![6, 12])
         );
+    }
+
+    fn injected(column: u32, content: &str) -> LineInjectedText {
+        LineInjectedText {
+            column,
+            content: content.to_string().into(),
+            cursor_stops: crate::decorations::InjectedTextCursorStops::Both,
+        }
+    }
+
+    fn with_injected(
+        line: &str,
+        texts: &[LineInjectedText],
+        column: Option<u32>,
+        wrap_on_escaped_line_feeds: bool,
+    ) -> Option<ModelLineProjectionData> {
+        create_line_breaks(
+            &WrapClassifier::default(),
+            line,
+            texts,
+            4,
+            column,
+            WrappingIndent::None,
+            false,
+            wrap_on_escaped_line_feeds,
+            None,
+        )
+    }
+
+    /// Monaco `createLineBreaks` with injected text: it counts when
+    /// wrapping, break offsets are in the line with its injected text, and
+    /// a line with injected text is projected even when it fits.
+    #[test]
+    fn injected_text_counts_when_wrapping() {
+        assert_eq!(with_injected("aaaa bbbb", &[], Some(10), false), None);
+        let data = with_injected("aaaa bbbb", &[injected(4, ": hint")], Some(10), false).unwrap();
+        // `aaaa: |hint bbbb`: `hint bbbb` doesn't fit after it.
+        assert_eq!(data.break_offsets(), &[6, 15]);
+        assert_eq!(data.injections().len(), 1);
+        let data = with_injected("aaaa", &[injected(4, "!")], Some(10), false).unwrap();
+        assert_eq!(data.break_offsets(), &[5]);
+        // Unwrapped, it's just projected.
+        let data = with_injected("aaaa bbbb", &[injected(4, ": hint")], None, false).unwrap();
+        assert_eq!(data.break_offsets(), &[15]);
+        // Long injected text wraps inside itself.
+        let data = with_injected("ab", &[injected(1, "xxxxxxxxxxxxxxx")], Some(5), false).unwrap();
+        assert_eq!(data.break_offsets(), &[5, 10, 15, 17]);
+    }
+
+    /// Monaco decides `wrapOnEscapedLineFeeds` on the model line, not the
+    /// injected text.
+    #[test]
+    fn escaped_line_feeds_are_decided_on_the_model_line() {
+        let quote = injected(0, "\"");
+        assert_eq!(
+            with_injected(r"a\nb", &[quote], Some(100), true)
+                .unwrap()
+                .break_offsets(),
+            &[5]
+        );
+        let data = with_injected(r#""a\nb""#, &[injected(0, ">")], Some(100), true).unwrap();
+        assert_eq!(data.break_offsets(), &[5, 7]);
     }
 }

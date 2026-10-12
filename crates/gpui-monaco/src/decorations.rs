@@ -445,6 +445,11 @@ impl DecorationOptions {
         self.show_if_collapsed || !range.is_empty()
     }
 
+    /// Whether it injects `before` or `after` text.
+    pub(crate) fn has_injected_text(&self) -> bool {
+        self.before.is_some() || self.after.is_some()
+    }
+
     /// Whether it changes the decorated text's font.
     pub(crate) fn has_font(&self) -> bool {
         self.font_family.is_some() || self.font_weight.is_some() || self.font_style.is_some()
@@ -510,6 +515,16 @@ pub struct DecorationSet {
     sorted: bool,
     /// Bumped on every change, so views can cache what they derive.
     version: u64,
+    /// Bumped when a decoration with injected text is added, removed or
+    /// changed (not moved by an edit): the view lines' injected text
+    /// (Monaco's `ModelInjectedTextChangedEvent`).
+    injected_text_version: u64,
+    /// How many decorations have injected text.
+    injected_text_count: usize,
+    /// The byte range of each recent injected text change, with the
+    /// `injected_text_version` it made, moved through edits since (Monaco's
+    /// `ModelInjectedTextChangedEvent` line numbers). The oldest drop off.
+    injected_text_changes: std::collections::VecDeque<(u64, Range<usize>)>,
     /// Whether a glyph picks its glyph margin lane, computed when asked
     /// after a change.
     has_glyph_lanes: std::cell::Cell<Option<bool>>,
@@ -532,6 +547,67 @@ impl DecorationSet {
         self.version
     }
 
+    /// A number that changes whenever a decoration with `before` or
+    /// `after` text is added, removed or changed; edits move injected text
+    /// without changing it.
+    pub(crate) fn injected_text_version(&self) -> u64 {
+        self.injected_text_version
+    }
+
+    /// Whether any decoration has `before` or `after` text.
+    pub(crate) fn has_injected_text(&self) -> bool {
+        self.injected_text_count > 0
+    }
+
+    /// The byte ranges (in the current text) of the injected text changes
+    /// since `injected_text_version` was `version`, or `None` when they
+    /// aren't all known (too many, or the decorations were cleared).
+    pub(crate) fn injected_text_changes_since(&self, version: u64) -> Option<Vec<Range<usize>>> {
+        if version == self.injected_text_version {
+            return Some(Vec::new());
+        }
+        let first = self
+            .injected_text_changes
+            .iter()
+            .position(|(v, _)| *v == version + 1)?;
+        Some(
+            self.injected_text_changes
+                .range(first..)
+                .map(|(_, range)| range.clone())
+                .collect(),
+        )
+    }
+
+    /// Counts `options`' injected text at `range` in or out.
+    fn note_injected_text(
+        &mut self,
+        options: &DecorationOptions,
+        range: Range<usize>,
+        added: bool,
+    ) {
+        if options.has_injected_text() {
+            self.note_injected_text_at(range, added);
+        }
+    }
+
+    /// Counts injected text at `range` in or out.
+    fn note_injected_text_at(&mut self, range: Range<usize>, added: bool) {
+        /// How many changes are kept: editors catch up every frame, and
+        /// gather everything again after more.
+        const KEPT_CHANGES: usize = 64;
+        if added {
+            self.injected_text_count += 1;
+        } else {
+            self.injected_text_count -= 1;
+        }
+        self.injected_text_version += 1;
+        if self.injected_text_changes.len() == KEPT_CHANGES {
+            self.injected_text_changes.pop_front();
+        }
+        self.injected_text_changes
+            .push_back((self.injected_text_version, range));
+    }
+
     /// Removes `old` and adds `new`, returning the new ids in order.
     pub fn delta(
         &mut self,
@@ -540,7 +616,17 @@ impl DecorationSet {
         new: impl IntoIterator<Item = (Range<usize>, DecorationOptions)>,
     ) -> Vec<DecorationId> {
         if !old.is_empty() {
-            self.decorations.retain(|d| !old.contains(&d.id));
+            let mut removed = Vec::new();
+            self.decorations.retain(|d| {
+                let keep = !old.contains(&d.id);
+                if !keep && d.options.has_injected_text() {
+                    removed.push(d.range.clone());
+                }
+                keep
+            });
+            for range in removed {
+                self.note_injected_text_at(range, false);
+            }
         }
         let mut ids = Vec::new();
         for (range, options) in new {
@@ -548,6 +634,7 @@ impl DecorationSet {
                 DecorationId(NEXT_DECORATION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
             let range = range.start.min(range.end)..range.end.max(range.start);
             self.max_len = self.max_len.max(range.len());
+            self.note_injected_text(&options, range.clone(), true);
             self.decorations.push(Decoration {
                 id,
                 range,
@@ -565,9 +652,13 @@ impl DecorationSet {
     /// Replaces the options of decoration `id`, keeping its range and id
     /// (Monaco `changeDecorationOptions`). Returns whether it exists.
     pub fn change_options(&mut self, id: DecorationId, options: DecorationOptions) -> bool {
-        match self.decorations.iter_mut().find(|d| d.id == id) {
-            Some(decoration) => {
-                decoration.options = Arc::new(options);
+        match self.decorations.iter().position(|d| d.id == id) {
+            Some(ix) => {
+                let old = std::mem::replace(&mut self.decorations[ix].options, Arc::new(options));
+                let new = self.decorations[ix].options.clone();
+                let range = self.decorations[ix].range.clone();
+                self.note_injected_text(&old, range.clone(), false);
+                self.note_injected_text(&new, range, true);
                 self.version += 1;
                 self.has_glyph_lanes.set(None);
                 true
@@ -591,6 +682,12 @@ impl DecorationSet {
         self.decorations.clear();
         self.max_len = 0;
         self.version += 1;
+        if self.injected_text_count > 0 {
+            // A change of its own, not logged: views gather it all again.
+            self.injected_text_count = 0;
+            self.injected_text_version += 1;
+            self.injected_text_changes.clear();
+        }
         self.has_glyph_lanes.set(None);
         Some(change)
     }
@@ -600,6 +697,7 @@ impl DecorationSet {
     /// `None` when there were none.
     pub fn remove_owned_by(&mut self, owner: EntityId) -> Option<crate::events::DecorationsChange> {
         let mut change = None;
+        let mut injected_text_removed = Vec::new();
         self.has_glyph_lanes.set(None);
         self.decorations.retain(|d| {
             if d.owner == Some(owner) {
@@ -608,11 +706,17 @@ impl DecorationSet {
                         .unwrap_or(crate::events::DecorationsChange::default())
                         .with(&d.options),
                 );
+                if d.options.has_injected_text() {
+                    injected_text_removed.push(d.range.clone());
+                }
                 false
             } else {
                 true
             }
         });
+        for range in injected_text_removed {
+            self.note_injected_text_at(range, false);
+        }
         if change.is_some() {
             self.version += 1;
         }
@@ -651,6 +755,13 @@ impl DecorationSet {
                 .max(start);
             decoration.range = start..end;
             max_len = max_len.max(end - start);
+        }
+        for (_, range) in &mut self.injected_text_changes {
+            let start = patch.transform_offset(range.start, text::Bias::Left);
+            let end = patch
+                .transform_offset(range.end, text::Bias::Right)
+                .max(start);
+            *range = start..end;
         }
         self.max_len = max_len;
         self.sorted = false;

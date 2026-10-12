@@ -219,7 +219,7 @@ impl CodeEditor {
         if !self.inlay_hints_active(cx) {
             self.inlay.task = None;
             if !self.inlay.items.is_empty() {
-                self.set_inlay_hint_items(Vec::new(), &HashMap::new(), cx);
+                self.set_inlay_hint_items(Vec::new(), None, false, cx);
             }
             return;
         }
@@ -227,7 +227,10 @@ impl CodeEditor {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
             }
-            let Ok(tasks) = this.update(cx, |this, cx| this.request_inlay_hints(cx)) else {
+            let Ok((tasks, rows)) = this.update(cx, |this, cx| {
+                let tasks = this.request_inlay_hints(cx);
+                (tasks, this.inlay.requested.clone())
+            }) else {
                 return;
             };
             let mut items = Vec::new();
@@ -245,26 +248,77 @@ impl CodeEditor {
             items.sort_by_key(|item| item.hint.position);
             this.update(cx, |this, cx| {
                 this.inlay.task = None;
-                // Monaco `_updateHintsDecorators`, then
-                // `_cacheHintsForFastRestore`.
-                let fixed = this.cursor_line_fixed_lengths(&items, cx);
-                this.set_inlay_hint_items(items, &fixed, cx);
+                // Monaco `_updateHintsDecorators` for the requested rows,
+                // then `_cacheHintsForFastRestore`.
+                this.set_inlay_hint_items(items, rows, true, cx);
                 this.cache_inlay_hints(cx);
             })
             .ok();
         }));
     }
 
+    /// Shows `items`, the hints for `rows` (all rows when `None`). As
+    /// Monaco's `_updateHintsDecorators` only replaces the decorations in
+    /// the requested ranges, hints shown elsewhere stay, where their
+    /// decorations moved to. With `fixed_lengths`, the hints before the
+    /// cursor keep their lengths (see
+    /// [`Self::cursor_line_fixed_lengths`]).
     fn set_inlay_hint_items(
         &mut self,
         items: Vec<InlayHintItem>,
-        fixed: &HashMap<usize, usize>,
+        rows: Option<Range<u32>>,
+        fixed_lengths: bool,
         cx: &mut Context<Self>,
     ) {
+        let rows = rows.filter(|_| self.inlay.decorations.is_some());
+        // The new index of each old item kept.
+        let mut kept: HashMap<usize, usize> = HashMap::new();
+        let items = match &rows {
+            None => items,
+            Some(rows) => {
+                // Where each old hint shows now.
+                let model = self.model().read(cx);
+                let mut at: HashMap<usize, PointUtf16> = HashMap::new();
+                for (id, ix) in &self.inlay.decoration_items {
+                    if let Some(range) = model.decoration_range(*id) {
+                        let position = at.entry(*ix).or_insert(range.start);
+                        *position = (*position).min(range.start);
+                    }
+                }
+                let old = std::mem::take(&mut self.inlay.items);
+                let mut merged: Vec<(Option<usize>, InlayHintItem)> = old
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(ix, mut item)| {
+                        let position = at.get(&ix).copied().unwrap_or(item.hint.position);
+                        if rows.contains(&position.row) {
+                            return None;
+                        }
+                        item.hint.position = position;
+                        Some((Some(ix), item))
+                    })
+                    .collect();
+                merged.extend(items.into_iter().map(|item| (None, item)));
+                merged.sort_by_key(|(_, item)| item.hint.position);
+                let mut items = Vec::with_capacity(merged.len());
+                for (ix, (old, item)) in merged.into_iter().enumerate() {
+                    if let Some(old) = old {
+                        kept.insert(old, ix);
+                    }
+                    items.push(item);
+                }
+                items
+            }
+        };
+        let fixed = if fixed_lengths {
+            self.cursor_line_fixed_lengths(&items, cx)
+        } else {
+            HashMap::new()
+        };
         self.inlay.items = items;
         self.inlay.generation += 1;
         self.inlay.active = None;
-        self.render_inlay_hints_with(fixed, cx);
+        self.render_inlay_hints_in(&fixed, rows, &kept, cx);
     }
 
     /// Monaco `_updateHintsDecorators`' fixed lengths: shortly after an
@@ -377,7 +431,7 @@ impl CodeEditor {
             .then(|| cx.global_mut::<InlayHintsCache>().get(id, &version))
             .flatten();
         if let Some(items) = cached {
-            self.set_inlay_hint_items(items, &HashMap::new(), cx);
+            self.set_inlay_hint_items(items, None, false, cx);
         }
     }
 
@@ -589,19 +643,33 @@ impl CodeEditor {
 
     /// Shows the hints as injected text the editor owns.
     fn render_inlay_hints(&mut self, cx: &mut Context<Self>) {
-        self.render_inlay_hints_with(&HashMap::new(), cx);
+        self.render_inlay_hints_in(&HashMap::new(), None, &HashMap::new(), cx);
     }
 
     /// Monaco `_updateHintsDecorators`: one decoration per label part,
     /// boxed as Monaco's CSS boxes them, and the padding of hints that keep
-    /// a `fixed` length (by index into the items).
-    fn render_inlay_hints_with(&mut self, fixed: &HashMap<usize, usize>, cx: &mut Context<Self>) {
-        if let Some(mut decorations) = self.inlay.decorations.take() {
-            decorations.clear(cx);
-        }
-        self.inlay.parts.clear();
-        self.inlay.decoration_items.clear();
+    /// a `fixed` length (by index into the items), for the hints in `rows`
+    /// (all when `None`). Decorations elsewhere stay, their hints now at
+    /// the `kept` indices (old index to new).
+    ///
+    /// Monaco replaces every decoration in the rows. Here a position whose
+    /// decorations would come out the same keeps them: the same text shows,
+    /// and the view lines don't gather its injected text again (a port-side
+    /// optimization, e.g. for the two thirds of the hints a Page Down asks
+    /// for again).
+    fn render_inlay_hints_in(
+        &mut self,
+        fixed: &HashMap<usize, usize>,
+        rows: Option<Range<u32>>,
+        kept: &HashMap<usize, usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let old_parts = std::mem::take(&mut self.inlay.parts);
+        let old_items = std::mem::take(&mut self.inlay.decoration_items);
         if !self.inlay_hints_visible() || self.inlay.items.is_empty() {
+            if let Some(mut decorations) = self.inlay.decorations.take() {
+                decorations.clear(cx);
+            }
             cx.notify();
             return;
         }
@@ -623,14 +691,26 @@ impl CodeEditor {
         } else {
             (px(0.), px(0.), px(0.))
         };
-        let hints: Vec<InlayHint> = self.inlay.items.iter().map(|i| i.hint.clone()).collect();
+        // The hints to show, by index into the items.
+        let (indices, hints): (Vec<usize>, Vec<InlayHint>) = self
+            .inlay
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| {
+                rows.as_ref()
+                    .is_none_or(|rows| rows.contains(&i.hint.position.row))
+            })
+            .map(|(ix, i)| (ix, i.hint.clone()))
+            .unzip();
         let mut decorations = Vec::new();
         // The hint, and the part, each decoration shows, by index into
         // `decorations`.
         let mut items = Vec::new();
         let mut parts = Vec::new();
-        for (item, shown) in limit_per_line(&hints, self.options.inlay_hints.maximum_length) {
-            let hint = &hints[item];
+        for (shown_ix, shown) in limit_per_line(&hints, self.options.inlay_hints.maximum_length) {
+            let hint = &hints[shown_ix];
+            let item = indices[shown_ix];
             let (shown, pad) = match fixed.get(&item) {
                 Some(fixed) => fix_length(shown, *fixed),
                 None => (shown, 0),
@@ -718,17 +798,104 @@ impl CodeEditor {
             }
         }
         let model = self.model().clone();
-        let mut collection = DecorationsCollection::for_owner(model, cx.entity_id());
-        collection.set(decorations, cx);
-        let ids = collection.ids();
-        for (ix, part) in parts {
-            if let Some(id) = ids.get(ix) {
-                self.inlay.parts.insert(*id, part);
+        let mut collection = self
+            .inlay
+            .decorations
+            .take()
+            .unwrap_or_else(|| DecorationsCollection::for_owner(model.clone(), cx.entity_id()));
+        let generation = self.inlay.generation;
+        // The current decorations at each position in the rows, in order,
+        // and those elsewhere, which stay.
+        let mut current: BTreeMap<PointUtf16, Vec<(DecorationId, Arc<DecorationOptions>)>> =
+            BTreeMap::new();
+        let mut remove = Vec::new();
+        {
+            let model = model.read(cx);
+            for id in collection.ids() {
+                let found = model
+                    .decoration_range(*id)
+                    .zip(model.decoration_options(*id));
+                let Some((range, options)) = found else {
+                    remove.push(*id);
+                    continue;
+                };
+                let inside = rows
+                    .as_ref()
+                    .is_none_or(|rows| rows.contains(&range.start.row));
+                if inside {
+                    current.entry(range.start).or_default().push((*id, options));
+                    continue;
+                }
+                // A hint elsewhere: kept with its new index.
+                match old_items.get(id).and_then(|ix| kept.get(ix)) {
+                    Some(item) => {
+                        self.inlay.decoration_items.insert(*id, *item);
+                        if let Some(part) = old_parts.get(id) {
+                            self.inlay.parts.insert(
+                                *id,
+                                InlayHintPart {
+                                    generation,
+                                    item: *item,
+                                    part: part.part,
+                                },
+                            );
+                        }
+                    }
+                    None => remove.push(*id),
+                }
             }
         }
-        for (ix, item) in items {
-            if let Some(id) = ids.get(ix) {
-                self.inlay.decoration_items.insert(*id, item);
+        // Each position's new decorations, in order; a position whose
+        // current ones are the same keeps them.
+        let part_of: HashMap<usize, InlayHintPart> = parts.into_iter().collect();
+        let item_of: HashMap<usize, usize> = items.into_iter().collect();
+        let mut add = Vec::new();
+        let mut added = Vec::new();
+        let mut ix = 0;
+        while ix < decorations.len() {
+            let position = decorations[ix].0.start;
+            let end = ix + decorations[ix..].partition_point(|(range, _)| range.start == position);
+            let same = current.remove(&position).and_then(|old| {
+                let same = old.len() == end - ix
+                    && old
+                        .iter()
+                        .zip(&decorations[ix..end])
+                        .all(|((_, old), (_, new))| **old == *new);
+                if same {
+                    Some(old)
+                } else {
+                    remove.extend(old.iter().map(|(id, _)| *id));
+                    None
+                }
+            });
+            for (offset, decoration) in decorations[ix..end].iter().enumerate() {
+                let new_ix = ix + offset;
+                match &same {
+                    Some(old) => {
+                        let id = old[offset].0;
+                        if let Some(item) = item_of.get(&new_ix) {
+                            self.inlay.decoration_items.insert(id, *item);
+                        }
+                        if let Some(part) = part_of.get(&new_ix) {
+                            self.inlay.parts.insert(id, *part);
+                        }
+                    }
+                    None => {
+                        add.push(decoration.clone());
+                        added.push(new_ix);
+                    }
+                }
+            }
+            ix = end;
+        }
+        remove.extend(current.into_values().flatten().map(|(id, _)| id));
+        let ids = collection.replace(&remove, add, cx);
+        for (id, new_ix) in ids.into_iter().zip(added) {
+            if let Some(item) = item_of.get(&new_ix) {
+                self.inlay.decoration_items.insert(id, *item);
+            }
+            if let Some(part) = part_of.get(&new_ix) {
+                self.inlay.parts.insert(id, *part);
             }
         }
         self.inlay.decorations = Some(collection);

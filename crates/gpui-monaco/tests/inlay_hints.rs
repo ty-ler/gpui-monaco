@@ -705,3 +705,54 @@ fn hints_are_restored_from_the_cache(cx: &mut TestAppContext) {
     draw(cx);
     assert_eq!(hints(&editor, cx), [(p(0, 5), ": i32".to_string())]);
 }
+
+/// The editor's hint decorations: (row, id), by row.
+fn hint_decorations(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+) -> Vec<(u32, gpui_monaco::DecorationId)> {
+    let id = editor.entity_id();
+    editor.read_with(cx, |e, cx| {
+        let mut found: Vec<_> = e
+            .model()
+            .read(cx)
+            .injected_text_decorations(Some(id))
+            .into_iter()
+            .map(|d| (d.range.start.row, d.id))
+            .collect();
+        found.sort();
+        found
+    })
+}
+
+/// Monaco `_updateHintsDecorators` replaces only the decorations in the
+/// requested ranges: after a Page Down, the hints above them stay; and
+/// hints asked for again that come out the same keep their decorations,
+/// so the view lines don't gather them again.
+#[gpui::test]
+fn scrolling_keeps_the_hints_it_asks_for_again(cx: &mut TestAppContext) {
+    let text: String = (0..400).map(|i| format!("let x{i} = {i};\n")).collect();
+    let types = Types::default();
+    let requests = types.requests.clone();
+    let (editor, cx) = setup_with(
+        &text,
+        |cx| {
+            register_inlay_hints_provider(cx, LanguageSelector::All, types);
+        },
+        cx,
+    );
+    let before = hint_decorations(&editor, cx);
+    assert!(!before.is_empty());
+    let asked = requests.borrow().len();
+    cx.simulate_keystrokes("pagedown pagedown");
+    settle(cx);
+    settle(cx);
+    assert!(requests.borrow().len() > asked);
+    let after = hint_decorations(&editor, cx);
+    // New rows got hints.
+    assert!(after.last().unwrap().0 > before.last().unwrap().0);
+    // Every hint shown before is still there, with the same decoration.
+    for decoration in &before {
+        assert!(after.contains(decoration), "{decoration:?} was replaced");
+    }
+}

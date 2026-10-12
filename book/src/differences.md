@@ -40,7 +40,7 @@ The repository's [`docs/MONACO_PARITY.md`](https://github.com/ty-ler/gpui-monaco
 - **Minimap section headers:** `section_header_letter_spacing` is accepted but not applied, because GPUI text has no letter spacing.
 - **Minimap glyphs at `scale` 2 and 3 on Retina displays:** Monaco draws its built-in glyphs at scales 1 and 2 (in device pixels) and samples the editor font for larger ones. GPUI can't rasterize a font into a buffer, so larger scales enlarge the scale-2 glyphs.
 - **Decoration colors:** overview ruler and minimap colors are a resolved color or a theme color id (`DecorationColor`); markers take the theme's `minimap.{error,warning,info}Highlight` and overview ruler colors.
-- **Injected text:** it's part of the shaped line, not of the view lines' columns. The cursor's side of injected text (Monaco's view column, kept to `cursorStops`) is tracked beside its model position for Left, Right, Up, Down, End and clicks; selections are drawn from model columns, and wrapping doesn't count injected text.
+- **Injected text:** as in Monaco, inlay hints, `before`/`after` text and ghost text are in the view lines' columns: selections are drawn and hit-tested across them, wrapping counts them (and may break inside one), and Up/Down keep the visible column with them included. Where both show at one column, `after` text comes before `before` text (Monaco has the reverse). `widthInEm` isn't supported, and `Advanced` wrapping measures injected text in the editor's font, not its own.
 - **Color picker:** the standalone picker isn't bound to a key (as in Monaco). It runs from the command palette or `ShowOrFocusStandaloneColorPicker`.
 - **Quick access:**
   - Symbols are matched with the suggest widget's fuzzy scorer, not VS Code's quick open scorer.
