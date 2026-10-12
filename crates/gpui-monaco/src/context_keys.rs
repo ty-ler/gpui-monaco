@@ -235,11 +235,7 @@ impl CodeEditor {
             selections.iter().any(|s| !s.is_empty()),
         );
         flag(context, "editorHasMultipleSelections", selections.len() > 1);
-        flag(
-            context,
-            "editorTabMovesFocus",
-            self.options.tab_focus_mode || crate::tab_focus_mode(cx),
-        );
+        flag(context, "editorTabMovesFocus", self.tab_moves_focus(cx));
         flag(context, "isInEmbeddedEditor", self.in_peek);
         flag(context, "canUndo", model.can_undo());
         flag(context, "canRedo", model.can_redo());

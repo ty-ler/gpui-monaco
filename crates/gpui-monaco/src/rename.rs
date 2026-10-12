@@ -20,7 +20,7 @@ use text::PointUtf16;
 
 use crate::actions::{
     AcceptRenameInput, AcceptRenameInputWithPreview, CancelRenameInput, FocusNextRenameSuggestion,
-    FocusPreviousRenameSuggestion,
+    FocusPreviousRenameSuggestion, Outdent, Tab,
 };
 use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
@@ -498,6 +498,11 @@ impl Render for RenameInput {
                     editor.cancel_rename(true, cx);
                 });
             }))
+            // The input propagates Tab and Shift+Tab; Monaco's `tab` and
+            // `outdent` need `editorTextFocus`, so they mustn't reach the
+            // editor and indent it at its hidden cursor.
+            .on_action(|_: &Tab, _, _| {})
+            .on_action(|_: &Outdent, _, _| {})
             .on_action(
                 cx.listener(|this, _: &FocusNextRenameSuggestion, _, cx| this.move_focus(true, cx)),
             )
