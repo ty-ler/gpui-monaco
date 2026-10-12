@@ -417,3 +417,38 @@ fn dragging_a_sash_keeps_its_pointer_everywhere(cx: &mut TestAppContext) {
         assert_eq!(captured(cx), None, "{id}");
     }
 }
+
+/// Monaco `Sash`: `sash.hoverBorder` shows once the mouse has rested on a
+/// sash for 300ms (`hoverDelay`), and goes as soon as it leaves.
+#[gpui::test]
+fn sashes_show_their_hover_border_after_a_delay(cx: &mut TestAppContext) {
+    use std::time::Duration;
+    let (editor, cx) = setup(&numbered(100), cx);
+    peek(&editor, cx, vec![here(1, 0, 4), here(5, 0, 4)]);
+    let shown = |id: &'static str, cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, cx| e.peek_sash_hover_for_tests(id, cx))
+    };
+    for id in ["peek-sash-height", "peek-sash-split"] {
+        let at = cx.debug_bounds(id).unwrap().center();
+        cx.simulate_mouse_move(at, None, Modifiers::default());
+        draw(cx);
+        assert!(!shown(id, cx), "{id}");
+        cx.executor().advance_clock(Duration::from_millis(299));
+        draw(cx);
+        assert!(!shown(id, cx), "{id}");
+        cx.executor().advance_clock(Duration::from_millis(1));
+        draw(cx);
+        assert!(shown(id, cx), "{id}");
+        // Leaving hides it at once.
+        cx.simulate_mouse_move(point(px(80.), px(5.)), None, Modifiers::default());
+        draw(cx);
+        assert!(!shown(id, cx), "{id}");
+        // Leaving before the delay cancels it.
+        cx.simulate_mouse_move(at, None, Modifiers::default());
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.simulate_mouse_move(point(px(80.), px(5.)), None, Modifiers::default());
+        cx.executor().advance_clock(Duration::from_millis(200));
+        draw(cx);
+        assert!(!shown(id, cx), "{id}");
+    }
+}

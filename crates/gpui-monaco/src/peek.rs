@@ -162,6 +162,8 @@ pub(crate) struct PeekView {
     /// A height sash drag's start: the pointer's y and the height in lines
     /// (Monaco `ZoneWidget._initSash`'s `data`).
     sash_start: Option<(Pixels, f32)>,
+    /// The sash showing `sash.hoverBorder` for the mouse resting on it.
+    sash_hover: crate::sash::SashHover,
     /// Monaco `TypeNavigationController`: the word typed so far and when
     /// its last character came.
     typed: Option<(String, Instant)>,
@@ -464,6 +466,7 @@ impl PeekView {
             list_hovered: false,
             slider_grab: px(0.),
             sash_start: None,
+            sash_hover: Default::default(),
             typed: None,
             zone_top: Default::default(),
             rendered: 0..0,
@@ -1126,13 +1129,28 @@ impl Render for PeekView {
         let show_slider = self.list_hovered || cx.has_active_drag();
         let scrolled = self.scroll_top > px(0.);
         let preview = self.preview.clone();
+        // Monaco `Sash`: `sash.hoverBorder` once the mouse has rested on
+        // the sash for its hover delay.
         let sash_hover = colors.sash_hover_border;
-        let sash = |id: &'static str, drag: PeekDrag| {
+        let shown = [
+            self.sash_hover.shows("peek-sash-split"),
+            self.sash_hover.shows("peek-sash-height"),
+        ];
+        let sash = |id: &'static str, drag: PeekDrag, cx: &mut Context<Self>| {
+            let shown = shown[usize::from(id == "peek-sash-height")];
             div()
                 .id(id)
                 .debug_selector(move || id.into())
                 .absolute()
-                .hover(move |style| style.bg(sash_hover))
+                .when(shown, |sash| sash.bg(sash_hover))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    this.sash_hover.set_hovered(
+                        id,
+                        *hovered,
+                        |this: &mut Self| &mut this.sash_hover,
+                        cx,
+                    );
+                }))
                 .on_drag(drag, |_, _, _, cx| cx.new(|_| gpui::Empty))
         };
         // Monaco `peekViewWidget.css`: the action bar's close action.
@@ -1406,7 +1424,7 @@ impl Render for PeekView {
                                     .children(preview),
                             )
                             .child(
-                                sash("peek-sash-split", PeekDrag::Split)
+                                sash("peek-sash-split", PeekDrag::Split, cx)
                                     .top_0()
                                     .bottom_0()
                                     .left(gpui::relative(self.ratio))
@@ -1419,7 +1437,7 @@ impl Render for PeekView {
             )
             .child(
                 // Monaco `getHorizontalSashTop`: the frame's bottom.
-                sash("peek-sash-height", PeekDrag::Height)
+                sash("peek-sash-height", PeekDrag::Height, cx)
                     .left_0()
                     .right_0()
                     .top(arrow_height + head_height + body_height + px(3.) - px(2.))
@@ -1647,6 +1665,17 @@ impl CodeEditor {
             view.scroll_top,
             view.rendered.clone(),
         ))
+    }
+
+    /// Whether the peek view's sash `id` (`peek-sash-split` or
+    /// `peek-sash-height`) shows `sash.hoverBorder` for the mouse resting
+    /// on it, for tests.
+    #[doc(hidden)]
+    pub fn peek_sash_hover_for_tests(&self, id: &'static str, cx: &gpui::App) -> bool {
+        self.peek
+            .view
+            .as_ref()
+            .is_some_and(|view| view.read(cx).sash_hover.shows(id))
     }
 
     /// The peek view's preview editor, once it has rendered.

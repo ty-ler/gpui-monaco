@@ -2170,8 +2170,8 @@ pub struct DiffEditor {
     bounds: Rc<Cell<Bounds<Pixels>>>,
     /// Monaco `DiffEditorSash`: a drag's start x and sash left.
     sash_drag: Option<(Pixels, Pixels)>,
-    /// The mouse is over the sash (Monaco's `sash.hoverBorder`).
-    sash_hovered: bool,
+    /// The sash showing `sash.hoverBorder` for the mouse resting on it.
+    sash_hover: crate::sash::SashHover,
     /// Monaco's `diffViewport` being dragged: where in the slider it was
     /// grabbed.
     overview_drag: Option<Pixels>,
@@ -2274,7 +2274,7 @@ impl DiffEditor {
             deleted_code: Vec::new(),
             bounds: Default::default(),
             sash_drag: None,
-            sash_hovered: false,
+            sash_hover: Default::default(),
             overview_drag: None,
             syncing_scroll: false,
             inline: false,
@@ -3908,6 +3908,13 @@ impl DiffEditor {
     #[doc(hidden)]
     pub fn sash_left_for_tests(&self) -> Pixels {
         self.sash_left()
+    }
+
+    /// Whether sash `id` (`diff-sash` or `diff-gutter-sash`) shows
+    /// `sash.hoverBorder` for the mouse resting on it, for tests.
+    #[doc(hidden)]
+    pub fn sash_hover_for_tests(&self, id: &'static str) -> bool {
+        self.sash_hover.shows(id)
     }
 
     /// Drags the sash from window x `from` to `to`, for tests.
@@ -6087,10 +6094,11 @@ impl Render for DiffEditor {
                 .child(self.original.clone())
         };
         // Monaco `Sash`: a 4px hit area on the boundary, `sash.hoverBorder`
-        // on hover or while dragging; a double click resets the ratio. A
-        // second one left of the gutter moves the same boundary.
+        // once the mouse has rested on it for the hover delay, or at once
+        // while dragging; a double click resets the ratio. A second one left
+        // of the gutter moves the same boundary.
         let sash = |id: &'static str, x: Pixels, cx: &mut Context<Self>| {
-            let active = self.sash_drag.is_some() || self.sash_hovered;
+            let active = self.sash_drag.is_some() || self.sash_hover.shows(id);
             div()
                 .id(id)
                 .absolute()
@@ -6099,10 +6107,14 @@ impl Render for DiffEditor {
                 .left(x - px(SASH_SIZE / 2.))
                 .w(px(SASH_SIZE))
                 .cursor(SASH_CURSOR)
-                .when(active, |sash| sash.bg(colors.focus_border))
-                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                    this.sash_hovered = *hovered;
-                    cx.notify();
+                .when(active, |sash| sash.bg(colors.sash_hover_border))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    this.sash_hover.set_hovered(
+                        id,
+                        *hovered,
+                        |this: &mut Self| &mut this.sash_hover,
+                        cx,
+                    );
                 }))
                 .on_mouse_down(
                     MouseButton::Left,

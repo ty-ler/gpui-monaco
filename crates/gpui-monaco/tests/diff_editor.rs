@@ -1867,3 +1867,29 @@ fn the_inline_breakpoint_is_inclusive(cx: &mut TestAppContext) {
     paint(cx);
     assert!(!diff.read_with(cx, |d, _| d.renders_side_by_side()));
 }
+
+/// Monaco `Sash`: the diff sash shows `sash.hoverBorder` after the mouse
+/// rests on it for 300ms (`hoverDelay`), and at once while dragged.
+#[gpui::test]
+fn the_sash_hover_border_waits_for_the_hover_delay(cx: &mut TestAppContext) {
+    use gpui::Modifiers;
+    use std::time::Duration;
+    let (diff, cx) = setup("a\nb", "a\nc", cx);
+    cx.simulate_resize(gpui::size(px(1230.), px(600.)));
+    paint(cx);
+    let shown =
+        |cx: &mut VisualTestContext| diff.read_with(cx, |d, _| d.sash_hover_for_tests("diff-sash"));
+    let on_sash = point(diff.read_with(cx, |d, _| d.sash_left_for_tests()), px(300.));
+    cx.simulate_mouse_move(on_sash, None, Modifiers::default());
+    paint(cx);
+    assert!(!shown(cx));
+    cx.executor().advance_clock(Duration::from_millis(299));
+    paint(cx);
+    assert!(!shown(cx));
+    cx.executor().advance_clock(Duration::from_millis(1));
+    paint(cx);
+    assert!(shown(cx));
+    cx.simulate_mouse_move(point(px(300.), px(300.)), None, Modifiers::default());
+    paint(cx);
+    assert!(!shown(cx));
+}

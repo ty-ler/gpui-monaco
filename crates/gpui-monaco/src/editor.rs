@@ -199,6 +199,48 @@ pub enum CodeEditorEvent {
     EndUpdate,
 }
 
+/// Changes view zones inside [`CodeEditor::change_view_zones`] (Monaco
+/// `IViewZoneChangeAccessor`): together they report one
+/// [`CodeEditorEvent::ViewZonesChanged`].
+pub struct ViewZoneChangeAccessor<'a, 'b> {
+    editor: &'a mut CodeEditor,
+    cx: &'a mut Context<'b, CodeEditor>,
+    changed: bool,
+}
+
+impl ViewZoneChangeAccessor<'_, '_> {
+    /// Inserts a host view between lines (Monaco `addZone`).
+    pub fn add_zone(&mut self, zone: ViewZone) -> WidgetId {
+        self.add(zone, false)
+    }
+
+    /// Adds a zone; `full_width` ones also cover the gutter.
+    pub(crate) fn add(&mut self, zone: ViewZone, full_width: bool) -> WidgetId {
+        self.changed = true;
+        self.editor.insert_zone(zone, full_width, self.cx)
+    }
+
+    /// Removes a view zone (Monaco `removeZone`); other widgets' ids are
+    /// ignored, as in Monaco.
+    pub fn remove_zone(&mut self, id: WidgetId) {
+        self.changed |= self.editor.widgets.remove_zone(id);
+    }
+
+    /// Moves a view zone after another line or column (Monaco
+    /// `layoutZone`, which re-reads `afterLineNumber` and `afterColumn`).
+    pub fn layout_zone(&mut self, id: WidgetId, after_line: u32, after_column: Option<u32>) {
+        self.changed |= self
+            .editor
+            .relayout_zone(id, after_line, after_column, self.cx);
+    }
+
+    /// Changes a zone's height (Monaco `layoutZone`, which also re-reads
+    /// `heightInLines` and `heightInPx`).
+    pub fn set_zone_height(&mut self, id: WidgetId, height: ZoneHeight) {
+        self.changed |= self.editor.resize_zone(id, height);
+    }
+}
+
 /// Monaco's folding update scheduler waits at least this long.
 const FOLD_UPDATE_DELAY: Duration = Duration::from_millis(200);
 
@@ -1495,6 +1537,28 @@ impl CodeEditor {
         )
     }
 
+    /// Adds, removes and lays out view zones in one change (Monaco
+    /// `changeViewZones`): `change` gets Monaco's `IViewZoneChangeAccessor`,
+    /// and one [`CodeEditorEvent::ViewZonesChanged`] follows if anything
+    /// changed. Returns what `change` returns (the new zones' ids, say).
+    pub fn change_view_zones<R>(
+        &mut self,
+        change: impl FnOnce(&mut ViewZoneChangeAccessor<'_, '_>) -> R,
+        cx: &mut Context<Self>,
+    ) -> R {
+        let mut accessor = ViewZoneChangeAccessor {
+            editor: self,
+            cx,
+            changed: false,
+        };
+        let result = change(&mut accessor);
+        if accessor.changed {
+            cx.emit(CodeEditorEvent::ViewZonesChanged);
+            cx.notify();
+        }
+        result
+    }
+
     /// Inserts a host view between lines (Monaco `changeViewZones` +
     /// `addZone`).
     pub fn add_view_zone(&mut self, zone: ViewZone, cx: &mut Context<Self>) -> WidgetId {
@@ -1509,10 +1573,15 @@ impl CodeEditor {
         full_width: bool,
         cx: &mut Context<Self>,
     ) -> WidgetId {
+        self.change_view_zones(|zones| zones.add(zone, full_width), cx)
+    }
+
+    /// Monaco `ViewZones._addZone`, without the change event.
+    fn insert_zone(&mut self, zone: ViewZone, full_width: bool, cx: &App) -> WidgetId {
         let id = self.widgets.next_id();
         let ordinal = zone.effective_ordinal();
         let anchor = self.zone_anchor(zone.after_line, zone.after_column, cx);
-        self.widgets.zones.push(ZoneState {
+        self.widgets.push_zone(ZoneState {
             id,
             anchor,
             after_column: zone.after_column.is_some(),
@@ -1526,11 +1595,43 @@ impl CodeEditor {
             full_width,
             captures_wheel: false,
             min_width: zone.min_width,
+            on_dom_node_top: zone.on_dom_node_top,
+            reported_top: None,
+            on_computed_height: zone.on_computed_height,
+            reported_height: None,
         });
-        self.widgets.zones_generation += 1;
-        cx.emit(CodeEditorEvent::ViewZonesChanged);
-        cx.notify();
         id
+    }
+
+    /// Monaco `ViewZones._layoutZone`, without the change event: whether
+    /// there's such a zone.
+    fn relayout_zone(
+        &mut self,
+        id: WidgetId,
+        after_line: u32,
+        after_column: Option<u32>,
+        cx: &App,
+    ) -> bool {
+        let anchor = self.zone_anchor(after_line, after_column, cx);
+        let Some(zone) = self.widgets.zones.iter_mut().find(|z| z.id == id) else {
+            return false;
+        };
+        zone.anchor = anchor;
+        zone.after_column = after_column.is_some();
+        // Rows are cached per zones generation.
+        self.widgets.zones_generation += 1;
+        true
+    }
+
+    /// A zone's new height, without the change event: whether it changed.
+    fn resize_zone(&mut self, id: WidgetId, height: ZoneHeight) -> bool {
+        match self.widgets.zones.iter_mut().find(|z| z.id == id) {
+            Some(zone) if zone.height != height => {
+                zone.height = height;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The anchor of a zone after 1-based `after_line`: at the line's end,
@@ -1564,15 +1665,7 @@ impl CodeEditor {
         after_column: Option<u32>,
         cx: &mut Context<Self>,
     ) {
-        let anchor = self.zone_anchor(after_line, after_column, cx);
-        if let Some(zone) = self.widgets.zones.iter_mut().find(|z| z.id == id) {
-            zone.anchor = anchor;
-            zone.after_column = after_column.is_some();
-            // Rows are cached per zones generation.
-            self.widgets.zones_generation += 1;
-            cx.emit(CodeEditorEvent::ViewZonesChanged);
-            cx.notify();
-        }
+        self.change_view_zones(|zones| zones.layout_zone(id, after_line, after_column), cx);
     }
 
     /// Changes the height of a zone added with [`CodeEditor::add_view_zone`].
@@ -1582,13 +1675,7 @@ impl CodeEditor {
         height: ZoneHeight,
         cx: &mut Context<Self>,
     ) {
-        if let Some(zone) = self.widgets.zones.iter_mut().find(|z| z.id == id)
-            && zone.height != height
-        {
-            zone.height = height;
-            cx.emit(CodeEditorEvent::ViewZonesChanged);
-            cx.notify();
-        }
+        self.change_view_zones(|zones| zones.set_zone_height(id, height), cx);
     }
 
     /// Adds a host view anchored to a text position (Monaco
@@ -1603,6 +1690,7 @@ impl CodeEditor {
         let secondary = widget
             .secondary_position
             .map(|position| self.anchor_for(position, cx));
+        let hooks = widget.hooks();
         self.widgets.content.push(ContentWidgetState {
             id,
             anchor: Some(anchor),
@@ -1615,6 +1703,8 @@ impl CodeEditor {
             layer: crate::widgets::layer::DEFAULT,
             room: Default::default(),
             window_anchor: None,
+            display_none: widget.use_display_none,
+            hooks,
         });
         cx.notify();
         id

@@ -115,6 +115,7 @@ pub mod quick_access;
 mod registry;
 mod rename;
 pub mod replace_pattern;
+mod sash;
 pub mod search;
 mod section_headers;
 mod tab_focus;
@@ -154,7 +155,10 @@ pub use decorations::{
 };
 #[doc(hidden)]
 pub use editor::OverviewRulerForTests;
-pub use editor::{CodeEditor, CodeEditorEvent, FoldingRegionState, FoldingViewState, ViewState};
+pub use editor::{
+    CodeEditor, CodeEditorEvent, FoldingRegionState, FoldingViewState, ViewState,
+    ViewZoneChangeAccessor,
+};
 pub use editor_actions::{
     ActionPrecondition, ActionRun, EditorActionDescriptor, EditorActionInfo, KeybindingRule,
     add_editor_action, add_keybinding_rule, add_keybinding_rules,
@@ -207,9 +211,9 @@ pub use theme::{
 };
 pub use view::reveal::{RevealType, ScrollType};
 pub use widgets::{
-    ContentWidget, ContentWidgetPosition, ContentWidgetPreference, GlyphMarginWidget,
-    GlyphMarginWidgetPosition, OverlayPosition, OverlayWidget, PositionAffinity, ViewZone,
-    WidgetId, ZoneHeight,
+    AfterRender, BeforeRender, ContentWidget, ContentWidgetPosition, ContentWidgetPreference,
+    GlyphMarginWidget, GlyphMarginWidgetPosition, OverlayPosition, OverlayWidget, PositionAffinity,
+    ViewZone, WidgetId, ZoneCallback, ZoneHeight,
 };
 
 /// Registers the codicon font with the `codicons` feature ([`codicons`]),

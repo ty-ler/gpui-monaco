@@ -2000,6 +2000,9 @@ pub struct PrepaintState {
     /// The `wordWrapIndicator` glyph and where it goes.
     wrap_indicators: Option<(ShapedLine, Vec<gpui::Point<Pixels>>)>,
     embedded: Vec<Embedded>,
+    /// Host callbacks due after this frame (zones' `onDomNodeTop` and
+    /// `onComputedHeight`, content widgets' `afterRender`).
+    callbacks: crate::widgets::PendingCallbacks,
     /// The placeholder's lines and where they go.
     placeholder: Vec<(ShapedLine, gpui::Point<Pixels>)>,
     /// Where a dragged selection would drop.
@@ -2249,12 +2252,45 @@ impl Element for EditorElement {
                     state.zone_margin_elements.push(element);
                 }
                 Embedded::Content {
+                    anchor,
+                    line_height,
+                    preference,
+                    overflow,
+                    display_none: true,
+                    hooks,
+                    ..
+                } => {
+                    // Monaco `useDisplayNone`: placed by `beforeRender`'s
+                    // size (else as an empty box) for `afterRender`, never
+                    // laid out or painted.
+                    let Some(hooks) = hooks else {
+                        continue;
+                    };
+                    let height = hooks.size(window, cx).map_or(px(0.), |size| size.height);
+                    let room = if overflow.is_some() {
+                        viewport.top() + crate::widgets::OVERFLOW_VERTICAL_PADDING
+                            ..viewport.bottom() - crate::widgets::OVERFLOW_VERTICAL_PADDING
+                    } else {
+                        text.top()..text.bottom()
+                    };
+                    let placed = crate::widgets::place_content_widget(
+                        &preference,
+                        anchor.y,
+                        line_height,
+                        height,
+                        room,
+                    );
+                    hooks.report(placed.map(|(_, used)| used), &mut state.callbacks);
+                }
+                Embedded::Content {
                     view,
                     anchor,
                     secondary_x,
                     line_height,
                     preference,
                     overflow: Some((layer, room)),
+                    hooks,
+                    ..
                 } => {
                     // Monaco `_layoutBoxInPage`: placed in the window, with
                     // some clearance, and told the room there is.
@@ -2271,8 +2307,9 @@ impl Element for EditorElement {
                     });
                     // Monaco's `maxWidth` for overflowing widgets: the
                     // window's width.
+                    let fixed = hooks.as_ref().and_then(|hooks| hooks.size(window, cx));
                     let (element, measured) =
-                        layout_capped(&view, Some(&room), viewport.size.width, window, cx);
+                        layout_capped(&view, Some(&room), viewport.size.width, fixed, window, cx);
                     // The part placed against the line: the whole widget, or
                     // the box it asked for (the suggest list, with its
                     // details around it), on the side it asked for.
@@ -2289,7 +2326,7 @@ impl Element for EditorElement {
                     let max_x = (bounds.right() + anchor_box.size.width)
                         .min(viewport.right() - crate::widgets::OVERFLOW_HORIZONTAL_PADDING);
                     let x = anchor_x.min(max_x - anchor_box.size.width).max(min_x);
-                    let Some(y) = crate::widgets::place_content_widget(
+                    let Some((y, used)) = crate::widgets::place_content_widget(
                         &preference,
                         anchor.y,
                         line_height,
@@ -2298,6 +2335,9 @@ impl Element for EditorElement {
                     ) else {
                         continue;
                     };
+                    if let Some(hooks) = &hooks {
+                        hooks.report(Some(used), &mut state.callbacks);
+                    }
                     let origin = point(x, y) - anchor_box.origin;
                     // The parts that take the mouse: the whole widget, or
                     // the anchored part and the one beside it.
@@ -2321,15 +2361,18 @@ impl Element for EditorElement {
                     line_height,
                     preference,
                     overflow: None,
+                    hooks,
+                    ..
                 } => {
                     // Monaco's `maxWidth`: the text area's width.
+                    let fixed = hooks.as_ref().and_then(|hooks| hooks.size(window, cx));
                     let (mut element, measured) =
-                        layout_capped(&view, None, text.size.width, window, cx);
+                        layout_capped(&view, None, text.size.width, fixed, window, cx);
                     let anchor_x =
                         reduce_anchor_x(anchor.x, secondary_x, measured.width, wide_char);
                     // Monaco `_layoutBoxInViewport`: kept in the text area.
                     let x = anchor_x.min(text.right() - measured.width).max(text.left());
-                    let Some(y) = crate::widgets::place_content_widget(
+                    let Some((y, used)) = crate::widgets::place_content_widget(
                         &preference,
                         anchor.y,
                         line_height,
@@ -2338,6 +2381,9 @@ impl Element for EditorElement {
                     ) else {
                         continue;
                     };
+                    if let Some(hooks) = &hooks {
+                        hooks.report(Some(used), &mut state.callbacks);
+                    }
                     let visible = Bounds::new(point(x, y), measured).intersect(&text_hits);
                     if !visible.is_empty() {
                         cursor_areas.push((
@@ -2560,6 +2606,7 @@ impl Element for EditorElement {
                 layout.widget_captures_wheel = widgets.captures_wheel;
             }
         });
+        crate::widgets::run_after_frame(std::mem::take(&mut state.callbacks), window, cx);
         state
     }
 
@@ -2808,7 +2855,7 @@ fn prepaint_editor(
         let model = editor.model().clone();
         let buffer = model.read(cx).buffer();
         let key = (
-            std::sync::Arc::as_ptr(&view_lines) as usize,
+            view_lines.generation(),
             buffer.version(),
             editor.widgets.zones_generation,
         );
@@ -2883,7 +2930,7 @@ fn prepaint_editor(
                 })
                 .collect()
         });
-        for (zone, after) in editor.widgets.zones.iter().zip(&rows) {
+        for (index, (zone, after)) in editor.widgets.zones.iter().zip(&rows).enumerate() {
             let Some(after) = *after else {
                 continue;
             };
@@ -2892,6 +2939,7 @@ fn prepaint_editor(
                 crate::widgets::ZoneHeight::Pixels(height) => height,
             };
             zone_specs.push(ZoneSpec {
+                index,
                 after,
                 ordinal: zone.ordinal,
                 height,
@@ -4905,6 +4953,16 @@ fn prepaint_editor(
     // gutter's width and doesn't scroll horizontally.
     let zone_width = layout.content_width.max(text_width);
     let margin_width = text_bounds.left() - layout.bounds.left();
+    // Monaco's `onComputedHeight` (`_computeWhitespaceProps`'s height, 0
+    // when hidden) and `onDomNodeTop` (the zone's top when it's in view):
+    // per zone, measured only when some zone has them.
+    let mut zone_reports: Vec<(Option<Pixels>, Pixels)> = Vec::new();
+    if editor.widgets.zone_callbacks > 0 {
+        zone_reports = vec![(None, px(0.)); editor.widgets.zones.len()];
+        for zone in &zone_specs {
+            zone_reports[zone.index].1 = zone.height;
+        }
+    }
     let mut ix = 0;
     while ix < zone_specs.len() {
         let after = zone_specs[ix].after;
@@ -4926,6 +4984,13 @@ fn prepaint_editor(
             continue;
         }
         for zone in &zone_specs[ix..group_end] {
+            // Monaco `ViewZones.render`: visible when it's in the viewport.
+            if !zone_reports.is_empty()
+                && top < layout.bounds.bottom()
+                && top + zone.height > layout.bounds.top()
+            {
+                zone_reports[zone.index].0 = Some(top - layout.bounds.top());
+            }
             // Zone widgets (peek, the problem zone) are overlay widgets in
             // Monaco: they don't scroll horizontally.
             let bounds = if zone.full_width {
@@ -4965,6 +5030,24 @@ fn prepaint_editor(
             top += zone.height;
         }
         ix = group_end;
+    }
+    let mut callbacks = crate::widgets::PendingCallbacks::new();
+    for (zone, (top, height)) in editor.widgets.zones.iter_mut().zip(zone_reports) {
+        use crate::widgets::PendingCallback;
+        if let Some(callback) = &zone.on_computed_height
+            && zone.reported_height != Some(height)
+        {
+            zone.reported_height = Some(height);
+            callbacks.push(PendingCallback::Zone(callback.clone(), height));
+        }
+        // Out of view: Monaco's `getScrolledTopFromAbsoluteTop(-1000000)`.
+        let top = top.unwrap_or(px(-1_000_000.) - scroll_top);
+        if let Some(callback) = &zone.on_dom_node_top
+            && zone.reported_top != Some(top)
+        {
+            zone.reported_top = Some(top);
+            callbacks.push(PendingCallback::Zone(callback.clone(), top));
+        }
     }
     {
         let model = editor.model().clone();
@@ -5072,19 +5155,29 @@ fn prepaint_editor(
                     line_height: rect.size.height,
                     preference: widget.preference.clone(),
                     overflow: Some((widget.layer, widget.room.clone())),
+                    display_none: widget.display_none,
+                    hooks: widget.hooks.clone(),
                 });
                 continue;
             }
+            // Monaco `afterRender(null)` for a widget that isn't shown.
+            let hidden = |callbacks: &mut crate::widgets::PendingCallbacks| {
+                if let Some(hooks) = &widget.hooks {
+                    hooks.report(None, callbacks);
+                }
+            };
             let Some(anchor) = widget
                 .anchor
                 .as_ref()
                 .filter(|_| !widget.preference.is_empty())
             else {
+                hidden(&mut callbacks);
                 continue;
             };
             let affinity = widget.affinity.unwrap_or_default();
             let position = buffer.offset_to_point_utf16(buffer.resolve(anchor));
             let Some(line) = layout.line_for_point_with_affinity(position, affinity) else {
+                hidden(&mut callbacks);
                 continue;
             };
             // Left-aligned before injected text at a line's start.
@@ -5112,6 +5205,8 @@ fn prepaint_editor(
                 overflow: widget
                     .allow_overflow
                     .then(|| (widget.layer, widget.room.clone())),
+                display_none: widget.display_none,
+                hooks: widget.hooks.clone(),
             });
         }
     }
@@ -5227,6 +5322,7 @@ fn prepaint_editor(
         whitespace,
         wrap_indicators,
         embedded,
+        callbacks,
         placeholder,
         dnd_target,
         minimap_stale: std::mem::take(&mut editor.minimap_cache.stale),
@@ -6683,6 +6779,10 @@ pub(crate) enum Embedded {
         preference: Vec<ContentWidgetPreference>,
         /// When it overflows the editor: its layer and room.
         overflow: Option<(usize, crate::widgets::OverflowRoomCell)>,
+        /// Monaco `useDisplayNone`: placed, but not laid out or painted.
+        display_none: bool,
+        /// Monaco `beforeRender` and `afterRender`.
+        hooks: Option<std::rc::Rc<crate::widgets::ContentWidgetHooks>>,
     },
     Overlay {
         view: gpui::AnyView,
@@ -6712,6 +6812,8 @@ impl Embedded {
 
 /// A view zone as laid out this frame.
 pub(crate) struct ZoneSpec {
+    /// Its index in `Widgets::zones`.
+    index: usize,
     /// The view line it's after (-1: above the first line).
     after: i64,
     /// Monaco's ordinal among zones after the same view line.
@@ -6794,10 +6896,12 @@ fn overflowing(
 /// Lays out a content widget's view at its min-content size, again at
 /// `max_width` when that's wider (Monaco's `maxWidth` on the widget's
 /// node). With `overflow`, its room, it wraps it as an overflowing widget.
+/// A `fixed` size (Monaco `beforeRender`'s) is used instead of measuring.
 fn layout_capped(
     view: &gpui::AnyView,
     overflow: Option<&crate::widgets::OverflowRoomCell>,
     max_width: Pixels,
+    fixed: Option<gpui::Size<Pixels>>,
     window: &mut Window,
     cx: &mut App,
 ) -> (gpui::AnyElement, gpui::Size<Pixels>) {
@@ -6805,6 +6909,18 @@ fn layout_capped(
         Some(room) => overflowing(view.clone(), Some(room.clone())),
         None => view.clone().into_any_element(),
     };
+    if let Some(fixed) = fixed {
+        let mut element = element(view);
+        element.layout_as_root(
+            size(
+                AvailableSpace::Definite(fixed.width),
+                AvailableSpace::Definite(fixed.height),
+            ),
+            window,
+            cx,
+        );
+        return (element, fixed);
+    }
     let mut measured_element = element(view);
     let measured = measured_element.layout_as_root(
         size(AvailableSpace::MinContent, AvailableSpace::MinContent),
