@@ -172,6 +172,29 @@ impl LineLayout {
         self.view_start + col as u32
     }
 
+    /// Monaco `_getGraphemeAwarePosition`: the view columns of the
+    /// grapheme at view column `column` (from its start, which is before
+    /// `column` inside a grapheme), or `None` at the end of the line.
+    pub fn grapheme_view_columns(&self, column: u32) -> Option<Range<u32>> {
+        let view_index = self.view_index();
+        let ix = column.checked_sub(self.view_start)? as usize;
+        if ix + 1 >= view_index.len() {
+            return None;
+        }
+        let bytes = self.shaped.grapheme_at(view_index[ix]);
+        let (start, end) = if bytes.is_empty() {
+            (ix, ix + 1)
+        } else {
+            (
+                view_index.partition_point(|&d| d < bytes.start).min(ix),
+                view_index
+                    .partition_point(|&d| d < bytes.end)
+                    .clamp(ix + 1, view_index.len() - 1),
+            )
+        };
+        Some(self.view_start + start as u32..self.view_start + end as u32)
+    }
+
     /// The largest view column on this line.
     pub fn view_end(&self) -> u32 {
         self.view_start + self.view_index().len() as u32 - 1
@@ -403,7 +426,8 @@ pub(crate) enum Substitute {
     /// columns wide, in `mtkcontrol` style, so it can't reorder the line.
     Hex(u32),
     /// The BOM, line and paragraph separators and NEL as U+FFFD (whatever
-    /// `renderControlCharacters` says).
+    /// `renderControlCharacters` says), and NUL without it (Monaco's
+    /// `&#00;`, which HTML shows as U+FFFD).
     Replacement,
 }
 
@@ -423,11 +447,33 @@ impl Substitute {
 pub(crate) fn substitute(ch: char, render_control_characters: bool) -> Option<Substitute> {
     match ch {
         '\u{feff}' | '\u{2028}' | '\u{2029}' | '\u{85}' => Some(Substitute::Replacement),
+        '\u{0}' if !render_control_characters => Some(Substitute::Replacement),
         _ if !render_control_characters || !is_control_character(ch) => None,
         '\u{0}'..='\u{1f}' => char::from_u32(0x2400 + ch as u32).map(Substitute::Picture),
         '\u{7f}' => Some(Substitute::Picture('\u{2421}')),
         _ => Some(Substitute::Hex(ch as u32)),
     }
+}
+
+/// Monaco `strings.getCharContainingOffset` in UTF-8: the byte range of the
+/// grapheme holding byte `offset` of `text` (`None` at or past the end, or
+/// off a character boundary).
+pub(crate) fn grapheme_containing(text: &str, offset: usize) -> Option<Range<usize>> {
+    use unicode_segmentation::GraphemeCursor;
+    if offset >= text.len() || !text.is_char_boundary(offset) {
+        return None;
+    }
+    let end = GraphemeCursor::new(offset, text.len(), true)
+        .next_boundary(text, 0)
+        .ok()
+        .flatten()
+        .unwrap_or(text.len());
+    let start = GraphemeCursor::new(end, text.len(), true)
+        .prev_boundary(text, 0)
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+    Some(start..end)
 }
 
 /// Long lines are shaped in chunks this big (bytes, ending at a
@@ -602,6 +648,14 @@ impl ChunkedLine {
             return self.width;
         }
         *x + shaped.x_for_index(index - start)
+    }
+
+    /// Monaco `strings.getCharContainingOffset`: the display byte range of
+    /// the grapheme holding display byte `index` (empty at the end).
+    pub fn grapheme_at(&self, index: usize) -> Range<usize> {
+        let (start, _, shaped) = &self.chunks[self.chunk(index)];
+        grapheme_containing(&shaped.text, index - start)
+            .map_or(index..index, |range| start + range.start..start + range.end)
     }
 
     /// The height of the text at display byte `index` (its font's ascent
@@ -2173,6 +2227,9 @@ pub(crate) struct EditorLayout {
     /// The rows and left edges of the `wordWrapIndicator` glyphs drawn (for
     /// tests).
     pub wrap_indicators: Vec<(u32, Pixels)>,
+    /// The rendered whitespace marks drawn: each one's position and whether
+    /// it's a tab (for tests).
+    pub whitespace_marks: WhitespaceMarks,
     /// The current line highlight's boxes.
     pub line_highlights: Vec<LineHighlight>,
     /// The line numbers' rows, left edges and colors (for tests).
@@ -4305,6 +4362,7 @@ fn prepaint_editor(
         cursors: (Vec::new(), false),
         view_selections: Vec::new(),
         wrap_indicators: Vec::new(),
+        whitespace_marks: Vec::new(),
         line_highlights: Vec::new(),
         line_number_styles: Vec::new(),
         glyphs_drawn: Vec::new(),
@@ -5287,21 +5345,16 @@ fn prepaint_editor(
         // Monaco's view column: before injected text there, or as far into
         // it as the cursor stops let a move or click take it.
         let column = view.column.clamp(line.view_start, line.view_end());
+        // Monaco `_getGraphemeAwarePosition`: inside a grapheme, the
+        // cursor draws at its start, and the character after the cursor on
+        // its view line (text or injected text) is the whole grapheme.
+        let grapheme = line.grapheme_view_columns(column);
+        let column = grapheme.as_ref().map_or(column, |g| g.start);
         let x = layout.text_origin_x() + line.x_for_view_column(column);
         let y = layout.line_top(line.view_line);
         // Monaco's cursor fills a taller line.
         let line_height = layout.line_height_of(line.view_line);
-        // Monaco `_getGraphemeAwarePosition`: the character after the
-        // cursor on its view line (text or injected text), if any.
-        let next = (column < line.view_end()).then(|| {
-            let ix = (column - line.view_start) as usize;
-            // A surrogate pair's halves display at the same index.
-            let len = if line.view_index().get(ix + 1) == line.view_index().get(ix) {
-                2
-            } else {
-                1
-            };
-            let end = (column + len).min(line.view_end());
+        let next = grapheme.map(|grapheme| {
             // A tab of the text (where its character shows: after any
             // injected text at its column).
             let model = view_lines.to_model(view.row, column);
@@ -5309,7 +5362,7 @@ fn prepaint_editor(
                 .to_view_with_affinity(model, crate::view::injected_text::PositionAffinity::Right)
                 == (view.row, column)
                 && rope.chars_at(rope.point_utf16_to_offset(model)).next() == Some('\t');
-            (end, is_tab)
+            (grapheme.end, is_tab)
         });
         // Monaco: a tab, the line end or a zero-width character are a
         // half-width character wide.
@@ -5447,11 +5500,15 @@ fn prepaint_editor(
             });
         let bracket_guides = bracket_guides_on.then(|| {
             let pairs = editor.bracket_pairs_in_rows(rows.clone(), cx);
+            // Monaco queries the pairs at a cursor out of view.
+            let pairs_at_active = (!rows.contains(&primary.row))
+                .then(|| editor.bracket_pairs_in_rows(primary.row..primary.row + 1, cx));
             crate::view::guides::lines_bracket_guides(
                 rope,
                 rows.clone(),
                 &pairs,
                 Some(primary),
+                pairs_at_active.as_deref(),
                 BracketGuideOptions {
                     include_inactive: options.guides.bracket_pairs
                         == crate::options::BracketPairGuides::On,
@@ -5600,10 +5657,56 @@ fn prepaint_editor(
                         start..end
                     })
                     .collect();
+                let top = layout.text_top(line.view_line);
+                // Monaco scans the view line, injected text included, in
+                // view columns.
+                if !line.view_index.is_empty() {
+                    let content = view_lines.line_content(line.view_line);
+                    let indent = line.view_start;
+                    let to_view = |row: u32, column: u32| {
+                        let (view_line, column) =
+                            view_lines.to_view(PointUtf16::new(row, column), false);
+                        match view_line.cmp(&line.view_line) {
+                            std::cmp::Ordering::Less => 0,
+                            std::cmp::Ordering::Equal => column,
+                            std::cmp::Ordering::Greater => u32::MAX,
+                        }
+                    };
+                    let selected: Vec<Range<u32>> = selected
+                        .iter()
+                        .map(|r| {
+                            // A selection going on past the row covers its
+                            // view lines' ends.
+                            let end = if r.end == u32::MAX {
+                                u32::MAX
+                            } else {
+                                to_view(line.row, r.end)
+                            };
+                            to_view(line.row, r.start)..end
+                        })
+                        .collect();
+                    let units: Vec<u16> = content.encode_utf16().collect();
+                    let shown = &content[utf16_to_byte(&content, indent)..];
+                    for column in crate::view::guides::whitespace_columns(
+                        shown,
+                        indent,
+                        indent,
+                        !line.is_last_segment,
+                        options.render_whitespace,
+                        &selected,
+                    ) {
+                        if column >= line.view_end() {
+                            break;
+                        }
+                        let is_tab = units.get(column as usize) == Some(&(b'\t' as u16));
+                        let x = layout.text_origin_x() + line.x_for_view_column(column);
+                        marks.push((point(x, top), is_tab));
+                    }
+                    continue;
+                }
                 let segment = &text[utf16_to_byte(&text, line.columns.start)
                     ..utf16_to_byte(&text, line.columns.end)];
                 let faux_indent = (line.indent_x / metrics.space_width).round() as u32;
-                let top = layout.text_top(line.view_line);
                 let columns = crate::view::guides::whitespace_columns(
                     segment,
                     line.columns.start,
@@ -5629,6 +5732,7 @@ fn prepaint_editor(
                     marks.push((point(x, top), is_tab));
                 }
             }
+            layout.whitespace_marks = marks.clone();
             marks
         });
 
@@ -8839,5 +8943,39 @@ mod decoration_overlay_tests {
             1,
             "{borders:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod view_line_text_tests {
+    use super::{Substitute, grapheme_containing, substitute};
+
+    /// Monaco `_renderLine`: a NUL is `&#00;` (U+FFFD) without
+    /// `renderControlCharacters`, and its control picture with it.
+    #[test]
+    fn nul_shows_as_the_replacement_character() {
+        assert_eq!(substitute('\0', false), Some(Substitute::Replacement));
+        assert_eq!(
+            substitute('\0', true),
+            Some(Substitute::Picture('\u{2400}'))
+        );
+        assert_eq!(substitute('\u{7}', false), None);
+    }
+
+    /// Monaco `strings.getCharContainingOffset`, in UTF-8 bytes.
+    #[test]
+    fn graphemes_containing_an_offset() {
+        // Decomposed `é`: from either code point, the whole grapheme.
+        let text = "e\u{301}x";
+        assert_eq!(grapheme_containing(text, 0), Some(0..3));
+        assert_eq!(grapheme_containing(text, 1), Some(0..3));
+        assert_eq!(grapheme_containing(text, 3), Some(3..4));
+        assert_eq!(grapheme_containing(text, 4), None);
+        // A ZWJ family and a flag are one grapheme each.
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        assert_eq!(grapheme_containing(family, 0), Some(0..family.len()));
+        let flags = "\u{1f1e9}\u{1f1ea}\u{1f1eb}\u{1f1f7}";
+        assert_eq!(grapheme_containing(flags, 0), Some(0..8));
+        assert_eq!(grapheme_containing(flags, 8), Some(8..16));
     }
 }

@@ -1578,6 +1578,12 @@ impl CodeEditor {
         if old.linked_editing != self.options.linked_editing {
             self.reinitialize_linked_editing(true, cx);
         }
+        // Monaco `ViewCursors.onConfigurationChanged` calls
+        // `_updateBlinking`: a read-only or `solid` cursor turns solid at
+        // once, and a blinking one starts over visible.
+        if change.is_some() {
+            self.restart_blink(cx);
+        }
         if let Some(change) = change {
             cx.emit(change);
         }
@@ -2690,6 +2696,16 @@ impl CodeEditor {
             .map_or_else(Vec::new, |l| l.wrap_indicators.clone())
     }
 
+    /// The rendered whitespace marks in the last frame: each one's position
+    /// (its character's left, its line's text top) and whether it's a tab,
+    /// for tests.
+    #[doc(hidden)]
+    pub fn whitespace_marks_for_tests(&self) -> Vec<(Point<Pixels>, bool)> {
+        self.layout
+            .as_ref()
+            .map_or_else(Vec::new, |l| l.whitespace_marks.clone())
+    }
+
     /// The mouse cursor over the text without links, for tests.
     #[doc(hidden)]
     pub fn text_mouse_cursor_for_tests(&self) -> MouseCursor {
@@ -3406,8 +3422,8 @@ impl CodeEditor {
         }
     }
 
-    /// Monaco `_updateBlinking`: restarts the blink after the cursor moves
-    /// or the editor is focused.
+    /// Monaco `_updateBlinking`: restarts the blink after the cursor moves,
+    /// the editor is focused or the options change.
     fn restart_blink(&mut self, cx: &mut Context<Self>) {
         use crate::options::CursorBlinking;
         self.cursor_visible = true;

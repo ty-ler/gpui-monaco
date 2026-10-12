@@ -263,3 +263,50 @@ fn up_and_down_keep_the_visible_column_with_injected_text(cx: &mut TestAppContex
     cx.simulate_keystrokes("up");
     assert_eq!(head(&editor, cx), p(0, 2));
 }
+
+/// Monaco `WhitespaceOverlay._applyRenderWhitespace` scans the view line,
+/// injected text included: spaces before `after` text at the line end
+/// aren't trailing, and spaces in injected text get marks too.
+#[gpui::test]
+fn whitespace_marks_see_injected_text(cx: &mut TestAppContext) {
+    use gpui_monaco::options::RenderWhitespace;
+    let (editor, cx) = setup("foo  ", cx);
+    let set_mode = |mode, cx: &mut VisualTestContext| {
+        editor.update(cx, |e, cx| {
+            let mut options = e.options().clone();
+            options.render_whitespace = mode;
+            e.update_options(options, cx);
+        });
+        draw(cx);
+    };
+    let marks = |cx: &mut VisualTestContext| {
+        draw(cx);
+        editor.read_with(cx, |e, _| e.whitespace_marks_for_tests())
+    };
+    set_mode(RenderWhitespace::Trailing, cx);
+    assert_eq!(marks(cx).len(), 2);
+    let options = DecorationOptions {
+        after: Some(InjectedText {
+            content: "<- note".into(),
+            ..Default::default()
+        }),
+        show_if_collapsed: true,
+        ..Default::default()
+    };
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |model, cx| {
+            model.delta_decorations(None, &[], vec![(5..5, options)], cx)
+        })
+    });
+    draw(cx);
+    // The spaces are followed by the injected text: not trailing.
+    assert!(marks(cx).is_empty());
+    // All: the two spaces, and the one inside the injected text, at its x.
+    set_mode(RenderWhitespace::All, cx);
+    let shown = marks(cx);
+    assert_eq!(shown.len(), 3, "{shown:?}");
+    assert!(close(shown[0].0.x, x_of(&editor, p(0, 3), cx)));
+    assert!(close(shown[1].0.x, x_of(&editor, p(0, 4), cx)));
+    assert!(shown[2].0.x > x_of(&editor, p(0, 5), cx));
+    assert!(shown.iter().all(|(_, tab)| !tab));
+}
