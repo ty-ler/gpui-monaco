@@ -2742,7 +2742,6 @@ impl Element for EditorElement {
                 .map(|overlay| overlay.measured)
                 .collect::<Vec<_>>(),
             bounds,
-            text,
             layout_info.vertical_scrollbar_width * 2. + layout_info.minimap.minimap_width,
             layout_info.horizontal_scrollbar_height * 2.,
         );

@@ -360,3 +360,69 @@ fn ctrl_click_opens_the_menu_on_macos(cx: &mut TestAppContext) {
         }
     }
 }
+
+fn wheel(cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: at,
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-40.))),
+        ..Default::default()
+    });
+    draw(cx);
+}
+
+/// Monaco `ContextMenuController`: the wheel in the editor hides the menu;
+/// over the menu it doesn't.
+#[gpui::test]
+fn the_wheel_over_the_text_hides_the_menu(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&"foo bar\n".repeat(200), cx);
+    cx.simulate_keystrokes("shift-f10");
+    draw(cx);
+    let row = cx.debug_bounds("context-menu-0").expect("a menu row");
+    wheel(cx, row.center());
+    assert!(editor.read_with(cx, |e, _| e.is_context_menu_visible()));
+    let (bounds, _) = editor.read_with(cx, |e, _| e.widget_bounds_for_tests());
+    wheel(
+        cx,
+        gpui::point(
+            bounds.right() - gpui::px(200.),
+            bounds.bottom() - gpui::px(20.),
+        ),
+    );
+    assert!(!editor.read_with(cx, |e, _| e.is_context_menu_visible()));
+    // And the text still scrolled.
+    assert!(editor.read_with(cx, |e, _| e.scroll_position().y) > gpui::px(0.));
+}
+
+/// VS Code's menu runs an item on mouse up: a press dragged off the item
+/// and released elsewhere runs nothing.
+#[gpui::test]
+fn items_run_on_mouse_up(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let (editor, cx) = setup("foo bar foo", cx);
+    cx.simulate_keystrokes("shift-f10");
+    draw(cx);
+    let item = cx
+        .debug_bounds("context-menu-0")
+        .expect("Change All Occurrences")
+        .center();
+    cx.simulate_mouse_down(item, MouseButton::Left, Modifiers::default());
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_context_menu_visible()));
+    assert_eq!(editor.read_with(cx, |e, _| e.selections().len()), 1);
+    // Dragged off and released over a separator: nothing runs.
+    let separator = gpui::point(item.x, item.y + gpui::px(ROW_PITCH));
+    cx.simulate_mouse_move(separator, MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(separator, MouseButton::Left, Modifiers::default());
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_context_menu_visible()));
+    assert_eq!(editor.read_with(cx, |e, _| e.selections().len()), 1);
+    // A click runs it.
+    cx.simulate_mouse_down(item, MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(item, MouseButton::Left, Modifiers::default());
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_context_menu_visible()));
+    assert_eq!(editor.read_with(cx, |e, _| e.selections().len()), 2);
+}
+
+/// From a row's center to the separator after it.
+const ROW_PITCH: f32 = 15.;

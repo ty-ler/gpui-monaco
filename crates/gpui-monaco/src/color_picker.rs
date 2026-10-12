@@ -457,9 +457,10 @@ impl Render for ColorPickerWidget {
             .child(
                 div()
                     .id("original-color")
+                    .debug_selector(|| "color-picker-original".into())
                     .relative()
                     .flex_none()
-                    .w(px(74.))
+                    .w(original_color_width(standalone))
                     .cursor_pointer()
                     .bg(original)
                     .on_click(cx.listener(|this, _, _, cx| this.restore_original(cx))),
@@ -665,6 +666,42 @@ impl Render for ColorPickerWidget {
     }
 }
 
+/// The original color's box in the header: `.original-color`'s 74px in
+/// the hover; in the standalone picker Monaco sizes it from the body
+/// (`standaloneColorPickerWidget.ts`: the body's width less the saturation
+/// box, the close button and 8px), which leaves the two strips and the
+/// body's padding.
+fn original_color_width(standalone: bool) -> Pixels {
+    /// `.colorpicker-body { padding: 8px }`.
+    const BODY_PADDING: f32 = 8.;
+    /// Each strip: `margin-left: 8px`, `width: 25px`.
+    const STRIP: f32 = 8. + 25.;
+    /// Monaco's `CLOSE_BUTTON_WIDTH` and `PADDING`.
+    const CLOSE_BUTTON_WIDTH: f32 = 22.;
+    const PADDING: f32 = 8.;
+    if standalone {
+        px(BODY_PADDING * 2. + STRIP * 2. - CLOSE_BUTTON_WIDTH - PADDING)
+    } else {
+        px(74.)
+    }
+}
+
+/// Monaco `StandaloneColorPickerWidget.getPosition`: above first, unless
+/// `hover.above` is off.
+fn standalone_preference(above: bool) -> Vec<ContentWidgetPreference> {
+    if above {
+        vec![
+            ContentWidgetPreference::Above,
+            ContentWidgetPreference::Below,
+        ]
+    } else {
+        vec![
+            ContentWidgetPreference::Below,
+            ContentWidgetPreference::Above,
+        ]
+    }
+}
+
 /// The standalone picker's state in the editor.
 #[derive(Default)]
 pub(crate) struct ColorPickerState {
@@ -836,10 +873,7 @@ impl CodeEditor {
                         allow_editor_overflow: true,
                         ..ContentWidget::new(
                             position,
-                            vec![
-                                ContentWidgetPreference::Above,
-                                ContentWidgetPreference::Below,
-                            ],
+                            standalone_preference(this.options.hover.above),
                             widget.clone().into(),
                         )
                     },

@@ -402,3 +402,273 @@ fn dragging_the_slider_keeps_the_arrow_everywhere(cx: &mut TestAppContext) {
     draw(cx);
     assert_eq!(captured(cx), None);
 }
+
+fn setup_language<'a>(
+    text: &str,
+    language: &str,
+    cx: &'a mut TestAppContext,
+) -> (Entity<CodeEditor>, &'a mut VisualTestContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
+    });
+    let text = text.to_string();
+    let language = language.to_string();
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new(&text).with_language(language));
+        CodeEditor::new(model, window, cx)
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    cx.run_until_parked();
+    (editor, cx)
+}
+
+/// Opens Go to Line, types `input` after the `:` and presses Enter; the
+/// cursor's 1-based line and column.
+fn go_to(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, input: &str) -> (u32, u32) {
+    cx.simulate_keystrokes("ctrl-g");
+    cx.simulate_input(input);
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(!open(editor, cx), "{input}");
+    let at = cursor(editor, cx);
+    (at.row + 1, at.column + 1)
+}
+
+/// Monaco `gotoLineQuickAccess.test.ts`, "parsePosition works as
+/// expected".
+#[gpui::test]
+fn parse_position_like_monaco(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("line 1\nline 2\nline 3\nline 4\nline 5", cx);
+    let cases: &[(&str, u32, u32)] = &[
+        // :line
+        ("-100", 1, 1),
+        ("-5", 1, 1),
+        ("-1", 5, 1),
+        ("0", 1, 1),
+        ("1", 1, 1),
+        ("2", 2, 1),
+        ("5", 5, 1),
+        ("6", 5, 1),
+        ("7", 5, 1),
+        ("100", 5, 1),
+        // :line,column
+        ("2:-100", 2, 1),
+        ("2:-5", 2, 2),
+        ("2:-1", 2, 6),
+        ("2:0", 2, 1),
+        ("2:1", 2, 1),
+        ("2:2", 2, 2),
+        ("2:6", 2, 6),
+        ("2:7", 2, 7),
+        ("2:8", 2, 7),
+        ("2:100", 2, 7),
+        // ::offset (1-based)
+        (":-1000", 1, 1),
+        (":-10", 4, 5),
+        (":-1", 5, 7),
+        (":0", 1, 1),
+        (":1", 1, 1),
+        (":10", 2, 3),
+        (":1000", 5, 7),
+        // :line#column, :line,column and spaces
+        ("-1#6", 5, 6),
+        ("2,4", 2, 4),
+        ("  2  :  3  ", 2, 3),
+        // `parseInt`: what follows the number is ignored.
+        ("3.", 3, 1),
+        ("4x:2y", 4, 2),
+        (":10.5", 2, 3),
+    ];
+    for &(input, line, column) in cases {
+        assert_eq!(go_to(&editor, cx, input), (line, column), "{input}");
+    }
+    // ::offset (0-based)
+    cx.update(|_, cx| gpui_monaco::quick_access::set_goto_offset_zero_based(true, cx));
+    for &(input, line, column) in &[
+        (":-1000", 1, 1),
+        (":-10", 4, 4),
+        (":-1", 5, 6),
+        (":0", 1, 1),
+        (":1", 1, 2),
+        (":10", 2, 4),
+        (":1000", 5, 7),
+    ] {
+        assert_eq!(go_to(&editor, cx, input), (line, column), "{input}");
+    }
+}
+
+/// Monaco `gotoLineQuickAccess.test.ts`, "parsePosition works with tabs".
+#[gpui::test]
+fn parse_position_with_tabs_like_monaco(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("\tline 1\n\t\tline 2\n\tline 3", cx);
+    for &(input, line, column) in &[
+        ("1:1", 1, 1),
+        ("1:2", 1, 1),
+        ("1:3", 1, 1),
+        ("1:4", 1, 2),
+        ("1:5", 1, 2),
+        ("1:6", 1, 3),
+        ("1:11", 1, 8),
+        ("1:12", 1, 8),
+        ("1:-5", 1, 3),
+        ("1:-6", 1, 2),
+        ("1:-7", 1, 2),
+        ("1:-8", 1, 1),
+        ("1:-9", 1, 1),
+        ("1:-10", 1, 1),
+        ("1:-11", 1, 1),
+        ("2:1", 2, 1),
+        ("2:2", 2, 1),
+        ("2:3", 2, 1),
+        ("2:4", 2, 2),
+        ("2:5", 2, 2),
+        ("2:8", 2, 3),
+        ("2:9", 2, 3),
+        ("2:11", 2, 5),
+    ] {
+        assert_eq!(go_to(&editor, cx, input), (line, column), "{input}");
+    }
+}
+
+/// Monaco `gotoLineQuickAccess.ts`: `12.` is read as line 12 (`parseInt`),
+/// not rejected.
+#[gpui::test]
+fn line_numbers_parse_like_parse_int(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(RUST, cx);
+    cx.simulate_keystrokes("ctrl-g");
+    cx.simulate_input("12.");
+    assert_eq!(
+        rows(&editor, cx),
+        vec!["> Press 'Enter' to go to line 12 or enter colon : to add a column number."]
+    );
+}
+
+fn line_numbers(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+) -> gpui_monaco::options::LineNumbers {
+    cx.run_until_parked();
+    editor.read_with(cx, |e, _| e.options().line_numbers.clone())
+}
+
+/// Monaco `provideWithTextEditor`: Go to Line shows absolute line numbers
+/// while it's the provider, then relative ones again.
+#[gpui::test]
+fn go_to_line_shows_absolute_line_numbers(cx: &mut TestAppContext) {
+    use gpui_monaco::options::LineNumbers;
+    let (editor, cx) = setup(RUST, cx);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.line_numbers = LineNumbers::Relative, cx)
+    });
+    cx.simulate_keystrokes("ctrl-g");
+    assert_eq!(line_numbers(&editor, cx), LineNumbers::On);
+    // Another provider: relative again.
+    cx.simulate_keystrokes("backspace");
+    cx.simulate_input("@");
+    assert_eq!(line_numbers(&editor, cx), LineNumbers::Relative);
+    cx.simulate_keystrokes("backspace");
+    cx.simulate_input("::");
+    assert_eq!(line_numbers(&editor, cx), LineNumbers::On);
+    cx.simulate_keystrokes("escape");
+    assert_eq!(line_numbers(&editor, cx), LineNumbers::Relative);
+    // Accepting restores them too.
+    cx.simulate_keystrokes("ctrl-g");
+    cx.simulate_input("3");
+    assert_eq!(line_numbers(&editor, cx), LineNumbers::On);
+    cx.simulate_keystrokes("enter");
+    assert_eq!(line_numbers(&editor, cx), LineNumbers::Relative);
+    // Other line numbers are left alone.
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.line_numbers = LineNumbers::Interval, cx)
+    });
+    cx.simulate_keystrokes("ctrl-g");
+    assert_eq!(line_numbers(&editor, cx), LineNumbers::Interval);
+    cx.simulate_keystrokes("escape");
+    assert_eq!(line_numbers(&editor, cx), LineNumbers::Interval);
+}
+
+/// Monaco `doGetSymbolPicks`: the whole query is tried against the name
+/// first, so names with spaces match.
+#[gpui::test]
+fn symbols_with_spaces_match_the_whole_query(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_language(
+        "# Getting Started\n\ntext\n\n## Change Log\n",
+        "markdown",
+        cx,
+    );
+    cx.simulate_keystrokes("cmd-shift-o");
+    cx.simulate_input("getting started");
+    assert_eq!(
+        rows(&editor, cx),
+        vec!["[symbols (1)]", "> Getting Started"]
+    );
+    cx.simulate_keystrokes("enter");
+    assert_eq!(cursor(&editor, cx).row, 0);
+}
+
+/// The words after the first still match the container when the whole
+/// query doesn't match the name.
+#[gpui::test]
+fn symbol_words_after_the_first_match_the_container(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(RUST, cx);
+    cx.simulate_keystrokes("cmd-shift-o");
+    cx.simulate_input("len point");
+    assert_eq!(rows(&editor, cx), vec!["[symbols (1)]", "> len (Point)"]);
+    cx.simulate_input("x");
+    assert_eq!(rows(&editor, cx), vec!["> No matching editor symbols"]);
+}
+
+/// Monaco `addDecorations`: the preview's overview ruler mark is in the
+/// Full lane.
+#[gpui::test]
+fn previews_mark_the_full_overview_ruler_lane(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(RUST, cx);
+    cx.simulate_keystrokes("ctrl-g");
+    cx.simulate_input("5");
+    cx.run_until_parked();
+    let lanes: Vec<_> = editor.update(cx, |e, cx| {
+        let id = Some(cx.entity_id());
+        e.model().update(cx, |model, _| {
+            model
+                .all_decorations(id)
+                .into_iter()
+                .filter_map(|d| d.options.overview_ruler.as_ref().map(|o| o.position))
+                .collect()
+        })
+    });
+    assert_eq!(
+        lanes,
+        vec![gpui_monaco::decorations::OverviewRulerLane::Full]
+    );
+}
+
+/// The quick input is centered on the whole editor, gutter included
+/// (Monaco's quick input), not on the text area.
+#[gpui::test]
+fn the_quick_input_centers_on_the_editor(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(RUST, cx);
+    cx.simulate_keystrokes("f1");
+    draw(cx);
+    let (bounds, widgets) = editor.read_with(cx, |e, _| e.widget_bounds_for_tests());
+    let quick = widgets.last().expect("the quick input").0;
+    let left = quick.left() - bounds.left();
+    let right = bounds.right() - quick.right();
+    assert!((left - right).abs() < gpui::px(1.), "{left:?} {right:?}");
+}
+
+/// The quick input's text box is laid out a line tall, so its text is
+/// painted (it was 0px tall under an auto-height parent).
+#[gpui::test]
+fn the_quick_input_text_box_has_a_line_of_height(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(RUST, cx);
+    cx.simulate_keystrokes("ctrl-g");
+    cx.simulate_input("12");
+    draw(cx);
+    let bounds = editor
+        .read_with(cx, |e, cx| e.quick_access_input_bounds_for_tests(cx))
+        .expect("the input was laid out");
+    assert_eq!(bounds.size.height, gpui::px(22.));
+    assert!(bounds.size.width > gpui::px(100.), "{bounds:?}");
+}

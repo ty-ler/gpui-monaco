@@ -6258,6 +6258,11 @@ impl CodeEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Monaco `ContextMenuController`: the wheel in the editor hides the
+        // context menu (the menu stops its own wheel).
+        if self.is_context_menu_visible() {
+            self.hide_context_menu(cx);
+        }
         // Widgets that keep the wheel: it scrolls them (GPUI's scrollable
         // elements don't stop it), never the editor.
         if self.wheel_over_widget(event.position) {

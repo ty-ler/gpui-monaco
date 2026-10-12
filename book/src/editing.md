@@ -140,16 +140,16 @@ Expand Selection grows each selection through the enclosing syntax nodes: word p
 
 ## Quick access
 
-Ctrl+G opens go to line, and Cmd/Ctrl+Shift+O opens go to symbol. Both use a quick input at the top of the editor:
+Ctrl+G opens go to line, and Cmd/Ctrl+Shift+O opens go to symbol. Both use a quick input at the top of the editor, centered on it:
 
-- **`:line` or `:line:column`:** goes to a line, previewing it as you type. Negative numbers count from the end, and `::offset` goes to a character offset ("Go to Offset...", `editor.action.gotoOffset`, opens it with `::`).
-- **`@name`:** goes to a symbol from the [document symbols](providers.md#document-symbols), with fuzzy matching. A second word matches the container. `@:` groups the symbols by kind.
+- **`:line` or `:line:column`:** goes to a line, previewing it as you type. Numbers are read as JavaScript's `parseInt` reads them (`:12.` is line 12), negative ones count from the end, and `::offset` goes to a character offset ("Go to Offset...", `editor.action.gotoOffset`, opens it with `::`). With `line_numbers: Relative`, the gutter shows absolute numbers while it's open.
+- **`@name`:** goes to a symbol from the [document symbols](providers.md#document-symbols), with fuzzy matching. The whole query is tried against the name first, so names with spaces match; otherwise the first word matches the name and the others the container. `@:` groups the symbols by kind.
 - **`>command`:** the command palette (F1). It runs any supported editor action by label, and recently used actions come first.
 - **Anything else:** lists the prefixes.
 
 Up and Down move through the list. Page Down focuses the last fully visible row, then scrolls a page; Page Up does the same upwards (Monaco's `focusNextPage` / `focusPreviousPage`). Enter goes to the item, while Escape (or clicking elsewhere) closes the list and restores the view. `CodeEditor::open_quick_access(prefix, …)` opens it from code.
 
-Right-click or Shift+F10 opens the context menu, as does Ctrl+click on macOS (without selecting, whatever `multi_cursor_modifier` is). It holds the navigation, editing, clipboard and command palette items that can run. Host actions join it with `.context_menu(group, order)`; Monaco's groups are `navigation`, `1_modification`, `9_cutcopypaste` and `z_commands`.
+Right-click or Shift+F10 opens the context menu, as does Ctrl+click on macOS (without selecting, whatever `multi_cursor_modifier` is). It holds the navigation, editing, clipboard and command palette items that can run. An item runs on mouse up, so a press can be dragged off it to cancel, and the wheel over the text closes the menu. Host actions join it with `.context_menu(group, order)`; Monaco's groups are `navigation`, `1_modification`, `9_cutcopypaste` and `z_commands`.
 
 Hosts add their own actions to the palette with Monaco's `addAction`:
 

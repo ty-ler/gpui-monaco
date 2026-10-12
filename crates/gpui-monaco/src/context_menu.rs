@@ -386,7 +386,12 @@ impl ContextMenu {
             .border_1()
             .border_color(colors.menu_border.unwrap_or_else(gpui::transparent_black))
             .rounded(px(5.))
-            .shadow_md()
+            // VS Code's menu shadow, `0 2px 8px widget.shadow` (none in
+            // high contrast).
+            .shadow(crate::widgets::card::widget_shadow(colors.widget_shadow))
+            // The wheel over the menu scrolls it, never the text: Monaco's
+            // menu is outside the editor, so its wheel doesn't hide it.
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .text_size(px(MENU_FONT_SIZE))
             .text_color(colors.menu_foreground)
             .children(entries.iter().enumerate().map(|(ix, entry)| {
@@ -418,8 +423,10 @@ impl ContextMenu {
                             Some(parent) => format!("context-menu-{parent}-{ix}").into(),
                             None => format!("context-menu-{ix}").into(),
                         };
+                        let selector = id.to_string();
                         div()
                             .id(id)
+                            .debug_selector(move || selector)
                             .relative()
                             .h(px(ROW_HEIGHT))
                             .mx(px(4.))
@@ -480,7 +487,10 @@ impl ContextMenu {
                                     None => this.hover_row(ix, cx),
                                 }
                             }))
-                            .on_mouse_down(
+                            // VS Code's menu items run on mouse up, so a
+                            // press can be dragged off the item to cancel.
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_mouse_up(
                                 MouseButton::Left,
                                 cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();

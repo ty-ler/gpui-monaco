@@ -70,6 +70,9 @@ struct RenameInput {
     theme: Arc<Theme>,
     colors: EditorColors,
     font_size: gpui::Pixels,
+    /// The editor's font, for the suggestions (Monaco `applyFontInfo`).
+    font_family: SharedString,
+    font_weight: gpui::FontWeight,
     /// The editor's line height and typical character width (Monaco's
     /// `fontInfo`).
     line_height: gpui::Pixels,
@@ -373,7 +376,13 @@ impl RenameInput {
                             icon.child(codicon(Codicon::Sparkle).size(self.line_height * 0.8))
                         }),
                 )
-                .child(candidate.new_symbol_name.clone())
+                // `RenameCandidateView`: the label in the editor's font.
+                .child(
+                    div()
+                        .font_family(self.font_family.clone())
+                        .font_weight(self.font_weight)
+                        .child(candidate.new_symbol_name.clone()),
+                )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     // Monaco's list selection: pick it and rename, without
                     // a preview.
@@ -704,6 +713,8 @@ impl CodeEditor {
             theme: Arc::new(theme),
             colors: self.theme.colors.clone(),
             font_size: self.options.font_size,
+            font_family: self.options.font_family.clone(),
+            font_weight: self.options.font_weight,
             line_height,
             char_width,
             location_length,
