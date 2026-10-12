@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Inline edits and the paste chip (#430):** ported Monaco's inline edit and paste options button details (audit 4 §C.44–§C.47, §G.16).
+  - **Docked gutter icon:** the inline edit pill beside its edit shows `keyboard-tab-above` (the cursor on or above the edit's first line) or `keyboard-tab-below` when Tab doesn't accept, instead of arrows.
+  - **Toolbar warning:** the warning row above the inline toolbar shows the message only, without an icon (the `icon` is the ghost text's).
+  - **Paste button anchor:** the paste and drop options button sits below the end of the edit (the first range, tracked as it grows), not at the cursor, which a snippet leaves on its first tabstop.
+  - **Keybinding labels:** the word replacement's alternative action label and the jump-to label show the keys bound to `inlineSuggest.commitAlternativeAction` and `inlineSuggest.commit` as keycaps, rather than a hard-coded "⇧⇥" and "Tab", so they follow rebinding and the platform.
+  - **Command icons:** `InlineCompletionList::commands` are `InlineCompletionCommand`s (Monaco's `{ command, icon? }`); the gutter menu draws their `icon`, `symbol-event` without one. A `Command` converts with `.into()`.
 - **Quick input and color picker polish (#429):** Ported Monaco's Go to Symbol containers and item activation, the `index-zero` toggle, the standalone quick input's highlight colors, the color picker's tracked range and the standalone picker closing over a swatch (audit 4 §C.26–§C.31).
   - **Go to Symbol containers:** a symbol's own `container_name` is its description, ahead of its parent's name (Monaco `OutlineModel._flattenDocumentSymbols`), so flat results such as the LSP bridge's `SymbolInformation` show and match theirs. The words after the first still match the container, and the matched part of the description is now highlighted like the label's (Monaco `highlights.description`); deprecated symbols highlight neither. `outline::flatten_symbols` follows the same rule, so the diff editor's breadcrumbs see it too.
   - **Go to Symbol activation:** Cmd/Ctrl+Shift+O opens with Monaco's `ItemActivation.NONE`, so with the cursor in no symbol nothing is active or previewed and the view doesn't move; the innermost symbol around the cursor is still active, and typing (or `@` from the help list) activates the first item again. Down or Up with nothing active focuses the first row (Monaco's list `focusNext`/`focusPrevious`).

@@ -302,6 +302,26 @@ impl GutterMenuAction {
             Self::Command(_) | Self::Link(_) => None,
         }
     }
+
+    /// The keys an inline edit view shows for the entry's command (Monaco's
+    /// `KeybindingLabel` over `lookupKeybinding`): as bound now, `None`
+    /// when unbound, as Monaco's empty label.
+    fn keys(&self, focus: &FocusHandle, window: &Window) -> Option<KeyLabel> {
+        self.binding(focus, window)
+            .map(|binding| KeyLabel::for_binding(&binding))
+            .filter(|keys| !keys.chords.is_empty())
+    }
+
+    /// [`Self::keys`] for the editor a view belongs to.
+    fn view_keys(
+        &self,
+        editor: &WeakEntity<CodeEditor>,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> Option<KeyLabel> {
+        let focus = editor.upgrade()?.read(cx).focus_handle.clone();
+        self.keys(&focus, window)
+    }
 }
 
 /// A menu entry: its title, its 16px codicon and its action.
@@ -390,7 +410,7 @@ pub(crate) struct InlineEditBox {
 }
 
 impl Render for InlineEditBox {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let editor = self.editor.clone();
         let hover_editor = self.editor.clone();
         let lines = div()
@@ -446,7 +466,22 @@ impl Render for InlineEditBox {
             return div().child(lines);
         };
         // Monaco's alternative action label (`inline-edit-alternative-
-        // action-label`): the keybinding, then the label.
+        // action-label`): the keybinding of
+        // `inlineSuggest.commitAlternativeAction` as bound now
+        // (`unthemedKeybindingLabelOptions` keycaps in the label's color,
+        // `2px 3px` padding), then the label.
+        let keys = GutterMenuAction::AcceptAlternative.view_keys(&self.editor, window, cx);
+        let keycap_style = KeycapStyle {
+            font_size: px(11.),
+            line_height: px(10.),
+            padding: (px(2.), px(3.)),
+            margin: px(2.),
+            background: None,
+            foreground: None,
+            border: Some(foreground),
+            bottom_border: Some(foreground),
+            shadow: None,
+        };
         let editor = self.editor.clone();
         let alternative = div()
             .id("inline-edit-alternative-action")
@@ -473,7 +508,11 @@ impl Render for InlineEditBox {
                     }
                 }),
             )
-            .child(div().opacity(0.7).child("⇧⇥"))
+            .children(keys.map(|keys| {
+                div()
+                    .opacity(0.7)
+                    .child(keycaps_styled(&keys, &keycap_style))
+            }))
             .child(label);
         div().flex().child(lines).child(alternative)
     }
@@ -495,8 +534,9 @@ impl Render for CollapsedMarker {
     }
 }
 
-/// Monaco `JumpToView` (`style: 'label'`): "Tab to jump" at the target,
-/// over the space a decoration makes for it.
+/// Monaco `JumpToView` (`style: 'label'`): "Tab to jump" (the keys bound
+/// to accept the suggestion) at the target, over the space a decoration
+/// makes for it.
 pub(crate) struct JumpToLabel {
     editor: WeakEntity<CodeEditor>,
     colors: [Hsla; 3],
@@ -504,8 +544,24 @@ pub(crate) struct JumpToLabel {
 }
 
 impl Render for JumpToLabel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let [foreground, border, background] = self.colors;
+        // Monaco's `keybindingLabel(inlineSuggestCommitId)`: the keys of
+        // `inlineSuggest.commit` as bound now, in clear keycaps bordered
+        // in the foreground (`.inline-edit-jump-to-widget
+        // .monaco-keybinding-key`: 11px, `1px 2px 2px` padding).
+        let keys = GutterMenuAction::Accept.view_keys(&self.editor, window, cx);
+        let keycap_style = KeycapStyle {
+            font_size: px(11.),
+            line_height: px(10.),
+            padding: (px(1.5), px(2.)),
+            margin: px(2.),
+            background: None,
+            foreground: Some(foreground),
+            border: Some(foreground),
+            bottom_border: Some(foreground),
+            shadow: None,
+        };
         let editor = self.editor.clone();
         div()
             .id("inline-edit-jump-to")
@@ -532,14 +588,7 @@ impl Render for JumpToLabel {
                     }
                 }),
             )
-            .child(
-                div()
-                    .px(px(3.))
-                    .rounded(px(2.))
-                    .border_1()
-                    .border_color(foreground)
-                    .child("Tab"),
-            )
+            .children(keys.map(|keys| keycaps_styled(&keys, &keycap_style)))
             .child("to jump")
     }
 }
@@ -665,7 +714,10 @@ impl GutterIndicator {
     }
 
     /// Monaco's indicator codicon: `check` while hovered, `keyboard-tab`
-    /// when Tab accepts, else `arrow-down` / `arrow-up` towards the edit.
+    /// when Tab accepts, else, docked, `keyboard-tab-above` with the cursor
+    /// on or above the edit's first line and `keyboard-tab-below` under it
+    /// (never turned); away from the edit, `arrow-down` / `arrow-up`
+    /// towards it.
     fn icon(&self) -> Codicon {
         match self.placement {
             IndicatorPlacement::Docked(_) => {
@@ -674,9 +726,9 @@ impl GutterIndicator {
                 } else if self.tab_action == TabAction::Accept {
                     Codicon::KeyboardTab
                 } else if self.cursor_above {
-                    Codicon::ArrowDown
+                    Codicon::KeyboardTabAbove
                 } else {
-                    Codicon::ArrowUp
+                    Codicon::KeyboardTabBelow
                 }
             }
             _ if self.tab_action == TabAction::Accept => Codicon::KeyboardTab,
@@ -1165,10 +1217,11 @@ impl CodeEditor {
         ));
         for command in &item.commands {
             menu.push((
-                command.title.clone(),
-                // Monaco's default for extension commands.
-                Some(Codicon::SymbolEvent),
-                GutterMenuAction::Command(command.clone()),
+                command.command.title.clone(),
+                // The command's icon, else Monaco's default for extension
+                // commands.
+                Some(command.icon.unwrap_or(Codicon::SymbolEvent)),
+                GutterMenuAction::Command(command.command.clone()),
             ));
         }
         if let Some(link) = &item.completion.gutter_menu_link_action {
@@ -1213,6 +1266,22 @@ impl CodeEditor {
             .collect()
     }
 
+    /// The gutter menu's titles with their icons (as their Unicode
+    /// stand-ins, empty for none), for tests.
+    #[doc(hidden)]
+    pub fn inline_edit_gutter_menu_icons_for_tests(&self, cx: &gpui::App) -> Vec<(String, String)> {
+        let (_, menu) = self.inline_edit_gutter_menu(cx);
+        menu.into_iter()
+            .map(|(title, icon, _)| {
+                (
+                    title.to_string(),
+                    icon.map(|icon| icon.fallback().to_string())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+
     /// The gutter menu's titles with the keys it shows for them, for tests.
     #[doc(hidden)]
     pub fn inline_edit_gutter_menu_keys_for_tests(
@@ -1230,6 +1299,22 @@ impl CodeEditor {
                 (title.to_string(), keys)
             })
             .collect()
+    }
+
+    /// The keys the word replacement's alternative action label and the
+    /// jump-to label show, for tests.
+    #[doc(hidden)]
+    pub fn inline_edit_view_keys_for_tests(&self, window: &Window) -> (String, String) {
+        let label = |action: GutterMenuAction| {
+            action
+                .keys(&self.focus_handle, window)
+                .map(|keys| keys.text.to_string())
+                .unwrap_or_default()
+        };
+        (
+            label(GutterMenuAction::AcceptAlternative),
+            label(GutterMenuAction::Accept),
+        )
     }
 
     /// Runs the gutter menu entry titled `title`, for tests.

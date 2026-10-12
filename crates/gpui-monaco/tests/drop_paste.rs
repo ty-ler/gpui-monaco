@@ -329,6 +329,69 @@ fn the_options_button_goes_when_the_cursor_moves(cx: &mut TestAppContext) {
     assert!(rows.is_empty(), "{rows:?}");
 }
 
+/// Pastes text as a Markdown link snippet, or as itself.
+struct Linkify;
+
+impl DocumentPasteEditProvider for Linkify {
+    fn paste_mime_types(&self) -> Vec<SharedString> {
+        vec!["text/plain".into()]
+    }
+
+    fn provide_document_paste_edits(
+        &self,
+        _: &ProviderContext,
+        _: &[std::ops::Range<PointUtf16>],
+        data: &DataTransfer,
+        _: DocumentPasteTriggerKind,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>> {
+        let text = data.text("text/plain").unwrap_or_default();
+        Task::ready(Ok(vec![
+            DocumentDropOrPasteEdit {
+                title: "Link".into(),
+                kind: Some("text.link".into()),
+                insert_text: EditInsertText::Snippet(format!("[${{1:{text}}}](url)")),
+                ..Default::default()
+            },
+            DocumentDropOrPasteEdit {
+                title: "Text".into(),
+                kind: Some("text.own".into()),
+                insert_text: EditInsertText::Text(text.to_string()),
+                ..Default::default()
+            },
+        ]))
+    }
+}
+
+/// Monaco `PostEditWidget.getPosition`: the button sits below the end of
+/// the pasted text (the first range, tracked as it grows), not at the
+/// cursor, which a snippet leaves on its first tabstop.
+#[gpui::test]
+fn the_options_button_sits_at_the_end_of_the_edit(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("ab", cx);
+    cx.update(|_, cx| {
+        register_document_paste_edit_provider(cx, LanguageSelector::All, Linkify);
+    });
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::new(
+                PointUtf16::new(0, 1),
+                PointUtf16::new(0, 1),
+            )],
+            cx,
+        )
+    });
+    cx.write_to_clipboard(ClipboardItem::new_string("text".into()));
+    cx.dispatch_action(Paste);
+    paint(cx);
+    assert_eq!(text(&editor, cx), "a[text](url)b");
+    assert!(editor.read_with(cx, |e, _| e.is_post_edit_widget_visible()));
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.post_edit_widget_position_for_tests(cx)),
+        Some(PointUtf16::new(0, 12))
+    );
+}
+
 /// A provider that takes `delay` to paste the text upper-cased, or, with
 /// `resolve`, as long to resolve its edit.
 struct Slow {

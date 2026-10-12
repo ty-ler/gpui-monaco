@@ -1853,6 +1853,31 @@ pub struct InlineCompletionAlternativeAction {
     pub count: Option<usize>,
 }
 
+/// A command an [`InlineCompletionList`] offers (Monaco
+/// `InlineCompletionCommand`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlineCompletionCommand {
+    /// The command, run from the menus.
+    pub command: Command,
+    /// Its icon in the inline edit gutter menu; `symbol-event` when `None`
+    /// (Monaco `c.icon ?? Codicon.symbolEvent`). The toolbar's menu shows
+    /// no icons.
+    pub icon: Option<Codicon>,
+}
+
+impl InlineCompletionCommand {
+    /// `command`, shown with `icon`.
+    pub fn new(command: Command, icon: Option<Codicon>) -> Self {
+        Self { command, icon }
+    }
+}
+
+impl From<Command> for InlineCompletionCommand {
+    fn from(command: Command) -> Self {
+        Self::new(command, None)
+    }
+}
+
 /// What an inline completions provider returns (Monaco
 /// `InlineCompletions`).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1861,9 +1886,10 @@ pub struct InlineCompletionList {
     pub items: Vec<InlineCompletion>,
     /// Keep the suggest widget from opening by itself while one shows.
     pub suppress_suggestions: Option<bool>,
-    /// Extra commands for the inline suggestion toolbar's menu (Monaco
-    /// `InlineCompletions.commands`).
-    pub commands: Vec<Command>,
+    /// Extra commands for the inline suggestion toolbar's menu and the
+    /// inline edit gutter menu (Monaco `InlineCompletions.commands`). A
+    /// [`Command`] converts into one without an icon.
+    pub commands: Vec<InlineCompletionCommand>,
     /// While the user types what a completion from this list suggests, it
     /// stays first even if a newer request returns others (Monaco
     /// `enableForwardStability`: the shown item is preserved through the

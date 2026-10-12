@@ -23,7 +23,7 @@ type Make = Rc<dyn Fn(&str, PointUtf16) -> Vec<InlineCompletion>>;
 #[derive(Clone)]
 struct Edits {
     make: Make,
-    commands: Vec<Command>,
+    commands: Vec<InlineCompletionCommand>,
     events: Rc<RefCell<Vec<String>>>,
     contexts: Rc<RefCell<Vec<InlineCompletionContext>>>,
 }
@@ -345,12 +345,15 @@ fn the_gutter_indicator_and_its_menu(cx: &mut TestAppContext) {
         }
         items
     });
-    provider.commands = vec![Command {
-        id: "test.explain".into(),
-        title: "Explain".into(),
-        arguments: Vec::new(),
-        ..Default::default()
-    }];
+    provider.commands = vec![
+        Command {
+            id: "test.explain".into(),
+            title: "Explain".into(),
+            arguments: Vec::new(),
+            ..Default::default()
+        }
+        .into(),
+    ];
     let events = provider.events.clone();
     let (editor, cx) = setup(DOC, provider, |_| {}, cx);
     type_at(&editor, p(4, 10), " ", cx);
@@ -415,6 +418,29 @@ fn the_gutter_indicator_and_its_menu(cx: &mut TestAppContext) {
     editor.update(cx, |e, cx| e.click_inline_edit_gutter_indicator(cx));
     assert!(text(&editor, cx).starts_with("let shade = 1;"));
     assert!(events.borrow().contains(&"accepted shade".to_string()));
+}
+
+/// Monaco `InlineCompletionCommand.icon`: the gutter menu draws a list
+/// command with its icon, `symbol-event` without one.
+#[gpui::test]
+fn the_gutter_menu_shows_the_commands_icons(cx: &mut TestAppContext) {
+    let mut provider = Edits::new(|text, _| replace(text, "colour", "shade"));
+    provider.commands = vec![
+        InlineCompletionCommand::new(
+            Command::new("test.improve", "Improve"),
+            Some(gpui_monaco::codicons::Codicon::Sparkle),
+        ),
+        Command::new("test.explain", "Explain").into(),
+    ];
+    let (editor, cx) = setup(DOC, provider, |_| {}, cx);
+    type_at(&editor, p(4, 10), " ", cx);
+    let icons = editor.read_with(cx, |e, cx| e.inline_edit_gutter_menu_icons_for_tests(cx));
+    let icons: Vec<(&str, &str)> = icons
+        .iter()
+        .map(|(title, icon)| (title.as_str(), icon.as_str()))
+        .filter(|(title, _)| ["Improve", "Explain"].contains(title))
+        .collect();
+    assert_eq!(icons, [("Improve", "✨"), ("Explain", "ϟ")]);
 }
 
 #[gpui::test]
@@ -863,6 +889,64 @@ fn alternative_actions_run_with_shift_tab(cx: &mut TestAppContext) {
     assert_eq!(text(&editor, cx), DOC);
 }
 
+/// Monaco's word replacement and jump-to views look their keys up
+/// (`inlineSuggestCommitAlternativeActionId`, `inlineSuggestCommitId`), so
+/// they follow the platform and rebinding.
+#[gpui::test]
+fn the_inline_edit_views_show_the_bound_keys(cx: &mut TestAppContext) {
+    let (next, provider) = offering();
+    let (editor, cx) = setup(DOC, provider, |_| {}, cx);
+    let mut item = replace(DOC, "let b = 2;", "let bb = 2;").remove(0);
+    item.alternative_action = Some(InlineCompletionAlternativeAction {
+        label: "Rename".into(),
+        command: Command {
+            id: "test.rename".into(),
+            title: "Rename Symbol".into(),
+            arguments: Vec::new(),
+            ..Default::default()
+        },
+        count: None,
+    });
+    show_item(&next, &editor, item, p(1, 0), cx);
+    assert_eq!(
+        view(&editor, cx),
+        Some(InlineEditViewKind::WordReplacements)
+    );
+    let keys = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| editor.read(cx).inline_edit_view_keys_for_tests(window))
+    };
+    let mac = cfg!(target_os = "macos");
+    assert_eq!(
+        keys(cx),
+        (
+            if mac { "⇧Tab" } else { "Shift+Tab" }.to_string(),
+            "Tab".to_string()
+        )
+    );
+    let _rules = cx.update(|_, cx| {
+        [
+            (
+                "ctrl-alt-r",
+                "editor.action.inlineSuggest.commitAlternativeAction",
+            ),
+            ("ctrl-alt-j", "editor.action.inlineSuggest.commit"),
+        ]
+        .map(|(keys, command)| {
+            gpui_monaco::add_keybinding_rule(cx, gpui_monaco::KeybindingRule::new(keys, command))
+                .unwrap()
+        })
+    });
+    draw(cx);
+    assert_eq!(
+        keys(cx),
+        if mac {
+            ("⌃⌥R".to_string(), "⌃⌥J".to_string())
+        } else {
+            ("Ctrl+Alt+R".to_string(), "Ctrl+Alt+J".to_string())
+        }
+    );
+}
+
 #[gpui::test]
 fn ghost_text_can_ask_for_the_inline_edit_menu(cx: &mut TestAppContext) {
     let (next, provider) = offering();
@@ -902,9 +986,10 @@ fn the_gutter_pill_shows_the_line_number_and_pulses(cx: &mut TestAppContext) {
         editor.read_with(cx, |e, _| e.inline_edit_gutter_indicator_for_tests()),
         Some(Ok(2))
     );
-    // Monaco `_lineNumberToRender`.
+    // Monaco `_lineNumberToRender`; docked under the cursor, the
+    // `keyboard-tab-below` icon.
     let pill = editor.read_with(cx, |e, cx| e.inline_edit_gutter_pill_for_tests(cx));
-    assert_eq!(pill, Some(("3".to_string(), "↑".to_string(), 0)));
+    assert_eq!(pill, Some(("3".to_string(), "⤓".to_string(), 0)));
     // Relative line numbers count from the cursor.
     editor.update(cx, |e, cx| {
         let mut options = e.options().clone();
@@ -921,6 +1006,21 @@ fn the_gutter_pill_shows_the_line_number_and_pulses(cx: &mut TestAppContext) {
         pill.map(|(_, icon, pulses)| (icon, pulses)),
         Some(("✓".to_string(), 1))
     );
+}
+
+#[gpui::test]
+fn the_docked_pill_points_tab_above_with_the_cursor_above_the_edit(cx: &mut TestAppContext) {
+    // Monaco `iconDocked`: `cursorLineNumber <= editStartLineNumber`
+    // shows `keyboard-tab-above`, not an arrow.
+    let provider = Edits::new(|text, _| replace(text, "let e = 5;", "let ee = 5;"));
+    let (editor, cx) = setup(DOC, provider, |_| {}, cx);
+    type_at(&editor, p(0, 15), " ", cx);
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.inline_edit_gutter_indicator_for_tests()),
+        Some(Ok(4))
+    );
+    let pill = editor.read_with(cx, |e, cx| e.inline_edit_gutter_pill_for_tests(cx));
+    assert_eq!(pill.map(|(_, icon, _)| icon), Some("⤒".to_string()));
 }
 
 #[gpui::test]

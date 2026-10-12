@@ -352,7 +352,7 @@ Ghost text is colored like code (`syntax_highlighting_enabled`, faded to 70%). T
 Providers can also:
 - hear how each completion ended through `handle_end_of_lifetime` (accepted, rejected with Escape, or ignored) and `handle_rejection`, when it first showed through `handle_item_did_show` (with its text after bracket completion), and when part of it was accepted through `handle_partial_accept` (`PartialAcceptInfo`: by word, by line, or as the suggestion it extends);
 - set a `group_id`, and list in `yields_to_group_ids` the groups they defer to. A provider is asked only after those groups answer, and not at all if one of them has a visible completion. Groups listed in `excludes_group_ids` aren't asked at all;
-- set `complete_bracket_pairs` on a completion to close the brackets it opens (and drop those it closes without opening), `warning` to squiggle its ghost text and show a message above the toolbar, and `shown_command` to run a command when it first shows;
+- set `complete_bracket_pairs` on a completion to close the brackets it opens (and drop those it closes without opening), `warning` to squiggle its ghost text and show its message (without the icon) above the toolbar, and `shown_command` to run a command when it first shows;
 - set `enable_forward_stability` on a list to keep its shown completion first while typing agrees with it, whatever newer requests return;
 - free what they keep for a list in `dispose_inline_completions`, called once none of its items is used any more, with why (`InlineCompletionsDisposeReason`);
 - ask the editor to request again with `refresh_inline_completions(cx, registration, change_hint)` (Monaco's `onDidChangeInlineCompletions`): the focused editor asks that provider, passing the hint in `InlineCompletionContext::change_hint`, unless another provider's suggestion shows.
@@ -382,18 +382,18 @@ The editor diffs `range` against `insert_text` and shows the changes where they 
 
 An inline edit shows only while no completion is visible at the cursor. It follows typing: typing its own text moves it along, and typing inside it drops it. Once other typing moves it, it shows collapsed, as a small marker, until you jump to it (or always, with `inline_suggest.edits.show_collapsed`).
 
-A pill in the gutter marks it, or points up or down while it's scrolled away. Tab jumps to it when the cursor is away from it, and accepts it once there. Escape rejects it. Clicking the pill accepts it (or jumps there when it points away), and hovering it shows a menu: Go To / Accept, Reject, Show Collapsed, the list's `commands`, and the item's `gutter_menu_link_action`. `display_name` titles the menu. The pill spans the gutter, so it shows without a glyph margin (in the line numbers' space). The menu is kept inside the window and closes when the editor scrolls; clicking it gives it the keyboard (Up, Down, Home, End, Enter, Escape).
+A pill in the gutter marks it, or points up or down while it's scrolled away. Beside the edit it shows Tab's icon: plain when Tab accepts, else with a bar above (the cursor is on or above the edit) or below. Tab jumps to it when the cursor is away from it, and accepts it once there. Escape rejects it. Clicking the pill accepts it (or jumps there when it points away), and hovering it shows a menu: Go To / Accept, Reject, Show Collapsed, the list's `commands` (each an `InlineCompletionCommand`, with its `icon` or `symbol-event`; a `Command` converts into one), and the item's `gutter_menu_link_action`. `display_name` titles the menu. The pill spans the gutter, so it shows without a glyph margin (in the line numbers' space). The menu is kept inside the window and closes when the editor scrolls; clicking it gives it the keyboard (Up, Down, Home, End, Enter, Escape).
 
 `show_range` limits where any item shows: only while the cursor is in that range. Providers see in `InlineCompletionContext::include_inline_edits` whether inline edits are wanted (`inline_suggest.edits.enabled`).
 
 While an inline edit is scrolled away, a box near the cursor previews its line (with `inline_suggest.edits.long_distance_hint_context_line_count` lines around it) and says "Tab to jump"; clicking it jumps too. `show_long_distance_hint` turns it off. The box fades in, and out once the edit scrolls into view. The pill beside the edit shows its line number, like the line numbers it covers, pulses while you hover the edit, and eases its colors and width as what Tab does and where it sits change. Accepted text fades out over a second, unless `App::reduce_motion` is set.
 
 Other kinds of items are inline edits too:
-- `jump_to_position` suggests moving the cursor rather than editing: a "Tab to jump" label marks the place, and jumping there accepts it.
+- `jump_to_position` suggests moving the cursor rather than editing: a "Tab to jump" label (with the keys bound to accept) marks the place, and jumping there accepts it.
 - `hint` shows `content` at its `range` instead of the diff (as code or as a plain label, per its `style`). Tab jumps to the hint, then accepts the edit, leaving the cursor where it is.
 - `uri` names another model the edit applies to. The editor diffs it against that model (found with `model_for_uri`, or your model resolver) and shows the long-distance hint, with the file's name and "Tab to open". Tab, or accepting, emits `CodeEditorEvent::OpenLocation` for you to open or focus an editor for that model, and moves the edit there: right away if one is open, else when its editor first shows. Accept it there as usual.
 
-An `alternative_action` is a second way to take an inline edit, like VS Code's "Rename" for a changed symbol. The edit shows as a word replacement with the action's label beside it; Shift+Tab, clicking the label or the gutter menu's entry runs its command instead of the edit (`editor.action.inlineSuggest.commitAlternativeAction`), and `handle_end_of_lifetime` gets `Accepted { alternative_action: true }`.
+An `alternative_action` is a second way to take an inline edit, like VS Code's "Rename" for a changed symbol. The edit shows as a word replacement with the action's label beside it, after the keys bound to `editor.action.inlineSuggest.commitAlternativeAction`; Shift+Tab, clicking the label or the gutter menu's entry runs its command instead of the edit (`editor.action.inlineSuggest.commitAlternativeAction`), and `handle_end_of_lifetime` gets `Accepted { alternative_action: true }`.
 
 With `show_inline_edit_menu`, ghost text gets the gutter pill and menu as well.
 
@@ -464,7 +464,7 @@ Monaco's `DocumentDropEditProvider` and `DocumentPasteEditProvider` decide how d
 - additional edits in the same document, and `additional_edit`, a `WorkspaceEdit` applied after it (Monaco `additionalEdit`);
 - `yield_to`, the edits it should rank below.
 
-The editor has built-in providers for plain text, paths and HTML. When other providers handle a paste, the first edit is applied. If there are alternatives, a button below the edit (or Cmd/Ctrl+.) switches between them, until the cursor moves or the text changes. "Paste As..." (`paste_as`) lists every edit.
+The editor has built-in providers for plain text, paths and HTML. When other providers handle a paste, the first edit is applied. If there are alternatives, a button below the end of the pasted text (or Cmd/Ctrl+.) switches between them, until the cursor moves or the text changes. "Paste As..." (`paste_as`) lists every edit.
 
 Providers that take a while show Monaco's inline progress: after 500ms, a spinner where the text goes. Clicking it cancels the providers (a paste then pastes the plain text), as Escape does. Changing the text cancels a pending paste or drop, and so does moving the selection for a paste. Resolving the paste edit shows the spinner at once.
 

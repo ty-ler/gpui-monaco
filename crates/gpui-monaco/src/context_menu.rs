@@ -914,11 +914,12 @@ impl CodeEditor {
         ];
         if !self.inline.commands.is_empty() {
             entries.push(Entry::Separator);
+            // Monaco's toolbar actions carry no icon.
             entries.extend(self.inline.commands.iter().map(|command| {
                 Entry::item(
-                    command.title.clone(),
+                    command.command.title.clone(),
                     None,
-                    Run::InlineCommand(command.clone()),
+                    Run::InlineCommand(command.command.clone()),
                 )
             }));
         }
