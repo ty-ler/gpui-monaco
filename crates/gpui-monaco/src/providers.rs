@@ -2268,6 +2268,18 @@ pub fn refresh_code_lenses(cx: &mut App) {
     cx.default_global::<CodeLensEpoch>().0 += 1;
 }
 
+/// Bumped when a code action provider is registered or removed; editors
+/// ask for the lightbulb's actions again (Monaco's `CodeActionModel`
+/// listening to `registry.onDidChange`).
+#[derive(Default)]
+pub(crate) struct CodeActionProvidersEpoch(pub u64);
+
+impl Global for CodeActionProvidersEpoch {}
+
+fn code_action_providers_changed(cx: &mut App) {
+    cx.default_global::<CodeActionProvidersEpoch>().0 += 1;
+}
+
 // ----- document highlights -------------------------------------------------------
 
 /// What an occurrence highlight marks (Monaco `DocumentHighlightKind`).
@@ -3114,13 +3126,26 @@ register_fn!(
     document_symbols,
     DocumentSymbolProvider
 );
-register_fn!(
-    /// Registers a code lens provider for the models `selector` matches
-    /// (Monaco `registerCodeLensProvider`). Lenses from all are shown.
-    register_code_lens_provider,
-    code_lens,
-    CodeLensProvider
-);
+/// Registers a code lens provider for the models `selector` matches
+/// (Monaco `registerCodeLensProvider`). Lenses from all are shown.
+/// Editors ask for lenses again, as they do when one is unregistered
+/// (Monaco `codeLensProvider.onDidChange`).
+pub fn register_code_lens_provider(
+    cx: &mut App,
+    selector: LanguageSelector,
+    provider: impl CodeLensProvider,
+) -> ProviderRegistration {
+    let features = features(cx);
+    features.next_id += 1;
+    let id = ProviderRegistration(features.next_id);
+    features.code_lens.push(Entry {
+        id,
+        selector,
+        provider: Arc::new(provider),
+    });
+    refresh_code_lenses(cx);
+    id
+}
 register_fn!(
     /// Registers a linked editing range provider for the models `selector`
     /// matches (Monaco `registerLinkedEditingRangeProvider`). The first with
@@ -3182,20 +3207,46 @@ register_fn!(
     links,
     LinkProvider
 );
-register_fn!(
-    /// Registers an inlay hints provider for the models `selector` matches (Monaco
-    /// `registerInlayHintsProvider`). Results from all matching providers are merged.
-    register_inlay_hints_provider,
-    inlay_hints,
-    InlayHintsProvider
-);
-register_fn!(
-    /// Registers a code action provider for the models `selector` matches (Monaco
-    /// `registerCodeActionProvider`). Results from all matching providers are merged.
-    register_code_action_provider,
-    code_action,
-    CodeActionProvider
-);
+/// Registers an inlay hints provider for the models `selector` matches (Monaco
+/// `registerInlayHintsProvider`). Results from all matching providers are merged.
+/// Editors ask for hints again, as they do when one is unregistered
+/// (Monaco `inlayHintsProvider.onDidChange`).
+pub fn register_inlay_hints_provider(
+    cx: &mut App,
+    selector: LanguageSelector,
+    provider: impl InlayHintsProvider,
+) -> ProviderRegistration {
+    let features = features(cx);
+    features.next_id += 1;
+    let id = ProviderRegistration(features.next_id);
+    features.inlay_hints.push(Entry {
+        id,
+        selector,
+        provider: Arc::new(provider),
+    });
+    refresh_inlay_hints(cx);
+    id
+}
+/// Registers a code action provider for the models `selector` matches (Monaco
+/// `registerCodeActionProvider`). Results from all matching providers are merged.
+/// Editors ask for the lightbulb's actions again, as they do when one is
+/// unregistered (Monaco's `CodeActionModel` on `registry.onDidChange`).
+pub fn register_code_action_provider(
+    cx: &mut App,
+    selector: LanguageSelector,
+    provider: impl CodeActionProvider,
+) -> ProviderRegistration {
+    let features = features(cx);
+    features.next_id += 1;
+    let id = ProviderRegistration(features.next_id);
+    features.code_action.push(Entry {
+        id,
+        selector,
+        provider: Arc::new(provider),
+    });
+    code_action_providers_changed(cx);
+    id
+}
 register_fn!(
     /// Registers a rename provider for the models `selector` matches (Monaco
     /// `registerRenameProvider`). Providers are tried best first (see [`LanguageSelector`]).
@@ -3277,13 +3328,19 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.declaration.retain(|e| e.id != registration);
     features.rename.retain(|e| e.id != registration);
     features.new_symbol_names.retain(|e| e.id != registration);
+    let code_action_changed = features.code_action.len();
     features.code_action.retain(|e| e.id != registration);
+    let code_action_changed = features.code_action.len() != code_action_changed;
+    let inlay_hints_changed = features.inlay_hints.len();
     features.inlay_hints.retain(|e| e.id != registration);
+    let inlay_hints_changed = features.inlay_hints.len() != inlay_hints_changed;
     features.links.retain(|e| e.id != registration);
     features.semantic_tokens.retain(|e| e.id != registration);
     features.inline_completions.retain(|e| e.id != registration);
     features.linked_editing.retain(|e| e.id != registration);
+    let code_lens_changed = features.code_lens.len();
     features.code_lens.retain(|e| e.id != registration);
+    let code_lens_changed = features.code_lens.len() != code_lens_changed;
     features.document_symbols.retain(|e| e.id != registration);
     features
         .range_semantic_tokens
@@ -3300,6 +3357,16 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.paste_edits.retain(|e| e.id != registration);
     if folding_changed {
         refresh_folding_ranges(cx);
+    }
+    // Monaco's per-feature registries fire `onDidChange` on removal too.
+    if inlay_hints_changed {
+        refresh_inlay_hints(cx);
+    }
+    if code_lens_changed {
+        refresh_code_lenses(cx);
+    }
+    if code_action_changed {
+        code_action_providers_changed(cx);
     }
 }
 

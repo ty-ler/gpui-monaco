@@ -53,6 +53,8 @@ let registration = register_hover_provider(
 // Later: unregister_provider(cx, registration);
 ```
 
+Open editors notice providers registered or removed later, as Monaco's registry `onDidChange` makes them: links are recomputed, inlay hints and code lenses asked for again (and removed when no provider is left), and the lightbulb's actions at the caret asked for again, as they are when the model's language or the `lightbulb` option changes.
+
 Besides `All` and a list of languages (where `*` means any language), `LanguageSelector::Filters` takes Monaco's `LanguageFilter`s. A filter sets any of a `language`, a uri `scheme` and a glob `pattern` for the path (each can be `*`). A model matches when every field that's set matches:
 
 ```rust,ignore

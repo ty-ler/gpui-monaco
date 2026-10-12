@@ -756,3 +756,53 @@ fn scrolling_keeps_the_hints_it_asks_for_again(cx: &mut TestAppContext) {
         assert!(after.contains(decoration), "{decoration:?} was replaced");
     }
 }
+
+/// A fixed `: B` hint at the end of the first line.
+struct Other;
+
+impl InlayHintsProvider for Other {
+    fn provide_inlay_hints(
+        &self,
+        _: &ProviderContext,
+        _: Range<PointUtf16>,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<InlayHint>>> {
+        Task::ready(Ok(vec![InlayHint {
+            position: p(0, 10),
+            label: ": B".into(),
+            ..Default::default()
+        }]))
+    }
+}
+
+/// Monaco `InlayHintsController` listens to
+/// `inlayHintsProvider.onDidChange`: a provider registered later shows its
+/// hints without an edit or a scroll, and unregistering the last one
+/// removes them.
+#[gpui::test]
+fn hints_follow_providers_registered_and_removed_later(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_with("let x = 1;\nlet yy = 2;\n", |_| {}, cx);
+    assert!(hints(&editor, cx).is_empty());
+    let a = cx
+        .update(|_, cx| register_inlay_hints_provider(cx, LanguageSelector::All, Types::default()));
+    settle(cx);
+    assert_eq!(
+        hints(&editor, cx),
+        vec![
+            (p(0, 5), ": i32".to_string()),
+            (p(1, 6), ": i32".to_string())
+        ]
+    );
+    let b = cx.update(|_, cx| register_inlay_hints_provider(cx, LanguageSelector::All, Other));
+    settle(cx);
+    assert_eq!(hints(&editor, cx).len(), 3);
+    assert!(hints(&editor, cx).contains(&(p(0, 10), ": B".to_string())));
+    // Removing one asks the others again.
+    cx.update(|_, cx| unregister_provider(cx, a));
+    settle(cx);
+    assert_eq!(hints(&editor, cx), vec![(p(0, 10), ": B".to_string())]);
+    // Removing the last removes its hints.
+    cx.update(|_, cx| unregister_provider(cx, b));
+    settle(cx);
+    assert!(hints(&editor, cx).is_empty());
+}

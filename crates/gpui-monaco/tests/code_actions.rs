@@ -926,6 +926,85 @@ fn lightbulb_off_shows_no_bulb_after_quick_fix(cx: &mut TestAppContext) {
     );
 }
 
+fn bulb(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> bool {
+    draw(cx);
+    editor.read_with(cx, |e, _| e.is_lightbulb_visible())
+}
+
+/// Monaco `CodeActionModel._update` runs on `registry.onDidChange` and
+/// `lightbulb` changes: the actions at the caret are asked for again
+/// right away, without moving it.
+#[gpui::test]
+fn the_lightbulb_follows_providers_and_the_option(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new(TEXT));
+        CodeEditor::new(model, window, cx)
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    wait(cx);
+    assert!(!bulb(&editor, cx));
+    let provider = Actions {
+        actions: vec![action("Inline variable", "refactor.inline")],
+        ..Default::default()
+    };
+    let registration =
+        cx.update(|_, cx| register_code_action_provider(cx, LanguageSelector::All, provider));
+    assert!(bulb(&editor, cx));
+    // Off hides it, On asks again.
+    let set = |mode, editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        editor.update(cx, |e, cx| {
+            e.update_options_with(|o| o.lightbulb = mode, cx)
+        });
+    };
+    set(gpui_monaco::options::LightbulbMode::Off, &editor, cx);
+    assert!(!bulb(&editor, cx));
+    set(gpui_monaco::options::LightbulbMode::On, &editor, cx);
+    assert!(bulb(&editor, cx));
+    cx.update(|_, cx| unregister_provider(cx, registration));
+    assert!(!bulb(&editor, cx));
+}
+
+/// Monaco `CodeActionModel._update` on `onDidChangeModelLanguage`: a
+/// provider for the new language shows its bulb at the caret.
+#[gpui::test]
+fn the_lightbulb_follows_the_language(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: vec![action("Inline variable", "refactor.inline")],
+        ..Default::default()
+    };
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_code_action_provider(
+            cx,
+            LanguageSelector::Languages(vec!["rust".into()]),
+            provider,
+        );
+    });
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new(TEXT));
+        CodeEditor::new(model, window, cx)
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    wait(cx);
+    assert!(!bulb(&editor, cx));
+    editor.update(cx, |e, cx| {
+        e.model()
+            .update(cx, |m, cx| m.set_language(Some("rust".into()), cx))
+    });
+    assert!(bulb(&editor, cx));
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| m.set_language(None, cx))
+    });
+    assert!(!bulb(&editor, cx));
+}
+
 /// The ranges of the code action highlight (`background` decorations).
 fn highlights(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<Range<PointUtf16>> {
     editor.update(cx, |e, cx| {

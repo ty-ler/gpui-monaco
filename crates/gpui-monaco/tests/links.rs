@@ -381,6 +381,33 @@ fn links_follow_language_and_provider_changes(cx: &mut TestAppContext) {
     assert_eq!(links(&editor, cx), vec![link(0, 12, 24, "https://a.io")]);
 }
 
+/// Monaco `LinkDetector` on `linkProvider.onDidChange`: a provider for
+/// the model's language registered after it was opened adds its links
+/// right away, without an edit.
+#[gpui::test]
+fn links_follow_a_provider_registered_later(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("see #12 and https://a.io", "file:///main.rs", |_| {}, cx);
+    editor.update(cx, |e, cx| {
+        e.model()
+            .update(cx, |m, cx| m.set_language(Some("rust".into()), cx))
+    });
+    assert_eq!(links(&editor, cx), vec![link(0, 12, 24, "https://a.io")]);
+    cx.update(|_, cx| {
+        register_link_provider(
+            cx,
+            LanguageSelector::Languages(vec!["rust".into()]),
+            fixed(0, 4, 7, "https://issues/12"),
+        )
+    });
+    assert_eq!(
+        links(&editor, cx),
+        vec![
+            link(0, 4, 7, "https://issues/12"),
+            link(0, 12, 24, "https://a.io")
+        ]
+    );
+}
+
 /// Monaco `_executeLinkProvider` is `getLinks`: the built-in URL links
 /// and every provider's, the better-ranked provider's replacing the
 /// links they overlap, sorted.
