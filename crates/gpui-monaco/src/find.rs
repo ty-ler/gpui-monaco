@@ -570,13 +570,20 @@ impl CodeEditor {
         let new = &self.find.options;
         let query_changed = new.query != old.query;
         let replace_changed = new.replace != old.replace;
-        let research = query_changed
-            || new.is_regex != old.is_regex
-            || new.match_case != old.match_case
-            || new.whole_word != old.whole_word;
+        let toggles_changed = new.match_case != old.match_case || new.whole_word != old.whole_word;
+        let research = query_changed || new.is_regex != old.is_regex || toggles_changed;
         if research || scope_changed {
             let scope = scope_changed.then(|| self.find.search_scope.clone());
             self.find_research(move_cursor, scope, cx);
+        }
+        if toggles_changed {
+            self.multi_cursor_find_toggles_changed(cx);
+        }
+        // Monaco's `SelectionHighlighter` updates on every find state change:
+        // selected text matches with the find toggles, and the find widget's
+        // own matches aren't highlighted twice.
+        if research {
+            self.refresh_selection_highlights(cx);
         }
         // Monaco's controller `_onStateChanged`.
         if query_changed {
@@ -2135,6 +2142,7 @@ impl CodeEditor {
             self.find.options.in_selection = false;
             self.find.search_scope = None;
         }
+        self.refresh_selection_highlights(cx);
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }

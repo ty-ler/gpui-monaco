@@ -2,13 +2,11 @@
 //! (MIT). Selections are Monaco 1-based `(startLine, startCol, endLine,
 //! endCol)` with the anchor at the start.
 //!
-//! Skipped: word-wrap and paste-order tests (covered by the cursor core),
-//! and most of the find-widget option matrix (`selectedTextMatchMode` isn't
-//! an option here; selected text matches case-sensitively, Monaco's
-//! `caseSensitive` mode).
+//! Skipped: word-wrap and paste-order tests (covered by the cursor core).
 
 use gpui::{Entity, Focusable, TestAppContext, VisualTestContext};
 use gpui_monaco::cursor::Selection;
+use gpui_monaco::options::SelectedTextMatchMode;
 use gpui_monaco::text::PointUtf16;
 use gpui_monaco::{CodeEditor, FindOptions};
 
@@ -52,6 +50,14 @@ fn get(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<Sel> {
 
 fn add_next(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) {
     editor.update(cx, |e, cx| e.add_selection_to_next_find_match(cx));
+}
+
+fn match_mode(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+    mode: SelectedTextMatchMode,
+) {
+    update_options(editor, cx, |o| o.selected_text_match_mode = mode);
 }
 
 #[gpui::test]
@@ -295,6 +301,7 @@ fn move_from_the_find_input_searches_the_find_string(cx: &mut TestAppContext) {
         &["foo", "FOO", "fooqux", "foobar", "bar", "BAR", "barista"],
         cx,
     );
+    match_mode(&editor, cx, SelectedTextMatchMode::CaseSensitive);
     set(&editor, cx, &[(1, 1, 1, 4)]);
     editor.update(cx, |e, cx| e.move_selection_to_next_find_match(cx));
     assert_eq!(get(&editor, cx), vec![(3, 1, 3, 4)]);
@@ -320,6 +327,7 @@ const OCCURRENCES: [&str; 5] = ["foo", "FOObar", "foobar", "FOO", "foo"];
 #[gpui::test]
 fn add_previous_selected_text_case_sensitive(cx: &mut TestAppContext) {
     let (editor, cx) = setup(&OCCURRENCES, cx);
+    match_mode(&editor, cx, SelectedTextMatchMode::CaseSensitive);
     set(&editor, cx, &[(5, 1, 5, 4)]);
     editor.update(cx, |e, cx| e.add_selection_to_previous_find_match(cx));
     assert_eq!(get(&editor, cx), vec![(5, 1, 5, 4), (3, 1, 3, 4)]);
@@ -341,6 +349,7 @@ fn add_previous_from_empty_selection(cx: &mut TestAppContext) {
 #[gpui::test]
 fn move_previous(cx: &mut TestAppContext) {
     let (editor, cx) = setup(&OCCURRENCES, cx);
+    match_mode(&editor, cx, SelectedTextMatchMode::CaseSensitive);
     set(&editor, cx, &[(5, 1, 5, 4)]);
     editor.update(cx, |e, cx| e.move_selection_to_previous_find_match(cx));
     assert_eq!(get(&editor, cx), vec![(3, 1, 3, 4)]);
@@ -470,4 +479,342 @@ fn multi_cursor_modifier_ctrl_cmd(cx: &mut TestAppContext) {
     let at = mouse_at(&editor, cx, 1, 2);
     cx.simulate_click(at, Modifiers::secondary_key());
     assert_eq!(get(&editor, cx).len(), 2);
+}
+
+/// Sets the find state's toggles and search string (Monaco's tests'
+/// `findController.getState().change`), with the widget open (`revealed`,
+/// the focus back in the text) or closed.
+fn find_state(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+    revealed: bool,
+    options: FindOptions,
+) {
+    if revealed {
+        cx.simulate_keystrokes("secondary-f");
+    }
+    editor.update(cx, |e, cx| e.change_find_options(options, false, cx));
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    cx.run_until_parked();
+}
+
+/// The find state's (match case, whole word, regex).
+fn find_toggles(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> [bool; 3] {
+    editor.read_with(cx, |e, _| {
+        let o = e.find_options();
+        [o.match_case, o.whole_word, o.is_regex]
+    })
+}
+
+type Run = fn(&mut CodeEditor, &mut gpui::Context<CodeEditor>);
+
+/// The actions of Monaco's "Selected text occurrence matching" suite.
+const OCCURRENCE_ACTIONS: [(&str, Run); 5] = [
+    ("addSelectionToNextFindMatch", |e, cx| {
+        e.add_selection_to_next_find_match(cx)
+    }),
+    ("addSelectionToPreviousFindMatch", |e, cx| {
+        e.add_selection_to_previous_find_match(cx)
+    }),
+    ("moveSelectionToNextFindMatch", |e, cx| {
+        e.move_selection_to_next_find_match(cx)
+    }),
+    ("moveSelectionToPreviousFindMatch", |e, cx| {
+        e.move_selection_to_previous_find_match(cx)
+    }),
+    ("selectHighlights", |e, cx| e.select_all_occurrences(cx)),
+];
+
+/// Monaco: "default selected-text matching uses Find match case and whole
+/// word options", with find closed.
+#[gpui::test]
+fn default_selected_text_matching_uses_find_match_case_and_whole_word(cx: &mut TestAppContext) {
+    let mut actual = Vec::new();
+    for (match_case, whole_word) in [(false, false), (false, true), (true, false), (true, true)] {
+        let (editor, vcx) = setup(&OCCURRENCES, cx);
+        find_state(
+            &editor,
+            vcx,
+            false,
+            FindOptions {
+                match_case,
+                whole_word,
+                ..Default::default()
+            },
+        );
+        set(&editor, vcx, &[(1, 1, 1, 4)]);
+        add_next(&editor, vcx);
+        actual.push(get(&editor, vcx));
+    }
+    assert_eq!(
+        actual,
+        vec![
+            vec![(1, 1, 1, 4), (2, 1, 2, 4)],
+            vec![(1, 1, 1, 4), (4, 1, 4, 4)],
+            vec![(1, 1, 1, 4), (3, 1, 3, 4)],
+            vec![(1, 1, 1, 4), (5, 1, 5, 4)],
+        ]
+    );
+}
+
+/// Monaco's "Selected text occurrence matching" matrix
+/// (`assertSelectedText`): with `caseSensitive` or `caseInsensitive`,
+/// selected text matches substrings whatever the find widget's toggles,
+/// open or closed, and leaves them alone.
+#[gpui::test]
+fn selected_text_matches_by_the_mode_not_the_find_widget(cx: &mut TestAppContext) {
+    // (action, start line, expected lines case-insensitive and
+    // case-sensitive).
+    let expected: [(usize, u32, [&[u32]; 2]); 5] = [
+        (0, 1, [&[1, 2], &[1, 3]]),
+        (1, 5, [&[5, 4], &[5, 3]]),
+        (2, 1, [&[2], &[3]]),
+        (3, 5, [&[4], &[3]]),
+        (4, 1, [&[1, 2, 3, 4, 5], &[1, 3, 5]]),
+    ];
+    for (action, start, lines) in expected {
+        let (name, run) = OCCURRENCE_ACTIONS[action];
+        for (mode, lines) in [
+            (SelectedTextMatchMode::CaseInsensitive, lines[0]),
+            (SelectedTextMatchMode::CaseSensitive, lines[1]),
+        ] {
+            let match_case = mode == SelectedTextMatchMode::CaseSensitive;
+            for revealed in [false, true] {
+                let (editor, vcx) = setup(&OCCURRENCES, cx);
+                match_mode(&editor, vcx, mode);
+                find_state(
+                    &editor,
+                    vcx,
+                    revealed,
+                    FindOptions {
+                        query: "FOO.*".into(),
+                        match_case: !match_case,
+                        whole_word: true,
+                        is_regex: true,
+                        ..Default::default()
+                    },
+                );
+                set(&editor, vcx, &[(start, 1, start, 4)]);
+                editor.update(vcx, run);
+                let expected: Vec<Sel> = lines.iter().map(|&l| (l, 1, l, 4)).collect();
+                assert_eq!(
+                    (get(&editor, vcx), find_toggles(&editor, vcx)),
+                    (expected, [!match_case, true, true]),
+                    "{name} {mode:?} revealed {revealed}"
+                );
+            }
+        }
+    }
+}
+
+/// Monaco's "Selected text occurrence matching" matrix
+/// (`assertEmptySelection`): an empty selection always starts a
+/// whole-word, case-sensitive session, overriding the find toggles while
+/// it lasts.
+#[gpui::test]
+fn empty_selection_always_starts_whole_word_case_sensitive(cx: &mut TestAppContext) {
+    let expected: [(usize, u32, &[u32]); 5] = [
+        (0, 1, &[1, 5]),
+        (1, 5, &[5, 1]),
+        (2, 1, &[5]),
+        (3, 5, &[1]),
+        (4, 1, &[1, 5]),
+    ];
+    for (action, start, lines) in expected {
+        let (name, run) = OCCURRENCE_ACTIONS[action];
+        for mode in [
+            SelectedTextMatchMode::CaseInsensitive,
+            SelectedTextMatchMode::CaseSensitive,
+        ] {
+            let (editor, vcx) = setup(&OCCURRENCES, cx);
+            match_mode(&editor, vcx, mode);
+            find_state(
+                &editor,
+                vcx,
+                false,
+                FindOptions {
+                    is_regex: true,
+                    ..Default::default()
+                },
+            );
+            set(&editor, vcx, &[(start, 2, start, 2)]);
+            editor.update(vcx, run);
+            editor.update(vcx, run);
+            let expected: Vec<Sel> = lines.iter().map(|&l| (l, 1, l, 4)).collect();
+            assert_eq!(
+                (get(&editor, vcx), find_toggles(&editor, vcx)),
+                (expected, [true, true, false]),
+                "{name} {mode:?}"
+            );
+        }
+    }
+}
+
+/// Monaco: with several selections and an empty one, Cmd/Ctrl+D only
+/// expands them to their words; the next one matches with the find
+/// state's toggles (match case off), not whole-word and case-sensitive.
+#[gpui::test]
+fn add_next_from_several_empty_cursors_starts_no_word_session(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&["foo", "foo", "Foo"], cx);
+    set(&editor, cx, &[(1, 1, 1, 1), (2, 1, 2, 1)]);
+    cx.simulate_keystrokes("secondary-d");
+    assert_eq!(get(&editor, cx), vec![(1, 1, 1, 4), (2, 1, 2, 4)]);
+    // No word session: the find toggles keep their own values.
+    assert_eq!(find_toggles(&editor, cx), [false, false, false]);
+    cx.simulate_keystrokes("secondary-d");
+    assert_eq!(
+        get(&editor, cx),
+        vec![(1, 1, 1, 4), (2, 1, 2, 4), (3, 1, 3, 4)]
+    );
+}
+
+/// Monaco ends a session that uses the find toggles when they change
+/// ("changing Find options ends caret-started sessions"): the next
+/// Cmd/Ctrl+D compares the selections with the new match case.
+#[gpui::test]
+fn changing_the_find_toggles_ends_the_session(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&["foo", "FOO", "foo", "FOO"], cx);
+    set(&editor, cx, &[(1, 1, 1, 4)]);
+    cx.simulate_keystrokes("secondary-d");
+    assert_eq!(get(&editor, cx), vec![(1, 1, 1, 4), (2, 1, 2, 4)]);
+    editor.update(cx, |e, cx| {
+        let mut options = e.find_options().clone();
+        options.match_case = true;
+        e.change_find_options(options, false, cx);
+    });
+    // `foo` and `FOO` differ case-sensitively: nothing to add.
+    cx.simulate_keystrokes("secondary-d");
+    assert_eq!(get(&editor, cx), vec![(1, 1, 1, 4), (2, 1, 2, 4)]);
+}
+
+fn text(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> String {
+    editor.read_with(cx, |e, cx| e.model().read(cx).text())
+}
+
+/// Monaco's Add Cursor Above/Below push an undo stop
+/// (`model.pushStackElement()`): undo after typing with the new cursor
+/// removes only that typing.
+#[gpui::test]
+fn add_cursor_pushes_an_undo_stop(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&["", ""], cx);
+    cx.simulate_input("foo");
+    cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-alt-down"
+    } else {
+        "ctrl-alt-down"
+    });
+    cx.simulate_input("x");
+    assert_eq!(text(&editor, cx), "foox\nx");
+    editor.update(cx, |e, cx| e.undo(cx));
+    assert_eq!(text(&editor, cx), "foo\n");
+}
+
+/// Monaco's `cursorColumnSelect*` push an undo stop too.
+#[gpui::test]
+fn keyboard_column_select_pushes_an_undo_stop(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&["", "ab"], cx);
+    cx.simulate_input("foo");
+    cx.dispatch_action(gpui_monaco::actions::CursorColumnSelectDown);
+    cx.simulate_input("x");
+    assert_eq!(text(&editor, cx), "foox\nabx");
+    editor.update(cx, |e, cx| e.undo(cx));
+    assert_eq!(text(&editor, cx), "foo\nab");
+}
+
+/// Monaco makes Add Cursor Above/Below and Focus Next/Previous Cursor
+/// no-ops in a read-only editor.
+#[gpui::test]
+fn multi_cursor_commands_do_nothing_when_read_only(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&["a", "b", "c"], cx);
+    set(&editor, cx, &[(2, 1, 2, 1), (3, 1, 3, 1)]);
+    update_options(&editor, cx, |o| o.read_only = true);
+    cx.dispatch_action(gpui_monaco::actions::AddCursorBelow::default());
+    cx.dispatch_action(gpui_monaco::actions::AddCursorAbove::default());
+    editor.update(cx, |e, cx| e.focus_next_cursor(true, cx));
+    assert_eq!(get(&editor, cx), vec![(2, 1, 2, 1), (3, 1, 3, 1)]);
+}
+
+fn trigger(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, id: &str, payload: &str) {
+    let payload: serde_json::Value = serde_json::from_str(payload).unwrap();
+    editor
+        .update_in(cx, |e, window, cx| {
+            e.trigger_with_payload(id, payload, window, cx)
+        })
+        .unwrap();
+}
+
+/// Line 2 wraps after `aaaa bbbb ` (columns 1-10, then 11-20).
+fn wrapped(cx: &mut TestAppContext) -> (Entity<CodeEditor>, &mut VisualTestContext) {
+    let (editor, cx) = setup(&["x", "aaaa bbbb cccc dddd", "y"], cx);
+    update_options(&editor, cx, |o| {
+        o.word_wrap = gpui_monaco::options::WordWrap::WordWrapColumn;
+        o.word_wrap_column = 10;
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+    });
+    (editor, cx)
+}
+
+/// Monaco `insertCursorBelow {logicalLine: false}` goes by view lines: the
+/// new cursor lands on the wrapped line's next segment.
+#[gpui::test]
+fn add_cursor_below_by_view_lines(cx: &mut TestAppContext) {
+    let (editor, cx) = wrapped(cx);
+    set(&editor, cx, &[(2, 3, 2, 3)]);
+    trigger(&editor, cx, "editor.action.insertCursorBelow", "{}");
+    assert_eq!(get(&editor, cx), vec![(2, 3, 2, 3), (3, 2, 3, 2)]);
+    set(&editor, cx, &[(2, 3, 2, 3)]);
+    trigger(
+        &editor,
+        cx,
+        "editor.action.insertCursorBelow",
+        r#"{ "logicalLine": false }"#,
+    );
+    assert_eq!(get(&editor, cx), vec![(2, 3, 2, 3), (2, 13, 2, 13)]);
+}
+
+/// Monaco's `cursorColumnSelect*` go by view lines: each segment of a
+/// wrapped line gets a cursor.
+#[gpui::test]
+fn keyboard_column_select_goes_by_wrapped_segments(cx: &mut TestAppContext) {
+    let (editor, cx) = wrapped(cx);
+    set(&editor, cx, &[(2, 2, 2, 2)]);
+    cx.dispatch_action(gpui_monaco::actions::CursorColumnSelectRight);
+    cx.dispatch_action(gpui_monaco::actions::CursorColumnSelectDown);
+    assert_eq!(get(&editor, cx), vec![(2, 2, 2, 3), (2, 12, 2, 13)]);
+    cx.dispatch_action(gpui_monaco::actions::CursorColumnSelectDown);
+    assert_eq!(
+        get(&editor, cx),
+        vec![(2, 2, 2, 3), (2, 12, 2, 13), (3, 2, 3, 2)]
+    );
+}
+
+/// Monaco's `cursorColumnSelectDown` skips folded lines: the new cursor
+/// goes on the line after the fold, not inside it.
+#[gpui::test]
+fn keyboard_column_select_skips_folded_lines(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&["a {", "  b", "  c", "  d", "  e", "}"], cx);
+    set(&editor, cx, &[(1, 1, 1, 1)]);
+    editor.update(cx, |e, cx| e.fold(cx));
+    cx.run_until_parked();
+    cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-shift-alt-down"
+    } else {
+        "ctrl-shift-alt-down"
+    });
+    assert_eq!(get(&editor, cx), vec![(1, 1, 1, 1), (6, 1, 6, 1)]);
+}
+
+/// Monaco `deleteInsideWord {onlyWord: true}` leaves the whitespace.
+#[gpui::test]
+fn delete_inside_word_only_word(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&["foo bar baz"], cx);
+    set(&editor, cx, &[(1, 6, 1, 6)]);
+    trigger(&editor, cx, "deleteInsideWord", r#"{ "onlyWord": true }"#);
+    assert_eq!(text(&editor, cx), "foo  baz");
+    trigger(&editor, cx, "deleteInsideWord", "{}");
+    assert_eq!(text(&editor, cx), "foobaz");
 }

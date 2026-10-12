@@ -1247,6 +1247,7 @@ impl CodeEditor {
     /// Monaco does; [`options`](Self::options) returns them as given.
     pub fn update_options(&mut self, options: EditorOptions, cx: &mut Context<Self>) {
         let old_from_all_providers = self.options.occurrences_highlight_from_all_providers;
+        let old_match_mode = self.options.selected_text_match_mode;
         let zoomed = crate::font_zoom::zoomed_options(&options, self.zoom_level(cx));
         let old = std::mem::replace(&mut self.options, zoomed);
         // Monaco `ContentHoverController._hookListeners`: turning
@@ -1290,6 +1291,12 @@ impl CodeEditor {
         // the highlights and asks again.
         if old_from_all_providers != self.options.occurrences_highlight_from_all_providers {
             self.restart_word_highlights(cx);
+        }
+        // Monaco: changing `selectedTextMatchMode` ends the Cmd/Ctrl+D
+        // session, and the selection highlights match the new way.
+        if old_match_mode != self.options.selected_text_match_mode {
+            self.end_multi_cursor_session(cx);
+            self.refresh_selection_highlights(cx);
         }
         if !self.options.inertial_scroll {
             self.stop_inertial_scroll();
@@ -3343,26 +3350,85 @@ impl CodeEditor {
         self.cursors_changed(true, cx);
     }
 
-    fn add_cursor_above(&mut self, _: &AddCursorAbove, _: &mut Window, cx: &mut Context<Self>) {
+    fn add_cursor_above(
+        &mut self,
+        action: &AddCursorAbove,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_cursor(true, action.logical_line != Some(false), cx);
+    }
+
+    fn add_cursor_below(
+        &mut self,
+        action: &AddCursorBelow,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_cursor(false, action.logical_line != Some(false), cx);
+    }
+
+    /// Monaco `InsertCursorAbove` / `InsertCursorBelow`: a cursor on the
+    /// line above (`up`) or below each cursor, by model lines with
+    /// `logical_line`, else by view lines. An undo stop, and nothing in a
+    /// read-only editor.
+    fn add_cursor(&mut self, up: bool, logical_line: bool, cx: &mut Context<Self>) {
+        if self.options.read_only {
+            return;
+        }
+        self.push_undo_stop(cx);
         let before = self.cursors.selections();
         let config = self.cursor_config(cx);
-        cursor::add_cursor_above(&config, self.snapshot.rope(), &mut self.cursors);
+        let delta = if up { -1 } else { 1 };
+        if logical_line {
+            cursor::add_cursors(&config, self.snapshot.rope(), &mut self.cursors, delta);
+        } else {
+            self.on_view_lines(|model, cursors| {
+                cursor::add_cursors(&config, model, cursors, delta)
+            });
+        }
         self.next_selection_change.reason = CursorChangeReason::Explicit;
         self.cursors_changed(false, cx);
-        // Monaco `revealTopMostCursor`: the new cursor shows.
-        self.reveal_edge_cursor(true, false, cx);
+        // Monaco `revealTopMostCursor` / `revealBottomMostCursor`: the new
+        // cursor shows.
+        self.reveal_edge_cursor(up, false, cx);
         self.announce_cursor_change(&before, cx);
     }
 
-    fn add_cursor_below(&mut self, _: &AddCursorBelow, _: &mut Window, cx: &mut Context<Self>) {
-        let before = self.cursors.selections();
-        let config = self.cursor_config(cx);
-        cursor::add_cursor_below(&config, self.snapshot.rope(), &mut self.cursors);
-        self.next_selection_change.reason = CursorChangeReason::Explicit;
-        self.cursors_changed(false, cx);
-        // Monaco `revealBottomMostCursor`: the new cursor shows.
-        self.reveal_edge_cursor(false, false, cx);
-        self.announce_cursor_change(&before, cx);
+    /// Runs `f` on the cursors in view coordinates (Monaco's cursor
+    /// commands on the view model: a wrapped line's segments are lines, a
+    /// fold is one), then sets the model cursors from the view states it
+    /// leaves. The column selection rectangle stays in view lines, as
+    /// Monaco's `IColumnSelectData` does.
+    pub(crate) fn on_view_lines(
+        &mut self,
+        f: impl FnOnce(&ViewCursorModel<'_>, &mut CursorCollection),
+    ) {
+        let lines = self.view_lines.clone();
+        let last_line = lines.line_count().saturating_sub(1);
+        let data = self.cursors.column_select_data().map(|data| {
+            // Folds may have changed the view lines since.
+            cursor::ColumnSelectData {
+                from_row: data.from_row.min(last_line),
+                to_row: data.to_row.min(last_line),
+                ..data
+            }
+        });
+        let mut view_cursors = self.cursors.clone();
+        view_cursors.set_states(self.cursor_view_states());
+        view_cursors.set_column_select_data(data);
+        f(&ViewCursorModel(&lines), &mut view_cursors);
+        let data = view_cursors.column_select_data();
+        let views = view_cursors.all().to_vec();
+        self.cursors.set_states(
+            views
+                .iter()
+                .map(|state| map_state(state, |q| lines.to_model(q.row, q.column)))
+                .collect(),
+        );
+        self.cursors.validate(self.snapshot.rope());
+        self.cursors.set_column_select_data(data);
+        self.set_cursor_view_states(views.into_iter().map(Some).collect());
     }
 
     /// Escape while parameter hints show (Monaco `closeParameterHints`):
@@ -3844,12 +3910,15 @@ impl CodeEditor {
         self.run_edit(cx, cursor::copy_lines_down);
     }
 
-    /// Keyboard column selection (Monaco `cursorColumnSelect*`).
+    /// Keyboard column selection (Monaco `cursorColumnSelect*`): on view
+    /// lines, after an undo stop.
     fn column_select(&mut self, command: cursor::ColumnSelectCommand, cx: &mut Context<Self>) {
         let config = self.cursor_config(cx);
         let page = self.page_lines();
-        let rope = self.snapshot.rope().clone();
-        cursor::column_select(&config, &rope, &mut self.cursors, command, page);
+        self.push_undo_stop(cx);
+        self.on_view_lines(|model, cursors| {
+            cursor::column_select(&config, model, cursors, command, page)
+        });
         self.next_selection_change.reason = CursorChangeReason::Explicit;
         self.cursors_changed(false, cx);
         self.reveal_column_select(false, cx);
@@ -5355,16 +5424,14 @@ impl CodeEditor {
         // segment's end.
         let mut reveal_kind: Option<bool> = None;
         let mut keep_on_wrapped = None;
+        // Monaco's mouse `columnSelect`: on view lines, from the view line
+        // under the mouse.
         let column = |this: &mut Self, extend: bool| {
             let visible_column = this.mouse_visible_column(mouse);
-            cursor::column_select_to(
-                &config,
-                this.snapshot.rope(),
-                &mut this.cursors,
-                position,
-                visible_column,
-                extend,
-            );
+            let view = PointUtf16::new(this.mouse_view_line(position, mouse), 0);
+            this.on_view_lines(|model, cursors| {
+                cursor::column_select_to(&config, model, cursors, view, visible_column, extend)
+            });
         };
         enum Next {
             States(Vec<SingleCursorState>),
@@ -5513,6 +5580,24 @@ impl CodeEditor {
             state.selection_start = view..view;
         }
         self.set_cursor_view_states(views.into_iter().map(Some).collect());
+    }
+
+    /// The view line under the mouse when it shows `position` (a wrapped
+    /// line's segment), else the one `position` shows on.
+    fn mouse_view_line(&self, position: PointUtf16, mouse: Point<Pixels>) -> u32 {
+        let lines = &self.view_lines;
+        if let Some(layout) = self.layout.as_ref() {
+            let y = mouse.y - layout.bounds.top() + layout.scroll_top;
+            if y >= px(0.) {
+                let line = layout
+                    .zones
+                    .line_at(y, layout.metrics.line_height, lines.line_count());
+                if line < lines.line_count() && lines.to_model(line, 0).row == position.row {
+                    return line;
+                }
+            }
+        }
+        lines.to_view(position, false).0
     }
 
     /// The text position under the mouse, or `None` when the mouse isn't
@@ -6786,8 +6871,11 @@ impl Render for CodeEditor {
             .on_action(cx.listener(|this, _: &DeleteWordPartRight, _, cx| {
                 this.run_edit(cx, |c, m, s| cursor::delete_word_part(c, m, s, false))
             }))
-            .on_action(cx.listener(|this, _: &DeleteInsideWord, _, cx| {
-                this.run_edit(cx, |c, m, s| cursor::delete_inside_word(c, m, s, false))
+            .on_action(cx.listener(|this, action: &DeleteInsideWord, _, cx| {
+                let only_word = action.only_word;
+                this.run_edit(cx, move |c, m, s| {
+                    cursor::delete_inside_word(c, m, s, only_word)
+                })
             }))
             .on_action(
                 cx.listener(|this, _: &AddSelectionToPreviousFindMatch, _, cx| {

@@ -428,8 +428,9 @@ fn selected_text_match_mode(cx: &mut TestAppContext) {
             e.selections()
         })
     };
-    // Selected text matches case-sensitively by default.
-    assert_eq!(select_next(cx)[1].start(), p(0, 8));
+    // By default selected text matches with the find state's match case,
+    // off until set.
+    assert_eq!(select_next(cx)[1].start(), p(0, 4));
     set_options(
         &editor,
         |o| o.selected_text_match_mode = SelectedTextMatchMode::CaseInsensitive,

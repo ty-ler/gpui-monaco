@@ -302,6 +302,50 @@ fn shift_alt_drag_column_selects(cx: &mut TestAppContext) {
     );
 }
 
+/// Monaco's mouse `columnSelect` goes by view lines: a fold is one line,
+/// so the drag puts no cursors inside it.
+#[gpui::test]
+fn column_select_drag_skips_folded_lines(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("a {\n  b\n  c\n  d\n  e\n}x", |_| {}, cx);
+    set(&editor, &[Selection::collapsed(p(1, 1))], cx);
+    editor.update(cx, |e, cx| e.fold(cx));
+    paint(cx);
+    let start = at(&editor, 1, 1, cx);
+    down(start, MouseButton::Left, alt_shift(), 1, cx);
+    let end = at(&editor, 6, 2, cx);
+    drag_to(end, MouseButton::Left, alt_shift(), cx);
+    up(end, MouseButton::Left, alt_shift(), cx);
+    assert_eq!(
+        selections(&editor, cx),
+        vec![sel((1, 1), (1, 2)), sel((6, 1), (6, 2))]
+    );
+}
+
+/// Monaco's mouse `columnSelect` goes by view lines: each segment of a
+/// wrapped line gets a cursor.
+#[gpui::test]
+fn column_select_drag_goes_by_wrapped_segments(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "x\naaaa bbbb cccc dddd\ny",
+        |o| {
+            o.word_wrap = gpui_monaco::options::WordWrap::WordWrapColumn;
+            o.word_wrap_column = 10;
+        },
+        cx,
+    );
+    set(&editor, &[Selection::collapsed(p(2, 2))], cx);
+    let start = at(&editor, 2, 2, cx);
+    down(start, MouseButton::Left, alt_shift(), 1, cx);
+    // Column 14 is on the second segment, three columns in.
+    let end = at(&editor, 2, 14, cx);
+    drag_to(end, MouseButton::Left, alt_shift(), cx);
+    up(end, MouseButton::Left, alt_shift(), cx);
+    assert_eq!(
+        selections(&editor, cx),
+        vec![sel((2, 2), (2, 4)), sel((2, 12), (2, 14))]
+    );
+}
+
 /// Monaco: Shift+Alt+click column-selects from the cursor to the click.
 #[gpui::test]
 fn shift_alt_click_column_selects_from_the_cursor(cx: &mut TestAppContext) {
