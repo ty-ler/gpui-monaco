@@ -14,6 +14,7 @@ use gpui::{
 };
 use serde::{Deserialize, Serialize};
 use text::{Bias, BufferSnapshot, OffsetUtf16, PointUtf16};
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::actions::*;
 use crate::cursor::{
@@ -2523,6 +2524,24 @@ impl CodeEditor {
                     return;
                 }
                 self.folds.prune(model.read(cx).buffer());
+                let patch = model.read(cx).buffer().edits_since(self.snapshot.version());
+                let old = &self.snapshot;
+                let transform = |p: PointUtf16, bias: Bias| {
+                    let offset = old.point_utf16_to_offset(p);
+                    latest.offset_to_point_utf16(patch.transform_offset(offset, bias))
+                };
+                // Undo/redo and edits from elsewhere move the auto-closed
+                // characters like Monaco's decorations
+                // (`NeverGrowsWhenTypingAtEdges`), before the cursors move
+                // and check they're still inside them.
+                if *kind == EditKind::SetValue {
+                    self.cursors.auto_closed_ranges_mut().clear();
+                } else {
+                    self.cursors.auto_closed_ranges_mut().map(|range| {
+                        let end = transform(range.end, Bias::Left);
+                        transform(range.start, Bias::Right).min(end)..end
+                    });
+                }
                 let restored = own
                     && matches!(kind, EditKind::Undo | EditKind::Redo)
                     && restore
@@ -2531,12 +2550,6 @@ impl CodeEditor {
                         .map(|selections| self.cursors.set_selections(selections))
                         .is_some();
                 if !restored {
-                    let patch = model.read(cx).buffer().edits_since(self.snapshot.version());
-                    let old = &self.snapshot;
-                    let transform = |p: PointUtf16, bias: Bias| {
-                        let offset = old.point_utf16_to_offset(p);
-                        latest.offset_to_point_utf16(patch.transform_offset(offset, bias))
-                    };
                     let selections: Vec<Selection> = self
                         .cursors
                         .selections()
@@ -2548,12 +2561,10 @@ impl CodeEditor {
                         .collect();
                     self.cursors.set_selections(&selections);
                 }
-                // Undo/redo and edits from elsewhere: stop treating closing
-                // characters as auto-inserted rather than tracking them.
-                self.cursors.auto_closed_ranges_mut().clear();
                 self.snapshot = latest;
                 self.cursors.validate(self.snapshot.rope());
                 if *kind == EditKind::SetValue {
+                    self.cursors.end_composition();
                     self.set_marked_range(None, cx);
                 }
                 self.find_content_changed(*kind == EditKind::SetValue, cx);
@@ -3522,7 +3533,9 @@ impl CodeEditor {
 
     // ----- editing ------------------------------------------------------------
 
-    /// Types `text` at every cursor, as if from the keyboard. Emits
+    /// Types `text` at every cursor, as if from the keyboard: one character
+    /// at a time, each through the language's auto-closing, auto-indenting
+    /// and other typing rules. Emits
     /// [`CodeEditorEvent::WillType`] and [`CodeEditorEvent::DidType`]
     /// around it (Monaco's `'keyboard'` source).
     pub fn type_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -3549,11 +3562,15 @@ impl CodeEditor {
         if let Some(ch) = text.chars().next().filter(|_| text.chars().count() == 1) {
             self.commit_suggestion_on(ch, cx);
         }
-        let prev = self.prev_edit_kind;
-        let operation = self.with_language(cx, |config, rope, cursors, lang| {
-            cursor::type_with_language(config, rope, cursors, text, prev, lang)
-        });
-        self.apply(operation, cx);
+        // Monaco `Cursor.type` from the keyboard: one character at a time,
+        // each through the interceptors.
+        for grapheme in text.graphemes(true) {
+            let prev = self.prev_edit_kind;
+            let operation = self.with_language(cx, |config, rope, cursors, lang| {
+                cursor::type_with_language(config, rope, cursors, grapheme, prev, lang)
+            });
+            self.apply(operation, cx);
+        }
         self.suggest_after_typing(text, cx);
         self.signature_help_after_typing(text, cx);
         if let Some(ch) = text.chars().last() {
@@ -3563,7 +3580,7 @@ impl CodeEditor {
 
     /// Runs `f` with the model's language context (configuration plus token
     /// types from syntax highlighting), if it has a language.
-    fn with_language<R>(
+    pub(crate) fn with_language<R>(
         &self,
         cx: &App,
         f: impl FnOnce(
@@ -3828,7 +3845,8 @@ impl CodeEditor {
             self.insert_other_suggestion(false, cx);
             return;
         }
-        self.run_edit(cx, cursor::outdent);
+        let operation = self.with_language(cx, cursor::outdent_with_language);
+        self.apply(operation, cx);
     }
 
     fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
@@ -3850,11 +3868,13 @@ impl CodeEditor {
     }
 
     fn indent_lines(&mut self, _: &IndentLines, _: &mut Window, cx: &mut Context<Self>) {
-        self.run_edit(cx, cursor::indent_lines);
+        let operation = self.with_language(cx, cursor::indent_lines_with_language);
+        self.apply(operation, cx);
     }
 
     fn outdent_lines(&mut self, _: &OutdentLines, _: &mut Window, cx: &mut Context<Self>) {
-        self.run_edit(cx, cursor::outdent_lines);
+        let operation = self.with_language(cx, cursor::outdent_lines_with_language);
+        self.apply(operation, cx);
     }
 
     fn move_lines_up(&mut self, _: &MoveLinesUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -3927,14 +3947,16 @@ impl CodeEditor {
         if self.options.single_line {
             return;
         }
-        self.run_edit(cx, cursor::insert_line_below);
+        let operation = self.with_language(cx, cursor::insert_line_below_with_language);
+        self.apply(operation, cx);
     }
 
     fn insert_line_before(&mut self, _: &InsertLineBefore, _: &mut Window, cx: &mut Context<Self>) {
         if self.options.single_line {
             return;
         }
-        self.run_edit(cx, cursor::insert_line_above);
+        let operation = self.with_language(cx, cursor::insert_line_above_with_language);
+        self.apply(operation, cx);
     }
 
     /// Undoes the model's last undo step (Monaco `undo`), restoring the cursors it
@@ -6035,24 +6057,25 @@ impl CodeEditor {
         (start..end, selection.is_reversed())
     }
 
-    /// Replaces `range` (bytes) with `text` and puts a single cursor after it.
-    /// Monaco `ReplaceOvertypeCommandOnCompositionEnd`: a committed
-    /// composition in overtype mode replaces as many characters after it as
-    /// it inserted, on the same line.
-    fn overtype_after_composition(&mut self, end: usize, text: &str, cx: &mut Context<Self>) {
-        let rope = self.snapshot.rope();
-        let line_end = rope.line_range(rope.offset_to_point(end).row).end;
-        let units = text.encode_utf16().count();
-        let mut overtyped = end;
-        for ch in rope.chars_at(end).take(units) {
-            if overtyped >= line_end {
-                break;
-            }
-            overtyped += ch.len_utf8();
-        }
-        let overtyped = overtyped.min(line_end);
-        if overtyped > end {
-            self.replace_range(end..overtyped, "", cx);
+    /// Monaco `Cursor.startComposition`: remembers the cursors' lines, so
+    /// that the composition's outcome is known when it ends.
+    pub(crate) fn start_composition(&mut self) {
+        self.cursors.start_composition(self.snapshot.rope());
+    }
+
+    /// Monaco `Cursor.endComposition` from the keyboard: runs the typing
+    /// interceptors on what the composition typed (a dead-key `'` then
+    /// auto-closes, overtypes or surrounds the selection it replaced), and
+    /// in overtype mode types over as many characters as it inserted.
+    pub(crate) fn end_composition(&mut self, cx: &mut Context<Self>) {
+        let Some(composition) = self.cursors.end_composition() else {
+            return;
+        };
+        let operation = self.with_language(cx, |config, rope, cursors, lang| {
+            cursor::composition_end_with_language(config, rope, cursors, &composition, lang)
+        });
+        if let Some(operation) = operation {
+            self.apply(operation, cx);
         }
     }
 
@@ -6127,6 +6150,11 @@ impl EntityInputHandler for CodeEditor {
 
     fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.marked_selection = None;
+        // The marked text stays: the composition ends with it (Monaco
+        // `compositionend`).
+        if self.marked_range.is_some() {
+            self.end_composition(cx);
+        }
         self.set_marked_range(None, cx);
         cx.notify();
     }
@@ -6146,7 +6174,6 @@ impl EntityInputHandler for CodeEditor {
             self.read_only_edit_attempt(cx);
             return;
         }
-        let from_composition = range_utf16.is_none() && self.marked_range.is_some();
         let marked = self.marked_range.take();
         self.marked_selection = None;
         let explicit = range_utf16
@@ -6160,22 +6187,21 @@ impl EntityInputHandler for CodeEditor {
                 .composition_type_at_cursors(range, text, 0, cx)
                 .is_some()
         {
+            self.end_composition(cx);
             cx.emit(CodeEditorEvent::CompositionEnded);
             return;
         }
         match explicit {
             Some(range) => {
-                self.replace_range(range.clone(), text, cx);
+                self.replace_range(range, text, cx);
                 self.prev_edit_kind = None;
-                if from_composition && self.overtype {
-                    self.overtype_after_composition(range.start + text.len(), text, cx);
-                }
             }
             None => self.type_text(text, cx),
         }
         // Committing the text ends the composition (Monaco
-        // `compositionend`).
+        // `compositionend`), which runs the typing interceptors on it.
         if marked.is_some() {
+            self.end_composition(cx);
             cx.emit(CodeEditorEvent::CompositionEnded);
         }
     }
@@ -6199,6 +6225,7 @@ impl EntityInputHandler for CodeEditor {
         // Monaco `compositionstart` comes before the composed text.
         let starting = self.marked_range.is_none() && !new_text.is_empty();
         if starting {
+            self.start_composition();
             cx.emit(CodeEditorEvent::CompositionStarted);
         }
         let was_marked = self.marked_range.is_some();
@@ -6240,6 +6267,7 @@ impl EntityInputHandler for CodeEditor {
         });
         // Marking nothing cancels the composition.
         if was_marked && self.marked_range.is_none() {
+            self.end_composition(cx);
             cx.emit(CodeEditorEvent::CompositionEnded);
         }
         if !composed_at_cursors && let Some(selected) = self.marked_selection.clone() {

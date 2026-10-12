@@ -9,6 +9,7 @@ use std::ops::Range;
 
 use super::auto_closed::{AutoClosedPair, AutoClosedRanges};
 use super::column::ColumnSelectData;
+use super::composition::CompositionState;
 use super::{CursorModel, Position, Selection, validate_position, validate_range};
 
 /// How the selection was started, which decides how extending it behaves
@@ -152,6 +153,8 @@ pub struct CursorCollection {
     column_select_data: Option<ColumnSelectData>,
     /// Closing characters the editor auto-inserted.
     auto_closed: AutoClosedRanges,
+    /// The ongoing IME composition, if any.
+    composition: Option<CompositionState>,
     /// Whether overlapping selections merge (Monaco
     /// `multiCursorMergeOverlapping`, default `true`).
     merge_overlapping: bool,
@@ -171,6 +174,7 @@ impl CursorCollection {
             last_added_cursor_index: 0,
             column_select_data: None,
             auto_closed: AutoClosedRanges::default(),
+            composition: None,
             merge_overlapping: true,
         }
     }
@@ -278,6 +282,26 @@ impl CursorCollection {
     ) {
         self.auto_closed.transform(model_before, edits);
         self.auto_closed.push(auto_closed);
+    }
+
+    /// Starts an IME composition (Monaco `Cursor.startComposition`):
+    /// records the cursors' lines to tell what it typed when it ends. Until
+    /// [`Self::end_composition`], typing skips most language interceptors
+    /// (see [`super::type_with_language`]).
+    pub fn start_composition(&mut self, model: &impl CursorModel) {
+        self.composition = Some(CompositionState::new(model, &self.selections()));
+    }
+
+    /// Whether an IME composition is in progress (Monaco's
+    /// `isDoingComposition`).
+    pub fn is_composing(&self) -> bool {
+        self.composition.is_some()
+    }
+
+    /// Ends the IME composition, returning what was recorded when it
+    /// started, for [`super::composition_end_with_language`].
+    pub fn end_composition(&mut self) -> Option<CompositionState> {
+        self.composition.take()
     }
 
     fn validate_auto_closed(&mut self) {

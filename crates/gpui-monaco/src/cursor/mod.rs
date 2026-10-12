@@ -20,7 +20,10 @@
 //! language-agnostic [`type_text`], [`line_break`], [`delete_left`] and
 //! [`tab`]. Which closing characters the editor auto-inserted is remembered
 //! across calls in [`CursorCollection::auto_closed_ranges`] (see
-//! [`AutoClosedRanges`] for how to keep it up to date).
+//! [`AutoClosedRanges`] for how to keep it up to date). An IME composition
+//! runs between [`CursorCollection::start_composition`] and
+//! [`composition_end_with_language`], which applies the interceptors to what
+//! it typed.
 
 mod auto_closed;
 mod auto_indent_paste;
@@ -28,6 +31,7 @@ mod brackets;
 mod collection;
 mod column;
 mod comment;
+mod composition;
 mod edit;
 pub(crate) mod in_place_replace;
 mod language;
@@ -54,6 +58,7 @@ pub use brackets::{enclosing_brackets, match_bracket, matching_bracket, next_bra
 pub use collection::{CursorCollection, SelectionStartKind, SingleCursorState};
 pub use column::{ColumnSelectCommand, ColumnSelectData, column_select, column_select_to};
 pub use comment::{CommentOptions, CommentsAt, LineCommentType, block_comment, line_comment};
+pub use composition::{CompositionOutcome, CompositionState, composition_end_with_language};
 pub(crate) use edit::execute_edits_forcing;
 pub(crate) use edit::{Command, CursorStateHelper, EditBuilder, TrackedId, execute_commands};
 pub use edit::{EditOperation, EditOperationType};
@@ -61,12 +66,14 @@ pub use in_place_replace::in_place_replace;
 pub use language::{LanguageContext, StandardTokenType};
 pub use language_typing::{
     delete_left_with_language, delete_word_part_with_language, delete_word_with_language,
-    line_break_insert, line_break_with_language, tab_with_language, type_with_language,
+    line_break_insert, line_break_with_language, outdent_with_language, snippet_auto_closed_pairs,
+    tab_with_language, type_with_language,
 };
 pub use lines::{
-    copy_lines_down, copy_lines_up, delete_lines, indent_lines, insert_line_above,
-    insert_line_below, move_lines_down, move_lines_down_with_language, move_lines_up,
-    move_lines_up_with_language, outdent_lines,
+    copy_lines_down, copy_lines_up, delete_lines, indent_lines, indent_lines_with_language,
+    insert_line_above, insert_line_above_with_language, insert_line_below,
+    insert_line_below_with_language, move_lines_down, move_lines_down_with_language, move_lines_up,
+    move_lines_up_with_language, outdent_lines, outdent_lines_with_language,
 };
 pub use movement::{
     MoveCommand, add_cursor_above, add_cursor_below, expand_line_selection, move_cursors, move_to,

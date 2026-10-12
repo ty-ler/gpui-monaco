@@ -15,8 +15,8 @@
 //! The language-aware parts (auto-closing pairs and their overtyping and
 //! deletion, surround-selection, electric characters, onEnter rules and
 //! indentation rules) are in `language_typing.rs`, which falls back to the
-//! functions here. Not ported: overtype (insert key) mode and `ShiftCommand`'s
-//! onEnter-based alignment of continuation lines.
+//! functions here. [`ShiftCommand`] takes the language when there is one, for
+//! its onEnter-based alignment of continuation lines.
 
 use std::ops::Range;
 
@@ -25,20 +25,20 @@ use super::edit::{
     ReplaceCommandThatPreservesSelection, ReplaceOvertypeCommand, TrackedId, auto_whitespace,
     execute_commands, should_push_stack_element_between, typing_operation,
 };
+use super::language::{LanguageSupport, enter_action};
 use super::movement;
 use super::word::{self, DeleteWordContext, WordClassifier, WordNavigationType};
 use super::{
-    CursorCollection, CursorConfig, CursorModel, MultiCursorPaste, Position, Selection, line_units,
-    strings, value_in_range,
+    AutoIndent, CursorCollection, CursorConfig, CursorModel, MultiCursorPaste, Position, Selection,
+    line_units, strings, value_in_range,
 };
 
-type Commands = Vec<Option<Box<dyn Command>>>;
+type Commands<'a> = Vec<Option<Box<dyn Command + 'a>>>;
 
 /// Types `text` at every cursor, replacing selections (Monaco
 /// `TypeOperations.typeWithoutInterceptors`, which for a single character is
 /// what `typeWithInterceptors` falls back to without language features).
-/// Typing a lone line break behaves like [`line_break`]. Also use this to
-/// commit IME compositions.
+/// Typing a lone line break behaves like [`line_break`].
 ///
 /// `prev` is the `kind` of the previous edit operation (`None` at start);
 /// it decides whether an undo stop goes before this one, so consecutive
@@ -57,13 +57,24 @@ pub fn type_text(
     if matches!(text, "\n" | "\r\n" | "\r") {
         return line_break(config, model, cursors);
     }
-    let model: &dyn CursorModel = model;
+    type_simple(model, cursors, text, prev, config.overtype)
+}
+
+/// Monaco `SimpleCharacterTypeOperation`: replaces every selection by
+/// `text`, typing over the characters after it when `overtype`.
+pub(crate) fn type_simple(
+    model: &dyn CursorModel,
+    cursors: &CursorCollection,
+    text: &str,
+    prev: Option<EditOperationType>,
+    overtype: bool,
+) -> EditOperation {
     let prev = prev.unwrap_or(EditOperationType::Other);
     let selections = cursors.selections();
     let commands: Commands = selections
         .iter()
         .map(|s| {
-            if config.overtype {
+            if overtype {
                 ReplaceOvertypeCommand::boxed(s.range(), text)
             } else {
                 ReplaceCommand::boxed(s.range(), text)
@@ -226,15 +237,17 @@ pub fn tab(
     cursors: &CursorCollection,
 ) -> EditOperation {
     // Without language rules there is no "good indent" for a line.
-    tab_with_good_indent(config, model, cursors, &|_| None)
+    tab_with_good_indent(config, model, cursors, None, &|_| None)
 }
 
 /// Monaco `TabOperation.getCommands`; `good_indent` is
-/// `TabOperation._goodIndentForLine` for a row.
+/// `TabOperation._goodIndentForLine` for a row, and `lang` aligns the lines
+/// a multi-line selection indents (see [`ShiftCommand`]).
 pub(crate) fn tab_with_good_indent(
     config: &CursorConfig,
     model: &dyn CursorModel,
     cursors: &CursorCollection,
+    lang: Option<&LanguageSupport>,
     good_indent: &dyn Fn(u32) -> Option<String>,
 ) -> EditOperation {
     let selections = cursors.selections();
@@ -265,7 +278,7 @@ pub(crate) fn tab_with_good_indent(
                     return replace_jump_to_next_indent(config, model, selection);
                 }
             }
-            Some(Box::new(ShiftCommand::new(selection, config, false)) as Box<dyn Command>)
+            Some(Box::new(ShiftCommand::new(selection, config, false, lang)) as Box<dyn Command>)
         })
         .collect();
     execute_commands(
@@ -285,20 +298,23 @@ pub fn outdent(
     model: &impl CursorModel,
     cursors: &CursorCollection,
 ) -> EditOperation {
-    shift(config, model, cursors, true)
+    shift(config, model, cursors, true, None)
 }
 
-/// Indents (`unshift == false`) or outdents the lines of every selection.
+/// Indents (`unshift == false`) or outdents the lines of every selection,
+/// keeping continuation lines aligned by `lang`'s onEnter rules (see
+/// [`ShiftCommand`]).
 pub(crate) fn shift(
     config: &CursorConfig,
     model: &dyn CursorModel,
     cursors: &CursorCollection,
     unshift: bool,
+    lang: Option<&LanguageSupport>,
 ) -> EditOperation {
     let selections = cursors.selections();
     let commands: Commands = selections
         .iter()
-        .map(|&s| Some(Box::new(ShiftCommand::new(s, config, unshift)) as Box<dyn Command>))
+        .map(|&s| Some(Box::new(ShiftCommand::new(s, config, unshift, lang)) as Box<dyn Command>))
         .collect();
     execute_commands(
         model,
@@ -310,21 +326,33 @@ pub(crate) fn shift(
     )
 }
 
-/// Monaco `ShiftCommand` (without the language-dependent alignment fix-up).
-pub(crate) struct ShiftCommand {
+/// Monaco `ShiftCommand`. With `use_tab_stops`, a line whose content starts
+/// off an indent stop is checked against the onEnter rules of the line
+/// above: the leading spaces of the rule's `appendText` (less its
+/// `removeText`) are alignment, not indentation, so ` * ` continuation lines
+/// of a doc comment keep their space when indented or outdented. That needs
+/// the language (`lang`); without one, every line is shifted as it is.
+pub(crate) struct ShiftCommand<'a> {
     selection: Selection,
     unshift: bool,
     tab_size: u32,
     indent_size: u32,
     insert_spaces: bool,
     use_tab_stops: bool,
+    auto_indent: AutoIndent,
+    lang: Option<&'a LanguageSupport<'a>>,
     tracked: Option<TrackedId>,
     use_last_edit_range_for_cursor_end_position: bool,
     selection_start_column_stays_put: bool,
 }
 
-impl ShiftCommand {
-    pub(crate) fn new(selection: Selection, config: &CursorConfig, unshift: bool) -> Self {
+impl<'a> ShiftCommand<'a> {
+    pub(crate) fn new(
+        selection: Selection,
+        config: &CursorConfig,
+        unshift: bool,
+        lang: Option<&'a LanguageSupport<'a>>,
+    ) -> Self {
         Self {
             selection,
             unshift,
@@ -332,10 +360,36 @@ impl ShiftCommand {
             indent_size: config.indent_size,
             insert_spaces: config.insert_spaces,
             use_tab_stops: config.use_tab_stops,
+            auto_indent: config.auto_indent,
+            lang,
             tracked: None,
             use_last_edit_range_for_cursor_end_position: false,
             selection_start_column_stays_put: false,
         }
+    }
+
+    /// The spaces at the end of row `row`'s indentation that are alignment
+    /// for the onEnter rule of the row above (Monaco's `extraSpaces`), given
+    /// the row above's own (`previous_line_extra_spaces`).
+    fn alignment_spaces(
+        &self,
+        model: &dyn CursorModel,
+        row: u32,
+        previous_line_extra_spaces: u32,
+    ) -> Option<u32> {
+        // Monaco also skips this while the line above isn't cheap to
+        // tokenize; token types are always at hand here.
+        let lang = self.lang?;
+        let end = Position::new(row - 1, model.line_max_column(row - 1));
+        let enter = enter_action(self.auto_indent, lang, model, &(end..end))?;
+        let mut extra_spaces = previous_line_extra_spaces;
+        for c in enter.append_text.chars() {
+            if extra_spaces >= self.indent_size || c != ' ' {
+                break;
+            }
+            extra_spaces += 1;
+        }
+        Some(extra_spaces.saturating_sub(enter.remove_text))
     }
 
     /// Monaco `ShiftCommand.shiftIndent`/`unshiftIndent`: the indentation
@@ -368,7 +422,7 @@ impl ShiftCommand {
     }
 }
 
-impl Command for ShiftCommand {
+impl Command for ShiftCommand<'_> {
     fn edit_operations(&mut self, model: &dyn CursorModel, builder: &mut EditBuilder) {
         let start_line = self.selection.start().row;
         let mut end_line = self.selection.end().row;
@@ -387,7 +441,11 @@ impl Command for ShiftCommand {
             {
                 self.use_last_edit_range_for_cursor_end_position = true;
             }
+            // Keep track of the previous line's misalignment.
+            let mut extra_spaces = 0;
             for row in start_line..=end_line {
+                let previous_line_extra_spaces = extra_spaces;
+                extra_spaces = 0;
                 let line = model.line_content(row);
                 let units = strings::utf16(&line);
                 let first_non_ws = strings::first_non_whitespace_index(&units);
@@ -399,7 +457,30 @@ impl Command for ShiftCommand {
                     // Do not indent empty lines.
                     continue;
                 }
-                let indentation_end_index = first_non_ws.unwrap_or(units.len()) as u32;
+                let mut indentation_end_index = first_non_ws.unwrap_or(units.len()) as u32;
+                let content_start_visible_column = strings::visible_column_from_column(
+                    &line,
+                    indentation_end_index,
+                    self.tab_size,
+                );
+                if row > 0
+                    && !content_start_visible_column.is_multiple_of(self.indent_size)
+                    && let Some(extra) =
+                        self.alignment_spaces(model, row, previous_line_extra_spaces)
+                {
+                    // The line is misaligned, as expected after a rule
+                    // whose `appendText` starts with spaces (` * ` in doc
+                    // comments): act as if those spaces weren't indentation.
+                    extra_spaces = extra;
+                    for _ in 0..extra_spaces {
+                        if indentation_end_index == 0
+                            || units[indentation_end_index as usize - 1] != b' ' as u16
+                        {
+                            break;
+                        }
+                        indentation_end_index -= 1;
+                    }
+                }
                 if self.unshift && indentation_end_index == 0 {
                     continue;
                 }

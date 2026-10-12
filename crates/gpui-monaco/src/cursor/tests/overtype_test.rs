@@ -1,9 +1,7 @@
 //! Ported from the "Overtype Mode" suite of Monaco's
-//! `src/vs/editor/test/browser/controller/cursor.test.ts` (MIT). The
-//! composition case is covered by the editor tests, since compositions are
-//! committed by the input handler.
+//! `src/vs/editor/test/browser/controller/cursor.test.ts` (MIT).
 
-use super::harness::{TestEditor, sel};
+use super::harness::{TestEditor, pos, sel};
 use crate::cursor::CursorConfig;
 
 fn overtype_editor() -> TestEditor {
@@ -76,4 +74,18 @@ fn paste_without_overtype_on_paste() {
     editor.set_selection(sel(1, 5, 1, 5));
     editor.paste("cc", false, None);
     assert_eq!(editor.value(), "1234cc56789\n123456789");
+}
+
+/// Monaco: composition type. The composition is inserted, then overtypes as
+/// many characters when it ends.
+#[test]
+fn composition_type() {
+    let mut editor = overtype_editor();
+    editor.set_selection(sel(1, 5, 1, 5));
+    editor.start_composition();
+    editor.composition_type("セ", 0, 0, 0);
+    assert_eq!(editor.value(), "1234セ56789\n123456789");
+    editor.end_composition();
+    assert_eq!(editor.value(), "1234セ6789\n123456789");
+    assert_eq!(editor.position(), pos(1, 6));
 }

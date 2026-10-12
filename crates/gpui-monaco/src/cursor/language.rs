@@ -631,6 +631,9 @@ pub(crate) struct EnterResult {
 pub(crate) struct CompleteEnterAction {
     pub indent_action: IndentAction,
     pub append_text: String,
+    /// How many characters of indentation the rule removes (Monaco
+    /// `removeText`, 0 when unset); already taken off `indentation`.
+    pub remove_text: u32,
     pub indentation: String,
 }
 
@@ -902,13 +905,15 @@ pub(crate) fn enter_action(
         Some(text) if indent_action == IndentAction::Indent => format!("\t{text}"),
         Some(text) => text,
     };
+    let remove_text = result.remove_text.unwrap_or(0);
     let mut indentation = indentation_at_position(model, range.start);
-    if let Some(remove) = result.remove_text.filter(|&r| r > 0) {
-        indentation = remove_suffix_units(&indentation, remove);
+    if remove_text > 0 {
+        indentation = remove_suffix_units(&indentation, remove_text);
     }
     Some(CompleteEnterAction {
         indent_action,
         append_text,
+        remove_text,
         indentation,
     })
 }

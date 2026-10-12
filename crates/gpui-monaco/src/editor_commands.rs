@@ -209,6 +209,7 @@ pub(crate) fn register_handlers(
         CompositionStart => |this, _, _, cx| {
             if !this.commands.composing {
                 this.commands.composing = true;
+                this.start_composition();
                 cx.emit(CodeEditorEvent::CompositionStarted);
                 cx.notify();
             }
@@ -216,6 +217,7 @@ pub(crate) fn register_handlers(
         CompositionEnd => |this, _, _, cx| {
             if this.commands.composing {
                 this.commands.composing = false;
+                this.end_composition(cx);
                 cx.emit(CodeEditorEvent::CompositionEnded);
                 cx.notify();
             }
