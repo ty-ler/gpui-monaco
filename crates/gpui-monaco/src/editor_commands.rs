@@ -807,7 +807,8 @@ impl CodeEditor {
     fn reveal_line_command(&mut self, args: &RevealLine, cx: &mut Context<Self>) {
         let line = match &args.line_number {
             Some(serde_json::Value::Number(n)) => n.as_f64().unwrap_or(0.) as i64,
-            Some(serde_json::Value::String(s)) => s.trim().parse::<i64>().unwrap_or(0),
+            // Monaco reads a string with `parseInt`, so `"12px"` is 12.
+            Some(serde_json::Value::String(s)) => crate::find::parse_int(s).unwrap_or(0),
             _ => 0,
         };
         let last = self.snapshot.rope().max_point().row;

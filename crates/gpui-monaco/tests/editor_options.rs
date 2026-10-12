@@ -657,6 +657,19 @@ fn inertial_scroll(cx: &mut TestAppContext) {
         .advance_clock(std::time::Duration::from_secs(2));
     paint(cx);
     assert_eq!(top(cx), resting);
+
+    // A physical wheel (whole lines) doesn't coast (Monaco skips inertia
+    // when `isPhysicalMouseWheel`): three lines, then nothing more.
+    let line_height = editor.read_with(cx, |e, _| e.options().resolved_line_height());
+    cx.simulate_event(ScrollWheelEvent {
+        position: point(origin.x + px(10.), origin.y + px(5.)),
+        delta: ScrollDelta::Lines(point(0., -3.)),
+        ..Default::default()
+    });
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    paint(cx);
+    assert_eq!(top(cx), resting + line_height * 3.);
 }
 
 #[gpui::test]

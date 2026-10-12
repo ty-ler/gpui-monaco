@@ -3199,6 +3199,16 @@ impl CodeEditor {
         }
     }
 
+    /// The cursor state (the selections and the model version) is the one
+    /// last reported (Monaco `setCursorStates` returning `false`).
+    fn cursor_state_unchanged(&self) -> bool {
+        self.last_cursor_state
+            .as_ref()
+            .is_some_and(|(selections, version)| {
+                *version == self.snapshot.version() && *selections == self.cursors.selections()
+            })
+    }
+
     pub(crate) fn cursors_changed(&mut self, autoscroll: bool, cx: &mut Context<Self>) {
         // Monaco `multiCursorLimit`: extra cursors are dropped.
         let limit = self.options.multi_cursor_limit.max(1);
@@ -3218,13 +3228,7 @@ impl CodeEditor {
         }
         // Monaco `_emitStateChangedIfNecessary`: nothing happens when the
         // cursor state (the selections and the model version) is the same.
-        if self
-            .last_cursor_state
-            .as_ref()
-            .is_some_and(|(selections, version)| {
-                *version == self.snapshot.version() && *selections == self.cursors.selections()
-            })
-        {
+        if self.cursor_state_unchanged() {
             let cause = std::mem::take(&mut self.next_selection_change);
             // Keyboard and mouse moves still reveal the cursor, as
             // Monaco's commands do; the API's don't.
@@ -5396,9 +5400,8 @@ impl CodeEditor {
         // the quick input, rename box and menus stay open.
         let over_widget = self.over_widget(event.position);
         if !over_widget {
-            window.focus(&self.focus_handle, cx);
-            // Keeps GPUI from focusing the editor's root after the menu
-            // shown below took the focus.
+            // Keeps GPUI from focusing the editor's root (and, once the menu
+            // below shows, taking the focus from it).
             window.prevent_default();
         }
         let mouse = self.emit_mouse(
@@ -5416,8 +5419,15 @@ impl CodeEditor {
         }
         self.long_lines_mouse_down(&mouse, cx);
         cx.emit(CodeEditorEvent::ContextMenu(mouse.clone()));
-        // Monaco: only over text, and not on widgets.
         use crate::mouse_target::MouseTargetKind;
+        // Monaco `_onContextMenu` with `contextmenu: false`: focus, and the
+        // cursor goes where the mouse is (unless that's in a selection) on
+        // any target with a position, the gutter's included. The sticky
+        // scroll is an overlay widget there, without one.
+        if !self.options.context_menu && mouse.target.kind != MouseTargetKind::StickyScroll {
+            window.focus(&self.focus_handle, cx);
+            self.context_menu_mouse_down(mouse.target.position, event.position, window, cx);
+        }
         // Monaco `StickyScrollController._onContextMenu`: its own menu.
         if mouse.target.kind == MouseTargetKind::StickyScroll {
             self.show_sticky_scroll_context_menu(event.position, window, cx);
@@ -5431,11 +5441,16 @@ impl CodeEditor {
             self.inlay_hint_context_menu(event.position, window, cx);
             return;
         }
+        // Monaco: the menu only over text, which takes focus; elsewhere
+        // (the gutter, scrollbars, minimap) the focus stays where it is.
         if matches!(
             mouse.target.kind,
             MouseTargetKind::ContentText | MouseTargetKind::ContentEmpty { .. }
         ) {
-            self.context_menu_mouse_down(mouse.target.position, event.position, window, cx);
+            if self.options.context_menu {
+                window.focus(&self.focus_handle, cx);
+                self.context_menu_mouse_down(mouse.target.position, event.position, window, cx);
+            }
             // Monaco's inlay hints show their own menu over a label part
             // with a location.
             self.inlay_hint_context_menu(event.position, window, cx);
@@ -5491,26 +5506,30 @@ impl CodeEditor {
             self.suppressed_widget_mouse_down(&mouse, event, window, cx);
             return;
         }
-        // Monaco `_onMouseDown`: the glyph margin and line decorations
-        // (folding controls included) don't steal focus, nor do the line
-        // numbers unless they select (`selectOnLineNumbers`).
-        let keeps_focus = match mouse.target.kind {
-            crate::mouse_target::MouseTargetKind::GutterGlyphMargin
-            | crate::mouse_target::MouseTargetKind::GutterLineDecorations => true,
-            crate::mouse_target::MouseTargetKind::GutterLineNumbers => {
-                !self.options.select_on_line_numbers
-            }
-            _ => false,
-        };
-        if keeps_focus {
-            // Also keeps GPUI from focusing the editor's root on the click.
-            window.prevent_default();
-        } else {
-            window.focus(&self.focus_handle, cx);
-        }
         let Some(layout) = self.layout.clone() else {
             return;
         };
+        // Monaco `_onMouseDown`: only the text takes focus, and the line
+        // numbers when they select (`selectOnLineNumbers`); the gutter,
+        // scrollbars and minimap don't steal it. The lightbulb and the
+        // sticky scroll lines focus the editor themselves.
+        let takes_focus = match mouse.target.kind {
+            crate::mouse_target::MouseTargetKind::ContentText
+            | crate::mouse_target::MouseTargetKind::ContentEmpty { .. }
+            | crate::mouse_target::MouseTargetKind::StickyScroll => true,
+            crate::mouse_target::MouseTargetKind::GutterLineNumbers => {
+                self.options.select_on_line_numbers
+            }
+            _ => false,
+        } || layout
+            .lightbulb
+            .is_some_and(|(bulb, _)| bulb.contains(&event.position));
+        if takes_focus {
+            window.focus(&self.focus_handle, cx);
+        } else {
+            // Also keeps GPUI from focusing the editor's root on the click.
+            window.prevent_default();
+        }
         // The lightbulb opens its code actions (Monaco `onClick`).
         if event.button == MouseButton::Left
             && layout
@@ -5792,6 +5811,8 @@ impl CodeEditor {
         // segment's end.
         let mut reveal_kind: Option<bool> = None;
         let mut keep_on_wrapped = None;
+        // Monaco `_moveTo` reveals only when the cursor state changed.
+        let mut move_to = false;
         // Monaco's mouse `columnSelect`: on view lines, from the view line
         // under the mouse.
         let column = |this: &mut Self, extend: bool| {
@@ -5883,6 +5904,7 @@ impl CodeEditor {
         } else {
             reveal_kind = Some(true);
             keep_on_wrapped = Some(0);
+            move_to = true;
             Next::States(vec![cursor::move_to_state(
                 &config,
                 model,
@@ -5908,7 +5930,8 @@ impl CodeEditor {
             reason: CursorChangeReason::Explicit,
             source: CursorChangeSource::Mouse,
         };
-        let reveal_kind = reveal_kind.filter(|_| reveal);
+        let reveal_kind =
+            reveal_kind.filter(|_| reveal && !(move_to && self.cursor_state_unchanged()));
         self.cursors_changed(reveal_kind.is_some(), cx);
         if let Some(horizontal) = reveal_kind {
             self.autoscroll_minimal = true;
@@ -6695,8 +6718,9 @@ impl CodeEditor {
             self.start_smooth_scroll(current, cx);
         }
         // Monaco `inertialScroll`: keep scrolling, slowing down, after the
-        // wheel events stop.
-        if self.options.inertial_scroll && self.animation.inertial.on_wheel(delta) {
+        // wheel events stop; not for physical wheels, which scroll smoothly
+        // instead (`!classifier.isPhysicalMouseWheel()`).
+        if self.options.inertial_scroll && !smooth && self.animation.inertial.on_wheel(delta) {
             self.run_inertial_scroll(cx);
         }
         self.emit_scroll_changed(cx);

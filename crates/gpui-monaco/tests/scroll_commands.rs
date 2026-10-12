@@ -229,6 +229,104 @@ fn reveal_line_command_is_vertical(cx: &mut TestAppContext) {
     assert_eq!(editor.read_with(cx, |e, _| e.scroll_left()), px(400.));
 }
 
+/// Monaco `revealLine` reads a string `lineNumber` with `parseInt`:
+/// `"120px"` is line 120 (0-based), not the first line (#411).
+#[gpui::test]
+fn reveal_line_parses_strings_like_parse_int(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&lines(500), false, cx);
+    let lh = line_height(&editor, cx);
+    for (arg, line) in [("120px", 120.), (" 40.9", 40.), ("abc", 0.)] {
+        editor.update_in(cx, |e, window, cx| {
+            e.trigger_with_payload(
+                "revealLine",
+                json!({ "lineNumber": arg, "at": "top" }),
+                window,
+                cx,
+            )
+            .unwrap()
+        });
+        draw(cx);
+        assert_eq!(top(&editor, cx), lh * line, "{arg:?}");
+    }
+}
+
+/// Monaco `onRevealRangeRequest`: a cursor reveal moving the scroll a
+/// line or less jumps, even with `smoothScrolling`; longer ones animate
+/// (#411).
+#[gpui::test]
+fn one_line_cursor_reveals_jump(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&lines(500), true, cx);
+    let lh = line_height(&editor, cx);
+    // Down until the view follows the cursor.
+    let mut presses = 0;
+    while top(&editor, cx) == px(0.) {
+        cx.simulate_keystrokes("down");
+        draw(cx);
+        presses += 1;
+        assert!(presses < 200);
+    }
+    assert_eq!(future_top(&editor, cx), top(&editor, cx));
+    assert!(top(&editor, cx) <= lh);
+    assert!(!editor.read_with(cx, |e, _| e.has_pending_scroll_animation()));
+    // Each press after that scrolls one line, right away.
+    let before = top(&editor, cx);
+    cx.simulate_keystrokes("down");
+    draw(cx);
+    assert_eq!(top(&editor, cx), before + lh);
+    assert!(!editor.read_with(cx, |e, _| e.has_pending_scroll_animation()));
+    // A page down is longer than a line: it animates.
+    cx.simulate_keystrokes("pagedown");
+    draw(cx);
+    assert!(top(&editor, cx) < future_top(&editor, cx));
+    assert!(editor.read_with(cx, |e, _| e.has_pending_scroll_animation()));
+}
+
+/// Monaco's mouse `_moveTo` reveals minimally: no `HORIZONTAL_EXTRA_PX`
+/// or `revealHorizontalRightPadding`, so clicking a visible column never
+/// scrolls sideways; and it reveals only when the cursor moved (#411).
+#[gpui::test]
+fn clicks_reveal_minimally(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&format!("{}\n", "x".repeat(1000)).repeat(50), false, cx);
+    let info = editor.read_with(cx, |e, _| e.layout_info().unwrap());
+    let lh = line_height(&editor, cx);
+    let left = |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.scroll_left());
+    editor.update(cx, |e, cx| {
+        e.set_scroll_left(px(600.), ScrollType::Immediate, cx)
+    });
+    draw(cx);
+    assert_eq!(left(cx), px(600.));
+    let y = lh * 0.5;
+    cx.simulate_click(
+        gpui::point(info.content_left + px(10.), y),
+        gpui::Modifiers::default(),
+    );
+    draw(cx);
+    assert_eq!(left(cx), px(600.), "near the left edge");
+    cx.simulate_click(
+        gpui::point(info.content_left + info.content_width - px(5.), y),
+        gpui::Modifiers::default(),
+    );
+    draw(cx);
+    assert_eq!(left(cx), px(600.), "near the right edge");
+
+    // A click where the cursor already is doesn't reveal it: a half
+    // hidden line stays half hidden.
+    let at = text::PointUtf16::new(10, 0);
+    editor.update(cx, |e, cx| {
+        e.set_scroll_left(px(0.), ScrollType::Immediate, cx);
+        e.set_selections(&[gpui_monaco::cursor::Selection::collapsed(at)], cx);
+        e.set_scroll_top(lh * 10.5, ScrollType::Immediate, cx);
+    });
+    draw(cx);
+    cx.simulate_click(
+        gpui::point(info.content_left + px(1.), px(2.)),
+        gpui::Modifiers::default(),
+    );
+    draw(cx);
+    assert_eq!(editor.read_with(cx, |e, _| e.selections()[0].head), at);
+    assert_eq!(top(&editor, cx), lh * 10.5);
+}
+
 /// A host mirroring the scroll follows a smooth scroll step by step: the
 /// diff editor's original side keeps up with the modified one (Monaco's
 /// `onDidScrollChange` with the current position).

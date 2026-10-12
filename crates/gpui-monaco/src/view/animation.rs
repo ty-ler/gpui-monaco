@@ -241,6 +241,9 @@ pub(crate) struct ViewAnimation {
     /// `smooth_scroll_requested` when the frame settles the vertical
     /// position, for the horizontal one it settles after laying out lines.
     frame_smooth: bool,
+    /// This frame's vertical scroll change jumps, whatever
+    /// `smooth_scroll_requested` says for the horizontal one.
+    jump_vertically: bool,
     /// Each cursor's smooth caret move, primary first.
     carets: Vec<Caret>,
     /// The next caret move jumps (Monaco pauses the transition when the
@@ -271,6 +274,7 @@ impl Default for ViewAnimation {
             scroll_x: None,
             scroll_y: None,
             frame_smooth: false,
+            jump_vertically: false,
             carets: Vec::new(),
             caret_jump: false,
             cursor_count: 1,
@@ -358,6 +362,15 @@ impl ViewAnimation {
         )
     }
 
+    /// Stops a vertical smooth scroll where it is, and makes this frame's
+    /// vertical scroll change jump (Monaco `onRevealRangeRequest` reveals
+    /// moving a line or less immediately) while the horizontal one may
+    /// still animate.
+    pub fn jump_vertically(&mut self) {
+        self.scroll_y = None;
+        self.jump_vertically = true;
+    }
+
     /// A smooth scroll is running or about to start (Monaco
     /// `hasPendingScrollAnimation`).
     pub fn is_scrolling(&self) -> bool {
@@ -410,7 +423,8 @@ impl ViewAnimation {
         now: Instant,
     ) -> (Pixels, bool) {
         self.frame_smooth = std::mem::take(&mut self.smooth_scroll_requested);
-        let flags = (smooth, self.frame_smooth);
+        let requested = self.frame_smooth && !std::mem::take(&mut self.jump_vertically);
+        let flags = (smooth, requested);
         scroll_axis(&mut self.scroll_y, from, target, viewport, flags, now)
     }
 

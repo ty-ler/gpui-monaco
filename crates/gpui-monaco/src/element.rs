@@ -3709,7 +3709,7 @@ fn prepaint_editor(
                 crate::view::reveal::RevealType::Simple,
             );
             if let Some(top) = top {
-                editor.scroll_top = px(top);
+                editor.scroll_top = cursor_reveal_top(editor, px(top), max_scroll_top, line_height);
                 if !editor.autoscroll_vertical_only {
                     editor.pending_reveal_x = Some(crate::editor::HorizontalReveal {
                         ranges: selections.iter().map(|s| s.start()..s.end()).collect(),
@@ -3723,10 +3723,11 @@ fn prepaint_editor(
             editor.autoscroll_vertical_only = false;
         } else {
             // One cursor: its position, as a single range.
-            editor.scroll_top = px(crate::view::reveal::scroll_top_to_reveal(
+            let top = crate::view::reveal::scroll_top_to_reveal(
                 request(primary_view_line, primary_view_line),
                 crate::view::reveal::RevealType::Simple,
-            ));
+            );
+            editor.scroll_top = cursor_reveal_top(editor, px(top), max_scroll_top, line_height);
         }
     }
     editor.scroll_top = editor.scroll_top.clamp(px(0.), max_scroll_top);
@@ -4013,8 +4014,13 @@ fn prepaint_editor(
             .map(|line| line.x_for_column(primary.column))
             .unwrap_or(px(0.));
         // Monaco `_computeScrollLeftToReveal`: 30px of room on the left,
-        // `revealHorizontalRightPadding` on the right.
-        let (left_pad, right_pad) = (px(30.), options.reveal_horizontal_right_padding);
+        // `revealHorizontalRightPadding` on the right, and none for a
+        // minimal reveal (mouse clicks).
+        let (left_pad, right_pad) = if editor.autoscroll_minimal {
+            (px(0.), px(0.))
+        } else {
+            (px(30.), options.reveal_horizontal_right_padding)
+        };
         if primary_x - left_pad < editor.scroll_left {
             editor.scroll_left = (primary_x - left_pad).max(px(0.));
         } else if primary_x + right_pad > editor.scroll_left + text_width {
@@ -6845,6 +6851,23 @@ fn slider_size(track: Pixels, visible: Pixels, scroll: Pixels) -> Pixels {
         .max(MIN_SLIDER)
         .round();
     px(size.min(track))
+}
+
+/// The scroll top revealing the cursors at `top` (clamped to
+/// `max_scroll_top`): Monaco `onRevealRangeRequest` jumps there when that
+/// moves the scroll a line or less, whatever the scroll type. The
+/// horizontal reveal keeps the request's scroll type, as in Monaco.
+fn cursor_reveal_top(
+    editor: &mut CodeEditor,
+    top: Pixels,
+    max_scroll_top: Pixels,
+    line_height: Pixels,
+) -> Pixels {
+    let top = top.clamp(px(0.), max_scroll_top);
+    if (editor.scroll_position().y - top).abs() <= line_height {
+        editor.animation.jump_vertically();
+    }
+    top
 }
 
 /// Monaco `ViewLines._computeScrollLeftToReveal`: the scroll left showing

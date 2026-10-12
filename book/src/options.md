@@ -31,7 +31,7 @@ editor.update(cx, |editor, cx| {
 | `scroll_beyond_last_column`, `reveal_horizontal_right_padding` | same names | room past the longest line (4 columns; none when wrapping at the viewport, which doesn't scroll horizontally) and right of revealed positions (15px) |
 | `fast_scroll_sensitivity`, `scroll_predominant_axis` | same names | Alt+wheel speed (5); scroll along the main axis only (on) |
 | `scroll_on_middle_click` | `scrollOnMiddleClick` | a middle click scrolls toward the mouse until the next click (off) |
-| `inertial_scroll` | `inertialScroll` | wheel and trackpad scrolling keeps going and slows down after the events stop, as Monaco's scrollable element does (off; mostly for Linux touchpads, since macOS and Windows already add momentum) |
+| `inertial_scroll` | `inertialScroll` | trackpad scrolling keeps going and slows down after the events stop, as Monaco's scrollable element does; physical mouse wheels (whole-line deltas) don't coast (off; mostly for Linux touchpads, since macOS and Windows already add momentum) |
 | `padding` | `padding` | `top` and `bottom` space |
 | `rounded_selection`, `render_line_highlight_only_when_focus` | same names | (on, off). Rounded selections get Monaco's reverse-rounded inner corners; high contrast themes draw them square. With several selections, each is inset 1px at its first and last line |
 | `read_only` | `readOnly` | edits are refused and show `read_only_message` |

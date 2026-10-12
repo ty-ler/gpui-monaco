@@ -410,6 +410,67 @@ fn gutter_clicks_dont_steal_focus(cx: &mut TestAppContext) {
     assert!(is_focused(cx), "the text");
 }
 
+/// Monaco `_onMouseDown`: the scrollbars and the minimap don't take focus
+/// either. `ContextMenuController._onContextMenu` focuses only over the
+/// text, but with `contextmenu: false` it focuses and moves the cursor for
+/// any target with a position, the line numbers included (#411).
+#[gpui::test]
+fn scrollbar_minimap_and_right_clicks_keep_focus(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&text(300), |o| o.minimap.enabled = true, cx);
+    let info = editor.read_with(cx, |e, _| e.layout_info().unwrap());
+    let line_height = editor.read_with(cx, |e, _| e.view_metrics_for_tests().unwrap().3);
+    let y = line_height * 5.5;
+    let is_focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| editor.focus_handle(cx).is_focused(window))
+    };
+    let head = |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.selections()[0].head);
+    let blur = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| window.blur(cx));
+        paint(cx);
+    };
+    blur(cx);
+    cx.simulate_click(
+        point(info.minimap.minimap_left + px(5.), y),
+        Modifiers::default(),
+    );
+    paint(cx);
+    assert!(!is_focused(cx), "the minimap");
+    cx.simulate_click(
+        point(
+            info.width - info.vertical_scrollbar_width / 2.,
+            line_height * 20.,
+        ),
+        Modifiers::default(),
+    );
+    paint(cx);
+    assert!(!is_focused(cx), "the scrollbar");
+    // Back to the top, with the cursor on the first line.
+    editor.update(cx, |e, cx| {
+        e.set_scroll_top(px(0.), gpui_monaco::ScrollType::Immediate, cx)
+    });
+    paint(cx);
+
+    let right_click = |cx: &mut VisualTestContext| {
+        let at = point(info.line_numbers_left + px(2.), y);
+        cx.simulate_mouse_down(at, gpui::MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(at, gpui::MouseButton::Right, Modifiers::default());
+        paint(cx);
+    };
+    right_click(cx);
+    assert!(!is_focused(cx), "a right-click on the line numbers");
+    assert_eq!(head(cx), PointUtf16::new(0, 0));
+
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.context_menu = false;
+        e.update_options(options, cx);
+    });
+    paint(cx);
+    right_click(cx);
+    assert!(is_focused(cx), "a right-click without the context menu");
+    assert_eq!(head(cx), PointUtf16::new(5, 0));
+}
+
 // ----- #295: manual folding icons, glyph margin widget ranges -----
 
 /// Monaco `getDecorationOption`: manual ranges (Create Folding Range from
