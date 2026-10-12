@@ -364,11 +364,13 @@ fn long_line_warnings(cx: &mut TestAppContext) {
         rest(cx, 0);
     };
     show_at(cx, 4);
+    // Monaco orders markdown parts by ordinal: the providers' first, then
+    // the warnings (from 1000).
     let warning = parts(&editor, cx);
-    assert!(warning[0][0].starts_with("Tokenization is skipped for long lines"));
-    assert_eq!(warning[1], ["line 0\n\n"]);
+    assert_eq!(warning[0], ["line 0\n\n"]);
+    assert!(warning[1][0].starts_with("Tokenization is skipped for long lines"));
     show_at(cx, 10_002);
-    assert!(parts(&editor, cx)[0][0].starts_with("Rendering paused for long line"));
+    assert!(parts(&editor, cx)[1][0].starts_with("Rendering paused for long line"));
     // Short lines don't warn.
     editor.update(cx, |e, cx| {
         e.set_selections(&[Selection::collapsed(PointUtf16::new(0, 1))], cx);
@@ -643,4 +645,148 @@ fn turning_hovers_off_hides_the_hover(cx: &mut TestAppContext) {
     });
     rest(cx, 0);
     assert!(!visible(&editor, cx));
+}
+
+// ----- Computing (#405): Monaco `HoverOperation` -----------------------------
+
+/// A hover that answers `text` after `ms`.
+struct SlowHover(u64, &'static str);
+impl HoverProvider for SlowHover {
+    fn provide_hover(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        cx: &mut App,
+    ) -> gpui::Task<anyhow::Result<Option<Hover>>> {
+        let timer = cx
+            .background_executor()
+            .timer(Duration::from_millis(self.0));
+        let text = self.1;
+        cx.foreground_executor().spawn(async move {
+            timer.await;
+            Ok(Some(Hover {
+                contents: vec![text.into()],
+                ..Default::default()
+            }))
+        })
+    }
+}
+
+fn flat_parts(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<String> {
+    parts(editor, cx).into_iter().flatten().collect()
+}
+
+/// Monaco `HoverOperation`: the providers are asked at half the delay, the
+/// decoration messages show at the delay, each provider's part as it
+/// arrives (before the decorations', by ordinal), and "Loading..." at three
+/// times the delay while one is still pending.
+#[gpui::test]
+fn hover_parts_stream_in_with_loading(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    cx.update(|cx| {
+        register_hover_provider(cx, LanguageSelector::All, SlowHover(2000, "slow"));
+        register_hover_provider(cx, LanguageSelector::All, SlowHover(400, "fast"));
+    });
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new("alpha beta gamma\n"));
+        CodeEditor::new(model, window, cx)
+    });
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    let id = editor.entity_id();
+    model.update(cx, |m, cx| {
+        m.delta_decorations(
+            Some(id),
+            &[],
+            vec![(
+                6..10,
+                DecorationOptions {
+                    hover_message: vec!["decoration".into()],
+                    ..Default::default()
+                },
+            )],
+            cx,
+        );
+    });
+    paint(cx);
+    let p = mouse_at(&editor, cx, 0, 7);
+    cx.simulate_mouse_move(p, None, Modifiers::default());
+    rest(cx, 250);
+    assert!(!visible(&editor, cx));
+    // The hover time: the decoration's message.
+    rest(cx, 100);
+    assert_eq!(flat_parts(&editor, cx), ["decoration"]);
+    // The fast provider answered at 150 + 400ms.
+    rest(cx, 250);
+    assert_eq!(flat_parts(&editor, cx), ["fast", "decoration"]);
+    // Three times the hover time.
+    rest(cx, 350);
+    assert_eq!(
+        flat_parts(&editor, cx),
+        ["fast", "decoration", "Loading..."]
+    );
+    // The slow provider answered at 150 + 2000ms.
+    rest(cx, 1300);
+    let mut all = flat_parts(&editor, cx);
+    assert_eq!(all.pop().as_deref(), Some("decoration"));
+    all.sort();
+    assert_eq!(all, ["fast", "slow"]);
+}
+
+/// Monaco: the keyboard's hover (`HoverStartMode.Immediate`) streams too,
+/// and never shows "Loading...".
+#[gpui::test]
+fn keyboard_hovers_stream_without_loading(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    cx.update(|cx| register_hover_provider(cx, LanguageSelector::All, SlowHover(2000, "slow")));
+    cx.update(|cx| register_hover_provider(cx, LanguageSelector::All, LongHover(1)));
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new("alpha beta gamma\n"));
+        CodeEditor::new(model, window, cx)
+    });
+    cx.update(|window, cx| window.focus(&editor.read(cx).focus_handle(cx), cx));
+    paint(cx);
+    cx.dispatch_action(gpui_monaco::actions::ShowHover::default());
+    rest(cx, 0);
+    assert_eq!(flat_parts(&editor, cx), ["line 0\n\n"]);
+    rest(cx, 1000);
+    assert_eq!(flat_parts(&editor, cx), ["line 0\n\n"]);
+    rest(cx, 1000);
+    let mut all = flat_parts(&editor, cx);
+    all.sort();
+    assert_eq!(all, ["line 0\n\n", "slow"]);
+}
+
+/// Monaco `ContentHoverController`'s `onDidShowContextMenu`: the hover
+/// goes, and none starts until the menu hides.
+#[gpui::test]
+fn no_hovers_while_the_context_menu_shows(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(HoverOptions::default(), 1, cx);
+    hover_beta(&editor, cx);
+    cx.update(|window, cx| {
+        editor.update(cx, |e, cx| e.show_context_menu(None, window, cx));
+    });
+    rest(cx, 0);
+    assert!(editor.read_with(cx, |e, _| e.is_context_menu_visible()));
+    assert!(!visible(&editor, cx));
+    let p = mouse_at(&editor, cx, 0, 13);
+    cx.simulate_mouse_move(p, None, Modifiers::default());
+    rest(cx, 1000);
+    assert!(!visible(&editor, cx));
+    editor.update(cx, |e, cx| e.hide_context_menu(cx));
+    let p = mouse_at(&editor, cx, 0, 1);
+    cx.simulate_mouse_move(p, None, Modifiers::default());
+    rest(cx, 400);
+    assert!(visible(&editor, cx));
+}
+
+/// Monaco's standalone `registerHoverProvider`: a hover without a range is
+/// about the word at the position, which the hover highlights.
+#[gpui::test]
+fn a_hover_without_a_range_highlights_the_word(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(HoverOptions::default(), 1, cx);
+    hover_beta(&editor, cx);
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.hover_highlight_for_tests(cx)),
+        Some(PointUtf16::new(0, 6)..PointUtf16::new(0, 10))
+    );
 }

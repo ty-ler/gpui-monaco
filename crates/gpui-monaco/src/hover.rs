@@ -10,6 +10,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use futures::future::LocalBoxFuture;
+use futures::stream::FuturesUnordered;
+use futures::{FutureExt as _, StreamExt as _};
+
 use gpui::{
     AppContext as _, Bounds, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     InteractiveElement, IntoElement, Modifiers, ParentElement, Pixels, Render, ScrollHandle, Size,
@@ -65,6 +69,9 @@ pub(crate) struct HoverState {
     /// The marker whose quick fixes were last asked for, and whether it had
     /// any (Monaco `MarkerHoverParticipant.recentMarkerCodeActionsInfo`).
     recent_marker_code_actions: Option<(crate::Marker, bool)>,
+    /// The visible card shows a partial result, still computing (Monaco
+    /// `ContentHoverResult.isComplete` off).
+    partial: bool,
 }
 
 /// A provider's hover, kept to ask it for more or less detail (Monaco
@@ -98,6 +105,10 @@ pub(crate) struct MarkdownHoverPart {
     /// The range it's about, for the `hoverHighlight` decoration (Monaco
     /// `IHoverPart.range`); `None` for parts that aren't about text.
     range: Option<Range<PointUtf16>>,
+    /// Where it goes among the markdown parts (Monaco `MarkdownHover.ordinal`):
+    /// a provider's index, [`SYNC_PART_ORDINAL`] on for decoration messages
+    /// and warnings, [`LOADING_PART_ORDINAL`] for "Loading...".
+    ordinal: usize,
 }
 
 impl MarkdownHoverPart {
@@ -107,9 +118,18 @@ impl MarkdownHoverPart {
             source: None,
             long_line_warning: false,
             range: None,
+            ordinal: 0,
         }
     }
 }
+
+/// Monaco `MarkdownHoverParticipant.computeSync`'s first ordinal: after the
+/// providers' parts.
+const SYNC_PART_ORDINAL: usize = 1000;
+/// Monaco `createLoadingMessage`'s ordinal: last.
+const LOADING_PART_ORDINAL: usize = 2000;
+/// Monaco's `modesContentHover.loading` message.
+const LOADING_MESSAGE: &str = "Loading...";
 
 /// Monaco's message when rendering stops on a long line.
 const STOPPED_RENDERING: &str = "Rendering paused for long line for performance reasons. This can be configured via `stop_rendering_line_after`.";
@@ -454,6 +474,81 @@ impl HoverContents {
     }
 }
 
+/// What a content hover operation waits for (Monaco `HoverOperation`'s
+/// schedulers and its async iterable).
+enum HoverEvent {
+    /// The hover time: compute the sync parts and show.
+    Sync,
+    /// Three times the hover time: show "Loading..." if still waiting.
+    Loading,
+    /// A provider's answer, with its index (the part's ordinal).
+    Provider(usize, Arc<dyn HoverProvider>, Option<Hover>),
+    /// The color picker hover part.
+    ColorPicker(Option<Entity<crate::ColorPickerWidget>>),
+}
+
+/// A content hover being computed (Monaco `HoverOperation` with the
+/// `ContentHoverComputer`): its result so far.
+#[derive(Default)]
+struct ContentHoverOperation {
+    position: PointUtf16,
+    /// The word at the position (or the empty range there).
+    word: Range<PointUtf16>,
+    /// Whether the hover time passed and the sync parts are in.
+    synced: bool,
+    /// The providers and color picker still to answer.
+    pending: usize,
+    /// Whether "Loading..." shows (`WaitingForAsyncShowingLoading`).
+    loading: bool,
+    markers: Vec<crate::Marker>,
+    sync_parts: Vec<MarkdownHoverPart>,
+    provider_parts: Vec<MarkdownHoverPart>,
+    /// The first provider's range, by ordinal.
+    provider_range: Option<(usize, Range<PointUtf16>)>,
+    color_picker: Option<Entity<crate::ColorPickerWidget>>,
+    unicode: Vec<crate::unicode_highlighter::UnicodeHover>,
+    toolbar: Option<Entity<crate::inline_completions::toolbar::InlineToolbar>>,
+}
+
+impl ContentHoverOperation {
+    /// Monaco's `Idle` state after the hover time: all answers are in.
+    fn is_complete(&self) -> bool {
+        self.synced && self.pending == 0
+    }
+
+    /// Monaco `MarkdownHoverParticipant._getMarkdownHovers`: provider
+    /// `ordinal`'s part.
+    fn add_provider_hover(
+        &mut self,
+        ordinal: usize,
+        provider: Arc<dyn HoverProvider>,
+        mut hover: Hover,
+    ) {
+        // Monaco's standalone `registerHoverProvider`: a hover without a
+        // range is about the word at the position, else the empty range
+        // there.
+        let range = hover.range.get_or_insert_with(|| self.word.clone()).clone();
+        if self
+            .provider_range
+            .as_ref()
+            .is_none_or(|(first, _)| ordinal < *first)
+        {
+            self.provider_range = Some((ordinal, range.clone()));
+        }
+        self.provider_parts.push(MarkdownHoverPart {
+            contents: hover.contents.clone(),
+            range: Some(range),
+            source: Some(HoverPartSource {
+                provider,
+                hover,
+                position: self.position,
+            }),
+            long_line_warning: false,
+            ordinal,
+        });
+    }
+}
+
 /// A marker's range on `row`, as Monaco's marker hover part has it
 /// (`MarkerHoverParticipant.computeSync`): clipped to the line.
 fn range_on_row(range: &Range<PointUtf16>, row: u32, line_len: u32) -> Range<PointUtf16> {
@@ -547,7 +642,8 @@ impl Render for HoverWidget {
             let label = self.part_accessible_content(*part);
             let focus = self.part_focus(index, cx);
             // Monaco `.hover-row:not(:first-child):not(:empty)`: a top
-            // border across the card's full width. A focused row has the
+            // border across the card's full width, in the hover border at
+            // half alpha (`hoverContribution.ts`). A focused row has the
             // focus outline (`[tabindex="0"]:focus`, inset by its width).
             rows.push(
                 div()
@@ -558,7 +654,8 @@ impl Render for HoverWidget {
                     .aria_label(gpui::SharedString::from(label))
                     .relative()
                     .when(index > 0, |this| {
-                        this.border_t_1().border_color(colors.hover_border)
+                        this.border_t_1()
+                            .border_color(colors.hover_border.opacity(0.5))
                     })
                     .child(row)
                     .when(focused, |this| {
@@ -1511,6 +1608,7 @@ impl CodeEditor {
             source: None,
             long_line_warning: true,
             range: Some(position..position),
+            ordinal: 0,
         }]
     }
 
@@ -1694,6 +1792,13 @@ impl CodeEditor {
         self.hover.glyph = None;
         self.hover.from_keyboard = false;
         self.hover.inlay = None;
+        self.hide_hover_card(cx);
+    }
+
+    /// Removes the card and its highlight, leaving what it's about and a
+    /// pending hover (Monaco `ContentHoverWidgetWrapper._hideHover`).
+    fn hide_hover_card(&mut self, cx: &mut Context<Self>) {
+        self.hover.partial = false;
         if let Some(mut highlight) = self.hover.highlight.take() {
             highlight.clear(cx);
         }
@@ -1705,7 +1810,7 @@ impl CodeEditor {
     /// Monaco `ContentHoverController.hideContentHover`: hides the hover
     /// for mouse moves, clicks, scrolls and keys, unless the inline
     /// suggestion toolbar's "⋯" menu shows (`dropDownVisible`).
-    fn hide_content_hover(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn hide_content_hover(&mut self, cx: &mut Context<Self>) {
         if self.inline_toolbar_menu_visible() {
             return;
         }
@@ -1741,9 +1846,20 @@ impl CodeEditor {
         position: gpui::Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
+        if self.ignores_hover_mouse() {
+            return;
+        }
         if self.hover_active() && !self.mouse_keeps_hover(Some(position), cx) {
             self.hide_content_hover(cx);
         }
+    }
+
+    /// Monaco `ContentHoverController._ignoreMouseEvents`: while a context
+    /// menu shows (from `onDidShowContextMenu`, which hid the hover, to
+    /// `onDidHideContextMenu`), the mouse and scrolling don't touch the
+    /// hover.
+    fn ignores_hover_mouse(&self) -> bool {
+        self.is_context_menu_visible()
     }
 
     /// Monaco `_onEditorMouseLeave`: the mouse left the editor at
@@ -1754,6 +1870,9 @@ impl CodeEditor {
         position: Option<gpui::Point<Pixels>>,
         cx: &mut Context<Self>,
     ) {
+        if self.ignores_hover_mouse() {
+            return;
+        }
         self.hover.hiding = None;
         // A drag (the card's scrollbar, say) has the pointer captured, which
         // Monaco's editor doesn't see leave.
@@ -1766,7 +1885,7 @@ impl CodeEditor {
     /// when the scroll position changed, maybe while painting, so it hides
     /// after.
     pub(crate) fn hover_scrolled(&mut self, cx: &mut Context<Self>) {
-        if self.hover_active() {
+        if self.hover_active() && !self.ignores_hover_mouse() {
             let editor = cx.weak_entity();
             cx.defer(move |cx| {
                 editor
@@ -1953,52 +2072,7 @@ impl CodeEditor {
         let position = self.cursors.primary().position;
         self.hide_hover(cx);
         self.hover.from_keyboard = true;
-        let config = self.cursor_config(cx);
-        let range =
-            cursor::word_at(&config, self.snapshot.rope(), position).unwrap_or(position..position);
-        let (markers, mut parts, tasks) = self.hover_requests(position, cx);
-        let picker = self.color_picker_request(position, HoverSource::Keyboard, cx);
-        self.hover.range = Some(range.clone());
-        self.hover.task = Some(cx.spawn(async move |this, cx| {
-            let picker = match picker {
-                Some(task) => task.await,
-                None => None,
-            };
-            let mut hover_range = None;
-            for (provider, task) in tasks {
-                if let Ok(Some(hover)) = task.await
-                    && is_valid_hover(&hover)
-                {
-                    hover_range = hover_range.or(hover.range.clone());
-                    parts.push(MarkdownHoverPart {
-                        contents: hover.contents.clone(),
-                        range: Some(hover.range.clone().unwrap_or(position..position)),
-                        source: Some(HoverPartSource {
-                            provider,
-                            hover,
-                            position,
-                        }),
-                        long_line_warning: false,
-                    });
-                }
-            }
-            this.update(cx, |this, cx| {
-                let unicode = this.unicode_hovers_at(position, cx);
-                let toolbar = this.inline_toolbar_hover(position, cx);
-                let contents = HoverContents {
-                    markers,
-                    parts,
-                    color_picker: picker,
-                    unicode,
-                };
-                if !contents.is_empty() || toolbar.is_some() {
-                    let range = hover_range.unwrap_or(range);
-                    this.show_hover(position, range, contents, cx);
-                    this.set_hover_inline_toolbar(toolbar, cx);
-                }
-            })
-            .ok();
-        }));
+        self.start_content_hover(position, None, HoverSource::Keyboard, cx);
     }
 
     /// Monaco `ContentHoverController._onEditorMouseMove`: on mouse moves
@@ -2013,6 +2087,9 @@ impl CodeEditor {
         modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) {
+        if self.ignores_hover_mouse() {
+            return;
+        }
         self.hover.last_mouse = Some((target, modifiers));
         // Off an inlay hint's part.
         if self.hover.inlay.is_some() && !over_hover && !hover_focused {
@@ -2033,9 +2110,11 @@ impl CodeEditor {
         }
         // Monaco `_shouldRescheduleHoverComputation`: a grace period for
         // the mouse to reach a sticky hover.
+        // Monaco's glyph hover has none (`GlyphHoverController`).
         if visible
             && options.sticky
             && !options.hiding_delay.is_zero()
+            && self.hover.glyph.is_none()
             && !self.mouse_in_hover(target)
         {
             if self.hover.hiding.is_none() {
@@ -2141,68 +2220,185 @@ impl CodeEditor {
         delay: Duration,
         cx: &mut Context<Self>,
     ) {
+        self.start_content_hover(position, Some(delay), HoverSource::Mouse, cx);
+    }
+
+    /// Monaco `HoverOperation` with the `ContentHoverComputer`, started
+    /// after `delay` for the mouse (`HoverStartMode.Delayed`) or at once
+    /// (`None`, `Immediate`): the providers and the color picker are asked
+    /// at half the delay (`computeAsync`), the markers, decoration messages
+    /// and other parts are computed at the delay (`computeSync`) and shown,
+    /// with each provider's part as it arrives. A delayed hover still
+    /// waiting at three times the delay shows "Loading..." until done.
+    fn start_content_hover(
+        &mut self,
+        position: PointUtf16,
+        delay: Option<Duration>,
+        source: HoverSource,
+        cx: &mut Context<Self>,
+    ) {
         let config = self.cursor_config(cx);
-        let range =
+        let word =
             cursor::word_at(&config, self.snapshot.rope(), position).unwrap_or(position..position);
-        self.hover.range = Some(range.clone());
+        self.hover.range = Some(word.clone());
         self.hover.task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(delay).await;
-            let Ok(requests) = this.update(cx, |this, cx| {
-                let requests = this.hover_requests(position, cx);
-                let picker = this.color_picker_request(position, HoverSource::Mouse, cx);
-                (requests, picker)
+            let executor = cx.background_executor().clone();
+            let mut events: FuturesUnordered<LocalBoxFuture<'static, HoverEvent>> =
+                FuturesUnordered::new();
+            if let Some(delay) = delay {
+                // Monaco `_firstWaitTime`, then `_secondWaitTime` and
+                // `_loadingMessageTime` from the start.
+                let first = delay / 2;
+                executor.timer(first).await;
+                events.push(
+                    executor
+                        .timer(delay - first)
+                        .map(|_| HoverEvent::Sync)
+                        .boxed_local(),
+                );
+                events.push(
+                    executor
+                        .timer(delay * 3 - first)
+                        .map(|_| HoverEvent::Loading)
+                        .boxed_local(),
+                );
+            }
+            let Ok(mut operation) = this.update(cx, |this, cx| {
+                let tasks = this.hover_provider_requests(position, cx);
+                let picker = this.color_picker_request(position, source, cx);
+                let mut operation = ContentHoverOperation {
+                    position,
+                    word: word.clone(),
+                    pending: tasks.len() + usize::from(picker.is_some()),
+                    ..Default::default()
+                };
+                for (ordinal, (provider, task)) in tasks.into_iter().enumerate() {
+                    events.push(
+                        async move {
+                            HoverEvent::Provider(ordinal, provider, task.await.ok().flatten())
+                        }
+                        .boxed_local(),
+                    );
+                }
+                if let Some(picker) = picker {
+                    events.push(picker.map(HoverEvent::ColorPicker).boxed_local());
+                }
+                if delay.is_none() {
+                    this.compute_sync_hover(&mut operation, cx);
+                    this.show_content_hover_result(&operation, cx);
+                }
+                operation
             }) else {
                 return;
             };
-            let ((markers, mut parts, tasks), picker) = requests;
-            let picker = match picker {
-                Some(task) => task.await,
-                None => None,
-            };
-            let mut hover_range = None;
-            for (provider, task) in tasks {
-                if let Ok(Some(hover)) = task.await
-                    && is_valid_hover(&hover)
-                {
-                    hover_range = hover_range.or(hover.range.clone());
-                    parts.push(MarkdownHoverPart {
-                        contents: hover.contents.clone(),
-                        range: Some(hover.range.clone().unwrap_or(position..position)),
-                        source: Some(HoverPartSource {
-                            provider,
-                            hover,
-                            position,
-                        }),
-                        long_line_warning: false,
-                    });
-                }
-            }
-            this.update(cx, |this, cx| {
-                let unicode = this.unicode_hovers_at(position, cx);
-                let toolbar = this.inline_toolbar_hover(position, cx);
-                let contents = HoverContents {
-                    markers,
-                    parts,
-                    color_picker: picker,
-                    unicode,
+            while !operation.is_complete() {
+                let Some(event) = events.next().await else {
+                    return;
                 };
-                if contents.is_empty() && toolbar.is_none() {
-                    // Monaco `_withResult`: an adopted hover goes once the
-                    // new anchor's hover turns out empty. The range stays,
-                    // so moving inside it doesn't ask again.
-                    if this.hover.widget.is_some() {
-                        let range = this.hover.range.take();
-                        this.hide_hover(cx);
-                        this.hover.range = range;
+                let updated = this.update(cx, |this, cx| {
+                    match event {
+                        HoverEvent::Sync => this.compute_sync_hover(&mut operation, cx),
+                        // Monaco `_triggerLoadingMessage`: only while waiting
+                        // for the providers after the hover time.
+                        HoverEvent::Loading => {
+                            if !operation.synced {
+                                return;
+                            }
+                            operation.loading = true;
+                        }
+                        HoverEvent::Provider(ordinal, provider, hover) => {
+                            operation.pending -= 1;
+                            if let Some(hover) = hover.filter(is_valid_hover) {
+                                operation.add_provider_hover(ordinal, provider, hover);
+                            }
+                        }
+                        HoverEvent::ColorPicker(picker) => {
+                            operation.pending -= 1;
+                            operation.color_picker = picker;
+                        }
                     }
+                    // Monaco `_fireResult`: nothing before the hover time.
+                    if operation.synced {
+                        this.show_content_hover_result(&operation, cx);
+                    }
+                });
+                if updated.is_err() {
                     return;
                 }
-                let range = hover_range.unwrap_or(range);
-                this.show_hover(position, range, contents, cx);
-                this.set_hover_inline_toolbar(toolbar, cx);
-            })
-            .ok();
+            }
         }));
+    }
+
+    /// Monaco `ContentHoverComputer.computeSync` at the hover time: the
+    /// markers, long line warnings and decoration hover messages, unicode
+    /// parts and the inline suggestion toolbar at the operation's position.
+    fn compute_sync_hover(
+        &mut self,
+        operation: &mut ContentHoverOperation,
+        cx: &mut Context<Self>,
+    ) {
+        let position = operation.position;
+        let (markers, parts) = self.hover_sync_parts(position, cx);
+        operation.markers = markers;
+        operation.sync_parts = parts;
+        operation.unicode = self.unicode_hovers_at(position, cx);
+        operation.toolbar = self.inline_toolbar_hover(position, cx);
+        operation.synced = true;
+    }
+
+    /// Monaco `ContentHoverWidgetWrapper._withResult` and
+    /// `_setCurrentResult`: shows the operation's parts so far, unless a
+    /// complete hover shows and this result isn't complete yet (an adopted
+    /// hover stays until the new one is done). An empty result hides the
+    /// card; the range stays, so moving inside it doesn't ask again.
+    fn show_content_hover_result(
+        &mut self,
+        operation: &ContentHoverOperation,
+        cx: &mut Context<Self>,
+    ) {
+        let complete = operation.is_complete();
+        let previous_complete = self.hover.widget.is_some() && !self.hover.partial;
+        if previous_complete && !complete {
+            return;
+        }
+        let mut parts: Vec<MarkdownHoverPart> = operation
+            .provider_parts
+            .iter()
+            .chain(&operation.sync_parts)
+            .cloned()
+            .collect();
+        // Monaco `_addLoadingMessage`: the markdown participant's
+        // `createLoadingMessage`, about the hovered character.
+        if operation.loading && !complete {
+            let position = operation.position;
+            let rope = self.snapshot.rope();
+            let line_len = rope.line_len_utf16(position.row.min(rope.max_point().row));
+            let end = (position.column + 1).min(line_len).max(position.column);
+            parts.push(MarkdownHoverPart {
+                range: Some(position..PointUtf16::new(position.row, end)),
+                ordinal: LOADING_PART_ORDINAL,
+                ..MarkdownHoverPart::new(vec![LOADING_MESSAGE.into()])
+            });
+        }
+        // Monaco `MarkdownRenderedHoverParts._renderHoverParts`.
+        parts.sort_by_key(|part| part.ordinal);
+        let contents = HoverContents {
+            markers: operation.markers.clone(),
+            parts,
+            color_picker: operation.color_picker.clone(),
+            unicode: operation.unicode.clone(),
+        };
+        if contents.is_empty() && operation.toolbar.is_none() {
+            self.hide_hover_card(cx);
+            return;
+        }
+        let range = operation
+            .provider_range
+            .as_ref()
+            .map_or_else(|| operation.word.clone(), |(_, range)| range.clone());
+        self.show_hover(operation.position, range, contents, cx);
+        self.set_hover_inline_toolbar(operation.toolbar.clone(), cx);
+        self.hover.partial = !complete;
     }
 
     /// Monaco `ContentHoverWidgetWrapper._startShowingOrUpdateHover` for the
@@ -2271,8 +2467,25 @@ impl CodeEditor {
             parts,
             ..Default::default()
         };
+        // Monaco `ContentHoverResult.filter` keeps `isComplete`.
+        let partial = self.hover.partial;
         self.show_hover(anchor, range, contents, cx);
+        self.hover.partial = partial;
         true
+    }
+
+    /// Monaco `GlyphHoverWidget._onModelDecorationsChanged`: a visible glyph
+    /// hover is computed again for its line and lane, after the hover delay
+    /// (staying meanwhile), and goes if nothing is left to show.
+    pub(crate) fn hover_decorations_changed(&mut self, cx: &mut Context<Self>) {
+        if self.hover.widget.is_none() {
+            return;
+        }
+        let Some((row, target)) = self.hover.glyph else {
+            return;
+        };
+        let delay = self.options.hover.delay;
+        self.schedule_gutter_hover(row, target, delay, cx);
     }
 
     /// Monaco `GlyphHoverWidget._startShowingAt`: after `delay`, the hover
@@ -2290,7 +2503,12 @@ impl CodeEditor {
             cx.background_executor().timer(delay).await;
             this.update(cx, |this, cx| {
                 let messages = this.glyph_hover_messages(row, target, cx);
+                // Monaco `GlyphHoverWidget._withResult`: nothing to show
+                // hides a visible card.
                 if messages.is_empty() {
+                    if this.hover.widget.is_some() {
+                        this.hide_hover(cx);
+                    }
                     return;
                 }
                 let start = PointUtf16::new(row, 0);
@@ -2363,7 +2581,7 @@ impl CodeEditor {
         part: crate::inlay_hints::InlayHintPart,
         cx: &mut Context<Self>,
     ) {
-        if self.hover.inlay == Some(part) {
+        if self.hover.inlay == Some(part) || self.ignores_hover_mouse() {
             return;
         }
         self.hide_hover(cx);
@@ -2431,18 +2649,14 @@ impl CodeEditor {
             .unwrap_or_default()
     }
 
-    /// Markers and decoration hover messages at `position`, plus provider
-    /// requests.
-    #[allow(clippy::type_complexity)]
-    fn hover_requests(
+    /// Monaco `computeSync` of the marker and markdown participants: the
+    /// markers at `position`, then its long line warnings and decoration
+    /// hover messages, ordered after the providers' parts.
+    fn hover_sync_parts(
         &mut self,
         position: PointUtf16,
         cx: &mut Context<Self>,
-    ) -> (
-        Vec<crate::Marker>,
-        Vec<MarkdownHoverPart>,
-        ProviderHoverTasks,
-    ) {
+    ) -> (Vec<crate::Marker>, Vec<MarkdownHoverPart>) {
         let offset = self.snapshot.point_utf16_to_offset(position);
         // Monaco's marker hover part comes first.
         let markers = if self.shows_validation_decorations() {
@@ -2455,17 +2669,29 @@ impl CodeEditor {
         let mut parts = self.long_line_warnings(position, cx);
         let decorations = self.line_decoration_hovers(position, cx);
         parts.extend(decorations);
+        for (index, part) in parts.iter_mut().enumerate() {
+            part.ordinal = SYNC_PART_ORDINAL + index;
+        }
+        (markers, parts)
+    }
+
+    /// Monaco `MarkdownHoverParticipant.computeAsync`: asks each hover
+    /// provider about `position`, in registry order.
+    fn hover_provider_requests(
+        &mut self,
+        position: PointUtf16,
+        cx: &mut Context<Self>,
+    ) -> ProviderHoverTasks {
         let model = self.model().read(cx);
         let context = model.provider_context();
         let providers = hover_providers(cx, self.provider_target(cx));
-        let tasks = providers
+        providers
             .into_iter()
             .map(|provider| {
                 let task = provider.provide_hover(&context, position, cx);
                 (provider, task)
             })
-            .collect();
-        (markers, parts, tasks)
+            .collect()
     }
 
     /// Monaco `ContentHoverComputer._getLineDecorations` and
@@ -2636,7 +2862,12 @@ impl CodeEditor {
         let highlight = self
             .hover_highlight_range(anchor.row, &markers, &parts, &color_picker, cx)
             .filter(|_| beside.is_none());
-        let style = self.markdown_style();
+        // Monaco `.monaco-editor .monaco-hover hr`: the hover border at half
+        // alpha (`hoverContribution.ts`).
+        let style = MarkdownStyle {
+            separator: self.theme.colors.hover_border.opacity(0.5),
+            ..self.markdown_style()
+        };
         let theme = self.theme.clone();
         let status_marker = most_severe(&markers).cloned();
         // Monaco forgets whether another marker had quick fixes.
@@ -2769,6 +3000,7 @@ impl CodeEditor {
         });
         self.hover.range = Some(range);
         self.hover.widget = Some((widget, id));
+        self.hover.partial = false;
     }
 
     /// Monaco `computeHoverPositions`' secondary position: the start of the

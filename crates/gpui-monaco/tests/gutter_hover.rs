@@ -398,3 +398,89 @@ fn gutter_hovers_show_beside_the_gutter(cx: &mut TestAppContext) {
         .expect("painted");
     assert_eq!(card.top(), top);
 }
+
+fn glyph_message(text: &str) -> DecorationOptions {
+    DecorationOptions {
+        glyph: Some(("●".into(), gpui::red())),
+        glyph_margin_hover_message: message(text),
+        ..Default::default()
+    }
+}
+
+fn contents(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<String> {
+    editor.read_with(cx, |e, cx| e.hover_contents_for_tests(cx))
+}
+
+/// Monaco `GlyphHoverWidget._onModelDecorationsChanged`: a visible glyph
+/// hover is computed again after the hover delay when decorations change,
+/// and goes once its line and lane have nothing left to show.
+#[gpui::test]
+fn a_visible_glyph_hover_follows_decoration_changes(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(cx);
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    let id = editor.entity_id();
+    let ids = model.update(cx, |m, cx| {
+        m.delta_decorations(
+            Some(id),
+            &[],
+            vec![(offset(1, 0)..offset(1, 0), glyph_message("old"))],
+            cx,
+        )
+    });
+    paint(cx);
+    let (glyph_left, _, _) = gutter(&editor, cx);
+    let y = text_point(&editor, cx, 1, 0).y;
+    assert_eq!(
+        hover_at(&editor, cx, gpui::point(glyph_left + px(4.), y)),
+        ["old"]
+    );
+    let ids = model.update(cx, |m, cx| {
+        m.delta_decorations(
+            Some(id),
+            &ids,
+            vec![(offset(1, 0)..offset(1, 0), glyph_message("new"))],
+            cx,
+        )
+    });
+    // The card stays until the hover delay passed.
+    rest(cx, 100);
+    assert_eq!(contents(&editor, cx), ["old"]);
+    rest(cx, 250);
+    assert_eq!(contents(&editor, cx), ["new"]);
+    model.update(cx, |m, cx| {
+        m.delta_decorations(Some(id), &ids, Vec::new(), cx);
+    });
+    rest(cx, 400);
+    assert!(!editor.read_with(cx, |e, _| e.is_hover_visible()));
+}
+
+/// Monaco's glyph hover has no hiding delay: another row's glyph hides the
+/// card at once and shows its own after the hover delay.
+#[gpui::test]
+fn moving_between_glyph_rows_skips_the_hiding_delay(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(cx);
+    decorate(
+        &editor,
+        cx,
+        vec![
+            (offset(1, 0)..offset(1, 0), glyph_message("one")),
+            (offset(2, 0)..offset(2, 0), glyph_message("two")),
+        ],
+    );
+    let (glyph_left, _, _) = gutter(&editor, cx);
+    let y = text_point(&editor, cx, 1, 0).y;
+    assert_eq!(
+        hover_at(&editor, cx, gpui::point(glyph_left + px(4.), y)),
+        ["one"]
+    );
+    let y = text_point(&editor, cx, 2, 0).y;
+    cx.simulate_mouse_move(
+        gpui::point(glyph_left + px(4.), y),
+        None,
+        Modifiers::default(),
+    );
+    rest(cx, 0);
+    assert!(!editor.read_with(cx, |e, _| e.is_hover_visible()));
+    rest(cx, 350);
+    assert_eq!(contents(&editor, cx), ["two"]);
+}
