@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Diff editor unchanged regions (#352):** hidden unchanged regions merge, drag and keep the scroll position like Monaco's (audit 3 §E.7–§E.10).
+  - **Merging:** regions whose hidden lines touch become one region with one "N hidden lines" bar, as Monaco's "collapse touching unchanged ranges" does. Before, reverting a change and then collapsing all regions could stack two bars.
+  - **Dragging:** a bar stays while its edge is dragged, even once every line shows, and goes when the mouse is released (Monaco `shouldHideControls` with `isDragged`).
+  - **Scroll anchor:** showing or hiding lines from a bar's bottom edge keeps the code below in place by adding up the view lines shown, so wrapped lines count each part (Monaco `_runWithLowerScrollAnchor`), and a click that shows the rest also accounts for the bar going away.
+  - **Bars between changes:** a bar whose next line is hidden shows again (Monaco's `PlaceholderViewZone` has `showInHiddenAreas`); only the first bar showed. `MultiDiffEditor::reveal_range` and the other line reveals wait for the hidden lines to lay out, so they center the right line now that those bars take room.
+  - **Bar edges:** the top and bottom edges are Monaco's 4px bands straddling the bar's top and bottom, with a 10px hit area reaching past the bar, and the dragged edge stays highlighted for the whole drag.
 - **Go to definition and navigation (#350):** link clicks, the definition link, F12 through results and the selection anchor follow Monaco (audit 3 §H.8, §D.33–§D.35).
   - **Clicks on mouse-up:** Cmd/Ctrl+click on a link, a symbol or an inlay hint part, and the middle click with `mouse_middle_click_action` `OpenLink` or `CtrlLeftClick`, act when the button comes up on the line it went down on, with the modifier held since the press (Monaco's `ClickLinkGesture`). Before, they acted on mouse-down and skipped the click. Now the press places the cursor (or column-selects for the middle button) as usual, so Cmd/Ctrl+drag selects, and a drag, a selection, a scroll, an edit or a new model in between cancels the gesture and removes the Cmd/Ctrl+hover links. A Cmd/Ctrl+click goes to the definition whenever a definition provider applies, even before the link shows.
   - **Link color:** the Cmd/Ctrl+hover definition link is underlined in `editorLink.activeForeground` (#4E94CE in the dark theme), not `inputOption.activeBorder`.

@@ -263,6 +263,37 @@ impl UnchangedRegion {
     }
 }
 
+/// Monaco's "collapse touching unchanged ranges" autorun: regions whose
+/// hidden ranges touch become one, with the first's visible top and the
+/// last's visible bottom, so one bar shows where they meet. `None` when
+/// none touch.
+pub(crate) fn merge_touching(regions: &[UnchangedRegion]) -> Option<Vec<UnchangedRegion>> {
+    let touches = |a: &UnchangedRegion, b: &UnchangedRegion| {
+        a.hidden_modified_range().end_line_number_exclusive
+            == b.hidden_modified_range().start_line_number
+    };
+    if !regions.windows(2).any(|w| touches(&w[0], &w[1])) {
+        return None;
+    }
+    let mut result: Vec<UnchangedRegion> = Vec::with_capacity(regions.len());
+    // Monaco's `groupAdjacentBy`: each region against the previous one.
+    for (i, r) in regions.iter().enumerate() {
+        match result.last_mut() {
+            Some(group) if i > 0 && touches(&regions[i - 1], r) => {
+                *group = UnchangedRegion::new(
+                    group.original_line_number,
+                    group.modified_line_number,
+                    group.line_count + r.line_count,
+                    group.visible_top,
+                    r.visible_bottom,
+                );
+            }
+            _ => result.push(r.clone()),
+        }
+    }
+    Some(result)
+}
+
 /// Monaco's state transfer in `updateUnchangedRegions`: new regions keep
 /// what the user revealed in `previous` (with their ranges as of now).
 pub(crate) fn transfer_state(
@@ -388,5 +419,46 @@ mod tests {
         );
         let regions = transfer_state(regions, &previous, 100, 100);
         assert_eq!(regions[0].hidden_modified_range().to_string(), "[1,37)");
+    }
+
+    /// Monaco's "collapse touching unchanged ranges": a region split around
+    /// what was visible merges back once its parts' hidden ranges touch.
+    #[test]
+    fn touching_regions_merge() {
+        // The change at line 50 is reverted while lines 47..54 were
+        // visible: the new region splits around them.
+        let previous = UnchangedRegion::from_diffs(&[change((50, 51), (50, 51))], 100, 100, 3, 3);
+        let regions = UnchangedRegion::from_diffs(&[], 100, 100, 3, 3);
+        let mut regions = transfer_state(regions, &previous, 100, 100);
+        assert_eq!(
+            serialize(&regions),
+            ["[1,47) - [1,47)", "[47,101) - [47,101)"]
+        );
+        // Parts that don't touch stay apart.
+        assert_eq!(merge_touching(&regions), None);
+        // Collapsing them makes the hidden ranges touch.
+        regions.iter_mut().for_each(UnchangedRegion::collapse_all);
+        let merged = merge_touching(&regions).unwrap();
+        assert_eq!(serialize(&merged), ["[1,101) - [1,101)"]);
+        assert_eq!((merged[0].visible_top, merged[0].visible_bottom), (0, 0));
+    }
+
+    #[test]
+    fn merging_keeps_the_outer_visible_lines() {
+        let regions = [
+            UnchangedRegion::new(1, 1, 10, 2, 0),
+            UnchangedRegion::new(11, 11, 10, 0, 0),
+            UnchangedRegion::new(21, 21, 10, 0, 4),
+            // Revealed at its top: doesn't touch.
+            UnchangedRegion::new(31, 31, 10, 1, 0),
+            UnchangedRegion::new(50, 52, 5, 0, 0),
+        ];
+        let merged = merge_touching(&regions).unwrap();
+        assert_eq!(
+            serialize(&merged),
+            ["[1,31) - [1,31)", "[31,41) - [31,41)", "[50,55) - [52,57)"]
+        );
+        assert_eq!((merged[0].visible_top, merged[0].visible_bottom), (2, 4));
+        assert_eq!(merged[0].hidden_modified_range().to_string(), "[3,27)");
     }
 }

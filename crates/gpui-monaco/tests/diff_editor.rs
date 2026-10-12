@@ -2083,3 +2083,154 @@ fn realignment_keeps_the_modified_side_still(cx: &mut TestAppContext) {
     assert_eq!(first_visible(cx), row);
     assert_eq!(top_of(row, cx), top);
 }
+
+/// Monaco's "collapse touching unchanged ranges": a region split around
+/// lines that were visible merges back once its parts touch, so one bar
+/// shows.
+#[gpui::test]
+fn touching_unchanged_regions_merge(cx: &mut TestAppContext) {
+    let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let modified = original
+        .replace("line 20\n", "changed\n")
+        .replace("line 50\n", "changed too\n");
+    let (diff, cx) = setup(&original, &modified, cx);
+    hide_unchanged(&diff, cx);
+    let hidden = |cx: &mut VisualTestContext| {
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests())
+    };
+    assert_eq!(hidden(cx), vec![1..18, 25..48, 55..102]);
+    // Reverting the first change keeps the lines around it visible: the
+    // new region splits around them.
+    let model = diff.read_with(cx, |d, cx| d.modified_editor().read(cx).model().clone());
+    model.update(cx, |m, cx| {
+        let offset = m.text().find("changed\n").unwrap();
+        m.edit([(offset..offset + 7, "line 20")], cx).unwrap();
+    });
+    recompute(cx);
+    // (The edit's cursor at line 1 also shows that line.)
+    assert_eq!(hidden(cx)[1..], [25..48, 55..102]);
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.unchanged_bars_for_tests()),
+        (3, 3)
+    );
+    // Collapsing makes the parts touch: they merge, with one bar.
+    diff.update(cx, |d, cx| d.collapse_all_unchanged_regions(cx));
+    paint(cx);
+    assert_eq!(hidden(cx), vec![1..48, 55..102]);
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.unchanged_bars_for_tests()),
+        (2, 2)
+    );
+}
+
+/// Monaco `shouldHideControls` is false while the bar is dragged: a drag
+/// that shows every line keeps the bar until the mouse is released. The
+/// edges are 10px bands straddling the bar's top and bottom.
+#[gpui::test]
+fn a_dragged_bar_stays_until_released(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let original: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    let modified = original.replace("line 35\n", "changed\n");
+    let (diff, cx) = setup(&original, &modified, cx);
+    cx.simulate_resize(gpui::size(px(1230.), px(600.)));
+    hide_unchanged(&diff, cx);
+    paint(cx);
+    let bars = |cx: &mut VisualTestContext| diff.read_with(cx, |d, _| d.unchanged_bars_for_tests());
+    assert_eq!(bars(cx), (1, 1));
+    let top = cx.debug_bounds("unchanged-top").expect("a bar's top edge");
+    let bottom = cx
+        .debug_bounds("unchanged-bottom")
+        .expect("a bar's bottom edge");
+    // Monaco's `.top`/`.bottom`: 6px above the bar's top to 4px below it,
+    // and 6px above its bottom to 4px below.
+    assert_eq!(top.size.height, px(10.));
+    assert_eq!(bottom.size.height, px(10.));
+    assert_eq!(bottom.top() - top.top(), px(24.));
+    let (_, modified_editor) = editors(&diff, cx);
+    let line_height = modified_editor.read_with(cx, |e, _| e.options().resolved_line_height());
+    // The bar is at the top: grab its top edge's lower half.
+    let start = point(px(300.), top.top() + px(8.));
+    cx.simulate_mouse_move(start, None, Modifiers::default());
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+    paint(cx);
+    cx.simulate_mouse_move(
+        point(start.x, start.y + line_height * 40.),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    paint(cx);
+    assert!(diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests().is_empty()));
+    assert_eq!(bars(cx), (1, 1));
+    assert_eq!(diff.read_with(cx, |d, _| d.fold_glyphs_for_tests()), (0, 0));
+    cx.simulate_mouse_up(
+        point(start.x, start.y + line_height * 40.),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    paint(cx);
+    assert_eq!(bars(cx), (0, 0));
+    assert_eq!(diff.read_with(cx, |d, _| d.fold_glyphs_for_tests()), (1, 1));
+}
+
+/// Monaco `_runWithLowerScrollAnchor` measures the anchor's top, so with
+/// word wrap the lines below a bar stay put as wrapped lines show. (Inline,
+/// so no padding for the other side's wrapping comes after.)
+#[gpui::test]
+fn the_lower_scroll_anchor_counts_wrapped_lines(cx: &mut TestAppContext) {
+    let long = "x ".repeat(200);
+    let original: String = (0..60).map(|i| format!("line {i} {long}\n")).collect();
+    let modified = original.replace(&format!("line 50 {long}\n"), "changed\n");
+    let (diff, cx) = setup(&original, &modified, cx);
+    cx.simulate_resize(gpui::size(px(1230.), px(600.)));
+    update_options(&diff, cx, |o| {
+        o.diff_word_wrap = gpui_monaco::options::WordWrapOverride::On;
+        o.render_side_by_side = false;
+    });
+    hide_unchanged(&diff, cx);
+    paint(cx);
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests())[0],
+        1..48
+    );
+    let (_, modified_editor) = editors(&diff, cx);
+    let line_height = modified_editor.read_with(cx, |e, _| e.options().resolved_line_height());
+    // Line 48, the first after the region.
+    let anchor = |cx: &mut VisualTestContext| {
+        modified_editor.read_with(cx, |e, _| {
+            e.top_for_line_number(47, false).unwrap() - e.scroll_position().y
+        })
+    };
+    let (before, scroll_before) = (
+        anchor(cx),
+        modified_editor.read_with(cx, |e, _| e.scroll_position().y),
+    );
+    diff.update(cx, |d, cx| {
+        d.drag_unchanged_for_tests(0, false, px(100.), px(100.) - line_height * 2., cx)
+    });
+    paint(cx);
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests())[0],
+        1..46
+    );
+    let scrolled = modified_editor.read_with(cx, |e, _| e.scroll_position().y) - scroll_before;
+    // The two lines shown wrap.
+    assert!(scrolled > line_height * 4., "{scrolled:?}");
+    assert_eq!(anchor(cx), before);
+}
+
+/// Monaco's `PlaceholderViewZone` has `showInHiddenAreas`: a bar between
+/// two changes shows, though the line after it is hidden.
+#[gpui::test]
+fn bars_between_changes_show(cx: &mut TestAppContext) {
+    let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let modified = original.replace("line 50\n", "changed\n");
+    let (diff, cx) = setup(&original, &modified, cx);
+    cx.simulate_resize(gpui::size(px(1230.), px(600.)));
+    hide_unchanged(&diff, cx);
+    paint(cx);
+    // The last bar painted is the second region's, after line 54.
+    let (_, modified_editor) = editors(&diff, cx);
+    let line_height = modified_editor.read_with(cx, |e, _| e.options().resolved_line_height());
+    let top = cx.debug_bounds("unchanged-top").expect("a bar's top edge");
+    assert!(top.top() > line_height * 7., "{top:?}");
+}

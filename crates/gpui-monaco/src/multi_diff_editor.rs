@@ -1816,6 +1816,11 @@ impl MultiDiffEditor {
             diff.modified_editor()
         }
         .read(cx);
+        // The hidden unchanged lines lay out on the next frame: measure
+        // once they have.
+        if editor.view_lines.hidden() != editor.hidden_areas() {
+            return;
+        }
         let (Some(top), Some(bottom)) = (
             editor.top_for_line_number(row, true),
             editor.bottom_for_line_number(row, false),
