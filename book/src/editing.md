@@ -58,7 +58,7 @@ Undo is operation-based and per model.
 
 ## Find and replace
 
-Cmd+F opens the find widget, and Cmd+Alt+F (Ctrl+H elsewhere) opens it with replace. The query starts as the selection or the word at the cursor (`options.find.seed_search_string_from_selection`). Selections can turn on find in selection (`auto_find_in_selection`).
+Cmd+F opens the find widget, and Cmd+Alt+F (Ctrl+H elsewhere) opens it with replace. The query starts as the selection or the word at the cursor (`options.find.seed_search_string_from_selection`). Selections can turn on find in selection (`auto_find_in_selection`). The widget slides down from above the editor as it opens, unless `App::reduce_motion` is set.
 
 - **Search modes:**
   - case sensitive

@@ -535,6 +535,44 @@ fn cmd_d_seeds_the_find_widget(cx: &mut TestAppContext) {
     assert_eq!(query(&editor, cx), "foo");
 }
 
+/// Monaco's `.find-widget` slides in from `translateY(calc(-100% - 10px))`
+/// over 200ms, linearly, to 4px (`margin-top`) below the editor's top.
+#[gpui::test]
+fn the_find_widget_slides_in_to_4px_below_the_top(cx: &mut TestAppContext) {
+    let (_editor, cx) = setup("a\nb", cx);
+    cx.simulate_keystrokes("secondary-f");
+    draw(cx);
+    let top = |cx: &mut VisualTestContext| {
+        cx.debug_bounds("find-widget")
+            .expect("the find widget")
+            .origin
+            .y
+    };
+    // 4px, less the 33px widget and its 10px shadow.
+    assert_eq!(top(cx), gpui::px(-39.));
+    cx.executor().advance_clock(Duration::from_millis(100));
+    draw(cx);
+    assert_eq!(top(cx), gpui::px(-17.5));
+    cx.executor().advance_clock(Duration::from_millis(100));
+    draw(cx);
+    assert_eq!(top(cx), gpui::px(4.));
+    cx.executor().advance_clock(Duration::from_millis(100));
+    draw(cx);
+    assert_eq!(top(cx), gpui::px(4.));
+}
+
+/// Monaco's `.monaco-reduce-motion` makes the transition 0ms: the widget
+/// shows in place at once.
+#[gpui::test]
+fn reduced_motion_shows_the_find_widget_in_place(cx: &mut TestAppContext) {
+    let (_editor, cx) = setup("a\nb", cx);
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    cx.simulate_keystrokes("secondary-f");
+    draw(cx);
+    let bounds = cx.debug_bounds("find-widget").expect("the find widget");
+    assert_eq!(bounds.origin.y, gpui::px(4.));
+}
+
 /// Monaco `_getHeight`: the view zone is the widget's height as laid out
 /// and measured (33px, 62px with replace).
 #[gpui::test]
@@ -743,6 +781,8 @@ fn dragging_the_sash_keeps_its_pointer_everywhere(cx: &mut TestAppContext) {
     let captured =
         |cx: &mut VisualTestContext| editor.read_with(cx, |e, cx| e.captured_cursor_for_tests(cx));
     cx.simulate_keystrokes("secondary-f");
+    // After the slide-in.
+    cx.executor().advance_clock(Duration::from_millis(200));
     paint(cx);
     let sash = cx.debug_bounds("find-sash").expect("the sash");
     let from = sash.center();

@@ -11,12 +11,12 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationExt as _, AppContext as _, Context, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels, Render,
-    SharedString, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div,
+    AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    KeyDownEvent, MouseButton, ParentElement, Pixels, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px,
 };
 
@@ -52,6 +52,11 @@ const INPUT_MAX_HEIGHT: f32 = 118.;
 /// `padding: 0 4px 0 9px`.
 const PADDING_LEFT: f32 = 9.;
 const PADDING_RIGHT: f32 = 4.;
+/// `margin-top: 4px`, below the editor's top.
+const MARGIN_TOP: f32 = 4.;
+/// The slide-in starts `translateY(calc(-100% - 10px))` above: the
+/// widget's height and its shadow.
+const REVEAL_SHADOW: f32 = 10.;
 /// The find and replace parts' `margin: 3px 25px 0 17px`.
 const PART_MARGIN_TOP: f32 = 3.;
 const PART_MARGIN_RIGHT: f32 = 25.;
@@ -362,6 +367,9 @@ pub struct FindWidget {
     measured: Rc<Cell<Option<(Pixels, Pixels)>>>,
     /// The layout of the last frame, for tests.
     last_layout: FindWidgetLayout,
+    /// When the widget was shown, on the executor's clock (Monaco adds
+    /// `visible`, starting the slide-in).
+    revealed_at: Instant,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -435,8 +443,23 @@ impl FindWidget {
             matches_width: px(MATCHES_COUNT_MIN_WIDTH),
             measured: Rc::new(Cell::new(None)),
             last_layout: FindWidgetLayout::default(),
+            revealed_at: cx.background_executor().now(),
             _subscriptions: subscriptions,
         }
+    }
+
+    /// How far the slide-in is, from 0 to 1: on the executor's clock, so
+    /// tests step it, and done at once when motion is reduced (Monaco's
+    /// `.monaco-reduce-motion` 0ms transition).
+    fn reveal_progress(&self, cx: &gpui::App) -> f32 {
+        if cx.reduce_motion() {
+            return 1.;
+        }
+        let elapsed = cx
+            .background_executor()
+            .now()
+            .saturating_duration_since(self.revealed_at);
+        (elapsed.as_secs_f32() / REVEAL_DURATION.as_secs_f32()).min(1.)
     }
 
     /// The find and replace inputs.
@@ -1240,6 +1263,10 @@ impl Render for FindWidget {
             )
         };
         let replace_visible = self.replace_visible && !state.read_only;
+        let reveal = self.reveal_progress(cx);
+        if reveal < 1. {
+            window.request_animation_frame();
+        }
         // Monaco `MAX_MATCHES_COUNT_WIDTH`: the count's box grows to fit.
         let status_label: SharedString = status.clone().unwrap_or_default().into();
         if !status_label.is_empty() {
@@ -1632,7 +1659,8 @@ impl Render for FindWidget {
         let weak_editor = self.editor.clone();
         let measure = gpui::canvas(
             move |bounds, _, cx| {
-                let report = (height, bounds.size.height);
+                // The box, without its margin.
+                let report = (height, bounds.size.height - px(MARGIN_TOP));
                 if measured.get() != Some(report) {
                     measured.set(Some(report));
                     cx.defer(move |cx| {
@@ -1651,8 +1679,10 @@ impl Render for FindWidget {
 
         let widget = div()
             .id("find-widget")
+            .debug_selector(|| "find-widget".into())
             .relative()
             .flex_none()
+            .mt(px(MARGIN_TOP))
             .w(layout.width)
             .h(height)
             .overflow_hidden()
@@ -1694,7 +1724,7 @@ impl Render for FindWidget {
         let message = regex_error.filter(|_| find_focused).map(|message| {
             div()
                 .absolute()
-                .top(px(1. + PART_MARGIN_TOP) + find_box - px(1.))
+                .top(px(MARGIN_TOP + 1. + PART_MARGIN_TOP) + find_box - px(1.))
                 .left(px(1. + PADDING_LEFT + PART_MARGIN_LEFT))
                 .w(layout.input_width)
                 .p(px(12. * 0.4))
@@ -1753,15 +1783,19 @@ impl Render for FindWidget {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .relative()
             .flex_none()
-            .child(widget)
-            .child(measure)
-            .children(message)
             // Monaco's slide-in: `translateY(calc(-100% - 10px))` to 0 in
-            // 200ms, linearly.
-            .with_animation(
-                "find-widget-reveal",
-                Animation::new(REVEAL_DURATION),
-                move |this, delta| this.top(-(height + px(10.)) * (1. - delta)),
+            // 200ms, linearly. The editor places this root by its origin,
+            // so a child moves.
+            .child(
+                // A flex box: the widget's margin stays inside it.
+                div()
+                    .relative()
+                    .flex()
+                    .flex_none()
+                    .top(-(height + px(REVEAL_SHADOW)) * (1. - reveal))
+                    .child(widget)
+                    .child(measure)
+                    .children(message),
             )
             .into_any_element()
     }
