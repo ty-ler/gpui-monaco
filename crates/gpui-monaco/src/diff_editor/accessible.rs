@@ -3,16 +3,18 @@
 //! F7 and Shift+F7 move between changes, Up and Down between lines, Enter
 //! or Space reveals the line in the editor and Escape closes it.
 
+use std::sync::Arc;
+
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    KeyDownEvent, ParentElement as _, Render, ScrollHandle, SharedString,
+    KeyDownEvent, ParentElement as _, Render, Role, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div, px,
 };
-use text::PointUtf16;
+use text::{PointUtf16, Rope};
 
 use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
-use crate::diff::{LineRange, LineRangeMapping};
+use crate::diff::{LineRange, LineRangeMapping, LinesDiff};
 use crate::editor::CodeEditor;
 use crate::view::reveal::RevealType;
 
@@ -21,6 +23,29 @@ use super::DiffEditor;
 /// Unchanged lines shown around each group (Monaco
 /// `viewElementGroupLineMargin`).
 const LINE_MARGIN: usize = 3;
+
+/// The role of the viewer's focused element, its line list (Monaco's
+/// `role="list"` container). GPUI makes an accessibility node, and so
+/// reports focus, only for an element with a role; the current row is
+/// that node's active descendant, as Monaco focuses the row itself.
+pub(crate) const FOCUSED_ROLE: Role = Role::List;
+
+/// The list's label (Monaco `ariaLabel`).
+const LIST_LABEL: &str = "Accessible Diff Viewer. Use arrow up and down to navigate.";
+
+/// What the viewer tells assistive technology, for tests: GPUI's test
+/// platform builds no accessibility tree.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccessibleDiffViewerAria {
+    /// The focused element's role and label.
+    pub focused: (Role, SharedString),
+    /// Each row's role, label and selected state.
+    pub rows: Vec<(Role, SharedString, bool)>,
+    /// The label of the row that's the focused element's active
+    /// descendant, the one a screen reader reads.
+    pub active_descendant: Option<SharedString>,
+}
 
 /// A row of the viewer (Monaco `ViewElement`), with 1-based line numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,11 +163,23 @@ fn lines_changed(lines: usize) -> String {
     }
 }
 
+/// 1-based `line`'s text, or nothing past the end.
+fn line_text(rope: &Rope, line: usize) -> String {
+    if line >= 1 && line <= rope.line_count() as usize {
+        rope.line(line as u32 - 1)
+    } else {
+        String::new()
+    }
+}
+
 /// The viewer (Monaco `AccessibleDiffViewer`'s view model and view).
 pub(crate) struct AccessibleDiffViewer {
     diff: WeakEntity<DiffEditor>,
     original: Entity<CodeEditor>,
     modified: Entity<CodeEditor>,
+    /// The diff the groups are from (Monaco's `_diffs` observable): the
+    /// groups are rebuilt only when it changes.
+    diff_source: Option<Arc<LinesDiff>>,
     groups: Vec<ViewElementGroup>,
     current_group: usize,
     current_element: usize,
@@ -170,6 +207,7 @@ impl AccessibleDiffViewer {
             diff,
             original,
             modified,
+            diff_source: None,
             groups: Vec::new(),
             current_group: 0,
             current_element: 0,
@@ -179,12 +217,32 @@ impl AccessibleDiffViewer {
         }
     }
 
-    /// New changes: the groups again, starting at the one at or after the
-    /// modified editor's cursor.
-    pub(crate) fn set_diffs(&mut self, diffs: &[LineRangeMapping], cx: &mut Context<Self>) {
+    /// Monaco's "update groups": a new diff (or none) rebuilds the groups
+    /// and picks the one at or after the modified editor's cursor, keeping
+    /// the current line's index. The same diff again (a re-apply for a
+    /// theme, options or layout change) keeps everything.
+    pub(crate) fn set_diff(&mut self, diff: Option<&Arc<LinesDiff>>, cx: &mut Context<Self>) {
+        let same = match (diff, &self.diff_source) {
+            (Some(new), Some(old)) => Arc::ptr_eq(new, old),
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        self.diff_source = diff.cloned();
+        let Some(diff) = diff else {
+            self.groups.clear();
+            cx.notify();
+            return;
+        };
         let original_count = self.original.read(cx).model().read(cx).line_count() as usize;
         let modified_count = self.modified.read(cx).model().read(cx).line_count() as usize;
-        self.groups = compute_view_element_groups(diffs, original_count, modified_count);
+        self.groups = compute_view_element_groups(
+            &super::diff_mappings(diff),
+            original_count,
+            modified_count,
+        );
         let line = self.modified.read(cx).selections()[0].head.row as usize + 1;
         if let Some(ix) = self
             .groups
@@ -193,8 +251,14 @@ impl AccessibleDiffViewer {
         {
             self.current_group = ix;
         }
+        // Monaco's element index can point past a shorter group; the port
+        // keeps a row selected.
         self.current_group = self.current_group.min(self.groups.len().saturating_sub(1));
-        self.current_element = 0;
+        let lines = self
+            .groups
+            .get(self.current_group)
+            .map_or(0, |g| g.lines.len());
+        self.current_element = self.current_element.min(lines.saturating_sub(1));
         cx.notify();
     }
 
@@ -318,6 +382,93 @@ impl AccessibleDiffViewer {
         cx.stop_propagation();
     }
 
+    /// Row `element`'s ARIA label (Monaco's header label and
+    /// `getLineAriaLabel`-style row labels).
+    fn row_label(&self, element: ViewElement, original: &Rope, modified: &Rope) -> String {
+        let Some(group) = self.groups.get(self.current_group) else {
+            return String::new();
+        };
+        let (o, m, content) = match element {
+            ViewElement::Header => {
+                let r = &group.range;
+                return format!(
+                    "Difference {} of {}: original line {}, {}, modified line {}, {}",
+                    self.current_group + 1,
+                    self.groups.len(),
+                    r.original.start_line_number,
+                    lines_changed(r.original.len()),
+                    r.modified.start_line_number,
+                    lines_changed(r.modified.len()),
+                );
+            }
+            ViewElement::Unchanged {
+                original: o,
+                modified: m,
+            } => (Some(o), Some(m), line_text(modified, m)),
+            ViewElement::Added { modified: m } => (None, Some(m), line_text(modified, m)),
+            ViewElement::Deleted { original: o, .. } => (Some(o), None, line_text(original, o)),
+        };
+        let spoken = if content.is_empty() {
+            "blank".to_string()
+        } else {
+            content
+        };
+        match (o, m) {
+            (Some(o), Some(m)) if o == m => format!("{spoken} unchanged line {o}"),
+            (Some(o), Some(m)) => format!("{spoken} original line {o} modified line {m}"),
+            (None, Some(m)) => format!("+ {spoken} modified line {m}"),
+            (Some(o), None) => format!("- {spoken} original line {o}"),
+            (None, None) => spoken,
+        }
+    }
+
+    /// What the viewer tells assistive technology, for tests.
+    pub(crate) fn aria_for_tests(&self, cx: &App) -> AccessibleDiffViewerAria {
+        let original = self
+            .original
+            .read(cx)
+            .model()
+            .read(cx)
+            .buffer()
+            .rope()
+            .clone();
+        let modified = self
+            .modified
+            .read(cx)
+            .model()
+            .read(cx)
+            .buffer()
+            .rope()
+            .clone();
+        let rows: Vec<(Role, SharedString, bool)> = self
+            .groups
+            .get(self.current_group)
+            .map(|group| {
+                group
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, element)| {
+                        (
+                            Role::ListItem,
+                            self.row_label(*element, &original, &modified).into(),
+                            ix == self.current_element,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let active_descendant = rows
+            .iter()
+            .find(|(_, _, selected)| *selected)
+            .map(|(_, label, _)| label.clone());
+        AccessibleDiffViewerAria {
+            focused: (FOCUSED_ROLE, LIST_LABEL.into()),
+            rows,
+            active_descendant,
+        }
+    }
+
     /// The groups, for tests.
     pub(crate) fn state_for_tests(&self) -> (usize, usize, usize) {
         (self.groups.len(), self.current_group, self.current_element)
@@ -352,13 +503,6 @@ impl Render for AccessibleDiffViewer {
             .clone();
         let modified_rope = modified_editor.model().read(cx).buffer().rope().clone();
         let tab_size = modified_editor.model().read(cx).options().tab_size.max(1) as usize;
-        let line_text = |rope: &text::Rope, line: usize| {
-            if line >= 1 && line <= rope.line_count() as usize {
-                rope.line(line as u32 - 1)
-            } else {
-                String::new()
-            }
-        };
         let group_count = self.groups.len();
         let em_width = modified_editor
             .layout
@@ -399,18 +543,10 @@ impl Render for AccessibleDiffViewer {
         if let Some(group) = self.groups.get(self.current_group) {
             for (ix, element) in group.lines.iter().enumerate() {
                 let selected = ix == self.current_element;
+                let label = self.row_label(*element, &original_rope, &modified_rope);
                 let row = match *element {
                     ViewElement::Header => {
                         let r = &group.range;
-                        let label = format!(
-                            "Difference {} of {}: original line {}, {}, modified line {}, {}",
-                            self.current_group + 1,
-                            group_count,
-                            r.original.start_line_number,
-                            lines_changed(r.original.len()),
-                            r.modified.start_line_number,
-                            lines_changed(r.modified.len()),
-                        );
                         // e.g. `1/10: @@ -504,7 +517,7 @@`
                         let summary = format!(
                             "{}/{}: @@ -{},{} +{},{} @@",
@@ -427,7 +563,7 @@ impl Render for AccessibleDiffViewer {
                             .pl(px(10.))
                             .flex()
                             .items_center()
-                            .role(gpui::Role::ListItem)
+                            .role(Role::ListItem)
                             .aria_label(label)
                             .child(summary)
                     }
@@ -443,22 +579,6 @@ impl Render for AccessibleDiffViewer {
                         let content = match modified {
                             Some(line) if kind >= 0 => line_text(&modified_rope, line),
                             _ => line_text(&original_rope, original.unwrap_or(1)),
-                        };
-                        let spoken = if content.is_empty() {
-                            "blank".to_string()
-                        } else {
-                            content.clone()
-                        };
-                        let label = match (kind, original, modified) {
-                            (0, Some(o), Some(m)) if o == m => {
-                                format!("{spoken} unchanged line {o}")
-                            }
-                            (0, Some(o), Some(m)) => {
-                                format!("{spoken} original line {o} modified line {m}")
-                            }
-                            (1, _, Some(m)) => format!("+ {spoken} modified line {m}"),
-                            (_, Some(o), _) => format!("- {spoken} original line {o}"),
-                            _ => spoken,
                         };
                         let (text, _) = crate::colorize::expand_tabs(&content, tab_size);
                         let (row_background, number_background, sign) = match kind {
@@ -494,7 +614,7 @@ impl Render for AccessibleDiffViewer {
                             .flex_row()
                             .items_center()
                             .whitespace_nowrap()
-                            .role(gpui::Role::ListItem)
+                            .role(Role::ListItem)
                             .aria_label(label)
                             .child(number(original, original_numbers_width))
                             .child(number(modified, modified_numbers_width).pr(px(10.)))
@@ -513,7 +633,13 @@ impl Render for AccessibleDiffViewer {
                         row
                     }
                 };
-                let row = row.min_w(row_width).flex_none();
+                // Monaco gives the current row DOM focus, so screen readers
+                // read it: here it's the focused list's active descendant.
+                let row = row
+                    .min_w(row_width)
+                    .flex_none()
+                    .aria_selected(selected)
+                    .when(selected, |row| row.aria_active_descendant());
                 let row = if selected {
                     row.border_1().border_color(colors.focus_border)
                 } else {
@@ -528,7 +654,6 @@ impl Render for AccessibleDiffViewer {
         div()
             .id("accessible-diff-viewer")
             .key_context("AccessibleDiffViewer")
-            .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
             .absolute()
             .size_full()
@@ -549,10 +674,11 @@ impl Render for AccessibleDiffViewer {
                     .flex_col()
                     .overflow_scroll()
                     .track_scroll(&self.scroll)
-                    .role(gpui::Role::List)
-                    .aria_label(SharedString::from(
-                        "Accessible Diff Viewer. Use arrow up and down to navigate.",
-                    ))
+                    // Focus goes to the list, which has a role, so it gets
+                    // an accessibility node.
+                    .track_focus(&self.focus_handle)
+                    .role(FOCUSED_ROLE)
+                    .aria_label(SharedString::new_static(LIST_LABEL))
                     .children(rows),
             )
             .when(self.can_close, |viewer| {
@@ -567,7 +693,7 @@ impl Render for AccessibleDiffViewer {
                         .cursor_pointer()
                         .rounded(px(3.))
                         .hover(|style| style.bg(colors.widget_border))
-                        .role(gpui::Role::Button)
+                        .role(Role::Button)
                         .aria_label(SharedString::from("Close"))
                         .on_click(cx.listener(|this, _, window, cx| this.close(window, cx)))
                         // `accessible-diff-viewer-close`: `close`.
