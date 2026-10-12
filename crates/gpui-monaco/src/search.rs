@@ -40,6 +40,20 @@ impl WordSeparators {
     }
 }
 
+/// Monaco `strings.escapeRegExpCharacters`: escapes only `\ { } * + ? | ^
+/// $ . [ ] ( )`, so a seeded `a-b` stays `a-b` (`regex::escape` would
+/// also escape `-`, `#`, `&` and `~`).
+pub(crate) fn escape_regexp_characters(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for c in value.chars() {
+        if "\\{}*+?|^$.[]()".contains(c) {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
 /// Monaco `isMultilineRegexSource`: whether a regex can match across lines.
 pub fn is_multiline_regex_source(source: &str) -> bool {
     let mut chars = source.chars();
@@ -332,6 +346,20 @@ mod tests {
             Some("Invalid regular expression: /a(b/: unclosed group".into())
         );
         assert_eq!(regex_error("a(b)"), None);
+    }
+
+    /// Monaco `escapeRegExpCharacters` (`base/common/strings.ts`).
+    #[test]
+    fn escapes_like_monaco() {
+        assert_eq!(escape_regexp_characters("a-b #&~"), "a-b #&~");
+        assert_eq!(
+            escape_regexp_characters(r"(3 * 5) a.b [c]{d}|e^$f?+\"),
+            r"\(3 \* 5\) a\.b \[c\]\{d\}\|e\^\$f\?\+\\"
+        );
+        // Escaped, it finds itself.
+        let source = "x-(y)#z";
+        let regex = Regex::new(&escape_regexp_characters(source)).unwrap();
+        assert!(regex.is_match(source));
     }
     use text::PointUtf16;
 

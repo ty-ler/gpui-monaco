@@ -7257,33 +7257,25 @@ impl Render for CodeEditor {
                 if this.options.single_line {
                     return cx.propagate();
                 }
-                let mut options = this.find_options().clone();
-                options.match_case = !options.match_case;
-                this.set_find_options(options, cx);
+                this.toggle_find_option(|o| o.match_case = !o.match_case, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleRegex, _, cx| {
                 if this.options.single_line {
                     return cx.propagate();
                 }
-                let mut options = this.find_options().clone();
-                options.is_regex = !options.is_regex;
-                this.set_find_options(options, cx);
+                this.toggle_find_option(|o| o.is_regex = !o.is_regex, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleWholeWord, _, cx| {
                 if this.options.single_line {
                     return cx.propagate();
                 }
-                let mut options = this.find_options().clone();
-                options.whole_word = !options.whole_word;
-                this.set_find_options(options, cx);
+                this.toggle_find_option(|o| o.whole_word = !o.whole_word, cx);
             }))
             .on_action(cx.listener(|this, _: &TogglePreserveCase, _, cx| {
                 if this.options.single_line {
                     return cx.propagate();
                 }
-                let mut options = this.find_options().clone();
-                options.preserve_case = !options.preserve_case;
-                this.set_find_options(options, cx);
+                this.toggle_find_option(|o| o.preserve_case = !o.preserve_case, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleFindInSelection, _, cx| {
                 if this.options.single_line {

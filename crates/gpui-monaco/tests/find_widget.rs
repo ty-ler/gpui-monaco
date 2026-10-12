@@ -821,3 +821,286 @@ fn dragging_the_sash_keeps_its_pointer_everywhere(cx: &mut TestAppContext) {
     paint(cx);
     assert_eq!(captured(cx), None);
 }
+
+fn options_widget_visible(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> bool {
+    cx.run_until_parked();
+    editor.read_with(cx, |e, _| e.is_find_options_widget_visible_for_tests())
+}
+
+/// Monaco `FindOptionsWidget`: with find closed, Alt+C, W, R and P show the
+/// toggles for 2s (find in selection doesn't); once it exists, any change
+/// to them shows it; with find open it stays hidden.
+#[gpui::test]
+fn the_options_widget_shows_toggle_changes_while_find_is_closed(cx: &mut TestAppContext) {
+    use gpui_monaco::actions::{
+        ToggleCaseSensitive, ToggleFindInSelection, TogglePreserveCase, ToggleRegex,
+    };
+    let (editor, cx) = setup("abc abc", cx);
+    let wait = |ms: u64, cx: &mut VisualTestContext| {
+        cx.executor().advance_clock(Duration::from_millis(ms));
+        cx.run_until_parked();
+    };
+    cx.dispatch_action(ToggleCaseSensitive);
+    assert!(options_widget_visible(&editor, cx));
+    assert!(editor.read_with(cx, |e, _| e.find_options().match_case));
+    wait(1900, cx);
+    assert!(options_widget_visible(&editor, cx));
+    wait(200, cx);
+    assert!(!options_widget_visible(&editor, cx));
+
+    cx.dispatch_action(ToggleFindInSelection);
+    assert!(!options_widget_visible(&editor, cx));
+    cx.dispatch_action(TogglePreserveCase);
+    assert!(options_widget_visible(&editor, cx));
+    wait(2100, cx);
+    assert!(!options_widget_visible(&editor, cx));
+
+    // Monaco's state listener: a change from anywhere shows it.
+    editor.update(cx, |e, cx| {
+        let mut options = e.find_options().clone();
+        options.whole_word = true;
+        e.change_find_options(options, false, cx);
+    });
+    assert!(options_widget_visible(&editor, cx));
+    wait(2100, cx);
+
+    // Not while find shows.
+    cx.simulate_keystrokes("secondary-f");
+    cx.dispatch_action(ToggleRegex);
+    assert!(!options_widget_visible(&editor, cx));
+    assert!(editor.read_with(cx, |e, _| e.find_options().is_regex));
+}
+
+/// Monaco's controller toggles change the state without moving the cursor
+/// (`change(…, false)`), unlike the find widget's own toggles.
+#[gpui::test]
+fn toggle_commands_do_not_move_the_cursor(cx: &mut TestAppContext) {
+    use gpui_monaco::actions::ToggleCaseSensitive;
+    let (editor, cx) = setup("Abc abc", cx);
+    cx.simulate_keystrokes("secondary-f");
+    type_query("abc", cx);
+    // Incremental search selected the first match.
+    assert_eq!(selection(&editor, cx), (0, 0, 0, 3));
+    cx.dispatch_action(ToggleCaseSensitive);
+    cx.run_until_parked();
+    assert_eq!(selection(&editor, cx), (0, 0, 0, 3));
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.find_status()),
+        Some("? of 1".into())
+    );
+}
+
+/// Monaco `FindOptionsWidget`: clicking a toggle changes the option, and
+/// the widget stays while the pointer is over it.
+#[gpui::test]
+fn the_options_widget_toggles_and_stays_while_hovered(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, point, px};
+    use gpui_monaco::actions::ToggleRegex;
+    let (editor, cx) = setup("abc", cx);
+    cx.dispatch_action(ToggleRegex);
+    draw(cx);
+    let bounds = cx
+        .debug_bounds("find-options-widget")
+        .expect("the options widget");
+    // Three 20px toggles, 2px apart, at the editor's top right.
+    assert_eq!(bounds.size, gpui::size(px(66.), px(20.)));
+    let editor_bounds = editor.read_with(cx, |e, _| e.widget_bounds_for_tests().0);
+    assert_eq!(bounds.top(), editor_bounds.top());
+    // The match case toggle.
+    let case = point(bounds.left() + px(12.), bounds.top() + px(10.));
+    cx.simulate_mouse_move(case, None, Modifiers::default());
+    cx.simulate_click(case, Modifiers::default());
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.find_options().match_case));
+    cx.simulate_mouse_move(case + point(px(1.), px(0.)), None, Modifiers::default());
+    cx.executor().advance_clock(Duration::from_secs(5));
+    assert!(options_widget_visible(&editor, cx));
+    // Leaving schedules the hiding.
+    cx.simulate_mouse_move(point(px(20.), px(200.)), None, Modifiers::default());
+    draw(cx);
+    cx.executor().advance_clock(Duration::from_millis(2100));
+    assert!(!options_widget_visible(&editor, cx));
+}
+
+/// Monaco's `.find-widget { margin-top: 4px }`.
+#[gpui::test]
+fn the_find_widget_is_4px_below_the_top(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("abc", cx);
+    cx.simulate_keystrokes("secondary-f");
+    draw(cx);
+    cx.executor().advance_clock(Duration::from_millis(300));
+    draw(cx);
+    let widget = cx.debug_bounds("find-widget").expect("the find widget");
+    let editor_bounds = editor.read_with(cx, |e, _| e.widget_bounds_for_tests().0);
+    assert_eq!(widget.top() - editor_bounds.top(), gpui::px(4.));
+}
+
+/// Monaco `_reveal`: opening find over a selection the widget would cover
+/// (spanning lines, or reaching under it) adds the view zone without
+/// scrolling, so the text moves down below the widget; elsewhere the zone
+/// scrolls with the text.
+#[gpui::test]
+fn opening_find_shifts_the_text_from_under_the_widget(cx: &mut TestAppContext) {
+    use gpui_monaco::cursor::Selection;
+    use text::PointUtf16;
+    let line = format!("{} target", "x ".repeat(300));
+    let end = line.len() as u32;
+    let (editor, cx) = setup(&format!("{line}\nsecond line\nthird"), cx);
+    let open_with = |selection: Selection, cx: &mut VisualTestContext| {
+        cx.simulate_keystrokes("escape");
+        editor.update(cx, |e, cx| {
+            e.set_selections(&[selection], cx);
+            e.set_scroll_position(gpui::point(gpui::px(0.), gpui::px(0.)), cx);
+        });
+        draw(cx);
+        cx.simulate_keystrokes("secondary-f");
+        draw(cx);
+        editor.read_with(cx, |e, _| {
+            (e.scroll_position().y, e.find_zone_height_for_tests())
+        })
+    };
+    let zone = Some(gpui::px(33.));
+    // A word at the right end of line 1, under the widget.
+    let word = Selection::new(PointUtf16::new(0, end - 6), PointUtf16::new(0, end));
+    assert_eq!(open_with(word, cx), (gpui::px(0.), zone));
+    // Lines 1 and 2: the text moves down too.
+    let lines = Selection::new(PointUtf16::new(1, 0), PointUtf16::new(0, 0));
+    assert_eq!(open_with(lines, cx), (gpui::px(0.), zone));
+    // A word at the left: the text stays.
+    let left = Selection::new(PointUtf16::new(0, 0), PointUtf16::new(0, 1));
+    assert_eq!(open_with(left, cx), (gpui::px(33.), zone));
+    // Below the widget: the text stays.
+    let below = Selection::new(PointUtf16::new(1, 0), PointUtf16::new(1, 6));
+    assert_eq!(open_with(below, cx), (gpui::px(33.), zone));
+    // Not seeding from the selection: the text stays.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.find.seed_search_string_from_selection =
+            gpui_monaco::options::SeedSearchString::Never;
+        e.update_options(options, cx);
+    });
+    assert_eq!(open_with(word, cx), (gpui::px(33.), zone));
+}
+
+/// Monaco `_updateSearchScope`: focusing the find input with find in
+/// selection on makes the selections the scope, as Monaco's
+/// `FindReplaceState.change` allows: a set scope only changes to
+/// selections one of which equals all of its ranges.
+#[gpui::test]
+fn focusing_an_input_updates_the_search_scope(cx: &mut TestAppContext) {
+    use gpui_monaco::cursor::Selection;
+    use text::PointUtf16;
+    let (editor, cx) = setup("a\nb\nc\nd\ne\nf", cx);
+    cx.update(|window, _| window.activate_window());
+    draw(cx);
+    let sel = |r: (u32, u32, u32, u32)| {
+        Selection::new(PointUtf16::new(r.0, r.1), PointUtf16::new(r.2, r.3))
+    };
+    let focus_input_with = |selections: &[Selection], cx: &mut VisualTestContext| {
+        cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+        draw(cx);
+        editor.update(cx, |e, cx| e.set_selections(selections, cx));
+        cx.simulate_keystrokes("secondary-f");
+        draw(cx);
+    };
+    let scope = |cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, _| {
+            e.find_search_scope().map(|scope| {
+                scope
+                    .iter()
+                    .map(|r| (r.start.row, r.start.column, r.end.row, r.end.column))
+                    .collect::<Vec<_>>()
+            })
+        })
+    };
+    focus_input_with(&[sel((0, 0, 1, 1))], cx);
+    editor.update(cx, |e, cx| {
+        let mut options = e.find_options().clone();
+        options.in_selection = true;
+        e.set_find_options(options, cx);
+    });
+    assert_eq!(scope(cx), Some(vec![(0, 0, 1, 1)]));
+    // Other lines: Monaco keeps the scope.
+    focus_input_with(&[sel((3, 0, 4, 1))], cx);
+    assert_eq!(scope(cx), Some(vec![(0, 0, 1, 1)]));
+    // Including it: the selections become the scope.
+    focus_input_with(&[sel((0, 0, 1, 1)), sel((3, 0, 4, 1))], cx);
+    assert_eq!(scope(cx), Some(vec![(0, 0, 1, 1), (3, 0, 4, 1)]));
+    // Find in selection off: left alone.
+    editor.update(cx, |e, cx| {
+        let mut options = e.find_options().clone();
+        options.in_selection = false;
+        e.set_find_options(options, cx);
+    });
+    focus_input_with(&[sel((0, 0, 1, 1))], cx);
+    assert_eq!(scope(cx), None);
+}
+
+/// Monaco's find widget theming: `editor.findMatchForeground` colors the
+/// other matches' text (`.findMatchInline`) and
+/// `editor.findMatchHighlightForeground` the current match's; over 1000
+/// matches, the other matches have no text color.
+#[gpui::test]
+fn find_match_foregrounds(cx: &mut TestAppContext) {
+    use gpui_monaco::Theme;
+    let (editor, cx) = setup("ab ab ab", cx);
+    let theme = Theme::from_vscode_json(
+        r##"{ "type": "dark", "colors": {
+            "editor.findMatchForeground": "#ff0000",
+            "editor.findMatchHighlightForeground": "#00ff00"
+        } }"##,
+    )
+    .unwrap();
+    let (red, green) = (
+        theme.colors.find_match_foreground.unwrap(),
+        theme.colors.find_match_highlight_foreground.unwrap(),
+    );
+    editor.update(cx, |e, cx| e.set_theme(std::sync::Arc::new(theme), cx));
+    cx.simulate_keystrokes("secondary-f");
+    cx.simulate_input("ab");
+    cx.run_until_parked();
+    // The matches' (start, text color, z-index).
+    let matches = |cx: &mut VisualTestContext| {
+        editor.update(cx, |e, cx| {
+            let id = cx.entity_id();
+            let background = e.colors().find_match_highlight_background;
+            let current = e.colors().find_match_background;
+            let mut matches: Vec<_> = e.model().update(cx, |m, _| {
+                m.all_decorations(Some(id))
+                    .into_iter()
+                    .filter(|d| {
+                        d.options.background == Some(background)
+                            || d.options.background == Some(current)
+                    })
+                    .map(|d| {
+                        let text = d.options.text.as_ref().and_then(|t| t.foreground);
+                        (d.range.start, text, d.options.z_index)
+                    })
+                    .collect()
+            });
+            matches.sort_by_key(|(start, _, _)| *start);
+            matches
+        })
+    };
+    assert_eq!(
+        matches(cx),
+        vec![(0, Some(green), 13), (3, Some(red), 10), (6, Some(red), 10)]
+    );
+
+    // Monaco `_FIND_MATCH_NO_OVERVIEW_DECORATION`.
+    editor.update(cx, |e, cx| {
+        e.model()
+            .update(cx, |m, cx| m.set_value(&"ab ".repeat(1001), cx))
+    });
+    cx.executor().advance_clock(Duration::from_millis(200));
+    cx.run_until_parked();
+    let all = matches(cx);
+    assert_eq!(all.len(), 1001);
+    assert!(
+        all.iter()
+            .filter(|(_, _, z)| *z != 13)
+            .all(|m| m.1.is_none() && m.2 == 0),
+        "{:?}",
+        &all[..3]
+    );
+}

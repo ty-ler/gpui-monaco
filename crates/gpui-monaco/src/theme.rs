@@ -250,13 +250,16 @@ editor_colors! { r;
     ime_underline: Hsla = r.color("editor.compositionBorder");
     /// Current find match (`editor.findMatchBackground`).
     find_match_background: Hsla = r.color("editor.findMatchBackground");
-    /// Its text (`editor.findMatchForeground`; `None` keeps the token colors).
+    /// `editor.findMatchForeground`: Monaco's theming gives it to the other
+    /// matches' text (`.findMatchInline`) despite its description; `None`
+    /// keeps the token colors.
     find_match_foreground: Option<Hsla> = r.get("editor.findMatchForeground");
     /// Its outline (`editor.findMatchBorder`, high contrast).
     find_match_border: Option<Hsla> = r.visible("editor.findMatchBorder");
     /// Other find matches (`editor.findMatchHighlightBackground`).
     find_match_highlight_background: Hsla = r.color("editor.findMatchHighlightBackground");
-    /// Their text (`editor.findMatchHighlightForeground`).
+    /// `editor.findMatchHighlightForeground`: Monaco's theming gives it to
+    /// the current match's text (`.currentFindMatchInline`).
     find_match_highlight_foreground: Option<Hsla> = r.get("editor.findMatchHighlightForeground");
     /// Their outline (`editor.findMatchHighlightBorder`).
     find_match_highlight_border: Option<Hsla> = r.visible("editor.findMatchHighlightBorder");
