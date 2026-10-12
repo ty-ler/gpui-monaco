@@ -782,7 +782,7 @@ impl CodeEditor {
             None => edits.push((edit_range.clone(), text.clone())),
         }
         self.color_picker.editing = true;
-        self.execute_edits(edits, None, cx);
+        self.execute_edits_from("colorpicker", edits, None, cx);
         self.color_picker.editing = false;
         self.push_undo_stop(cx);
         let start = edit_range.start;

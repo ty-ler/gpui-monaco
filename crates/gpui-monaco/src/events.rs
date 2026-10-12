@@ -227,8 +227,17 @@ pub enum CursorChangeReason {
     Redo,
 }
 
-/// What triggered a selection change (Monaco's cursor event `source`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// What triggered a selection change (Monaco's cursor event `source`, a
+/// free-form string).
+///
+/// Monaco's own names have variants; any other string, such as the one a
+/// host passes to
+/// [`CodeEditor::execute_edits_from`](crate::CodeEditor::execute_edits_from)
+/// or [`CodeEditor::set_selections_from`](crate::CodeEditor::set_selections_from)
+/// to recognize its own changes, is [`CursorChangeSource::Other`].
+/// [`CursorChangeSource::from`] and [`CursorChangeSource::as_str`] convert
+/// between the two.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum CursorChangeSource {
     /// A key binding or typing (`"keyboard"`).
     #[default]
@@ -244,6 +253,66 @@ pub enum CursorChangeSource {
     /// [`CodeEditor::restore_view_state`](crate::CodeEditor::restore_view_state)
     /// (`"restoreState"`).
     RestoreState,
+    /// Any other source, as given (e.g. `"my-extension"`, or Monaco's
+    /// `"snippet"` and `"formatEditsCommand"`).
+    Other(SharedString),
+}
+
+impl CursorChangeSource {
+    /// The source as Monaco names it, e.g. `"keyboard"` or `"modelChange"`.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Keyboard => "keyboard",
+            Self::Mouse => "mouse",
+            Self::Api => "api",
+            Self::Model => "model",
+            Self::ModelChange => "modelChange",
+            Self::RestoreState => "restoreState",
+            Self::Other(source) => source,
+        }
+    }
+
+    /// Monaco's `source || 'keyboard'`: no source is the keyboard.
+    pub(crate) fn from_option(source: Option<&str>) -> Self {
+        source.map_or(Self::Keyboard, Self::from)
+    }
+}
+
+impl From<&str> for CursorChangeSource {
+    /// Monaco's names give their variants (an empty string, falsy in
+    /// Monaco, is the keyboard), other strings [`CursorChangeSource::Other`].
+    fn from(source: &str) -> Self {
+        match source {
+            "" | "keyboard" => Self::Keyboard,
+            "mouse" => Self::Mouse,
+            "api" => Self::Api,
+            "model" => Self::Model,
+            "modelChange" => Self::ModelChange,
+            "restoreState" => Self::RestoreState,
+            other => Self::Other(SharedString::from(other.to_string())),
+        }
+    }
+}
+
+impl From<SharedString> for CursorChangeSource {
+    fn from(source: SharedString) -> Self {
+        match Self::from(source.as_ref()) {
+            Self::Other(_) => Self::Other(source),
+            known => known,
+        }
+    }
+}
+
+impl From<String> for CursorChangeSource {
+    fn from(source: String) -> Self {
+        Self::from(SharedString::from(source))
+    }
+}
+
+impl std::fmt::Display for CursorChangeSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// The details of a [`CodeEditorEvent::SelectionsChanged`](crate::CodeEditorEvent)
@@ -271,7 +340,7 @@ pub struct SelectionChange {
 
 /// Why and how the selections are about to change: what the next
 /// [`SelectionChange`] reports.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CursorChangeCause {
     pub reason: CursorChangeReason,
     pub source: CursorChangeSource,
@@ -403,6 +472,79 @@ pub struct MouseWheelEvent {
     /// `DOM_DELTA_LINE`), as a physical mouse wheel does; trackpads report
     /// pixels.
     pub lines: Option<Point<f32>>,
+    /// The modifier keys held.
+    pub modifiers: Modifiers,
+}
+
+/// A line whose height a decoration changed, in a
+/// [`TextModelEvent::LineHeightChanged`](crate::TextModelEvent) or
+/// [`CodeEditorEvent::LineHeightChanged`](crate::CodeEditorEvent) (Monaco
+/// `ModelLineHeightChanged`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LineHeightChange {
+    /// The editor the decoration is shown in, `None` for every editor
+    /// (Monaco `ownerId`, 0 for all).
+    pub owner: Option<gpui::EntityId>,
+    /// The decoration (Monaco `decorationId`).
+    pub decoration_id: crate::decorations::DecorationId,
+    /// Its first row (0-based; Monaco `lineNumber`).
+    pub row: u32,
+    /// Its [`line_height`](crate::DecorationOptions::line_height) now,
+    /// `None` once it's removed or no longer sets one (Monaco
+    /// `lineHeightMultiplier`).
+    pub line_height: Option<f32>,
+}
+
+/// A line whose font a decoration changed, in a
+/// [`TextModelEvent::FontChanged`](crate::TextModelEvent) or
+/// [`CodeEditorEvent::FontChanged`](crate::CodeEditorEvent) (Monaco
+/// `ModelFontChanged`): a decoration with a
+/// [`font_family`](crate::DecorationOptions::font_family),
+/// [`font_weight`](crate::DecorationOptions::font_weight) or
+/// [`font_style`](crate::DecorationOptions::font_style) was added, removed
+/// or changed there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FontChange {
+    /// The editor the decoration is shown in, `None` for every editor
+    /// (Monaco `ownerId`).
+    pub owner: Option<gpui::EntityId>,
+    /// Its first row (0-based; Monaco `lineNumber`).
+    pub row: u32,
+}
+
+/// The details of a
+/// [`CodeEditorEvent::WillTriggerEditorOperation`](crate::CodeEditorEvent)
+/// (Monaco `ITriggerEditorOperationEvent`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TriggerEditorOperationEvent {
+    /// Who triggered it (Monaco `source`), as given to
+    /// [`CodeEditor::trigger_from`](crate::CodeEditor::trigger_from).
+    pub source: CursorChangeSource,
+    /// The action, command or handler id (Monaco `handlerId`).
+    pub handler_id: SharedString,
+    /// Its payload, if any (Monaco `payload`).
+    pub payload: Option<serde_json::Value>,
+}
+
+/// The details of a [`CodeEditorEvent::DropIntoEditor`](crate::CodeEditorEvent)
+/// (Monaco's `onDropIntoEditor` `{ position, event }`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DropIntoEditorEvent {
+    /// Where it was dropped (0-based row, UTF-16 column; Monaco
+    /// `position`).
+    pub position: PointUtf16,
+    /// What was dropped (Monaco's `event.dataTransfer`).
+    pub data: crate::providers::DataTransfer,
+}
+
+/// The details of a [`CodeEditorEvent::MouseLeave`](crate::CodeEditorEvent)
+/// (Monaco `IPartialEditorMouseEvent`). Monaco has no target when the
+/// mouse leaves, so neither has this.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PartialEditorMouseEvent {
+    /// Where the mouse is, in window coordinates (Monaco's
+    /// `event.posx`/`posy`).
+    pub position: Point<Pixels>,
     /// The modifier keys held.
     pub modifiers: Modifiers,
 }

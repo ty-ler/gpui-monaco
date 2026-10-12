@@ -115,6 +115,8 @@ A `ViewState` (Monaco `ICodeEditorViewState`) holds the selections, the scroll p
 | `execute_edits(edits, Some(end_selections), cx)`, `execute_edit_operations(edits, end_cursor_state, cx)` (`SingleEditOperation` with `force_move_markers`, `EndCursorState::Computer`) | `executeEdits`: joins the open undo step, and returns `false` in a read-only editor without the read-only message |
 | `push_undo_stop(cx)`, `pop_undo_stop(cx)` | `pushUndoStop`, `popUndoStop` |
 | `position()`, `set_position(p, cx)`, `selection()`, `set_selection(s, cx)` | `getPosition`, `setPosition`, `getSelection`, `setSelection`: like `set_selections`, they don't scroll, so follow them with a `reveal_*` call to show the cursor |
+| `set_position_from(source, p, cx)`, `set_selection_from`, `set_selections_from`, `execute_edits_from(source, …)`, `execute_edit_operations_from`, `trigger_from(source, id, payload, window, cx)` | the `source` argument of `setPosition`, `setSelection(s)`, `executeEdits` and `trigger`, which the cursor events report |
+| `id()`, `editor_type()` | `getId` (`vs.editor.ICodeEditor:1`), `getEditorType` |
 | `value(eol, preserve_bom, cx)`, `set_value(text, cx)` | `getValue`, `setValue` |
 | `configured_word_at_position(p, cx)` | `getConfiguredWordAtPosition` (the editor's `word_separators`) |
 | `update_options_with(\|o\| o.read_only = true, cx)` | `updateOptions` with some options |
@@ -147,18 +149,18 @@ These answer from the last frame, so they return `None` until the editor was pai
 
 `CodeEditor` emits `CodeEditorEvent`:
 
-- `SelectionsChanged(SelectionChange)`: the selections changed (only then, as in Monaco). The `reason` is Monaco's `CursorChangeReason` (`Explicit`, `Paste`, `Undo`, `Redo`, `ContentFlush`, `RecoverFromMarkers` or `NotSet`). The `source` is `Keyboard`, `Mouse`, `Api`, `Model`, `ModelChange` or `RestoreState`. It also has the primary and secondary selections, the old ones and the model versions (Monaco `ICursorSelectionChangedEvent`). `CursorPositionChanged` comes right before it with the positions (Monaco `onDidChangeCursorPosition`).
+- `SelectionsChanged(SelectionChange)`: the selections changed (only then, as in Monaco). The `reason` is Monaco's `CursorChangeReason` (`Explicit`, `Paste`, `Undo`, `Redo`, `ContentFlush`, `RecoverFromMarkers` or `NotSet`). The `source` is Monaco's: `Keyboard`, `Mouse`, `Api`, `Model`, `ModelChange`, `RestoreState`, or `Other(name)` for any other name, such as the one a host passes to `execute_edits_from("my-ext", …)`, `set_selections_from`, `set_position_from`, `trigger_from` or `execute_command(Some("my-ext"), …)` to recognize its own changes. It also has the primary and secondary selections, the old ones and the model versions (Monaco `ICursorSelectionChangedEvent`). `CursorPositionChanged` comes right before it with the positions (Monaco `onDidChangeCursorPosition`).
 - `ScrollChanged(ScrollEvent)`: the scroll position or the scrollable size changed, and which (Monaco `IScrollEvent`). Since an unchanged position reports nothing, two editors can sync their scroll positions (or selections) both ways, as Monaco hosts do.
 - `ModelContentChanged`, `ModelDecorationsChanged`, `ModelOptionsChanged`, `ModelTokensChanged` and `ModelLanguageConfigurationChanged` forward the shown model's events (Monaco's editor-level `onDidChangeModel*`), so a host needn't resubscribe after `set_model`.
 - `ReadOnlyEditAttempt`: an edit was refused because the editor is read-only. The editor also shows `read_only_message`.
 - `Focused`
 - `Blurred`
-- `MouseDown`, `MouseUp`, `MouseMove`, `MouseLeave` and `ContextMenu` (on right click): each carries an `EditorMouseEvent` whose `target` says what's under the mouse. The editor shows its own context menu unless the `context_menu` option is off.
+- `MouseDown`, `MouseUp`, `MouseMove` and `ContextMenu` (on right click): each carries an `EditorMouseEvent` whose `target` says what's under the mouse. `MouseLeave` carries a `PartialEditorMouseEvent`: the mouse position and modifiers, with no target, as in Monaco. The editor shows its own context menu unless the `context_menu` option is off.
   - Targets include the glyph margin, line numbers, line decorations, text, empty area, view zones, widgets, scrollbars, minimap and sticky scroll.
   - Each target also gives the text position, the `range` (the whole line in the gutter), the `mouse_column` and a `detail` (Monaco `IMouseTarget.detail`): which view zone (and the line it's after), content, overlay or glyph margin widget, the margin's layout and lane, or the distance past a line's end. Use `editor.mouse_target(point, window, cx)` to hit-test any point.
   - The playground toggles breakpoints from glyph margin clicks.
 - `OpenLocation(Location)`: a navigation command or the peek view wants a location in another model. Open it and call `go_to_location` on the new editor. `OpenLink(url)` is a followed link. Instead of subscribing to every editor, register once with `register_editor_opener` and `register_link_opener` (Monaco `registerEditorOpener`/`registerLinkOpener`), which cover peek and diff editors too; the events then come only for what no opener opened.
-- `WillChangeModel` and `ModelChanged`, with the old and new model's uri. `ModelLanguageChanged` forwards the model's language change.
+- `WillChangeModel` and `ModelChanged`, with the old and new model's uri. `ModelLanguageChanged` forwards the model's language change, with its `source` (`TextModel::set_language_from`, else `"api"`).
 - `ConfigurationChanged(change)`: some option changed. `change.has_changed(|o| &o.font_size)` says which.
 - `LayoutChanged(LayoutInfo)` and `ContentSizeChanged`: sent after the frame that changed them, including the first frame.
 - `WillType`/`DidType` (typed text), `WillPaste`/`DidPaste` (the pasted range and the language it was copied from), `WillCopy`/`WillCut`.
@@ -167,6 +169,9 @@ These answer from the last frame, so they return `None` until the editor was pai
 - `CompositionStarted`/`CompositionEnded`: an input method marked text, then committed, cancelled or unmarked it. `in_composition()` says whether one is in progress.
 - `HiddenAreasChanged`: folding or `set_hidden_areas` changed the hidden lines, reported when the next frame applies them.
 - `ViewZonesChanged`: a view zone was added, removed or resized, including the editor's own (code lenses, peek views).
+- `LineHeightChanged`/`FontChanged`: decorations this editor shows that set a line height or a font were added, changed or removed (Monaco `onDidChangeLineHeight`/`onDidChangeFont`).
+- `DropIntoEditor`: files or other data were dropped on the text, with the position and the data, before the drop providers run (Monaco `onDropIntoEditor`).
+- `WillTriggerEditorOperation`: `trigger` or `trigger_from` is about to run an action or command, with its source, id and payload (Monaco `onWillTriggerEditorOperationEvent`).
 - `BeginUpdate`/`EndUpdate`: bracket an operation that may change the model or view several times (edits, typing, pasting, undo, redo, setting selections or the model), once however nested. As in Monaco, not every operation is bracketed.
 
 These events are notifications. Unlike Monaco, a listener can't change the clipboard data or stop a key.

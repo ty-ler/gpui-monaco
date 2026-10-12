@@ -285,6 +285,7 @@ fn registering_a_language_later_updates_models_guessing_it(cx: &mut TestAppConte
             if let TextModelEvent::LanguageChanged {
                 old_language,
                 new_language,
+                ..
             } = event
             {
                 assert_eq!(old_language, &None);

@@ -115,11 +115,26 @@ editor.update(cx, |editor, cx| editor.trigger(&id, window, cx))?; // also by its
 let action = editor.update(cx, |editor, cx| {
     editor.add_action(
         EditorActionDescriptor::new("my.upper", "Make Upper", |editor, window, cx| { /* … */ })
-            .keybinding("ctrl-alt-u"),
+            .keybinding("ctrl-alt-u")
+            // Monaco's `keybindingContext`: where the keybinding applies.
+            .keybinding_context("!editorReadonly"),
         cx,
     )
 });
 action.dispose(cx); // gone from the palette, the context menu and the keymap
+
+// Monaco `run(editor, ...args)`: the body gets `trigger_with_payload`'s
+// payload, a keybinding rule's `args` or `run_action_with_args`' argument.
+let repeat = EditorActionDescriptor::new_with_args("my.repeat", "Repeat", |editor, args, window, cx| {
+    let times = args.and_then(|a| a.as_u64()).unwrap_or(1);
+    /* … */
+});
+
+// Monaco `getAction(id)`: run it later, or ask whether it can run.
+let comment = editor.update(cx, |editor, cx| editor.get_action("editor.action.commentLine", cx));
+if let Some(comment) = comment.filter(|a| a.is_supported(cx)) {
+    comment.run(None, window, cx);
+}
 ```
 
 You can also use GPUI's usual pattern: define an action, bind it in the editor's context, and handle it on an element that contains the editor. While the editor has focus, its key context is part of the dispatch path, and actions bubble up to your handler.
@@ -249,5 +264,7 @@ editor.update(cx, |editor, cx| {
     editor.execute_command(Some("my-extension"), Wrap(selection, None), cx);
 });
 ```
+
+The cursor events it causes report `CursorChangeSource::Other("my-extension")`, so a `SelectionsChanged` listener can skip its own changes; `None` reports the keyboard, as Monaco's `source || 'keyboard'`.
 
 `execute_commands` runs one command per cursor (`None` leaves one alone) as a single edit.

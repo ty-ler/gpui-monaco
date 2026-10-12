@@ -89,7 +89,12 @@ impl CodeEditor {
             .collect();
         self.push_undo_stop(cx);
         if !edits.is_empty() {
-            self.execute_edits(edits, Some(selections), cx);
+            let source = if to_spaces {
+                "editor.action.indentationToSpaces"
+            } else {
+                "editor.action.indentationToTabs"
+            };
+            self.execute_edits_from(source, edits, Some(selections), cx);
         }
         self.push_undo_stop(cx);
         model.update(cx, |model, cx| {

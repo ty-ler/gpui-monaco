@@ -213,7 +213,7 @@ fn cursor_event_payloads(cx: &mut TestAppContext) {
     assert_eq!(position.position, p(1, 4));
     assert!(position.secondary_positions.is_empty());
     assert_eq!(
-        (position.reason, position.source),
+        (position.reason, position.source.clone()),
         (CursorChangeReason::NotSet, CursorChangeSource::Api)
     );
     assert_eq!(selection.selection, Selection::collapsed(p(1, 4)));

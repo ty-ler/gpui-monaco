@@ -385,6 +385,13 @@ pub struct DecorationOptions {
     /// ([`Codicon::char`](crate::codicons::Codicon::char)) are drawn with
     /// the codicon font at 11px.
     pub lines_decoration_text: Option<(SharedString, Hsla)>,
+    /// A tooltip shown when the mouse rests on what
+    /// [`gutter_bar`](Self::gutter_bar),
+    /// [`lines_decoration_text`](Self::lines_decoration_text) or
+    /// [`first_line_decoration`](Self::first_line_decoration) draws in the
+    /// line decorations area (Monaco `linesDecorationsTooltip`, the
+    /// element's `title`).
+    pub lines_decorations_tooltip: Option<SharedString>,
     /// A background across the whole gutter on the decorated lines (Monaco
     /// `marginClassName`).
     pub margin_background: Option<Hsla>,
@@ -457,6 +464,10 @@ pub struct DecorationOptions {
     pub font_weight: Option<FontWeight>,
     /// The decorated text's style, e.g. italic (Monaco `fontStyle`).
     pub font_style: Option<FontStyle>,
+    /// The direction of the decorated lines' text (Monaco `textDirection`),
+    /// kept for hosts and the getters. GPUI has no bidirectional text
+    /// layout, so lines are still laid out left to right.
+    pub text_direction: Option<TextDirection>,
 }
 
 impl DecorationOptions {
@@ -504,7 +515,11 @@ pub struct LeftBorder {
 
 /// Monaco's block decoration: a box spanning the content width around
 /// whole lines.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// By default it runs from the top of the view zones above the first
+/// decorated line to the bottom of those below the last; an empty range
+/// covers only the zones above its line (Monaco's collapsed block).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BlockDecoration {
     /// The border's color.
     pub border: Hsla,
@@ -513,6 +528,22 @@ pub struct BlockDecoration {
     /// Monaco `blockPadding`: top, right, bottom and left, outside the
     /// lines.
     pub padding: [Pixels; 4],
+    /// Monaco `blockIsAfterEnd`: the box covers just the view zones below
+    /// the range's last line (meant for an empty range).
+    pub is_after_end: bool,
+    /// Monaco `blockDoesNotCollapse`: an empty range's box still covers its
+    /// line, not only the zones above it.
+    pub does_not_collapse: bool,
+}
+
+/// The direction of a decorated line's text (Monaco `TextDirection`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TextDirection {
+    /// Left to right (Monaco `LTR`).
+    #[default]
+    Ltr,
+    /// Right to left (Monaco `RTL`).
+    Rtl,
 }
 
 /// A decoration as stored in the model.

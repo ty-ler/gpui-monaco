@@ -52,7 +52,7 @@ pub use developer::TokenInspection;
 pub mod diff;
 pub mod diff_editor;
 mod editor_api;
-pub use editor_api::AriaOptions;
+pub use editor_api::{AriaOptions, EditorType};
 pub mod multi_diff_editor;
 pub use diff_editor::{
     AccessibilitySignal, CharChange, DiffAlgorithm, DiffEditor, DiffEditorEvent, DiffEditorModel,
@@ -141,7 +141,7 @@ pub mod view;
 pub mod widgets;
 
 pub use api::{
-    BracketPairInfo, CursorStateComputer, DecorationsCollection, EndCursorState,
+    BracketPairInfo, CursorStateComputer, DecorationFilter, DecorationsCollection, EndCursorState,
     EndOfLinePreference, FindMatch, ModelDecoration, SingleEditOperation, WordAtPosition,
 };
 pub use bulk_edit::{
@@ -155,6 +155,7 @@ pub use decorations::{
     DecorationUnderline, GlyphMarginLane, GlyphMarginOptions, InjectedText, InjectedTextBox,
     InjectedTextCursorStops, InjectedTextTokens, LeftBorder, LinesDecoration, MinimapDecoration,
     MinimapPosition, MinimapSectionHeaderStyle, OverviewRulerDecoration, OverviewRulerLane,
+    TextDirection,
 };
 #[doc(hidden)]
 pub use editor::OverviewRulerForTests;
@@ -163,8 +164,8 @@ pub use editor::{
     ViewZoneChangeAccessor,
 };
 pub use editor_actions::{
-    ActionPrecondition, ActionRun, EditorActionDescriptor, EditorActionInfo, KeybindingRule,
-    add_editor_action, add_keybinding_rule, add_keybinding_rules,
+    ActionPrecondition, ActionRun, EditorAction, EditorActionDescriptor, EditorActionInfo,
+    KeybindingRule, add_editor_action, add_keybinding_rule, add_keybinding_rules,
 };
 pub use editor_commands::{
     CursorStateComputerData, EditOperationBuilder, EditorCommand, TrackedSelection,
@@ -172,9 +173,10 @@ pub use editor_commands::{
 pub use element::EditorElement;
 pub use events::{
     ClipboardCopyEvent, ClipboardPasteEvent, ConfigurationChange, ContentChange, ContentSizeChange,
-    CursorChangeReason, CursorChangeSource, CursorPositionChange, DecorationsChange, ModelChange,
-    ModelContentChange, ModelOptionsChange, MouseWheelEvent, PasteEvent, ScrollEvent,
-    SelectionChange,
+    CursorChangeReason, CursorChangeSource, CursorPositionChange, DecorationsChange,
+    DropIntoEditorEvent, FontChange, LineHeightChange, ModelChange, ModelContentChange,
+    ModelOptionsChange, MouseWheelEvent, PartialEditorMouseEvent, PasteEvent, ScrollEvent,
+    SelectionChange, TriggerEditorOperationEvent,
 };
 pub use find::{FindOptions, MATCHES_LIMIT};
 pub use find_widget::FindWidget;

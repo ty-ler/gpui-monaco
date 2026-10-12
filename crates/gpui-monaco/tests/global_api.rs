@@ -216,6 +216,7 @@ fn language_changes_report_the_old_language(cx: &mut TestAppContext) {
                 if let TextModelEvent::LanguageChanged {
                     old_language,
                     new_language,
+                    ..
                 } = event
                 {
                     local

@@ -1,6 +1,7 @@
-//! The rest of Monaco's `ICodeEditor` and `ITextModel` API: contributions
-//! (`getContribution`), `getFontSizeAtPosition`, `writeScreenReaderContent`
-//! and `setAriaOptions`, and a model's `onWillDispose`.
+//! The rest of Monaco's `ICodeEditor` and `ITextModel` API: `getId` and
+//! `getEditorType`, contributions (`getContribution`),
+//! `getFontSizeAtPosition`, `writeScreenReaderContent` and
+//! `setAriaOptions`, and a model's `onWillDispose`.
 
 use std::any::{Any, TypeId};
 
@@ -9,6 +10,46 @@ use text::PointUtf16;
 
 use crate::editor::CodeEditor;
 use crate::model::TextModel;
+
+/// What kind of editor an editor is (Monaco `editor.EditorType`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EditorType {
+    /// A [`CodeEditor`] (Monaco `'vs.editor.ICodeEditor'`).
+    CodeEditor,
+    /// A [`DiffEditor`](crate::DiffEditor) (Monaco `'vs.editor.IDiffEditor'`).
+    DiffEditor,
+}
+
+impl EditorType {
+    /// Monaco's string for it, e.g. `"vs.editor.ICodeEditor"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CodeEditor => "vs.editor.ICodeEditor",
+            Self::DiffEditor => "vs.editor.IDiffEditor",
+        }
+    }
+}
+
+impl std::fmt::Display for EditorType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl CodeEditor {
+    /// The editor's unique id, `vs.editor.ICodeEditor:1`,
+    /// `vs.editor.ICodeEditor:2`, … in creation order (Monaco `getId`, the
+    /// editor type and a counter). A diff editor's two sides have their
+    /// own.
+    pub fn id(&self) -> String {
+        format!("{}:{}", self.editor_type(), self.commands.id)
+    }
+
+    /// [`EditorType::CodeEditor`] (Monaco `getEditorType`).
+    pub fn editor_type(&self) -> EditorType {
+        EditorType::CodeEditor
+    }
+}
 
 /// Monaco `IEditorAriaOptions`: what the editor tells assistive technology
 /// besides its text, for hosts that show their own UI (such as a list of
