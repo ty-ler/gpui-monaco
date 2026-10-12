@@ -1024,6 +1024,10 @@ struct UnchangedBar {
     editor: WeakEntity<CodeEditor>,
     /// In the original editor (else the modified).
     original: bool,
+    /// Monaco `_hide`: the original editor's bar in the inline view, which
+    /// shows only the background and edges (in `compact` mode, nothing),
+    /// so its line-number column gets no unfold button or label.
+    hide: bool,
     index: usize,
     hidden_lines: usize,
     /// Monaco `canMoveTop` for the top edge: lines above can be hidden
@@ -1058,6 +1062,10 @@ impl Render for UnchangedBar {
         };
         let editor = editor.read(cx);
         let colors = editor.colors().clone();
+        if self.compact && self.hide {
+            // Monaco's `replaceChildren()`: an empty widget.
+            return div();
+        }
         if self.compact {
             // `.diff-hidden-lines-compact`: a 20px rule, the label and a
             // rule to the end, in the code lens color.
@@ -1188,6 +1196,7 @@ impl Render for UnchangedBar {
                 })
         });
         // Monaco's `.center`, with the edges over it reaching past it.
+        let hide = self.hide;
         let center = div()
             .size_full()
             .flex()
@@ -1198,39 +1207,49 @@ impl Render for UnchangedBar {
             .text_color(colors.diff_unchanged_region_foreground)
             // Monaco's `.diff-hidden-lines`: 13px in the UI font.
             .text_size(px(13.))
-            .child(
-                div().w(gutter).flex_none().flex().justify_center().child(
-                    div()
-                        .id("unchanged-unfold")
-                        .tooltip(crate::tooltip::tooltip("Show Unchanged Region", &colors))
-                        .cursor_pointer()
-                        .px_1()
-                        .hover(|style| style.text_color(link))
-                        .on_click(move |_, _, cx| unfold(cx, |r, _| r.show_all()))
-                        .child(codicon(Codicon::Unfold)),
-                ),
-            )
-            .child(
-                div()
-                    .id("unchanged-label")
-                    .tooltip(crate::tooltip::tooltip("Double click to unfold", &colors))
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .on_click(move |event, _, cx| {
-                        if event.click_count() == 2 {
-                            label(cx, |r, _| r.show_all())
-                        }
+            .when(!hide, |center| {
+                center
+                    .child(
+                        div().w(gutter).flex_none().flex().justify_center().child(
+                            div()
+                                .id("unchanged-unfold")
+                                .debug_selector(move || {
+                                    if original {
+                                        "unchanged-unfold-original".into()
+                                    } else {
+                                        "unchanged-unfold-modified".into()
+                                    }
+                                })
+                                .tooltip(crate::tooltip::tooltip("Show Unchanged Region", &colors))
+                                .cursor_pointer()
+                                .px_1()
+                                .hover(|style| style.text_color(link))
+                                .on_click(move |_, _, cx| unfold(cx, |r, _| r.show_all()))
+                                .child(codicon(Codicon::Unfold)),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .id("unchanged-label")
+                            .tooltip(crate::tooltip::tooltip("Double click to unfold", &colors))
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .on_click(move |event, _, cx| {
+                                if event.click_count() == 2 {
+                                    label(cx, |r, _| r.show_all())
+                                }
+                            })
+                            .child(format!("{} hidden lines", self.hidden_lines)),
+                    )
+                    .when(breadcrumb_count > 0, |bar| {
+                        bar.child(
+                            div()
+                                .flex_none()
+                                .whitespace_nowrap()
+                                .child("\u{a0}\u{a0}|\u{a0}\u{a0}"),
+                        )
+                        .children(breadcrumbs)
                     })
-                    .child(format!("{} hidden lines", self.hidden_lines)),
-            )
-            .when(breadcrumb_count > 0, |bar| {
-                bar.child(
-                    div()
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .child("\u{a0}\u{a0}|\u{a0}\u{a0}"),
-                )
-                .children(breadcrumbs)
             })
             // Monaco's inset shadows at the top and bottom.
             .border_t_1()
@@ -2287,8 +2306,15 @@ pub struct DiffEditor {
     screen_reader_mode: bool,
     /// Editor options the diff editor replaced.
     host_options: HostOptions,
-    /// Hideable unchanged regions, when `hide_unchanged_regions` is on.
-    unchanged: Vec<UnchangedRegion>,
+    /// Hideable unchanged regions, when `hide_unchanged_regions` is on
+    /// (Monaco `_unchangedRegions`): `None` before the first diff, empty
+    /// when everything shows. When nothing changed, one region covers the
+    /// whole file, which the view skips.
+    unchanged: Option<Vec<UnchangedRegion>>,
+    /// The only region covers the whole modified model: no bars, glyphs or
+    /// hidden lines (Monaco's `unchangedRegions` in
+    /// `HideUnchangedRegionsFeature`).
+    unchanged_whole_file: bool,
     /// Decorations on each region's lines, tracking them through edits.
     unchanged_decorations: (Vec<DecorationId>, Vec<DecorationId>),
     /// The "hidden lines" bars.
@@ -2402,7 +2428,8 @@ impl DiffEditor {
             inline: false,
             screen_reader_mode: false,
             host_options: HostOptions::default(),
-            unchanged: Vec::new(),
+            unchanged: None,
+            unchanged_whole_file: false,
             unchanged_decorations: Default::default(),
             unchanged_zones: Default::default(),
             fold_glyphs: Default::default(),
@@ -3008,7 +3035,7 @@ impl DiffEditor {
     /// (from its document symbol providers, or the language's tags), for the
     /// hidden-lines bars.
     fn update_breadcrumb_symbols(&mut self, cx: &mut Context<Self>) {
-        if !self.options.hide_unchanged_regions.enabled || self.unchanged.is_empty() {
+        if !self.options.hide_unchanged_regions.enabled || self.shown_unchanged().is_empty() {
             return;
         }
         let task = self
@@ -3038,14 +3065,14 @@ impl DiffEditor {
     /// Monaco `_revealModifiedHiddenLine`: shows a hidden modified line from
     /// the bottom of its region and reveals it.
     fn reveal_modified_hidden_line(&mut self, line: usize, cx: &mut Context<Self>) {
-        let Some(index) = self
-            .unchanged
-            .iter()
-            .position(|r| r.hidden_modified_range().contains(line))
+        let Some(region) = self
+            .unchanged_regions_mut()
+            .iter_mut()
+            .find(|r| r.hidden_modified_range().contains(line))
         else {
             return;
         };
-        self.unchanged[index].show_modified_line(line, RevealPreference::FromBottom);
+        region.show_modified_line(line, RevealPreference::FromBottom);
         self.apply_unchanged(cx);
         let point = PointUtf16::new(line as u32 - 1, 0);
         self.modified.update(cx, |editor, cx| {
@@ -3067,13 +3094,12 @@ impl DiffEditor {
                 }
             });
         }
-        if self.options.compact_mode {
-            return;
-        }
+        // Monaco skips it only in its `compact` variant (multi diff
+        // cards), which the port doesn't have, not with `compactMode`.
         let colors = self.modified.read(cx).colors().clone();
         let this = cx.entity().downgrade();
         let mut glyphs = (Vec::new(), Vec::new());
-        for (index, region) in self.unchanged.iter().enumerate() {
+        for (index, region) in self.shown_unchanged().iter().enumerate() {
             if !self.hides_unchanged_controls(index) {
                 continue;
             }
@@ -3322,12 +3348,14 @@ impl DiffEditor {
     /// Region `index`'s breadcrumbs, for tests.
     #[doc(hidden)]
     pub fn breadcrumbs_for_tests(&self, index: usize) -> Vec<String> {
-        self.unchanged.get(index).map_or(Vec::new(), |region| {
-            breadcrumb_items(&self.breadcrumb_symbols, region.hidden_modified_range())
-                .into_iter()
-                .map(|s| s.name.to_string())
-                .collect()
-        })
+        self.shown_unchanged()
+            .get(index)
+            .map_or(Vec::new(), |region| {
+                breadcrumb_items(&self.breadcrumb_symbols, region.hidden_modified_range())
+                    .into_iter()
+                    .map(|s| s.name.to_string())
+                    .collect()
+            })
     }
 
     /// Clicks breadcrumb `item` of region `index`, for tests.
@@ -3338,7 +3366,7 @@ impl DiffEditor {
         item: usize,
         cx: &mut Context<Self>,
     ) {
-        let Some(region) = self.unchanged.get(index) else {
+        let Some(region) = self.shown_unchanged().get(index) else {
             return;
         };
         let items = breadcrumb_items(&self.breadcrumb_symbols, region.hidden_modified_range());
@@ -3564,7 +3592,7 @@ impl DiffEditor {
         let (original_zones, modified_zones) = std::mem::take(&mut self.move_caption_zones);
         clear_side(&self.original, Vec::new(), original_zones, cx);
         clear_side(&self.modified, Vec::new(), modified_zones, cx);
-        self.unchanged.clear();
+        self.unchanged = None;
         self.apply_unchanged(cx);
         self.active_move = None;
         self.move_to_compare = None;
@@ -4194,7 +4222,7 @@ impl DiffEditor {
             return Some(gpui::CursorStyle::Arrow);
         }
         let drag = self.unchanged_drag?;
-        let region = self.unchanged.get(drag.index)?;
+        let region = self.unchanged_regions().get(drag.index)?;
         let fully_revealed = region.hidden_modified_range().is_empty();
         let (up, down) = if drag.top {
             (region.visible_top > 0, !fully_revealed)
@@ -4610,7 +4638,7 @@ impl DiffEditor {
         let settings = self.options.hide_unchanged_regions;
         let original_count = self.original.read(cx).model().read(cx).line_count() as usize;
         let modified_count = self.modified.read(cx).model().read(cx).line_count() as usize;
-        let regions = if settings.enabled {
+        self.unchanged = settings.enabled.then(|| {
             let regions = UnchangedRegion::from_diffs(
                 &diff.changes,
                 original_count,
@@ -4619,27 +4647,15 @@ impl DiffEditor {
                 settings.context_line_count,
             );
             let previous = self.tracked_unchanged_regions(cx);
-            let regions =
-                unchanged::transfer_state(regions, &previous, original_count, modified_count);
-            // Nothing changed: Monaco shows everything.
-            if regions.len() == 1
-                && regions[0].modified_line_number == 1
-                && regions[0].line_count == modified_count
-            {
-                Vec::new()
-            } else {
-                regions
-            }
-        } else {
-            Vec::new()
-        };
-        self.unchanged = regions;
+            unchanged::transfer_state(regions, previous.as_deref(), original_count, modified_count)
+        });
         self.apply_unchanged(cx);
     }
 
     /// The regions with their ranges moved through edits since they were
-    /// shown (Monaco tracks them with decorations).
-    fn tracked_unchanged_regions(&self, cx: &App) -> Vec<UnchangedRegion> {
+    /// shown (Monaco tracks them with decorations), without those that
+    /// edits made overlap the one before. `None` before the first diff.
+    fn tracked_unchanged_regions(&self, cx: &App) -> Option<Vec<UnchangedRegion>> {
         let rows = |editor: &Entity<CodeEditor>, id: DecorationId| {
             let model = editor.read(cx).model().read(cx);
             let range = model.decoration(id)?.range.clone();
@@ -4649,7 +4665,9 @@ impl DiffEditor {
                     ..rope.offset_to_point(range.end).row as usize + 2,
             )
         };
-        self.unchanged
+        let regions = self
+            .unchanged
+            .as_ref()?
             .iter()
             .zip(&self.unchanged_decorations.0)
             .zip(&self.unchanged_decorations.1)
@@ -4666,7 +4684,28 @@ impl DiffEditor {
                     r.visible_bottom.min(length - top),
                 ))
             })
-            .collect()
+            .collect();
+        Some(unchanged::drop_overlapping(regions))
+    }
+
+    /// The unchanged regions, none before the first diff.
+    fn unchanged_regions(&self) -> &[UnchangedRegion] {
+        self.unchanged.as_deref().unwrap_or_default()
+    }
+
+    fn unchanged_regions_mut(&mut self) -> &mut [UnchangedRegion] {
+        self.unchanged.as_deref_mut().unwrap_or_default()
+    }
+
+    /// The unchanged regions the view shows: none when the only one covers
+    /// the whole modified model (Monaco `HideUnchangedRegionsFeature`'s
+    /// `unchangedRegions`).
+    fn shown_unchanged(&self) -> &[UnchangedRegion] {
+        if self.unchanged_whole_file {
+            &[]
+        } else {
+            self.unchanged_regions()
+        }
     }
 
     /// Hides the regions' hidden lines and shows a bar in their place.
@@ -4674,15 +4713,21 @@ impl DiffEditor {
         // Monaco's "collapse touching unchanged ranges", except while a bar
         // is dragged.
         if self.unchanged_drag.is_none()
-            && let Some(merged) = unchanged::merge_touching(&self.unchanged)
+            && let Some(merged) = unchanged::merge_touching(self.unchanged_regions())
         {
-            self.unchanged = merged;
+            self.unchanged = Some(merged);
         }
+        let modified_count = self.modified.read(cx).model().read(cx).line_count() as usize;
+        self.unchanged_whole_file = matches!(
+            self.unchanged_regions(),
+            [r] if r.modified_line_number == 1 && r.line_count == modified_count
+        );
         let colors = self.modified.read(cx).colors().clone();
-        // The tracking decorations, which also tint the lines (Monaco
-        // `diff-unchanged-lines`).
+        // The tracking decorations, which also tint the shown regions' lines
+        // (Monaco `diff-unchanged-lines`).
         let line = DecorationOptions {
-            background: Some(colors.diff_unchanged_code_background),
+            background: (!self.unchanged_whole_file)
+                .then_some(colors.diff_unchanged_code_background),
             is_whole_line: true,
             ..Default::default()
         };
@@ -4707,12 +4752,12 @@ impl DiffEditor {
             })
         };
         let original_ranges = self
-            .unchanged
+            .unchanged_regions()
             .iter()
             .map(|r| r.original_unchanged_range())
             .collect();
         let modified_ranges = self
-            .unchanged
+            .unchanged_regions()
             .iter()
             .map(|r| r.modified_unchanged_range())
             .collect();
@@ -4721,13 +4766,13 @@ impl DiffEditor {
             decorate(&self.modified, old_modified, modified_ranges, cx),
         );
         let original_hidden = self
-            .unchanged
+            .shown_unchanged()
             .iter()
             .map(|r| r.hidden_original_range().to_rows())
             .filter(|r| !r.is_empty())
             .collect();
         let modified_hidden = self
-            .unchanged
+            .shown_unchanged()
             .iter()
             .map(|r| r.hidden_modified_range().to_rows())
             .filter(|r| !r.is_empty())
@@ -4745,7 +4790,7 @@ impl DiffEditor {
         let this = cx.entity().downgrade();
         let mut zones = (Vec::new(), Vec::new());
         let compact = self.options.compact_mode;
-        for (index, region) in self.unchanged.iter().enumerate() {
+        for (index, region) in self.shown_unchanged().iter().enumerate() {
             let Some(height) = self.unchanged_bar_height(index) else {
                 continue;
             };
@@ -4756,10 +4801,13 @@ impl DiffEditor {
             let breadcrumbs =
                 breadcrumb_items(&self.breadcrumb_symbols, region.hidden_modified_range());
             for (editor, hidden, ids) in sides {
+                let original = editor == &self.original;
                 let bar = cx.new(|_| UnchangedBar {
                     diff: this.clone(),
                     editor: editor.downgrade(),
-                    original: editor == &self.original,
+                    original,
+                    // Monaco's `_hide = !sideBySide` on the original side.
+                    hide: original && self.inline,
                     index,
                     hidden_lines: hidden.len(),
                     visible_top: region.visible_top > 0,
@@ -4787,7 +4835,7 @@ impl DiffEditor {
     /// Monaco `shouldHideControls`: region `index` is fully shown and not
     /// being dragged, so it has no bar.
     fn hides_unchanged_controls(&self, index: usize) -> bool {
-        self.unchanged
+        self.unchanged_regions()
             .get(index)
             .is_none_or(|r| r.should_hide_controls())
             && self.unchanged_drag.is_none_or(|d| d.index != index)
@@ -4802,7 +4850,8 @@ impl DiffEditor {
             return Some(UNCHANGED_BAR_HEIGHT);
         }
         // Monaco `compactMode`: no separators at the start and end.
-        (index != 0 && index + 1 != self.unchanged.len()).then_some(COMPACT_UNCHANGED_BAR_HEIGHT)
+        (index != 0 && index + 1 != self.shown_unchanged().len())
+            .then_some(COMPACT_UNCHANGED_BAR_HEIGHT)
     }
 
     /// Changes region `index` and shows the result.
@@ -4812,7 +4861,7 @@ impl DiffEditor {
         change: impl FnOnce(&mut UnchangedRegion),
         cx: &mut Context<Self>,
     ) {
-        if let Some(region) = self.unchanged.get_mut(index) {
+        if let Some(region) = self.unchanged_regions_mut().get_mut(index) {
             change(region);
             self.apply_unchanged(cx);
         }
@@ -4829,7 +4878,7 @@ impl DiffEditor {
         y: Pixels,
         cx: &mut Context<Self>,
     ) {
-        let Some(region) = self.unchanged.get(index) else {
+        let Some(region) = self.unchanged_regions().get(index) else {
             return;
         };
         let start = if top {
@@ -4860,7 +4909,7 @@ impl DiffEditor {
         let lines = (f32::from(delta) / line_height).round() as isize;
         let (index, top, original, start) =
             (drag.index, drag.top, drag.original, drag.start as isize);
-        let Some(region) = self.unchanged.get_mut(index) else {
+        let Some(region) = self.unchanged_regions_mut().get_mut(index) else {
             return;
         };
         if top {
@@ -4894,7 +4943,7 @@ impl DiffEditor {
             }
         };
         let bar_before = self.unchanged_bar_height(index);
-        let Some(region) = self.unchanged.get_mut(index) else {
+        let Some(region) = self.unchanged_regions_mut().get_mut(index) else {
             return;
         };
         let before = hidden(region);
@@ -4961,7 +5010,7 @@ impl DiffEditor {
     /// Monaco `ensureModifiedLineIsVisible`/`ensureOriginalLineIsVisible`
     /// for each selection's ends: the cursor never sits in hidden lines.
     fn ensure_selections_visible(&mut self, original: bool, cx: &mut Context<Self>) {
-        if self.unchanged.is_empty() {
+        if self.unchanged_regions().is_empty() {
             return;
         }
         let editor = if original {
@@ -4977,7 +5026,7 @@ impl DiffEditor {
             .collect();
         let mut changed = false;
         for line in lines {
-            for region in &mut self.unchanged {
+            for region in self.unchanged_regions_mut() {
                 let hidden = if original {
                     region.hidden_original_range()
                 } else {
@@ -5002,7 +5051,7 @@ impl DiffEditor {
     /// Hides every unchanged region again (Monaco
     /// `collapseAllUnchangedRegions`).
     pub fn collapse_all_unchanged_regions(&mut self, cx: &mut Context<Self>) {
-        self.unchanged
+        self.unchanged_regions_mut()
             .iter_mut()
             .for_each(UnchangedRegion::collapse_all);
         self.apply_unchanged(cx);
@@ -5010,7 +5059,7 @@ impl DiffEditor {
 
     /// Shows every unchanged region (Monaco `showAllUnchangedRegions`).
     pub fn show_all_unchanged_regions(&mut self, cx: &mut Context<Self>) {
-        self.unchanged
+        self.unchanged_regions_mut()
             .iter_mut()
             .for_each(UnchangedRegion::show_all);
         self.apply_unchanged(cx);
@@ -5020,7 +5069,7 @@ impl DiffEditor {
     /// exclusive), for tests.
     #[doc(hidden)]
     pub fn hidden_modified_ranges_for_tests(&self) -> Vec<Range<usize>> {
-        self.unchanged
+        self.shown_unchanged()
             .iter()
             .map(|r| r.hidden_modified_range())
             .filter(|r| !r.is_empty())
@@ -5913,7 +5962,7 @@ impl DiffEditor {
             original: self.original.read(cx).save_view_state(cx),
             modified: self.modified.read(cx).save_view_state(cx),
             collapsed_regions: self
-                .unchanged
+                .unchanged_regions()
                 .iter()
                 .map(|r| r.hidden_modified_range())
                 .collect(),
@@ -5947,10 +5996,10 @@ impl DiffEditor {
     /// Monaco `restoreSerializedState`: each region takes the first saved
     /// range it intersects as its hidden range.
     fn restore_collapsed_regions(&mut self, ranges: &[LineRange], cx: &mut Context<Self>) {
-        if self.unchanged.is_empty() {
+        if self.unchanged_regions().is_empty() {
             return;
         }
-        for region in &mut self.unchanged {
+        for region in self.unchanged_regions_mut() {
             let unchanged = region.modified_unchanged_range();
             if let Some(range) = ranges.iter().find(|r| unchanged.intersect(r).is_some()) {
                 region.set_hidden_modified_range(*range);
