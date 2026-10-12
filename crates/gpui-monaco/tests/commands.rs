@@ -1,7 +1,9 @@
 //! Commands, keybindings and context keys (#261): Monaco's command ids and
 //! their arguments through `trigger`, preconditions, context keys, the
 //! host's commands, actions and context keys, `executeCommand`, and the
-//! screen reader alerts that come with commands.
+//! screen reader alerts that come with commands; and their leftovers (#300):
+//! the mouse commands' `viewPosition`, `pasteAs`' `preferences`,
+//! `inlineSuggest.trigger`'s arguments and widgets' preconditions.
 
 use std::cell::RefCell;
 use std::ops::Range;
@@ -13,6 +15,7 @@ use gpui::{
     Task, TestAppContext, VisualTestContext, Window, div,
 };
 use gpui_monaco::cursor::{CursorModel, Selection};
+use gpui_monaco::options::WordWrap;
 use gpui_monaco::providers::*;
 use gpui_monaco::text::PointUtf16;
 use gpui_monaco::{
@@ -1474,4 +1477,553 @@ fn api_commands_ask_providers(cx: &mut TestAppContext) {
     assert!(cx.update(|_, cx| {
         gpui_monaco::api_commands::provide_document_semantic_tokens_legend(&model, cx).is_none()
     }));
+}
+
+// ----- #300: view positions, pasteAs, inlineSuggest.trigger, widgets ----------
+
+/// "x", then "aaaa bbbb " | "cccc dddd" wrapped at 10 columns, then "y":
+/// view lines 0, 1 and 2, and 3.
+const WRAPPED: &str = "x\naaaa bbbb cccc dddd\ny";
+
+fn setup_wrapped(cx: &mut TestAppContext) -> (Entity<CodeEditor>, &mut VisualTestContext) {
+    let (editor, cx) = setup_model(|| TextModel::new(WRAPPED), cx);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(
+            |o| {
+                o.word_wrap = WordWrap::WordWrapColumn;
+                o.word_wrap_column = 10;
+            },
+            cx,
+        )
+    });
+    draw(cx);
+    (editor, cx)
+}
+
+fn view_positions(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<(u32, u32)> {
+    editor.read_with(cx, |e, _| e.cursor_view_positions_for_tests())
+}
+
+/// Monaco's `{ lineNumber, column }`, from 1.
+fn pos(line: u32, column: u32) -> serde_json::Value {
+    json!({ "lineNumber": line, "column": column })
+}
+
+/// `_moveTo`, `createCursor` and `_lastCursorMoveToSelect` put the cursor
+/// at the `viewPosition` when it shows the position: at a wrap point, on
+/// the end of the first segment rather than the start of the next.
+#[gpui::test]
+fn mouse_commands_honour_the_view_position(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_wrapped(cx);
+    // The wrap point (2, 11): without a view position it shows at the start
+    // of the second segment.
+    trigger_with(&editor, cx, "_moveTo", json!({ "position": pos(2, 11) }));
+    assert_eq!(head(&editor, cx), p(1, 10));
+    assert_eq!(view_positions(&editor, cx), [(2, 0)]);
+    trigger_with(
+        &editor,
+        cx,
+        "_moveTo",
+        json!({ "position": pos(2, 11), "viewPosition": pos(2, 11) }),
+    );
+    assert_eq!(head(&editor, cx), p(1, 10));
+    assert_eq!(view_positions(&editor, cx), [(1, 10)]);
+    // A view position elsewhere is ignored (Monaco `validateViewPosition`).
+    trigger_with(
+        &editor,
+        cx,
+        "_moveTo",
+        json!({ "position": pos(2, 11), "viewPosition": pos(4, 1) }),
+    );
+    assert_eq!(view_positions(&editor, cx), [(2, 0)]);
+    // `_moveToSelect` keeps the anchor and moves the head by view.
+    set_cursor(&editor, cx, p(0, 0));
+    trigger_with(
+        &editor,
+        cx,
+        "_moveToSelect",
+        json!({ "position": pos(2, 11), "viewPosition": pos(2, 11) }),
+    );
+    assert_eq!(selections(&editor, cx), [Selection::new(p(0, 0), p(1, 10))]);
+    assert_eq!(view_positions(&editor, cx), [(1, 10)]);
+
+    // `createCursor` at the view position, then toggled off there.
+    set_cursor(&editor, cx, p(0, 0));
+    let create = json!({ "position": pos(2, 11), "viewPosition": pos(2, 11) });
+    trigger_with(&editor, cx, "createCursor", create.clone());
+    assert_eq!(view_positions(&editor, cx), [(0, 0), (1, 10)]);
+    trigger_with(&editor, cx, "createCursor", create);
+    assert_eq!(view_positions(&editor, cx), [(0, 0)]);
+
+    // `_lastCursorMoveToSelect` moves the last added cursor's head.
+    trigger_with(
+        &editor,
+        cx,
+        "createCursor",
+        json!({ "position": pos(3, 1) }),
+    );
+    trigger_with(
+        &editor,
+        cx,
+        "_lastCursorMoveToSelect",
+        json!({ "position": pos(2, 11), "viewPosition": pos(2, 11) }),
+    );
+    assert_eq!(
+        selections(&editor, cx),
+        [
+            Selection::collapsed(p(0, 0)),
+            Selection::new(p(2, 0), p(1, 10))
+        ]
+    );
+    assert_eq!(view_positions(&editor, cx), [(0, 0), (1, 10)]);
+}
+
+/// Monaco `CursorMoveCommands.line`: extending a line selection goes by view
+/// lines, so a wrapped line's segments are selected one at a time.
+#[gpui::test]
+fn line_selection_extends_by_view_lines(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_wrapped(cx);
+    trigger_with(&editor, cx, "_lineSelect", json!({ "position": pos(1, 1) }));
+    assert_eq!(selections(&editor, cx), [Selection::new(p(0, 0), p(1, 0))]);
+    // Onto the first segment: to the start of the second.
+    trigger_with(
+        &editor,
+        cx,
+        "_lineSelectDrag",
+        json!({ "position": pos(2, 3), "viewPosition": pos(2, 3) }),
+    );
+    assert_eq!(selections(&editor, cx), [Selection::new(p(0, 0), p(1, 10))]);
+    // Onto the second: to the next line.
+    trigger_with(
+        &editor,
+        cx,
+        "_lineSelectDrag",
+        json!({ "position": pos(2, 13), "viewPosition": pos(3, 3) }),
+    );
+    assert_eq!(selections(&editor, cx), [Selection::new(p(0, 0), p(2, 0))]);
+    // Upwards from the last line: to the start of the segment.
+    trigger_with(&editor, cx, "_lineSelect", json!({ "position": pos(3, 1) }));
+    trigger_with(
+        &editor,
+        cx,
+        "_lineSelectDrag",
+        json!({ "position": pos(2, 13), "viewPosition": pos(3, 3) }),
+    );
+    assert_eq!(head(&editor, cx), p(1, 10));
+    assert_eq!(view_positions(&editor, cx), [(2, 0)]);
+    // The last cursor's line selection does the same.
+    trigger_with(&editor, cx, "_moveTo", json!({ "position": pos(1, 1) }));
+    trigger_with(
+        &editor,
+        cx,
+        "lastCursorLineSelect",
+        json!({ "position": pos(1, 1) }),
+    );
+    trigger_with(
+        &editor,
+        cx,
+        "lastCursorLineSelectDrag",
+        json!({ "position": pos(2, 3), "viewPosition": pos(2, 3) }),
+    );
+    assert_eq!(selections(&editor, cx), [Selection::new(p(0, 0), p(1, 10))]);
+}
+
+/// Monaco's mouse commands go through view positions: a position inside a
+/// fold lands where the fold shows.
+#[gpui::test]
+fn mouse_commands_respect_folds(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_model(|| TextModel::new(FOLDS), cx);
+    cx.executor().advance_clock(Duration::from_secs(1));
+    draw(cx);
+    trigger_with(
+        &editor,
+        cx,
+        "editor.fold",
+        json!({ "levels": 1, "selectionLines": [1] }),
+    );
+    assert_eq!(hidden_rows(&editor, cx), 3);
+    // Row 3 is hidden in the fold that starts on row 1 ("  b {").
+    trigger_with(&editor, cx, "_moveTo", json!({ "position": pos(4, 3) }));
+    assert_eq!(selections(&editor, cx), [Selection::collapsed(p(1, 5))]);
+    // A line selection extended past the fold goes to the line after it.
+    trigger_with(&editor, cx, "_lineSelect", json!({ "position": pos(1, 1) }));
+    trigger_with(
+        &editor,
+        cx,
+        "_lineSelectDrag",
+        json!({ "position": pos(2, 1) }),
+    );
+    assert_eq!(selections(&editor, cx), [Selection::new(p(0, 0), p(5, 0))]);
+}
+
+/// Monaco `columnSelect` selects on view lines: each segment of a wrapped
+/// line is a line of the box.
+#[gpui::test]
+fn column_select_goes_by_view_lines(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_wrapped(cx);
+    trigger_with(
+        &editor,
+        cx,
+        "columnSelect",
+        json!({
+            "position": pos(2, 2),
+            "viewPosition": pos(2, 2),
+            "mouseColumn": 2,
+            "doColumnSelect": false
+        }),
+    );
+    assert_eq!(selections(&editor, cx), [Selection::collapsed(p(1, 1))]);
+    trigger_with(
+        &editor,
+        cx,
+        "columnSelect",
+        json!({
+            "position": pos(2, 14),
+            "viewPosition": pos(3, 4),
+            "mouseColumn": 4,
+            "doColumnSelect": true
+        }),
+    );
+    assert_eq!(
+        selections(&editor, cx),
+        [
+            Selection::new(p(1, 1), p(1, 3)),
+            Selection::new(p(1, 11), p(1, 13)),
+        ]
+    );
+    assert_eq!(view_positions(&editor, cx), [(1, 3), (2, 3)]);
+    // On to the next line.
+    trigger_with(
+        &editor,
+        cx,
+        "columnSelect",
+        json!({
+            "position": pos(3, 2),
+            "viewPosition": pos(4, 2),
+            "mouseColumn": 4,
+            "doColumnSelect": true
+        }),
+    );
+    assert_eq!(selections(&editor, cx).len(), 3);
+}
+
+/// Pastes the clipboard as an edit of `kind` with `text`.
+struct PasteKind {
+    kind: &'static str,
+    text: &'static str,
+}
+
+impl DocumentPasteEditProvider for PasteKind {
+    fn paste_mime_types(&self) -> Vec<gpui::SharedString> {
+        vec!["text/plain".into()]
+    }
+
+    fn provided_paste_edit_kinds(&self) -> Vec<gpui::SharedString> {
+        vec![self.kind.into()]
+    }
+
+    fn provide_document_paste_edits(
+        &self,
+        _: &ProviderContext,
+        _: &[Range<PointUtf16>],
+        _: &DataTransfer,
+        _: DocumentPasteTriggerKind,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>> {
+        Task::ready(Ok(vec![DocumentDropOrPasteEdit {
+            title: self.text.into(),
+            kind: Some(self.kind.into()),
+            insert_text: EditInsertText::Text(self.text.into()),
+            ..Default::default()
+        }]))
+    }
+}
+
+/// `editor.action.pasteAs` with `preferences`: the first edit matching any
+/// of them, without asking; `kind` wins over them.
+#[gpui::test]
+fn paste_as_preferences(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_model(|| TextModel::new(""), cx);
+    cx.update(|_, cx| {
+        register_document_paste_edit_provider(
+            cx,
+            LanguageSelector::All,
+            PasteKind {
+                kind: "text.shout",
+                text: "HI",
+            },
+        );
+        register_document_paste_edit_provider(
+            cx,
+            LanguageSelector::All,
+            PasteKind {
+                kind: "text.tag",
+                text: "<hi>",
+            },
+        );
+    });
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("hi".into()));
+    let paste_as = |args: serde_json::Value, cx: &mut VisualTestContext| {
+        editor.update(cx, |e, cx| {
+            e.model().update(cx, |m, cx| m.set_value("", cx))
+        });
+        draw(cx);
+        trigger_with(&editor, cx, "editor.action.pasteAs", args);
+        draw(cx);
+        let rows = editor.read_with(cx, |e, cx| e.quick_access_rows_for_tests(cx));
+        assert!(rows.is_empty(), "asked: {rows:?}");
+        text(&editor, cx)
+    };
+    // A later preference applies when an earlier one matches nothing.
+    assert_eq!(
+        paste_as(json!({ "preferences": ["text.missing", "text.tag"] }), cx),
+        "<hi>"
+    );
+    // A parent kind matches its children: several edits, the first applies.
+    assert!(!paste_as(json!({ "preferences": ["text"] }), cx).is_empty());
+    // `kind` first.
+    assert_eq!(
+        paste_as(
+            json!({ "kind": "text.tag", "preferences": ["text.shout"] }),
+            cx
+        ),
+        "<hi>"
+    );
+    // Nothing matches: Monaco's message, with every preference.
+    assert_eq!(
+        paste_as(json!({ "preferences": ["text.a", "text.b"] }), cx),
+        ""
+    );
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.message_text()).as_deref(),
+        Some("No paste edits for 'text.a, text.b' found")
+    );
+    paste_as(json!({ "preferences": [] }), cx);
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.message_text()).as_deref(),
+        Some("No paste edits for 'empty' found")
+    );
+}
+
+/// An inline completions provider with an id, counting its requests.
+struct Identified {
+    id: Option<&'static str>,
+    text: &'static str,
+    requests: Rc<RefCell<usize>>,
+}
+
+impl InlineCompletionsProvider for Identified {
+    fn provide_inline_completions(
+        &self,
+        _: &ProviderContext,
+        position: PointUtf16,
+        _: InlineCompletionContext,
+        _: &mut App,
+    ) -> Task<anyhow::Result<InlineCompletionList>> {
+        *self.requests.borrow_mut() += 1;
+        let items = if self.text.is_empty() {
+            Vec::new()
+        } else {
+            vec![InlineCompletion {
+                insert_text: self.text.into(),
+                range: Some(position..position),
+                ..Default::default()
+            }]
+        };
+        Task::ready(Ok(InlineCompletionList {
+            items,
+            ..Default::default()
+        }))
+    }
+
+    fn provider_id(&self) -> Option<gpui::SharedString> {
+        self.id.map(Into::into)
+    }
+}
+
+/// Logs the editor writes, for `showNoResultNotification`.
+static LOGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+struct CaptureLogs;
+
+impl log::Log for CaptureLogs {
+    fn enabled(&self, _: &log::Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record) {
+        LOGS.lock().unwrap().push(record.args().to_string());
+    }
+
+    fn flush(&self) {}
+}
+
+fn logged(message: &str) -> usize {
+    LOGS.lock()
+        .unwrap()
+        .iter()
+        .filter(|line| *line == message)
+        .count()
+}
+
+/// `editor.action.inlineSuggest.trigger`'s `providerId` asks only that
+/// provider (by its id or its extension's `ext:*`), every provider when
+/// none matches; `showNoResultNotification` logs when nothing shows, as
+/// standalone Monaco's notification service does.
+#[gpui::test]
+fn inline_suggest_trigger_arguments(cx: &mut TestAppContext) {
+    static CAPTURE: CaptureLogs = CaptureLogs;
+    if log::set_logger(&CAPTURE).is_ok() {
+        log::set_max_level(log::LevelFilter::Info);
+    }
+    let (editor, cx) = setup_model(|| TextModel::new(""), cx);
+    let (a, b) = (Rc::new(RefCell::new(0)), Rc::new(RefCell::new(0)));
+    let (provider_a, provider_b) = (
+        Identified {
+            id: Some("ext.a:one"),
+            text: "alpha",
+            requests: a.clone(),
+        },
+        Identified {
+            id: Some("ext.b"),
+            text: "",
+            requests: b.clone(),
+        },
+    );
+    cx.update(|_, cx| {
+        register_inline_completions_provider(cx, LanguageSelector::All, provider_a);
+        register_inline_completions_provider(cx, LanguageSelector::All, provider_b);
+    });
+    // New text each time, so no request is the same as the last.
+    let runs = std::cell::Cell::new(0);
+    let run = |args: serde_json::Value, cx: &mut VisualTestContext| {
+        runs.set(runs.get() + 1);
+        let text = " ".repeat(runs.get());
+        editor.update(cx, |e, cx| {
+            e.model().update(cx, |m, cx| m.set_value(&text, cx))
+        });
+        draw(cx);
+        let before = (*a.borrow(), *b.borrow());
+        trigger_with(&editor, cx, "editor.action.inlineSuggest.trigger", args);
+        cx.executor().advance_clock(Duration::from_millis(100));
+        draw(cx);
+        (*a.borrow() - before.0, *b.borrow() - before.1)
+    };
+    // Only the empty provider: nothing shows, and it says so.
+    let message = "No inline suggestion is available.";
+    let before = logged(message);
+    assert_eq!(
+        run(
+            json!({ "providerId": "ext.b", "showNoResultNotification": true }),
+            cx
+        ),
+        (0, 1)
+    );
+    assert!(!editor.read_with(cx, |e, cx| e.inline_suggestion_visible(cx)));
+    assert_eq!(logged(message), before + 1);
+    // Not without the argument, or when something shows.
+    run(json!({ "providerId": "ext.b" }), cx);
+    assert_eq!(
+        run(
+            json!({ "providerId": "ext.a:one", "showNoResultNotification": true }),
+            cx
+        ),
+        (1, 0)
+    );
+    assert!(editor.read_with(cx, |e, cx| e.inline_suggestion_visible(cx)));
+    assert_eq!(logged(message), before + 1);
+    // An extension's providers, then no match: every provider.
+    assert_eq!(run(json!({ "providerId": "ext.b:*" }), cx), (0, 1));
+    assert_eq!(run(json!({ "providerId": "ext.c" }), cx), (1, 1));
+    assert_eq!(run(json!({}), cx), (1, 1));
+}
+
+/// The default keybindings in a widget's key context get the editor's
+/// preconditions there (Monaco folds an action's precondition into its
+/// keybinding wherever it's bound).
+#[test]
+fn widget_keybindings_get_their_preconditions() {
+    let bindings = gpui_monaco::actions::default_key_bindings();
+    let predicate = |keystrokes: &str, action: &str| {
+        bindings
+            .iter()
+            .find(|b| {
+                b.action().name() == action
+                    && b.keystrokes()
+                        .iter()
+                        .map(|k| k.inner().unparse())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        == keystrokes
+            })
+            .and_then(|b| b.predicate())
+            .unwrap_or_else(|| panic!("{keystrokes} {action}"))
+    };
+    let contexts = |contexts: &[&str]| -> Vec<gpui::KeyContext> {
+        contexts
+            .iter()
+            .map(|c| gpui::KeyContext::parse(c).unwrap())
+            .collect()
+    };
+    // The hover's scroll keys need `editorHoverFocused`.
+    let up = predicate("up", "code_editor::ScrollUpHover");
+    assert!(!up.eval(&contexts(&["CodeEditor", "HoverWidget"])));
+    assert!(up.eval(&contexts(&["CodeEditor", "HoverWidget editorHoverFocused"])));
+    // The rename input's need `renameInputVisible`, in the box around the
+    // input.
+    let enter = predicate("enter", "code_editor::AcceptRenameInput");
+    assert!(!enter.eval(&contexts(&["CodeEditor", "RenameInput", "CodeEditor"])));
+    assert!(enter.eval(&contexts(&[
+        "CodeEditor",
+        "RenameInput renameInputVisible",
+        "CodeEditor"
+    ])));
+    // The standalone color picker's.
+    let escape = predicate("escape", "code_editor::HideColorPicker");
+    assert!(!escape.eval(&contexts(&["CodeEditor", "StandaloneColorPicker"])));
+    assert!(escape.eval(&contexts(&[
+        "CodeEditor",
+        "StandaloneColorPicker standaloneColorPickerVisible"
+    ])));
+}
+
+/// A widget's key context carries its editor's context keys, so a rule in
+/// the widget's context can test them, as Monaco's widgets see their
+/// editor's keys.
+#[gpui::test]
+fn widget_key_contexts_see_the_editor_keys(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(cx);
+    cx.update(|_, cx| {
+        register_hover_provider(cx, LanguageSelector::All, Hello);
+    });
+    let ran = Rc::new(RefCell::new(0));
+    let count = ran.clone();
+    let _command = cx.update(|_, cx| {
+        gpui_monaco::add_command(cx, "test.inHover", move |_, _| *count.borrow_mut() += 1)
+    });
+    let _rule = cx
+        .update(|_, cx| {
+            gpui_monaco::add_keybinding_rule(
+                cx,
+                KeybindingRule::new("ctrl-alt-h", "test.inHover")
+                    .when("HoverWidget && editorLangId == rust && myMode"),
+            )
+        })
+        .unwrap();
+    let key = editor.update(cx, |e, cx| e.create_context_key("myMode", false, cx));
+    set_cursor(&editor, cx, p(0, 4));
+    // Show the hover, then focus it.
+    trigger(&editor, cx, "editor.action.showHover");
+    trigger(&editor, cx, "editor.action.showHover");
+    assert!(has_key(&editor, cx, "editorHoverFocused"));
+    cx.simulate_keystrokes("ctrl-alt-h");
+    assert_eq!(*ran.borrow(), 0);
+    cx.update(|_, cx| key.set(true, cx));
+    draw(cx);
+    cx.simulate_keystrokes("ctrl-alt-h");
+    assert_eq!(*ran.borrow(), 1);
+    // The hover's own keys still work there.
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    assert!(!has_key(&editor, cx, "editorHoverVisible"));
 }

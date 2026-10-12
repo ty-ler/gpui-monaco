@@ -608,12 +608,42 @@ fn in_editor_context(predicate: &gpui::KeyBindingContextPredicate) -> bool {
     }
 }
 
+/// `predicate` with `when` required where it names one of
+/// [`crate::context_keys::WIDGET_KEY_CONTEXTS`] (the outermost, for `A > B`),
+/// so a widget's keybinding tests its editor's keys in the widget's own
+/// context; `None` if it names none.
+fn fold_into_widget_context(
+    predicate: &gpui::KeyBindingContextPredicate,
+    when: &gpui::KeyBindingContextPredicate,
+) -> Option<gpui::KeyBindingContextPredicate> {
+    use gpui::KeyBindingContextPredicate as P;
+    match predicate {
+        P::Identifier(name)
+            if crate::context_keys::WIDGET_KEY_CONTEXTS.contains(&name.as_ref()) =>
+        {
+            Some(P::And(Box::new(predicate.clone()), Box::new(when.clone())))
+        }
+        P::And(a, b) => fold_into_widget_context(a, when)
+            .map(|a| P::And(Box::new(a), b.clone()))
+            .or_else(|| fold_into_widget_context(b, when).map(|b| P::And(a.clone(), Box::new(b)))),
+        P::Descendant(a, b) => fold_into_widget_context(a, when)
+            .map(|a| P::Descendant(Box::new(a), b.clone()))
+            .or_else(|| {
+                fold_into_widget_context(b, when).map(|b| P::Descendant(a.clone(), Box::new(b)))
+            }),
+        _ => None,
+    }
+}
+
 /// Folds each binding's action's precondition into its context, as Monaco
 /// does for an action's keybinding (`editorExtensions.ts`): when the
 /// precondition fails, the key falls through, so Cmd+/ in a read-only
 /// editor does nothing (and reaches the host). Bindings in a widget's key
-/// context (the hover, the rename input, …) keep theirs: GPUI tests each
-/// context's own keys, and the editor's aren't there.
+/// context (the hover, the rename input, the peek list, …) get it in that
+/// context, which carries the editor's keys
+/// ([`crate::context_keys::widget_key_context`]): Up in a focused hover
+/// (`editor.action.scrollUpHover`) tests `editorHoverFocused` there, and
+/// Enter in the rename input `renameInputVisible`.
 pub(crate) fn with_preconditions(bindings: Vec<KeyBinding>) -> Vec<KeyBinding> {
     bindings
         .into_iter()
@@ -621,11 +651,16 @@ pub(crate) fn with_preconditions(bindings: Vec<KeyBinding>) -> Vec<KeyBinding> {
             let Some(when) = action_precondition(binding.action().name()) else {
                 return binding;
             };
-            let Some(context) = binding.predicate().filter(|p| in_editor_context(p)) else {
+            let Some(context) = binding.predicate() else {
                 return binding;
             };
-            let predicate =
-                gpui::KeyBindingContextPredicate::And(Box::new((*context).clone()), Box::new(when));
+            let predicate = if in_editor_context(&context) {
+                gpui::KeyBindingContextPredicate::And(Box::new((*context).clone()), Box::new(when))
+            } else if let Some(folded) = fold_into_widget_context(&context, &when) {
+                folded
+            } else {
+                return binding;
+            };
             let keystrokes: Vec<String> = binding
                 .keystrokes()
                 .iter()

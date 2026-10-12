@@ -25,6 +25,41 @@ use crate::snippet::parser::SnippetParser;
 use crate::snippet_session::SnippetInsertOptions;
 use crate::widgets::{ContentWidget, ContentWidgetPreference, WidgetId};
 
+/// What `editor.action.pasteAs` asks for (Monaco `PastePreference`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum PastePreference {
+    /// Edits of this kind or the kinds it contains (Monaco `only`, the
+    /// command's `kind`).
+    Only(SharedString),
+    /// Edits of a kind one of these contains (Monaco `preferences`).
+    Preferences(Vec<SharedString>),
+}
+
+impl PastePreference {
+    /// Whether edits of `kind` match (Monaco `HierarchicalKind.contains`).
+    fn matches(&self, kind: &str) -> bool {
+        match self {
+            Self::Only(only) => edit_kind_contains(only, kind),
+            Self::Preferences(preferences) => preferences
+                .iter()
+                .any(|preference| edit_kind_contains(preference, kind)),
+        }
+    }
+
+    /// The kinds, for the message when nothing matches.
+    fn label(&self) -> String {
+        match self {
+            Self::Only(only) => only.to_string(),
+            Self::Preferences(preferences) if preferences.is_empty() => "empty".into(),
+            Self::Preferences(preferences) => preferences
+                .iter()
+                .map(SharedString::as_ref)
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    }
+}
+
 /// Monaco `Mimes.text`.
 pub(crate) const TEXT_PLAIN: &str = "text/plain";
 /// Monaco `Mimes.uriList`.
@@ -586,7 +621,7 @@ impl CodeEditor {
         &self,
         data: &DataTransfer,
         copy_mime_types: &[String],
-        only: Option<&str>,
+        preference: Option<&PastePreference>,
         cx: &App,
     ) -> Vec<Arc<dyn DocumentPasteEditProvider>> {
         crate::providers::paste_edit_providers(cx, self.provider_target(cx))
@@ -599,11 +634,11 @@ impl CodeEditor {
                             .map(|m| m.as_ref())
                             .chain(copy_mime_types.iter().map(String::as_str)),
                     )
-                }) && only.is_none_or(|only| {
+                }) && preference.is_none_or(|preference| {
                     provider
                         .provided_paste_edit_kinds()
                         .iter()
-                        .any(|kind| edit_kind_contains(only, kind))
+                        .any(|kind| preference.matches(kind))
                 })
             })
             .collect()
@@ -636,11 +671,33 @@ impl CodeEditor {
     }
 
     /// Monaco `editor.action.pasteAs`: every way to paste the clipboard, in
-    /// a quick pick. With `only` (an edit kind, such as `text.plain`), the
-    /// matching edit is applied directly when there's just one.
+    /// a quick pick. With `only` (an edit kind, such as `text.plain`, and
+    /// the kinds it contains), the first matching edit is applied directly.
     pub fn paste_as(
         &mut self,
         only: Option<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.paste_as_with(only.map(PastePreference::Only), window, cx);
+    }
+
+    /// Monaco `editor.action.pasteAs` with `preferences`: applies the first
+    /// edit (in the providers' order) whose kind one of `preferences`
+    /// contains, or says there's none.
+    pub fn paste_as_preferring(
+        &mut self,
+        preferences: Vec<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.paste_as_with(Some(PastePreference::Preferences(preferences)), window, cx);
+    }
+
+    /// Monaco `CopyPasteController.pasteAs` and `showPasteAsPick`.
+    pub(crate) fn paste_as_with(
+        &mut self,
+        preference: Option<PastePreference>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -652,7 +709,12 @@ impl CodeEditor {
         };
         let data = clipboard_data(&item);
         let copy_mime_types = copy_mime_types(&item);
-        let providers = self.paste_providers_for(&data, &copy_mime_types, only.as_deref(), cx);
+        let providers = self.paste_providers_for(&data, &copy_mime_types, preference.as_ref(), cx);
+        // Monaco passes providers `only` for that preference alone.
+        let only = match &preference {
+            Some(PastePreference::Only(kind)) => Some(kind.clone()),
+            _ => None,
+        };
         let ranges: Vec<_> = self.selections().iter().map(|s| s.range()).collect();
         let requests = self.paste_requests(
             providers,
@@ -690,13 +752,8 @@ impl CodeEditor {
                 }
             };
             let mut edits = collect_edits(tasks).await;
-            if let Some(only) = &only {
-                edits.retain(|e| {
-                    e.edit
-                        .kind
-                        .as_ref()
-                        .is_some_and(|k| edit_kind_contains(only, k))
-                });
+            if let Some(preference) = &preference {
+                edits.retain(|e| e.edit.kind.as_ref().is_some_and(|k| preference.matches(k)));
             }
             this.update_in(cx, |this, window, cx| {
                 if this.snapshot.version() != version {
@@ -704,13 +761,15 @@ impl CodeEditor {
                 }
                 if edits.is_empty() {
                     // Monaco `showPasteAsNoEditMessage`.
-                    if let Some(only) = &only {
+                    if let Some(preference) = &preference {
                         let at = this.selections()[0].start();
-                        this.show_message(format!("No paste edits for '{only}' found"), at, cx);
+                        let label = preference.label();
+                        this.show_message(format!("No paste edits for '{label}' found"), at, cx);
                     }
                     return;
                 }
-                if only.is_some() && edits.len() == 1 {
+                // Monaco: with a preference, the first edit that matches.
+                if preference.is_some() {
                     this.apply_post_edit_resolved(ranges, edits[0].clone(), cx);
                     return;
                 }

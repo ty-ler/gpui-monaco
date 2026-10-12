@@ -1294,11 +1294,14 @@ command_action! {
 
 command_action! {
     /// Picks how to paste the clipboard (Monaco `editor.action.pasteAs`).
-    /// With a `kind` (or `preferences`), pastes with the matching edit.
+    /// With a `kind` (or `preferences`), pastes with the first matching
+    /// edit instead of asking.
     pub struct PasteAs {
-        /// The paste edit kind to use, e.g. `"text.plain"`.
+        /// The paste edit kind to use, e.g. `"text.plain"` (or the kinds
+        /// it contains). Takes precedence over `preferences`.
         pub kind: Option<String>,
-        /// Preferred kinds; the first is used, as `kind`.
+        /// Kinds to try: the first edit, in the providers' order, whose
+        /// kind one of them contains is applied (Monaco `preferences`).
         pub preferences: Option<Vec<String>>,
     }
 }
@@ -1319,15 +1322,18 @@ command_action! {
     /// Asks for inline completions (Monaco
     /// `editor.action.inlineSuggest.trigger`).
     pub struct TriggerInlineSuggest {
-        /// Monaco's `providerId`. Accepted for compatibility; every provider
-        /// is asked.
+        /// Monaco's `providerId`: asks only the provider whose
+        /// [`provider_id`](crate::providers::InlineCompletionsProvider::provider_id)
+        /// it is (or `"extension:*"`), or every provider when none is.
         pub provider_id: Option<String>,
         /// An explicit request (the default); `false` asks as typing does.
         pub explicit: Option<bool>,
         /// Monaco's `changeHintData`, accepted for compatibility.
         pub change_hint_data: Option<serde_json::Value>,
-        /// Monaco's `showNoResultNotification`, accepted for compatibility
-        /// (there's no notification service).
+        /// Monaco's `showNoResultNotification`: logs "No inline suggestion
+        /// is available." (at info level) when the request shows nothing,
+        /// as standalone Monaco's notification service logs it to the
+        /// console.
         pub show_no_result_notification: bool,
     }
 }
@@ -1442,6 +1448,10 @@ command_action! {
     pub struct CreateCursor {
         /// Where.
         pub position: Option<CommandPosition>,
+        /// Where it shows, in view coordinates (view line and column, from
+        /// 1, with wrapping and folding): at a wrap point, which segment
+        /// the cursor is on. Ignored unless it shows `position`.
+        pub view_position: Option<CommandPosition>,
         /// Selects the whole line instead.
         pub whole_line: bool,
     }
@@ -1454,8 +1464,10 @@ command_action! {
     pub struct ColumnSelect {
         /// The position under the mouse.
         pub position: Option<CommandPosition>,
-        /// The same position in view coordinates; unused (the editor
-        /// converts `position`).
+        /// The same position in view coordinates (view line and column,
+        /// from 1). With it the selection goes by view lines, as Monaco's
+        /// does: a wrapped line's segments are lines of their own and a
+        /// fold is one line. Without it, by model lines.
         pub view_position: Option<CommandPosition>,
         /// The 1-based visible column under the mouse.
         pub mouse_column: Option<u32>,
@@ -1472,8 +1484,11 @@ macro_rules! move_to_command {
             pub struct $name {
                 /// Where, 1-based.
                 pub position: Option<CommandPosition>,
-                /// The same position in view coordinates; unused (the
-                /// editor converts `position`).
+                /// Where it shows, in view coordinates (view line and
+                /// column, from 1, with wrapping and folding): at a wrap
+                /// point, which segment the cursor is on, and the view line
+                /// a line selection extends from. Ignored unless it shows
+                /// `position`; without it, where `position` shows.
                 pub view_position: Option<CommandPosition>,
                 /// Monaco's `revealType`: 2 doesn't scroll to the cursor.
                 pub reveal_type: Option<u32>,

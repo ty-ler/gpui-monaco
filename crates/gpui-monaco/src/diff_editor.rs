@@ -2134,6 +2134,9 @@ struct HostOptions {
     unicode_highlight: Option<crate::options::UnicodeHighlightOptions>,
 }
 
+/// A command from [`DiffEditor::add_command`].
+type DiffCommandHandler = Rc<dyn Fn(&mut DiffEditor, &mut Window, &mut Context<DiffEditor>)>;
+
 /// The side-by-side diff editor (Monaco `DiffEditorWidget`).
 pub struct DiffEditor {
     original: Entity<CodeEditor>,
@@ -2198,6 +2201,8 @@ pub struct DiffEditor {
     gutter_fade: usize,
     /// Host buttons in the gutter menu.
     hunk_actions: Vec<DiffHunkAction>,
+    /// Commands from [`DiffEditor::add_command`], by id.
+    command_handlers: std::collections::HashMap<SharedString, DiffCommandHandler>,
     /// A hidden-lines bar's edge being dragged.
     unchanged_drag: Option<UnchangedDrag>,
     /// The margin revert arrows in the modified editor.
@@ -2284,6 +2289,7 @@ impl DiffEditor {
             gutter_hovered: false,
             gutter_fade: 0,
             hunk_actions: Vec::new(),
+            command_handlers: Default::default(),
             unchanged_drag: None,
             revert_arrows: Vec::new(),
             accessible_viewer: None,
@@ -2654,16 +2660,66 @@ impl DiffEditor {
             .update(cx, |editor, cx| editor.add_action(descriptor, cx))
     }
 
-    /// Adds a command handler (Monaco `IStandaloneDiffEditor.addCommand`,
-    /// which delegates to the modified editor's `addCommand`): see
-    /// [`crate::add_command`].
+    /// Adds a command run by `keystrokes` (GPUI syntax, e.g. `"cmd-k
+    /// cmd-m"`) in this diff editor (Monaco
+    /// `IStandaloneDiffEditor.addCommand`, which delegates to the modified
+    /// editor's per-editor `addCommand`), with either side focused, while
+    /// `when` (a GPUI predicate over the focused side's
+    /// [context keys](CodeEditor::context_keys)) holds. Returns the
+    /// command's generated id, which [`DiffEditor::trigger`] runs too, and
+    /// the [`Disposable`](crate::Disposable) that removes it. Fails if the
+    /// keystrokes or `when` don't parse.
     pub fn add_command(
         &mut self,
-        id: impl Into<SharedString>,
-        handler: impl Fn(&[serde_json::Value], &mut App) + 'static,
+        keystrokes: &str,
+        handler: impl Fn(&mut DiffEditor, &mut Window, &mut Context<DiffEditor>) + 'static,
+        when: Option<&str>,
         cx: &mut Context<Self>,
-    ) -> crate::registry::Disposable {
-        crate::commands::add_command(cx, id, handler)
+    ) -> anyhow::Result<(SharedString, crate::registry::Disposable)> {
+        let id: SharedString = crate::editor_commands::next_dynamic_command_id().into();
+        // Either side's editor (each names itself in its key context).
+        let sides = format!(
+            "{} && ({key} == {} || {key} == {})",
+            crate::actions::KEY_CONTEXT,
+            self.original.read(cx).commands.id,
+            self.modified.read(cx).commands.id,
+            key = crate::context_keys::EDITOR_ID_KEY,
+        );
+        let context = match when {
+            Some(when) => format!("{sides} && ({when})"),
+            None => sides,
+        };
+        let binding = gpui::KeyBinding::load(
+            keystrokes,
+            Box::new(crate::actions::RunCommand {
+                id: id.to_string(),
+                args: None,
+            }),
+            Some(Rc::new(gpui::KeyBindingContextPredicate::parse(&context)?)),
+            false,
+            None,
+            &gpui::DummyKeyboardMapper,
+        )?;
+        let bindings = crate::editor_actions::bind_removable(cx, vec![binding]);
+        self.command_handlers.insert(id.clone(), Rc::new(handler));
+        let editor = cx.weak_entity();
+        let handler_id = id.clone();
+        let disposable = crate::registry::Disposable::new(move |cx| {
+            bindings.dispose(cx);
+            editor
+                .update(cx, |editor, _| editor.command_handlers.remove(&handler_id))
+                .ok();
+        });
+        Ok((id, disposable))
+    }
+
+    /// Runs a command from [`DiffEditor::add_command`]; whether `id` is one.
+    fn run_added_command(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(handler) = self.command_handlers.get(id).cloned() else {
+            return false;
+        };
+        handler(self, window, cx);
+        true
     }
 
     /// Adds a button to the gutter menu (a Monaco `DiffEditorHunkToolbar` or
@@ -5310,6 +5366,7 @@ impl DiffEditor {
             "editor.action.accessibleDiffViewer.prev" => {
                 self.accessible_diff_viewer_prev(window, cx)
             }
+            _ if self.run_added_command(name, window, cx) => {}
             _ => {
                 return self
                     .modified
@@ -6103,6 +6160,15 @@ impl Render for DiffEditor {
             })
             .on_action(
                 cx.listener(|this, _: &ExitCompareMove, _, cx| this.set_move_to_compare(None, cx)),
+            )
+            // Keybindings from `add_command`, which the focused side passes
+            // on.
+            .on_action(
+                cx.listener(|this, action: &crate::actions::RunCommand, window, cx| {
+                    if !this.run_added_command(&action.id, window, cx) {
+                        cx.propagate();
+                    }
+                }),
             )
             .track_focus(&self.focus_handle)
             .size_full()

@@ -7220,7 +7220,10 @@ pub(crate) fn widget_input_options() -> EditorOptions {
 }
 
 /// Applies `f` to every position in a cursor state.
-fn map_state(state: &SingleCursorState, f: impl Fn(PointUtf16) -> PointUtf16) -> SingleCursorState {
+pub(crate) fn map_state(
+    state: &SingleCursorState,
+    f: impl Fn(PointUtf16) -> PointUtf16,
+) -> SingleCursorState {
     SingleCursorState {
         selection_start: f(state.selection_start.start)..f(state.selection_start.end),
         position: f(state.position),
@@ -7248,7 +7251,7 @@ struct CursorViewStates {
 }
 
 /// The cursor core's view of the view lines (Monaco's view model lines).
-struct ViewCursorModel<'a>(&'a ViewLines);
+pub(crate) struct ViewCursorModel<'a>(pub(crate) &'a ViewLines);
 
 impl cursor::CursorModel for ViewCursorModel<'_> {
     fn line_count(&self) -> u32 {

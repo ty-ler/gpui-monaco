@@ -1735,6 +1735,82 @@ fn diff_editor_add_action(cx: &mut TestAppContext) {
     }));
 }
 
+/// Monaco `IStandaloneDiffEditor.addCommand`: the keybinding works in this
+/// diff editor, on either side, while `when` holds there, and the command
+/// runs by id too, until disposed.
+#[gpui::test]
+fn diff_editor_add_command(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a", "b", cx);
+    let (original, modified) = editors(&diff, cx);
+    let ran = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let log = ran.clone();
+    let (id, command) = diff
+        .update(cx, |d, cx| {
+            d.add_command(
+                "ctrl-alt-k",
+                move |d, _, cx| {
+                    log.borrow_mut()
+                        .push(d.modified_editor().read(cx).model().read(cx).text())
+                },
+                None,
+                cx,
+            )
+        })
+        .unwrap();
+    assert!(id.starts_with("DYNAMIC_"));
+    let focus = |editor: &Entity<gpui_monaco::CodeEditor>, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+        paint(cx);
+    };
+    focus(&modified, cx);
+    cx.simulate_keystrokes("ctrl-alt-k");
+    focus(&original, cx);
+    cx.simulate_keystrokes("ctrl-alt-k");
+    assert_eq!(*ran.borrow(), ["b", "b"]);
+    diff.update_in(cx, |d, window, cx| d.trigger(&id, window, cx))
+        .unwrap();
+    assert_eq!(ran.borrow().len(), 3);
+    cx.update(|_, cx| command.dispose(cx));
+    cx.simulate_keystrokes("ctrl-alt-k");
+    assert_eq!(ran.borrow().len(), 3);
+
+    // `when` is tested in the focused side's keys: a key made on the
+    // modified editor (Monaco's `createContextKey` delegates there too).
+    let key = modified.update(cx, |e, cx| e.create_context_key("myMode", true, cx));
+    let count = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counter = count.clone();
+    let _command = diff
+        .update(cx, |d, cx| {
+            d.add_command(
+                "ctrl-alt-j",
+                move |_, _, _| counter.set(counter.get() + 1),
+                Some("myMode"),
+                cx,
+            )
+        })
+        .unwrap();
+    paint(cx);
+    cx.simulate_keystrokes("ctrl-alt-j");
+    assert_eq!(count.get(), 0);
+    focus(&modified, cx);
+    cx.simulate_keystrokes("ctrl-alt-j");
+    assert_eq!(count.get(), 1);
+    cx.update(|_, cx| key.set(false, cx));
+    paint(cx);
+    cx.simulate_keystrokes("ctrl-alt-j");
+    assert_eq!(count.get(), 1);
+    // Bad keystrokes or conditions fail.
+    assert!(
+        diff.update(cx, |d, cx| d.add_command(
+            "ctrl-alt-j",
+            |_, _, _| {},
+            Some("&&"),
+            cx
+        ))
+        .is_err()
+    );
+}
+
 /// Monaco's signals from `goToDiff` and cursor moves onto changes.
 #[gpui::test]
 fn accessibility_signals_for_changes(cx: &mut TestAppContext) {

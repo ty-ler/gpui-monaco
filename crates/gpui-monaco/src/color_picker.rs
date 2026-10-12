@@ -646,7 +646,11 @@ impl Render for ColorPickerWidget {
         if let Some(standalone) = &self.standalone {
             root =
                 root.track_focus(&standalone.focus)
-                    .key_context(STANDALONE_COLOR_PICKER_KEY_CONTEXT)
+                    // With the editor's keys, for its preconditions.
+                    .key_context(crate::context_keys::widget_key_context(
+                        STANDALONE_COLOR_PICKER_KEY_CONTEXT,
+                        &crate::context_keys::editor_keys_for_widgets(&self.editor, cx),
+                    ))
                     // `.standalone-colorpicker`: `editorHoverWidget.*`.
                     .bg(colors.hover_background)
                     .text_color(colors.hover_foreground)
