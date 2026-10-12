@@ -38,7 +38,7 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **Cmd+/** in the suggest widget: explain mode, which shows how the focused suggestion was scored in the details (Monaco's `toggleExplainMode`)
 - **Shift+Enter / Shift+Tab** in the suggest widget: accept in the other insert mode
 - **Up / Down (or Cmd+Up / Cmd+Down, Ctrl+P / Ctrl+N), PageUp / PageDown** in the suggest widget: previous and next suggestion, by item or page
-- **Cmd+K Cmd+I** with a hover showing: focus it. Arrows scroll it, PageUp / PageDown (or Alt+Up / Alt+Down) page, Home / End (or Cmd+Up / Cmd+Down) go to the top and bottom, and Escape closes it
+- **Cmd+K Cmd+I** with a hover showing: focus it (a hover with a single part focuses that part). Tab / Shift+Tab move between its parts and its status bar, each read to screen readers, and past either end go back to the editor. Arrows scroll it, PageUp / PageDown (or Alt+Up / Alt+Down) page, Home / End (or Cmd+Up / Cmd+Down) go to the top and bottom, and Escape closes it
 - **Tab / Shift+Tab** with `tab_completion: On`: insert the best completion, then cycle through the others
 - **Cmd+Shift+Space:** parameter hints. While they show, **Escape / Shift+Escape** close them, and with several signatures **Up / Down (or Alt+Up / Alt+Down, Ctrl+P / Ctrl+N)** go to the previous and next one
 - **Shift+Escape:** Monaco's second Escape. It closes the suggest widget, parameter hints, the problem zone, the reference peek and the find widget, leaves snippet mode and linked editing, then removes the other cursors and the selection. Unlike Escape, it leaves ghost text, the hover, inline messages and the selection anchor alone

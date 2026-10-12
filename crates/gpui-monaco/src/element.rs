@@ -4984,6 +4984,19 @@ fn prepaint_editor(
         // Monaco `ContentWidget._getAnchorsCoordinates`: hidden without a
         // position or preference, or when its line isn't laid out.
         for widget in &editor.widgets.content {
+            // Against a box in the window (Monaco's `IAnchor`): below or
+            // above it as below or above a line.
+            if let Some(rect) = widget.window_anchor.filter(|_| widget.allow_overflow) {
+                embedded.push(Embedded::Content {
+                    view: widget.view.clone(),
+                    anchor: rect.origin,
+                    secondary_x: None,
+                    line_height: rect.size.height,
+                    preference: widget.preference.clone(),
+                    overflow: Some((widget.layer, widget.room.clone())),
+                });
+                continue;
+            }
             let Some(anchor) = widget
                 .anchor
                 .as_ref()
