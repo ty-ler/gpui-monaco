@@ -222,6 +222,17 @@ pub struct HoverWidget {
     bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The room it has in the window (it overflows the editor).
     room: crate::widgets::OverflowRoomCell,
+    /// The status bar's keybinding labels, looked up in the editor's key
+    /// context when rendering (Monaco `keybindingService.lookupKeybinding`
+    /// for `editor.action.marker.next` and `editor.action.quickFix`).
+    status_keys: StatusKeys,
+}
+
+/// The labels of the keys the problem hover's actions name.
+#[derive(Clone, Default)]
+struct StatusKeys {
+    view_problem: Option<gpui::SharedString>,
+    quick_fix: Option<gpui::SharedString>,
 }
 
 impl Focusable for HoverWidget {
@@ -269,6 +280,18 @@ type PickerTask = Option<Task<Option<Entity<crate::ColorPickerWidget>>>>;
 
 impl Render for HoverWidget {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.markers.is_empty()
+            && let Some(editor) = self.editor.upgrade()
+        {
+            let focus = editor.read(cx).focus_handle(cx);
+            let label = |action: &dyn gpui::Action| {
+                crate::keybinding_label::command_label(action, None, &focus, window)
+            };
+            self.status_keys = StatusKeys {
+                view_problem: label(&crate::actions::GoToNextMarker),
+                quick_fix: label(&crate::actions::QuickFix),
+            };
+        }
         let colors = &self.theme.colors;
         // Monaco's `.hover-row`s: the parts in participant order, then the
         // status bar.
@@ -823,12 +846,11 @@ impl HoverWidget {
         let Some(marker) = most_severe(&self.markers) else {
             return Vec::new();
         };
-        let mac = cfg!(target_os = "macos");
         let mut entries = Vec::new();
         if marker.severity >= crate::MarkerSeverity::Info {
             entries.push(StatusBarEntry::Action {
                 label: "View Problem".into(),
-                keys: Some(if mac { "⌥F8" } else { "Alt+F8" }),
+                keys: self.status_keys.view_problem.clone(),
                 icon: None,
                 run: StatusBarRun::ViewProblem(marker.clone()),
             });
@@ -846,7 +868,7 @@ impl HoverWidget {
             QuickFixStatus::Available(set) => {
                 entries.push(StatusBarEntry::Action {
                     label: "Quick Fix...".into(),
-                    keys: Some(if mac { "⌘." } else { "Ctrl+." }),
+                    keys: self.status_keys.quick_fix.clone(),
                     icon: None,
                     run: StatusBarRun::QuickFix(set.clone(), marker.range.start),
                 });
@@ -971,11 +993,13 @@ impl HoverWidget {
 }
 
 /// An entry of the hover's status bar.
+// Built per render and dropped right away; boxing would cost more.
+#[allow(clippy::large_enum_variant)]
 enum StatusBarEntry {
     /// Monaco `HoverAction`: a link, with its keybinding and icon.
     Action {
         label: gpui::SharedString,
-        keys: Option<&'static str>,
+        keys: Option<gpui::SharedString>,
         icon: Option<Codicon>,
         run: StatusBarRun,
     },
@@ -1913,6 +1937,7 @@ impl CodeEditor {
             line_height,
             bounds: Default::default(),
             room: Default::default(),
+            status_keys: StatusKeys::default(),
         });
         if let Some(marker) = status_marker.filter(|_| request_quick_fixes) {
             self.request_hover_quick_fixes(&widget, marker, !known_unavailable, cx);

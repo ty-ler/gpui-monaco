@@ -660,9 +660,12 @@ impl CodeEditor {
     fn context_menu_entries(&self, window: &Window, cx: &App) -> Vec<Entry> {
         let keys = |name: &str| -> Option<SharedString> {
             let action = cx.build_action(name, None).ok()?;
-            let binding = window
-                .highest_precedence_binding_for_action_in(action.as_ref(), &self.focus_handle)?;
-            Some(crate::keybinding_label::binding_label(&binding))
+            crate::keybinding_label::command_label(
+                action.as_ref(),
+                None,
+                &self.focus_handle,
+                window,
+            )
         };
         let builtin = |items: &[BuiltinItem]| -> Vec<Grouped> {
             items

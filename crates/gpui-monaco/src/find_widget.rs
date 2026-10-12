@@ -1099,9 +1099,7 @@ impl FindWidget {
     fn title(control: Control, focus: &FocusHandle, window: &Window) -> String {
         let label = control.title().to_string();
         let keys = control.action().and_then(|action| {
-            window
-                .highest_precedence_binding_for_action_in(action.as_ref(), focus)
-                .map(|binding| crate::keybinding_label::binding_label(&binding))
+            crate::keybinding_label::command_label(action.as_ref(), None, focus, window)
         });
         match keys {
             Some(keys) => format!("{label} ({keys})"),

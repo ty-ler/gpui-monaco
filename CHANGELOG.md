@@ -5,6 +5,9 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Keybinding labels follow the host's keybinding rules (#294):** labels look up keys as Monaco's `lookupKeybinding` does. A rule from `add_keybinding_rule(s)` naming a command's Monaco id now shows instead of the default binding, as Monaco's dynamic keybindings come after the defaults. Before, rules were bound as `RunCommand` and labels only found the default.
+  - This applies to the command palette, the context menu, the lightbulb, the code action menu's Organize Imports and Fix All rows, the find widget's titles, and the hover's status bar.
+  - **Hover status bar:** "View Problem" and "Quick Fix..." keys are looked up through the shared formatter instead of being hard-coded.
 - **Drags end when the window goes inactive (#301):** a widget drag that captured the pointer (hover, find and diff sashes, the color picker, the quick input, diff overview and multi diff sliders, the diff editor's hidden-lines bar edges) now ends, and gives the pointer back, when the window stops being the active one, as Monaco's pointer capture is lost. Only the change ends it: a drag in a window that isn't active (a click-through) goes on.
   - **Tests:** the window going inactive mid-drag (diff editor sash), and the quick input slider, diff overview slider and hidden-lines bar edge drags keeping their pointer window-wide.
 - **Quick input Page Up/Down (#293):** Page Down focuses the last fully visible row, and only when it's focused already scrolls a page and focuses the new last row; Page Up does the same upwards (Monaco `List.focusNextPage` / `focusPreviousPage`). Before, they moved the focus by a page of rows. Ported from VS Code's `listWidget.ts`, which isn't vendored.

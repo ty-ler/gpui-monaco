@@ -180,6 +180,31 @@ fn the_status_bar_offers_view_problem_and_says_when_there_are_no_fixes(cx: &mut 
     assert!(editor.update(cx, |e, cx| e.close_marker_zone(cx)));
 }
 
+/// Monaco looks the status bar's keys up (`lookupKeybinding`): a host's
+/// binding for Go to Next Problem shows instead of the default.
+#[gpui::test]
+fn the_status_bar_shows_the_hosts_keybinding(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let _rule = cx.update(|cx| {
+        gpui_monaco::add_keybinding_rule(
+            cx,
+            gpui_monaco::KeybindingRule::new("f9", "editor.action.marker.next"),
+        )
+        .unwrap()
+    });
+    let (editor, cx) = setup("let x = 1;\n", |_| {}, cx);
+    set_markers(
+        &editor,
+        cx,
+        vec![marker(MarkerSeverity::Error, p(0, 4)..p(0, 5))],
+    );
+    show_at(&editor, cx, p(0, 4));
+    cx.run_until_parked();
+    paint(cx);
+    let status = status_bar(&editor, cx);
+    assert_eq!(status[0], "View Problem (F9)");
+}
+
 #[gpui::test]
 fn quick_fix_lists_the_markers_quick_fixes(cx: &mut TestAppContext) {
     let fixes = Fixes::default();
