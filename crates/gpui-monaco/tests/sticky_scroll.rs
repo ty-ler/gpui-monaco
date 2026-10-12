@@ -452,3 +452,104 @@ fn sticky_keyboard_focus_follows_the_lines(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(cursor_row(&editor, cx), 1);
 }
+
+// ----- #295: chevron fade, click reveal -----
+
+/// Monaco `StickyScrollWidget._setFoldingHoverListeners`: with
+/// `showFoldingControls: mouseover`, the expanded chevrons fade in (0.5s)
+/// while the mouse is over the sticky line numbers, and out after, as the
+/// gutter's do; with `always` they show.
+#[gpui::test]
+fn sticky_chevrons_fade_with_mouseover(cx: &mut TestAppContext) {
+    use gpui_monaco::options::ShowFoldingControls;
+    let (editor, cx) = setup_with(
+        "rust",
+        |o| o.show_folding_controls = ShowFoldingControls::Mouseover,
+        cx,
+    );
+    let lh = line_height(&editor, cx);
+    assert_eq!(sticky_rows_at(&editor, 100. * lh, cx), vec![0, 1, 2]);
+    let opacity = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        editor.read_with(cx, |e, _| e.sticky_fold_controls_opacity_for_tests())
+    };
+    assert_eq!(opacity(cx), 0.);
+    let (lines, _) = editor.read_with(cx, |e, _| e.sticky_lines_for_tests());
+    let gutter = gpui::point(lines[1].1.left() + px(4.), lines[1].1.center().y);
+    let text = gpui::point(lines[1].1.right() - px(20.), lines[1].1.center().y);
+    // Over the sticky line numbers: fading in, not shown at once. The fade
+    // runs on the wall clock, as Monaco's CSS transition does.
+    cx.simulate_mouse_move(gutter, None, gpui::Modifiers::default());
+    let start = opacity(cx);
+    assert!(start < 1., "{start}");
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    assert_eq!(opacity(cx), 1.);
+    // Over the sticky text: fading out.
+    cx.simulate_mouse_move(text, None, gpui::Modifiers::default());
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let fading = opacity(cx);
+    assert!(fading > 0. && fading < 1., "{fading}");
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    assert_eq!(opacity(cx), 0.);
+
+    // `always`: shown without the mouse.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.show_folding_controls = ShowFoldingControls::Always;
+        e.update_options(options, cx);
+    });
+    assert_eq!(opacity(cx), 1.);
+}
+
+/// Monaco's sticky click `_revealPosition`s the clicked position: a plain
+/// `revealPosition`, then the cursor goes there. It doesn't scroll the
+/// line to where it showed in the widget.
+#[gpui::test]
+fn a_sticky_click_reveals_the_position(cx: &mut TestAppContext) {
+    let mut text = String::new();
+    for i in 0..100 {
+        text.push_str(&format!("// pad {i}\n"));
+    }
+    text.push_str("fn deep() {\n    if true {\n");
+    for i in 0..200 {
+        text.push_str(&format!("        let v{i} = {i};\n"));
+    }
+    text.push_str("    }\n}\n");
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
+    });
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new(&text).with_language("rust"));
+        let mut editor = CodeEditor::new(model, window, cx);
+        let mut options = editor.options().clone();
+        options.sticky_scroll.default_model = StickyScrollModel::FoldingProvider;
+        editor.update_options(options, cx);
+        editor
+    });
+    cx.run_until_parked();
+    let lh = line_height(&editor, cx);
+    let scrolled = 200. * lh;
+    assert_eq!(sticky_rows_at(&editor, scrolled, cx), vec![100, 101]);
+    // A click on the `if` line's text.
+    let (lines, _) = editor.read_with(cx, |e, _| e.sticky_lines_for_tests());
+    let content_left = editor.read_with(cx, |e, _| e.layout_info().unwrap().content_left);
+    let at = gpui::point(
+        lines[1].1.left() + content_left + px(40.),
+        lines[1].1.center().y,
+    );
+    click(cx, at, gpui::Modifiers::default());
+    line_height(&editor, cx);
+    let (head, clicked) =
+        editor.read_with(cx, |e, _| (e.selections()[0].head, e.scroll_position().y));
+    assert_eq!(head.row, 101);
+    // Where `revealPosition` puts it from the same scroll position.
+    sticky_rows_at(&editor, scrolled, cx);
+    editor.update(cx, |e, cx| e.reveal_position(head, cx));
+    line_height(&editor, cx);
+    let revealed = editor.read_with(cx, |e, _| e.scroll_position().y);
+    assert_eq!(clicked, revealed);
+    // Not where the line showed (its top minus one line).
+    assert_ne!(clicked, px(100. * lh));
+}

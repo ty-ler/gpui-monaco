@@ -90,6 +90,7 @@ Fold ranges come from these sources, in order (Monaco's `foldingStrategy: auto`)
 `folding_strategy: Indentation` uses only the last source. Provider and syntax ranges are capped at `folding_maximum_regions` (5000); the most deeply nested are dropped first, as in Monaco. Recomputing waits for a 200ms pause in edits. `editor.folding_ranges()` and `editor.collapsed_folds(cx)` read the current state.
 
 - **Gutter:** chevrons fade in on hover, or show always with `show_folding_controls: Always`; `Never` drops the column. A folded region ends with a grey "⋯"; click it to unfold.
+  - Manual ranges have their own icons (Monaco's `folding-manual-collapsed` and `folding-manual-expanded`). They look like the others unless the host changes them with `view::folding::set_folding_icon(FoldingIcon::ManualCollapsed, Some(codicon), cx)`, as a VS Code product icon theme does.
   - Shift-click (or middle-click) a chevron to toggle the region with everything inside it.
   - Alt-click it to fold the regions around it instead (or unfold them if any are folded).
 - **Placeholder:** a collapsed region shows `⋯` after its first line. Clicking it unfolds the region, and so does clicking after the end of the line with `unfold_on_click_after_end_of_line`. With `folding_highlight` (the default), the line gets the `editor.foldBackground` color.
@@ -139,7 +140,7 @@ Ctrl+G opens go to line, and Cmd/Ctrl+Shift+O opens go to symbol. Both use a qui
 
 Up and Down move through the list. Page Down focuses the last fully visible row, then scrolls a page; Page Up does the same upwards (Monaco's `focusNextPage` / `focusPreviousPage`). Enter goes to the item, while Escape (or clicking elsewhere) closes the list and restores the view. `CodeEditor::open_quick_access(prefix, …)` opens it from code.
 
-Right-click or Shift+F10 opens the context menu. It holds the navigation, editing, clipboard and command palette items that can run. Host actions join it with `.context_menu(group, order)`; Monaco's groups are `navigation`, `1_modification`, `9_cutcopypaste` and `z_commands`.
+Right-click or Shift+F10 opens the context menu, as does Ctrl+click on macOS (without selecting, whatever `multi_cursor_modifier` is). It holds the navigation, editing, clipboard and command palette items that can run. Host actions join it with `.context_menu(group, order)`; Monaco's groups are `navigation`, `1_modification`, `9_cutcopypaste` and `z_commands`.
 
 Hosts add their own actions to the palette with Monaco's `addAction`:
 
@@ -192,9 +193,9 @@ Lines are indented like the cursor's line unless `adjust_whitespace` is off. `se
 - **Drag and drop:** drag the selection to move it, or hold Alt (Ctrl on Windows and Linux) to copy it. Double-click just inside brackets or quotes to select their content.
 - **Unicode highlighting:** ambiguous and invisible characters get a warning border. Hover one to learn why, or to stop highlighting it.
 - **Minimap:** draws each character from Monaco's own minimap glyphs (or blocks with `render_characters` off), in its token color. The slider follows Monaco's `MinimapLayout`, so the end of a long file shows at the bottom and the slider follows the pointer when dragged. Clicking elsewhere centers the clicked line (`minimap.size: Proportional`) or moves the slider there (`Fill` and `Fit`). It shows the selections (`minimap.selectionHighlight`), find matches, occurrences, errors, warnings and infos, and decorations with `minimap` options. `// #region Name` and `// MARK: - Name` comments, and decorations with a section header, become section headers in it.
-- **Sticky scroll:** pins up to `max_line_count` enclosing scope headers to the top, and at most a quarter of the editor's height. As a scope scrolls out, its header slides up under the one above. Clicking a header jumps to the clicked column; Cmd/Ctrl+click goes to the definition of the word under the mouse.
+- **Sticky scroll:** pins up to `max_line_count` enclosing scope headers to the top, and at most a quarter of the editor's height. As a scope scrolls out, its header slides up under the one above. Clicking a header puts the cursor at the clicked column and reveals it, as Monaco's `revealPosition` does; Cmd/Ctrl+click goes to the definition of the word under the mouse.
   - The scopes come from `default_model`: the document symbols by default (Monaco's outline model), then the folding ranges or indentation. This doesn't need `folding` on.
   - Without symbols, it uses the folding ranges. The indentation model follows the language's `offSide` setting.
   - "Focus Editor Sticky Scroll" (command palette) puts the keyboard on the sticky lines. Use Up and Down, Enter to go to one, and Escape to return.
-  - Shift over a sticky line shows the end of its scope; Shift+click goes there. The folding controls in the sticky gutter fold the scope without moving the cursor; with `show_folding_controls: Never` there are none.
+  - Shift over a sticky line shows the end of its scope; Shift+click goes there. The folding controls in the sticky gutter fold the scope without moving the cursor. With `show_folding_controls: Mouseover` the expanded ones fade in while the mouse is over the sticky line numbers, as the gutter's do; with `Never` there are none.
 - **Scrollbars:** have an overview ruler showing the cursors, find matches, diagnostics and decorations. As in Monaco, a mark sits where its lines are in the whole scrollable height (view zones, padding and scrolling beyond the last line included), so it lines up with the slider, spans its lines (at least 6px), and marks of a color in the same lane that touch are merged. Once scrolled down, a 6px `scrollbar.shadow` shadow runs along the top (`scrollbar.use_shadows`).

@@ -113,7 +113,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `changeViewZones(a => a.addZone(z))` | `add_view_zone(zone, cx)`, `set_view_zone_height`, `remove_widget` |
 | `addContentWidget(w)` / `layoutContentWidget(w)` | `add_content_widget(w, cx)` / `set_content_widget_position(…)` |
 | `addOverlayWidget(w)` | `add_overlay_widget(w, cx)` |
-| `addGlyphMarginWidget(w)` | `add_glyph_margin_widget(GlyphMarginWidget { row, view, lane, z_index }, cx)` |
+| `addGlyphMarginWidget(w)` / `layoutGlyphMarginWidget(w)` | `add_glyph_margin_widget(GlyphMarginWidget { range, view, lane, z_index }, cx)` (`GlyphMarginWidget::new(row, view)` for a line) / `layout_glyph_margin_widget(id, GlyphMarginWidgetPosition { range, lane, z_index }, cx)` |
 | `getContribution(id)` | built-in contributions are `CodeEditor` methods (the find controller's are `start_find`, …); a host's own per-editor state goes in `add_contribution(value)` and comes back by type from `get_contribution::<T>()` |
 | `getFontSizeAtPosition(p)` | `get_font_size_at_position(p)` (`Pixels`; the editor's size, with the zoom) |
 | `writeScreenReaderContent(reason)`, `setAriaOptions({ activeDescendant, role })` | `write_screen_reader_content(reason, cx)`, `set_aria_options(AriaOptions { active_descendant, role }, cx)` (an AccessKit node id and role) |

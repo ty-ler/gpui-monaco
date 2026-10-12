@@ -1484,6 +1484,15 @@ pub(crate) struct FoldControl {
     pub row: u32,
     pub bounds: Bounds<Pixels>,
     pub collapsed: bool,
+    /// A manual range's (Monaco `isUserDefined`), with its own icons.
+    pub manual: bool,
+}
+
+impl FoldControl {
+    /// Its icon (Monaco `getDecorationOption`).
+    pub fn icon(&self) -> crate::view::folding::FoldingIcon {
+        crate::view::folding::FoldingIcon::for_region(self.collapsed, self.manual)
+    }
 }
 
 /// A sticky scroll line, for hit testing.
@@ -1750,6 +1759,9 @@ pub(crate) struct EditorLayout {
     pub sticky_lines: Vec<StickyLine>,
     /// The sticky lines' shaped text, for clicks.
     pub sticky_layouts: Vec<LineLayout>,
+    /// The sticky lines' expanded folding controls' opacity (collapsed ones
+    /// always show).
+    pub sticky_fold_controls_opacity: f32,
     pub vertical_scrollbar: Option<ScrollbarLayout>,
     pub horizontal_scrollbar: Option<ScrollbarLayout>,
     /// The line number labels drawn, by row (for tests).
@@ -1972,8 +1984,6 @@ pub struct PrepaintState {
     /// The keyboard-focused and hovered sticky lines.
     sticky_focused: Option<usize>,
     sticky_hovered: Option<usize>,
-    /// Every sticky folding control shows, not just the collapsed ones.
-    sticky_show_fold_controls: bool,
     numbers_right: Pixels,
     zone_elements: Vec<gpui::AnyElement>,
     full_width_zone_elements: Vec<gpui::AnyElement>,
@@ -2630,8 +2640,9 @@ fn glyph_margin_lanes(
         })
         .collect();
     glyphs.extend(editor.widgets.glyphs.iter().map(|widget| {
-        let row = buffer.offset_to_point(buffer.resolve(&widget.anchor)).row;
-        (row, row, widget.lane, false)
+        let start = buffer.offset_to_point(buffer.resolve(&widget.anchor)).row;
+        let end = buffer.offset_to_point(buffer.resolve(&widget.end)).row;
+        (start, end.max(start), widget.lane, false)
     }));
     glyphs.sort_by_key(|(start, end, _, _)| (*start, *end));
     lanes.reset(glyphs.iter().map(|g| g.1).max().unwrap_or(0));
@@ -3470,11 +3481,13 @@ fn prepaint_editor(
             let top = bounds.top() + zones.line_y(line.view_line, line_height) - scroll_top;
             let height = zones.height(line.view_line, line_height);
             let is_collapsed = collapsed.iter().any(|(start, _)| *start == line.row);
-            if is_collapsed || editor.folds.range_starting_at(line.row).is_some() {
+            let range = editor.folds.range_starting_at(line.row);
+            if is_collapsed || range.is_some() {
                 fold_controls.push(FoldControl {
                     row: line.row,
                     bounds: Bounds::new(point(left, top), size(control_width, height)),
                     collapsed: is_collapsed,
+                    manual: range.is_some_and(|range| range.manual),
                 });
             }
         }
@@ -3569,6 +3582,7 @@ fn prepaint_editor(
         minimap_paint: None,
         sticky_lines: Vec::new(),
         sticky_layouts: Vec::new(),
+        sticky_fold_controls_opacity: 0.,
         vertical_scrollbar,
         horizontal_scrollbar,
         line_number_labels: Vec::new(),
@@ -3802,6 +3816,8 @@ fn prepaint_editor(
                         size(px(26.), line_height),
                     ),
                     collapsed,
+                    // Monaco's `StickyFoldingIcon` has only the plain icons.
+                    manual: false,
                 });
             // The pushed last line only shows above the widget's bottom.
             let line_bounds = Bounds::new(
@@ -3847,6 +3863,24 @@ fn prepaint_editor(
                 )
             };
         }
+        // Monaco `StickyScrollWidget._setFoldingHoverListeners`: with
+        // `mouseover`, the expanded regions' controls fade in (0.5s) while
+        // the mouse is over the sticky line numbers and out after, as the
+        // gutter's do; with `always` they show.
+        layout.sticky_fold_controls_opacity = match options.show_folding_controls {
+            ShowFoldingControls::Always => 1.,
+            ShowFoldingControls::Mouseover => {
+                let (opacity, fading) = editor
+                    .animation
+                    .sticky_folding
+                    .update(editor.sticky.gutter_hovered);
+                if fading && !layout.sticky_lines.is_empty() {
+                    window.request_animation_frame();
+                }
+                opacity
+            }
+            ShowFoldingControls::Never => 0.,
+        };
     }
     let numbers_right = bounds.left() + glyph_width + numbers_width;
 
@@ -4898,21 +4932,28 @@ fn prepaint_editor(
     {
         let model = editor.model().clone();
         let buffer = model.read(cx).buffer();
-        // Monaco glyph margin widgets: on their line's first view line.
+        // Monaco `_collectWidgetBasedGlyphRenderRequest`: a glyph margin
+        // widget shows once, on its range's first view line, or on the
+        // first visible one while the range starts above the viewport.
         let glyph_width = layout.glyph_margin_width;
-        if glyph_width > px(0.) {
+        if glyph_width > px(0.)
+            && let (Some(first), Some(last)) = (layout.lines.first(), layout.lines.last())
+        {
+            let (first, last) = (first.view_line, last.view_line);
             for (ix, widget) in editor.widgets.glyphs.iter().enumerate() {
-                let row = buffer.offset_to_point(buffer.resolve(&widget.anchor)).row;
-                let Some(line) = layout
-                    .lines
-                    .iter()
-                    .find(|line| line.row == row && line.columns.start == 0)
-                else {
+                let start = buffer.offset_to_point_utf16(buffer.resolve(&widget.anchor));
+                let end = buffer.offset_to_point_utf16(buffer.resolve(&widget.end));
+                let start = editor.view_lines.to_view(start, false).0;
+                let end = editor.view_lines.to_view(end, true).0;
+                if end < first || start > last {
+                    continue;
+                }
+                let Some(line) = layout.view_line(start.max(first)) else {
                     continue;
                 };
                 glyph_requests.push(GlyphRequest {
                     view_line: line.view_line,
-                    lane_index: glyph_lanes.lane_index(row, widget.lane),
+                    lane_index: glyph_lanes.lane_index(line.row, widget.lane),
                     z_index: widget.z_index,
                     glyph: None,
                     widget: Some(ix),
@@ -5156,11 +5197,6 @@ fn prepaint_editor(
         sticky_height,
         sticky_focused: editor.sticky.focused,
         sticky_hovered: editor.sticky.hovered,
-        // Monaco: hovering the sticky gutter shows every folding control
-        // there with `mouseover`; else the collapsed ones (and all with
-        // `always`).
-        sticky_show_fold_controls: editor.sticky.gutter_hovered
-            || options.show_folding_controls == ShowFoldingControls::Always,
         numbers_right,
         zone_elements: Vec::new(),
         full_width_zone_elements: Vec::new(),
@@ -5710,17 +5746,23 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                         },
                     );
                     // Its folding control (Monaco `StickyFoldingIcon`): the
-                    // codicon at its 16px.
+                    // codicon at its 16px, the collapsed ones always shown.
                     if let Some(control) = layout.sticky_lines.get(k).and_then(|l| l.fold.as_ref())
-                        && (control.collapsed || state.sticky_show_fold_controls)
                     {
-                        paint_chevron(
-                            control,
-                            colors.folding_control_foreground,
-                            px(16.),
-                            window,
-                            cx,
-                        );
+                        let opacity = if control.collapsed {
+                            1.
+                        } else {
+                            layout.sticky_fold_controls_opacity
+                        };
+                        if opacity > 0. {
+                            paint_chevron(
+                                control,
+                                colors.folding_control_foreground.opacity(opacity),
+                                px(16.),
+                                window,
+                                cx,
+                            );
+                        }
                     }
                 }
             });
@@ -6170,10 +6212,11 @@ fn paint_fold_placeholder(
         .ok();
 }
 
-/// A folding control (Monaco `foldingDecorations.ts`): the `chevron-down`
-/// codicon when expanded and `chevron-right` when collapsed, `icon_size`
-/// big and centered (`folding.css`); without the codicon font, a drawn
-/// chevron.
+/// A folding control (Monaco `foldingDecorations.ts`): its
+/// [`FoldingIcon`](crate::view::folding::FoldingIcon)'s codicon (by default
+/// `chevron-down` when expanded and `chevron-right` when collapsed, manual
+/// ranges' too), `icon_size` big and centered (`folding.css`); without the
+/// codicon font, a drawn chevron.
 fn paint_chevron(
     control: &FoldControl,
     color: Hsla,
@@ -6181,11 +6224,7 @@ fn paint_chevron(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let icon = if control.collapsed {
-        crate::codicons::Codicon::ChevronRight
-    } else {
-        crate::codicons::Codicon::ChevronDown
-    };
+    let icon = control.icon().codicon(cx);
     let icon_size = icon_size.min(control.bounds.size.height);
     if let Some(shaped) = crate::codicons::shape_icon(icon, icon_size, color, window, cx) {
         paint_icon(shaped, control.bounds, icon_size, window, cx);

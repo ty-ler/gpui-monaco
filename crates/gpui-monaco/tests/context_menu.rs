@@ -306,3 +306,57 @@ fn refactor_and_source_items_need_declared_kinds(cx: &mut TestAppContext) {
     assert!(menu.iter().any(|r| r == "Refactor..."), "{menu:?}");
     assert!(!menu.iter().any(|r| r == "Source Action..."));
 }
+
+/// Monaco `MouseHandler._onMouseDown`: on macOS, Ctrl+click isn't a click
+/// (no selection drag, whatever the `multiCursorModifier`); it opens the
+/// context menu, as a right-click does. Elsewhere Ctrl+click stays a click.
+#[gpui::test]
+fn ctrl_click_opens_the_menu_on_macos(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, point, px};
+    use gpui_monaco::options::MultiCursorModifier;
+    let (editor, cx) = setup("foo bar foo\nbaz qux\n", cx);
+    draw(cx);
+    let at = |column: u32, cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, _| {
+                e.scrolled_visible_position(PointUtf16::new(0, column))
+            })
+            .unwrap()
+            + point(px(1.), px(5.))
+    };
+    let ctrl = Modifiers {
+        control: true,
+        ..Default::default()
+    };
+    for modifier in [MultiCursorModifier::Alt, MultiCursorModifier::CtrlCmd] {
+        editor.update(cx, |e, cx| {
+            let mut options = e.options().clone();
+            options.multi_cursor_modifier = modifier;
+            e.update_options(options, cx);
+            e.set_selections(
+                &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                    1, 0,
+                ))],
+                cx,
+            );
+        });
+        draw(cx);
+        let (from, to) = (at(4, cx), at(9, cx));
+        cx.simulate_mouse_down(from, MouseButton::Left, ctrl);
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), ctrl);
+        cx.simulate_mouse_up(to, MouseButton::Left, ctrl);
+        draw(cx);
+        let selections = editor.read_with(cx, |e, _| e.selections().to_vec());
+        assert_eq!(selections.len(), 1, "{modifier:?}");
+        assert!(selections[0].is_empty(), "{modifier:?}: {selections:?}");
+        if cfg!(target_os = "macos") {
+            assert!(editor.read_with(cx, |e, _| e.is_context_menu_visible()));
+            // The menu's cursor move: to the click, outside the selection.
+            assert_eq!(selections[0].head, PointUtf16::new(0, 4));
+            cx.simulate_keystrokes("escape");
+            draw(cx);
+        } else {
+            assert!(!editor.read_with(cx, |e, _| e.is_context_menu_visible()));
+        }
+    }
+}

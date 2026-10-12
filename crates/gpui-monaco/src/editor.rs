@@ -1641,7 +1641,7 @@ impl CodeEditor {
         }
     }
 
-    /// Adds a view in the glyph margin beside a line (Monaco
+    /// Adds a view in the glyph margin beside a range's first line (Monaco
     /// `addGlyphMarginWidget`). Remove it with [`CodeEditor::remove_widget`].
     pub fn add_glyph_margin_widget(
         &mut self,
@@ -1649,16 +1649,43 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) -> WidgetId {
         let id = self.widgets.next_id();
-        let anchor = self.anchor_for(PointUtf16::new(widget.row, 0), cx);
+        let (anchor, end) = self.anchors_for(&widget.range, cx);
         self.widgets.glyphs.push(crate::widgets::GlyphWidgetState {
             id,
             anchor,
+            end,
             view: widget.view,
             lane: widget.lane,
             z_index: widget.z_index,
         });
         cx.notify();
         id
+    }
+
+    /// Re-places a glyph margin widget (Monaco `layoutGlyphMarginWidget`,
+    /// which re-reads the widget's `getPosition()`): its range, lane and
+    /// z-index.
+    pub fn layout_glyph_margin_widget(
+        &mut self,
+        id: WidgetId,
+        position: crate::widgets::GlyphMarginWidgetPosition,
+        cx: &mut Context<Self>,
+    ) {
+        let (anchor, end) = self.anchors_for(&position.range, cx);
+        if let Some(widget) = self.widgets.glyphs.iter_mut().find(|w| w.id == id) {
+            widget.anchor = anchor;
+            widget.end = end;
+            widget.lane = position.lane;
+            widget.z_index = position.z_index;
+            cx.notify();
+        }
+    }
+
+    /// Anchors for `range`'s ends, the end clipped to after the start.
+    fn anchors_for(&self, range: &Range<PointUtf16>, cx: &App) -> (text::Anchor, text::Anchor) {
+        let start = self.anchor_for(range.start, cx);
+        let end = self.anchor_for(range.end.max(range.start), cx);
+        (start, end)
     }
 
     /// Adds a view across the whole gutter beside `row` (see
@@ -1675,6 +1702,7 @@ impl CodeEditor {
         self.widgets.gutter.push(crate::widgets::GlyphWidgetState {
             id,
             anchor,
+            end: anchor,
             view,
             lane: Default::default(),
             z_index: 0,
@@ -1789,7 +1817,7 @@ impl CodeEditor {
     }
 
     /// Where each content widget (position, secondary position) and glyph
-    /// margin widget (row) is in the current model.
+    /// margin widget (range) is in the current model.
     fn widget_positions(&self, cx: &App) -> WidgetPositions {
         let buffer = self.model.read(cx).buffer();
         let point = |anchor: &text::Anchor| buffer.offset_to_point_utf16(buffer.resolve(anchor));
@@ -1809,7 +1837,7 @@ impl CodeEditor {
                 .widgets
                 .glyphs
                 .iter()
-                .map(|w| point(&w.anchor).row)
+                .map(|w| point(&w.anchor)..point(&w.end))
                 .collect(),
             gutter: self
                 .widgets
@@ -1835,7 +1863,7 @@ impl CodeEditor {
                 .glyphs
                 .iter()
                 .map(|w| w.id)
-                .zip(positions.glyphs.iter().copied())
+                .zip(positions.glyphs.iter().cloned())
                 .collect(),
             gutter: widgets
                 .gutter
@@ -1859,9 +1887,9 @@ impl CodeEditor {
                 *position = *saved;
             }
         }
-        for (widget, row) in widgets.glyphs.iter().zip(&mut positions.glyphs) {
+        for (widget, range) in widgets.glyphs.iter().zip(&mut positions.glyphs) {
             if let Some(saved) = saved.glyphs.get(&widget.id) {
-                *row = *saved;
+                *range = saved.clone();
             }
         }
         for (widget, row) in widgets.gutter.iter().zip(&mut positions.gutter) {
@@ -1892,10 +1920,11 @@ impl CodeEditor {
         let glyphs: Vec<_> = positions
             .glyphs
             .into_iter()
-            .map(|row| self.anchor_for(PointUtf16::new(row, 0), cx))
+            .map(|range| self.anchors_for(&range, cx))
             .collect();
-        for (widget, anchor) in self.widgets.glyphs.iter_mut().zip(glyphs) {
+        for (widget, (anchor, end)) in self.widgets.glyphs.iter_mut().zip(glyphs) {
             widget.anchor = anchor;
+            widget.end = end;
         }
         let gutter: Vec<_> = positions
             .gutter
@@ -2083,6 +2112,34 @@ impl CodeEditor {
                 .map(|c| (c.row, c.bounds, c.collapsed))
                 .collect()
         })
+    }
+
+    /// The folding controls' icons in the last frame, by row, and the
+    /// codicons they draw, for tests.
+    #[doc(hidden)]
+    pub fn fold_control_icons_for_tests(
+        &self,
+        cx: &App,
+    ) -> Vec<(
+        u32,
+        crate::view::folding::FoldingIcon,
+        crate::codicons::Codicon,
+    )> {
+        self.layout.as_ref().map_or_else(Vec::new, |l| {
+            l.fold_controls
+                .iter()
+                .map(|c| (c.row, c.icon(), c.icon().codicon(cx)))
+                .collect()
+        })
+    }
+
+    /// The sticky lines' expanded folding controls' opacity in the last
+    /// frame, for tests.
+    #[doc(hidden)]
+    pub fn sticky_fold_controls_opacity_for_tests(&self) -> f32 {
+        self.layout
+            .as_ref()
+            .map_or(0., |l| l.sticky_fold_controls_opacity)
     }
 
     /// The cursors of the last frame and whether they're outlined, for
@@ -4506,6 +4563,24 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Monaco `_onMouseDown`: a macOS Ctrl+click isn't handled as a click
+        // (no selection, no definition link, whatever the
+        // `multiCursorModifier`); the `contextmenu` event that follows it
+        // opens the context menu, as a right-click does. The folding
+        // contribution still takes it on a folding control.
+        if cfg!(target_os = "macos")
+            && event.modifiers.control
+            && !self.layout.as_ref().is_some_and(|layout| {
+                layout.sticky_line_at(event.position).is_none()
+                    && layout
+                        .fold_controls
+                        .iter()
+                        .any(|control| control.bounds.contains(&event.position))
+            })
+        {
+            self.on_right_mouse_down(event, window, cx);
+            return;
+        }
         if self.end_middle_scroll(cx) {
             return;
         }
@@ -7238,7 +7313,7 @@ pub(crate) fn map_state(
 /// [`CodeEditor::set_model`]).
 struct DetachedWidgetPositions {
     content: std::collections::HashMap<WidgetId, (Option<PointUtf16>, Option<PointUtf16>)>,
-    glyphs: std::collections::HashMap<WidgetId, u32>,
+    glyphs: std::collections::HashMap<WidgetId, Range<PointUtf16>>,
     gutter: std::collections::HashMap<WidgetId, u32>,
 }
 

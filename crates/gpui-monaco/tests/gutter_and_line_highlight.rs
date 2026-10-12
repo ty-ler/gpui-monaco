@@ -409,3 +409,130 @@ fn gutter_clicks_dont_steal_focus(cx: &mut TestAppContext) {
     cx.simulate_click(point(info.content_left + px(20.), y), Modifiers::default());
     assert!(is_focused(cx), "the text");
 }
+
+// ----- #295: manual folding icons, glyph margin widget ranges -----
+
+/// Monaco `getDecorationOption`: manual ranges (Create Folding Range from
+/// Selection) get `foldingManualCollapsedIcon` and
+/// `foldingManualExpandedIcon`, which default to the other icons'
+/// codicons and can be changed on their own.
+#[gpui::test]
+fn manual_folding_ranges_have_their_own_icons(cx: &mut TestAppContext) {
+    use gpui_monaco::codicons::Codicon;
+    use gpui_monaco::view::folding::{FoldingIcon, set_folding_icon};
+    let source = "fn a() {\n    one();\n    two();\n}\nlet x = 1;\nlet y = 2;\nlet z = 3;\n";
+    let (editor, cx) = setup(
+        source,
+        |o| o.show_folding_controls = ShowFoldingControls::Always,
+        cx,
+    );
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(500));
+    paint(cx);
+    select(
+        &editor,
+        &[Selection::new(PointUtf16::new(4, 0), PointUtf16::new(6, 3))],
+        cx,
+    );
+    editor.update(cx, |e, cx| e.create_fold_from_selection(cx));
+    paint(cx);
+    let icons = |cx: &mut VisualTestContext| {
+        paint(cx);
+        editor.read_with(cx, |e, cx| e.fold_control_icons_for_tests(cx))
+    };
+    assert_eq!(
+        icons(cx),
+        vec![
+            (0, FoldingIcon::Expanded, Codicon::ChevronDown),
+            (4, FoldingIcon::ManualCollapsed, Codicon::ChevronRight),
+        ]
+    );
+    editor.update(cx, |e, cx| e.unfold(cx));
+    assert_eq!(
+        icons(cx)[1],
+        (4, FoldingIcon::ManualExpanded, Codicon::ChevronDown)
+    );
+    // A product icon theme's `folding-manual-expanded`.
+    cx.update(|_, cx| set_folding_icon(FoldingIcon::ManualExpanded, Some(Codicon::Ellipsis), cx));
+    assert_eq!(
+        icons(cx),
+        vec![
+            (0, FoldingIcon::Expanded, Codicon::ChevronDown),
+            (4, FoldingIcon::ManualExpanded, Codicon::Ellipsis),
+        ]
+    );
+    cx.update(|_, cx| set_folding_icon(FoldingIcon::ManualExpanded, None, cx));
+    assert_eq!(icons(cx)[1].2, Codicon::ChevronDown);
+}
+
+struct Glyph;
+
+impl gpui::Render for Glyph {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        gpui::div()
+    }
+}
+
+/// Monaco `IGlyphMarginWidget.getPosition()`: a range, a lane and a
+/// z-index. The widget shows once, on the range's first line or the first
+/// one in view (`_collectWidgetBasedGlyphRenderRequest`), and its lane is
+/// taken on every line of the range (`_computeGlyphMarginLanes`).
+#[gpui::test]
+fn glyph_margin_widgets_take_a_range(cx: &mut TestAppContext) {
+    use gpui::AppContext as _;
+    use gpui_monaco::{GlyphMarginWidget, GlyphMarginWidgetPosition};
+    let (editor, cx) = setup(&text(40), |o| o.glyph_margin = true, cx);
+    let line_height = editor.read_with(cx, |e, _| e.view_metrics_for_tests().unwrap().3);
+    let id = editor.update(cx, |e, cx| {
+        let view = cx.new(|_| Glyph);
+        e.add_glyph_margin_widget(
+            GlyphMarginWidget {
+                lane: GlyphMarginLane::Left,
+                ..GlyphMarginWidget::with_range(p(3, 2)..p(6, 1), view)
+            },
+            cx,
+        )
+    });
+    // A center glyph inside the range takes the second lane.
+    decorate(&editor, vec![(p(5, 0)..p(5, 0), glyph(None, 0))], cx);
+    let drawn = |cx: &mut VisualTestContext| {
+        paint(cx);
+        editor.read_with(cx, |e, _| e.glyphs_for_tests())
+    };
+    assert_eq!(drawn(cx), vec![(3, 0), (5, 1)]);
+    // Scrolled into the range: on the first visible line.
+    let scroll = |y: f32, cx: &mut VisualTestContext| {
+        editor.update(cx, |e, cx| {
+            e.set_scroll_position(point(px(0.), line_height * y), cx)
+        });
+    };
+    scroll(4., cx);
+    assert_eq!(drawn(cx)[..2], [(4, 0), (5, 1)]);
+    // Past it: not shown.
+    scroll(7., cx);
+    assert!(drawn(cx).is_empty());
+    // Monaco `layoutGlyphMarginWidget`.
+    editor.update(cx, |e, cx| {
+        e.layout_glyph_margin_widget(
+            id,
+            GlyphMarginWidgetPosition {
+                range: p(10, 0)..p(10, 0),
+                lane: GlyphMarginLane::Center,
+                z_index: 0,
+            },
+            cx,
+        )
+    });
+    assert_eq!(drawn(cx), vec![(10, 0)]);
+    // The row constructor still shows beside its row.
+    scroll(0., cx);
+    editor.update(cx, |e, cx| {
+        let view = cx.new(|_| Glyph);
+        e.add_glyph_margin_widget(GlyphMarginWidget::new(2, view), cx)
+    });
+    assert_eq!(drawn(cx)[0], (2, 0));
+}

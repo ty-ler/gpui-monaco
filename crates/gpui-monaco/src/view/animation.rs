@@ -170,6 +170,9 @@ pub(crate) struct ViewAnimation {
     pub minimap_slider: SliderFade,
     /// The gutter's folding controls.
     pub folding: FoldingFade,
+    /// The sticky scroll's folding controls (Monaco `StickyScrollWidget`'s
+    /// own `foldingOpacityTransition`, over its line numbers).
+    pub sticky_folding: FoldingFade,
     /// Inertial scrolling (`inertialScroll`).
     pub inertial: InertialScroll,
 }
@@ -189,6 +192,7 @@ impl Default for ViewAnimation {
             minimap: MinimapFade::default(),
             minimap_slider: SliderFade::default(),
             folding: FoldingFade::default(),
+            sticky_folding: FoldingFade::default(),
             inertial: InertialScroll::default(),
         }
     }
