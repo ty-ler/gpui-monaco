@@ -1259,6 +1259,9 @@ fn refactor_arguments(cx: &mut TestAppContext) {
     cx.update(|_, cx| {
         register_code_action_provider(cx, LanguageSelector::All, record);
     });
+    // Registering asks for the lightbulb's actions (Monaco
+    // `CodeActionModel._update`) first.
+    cx.run_until_parked();
     trigger_with(
         &editor,
         cx,

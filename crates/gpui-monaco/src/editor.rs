@@ -1079,6 +1079,12 @@ impl CodeEditor {
             cx,
             |this: &mut Self, cx| this.reinitialize_linked_editing(false, cx),
         ));
+        // Monaco's `CodeActionModel` listens to its registry's `onDidChange`.
+        subscriptions.push(
+            cx.observe_global::<crate::providers::CodeActionProvidersEpoch>(|this, cx| {
+                this.update_code_actions(cx)
+            }),
+        );
         subscriptions.extend(crate::editor_commands::subscriptions(cx));
         subscriptions.push(
             cx.observe_global::<crate::font_zoom::EditorZoom>(|this, cx| this.on_zoom_changed(cx)),
@@ -1551,6 +1557,10 @@ impl CodeEditor {
         self.refresh_bracket_colors(cx);
         self.update_bracket_highlights(cx);
         self.reset_inlay_hints(cx);
+        // Monaco `CodeActionModel` on a `lightbulb` change.
+        if old.lightbulb != self.options.lightbulb {
+            self.update_code_actions(cx);
+        }
         // Monaco `ParameterHintsModel.onEditorConfigurationChange`.
         if !self.options.parameter_hints.enabled {
             self.hide_signature_help(cx);
@@ -3066,6 +3076,8 @@ impl CodeEditor {
                 // And the inspect tokens widget.
                 self.stop_inspect_tokens(cx);
                 self.reset_inlay_hints(cx);
+                // Monaco `CodeActionModel` on `onDidChangeModelLanguage`.
+                self.update_code_actions(cx);
                 // The brackets are the new language's, grammar or not.
                 self.bracket_colors = Default::default();
                 // Monaco `onDidChangeModelLanguageConfiguration`, which a

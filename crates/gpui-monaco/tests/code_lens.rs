@@ -151,6 +151,56 @@ fn refreshed_after_edits(cx: &mut TestAppContext) {
     assert_eq!(requests.get(), 2);
 }
 
+/// Monaco `CodeLensContribution` listens to
+/// `codeLensProvider.onDidChange`: providers registered or removed later
+/// are asked again (after the debounce) without an edit, and with none
+/// left the lenses go.
+#[gpui::test]
+fn lenses_follow_providers_registered_and_removed_later(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new("fn a() {}\n\nfn b() {}\n"));
+        CodeEditor::new(model, window, cx)
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    assert!(lenses(&editor, cx).is_empty());
+    let requests = Rc::new(Cell::new(0));
+    let provider = |requests: &Rc<Cell<usize>>| Functions {
+        requests: requests.clone(),
+    };
+    let a = cx.update(|_, cx| {
+        register_code_lens_provider(cx, LanguageSelector::All, provider(&requests))
+    });
+    assert_eq!(lenses(&editor, cx).len(), 2);
+    assert_eq!(requests.get(), 1);
+    let b = cx.update(|_, cx| {
+        register_code_lens_provider(cx, LanguageSelector::All, provider(&requests))
+    });
+    cx.executor().advance_clock(Duration::from_millis(500));
+    // Both providers' lenses, two per line.
+    assert_eq!(
+        lenses(&editor, cx),
+        vec![
+            (
+                0,
+                vec![Some("2 references".into()), Some("2 references".into())]
+            ),
+            (2, vec![Some("Run test".into()), Some("Run test".into())]),
+        ]
+    );
+    cx.update(|_, cx| unregister_provider(cx, a));
+    cx.executor().advance_clock(Duration::from_millis(500));
+    assert_eq!(
+        lenses(&editor, cx),
+        vec![
+            (0, vec![Some("2 references".into())]),
+            (2, vec![Some("Run test".into())]),
+        ]
+    );
+    cx.update(|_, cx| unregister_provider(cx, b));
+    assert!(lenses(&editor, cx).is_empty());
+}
+
 #[gpui::test]
 fn code_lens_option(cx: &mut TestAppContext) {
     let (editor, cx, _) = setup("fn a() {}\n", cx);

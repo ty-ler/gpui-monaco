@@ -1019,6 +1019,21 @@ impl CodeEditor {
     /// After the cursor moves or markers change: asks for actions for the
     /// lightbulb after a pause (Monaco `CodeActionOracle`).
     pub(crate) fn schedule_auto_code_actions(&mut self, cx: &mut Context<Self>) {
+        self.request_auto_code_actions(AUTO_TRIGGER_DELAY, cx);
+    }
+
+    /// Monaco `CodeActionModel._update`, run when the model's language,
+    /// the code action providers or the `lightbulb` option change: the
+    /// lightbulb goes, and the actions at the selection are asked for
+    /// again right away (the new oracle's `trigger`).
+    pub(crate) fn update_code_actions(&mut self, cx: &mut Context<Self>) {
+        if self.code_actions.lightbulb.take().is_some() {
+            cx.notify();
+        }
+        self.request_auto_code_actions(Duration::ZERO, cx);
+    }
+
+    fn request_auto_code_actions(&mut self, delay: Duration, cx: &mut Context<Self>) {
         if self.options.read_only
             || self.in_peek
             || self.options.single_line
@@ -1036,7 +1051,9 @@ impl CodeEditor {
         };
         let position = self.selection_start();
         self.code_actions.auto = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(AUTO_TRIGGER_DELAY).await;
+            if !delay.is_zero() {
+                cx.background_executor().timer(delay).await;
+            }
             let Ok(request) = this.update(cx, |this, cx| {
                 this.request_code_actions(range, Default::default(), CodeActionTrigger::Auto, cx)
             }) else {
