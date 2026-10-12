@@ -1332,3 +1332,105 @@ fn the_gutter_indicator_survives_set_model(cx: &mut TestAppContext) {
     draw(cx);
     assert_eq!(text(&editor, cx), "x");
 }
+
+/// The inline edit views' transitions: the gutter indicator's (count,
+/// running) and the long-distance hint's (target opacity, running).
+#[allow(clippy::type_complexity)]
+fn transitions(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+) -> (Option<(usize, bool)>, Option<(f32, bool)>) {
+    editor.read_with(cx, |e, cx| e.inline_edit_transitions_for_tests(cx))
+}
+
+/// Lets running transitions finish (they follow the real clock, as GPUI
+/// animations do), then draws.
+fn finish_transitions(cx: &mut VisualTestContext) {
+    std::thread::sleep(Duration::from_millis(250));
+    draw(cx);
+}
+
+/// Whether drawing settles into asking for no more frames (an animation
+/// running asks for one each frame; the editor's own, like the
+/// scrollbars', end too).
+fn settles_without_frames(cx: &mut VisualTestContext) -> bool {
+    (0..20).any(|_| {
+        std::thread::sleep(Duration::from_millis(50));
+        draw(cx);
+        cx.update(|window, cx| window.simulate_next_frame(cx)) == 0
+    })
+}
+
+/// Monaco's inline edit transitions (`transition: ... 0.2s ease-in-out`):
+/// the long-distance hint fades in, and out once the edit is in view; the
+/// gutter indicator eases its width and colors as it docks beside the
+/// edit and as what Tab does changes. Once they're done nothing asks for
+/// frames.
+#[gpui::test]
+fn inline_edit_views_transition(cx: &mut TestAppContext) {
+    let doc = long_doc();
+    let provider = Edits::new(|text, _| replace(text, "let v250 = 250;", "let v250 = 2500;"));
+    let (editor, cx) = setup(&doc, provider, |_| {}, cx);
+    type_at(&editor, p(0, 0), " ", cx);
+    // The hint fades in; the indicator, pinned below, shows as it is.
+    let (indicator, hint) = transitions(&editor, cx);
+    assert_eq!(indicator.map(|(count, _)| count), Some(0));
+    assert_eq!(hint.map(|(opacity, _)| opacity), Some(1.));
+    finish_transitions(cx);
+    assert_eq!(
+        transitions(&editor, cx),
+        (Some((0, false)), Some((1., false)))
+    );
+    assert!(settles_without_frames(cx));
+    // The edit comes into view: the hint fades out, then goes, and the
+    // indicator docks beside the edit, easing to the gutter's width.
+    editor.update(cx, |e, cx| e.reveal_line_in_center(250, cx));
+    draw(cx);
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.inline_edit_gutter_indicator_for_tests()),
+        Some(Ok(250))
+    );
+    let (indicator, hint) = transitions(&editor, cx);
+    assert_eq!(indicator.map(|(count, _)| count), Some(1));
+    assert_eq!(hint.map(|(opacity, _)| opacity), Some(0.));
+    assert!(
+        editor
+            .read_with(cx, |e, cx| e.inline_edit_long_distance_hint_for_tests(cx))
+            .is_some()
+    );
+    draw(cx);
+    draw(cx);
+    assert_eq!(transitions(&editor, cx).1, None);
+    finish_transitions(cx);
+    assert!(settles_without_frames(cx));
+    // Jumping there: Tab now accepts, and the pill eases to its colors.
+    cx.simulate_keystrokes("tab");
+    draw(cx);
+    let (indicator, _) = transitions(&editor, cx);
+    assert_eq!(indicator.map(|(count, _)| count), Some(2));
+    // Redrawing without a change starts nothing.
+    draw(cx);
+    assert_eq!(transitions(&editor, cx).0.map(|(count, _)| count), Some(2));
+    finish_transitions(cx);
+    assert!(settles_without_frames(cx));
+}
+
+/// Scrolled back away within the fade-out, the hint fades back in rather
+/// than going.
+#[gpui::test]
+fn the_long_distance_hint_fades_back_in(cx: &mut TestAppContext) {
+    let doc = long_doc();
+    let provider = Edits::new(|text, _| replace(text, "let v250 = 250;", "let v250 = 2500;"));
+    let (editor, cx) = setup(&doc, provider, |_| {}, cx);
+    type_at(&editor, p(0, 0), " ", cx);
+    editor.update(cx, |e, cx| e.reveal_line_in_center(250, cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert_eq!(transitions(&editor, cx).1.map(|(o, _)| o), Some(0.));
+    editor.update(cx, |e, cx| e.reveal_line_in_center(0, cx));
+    draw(cx);
+    draw(cx);
+    draw(cx);
+    assert_eq!(transitions(&editor, cx).1.map(|(o, _)| o), Some(1.));
+}

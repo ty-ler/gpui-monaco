@@ -17,18 +17,16 @@
 
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Animation, AnimationExt as _, AppContext as _, Context, Hsla, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, Pixels, Render, SharedString, Styled, WeakEntity, Window, div,
-    point, px,
+    AppContext as _, Context, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement,
+    Pixels, Render, SharedString, Styled, WeakEntity, Window, div, point, px,
 };
 use text::PointUtf16;
 
 use super::inline_edits::InlineEditDiff;
-use super::inline_edits_view::{Segment, TabAction};
+use super::inline_edits_view::{Segment, TRANSITION_DURATION, TabAction, Transition};
 use crate::codicons::{Codicon, icon as codicon};
 use crate::editor::CodeEditor;
 use crate::theme::Theme;
@@ -42,8 +40,6 @@ const MAX_WIDGET_WIDTH_EMPTY_SPACE: f32 = 425.;
 const MAX_WIDGET_WIDTH_OVERLAY: f32 = 375.;
 /// Monaco `MIN_WIDGET_WIDTH`.
 const MIN_WIDGET_WIDTH: f32 = 250.;
-/// Monaco's fade-in (`transition: opacity 200ms`).
-const FADE_IN: Duration = Duration::from_millis(200);
 
 /// Monaco `DEFAULT_WIDGET_LAYOUT_CONSTANTS`.
 pub(crate) const DEFAULT_LAYOUT_CONSTANTS: WidgetLayoutConstants = WidgetLayoutConstants {
@@ -349,8 +345,9 @@ pub(crate) struct LongDistanceHint {
     font: SharedString,
     font_size: Pixels,
     line_height: Pixels,
-    /// Restarts the fade-in.
-    generation: usize,
+    /// Monaco's `transition: opacity 200ms ease-in-out`: it fades in when
+    /// it shows, and out when the edit comes into view.
+    opacity: Transition<f32>,
 }
 
 impl Render for LongDistanceHint {
@@ -418,7 +415,7 @@ impl Render for LongDistanceHint {
             );
             div().flex().h(line_height).child(gutter).child(text)
         });
-        div()
+        let hint = div()
             .id("inline-edit-long-distance-hint")
             .w(self.width)
             .p(px(constants.widget_padding))
@@ -477,12 +474,12 @@ impl Render for LongDistanceHint {
                             .child(self.label.clone())
                             .child(codicon(self.arrow).size(px(12.))),
                     ),
-            )
-            .with_animation(
-                ("inline-edit-long-distance-hint-fade", self.generation),
-                Animation::new(FADE_IN),
-                |this, delta| this.opacity(delta),
-            )
+            );
+        self.opacity.apply(
+            "inline-edit-long-distance-hint-fade",
+            hint,
+            |hint, opacity| hint.opacity(opacity),
+        )
     }
 }
 
@@ -509,21 +506,23 @@ pub(crate) struct LongDistanceHintState {
         WidgetId,
         gpui::Point<Pixels>,
     )>,
-    generation: usize,
+    /// Removes the hint once it faded out (Monaco keeps its layout for
+    /// 200ms after it stops being visible, `_isVisibleDelayed`).
+    fade_out: Option<gpui::Task<()>>,
 }
 
 impl CodeEditor {
     /// Monaco `_getLongDistanceHintState`: where the long-distance hint
     /// shows for the inline edit `ix` (with `target`, its range), and
     /// whether it's visible: always for a cross-file edit, else while the
-    /// edit isn't on screen. Nothing once it's jumped to, or for a hint
-    /// alone.
+    /// edit isn't on screen (once it is, the hint fades out). Nothing once
+    /// it's jumped to, or for a hint alone.
     pub(crate) fn long_distance_hint_row(
         &mut self,
         ix: usize,
         target: Option<&Range<PointUtf16>>,
         cx: &gpui::App,
-    ) -> Option<u32> {
+    ) -> Option<(u32, bool)> {
         if !self.options.inline_suggest.edits.show_long_distance_hint {
             return None;
         }
@@ -534,7 +533,7 @@ impl CodeEditor {
         }
         let cursor_row = self.cursors.primary().position.row;
         if self.inline_edit_is_cross_file(ix) {
-            return Some(cursor_row);
+            return Some((cursor_row, true));
         }
         let id = item.id;
         let row = match self.inline.edit_view.long_distance.first_cursor_row {
@@ -545,7 +544,7 @@ impl CodeEditor {
             }
         };
         let in_viewport = target.is_some_and(|target| self.inline_edit_in_viewport(target, cx));
-        (!in_viewport && self.layout.is_some()).then_some(row)
+        self.layout.is_some().then_some((row, !in_viewport))
     }
 
     /// Monaco `LongDistancePreviewEditor._state`: the rows the hint
@@ -689,6 +688,20 @@ impl CodeEditor {
         let font_size = self.options.font_size;
         let line_height = self.options.resolved_line_height();
         if let Some((view, id, current)) = self.inline.edit_view.long_distance.view.clone() {
+            // Visible again while fading out: it fades back in.
+            if self
+                .inline
+                .edit_view
+                .long_distance
+                .fade_out
+                .take()
+                .is_some()
+            {
+                view.update(cx, |view, cx| {
+                    view.opacity.set(1.);
+                    cx.notify();
+                });
+            }
             view.update(cx, |view, cx| {
                 let changed = view.tab_action != tab_action
                     || view.preview != state.preview
@@ -720,9 +733,10 @@ impl CodeEditor {
             }
             return;
         }
-        self.inline.edit_view.long_distance.generation += 1;
-        let generation = self.inline.edit_view.long_distance.generation;
         let editor = cx.entity().downgrade();
+        // Monaco's fade-in from the opacity it has while hidden.
+        let mut opacity = Transition::new(0.);
+        opacity.set(1.);
         let theme = self.theme.clone();
         let view = cx.new(|_| LongDistanceHint {
             editor,
@@ -738,7 +752,7 @@ impl CodeEditor {
             font,
             font_size,
             line_height,
-            generation,
+            opacity,
         });
         let id = self.add_overlay_widget(
             OverlayWidget::new(OverlayPosition::Custom(position), view.clone().into()),
@@ -747,7 +761,44 @@ impl CodeEditor {
         self.inline.edit_view.long_distance.view = Some((view, id, position));
     }
 
+    /// The hint's opacity target and whether it's still easing.
+    pub(crate) fn long_distance_hint_opacity(&self, cx: &gpui::App) -> Option<(f32, bool)> {
+        let (view, _, _) = self.inline.edit_view.long_distance.view.as_ref()?;
+        let opacity = &view.read(cx).opacity;
+        Some((*opacity.target(), opacity.animating()))
+    }
+
+    /// Monaco's hint once the edit is in view (`isVisible: false`): it
+    /// fades out, then goes.
+    pub(crate) fn fade_out_long_distance_hint(&mut self, cx: &mut Context<Self>) {
+        let state = &mut self.inline.edit_view.long_distance;
+        if state.fade_out.is_some() {
+            return;
+        }
+        let Some((view, _, _)) = state.view.clone() else {
+            return;
+        };
+        if cx.reduce_motion() {
+            self.clear_long_distance_hint(cx);
+            return;
+        }
+        view.update(cx, |view, cx| {
+            view.opacity.set(0.);
+            cx.notify();
+        });
+        self.inline.edit_view.long_distance.fade_out = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TRANSITION_DURATION).await;
+            this.update(cx, |this, cx| {
+                if this.inline.edit_view.long_distance.fade_out.is_some() {
+                    this.clear_long_distance_hint(cx);
+                }
+            })
+            .ok();
+        }));
+    }
+
     pub(crate) fn clear_long_distance_hint(&mut self, cx: &mut Context<Self>) {
+        self.inline.edit_view.long_distance.fade_out = None;
         if let Some((_, id, _)) = self.inline.edit_view.long_distance.view.take() {
             self.remove_widget(id, cx);
         }

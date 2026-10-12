@@ -45,7 +45,7 @@ fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
 }
 
 /// CSS `ease-in-out`.
-fn ease_in_out(x: f32) -> f32 {
+pub(crate) fn ease_in_out(x: f32) -> f32 {
     cubic_bezier(0.42, 0., 0.58, 1., x.clamp(0., 1.))
 }
 

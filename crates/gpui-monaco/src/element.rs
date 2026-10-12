@@ -763,6 +763,7 @@ fn overflow_size(units: u32) -> String {
 }
 
 /// What to shape for one view line.
+#[derive(Clone)]
 pub(crate) struct RowSegment {
     pub view_line: u32,
     pub row: u32,
@@ -1113,6 +1114,29 @@ pub(crate) fn layout_segment<'a>(
             })
             .collect(),
     }
+}
+
+/// Monaco's `ghost-text-hidden` (`opacity: 0; font-size: 0`): `segment`
+/// shown only up to UTF-16 column `from` of its row, as the end of the row
+/// it holds `from`'s injected text; a later segment shows nothing. `None`
+/// leaves a segment before `from` as it is.
+pub(crate) fn hide_segment_from(segment: &RowSegment, from: u32) -> Option<RowSegment> {
+    let holds = segment.columns.start <= from
+        && (from < segment.columns.end || (from == segment.columns.end && segment.is_last_segment));
+    if holds {
+        return Some(RowSegment {
+            columns: segment.columns.start..from,
+            is_last_segment: true,
+            overflow: 0,
+            ..segment.clone()
+        });
+    }
+    (segment.columns.start > from).then(|| RowSegment {
+        columns: segment.columns.start..segment.columns.start,
+        is_last_segment: false,
+        overflow: 0,
+        ..segment.clone()
+    })
 }
 
 /// Monaco `_renderNormalDecoration` with `showIfCollapsed`: a range
@@ -3110,6 +3134,9 @@ fn prepaint_editor(
                 )
             })
             .collect();
+    // Monaco `ghost-text-hidden`: the rows whose end moved below their
+    // ghost text, as of the decorations above.
+    let ghost_hidden = editor.ghost_text_hidden_rows();
     // Monaco `bracketPairColorization`.
     editor.refresh_bracket_colors(cx);
     editor.refresh_links(cx);
@@ -3252,6 +3279,18 @@ fn prepaint_editor(
                 }
             }
             None => row_highlights,
+        };
+        let hidden_segment;
+        let segment = match ghost_hidden
+            .iter()
+            .find(|(row, _)| *row == segment.row)
+            .and_then(|(_, from)| hide_segment_from(segment, *from))
+        {
+            Some(hidden) => {
+                hidden_segment = hidden;
+                &hidden_segment
+            }
+            None => segment,
         };
         let line = layout_segment(
             &snapshot,

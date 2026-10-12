@@ -11,8 +11,9 @@
 //!   custom (`inlineEditsCustomView.ts`, an item's hint) and jump-to
 //!   (`jumpToView.ts`) views, as boxes in content widgets rather than DOM
 //!   overlays,
-//! - `components/gutterIndicatorView.ts` (with the line number in the pill
-//!   and the pulse when the view is hovered; across the whole gutter, so it
+//! - `components/gutterIndicatorView.ts` (with the line number in the pill,
+//!   the pulse when the view is hovered, and the pill's color and width
+//!   and the icon's opacity transitions; across the whole gutter, so it
 //!   shows without a glyph margin too) and `gutterIndicatorMenu.ts` (a
 //!   popup kept in the window that closes when the editor scrolls, as
 //!   Monaco's instant hover; with the keyboard once it has focus: Up,
@@ -78,6 +79,166 @@ const CUSTOM_VERTICAL_OFFSET: f32 = 2.;
 /// The gutter menu paints above the editor's overflowing widgets, as
 /// Monaco's hover service's hovers do.
 const MENU_PRIORITY: usize = 1000;
+
+/// Monaco's inline edit transitions (`transition: ... 0.2s ease-in-out`
+/// on the gutter indicator, `opacity 200ms ease-in-out` on the
+/// long-distance hint).
+pub(crate) const TRANSITION_DURATION: Duration = Duration::from_millis(200);
+
+/// A value a transition eases between.
+pub(crate) trait Lerp: Clone + PartialEq + 'static {
+    /// The value `t` (0 to 1) of the way from `self` to `to`.
+    fn lerp(&self, to: &Self, t: f32) -> Self;
+}
+
+impl Lerp for f32 {
+    fn lerp(&self, to: &Self, t: f32) -> Self {
+        self + (to - self) * t
+    }
+}
+
+impl Lerp for Pixels {
+    fn lerp(&self, to: &Self, t: f32) -> Self {
+        *self + (*to - *self) * t
+    }
+}
+
+impl Lerp for Hsla {
+    /// In sRGB, as CSS interpolates colors.
+    fn lerp(&self, to: &Self, t: f32) -> Self {
+        let (from, to) = (self.to_rgb(), to.to_rgb());
+        gpui::Rgba {
+            r: from.r.lerp(&to.r, t),
+            g: from.g.lerp(&to.g, t),
+            b: from.b.lerp(&to.b, t),
+            a: from.a.lerp(&to.a, t),
+        }
+        .into()
+    }
+}
+
+/// A CSS transition (Monaco's inline edit views): when the value changes,
+/// it eases from what showed then to the new value over
+/// [`TRANSITION_DURATION`] with `ease-in-out`. Drawn with a GPUI animation
+/// that each change restarts (`generation`), so it repaints only while it
+/// runs.
+#[derive(Clone, Debug)]
+pub(crate) struct Transition<T> {
+    from: T,
+    to: T,
+    started: Instant,
+    generation: usize,
+}
+
+impl<T: Lerp> Transition<T> {
+    /// A value shown as it is, as CSS doesn't transition a first value.
+    pub(crate) fn new(value: T) -> Self {
+        Self {
+            from: value.clone(),
+            to: value,
+            started: Instant::now(),
+            generation: 0,
+        }
+    }
+
+    /// How far along it is, 0 to 1.
+    fn progress(&self) -> f32 {
+        if self.generation == 0 {
+            return 1.;
+        }
+        (self.started.elapsed().as_secs_f32() / TRANSITION_DURATION.as_secs_f32()).min(1.)
+    }
+
+    /// The value showing now.
+    pub(crate) fn current(&self) -> T {
+        self.from.lerp(
+            &self.to,
+            crate::view::animation::ease_in_out(self.progress()),
+        )
+    }
+
+    /// The value it's going to.
+    pub(crate) fn target(&self) -> &T {
+        &self.to
+    }
+
+    /// Moves to `to` from the value showing now; whether it changed.
+    pub(crate) fn set(&mut self, to: T) -> bool {
+        if to == self.to {
+            return false;
+        }
+        self.from = self.current();
+        self.to = to;
+        self.started = Instant::now();
+        self.generation += 1;
+        true
+    }
+
+    /// Whether it's still easing.
+    pub(crate) fn animating(&self) -> bool {
+        self.progress() < 1.
+    }
+
+    /// How many times it changed.
+    pub(crate) fn generation(&self) -> usize {
+        self.generation
+    }
+
+    /// `element` with the value applied: animated, for what's left of the
+    /// transition, while it runs (`id` unique among the element's
+    /// siblings), else as it is.
+    pub(crate) fn apply<E: IntoElement + 'static>(
+        &self,
+        id: &'static str,
+        element: E,
+        apply: impl Fn(E, T) -> E + 'static,
+    ) -> gpui::AnyElement {
+        if !self.animating() {
+            return apply(element, self.to.clone()).into_any_element();
+        }
+        let start = self.progress();
+        let remaining = TRANSITION_DURATION.mul_f32(1. - start);
+        let (from, to) = (self.from.clone(), self.to.clone());
+        element
+            .with_animation(
+                (id, self.generation),
+                Animation::new(remaining),
+                move |element, delta| {
+                    let t = start + (1. - start) * delta;
+                    apply(
+                        element,
+                        from.lerp(&to, crate::view::animation::ease_in_out(t)),
+                    )
+                },
+            )
+            .into_any_element()
+    }
+}
+
+/// What the gutter indicator's transitions animate (Monaco's pill
+/// `transition: background-color 0.2s ease-in-out, width 0.2s ease-in-out`
+/// and its icon's `opacity 0.2s ease-in-out`): the pill's foreground,
+/// border and background, its width, and the icon's opacity.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct IndicatorLook {
+    colors: [Hsla; 3],
+    width: Pixels,
+    icon_opacity: f32,
+}
+
+impl Lerp for IndicatorLook {
+    fn lerp(&self, to: &Self, t: f32) -> Self {
+        Self {
+            colors: [
+                self.colors[0].lerp(&to.colors[0], t),
+                self.colors[1].lerp(&to.colors[1], t),
+                self.colors[2].lerp(&to.colors[2], t),
+            ],
+            width: self.width.lerp(&to.width, t),
+            icon_opacity: self.icon_opacity.lerp(&to.icon_opacity, t),
+        }
+    }
+}
 
 /// What Tab does (Monaco `InlineEditTabAction`); it colors the indicator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -382,6 +543,9 @@ pub(crate) struct GutterIndicator {
     /// The editor's scroll position when the menu opened: scrolling
     /// closes it (Monaco's `onDidScrollChange`).
     scroll: gpui::Point<Pixels>,
+    /// The pill's colors and width and the icon's opacity, easing when
+    /// they change.
+    look: Transition<IndicatorLook>,
 }
 
 impl GutterIndicator {
@@ -498,38 +662,61 @@ impl GutterIndicator {
         let visible = icon >= px(MINIMAL_ICON_WIDTH);
         (pill, number, icon.max(px(MINIMAL_ICON_WIDTH)), visible)
     }
+
+    /// The look the indicator has for what it shows now: the pill's
+    /// colors for what Tab does, its width (the gutter's when docked) and
+    /// whether the icon fits.
+    fn target_look(&self) -> IndicatorLook {
+        let colors = &self.theme.colors;
+        let colors = match self.tab_action {
+            TabAction::Jump => colors.inline_edit_gutter_indicator_primary(),
+            TabAction::Accept => colors.inline_edit_gutter_indicator_successful(),
+            TabAction::Inactive => colors.inline_edit_gutter_indicator_secondary(),
+        };
+        let (pill_width, _, _, icon_visible) = self.docked_layout();
+        let docked = matches!(self.placement, IndicatorPlacement::Docked(_));
+        IndicatorLook {
+            colors,
+            width: if docked { pill_width } else { px(22.) },
+            icon_opacity: if icon_visible || !docked { 1. } else { 0. },
+        }
+    }
 }
 
 impl Render for GutterIndicator {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = &self.theme.colors;
-        let [foreground, border, background] = match self.tab_action {
-            TabAction::Jump => colors.inline_edit_gutter_indicator_primary(),
-            TabAction::Accept => colors.inline_edit_gutter_indicator_successful(),
-            TabAction::Inactive => colors.inline_edit_gutter_indicator_secondary(),
-        };
         let editor = self.editor.clone();
         let docked = matches!(self.placement, IndicatorPlacement::Docked(_));
-        let (pill_width, number_width, icon_width, icon_visible) = self.docked_layout();
+        let (_, number_width, icon_width, _) = self.docked_layout();
         let line_height = self.line_height;
+        // Monaco's transitions: the colors, width and icon opacity ease
+        // from what showed when they change.
+        let target = *self.look.target();
+        let [_, border, _] = target.colors;
+        let icon = self.look.apply(
+            "inline-edit-gutter-indicator-icon",
+            div()
+                .flex_none()
+                .w(icon_width)
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(codicon(self.icon())),
+            |icon, look| icon.opacity(look.icon_opacity),
+        );
         let pill = div()
             .id("inline-edit-gutter-indicator")
             .when(docked, |this| {
-                this.absolute()
-                    .top_0()
-                    .left(px(1.))
-                    .w(pill_width)
-                    .h(line_height)
+                this.absolute().top_0().left(px(1.)).h(line_height)
             })
-            .when(!docked, |this| this.w(px(22.)).h(self.line_height))
+            .when(!docked, |this| this.h(self.line_height))
             .flex()
             .items_center()
             .justify_center()
             .rounded(px(4.))
             .border_1()
-            .border_color(border)
-            .bg(background)
-            .text_color(foreground)
             .text_size(px(12.))
             .cursor_pointer()
             .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
@@ -562,22 +749,21 @@ impl Render for GutterIndicator {
                             .overflow_hidden()
                             .child(self.line_number.clone()),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(icon_width)
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .when(!icon_visible, |this| this.opacity(0.))
-                            .child(codicon(self.icon())),
-                    )
+                    .child(icon)
             })
             .when(!docked, |this| this.child(codicon(self.icon())));
+        let pill = self
+            .look
+            .apply("inline-edit-gutter-indicator-look", pill, |pill, look| {
+                let [foreground, border, background] = look.colors;
+                pill.w(look.width)
+                    .border_color(border)
+                    .bg(background)
+                    .text_color(foreground)
+            });
         // Monaco's pulse: an outline growing from the pill as it fades.
         let pulse = (self.pulses > 0).then(|| {
-            let width = if docked { pill_width } else { px(22.) };
+            let width = target.width;
             div().absolute().rounded(px(4.)).border_2().with_animation(
                 ("inline-edit-gutter-indicator-pulse", self.pulses),
                 Animation::new(PULSE_DURATION),
@@ -693,7 +879,11 @@ impl Render for GutterIndicator {
             }
             // Monaco shows it with the hover service, kept in the window:
             // a popup beside the pill, moved to fit.
-            let left = if docked { pill_width + px(1.) } else { px(22.) };
+            let left = if docked {
+                target.width + px(1.)
+            } else {
+                px(22.)
+            };
             div().absolute().top_0().left(left).child(
                 gpui::deferred(
                     gpui::anchored()
@@ -710,14 +900,17 @@ impl Render for GutterIndicator {
                 // The editor's background under the translucent pill, so the
                 // line number below doesn't show through.
                 this.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left(px(1.))
-                        .w(pill_width)
-                        .h(line_height)
-                        .rounded(px(4.))
-                        .bg(self.background),
+                    self.look.apply(
+                        "inline-edit-gutter-indicator-underlay",
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left(px(1.))
+                            .h(line_height)
+                            .rounded(px(4.))
+                            .bg(self.background),
+                        |underlay, look| underlay.w(look.width),
+                    ),
                 )
             })
             .child(pill)
@@ -998,6 +1191,23 @@ impl CodeEditor {
         ))
     }
 
+    /// The inline edit views' transitions, for tests: the gutter indicator's
+    /// (how many there were, whether one runs) and the long-distance hint's
+    /// (the opacity it goes to, whether it's still easing).
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    pub fn inline_edit_transitions_for_tests(
+        &self,
+        cx: &gpui::App,
+    ) -> (Option<(usize, bool)>, Option<(f32, bool)>) {
+        let indicator = self.inline.edit_view.indicator.as_ref().map(|indicator| {
+            let look = &indicator.read(cx).look;
+            (look.generation(), look.animating())
+        });
+        let hint = self.long_distance_hint_opacity(cx);
+        (indicator, hint)
+    }
+
     /// Clears the inline edit's view, indicator and long-distance hint.
     pub(crate) fn clear_inline_edit_view(&mut self, cx: &mut Context<Self>) {
         self.clear_inline_edit_rendering(cx);
@@ -1157,9 +1367,10 @@ impl CodeEditor {
         }
         // The long-distance hint.
         let target = self.inline_edit_target(ix, &edits, cx);
-        let long_distance = self
-            .long_distance_hint_row(ix, target.as_ref(), cx)
-            .and_then(|hint_row| {
+        let hint_row = self.long_distance_hint_row(ix, target.as_ref(), cx);
+        let long_distance = hint_row
+            .filter(|(_, visible)| *visible)
+            .and_then(|(hint_row, _)| {
                 let preview = self.long_distance_preview(
                     if cross_file || jump_to.is_none() {
                         diff.as_ref()
@@ -1199,7 +1410,11 @@ impl CodeEditor {
                     cross_file,
                 })
             });
-        self.refresh_long_distance_hint(long_distance, tab_action, cx);
+        if hint_row.is_some_and(|(_, visible)| !visible) {
+            self.fade_out_long_distance_hint(cx);
+        } else {
+            self.refresh_long_distance_hint(long_distance, tab_action, cx);
+        }
         let key = RenderKey {
             version: self.model().read(cx).buffer().version(),
             id,
@@ -1325,6 +1540,8 @@ impl CodeEditor {
                     indicator.line_number = line_number;
                     indicator.gutter = gutter;
                     indicator.background = background;
+                    let target = indicator.target_look();
+                    let changed = indicator.look.set(target) || changed;
                     // Monaco closes the menu when the editor scrolls.
                     if indicator.menu_open && indicator.scroll != scroll {
                         indicator.menu_open = false;
@@ -1342,27 +1559,32 @@ impl CodeEditor {
             None => {
                 let editor = cx.entity().downgrade();
                 let theme = self.theme.clone();
-                let indicator = cx.new(|cx| GutterIndicator {
-                    editor,
-                    theme,
-                    tab_action,
-                    placement,
-                    cursor_above,
-                    header,
-                    menu,
-                    line_height,
-                    line_number,
-                    gutter,
-                    background,
-                    edit_hovered,
-                    pulses: 0,
-                    hovered: false,
-                    menu_hovered: false,
-                    menu_open: false,
-                    close: None,
-                    active: None,
-                    focus: cx.focus_handle(),
-                    scroll,
+                let indicator = cx.new(|cx| {
+                    let mut indicator = GutterIndicator {
+                        editor,
+                        theme,
+                        tab_action,
+                        placement,
+                        cursor_above,
+                        header,
+                        menu,
+                        line_height,
+                        line_number,
+                        gutter,
+                        background,
+                        edit_hovered,
+                        pulses: 0,
+                        hovered: false,
+                        menu_hovered: false,
+                        menu_open: false,
+                        close: None,
+                        active: None,
+                        focus: cx.focus_handle(),
+                        scroll,
+                        look: Transition::new(IndicatorLook::default()),
+                    };
+                    indicator.look = Transition::new(indicator.target_look());
+                    indicator
                 });
                 self.inline.edit_view.indicator = Some(indicator.clone());
                 indicator

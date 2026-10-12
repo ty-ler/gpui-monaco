@@ -10,8 +10,14 @@
 //!   `cachingDiff`, `deletedCharacters`, `smartDiff`),
 //! - `.../browser/model/singleTextEditHelpers.ts`
 //!   ([`single_text_remove_common_prefix`], [`single_text_edit_augments`]),
+//! - `.../browser/model/inlineCompletionsModel.ts` (`getSecondaryEdits`:
+//!   [`secondary_edits`]) and `TextReplacement.removeCommonPrefixAndSuffix`
+//!   ([`remove_common_prefix_and_suffix`]),
+//! - `.../browser/view/ghostText/ghostTextView.ts`
+//!   (`computeGhostTextViewData`: [`compute_ghost_text_view_data`]),
 //! - `vs/base/common/diff/diff.ts` (`LcsDiff`, the non-"pretty" path only),
-//! - tests from `.../test/browser/computeGhostText.test.ts`.
+//! - tests from `.../test/browser/computeGhostText.test.ts` and
+//!   `getSecondaryEdits.test.ts`.
 //!
 //! # Coordinates
 //!
@@ -175,6 +181,94 @@ impl GhostText {
     }
 }
 
+/// A piece of an additional line of ghost text (Monaco's `additionalLines`
+/// content).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GhostLinePiece {
+    /// Suggested text, drawn as ghost text.
+    Ghost(String),
+    /// Text of the ghost text's line, at these UTF-16 columns, moved below:
+    /// what lies between parts once one added lines, and the rest of the
+    /// line after the last part (Monaco `additionalLinesOriginalSuffix`).
+    Buffer(Range<u32>),
+}
+
+/// How ghost text is drawn (Monaco `computeGhostTextViewData`): text
+/// injected into its line, additional lines below it, and the part of the
+/// line hidden because it moved to the end of the additional lines.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GhostTextViewData {
+    /// Text injected into the line: (UTF-16 column, text, preview).
+    pub inline_texts: Vec<(u32, String, bool)>,
+    /// The lines added below the line.
+    pub additional_lines: Vec<Vec<GhostLinePiece>>,
+    /// The columns of the line that don't show there (Monaco `hiddenRange`,
+    /// drawn with `ghost-text-hidden`): from where a part first adds lines
+    /// to the end of the line. That text shows at the end of the last
+    /// additional line instead.
+    pub hidden_range: Option<Range<u32>>,
+}
+
+/// Monaco `computeGhostTextViewData`: until a part adds lines, parts are
+/// injected into `line` (the ghost text's line); its further lines become
+/// additional lines, the following parts (with the text between them) are
+/// appended to those, and the rest of the line moves to the end of the last
+/// one. The rest of the line is hidden from that first part on, unless the
+/// part is at the end of the line.
+pub(crate) fn compute_ghost_text_view_data(ghost: &GhostText, line: &str) -> GhostTextViewData {
+    let line_len = line.encode_utf16().count() as u32;
+    let mut data = GhostTextViewData::default();
+    let mut hidden_start: Option<u32> = None;
+    let mut last_column = 0u32;
+    // Monaco `addToAdditionalLines`: the first piece continues the last
+    // additional line, if any; each further one starts a line.
+    fn add(lines: &mut Vec<Vec<GhostLinePiece>>, pieces: Vec<GhostLinePiece>) {
+        let mut pieces = pieces.into_iter();
+        if let Some(last) = lines.last_mut()
+            && let Some(first) = pieces.next()
+        {
+            last.push(first);
+        }
+        lines.extend(pieces.map(|piece| vec![piece]));
+    }
+    for part in &ghost.parts {
+        let mut lines = &part.lines[..];
+        if hidden_start.is_none() {
+            data.inline_texts.push((
+                part.column,
+                lines.first().cloned().unwrap_or_default(),
+                part.preview,
+            ));
+            lines = lines.get(1..).unwrap_or_default();
+        } else {
+            add(
+                &mut data.additional_lines,
+                vec![GhostLinePiece::Buffer(last_column..part.column)],
+            );
+        }
+        if !lines.is_empty() {
+            add(
+                &mut data.additional_lines,
+                lines
+                    .iter()
+                    .map(|line| GhostLinePiece::Ghost(line.clone()))
+                    .collect(),
+            );
+            if hidden_start.is_none() && part.column < line_len {
+                hidden_start = Some(part.column);
+            }
+        }
+        last_column = part.column;
+    }
+    if hidden_start.is_some()
+        && let Some(last) = data.additional_lines.last_mut()
+    {
+        last.push(GhostLinePiece::Buffer(last_column..line_len));
+    }
+    data.hidden_range = hidden_start.map(|start| start..line_len);
+    data
+}
+
 /// Ghost text that replaces a column range of a line instead of only
 /// inserting. Port of Monaco's `GhostTextReplacement`. Not produced by
 /// [`compute_ghost_text`]; Monaco's views accept either kind.
@@ -303,6 +397,88 @@ pub(crate) fn single_text_edit_augments(edit: &TextReplacement, base: &TextRepla
     edit.text.starts_with(&base.text)
         && base.range.start == edit.range.start
         && base.range.end <= edit.range.end
+}
+
+/// Monaco `TextReplacement.removeCommonPrefixAndSuffix`: `edit` less the
+/// text it keeps at the start of its range, then at the end. (The same
+/// edit as `StringReplacement.removeCommonSuffixPrefix`, which Monaco's
+/// `removeTextReplacementCommonSuffixPrefix` uses.)
+pub(crate) fn remove_common_prefix_and_suffix(
+    edit: &TextReplacement,
+    line_text: &dyn Fn(u32) -> String,
+) -> TextReplacement {
+    let edit = single_text_remove_common_prefix(edit, line_text);
+    let original = value_in_range(line_text, &edit.range);
+    let modified: Vec<u16> = edit.text.encode_utf16().collect();
+    let suffix = original
+        .iter()
+        .rev()
+        .zip(modified.iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    TextReplacement {
+        range: edit.range.start
+            ..add_text_length(edit.range.start, &original[..original.len() - suffix]),
+        text: String::from_utf16_lossy(&modified[..modified.len() - suffix]),
+    }
+}
+
+/// Monaco `getSecondaryEdits`: `primary` (the edit at `positions[0]`, the
+/// primary cursor) repeated at each other cursor of `positions` whose
+/// surroundings match: the text from the cursor to the end of the edit's
+/// range (less the text it keeps) must be what it is at the primary
+/// cursor. One entry per secondary cursor, `None` where it doesn't fit
+/// (Monaco filters those out; keeping them lines each edit up with its
+/// cursor). Offsets are in UTF-16 code units, as in Monaco.
+pub(crate) fn secondary_edits(
+    rope: &text::Rope,
+    positions: &[PointUtf16],
+    primary: &TextReplacement,
+) -> Vec<Option<TextReplacement>> {
+    if positions.len() <= 1 {
+        return Vec::new();
+    }
+    let line_text = |row: u32| rope.line(row);
+    let offset = |point: PointUtf16| {
+        rope.offset_to_offset_utf16(
+            rope.point_utf16_to_offset(rope.clip_point_utf16(point, text::Bias::Left)),
+        )
+        .0
+    };
+    let value = |range: Range<usize>| {
+        rope.text_for_range(
+            rope.offset_utf16_to_offset(text::OffsetUtf16(range.start))
+                ..rope.offset_utf16_to_offset(text::OffsetUtf16(range.end)),
+        )
+    };
+    let len = rope.len_utf16().0;
+    let primary = remove_common_prefix_and_suffix(primary, &line_text);
+    let primary_offset = offset(positions[0]);
+    let replace = offset(primary.range.start)..offset(primary.range.end);
+    let delta = replace.start as isize - primary_offset as isize;
+    // `replaceRange.join(OffsetRange.emptyAt(primaryOffset))`.
+    let context = value(replace.start.min(primary_offset)..replace.end.max(primary_offset));
+    positions[1..]
+        .iter()
+        .map(|&position| {
+            let secondary = offset(position);
+            let start = usize::try_from(secondary as isize + delta).ok()?;
+            let end = start + replace.len();
+            if end > len {
+                return None;
+            }
+            if value(start.min(secondary)..end.max(secondary)) != context {
+                return None;
+            }
+            let point = |offset: usize| {
+                rope.offset_to_point_utf16(rope.offset_utf16_to_offset(text::OffsetUtf16(offset)))
+            };
+            Some(TextReplacement {
+                range: point(start)..point(end),
+                text: primary.text.clone(),
+            })
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1608,5 +1784,143 @@ mod tests {
         };
         assert!(single_text_edit_augments(&edit, &base));
         assert!(!single_text_edit_augments(&base, &edit));
+    }
+
+    fn replacement(range: (u32, u32, u32, u32), text: &str) -> TextReplacement {
+        TextReplacement {
+            range: PointUtf16::new(range.0, range.1)..PointUtf16::new(range.2, range.3),
+            text: text.into(),
+        }
+    }
+
+    /// Ported from `getSecondaryEdits.test.ts` ("basic").
+    #[test]
+    fn secondary_edits_basic() {
+        let rope = text::Rope::from("function fib(\nfunction fib(");
+        let positions = [PointUtf16::new(0, 13), PointUtf16::new(1, 13)];
+        let primary = replacement((0, 0, 0, 13), "function fib() {");
+        assert_eq!(
+            secondary_edits(&rope, &positions, &primary),
+            vec![Some(replacement((1, 13, 1, 13), ") {"))]
+        );
+    }
+
+    /// Ported from `getSecondaryEdits.test.ts` ("cursor not on same line as
+    /// primary edit 1"): Monaco renders the edit as a replacement of the
+    /// line break after the second `function fib(`.
+    #[test]
+    fn secondary_edits_cursor_not_on_edit_line() {
+        let rope = text::Rope::from("function fib(\n\nfunction fib(\n");
+        let positions = [PointUtf16::new(1, 0), PointUtf16::new(3, 0)];
+        let primary = replacement((0, 0, 1, 0), "function fib() {\n\treturn 0;\n}");
+        assert_eq!(
+            secondary_edits(&rope, &positions, &primary),
+            vec![Some(replacement((2, 13, 3, 0), ") {\n\treturn 0;\n}"))]
+        );
+    }
+
+    /// Ported from `getSecondaryEdits.test.ts` ("cursor not on same line as
+    /// primary edit 2").
+    #[test]
+    fn secondary_edits_insert_lines() {
+        let rope = text::Rope::from("class A {\n\nclass B {\n\nfunction f() {}");
+        let positions = [PointUtf16::new(1, 0), PointUtf16::new(3, 0)];
+        let primary = replacement(
+            (0, 0, 1, 0),
+            "class A {\n\tpublic x: number = 0;\n   public y: number = 0;\n}",
+        );
+        assert_eq!(
+            secondary_edits(&rope, &positions, &primary),
+            vec![Some(replacement(
+                (3, 0, 3, 0),
+                "\tpublic x: number = 0;\n   public y: number = 0;\n}"
+            ))]
+        );
+    }
+
+    /// Monaco's "Multi Part" case: a cursor whose surroundings differ gets
+    /// nothing, and one cursor alone has no secondary edits.
+    #[test]
+    fn secondary_edits_need_matching_context() {
+        let rope = text::Rope::from("console.log()\nconsole.log\n");
+        let positions = [PointUtf16::new(0, 11), PointUtf16::new(1, 11)];
+        let primary = replacement((0, 0, 0, 13), "console.log(\"hello\");");
+        assert_eq!(secondary_edits(&rope, &positions, &primary), vec![None]);
+        assert_eq!(
+            secondary_edits(&rope, &positions[..1], &primary),
+            Vec::<Option<TextReplacement>>::new()
+        );
+    }
+
+    #[test]
+    fn common_prefix_and_suffix() {
+        let lines = |row: u32| ["console.log()"][row as usize].to_string();
+        assert_eq!(
+            remove_common_prefix_and_suffix(
+                &replacement((0, 0, 0, 13), "console.log(\"hi\")"),
+                &lines
+            ),
+            replacement((0, 12, 0, 12), "\"hi\"")
+        );
+    }
+
+    /// Monaco `computeGhostTextViewData`: a multi-line part inserted
+    /// mid-line moves the rest of the line to the end of its last line.
+    #[test]
+    fn view_data_moves_rest_of_line() {
+        let ghost = GhostText::new(0, vec![GhostTextPart::new(4, "a {\n  b\n}", false)]);
+        let data = compute_ghost_text_view_data(&ghost, "foo(x);");
+        assert_eq!(data.inline_texts, vec![(4, "a {".to_string(), false)]);
+        assert_eq!(
+            data.additional_lines,
+            vec![
+                vec![GhostLinePiece::Ghost("  b".into())],
+                vec![
+                    GhostLinePiece::Ghost("}".into()),
+                    GhostLinePiece::Buffer(4..7)
+                ],
+            ]
+        );
+        assert_eq!(data.hidden_range, Some(4..7));
+        // At the end of the line nothing is hidden or moved.
+        let data = compute_ghost_text_view_data(&ghost, "foo(");
+        assert_eq!(data.hidden_range, None);
+        assert_eq!(
+            data.additional_lines,
+            vec![
+                vec![GhostLinePiece::Ghost("  b".into())],
+                vec![GhostLinePiece::Ghost("}".into())]
+            ]
+        );
+        // Single-line parts stay in the line.
+        let ghost = GhostText::new(0, vec![GhostTextPart::new(2, "x", false)]);
+        let data = compute_ghost_text_view_data(&ghost, "abcd");
+        assert_eq!(data.inline_texts, vec![(2, "x".to_string(), false)]);
+        assert!(data.additional_lines.is_empty() && data.hidden_range.is_none());
+    }
+
+    /// Parts after one that added lines go to the additional lines, with
+    /// the line's text between them.
+    #[test]
+    fn view_data_parts_after_added_lines() {
+        let ghost = GhostText::new(
+            0,
+            vec![
+                GhostTextPart::new(1, "1\n2", false),
+                GhostTextPart::new(3, "3", false),
+            ],
+        );
+        let data = compute_ghost_text_view_data(&ghost, "abcde");
+        assert_eq!(data.inline_texts, vec![(1, "1".to_string(), false)]);
+        assert_eq!(
+            data.additional_lines,
+            vec![vec![
+                GhostLinePiece::Ghost("2".into()),
+                GhostLinePiece::Buffer(1..3),
+                GhostLinePiece::Ghost("3".into()),
+                GhostLinePiece::Buffer(3..5),
+            ]]
+        );
+        assert_eq!(data.hidden_range, Some(1..5));
     }
 }

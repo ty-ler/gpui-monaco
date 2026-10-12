@@ -199,6 +199,7 @@ impl InlineCompletionsProvider for Ghost {
             }],
             suppress_suggestions: None,
             commands: Vec::new(),
+            ..Default::default()
         }))
     }
 }

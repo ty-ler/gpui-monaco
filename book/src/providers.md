@@ -326,7 +326,7 @@ impl InlineCompletionsProvider for MyCompletions {
 }
 ```
 
-Typing asks for completions after a short pause. A completion keeps showing, without a new request, while what you type matches it. The rest shows as faded italic text after the cursor, and lines after the first go in a zone below.
+Typing asks for completions after a short pause. A completion keeps showing, without a new request, while what you type matches it. The rest shows as faded italic text after the cursor, and lines after the first go in a zone below; inserted mid-line, the rest of the line moves to the end of its last line. With several cursors, it shows and applies at each one where the text around the cursor matches the primary cursor's.
 
 To accept:
 - Tab takes it all.
@@ -342,11 +342,13 @@ Providers can also:
 - hear how each completion ended through `handle_end_of_lifetime` (accepted, rejected with Escape, or ignored) and `handle_rejection`, when it first showed through `handle_item_did_show` (with its text after bracket completion), and when part of it was accepted through `handle_partial_accept` (`PartialAcceptInfo`: by word, by line, or as the suggestion it extends);
 - set a `group_id`, and list in `yields_to_group_ids` the groups they defer to. A provider is asked only after those groups answer, and not at all if one of them has a visible completion. Groups listed in `excludes_group_ids` aren't asked at all;
 - set `complete_bracket_pairs` on a completion to close the brackets it opens (and drop those it closes without opening), `warning` to squiggle its ghost text and show a message above the toolbar, and `shown_command` to run a command when it first shows;
+- set `enable_forward_stability` on a list to keep its shown completion first while typing agrees with it, whatever newer requests return;
+- free what they keep for a list in `dispose_inline_completions`, called once none of its items is used any more, with why (`InlineCompletionsDisposeReason`);
 - ask the editor to request again with `refresh_inline_completions(cx, registration, change_hint)` (Monaco's `onDidChangeInlineCompletions`): the focused editor asks that provider, passing the hint in `InlineCompletionContext::change_hint`, unless another provider's suggestion shows.
 
 `InlineCompletionContext` also has a `request_uuid`, when the request was issued and the earliest its results show (`min_show_delay`), and whether inline edits and classic completions are wanted.
 
-The `inline_suggest` options control this; see [Options](options.md). With `suggest.preview`, the suggest widget's selected item shows as ghost text too. While the suggest widget has a selection, requests pass it (`selected_suggestion_info`), as in Monaco: a completion that extends the selected suggestion extends its preview, and accepting the suggestion keeps the rest of it. Inline edits don't show meanwhile; they come back when the widget closes. With `inline_suggest.experimental.show_on_suggest_conflict`, a visible completion shows instead of the widget's preview.
+The `inline_suggest` options control this; see [Options](options.md). With `suggest.preview`, the suggest widget's selected item shows as ghost text too. While the suggest widget has a selection, requests pass it (`selected_suggestion_info`), as in Monaco: a completion that extends the selected suggestion extends its preview, and accepting the suggestion keeps the rest of it. When the widget opens over ghost text, it selects the suggestion the ghost text extends. Inline edits don't show meanwhile; they come back when the widget closes. With `inline_suggest.experimental.show_on_suggest_conflict`, a visible completion shows instead of the widget's preview.
 
 ### Inline edits
 
@@ -373,7 +375,7 @@ A pill in the gutter marks it, or points up or down while it's scrolled away. Ta
 
 `show_range` limits where any item shows: only while the cursor is in that range. Providers see in `InlineCompletionContext::include_inline_edits` whether inline edits are wanted (`inline_suggest.edits.enabled`).
 
-While an inline edit is scrolled away, a box near the cursor previews its line (with `inline_suggest.edits.long_distance_hint_context_line_count` lines around it) and says "Tab to jump"; clicking it jumps too. `show_long_distance_hint` turns it off. The pill beside the edit shows its line number, like the line numbers it covers, and pulses while you hover the edit. Accepted text fades out over a second, unless `App::reduce_motion` is set.
+While an inline edit is scrolled away, a box near the cursor previews its line (with `inline_suggest.edits.long_distance_hint_context_line_count` lines around it) and says "Tab to jump"; clicking it jumps too. `show_long_distance_hint` turns it off. The box fades in, and out once the edit scrolls into view. The pill beside the edit shows its line number, like the line numbers it covers, pulses while you hover the edit, and eases its colors and width as what Tab does and where it sits change. Accepted text fades out over a second, unless `App::reduce_motion` is set.
 
 Other kinds of items are inline edits too:
 - `jump_to_position` suggests moving the cursor rather than editing: a "Tab to jump" label marks the place, and jumping there accepts it.

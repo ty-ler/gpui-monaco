@@ -1821,6 +1821,34 @@ pub struct InlineCompletionList {
     /// Extra commands for the inline suggestion toolbar's menu (Monaco
     /// `InlineCompletions.commands`).
     pub commands: Vec<Command>,
+    /// While the user types what a completion from this list suggests, it
+    /// stays first even if a newer request returns others (Monaco
+    /// `enableForwardStability`: the shown item is preserved through the
+    /// requests that typing makes).
+    pub enable_forward_stability: bool,
+}
+
+/// Why a provider's list is no longer used (Monaco
+/// `InlineCompletionsDisposeReason`), passed to
+/// [`InlineCompletionsProvider::dispose_inline_completions`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InlineCompletionsDisposeReason {
+    /// Monaco stops waiting for providers once one returned a visible
+    /// completion for an automatic request, and disposes the lists that
+    /// come later with this reason. This editor waits for every provider,
+    /// so it doesn't use it.
+    LostRace,
+    /// The request was superseded (typing, moving the cursor, stopping)
+    /// after the list came back and before it was used.
+    TokenCancellation,
+    /// The list's items were shown or kept, and the last of them is gone
+    /// (accepted, rejected, replaced or hidden).
+    Other,
+    /// The list had no items.
+    Empty,
+    /// None of the list's items were kept (not requested, changing nothing,
+    /// or another provider's completion was preferred).
+    NotTaken,
 }
 
 /// Why an inline completion stopped showing for good (Monaco
@@ -1883,6 +1911,17 @@ pub trait InlineCompletionsProvider: 'static {
         &self,
         _item: &InlineCompletion,
         _reason: &InlineCompletionEndOfLifeReason,
+    ) {
+    }
+
+    /// `list`, which this provider returned, is no longer used: no item of
+    /// it shows or will show, so what the provider keeps for it can go
+    /// (Monaco `disposeInlineCompletions`). Called once per list, after
+    /// its items' [`handle_end_of_lifetime`](Self::handle_end_of_lifetime).
+    fn dispose_inline_completions(
+        &self,
+        _list: &InlineCompletionList,
+        _reason: InlineCompletionsDisposeReason,
     ) {
     }
 
