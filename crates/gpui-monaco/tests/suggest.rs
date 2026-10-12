@@ -1951,3 +1951,255 @@ fn screen_readers_hear_the_focused_suggestion(cx: &mut TestAppContext) {
     settle(cx);
     assert_eq!(heard(cx).as_deref(), Some("No suggestions."));
 }
+
+/// Items without docs whose docs arrive from a 300ms resolve.
+struct DocsOnResolve;
+impl CompletionProvider for DocsOnResolve {
+    fn provide_completions(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        _: CompletionTrigger,
+        _: &mut App,
+    ) -> Task<anyhow::Result<CompletionList>> {
+        Task::ready(Ok(CompletionList {
+            items: ["alpha", "beta", "gamma"]
+                .into_iter()
+                .map(|label| CompletionItem::new(label, CompletionItemKind::Function))
+                .collect(),
+            incomplete: false,
+        }))
+    }
+
+    fn resolve_completion_item(
+        &self,
+        item: &CompletionItem,
+        cx: &mut App,
+    ) -> Option<Task<anyhow::Result<CompletionItem>>> {
+        let item = item.clone();
+        let timer = cx.background_executor().timer(Duration::from_millis(300));
+        Some(cx.background_executor().spawn(async move {
+            timer.await;
+            Ok(CompletionItem {
+                documentation: Some(format!("Docs for {}.", item.label).into()),
+                ..item
+            })
+        }))
+    }
+}
+
+/// The details panel's docs (or its detail without docs), while it shows.
+fn details_docs(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Option<String> {
+    editor
+        .read_with(cx, |e, cx| e.suggest_details_for_tests(cx))
+        .map(|(detail, docs)| docs.or(detail).unwrap_or_default())
+}
+
+/// Monaco `SuggestWidget._onListFocus`: while the focused item resolves,
+/// the details panel keeps what it showed, shows "Loading..." after 250ms,
+/// then the resolved docs (#344).
+#[gpui::test]
+fn details_stay_while_an_item_resolves(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    cx.update(|_, cx| register_completion_provider(cx, LanguageSelector::All, DocsOnResolve));
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    // Nothing to expand until it resolves (Monaco `toggleDetails`).
+    cx.simulate_keystrokes("ctrl-space");
+    assert_eq!(details_docs(&editor, cx), None);
+    cx.executor().advance_clock(Duration::from_millis(300));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("ctrl-space");
+    assert_eq!(
+        details_docs(&editor, cx).as_deref(),
+        Some("Docs for alpha.")
+    );
+    // The next item resolves: alpha's docs stay meanwhile.
+    cx.simulate_keystrokes("down");
+    cx.executor().advance_clock(Duration::from_millis(200));
+    cx.run_until_parked();
+    assert_eq!(
+        details_docs(&editor, cx).as_deref(),
+        Some("Docs for alpha.")
+    );
+    // After 250ms, "Loading...".
+    cx.executor().advance_clock(Duration::from_millis(60));
+    cx.run_until_parked();
+    assert_eq!(details_docs(&editor, cx).as_deref(), Some("Loading..."));
+    cx.executor().advance_clock(Duration::from_millis(50));
+    cx.run_until_parked();
+    assert_eq!(details_docs(&editor, cx).as_deref(), Some("Docs for beta."));
+    // Back to a resolved item: at once.
+    cx.simulate_keystrokes("up");
+    assert_eq!(
+        details_docs(&editor, cx).as_deref(),
+        Some("Docs for alpha.")
+    );
+    // Typing refilters without resolving the focused item again.
+    cx.simulate_input("a");
+    assert_eq!(
+        details_docs(&editor, cx).as_deref(),
+        Some("Docs for alpha.")
+    );
+}
+
+fn focused_label(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Option<String> {
+    editor.read_with(cx, |e, _| {
+        e.selected_suggestion()
+            .map(|(_, item)| item.label.to_string())
+    })
+}
+
+/// Monaco's `toggleDetails` opens the details only when the focused item
+/// has something to show (#344).
+#[gpui::test]
+fn toggling_details_needs_something_to_show(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    provide(cx, |_| {
+        vec![
+            CompletionItem::new("plain", CompletionItemKind::Function),
+            CompletionItem {
+                documentation: Some("Prints.".into()),
+                ..CompletionItem::new("print", CompletionItemKind::Function)
+            },
+        ]
+    });
+    let details = |cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, cx| e.is_suggestion_details_visible(cx))
+    };
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert_eq!(focused_label(&editor, cx).as_deref(), Some("plain"));
+    // No docs: nothing happens, so the next item doesn't open them either.
+    cx.simulate_keystrokes("ctrl-space");
+    cx.simulate_keystrokes("down");
+    assert!(!details(cx));
+    cx.simulate_keystrokes("ctrl-space");
+    assert!(details(cx));
+}
+
+/// Monaco's status bar "Show More" follows `suggestionCanResolve`: word
+/// based suggestions (no detail) have it, though they have nothing to
+/// show (#344).
+#[gpui::test]
+fn show_more_follows_suggestion_can_resolve(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "alpha alphabet\n",
+        |o| {
+            o.suggest.show_status_bar = true;
+            o.quick_suggestions = QuickSuggestions::OFF;
+        },
+        cx,
+    );
+    move_to(&editor, cx, 1, 0);
+    cx.simulate_input("al");
+    cx.simulate_keystrokes("ctrl-space");
+    settle(cx);
+    let status = |cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, cx| e.suggest_status_bar_for_tests(cx))
+            .unwrap()
+            .1
+    };
+    let space = if cfg!(target_os = "macos") {
+        "⌃Space"
+    } else {
+        "Ctrl+Space"
+    };
+    assert_eq!(status(cx), format!("Show More ({space})"));
+    // Toggling shows nothing: still "Show More".
+    cx.simulate_keystrokes("ctrl-space");
+    assert_eq!(status(cx), format!("Show More ({space})"));
+    cx.simulate_keystrokes("escape");
+
+    // A detail equal to the label, no docs and no resolve: none.
+    provide(cx, |_| {
+        vec![CompletionItem {
+            detail: Some("same".into()),
+            ..CompletionItem::new("same", CompletionItemKind::Function)
+        }]
+    });
+    cx.simulate_input(" s");
+    cx.simulate_keystrokes("ctrl-space");
+    settle(cx);
+    assert_eq!(status(cx), "");
+}
+
+/// Monaco's details show a detail equal to the label when there are docs
+/// too (`renderItem`; only `canExpandCompletionItem` compares them) (#344).
+#[gpui::test]
+fn details_show_a_detail_equal_to_the_label(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    provide(cx, |_| {
+        vec![CompletionItem {
+            detail: Some("print".into()),
+            documentation: Some("Prints.".into()),
+            ..CompletionItem::new("print", CompletionItemKind::Function)
+        }]
+    });
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("ctrl-space");
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.suggest_details_for_tests(cx)),
+        Some((Some("print".to_string()), Some("Prints.".to_string())))
+    );
+}
+
+/// Replaces the last accepted suggestion with the next (Monaco
+/// `insertNextSuggestion`), if Tab may.
+fn insert_next_suggestion(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        editor.update(cx, |e, cx| e.trigger("insertNextSuggestion", window, cx))
+    })
+    .unwrap();
+    cx.run_until_parked();
+}
+
+/// Monaco keeps the other suggestions for Tab only after Tab or Enter
+/// (`KeepAlternativeSuggestions`); Shift+Enter and commit characters
+/// don't (#344).
+#[gpui::test]
+fn only_tab_and_enter_keep_the_alternatives(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "",
+        |o| {
+            o.tab_completion = gpui_monaco::options::TabCompletion::On;
+            o.quick_suggestions = QuickSuggestions::OFF;
+        },
+        cx,
+    );
+    provide(cx, |_| {
+        ["print", "println"]
+            .into_iter()
+            .map(|label| CompletionItem {
+                commit_characters: vec![';'],
+                ..CompletionItem::new(label, CompletionItemKind::Function)
+            })
+            .collect()
+    });
+    // Enter: the next replaces it.
+    cx.simulate_input("pri");
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    assert_eq!(text(&editor, cx), "print");
+    insert_next_suggestion(&editor, cx);
+    assert_eq!(text(&editor, cx), "println");
+    // Shift+Enter: not.
+    cx.simulate_input(" pri");
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("shift-enter");
+    assert_eq!(text(&editor, cx), "println print");
+    insert_next_suggestion(&editor, cx);
+    assert_eq!(text(&editor, cx), "println print");
+    // A commit character: not either.
+    cx.simulate_input(" pri");
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    cx.simulate_input(";");
+    assert_eq!(text(&editor, cx), "println print print;");
+    insert_next_suggestion(&editor, cx);
+    assert_eq!(text(&editor, cx), "println print print;");
+}

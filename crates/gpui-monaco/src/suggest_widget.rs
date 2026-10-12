@@ -85,6 +85,9 @@ pub(crate) enum DetailsScroll {
 pub const LOADING_MESSAGE: &str = "Loading...";
 /// The message shown when an explicit request found nothing.
 pub const NO_SUGGESTIONS_MESSAGE: &str = "No suggestions.";
+/// What the details panel shows while the focused item takes a while to
+/// resolve (Monaco `SuggestDetailsWidget.renderLoading`).
+pub const DETAILS_LOADING_MESSAGE: &str = "Loading...";
 
 /// What the widget shows; rebuilt from the session on each change.
 pub struct SuggestWidgetState {
@@ -106,6 +109,13 @@ pub struct SuggestWidgetState {
     /// The completion model shown (a new one per request), for what's
     /// measured once per model (`fitWidthToDetails`).
     model_id: u64,
+    /// The focused row's item is resolving.
+    resolving: bool,
+    /// It has resolved for 250ms: its details show "Loading...".
+    details_loading: bool,
+    /// Monaco's `suggestionCanResolve` for the focused row: the status
+    /// bar's "Show More".
+    can_resolve: bool,
 }
 
 impl SuggestWidgetState {
@@ -124,6 +134,7 @@ impl SuggestWidgetState {
                 )
             })
             .collect();
+        let (resolving, details_loading) = session.focused_resolving();
         Self {
             rows,
             selected: session.selected,
@@ -133,6 +144,9 @@ impl SuggestWidgetState {
             frozen: session.frozen,
             details_focused: false,
             model_id: session.id,
+            resolving,
+            details_loading,
+            can_resolve: session.focused_can_resolve(),
         }
     }
 
@@ -146,6 +160,9 @@ impl SuggestWidgetState {
             frozen: false,
             details_focused: false,
             model_id: 0,
+            resolving: false,
+            details_loading: false,
+            can_resolve: false,
         }
     }
 
@@ -185,15 +202,27 @@ pub(crate) fn details_expanded(cx: &App) -> bool {
         .is_some_and(|ui| ui.details_expanded)
 }
 
+/// Whether Monaco would see the item's label as a `CompletionItemLabel`
+/// object (with a detail or description) rather than a string, which no
+/// detail equals.
+pub(crate) fn has_label_object(item: &CompletionItem) -> bool {
+    item.label_detail.is_some() || item.label_description.is_some()
+}
+
 /// Monaco `canExpandCompletionItem`: docs, or a detail other than the
 /// label.
 pub(crate) fn can_expand(item: &CompletionItem) -> bool {
     item.documentation.is_some()
-        || item
-            .detail
-            .as_ref()
-            .is_some_and(|detail| *detail != item.label)
+        || item.detail.as_ref().is_some_and(|detail| {
+            !detail.is_empty() && (has_label_object(item) || *detail != item.label)
+        })
 }
+
+/// What the details panel shows: a detail (the type) and docs.
+type DetailsContent = (
+    Option<SharedString>,
+    Option<crate::providers::Documentation>,
+);
 
 /// Monaco `CompletionItemKinds.toLabel`: the kind as screen readers read
 /// it.
@@ -665,6 +694,13 @@ pub struct SuggestWidget {
     slider_drag: Option<ScrollbarTarget>,
     /// The details panel's last place, for tests.
     details_layout: Option<DetailsLayout>,
+    /// What the details panel shows (while expanded): the focused item's
+    /// detail and docs, or what it showed before while that item resolves
+    /// (Monaco re-renders the panel only once it's resolved), or
+    /// "Loading..." once it's taken 250ms (Monaco `renderLoading`).
+    details: Option<DetailsContent>,
+    /// `details` is Monaco's "Loading..." panel, two rows tall.
+    details_loading: bool,
 }
 
 /// The kind's codicon (Monaco `CompletionItemKinds.toIcon`), in the
@@ -798,9 +834,46 @@ impl SuggestWidget {
             hide_scrollbars: None,
             slider_drag: None,
             details_layout: None,
+            details: None,
+            details_loading: false,
         };
+        (this.details, this.details_loading) = this.next_details(&this.state, details_expanded(cx));
         this.reveal_selected_at_top(cx);
         this
+    }
+
+    /// What the details panel shows for `state` (see [`Self::details`]):
+    /// explain mode's scoring, the focused item's detail and docs if it has
+    /// any, or while it resolves with the panel expanded, what the panel
+    /// showed until 250ms pass and then "Loading...". Also whether that's
+    /// the loading panel.
+    fn next_details(
+        &self,
+        state: &SuggestWidgetState,
+        expanded: bool,
+    ) -> (Option<DetailsContent>, bool) {
+        let Some(item) = state.focused_item() else {
+            return (None, false);
+        };
+        if let Some((detail, docs)) = &state.explanation {
+            let docs = crate::providers::MarkdownString::new(docs.clone()).into();
+            return (Some((Some(detail.clone()), Some(docs))), false);
+        }
+        if state.resolving && expanded {
+            if state.details_loading {
+                return (Some((Some(DETAILS_LOADING_MESSAGE.into()), None)), true);
+            }
+            return (self.details.clone(), self.details_loading);
+        }
+        // Monaco `renderItem`: the detail as the type, even when it's the
+        // label, unless it's empty.
+        let content = can_expand(item).then(|| {
+            (
+                item.detail.clone().filter(|detail| !detail.is_empty()),
+                item.documentation.clone(),
+            )
+        });
+        (content, false)
     }
 
     pub(crate) fn set_state(
@@ -829,6 +902,7 @@ impl SuggestWidget {
                 .zip(&self.state.rows)
                 .all(|((a, _), (b, _))| a.label == b.label);
         let moved = state.selected != self.state.selected || state.focused != self.state.focused;
+        (self.details, self.details_loading) = self.next_details(&state, details_expanded(cx));
         self.state = state;
         self.metrics = metrics;
         let scroll_top = self.scroll_top;
@@ -1327,9 +1401,13 @@ impl SuggestWidget {
         // `.fit-width-to-details`: the label keeps its width and the right
         // side gives way.
         let fit = self.options.fit_width_to_details;
+        let font_size = self.metrics.font_size;
         let icon = self.options.show_icons.then(|| {
+            // `.suggest-icon`: the 16px codicon and a 4px margin, whatever
+            // the row height.
             let mut icon = div()
-                .w(item_height)
+                .w(px(16.))
+                .mr(px(4.))
                 .flex_none()
                 .flex()
                 .justify_center()
@@ -1337,13 +1415,24 @@ impl SuggestWidget {
             if item.kind == CompletionItemKind::Color
                 && let Some(color) = completion_item_color(item)
             {
-                icon = icon.child(
-                    div()
-                        .size(px(9.))
-                        .border_1()
-                        .border_color(gpui::black())
-                        .bg(color),
-                );
+                // `.icon.customcolor` instead: 16px after a 2px margin, its
+                // `.colorspan` 0.7em square after 0.3em, in a 0.1em black
+                // border.
+                icon = div()
+                    .w(px(16.))
+                    .ml(px(2.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_none()
+                            .ml(font_size * 0.3)
+                            .size(font_size * 0.7)
+                            .border(font_size * 0.1)
+                            .border_color(gpui::black())
+                            .bg(color),
+                    );
             } else {
                 let (glyph, glyph_color) = kind_icon(item.kind, &self.theme.colors);
                 // `editorSuggestWidget.selectedIconForeground` on the
@@ -1371,6 +1460,12 @@ impl SuggestWidget {
             .flex()
             .items_center()
             .overflow_hidden()
+            // Monaco's list styles: `list.hoverBackground` on the other
+            // rows under the mouse.
+            .when_some(
+                colors.list_hover_background.filter(|_| !is_selected),
+                |this, hover| this.hover(move |style| style.bg(hover)),
+            )
             .when(is_selected, |this| {
                 let this = this
                     .bg(colors.suggest_selected_background)
@@ -1387,7 +1482,7 @@ impl SuggestWidget {
                 if let Some(editor) = editor.upgrade() {
                     editor.update(cx, |editor, cx| {
                         editor.select_suggestion(ix, cx);
-                        editor.accept_suggestion(cx);
+                        editor.accept_suggestion_only(cx);
                     });
                 }
             })
@@ -1464,13 +1559,10 @@ impl SuggestWidget {
             })
     }
 
-    /// Whether the details panel shows: expanded, and the focused item has
-    /// something to show.
+    /// Whether the details panel shows: expanded, with something to show
+    /// (see [`Self::details`]).
     pub(crate) fn details_shown(&self, cx: &App) -> bool {
-        self.state.message.is_none()
-            && details_expanded(cx)
-            && (self.state.explanation.is_some()
-                || self.state.focused_item().is_some_and(can_expand))
+        self.state.message.is_none() && details_expanded(cx) && self.details.is_some()
     }
 
     /// The status bar's actions (Monaco's `suggestWidgetStatusbarMenu`), as
@@ -1509,7 +1601,8 @@ impl SuggestWidget {
                         run: StatusCommand::AcceptAlternative,
                     });
                 }
-                if can_expand(item) {
+                // Monaco: with `suggestionCanResolve`.
+                if self.state.can_resolve {
                     right.push(StatusAction {
                         label: if show_details {
                             "Show Less"
@@ -1586,25 +1679,9 @@ impl SuggestWidget {
             .child(group("suggest-status-right", right))
     }
 
-    /// The details panel's detail and docs for the focused row: its own,
-    /// or explain mode's.
-    pub(crate) fn details_content(
-        &self,
-    ) -> Option<(
-        Option<SharedString>,
-        Option<crate::providers::Documentation>,
-    )> {
-        let item = self.state.focused_item()?;
-        Some(match &self.state.explanation {
-            Some((detail, docs)) => (
-                Some(detail.clone()),
-                Some(crate::providers::MarkdownString::new(docs.clone()).into()),
-            ),
-            None => (
-                item.detail.clone().filter(|detail| *detail != item.label),
-                item.documentation.clone(),
-            ),
-        })
+    /// The details panel's detail and docs (see [`Self::details`]).
+    pub(crate) fn details_content(&self) -> Option<DetailsContent> {
+        self.details.clone()
     }
 
     /// Monaco `SuggestDetailsWidget`: the detail (the type) in the editor
@@ -1697,6 +1774,24 @@ impl SuggestWidget {
         )
     }
 
+    /// Double-clicking a sash: the list goes back to its default size
+    /// (forgetting the stored one, as `resetSuggestSize` does), the details
+    /// panel back to fitting its content.
+    fn reset_size(&mut self, sash: Sash, cx: &mut Context<Self>) {
+        match sash {
+            Sash::North | Sash::East | Sash::South => {
+                if let Some(ui) = cx.try_global::<SuggestUi>()
+                    && ui.size.is_some()
+                {
+                    cx.global_mut::<SuggestUi>().size = None;
+                }
+                self.clamp_list_scroll(cx);
+            }
+            _ => self.details_size = None,
+        }
+        cx.notify();
+    }
+
     /// Resizes the list or the details panel as a sash is dragged. The
     /// list's size is kept for later sessions (Monaco's `suggestWidget.size`,
     /// each edge changing only its own dimension); the details panel's for
@@ -1782,11 +1877,25 @@ struct StatusAction {
     run: StatusCommand,
 }
 
-/// A 4px resize handle along an edge (Monaco's `Sash`).
-fn sash(id: &'static str, sash: Sash) -> gpui::Stateful<gpui::Div> {
+/// A 4px resize handle along an edge (Monaco's `Sash`). Double-clicking
+/// it resets the size (Monaco's sash `onDidReset`).
+fn sash(
+    id: &'static str,
+    sash: Sash,
+    cx: &mut Context<SuggestWidget>,
+) -> gpui::Stateful<gpui::Div> {
     let handle = div()
         .id(id)
         .absolute()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                if event.click_count == 2 {
+                    cx.stop_propagation();
+                    this.reset_size(sash, cx);
+                }
+            }),
+        )
         .on_drag(sash, |_, _, _, cx| cx.new(|_| gpui::Empty));
     match sash {
         Sash::North | Sash::DetailsNorth => handle
@@ -1957,10 +2066,10 @@ impl Render for SuggestWidget {
             })
             // Monaco enables the (north, east) sashes above the cursor and
             // (east, south) below it.
-            .child(sash("suggest-sash-east", Sash::East))
+            .child(sash("suggest-sash-east", Sash::East, cx))
             .child(match layout.side {
-                ContentWidgetPreference::Above => sash("suggest-sash-north", Sash::North),
-                _ => sash("suggest-sash-south", Sash::South),
+                ContentWidgetPreference::Above => sash("suggest-sash-north", Sash::North, cx),
+                _ => sash("suggest-sash-south", Sash::South, cx),
             })
             .on_drag_move(cx.listener(|this, event: &DragMoveEvent<Sash>, _, cx| {
                 let sash = *event.drag(cx);
@@ -2024,6 +2133,11 @@ impl SuggestWidget {
             return Some(self.place_details_at(list, side, wanted));
         }
         let width = px(DETAILS_WIDTH);
+        // Monaco `renderLoading`: two rows tall.
+        if self.details_loading {
+            let height = self.metrics.item_height * 2. + border2;
+            return Some(self.place_details_at(list, side, size(width, height)));
+        }
         let content = self.measure_details(width - border2, window, cx)?;
         let placement = self.place_details_at(list, side, size(width, content + border2));
         // Narrower or wider there (below or above the list, or capped to
@@ -2180,16 +2294,16 @@ impl SuggestWidget {
             )
             .children(scrollbar)
             .when(north, |this| {
-                this.child(sash("suggest-details-sash-north", Sash::DetailsNorth))
+                this.child(sash("suggest-details-sash-north", Sash::DetailsNorth, cx))
             })
             .when(east, |this| {
-                this.child(sash("suggest-details-sash-east", Sash::DetailsEast))
+                this.child(sash("suggest-details-sash-east", Sash::DetailsEast, cx))
             })
             .when(south, |this| {
-                this.child(sash("suggest-details-sash-south", Sash::DetailsSouth))
+                this.child(sash("suggest-details-sash-south", Sash::DetailsSouth, cx))
             })
             .when(west, |this| {
-                this.child(sash("suggest-details-sash-west", Sash::DetailsWest))
+                this.child(sash("suggest-details-sash-west", Sash::DetailsWest, cx))
             })
             .on_drag_move(cx.listener(|this, event: &DragMoveEvent<Sash>, _, cx| {
                 let sash = *event.drag(cx);

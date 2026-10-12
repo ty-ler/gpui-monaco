@@ -2914,8 +2914,14 @@ impl CodeEditor {
         // shown or asked for.
         if change.source == CursorChangeSource::Mouse {
             self.hide_signature_help(cx);
-        } else if self.is_signature_help_triggered() {
-            self.schedule_signature_help(crate::providers::SignatureHelpTrigger::ContentChange, cx);
+        } else {
+            self.signature_help_cursor_changed(cx);
+            if self.is_signature_help_triggered() {
+                self.schedule_signature_help(
+                    crate::providers::SignatureHelpTrigger::ContentChange,
+                    cx,
+                );
+            }
         }
         self.color_picker_cursor_changed(cx);
         self.find_cursor_changed(change.reason, cx);
