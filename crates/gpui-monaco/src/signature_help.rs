@@ -513,7 +513,7 @@ impl CodeEditor {
         let style = MarkdownStyle {
             // Monaco `.parameter-hints-widget .docs code`.
             code_corner_radius: px(3.),
-            ..self.markdown_style()
+            ..self.markdown_style(cx)
         };
         let theme = self.theme.clone();
         let editor = cx.entity().downgrade();

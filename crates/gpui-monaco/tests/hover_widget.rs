@@ -484,13 +484,15 @@ fn code_links_and_related_information_links(cx: &mut TestAppContext) {
         content.starts_with("Error here\nlib.rs(3, 4): defined here\nmain.rs(1, 4): and here"),
         "{content}"
     );
-    // The code is a link to its target.
+    // The code is a link to its target, a web page the browser opens
+    // (Monaco's opener service).
     let code = cx.debug_bounds("marker-code-link").expect("code link");
     cx.simulate_click(code.center(), Modifiers::default());
     cx.run_until_parked();
+    assert!(opened.borrow().is_empty());
     assert_eq!(
-        *opened.borrow(),
-        ["https://doc.rust-lang.org/error_codes/E0061.html"]
+        cx.opened_url().as_deref(),
+        Some("https://doc.rust-lang.org/error_codes/E0061.html")
     );
     assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));
     // Only `file(line, col): ` is the related information's link: a click
@@ -499,7 +501,7 @@ fn code_links_and_related_information_links(cx: &mut TestAppContext) {
     let after_link = gpui::point(link.right() + px(20.), link.center().y);
     cx.simulate_click(after_link, Modifiers::default());
     cx.run_until_parked();
-    assert_eq!(opened.borrow().len(), 1);
+    assert!(opened.borrow().is_empty());
     cx.simulate_click(link.center(), Modifiers::default());
     cx.run_until_parked();
     assert_eq!(
@@ -845,7 +847,7 @@ fn the_marker_zone_links_the_code_too(cx: &mut TestAppContext) {
     let marker = Marker {
         source: Some("lint".into()),
         code: Some("unused".into()),
-        code_target: Some("https://example.com/unused".into()),
+        code_target: Some("x-lint:unused".into()),
         ..marker(MarkerSeverity::Warning, p(0, 4)..p(0, 5))
     };
     set_markers(&editor, cx, vec![marker.clone()]);
@@ -855,7 +857,8 @@ fn the_marker_zone_links_the_code_too(cx: &mut TestAppContext) {
     let code = cx.debug_bounds("marker-code-link").expect("code link");
     cx.simulate_click(code.center(), Modifiers::default());
     cx.run_until_parked();
-    assert_eq!(*opened.borrow(), ["https://example.com/unused"]);
+    // Nothing can open it: the editor reports it.
+    assert_eq!(*opened.borrow(), ["x-lint:unused"]);
 }
 
 /// Monaco's "Quick Fix..." opens the code action menu at the clicked link

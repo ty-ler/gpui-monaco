@@ -112,7 +112,10 @@ pub(crate) fn code_element(
                     cx.stop_propagation();
                     if let Some(editor) = editor.upgrade() {
                         let target = target.clone();
-                        editor.update(cx, |editor, cx| editor.open_link_with_openers(target, cx));
+                        // Monaco `open(code.target)`: no `allowCommands`.
+                        editor.update(cx, |editor, cx| {
+                            editor.open_link_with_openers(target, false, cx)
+                        });
                     }
                 })
                 .child(code.clone()),

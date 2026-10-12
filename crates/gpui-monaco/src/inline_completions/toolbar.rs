@@ -220,7 +220,7 @@ impl Render for InlineToolbar {
             (
                 editor.inline_suggestion_index(cx),
                 editor.inline_warning(cx),
-                editor.markdown_style(),
+                editor.markdown_style(cx),
                 editor.focus_handle.clone(),
             )
         };

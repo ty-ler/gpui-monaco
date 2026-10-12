@@ -1702,7 +1702,10 @@ fn marker_accessible_content(marker: &crate::Marker, uri: Option<&str>) -> Strin
 use gpui::prelude::FluentBuilder as _;
 
 impl CodeEditor {
-    pub(crate) fn markdown_style(&self) -> MarkdownStyle {
+    /// The markdown style of the editor's widgets; code blocks without a
+    /// language are in the model's (Monaco renders their markdown with the
+    /// editor as context).
+    pub(crate) fn markdown_style(&self, cx: &gpui::App) -> MarkdownStyle {
         let colors = &self.theme.colors;
         let font_size = self.options.font_size;
         MarkdownStyle {
@@ -1720,6 +1723,7 @@ impl CodeEditor {
             separator: colors.text_separator_foreground,
             quote_background: colors.text_block_quote_background,
             quote_border: colors.text_block_quote_border,
+            code_language: self.model().read(cx).language_id().cloned(),
         }
     }
 
@@ -3065,7 +3069,7 @@ impl CodeEditor {
         // alpha (`hoverContribution.ts`).
         let style = MarkdownStyle {
             separator: self.theme.colors.hover_border.opacity(0.5),
-            ..self.markdown_style()
+            ..self.markdown_style(cx)
         };
         let theme = self.theme.clone();
         let status_marker = most_severe(&markers).cloned();

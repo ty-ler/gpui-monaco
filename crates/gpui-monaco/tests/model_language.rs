@@ -11,7 +11,10 @@ use gpui_monaco::text::PointUtf16;
 use gpui_monaco::{CodeEditor, TextModel, api_commands};
 
 /// One link covering the first character, to tell providers apart by url.
-struct Link(&'static str);
+/// A link provider answering one link at its own column, so links from
+/// several providers don't touch (touching links keep only the
+/// best-ranked provider's, as Monaco's `LinksList` does).
+struct Link(&'static str, u32);
 impl LinkProvider for Link {
     fn provide_links(
         &self,
@@ -19,7 +22,7 @@ impl LinkProvider for Link {
         _: &mut App,
     ) -> Task<anyhow::Result<Vec<DocumentLink>>> {
         Task::ready(Ok(vec![DocumentLink {
-            range: PointUtf16::new(0, 0)..PointUtf16::new(0, 1),
+            range: PointUtf16::new(0, self.1)..PointUtf16::new(0, self.1 + 1),
             url: Some(self.0.into()),
             tooltip: None,
         }]))
@@ -58,18 +61,22 @@ fn register_rust(cx: &mut App) {
 fn a_model_without_a_language_is_plaintext(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_monaco::init(cx);
-        register_link_provider(cx, LanguageSelector::language("plaintext"), Link("plain"));
+        register_link_provider(
+            cx,
+            LanguageSelector::language("plaintext"),
+            Link("plain", 0),
+        );
         register_link_provider(
             cx,
             LanguageSelector::Filters(vec![LanguageFilter {
                 scheme: Some("inmemory".into()),
                 ..Default::default()
             }]),
-            Link("inmemory"),
+            Link("inmemory", 3),
         );
-        register_link_provider(cx, LanguageSelector::language("rust"), Link("rust"));
+        register_link_provider(cx, LanguageSelector::language("rust"), Link("rust", 0));
     });
-    let model = cx.update(|cx| gpui_monaco::create_model(cx, "hi", None, None).unwrap());
+    let model = cx.update(|cx| gpui_monaco::create_model(cx, "hello", None, None).unwrap());
     assert_eq!(language_id(&model, cx).as_deref(), Some("plaintext"));
     assert_eq!(link_urls(&model, cx), ["inmemory", "plain"]);
     model.read_with(cx, |m, _| {
@@ -108,7 +115,7 @@ fn create_model_resolves_the_language_right_away(cx: &mut TestAppContext) {
         let requested_ = requested.clone();
         let _ = gpui_monaco::on_language(cx, "rust", move |cx| {
             requested_.borrow_mut().push("rust".into());
-            register_link_provider(cx, LanguageSelector::language("rust"), Link("rust"));
+            register_link_provider(cx, LanguageSelector::language("rust"), Link("rust", 0));
         });
         let created = created.clone();
         gpui_monaco::on_did_create_model(cx, move |model, cx| {

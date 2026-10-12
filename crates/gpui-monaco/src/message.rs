@@ -195,7 +195,12 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         let markdown: crate::providers::MarkdownString = markdown.into();
-        let style = self.markdown_style();
+        // Monaco's message renders markdown without the editor as context:
+        // code blocks without a language stay plain text.
+        let style = crate::markdown::MarkdownStyle {
+            code_language: None,
+            ..self.markdown_style(cx)
+        };
         let theme = self.theme.clone();
         self.show_message_content(
             markdown.value.clone(),

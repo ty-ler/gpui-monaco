@@ -52,14 +52,20 @@ impl HoverProvider for DemoHover {
                 (previous + request.verbosity_delta).clamp(0, 2)
             });
         let mut contents = vec![
-            format!("```rust\nfn {word}(&self) -> usize\n```").into(),
-            format!("Documentation for **{word}**, rendered as *markdown* with `inline code`.")
-                .into(),
-            // Monaco's GFM tables, theme icons, lists and quotes.
+            // No language: the editor's (Monaco's `renderCodeBlock`).
+            format!("```\nfn {word}(&self) -> usize\n```").into(),
+            MarkdownString::new(format!(
+                "Documentation for **{word}**, rendered as *markdown* with `inline code`. \
+                 Peek with <kbd>Alt</kbd>+<kbd>F12</kbd>."
+            ))
+            .with_html(true),
+            // Monaco's GFM tables and task lists, theme icons, lists and
+            // quotes.
             MarkdownString::new(
                 "$(info) Returns ~~a guess~~ the count.\n\n\
                  | Case | Result |\n|:--|--:|\n| empty | `0` |\n| one item | `1` |\n\n\
                  - counts every item\n  - including hidden ones\n\n\
+                 - [x] cached\n- [ ] thread safe\n\n\
                  > Never negative.",
             )
             .with_theme_icons(true),

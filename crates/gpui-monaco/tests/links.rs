@@ -53,10 +53,23 @@ fn link(
     )
 }
 
-/// Collects `OpenLink` events.
-fn opened(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Rc<RefCell<Vec<String>>> {
+/// Collects the links followed, with a link opener that takes them all.
+fn opened(_: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Rc<RefCell<Vec<String>>> {
     let opened = Rc::new(RefCell::new(Vec::new()));
     let sink = opened.clone();
+    cx.update(|_, cx| {
+        let _opener = gpui_monaco::register_link_opener(cx, move |url, _| {
+            sink.borrow_mut().push(url.to_string());
+            true
+        });
+    });
+    opened
+}
+
+/// Collects `OpenLink` events: links nothing opened.
+fn reported(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Rc<RefCell<Vec<String>>> {
+    let reported = Rc::new(RefCell::new(Vec::new()));
+    let sink = reported.clone();
     cx.update(|_, cx| {
         cx.subscribe(editor, move |_, event, _| {
             if let CodeEditorEvent::OpenLink(url) = event {
@@ -65,7 +78,7 @@ fn opened(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Rc<RefCell
         })
         .detach()
     });
-    opened
+    reported
 }
 
 #[gpui::test]
@@ -265,4 +278,164 @@ fn links_open_on_mouse_up(cx: &mut TestAppContext) {
     assert_eq!(opened.borrow().len(), 1);
     cx.simulate_mouse_up(at, middle, none);
     assert_eq!(opened.borrow().len(), 2);
+}
+
+/// Links to fixed urls.
+struct Fixed(Vec<DocumentLink>);
+impl LinkProvider for Fixed {
+    fn provide_links(
+        &self,
+        _: &ProviderContext,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<DocumentLink>>> {
+        Task::ready(Ok(self.0.clone()))
+    }
+}
+
+fn fixed(row: u32, start: u32, end: u32, url: &str) -> Fixed {
+    Fixed(vec![DocumentLink {
+        range: PointUtf16::new(row, start)..PointUtf16::new(row, end),
+        url: Some(url.to_string().into()),
+        tooltip: None,
+    }])
+}
+
+/// Monaco `openLinkOccurrence` hands links to the opener service (with
+/// `allowCommands`): with no link opener taking them, web links open in
+/// the browser, `command:` links run, and a link into the model selects
+/// its fragment; only what nothing opens is reported.
+#[gpui::test]
+fn detected_links_open_by_default(cx: &mut TestAppContext) {
+    let ran = Rc::new(RefCell::new(Vec::new()));
+    let sink = ran.clone();
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_link_provider(
+            cx,
+            LanguageSelector::All,
+            fixed(1, 0, 3, "command:test.run?%5B7%5D"),
+        );
+        let _command = gpui_monaco::register_command(cx, "test.run", move |args, _| {
+            sink.borrow_mut().push(args.to_vec());
+        });
+    });
+    let (editor, cx) = setup(
+        "https://a.io file:///main.rs#L3,2 file:///other.rs\nrun\nthird line\n",
+        "file:///main.rs",
+        |_| {},
+        cx,
+    );
+    assert_eq!(links(&editor, cx).len(), 4);
+    let reported = reported(&editor, cx);
+    let open_at = |row: u32, column: u32, cx: &mut VisualTestContext| {
+        editor.update(cx, |e, cx| {
+            e.set_selections(
+                &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                    row, column,
+                ))],
+                cx,
+            );
+            e.open_link(cx);
+        });
+        cx.run_until_parked();
+    };
+    open_at(0, 3, cx);
+    assert_eq!(cx.opened_url().as_deref(), Some("https://a.io"));
+    open_at(1, 1, cx);
+    assert_eq!(*ran.borrow(), vec![vec![serde_json::json!(7)]]);
+    open_at(0, 20, cx);
+    let selection = editor.read_with(cx, |e, _| e.selection());
+    assert_eq!(selection.head, PointUtf16::new(2, 1));
+    assert!(reported.borrow().is_empty());
+    // Another model, and no editor opener.
+    open_at(0, 40, cx);
+    assert_eq!(*reported.borrow(), ["file:///other.rs"]);
+}
+
+/// Monaco `LinkDetector`: links are recomputed right away when the
+/// model's language or the link providers change.
+#[gpui::test]
+fn links_follow_language_and_provider_changes(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("see #12 and https://a.io", "file:///main.rs", |_| {}, cx);
+    assert_eq!(links(&editor, cx), vec![link(0, 12, 24, "https://a.io")]);
+    let registration = cx.update(|_, cx| {
+        register_link_provider(
+            cx,
+            LanguageSelector::Languages(vec!["rust".into()]),
+            fixed(0, 4, 7, "https://issues/12"),
+        )
+    });
+    assert_eq!(links(&editor, cx).len(), 1);
+    editor.update(cx, |e, cx| {
+        e.model()
+            .update(cx, |m, cx| m.set_language(Some("rust".into()), cx))
+    });
+    assert_eq!(
+        links(&editor, cx),
+        vec![
+            link(0, 4, 7, "https://issues/12"),
+            link(0, 12, 24, "https://a.io")
+        ]
+    );
+    cx.update(|_, cx| unregister_provider(cx, registration));
+    assert_eq!(links(&editor, cx), vec![link(0, 12, 24, "https://a.io")]);
+}
+
+/// Monaco `_executeLinkProvider` is `getLinks`: the built-in URL links
+/// and every provider's, the better-ranked provider's replacing the
+/// links they overlap, sorted.
+#[gpui::test]
+fn execute_link_provider_merges_like_the_editor(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let model = cx.new(|_| {
+        TextModel::new("x https://a.example y #12 z")
+            .with_uri("file:///main.rs")
+            .with_language("rust")
+    });
+    cx.update(|cx| {
+        // Better ranked (a language match) than `All`.
+        register_link_provider(
+            cx,
+            LanguageSelector::Languages(vec!["rust".into()]),
+            fixed(0, 22, 25, "https://best/12"),
+        );
+        register_link_provider(
+            cx,
+            LanguageSelector::All,
+            Fixed(vec![
+                DocumentLink {
+                    range: PointUtf16::new(0, 0)..PointUtf16::new(0, 1),
+                    url: Some("https://x".into()),
+                    tooltip: None,
+                },
+                DocumentLink {
+                    range: PointUtf16::new(0, 23)..PointUtf16::new(0, 26),
+                    url: Some("https://worse/12".into()),
+                    tooltip: None,
+                },
+            ]),
+        );
+    });
+    let task = cx.update(|cx| gpui_monaco::api_commands::execute_link_provider(&model, 0, cx));
+    cx.run_until_parked();
+    let found = Rc::new(RefCell::new(None));
+    let sink = found.clone();
+    cx.spawn(async move |_| *sink.borrow_mut() = Some(task.await))
+        .detach();
+    cx.run_until_parked();
+    let links: Vec<_> = found
+        .take()
+        .expect("links")
+        .into_iter()
+        .map(|l| (l.range, l.url.map(|u| u.to_string())))
+        .collect();
+    let at = |start: u32, end: u32| PointUtf16::new(0, start)..PointUtf16::new(0, end);
+    assert_eq!(
+        links,
+        vec![
+            (at(0, 1), Some("https://x".to_string())),
+            (at(2, 19), Some("https://a.example".to_string())),
+            (at(22, 25), Some("https://best/12".to_string())),
+        ]
+    );
 }
