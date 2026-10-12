@@ -3365,6 +3365,10 @@ fn prepaint_editor(
         viewport_height
     };
 
+    // Where the scroll is before this frame moves it, and the frame's
+    // clock (the executor's, so tests can advance it).
+    let scroll_before = editor.scroll_position();
+    let now = cx.background_executor().now();
     // Middle-click scrolling moves every frame.
     if let Some(session) = editor.animation.middle_scroll.as_mut() {
         let delta = session.frame_delta();
@@ -3443,10 +3447,7 @@ fn prepaint_editor(
         if let Some(top) = top {
             let top = px(top).clamp(px(0.), max_scroll_top);
             // Monaco `onRevealRangeRequest`: a line or less jumps.
-            let current = editor
-                .animation
-                .animated_scroll_position()
-                .map_or(editor.scroll_top, |position| position.y);
+            let current = editor.scroll_position().y;
             let scroll_type = if (current - top).abs() <= line_height {
                 crate::view::reveal::ScrollType::Immediate
             } else {
@@ -3533,9 +3534,13 @@ fn prepaint_editor(
     }
     editor.scroll_top = editor.scroll_top.clamp(px(0.), max_scroll_top);
     // Monaco `smoothScrolling`: animate to the new position.
-    let (shown_top, scrolling) = editor
-        .animation
-        .scroll_top_position(editor.scroll_top, options.smooth_scrolling);
+    let (shown_top, scrolling) = editor.animation.scroll_top_position(
+        scroll_before.y,
+        editor.scroll_top,
+        viewport_height,
+        options.smooth_scrolling,
+        now,
+    );
     if scrolling {
         window.request_animation_frame();
     }
@@ -3816,12 +3821,17 @@ fn prepaint_editor(
     }
     editor.scroll_left = editor.scroll_left.clamp(px(0.), max_scroll_left);
     // Monaco `smoothScrolling` animates both axes.
-    let (shown_left, scrolling) = editor
-        .animation
-        .scroll_left_position(editor.scroll_left, options.smooth_scrolling);
+    let (shown_left, scrolling) = editor.animation.scroll_left_position(
+        scroll_before.x,
+        editor.scroll_left,
+        text_width,
+        options.smooth_scrolling,
+        now,
+    );
     if scrolling {
         window.request_animation_frame();
     }
+    editor.ensure_smooth_scroll_task(cx);
     let scroll_left = shown_left.clamp(px(0.), max_scroll_left);
 
     let text_bounds = Bounds::new(

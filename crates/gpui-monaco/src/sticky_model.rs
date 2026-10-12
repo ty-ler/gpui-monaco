@@ -609,6 +609,8 @@ impl CodeEditor {
         self.click_fold(row, true, false, false, cx);
         let line = self.view_lines.first_view_line_of_row(row);
         let line_height = layout.metrics.line_height;
+        // Monaco `setScrollTop`, immediate: a smooth scroll stops.
+        self.animation.cancel_scroll();
         self.scroll_top = (layout.zones.line_y(line, line_height) - line_height * ix as f32
             + gpui::px(1.))
         .max(gpui::px(0.));

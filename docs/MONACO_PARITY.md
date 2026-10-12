@@ -112,6 +112,7 @@ Issues are linked by number.
 | Per-decoration fonts (`fontFamily`, `fontWeight`, `fontStyle`) | decorations | ✅ wrapping measures the editor's font; no per-decoration `fontSize` | #272 |
 | Letter spacing, font variations | options | ❌ | #87 |
 | Smooth scrolling (both axes), caret animation, blinking styles, cursor surrounding lines, padding, wheel and middle-click options | options | ✅ | #88, #302 |
+| Smooth scroll positions and scroll commands: `getScrollTop` and `onDidScrollChange` follow the animation step by step, `getFutureScrollPosition` is the destination, long scrolls use the composed animation (`createComposed`, 10ms head start), the `EditorScroll` commands scroll smoothly from the current position, `scrollEditorBottom` stops at `lineCount - pageSize`, `revealLine` is vertical only | `Scrollable`, `SmoothScrollingOperation`, `coreCommands` | ✅ the axes animate independently (Monaco restarts both on a new destination); ticks run on the executor's timers between frames | #355 |
 | Placeholder text, read-only message | `placeholderText`, `readOnlyMessage`, `message` | ✅ the message's arrow, 8px gap, fade in and out, reveal, `editorHoverWidget.*` colors with the `inputValidation.infoBorder` border, and staying open on blur under the mouse | #89, #251 |
 | Very long lines | `stopRenderingLineAfter`, `maxTokenizationLineLength` | ✅ | #59 |
 | Clicking past the rendering limit turns it off | `longLinesHelper` | ✅ | #227 |

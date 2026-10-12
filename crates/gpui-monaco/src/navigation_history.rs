@@ -2,12 +2,13 @@
 //! (`contrib/anchorSelect`) and the editor scroll commands
 //! (`scrollLineUp`, `scrollPageDown`, … from `browser/coreCommands.ts`).
 
-use gpui::{Context, Pixels, px};
+use gpui::{Context, Pixels, point, px};
 use text::PointUtf16;
 
 use crate::cursor::Selection;
 use crate::decorations::{DecorationId, DecorationOptions};
 use crate::editor::CodeEditor;
+use crate::view::reveal::ScrollType;
 
 /// Monaco keeps this many cursor states.
 const MAX_CURSOR_UNDO: usize = 50;
@@ -218,13 +219,21 @@ impl CodeEditor {
             })
     }
 
-    /// Scrolls without moving the cursors (Monaco `editorScroll`); the
-    /// next frame clamps to the content.
+    /// Scrolls by `delta_y` and `delta_x` from where the scroll is now,
+    /// without moving the cursors (Monaco `editorScroll`): smoothly, when
+    /// `smooth_scrolling` is on (`ScrollType.Smooth`), clamped to the last
+    /// frame's scroll range.
     pub fn scroll_by(&mut self, delta_y: Pixels, delta_x: Pixels, cx: &mut Context<Self>) {
-        self.scroll_top = (self.scroll_top + delta_y).max(px(0.));
-        self.scroll_left = (self.scroll_left + delta_x).max(px(0.));
-        self.emit_scroll_changed(cx);
-        cx.notify();
+        // Monaco `getCurrentScrollTop() + delta` on the axis that moves;
+        // the other keeps where it's going.
+        let (current, mut position) = (self.scroll_position(), self.future_scroll_position());
+        if delta_y != px(0.) {
+            position.y = (current.y + delta_y).max(px(0.));
+        }
+        if delta_x != px(0.) {
+            position.x = (current.x + delta_x).max(px(0.));
+        }
+        self.set_scroll_position_with_scroll_type(position, ScrollType::Smooth, cx);
     }
 
     /// Scrolls by `lines` lines (Monaco `scrollLineUp`/`Down`).
@@ -241,11 +250,30 @@ impl CodeEditor {
         self.scroll_lines(rows * pages, cx);
     }
 
-    /// Scrolls to the top or bottom (Monaco `scrollEditorTop`/`Bottom`).
+    /// Scrolls to the top or bottom (Monaco `scrollEditorTop`/`Bottom`),
+    /// smoothly when `smooth_scrolling` is on: the bottom puts line
+    /// `lineCount - pageSize` (1-based) at the top, so the last line ends
+    /// a page down rather than at the top of an empty viewport. Monaco
+    /// passes that model line count to `getVerticalOffsetForLineNumber`,
+    /// which takes a view line; so does this.
     pub fn scroll_to_edge(&mut self, bottom: bool, cx: &mut Context<Self>) {
-        // Clamped to the content on the next frame.
-        self.scroll_top = if bottom { px(1e9) } else { px(0.) };
-        self.emit_scroll_changed(cx);
-        cx.notify();
+        let line_count = self.snapshot.line_count() as i64;
+        let line = if bottom {
+            line_count - self.page_lines() as i64
+        } else {
+            0
+        };
+        let top = match self.layout.as_ref() {
+            Some(layout) => {
+                let last = self.view_lines.line_count().saturating_sub(1) as i64;
+                let view_line = (line - 1).clamp(0, last) as u32;
+                layout.zones.line_y(view_line, layout.metrics.line_height)
+            }
+            // Clamped to the content on the first frame.
+            None if bottom => px(1e9),
+            None => px(0.),
+        };
+        let left = self.future_scroll_position().x;
+        self.set_scroll_position_with_scroll_type(point(left, top), ScrollType::Smooth, cx);
     }
 }

@@ -653,6 +653,24 @@ impl CodeEditor {
         Some(lines.to_model(start, 0)..lines.to_model(end, lines.line_max_column(end)))
     }
 
+    /// The model row of the first view line that fully shows at the
+    /// future scroll top (Monaco `getCompletelyVisibleViewRangeAtScrollTop`
+    /// of `getFutureViewport().top`, converted to the model).
+    fn first_fully_visible_row_at_future_top(&self) -> Option<u32> {
+        let layout = self.layout.as_ref()?;
+        let count = self.view_lines.line_count();
+        if count == 0 {
+            return None;
+        }
+        let (zones, line_height) = (&layout.zones, layout.metrics.line_height);
+        let top = self.scroll_top.clamp(px(0.), layout.max_scroll.y);
+        let mut line = zones.line_at(top, line_height, count);
+        if zones.line_y(line, line_height) < top && line + 1 < count {
+            line += 1;
+        }
+        Some(self.view_lines.to_model(line, 0).row)
+    }
+
     /// Monaco `editorScroll`.
     fn editor_scroll(&mut self, args: &EditorScroll, cx: &mut Context<Self>) {
         let value = args.value.unwrap_or(1.).floor().max(1.) as f32;
@@ -667,9 +685,10 @@ impl CodeEditor {
                 let up = args.to == "up";
                 match by {
                     Some("line") => {
-                        // By model lines, from the first visible one.
-                        let Some(first) = self.visible_ranges(cx).first().map(|r| r.start.row)
-                        else {
+                        // By model lines, from the first one fully visible
+                        // where the scroll is going (Monaco's
+                        // `getFutureViewport`).
+                        let Some(first) = self.first_fully_visible_row_at_future_top() else {
                             return;
                         };
                         let last = self.snapshot.rope().max_point().row;
@@ -799,9 +818,18 @@ impl CodeEditor {
             _ => RevealType::Simple,
         };
         let end = self.snapshot.rope().line_len_utf16(row);
-        self.reveal_range(
-            PointUtf16::new(row, 0)..PointUtf16::new(row, end),
-            reveal,
+        // Vertically only (Monaco `revealRange(…, revealHorizontal: false,
+        // …)`).
+        self.request_reveal(
+            crate::editor::PendingReveal {
+                ranges: vec![PointUtf16::new(row, 0)..PointUtf16::new(row, end)],
+                cursors: false,
+                reveal,
+                horizontal: false,
+                minimal: false,
+                mouse: false,
+                scroll_type: crate::ScrollType::Smooth,
+            },
             cx,
         );
     }
