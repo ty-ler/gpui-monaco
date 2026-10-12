@@ -2221,6 +2221,8 @@ type DiffCommandHandler = Rc<dyn Fn(&mut DiffEditor, &mut Window, &mut Context<D
 
 /// The side-by-side diff editor (Monaco `DiffEditorWidget`).
 pub struct DiffEditor {
+    /// The counter in its [`DiffEditor::id`].
+    id: u64,
     original: Entity<CodeEditor>,
     modified: Entity<CodeEditor>,
     options: DiffEditorOptions,
@@ -2340,9 +2342,12 @@ impl DiffEditor {
             editor
         });
         let modified_editor = cx.new(|cx| CodeEditor::new(modified, window, cx));
+        // Monaco `DelegatingEditor.idCounter`.
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let mut this = Self {
             original: original_editor,
             modified: modified_editor,
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             ratio: options.split_view_default_ratio,
             options,
             diff: None,
@@ -2456,6 +2461,18 @@ impl DiffEditor {
             cx.subscribe(&self.original, editor_events(true)),
             cx.subscribe(&self.modified, editor_events(false)),
         ];
+    }
+
+    /// The diff editor's unique id, `vs.editor.IDiffEditor:v2:1`, … in
+    /// creation order (Monaco `getId`).
+    pub fn id(&self) -> String {
+        format!("{}:v2:{}", self.editor_type(), self.id)
+    }
+
+    /// [`EditorType::DiffEditor`](crate::EditorType::DiffEditor) (Monaco
+    /// `getEditorType`).
+    pub fn editor_type(&self) -> crate::EditorType {
+        crate::EditorType::DiffEditor
     }
 
     /// The editor showing the original model (Monaco `getOriginalEditor`).
@@ -3883,6 +3900,7 @@ impl DiffEditor {
                 },
                 border_width: px(2.),
                 padding: [px(4.), px(0.), px(4.), px(4.)],
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -4973,7 +4991,7 @@ impl DiffEditor {
             .collect();
         self.modified.update(cx, |editor, cx| {
             editor.push_undo_stop(cx);
-            editor.execute_edits(edits, None, cx);
+            editor.execute_edits_from("diffEditor", edits, None, cx);
             editor.push_undo_stop(cx);
         });
     }

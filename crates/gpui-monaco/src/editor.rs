@@ -25,8 +25,9 @@ use crate::element::{EditorElement, EditorLayout, layout_segment, row_segment};
 use crate::events::{
     ClipboardCopyEvent, ClipboardPasteEvent, ConfigurationChange, ContentSizeChange,
     CursorChangeCause, CursorChangeReason, CursorChangeSource, CursorPositionChange,
-    DecorationsChange, ModelChange, ModelContentChange, ModelOptionsChange, MouseWheelEvent,
-    PasteEvent, ScrollEvent, SelectionChange,
+    DecorationsChange, DropIntoEditorEvent, FontChange, LineHeightChange, ModelChange,
+    ModelContentChange, ModelOptionsChange, MouseWheelEvent, PartialEditorMouseEvent, PasteEvent,
+    ScrollEvent, SelectionChange, TriggerEditorOperationEvent,
 };
 use crate::model::{EditKind, TextModel, TextModelEvent, metadata};
 use crate::options::EditorOptions;
@@ -111,8 +112,8 @@ pub enum CodeEditorEvent {
     MouseUp(crate::mouse_target::EditorMouseEvent),
     /// The mouse moved over the editor (Monaco `onMouseMove`).
     MouseMove(crate::mouse_target::EditorMouseEvent),
-    /// The mouse left the editor (Monaco `onMouseLeave`).
-    MouseLeave,
+    /// The mouse left the editor (Monaco `onMouseLeave`), and where it was.
+    MouseLeave(PartialEditorMouseEvent),
     /// The context menu was requested with a right click (Monaco
     /// `onContextMenu`). The editor shows its own unless the
     /// `context_menu` option is off.
@@ -131,7 +132,27 @@ pub enum CodeEditorEvent {
         old_language: Option<gpui::SharedString>,
         /// The new language id (Monaco `newLanguage`).
         new_language: Option<gpui::SharedString>,
+        /// What changed it (Monaco `source`): `"api"` unless given to
+        /// [`TextModel::set_language_from`].
+        source: gpui::SharedString,
     },
+    /// Decorations that set a line height on this editor's lines were
+    /// added, removed or changed (Monaco `onDidChangeLineHeight`), with the
+    /// `allow_variable_line_heights` option. Only the decorations this
+    /// editor shows are listed.
+    LineHeightChanged(Arc<[LineHeightChange]>),
+    /// Decorations that set a font on this editor's lines were added,
+    /// removed or changed (Monaco `onDidChangeFont`). Only the decorations
+    /// this editor shows are listed.
+    FontChanged(Arc<[FontChange]>),
+    /// Files or other data were dropped on the text (Monaco
+    /// `onDropIntoEditor`), with the `drop_into_editor` option on, before
+    /// the drop providers run.
+    DropIntoEditor(DropIntoEditorEvent),
+    /// [`CodeEditor::trigger`] or [`CodeEditor::trigger_from`] is about to
+    /// run an action or command (Monaco
+    /// `onWillTriggerEditorOperationEvent`).
+    WillTriggerEditorOperation(TriggerEditorOperationEvent),
     /// The options changed (Monaco `onDidChangeConfiguration`), through
     /// [`CodeEditor::update_options`] or the font zoom.
     ConfigurationChanged(ConfigurationChange),
@@ -819,6 +840,9 @@ pub struct CodeEditor {
     pub(crate) edit_group: Option<u64>,
     /// The reason and source the next `SelectionsChanged` reports.
     pub(crate) next_selection_change: CursorChangeCause,
+    /// While an action `trigger_from` dispatched runs: its source, which
+    /// its cursor changes report instead of the keyboard.
+    pub(crate) trigger_source: Option<CursorChangeSource>,
     /// The selections and model version last reported (Monaco's cursor
     /// state, which events are only fired for when it changes).
     last_cursor_state: Option<(Vec<Selection>, text::Version)>,
@@ -1084,6 +1108,7 @@ impl CodeEditor {
             prev_edit_kind: None,
             edit_group: None,
             next_selection_change: CursorChangeCause::default(),
+            trigger_source: None,
             last_cursor_state: None,
             last_scroll_state: None,
             message: Default::default(),
@@ -1558,9 +1583,25 @@ impl CodeEditor {
     /// with [`CodeEditor::reveal_all_cursors`] or one of the `reveal_*`
     /// methods.
     pub fn set_selections(&mut self, selections: &[Selection], cx: &mut Context<Self>) {
+        self.set_selections_from(CursorChangeSource::Api, selections, cx);
+    }
+
+    /// [`CodeEditor::set_selections`] on behalf of `source` (Monaco
+    /// `setSelections(ranges, source)`), which the
+    /// [`CodeEditorEvent::SelectionsChanged`] and
+    /// [`CodeEditorEvent::CursorPositionChanged`] report, e.g.
+    /// `set_selections_from("my-extension", &selections, cx)` to tell the
+    /// host's own changes apart.
+    pub fn set_selections_from(
+        &mut self,
+        source: impl Into<CursorChangeSource>,
+        selections: &[Selection],
+        cx: &mut Context<Self>,
+    ) {
         if selections.is_empty() {
             return;
         }
+        let source = source.into();
         self.begin_update(cx);
         // The model may have changed since our last event (e.g. `set_value`
         // just now); the new selections refer to its current text.
@@ -1574,7 +1615,7 @@ impl CodeEditor {
         // from the model again (before any injected text), even for the
         // same selections.
         self.cursor_views = None;
-        self.next_selection_change.source = CursorChangeSource::Api;
+        self.next_selection_change.source = source;
         // Monaco `Cursor.setStates` only emits events: no reveal.
         self.cursors_changed(false, cx);
         self.end_update(cx);
@@ -2946,6 +2987,7 @@ impl CodeEditor {
             TextModelEvent::LanguageChanged {
                 old_language,
                 new_language,
+                source,
             } => {
                 // Monaco closes the peek view.
                 self.close_peek(cx);
@@ -2960,8 +3002,36 @@ impl CodeEditor {
                 cx.emit(CodeEditorEvent::ModelLanguageChanged {
                     old_language: old_language.clone(),
                     new_language: new_language.clone(),
+                    source: source.clone(),
                 });
                 cx.notify();
+            }
+            // Monaco's view model forwards the changes of the decorations
+            // this editor shows (owner 0 or its own), line heights only with
+            // `allowVariableLineHeights`.
+            TextModelEvent::LineHeightChanged(changes) => {
+                let me = Some(cx.entity_id());
+                if self.options.allow_variable_line_heights {
+                    let mine: Arc<[LineHeightChange]> = changes
+                        .iter()
+                        .filter(|c| c.owner.is_none() || c.owner == me)
+                        .copied()
+                        .collect();
+                    if !mine.is_empty() {
+                        cx.emit(CodeEditorEvent::LineHeightChanged(mine));
+                    }
+                }
+            }
+            TextModelEvent::FontChanged(changes) => {
+                let me = Some(cx.entity_id());
+                let mine: Arc<[FontChange]> = changes
+                    .iter()
+                    .filter(|c| c.owner.is_none() || c.owner == me)
+                    .copied()
+                    .collect();
+                if !mine.is_empty() {
+                    cx.emit(CodeEditorEvent::FontChanged(mine));
+                }
             }
             TextModelEvent::MarkersChanged => {
                 self.schedule_auto_code_actions(cx);
@@ -3219,7 +3289,19 @@ impl CodeEditor {
     /// and [`CodeEditorEvent::SelectionsChanged`] (Monaco's outgoing
     /// `CursorStateChangedEvent`, fired only when a cursor's model state
     /// changed).
-    pub(crate) fn emit_cursor_events(&mut self, cause: CursorChangeCause, cx: &mut Context<Self>) {
+    pub(crate) fn emit_cursor_events(
+        &mut self,
+        mut cause: CursorChangeCause,
+        cx: &mut Context<Self>,
+    ) {
+        // A command run by `trigger_from` reports the trigger's source
+        // (Monaco passes it down to the cursor), where it would say the
+        // keyboard.
+        if cause.source == CursorChangeSource::Keyboard
+            && let Some(source) = &self.trigger_source
+        {
+            cause.source = source.clone();
+        }
         let selections = self.cursors.selections();
         let version = self.snapshot.version();
         let old = self
@@ -3238,7 +3320,7 @@ impl CodeEditor {
                 position: selections[0].head,
                 secondary_positions: selections[1..].iter().map(|s| s.head).collect(),
                 reason: cause.reason,
-                source: cause.source,
+                source: cause.source.clone(),
             },
         ));
         cx.emit(CodeEditorEvent::SelectionsChanged(SelectionChange {
@@ -7991,7 +8073,10 @@ impl Render for CodeEditor {
                         this.hover_mouse_leave(Some(window.mouse_position()), cx);
                     }
                     this.sticky_mouse_leave(cx);
-                    cx.emit(CodeEditorEvent::MouseLeave);
+                    cx.emit(CodeEditorEvent::MouseLeave(PartialEditorMouseEvent {
+                        position: window.mouse_position(),
+                        modifiers: window.modifiers(),
+                    }));
                 }
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))

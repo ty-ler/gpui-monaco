@@ -522,7 +522,7 @@ impl CodeEditor {
                 force_move_markers,
             })
             .collect();
-        self.execute_edit_operations(edits, None, cx);
+        self.execute_edit_operations_from("formatEditsCommand", edits, None, cx);
         if eol.is_some() {
             self.model().update(cx, |model, _| model.end_transaction());
         }

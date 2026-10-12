@@ -1101,9 +1101,26 @@ impl CodeEditor {
 
     /// Applies `edits` (in current coordinates), then sets
     /// `end_selections`, or lets the cursors follow the edits (Monaco
-    /// `executeEdits`). See [`CodeEditor::execute_edit_operations`].
+    /// `executeEdits('api', …)`). See [`CodeEditor::execute_edit_operations`],
+    /// and [`CodeEditor::execute_edits_from`] to name the source.
     pub fn execute_edits(
         &mut self,
+        edits: Vec<(Range<PointUtf16>, String)>,
+        end_selections: Option<Vec<Selection>>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.execute_edits_from("api", edits, end_selections, cx)
+    }
+
+    /// [`CodeEditor::execute_edits`] on behalf of `source` (Monaco
+    /// `executeEdits(source, edits, endCursorState)`), which the cursor
+    /// events report: the usual way for a host to recognize its own
+    /// changes, e.g. `execute_edits_from("my-extension", …)` and then
+    /// ignore [`SelectionChange`](crate::SelectionChange)s whose `source`
+    /// is `"my-extension"`.
+    pub fn execute_edits_from(
+        &mut self,
+        source: impl Into<crate::events::CursorChangeSource>,
         edits: Vec<(Range<PointUtf16>, String)>,
         end_selections: Option<Vec<Selection>>,
         cx: &mut Context<Self>,
@@ -1112,7 +1129,12 @@ impl CodeEditor {
             .into_iter()
             .map(|(range, text)| SingleEditOperation::new(range, text))
             .collect();
-        self.execute_edit_operations(edits, end_selections.map(EndCursorState::Selections), cx)
+        self.execute_edit_operations_from(
+            source,
+            edits,
+            end_selections.map(EndCursorState::Selections),
+            cx,
+        )
     }
 
     /// Applies `edits` (in current coordinates) and sets the cursors from
@@ -1126,9 +1148,22 @@ impl CodeEditor {
     /// As in Monaco, the edits join the open undo step (typing's too) until
     /// [`CodeEditor::push_undo_stop`], and a read-only editor returns
     /// `false` without saying anything (its read-only message is only for
-    /// the user's own edits).
+    /// the user's own edits). The cursor events report the source `"api"`;
+    /// see [`CodeEditor::execute_edit_operations_from`].
     pub fn execute_edit_operations(
         &mut self,
+        edits: Vec<SingleEditOperation>,
+        end_cursor_state: Option<EndCursorState>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.execute_edit_operations_from("api", edits, end_cursor_state, cx)
+    }
+
+    /// [`CodeEditor::execute_edit_operations`] on behalf of `source`
+    /// (Monaco `executeEdits(source, …)`), which the cursor events report.
+    pub fn execute_edit_operations_from(
+        &mut self,
+        source: impl Into<crate::events::CursorChangeSource>,
         edits: Vec<SingleEditOperation>,
         end_cursor_state: Option<EndCursorState>,
         cx: &mut Context<Self>,
@@ -1137,6 +1172,7 @@ impl CodeEditor {
         if self.options.read_only || self.detached {
             return false;
         }
+        let source = source.into();
         let selections = self.cursors.selections();
         let old = self.snapshot.clone();
         let (end_selections, computer) = match end_cursor_state {
@@ -1166,7 +1202,7 @@ impl CodeEditor {
             self.model()
                 .update(cx, |model, _| model.force_move_markers_on_next_edit(force));
         }
-        self.next_selection_change.source = crate::events::CursorChangeSource::Api;
+        self.next_selection_change.source = source.clone();
         self.edit_group = Some(text::JOIN_OPEN_UNDO_STEP);
         self.begin_update(cx);
         let ranges = self.apply(operation, cx);
@@ -1199,7 +1235,7 @@ impl CodeEditor {
                 self.model().update(cx, |model, _| {
                     model.set_undo_metadata(None, Some(crate::model::metadata(after)))
                 });
-                self.next_selection_change.source = crate::events::CursorChangeSource::Api;
+                self.next_selection_change.source = source;
                 self.cursors_changed(true, cx);
             }
         }
@@ -1256,7 +1292,7 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        self.trigger_command(name, None, window, cx)
+        self.trigger_from("keyboard", name, None, window, cx)
     }
 
     /// [`CodeEditor::trigger`] with Monaco's `payload`: the arguments of
@@ -1268,9 +1304,9 @@ impl CodeEditor {
     /// ([`FindWithArgs`](crate::actions::FindWithArgs)) and
     /// `editor.action.codeAction`
     /// ([`TriggerCodeAction`](crate::actions::TriggerCodeAction)). Actions
-    /// added with [`CodeEditor::add_action`] run without it; registered
-    /// commands get it as their argument. Fails for unknown names and
-    /// payloads the action can't be built from.
+    /// added with [`CodeEditor::add_action`] and registered commands get it
+    /// as their argument. Fails for unknown names and payloads the action
+    /// can't be built from.
     pub fn trigger_with_payload(
         &mut self,
         name: &str,
@@ -1278,26 +1314,58 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        self.trigger_command(name, Some(payload), window, cx)
+        self.trigger_from("keyboard", name, Some(payload), window, cx)
+    }
+
+    /// [`CodeEditor::trigger`] or [`CodeEditor::trigger_with_payload`] on
+    /// behalf of `source` (Monaco `trigger(source, handlerId, payload)`):
+    /// it first emits [`CodeEditorEvent::WillTriggerEditorOperation`], and
+    /// the cursor changes the action or command makes report `source`
+    /// (`trigger` and `trigger_with_payload` are `"keyboard"`'s, Monaco's
+    /// default).
+    ///
+    /// [`CodeEditorEvent::WillTriggerEditorOperation`]: crate::CodeEditorEvent::WillTriggerEditorOperation
+    pub fn trigger_from(
+        &mut self,
+        source: impl Into<crate::events::CursorChangeSource>,
+        name: &str,
+        payload: Option<serde_json::Value>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let source = source.into();
+        cx.emit(CodeEditorEvent::WillTriggerEditorOperation(
+            crate::events::TriggerEditorOperationEvent {
+                source: source.clone(),
+                handler_id: gpui::SharedString::from(name.to_string()),
+                payload: payload.clone(),
+            },
+        ));
+        // Monaco's `trigger` does nothing without a model.
+        if self.detached {
+            return Ok(());
+        }
+        let source = (source != crate::events::CursorChangeSource::Keyboard).then_some(source);
+        let previous = std::mem::replace(&mut self.trigger_source, source.clone());
+        let result = self.trigger_command(name, payload, source, window, cx);
+        self.trigger_source = previous;
+        result
     }
 
     fn trigger_command(
         &mut self,
         name: &str,
         payload: Option<serde_json::Value>,
+        source: Option<crate::events::CursorChangeSource>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        // Monaco's `trigger` does nothing without a model.
-        if self.detached {
-            return Ok(());
-        }
         let added = self.added_actions.iter().any(|a| a.id.as_ref() == name)
             || crate::editor_actions::global_actions(cx)
                 .iter()
                 .any(|a| a.id.as_ref() == name);
         if added {
-            self.run_action(name, window, cx);
+            self.run_action_with_args(name, payload, window, cx);
             return Ok(());
         }
         if let Some(handler) = self.commands.handlers.get(name).cloned() {
@@ -1322,7 +1390,25 @@ impl CodeEditor {
             None => cx.build_action(name, payload)?,
         };
         window.focus(&self.focus_handle, cx);
-        window.dispatch_action(action, cx);
+        match source {
+            None => window.dispatch_action(action, cx),
+            // The action runs after this update: its cursor changes report
+            // `source` while it runs.
+            Some(source) => {
+                let editor = cx.weak_entity();
+                let focus = self.focus_handle.clone();
+                window.defer(cx, move |window, cx| {
+                    let previous = editor
+                        .update(cx, |editor, _| editor.trigger_source.replace(source))
+                        .ok()
+                        .flatten();
+                    focus.dispatch_action(action.as_ref(), window, cx);
+                    editor
+                        .update(cx, |editor, _| editor.trigger_source = previous)
+                        .ok();
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -1526,8 +1612,14 @@ impl DecorationsCollection {
         cx: &mut App,
     ) -> Vec<DecorationId> {
         let owner = self.owner;
-        // The editor forwards the model's event if it shows the model.
-        if let CollectionTarget::Editor(editor, _) = &self.target
+        // The editor forwards the model's event if it shows the model, and
+        // there's one unless nothing is removed or added.
+        let changes = !new.is_empty() || {
+            let model = self.model.read(cx);
+            old.iter().any(|id| model.decoration(*id).is_some())
+        };
+        if changes
+            && let CollectionTarget::Editor(editor, _) = &self.target
             && editor.upgrade().is_some()
             && self.current_model() == self.model
         {
@@ -1594,12 +1686,52 @@ pub struct ModelDecoration {
     pub options: Arc<DecorationOptions>,
 }
 
+/// Which decorations Monaco's decoration getters leave out or keep, as
+/// their trailing flags. A `bool` converts to `filter_out_validation`
+/// alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DecorationFilter {
+    /// Leave out diagnostics' decorations (Monaco `filterOutValidation`).
+    pub filter_out_validation: bool,
+    /// Leave out decorations that change the font: a `font_family`,
+    /// `font_weight` or `font_style` (Monaco `filterFontDecorations`).
+    pub filter_font_decorations: bool,
+    /// Keep only decorations shown in the minimap (Monaco
+    /// `onlyMinimapDecorations`, which Monaco applies to its decoration
+    /// providers' decorations).
+    pub only_minimap_decorations: bool,
+    /// Keep only decorations in the glyph margin, those with a `glyph`
+    /// (Monaco `onlyMarginDecorations`).
+    pub only_margin_decorations: bool,
+}
+
+impl DecorationFilter {
+    /// Whether a decoration with `options` passes.
+    fn keeps(&self, options: &DecorationOptions) -> bool {
+        !(self.filter_out_validation && options.validation)
+            && !(self.filter_font_decorations && options.has_font())
+            && !(self.only_minimap_decorations && options.minimap.is_none())
+            && !(self.only_margin_decorations && options.glyph.is_none())
+    }
+}
+
+impl From<bool> for DecorationFilter {
+    fn from(filter_out_validation: bool) -> Self {
+        Self {
+            filter_out_validation,
+            ..Self::default()
+        }
+    }
+}
+
 /// Monaco's `ITextModel` decoration getters, in positions (0-based rows,
 /// UTF-16 columns), next to the byte-offset
 /// [`TextModel::decorations_in_range`]. `owner` is Monaco's `ownerId`:
 /// `Some(editor)` leaves out decorations only other editors show, `None`
-/// keeps every decoration. `filter_out_validation` leaves out diagnostics'
-/// (Monaco `filterOutValidation`).
+/// keeps every decoration. `filter` is Monaco's `filterOutValidation`,
+/// `filterFontDecorations`, `onlyMinimapDecorations` and
+/// `onlyMarginDecorations` (a [`DecorationFilter`], or a `bool` for
+/// `filterOutValidation` alone).
 impl TextModel {
     fn model_decoration(&self, decoration: &Decoration) -> ModelDecoration {
         ModelDecoration {
@@ -1610,19 +1742,19 @@ impl TextModel {
         }
     }
 
-    /// The decorations matching `owner` and `filter_out_validation` that
-    /// `keep` accepts, sorted by position.
+    /// The decorations matching `owner` and `filter` that `keep` accepts,
+    /// sorted by position.
     fn query_decorations(
         &self,
         owner: Option<EntityId>,
-        filter_out_validation: bool,
+        filter: DecorationFilter,
         keep: impl Fn(&Decoration) -> bool,
     ) -> Vec<ModelDecoration> {
         let mut result: Vec<ModelDecoration> = self
             .decoration_set()
             .iter()
             .filter(|d| owner.is_none() || d.owner.is_none() || d.owner == owner)
-            .filter(|d| !(filter_out_validation && d.options.validation))
+            .filter(|d| filter.keeps(&d.options))
             .filter(|d| keep(d))
             .map(|d| self.model_decoration(d))
             .collect();
@@ -1648,17 +1780,13 @@ impl TextModel {
         start_row: u32,
         end_row: u32,
         owner: Option<EntityId>,
-        filter_out_validation: bool,
+        filter: impl Into<DecorationFilter>,
     ) -> Vec<ModelDecoration> {
         let end = PointUtf16::new(
             end_row,
             self.line_len_utf16(end_row.min(self.line_count() - 1)),
         );
-        self.decorations_in_point_range(
-            PointUtf16::new(start_row, 0)..end,
-            owner,
-            filter_out_validation,
-        )
+        self.decorations_in_point_range(PointUtf16::new(start_row, 0)..end, owner, filter)
     }
 
     /// The decorations on `row` (Monaco `getLineDecorations`).
@@ -1666,9 +1794,9 @@ impl TextModel {
         &self,
         row: u32,
         owner: Option<EntityId>,
-        filter_out_validation: bool,
+        filter: impl Into<DecorationFilter>,
     ) -> Vec<ModelDecoration> {
-        self.lines_decorations(row, row, owner, filter_out_validation)
+        self.lines_decorations(row, row, owner, filter)
     }
 
     /// The decorations intersecting `range`, touching ones included (Monaco
@@ -1677,11 +1805,11 @@ impl TextModel {
         &self,
         range: Range<PointUtf16>,
         owner: Option<EntityId>,
-        filter_out_validation: bool,
+        filter: impl Into<DecorationFilter>,
     ) -> Vec<ModelDecoration> {
         let range = self.validate_range(range);
         let (start, end) = (self.offset_at(range.start), self.offset_at(range.end));
-        self.query_decorations(owner, filter_out_validation, |d| {
+        self.query_decorations(owner, filter.into(), |d| {
             d.range.start <= end && start <= d.range.end
         })
     }
@@ -1690,9 +1818,9 @@ impl TextModel {
     pub fn all_model_decorations(
         &self,
         owner: Option<EntityId>,
-        filter_out_validation: bool,
+        filter: impl Into<DecorationFilter>,
     ) -> Vec<ModelDecoration> {
-        self.query_decorations(owner, filter_out_validation, |_| true)
+        self.query_decorations(owner, filter.into(), |_| true)
     }
 
     /// The decorations with an overview ruler mark (Monaco
@@ -1701,9 +1829,9 @@ impl TextModel {
     pub fn overview_ruler_decorations(
         &self,
         owner: Option<EntityId>,
-        filter_out_validation: bool,
+        filter: impl Into<DecorationFilter>,
     ) -> Vec<ModelDecoration> {
-        self.query_decorations(owner, filter_out_validation, |d| {
+        self.query_decorations(owner, filter.into(), |d| {
             d.options.overview_ruler.is_some() || d.options.severity.is_some()
         })
     }
@@ -1712,7 +1840,7 @@ impl TextModel {
     /// `getInjectedTextDecorations`): `before` or `after`, on an empty range
     /// only with `show_if_collapsed`.
     pub fn injected_text_decorations(&self, owner: Option<EntityId>) -> Vec<ModelDecoration> {
-        self.query_decorations(owner, false, |d| {
+        self.query_decorations(owner, DecorationFilter::default(), |d| {
             (d.options.before.is_some() || d.options.after.is_some())
                 && d.options.shows_injected_text(&d.range)
         })
@@ -1722,7 +1850,7 @@ impl TextModel {
     /// `getAllMarginDecorations`): a glyph, a line number color, a line
     /// decoration or a margin background.
     pub fn all_margin_decorations(&self, owner: Option<EntityId>) -> Vec<ModelDecoration> {
-        self.query_decorations(owner, false, |d| {
+        self.query_decorations(owner, DecorationFilter::default(), |d| {
             let o = &d.options;
             o.glyph.is_some()
                 || o.line_number_color.is_some()
@@ -1730,6 +1858,28 @@ impl TextModel {
                 || o.lines_decoration_text.is_some()
                 || o.first_line_decoration.is_some()
                 || o.margin_background.is_some()
+        })
+    }
+
+    /// The decorations that set a line height (Monaco
+    /// `getCustomLineHeightsDecorations`).
+    pub fn custom_line_heights_decorations(&self, owner: Option<EntityId>) -> Vec<ModelDecoration> {
+        self.query_decorations(owner, DecorationFilter::default(), |d| {
+            d.options.line_height.is_some()
+        })
+    }
+
+    /// The decorations intersecting `range` that set a line height (Monaco
+    /// `getCustomLineHeightsDecorationsInRange`).
+    pub fn custom_line_heights_decorations_in_range(
+        &self,
+        range: Range<PointUtf16>,
+        owner: Option<EntityId>,
+    ) -> Vec<ModelDecoration> {
+        let range = self.validate_range(range);
+        let (start, end) = (self.offset_at(range.start), self.offset_at(range.end));
+        self.query_decorations(owner, DecorationFilter::default(), |d| {
+            d.options.line_height.is_some() && d.range.start <= end && start <= d.range.end
         })
     }
 
@@ -1863,6 +2013,17 @@ impl CodeEditor {
         self.set_selections(&[Selection::collapsed(position)], cx);
     }
 
+    /// [`CodeEditor::set_position`] on behalf of `source` (Monaco
+    /// `setPosition(position, source)`), which the cursor events report.
+    pub fn set_position_from(
+        &mut self,
+        source: impl Into<crate::events::CursorChangeSource>,
+        position: PointUtf16,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_selections_from(source, &[Selection::collapsed(position)], cx);
+    }
+
     /// The primary selection (Monaco `getSelection`).
     pub fn selection(&self) -> Selection {
         self.cursors.selections()[0]
@@ -1872,6 +2033,17 @@ impl CodeEditor {
     /// without scrolling.
     pub fn set_selection(&mut self, selection: Selection, cx: &mut Context<Self>) {
         self.set_selections(&[selection], cx);
+    }
+
+    /// [`CodeEditor::set_selection`] on behalf of `source` (Monaco
+    /// `setSelection(selection, source)`), which the cursor events report.
+    pub fn set_selection_from(
+        &mut self,
+        source: impl Into<crate::events::CursorChangeSource>,
+        selection: Selection,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_selections_from(source, &[selection], cx);
     }
 
     /// The model's text (Monaco `ICodeEditor.getValue`), with `eol`'s line

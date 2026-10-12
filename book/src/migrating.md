@@ -65,10 +65,14 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `tokenization.getLineTokens(n)` | `line_tokens(row, cx)` (`colorize::Token`s) |
 | `getOptions()` / `updateOptions(...)` | `options()` / `update_options(...)` (tab size, insert spaces, …) |
 | `deltaDecorations(old, new)` | `delta_decorations_at(owner, &old, new, cx)` (positions), or `delta_decorations` with byte ranges |
-| `getDecorationsInRange(range, ownerId, filterOutValidation)` | `decorations_in_point_range(range, owner, filter_out_validation)` (positions), or `decorations_in_range(range, editor)` with byte ranges |
+| `getDecorationsInRange(range, ownerId, filterOutValidation, filterFontDecorations, onlyMinimapDecorations, onlyMarginDecorations)` | `decorations_in_point_range(range, owner, filter)` (positions; `filter` a `DecorationFilter`, or a `bool` for `filterOutValidation`), or `decorations_in_range(range, editor)` with byte ranges |
 | `getDecorationRange(id)`, `getDecorationOptions(id)`, `getLineDecorations`, `getLinesDecorations`, `getAllDecorations`, `getOverviewRulerDecorations`, `getInjectedTextDecorations`, `getAllMarginDecorations` | `decoration_range(id)`, `decoration_options(id)`, `line_decorations`, `lines_decorations`, `all_model_decorations`, `overview_ruler_decorations`, `injected_text_decorations`, `all_margin_decorations` (`ModelDecoration`s) |
+| `getCustomLineHeightsDecorations(ownerId)`, `getCustomLineHeightsDecorationsInRange(range, ownerId)` | `custom_line_heights_decorations(owner)`, `custom_line_heights_decorations_in_range(range, owner)` |
+| `id` | `id()` (`$model1`, …) |
+| `setLanguage(languageId, source)` | `set_language(id, cx)` (source `"api"`), `set_language_from(source, id, cx)` |
 | `onDidChangeContent` | `TextModelEvent::Edited { changes, version, eol, is_eol_change, … }` |
-| `onDidChangeLanguage`, `onDidChangeOptions`, `onDidChangeDecorations` | `LanguageChanged { old_language, new_language }`, `OptionsChanged(ModelOptionsChange)`, `DecorationsChanged(DecorationsChange)` |
+| `onDidChangeLanguage`, `onDidChangeOptions`, `onDidChangeDecorations` | `LanguageChanged { old_language, new_language, source }`, `OptionsChanged(ModelOptionsChange)`, `DecorationsChanged(DecorationsChange)` (edits fire it too while the model has decorations; a no-op delta doesn't) |
+| `onDidChangeLineHeight`, `onDidChangeFont` | `LineHeightChanged(changes)`, `FontChanged(changes)` (`LineHeightChange`, `FontChange`) |
 
 ## Editor
 
@@ -79,9 +83,9 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `getOptions()` / `updateOptions(o)` | `computed_options()` (validated, zoomed and resolved) / `update_options_with(\|o\| o.read_only = true, cx)`, or `update_options(full_options, cx)` |
 | `getRawOptions()` | `options()` (as set) |
 | `getOption(EditorOption.x)` | `computed_options().x`; `font_info()` and `layout_info()` for `fontInfo` and `layoutInfo` (after the first frame) |
-| `getPosition()` / `setPosition(p)`, `getSelection()` / `setSelection(s)` | `position()` / `set_position(p, cx)`, `selection()` / `set_selection(s, cx)` |
+| `getPosition()` / `setPosition(p, source)`, `getSelection()` / `setSelection(s, source)` | `position()` / `set_position(p, cx)`, `selection()` / `set_selection(s, cx)`; `set_position_from(source, p, cx)`, `set_selection_from(source, s, cx)` to name the cursor events' `source` (a `CursorChangeSource`, `Other` for a host's own name) |
 | `getConfiguredWordAtPosition(p)` | `configured_word_at_position(p, cx)` |
-| `getSelections()` / `setSelections(s)` | `selections()` / `set_selections(&s, cx)` (as in Monaco, the setters don't scroll: `set_position(p, cx)` then `reveal_position_in_center(p, cx)`) |
+| `getSelections()` / `setSelections(s)` | `selections()` / `set_selections(&s, cx)`, `set_selections_from(source, &s, cx)` (as in Monaco, the setters don't scroll: `set_position(p, cx)` then `reveal_position_in_center(p, cx)`) |
 | `revealLine`, `revealLineInCenter`, `revealLines…`, `revealRange…`, `revealPosition…` | `reveal_line`, `reveal_line_in_center`, `reveal_lines…`, `reveal_range…`, `reveal_position…` |
 | `revealRange(range, ScrollType.Immediate)` | `reveal_range_with_scroll_type(range, RevealType::Simple, ScrollType::Immediate, cx)`; `reveal_lines_with_scroll_type` for lines |
 | `revealAllCursors(revealHorizontal, minimalReveal)` | `reveal_all_cursors(reveal_horizontal, minimal_reveal, cx)` |
@@ -99,12 +103,13 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `getTargetAtClientPoint(x, y)` | `mouse_target(point, window, cx)` |
 | `focus()` / `hasTextFocus()` / `hasWidgetFocus()` | `window.focus(&editor.focus_handle(cx), cx)` / `has_text_focus(window)` / `has_widget_focus(window, cx)` |
 | `saveViewState()` / `restoreViewState(s)` | `save_view_state(cx)` / `restore_view_state(&s, cx)` (with the folded regions) |
-| `executeEdits(source, edits, endCursorState)` | `execute_edits(edits, end_selections, cx)`, or `execute_edit_operations(edits, end_cursor_state, cx)` with `SingleEditOperation`s (`force_move_markers`) and an `EndCursorState` (selections or a cursor state computer) |
+| `executeEdits(source, edits, endCursorState)` | `execute_edits_from(source, edits, end_selections, cx)` (or `execute_edits(edits, end_selections, cx)` for `"api"`), or `execute_edit_operations_from(source, edits, end_cursor_state, cx)` with `SingleEditOperation`s (`force_move_markers`) and an `EndCursorState` (selections or a cursor state computer) |
 | `pushUndoStop()` / `popUndoStop()` | `push_undo_stop(cx)` / `pop_undo_stop(cx)` |
-| `trigger(source, handlerId, payload)` | `trigger(id, window, cx)` / `trigger_with_payload(id, json, window, cx)`, taking any Monaco action, command or handler id (`cursorDown`, `type`, `cursorMove`, `editor.fold`, aliases, …) with Monaco's payload, or a GPUI action name; `DiffEditor::trigger` for `diffEditor.*` ids |
-| `getAction(id)`, `getAction(id).run()` | `supported_actions(cx)` (each an `EditorActionInfo` with `id`, `label`, `alias`), `run_action(id, window, cx)` |
-| `getId()`, `getEditorType()` | `editor.entity_id()`; the type is the Rust type (`CodeEditor`, or `DiffEditor`) |
-| `addAction(descriptor)` | `add_action(EditorActionDescriptor::new(id, label, run).keybinding(…), cx)`, returning a `Disposable`; its keybindings apply in this editor only |
+| `trigger(source, handlerId, payload)` | `trigger_from(source, id, payload, window, cx)`, or `trigger(id, window, cx)` / `trigger_with_payload(id, json, window, cx)` for `"keyboard"`, taking any Monaco action, command or handler id (`cursorDown`, `type`, `cursorMove`, `editor.fold`, aliases, …) with Monaco's payload, or a GPUI action name; `DiffEditor::trigger` for `diffEditor.*` ids |
+| `getAction(id)`, `getActions()` | `get_action(id, cx)` (an `EditorAction` with `id()`, `label()`, `alias()`, `is_supported(cx)` and `run(args, window, cx)`), `actions()` |
+| `getAction(id).run(args)` | `run_action(id, window, cx)`, `run_action_with_args(id, args, window, cx)` |
+| `getId()`, `getEditorType()`, `EditorType` | `id()` (`vs.editor.ICodeEditor:1`), `editor_type()`, `EditorType` (`DiffEditor` has them too) |
+| `addAction(descriptor)` | `add_action(EditorActionDescriptor::new(id, label, run).keybinding(…).keybinding_context(when), cx)`, returning a `Disposable`; its keybindings apply in this editor only; `EditorActionDescriptor::new_with_args` for `run(editor, ...args)` |
 | `addCommand(keybinding, handler, context)` | `add_command(keystrokes, handler, when, cx)`, returning the command's id and a `Disposable`; its keybinding applies in this editor only |
 | `createContextKey(key, defaultValue)` | `create_context_key(key, default, cx)`; `ContextKey::set`, `reset`, `get` |
 | `executeCommand(source, command)` / `executeCommands(source, commands)` | `execute_command(source, command, cx)` / `execute_commands(source, commands, cx)` with an `EditorCommand` |
@@ -130,10 +135,12 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `onDidChangeCursorSelection` / `onDidChangeCursorPosition` | `SelectionsChanged(SelectionChange { reason, source, selection, secondary_selections, old_selections, … })` / `CursorPositionChanged(CursorPositionChange)`, only when the selections changed |
 | `onDidScrollChange` | `ScrollChanged(ScrollEvent)`, only when something changed |
 | `onDidFocusEditorText` / `onDidBlurEditorText` | `Focused` / `Blurred` |
-| `onMouseDown`, `onMouseUp`, `onMouseMove`, `onMouseLeave`, `onContextMenu` | `MouseDown`, `MouseUp`, `MouseMove`, `MouseLeave`, `ContextMenu` (with `EditorMouseEvent`) |
+| `onMouseDown`, `onMouseUp`, `onMouseMove`, `onMouseLeave`, `onContextMenu` | `MouseDown`, `MouseUp`, `MouseMove`, `MouseLeave`, `ContextMenu` (with `EditorMouseEvent`; `MouseLeave` with a `PartialEditorMouseEvent`) |
 | `onDidAttemptReadOnlyEdit` | `ReadOnlyEditAttempt` |
 | `onWillChangeModel` / `onDidChangeModel` | `WillChangeModel` / `ModelChanged` (`ModelChange { old_uri, new_uri }`) |
-| `onDidChangeModelLanguage` | `ModelLanguageChanged { old_language, new_language }` |
+| `onDidChangeModelLanguage` | `ModelLanguageChanged { old_language, new_language, source }` |
+| `onDidChangeLineHeight`, `onDidChangeFont` | `LineHeightChanged(changes)`, `FontChanged(changes)` (the decorations this editor shows) |
+| `onDropIntoEditor`, `onWillTriggerEditorOperationEvent` | `DropIntoEditor(DropIntoEditorEvent { position, data })`, `WillTriggerEditorOperation(TriggerEditorOperationEvent { source, handler_id, payload })` |
 | `onDidChangeConfiguration` | `ConfigurationChanged(change)`; `change.has_changed(\|o\| &o.font_size)` |
 | `onDidLayoutChange` / `onDidContentSizeChange` | `LayoutChanged(LayoutInfo)` / `ContentSizeChanged` |
 | `onDidFocusEditorWidget` / `onDidBlurEditorWidget` | `WidgetFocused` / `WidgetBlurred` |

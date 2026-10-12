@@ -15,8 +15,13 @@ use crate::editor::CodeEditor;
 use crate::providers;
 use crate::registry::Disposable;
 
-/// A host action's body.
-pub type ActionRun = Rc<dyn Fn(&mut CodeEditor, &mut Window, &mut Context<CodeEditor>)>;
+/// A host action's body, with its argument (Monaco `run(editor, ...args)`):
+/// the payload of [`CodeEditor::trigger_with_payload`], the `args` of
+/// [`CodeEditor::run_action_with_args`] and [`EditorAction::run`], or a
+/// keybinding rule's `command_args`; `None` when run by its keybindings or
+/// from the menus.
+pub type ActionRun =
+    Rc<dyn Fn(&mut CodeEditor, Option<serde_json::Value>, &mut Window, &mut Context<CodeEditor>)>;
 
 /// A host action's precondition.
 pub type ActionPrecondition = Rc<dyn Fn(&CodeEditor, &App) -> bool>;
@@ -34,6 +39,12 @@ pub struct EditorActionDescriptor {
     /// Keystrokes (GPUI syntax, e.g. `"cmd-k cmd-m"`) that run it in the
     /// editor's key context.
     pub keybindings: Vec<SharedString>,
+    /// Where its keybindings apply, besides the precondition (Monaco
+    /// `keybindingContext`): a GPUI predicate over the editor's
+    /// [context keys](CodeEditor::context_keys), such as `"!editorReadonly"`
+    /// or a key from [`CodeEditor::create_context_key`]. Keybindings whose
+    /// predicate doesn't parse aren't bound.
+    pub keybinding_context: Option<SharedString>,
     /// Whether it can run; without one it always can.
     pub precondition: Option<ActionPrecondition>,
     /// The context menu group to show it in (Monaco `contextMenuGroupId`,
@@ -47,17 +58,31 @@ pub struct EditorActionDescriptor {
 }
 
 impl EditorActionDescriptor {
-    /// An action with `id`, `label` and its body.
+    /// An action with `id`, `label` and its body, which ignores arguments.
     pub fn new(
         id: impl Into<SharedString>,
         label: impl Into<SharedString>,
         run: impl Fn(&mut CodeEditor, &mut Window, &mut Context<CodeEditor>) + 'static,
+    ) -> Self {
+        Self::new_with_args(id, label, move |editor, _, window, cx| {
+            run(editor, window, cx)
+        })
+    }
+
+    /// An action with `id`, `label` and a body taking its argument (Monaco
+    /// `run(editor, ...args)`; see [`ActionRun`]).
+    pub fn new_with_args(
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        run: impl Fn(&mut CodeEditor, Option<serde_json::Value>, &mut Window, &mut Context<CodeEditor>)
+        + 'static,
     ) -> Self {
         Self {
             id: id.into(),
             label: label.into(),
             alias: None,
             keybindings: Vec::new(),
+            keybinding_context: None,
             precondition: None,
             context_menu_group_id: None,
             context_menu_order: 0.,
@@ -74,6 +99,12 @@ impl EditorActionDescriptor {
     /// Adds a keybinding.
     pub fn keybinding(mut self, keystrokes: impl Into<SharedString>) -> Self {
         self.keybindings.push(keystrokes.into());
+        self
+    }
+
+    /// Sets where the keybindings apply (Monaco `keybindingContext`).
+    pub fn keybinding_context(mut self, when: impl Into<SharedString>) -> Self {
+        self.keybinding_context = Some(when.into());
         self
     }
 
@@ -103,6 +134,54 @@ pub struct EditorActionInfo {
     pub label: SharedString,
     /// Another name, if any.
     pub alias: Option<SharedString>,
+}
+
+/// One of an editor's actions, from [`CodeEditor::get_action`] (Monaco
+/// `IEditorAction`): its names, whether it can run now, and a way to run
+/// it in that editor. Monaco's `metadata` (a command's argument
+/// descriptions) has no counterpart.
+#[derive(Clone, Debug)]
+pub struct EditorAction {
+    /// Its id, label and alias.
+    pub info: EditorActionInfo,
+    editor: gpui::WeakEntity<CodeEditor>,
+}
+
+impl EditorAction {
+    /// Its id (Monaco `id`).
+    pub fn id(&self) -> &SharedString {
+        &self.info.id
+    }
+
+    /// Its label (Monaco `label`).
+    pub fn label(&self) -> &SharedString {
+        &self.info.label
+    }
+
+    /// Its alias (Monaco `alias`).
+    pub fn alias(&self) -> Option<&SharedString> {
+        self.info.alias.as_ref()
+    }
+
+    /// Whether its precondition holds now (Monaco `isSupported`); `false`
+    /// once the editor is gone.
+    pub fn is_supported(&self, cx: &App) -> bool {
+        self.editor
+            .upgrade()
+            .is_some_and(|editor| editor.read(cx).action_supported(&self.info.id, cx))
+    }
+
+    /// Runs it in its editor with `args` (Monaco `run(args)`), as
+    /// [`CodeEditor::run_action_with_args`] does. Call it outside the
+    /// editor's own update (from an editor method, use
+    /// [`CodeEditor::run_action_with_args`]). Returns whether it ran.
+    pub fn run(&self, args: Option<serde_json::Value>, window: &mut Window, cx: &mut App) -> bool {
+        self.editor
+            .update(cx, |editor, cx| {
+                editor.run_action_with_args(&self.info.id, args, window, cx)
+            })
+            .unwrap_or(false)
+    }
 }
 
 /// A built-in action: Monaco id, GPUI action name, label, and Monaco's
@@ -753,19 +832,7 @@ pub(crate) fn global_actions(cx: &App) -> Vec<EditorActionDescriptor> {
 /// [`CodeEditor::supported_actions`] (the command palette). An editor's own
 /// action with the same id ([`CodeEditor::add_action`]) wins.
 pub fn add_editor_action(cx: &mut App, descriptor: EditorActionDescriptor) -> Disposable {
-    let bindings = descriptor
-        .keybindings
-        .iter()
-        .map(|keystrokes| {
-            KeyBinding::new(
-                keystrokes,
-                RunAction {
-                    id: descriptor.id.to_string(),
-                },
-                Some(KEY_CONTEXT),
-            )
-        })
-        .collect();
+    let bindings = action_key_bindings(&descriptor, KEY_CONTEXT);
     let keybindings = bind_removable(cx, bindings);
     let global = cx.default_global::<GlobalActions>();
     global.next_id += 1;
@@ -779,6 +846,38 @@ pub fn add_editor_action(cx: &mut App, descriptor: EditorActionDescriptor) -> Di
             .retain(|(id, _)| *id != entry_id);
         cx.refresh_windows();
     })
+}
+
+/// The keybindings of a host action, in key context `context` and the
+/// action's `keybinding_context` (Monaco's `keybindingsWhen`, the
+/// precondition and `keybindingContext`). Those that don't parse are
+/// left out.
+fn action_key_bindings(descriptor: &EditorActionDescriptor, context: &str) -> Vec<KeyBinding> {
+    let when = match &descriptor.keybinding_context {
+        Some(when) => format!("{context} && ({when})"),
+        None => context.to_string(),
+    };
+    let Ok(predicate) = gpui::KeyBindingContextPredicate::parse(&when) else {
+        return Vec::new();
+    };
+    let predicate = Rc::new(predicate);
+    descriptor
+        .keybindings
+        .iter()
+        .filter_map(|keystrokes| {
+            KeyBinding::load(
+                keystrokes,
+                Box::new(RunAction {
+                    id: descriptor.id.to_string(),
+                }),
+                Some(predicate.clone()),
+                false,
+                None,
+                &gpui::DummyKeyboardMapper,
+            )
+            .ok()
+        })
+        .collect()
 }
 
 /// Monaco `IKeybindingRule`: keystrokes that run a command, for
@@ -928,19 +1027,7 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) -> Disposable {
         let context = self.own_keybinding_context(None);
-        let bindings: Vec<KeyBinding> = descriptor
-            .keybindings
-            .iter()
-            .map(|keystrokes| {
-                KeyBinding::new(
-                    keystrokes,
-                    RunAction {
-                        id: descriptor.id.to_string(),
-                    },
-                    Some(&context),
-                )
-            })
-            .collect();
+        let bindings = action_key_bindings(&descriptor, &context);
         let id = descriptor.id.clone();
         self.remove_action_bindings(&id, cx);
         self.commands
@@ -1055,18 +1142,22 @@ impl CodeEditor {
     /// `getAction(id).run()`); built-in ones run as if their key were
     /// pressed.
     pub fn run_action(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let action = self
-            .added_actions
-            .iter()
-            .find(|a| a.id.as_ref() == id)
-            .cloned()
-            .or_else(|| global_actions(cx).into_iter().find(|a| a.id.as_ref() == id));
-        if let Some(action) = action {
-            if !action.precondition.as_ref().is_none_or(|p| p(self, cx)) {
-                return false;
-            }
-            (action.run)(self, window, cx);
-            return true;
+        self.run_action_with_args(id, None, window, cx)
+    }
+
+    /// [`CodeEditor::run_action`] with an argument (Monaco
+    /// `getAction(id).run(args)`): a host action's body gets it, and a
+    /// built-in one is built from it as [`CodeEditor::trigger_with_payload`]
+    /// builds its payload (ignoring an argument it can't be built from).
+    pub fn run_action_with_args(
+        &mut self,
+        id: &str,
+        args: Option<serde_json::Value>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(ran) = self.run_host_action(id, args.clone(), window, cx) {
+            return ran;
         }
         let Some(builtin) = builtin(resolve_alias(id)) else {
             return false;
@@ -1074,12 +1165,104 @@ impl CodeEditor {
         if !self.when(builtin.3, cx) {
             return false;
         }
-        let Ok(action) = cx.build_action(builtin.1, None) else {
+        let Ok(action) = args
+            .and_then(|args| cx.build_action(builtin.1, Some(args)).ok())
+            .map_or_else(|| cx.build_action(builtin.1, None), Ok)
+        else {
             return false;
         };
         window.focus(&self.focus_handle, cx);
         window.dispatch_action(action, cx);
         true
+    }
+
+    /// Runs the host action `id` ([`CodeEditor::add_action`] or
+    /// [`add_editor_action`]) with `args`: `None` if there's none, else
+    /// whether its precondition let it run.
+    fn run_host_action(
+        &mut self,
+        id: &str,
+        args: Option<serde_json::Value>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<bool> {
+        let action = self
+            .added_actions
+            .iter()
+            .find(|a| a.id.as_ref() == id)
+            .cloned()
+            .or_else(|| global_actions(cx).into_iter().find(|a| a.id.as_ref() == id))?;
+        if !action.precondition.as_ref().is_none_or(|p| p(self, cx)) {
+            return Some(false);
+        }
+        (action.run)(self, args, window, cx);
+        Some(true)
+    }
+
+    /// Whether action `id` (built-in or the host's) exists and its
+    /// precondition holds.
+    fn action_supported(&self, id: &str, cx: &App) -> bool {
+        let added = self
+            .added_actions
+            .iter()
+            .find(|a| a.id.as_ref() == id)
+            .cloned()
+            .or_else(|| global_actions(cx).into_iter().find(|a| a.id.as_ref() == id));
+        match added {
+            Some(action) => action.precondition.as_ref().is_none_or(|p| p(self, cx)),
+            None => builtin(resolve_alias(id)).is_some_and(|b| self.when(b.3, cx)),
+        }
+    }
+
+    /// Every action of this editor, supported now or not (Monaco
+    /// `getActions`): the built-in ones, then the added ones.
+    pub fn actions(&self) -> Vec<EditorActionInfo> {
+        let builtins = BUILTINS.iter().map(|b| EditorActionInfo {
+            id: b.0.into(),
+            label: b.2.into(),
+            alias: None,
+        });
+        let added = self.added_actions.iter().map(|a| EditorActionInfo {
+            id: a.id.clone(),
+            label: a.label.clone(),
+            alias: a.alias.clone(),
+        });
+        builtins.chain(added).collect()
+    }
+
+    /// The action with id `id` (Monaco `getAction`): one of
+    /// [`CodeEditor::actions`], supported now or not, or an action from
+    /// [`add_editor_action`] (which Monaco registers as a command, so its
+    /// `getAction` doesn't find it). Aliases of built-in ids resolve.
+    pub fn get_action(&self, id: &str, cx: &Context<Self>) -> Option<EditorAction> {
+        let info = match self.added_actions.iter().find(|a| a.id.as_ref() == id) {
+            Some(a) => EditorActionInfo {
+                id: a.id.clone(),
+                label: a.label.clone(),
+                alias: a.alias.clone(),
+            },
+            None => match builtin(resolve_alias(id)) {
+                Some(b) => EditorActionInfo {
+                    id: b.0.into(),
+                    label: b.2.into(),
+                    alias: None,
+                },
+                None => {
+                    let a = global_actions(cx)
+                        .into_iter()
+                        .find(|a| a.id.as_ref() == id)?;
+                    EditorActionInfo {
+                        id: a.id,
+                        label: a.label,
+                        alias: a.alias,
+                    }
+                }
+            },
+        };
+        Some(EditorAction {
+            info,
+            editor: cx.weak_entity(),
+        })
     }
 
     /// Runs command `id` as a keybinding rule's [`RunCommand`] does
@@ -1096,6 +1279,11 @@ impl CodeEditor {
     ) -> bool {
         if let Some(handler) = self.commands.handlers.get(id).cloned() {
             handler(self, window, cx);
+            return true;
+        }
+        // Host actions take the rule's `commandArgs` (Monaco `run(accessor,
+        // ...args)`).
+        if self.run_host_action(id, args.clone(), window, cx) == Some(true) {
             return true;
         }
         if args.is_none() && self.run_action(id, window, cx) {

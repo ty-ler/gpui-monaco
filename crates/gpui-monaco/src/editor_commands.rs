@@ -1210,8 +1210,11 @@ impl CodeEditor {
 
     /// Runs `command` at the primary selection (Monaco `executeCommand`):
     /// its edits, then its cursor state, as one undo step joined to the
-    /// open one. `source` is the change's source (Monaco's `source`).
-    /// Read-only editors refuse it.
+    /// open one. `source` is the change's source (Monaco's `source`), which
+    /// the cursor events report as given
+    /// ([`CursorChangeSource::from`](crate::CursorChangeSource)), `None`
+    /// as the keyboard (Monaco `source || 'keyboard'`). Read-only editors
+    /// refuse it.
     pub fn execute_command(
         &mut self,
         source: Option<&str>,
@@ -1253,12 +1256,8 @@ impl CodeEditor {
             false,
             false,
         );
-        // Monaco's sources are free strings; others count as the API's.
-        self.next_selection_change.source = match source {
-            Some("keyboard") => crate::events::CursorChangeSource::Keyboard,
-            Some("mouse") => crate::events::CursorChangeSource::Mouse,
-            _ => crate::events::CursorChangeSource::Api,
-        };
+        // Monaco's sources are free strings, `source || 'keyboard'`.
+        self.next_selection_change.source = crate::events::CursorChangeSource::from_option(source);
         self.apply(operation, cx);
         self.next_selection_change = Default::default();
     }

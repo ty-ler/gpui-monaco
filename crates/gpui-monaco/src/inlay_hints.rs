@@ -1099,7 +1099,7 @@ impl CodeEditor {
                 return;
             }
             this.update(cx, |this, cx| {
-                this.execute_edits(hint.text_edits, None, cx);
+                this.execute_edits_from("inlayHint.default", hint.text_edits, None, cx);
                 this.schedule_inlay_hints(Duration::ZERO, cx);
             })
             .ok();

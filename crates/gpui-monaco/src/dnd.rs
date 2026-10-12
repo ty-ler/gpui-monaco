@@ -241,7 +241,12 @@ impl CodeEditor {
                     let (edits, after) = drag_and_drop_edits(&text, selection, position, copy);
                     self.model()
                         .update(cx, |model, _| model.push_stack_element());
-                    self.execute_edits(edits, Some(vec![after]), cx);
+                    self.execute_edits_from(
+                        "editor.contrib.dragAndDrop",
+                        edits,
+                        Some(vec![after]),
+                        cx,
+                    );
                     self.model()
                         .update(cx, |model, _| model.push_stack_element());
                 }

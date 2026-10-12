@@ -112,10 +112,14 @@ fn standard_token_type(name: &str) -> crate::cursor::StandardTokenType {
 /// Monaco `TextModel`'s `MODEL_ID`, counting every model made.
 static MODEL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// A new model's uri without one (Monaco `inmemory://model/${MODEL_ID}`).
-fn next_inmemory_uri() -> SharedString {
+/// A new model's id (Monaco `'$model' + MODEL_ID`) and its uri without one
+/// (Monaco `inmemory://model/${MODEL_ID}`).
+fn next_model_id() -> (SharedString, SharedString) {
     let id = MODEL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    format!("inmemory://model/{id}").into()
+    (
+        format!("$model{id}").into(),
+        format!("inmemory://model/{id}").into(),
+    )
 }
 
 /// Monaco `guessLanguageIdByFilepathOrFirstLine` for a model with this uri
@@ -445,6 +449,10 @@ pub enum TextModelEvent {
         old_language: Option<SharedString>,
         /// The new language id (Monaco `newLanguage`).
         new_language: Option<SharedString>,
+        /// What changed it (Monaco `source`): the one given to
+        /// [`TextModel::set_language_from`], else `"api"`, as Monaco's
+        /// default.
+        source: SharedString,
     },
     /// The language's configuration changed at runtime (Monaco
     /// `onDidChangeLanguageConfiguration`).
@@ -471,12 +479,26 @@ pub enum TextModelEvent {
         ranges: Arc<[RangeInclusive<u32>]>,
     },
     /// Decorations were added, removed or changed (Monaco
-    /// `onDidChangeDecorations`), and what they affect.
+    /// `onDidChangeDecorations`), and what they affect. As in Monaco, an
+    /// edit fires it too while the model has decorations, since they move
+    /// with the text (affecting the minimap, overview ruler and glyph
+    /// margin); a [`TextModel::delta_decorations`] that removes and adds
+    /// nothing doesn't.
     DecorationsChanged(DecorationsChange),
+    /// Decorations with a [`line_height`](crate::DecorationOptions::line_height)
+    /// were added, removed or changed (Monaco `onDidChangeLineHeight`),
+    /// before the [`TextModelEvent::DecorationsChanged`] that reports them.
+    LineHeightChanged(Arc<[crate::events::LineHeightChange]>),
+    /// Decorations with a font were added, removed or changed (Monaco
+    /// `onDidChangeFont`), before the
+    /// [`TextModelEvent::DecorationsChanged`] that reports them.
+    FontChanged(Arc<[crate::events::FontChange]>),
 }
 
 /// A text document: buffer, undo history, language and options.
 pub struct TextModel {
+    /// `$modelN` (Monaco `id`).
+    id: SharedString,
     buffer: Buffer,
     options: ModelOptions,
     language_id: Option<SharedString>,
@@ -516,6 +538,64 @@ pub struct TextModel {
     force_move_markers: Vec<Range<usize>>,
 }
 
+/// The line heights and fonts a decorations change changes (Monaco's
+/// `recordLineAffectedByLineHeightChange` and
+/// `recordLineAffectedByFontChange`), reported before its
+/// [`TextModelEvent::DecorationsChanged`].
+#[derive(Default)]
+struct LayoutChanges {
+    heights: Vec<crate::events::LineHeightChange>,
+    fonts: Vec<crate::events::FontChange>,
+}
+
+impl LayoutChanges {
+    /// Whether a decoration with `options` changes line heights or fonts.
+    fn affects(options: &DecorationOptions) -> bool {
+        options.line_height.is_some() || options.has_font()
+    }
+
+    /// Notes decoration `id` at `range`, with `options`, added (`now`) or
+    /// removed, on behalf of `owner` (Monaco records the change's owner).
+    fn note(
+        &mut self,
+        model: &TextModel,
+        owner: Option<EntityId>,
+        id: DecorationId,
+        range: &Range<usize>,
+        options: &DecorationOptions,
+        now: bool,
+    ) {
+        if !Self::affects(options) {
+            return;
+        }
+        let row = model.buffer.rope().offset_to_point(range.start).row;
+        if let Some(height) = options.line_height {
+            self.heights.push(crate::events::LineHeightChange {
+                owner,
+                decoration_id: id,
+                row,
+                line_height: now.then_some(height),
+            });
+        }
+        if options.has_font() {
+            let change = crate::events::FontChange { owner, row };
+            // Monaco keeps a set.
+            if !self.fonts.contains(&change) {
+                self.fonts.push(change);
+            }
+        }
+    }
+
+    fn emit(self, cx: &mut Context<TextModel>) {
+        if !self.heights.is_empty() {
+            cx.emit(TextModelEvent::LineHeightChanged(self.heights.into()));
+        }
+        if !self.fonts.is_empty() {
+            cx.emit(TextModelEvent::FontChanged(self.fonts.into()));
+        }
+    }
+}
+
 /// Monaco `TextModel.LARGE_FILE_SIZE_THRESHOLD`, in characters.
 const LARGE_FILE_SIZE_THRESHOLD: usize = 20 * 1024 * 1024;
 /// Monaco `TextModel.LARGE_FILE_LINE_COUNT_THRESHOLD`.
@@ -528,13 +608,15 @@ impl TextModel {
     /// breaks are normalized to `\n` and the original line ending is detected
     /// (LF when there are none); a leading byte order mark is stripped.
     pub fn new(text: &str) -> Self {
+        let (id, resource) = next_model_id();
         Self {
+            id,
             buffer: Buffer::new(text),
             options: ModelOptions::default(),
             language_id: None,
             language: None,
             uri: None,
-            resource: next_inmemory_uri(),
+            resource,
             syntax: None,
             decorations: DecorationSet::default(),
             ignore_unusual_line_terminators: false,
@@ -565,6 +647,13 @@ impl TextModel {
     /// Whether the editor made this model for its own use.
     pub(crate) fn is_internal(&self) -> bool {
         self.internal
+    }
+
+    /// The model's unique id, `$model1`, `$model2`, … in creation order
+    /// (Monaco `ITextModel.id`). The number is the one in the
+    /// `inmemory://model/N` uri of a model without one.
+    pub fn id(&self) -> &SharedString {
+        &self.id
     }
 
     /// Sets the creation options (Monaco `createModel`'s options): with
@@ -854,6 +943,18 @@ impl TextModel {
     /// [`on_did_change_model_language`](crate::on_did_change_model_language))
     /// if it differs. A MIME type gives its language's id, as in Monaco.
     pub fn set_language(&mut self, language_id: Option<SharedString>, cx: &mut Context<Self>) {
+        self.set_language_from("api", language_id, cx);
+    }
+
+    /// [`TextModel::set_language`] on behalf of `source` (Monaco
+    /// `setLanguage(languageId, source)`), which the
+    /// [`TextModelEvent::LanguageChanged`] reports.
+    pub fn set_language_from(
+        &mut self,
+        source: impl Into<SharedString>,
+        language_id: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
         self.language_guessed = false;
         if self.language_id != language_id {
             let old_language = std::mem::replace(&mut self.language_id, language_id);
@@ -866,6 +967,7 @@ impl TextModel {
             cx.emit(TextModelEvent::LanguageChanged {
                 old_language: old_language.clone(),
                 new_language: self.language_id.clone(),
+                source: source.into(),
             });
             crate::registry::model_language_changed(cx.weak_entity(), old_language, cx);
             cx.notify();
@@ -947,9 +1049,12 @@ impl TextModel {
         if self.language_id == old_language {
             cx.emit(TextModelEvent::LanguageConfigurationChanged);
         } else {
+            // Monaco's `LanguageSelection.onDidChange` sets it with no
+            // source: `'api'`.
             cx.emit(TextModelEvent::LanguageChanged {
                 old_language: old_language.clone(),
                 new_language: self.language_id.clone(),
+                source: "api".into(),
             });
             crate::registry::model_language_changed(cx.weak_entity(), old_language, cx);
         }
@@ -1330,7 +1435,24 @@ impl TextModel {
                 is_eol_change: false,
                 force_move_markers,
             });
+            self.emit_decorations_moved(cx);
             cx.notify();
+        }
+    }
+
+    /// Monaco `_doApplyEdits`' `_onDidChangeDecorations.fire()`: an edit
+    /// moves the decorations, so it's a decorations change affecting the
+    /// minimap, the overview ruler and the glyph margin. Monaco fires it
+    /// whatever the decorations; with none there's nothing to tell, and
+    /// typing in an undecorated model stays free of it.
+    fn emit_decorations_moved(&self, cx: &mut Context<Self>) {
+        if !self.decorations.is_empty() {
+            cx.emit(TextModelEvent::DecorationsChanged(DecorationsChange {
+                affects_minimap: true,
+                affects_overview_ruler: true,
+                affects_glyph_margin: true,
+                affects_line_number: false,
+            }));
         }
     }
 
@@ -1353,16 +1475,44 @@ impl TextModel {
                 .clip_offset(range.end.min(len), text::Bias::Right);
             (start..end, options)
         });
-        let mut change = old
-            .iter()
-            .filter_map(|id| self.decorations.get(*id))
-            .fold(DecorationsChange::default(), |change, decoration| {
-                change.with(&decoration.options)
-            });
+        let mut change = DecorationsChange::default();
+        let mut layout = LayoutChanges::default();
+        let mut removed = false;
+        for decoration in old.iter().filter_map(|id| self.decorations.get(*id)) {
+            removed = true;
+            change = change.with(&decoration.options);
+            layout.note(
+                self,
+                owner,
+                decoration.id,
+                &decoration.range,
+                &decoration.options,
+                false,
+            );
+        }
         let new: Vec<_> = new
             .inspect(|(_, options)| change = change.with(options))
             .collect();
+        // Monaco `deltaDecorations([], [])` returns early, and otherwise
+        // fires only when a decoration was removed or added.
+        if !removed && new.is_empty() {
+            return Vec::new();
+        }
+        // The added decorations that change line heights or fonts: their
+        // index, start and options.
+        let new_layout: Vec<(usize, usize, Arc<DecorationOptions>)> = new
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, options))| LayoutChanges::affects(options))
+            .map(|(ix, (range, options))| {
+                (ix, range.start.min(range.end), Arc::new(options.clone()))
+            })
+            .collect();
         let ids = self.decorations.delta(owner, old, new);
+        for (ix, start, options) in new_layout {
+            layout.note(self, owner, ids[ix], &(start..start), &options, true);
+        }
+        layout.emit(cx);
         cx.emit(TextModelEvent::DecorationsChanged(change));
         cx.notify();
         ids
@@ -1380,7 +1530,21 @@ impl TextModel {
     /// `removeAllDecorationsWithOwnerId`), as an editor does with its own
     /// when it stops showing the model.
     pub fn remove_all_decorations_with_owner(&mut self, owner: EntityId, cx: &mut Context<Self>) {
+        let mut layout = LayoutChanges::default();
+        for decoration in self.decorations.iter() {
+            if decoration.owner == Some(owner) {
+                layout.note(
+                    self,
+                    Some(owner),
+                    decoration.id,
+                    &decoration.range,
+                    &decoration.options,
+                    false,
+                );
+            }
+        }
         if let Some(change) = self.decorations.remove_owned_by(owner) {
+            layout.emit(cx);
             cx.emit(TextModelEvent::DecorationsChanged(change));
             cx.notify();
         }
@@ -1417,7 +1581,27 @@ impl TextModel {
         let change = DecorationsChange::default()
             .with(&old.options)
             .with(&options);
+        // Monaco records the line once, with the new height.
+        let mut layout = LayoutChanges::default();
+        if LayoutChanges::affects(&old.options) || LayoutChanges::affects(&options) {
+            let row = self.buffer.rope().offset_to_point(old.range.start).row;
+            if old.options.line_height.is_some() || options.line_height.is_some() {
+                layout.heights.push(crate::events::LineHeightChange {
+                    owner: old.owner,
+                    decoration_id: id,
+                    row,
+                    line_height: options.line_height,
+                });
+            }
+            if old.options.has_font() || options.has_font() {
+                layout.fonts.push(crate::events::FontChange {
+                    owner: old.owner,
+                    row,
+                });
+            }
+        }
         if self.decorations.change_options(id, options) {
+            layout.emit(cx);
             cx.emit(TextModelEvent::DecorationsChanged(change));
             cx.notify();
         }
@@ -1530,6 +1714,7 @@ impl TextModel {
             return true;
         }
         self.decorations.apply_patch(&outcome.patch);
+        let moved = !outcome.patch.is_empty();
         self.reparse(cx);
         cx.emit(TextModelEvent::Edited {
             changes: content_changes(old, self.buffer.rope(), &outcome.patch, old_line_ending)
@@ -1543,6 +1728,9 @@ impl TextModel {
             is_eol_change: false,
             force_move_markers: Arc::default(),
         });
+        if moved {
+            self.emit_decorations_moved(cx);
+        }
         // Monaco `_applyUndoRedoEdits` sets the step's line ending.
         if eol != old_line_ending {
             cx.emit(TextModelEvent::LineEndingChanged);

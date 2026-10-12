@@ -2423,6 +2423,9 @@ impl CodeEditor {
                                 border: colors.inline_edit_original_border(),
                                 border_width: px(1.),
                                 padding: [px(0.); 4],
+                                // A deleted empty line still gets its box.
+                                does_not_collapse: true,
+                                ..Default::default()
                             }),
                             ..Default::default()
                         },

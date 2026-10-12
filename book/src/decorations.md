@@ -68,7 +68,8 @@ Ranges are byte offsets. To convert from `PointUtf16`, use `model.buffer().point
 | `include_new_lines` | `includeNewLines` (find matches) | where the range goes past a line break, the background covers it, half a character wide |
 | `margin_background` | `marginClassName` | a background across the gutter on the decorated lines |
 | `lines_decoration_text` | `linesDecorationsClassName` (icons) | text such as `+` in the line decorations area on each decorated line |
-| `block` | `blockClassName` + `blockPadding` | a bordered box around the decorated lines and the view zones above them |
+| `lines_decorations_tooltip` | `linesDecorationsTooltip` | a tooltip over what `gutter_bar`, `lines_decoration_text` and `first_line_decoration` draw |
+| `block` (`BlockDecoration`) | `blockClassName` + `blockPadding`, `blockIsAfterEnd`, `blockDoesNotCollapse` | a bordered box around the decorated lines and the view zones around them; on an empty range just the zones above its line unless `does_not_collapse`, and with `is_after_end` just the zones below the last line |
 | `line_height` | `lineHeight` | the covered lines' height, as a multiple of the line height; text stays centered |
 | `glyph` | `glyphMarginClassName` | a short glyph in the glyph margin, on every line of the range; the highest `z_index` wins a lane |
 | `glyph_margin` | `glyphMargin` | the glyph's lane (`GlyphMarginLane::Left`, `Center` or `Right`), and `persist_lane` to keep the lane on every line; the margin is a line height wide per lane in use |
@@ -82,6 +83,7 @@ Ranges are byte offsets. To convert from `PointUtf16`, use `model.buffer().point
 | `before`, `after` | `before`, `after` | text injected before or after the range (see below) |
 | `show_if_collapsed` | `showIfCollapsed` | an empty range still shows: its injected text only shows with it, its background is widened to a character's width (so are narrower ones, such as a zero-width space's), and a range ending at a line's start stops at the end of the line before |
 | `font_family`, `font_weight`, `font_style` | `fontFamily`, `fontWeight`, `fontStyle` | the decorated text's font; line wrapping still measures the editor's font |
+| `text_direction` | `textDirection` | kept for the getters; GPUI can't lay out right-to-left lines, so they stay left to right |
 | `hover_message` | `hoverMessage` | markdown (`Vec<MarkdownString>`) shown in the hover over the range, or anywhere on its lines with `is_whole_line`; `show_if_collapsed` ones take a character more each side |
 | `stickiness` | `stickiness` | whether typing at the edges grows the range |
 | `z_index` | `zIndex` | paint order for overlapping decorations: among the whole-line ones, painted first (the fold background is one, at 0), then among the others |
@@ -139,6 +141,18 @@ It saves keeping the ids yourself:
 let mut highlights = editor.update(cx, |editor, cx| editor.create_decorations_collection(vec![], cx));
 highlights.set(vec![(start..end, options)], cx);
 ```
+
+`on_did_change(callback, cx)` (Monaco `onDidChange`) calls back when the model's decorations change, except by the collection itself.
+
+## Events
+
+The model emits `TextModelEvent::DecorationsChanged(DecorationsChange)` (Monaco `onDidChangeDecorations`), and an editor forwards it as `ModelDecorationsChanged`:
+
+- When decorations are added, removed or have their options changed. The `DecorationsChange` says whether the minimap, overview ruler, glyph margin or line numbers are affected.
+- On every edit, undo and redo while the model has decorations, since they move with the text. A list built from `collection.ranges(cx)` stays current this way.
+- Not for a delta that removes and adds nothing, such as removing ids that are already gone. So a listener that sets decorations again on this event doesn't loop.
+
+`LineHeightChanged` and `FontChanged` (Monaco `onDidChangeLineHeight` and `onDidChangeFont`) come before it when decorations with a `line_height` or a font were added, changed or removed. They list each decoration's first row and owner, and `line_height` is `None` once it's gone. An editor forwards the changes of the decorations it shows. Line heights are forwarded only with `allow_variable_line_heights`.
 
 ## Ownership
 

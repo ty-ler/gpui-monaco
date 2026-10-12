@@ -107,7 +107,8 @@ fn model_language_and_configuration_events(cx: &mut TestAppContext) {
         [CodeEditorEvent::BeginUpdate, CodeEditorEvent::EndUpdate]
     );
 
-    // The model's language change reaches the editor.
+    // The model's language change reaches the editor, with its source
+    // (Monaco `IModelLanguageChangedEvent.source`, `'api'` by default).
     other.update(cx, |m, cx| m.set_language(Some("rust".into()), cx));
     assert!(
         events
@@ -115,6 +116,19 @@ fn model_language_and_configuration_events(cx: &mut TestAppContext) {
             .contains(&CodeEditorEvent::ModelLanguageChanged {
                 old_language: None,
                 new_language: Some("rust".into()),
+                source: "api".into(),
+            })
+    );
+    other.update(cx, |m, cx| {
+        m.set_language_from("my-extension", Some("plaintext".into()), cx)
+    });
+    assert!(
+        events
+            .borrow()
+            .contains(&CodeEditorEvent::ModelLanguageChanged {
+                old_language: Some("rust".into()),
+                new_language: Some("plaintext".into()),
+                source: "my-extension".into(),
             })
     );
 

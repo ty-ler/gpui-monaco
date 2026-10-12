@@ -1797,6 +1797,40 @@ pub(crate) struct LineHighlight {
     pub border: Option<(Hsla, Edges<Pixels>)>,
 }
 
+/// Monaco `BlockDecorations.render`: the content top and bottom of a block
+/// decoration on view lines `lines` (those of its first to last row),
+/// `empty` when its range is.
+fn block_extent(
+    block: &crate::decorations::BlockDecoration,
+    lines: Range<u32>,
+    empty: bool,
+    zones: &ZoneLayout,
+    line_height: Pixels,
+) -> (Pixels, Pixels) {
+    let (first, end_line) = (lines.start, lines.end);
+    if block.is_after_end {
+        // `getVerticalOffsetAfterLineNumber(end, false)` to
+        // `(end, true)`: just the zones below the last line.
+        let text_bottom =
+            zones.line_y(end_line - 1, line_height) + zones.height(end_line - 1, line_height);
+        return (text_bottom, zones.line_y(end_line, line_height));
+    }
+    // `getVerticalOffsetForLineNumber(start, true)`: above the first
+    // line's zones.
+    let top = if first == 0 {
+        px(0.)
+    } else {
+        zones.line_y(first - 1, line_height) + zones.height(first - 1, line_height)
+    };
+    // An empty range collapses to the zones above its line.
+    let bottom = if empty && !block.does_not_collapse {
+        zones.line_y(first, line_height)
+    } else {
+        zones.line_y(end_line, line_height)
+    };
+    (top, bottom)
+}
+
 /// Vertical positions with view zones: zone `i` sits after view line
 /// `after` (-1 for above the first line).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -2279,6 +2313,9 @@ pub struct PrepaintState {
     /// The IME composition's boxes in high contrast themes.
     composition_boxes: Vec<Bounds<Pixels>>,
     gutter_bars: Vec<(Bounds<Pixels>, Hsla)>,
+    /// Monaco `linesDecorationsTooltip`: where the line decorations area
+    /// shows each title.
+    lines_tooltips: Vec<(Bounds<Pixels>, SharedString)>,
     /// Monaco `marginClassName` backgrounds.
     margin_backgrounds: Vec<(Bounds<Pixels>, Hsla)>,
     glyphs: Vec<(gpui::Point<Pixels>, ShapedLine)>,
@@ -2320,7 +2357,7 @@ pub struct PrepaintState {
     content_elements: Vec<gpui::AnyElement>,
     /// Glyph margin widgets, painted in the gutter under the sticky scroll.
     glyph_elements: Vec<gpui::AnyElement>,
-    /// The hovered folding control's tooltip.
+    /// The tooltip of the hovered folding control or line decoration.
     fold_tooltip: Option<gpui::AnyElement>,
     /// Overlay widgets, painted last, clipped to the editor.
     overlay_elements: Vec<gpui::AnyElement>,
@@ -2859,40 +2896,62 @@ impl Element for EditorElement {
             state.overlay_elements.push(element);
         }
         // Monaco's `linesDecorationsTooltip` on the folding control under
-        // the mouse.
+        // the mouse, else on a decoration's part of the line decorations
+        // area.
         let mouse = window.mouse_position();
-        if let Some(control) = state
+        // Not under the sticky scroll, which is above the gutter.
+        let in_gutter =
+            state.layout.bounds.contains(&mouse) && state.layout.sticky_line_at(mouse).is_none();
+        let tooltip = state
             .layout
             .fold_controls
             .iter()
             .find(|control| control.bounds.contains(&mouse))
-            .copied()
-            // Not under the sticky scroll, which is above the gutter.
-            .filter(|_| {
-                state.layout.bounds.contains(&mouse) && state.layout.sticky_line_at(mouse).is_none()
+            .map(|control| {
+                let text = if control.collapsed {
+                    "Click to expand the range."
+                } else {
+                    "Click to collapse the range."
+                };
+                (
+                    ElementId::from(("folding-control", control.row as usize)),
+                    control.bounds,
+                    SharedString::from(text),
+                )
             })
-        {
-            let text = if control.collapsed {
-                "Click to expand the range."
-            } else {
-                "Click to collapse the range."
-            };
+            .or_else(|| {
+                state
+                    .lines_tooltips
+                    .iter()
+                    .rev()
+                    .find(|(bounds, _)| bounds.contains(&mouse))
+                    .map(|(bounds, text)| {
+                        let y = f32::from(bounds.origin.y).max(0.) as usize;
+                        (
+                            ElementId::from(("lines-decorations-tooltip", y)),
+                            *bounds,
+                            text.clone(),
+                        )
+                    })
+            })
+            .filter(|_| in_gutter);
+        if let Some((id, bounds, text)) = tooltip {
             use gpui::{InteractiveElement as _, StatefulInteractiveElement as _, Styled as _};
             let mut element = gpui::div()
-                .id(("folding-control", control.row as usize))
-                .w(control.bounds.size.width)
-                .h(control.bounds.size.height)
+                .id(id)
+                .w(bounds.size.width)
+                .h(bounds.size.height)
                 .tooltip(crate::tooltip::tooltip(text, &state.colors))
                 .into_any_element();
             element.layout_as_root(
                 size(
-                    AvailableSpace::Definite(control.bounds.size.width),
-                    AvailableSpace::Definite(control.bounds.size.height),
+                    AvailableSpace::Definite(bounds.size.width),
+                    AvailableSpace::Definite(bounds.size.height),
                 ),
                 window,
                 cx,
             );
-            element.prepaint_at(control.bounds.origin, window, cx);
+            element.prepaint_at(bounds.origin, window, cx);
             state.fold_tooltip = Some(element);
         }
         // Monaco's `.lightBulbWidget:hover { cursor: pointer }` and its
@@ -4438,13 +4497,13 @@ fn prepaint_editor(
         if end_line <= first {
             continue;
         }
-        let top = if first == 0 {
-            px(0.)
-        } else {
-            layout.zones.line_y(first - 1, line_height)
-                + layout.zones.height(first - 1, line_height)
-        };
-        let bottom = layout.zones.line_y(end_line, line_height);
+        let (top, bottom) = block_extent(
+            &block,
+            first..end_line,
+            start == end,
+            &layout.zones,
+            line_height,
+        );
         let [padding_top, padding_right, padding_bottom, padding_left] = block.padding;
         let text = layout.text_bounds;
         block_borders.push((
@@ -4486,6 +4545,7 @@ fn prepaint_editor(
         _ => Vec::new(),
     };
     let mut gutter_bars: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
+    let mut lines_tooltips: Vec<(Bounds<Pixels>, SharedString)> = Vec::new();
     let mut margin_backgrounds: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
     let options_line_decorations_width = line_decorations_width;
     let mut glyphs: Vec<(gpui::Point<Pixels>, ShapedLine)> = Vec::new();
@@ -4638,6 +4698,21 @@ fn prepaint_editor(
             for color in bars {
                 let left = bounds.left() + glyph_width + numbers_width + px(2.);
                 gutter_bars.push((Bounds::new(point(left, top), size(px(3.), height)), color));
+            }
+            // Monaco `linesDecorationsTooltip`: the `title` of the element
+            // the line decorations area gets.
+            if let Some(tooltip) = &options.lines_decorations_tooltip
+                && (options.gutter_bar.is_some()
+                    || options.lines_decoration_text.is_some()
+                    || first_line.is_some())
+            {
+                lines_tooltips.push((
+                    Bounds::new(
+                        point(bounds.left() + glyph_width + numbers_width, top),
+                        size(options_line_decorations_width, height),
+                    ),
+                    tooltip.clone(),
+                ));
             }
             if let Some(color) = options.margin_background {
                 margin_backgrounds.push((
@@ -5848,6 +5923,7 @@ fn prepaint_editor(
         marker_marks,
         composition_boxes,
         gutter_bars,
+        lines_tooltips,
         margin_backgrounds,
         glyphs,
         lightbulb,
@@ -7612,6 +7688,108 @@ mod fold_control_tests {
                 .iter()
                 .any(|text| text == "Click to collapse the range.")
         }));
+    }
+
+    /// Monaco's `linesDecorationsTooltip` on a decoration's
+    /// `linesDecorationsClassName`.
+    #[gpui::test]
+    fn line_decorations_have_tooltips(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (editor, cx) =
+            cx.add_window_view(|window, cx| CodeEditor::with_text("a\nb\nc\n", window, cx));
+        editor.update(cx, |editor, cx| {
+            editor.delta_decorations(
+                &[],
+                vec![(
+                    text::PointUtf16::new(1, 0)..text::PointUtf16::new(1, 1),
+                    crate::DecorationOptions {
+                        gutter_bar: Some(gpui::red()),
+                        lines_decorations_tooltip: Some("Changed line".into()),
+                        ..Default::default()
+                    },
+                )],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let bar = editor.read_with(cx, |e, _| e.layout.as_ref().unwrap().gutter_bars[0].0);
+        cx.simulate_mouse_move(bar.center(), None, gpui::Modifiers::none());
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        cx.simulate_mouse_move(
+            bar.center() + gpui::point(gpui::px(0.), gpui::px(1.)),
+            None,
+            gpui::Modifiers::none(),
+        );
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(crate::tooltip::RENDERED.with(|r| r.borrow().iter().any(|t| t == "Changed line")));
+    }
+}
+
+#[cfg(test)]
+mod block_decoration_tests {
+    //! Monaco `BlockDecorations.render`: where a block decoration's box
+    //! goes, with `blockIsAfterEnd` and `blockDoesNotCollapse`.
+
+    use gpui::px;
+
+    use super::{ZoneLayout, block_extent};
+    use crate::decorations::BlockDecoration;
+
+    /// 10px lines, a 5px zone above view line 2 and a 7px one below it.
+    fn zones() -> ZoneLayout {
+        ZoneLayout::new(vec![(1, px(5.)), (2, px(7.))])
+    }
+
+    #[test]
+    fn blocks_span_the_zones_around_their_lines() {
+        let block = BlockDecoration::default();
+        // Rows 2..=2: from above its zone to below its own.
+        assert_eq!(
+            block_extent(&block, 2..3, false, &zones(), px(10.)),
+            (px(20.), px(42.))
+        );
+        // The first line has nothing above.
+        assert_eq!(
+            block_extent(&block, 0..1, false, &zones(), px(10.)),
+            (px(0.), px(10.))
+        );
+    }
+
+    #[test]
+    fn an_empty_range_collapses_unless_told_not_to() {
+        let block = BlockDecoration::default();
+        // Only the zone above line 2.
+        assert_eq!(
+            block_extent(&block, 2..3, true, &zones(), px(10.)),
+            (px(20.), px(25.))
+        );
+        let block = BlockDecoration {
+            does_not_collapse: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            block_extent(&block, 2..3, true, &zones(), px(10.)),
+            (px(20.), px(42.))
+        );
+    }
+
+    #[test]
+    fn after_end_covers_the_zones_below() {
+        let block = BlockDecoration {
+            is_after_end: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            block_extent(&block, 2..3, true, &zones(), px(10.)),
+            (px(35.), px(42.))
+        );
     }
 }
 

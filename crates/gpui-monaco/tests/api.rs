@@ -342,7 +342,8 @@ fn selection_change_reasons(cx: &mut TestAppContext) {
     cx.update(|_, cx| {
         cx.subscribe(&editor, move |_, event: &CodeEditorEvent, _| {
             if let CodeEditorEvent::SelectionsChanged(change) = event {
-                sink.borrow_mut().push((change.reason, change.source));
+                sink.borrow_mut()
+                    .push((change.reason, change.source.clone()));
             }
         })
         .detach();

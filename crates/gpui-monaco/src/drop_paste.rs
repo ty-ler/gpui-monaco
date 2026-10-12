@@ -543,6 +543,13 @@ impl CodeEditor {
         if !self.options.drop_into_editor.enabled || self.options.read_only {
             return;
         }
+        // Monaco `onDropIntoEditor`, which its drop controller listens to.
+        cx.emit(crate::CodeEditorEvent::DropIntoEditor(
+            crate::events::DropIntoEditorEvent {
+                position,
+                data: data.clone(),
+            },
+        ));
         self.clear_post_edit(cx);
         self.set_selections(&[Selection::collapsed(position)], cx);
         let context = self.provider_context_now(cx);
