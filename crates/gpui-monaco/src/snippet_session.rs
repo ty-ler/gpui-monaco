@@ -456,9 +456,24 @@ impl CodeEditor {
                 self.adjust_snippet_whitespace(range.start, adjust, &mut snippet, &config);
             let head = selection.head;
             let start_line = self.snapshot.line(selection.start().row);
+            // Monaco `SelectionBasedVariableResolver`: without selected
+            // text, a suggestion's `$SELECTION` is what typing last replaced
+            // at this cursor (its `OvertypingCapturer`).
+            let (selected_text, selection_is_multiline) = match (
+                self.text_in(range_of(selection)),
+                self.suggest
+                    .snippet_overtyped
+                    .as_ref()
+                    .and_then(|overtyped| overtyped.get(ix)),
+            ) {
+                (text, Some((overtyped, multiline))) if text.is_empty() => {
+                    (overtyped.clone(), *multiline)
+                }
+                (text, _) => (text, selection.start().row != selection.end().row),
+            };
             let context = SnippetVariableContext {
-                selected_text: self.text_in(range_of(selection)),
-                selection_is_multiline: selection.start().row != selection.end().row,
+                selected_text,
+                selection_is_multiline,
                 selection_line_leading_whitespace: leading_whitespace(
                     &start_line
                         .encode_utf16()

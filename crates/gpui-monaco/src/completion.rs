@@ -272,6 +272,12 @@ pub(crate) struct SuggestState {
     inline_wait: Option<InlineWait>,
     /// Sessions started, for their ids.
     sessions: u64,
+    /// Monaco `OvertypingCapturer`: each selection's text (and whether it
+    /// spans lines) when typing last replaced selections, for `$SELECTION`
+    /// in the suggestion inserted next.
+    overtyped: Vec<(String, bool)>,
+    /// What `$SELECTION` falls back to while a suggestion is inserted.
+    pub(crate) snippet_overtyped: Option<Vec<(String, bool)>>,
     /// What screen readers last read for the widget (Monaco reads the
     /// focused row as the list's active descendant), so it isn't read again
     /// on every keystroke.
@@ -1074,6 +1080,38 @@ impl CodeEditor {
         self.suggest.keep_alternatives = false;
     }
 
+    /// Monaco `OvertypingCapturer` on `onWillType`: remembers the text of
+    /// the selections typing is about to replace (for `$SELECTION` in a
+    /// suggestion inserted next), or forgets it when typing replaces none.
+    /// It's locked from a suggest request until the widget closes (Monaco's
+    /// `onDidTrigger` to `onDidCancel`), so typing that filters a session
+    /// keeps what the first keystroke replaced.
+    pub(crate) fn capture_overtyped(&mut self) {
+        /// Monaco `OvertypingCapturer._maxSelectionLength`.
+        const MAX_SELECTION_LENGTH: usize = 51_200;
+        if self.suggest.session.is_some() || self.suggest.task.is_some() {
+            return;
+        }
+        let selections = self.cursors.selections();
+        if selections.iter().all(Selection::is_empty) {
+            self.suggest.overtyped.clear();
+            return;
+        }
+        self.suggest.overtyped.clear();
+        for selection in selections {
+            let start = self.snapshot.point_utf16_to_offset(selection.start());
+            let end = self.snapshot.point_utf16_to_offset(selection.end());
+            let text = self.snapshot.rope().text_for_range(start..end);
+            // Monaco counts UTF-16 units, and stops at the first that's too
+            // long.
+            if text.encode_utf16().count() > MAX_SELECTION_LENGTH {
+                return;
+            }
+            let multiline = selection.start().row != selection.end().row;
+            self.suggest.overtyped.push((text, multiline));
+        }
+    }
+
     /// Drops the alternatives when the cursor moves (Monaco resets them on
     /// any cursor change it didn't cause).
     pub(crate) fn suggest_cursor_changed(&mut self) {
@@ -1091,7 +1129,6 @@ impl CodeEditor {
         cx: &gpui::App,
     ) -> Vec<u32> {
         use crate::cursor::smart_select::bracket_selection_ranges;
-        const FAR: u32 = 2 << 20;
         let ranges = self
             .with_bracket_context(cx, |rope, config, skip| {
                 bracket_selection_ranges(rope, config, position, skip)
@@ -1104,37 +1141,10 @@ impl CodeEditor {
                     &|_| false,
                 )
             });
-        let Some(block) = ranges.first() else {
+        if ranges.is_empty() {
             return Vec::new();
-        };
-        // Monaco `computeWordRanges`: the words of the block's lines (its
-        // last line excluded, as in Monaco), except numbers.
-        let (_, regex) = self.word_sources(cx);
-        let mut words: std::collections::HashMap<String, Vec<std::ops::Range<PointUtf16>>> =
-            Default::default();
-        for row in block.start.row..block.end.row {
-            let line = self.snapshot.line(row);
-            let mut start = 0;
-            while start < line.len() {
-                let Ok(Some(found)) = regex.find_from_pos(&line, start) else {
-                    break;
-                };
-                start = if found.end() > found.start() {
-                    found.end()
-                } else {
-                    found.end() + line[found.end()..].chars().next().map_or(1, char::len_utf8)
-                };
-                let word = found.as_str();
-                if word.is_empty() || word.parse::<f64>().is_ok() {
-                    continue;
-                }
-                let column = |byte: usize| line[..byte].encode_utf16().count() as u32;
-                words.entry(word.to_string()).or_default().push(
-                    PointUtf16::new(row, column(found.start()))
-                        ..PointUtf16::new(row, column(found.end())),
-                );
-            }
         }
+        let (_, regex) = self.word_sources(cx);
         // The word being typed doesn't count.
         let word_start = self.word_start_at(position);
         let current: String = self
@@ -1145,33 +1155,19 @@ impl CodeEditor {
             .take((position.column - word_start) as usize)
             .map(|u| char::from_u32(u as u32).unwrap_or('\u{fffd}'))
             .collect();
-        words.remove(&current);
+        let Some(distance) = crate::suggest::word_distance::WordDistance::new(
+            self.snapshot.rope(),
+            ranges,
+            &regex,
+            &current,
+        ) else {
+            return Vec::new();
+        };
+        // Monaco's completion model asks for each item at its request
+        // position.
         items
             .iter()
-            .map(|item| {
-                if item.kind == CompletionItemKind::Keyword {
-                    return FAR;
-                }
-                let Some(lines) = words.get(item.label.as_ref()) else {
-                    return FAR;
-                };
-                // The occurrence at or last before the request position.
-                let anchor = position..position;
-                let best = match lines
-                    .binary_search_by(|r| r.start.cmp(&anchor.start).then(r.end.cmp(&anchor.end)))
-                {
-                    Ok(ix) => &lines[ix],
-                    Err(ix) => &lines[ix.saturating_sub(1)],
-                };
-                let mut distance = ranges.len() as u32;
-                for range in &ranges {
-                    if !(range.start <= best.start && best.end <= range.end) {
-                        break;
-                    }
-                    distance -= 1;
-                }
-                distance
-            })
+            .map(|item| distance.distance(position, item))
             .collect()
     }
 
@@ -2328,6 +2324,8 @@ impl CodeEditor {
         } else {
             crate::snippet::parser::SnippetParser::escape(item.insert_text())
         };
+        // Monaco passes its `OvertypingCapturer` to the snippet controller.
+        self.suggest.snippet_overtyped = Some(self.suggest.overtyped.clone());
         self.insert_snippet(
             &template,
             crate::snippet_session::SnippetInsertOptions {
@@ -2340,6 +2338,7 @@ impl CodeEditor {
             },
             cx,
         );
+        self.suggest.snippet_overtyped = None;
         self.model().update(cx, |model, _| {
             model.end_transaction();
             model.push_stack_element();

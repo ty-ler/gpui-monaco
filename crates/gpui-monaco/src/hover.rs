@@ -1302,6 +1302,8 @@ impl CodeEditor {
             foreground: colors.hover_foreground,
             link: colors.text_link_foreground,
             code_background: colors.text_code_block_background,
+            // Monaco's hover CSS doesn't round inline code.
+            code_corner_radius: px(0.),
             code_font: self.options.font_family.clone(),
             font_size,
             // Monaco `ContentHoverWidget._updateFont` and

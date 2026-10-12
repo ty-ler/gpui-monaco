@@ -705,6 +705,16 @@ pub(crate) struct LineStyle {
     pub tab_size: u32,
 }
 
+/// Whether [`render_line`] draws only in its own rows (whole pixel rows,
+/// and glyphs no taller than the line), so lines drawn apart can be put
+/// together.
+pub(crate) fn lines_are_separate(style: &LineStyle) -> bool {
+    let line_height = style.minimap_line_height;
+    line_height.fract() == 0.
+        && (line_height == 1.
+            || line_height >= f64::from(sheet::BASE_CHAR_HEIGHT * style.font_scale))
+}
+
 /// Monaco `InnerMinimap._renderLine`: one line's UTF-16 `content`, colored
 /// by `color_at(utf16 index)`, at canvas row `dy`.
 pub(crate) fn render_line(

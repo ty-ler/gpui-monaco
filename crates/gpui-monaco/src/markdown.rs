@@ -18,17 +18,19 @@
 //! The text is laid out by GPUI's `StyledText`, which can't be selected:
 //! hovers copy through their copy button, and suggest details through
 //! `editor.action.suggestWidgetCopy` (Monaco lets the text be selected).
-//! Inline code is padded with spaces in its background but isn't rounded,
-//! and an image inside a paragraph is placed on its own line.
+//! Inline code is padded with spaces in its background, rounded by
+//! [`MarkdownStyle::code_corner_radius`] (the backgrounds are drawn under
+//! the text, as GPUI's text backgrounds are square), and an image inside a
+//! paragraph is placed on its own line.
 
 use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, FontStyle, FontWeight, HighlightStyle, Hsla, Image, ImageFormat, ImageSource,
-    InteractiveText, IntoElement, ParentElement, Pixels, SharedString, SharedUri,
-    StrikethroughStyle, Styled, StyledImage as _, StyledText, UnderlineStyle, div, img, px,
-    relative,
+    AnyElement, App, BorderStyle, Bounds, Corners, Edges, FontStyle, FontWeight, HighlightStyle,
+    Hsla, Image, ImageFormat, ImageSource, InteractiveText, IntoElement, ParentElement, Pixels,
+    Point, SharedString, SharedUri, StrikethroughStyle, Styled, StyledImage as _, StyledText,
+    UnderlineStyle, canvas, div, img, point, px, quad, relative,
 };
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
@@ -45,6 +47,10 @@ pub struct MarkdownStyle {
     pub link: Hsla,
     /// Background of inline code spans (`textCodeBlock.background`).
     pub code_background: Hsla,
+    /// Corner radius of inline code backgrounds: Monaco's suggest details
+    /// and parameter hints round them by 3px (`border-radius: 3px`); its
+    /// hover CSS doesn't (zero).
+    pub code_corner_radius: Pixels,
     /// Font family of code spans and code blocks (the editor's).
     pub code_font: SharedString,
     /// Base text size; headings are scaled up from it.
@@ -854,6 +860,34 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The background boxes of a span of text from its character boundaries'
+/// positions (in order): one per line it's wrapped over, from the span's
+/// start (or the line's `left` after a wrap) to its last boundary there.
+fn code_background_bounds(
+    points: &[Point<Pixels>],
+    left: Pixels,
+    line_height: Pixels,
+) -> Vec<Bounds<Pixels>> {
+    let mut boxes = Vec::new();
+    let mut ix = 0;
+    while ix < points.len() {
+        let y = points[ix].y;
+        let start = if ix == 0 { points[0].x } else { left };
+        let mut end = start;
+        while let Some(at) = points.get(ix).filter(|at| at.y == y) {
+            end = end.max(at.x);
+            ix += 1;
+        }
+        if end > start {
+            boxes.push(Bounds::from_corners(
+                point(start, y),
+                point(end, y + line_height),
+            ));
+        }
+    }
+    boxes
+}
+
 /// Renders blocks with a style.
 struct Renderer<'a> {
     style: &'a MarkdownStyle,
@@ -867,6 +901,24 @@ struct Renderer<'a> {
 impl Renderer<'_> {
     fn inline(&mut self, inline: Inline, font_size: Pixels) -> AnyElement {
         let style = self.style;
+        // Rounded code backgrounds are drawn under the text, at each
+        // character boundary's position (to follow wrapping).
+        let rounded_code: Vec<Vec<usize>> = if style.code_corner_radius > px(0.) {
+            inline
+                .spans
+                .iter()
+                .filter(|(_, span)| span.code && span.background.is_none())
+                .map(|(range, _)| {
+                    inline.text[range.clone()]
+                        .char_indices()
+                        .map(|(ix, _)| range.start + ix)
+                        .chain([range.end])
+                        .collect()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut highlights: Vec<(Range<usize>, HighlightStyle)> = inline
             .spans
             .iter()
@@ -894,7 +946,7 @@ impl Renderer<'_> {
                 highlight.color = span.color;
                 highlight.background_color = span
                     .background
-                    .or(span.code.then_some(style.code_background));
+                    .or((span.code && rounded_code.is_empty()).then_some(style.code_background));
                 (range.clone(), highlight)
             })
             .collect();
@@ -928,6 +980,35 @@ impl Renderer<'_> {
         let text = StyledText::new(inline.text)
             .with_highlights(highlights)
             .with_font_family_overrides(overrides);
+        let code_backgrounds = (!rounded_code.is_empty()).then(|| {
+            let layout = text.layout().clone();
+            let (radius, color) = (style.code_corner_radius, style.code_background);
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let line_height = layout.line_height();
+                    let left = layout.bounds().left();
+                    for boundaries in &rounded_code {
+                        let points: Vec<_> = boundaries
+                            .iter()
+                            .filter_map(|ix| layout.position_for_index(*ix))
+                            .collect();
+                        for bounds in code_background_bounds(&points, left, line_height) {
+                            window.paint_quad(quad(
+                                bounds,
+                                Corners::all(radius),
+                                color,
+                                Edges::default(),
+                                gpui::transparent_black(),
+                                BorderStyle::Solid,
+                            ));
+                        }
+                    }
+                },
+            )
+            .absolute()
+            .size_full()
+        });
         let element = if inline.links.is_empty() {
             text.into_any_element()
         } else {
@@ -938,7 +1019,13 @@ impl Renderer<'_> {
                 .on_click(ranges, move |ix, _, cx| open_link(&urls[ix], trusted, cx))
                 .into_any_element()
         };
-        div().text_size(font_size).child(element).into_any_element()
+        div()
+            .text_size(font_size)
+            .when_some(code_backgrounds, |div, backgrounds| {
+                div.relative().child(backgrounds)
+            })
+            .child(element)
+            .into_any_element()
     }
 
     fn blocks(&mut self, blocks: Vec<Block>, depth: usize) -> Vec<AnyElement> {
@@ -1327,6 +1414,35 @@ mod tests {
         assert_eq!(inline.text, "use \u{2004}foo\u{2004} here");
         assert!(style_at(inline, "use ".len()).code);
         assert!(!style_at(inline, inline.text.len() - 1).code);
+    }
+
+    #[test]
+    fn rounded_code_backgrounds_follow_wrapping() {
+        let at = |x: f32, y: f32| point(px(x), px(y));
+        // On one line: one box from the first boundary to the last.
+        assert_eq!(
+            code_background_bounds(&[at(10., 0.), at(18., 0.), at(26., 0.)], px(0.), px(19.)),
+            [Bounds::from_corners(at(10., 0.), at(26., 19.))]
+        );
+        // Wrapped after its second character: the rest starts at the
+        // line's left.
+        assert_eq!(
+            code_background_bounds(
+                &[
+                    at(90., 0.),
+                    at(98., 0.),
+                    at(106., 0.),
+                    at(8., 19.),
+                    at(16., 19.)
+                ],
+                px(2.),
+                px(19.)
+            ),
+            [
+                Bounds::from_corners(at(90., 0.), at(106., 19.)),
+                Bounds::from_corners(at(2., 19.), at(16., 38.)),
+            ]
+        );
     }
 
     #[test]

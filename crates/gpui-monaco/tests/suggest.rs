@@ -641,6 +641,95 @@ fn locality_bonus_prefers_words_in_the_block(cx: &mut TestAppContext) {
     assert_eq!(labels(&editor, cx).unwrap(), vec!["beta", "alpha"]);
 }
 
+/// A snippet suggestion wrapping `$SELECTION`.
+fn provide_wrapping_snippet(cx: &mut VisualTestContext) {
+    provide(cx, |_| {
+        vec![CompletionItem {
+            insert_text: Some("log($SELECTION)".into()),
+            insert_text_is_snippet: true,
+            ..CompletionItem::new("log", CompletionItemKind::Snippet)
+        }]
+    });
+}
+
+/// Monaco's `OvertypingCapturer`: typing over a selection starts a
+/// suggestion, and `$SELECTION` in the one inserted is the text typed over.
+#[gpui::test]
+fn selection_variable_gets_the_overtyped_text(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("foo bar\nbaz", |_| {}, cx);
+    provide_wrapping_snippet(cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::from_range(
+                PointUtf16::new(0, 0)..PointUtf16::new(0, 3),
+                false,
+            )],
+            cx,
+        )
+    });
+    cx.simulate_input("l");
+    settle(cx);
+    // Typing on filters the session; it still has `foo`.
+    cx.simulate_input("o");
+    settle(cx);
+    assert_eq!(labels(&editor, cx).unwrap(), vec!["log"]);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "log(foo) bar\nbaz");
+
+    // Multi-line text keeps its lines; typing without a selection forgets
+    // it.
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::from_range(
+                PointUtf16::new(0, 9)..PointUtf16::new(1, 3),
+                false,
+            )],
+            cx,
+        )
+    });
+    cx.simulate_input("l");
+    settle(cx);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "log(foo) log(bar\nbaz)");
+    cx.simulate_input(" l");
+    settle(cx);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "log(foo) log(bar\nbaz) log()");
+}
+
+/// Monaco feeds `WordDistance` to word-based suggestions as to any other:
+/// with `localityBonus` the words used in the cursor's block come first.
+#[gpui::test]
+fn locality_bonus_ranks_word_based_suggestions(cx: &mut TestAppContext) {
+    let source = "fn a() {\n    alpha\n}\nfn b() {\n    beta;\n    \n}\n";
+    let (editor, cx) = setup(source, |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    move_to(&editor, cx, 5, 4);
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    // Sorted by label.
+    assert_eq!(
+        labels(&editor, cx).unwrap(),
+        vec!["a", "alpha", "b", "beta", "fn"]
+    );
+    cx.simulate_keystrokes("escape");
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.suggest.locality_bonus = true;
+        e.update_options(options, cx);
+    });
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    // `beta` is in the block; `b` and `fn` on its first line, outside its
+    // braces; `a` and `alpha` elsewhere.
+    assert_eq!(
+        labels(&editor, cx).unwrap(),
+        vec!["beta", "b", "fn", "a", "alpha"]
+    );
+}
+
 #[gpui::test]
 fn explicit_sessions_freeze_and_automatic_ones_close(cx: &mut TestAppContext) {
     let (editor, cx) = setup("", |_| {}, cx);

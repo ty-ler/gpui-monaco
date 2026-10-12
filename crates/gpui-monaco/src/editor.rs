@@ -2247,6 +2247,22 @@ impl CodeEditor {
         ))
     }
 
+    /// The "Show more" chips the last frame drew; for tests.
+    #[doc(hidden)]
+    pub fn overflow_chips_for_tests(&self) -> Vec<Bounds<Pixels>> {
+        self.layout
+            .as_ref()
+            .map_or_else(Vec::new, |layout| layout.overflow_chips().collect())
+    }
+
+    /// The scroll position the last frame showed (on its way to
+    /// [`Self::scroll_position`] while smooth scrolling); for tests.
+    #[doc(hidden)]
+    pub fn shown_scroll_position_for_tests(&self) -> Option<Point<Pixels>> {
+        let layout = self.layout.as_ref()?;
+        Some(point(layout.scroll_left, layout.scroll_top))
+    }
+
     pub(crate) fn cursor_config(&self, cx: &App) -> CursorConfig {
         let model_options = self.model.read(cx).options();
         CursorConfig {
@@ -2459,6 +2475,8 @@ impl CodeEditor {
                 cx.notify();
             }
             TextModelEvent::SyntaxUpdated { ranges } => {
+                self.minimap_cache
+                    .note_tokens_changed(ranges, model.read(cx));
                 self.update_bracket_highlights(cx);
                 self.refresh_bracket_colors(cx);
                 // Syntax folding follows the new trees.
@@ -3410,6 +3428,7 @@ impl CodeEditor {
         }
         let typed = gpui::SharedString::from(text.to_string());
         self.begin_update(cx);
+        self.capture_overtyped();
         cx.emit(CodeEditorEvent::WillType(typed.clone()));
         self.type_text_inner(text, cx);
         cx.emit(CodeEditorEvent::DidType(typed));

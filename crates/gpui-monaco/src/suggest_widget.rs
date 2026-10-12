@@ -1619,6 +1619,8 @@ impl SuggestWidget {
             font_size: self.metrics.font_size,
             line_height: f32::from(self.metrics.item_height) / f32::from(self.metrics.font_size),
             foreground: colors.suggest_foreground,
+            // Monaco `.suggest-details code`.
+            code_corner_radius: px(3.),
             ..self.style.clone()
         };
         let detail = detail.map(|detail| -> SharedString {
