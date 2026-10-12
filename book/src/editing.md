@@ -137,7 +137,7 @@ Ctrl+G opens go to line, and Cmd/Ctrl+Shift+O opens go to symbol. Both use a qui
 - **`>command`:** the command palette (F1). It runs any supported editor action by label, and recently used actions come first.
 - **Anything else:** lists the prefixes.
 
-Up, Down, Page Up and Page Down move through the list. Enter goes to the item, while Escape (or clicking elsewhere) closes the list and restores the view. `CodeEditor::open_quick_access(prefix, …)` opens it from code.
+Up and Down move through the list. Page Down focuses the last fully visible row, then scrolls a page; Page Up does the same upwards (Monaco's `focusNextPage` / `focusPreviousPage`). Enter goes to the item, while Escape (or clicking elsewhere) closes the list and restores the view. `CodeEditor::open_quick_access(prefix, …)` opens it from code.
 
 Right-click or Shift+F10 opens the context menu. It holds the navigation, editing, clipboard and command palette items that can run. Host actions join it with `.context_menu(group, order)`; Monaco's groups are `navigation`, `1_modification`, `9_cutcopypaste` and `z_commands`.
 
