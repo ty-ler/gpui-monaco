@@ -158,34 +158,49 @@ fn can_break(prev_code: u32, prev: CharClass, code: u32, class: CharClass, keep_
                 && prev != CharClass::BreakBefore))
 }
 
+/// Monaco's continuation indent: `computeWrappedTextIndentLength`
+/// (monospace), or with `measure` the DOM computer's (`createLineBreaks`
+/// in `domLineBreaksComputer.ts`). The DOM computer adds `tab_size` per
+/// extra indent without rounding to a tab stop, and sticks to column 1 when
+/// the existing indent leaves no room for a full-width character (the
+/// extra indent still applies).
 fn wrapped_text_indent_length(
     line: &[u16],
     tab_size: u32,
     first_break_column: u32,
     indent: WrappingIndent,
+    measure: Option<&dyn MeasureChar>,
 ) -> u32 {
     if indent == WrappingIndent::None {
         return 0;
-    }
-    let Some(first_non_ws) = line
-        .iter()
-        .position(|&u| u != b' ' as u16 && u != b'\t' as u16)
-    else {
-        return 0;
-    };
-    let mut length = 0;
-    for &unit in &line[..first_non_ws] {
-        length += if unit == b'\t' as u16 {
-            tab_size - length % tab_size
-        } else {
-            1
-        };
     }
     let extra_tabs = match indent {
         WrappingIndent::DeepIndent => 2,
         WrappingIndent::Indent => 1,
         _ => 0,
     };
+    let first_non_ws = line
+        .iter()
+        .position(|&u| u != b' ' as u16 && u != b'\t' as u16);
+    let mut length = 0;
+    for &unit in &line[..first_non_ws.unwrap_or(0)] {
+        length += if unit == b'\t' as u16 {
+            tab_size - length % tab_size
+        } else {
+            1
+        };
+    }
+    if let Some(measure) = measure {
+        // Monaco: the indent's spaces and a full-width character (two
+        // columns) don't fit.
+        if length as f32 * measure.columns(' ') + 2. > first_break_column as f32 {
+            length = 0;
+        }
+        return length + tab_size * extra_tabs;
+    }
+    if first_non_ws.is_none() {
+        return 0;
+    }
     for _ in 0..extra_tabs {
         length += tab_size - length % tab_size;
     }
@@ -362,7 +377,13 @@ fn line_breaks(
         return None;
     }
     let tab_size = tab_size.max(1);
-    let indent = wrapped_text_indent_length(&units, tab_size, first_break_column, wrapping_indent);
+    let indent = wrapped_text_indent_length(
+        &units,
+        tab_size,
+        first_break_column,
+        wrapping_indent,
+        measure,
+    );
     // Monaco's DOM computer indents by space widths.
     let space = measure.map_or(1., |m| m.columns(' '));
     // A character's width: its columns, or its measured width (tabs and
@@ -729,6 +750,68 @@ mod tests {
             Some(&Proportional),
         )
         .map_or_else(Vec::new, |data| data.break_offsets)
+    }
+
+    fn measured_indent(line: &str, column: u32, indent: WrappingIndent) -> u32 {
+        compute_measured_line_breaks(
+            &WrapClassifier::default(),
+            line,
+            4,
+            Some(column),
+            indent,
+            false,
+            false,
+            Some(&Proportional),
+        )
+        .expect("wraps")
+        .wrapped_text_indent_length
+    }
+
+    fn monospace_indent(line: &str, column: u32, indent: WrappingIndent) -> u32 {
+        compute_line_breaks(
+            &WrapClassifier::default(),
+            line,
+            4,
+            Some(column),
+            indent,
+            false,
+        )
+        .expect("wraps")
+        .wrapped_text_indent_length
+    }
+
+    /// Monaco's DOM line-break computer (`wrappingStrategy: advanced`):
+    /// the continuation indent is the existing indent plus `tabSize` per
+    /// extra indent, not rounded to a tab stop, and only the existing
+    /// indent decides sticking to column 1.
+    #[test]
+    fn measured_continuation_indent() {
+        let words = "aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk lll";
+        let line = |indent: &str| format!("{indent}{words}");
+        // Monospace rounds to the tab stop: 4 and 8.
+        assert_eq!(monospace_indent(&line("  "), 20, WrappingIndent::Indent), 4);
+        assert_eq!(
+            monospace_indent(&line(" "), 20, WrappingIndent::DeepIndent),
+            8
+        );
+        // Measured: 2 + 4 and 1 + 8.
+        assert_eq!(measured_indent(&line("  "), 20, WrappingIndent::Indent), 6);
+        assert_eq!(
+            measured_indent(&line(" "), 20, WrappingIndent::DeepIndent),
+            9
+        );
+        assert_eq!(measured_indent(&line("\t "), 20, WrappingIndent::Same), 5);
+        // The extra indent alone doesn't stick to column 1 (monospace
+        // does: 8 + 2 > 9).
+        assert_eq!(measured_indent(&line(""), 9, WrappingIndent::DeepIndent), 8);
+        assert_eq!(
+            monospace_indent(&line(""), 9, WrappingIndent::DeepIndent),
+            0
+        );
+        // The existing indent leaving no room for a full-width character
+        // does, and the extra indent still applies.
+        let deep = format!("{}{words}", " ".repeat(8));
+        assert_eq!(measured_indent(&deep, 9, WrappingIndent::Indent), 4);
     }
 
     /// `text` with `|` at each break, with `wrapOnEscapedLineFeeds`.

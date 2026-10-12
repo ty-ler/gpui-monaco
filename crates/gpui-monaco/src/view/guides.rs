@@ -325,12 +325,15 @@ pub struct BracketGuideOptions {
 
 /// Monaco `getLinesBracketGuides`: the guides of each of `rows`, sorted by
 /// visible column. `pairs` are the pairs intersecting the rows, sorted by
-/// opening bracket.
+/// opening bracket. With the active position outside `rows`,
+/// `pairs_at_active` are the pairs intersecting its row (the same way), for
+/// Monaco's query of the pairs at the cursor.
 pub fn lines_bracket_guides(
     rope: &Rope,
     rows: Range<u32>,
     pairs: &[GuidePair],
     active_position: Option<PointUtf16>,
+    pairs_at_active: Option<&[GuidePair]>,
     options: BracketGuideOptions,
     tab_size: u32,
 ) -> Vec<Vec<BracketGuide>> {
@@ -340,12 +343,22 @@ pub fn lines_bracket_guides(
         return result;
     }
     let (start_row, end_row) = (rows.start, rows.end - 1);
-    // Monaco: the innermost pair strictly containing the cursor.
-    let active = active_position.and_then(|position| {
-        pairs
-            .iter()
-            .rposition(|pair| pair.open.start < position && position < pair.close.end)
-    });
+    // Monaco: the innermost pair strictly containing the cursor, among the
+    // pairs in view when the cursor is, else among the pairs at the
+    // cursor; it's highlighted only if in view.
+    let active = active_position
+        .filter(|_| !pairs.is_empty())
+        .and_then(|position| {
+            let candidates = if rows.contains(&position.row) {
+                pairs
+            } else {
+                pairs_at_active.unwrap_or_default()
+            };
+            candidates
+                .iter()
+                .rfind(|pair| pair.open.start < position && position < pair.close.end)
+        })
+        .map(|pair| (pair.open.clone(), pair.close.clone()));
     let visible = |point: PointUtf16| -> i64 {
         crate::cursor::strings::visible_column_from_column(
             &rope.line(point.row),
@@ -357,8 +370,10 @@ pub fn lines_bracket_guides(
     let mut push = |row: u32, guide: BracketGuide| {
         result[(row - start_row) as usize].push(guide);
     };
-    for (ix, pair) in pairs.iter().enumerate() {
-        let is_active = active == Some(ix);
+    for pair in pairs {
+        let is_active = active
+            .as_ref()
+            .is_some_and(|(open, close)| *open == pair.open && *close == pair.close);
         if !is_active && !options.include_inactive {
             continue;
         }
@@ -510,8 +525,15 @@ mod tests {
             horizontal: crate::options::BracketPairGuides::On,
             highlight_active: true,
         };
-        let guides =
-            lines_bracket_guides(&rope, 0..5, &pairs, Some(PointUtf16::new(2, 8)), options, 4);
+        let guides = lines_bracket_guides(
+            &rope,
+            0..5,
+            &pairs,
+            Some(PointUtf16::new(2, 8)),
+            None,
+            options,
+            4,
+        );
         assert_eq!(
             summarize(guides.clone()),
             vec![
@@ -544,6 +566,7 @@ mod tests {
             0..5,
             &pairs,
             Some(PointUtf16::new(2, 8)),
+            None,
             BracketGuideOptions {
                 include_inactive: false,
                 horizontal: crate::options::BracketPairGuides::Active,
@@ -566,6 +589,49 @@ mod tests {
         );
     }
 
+    /// Monaco `getLinesBracketGuides` with the cursor out of view: the
+    /// active pair is the innermost pair at the cursor, visible or not, and
+    /// only a visible one is highlighted.
+    #[test]
+    fn active_pair_with_the_cursor_out_of_view() {
+        let text = "{\n\n  {\n    a\n    b\n    c\n  }\n}";
+        let rope = Rope::from(text);
+        let all = guide_pairs(text);
+        let in_rows = |rows: Range<u32>| -> Vec<GuidePair> {
+            all.iter()
+                .filter(|p| p.open.start.row < rows.end && p.close.end.row >= rows.start)
+                .cloned()
+                .collect()
+        };
+        let options = BracketGuideOptions {
+            include_inactive: true,
+            horizontal: crate::options::BracketPairGuides::Active,
+            highlight_active: true,
+        };
+        let cursor = PointUtf16::new(5, 4);
+        let guides = |rows: Range<u32>| {
+            lines_bracket_guides(
+                &rope,
+                rows.clone(),
+                &in_rows(rows),
+                Some(cursor),
+                Some(&in_rows(5..6)),
+                options,
+                4,
+            )
+        };
+        // Only the outer block's top in view: the cursor's pair (the inner
+        // one) isn't, so nothing is active (not the outer pair, which
+        // contains the cursor too).
+        let top = guides(0..2);
+        assert_eq!(top[0].len(), 1);
+        assert!(top.iter().flatten().all(|g| !g.active));
+        // With the inner block in view, it's active.
+        let shown = guides(0..5);
+        assert!(shown[3].iter().any(|g| g.active && g.level == 1));
+        assert!(shown.iter().flatten().all(|g| !g.active || g.level == 1));
+    }
+
     #[test]
     fn text_before_the_closing_bracket_turns_at_the_bottom() {
         // `x }`: the guide runs through the closing line and turns along
@@ -576,6 +642,7 @@ mod tests {
             &rope,
             0..3,
             &guide_pairs(text),
+            None,
             None,
             BracketGuideOptions {
                 include_inactive: true,

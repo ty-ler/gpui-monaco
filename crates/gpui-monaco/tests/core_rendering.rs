@@ -333,6 +333,69 @@ fn cursor_geometry(cx: &mut TestAppContext) {
     assert_px(cursors(&editor, cx)[0].size.width, char_width);
 }
 
+/// Monaco's DOM line-break computer (`wrappingStrategy: advanced`): with
+/// `wrappingIndent: indent`, a line indented by 2 continues 2 + 4 columns
+/// (of spaces) in, where the monospace computer rounds to the tab stop (4).
+#[gpui::test]
+fn advanced_wrapping_indents_by_tab_size(cx: &mut TestAppContext) {
+    use gpui_monaco::options::WrappingStrategy;
+    let text = "  aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk lll mmm";
+    let (editor, cx) = setup(
+        text,
+        |o| {
+            wrap_at(20)(o);
+            o.wrapping_indent = WrappingIndent::Indent;
+        },
+        cx,
+    );
+    // Tab size 4 (not the 2 detected from the text).
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    model.update(cx, |m, cx| {
+        let mut options = m.options().clone();
+        options.tab_size = 4;
+        m.update_options(options, cx);
+    });
+    let indent = |strategy, cx: &mut VisualTestContext| {
+        editor.update(cx, |e, cx| {
+            let mut options = e.options().clone();
+            options.wrapping_strategy = strategy;
+            e.update_options(options, cx);
+        });
+        paint(cx);
+        let segments = editor.read_with(cx, |e, _| e.view_line_segments_for_tests());
+        assert!(segments.len() > 1, "{segments:?}");
+        position_of(&editor, p(1, segments[1].1.start + 1), cx).x
+            - position_of(&editor, p(1, 1), cx).x
+    };
+    let simple = indent(WrappingStrategy::Simple, cx);
+    let advanced = indent(WrappingStrategy::Advanced, cx);
+    assert_px(advanced, simple / 4. * 6.);
+}
+
+/// Monaco `ViewCursor._getGraphemeAwarePosition`: a block cursor covers the
+/// whole grapheme after it (a decomposed `é`), and inside a grapheme it
+/// draws at the grapheme's start.
+#[gpui::test]
+fn block_cursor_covers_a_grapheme(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("e\u{301}x", |o| o.cursor_style = CursorStyle::Block, cx);
+    set(&editor, &[Selection::collapsed(p(1, 1))], cx);
+    let start = position_of(&editor, p(1, 1), cx).x;
+    let end = position_of(&editor, p(1, 3), cx).x;
+    let block = cursors(&editor, cx)[0];
+    assert_px(block.left(), start);
+    assert_px(block.size.width, end - start);
+    // Between `e` and the accent: the same block.
+    set(&editor, &[Selection::collapsed(p(1, 2))], cx);
+    let inside = cursors(&editor, cx)[0];
+    assert_px(inside.left(), start);
+    assert_px(inside.size.width, end - start);
+    // On `x`: one character.
+    set(&editor, &[Selection::collapsed(p(1, 3))], cx);
+    let x = cursors(&editor, cx)[0];
+    assert_px(x.left(), end);
+    assert_px(x.size.width, position_of(&editor, p(1, 4), cx).x - end);
+}
+
 /// Monaco `renderControlCharacters`: directional formatting characters show
 /// as `[U+202E]`, eight columns wide (so they can't reorder the line), and
 /// C0 controls as their control pictures; tabs after them keep to the tab

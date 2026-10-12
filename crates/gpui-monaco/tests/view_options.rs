@@ -157,6 +157,51 @@ fn solid_cursors_dont_blink(cx: &mut TestAppContext) {
     assert!(hidden);
 }
 
+/// Monaco `ViewCursors.onConfigurationChanged` calls `_updateBlinking`:
+/// turning the editor read-only (or the cursor solid) shows the cursor at
+/// once and stops the blink.
+#[gpui::test]
+fn option_changes_reset_the_blink(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("abc", |_| {}, cx);
+    let visible =
+        |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.cursor_visible_for_tests());
+    let hide = |cx: &mut VisualTestContext| {
+        for _ in 0..4 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(250));
+            cx.run_until_parked();
+            if !visible(cx) {
+                return;
+            }
+        }
+        panic!("the cursor never blinked off");
+    };
+    let set = |f: fn(&mut EditorOptions), cx: &mut VisualTestContext| {
+        editor.update(cx, |e, cx| {
+            let mut o = e.options().clone();
+            f(&mut o);
+            e.update_options(o, cx);
+        });
+        cx.run_until_parked();
+    };
+    let stays_visible = |cx: &mut VisualTestContext| {
+        assert!(visible(cx));
+        for _ in 0..4 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(500));
+            cx.run_until_parked();
+            assert!(visible(cx));
+        }
+    };
+    hide(cx);
+    set(|o| o.read_only = true, cx);
+    stays_visible(cx);
+    set(|o| o.read_only = false, cx);
+    hide(cx);
+    set(|o| o.cursor_blinking = CursorBlinking::Solid, cx);
+    stays_visible(cx);
+}
+
 fn long_text() -> String {
     (0..500)
         .map(|i| format!("line {i}"))
