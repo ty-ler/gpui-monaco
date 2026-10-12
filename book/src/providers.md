@@ -307,7 +307,9 @@ Clicking a lens runs its command through [`register_command`](editing.md) handle
 
 ## Linked editing
 
-With `linked_editing` on, ranges that belong together are edited together. In HTML, renaming an element's start tag renames its end tag. Without a provider, tag pairs come from the syntax tree. A `LinkedEditingRangeProvider` supplies ranges for anything else, optionally with a `word_pattern` that ends linked editing when the text no longer matches it.
+With `linked_editing` on, ranges that belong together are edited together. In HTML, renaming an element's start tag renames its end tag. Without a provider, tag pairs come from the syntax tree. A `LinkedEditingRangeProvider` supplies ranges for anything else, optionally with a `word_pattern` that ends linked editing when the text no longer matches it. Without one, the language's word pattern applies, or Monaco's default word pattern for a language without one, so typing a space or other separator always ends it.
+
+Turning the option off removes the ranges at once. Turning it on, registering or removing a provider, and changing the model or its language ask for the ranges at the cursor again.
 
 The linked ranges are highlighted (`editor.linkedEditingBackground`). Escape ends it, and Cmd/Ctrl+Shift+F2 starts it even with the option off.
 

@@ -1064,6 +1064,10 @@ impl CodeEditor {
         // Providers coming and going (e.g. a language server starting) and
         // refresh requests are noticed when painting.
         subscriptions.extend(crate::providers::observe_language_features(cx));
+        subscriptions.push(crate::providers::observe_provider_registry(
+            cx,
+            |this: &mut Self, cx| this.reinitialize_linked_editing(false, cx),
+        ));
         subscriptions.extend(crate::editor_commands::subscriptions(cx));
         subscriptions.push(
             cx.observe_global::<crate::font_zoom::EditorZoom>(|this, cx| this.on_zoom_changed(cx)),
@@ -1384,6 +1388,8 @@ impl CodeEditor {
             cx,
         );
         self.emit_scroll_changed(cx);
+        // Monaco's linked editing `onDidChangeModel`.
+        self.reinitialize_linked_editing(true, cx);
         cx.emit(CodeEditorEvent::ModelChanged(change));
         cx.notify();
     }
@@ -1548,6 +1554,12 @@ impl CodeEditor {
             self.stop_inertial_scroll();
         }
         self.folding_options_changed(&old_folding, cx);
+        // Monaco's linked editing `onDidChangeConfiguration`. Forced: the
+        // built-in HTML ranges count as a provider once the syntax tree is
+        // parsed, which no event marks, so the last state may be stale.
+        if old.linked_editing != self.options.linked_editing {
+            self.reinitialize_linked_editing(true, cx);
+        }
         if let Some(change) = change {
             cx.emit(change);
         }
@@ -2919,9 +2931,15 @@ impl CodeEditor {
                 if *kind == EditKind::SetValue {
                     self.cursors.auto_closed_ranges_mut().clear();
                 } else {
+                    let edge = |p: PointUtf16, bias: Bias| {
+                        let offset = old.point_utf16_to_offset(p);
+                        latest.offset_to_point_utf16(crate::decorations::move_edge(
+                            &patch, old, &latest, offset, bias,
+                        ))
+                    };
                     self.cursors.auto_closed_ranges_mut().map(|range| {
-                        let end = transform(range.end, Bias::Left);
-                        transform(range.start, Bias::Right).min(end)..end
+                        let end = edge(range.end, Bias::Left);
+                        edge(range.start, Bias::Right).min(end)..end
                     });
                 }
                 let restored = own
@@ -3011,6 +3029,8 @@ impl CodeEditor {
                 // Monaco `onDidChangeModelLanguageConfiguration`, which a
                 // language change fires too.
                 self.refresh_folding(cx);
+                // Linked editing `onDidChangeModelLanguage`.
+                self.reinitialize_linked_editing(true, cx);
                 cx.emit(CodeEditorEvent::ModelLanguageChanged {
                     old_language: old_language.clone(),
                     new_language: new_language.clone(),

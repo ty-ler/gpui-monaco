@@ -8,7 +8,7 @@ Decorations (Monaco `deltaDecorations`) style ranges of text without changing it
 - breakpoints
 - inline hints
 
-They live on the `TextModel`. Their ranges follow edits.
+They live on the `TextModel`. Their ranges follow edits as Monaco's do. Edges inside a replaced span stay as far into the new text as they were into the old, up to the shorter of the two, so an equal-length replace such as Transform to Uppercase leaves them where they were.
 
 ```rust,ignore
 use gpui_monaco::{
@@ -87,6 +87,7 @@ Ranges are byte offsets. To convert from `PointUtf16`, use `model.buffer().point
 | `text_direction` | `textDirection` | kept for the getters; GPUI can't lay out right-to-left lines, so they stay left to right |
 | `hover_message` | `hoverMessage` | markdown (`Vec<MarkdownString>`) shown in the hover over the range, or anywhere on its lines with `is_whole_line`; `show_if_collapsed` ones take a character more each side |
 | `stickiness` | `stickiness` | whether typing at the edges grows the range |
+| `collapse_on_replace_edit` | `collapseOnReplaceEdit` | an edit replacing the whole range collapses it to the edit's start, so pasting over a link doesn't decorate the pasted text |
 | `z_index` | `zIndex` | paint order for overlapping decorations: among the whole-line ones, painted first (the fold background is one, at 0), then among the others |
 
 Monaco's class names become styles here, so `className` effects beyond these fields can't be expressed. `inlineClassNameAffectsLetterSpacing` has no equivalent: it tells Monaco's DOM renderer to measure again, and text here is always shaped with its styles. A decoration doesn't change the font size (`fontSize`); `get_font_size_at_position` is the editor's.
