@@ -806,9 +806,10 @@ pub(crate) fn prepaint(
     }
     // Monaco's folding decorations: with `foldingHighlight`, a collapsed
     // region's `editor.foldBackground` shows inline in the minimap
-    // (`foldedBackgroundMinimap`). Its range runs from the end of the
-    // header to the end of the last hidden line, so it covers the header's
-    // line, where the hidden lines start.
+    // (`foldedBackgroundMinimap`). The decoration is whole-line on the
+    // header (`isWholeLine`), so its view range runs from the header's
+    // first column to its line end (Monaco `_getOrCreateViewModelDecoration`):
+    // a band on every wrapped piece and the color over the header's text.
     if options.folding
         && options.folding_highlight
         && editor.folds.has_collapsed()
@@ -821,9 +822,11 @@ pub(crate) fn prepaint(
             .filter(|(start, _)| !editor.folds.is_hidden(*start))
             .map(|(start, _)| {
                 let end = rope.clip_point_utf16(PointUtf16::new(start, u32::MAX), text::Bias::Left);
-                let line = to_view(end, false);
                 (
-                    to_minimap_range((line, line)),
+                    to_minimap_range((
+                        to_view(PointUtf16::new(start, 0), false),
+                        to_view(end, true),
+                    )),
                     colors.fold_background,
                     MinimapPosition::Inline,
                 )

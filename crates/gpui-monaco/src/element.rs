@@ -1950,18 +1950,47 @@ pub(crate) fn resolve_glyph_requests(mut requests: Vec<GlyphRequest>) -> Vec<Gly
     requests
 }
 
-/// Whether view line `line` shows part of `start..end` (inclusive): Monaco
-/// converts a decoration's range to view lines, so a glyph shows on every
-/// line of its range, wrapped segments included, but not on a wrapped
-/// line's later segments for a range that ends before them.
+/// Whether view line `line` is in the view range of `start..end`
+/// (inclusive). Monaco converts a decoration's range to view lines
+/// (`convertModelRangeToViewRange`): the start with `PositionAffinity.Right`
+/// and, for a non-empty range, the end with `PositionAffinity.Left`, so at
+/// a wrap point the start is on the later segment and the end on the
+/// earlier one. A glyph or line decoration shows on every view line of
+/// that range, wrapped segments included.
 pub(crate) fn segment_intersects(line: &LineLayout, start: PointUtf16, end: PointUtf16) -> bool {
     if line.row < start.row || line.row > end.row {
         return false;
     }
-    if line.row == end.row && line.columns.start > 0 && line.columns.start >= end.column {
+    // Before the start's segment.
+    if line.row == start.row && line.columns.end <= start.column && !line.is_last_segment {
         return false;
     }
-    !(line.row == start.row && line.columns.end < start.column)
+    // After the end's segment.
+    let after_end = if start == end {
+        line.columns.start > end.column
+    } else {
+        line.columns.start >= end.column
+    };
+    !(line.row == end.row && line.columns.start > 0 && after_end)
+}
+
+/// A decoration's range as Monaco's view model sees it
+/// (`_getOrCreateViewModelDecoration`): an `isWholeLine` one runs from the
+/// first column of its first row to the end of its last.
+pub(crate) fn decoration_view_range(
+    start: PointUtf16,
+    end: PointUtf16,
+    is_whole_line: bool,
+    line_len: impl Fn(u32) -> u32,
+) -> (PointUtf16, PointUtf16) {
+    if is_whole_line {
+        (
+            PointUtf16::new(start.row, 0),
+            PointUtf16::new(end.row, line_len(end.row)),
+        )
+    } else {
+        (start, end)
+    }
 }
 
 /// One box of the current line highlight (Monaco
@@ -4769,6 +4798,9 @@ fn prepaint_editor(
     let mut gutter_bars: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
     let mut lines_tooltips: Vec<(Bounds<Pixels>, SharedString)> = Vec::new();
     let mut margin_backgrounds: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
+    // Monaco's `.cldr` element is `decorationsWidth` wide, the folding
+    // column included.
+    let lines_decorations_width = line_decorations_width + folding_width;
     let options_line_decorations_width = line_decorations_width;
     let mut glyphs: Vec<(gpui::Point<Pixels>, ShapedLine)> = Vec::new();
     let mut glyph_requests: Vec<GlyphRequest> = Vec::new();
@@ -4808,6 +4840,10 @@ fn prepaint_editor(
         }
         let faded = faded(decoration);
         let last_row = overlay.map_or(end.row, |(_, overlay_end)| overlay_end.row.max(end.row));
+        let (view_start, view_end) =
+            decoration_view_range(*start, *end, options.is_whole_line, |row| {
+                snapshot.line_len_utf16(row)
+            });
         for line in layout.lines.iter() {
             if line.row < start.row || line.row > last_row {
                 continue;
@@ -4941,15 +4977,18 @@ fn prepaint_editor(
                     ));
                 }
             }
-            if line.row > end.row {
+            // The gutter's parts (Monaco `LinesDecorationsOverlay`,
+            // `MarginViewLineDecorationsOverlay`, `GlyphMarginWidgets`) are
+            // on the view lines of the decoration's view range.
+            if !segment_intersects(line, view_start, view_end) {
                 continue;
             }
-            // Monaco `firstLineDecorationClassName`: in the line decorations
-            // area too, on a wrapped line's first view line only.
+            // Monaco `firstLineDecorationClassName`: only on the view
+            // range's start line.
             let first_line = options
                 .first_line_decoration
                 .as_ref()
-                .filter(|_| line.columns.start == 0);
+                .filter(|_| line.contains(view_start));
             let bars = options
                 .gutter_bar
                 .into_iter()
@@ -4968,7 +5007,7 @@ fn prepaint_editor(
                 lines_tooltips.push((
                     Bounds::new(
                         point(bounds.left() + glyph_width + numbers_width, top),
-                        size(options_line_decorations_width, height),
+                        size(lines_decorations_width, height),
                     ),
                     tooltip.clone(),
                 ));
@@ -5008,9 +5047,7 @@ fn prepaint_editor(
             }
             // Monaco `_collectDecorationBasedGlyphRenderRequest`: on every
             // view line of the range.
-            if let Some((glyph, color)) = &options.glyph
-                && segment_intersects(line, *start, *end)
-            {
+            if let Some((glyph, color)) = &options.glyph {
                 let lane = options.glyph_margin.unwrap_or_default().position;
                 glyph_requests.push(GlyphRequest {
                     view_line: line.view_line,
@@ -5997,13 +6034,15 @@ fn prepaint_editor(
                 }),
                 (None, Some((glyph, color))) => {
                     let (glyph, font) = crate::codicons::decoration_text(&glyph, cx);
-                    let font = font.unwrap_or_else(|| metrics.font.clone());
+                    let (font, font_size) = glyph_font(font, &metrics.font, metrics.font_size);
                     let shaped = window.text_system().shape_line(
                         glyph.clone(),
-                        metrics.font_size,
+                        font_size,
                         &[run(glyph.len(), &font, color)],
                         None,
                     );
+                    // Centered in the lane; painted at the line's height, so
+                    // centered in the line too (Monaco's `.cgmr` flexbox).
                     let x = left + (lane_width - shaped.width) / 2.;
                     glyphs.push((point(x, layout.text_top(line.view_line)), shaped));
                 }
@@ -7065,6 +7104,21 @@ fn paint_scrollbar_arrow(
     }
 }
 
+/// The font and size of a glyph margin glyph: a codicon (the codicon
+/// font, from [`crate::codicons::decoration_text`]) is Monaco's `cgmr
+/// codicon` element, `font: 16px/1 codicon` (`codicon.css`) whatever the
+/// editor's font size; other text is in the editor's font.
+pub(crate) fn glyph_font(
+    codicon_font: Option<Font>,
+    editor_font: &Font,
+    font_size: Pixels,
+) -> (Font, Pixels) {
+    match codicon_font {
+        Some(font) => (font, px(16.)),
+        None => (editor_font.clone(), font_size),
+    }
+}
+
 /// Paints a shaped codicon centered in `bounds`.
 pub(crate) fn paint_icon(
     shaped: ShapedLine,
@@ -8053,6 +8107,21 @@ mod fold_control_tests {
     /// `linesDecorationsClassName`.
     #[gpui::test]
     fn line_decorations_have_tooltips(cx: &mut TestAppContext) {
+        assert!(line_decoration_tooltip_at(gpui::px(0.), cx));
+    }
+
+    /// Monaco's `.cldr` element is `decorationsWidth` wide, so its title
+    /// shows over the folding column too.
+    #[gpui::test]
+    fn line_decoration_tooltips_cover_the_folding_column(cx: &mut TestAppContext) {
+        // The bar is 2px into the 10px line decorations area, which the
+        // 16px folding column follows.
+        assert!(line_decoration_tooltip_at(gpui::px(14.), cx));
+    }
+
+    /// Whether hovering `dx` right of the center of a decoration's gutter
+    /// bar shows its tooltip.
+    fn line_decoration_tooltip_at(dx: gpui::Pixels, cx: &mut TestAppContext) -> bool {
         cx.update(crate::init);
         let (editor, cx) =
             cx.add_window_view(|window, cx| CodeEditor::with_text("a\nb\nc\n", window, cx));
@@ -8074,11 +8143,12 @@ mod fold_control_tests {
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         let bar = editor.read_with(cx, |e, _| e.layout.as_ref().unwrap().gutter_bars[0].0);
-        cx.simulate_mouse_move(bar.center(), None, gpui::Modifiers::none());
+        let at = bar.center() + gpui::point(dx, gpui::px(0.));
+        cx.simulate_mouse_move(at, None, gpui::Modifiers::none());
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         cx.simulate_mouse_move(
-            bar.center() + gpui::point(gpui::px(0.), gpui::px(1.)),
+            at + gpui::point(gpui::px(0.), gpui::px(1.)),
             None,
             gpui::Modifiers::none(),
         );
@@ -8087,7 +8157,7 @@ mod fold_control_tests {
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
-        assert!(crate::tooltip::RENDERED.with(|r| r.borrow().iter().any(|t| t == "Changed line")));
+        crate::tooltip::RENDERED.with(|r| r.borrow().iter().any(|t| t == "Changed line"))
     }
 }
 
@@ -8977,5 +9047,26 @@ mod view_line_text_tests {
         let flags = "\u{1f1e9}\u{1f1ea}\u{1f1eb}\u{1f1f7}";
         assert_eq!(grapheme_containing(flags, 0), Some(0..8));
         assert_eq!(grapheme_containing(flags, 8), Some(8..16));
+    }
+}
+
+#[cfg(test)]
+mod glyph_font_tests {
+    use gpui::{font, px};
+
+    use super::glyph_font;
+    use crate::codicons::codicon_font;
+
+    /// Monaco's glyph margin codicons are 16px (`codicon.css`), whatever
+    /// the editor's font size; other glyph text follows the editor font.
+    #[test]
+    fn codicon_glyphs_are_16px() {
+        let editor_font = font("Menlo");
+        for size in [px(12.), px(14.), px(20.)] {
+            let (codicon, codicon_size) = glyph_font(Some(codicon_font()), &editor_font, size);
+            assert_eq!((codicon, codicon_size), (codicon_font(), px(16.)));
+            let (text, text_size) = glyph_font(None, &editor_font, size);
+            assert_eq!((text, text_size), (editor_font.clone(), size));
+        }
     }
 }
