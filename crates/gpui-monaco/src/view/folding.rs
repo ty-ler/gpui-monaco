@@ -4,7 +4,9 @@
 //! `contrib/folding/browser/indentRangeProvider.ts` (MIT): regions from
 //! indentation, plus `#region`-style markers from the language configuration.
 //! [`sanitize_ranges`] is `sanitizeRanges` from `syntaxRangeProvider.ts`,
-//! for provider and syntax ranges.
+//! for provider and syntax ranges. [`sanitize_and_merge`] is
+//! `FoldingRegions.sanitizeAndMerge` from `foldingRanges.ts`, and
+//! [`FoldState`] ports `foldingModel.ts` and `hiddenRangeModel.ts`.
 
 use syntax::Pattern;
 use text::Rope;
@@ -26,6 +28,29 @@ pub struct FoldRange {
     /// Made by "Create Folding Range from Selection" (Monaco
     /// `FoldSource.userDefined`).
     pub manual: bool,
+    /// A collapsed region kept after the recomputed ranges dropped it
+    /// (Monaco `FoldSource.recovered`).
+    pub recovered: bool,
+}
+
+impl FoldRange {
+    /// Where the region came from (Monaco `FoldSource`).
+    pub fn source(&self) -> FoldSource {
+        if self.manual {
+            FoldSource::UserDefined
+        } else if self.recovered {
+            FoldSource::Recovered
+        } else {
+            FoldSource::Provider
+        }
+    }
+
+    /// The region came from the provider: it isn't manual or recovered
+    /// (Monaco shows the others with the manual icons and removes them
+    /// with "Remove Manual Folding Ranges").
+    pub fn is_provided(&self) -> bool {
+        self.source() == FoldSource::Provider
+    }
 }
 
 /// Monaco `computeIndentLevel`: visible indent width, or `None` for a
@@ -200,6 +225,7 @@ pub fn compute_indent_ranges_limited(
             parent,
             kind: is_marker.then_some(FoldingRangeKind::Region),
             manual: false,
+            recovered: false,
         });
         stack.push(ranges.len() - 1);
     }
@@ -334,6 +360,7 @@ pub fn sanitize_ranges(mut data: Vec<FoldingRangeData>, limit: usize) -> (Vec<Fo
             parent: stack.last().copied(),
             kind,
             manual,
+            recovered: false,
         });
         stack.push(ranges.len() - 1);
     }
@@ -688,19 +715,6 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_regions_shrunk_to_one_row_are_pruned() {
-        let mut buffer = text::Buffer::new("a\n  b\n  c\nd");
-        let mut state = FoldState::default();
-        state.collapse(&buffer, 0, 2);
-        assert_eq!(state.collapsed_rows(&buffer), vec![(0, 2)]);
-        // Delete the folded lines: the region is a single row now.
-        buffer.edit([(1..9, "")]).unwrap();
-        assert!(state.collapsed_rows(&buffer).is_empty());
-        state.prune(&buffer);
-        assert!(!state.has_collapsed());
-    }
-
-    #[test]
     fn enclosing_lookups_match_brute_force() {
         // Deterministic pseudo-random indentation.
         let mut seed = 7u64;
@@ -712,13 +726,15 @@ mod tests {
             let indent = (seed >> 33) % 6;
             lines.push(format!("{}x", "  ".repeat(indent as usize)));
         }
-        let rope = Rope::from(lines.join("\n").as_str());
+        let buffer = text::Buffer::new(&lines.join("\n"));
+        let rope = buffer.rope().clone();
         let mut state = FoldState::default();
-        let buffer = text::Buffer::new("");
         state.set_ranges(
             compute_indent_ranges(&rope, 4, false, None),
             buffer.version(),
+            &rope,
             &buffer,
+            &[],
         );
         for row in 0..402 {
             let brute: Vec<_> = state
@@ -750,135 +766,579 @@ mod tests {
     }
 }
 
-/// Fold ranges plus which are collapsed. Collapsed regions are tracked with
-/// anchors so they follow edits.
+/// Where a region came from (Monaco `FoldSource`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FoldSource {
+    /// Computed (a folding range provider, the syntax tree or indentation).
+    #[default]
+    Provider,
+    /// Made by "Create Folding Range from Selection".
+    UserDefined,
+    /// A collapsed region that the latest computed ranges no longer have,
+    /// kept collapsed.
+    Recovered,
+}
+
+/// A region for [`sanitize_and_merge`] (Monaco `FoldRange` of
+/// `foldingRanges.ts`), 0-based.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeRange {
+    /// The header row.
+    pub start: u32,
+    /// The last row hidden when collapsed.
+    pub end: u32,
+    /// Its kind.
+    pub kind: Option<FoldingRangeKind>,
+    /// Whether it's collapsed.
+    pub collapsed: bool,
+    /// Where it came from.
+    pub source: FoldSource,
+}
+
+/// Monaco `FoldingRegions.sanitizeAndMerge`: merges the regions `a` (the
+/// computed ones) with `b` (the collapsed and manual ones), both sorted by
+/// start. At the same start a user-defined `b` wins; otherwise `a` takes
+/// `b`'s collapsed state, unless its end moved and a selection starts in it
+/// or right after it. A user-defined `b` drops the `a`s it crosses, and a
+/// collapsed computed `b` that matches no `a` is kept, recovered. Ranges
+/// that are empty, start where the previous one did, end at or past
+/// `line_count`, or aren't inside their enclosing range are dropped.
+/// `selection` holds each selection's first row.
+pub fn sanitize_and_merge(
+    a: &[MergeRange],
+    b: &[MergeRange],
+    line_count: u32,
+    selection: Option<&[u32]>,
+) -> Vec<MergeRange> {
+    let starts_inside = |start: u32, end: u32| {
+        selection.is_some_and(|rows| rows.iter().any(|&row| start <= row && row <= end))
+    };
+    let (mut ia, mut ib) = (0, 0);
+    let mut stacked: Vec<(u32, u32)> = Vec::new();
+    let mut top: Option<(u32, u32)> = None;
+    let mut previous: Option<u32> = None;
+    let mut result = Vec::new();
+    while ia < a.len() || ib < b.len() {
+        let (next_a, next_b) = (a.get(ia), b.get(ib));
+        let mut use_range = None;
+        match next_b {
+            Some(nb) if next_a.is_none_or(|na| na.start >= nb.start) => {
+                match next_a {
+                    Some(na) if na.start == nb.start => {
+                        if nb.source == FoldSource::UserDefined {
+                            use_range = Some(nb.clone());
+                        } else {
+                            // A previously collapsed or recovered range: it
+                            // stays collapsed if it has the same lines, or
+                            // no selection starts in it or right after it.
+                            let mut range = na.clone();
+                            range.collapsed = nb.collapsed
+                                && (na.end == nb.end || !starts_inside(na.start + 1, na.end + 1));
+                            range.source = FoldSource::Provider;
+                            use_range = Some(range);
+                        }
+                        ia += 1;
+                    }
+                    _ => {
+                        let mut range = nb.clone();
+                        if nb.collapsed && nb.source == FoldSource::Provider {
+                            range.source = FoldSource::Recovered;
+                        }
+                        use_range = Some(range);
+                    }
+                }
+                ib += 1;
+            }
+            _ => {
+                let na = next_a.expect("one of the lists has ranges left");
+                // A user-defined range in `b` ending after this one wins.
+                let mut scan = ib;
+                loop {
+                    match b.get(scan) {
+                        Some(nb) if nb.start <= na.end => {
+                            if nb.source == FoldSource::UserDefined && nb.end > na.end {
+                                break;
+                            }
+                            scan += 1;
+                        }
+                        _ => {
+                            use_range = Some(na.clone());
+                            break;
+                        }
+                    }
+                }
+                ia += 1;
+            }
+        }
+        if let Some(range) = use_range {
+            while let Some((_, end)) = top
+                && end < range.start
+            {
+                top = stacked.pop();
+            }
+            if range.end > range.start
+                && previous.is_none_or(|previous| range.start > previous)
+                && range.end < line_count
+                && top.is_none_or(|(_, end)| end >= range.end)
+            {
+                previous = Some(range.start);
+                if let Some(top) = top {
+                    stacked.push(top);
+                }
+                top = Some((range.start, range.end));
+                result.push(range);
+            }
+        }
+    }
+    result
+}
+
+/// One edit in points, for moving tracked positions.
+#[derive(Clone, Copy, Debug)]
+struct PointEdit {
+    old_start: text::Point,
+    old_end: text::Point,
+    new_start: text::Point,
+    new_end: text::Point,
+}
+
+/// Where `point` moves through `edits` (sorted, in old coordinates), as
+/// [`text::Patch::transform_offset`] moves an offset: inside an edit it
+/// goes to the edit's start (`Bias::Left`) or end (`Bias::Right`, or the
+/// end of a deletion).
+fn transform_point(point: text::Point, bias: text::Bias, edits: &[PointEdit]) -> text::Point {
+    let ix = edits.partition_point(|edit| edit.old_end < point);
+    match edits.get(ix) {
+        Some(edit) if edit.old_start <= point => {
+            let at_end = point == edit.old_end && edit.old_start < edit.old_end;
+            if at_end || bias == text::Bias::Right {
+                edit.new_end
+            } else {
+                edit.new_start
+            }
+        }
+        _ => match ix.checked_sub(1).map(|ix| &edits[ix]) {
+            None => point,
+            Some(edit) if point.row == edit.old_end.row => text::Point::new(
+                edit.new_end.row,
+                point.column - edit.old_end.column + edit.new_end.column,
+            ),
+            Some(edit) => text::Point::new(
+                point.row - edit.old_end.row + edit.new_end.row,
+                point.column,
+            ),
+        },
+    }
+}
+
+/// The folding regions and the rows they hide (Monaco's `FoldingModel`
+/// and `HiddenRangeModel`).
+///
+/// Like Monaco's folding decorations, each region is tracked from the end
+/// of its header row to the end of its last row and moves with edits at
+/// once (text typed at the end of the last row joins it); recomputed ranges
+/// are merged in with [`sanitize_and_merge`]. The hidden rows follow edits
+/// separately, as Monaco's view model lines do (a line keeps its
+/// visibility, and inserted lines take that of the line they're inserted
+/// after), and are derived from the collapsed regions again whenever those
+/// change, so a line typed after a collapsed header shows until the regions
+/// are updated.
 #[derive(Clone, Default)]
 pub struct FoldState {
-    /// Computed and manual ranges, merged.
+    /// The regions, sorted by start row and nested via `parent`.
     ranges: Vec<FoldRange>,
-    /// The computed ranges.
-    computed: Vec<FoldRange>,
+    /// For each region, whether it's collapsed.
+    collapsed: Vec<bool>,
+    /// For each region, the end of its header row and of its last row.
+    positions: Vec<(text::Point, text::Point)>,
+    /// The hidden rows, sorted and disjoint.
+    hidden_rows: Vec<std::ops::Range<u32>>,
+    /// Rows changed since the hidden areas were last derived (Monaco
+    /// `HiddenRangeModel._hasLineChanges`).
+    hidden_line_changes: bool,
+    /// The text the positions are for.
+    tracked: Option<(text::Version, Rope)>,
     ranges_version: Option<text::Version>,
-    /// (start of the start row, end of the end row).
-    collapsed: Vec<std::ops::Range<text::Anchor>>,
-    /// Manual ranges (Monaco's user-defined folding ranges), which survive
-    /// recomputing.
-    manual: Vec<std::ops::Range<text::Anchor>>,
     /// The computed ranges came from providers, with kinds (Monaco
     /// `FoldingRegions.hasTypes`).
     has_types: bool,
+    /// Renewed whenever the regions or their rows change (unique across
+    /// states).
+    generation: u64,
 }
 
 impl FoldState {
-    /// The fold ranges (computed and manual), sorted by start row.
+    /// The regions (computed, manual and recovered), sorted by start row,
+    /// with their current rows.
     pub fn ranges(&self) -> &[FoldRange] {
         &self.ranges
     }
 
-    /// The text version [`Self::ranges`] were computed for; `None` until
+    /// The text version the ranges were last computed for; `None` until
     /// [`Self::set_ranges`] is first called.
     pub fn ranges_version(&self) -> Option<text::Version> {
         self.ranges_version
     }
 
-    /// Replaces the computed fold ranges with ones for text `version`.
-    /// Collapsed regions and manual ranges are kept.
+    /// Changes whenever the regions or their rows do, for caches.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Moves the regions and hidden areas through the edits made to
+    /// `buffer` since the last call, as Monaco's decorations follow edits.
+    /// Returns whether any row changed.
+    pub fn sync(&mut self, buffer: &text::Buffer) -> bool {
+        let version = buffer.version();
+        let Some((old_version, old_rope)) = self.tracked.take() else {
+            self.tracked = Some((version, buffer.rope().clone()));
+            return false;
+        };
+        self.tracked = Some((version, buffer.rope().clone()));
+        if old_version == version || (self.ranges.is_empty() && self.hidden_rows.is_empty()) {
+            return false;
+        }
+        let edits = point_edits(&old_rope, buffer.rope(), &buffer.edits_since(old_version));
+        if edits.is_empty() {
+            return false;
+        }
+        // Typing within lines moves only the positions on the edited rows,
+        // as an interval tree would find them: no row changes.
+        if edits.iter().all(|edit| {
+            edit.old_end.row == edit.old_start.row && edit.new_end.row == edit.old_start.row
+        }) {
+            let mut previous = None;
+            for edit in &edits {
+                let row = edit.old_start.row;
+                if previous != Some(row) {
+                    self.move_within_row(row, &edits);
+                    previous = Some(row);
+                }
+            }
+            return false;
+        }
+        let mut rows_changed = false;
+        for (range, (start, end)) in self.ranges.iter_mut().zip(&mut self.positions) {
+            *start = transform_point(*start, text::Bias::Left, &edits);
+            *end = transform_point(*end, text::Bias::Right, &edits);
+            let rows = (start.row, end.row.max(start.row));
+            if rows != (range.start_row, range.end_row) {
+                (range.start_row, range.end_row) = rows;
+                rows_changed = true;
+            }
+        }
+        if rows_changed {
+            self.normalize();
+        }
+        let mut hidden_changed = false;
+        if !self.hidden_rows.is_empty() {
+            // Each edit replaces old rows `a ..= b` (shifted by the edits
+            // before it) with new rows `a ..= c`.
+            let mut delta: i64 = 0;
+            for edit in &edits {
+                let a = edit.new_start.row;
+                let b = (edit.old_end.row as i64 + delta) as u32;
+                let c = edit.new_end.row;
+                if b != a || c != a {
+                    hidden_changed |= apply_row_edit(&mut self.hidden_rows, a, b, c);
+                }
+                delta = c as i64 - edit.old_end.row as i64;
+            }
+        }
+        if hidden_changed {
+            self.hidden_line_changes = true;
+        }
+        if rows_changed || hidden_changed {
+            self.generation = next_generation();
+        }
+        rows_changed || hidden_changed
+    }
+
+    /// Moves the positions on `row` through `edits`, which stay within
+    /// their rows: those of the regions starting on it, and the ends of the
+    /// regions enclosing it that end on it.
+    fn move_within_row(&mut self, row: u32, edits: &[PointEdit]) {
+        let first = self.ranges.partition_point(|range| range.start_row < row);
+        let last = self.ranges.partition_point(|range| range.start_row <= row);
+        for (start, _) in &mut self.positions[first..last] {
+            *start = transform_point(*start, text::Bias::Left, edits);
+        }
+        // The regions containing `row` are the innermost one starting
+        // above it and its ancestors.
+        let mut ix = first.checked_sub(1);
+        while let Some(i) = ix {
+            if self.ranges[i].end_row == row {
+                let end = &mut self.positions[i].1;
+                *end = transform_point(*end, text::Bias::Right, edits);
+            }
+            ix = self.ranges[i].parent;
+        }
+    }
+
+    /// Forgets every region (Monaco drops the folding decorations when the
+    /// whole text is replaced).
+    pub fn clear(&mut self, buffer: &text::Buffer) {
+        self.ranges.clear();
+        self.collapsed.clear();
+        self.positions.clear();
+        self.hidden_rows.clear();
+        self.hidden_line_changes = false;
+        self.tracked = Some((buffer.version(), buffer.rope().clone()));
+        self.generation = next_generation();
+    }
+
+    /// Drops the regions edits emptied or made start on the same row as
+    /// the one before, or cross their parent, and recomputes the parents.
+    fn normalize(&mut self) {
+        let mut write = 0;
+        let mut stack: Vec<usize> = Vec::new();
+        let mut previous: Option<u32> = None;
+        for read in 0..self.ranges.len() {
+            let (start, end) = (self.ranges[read].start_row, self.ranges[read].end_row);
+            while let Some(&top) = stack.last()
+                && self.ranges[top].end_row < start
+            {
+                stack.pop();
+            }
+            let valid = end > start
+                && previous.is_none_or(|previous| start > previous)
+                && stack
+                    .last()
+                    .is_none_or(|&top| self.ranges[top].end_row >= end);
+            if !valid {
+                continue;
+            }
+            previous = Some(start);
+            self.ranges.swap(write, read);
+            self.collapsed.swap(write, read);
+            self.positions.swap(write, read);
+            self.ranges[write].parent = stack.last().copied();
+            stack.push(write);
+            write += 1;
+        }
+        self.ranges.truncate(write);
+        self.collapsed.truncate(write);
+        self.positions.truncate(write);
+    }
+
+    fn merge_range(&self, ix: usize) -> MergeRange {
+        let range = &self.ranges[ix];
+        MergeRange {
+            start: range.start_row,
+            end: range.end_row,
+            kind: range.kind.clone(),
+            collapsed: self.collapsed[ix],
+            source: range.source(),
+        }
+    }
+
+    /// Monaco `FoldingModel._currentFoldedOrManualRanges`: the collapsed
+    /// regions (expanded if a selection starts in their hidden rows) and
+    /// those not from the provider.
+    fn folded_or_manual(&self, selection: Option<&[u32]>) -> Vec<MergeRange> {
+        (0..self.ranges.len())
+            .filter(|&ix| self.collapsed[ix] || !self.ranges[ix].is_provided())
+            .map(|ix| {
+                let mut range = self.merge_range(ix);
+                if range.collapsed
+                    && selection.is_some_and(|rows| {
+                        rows.iter()
+                            .any(|&row| range.start < row && row <= range.end)
+                    })
+                {
+                    range.collapsed = false;
+                }
+                range
+            })
+            .collect()
+    }
+
+    /// Monaco `FoldingModel.updatePost`: makes `ranges` the regions, with
+    /// positions on `rope`, and derives the hidden areas again. Returns
+    /// whether those changed.
+    fn update_post(&mut self, ranges: Vec<MergeRange>, rope: &Rope) -> bool {
+        self.ranges.clear();
+        self.collapsed.clear();
+        self.positions.clear();
+        let mut stack: Vec<usize> = Vec::new();
+        for range in ranges {
+            while let Some(&top) = stack.last()
+                && self.ranges[top].end_row < range.start
+            {
+                stack.pop();
+            }
+            self.positions.push((
+                text::Point::new(range.start, rope.line_len(range.start)),
+                text::Point::new(range.end, rope.line_len(range.end)),
+            ));
+            self.collapsed.push(range.collapsed);
+            self.ranges.push(FoldRange {
+                start_row: range.start,
+                end_row: range.end,
+                parent: stack.last().copied(),
+                kind: range.kind,
+                manual: range.source == FoldSource::UserDefined,
+                recovered: range.source == FoldSource::Recovered,
+            });
+            stack.push(self.ranges.len() - 1);
+        }
+        self.generation = next_generation();
+        self.derive_hidden()
+    }
+
+    /// Monaco `FoldingModel.update`: merges newly computed `ranges`, for
+    /// text `version` (`rope`), into the regions, keeping collapsed ones
+    /// collapsed unless a selection starting row in `selection` makes them
+    /// expand. Ranges for an older version are moved through the edits made
+    /// since. Returns whether the hidden rows changed.
     pub fn set_ranges(
         &mut self,
         ranges: Vec<FoldRange>,
         version: text::Version,
+        rope: &Rope,
         buffer: &text::Buffer,
-    ) {
-        self.computed = ranges;
+        selection: &[u32],
+    ) -> bool {
+        self.sync(buffer);
         self.ranges_version = Some(version);
-        self.merge(buffer);
-    }
-
-    fn anchor_rows(buffer: &text::Buffer, range: &std::ops::Range<text::Anchor>) -> (u32, u32) {
-        let start = buffer.offset_to_point(buffer.resolve(&range.start)).row;
-        let end = buffer.offset_to_point(buffer.resolve(&range.end)).row;
-        (start, end.max(start))
-    }
-
-    /// Monaco `FoldingRegions.sanitizeAndMerge`: the manual ranges join the
-    /// computed ones, winning ties.
-    fn merge(&mut self, buffer: &text::Buffer) {
-        if self.manual.is_empty() {
-            self.ranges = self.computed.clone();
-            return;
-        }
-        let mut data: Vec<FoldingRangeData> = self
-            .manual
-            .iter()
-            .map(|range| Self::anchor_rows(buffer, range))
-            .filter(|(start, end)| end > start)
-            .map(|(start, end)| FoldingRangeData {
-                start,
-                end,
-                rank: 0,
-                kind: None,
-                manual: true,
+        let edits = if version == buffer.version() {
+            Vec::new()
+        } else {
+            point_edits(rope, buffer.rope(), &buffer.edits_since(version))
+        };
+        let computed: Vec<MergeRange> = ranges
+            .into_iter()
+            .filter_map(|range| {
+                let (mut start, mut end) = (range.start_row, range.end_row);
+                if !edits.is_empty() {
+                    let at_end = |row: u32| text::Point::new(row, rope.line_len(row));
+                    start = transform_point(at_end(start), text::Bias::Left, &edits).row;
+                    end = transform_point(at_end(end), text::Bias::Right, &edits).row;
+                }
+                (end > start).then_some(MergeRange {
+                    start,
+                    end,
+                    kind: range.kind,
+                    collapsed: false,
+                    source: FoldSource::Provider,
+                })
             })
             .collect();
-        data.extend(self.computed.iter().map(|range| FoldingRangeData {
-            start: range.start_row,
-            end: range.end_row,
-            rank: 1,
-            kind: range.kind.clone(),
-            manual: false,
-        }));
-        self.ranges = sanitize_ranges(data, usize::MAX).0;
+        let folded = self.folded_or_manual(Some(selection));
+        let line_count = buffer.rope().line_count();
+        let merged = sanitize_and_merge(&computed, &folded, line_count, Some(selection));
+        self.update_post(merged, buffer.rope())
     }
 
-    /// Adds a collapsed manual range over rows `start_row ..= end_row`
-    /// (Monaco "Create Folding Range from Selection").
-    pub fn add_manual(&mut self, buffer: &text::Buffer, start_row: u32, end_row: u32) {
-        if end_row <= start_row {
-            return;
+    /// Monaco `HiddenRangeModel.updateHiddenRanges`: the hidden areas from
+    /// the collapsed regions, those inside another left out. Returns
+    /// whether they changed, or rows changed since they were last derived.
+    fn derive_hidden(&mut self) -> bool {
+        let mut areas: Vec<(u32, u32)> = Vec::new();
+        let mut last: Option<(u32, u32)> = None;
+        for (range, _) in self
+            .ranges
+            .iter()
+            .zip(&self.collapsed)
+            .filter(|(_, collapsed)| **collapsed)
+        {
+            let (start, end) = (range.start_row + 1, range.end_row);
+            if last.is_some_and(|(last_start, last_end)| last_start <= start && end <= last_end) {
+                continue;
+            }
+            areas.push((start, end));
+            last = Some((start, end));
         }
-        let start = buffer.anchor_before(buffer.point_to_offset(text::Point::new(start_row, 0)));
-        let end = buffer.anchor_after(buffer.point_to_offset(text::Point::new(end_row, u32::MAX)));
-        self.manual.push(start..end);
-        self.merge(buffer);
-        self.expand(buffer, start_row);
-        self.collapse(buffer, start_row, end_row);
+        let unchanged = areas.len() == self.hidden_rows.len()
+            && areas
+                .iter()
+                .zip(&self.hidden_rows)
+                .all(|((start, end), rows)| *start == rows.start && end + 1 == rows.end);
+        let line_changes = std::mem::take(&mut self.hidden_line_changes);
+        if unchanged {
+            return line_changes;
+        }
+        self.hidden_rows = areas
+            .into_iter()
+            .map(|(start, end)| start..end + 1)
+            .collect();
+        true
     }
 
-    /// Removes manual ranges (Monaco "Remove Manual Folding Ranges") and
-    /// expands them.
+    /// Adds collapsed manual ranges over rows `start ..= end` (Monaco
+    /// "Create Folding Range from Selection"). Returns whether the hidden
+    /// rows changed.
+    pub fn add_manual(&mut self, buffer: &text::Buffer, rows: &[(u32, u32)]) -> bool {
+        self.sync(buffer);
+        let mut added: Vec<MergeRange> = rows
+            .iter()
+            .filter(|(start, end)| end > start)
+            .map(|&(start, end)| MergeRange {
+                start,
+                end,
+                kind: None,
+                collapsed: true,
+                source: FoldSource::UserDefined,
+            })
+            .collect();
+        if added.is_empty() {
+            return false;
+        }
+        added.sort_by_key(|range| range.start);
+        let current: Vec<MergeRange> = (0..self.ranges.len())
+            .map(|ix| self.merge_range(ix))
+            .collect();
+        let merged = sanitize_and_merge(&current, &added, buffer.rope().line_count(), None);
+        self.update_post(merged, buffer.rope())
+    }
+
+    /// Removes manual ranges (Monaco "Remove Manual Folding Ranges"), with
+    /// their collapsed state. Returns whether the hidden rows changed.
     pub fn remove_manual(
         &mut self,
         buffer: &text::Buffer,
         selections: &[crate::view::fold_model::SelectedRows],
-    ) {
-        let collapsed = self.collapsed_flags(buffer);
-        let model = crate::view::fold_model::FoldingModel::new(&self.ranges, collapsed);
-        let removed: Vec<(u32, u32)> =
-            crate::view::fold_model::manual_ranges_to_remove(&model, selections)
-                .into_iter()
-                .map(|ix| (self.ranges[ix].start_row, self.ranges[ix].end_row))
-                .collect();
+    ) -> bool {
+        self.sync(buffer);
+        let model =
+            crate::view::fold_model::FoldingModel::new(&self.ranges, self.collapsed.clone());
+        let removed = crate::view::fold_model::manual_ranges_to_remove(&model, selections);
         if removed.is_empty() {
-            return;
+            return false;
         }
-        self.manual
-            .retain(|range| !removed.contains(&Self::anchor_rows(buffer, range)));
-        for (start, _) in &removed {
-            self.expand(buffer, *start);
-        }
-        self.merge(buffer);
+        let kept: Vec<MergeRange> = (0..self.ranges.len())
+            .filter(|ix| !removed.contains(ix))
+            .map(|ix| self.merge_range(ix))
+            .collect();
+        self.update_post(kept, buffer.rope())
+    }
+
+    /// Monaco `FoldingModel.getMemento`: the collapsed regions and those
+    /// not from the provider.
+    pub fn memento(&self) -> Vec<MergeRange> {
+        self.folded_or_manual(None)
+    }
+
+    /// Monaco `FoldingModel.applyMemento`: merges saved regions (sorted by
+    /// start) into the current ones. Returns whether the hidden rows
+    /// changed.
+    pub fn apply_memento(&mut self, buffer: &text::Buffer, mut saved: Vec<MergeRange>) -> bool {
+        self.sync(buffer);
+        saved.sort_by_key(|range| range.start);
+        let current: Vec<MergeRange> = (0..self.ranges.len())
+            .map(|ix| self.merge_range(ix))
+            .collect();
+        let merged = sanitize_and_merge(&current, &saved, buffer.rope().line_count(), None);
+        self.update_post(merged, buffer.rope())
     }
 
     /// The manual ranges as inclusive model row ranges `(start, end)`.
-    pub fn manual_rows(&self, buffer: &text::Buffer) -> Vec<(u32, u32)> {
-        let mut rows: Vec<(u32, u32)> = self
-            .manual
+    pub fn manual_rows(&self) -> Vec<(u32, u32)> {
+        self.ranges
             .iter()
-            .map(|range| Self::anchor_rows(buffer, range))
-            .filter(|(start, end)| end > start)
-            .collect();
-        rows.sort();
-        rows
+            .filter(|range| range.manual)
+            .map(|range| (range.start_row, range.end_row))
+            .collect()
     }
 
     /// Whether the ranges came from providers, with kinds: commands then
@@ -893,64 +1353,79 @@ impl FoldState {
     }
 
     /// For each range, whether it's collapsed.
-    pub fn collapsed_flags(&self, buffer: &text::Buffer) -> Vec<bool> {
-        let collapsed: Vec<u32> = self
-            .collapsed_rows(buffer)
-            .into_iter()
-            .map(|(start, _)| start)
-            .collect();
-        self.ranges
-            .iter()
-            .map(|range| collapsed.binary_search(&range.start_row).is_ok())
-            .collect()
+    pub fn collapsed_flags(&self) -> Vec<bool> {
+        self.collapsed.clone()
     }
 
     /// Toggles the ranges at `indexes` (Monaco
     /// `FoldingModel.toggleCollapseState`): each once, however often listed.
-    pub fn toggle(&mut self, buffer: &text::Buffer, mut indexes: Vec<usize>) {
+    /// Returns whether the hidden rows changed.
+    pub fn toggle(&mut self, mut indexes: Vec<usize>) -> bool {
         indexes.sort_unstable();
         indexes.dedup();
-        let collapsed = self.collapsed_flags(buffer);
         for ix in indexes {
-            let range = &self.ranges[ix];
-            let (start, end) = (range.start_row, range.end_row);
-            if collapsed[ix] {
-                self.expand(buffer, start);
-            } else {
-                self.collapse(buffer, start, end);
+            if let Some(collapsed) = self.collapsed.get_mut(ix) {
+                *collapsed = !*collapsed;
             }
         }
+        self.generation = next_generation();
+        self.derive_hidden()
     }
 
-    /// Collapsed regions as inclusive model row ranges `(start, end)`.
-    pub fn collapsed_rows(&self, buffer: &text::Buffer) -> Vec<(u32, u32)> {
-        let mut rows: Vec<(u32, u32)> = self
-            .collapsed
+    /// Monaco `FoldingController.revealCursor`: expands the collapsed
+    /// regions around each of `rows` that's hidden. Returns whether any
+    /// was.
+    pub fn reveal_rows(&mut self, rows: &[u32]) -> bool {
+        let model =
+            crate::view::fold_model::FoldingModel::new(&self.ranges, self.collapsed.clone());
+        let mut toggle = Vec::new();
+        for &row in rows.iter().filter(|&&row| self.is_hidden(row)) {
+            toggle.extend(model.all_regions_at_line(row, |ix, _| {
+                model.collapsed[ix] && row > model.ranges[ix].start_row
+            }));
+        }
+        if toggle.is_empty() {
+            return false;
+        }
+        self.toggle(toggle);
+        true
+    }
+
+    /// Collapsed regions as inclusive model row ranges `(start, end)`,
+    /// nested ones included.
+    pub fn collapsed_rows(&self) -> Vec<(u32, u32)> {
+        self.ranges
             .iter()
-            .map(|range| {
-                let start = buffer.offset_to_point(buffer.resolve(&range.start)).row;
-                let end = buffer.offset_to_point(buffer.resolve(&range.end)).row;
-                (start, end.max(start))
-            })
-            .filter(|(start, end)| end > start)
-            .collect();
-        rows.sort();
-        rows
-    }
-
-    /// Model rows hidden by collapsed regions.
-    pub fn hidden_rows(&self, buffer: &text::Buffer) -> Vec<std::ops::Range<u32>> {
-        self.collapsed_rows(buffer)
-            .into_iter()
-            .map(|(start, end)| start + 1..end + 1)
+            .zip(&self.collapsed)
+            .filter(|(_, collapsed)| **collapsed)
+            .map(|(range, _)| (range.start_row, range.end_row))
             .collect()
     }
 
-    /// True if a collapsed region starts at model row `start_row`.
-    pub fn is_collapsed(&self, buffer: &text::Buffer, start_row: u32) -> bool {
-        self.collapsed_rows(buffer)
-            .iter()
-            .any(|(start, _)| *start == start_row)
+    /// Model rows hidden by collapsed regions, sorted.
+    pub fn hidden_rows(&self) -> &[std::ops::Range<u32>] {
+        &self.hidden_rows
+    }
+
+    /// Whether model `row` is hidden (Monaco `HiddenRangeModel.isHidden`).
+    pub fn is_hidden(&self, row: u32) -> bool {
+        let ix = self.hidden_rows.partition_point(|rows| rows.start <= row);
+        ix > 0 && self.hidden_rows[ix - 1].contains(&row)
+    }
+
+    /// Whether any row is hidden (Monaco `HiddenRangeModel.hasRanges`).
+    pub fn has_hidden(&self) -> bool {
+        !self.hidden_rows.is_empty()
+    }
+
+    /// True if the region starting at model row `start_row` is collapsed.
+    pub fn is_collapsed(&self, start_row: u32) -> bool {
+        let ix = self
+            .ranges
+            .partition_point(|range| range.start_row < start_row);
+        self.ranges
+            .get(ix)
+            .is_some_and(|range| range.start_row == start_row && self.collapsed[ix])
     }
 
     /// The innermost fold range containing `row` (whose start row is `row`
@@ -986,74 +1461,79 @@ impl FoldState {
         })
     }
 
-    /// The first fold range whose start row is `row`, if any.
+    /// The fold range whose start row is `row`, if any.
     pub fn range_starting_at(&self, row: u32) -> Option<&FoldRange> {
         let ix = self.ranges.partition_point(|range| range.start_row < row);
         self.ranges.get(ix).filter(|range| range.start_row == row)
     }
 
-    /// Collapses model rows `start_row + 1 ..= end_row` under `start_row`.
-    /// Does nothing if `end_row <= start_row` or a region starting at
-    /// `start_row` is already collapsed.
-    pub fn collapse(&mut self, buffer: &text::Buffer, start_row: u32, end_row: u32) {
-        if end_row <= start_row || self.is_collapsed(buffer, start_row) {
-            return;
-        }
-        let start = buffer.anchor_before(buffer.point_to_offset(text::Point::new(start_row, 0)));
-        let end = buffer.anchor_after(buffer.point_to_offset(text::Point::new(end_row, u32::MAX)));
-        self.collapsed.push(start..end);
-    }
-
-    /// Forgets collapsed regions that edits shrank to a single row (Monaco
-    /// drops folding regions whose range became empty).
-    pub fn prune(&mut self, buffer: &text::Buffer) {
-        self.collapsed.retain(|range| {
-            let start = buffer.offset_to_point(buffer.resolve(&range.start)).row;
-            let end = buffer.offset_to_point(buffer.resolve(&range.end)).row;
-            end > start
-        });
-    }
-
-    /// Expands collapsed regions starting at `start_row`.
-    pub fn expand(&mut self, buffer: &text::Buffer, start_row: u32) -> bool {
-        let before = self.collapsed.len();
-        self.collapsed
-            .retain(|range| buffer.offset_to_point(buffer.resolve(&range.start)).row != start_row);
-        self.collapsed.len() != before
-    }
-
-    /// Expands collapsed regions whose hidden rows intersect `rows`.
-    pub fn expand_intersecting(
-        &mut self,
-        buffer: &text::Buffer,
-        rows: std::ops::Range<u32>,
-    ) -> bool {
-        let before = self.collapsed.len();
-        self.collapsed.retain(|range| {
-            let start = buffer.offset_to_point(buffer.resolve(&range.start)).row;
-            let end = buffer.offset_to_point(buffer.resolve(&range.end)).row;
-            !(start + 1 < rows.end && rows.start <= end)
-        });
-        self.collapsed.len() != before
-    }
-
-    /// Collapses every fold range.
-    pub fn collapse_all(&mut self, buffer: &text::Buffer) {
-        let ranges = self.ranges.clone();
-        for range in ranges {
-            self.collapse(buffer, range.start_row, range.end_row);
-        }
-    }
-
-    /// Expands every collapsed region.
-    pub fn expand_all(&mut self) {
-        self.collapsed.clear();
+    /// Expands every collapsed region. Returns whether the hidden rows
+    /// changed.
+    pub fn expand_all(&mut self) -> bool {
+        let collapsed: Vec<usize> = (0..self.ranges.len())
+            .filter(|&ix| self.collapsed[ix])
+            .collect();
+        self.toggle(collapsed)
     }
 
     /// True if any region is collapsed.
     pub fn has_collapsed(&self) -> bool {
-        !self.collapsed.is_empty()
+        self.collapsed.contains(&true)
     }
+}
+
+/// Monaco's view model lines through an edit replacing rows `a ..= b` with
+/// rows `a ..= c` (`TextModel._doApplyEdits`): the first `min(b, c) - a`
+/// rows after `a` are edited in place and keep their visibility, extra old
+/// rows go and later ones shift, and extra new rows are hidden if the row
+/// they're inserted after is and isn't the first
+/// (`ViewModelLinesFromProjectedModel.onModelLinesInserted`). Returns
+/// whether any hidden row changed.
+fn apply_row_edit(hidden: &mut Vec<std::ops::Range<u32>>, a: u32, b: u32, c: u32) -> bool {
+    let a = b.min(c).max(a);
+    let inserted_hidden = a > 0 && hidden.iter().any(|rows| rows.contains(&a));
+    let shift = |row: u32| (row as i64 + c as i64 - b as i64) as u32;
+    let mut result: Vec<std::ops::Range<u32>> = Vec::with_capacity(hidden.len() + 1);
+    let mut push = |rows: std::ops::Range<u32>| {
+        if rows.is_empty() {
+            return;
+        }
+        match result.last_mut() {
+            Some(last) if last.end >= rows.start => last.end = last.end.max(rows.end),
+            _ => result.push(rows),
+        }
+    };
+    for rows in hidden.iter() {
+        // Up to row `a`, then the inserted rows, then what's after `b`.
+        push(rows.start..rows.end.min(a + 1));
+        if rows.contains(&a) && inserted_hidden {
+            push(a + 1..c + 1);
+        }
+        if rows.end > b + 1 {
+            push(shift(rows.start.max(b + 1))..shift(rows.end));
+        }
+    }
+    let changed = result != *hidden;
+    *hidden = result;
+    changed
+}
+
+fn next_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn point_edits(old: &Rope, new: &Rope, patch: &text::Patch) -> Vec<PointEdit> {
+    patch
+        .edits()
+        .iter()
+        .map(|edit| PointEdit {
+            old_start: old.offset_to_point(edit.old.start),
+            old_end: old.offset_to_point(edit.old.end),
+            new_start: new.offset_to_point(edit.new.start),
+            new_end: new.offset_to_point(edit.new.end),
+        })
+        .collect()
 }
 
 /// The folding controls' icons (Monaco `foldingDecorations.ts`'s

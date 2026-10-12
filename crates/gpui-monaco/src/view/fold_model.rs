@@ -269,7 +269,7 @@ pub fn manual_ranges_to_remove(model: &FoldingModel, selections: &[SelectedRows]
     for selection in selections.iter().filter(|s| s.empty) {
         let mut ix = model.find_range(selection.start);
         while let Some(i) = ix
-            && !model.ranges[i].manual
+            && model.ranges[i].is_provided()
         {
             ix = model.ranges[i].parent;
         }
@@ -286,7 +286,8 @@ pub fn manual_ranges_to_remove(model: &FoldingModel, selections: &[SelectedRows]
     };
     (0..model.ranges.len())
         .filter(|&ix| {
-            model.ranges[ix].manual && (remove_all || remove.contains(&ix) || intersects(ix))
+            !model.ranges[ix].is_provided()
+                && (remove_all || remove.contains(&ix) || intersects(ix))
         })
         .collect()
 }

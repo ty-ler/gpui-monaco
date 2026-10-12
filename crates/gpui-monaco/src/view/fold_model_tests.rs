@@ -3,10 +3,10 @@
 //! Line numbers in the test data are Monaco's (1-based); the helpers convert
 //! to and from our 0-based rows.
 //!
-//! Not ported:
+//! Not ported here:
 //! - `update` and `delete`: they test how `FoldingModel.update` carries the
-//!   collapse state across text edits, which is editor integration rather
-//!   than the pure fold commands in `fold_model.rs`.
+//!   collapse state across text edits, which `FoldState` does; they're in
+//!   `fold_state_tests.rs`.
 //! - `folding decoration`: it tests the decorations (rendering) Monaco
 //!   derives from the collapse state.
 
@@ -92,6 +92,7 @@ impl Harness {
                 parent: None,
                 kind: None,
                 manual,
+                recovered: false,
             })
             .collect();
         let mut harness = Self {

@@ -629,6 +629,9 @@ pub struct CodeEditor {
     /// wouldn't stop it), and whether a newer version waits for it.
     fold_computing: bool,
     fold_rerun: bool,
+    /// Expands the folds around hidden cursors after a cursor change
+    /// (Monaco `FoldingController.cursorChangedScheduler`).
+    pub(crate) fold_reveal_task: Option<Task<()>>,
     pub(crate) autoscroll_requested: bool,
     /// The autoscroll comes from a mouse gesture (Monaco ignores
     /// `cursorSurroundingLines` for those by default).
@@ -992,6 +995,7 @@ impl CodeEditor {
             hidden_areas: Vec::new(),
             fold_computing: false,
             fold_rerun: false,
+            fold_reveal_task: None,
             _blink_task: None,
             _subscriptions: subscriptions,
         }
@@ -1137,6 +1141,7 @@ impl CodeEditor {
         self.hidden_areas.clear();
         self.fold_computing = false;
         self.fold_rerun = false;
+        self.fold_reveal_task = None;
         *self.shared_model.borrow_mut() = model.downgrade();
         self.model = model;
         self.reanchor_widgets(widget_positions, cx);
@@ -2555,11 +2560,17 @@ impl CodeEditor {
                 self.semantic_tokens_after_edit(changes, cx);
                 self.inline_completions_after_edit(*kind, cx);
                 self.linked_editing_after_edit(changes, own, cx);
+                // Monaco's folding decorations follow the edit; replacing
+                // the whole text drops them.
+                if *kind == EditKind::SetValue {
+                    self.folds.clear(model.read(cx).buffer());
+                } else {
+                    self.folds.sync(model.read(cx).buffer());
+                }
                 let latest = model.read(cx).snapshot();
                 if latest.version() == self.snapshot.version() {
                     return;
                 }
-                self.folds.prune(model.read(cx).buffer());
                 let patch = model.read(cx).buffer().edits_since(self.snapshot.version());
                 let old = &self.snapshot;
                 let transform = |p: PointUtf16, bias: Bias| {
@@ -2893,6 +2904,7 @@ impl CodeEditor {
                 && change.reason != CursorChangeReason::Explicit);
         // The cursor moving means the keyboard is back in the text.
         self.sticky.focused = None;
+        self.folding_cursor_changed(cx);
         self.emit_cursor_events(change, cx);
         cx.notify();
     }
@@ -4479,11 +4491,12 @@ impl CodeEditor {
             let model = self.model.clone();
             let buffer = model.read(cx).buffer();
             let patch = buffer.edits_since(self.view_lines.version());
-            // Like Monaco, editing inside a collapsed region expands it.
+            // The folds follow the edits (lines typed into a collapsed
+            // region stay hidden).
+            self.folds.sync(buffer);
             for edit in patch.edits() {
                 let start = self.snapshot.offset_to_point(edit.new.start).row;
                 let end = self.snapshot.offset_to_point(edit.new.end).row;
-                self.folds.expand_intersecting(buffer, start..end + 1);
                 edited_rows.push(start..end + 1);
             }
             Arc::make_mut(&mut self.view_lines).apply_edits(
@@ -4499,7 +4512,7 @@ impl CodeEditor {
         }
         self.sync_injected_text(&edited_rows, cx);
         let mut hidden = if self.options.folding {
-            self.folds.hidden_rows(self.model.read(cx).buffer())
+            self.folds.hidden_rows().to_vec()
         } else {
             Vec::new()
         };
@@ -4564,6 +4577,7 @@ impl CodeEditor {
                 return;
             };
             let (snapshot, version, providers, compute) = inputs;
+            let rope = snapshot.rope().clone();
             let provided =
                 collect_provided_folding_ranges(providers, snapshot.rope().line_count()).await;
             let ranges = cx
@@ -4575,11 +4589,23 @@ impl CodeEditor {
                 let model = this.model.clone();
                 let first = this.folds.ranges_version().is_none();
                 this.folds.set_has_types(has_types);
-                this.folds
-                    .set_ranges(ranges, version, model.read(cx).buffer());
+                // Monaco `FoldingModel.update`: cursors starting in a
+                // collapsed region whose lines changed expand it.
+                let selection: Vec<u32> = this
+                    .cursors
+                    .selections()
+                    .iter()
+                    .map(|s| s.start().row)
+                    .collect();
+                let mut hidden_changed = this.folds.set_ranges(
+                    ranges,
+                    version,
+                    &rope,
+                    model.read(cx).buffer(),
+                    &selection,
+                );
                 // Monaco `foldingImportsByDefault`: imports start folded.
                 if first && this.options.folding_imports_by_default {
-                    let buffer = model.read(cx).buffer().clone();
                     let imports: Vec<usize> = this
                         .folds
                         .ranges()
@@ -4590,7 +4616,12 @@ impl CodeEditor {
                         })
                         .map(|(ix, _)| ix)
                         .collect();
-                    this.folds.toggle(&buffer, imports);
+                    hidden_changed |= this.folds.toggle(imports);
+                }
+                // Monaco `onHiddenRangesChanges`: cursors move out of the
+                // hidden lines.
+                if hidden_changed {
+                    this.after_fold_change(cx);
                 }
                 this.fold_task = None;
                 this.fold_computing = false;
@@ -4708,8 +4739,8 @@ impl CodeEditor {
     }
 
     /// The collapsed regions, as (header row, last hidden row).
-    pub fn collapsed_folds(&self, cx: &App) -> Vec<(u32, u32)> {
-        self.folds.collapsed_rows(self.model.read(cx).buffer())
+    pub fn collapsed_folds(&self, _cx: &App) -> Vec<(u32, u32)> {
+        self.folds.collapsed_rows()
     }
 
     fn emit_mouse(
@@ -5148,9 +5179,7 @@ impl CodeEditor {
                 crate::mouse_target::MouseTargetKind::ContentEmpty { after_lines: false }
             )
             && let Some(position) = mouse.target.position
-            && self
-                .folds
-                .is_collapsed(self.model.read(cx).buffer(), position.row)
+            && self.folds.is_collapsed(position.row)
         {
             self.click_fold(position.row, false, recursive, event.modifiers.alt, cx);
             return;
