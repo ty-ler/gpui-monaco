@@ -264,6 +264,13 @@ static REGISTRY: &[(&str, [V; 4])] = &[
     // refer to.
     ("tab.inactiveBackground", [H(0x2d2d2dff), H(0xecececff), N, N]),
     ("sideBarSectionHeader.border", [R("contrastBorder"), R("contrastBorder"), R("contrastBorder"), R("contrastBorder")]),
+    // The multi diff editor's compact and card variants' (`style.css`).
+    ("sideBarSectionHeader.background", [T(&H(0x808080ff), 0.2), T(&H(0x808080ff), 0.2), N, N]),
+    ("panel.border", [T(&H(0x808080ff), 0.35), T(&H(0x808080ff), 0.35), R("contrastBorder"), R("contrastBorder")]),
+    // The git extension's decoration colors (its `package.json`).
+    ("gitDecoration.addedResourceForeground", [H(0x81b88bff), H(0x587c0cff), H(0xa1e3adff), H(0x374e06ff)]),
+    ("gitDecoration.deletedResourceForeground", [H(0xc74e39ff), H(0xad0707ff), H(0xc74e39ff), H(0xad0707ff)]),
+    ("gitDecoration.modifiedResourceForeground", [H(0xe2c08dff), H(0x895503ff), H(0xe2c08dff), H(0x895503ff)]),
     ("banner.background", [R("list.activeSelectionBackground"), D(&R("list.activeSelectionBackground"), 0.3), R("list.activeSelectionBackground"), R("list.activeSelectionBackground")]),
     ("banner.foreground", [R("list.activeSelectionForeground"), R("list.activeSelectionForeground"), R("list.activeSelectionForeground"), R("list.activeSelectionForeground")]),
     ("banner.iconForeground", [R("editorInfo.foreground"), R("editorInfo.foreground"), R("editorInfo.foreground"), R("editorInfo.foreground")]),

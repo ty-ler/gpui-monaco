@@ -4,43 +4,54 @@
 //! Like Monaco, each diff editor is as tall as its content (with unchanged
 //! regions hidden), the list scrolls them as one, and only the visible part
 //! of each is laid out: the list sizes the editor to what shows and scrolls
-//! it to match.
+//! it to match (what Monaco's `CompressedVirtualizedScrollView` does by
+//! capping each row at the viewport's height). When files change height,
+//! the list keeps what's at the top of the viewport in place, as Monaco's
+//! anchored geometry edits do (see `scroll_layout`).
 //!
 //! Monaco's `VirtualizedItemManager` binds diff editors only to the files in
 //! view: a file scrolled out gives its editor back to a pool (Monaco
 //! `VirtualizedTemplatePool`, which keeps up to five unused ones), keeping
-//! its view state and measured height for when it shows again. The list
-//! has Monaco's `SmoothScrollableElement` scrollbars, and the headers follow
-//! the `multiDiffEditor-standard` variant of Monaco's `style.css`.
+//! its view state and measured height for when it shows again. Binary files
+//! show Monaco's "Binary file changed" placeholder instead. The list has
+//! Monaco's `SmoothScrollableElement` scrollbars and smooth wheel
+//! scrolling, and the headers follow one of the three variants of Monaco's
+//! `style.css` ([`MultiDiffEditorVariant`]).
+
+mod scroll_layout;
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Bounds, BoxShadow, Context, DispatchPhase, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels, Point, Render, ScrollWheelEvent,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, canvas, div,
-    point, px, size,
+    AnyElement, App, AppContext as _, Bounds, BoxShadow, Context, DispatchPhase, Entity,
+    EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels, Point,
+    Render, ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, canvas, div, point, px, size,
 };
 use text::PointUtf16;
+use web_time::Instant;
 
 use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
+use crate::decorations::DecorationOptions;
 use crate::diff_editor::{DiffEditor, DiffEditorEvent, DiffEditorOptions, DiffEditorViewState};
+use crate::editor::{CodeEditor, CodeEditorEvent};
+use crate::events::CursorChangeSource;
 use crate::model::TextModel;
 use crate::options::ScrollbarVisibility;
 use crate::theme::EditorColors;
-use crate::view::animation::ScrollbarFade;
+use crate::view::animation::{ScrollbarFade, ease_out_cubic};
+use scroll_layout::ScrollAnchoring;
 
-/// A file header's height (Monaco's `headerHeight`).
-const HEADER_HEIGHT: f32 = 40.;
-/// Space above a header's content (Monaco's `.header-content` margin).
+/// Space above the standard variant's header content (its `.header-content`
+/// margin).
 const HEADER_MARGIN_TOP: f32 = 8.;
-/// Space left and right of each diff editor (Monaco's `horizontalInsets`).
-const HORIZONTAL_INSET: f32 = 9.;
 /// The height assumed for a diff editor before it's laid out (Monaco's
 /// initial `editorContentHeight`).
 const INITIAL_CONTENT_HEIGHT: f32 = 500.;
@@ -52,6 +63,107 @@ const MIN_SLIDER: f32 = 20.;
 /// How many unused diff editors the pool keeps (Monaco
 /// `VirtualizedTemplatePool`).
 const MAX_UNUSED_EDITORS: usize = 5;
+/// A binary file's placeholder height (Monaco
+/// `binaryFilePlaceholderContentHeight`).
+const BINARY_PLACEHOLDER_HEIGHT: f32 = 100.;
+/// The list's smooth scroll duration (the `smoothScrollDuration` of
+/// Monaco `CompressedVirtualizedScrollView`'s `Scrollable`).
+const SMOOTH_SCROLL_DURATION: Duration = Duration::from_millis(100);
+/// How long a revealed range stays highlighted (Monaco `highlightRange`).
+const REVEAL_HIGHLIGHT_DURATION: Duration = Duration::from_millis(350);
+/// `--vscode-cornerRadius-medium` (`cornerRadius.medium`, 6px).
+const CORNER_RADIUS_MEDIUM: f32 = 6.;
+/// The compact variants' header content height
+/// (`--vscode-spacing-size320`).
+const COMPACT_HEADER_CONTENT_HEIGHT: f32 = 32.;
+/// The card variant's space around its cards (`--vscode-spacing-size80`
+/// padding, `--vscode-spacing-size40` above the header).
+const CARD_PADDING_X: f32 = 8.;
+const CARD_MARGIN_TOP: f32 = 4.;
+/// The inset of the compact variants' line between files
+/// (`--vscode-spacing-size100`).
+const COMPACT_SEPARATOR_INSET: f32 = 10.;
+
+/// The layout and look of a multi-diff editor (Monaco
+/// `MultiDiffEditorVariant`, from `multiDiffEditorOptions.ts` and the
+/// variant classes of `style.css`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum MultiDiffEditorVariant {
+    /// Monaco `cards`: each file in a bordered card with a rounded header
+    /// (`multiDiffEditor-compact multiDiffEditor-card`); headers collapse
+    /// their file when clicked, and original line numbers are hidden.
+    Cards,
+    /// Monaco `noCards`: compact 32px headers on the list's background with
+    /// a line between files (`multiDiffEditor-compact`); headers collapse
+    /// their file when clicked, original line numbers are hidden and the
+    /// diffs span the whole width.
+    NoCards,
+    /// Monaco `noCardsNonCompact` (`multiDiffEditor-standard`), what
+    /// standalone Monaco's `createMultiFileDiffEditor` uses: 40px headers
+    /// with a border above, collapsed with their chevron only.
+    #[default]
+    NoCardsNonCompact,
+}
+
+/// Monaco `IMultiDiffEditorVariantConfiguration`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct VariantConfiguration {
+    /// The `multiDiffEditor-compact` class (else `-standard`).
+    compact: bool,
+    /// The `multiDiffEditor-card` class.
+    card: bool,
+    /// `horizontalInsets` (the same on both sides).
+    horizontal_inset: Pixels,
+    /// `headerHeight`.
+    header_height: Pixels,
+    /// `contentBottomPadding`.
+    content_bottom_padding: Pixels,
+    /// `headerClickToCollapse`.
+    header_click_to_collapse: bool,
+    /// `diffEditorOptions.hideOriginalLineNumbers`.
+    hide_original_line_numbers: bool,
+    /// Where the editor starts: the header's height in `style.css` (the
+    /// card's header is 4px shorter than `headerHeight`).
+    editor_top: Pixels,
+}
+
+impl MultiDiffEditorVariant {
+    /// Monaco `getMultiDiffEditorVariantConfiguration`.
+    fn configuration(self) -> VariantConfiguration {
+        match self {
+            Self::NoCardsNonCompact => VariantConfiguration {
+                compact: false,
+                card: false,
+                horizontal_inset: px(9.),
+                header_height: px(40.),
+                content_bottom_padding: px(0.),
+                header_click_to_collapse: false,
+                hide_original_line_numbers: false,
+                editor_top: px(40.),
+            },
+            Self::NoCards => VariantConfiguration {
+                compact: true,
+                card: false,
+                horizontal_inset: px(0.),
+                header_height: px(32.),
+                content_bottom_padding: px(8.),
+                header_click_to_collapse: true,
+                hide_original_line_numbers: true,
+                editor_top: px(COMPACT_HEADER_CONTENT_HEIGHT),
+            },
+            Self::Cards => VariantConfiguration {
+                compact: true,
+                card: true,
+                horizontal_inset: px(9.),
+                header_height: px(40.),
+                content_bottom_padding: px(0.),
+                header_click_to_collapse: true,
+                hide_original_line_numbers: true,
+                editor_top: px(CARD_MARGIN_TOP + COMPACT_HEADER_CONTENT_HEIGHT),
+            },
+        }
+    }
+}
 
 /// A file in a multi-diff editor (Monaco `IDocumentDiffItem`).
 #[derive(Clone)]
@@ -65,6 +177,11 @@ pub struct MultiDiffDocument {
     pub original: Option<Entity<TextModel>>,
     /// The modified text; `None` if the file was deleted.
     pub modified: Option<Entity<TextModel>>,
+    /// The file isn't text (Monaco `isBinary`: a side without a text
+    /// model). It shows a "Binary file changed" placeholder instead of a
+    /// diff; `original` and `modified` still say which sides exist, and
+    /// their text isn't shown.
+    pub binary: bool,
 }
 
 impl MultiDiffDocument {
@@ -79,8 +196,57 @@ impl MultiDiffDocument {
             original_label: None,
             original: Some(original),
             modified: Some(modified),
+            binary: false,
         }
     }
+
+    /// The file's key in a [`MultiDiffEditorViewState`] (Monaco
+    /// `DocumentDiffItemViewModel.getKey`).
+    pub fn key(&self) -> MultiDiffDocumentKey {
+        MultiDiffDocumentKey {
+            original: self.original.as_ref().map(|_| {
+                self.original_label
+                    .clone()
+                    .unwrap_or_else(|| self.label.clone())
+            }),
+            modified: self.modified.as_ref().map(|_| self.label.clone()),
+        }
+    }
+}
+
+/// Which file a [`MultiDiffDocState`] is for (Monaco's item key, its
+/// original and modified uris): the original and modified paths, `None`
+/// for a side that doesn't exist.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MultiDiffDocumentKey {
+    /// The original path (`original_label`, else `label`).
+    pub original: Option<SharedString>,
+    /// The modified path (`label`).
+    pub modified: Option<SharedString>,
+}
+
+/// A file's part of a [`MultiDiffEditorViewState`] (Monaco
+/// `IMultiDiffDocState`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MultiDiffDocState {
+    /// Whether it's collapsed to its header.
+    pub collapsed: bool,
+    /// Its modified editor's selections, if it had an editor.
+    pub selections: Option<Vec<Selection>>,
+}
+
+/// The whole list's view state (Monaco `IMultiDiffEditorViewState`), from
+/// [`MultiDiffEditor::save_view_state`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MultiDiffEditorViewState {
+    /// The vertical scroll position (Monaco `scrollState.top`).
+    pub scroll_top: Pixels,
+    /// The horizontal one (`scrollState.left`).
+    pub scroll_left: Pixels,
+    /// Each file's state (Monaco `docStates`).
+    pub doc_states: HashMap<MultiDiffDocumentKey, MultiDiffDocState>,
+    /// The active file (Monaco `activeDiffItemKey`).
+    pub active_item: Option<MultiDiffDocumentKey>,
 }
 
 /// Events a [`MultiDiffEditor`] emits.
@@ -142,21 +308,37 @@ struct Item {
     modified: Entity<TextModel>,
     collapsed: bool,
     /// The diff editor's content height, as last measured (Monaco
-    /// `expandedContentHeight`, less the header).
+    /// `expandedContentHeight`, less the header and bottom padding).
     content_height: Pixels,
     /// The view state its editor had when it was given back to the pool
     /// (Monaco keeps the selections).
     view_state: Option<DiffEditorViewState>,
+    /// Selections from a restored [`MultiDiffEditorViewState`], for when
+    /// it next gets an editor (Monaco `lastTemplateData.selections`).
+    selections: Option<Vec<Selection>>,
+    /// The header, which takes focus in the variants that collapse on a
+    /// header click (Monaco's `tabIndex = 0`).
+    header_focus: FocusHandle,
+    /// A binary file's placeholder, or its "Open Diff" button.
+    placeholder_focus: FocusHandle,
 }
 
 impl Item {
-    /// Monaco `DiffEditorItemTemplate.size`.
-    fn height(&self) -> Pixels {
+    /// Monaco `DiffEditorItemTemplate.size` (and `getUnboundSize` for
+    /// binary files).
+    fn height(&self, config: &VariantConfiguration) -> Pixels {
         if self.collapsed {
-            px(HEADER_HEIGHT)
+            config.header_height
+        } else if self.document.binary {
+            config.header_height + config.content_bottom_padding + px(BINARY_PLACEHOLDER_HEIGHT)
         } else {
-            px(HEADER_HEIGHT) + self.content_height
+            config.header_height + self.content_height + config.content_bottom_padding
         }
+    }
+
+    /// Whether both sides exist (Monaco: the "Open Diff" button shows).
+    fn has_both_sides(&self) -> bool {
+        self.document.original.is_some() && self.document.modified.is_some()
     }
 }
 
@@ -169,7 +351,12 @@ struct Template {
     /// The diff changed since the editors were last laid out, so their
     /// content height is not the new one yet.
     stale: bool,
-    _subscription: Subscription,
+    /// The editors' scroll position the list last set.
+    expected_scroll: Point<Pixels>,
+    /// Frames left in which a scroll of the editors, from revealing a cursor
+    /// moved by the keyboard, scrolls the list along.
+    follow_cursor: u8,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl Template {
@@ -280,6 +467,14 @@ struct ScrollbarDrag {
     grab: Pixels,
 }
 
+/// A smooth scroll of the list towards its scroll position (Monaco
+/// `SmoothScrollingOperation`, easing out over 100ms).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SmoothScroll {
+    from: Pixels,
+    start: Instant,
+}
+
 /// What a pending reveal shows once its file's editor is laid out.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum RevealTarget {
@@ -296,10 +491,36 @@ struct PendingReveal {
     target: RevealTarget,
 }
 
+/// A restored scroll position, per axis until it lands (Monaco
+/// `_pendingScrollState`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PendingScroll {
+    top: Option<Pixels>,
+    left: Option<Pixels>,
+}
+
+/// The per-item state the headers are drawn with.
+#[derive(Clone, Copy, Debug)]
+struct EntryState {
+    /// The file is the active one (Monaco's `.active`).
+    active: bool,
+    /// Its editor, header or placeholder has focus (`:focus-within`).
+    focused: bool,
+    /// The list has focus and the file is active (Monaco's
+    /// `.multiDiffEditor:focus-within .multiDiffEntry.active`).
+    selected: bool,
+    /// The mouse is over the header (`.header-hovered`) or it has focus
+    /// (`.header-focused`).
+    header_highlighted: bool,
+    /// The mouse is over the file (`.multiDiffEntry:hover`).
+    hovered: bool,
+}
+
 /// Monaco `MultiDiffEditorWidget`: diffs of many files in one list.
 pub struct MultiDiffEditor {
     items: Vec<Item>,
     options: DiffEditorOptions,
+    variant: MultiDiffEditorVariant,
     /// Diff editors bound to files (Monaco's acquired templates).
     bound: Vec<Template>,
     /// Unused diff editors (Monaco `VirtualizedTemplatePool._unused`).
@@ -308,12 +529,26 @@ pub struct MultiDiffEditor {
     empty_models: (Entity<TextModel>, Entity<TextModel>),
     /// Monaco `MultiDiffEditorViewModel.activeDiffItem`.
     active: Option<usize>,
-    /// The file whose editor had focus when last drawn.
+    /// The file whose editor, header or placeholder had focus when last
+    /// drawn.
     focused_item: Option<usize>,
+    /// The file whose header the mouse is over, and the file it's over.
+    hovered_header: Option<usize>,
+    hovered_entry: Option<usize>,
     file_actions: Vec<MultiDiffFileAction>,
+    /// Opens a binary file's diff elsewhere (Monaco
+    /// `IWorkbenchUIElementFactory.openDiffEditor`).
+    open_binary_diff: Option<MultiDiffFileHandler>,
     pending_reveal: Option<PendingReveal>,
+    /// A restored scroll position, applied until the list is tall enough
+    /// for it (Monaco `_pendingScrollState`).
+    pending_scroll: Option<PendingScroll>,
+    /// Where the list scrolls to (Monaco `getFutureScrollPosition`); it
+    /// shows `smooth_scroll`'s position on the way.
     scroll_top: Pixels,
     scroll_left: Pixels,
+    smooth_scroll: Option<SmoothScroll>,
+    anchoring: ScrollAnchoring,
     /// The scroll position last drawn, to reveal the scrollbars when it
     /// changes.
     drawn_scroll: Point<Pixels>,
@@ -333,7 +568,9 @@ impl Focusable for MultiDiffEditor {
 }
 
 impl MultiDiffEditor {
-    /// A multi-diff editor showing `documents`.
+    /// A multi-diff editor showing `documents`, in the
+    /// [`MultiDiffEditorVariant::NoCardsNonCompact`] variant as standalone
+    /// Monaco's.
     pub fn new(
         documents: Vec<MultiDiffDocument>,
         window: &mut Window,
@@ -342,6 +579,7 @@ impl MultiDiffEditor {
         let mut this = Self {
             items: Vec::new(),
             options: DiffEditorOptions::default(),
+            variant: MultiDiffEditorVariant::default(),
             bound: Vec::new(),
             pool: Vec::new(),
             empty_models: (
@@ -350,10 +588,16 @@ impl MultiDiffEditor {
             ),
             active: None,
             focused_item: None,
+            hovered_header: None,
+            hovered_entry: None,
             file_actions: Vec::new(),
+            open_binary_diff: None,
             pending_reveal: None,
+            pending_scroll: None,
             scroll_top: px(0.),
             scroll_left: px(0.),
+            smooth_scroll: None,
+            anchoring: ScrollAnchoring::default(),
             drawn_scroll: Point::default(),
             scrollbars: [None, None],
             scrollbar_drag: None,
@@ -366,6 +610,9 @@ impl MultiDiffEditor {
     }
 
     /// Replaces the files (Monaco `setViewModel`), scrolled to the top.
+    /// Nothing of the previous files' view state carries over (Monaco
+    /// `clearPendingRestorationState`); restore some with
+    /// [`MultiDiffEditor::restore_view_state`].
     pub fn set_documents(
         &mut self,
         documents: Vec<MultiDiffDocument>,
@@ -402,15 +649,49 @@ impl MultiDiffEditor {
                     collapsed: false,
                     content_height: px(INITIAL_CONTENT_HEIGHT),
                     view_state: None,
+                    selections: None,
+                    header_focus: cx.focus_handle(),
+                    placeholder_focus: cx.focus_handle(),
                 }
             })
             .collect();
         self.active = None;
         self.focused_item = None;
+        self.hovered_header = None;
+        self.hovered_entry = None;
         self.pending_reveal = None;
+        self.pending_scroll = None;
         self.scroll_top = px(0.);
         self.scroll_left = px(0.);
+        self.smooth_scroll = None;
+        self.anchoring.reset();
         cx.notify();
+    }
+
+    /// The variant (Monaco `IMultiDiffEditorWidgetOptions.variant`).
+    pub fn variant(&self) -> MultiDiffEditorVariant {
+        self.variant
+    }
+
+    /// Switches to another variant (Monaco `setVariant`), keeping the view
+    /// state.
+    pub fn set_variant(&mut self, variant: MultiDiffEditorVariant, cx: &mut Context<Self>) {
+        if self.variant == variant {
+            return;
+        }
+        self.variant = variant;
+        let options = self.item_options();
+        for template in self.bound.iter().chain(&self.pool) {
+            template
+                .diff
+                .update(cx, |diff, cx| diff.update_options(options.clone(), cx));
+        }
+        self.hovered_header = None;
+        cx.notify();
+    }
+
+    fn config(&self) -> VariantConfiguration {
+        self.variant.configuration()
     }
 
     /// A diff editor for the pool, with Monaco's item template options:
@@ -445,21 +726,87 @@ impl MultiDiffEditor {
             }
             diff
         });
-        let subscription = cx.subscribe(&diff, |this, diff, event: &DiffEditorEvent, cx| {
-            if matches!(
-                event,
-                DiffEditorEvent::DiffUpdated | DiffEditorEvent::ModelChanged
-            ) && let Some(template) = this.bound.iter_mut().find(|t| t.diff == diff)
-            {
-                template.stale = true;
-            }
-            cx.notify();
-        });
+        let mut subscriptions =
+            vec![
+                cx.subscribe(&diff, |this, diff, event: &DiffEditorEvent, cx| {
+                    if matches!(
+                        event,
+                        DiffEditorEvent::DiffUpdated | DiffEditorEvent::ModelChanged
+                    ) && let Some(template) = this.bound.iter_mut().find(|t| t.diff == diff)
+                    {
+                        template.stale = true;
+                    }
+                    cx.notify();
+                }),
+            ];
+        let editors = {
+            let diff = diff.read(cx);
+            [
+                diff.original_editor().clone(),
+                diff.modified_editor().clone(),
+            ]
+        };
+        for editor in editors {
+            let diff = diff.downgrade();
+            subscriptions.push(cx.subscribe(
+                &editor,
+                move |this, _, event: &CodeEditorEvent, cx| {
+                    if let Some(diff) = diff.upgrade() {
+                        this.on_item_editor_event(&diff, event, cx);
+                    }
+                },
+            ));
+        }
         Template {
             diff,
             item: 0,
             stale: true,
-            _subscription: subscription,
+            expected_scroll: Point::default(),
+            follow_cursor: 0,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// Keeps a cursor moved by the keyboard in view: the editor reveals it
+    /// by scrolling itself (it's as tall as what shows of its file), and
+    /// the list scrolls along, as Monaco's list keeps the editor's own
+    /// scroll position until it next lays the file out.
+    fn on_item_editor_event(
+        &mut self,
+        diff: &Entity<DiffEditor>,
+        event: &CodeEditorEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(template) = self.bound.iter_mut().find(|t| t.diff == *diff) else {
+            return;
+        };
+        match event {
+            CodeEditorEvent::SelectionsChanged(change)
+                if change.source == CursorChangeSource::Keyboard =>
+            {
+                // The editor reveals the cursor in its next layout, after
+                // the list's next render.
+                template.follow_cursor = 2;
+            }
+            CodeEditorEvent::ScrollChanged(scroll) if template.follow_cursor > 0 => {
+                let delta = point(
+                    scroll.scroll_left - template.expected_scroll.x,
+                    scroll.scroll_top - template.expected_scroll.y,
+                );
+                if delta.x.abs() < px(0.5) && delta.y.abs() < px(0.5) {
+                    return;
+                }
+                // The other editor follows with the same scroll.
+                template.follow_cursor = 0;
+                template.expected_scroll = point(scroll.scroll_left, scroll.scroll_top);
+                self.scroll_top = (self.scroll_top + delta.y).max(px(0.));
+                self.scroll_left = (self.scroll_left + delta.x).max(px(0.));
+                self.smooth_scroll = None;
+                self.pending_scroll = None;
+                self.pending_reveal = None;
+                cx.notify();
+            }
+            _ => {}
         }
     }
 
@@ -471,11 +818,13 @@ impl MultiDiffEditor {
             Some(template) => template,
             None => self.create_template(window, cx),
         };
-        let item = &self.items[index];
+        let item = &mut self.items[index];
         let deleted = item.status == FileStatus::Deleted;
         let original_read_only = deleted || !self.options.original_editable;
         let (original, modified) = (item.original.clone(), item.modified.clone());
         let view_state = item.view_state.clone();
+        // Monaco `onDidBind`: the selections it had.
+        let selections = item.selections.take();
         template.diff.update(cx, |diff, cx| {
             diff.set_models(original, modified, cx);
             for (editor, read_only) in [
@@ -493,9 +842,14 @@ impl MultiDiffEditor {
             if let Some(state) = &view_state {
                 diff.restore_view_state(state, cx);
             }
+            if let Some(selections) = selections.filter(|s| !s.is_empty()) {
+                diff.modified_editor()
+                    .update(cx, |editor, cx| editor.set_selections(&selections, cx));
+            }
         });
         template.item = index;
         template.stale = true;
+        template.follow_cursor = 0;
         self.bound.push(template);
     }
 
@@ -539,13 +893,17 @@ impl MultiDiffEditor {
         }
     }
 
-    /// Binds file `index` now, for navigation.
+    /// Binds file `index` now, for navigation; `None` for a binary file,
+    /// which has no editor.
     fn ensure_bound(
         &mut self,
         index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Entity<DiffEditor> {
+    ) -> Option<Entity<DiffEditor>> {
+        if self.items[index].document.binary {
+            return None;
+        }
         if !self.bound.iter().any(|t| t.item == index) {
             self.bind(index, window, cx);
         }
@@ -553,14 +911,15 @@ impl MultiDiffEditor {
             .iter()
             .find(|t| t.item == index)
             .map(|t| t.diff.clone())
-            .expect("just bound")
     }
 
-    /// Monaco's item options: unchanged regions hidden, no overview ruler.
+    /// Monaco's item options: unchanged regions hidden, no overview ruler,
+    /// and the variant's `hideOriginalLineNumbers`.
     fn item_options(&self) -> DiffEditorOptions {
         let mut options = self.options.clone();
         options.hide_unchanged_regions.enabled = true;
         options.render_overview_ruler = false;
+        options.hide_original_line_numbers |= self.config().hide_original_line_numbers;
         options
     }
 
@@ -607,8 +966,8 @@ impl MultiDiffEditor {
     }
 
     /// The diff editor showing file `index`, if one does: only the files in
-    /// view (and a focused one) have an editor (Monaco
-    /// `tryGetCodeEditor`).
+    /// view (and a focused one) have an editor, and binary files never do
+    /// (Monaco `tryGetCodeEditor`).
     pub fn diff_editor(&self, index: usize) -> Option<&Entity<DiffEditor>> {
         self.bound.iter().find(|t| t.item == index).map(|t| &t.diff)
     }
@@ -637,15 +996,16 @@ impl MultiDiffEditor {
     }
 
     /// The active file (Monaco `activeDiffItem`): the last one focused,
-    /// revealed, navigated to or collapsed with its chevron. Its header and
-    /// bottom border are in `focusBorder`.
+    /// revealed, navigated to or collapsed with its chevron or header. It's
+    /// outlined (standard variant) or highlighted (compact variants).
     pub fn active_item(&self) -> Option<usize> {
         self.active
     }
 
     /// Adds a button to every file header's toolbar (Monaco's
     /// `MultiDiffEditorFileToolbar` menu). One with the same id is
-    /// replaced.
+    /// replaced. The compact variants show the toolbar only while the
+    /// mouse is over the file or it has focus.
     pub fn add_file_action(&mut self, action: MultiDiffFileAction, cx: &mut Context<Self>) {
         self.file_actions.retain(|a| a.id != action.id);
         self.file_actions.push(action);
@@ -661,14 +1021,31 @@ impl MultiDiffEditor {
         self.file_actions.len() != before
     }
 
-    /// The vertical scroll position.
+    /// Shows an "Open Diff" button on binary files with both sides, which
+    /// runs `handler` (Monaco `IWorkbenchUIElementFactory.openDiffEditor`;
+    /// standalone Monaco has none). `None` removes it.
+    pub fn set_open_binary_diff_handler(
+        &mut self,
+        handler: Option<MultiDiffFileHandler>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_binary_diff = handler;
+        cx.notify();
+    }
+
+    /// The vertical scroll position: where the list is going during a
+    /// smooth scroll (Monaco `getFutureScrollPosition`). It includes any
+    /// room left above the first file by the anchoring (Monaco
+    /// `leadingScrollSlack`).
     pub fn scroll_top(&self) -> Pixels {
         self.scroll_top
     }
 
-    /// Scrolls the list (clamped when next drawn).
+    /// Scrolls the list at once (clamped when next drawn).
     pub fn set_scroll_top(&mut self, scroll_top: Pixels, cx: &mut Context<Self>) {
         self.scroll_top = scroll_top.max(px(0.));
+        self.smooth_scroll = None;
+        self.pending_scroll = None;
         cx.notify();
     }
 
@@ -680,6 +1057,99 @@ impl MultiDiffEditor {
     /// Scrolls every file sideways (clamped when next drawn).
     pub fn set_scroll_left(&mut self, scroll_left: Pixels, cx: &mut Context<Self>) {
         self.scroll_left = scroll_left.max(px(0.));
+        self.pending_scroll = None;
+        cx.notify();
+    }
+
+    /// The scrollable height: the files and the anchoring's room above and
+    /// below them (Monaco's layout `scrollHeight`).
+    pub fn scroll_height(&self) -> Pixels {
+        self.anchoring.scroll_height(&self.heights())
+    }
+
+    /// Whether a smooth scroll is on its way (Monaco
+    /// `hasPendingScrollAnimation`).
+    pub fn has_pending_scroll_animation(&self) -> bool {
+        self.smooth_scroll.is_some()
+    }
+
+    /// The whole list's view state (Monaco `getViewState`): the scroll
+    /// position, each file's collapsed state and selections, and the
+    /// active file.
+    pub fn save_view_state(&self, cx: &App) -> MultiDiffEditorViewState {
+        let doc_states = self
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let selections = match self.diff_editor(index) {
+                    Some(diff) => Some(diff.read(cx).modified_editor().read(cx).selections()),
+                    None => item.selections.clone().or_else(|| {
+                        item.view_state
+                            .as_ref()
+                            .map(|state| state.modified.selections.clone())
+                    }),
+                };
+                (
+                    item.document.key(),
+                    MultiDiffDocState {
+                        collapsed: item.collapsed,
+                        selections,
+                    },
+                )
+            })
+            .collect();
+        MultiDiffEditorViewState {
+            scroll_top: self.scroll_top,
+            scroll_left: self.scroll_left,
+            doc_states,
+            active_item: self
+                .active
+                .and_then(|index| self.items.get(index))
+                .map(|item| item.document.key()),
+        }
+    }
+
+    /// Restores a [`MultiDiffEditor::save_view_state`] (Monaco
+    /// `setViewState`) onto the files with the same keys. The scroll
+    /// position is applied once the list is tall enough for it (Monaco
+    /// `_applyPendingScrollState`), as files get measured.
+    pub fn restore_view_state(&mut self, state: &MultiDiffEditorViewState, cx: &mut Context<Self>) {
+        for index in 0..self.items.len() {
+            let Some(doc) = state.doc_states.get(&self.items[index].document.key()) else {
+                continue;
+            };
+            self.set_collapsed(index, doc.collapsed, cx);
+            let Some(selections) = doc.selections.clone() else {
+                continue;
+            };
+            match self.diff_editor(index).cloned() {
+                Some(diff) => {
+                    let editor = diff.read(cx).modified_editor().clone();
+                    editor.update(cx, |editor, cx| editor.set_selections(&selections, cx));
+                }
+                None => {
+                    let item = &mut self.items[index];
+                    if let Some(view_state) = &mut item.view_state {
+                        view_state.modified.selections = selections.clone();
+                    }
+                    item.selections = Some(selections);
+                }
+            }
+        }
+        if let Some(key) = &state.active_item
+            && let Some(index) = self.items.iter().position(|i| i.document.key() == *key)
+        {
+            self.active = Some(index);
+        }
+        self.pending_reveal = None;
+        self.smooth_scroll = None;
+        self.scroll_top = state.scroll_top.max(px(0.));
+        self.scroll_left = state.scroll_left.max(px(0.));
+        self.pending_scroll = Some(PendingScroll {
+            top: Some(self.scroll_top),
+            left: Some(self.scroll_left),
+        });
         cx.notify();
     }
 
@@ -690,11 +1160,13 @@ impl MultiDiffEditor {
             self.active = Some(index);
         }
         let top = self.item_top(index.min(self.items.len()));
-        self.set_scroll_top(top, cx);
+        // Monaco `setLogicalScrollPosition`.
+        self.set_scroll_top(self.anchoring.leading_slack + top, cx);
     }
 
     /// Reveals file `index` and, once its diff is shown, centers `range`
-    /// of its original or modified side (Monaco `reveal` with a `range`).
+    /// of its original or modified side, highlighting it for 350ms (Monaco
+    /// `reveal` with a `range`, and `highlightRange`).
     pub fn reveal_range(
         &mut self,
         index: usize,
@@ -708,7 +1180,15 @@ impl MultiDiffEditor {
         }
         self.set_collapsed(index, false, cx);
         self.reveal(index, cx);
-        self.ensure_bound(index, window, cx);
+        let Some(diff) = self.ensure_bound(index, window, cx) else {
+            return;
+        };
+        let editor = if original {
+            diff.read(cx).original_editor().clone()
+        } else {
+            diff.read(cx).modified_editor().clone()
+        };
+        highlight_range(&editor, range.clone(), cx);
         self.pending_reveal = Some(PendingReveal {
             item: index,
             target: RevealTarget::Line {
@@ -720,7 +1200,7 @@ impl MultiDiffEditor {
 
     /// Monaco `goToNextChange`: the next change of the active file, else
     /// the first change of the next file (wrapping around), expanding it
-    /// and focusing its modified editor.
+    /// and focusing its modified editor (a binary file's placeholder).
     pub fn go_to_next_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.navigate_to_change(true, window, cx);
     }
@@ -748,30 +1228,32 @@ impl MultiDiffEditor {
             return;
         };
         self.set_collapsed(current, false, cx);
-        let diff = self.ensure_bound(current, window, cx);
-        let has_more = {
-            let diff = diff.read(cx);
-            let line = diff.modified_editor().read(cx).selections()[0].head.row as usize + 1;
-            diff.diff().is_some_and(|d| {
-                if next {
-                    d.changes
-                        .iter()
-                        .any(|c| c.modified.start_line_number > line)
-                } else {
-                    d.changes
-                        .iter()
-                        .any(|c| c.modified.end_line_number_exclusive <= line)
-                }
-            })
-        };
-        if has_more {
-            diff.update(cx, |diff, cx| diff.go_to_diff(next, window, cx));
-            self.pending_reveal = Some(PendingReveal {
-                item: current,
-                target: RevealTarget::Cursor,
-            });
-            cx.notify();
-            return;
+        // A binary file has no changes to go to.
+        if let Some(diff) = self.ensure_bound(current, window, cx) {
+            let has_more = {
+                let diff = diff.read(cx);
+                let line = diff.modified_editor().read(cx).selections()[0].head.row as usize + 1;
+                diff.diff().is_some_and(|d| {
+                    if next {
+                        d.changes
+                            .iter()
+                            .any(|c| c.modified.start_line_number > line)
+                    } else {
+                        d.changes
+                            .iter()
+                            .any(|c| c.modified.end_line_number_exclusive <= line)
+                    }
+                })
+            };
+            if has_more {
+                diff.update(cx, |diff, cx| diff.go_to_diff(next, window, cx));
+                self.pending_reveal = Some(PendingReveal {
+                    item: current,
+                    target: RevealTarget::Cursor,
+                });
+                cx.notify();
+                return;
+            }
         }
         let count = self.items.len();
         let index = if next {
@@ -795,7 +1277,13 @@ impl MultiDiffEditor {
         }
         self.set_collapsed(index, false, cx);
         self.reveal(index, cx);
-        let diff = self.ensure_bound(index, window, cx);
+        let Some(diff) = self.ensure_bound(index, window, cx) else {
+            // Monaco `DiffEditorItemBinding.focus`: a binary file's
+            // placeholder (or its "Open Diff" button).
+            let focus = self.items[index].placeholder_focus.clone();
+            window.focus(&focus, cx);
+            return;
+        };
         if first {
             diff.update(cx, |diff, cx| diff.reveal_first_diff(cx));
         } else if !diff.read(cx).is_computing_diff() {
@@ -819,16 +1307,25 @@ impl MultiDiffEditor {
         window.focus(&modified, cx);
     }
 
-    /// The top of file `index` in the list.
+    /// Each file's height.
+    fn heights(&self) -> Vec<Pixels> {
+        let config = self.config();
+        self.items.iter().map(|item| item.height(&config)).collect()
+    }
+
+    /// The top of file `index` in the list, below any room the anchoring
+    /// left above the first file.
     fn item_top(&self, index: usize) -> Pixels {
+        let config = self.config();
         self.items[..index.min(self.items.len())]
             .iter()
-            .map(Item::height)
+            .map(|item| item.height(&config))
             .fold(px(0.), |a, b| a + b)
     }
 
-    fn total_height(&self) -> Pixels {
-        self.item_top(self.items.len())
+    /// The largest vertical scroll position for a `viewport` this tall.
+    fn max_scroll_top(&self, viewport: Pixels) -> Pixels {
+        (self.scroll_height() - viewport).max(px(0.))
     }
 
     /// Monaco's `scrollWidth` less the width: the widest horizontal scroll
@@ -840,6 +1337,26 @@ impl MultiDiffEditor {
             .fold(px(0.), |a, b| a.max(b))
     }
 
+    /// The vertical scroll position shown at `now`: on the way to
+    /// `scroll_top` during a smooth scroll.
+    fn shown_scroll_top(&self, now: Instant) -> Pixels {
+        match self.smooth_scroll {
+            Some(smooth) => {
+                let t = now.duration_since(smooth.start).as_secs_f32()
+                    / SMOOTH_SCROLL_DURATION.as_secs_f32();
+                if t >= 1. {
+                    self.scroll_top
+                } else {
+                    smooth.from + (self.scroll_top - smooth.from) * ease_out_cubic(t)
+                }
+            }
+            None => self.scroll_top,
+        }
+    }
+
+    /// Monaco `SmoothScrollableElement._onMouseWheel`: from where the list
+    /// is going, and smoothly for a physical wheel's line deltas
+    /// (`mouseWheelSmoothScroll`), at once for a trackpad's pixel deltas.
     fn on_scroll_wheel(
         &mut self,
         event: &ScrollWheelEvent,
@@ -848,11 +1365,24 @@ impl MultiDiffEditor {
     ) {
         let delta = event.delta.pixel_delta(px(18.));
         let viewport = self.bounds.get().size;
-        let max_top = (self.total_height() - viewport.height).max(px(0.));
+        let max_top = self.max_scroll_top(viewport.height);
         let max_left = self.max_scroll_left(cx);
-        self.scroll_top = (self.scroll_top - delta.y).clamp(px(0.), max_top);
+        let now = Instant::now();
+        let top = (self.scroll_top - delta.y).clamp(px(0.), max_top);
+        if matches!(event.delta, ScrollDelta::Lines(_)) && top != self.scroll_top {
+            // Monaco `SmoothScrollingOperation.combine`: on from where it
+            // shows now.
+            self.smooth_scroll = Some(SmoothScroll {
+                from: self.shown_scroll_top(now),
+                start: now,
+            });
+        } else if !matches!(event.delta, ScrollDelta::Lines(_)) {
+            self.smooth_scroll = None;
+        }
+        self.scroll_top = top;
         self.scroll_left = (self.scroll_left - delta.x).clamp(px(0.), max_left);
         self.pending_reveal = None;
+        self.pending_scroll = None;
         cx.stop_propagation();
         cx.notify();
     }
@@ -876,6 +1406,7 @@ impl MultiDiffEditor {
         };
         self.scrollbar_drag = Some(ScrollbarDrag { vertical, grab });
         self.pending_reveal = None;
+        self.pending_scroll = None;
         self.drag_scrollbar(position, cx);
     }
 
@@ -907,6 +1438,7 @@ impl MultiDiffEditor {
             .max(px(0.));
         if drag.vertical {
             self.scroll_top = scroll;
+            self.smooth_scroll = None;
         } else {
             self.scroll_left = scroll;
         }
@@ -978,9 +1510,10 @@ impl MultiDiffEditor {
         ) else {
             return;
         };
-        let offset = self.item_top(pending.item) + px(HEADER_HEIGHT);
+        let offset = self.item_top(pending.item) + self.config().editor_top;
         let center = offset + (top + bottom) / 2.;
-        self.scroll_top = (center - viewport / 2.).max(px(0.));
+        self.scroll_top = (self.anchoring.leading_slack + center - viewport / 2.).max(px(0.));
+        self.smooth_scroll = None;
         self.pending_reveal = None;
         cx.notify();
     }
@@ -1000,7 +1533,7 @@ impl MultiDiffEditor {
         self.scrollbar_fade.mouse_position = over.then_some(position);
         self.scrollbar_fade.mouse_over = over;
         if was_over && !over {
-            self.scrollbar_fade.left_at = Some(web_time::Instant::now());
+            self.scrollbar_fade.left_at = Some(Instant::now());
         }
         if was_over != over
             || hovered_before != slider_hovered(&self.scrollbar_fade, &self.scrollbars)
@@ -1009,10 +1542,21 @@ impl MultiDiffEditor {
         }
     }
 
+    /// Monaco's header click and Enter/Space on a focused header
+    /// (`headerClickToCollapse`): activates the file and toggles it.
+    fn toggle_from_header(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.active = Some(index);
+        let collapsed = self.is_collapsed(index);
+        self.set_collapsed(index, !collapsed, cx);
+    }
+
     /// File `index`'s top and height, for tests.
     #[doc(hidden)]
     pub fn item_bounds_for_tests(&self, index: usize) -> (Pixels, Pixels) {
-        (self.item_top(index), self.items[index].height())
+        (
+            self.item_top(index),
+            self.items[index].height(&self.config()),
+        )
     }
 
     /// The files with a diff editor, in order, for tests.
@@ -1037,23 +1581,246 @@ impl MultiDiffEditor {
         Some((state.bar, state.slider()))
     }
 
-    /// The header's content: chevron, file label, status and toolbar
-    /// (Monaco `DiffEditorItemTemplate`'s `.header-content`).
+    /// The vertical scroll position last drawn and the anchoring's room
+    /// above and below the files, for tests.
+    #[doc(hidden)]
+    pub fn scroll_state_for_tests(&self) -> (Pixels, Pixels, Pixels) {
+        (
+            self.drawn_scroll.y,
+            self.anchoring.leading_slack,
+            self.anchoring.trailing_slack,
+        )
+    }
+
+    /// The per-file state the header and borders are drawn with.
+    fn entry_state(&self, index: usize, list_focused: bool, window: &Window) -> EntryState {
+        let active = self.active == Some(index);
+        let header_focused = self.config().header_click_to_collapse
+            && self.items[index].header_focus.is_focused(window);
+        EntryState {
+            active,
+            focused: self.focused_item == Some(index),
+            selected: list_focused && active,
+            header_highlighted: self.hovered_header == Some(index) || header_focused,
+            hovered: self.hovered_entry == Some(index),
+        }
+    }
+
+    /// The header (Monaco `DiffEditorItemTemplate`'s `.header`) for the
+    /// variant, at `top` in its file's visible part.
+    #[allow(clippy::too_many_arguments)]
     fn render_header(
         &self,
         index: usize,
+        top: Pixels,
         stuck: bool,
         pushed_up: bool,
+        state: EntryState,
         colors: &EditorColors,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
+        let config = self.config();
         let item = &self.items[index];
         let collapsed = item.collapsed;
-        let border = if self.active == Some(index) {
-            colors.focus_border
-        } else {
-            colors.multi_diff_border
+        let content = self.render_header_content(index, state, colors, cx);
+        if !config.compact {
+            // `.multiDiffEditor-standard`: an 8px margin above the content,
+            // a border above it (`focusBorder` when active) and one below
+            // (a header pushed up by the next file, or a collapsed file's,
+            // has none). Monaco's `.header-content.shadow` once the file is
+            // scrolled under its header.
+            let border = if state.active {
+                colors.focus_border
+            } else {
+                colors.multi_diff_border
+            };
+            let bottom_border = colors
+                .multi_diff_header_border
+                .filter(|_| !pushed_up && !collapsed);
+            return div()
+                .absolute()
+                .top(top)
+                .left(px(0.))
+                .right(px(0.))
+                .h(config.header_height)
+                .pt(px(HEADER_MARGIN_TOP))
+                .bg(colors.multi_diff_background)
+                .child(
+                    content
+                        .relative()
+                        .size_full()
+                        .px(px(6.))
+                        .py(px(1.))
+                        .bg(colors.multi_diff_header_background)
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(0.))
+                                .left(px(0.))
+                                .right(px(0.))
+                                .h(px(1.))
+                                .bg(border),
+                        )
+                        .when_some(bottom_border, |header, bottom| {
+                            header.child(
+                                div()
+                                    .absolute()
+                                    .bottom(px(0.))
+                                    .left(px(0.))
+                                    .right(px(0.))
+                                    .h(px(1.))
+                                    .bg(bottom),
+                            )
+                        })
+                        .when(stuck, |header| {
+                            header.shadow(header_shadow(colors.scrollbar_shadow))
+                        }),
+                )
+                .into_any_element();
+        }
+        // The compact variants: the header collapses its file when clicked
+        // and takes focus (`tabIndex = 0`, `role="button"`,
+        // `aria-expanded`).
+        let label = item.document.label.clone();
+        let header = div()
+            .id(("multi-diff-header", index))
+            .debug_selector(move || format!("multi-diff-header-{index}"))
+            .track_focus(&item.header_focus)
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .aria_expanded(!collapsed)
+            .absolute()
+            .top(top)
+            .left(px(0.))
+            .right(px(0.))
+            .h(config.header_height)
+            .bg(colors.multi_diff_background)
+            .cursor_pointer()
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.hovered_header = Some(index);
+                } else if this.hovered_header == Some(index) {
+                    this.hovered_header = None;
+                }
+                cx.notify();
+            }))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_from_header(index, cx)))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    this.toggle_from_header(index, cx);
+                }
+            }));
+        let hover_background = colors.list_hover_background;
+        let pressed_background = colors.toolbar_active_background;
+        if !config.card {
+            // `.multiDiffEditor-compact`: the content fills the header,
+            // highlighted when hovered or pressed, and in
+            // `list.inactiveSelectionBackground` while the list has focus
+            // and the file is active.
+            let selected = state
+                .selected
+                .then_some(colors.list_inactive_selection_background)
+                .flatten();
+            let focus_border = colors.focus_border;
+            return header
+                .focus_visible(move |style| style.border_1().border_color(focus_border))
+                .child(
+                    content
+                        .size_full()
+                        .h(px(COMPACT_HEADER_CONTENT_HEIGHT))
+                        .when_some(selected, |content, background| content.bg(background))
+                        .when(selected.is_none(), |content| {
+                            content
+                                .when_some(hover_background, |content, background| {
+                                    content.hover(move |style| style.bg(background))
+                                })
+                                .when_some(pressed_background, |content, background| {
+                                    content.active(move |style| style.bg(background))
+                                })
+                        }),
+                )
+                .into_any_element();
+        }
+        // `.multiDiffEditor-card`: a bordered, rounded header 4px below the
+        // file's top and 8px in from the sides. Its background layers the
+        // hover, pressed and focus colors over
+        // `sideBarSectionHeader.background`; its border is `focusBorder`
+        // while the file has focus. Stuck to the top of its expanded file,
+        // it's square, 4px taller, without the top border and with a
+        // shadow.
+        let base = colors
+            .multi_diff_card_header_background
+            .unwrap_or(colors.multi_diff_background);
+        let focused = state.focused || state.selected;
+        let background = match colors.list_focus_background.filter(|_| focused) {
+            Some(focus) => base.blend(focus),
+            None => base,
         };
+        let border = if state.focused {
+            Some(colors.focus_border)
+        } else {
+            colors.multi_diff_card_border
+        };
+        let border_color = border.unwrap_or_else(gpui::transparent_black);
+        let floating = stuck && !collapsed;
+        let radius = px(CORNER_RADIUS_MEDIUM);
+        let content = content
+            .mx(px(CARD_PADDING_X))
+            .mt(if floating {
+                px(0.)
+            } else {
+                px(CARD_MARGIN_TOP)
+            })
+            .h(if floating {
+                px(COMPACT_HEADER_CONTENT_HEIGHT + CARD_MARGIN_TOP)
+            } else {
+                px(COMPACT_HEADER_CONTENT_HEIGHT)
+            })
+            .border_l_1()
+            .border_r_1()
+            .when(collapsed, |content| content.border_b_1())
+            .border_color(border_color)
+            .bg(background)
+            .when(!focused, |content| {
+                content
+                    .when_some(colors.toolbar_hover_background, |content, hover| {
+                        content.hover(move |style| style.bg(base.blend(hover)))
+                    })
+                    .when_some(pressed_background, |content, pressed| {
+                        content.active(move |style| style.bg(base.blend(pressed)))
+                    })
+            });
+        // `border-top-color: transparent` over the background: no top
+        // border shows.
+        let content = if floating {
+            content.shadow(header_shadow(colors.scrollbar_shadow))
+        } else if collapsed {
+            content.border_t_1().rounded(radius)
+        } else {
+            content.border_t_1().rounded_t(radius)
+        };
+        let focus_border = colors.focus_border;
+        header
+            .flex()
+            .flex_col()
+            .focus_visible(move |style| style.border_1().border_color(focus_border))
+            .child(content.relative())
+            .into_any_element()
+    }
+
+    /// The header's content: chevron, file label, status and toolbar
+    /// (Monaco `DiffEditorItemTemplate`'s `.header-content`).
+    fn render_header_content(
+        &self,
+        index: usize,
+        state: EntryState,
+        colors: &EditorColors,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let config = self.config();
+        let item = &self.items[index];
+        let collapsed = item.collapsed;
         // Monaco's `chevron-right` / `chevron-down` toggle.
         let chevron = codicon(if collapsed {
             Codicon::ChevronRight
@@ -1062,12 +1829,15 @@ impl MultiDiffEditor {
         });
         let status = match item.status {
             FileStatus::Modified => None,
-            FileStatus::Added => Some("A"),
-            FileStatus::Deleted => Some("D"),
-            FileStatus::Renamed => Some("R"),
+            FileStatus::Added => Some(("A", colors.multi_diff_added_foreground)),
+            FileStatus::Deleted => Some(("D", colors.multi_diff_deleted_foreground)),
+            FileStatus::Renamed => Some(("R", colors.multi_diff_renamed_foreground)),
         };
         let foreground = colors.multi_diff_header_foreground;
         let label = item.document.label.clone();
+        // The compact variants show the toolbar only while the mouse is
+        // over the file or it has focus.
+        let show_actions = !config.compact || state.hovered || state.focused;
         let actions = self.file_actions.iter().enumerate().map(|(ix, action)| {
             let action = action.clone();
             let document = item.document.clone();
@@ -1082,89 +1852,65 @@ impl MultiDiffEditor {
                 .justify_center()
                 .min_w(px(22.))
                 .h(px(22.))
-                .p(px(3.))
+                .p(if config.compact { px(4.) } else { px(3.) })
                 .rounded(px(5.))
                 .cursor_pointer()
                 .hover(|style| colors.toolbar_hover(style))
                 .child(action.icon.clone())
                 .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
                     this.active = Some(index);
                     (action.run)(index, &document, window, cx);
                     cx.notify();
                 }))
         });
-        // Monaco's `.header:not(.collapsed)` bottom border: a header pushed
-        // up by the next file, or a collapsed file's, has none.
-        let bottom_border = colors
-            .multi_diff_header_border
-            .filter(|_| !pushed_up && !collapsed);
+        let chevron_button = div()
+            .id(("multi-diff-collapse", index))
+            .debug_selector(|| format!("multi-diff-collapse-{index}"))
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!(
+                "{}, {}",
+                label,
+                if collapsed { "collapsed" } else { "expanded" }
+            )))
+            .mx(px(6.))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .map(|button| {
+                if config.compact {
+                    // The compact `.collapse-button a`: 4px padding and a
+                    // rounded hover background.
+                    let pressed = colors.toolbar_active_background;
+                    button
+                        .p(px(4.))
+                        .rounded(px(CORNER_RADIUS_MEDIUM))
+                        .hover(|style| colors.toolbar_hover(style))
+                        .when_some(pressed, |button, pressed| {
+                            button.active(move |style| style.bg(pressed))
+                        })
+                } else {
+                    button.w(px(16.)).h(px(22.))
+                }
+            })
+            .child(chevron)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                // Monaco `activateItem`.
+                this.active = Some(index);
+                this.set_collapsed(index, !collapsed, cx)
+            }));
         div()
-            .relative()
+            .id(("multi-diff-header-content", index))
             .flex()
             .flex_row()
             .items_center()
-            .size_full()
-            .px(px(6.))
-            .py(px(1.))
-            .bg(colors.multi_diff_header_background)
-            .child(
-                div()
-                    .absolute()
-                    .top(px(0.))
-                    .left(px(0.))
-                    .right(px(0.))
-                    .h(px(1.))
-                    .bg(border),
-            )
-            .when_some(bottom_border, |header, bottom| {
-                header.child(
-                    div()
-                        .absolute()
-                        .bottom(px(0.))
-                        .left(px(0.))
-                        .right(px(0.))
-                        .h(px(1.))
-                        .bg(bottom),
-                )
-            })
             .text_color(foreground)
-            .text_size(px(14.))
+            .text_size(if config.compact { px(13.) } else { px(14.) })
             .line_height(px(22.))
-            // Monaco's `.header-content.shadow`, once the file is scrolled
-            // under its header.
-            .when(stuck, |header| {
-                header.shadow(vec![BoxShadow {
-                    color: colors.scrollbar_shadow,
-                    offset: point(px(0.), px(6.)),
-                    blur_radius: px(6.),
-                    spread_radius: px(-6.),
-                    inset: false,
-                }])
-            })
-            .child(
-                div()
-                    .id(("multi-diff-collapse", index))
-                    .debug_selector(|| format!("multi-diff-collapse-{index}"))
-                    .role(gpui::Role::Button)
-                    .aria_label(SharedString::from(format!(
-                        "{}, {}",
-                        label,
-                        if collapsed { "collapsed" } else { "expanded" }
-                    )))
-                    .mx(px(6.))
-                    .w(px(16.))
-                    .h(px(22.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .child(chevron)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        // Monaco `activateItem`.
-                        this.active = Some(index);
-                        this.set_collapsed(index, !collapsed, cx)
-                    })),
-            )
+            .child(chevron_button)
             .child(
                 div()
                     .flex()
@@ -1179,22 +1925,41 @@ impl MultiDiffEditor {
                         true,
                         colors,
                     ))
-                    .when_some(status, |path, status| {
-                        // Monaco's `.status`: semibold at 0.75 opacity.
-                        path.child(
-                            div()
-                                .flex_none()
-                                .mx(px(10.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(foreground.opacity(0.75))
-                                .child(status),
-                        )
+                    .when_some(status, |path, (status, color)| {
+                        if config.compact {
+                            // The compact `.status`: 16px wide, 12px,
+                            // semibold at 0.9 opacity, in the git
+                            // decoration colors.
+                            path.child(
+                                div()
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .justify_center()
+                                    .w(px(16.))
+                                    .mx(px(10.))
+                                    .text_size(px(12.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(color.opacity(0.9))
+                                    .child(status),
+                            )
+                        } else {
+                            // Monaco's `.status`: semibold at 0.75 opacity.
+                            path.child(
+                                div()
+                                    .flex_none()
+                                    .mx(px(10.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(foreground.opacity(0.75))
+                                    .child(status),
+                            )
+                        }
                     })
                     .when_some(item.document.original_label.clone(), |path, original| {
                         path.child(resource_label(&original, true, false, colors))
                     }),
             )
-            .when(!self.file_actions.is_empty(), |header| {
+            .when(!self.file_actions.is_empty() && show_actions, |header| {
                 header.child(
                     div()
                         .id(("multi-diff-file-actions", index))
@@ -1209,6 +1974,81 @@ impl MultiDiffEditor {
             })
     }
 
+    /// A binary file's placeholder (Monaco's `.binary-file-placeholder`):
+    /// "Binary file changed" and, with a handler and both sides, an "Open
+    /// Diff" button. The button, else the placeholder, takes focus.
+    fn render_binary_placeholder(
+        &self,
+        index: usize,
+        colors: &EditorColors,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let item = &self.items[index];
+        let open_diff = self
+            .open_binary_diff
+            .clone()
+            .filter(|_| item.has_both_sides());
+        let focus_border = colors.focus_border;
+        let placeholder = div()
+            .id(("multi-diff-binary", index))
+            .debug_selector(move || format!("multi-diff-binary-{index}"))
+            .role(gpui::Role::Group)
+            .aria_label("Binary file changed")
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(8.))
+            .text_color(colors.description_foreground)
+            .text_size(px(13.))
+            .child("Binary file changed");
+        let Some(handler) = open_diff else {
+            return placeholder
+                .track_focus(&item.placeholder_focus)
+                .focus_visible(move |style| style.border_1().border_color(focus_border));
+        };
+        let document = item.document.clone();
+        let run = {
+            let document = document.clone();
+            let handler = handler.clone();
+            move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+                this.active = Some(index);
+                handler(index, &document, window, cx);
+                cx.notify();
+            }
+        };
+        let run_on_key = run.clone();
+        let button = div()
+            .id(("multi-diff-open-binary-diff", index))
+            .debug_selector(move || format!("multi-diff-open-binary-diff-{index}"))
+            .track_focus(&item.placeholder_focus)
+            .role(gpui::Role::Button)
+            .px(px(14.))
+            .py(px(4.))
+            .rounded(px(2.))
+            .cursor_pointer()
+            .text_color(colors.button_secondary_foreground)
+            .when_some(colors.button_secondary_background, |button, background| {
+                button.bg(background)
+            })
+            .when_some(colors.button_secondary_border, |button, border| {
+                button.border_1().border_color(border)
+            })
+            .when_some(colors.button_secondary_hover_background, |button, hover| {
+                button.hover(move |style| style.bg(hover))
+            })
+            .focus_visible(move |style| style.border_1().border_color(focus_border))
+            .child("Open Diff")
+            .on_click(cx.listener(move |this, _, window, cx| run(this, window, cx)))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    run_on_key(this, window, cx);
+                }
+            }));
+        placeholder.child(button)
+    }
+
     /// The list's scrollbars (Monaco `SmoothScrollableElement`'s, `Auto`
     /// and without shadows).
     fn render_scrollbars(
@@ -1217,7 +2057,7 @@ impl MultiDiffEditor {
         colors: &EditorColors,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
+    ) -> Vec<AnyElement> {
         let (opacity, animating) = self.scrollbar_fade.opacity(self.scrollbar_drag.is_some());
         if animating {
             window.request_animation_frame();
@@ -1291,6 +2131,48 @@ impl MultiDiffEditor {
         }
         elements
     }
+}
+
+/// `box-shadow: var(--vscode-scrollbar-shadow) 0 6px 6px -6px`, under a
+/// header with its file scrolled under it.
+fn header_shadow(color: Hsla) -> Vec<BoxShadow> {
+    vec![BoxShadow {
+        color,
+        offset: point(px(0.), px(6.)),
+        blur_radius: px(6.),
+        spread_radius: px(-6.),
+        inset: false,
+    }]
+}
+
+/// Monaco `highlightRange`: `range` in `symbolHighlight` for 350ms, unless
+/// the editor shows another model by then.
+fn highlight_range(editor: &Entity<CodeEditor>, range: Range<PointUtf16>, cx: &mut App) {
+    let model = editor.read(cx).model().clone();
+    let collection = editor.update(cx, |editor, cx| {
+        let colors = editor.colors();
+        let options = DecorationOptions {
+            background: Some(colors.symbol_highlight_background),
+            border: colors.symbol_highlight_border,
+            ..Default::default()
+        };
+        editor.create_decorations_collection(vec![(range, options)], cx)
+    });
+    let editor = editor.downgrade();
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(REVEAL_HIGHLIGHT_DURATION)
+            .await;
+        let mut collection = collection;
+        cx.update(|cx| {
+            if let Some(editor) = editor.upgrade()
+                && *editor.read(cx).model() == model
+            {
+                collection.clear(cx);
+            }
+        });
+    })
+    .detach();
 }
 
 /// Monaco `_goToFile(_, 'last')`: puts the modified editor's cursor on the
@@ -1376,6 +2258,7 @@ fn list_colors(this: &MultiDiffEditor, cx: &App) -> EditorColors {
 
 impl Render for MultiDiffEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let now = Instant::now();
         let bounds = self.bounds.get();
         // Before the first layout, the window's height.
         let viewport = if bounds.size.height > px(0.) {
@@ -1383,27 +2266,68 @@ impl Render for MultiDiffEditor {
         } else {
             window.viewport_size()
         };
-        self.resolve_pending_reveal(viewport.height, cx);
+        let config = self.config();
         self.measure(window, cx);
-        let max_top = (self.total_height() - viewport.height).max(px(0.));
+        // Monaco `CompressedVirtualizedScrollView._update`: keep the anchor
+        // in place through height changes; a correction ends a smooth
+        // scroll.
+        let heights = self.heights();
+        let shown = self.shown_scroll_top(now);
+        let (anchored, geometry_changed) =
+            self.anchoring.update(&heights, viewport.height, shown, now);
+        if geometry_changed || anchored != shown {
+            self.scroll_top = anchored;
+            self.smooth_scroll = None;
+        }
+        self.resolve_pending_reveal(viewport.height, cx);
+        // Monaco `_applyPendingScrollState`: a restored position, until the
+        // list is tall (or wide) enough for it.
+        if let Some(pending) = self.pending_scroll {
+            if let Some(top) = pending.top {
+                self.scroll_top = top;
+            }
+            if let Some(left) = pending.left {
+                self.scroll_left = left;
+            }
+        }
+        let max_top = self.max_scroll_top(viewport.height);
         self.scroll_top = self.scroll_top.clamp(px(0.), max_top);
         let max_left = self.max_scroll_left(cx);
         if bounds.size.width > px(0.) {
             self.scroll_left = self.scroll_left.clamp(px(0.), max_left);
         }
-        let scroll_top = self.scroll_top;
+        if let Some(pending) = &mut self.pending_scroll {
+            pending.top = pending.top.filter(|&top| self.scroll_top < top);
+            pending.left = pending.left.filter(|&left| self.scroll_left < left);
+            if pending.top.is_none() && pending.left.is_none() {
+                self.pending_scroll = None;
+            }
+        }
+        let mut shown = self.shown_scroll_top(now).clamp(px(0.), max_top);
+        if self.smooth_scroll.is_some() {
+            if now.duration_since(self.smooth_scroll.map_or(now, |s| s.start))
+                >= SMOOTH_SCROLL_DURATION
+            {
+                self.smooth_scroll = None;
+                shown = self.scroll_top;
+            } else {
+                window.request_animation_frame();
+            }
+        }
+        self.anchoring.last_scroll_top = shown;
         let scroll_left = self.scroll_left;
         // Monaco reveals `auto` scrollbars whenever the list scrolls.
-        if self.drawn_scroll != point(scroll_left, scroll_top) {
-            self.drawn_scroll = point(scroll_left, scroll_top);
-            self.scrollbar_fade.revealed_at = Some(web_time::Instant::now());
+        if self.drawn_scroll != point(scroll_left, shown) {
+            self.drawn_scroll = point(scroll_left, shown);
+            self.scrollbar_fade.revealed_at = Some(Instant::now());
         }
+        // The list's top in the files' coordinates.
+        let scroll_top = shown - self.anchoring.leading_slack;
 
         // The files in view (Monaco's rendered range).
         let mut visible = Vec::new();
         let mut top = px(0.);
-        for (index, item) in self.items.iter().enumerate() {
-            let height = item.height();
+        for (index, &height) in heights.iter().enumerate() {
             let item_top = top;
             top += height;
             if item_top >= scroll_top + viewport.height {
@@ -1416,22 +2340,32 @@ impl Render for MultiDiffEditor {
         let wanted: Vec<usize> = visible
             .iter()
             .map(|&(index, _)| index)
-            .filter(|&index| !self.items[index].collapsed)
+            .filter(|&index| !self.items[index].collapsed && !self.items[index].document.binary)
             .collect();
         self.update_bindings(&wanted, window, cx);
-        // Monaco `setIsFocused`: a file whose editor gains focus becomes the
-        // active one.
+        for template in &mut self.bound {
+            template.follow_cursor = template.follow_cursor.saturating_sub(1);
+        }
+        // Monaco `setIsFocused`: a file whose editor, header or binary
+        // placeholder gains focus becomes the active one.
         let focused = self
             .bound
             .iter()
             .find(|t| t.is_focused(window, cx))
-            .map(|t| t.item);
+            .map(|t| t.item)
+            .or_else(|| {
+                self.items.iter().position(|item| {
+                    item.placeholder_focus.is_focused(window)
+                        || (config.header_click_to_collapse && item.header_focus.is_focused(window))
+                })
+            });
         if focused != self.focused_item {
             self.focused_item = focused;
             if focused.is_some() {
                 self.active = focused;
             }
         }
+        let list_focused = self.focus_handle.contains_focused(window, cx);
 
         // Monaco `ScrollableElement`: each bar leaves room for the other.
         self.scrollbars = [
@@ -1442,8 +2376,8 @@ impl Render for MultiDiffEditor {
                 ),
                 true,
                 bounds.size.height,
-                self.total_height(),
-                scroll_top,
+                self.scroll_height(),
+                shown,
             ),
             ScrollbarState::new(
                 Bounds::new(
@@ -1459,89 +2393,187 @@ impl Render for MultiDiffEditor {
 
         let colors = list_colors(self, cx);
         let mut children = Vec::new();
-        for &(index, item_top) in &visible {
-            let item = &self.items[index];
-            let height = item.height();
-            let collapsed = item.collapsed;
+        for (position, &(index, item_top)) in visible.iter().enumerate() {
+            let height = heights[index];
+            let collapsed = self.items[index].collapsed;
+            let binary = self.items[index].document.binary;
             // The visible part: the editor scrolled to the part under the
             // header, which sticks to the top until the next file pushes it
             // up (Monaco's `translateY(delta)`).
             let visible_start = item_top.max(scroll_top);
             let visible_end = (item_top + height).min(scroll_top + viewport.height);
             let delta = (visible_start - item_top)
-                .min(height - px(HEADER_HEIGHT))
+                .min(height - config.header_height)
                 .max(px(0.));
             let header_top = item_top + delta - visible_start;
             let editor_scroll = visible_start - item_top;
-            let editor_height = (visible_end - visible_start - px(HEADER_HEIGHT)).max(px(0.));
+            let content_bottom = item_top + height - config.content_bottom_padding;
+            let editor_height =
+                (visible_end.min(content_bottom) - visible_start - config.editor_top).max(px(0.));
             let shows_bottom = visible_end >= item_top + height;
-            let diff = self
-                .bound
-                .iter()
-                .find(|t| t.item == index)
-                .map(|t| t.diff.clone());
+            let diff = self.bound.iter_mut().find(|t| t.item == index).map(|t| {
+                t.expected_scroll = point(scroll_left, editor_scroll);
+                t.diff.clone()
+            });
             if let Some(diff) = &diff {
                 diff.update(cx, |diff, cx| {
                     diff.set_scroll_position_unclamped(point(scroll_left, editor_scroll), cx)
                 });
             }
-            let border = if self.active == Some(index) {
+            let state = self.entry_state(index, list_focused, window);
+            // The next file's header highlight draws the line above it,
+            // over this file's (Monaco's `::before` at -1px).
+            let next_highlighted = visible.get(position + 1).is_some_and(|&(next, _)| {
+                let next = self.entry_state(next, list_focused, window);
+                next.header_highlighted || next.selected
+            });
+            let header = self.render_header(
+                index,
+                header_top,
+                visible_start > item_top,
+                delta >= height - config.header_height,
+                state,
+                &colors,
+                cx,
+            );
+            let border = if state.active {
                 colors.focus_border
             } else {
                 colors.multi_diff_border
             };
-            let header = self.render_header(
-                index,
-                visible_start > item_top,
-                delta >= height - px(HEADER_HEIGHT),
-                &colors,
-                cx,
-            );
+            // The editor's (or placeholder's) part, under the header.
+            let body_top = item_top + config.editor_top - visible_start;
+            let placeholder =
+                (binary && !collapsed).then(|| self.render_binary_placeholder(index, &colors, cx));
             children.push(
                 div()
+                    .id(("multi-diff-entry", index))
                     .absolute()
                     .top(visible_start - scroll_top)
                     .left(px(0.))
                     .right(px(0.))
                     .h(visible_end - visible_start)
                     .overflow_hidden()
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if *hovered {
+                            this.hovered_entry = Some(index);
+                        } else if this.hovered_entry == Some(index) {
+                            this.hovered_entry = None;
+                        }
+                        cx.notify();
+                    }))
                     .when_some(
                         diff.filter(|_| !collapsed && editor_height > px(0.)),
                         |item_div, diff| {
                             item_div.child(
                                 div()
+                                    .debug_selector(move || format!("multi-diff-editor-{index}"))
                                     .absolute()
-                                    .top(px(HEADER_HEIGHT))
-                                    .left(px(HORIZONTAL_INSET))
-                                    .right(px(HORIZONTAL_INSET))
+                                    .top(config.editor_top)
+                                    .left(config.horizontal_inset)
+                                    .right(config.horizontal_inset)
                                     .h(editor_height)
                                     .child(diff),
                             )
                         },
                     )
-                    // Monaco's `.editorParent` bottom border.
-                    .when(!collapsed && shows_bottom, |item_div| {
+                    .when_some(placeholder, |item_div, placeholder| {
                         item_div.child(
-                            div()
+                            placeholder
                                 .absolute()
-                                .bottom(px(0.))
-                                .left(px(0.))
-                                .right(px(0.))
-                                .h(px(1.))
-                                .bg(border),
+                                .top(body_top)
+                                .left(config.horizontal_inset)
+                                .right(config.horizontal_inset)
+                                .h(px(BINARY_PLACEHOLDER_HEIGHT)),
                         )
                     })
-                    .child(
-                        div()
-                            .absolute()
-                            .top(header_top)
-                            .left(px(0.))
-                            .right(px(0.))
-                            .h(px(HEADER_HEIGHT))
-                            .pt(px(HEADER_MARGIN_TOP))
-                            .bg(colors.multi_diff_background)
-                            .child(header),
-                    ),
+                    .map(|item_div| {
+                        if config.card {
+                            // `.multiDiffEditor-card .editorParent`: the
+                            // card's sides and rounded bottom, in
+                            // `focusBorder` while the file has focus.
+                            let card_border = if state.focused {
+                                Some(colors.focus_border)
+                            } else {
+                                colors.multi_diff_card_border
+                            };
+                            item_div.when_some(
+                                card_border.filter(|_| !collapsed),
+                                |item_div, card_border| {
+                                    item_div.child(
+                                        div()
+                                            .absolute()
+                                            .top(body_top)
+                                            .left(px(CARD_PADDING_X))
+                                            .right(px(CARD_PADDING_X))
+                                            .h(height - config.editor_top)
+                                            .border_l_1()
+                                            .border_r_1()
+                                            .border_b_1()
+                                            .border_color(card_border)
+                                            .rounded_b(px(CORNER_RADIUS_MEDIUM)),
+                                    )
+                                },
+                            )
+                        } else if config.compact {
+                            // `.multiDiffEntry::after`: a line 10px in from
+                            // the sides below each file, the whole width
+                            // while its header (or the next one) is
+                            // hovered or focused, or the file is selected.
+                            let full =
+                                state.header_highlighted || state.selected || next_highlighted;
+                            let inset = if full {
+                                px(0.)
+                            } else {
+                                px(COMPACT_SEPARATOR_INSET)
+                            };
+                            let first_line = (index == 0
+                                && (state.header_highlighted || state.selected)
+                                && visible_start == item_top)
+                                .then_some(colors.multi_diff_entry_border)
+                                .flatten();
+                            item_div
+                                .when_some(
+                                    colors.multi_diff_entry_border.filter(|_| shows_bottom),
+                                    |item_div, line| {
+                                        item_div.child(
+                                            div()
+                                                .absolute()
+                                                .bottom(px(0.))
+                                                .left(inset)
+                                                .right(inset)
+                                                .h(px(1.))
+                                                .bg(line),
+                                        )
+                                    },
+                                )
+                                .when_some(first_line, |item_div, line| {
+                                    item_div.child(
+                                        div()
+                                            .absolute()
+                                            .top(px(0.))
+                                            .left(px(0.))
+                                            .right(px(0.))
+                                            .h(px(1.))
+                                            .bg(line),
+                                    )
+                                })
+                        } else {
+                            // Monaco's `.editorParent` bottom border.
+                            item_div.when(!collapsed && shows_bottom, |item_div| {
+                                item_div.child(
+                                    div()
+                                        .absolute()
+                                        .bottom(px(0.))
+                                        .left(px(0.))
+                                        .right(px(0.))
+                                        .h(px(1.))
+                                        .bg(border),
+                                )
+                            })
+                        }
+                    })
+                    .child(header),
             );
         }
         let scrollbars = self.render_scrollbars(bounds.origin, &colors, window, cx);
@@ -1599,5 +2631,40 @@ mod tests {
         // Proportional when larger than the minimum.
         let state = ScrollbarState::new(bar(200.), true, px(200.), px(400.), px(0.)).unwrap();
         assert_eq!(state.slider_size, px(100.));
+    }
+
+    #[test]
+    fn variant_configurations() {
+        // Monaco `getMultiDiffEditorVariantConfiguration`.
+        let standard = MultiDiffEditorVariant::NoCardsNonCompact.configuration();
+        assert_eq!(
+            (standard.header_height, standard.content_bottom_padding),
+            (px(40.), px(0.))
+        );
+        assert!(!standard.header_click_to_collapse && !standard.hide_original_line_numbers);
+        let compact = MultiDiffEditorVariant::NoCards.configuration();
+        assert_eq!(
+            (
+                compact.header_height,
+                compact.content_bottom_padding,
+                compact.horizontal_inset
+            ),
+            (px(32.), px(8.), px(0.))
+        );
+        assert!(compact.compact && !compact.card && compact.header_click_to_collapse);
+        let cards = MultiDiffEditorVariant::Cards.configuration();
+        assert_eq!(
+            (
+                cards.header_height,
+                cards.horizontal_inset,
+                cards.editor_top
+            ),
+            (px(40.), px(9.), px(36.))
+        );
+        assert!(cards.compact && cards.card && cards.hide_original_line_numbers);
+        assert_eq!(
+            MultiDiffEditorVariant::default(),
+            MultiDiffEditorVariant::NoCardsNonCompact
+        );
     }
 }
