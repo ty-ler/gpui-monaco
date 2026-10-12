@@ -652,6 +652,7 @@ impl QuickInput {
                 .child(
                     div()
                         .id("quick-scrollbar-slider")
+                        .debug_selector(|| "quick-scrollbar-slider".into())
                         .absolute()
                         .top(slider_top)
                         .left_0()
@@ -1414,6 +1415,15 @@ impl CodeEditor {
             rows.push(row);
         }
         rows
+    }
+
+    /// The quick input's window-wide pointer while its slider is dragged.
+    pub(crate) fn quick_access_captured_cursor(&self, cx: &gpui::App) -> Option<gpui::CursorStyle> {
+        let (widget, _) = self.quick.as_ref()?.widget.as_ref()?;
+        widget
+            .read(cx)
+            .slider_drag
+            .map(|_| gpui::CursorStyle::Arrow)
     }
 
     /// The list's scroll offset, height and content height, for tests.

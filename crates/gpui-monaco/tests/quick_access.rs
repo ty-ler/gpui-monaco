@@ -357,3 +357,48 @@ fn page_keys_move_like_monaco_lists(cx: &mut TestAppContext) {
     assert_eq!(scroll(&editor, cx).0, gpui::px(0.));
     assert_eq!(active_index(&editor, cx), Some(0));
 }
+
+/// Monaco captures the pointer on the list's slider: dragging it scrolls
+/// the list from anywhere in the window, with the arrow, until the release.
+#[gpui::test]
+fn dragging_the_slider_keeps_the_arrow_everywhere(cx: &mut TestAppContext) {
+    use gpui::{CursorStyle, Modifiers, MouseButton, point, px};
+    let (editor, cx) = setup(&"fn main() {}\n".repeat(200), cx);
+    cx.simulate_keystrokes("f1");
+    draw(cx);
+    let (_, widgets) = editor.read_with(cx, |e, _| e.widget_bounds_for_tests());
+    let quick_input = widgets.last().unwrap().0;
+    // The slider shows while the mouse is over the list.
+    cx.simulate_mouse_move(
+        point(quick_input.center().x, quick_input.bottom() - px(30.)),
+        None,
+        Modifiers::default(),
+    );
+    draw(cx);
+    let captured =
+        |cx: &mut VisualTestContext| editor.read_with(cx, |e, cx| e.captured_cursor_for_tests(cx));
+    assert_eq!(captured(cx), None);
+    let slider = cx
+        .debug_bounds("quick-scrollbar-slider")
+        .expect("the slider");
+    cx.simulate_mouse_move(slider.center(), None, Modifiers::default());
+    cx.simulate_mouse_down(slider.center(), MouseButton::Left, Modifiers::default());
+    draw(cx);
+    assert_eq!(captured(cx), Some(CursorStyle::Arrow));
+    // Far outside the list and the editor's text.
+    cx.simulate_mouse_move(
+        point(px(5.), slider.center().y + px(80.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    draw(cx);
+    assert_eq!(captured(cx), Some(CursorStyle::Arrow));
+    assert!(scroll(&editor, cx).0 > px(0.));
+    cx.simulate_mouse_up(
+        point(px(5.), px(5.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    draw(cx);
+    assert_eq!(captured(cx), None);
+}

@@ -1364,6 +1364,126 @@ fn dragging_the_sash_keeps_its_pointer_everywhere(cx: &mut TestAppContext) {
     assert_eq!(captured(cx), None);
 }
 
+/// Monaco's monitor stops when the capture is lost: the window going
+/// inactive mid-drag ends the sash drag and gives the pointer back. A drag
+/// in a window that isn't active (a click-through) goes on.
+#[gpui::test]
+fn the_window_going_inactive_ends_a_sash_drag(cx: &mut TestAppContext) {
+    use gpui::{CursorStyle, Modifiers, MouseButton};
+    let (diff, cx) = setup("a\nb", "a\nc", cx);
+    cx.simulate_resize(gpui::size(px(1230.), px(600.)));
+    paint(cx);
+    let captured =
+        |cx: &mut VisualTestContext| diff.read_with(cx, |d, _| d.captured_cursor_for_tests());
+    let start_drag = |cx: &mut VisualTestContext| {
+        let sash = diff.read_with(cx, |d, _| d.sash_left_for_tests());
+        let from = point(sash, px(300.));
+        cx.simulate_mouse_move(from, None, Modifiers::default());
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(sash - px(50.), px(300.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        paint(cx);
+    };
+    // The test window isn't active: the drag goes on.
+    start_drag(cx);
+    assert_eq!(captured(cx), Some(CursorStyle::ResizeColumn));
+    let sash = diff.read_with(cx, |d, _| d.sash_left_for_tests());
+    cx.simulate_mouse_up(
+        point(sash, px(300.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    paint(cx);
+    assert_eq!(captured(cx), None);
+    // Active, then deactivated mid-drag: the drag ends.
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    start_drag(cx);
+    assert_eq!(captured(cx), Some(CursorStyle::ResizeColumn));
+    cx.deactivate_window();
+    paint(cx);
+    assert_eq!(captured(cx), None);
+}
+
+/// Monaco captures the pointer on the overview ruler's slider: the arrow
+/// over the whole window while it's dragged, given back on release.
+#[gpui::test]
+fn dragging_the_overview_slider_keeps_the_arrow_everywhere(cx: &mut TestAppContext) {
+    use gpui::{CursorStyle, Modifiers, MouseButton};
+    let text: String = (0..300).map(|i| format!("line {i}\n")).collect();
+    let (diff, cx) = setup(&text, &text.replace("line 50\n", "changed\n"), cx);
+    cx.simulate_resize(gpui::size(px(1230.), px(600.)));
+    paint(cx);
+    let captured =
+        |cx: &mut VisualTestContext| diff.read_with(cx, |d, _| d.captured_cursor_for_tests());
+    let (_, modified) = editors(&diff, cx);
+    let scroll = |cx: &mut VisualTestContext| modified.read_with(cx, |e, _| e.scroll_position().y);
+    let ruler = cx
+        .debug_bounds("diff-overview")
+        .expect("the overview ruler");
+    let from = point(ruler.center().x, ruler.top() + px(5.));
+    cx.simulate_mouse_move(from, None, Modifiers::default());
+    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+    paint(cx);
+    assert_eq!(captured(cx), Some(CursorStyle::Arrow));
+    cx.simulate_mouse_move(
+        point(px(20.), ruler.center().y),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    paint(cx);
+    assert_eq!(captured(cx), Some(CursorStyle::Arrow));
+    assert!(scroll(cx) > px(0.));
+    cx.simulate_mouse_up(
+        point(px(20.), px(20.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    paint(cx);
+    assert_eq!(captured(cx), None);
+}
+
+/// Monaco captures the pointer on a hidden-lines bar's edge: its resize
+/// cursor over the whole window while it's dragged.
+#[gpui::test]
+fn dragging_a_hidden_lines_edge_keeps_its_pointer_everywhere(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let modified = original.replace("line 50\n", "changed\n");
+    let (diff, cx) = setup(&original, &modified, cx);
+    cx.simulate_resize(gpui::size(px(1230.), px(600.)));
+    hide_unchanged(&diff, cx);
+    paint(cx);
+    let captured =
+        |cx: &mut VisualTestContext| diff.read_with(cx, |d, _| d.captured_cursor_for_tests());
+    assert_eq!(captured(cx), None);
+    let edge = cx
+        .debug_bounds("unchanged-bottom")
+        .expect("a bar's bottom edge");
+    cx.simulate_mouse_move(edge.center(), None, Modifiers::default());
+    cx.simulate_mouse_down(edge.center(), MouseButton::Left, Modifiers::default());
+    paint(cx);
+    let during = captured(cx);
+    assert!(during.is_some());
+    cx.simulate_mouse_move(
+        point(px(20.), edge.center().y + px(60.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    paint(cx);
+    assert!(captured(cx).is_some());
+    cx.simulate_mouse_up(
+        point(px(20.), px(20.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    paint(cx);
+    assert_eq!(captured(cx), None);
+}
+
 /// Monaco: a click on the gutter focuses the modified editor.
 #[gpui::test]
 fn clicking_the_gutter_focuses_the_modified_editor(cx: &mut TestAppContext) {

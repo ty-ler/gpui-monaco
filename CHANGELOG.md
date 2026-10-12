@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Drags end when the window goes inactive (#301):** a widget drag that captured the pointer (hover, find and diff sashes, the color picker, the quick input, diff overview and multi diff sliders, the diff editor's hidden-lines bar edges) now ends, and gives the pointer back, when the window stops being the active one, as Monaco's pointer capture is lost. Only the change ends it: a drag in a window that isn't active (a click-through) goes on.
+  - **Tests:** the window going inactive mid-drag (diff editor sash), and the quick input slider, diff overview slider and hidden-lines bar edge drags keeping their pointer window-wide.
 - **Quick input Page Up/Down (#293):** Page Down focuses the last fully visible row, and only when it's focused already scrolls a page and focuses the new last row; Page Up does the same upwards (Monaco `List.focusNextPage` / `focusPreviousPage`). Before, they moved the focus by a page of rows. Ported from VS Code's `listWidget.ts`, which isn't vendored.
 - **Mouse pointer during drags:** the I-beam shows only over the text, and every other area keeps its own pointer, during drags too, as with Monaco's CSS cursors and its `GlobalPointerMoveMonitor`'s pointer capture.
   - **Text selection drags:** the gutter, minimap, scrollbars, folding controls and widgets keep their arrow or hand while drag-selecting text, instead of all turning into the I-beam; the I-beam stays over the text.
