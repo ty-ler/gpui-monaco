@@ -55,6 +55,9 @@ struct Session {
     candidates: Option<Task<()>>,
 }
 
+/// The rename box's key context, around its input.
+pub(crate) const RENAME_INPUT_KEY_CONTEXT: &str = "RenameInput";
+
 /// Monaco `RenameWidget`: the input box, its suggestions button and the
 /// list of suggestions.
 struct RenameInput {
@@ -477,7 +480,11 @@ impl Render for RenameInput {
             inset: false,
         });
         div()
-            .key_context("RenameInput")
+            // With the editor's keys, for its preconditions.
+            .key_context(crate::context_keys::widget_key_context(
+                RENAME_INPUT_KEY_CONTEXT,
+                &crate::context_keys::editor_keys_for_widgets(&self.editor, cx),
+            ))
             .on_action(cx.listener(|this, _: &AcceptRenameInput, _, cx| {
                 this.with_editor(cx, |editor, cx| editor.accept_rename_input(false, cx));
             }))

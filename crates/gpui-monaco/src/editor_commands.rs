@@ -20,8 +20,9 @@ use text::PointUtf16;
 use crate::actions::*;
 use crate::code_action::{CodeActionAutoApply, CodeActionFilter};
 use crate::context_keys::{ContextKeyValue, FocusKeys};
-use crate::cursor::{self, CursorModel, Selection, SingleCursorState};
-use crate::editor::{CodeEditor, CodeEditorEvent};
+use crate::cursor::{self, CursorModel, Selection, SelectionStartKind, SingleCursorState};
+use crate::drop_paste::PastePreference;
+use crate::editor::{CodeEditor, CodeEditorEvent, ViewCursorModel, map_state};
 use crate::events::CursorChangeReason;
 use crate::providers::CodeActionKind;
 use crate::registry::Disposable;
@@ -49,6 +50,9 @@ pub(crate) struct EditorCommandsState {
     /// Focus the hover once it shows (`editor.action.showHover` with
     /// `autoFocusImmediately`).
     pub(crate) focus_hover_when_shown: bool,
+    /// The last `columnSelect` with a `viewPosition`, in view lines (Monaco
+    /// `IColumnSelectData`), and the cursors it left.
+    column_select_view: Option<(cursor::ColumnSelectData, Vec<SingleCursorState>)>,
 }
 
 impl Default for EditorCommandsState {
@@ -63,8 +67,15 @@ impl Default for EditorCommandsState {
             action_bindings: HashMap::new(),
             pending_dispose: Vec::new(),
             focus_hover_when_shown: false,
+            column_select_view: None,
         }
     }
+}
+
+/// The smallest view column on view `line`: past a wrapped segment's
+/// continuation indentation (Monaco `getViewLineMinColumn`).
+fn view_line_min_column(lines: &crate::view::view_lines::ViewLines, line: u32) -> u32 {
+    lines.segment_info(lines.view_line(line)).indent
 }
 
 /// A new id for [`CodeEditor::add_command`] (Monaco's `DYNAMIC_` ids).
@@ -181,27 +192,17 @@ pub(crate) fn register_handlers(
             }
         },
         CreateCursor => |this, args, _, cx| this.create_cursor(args, cx),
-        ColumnSelect => |this, args, _, cx| {
-            let (Some(position), Some(column)) = (args.position, args.mouse_column) else {
-                return;
-            };
-            let config = this.cursor_config(cx);
-            let rope = this.snapshot.rope().clone();
-            this.model().update(cx, |model, _| model.push_stack_element());
-            cursor::column_select_to(&config, &rope, &mut this.cursors, position.to_point(), column.saturating_sub(1), args.do_column_select);
-            this.next_selection_change.reason = CursorChangeReason::Explicit;
-            this.cursors_changed(true, cx);
-        },
-        MoveTo => |this, args, _, cx| this.mouse_command(MouseCommand::MoveTo(false), args.position, args.reveal_type, cx),
-        MoveToSelect => |this, args, _, cx| this.mouse_command(MouseCommand::MoveTo(true), args.position, args.reveal_type, cx),
-        WordSelect => |this, args, _, cx| this.mouse_command(MouseCommand::Word(false), args.position, args.reveal_type, cx),
-        WordSelectDrag => |this, args, _, cx| this.mouse_command(MouseCommand::Word(true), args.position, args.reveal_type, cx),
-        LineSelect => |this, args, _, cx| this.mouse_command(MouseCommand::Line(false), args.position, args.reveal_type, cx),
-        LineSelectDrag => |this, args, _, cx| this.mouse_command(MouseCommand::Line(true), args.position, args.reveal_type, cx),
-        LastCursorMoveToSelect => |this, args, _, cx| this.mouse_command(MouseCommand::LastMoveTo, args.position, Some(2), cx),
-        LastCursorWordSelect => |this, args, _, cx| this.mouse_command(MouseCommand::LastWord, args.position, Some(2), cx),
-        LastCursorLineSelect => |this, args, _, cx| this.mouse_command(MouseCommand::LastLine(false), args.position, Some(2), cx),
-        LastCursorLineSelectDrag => |this, args, _, cx| this.mouse_command(MouseCommand::LastLine(true), args.position, Some(2), cx),
+        ColumnSelect => |this, args, _, cx| this.column_select_command(args, cx),
+        MoveTo => |this, args, _, cx| this.mouse_command(MouseCommand::MoveTo(false), args.position, args.view_position, args.reveal_type, cx),
+        MoveToSelect => |this, args, _, cx| this.mouse_command(MouseCommand::MoveTo(true), args.position, args.view_position, args.reveal_type, cx),
+        WordSelect => |this, args, _, cx| this.mouse_command(MouseCommand::Word(false), args.position, args.view_position, args.reveal_type, cx),
+        WordSelectDrag => |this, args, _, cx| this.mouse_command(MouseCommand::Word(true), args.position, args.view_position, args.reveal_type, cx),
+        LineSelect => |this, args, _, cx| this.mouse_command(MouseCommand::Line(false), args.position, args.view_position, args.reveal_type, cx),
+        LineSelectDrag => |this, args, _, cx| this.mouse_command(MouseCommand::Line(true), args.position, args.view_position, args.reveal_type, cx),
+        LastCursorMoveToSelect => |this, args, _, cx| this.mouse_command(MouseCommand::LastMoveTo, args.position, args.view_position, Some(2), cx),
+        LastCursorWordSelect => |this, args, _, cx| this.mouse_command(MouseCommand::LastWord, args.position, args.view_position, Some(2), cx),
+        LastCursorLineSelect => |this, args, _, cx| this.mouse_command(MouseCommand::LastLine(false), args.position, args.view_position, Some(2), cx),
+        LastCursorLineSelectDrag => |this, args, _, cx| this.mouse_command(MouseCommand::LastLine(true), args.position, args.view_position, Some(2), cx),
         Type => |this, args, _, cx| this.type_text(&args.text, cx),
         ReplacePreviousChar => |this, args, _, cx| this.composition_type(&args.text, args.replace_char_cnt, 0, 0, cx),
         CompositionType => |this, args, _, cx| this.composition_type(&args.text, args.replace_prev_char_cnt, args.replace_next_char_cnt, args.position_delta, cx),
@@ -240,17 +241,23 @@ pub(crate) fn register_handlers(
         Refactor => |this, args, _, cx| this.code_action_kind_command(CodeActionKind::REFACTOR, args.kind.clone(), args.apply.clone(), args.preferred, cx),
         SourceAction => |this, args, _, cx| this.code_action_kind_command(CodeActionKind::SOURCE, args.kind.clone(), args.apply.clone(), args.preferred, cx),
         PasteAs => |this, args, window, cx| {
-            let only = args.kind.clone().or_else(|| args.preferences.as_ref()?.first().cloned());
-            this.paste_as(only.map(Into::into), window, cx)
+            // Monaco takes `kind` over `preferences`.
+            let preference = match (&args.kind, &args.preferences) {
+                (Some(kind), _) => Some(PastePreference::Only(kind.clone().into())),
+                (None, Some(preferences)) => Some(PastePreference::Preferences(
+                    preferences.iter().cloned().map(Into::into).collect(),
+                )),
+                (None, None) => None,
+            };
+            this.paste_as_with(preference, window, cx)
         },
         ShowHover => |this, args, window, cx| this.show_hover_command(args, window, cx),
-        TriggerInlineSuggest => |this, args, _, cx| {
-            if args.explicit == Some(false) {
-                this.trigger_inline_completions(cx);
-            } else {
-                this.trigger_inline_suggest(cx);
-            }
-        },
+        TriggerInlineSuggest => |this, args, _, cx| this.trigger_inline_suggest_with_args(
+            args.explicit != Some(false),
+            args.provider_id.as_deref(),
+            args.show_no_result_notification,
+            cx,
+        ),
         AcceptSelectedSuggestion => |this, _, _, cx| {
             this.accept_suggestion(cx);
         },
@@ -400,13 +407,28 @@ impl CodeEditor {
         reveal: bool,
         cx: &mut Context<Self>,
     ) {
+        let states = states.into_iter().map(|state| (state, None)).collect();
+        self.set_cursor_states_with_views(states, reveal, cx);
+    }
+
+    /// [`Self::set_cursor_states`] with each cursor's view state, where it
+    /// has one (Monaco `CursorState.fromViewState`); the others show at
+    /// their model positions (`fromModelState`).
+    fn set_cursor_states_with_views(
+        &mut self,
+        states: Vec<(SingleCursorState, Option<SingleCursorState>)>,
+        reveal: bool,
+        cx: &mut Context<Self>,
+    ) {
         if states.is_empty() {
             return;
         }
+        let (states, views): (Vec<_>, Vec<_>) = states.into_iter().unzip();
         self.model()
             .update(cx, |model, _| model.push_stack_element());
         let rope = self.snapshot.rope().clone();
         self.cursors.validated_states(&rope, states);
+        self.set_cursor_view_states(views);
         self.next_selection_change.reason = CursorChangeReason::Explicit;
         self.cursors_changed(reveal, cx);
     }
@@ -699,92 +721,292 @@ impl CodeEditor {
         );
     }
 
-    /// Monaco `createCursor`: adds a cursor at `position`, or removes the
-    /// one there.
+    /// Monaco `createCursor`: adds a cursor at `position` (shown at
+    /// `view_position`), or removes the one whose selection holds it.
     fn create_cursor(&mut self, args: &CreateCursor, cx: &mut Context<Self>) {
         let Some(position) = args.position else {
             return;
         };
         let config = self.cursor_config(cx);
-        let rope = self.snapshot.rope().clone();
-        let p = position.to_point();
-        let mut temp = cursor::CursorCollection::new(self.cursors.primary().clone());
-        if args.whole_line {
-            cursor::select_line(&rope, &mut temp, p, false);
+        let models = self.cursors.all().to_vec();
+        let views = self.cursor_view_states();
+        let primary = (&models[0], &views[0]);
+        let (new, new_view) = if args.whole_line {
+            self.line_command_state(primary, false, position, args.view_position)
         } else {
-            cursor::move_to(&config, &rope, &mut temp, p, false);
+            self.move_to_command_state(&config, primary, false, position, args.view_position)
+        };
+        let mut states: Vec<_> = models
+            .into_iter()
+            .zip(views.into_iter().map(Some))
+            .collect();
+        // Monaco compares a state from view coordinates in view
+        // coordinates, and one from model coordinates (a whole line) in
+        // model coordinates.
+        let contains = |state: &SingleCursorState, p: PointUtf16| {
+            let selection = state.selection();
+            selection.start() <= p && p <= selection.end()
+        };
+        let existing = states
+            .iter()
+            .position(|(model, view)| match (&new_view, view) {
+                (Some(new_view), Some(view)) => contains(view, new_view.position),
+                _ => contains(model, new.position),
+            });
+        match existing {
+            Some(index) if states.len() > 1 => {
+                states.remove(index);
+            }
+            _ => states.push((new, new_view)),
         }
-        let new = temp.primary().clone();
-        let mut states = self.cursors.all().to_vec();
-        if states.len() > 1
-            && let Some(index) = states.iter().position(|state| {
-                let selection = state.selection();
-                selection.start() <= new.position && new.position <= selection.end()
-            })
-        {
-            states.remove(index);
+        self.set_cursor_states_with_views(states, false, cx);
+    }
+
+    /// Monaco's `validateViewPosition` for a command's `viewPosition`: it
+    /// (clamped to its view line) if it shows model position `model`,
+    /// else where `model` shows (as without one).
+    fn command_view_position(
+        &self,
+        view: Option<CommandPosition>,
+        model: PointUtf16,
+    ) -> PointUtf16 {
+        let lines = &self.view_lines;
+        if let Some(view) = view {
+            let line = view
+                .line_number
+                .saturating_sub(1)
+                .min(lines.line_count().saturating_sub(1));
+            let min = view_line_min_column(lines, line);
+            let column = view
+                .column
+                .saturating_sub(1)
+                .clamp(min, lines.line_max_column(line).max(min));
+            if lines.to_model(line, column) == model {
+                return PointUtf16::new(line, column);
+            }
+        }
+        let (line, column) = lines.to_view(model, false);
+        PointUtf16::new(line, column)
+    }
+
+    /// Monaco `CursorMoveCommands.moveTo` for a cursor's (model, view)
+    /// states: by view position (Monaco `CursorState.fromViewState`), so a
+    /// position at a wrap point stays on the `viewPosition`'s segment and
+    /// one in a folded region lands where the fold shows; extending a word
+    /// or line selection goes by words or lines.
+    fn move_to_command_state(
+        &self,
+        config: &cursor::CursorConfig,
+        (model_state, view_state): (&SingleCursorState, &SingleCursorState),
+        select: bool,
+        position: CommandPosition,
+        view_position: Option<CommandPosition>,
+    ) -> (SingleCursorState, Option<SingleCursorState>) {
+        let model: &dyn CursorModel = self.snapshot.rope();
+        let p = cursor::validate_position(model, position.to_point());
+        if select {
+            match model_state.selection_start_kind {
+                SelectionStartKind::Word => {
+                    return (
+                        cursor::word_state(config, model, model_state, p, true),
+                        None,
+                    );
+                }
+                SelectionStartKind::Line => {
+                    return self.line_command_state(
+                        (model_state, view_state),
+                        true,
+                        position,
+                        view_position,
+                    );
+                }
+                SelectionStartKind::Simple => {}
+            }
+        }
+        let view = self.command_view_position(view_position, p);
+        let moved = view_state.move_to(select, view, 0);
+        let lines = &self.view_lines;
+        (
+            map_state(&moved, |q| lines.to_model(q.row, q.column)),
+            Some(moved),
+        )
+    }
+
+    /// Monaco `CursorMoveCommands.line` for a cursor's (model, view)
+    /// states: a new line selection, or one extended to another line, which
+    /// goes by view lines (wrapped segments, a fold as one line) from the
+    /// `viewPosition`.
+    fn line_command_state(
+        &self,
+        (model_state, view_state): (&SingleCursorState, &SingleCursorState),
+        select: bool,
+        position: CommandPosition,
+        view_position: Option<CommandPosition>,
+    ) -> (SingleCursorState, Option<SingleCursorState>) {
+        let model: &dyn CursorModel = self.snapshot.rope();
+        let p = cursor::validate_position(model, position.to_point());
+        let entering = model_state.selection_start.start.row;
+        if !select || p.row == entering {
+            return (cursor::line_state(model, model_state, p, select), None);
+        }
+        let lines = &self.view_lines;
+        let view = self.command_view_position(view_position, p);
+        let last = lines.line_count().saturating_sub(1);
+        let to = if p.row < entering {
+            PointUtf16::new(view.row, view_line_min_column(lines, view.row))
+        } else if view.row + 1 > last {
+            PointUtf16::new(last, lines.line_max_column(last))
         } else {
-            states.push(new);
-        }
-        self.set_cursor_states(states, false, cx);
+            PointUtf16::new(view.row + 1, view_line_min_column(lines, view.row + 1))
+        };
+        let moved = view_state.move_to(true, to, 0);
+        (
+            map_state(&moved, |q| lines.to_model(q.row, q.column)),
+            Some(moved),
+        )
     }
 
     /// Monaco's mouse commands: `_moveTo`, `_wordSelect`,
-    /// `lastCursorLineSelect` and the rest.
+    /// `lastCursorLineSelect` and the rest, at `position`, shown at
+    /// `view_position` (Monaco's `viewPosition`; without one, where
+    /// `position` shows).
     fn mouse_command(
         &mut self,
         command: MouseCommand,
         position: Option<CommandPosition>,
+        view_position: Option<CommandPosition>,
         reveal_type: Option<u32>,
         cx: &mut Context<Self>,
     ) {
         let Some(position) = position else {
             return;
         };
-        let p = position.to_point();
         let config = self.cursor_config(cx);
         let rope = self.snapshot.rope().clone();
-        let single = |state: SingleCursorState, f: &dyn Fn(&mut cursor::CursorCollection)| {
-            let mut temp = cursor::CursorCollection::new(state);
-            f(&mut temp);
-            temp.primary().clone()
-        };
+        let model: &dyn CursorModel = &rope;
+        let p = cursor::validate_position(model, position.to_point());
+        let models = self.cursors.all().to_vec();
+        let views = self.cursor_view_states();
+        let primary = (&models[0], &views[0]);
         let states = match command {
             MouseCommand::MoveTo(select) => {
-                let mut cursors = self.cursors.clone();
-                cursor::move_to(&config, &rope, &mut cursors, p, select);
-                cursors.all().to_vec()
+                vec![self.move_to_command_state(&config, primary, select, position, view_position)]
             }
             MouseCommand::Word(select) => {
-                let mut cursors = self.cursors.clone();
-                cursor::select_word(&config, &rope, &mut cursors, p, select);
-                cursors.all().to_vec()
+                vec![(
+                    cursor::word_state(&config, model, primary.0, p, select),
+                    None,
+                )]
             }
             MouseCommand::Line(select) => {
-                let mut cursors = self.cursors.clone();
-                cursor::select_line(&rope, &mut cursors, p, select);
-                cursors.all().to_vec()
+                vec![self.line_command_state(primary, select, position, view_position)]
             }
             MouseCommand::LastMoveTo | MouseCommand::LastWord | MouseCommand::LastLine(_) => {
-                let mut states = self.cursors.all().to_vec();
-                let index = self.cursors.last_added_cursor_index().min(states.len() - 1);
-                let last = states[index].clone();
-                states[index] = match command {
-                    MouseCommand::LastMoveTo => last.move_to(true, p, 0),
+                let index = self.cursors.last_added_cursor_index().min(models.len() - 1);
+                let last = (&models[index], &views[index]);
+                let new = match command {
+                    MouseCommand::LastMoveTo => {
+                        self.move_to_command_state(&config, last, true, position, view_position)
+                    }
                     MouseCommand::LastWord => {
-                        let select = last.has_selection();
-                        single(last, &|c| cursor::select_word(&config, &rope, c, p, select))
+                        let select = last.0.has_selection();
+                        (cursor::word_state(&config, model, last.0, p, select), None)
                     }
                     MouseCommand::LastLine(select) => {
-                        single(last, &|c| cursor::select_line(&rope, c, p, select))
+                        self.line_command_state(last, select, position, view_position)
                     }
                     _ => unreachable!(),
                 };
+                let mut states: Vec<_> = models
+                    .iter()
+                    .cloned()
+                    .zip(views.iter().cloned().map(Some))
+                    .collect();
+                states[index] = new;
                 states
             }
         };
         // Monaco `NavigationCommandRevealType.None` is 2.
-        self.set_cursor_states(states, reveal_type != Some(2), cx);
+        self.set_cursor_states_with_views(states, reveal_type != Some(2), cx);
+    }
+
+    /// Monaco `columnSelect` (Shift+Alt+drag): with a `viewPosition`, on
+    /// view lines as Monaco does (a wrapped line's segments are lines, a
+    /// fold is one); without one, on model lines.
+    fn column_select_command(&mut self, args: &ColumnSelect, cx: &mut Context<Self>) {
+        let (Some(position), Some(column)) = (args.position, args.mouse_column) else {
+            return;
+        };
+        let config = self.cursor_config(cx);
+        let rope = self.snapshot.rope().clone();
+        let mouse_column = column.saturating_sub(1);
+        self.model()
+            .update(cx, |model, _| model.push_stack_element());
+        if args.view_position.is_none() {
+            cursor::column_select_to(
+                &config,
+                &rope,
+                &mut self.cursors,
+                position.to_point(),
+                mouse_column,
+                args.do_column_select,
+            );
+        } else {
+            let p = cursor::validate_position(&rope, position.to_point());
+            let view = self.command_view_position(args.view_position, p);
+            let lines = self.view_lines.clone();
+            let to_view_row = |row: u32| lines.to_view(PointUtf16::new(row, 0), false).0;
+            let to_model_row = |line: u32| lines.to_model(line, 0).row;
+            // The column selection so far, in view lines: the last one
+            // this command made, or a keyboard one's.
+            let data = self
+                .commands
+                .column_select_view
+                .as_ref()
+                .filter(|(_, states)| states.as_slice() == self.cursors.all())
+                .map(|(data, _)| *data)
+                .or_else(|| {
+                    self.cursors
+                        .column_select_data()
+                        .map(|data| cursor::ColumnSelectData {
+                            from_row: to_view_row(data.from_row),
+                            to_row: to_view_row(data.to_row),
+                            ..data
+                        })
+                });
+            let mut view_cursors = self.cursors.clone();
+            view_cursors.set_states(self.cursor_view_states());
+            view_cursors.set_column_select_data(data);
+            cursor::column_select_to(
+                &config,
+                &ViewCursorModel(&lines),
+                &mut view_cursors,
+                view,
+                mouse_column,
+                args.do_column_select,
+            );
+            let data = view_cursors.column_select_data();
+            let views = view_cursors.all().to_vec();
+            self.cursors.set_states(
+                views
+                    .iter()
+                    .map(|state| map_state(state, |q| lines.to_model(q.row, q.column)))
+                    .collect(),
+            );
+            self.cursors.validate(&rope);
+            self.set_cursor_view_states(views.into_iter().map(Some).collect());
+            // The keyboard's column selection goes on from it, on model
+            // rows.
+            self.cursors
+                .set_column_select_data(data.map(|data| cursor::ColumnSelectData {
+                    from_row: to_model_row(data.from_row),
+                    to_row: to_model_row(data.to_row),
+                    ..data
+                }));
+            self.commands.column_select_view = data.map(|data| (data, self.cursors.all().to_vec()));
+        }
+        self.next_selection_change.reason = CursorChangeReason::Explicit;
+        self.cursors_changed(true, cx);
     }
 
     /// Monaco's `compositionType` handler.

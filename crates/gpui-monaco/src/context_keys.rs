@@ -619,6 +619,43 @@ fn has(context: &mut KeyContext, key: &'static str, count: usize) {
 /// The key context entry naming an editor, which its own keybindings test.
 pub(crate) const EDITOR_ID_KEY: &str = "code_editor_id";
 
+/// The editor's widgets whose key contexts carry the editor's context keys
+/// ([`widget_key_context`]), so their keybindings can test them: Monaco's
+/// widgets live in their editor's context key service.
+pub(crate) const WIDGET_KEY_CONTEXTS: &[&str] = &[
+    crate::hover::HOVER_KEY_CONTEXT,
+    crate::rename::RENAME_INPUT_KEY_CONTEXT,
+    crate::peek::PEEK_KEY_CONTEXT,
+    crate::color_picker::STANDALONE_COLOR_PICKER_KEY_CONTEXT,
+    crate::find_widget::FIND_WIDGET_KEY_CONTEXT,
+    crate::find_widget::FIND_INPUT_KEY_CONTEXT,
+    crate::find_widget::REPLACE_INPUT_KEY_CONTEXT,
+];
+
+/// `editor`'s context keys for its widgets' key contexts (see
+/// [`widget_key_context`]); empty once the editor is gone.
+pub(crate) fn editor_keys_for_widgets(editor: &WeakEntity<CodeEditor>, cx: &App) -> KeyContext {
+    let mut keys = KeyContext::default();
+    if let Some(editor) = editor.upgrade() {
+        editor.read(cx).add_context_keys(&mut keys, cx);
+    }
+    keys
+}
+
+/// The key context of one of the editor's widgets (one of
+/// [`WIDGET_KEY_CONTEXTS`]): `widget`, then the editor's context keys
+/// (from [`editor_keys_for_widgets`]) but not [`KEY_CONTEXT`], so the
+/// editor's preconditions folded into the widget's keybindings (and hosts'
+/// rules such as `HoverWidget && editorLangId == rust`) see them, while the
+/// editor's own keybindings don't match in the widget.
+pub(crate) fn widget_key_context(widget: &'static str, editor_keys: &KeyContext) -> KeyContext {
+    debug_assert!(WIDGET_KEY_CONTEXTS.contains(&widget));
+    let mut context = KeyContext::default();
+    context.add(widget);
+    context.extend(editor_keys);
+    context
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1951,6 +1951,28 @@ pub trait InlineCompletionsProvider: 'static {
     fn display_name(&self) -> Option<SharedString> {
         None
     }
+
+    /// The provider's id (Monaco `providerId`, as
+    /// `ProviderId.toStringWithoutVersion`: `"extension:provider"`, or just
+    /// `"extension"`), for `editor.action.inlineSuggest.trigger`'s
+    /// `providerId`, which names it or `"extension:*"`.
+    fn provider_id(&self) -> Option<SharedString> {
+        None
+    }
+}
+
+/// Whether `id` (`editor.action.inlineSuggest.trigger`'s `providerId`) names
+/// `provider` (Monaco `inlineCompletionProviderGetMatcher`): its
+/// [`provider_id`](InlineCompletionsProvider::provider_id), or its
+/// extension with `:*`.
+pub(crate) fn inline_completions_provider_matches(
+    provider: &dyn InlineCompletionsProvider,
+    id: &str,
+) -> bool {
+    provider.provider_id().is_some_and(|provider_id| {
+        let extension = provider_id.split(':').next().unwrap_or_default();
+        provider_id.as_ref() == id || id.strip_suffix(":*") == Some(extension)
+    })
 }
 
 // ----- semantic tokens -------------------------------------------------------------

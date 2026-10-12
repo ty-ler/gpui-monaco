@@ -439,7 +439,11 @@ impl Render for HoverWidget {
             .id("hover")
             .role(gpui::Role::Tooltip)
             .aria_label(gpui::SharedString::from(label))
-            .key_context(HOVER_KEY_CONTEXT)
+            // With the editor's keys, for its preconditions.
+            .key_context(crate::context_keys::widget_key_context(
+                HOVER_KEY_CONTEXT,
+                &crate::context_keys::editor_keys_for_widgets(&self.editor, cx),
+            ))
             .track_focus(&self.focus_handle)
             .relative()
             .text_size(self.style.font_size)

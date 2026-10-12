@@ -48,7 +48,9 @@ Tab focus mode (Ctrl+M; Ctrl+Shift+M on macOS) makes Tab and Shift+Tab move focu
 
 Font zoom (`FontZoomIn`, `FontZoomOut`, `FontZoomReset`) has no default key, as in Monaco. Run it from the command palette, or bind it yourself. The zoom level is shared by every editor; `set_editor_zoom_level` sets it directly.
 
-All of these bindings live in the `CodeEditor` key context (`actions::KEY_CONTEXT`). As in Monaco, an action's precondition is part of its keybindings: in a read-only editor Cmd+/ does nothing (the key reaches your app), F12 needs a definition provider, and Shift+Alt+O needs a code action provider declaring `source.organizeImports`. `trigger` and the command palette follow the same preconditions.
+All of these bindings live in the `CodeEditor` key context (`actions::KEY_CONTEXT`), except the widgets' own keys. As in Monaco, an action's precondition is part of its keybindings: in a read-only editor Cmd+/ does nothing (the key reaches your app), F12 needs a definition provider, and Shift+Alt+O needs a code action provider declaring `source.organizeImports`. `trigger` and the command palette follow the same preconditions.
+
+The editor's widgets have key contexts of their own: `HoverWidget`, `RenameInput`, `PeekView` (the reference list), `StandaloneColorPicker`, `FindWidget`, `FindInput` and `ReplaceInput`. Each carries its editor's context keys (below) but not `CodeEditor`, so the editor's bindings don't apply there, while the widget's bindings get their preconditions there as Monaco's do: Up in a focused hover needs `editorHoverFocused`, Enter in the rename input `renameInputVisible`. Your rules can test them too (`HoverWidget && editorLangId == rust`).
 
 ## Context keys
 
@@ -90,7 +92,7 @@ To build a keymap from scratch, skip `init` and bind exactly what you want. `act
 
 ## Your own commands
 
-Monaco's per-editor `addCommand(keybinding, handler, context)` and `addAction` bind keys in that editor only, until the returned `Disposable` is disposed:
+Monaco's per-editor `addCommand(keybinding, handler, context)` and `addAction` bind keys in that editor only, until the returned `Disposable` is disposed. `DiffEditor::add_command` binds in the diff editor, with either side focused; its handler gets the `DiffEditor`, and `when` tests the focused side's keys (Monaco delegates to the modified editor, whose `createContextKey` keys are there):
 
 ```rust,ignore
 let (id, command) = editor.update(cx, |editor, cx| {
@@ -210,7 +212,10 @@ editor.trigger_with_payload("editor.fold", serde_json::json!({ "levels": 2, "sel
 editor.trigger_with_payload("revealLine", serde_json::json!({ "lineNumber": 40, "at": "center" }), window, cx)?;
 ```
 
-The same arguments are the fields of the actions (`FindWithArgs`, `TriggerCodeAction`, `CursorMove`, `EditorScroll`, `Fold`, `Refactor`, `ShowHover`, …), which can be bound to keys, and of `RunCommand`'s `args` in keybinding rules.
+The same arguments are the fields of the actions (`FindWithArgs`, `TriggerCodeAction`, `CursorMove`, `EditorScroll`, `Fold`, `Refactor`, `ShowHover`, …), which can be bound to keys, and of `RunCommand`'s `args` in keybinding rules. A few follow Monaco closely enough to note:
+- **Mouse commands** (`_moveTo`, `_moveToSelect`, `_lineSelect(Drag)`, `lastCursorLineSelect(Drag)`, `_lastCursorMoveToSelect`, `createCursor`, `columnSelect`): `viewPosition` is the view line and column, with wrapping and folding. When it shows `position`, the cursor shows there, so at a wrap point it stays at the end of the first segment. Extending a line selection goes by view lines (a wrapped line's segments one at a time, a fold as one line), and `columnSelect` with a `viewPosition` selects on view lines. A position inside a fold lands where the fold shows.
+- **`editor.action.pasteAs`:** `kind` pastes with that kind (or one it contains); `preferences` applies the first edit, in the providers' order, whose kind any of them contains. Either one applies the edit without asking, or says no edit matched.
+- **`editor.action.inlineSuggest.trigger`:** `providerId` asks only the inline completions provider with that `InlineCompletionsProvider::provider_id` (`"extension:provider"`, or `"extension:*"` for any of an extension's), or every provider when none has it. `showNoResultNotification` logs "No inline suggestion is available." at info level when nothing shows, as standalone Monaco's notification service logs to the console.
 
 ## Edit commands
 

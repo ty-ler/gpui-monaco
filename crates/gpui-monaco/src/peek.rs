@@ -1199,7 +1199,11 @@ impl Render for PeekView {
         let list = div()
             .id("peek-results")
             .debug_selector(|| "peek-results".into())
-            .key_context(PEEK_KEY_CONTEXT)
+            // With the editor's keys, for its preconditions.
+            .key_context(crate::context_keys::widget_key_context(
+                PEEK_KEY_CONTEXT,
+                &crate::context_keys::editor_keys_for_widgets(&self.editor, cx),
+            ))
             .track_focus(&self.focus)
             .relative()
             .h_full()

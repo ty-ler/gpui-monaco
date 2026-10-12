@@ -325,6 +325,14 @@ fn end_after(start: text::PointUtf16, text: &str) -> text::PointUtf16 {
     }
 }
 
+/// The find widget's key context; its inputs' are inside it. Each carries
+/// the editor's context keys, for its preconditions.
+pub(crate) const FIND_WIDGET_KEY_CONTEXT: &str = "FindWidget";
+/// The find input's key context, around its input editor.
+pub(crate) const FIND_INPUT_KEY_CONTEXT: &str = "FindInput";
+/// The replace input's key context, around its input editor.
+pub(crate) const REPLACE_INPUT_KEY_CONTEXT: &str = "ReplaceInput";
+
 /// The find and replace widget, shown as an overlay at the top right of the
 /// editor by the find commands.
 pub struct FindWidget {
@@ -1270,6 +1278,7 @@ impl Render for FindWidget {
         if layout.hidden {
             return div().into_any_element();
         }
+        let editor_keys = crate::context_keys::editor_keys_for_widgets(&self.editor, cx);
         let find_box = input_box_height(self.find_input.read(cx), cx);
         let replace_box = input_box_height(self.replace_input.read(cx), cx);
         let height = widget_height(
@@ -1323,7 +1332,10 @@ impl Render for FindWidget {
                 })
                 .child(
                     div()
-                        .key_context(context)
+                        .key_context(crate::context_keys::widget_key_context(
+                            context,
+                            &editor_keys,
+                        ))
                         .absolute()
                         .top(px(2.))
                         .bottom(px(2.))
@@ -1346,7 +1358,7 @@ impl Render for FindWidget {
             .child(
                 input_box(
                     &self.find_input,
-                    "FindInput",
+                    FIND_INPUT_KEY_CONTEXT,
                     find_box,
                     find_focused,
                     regex_error.is_some(),
@@ -1454,7 +1466,7 @@ impl Render for FindWidget {
                 .child(
                     input_box(
                         &self.replace_input,
-                        "ReplaceInput",
+                        REPLACE_INPUT_KEY_CONTEXT,
                         replace_box,
                         replace_focused,
                         false,
@@ -1698,7 +1710,10 @@ impl Render for FindWidget {
         });
 
         div()
-            .key_context("FindWidget")
+            .key_context(crate::context_keys::widget_key_context(
+                FIND_WIDGET_KEY_CONTEXT,
+                &editor_keys,
+            ))
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_enter))
             .on_action(cx.listener(Self::on_input_newline))

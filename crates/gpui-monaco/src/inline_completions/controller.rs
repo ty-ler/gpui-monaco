@@ -178,7 +178,15 @@ pub(crate) struct FetchOptions {
     pub provider: Option<Arc<dyn InlineCompletionsProvider>>,
     /// The hint that provider passed (Monaco `changeHint`).
     pub change_hint: Option<InlineCompletionChangeHint>,
+    /// Log "No inline suggestion is available." when the request shows
+    /// nothing (`inlineSuggest.trigger`'s `showNoResultNotification`; the
+    /// standalone notification service logs it to the console).
+    pub notify_no_result: bool,
 }
+
+/// What standalone Monaco's notification service logs for
+/// `showNoResultNotification`.
+pub(crate) const NO_INLINE_SUGGESTION: &str = "No inline suggestion is available.";
 
 /// Cross-file inline edits accepted while no editor showed their model, by
 /// uri: the next editor to show it takes the edit (Monaco opens the editor
@@ -587,23 +595,79 @@ impl CodeEditor {
     /// Asks for inline completions now (Monaco
     /// `editor.action.inlineSuggest.trigger`, Alt+\).
     pub fn trigger_inline_suggest(&mut self, cx: &mut Context<Self>) {
+        self.trigger_inline_suggest_with(true, None, false, cx);
+    }
+
+    /// Monaco `editor.action.inlineSuggest.trigger` with its arguments:
+    /// `explicit` (else as typing asks), `provider_id` (only the provider
+    /// it names, see [`InlineCompletionsProvider::provider_id`]; every
+    /// provider when none matches) and `show_no_result_notification` (logs
+    /// "No inline suggestion is available." when nothing shows, as
+    /// standalone Monaco's notification service does).
+    pub fn trigger_inline_suggest_with_args(
+        &mut self,
+        explicit: bool,
+        provider_id: Option<&str>,
+        show_no_result_notification: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let provider = provider_id.and_then(|id| {
+            self.editor_inline_completions_providers(cx)
+                .into_iter()
+                .find(|provider| {
+                    crate::providers::inline_completions_provider_matches(provider.as_ref(), id)
+                })
+        });
+        self.trigger_inline_suggest_with(explicit, provider, show_no_result_notification, cx);
+    }
+
+    fn trigger_inline_suggest_with(
+        &mut self,
+        explicit: bool,
+        provider: Option<Arc<dyn InlineCompletionsProvider>>,
+        notify_no_result: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.options.read_only || self.widget_input {
+            return;
+        }
+        // Typing asks only with inline suggestions on.
+        if !explicit && !self.options.inline_suggest.enabled {
             return;
         }
         self.inline.active = true;
         // Monaco `trigger({ explicit: true })` starts an accept flow, and
         // keeps the shown item ahead of the new ones
         // (`_forceUpdateExplicitlySignal` sets `preserveCurrentCompletion`).
-        self.inline.in_accept_flow = true;
-        let preserve = self.inline_preserve_candidate(cx);
+        let preserve = if explicit {
+            self.inline.in_accept_flow = true;
+            self.inline_preserve_candidate(cx)
+        } else {
+            None
+        };
+        let kind = if explicit {
+            InlineCompletionTriggerKind::Explicit
+        } else {
+            InlineCompletionTriggerKind::Automatic
+        };
         self.fetch_inline_completions(
-            InlineCompletionTriggerKind::Explicit,
+            kind,
             FetchOptions {
                 preserve,
+                provider,
+                notify_no_result,
                 ..Default::default()
             },
             cx,
         );
+    }
+
+    /// `showNoResultNotification`: logs when no inline suggestion or edit
+    /// shows (Monaco checks the model's state after the request).
+    fn notify_if_no_inline_suggestion(&self, cx: &gpui::App) {
+        if !self.inline_suggestion_visible(cx) && !self.inline_edit_visible(cx) {
+            log::info!("{NO_INLINE_SUGGESTION}");
+        }
     }
 
     /// The text changed: inline edits follow it, and while active it
@@ -765,6 +829,9 @@ impl CodeEditor {
             && (kind == InlineCompletionTriggerKind::Automatic
                 || *k == InlineCompletionTriggerKind::Explicit)
         {
+            if options.notify_no_result {
+                self.notify_if_no_inline_suggestion(cx);
+            }
             return;
         }
         let providers = match &options.provider {
@@ -772,6 +839,9 @@ impl CodeEditor {
             None => self.available_inline_completions_providers(cx),
         };
         if providers.is_empty() {
+            if options.notify_no_result {
+                self.notify_if_no_inline_suggestion(cx);
+            }
             return;
         }
         // Monaco `itemToPreserve`: the shown item also stays first when its
@@ -788,6 +858,7 @@ impl CodeEditor {
             }),
             ..options
         };
+        let notify_no_result = options.notify_no_result;
         let updating = self.inline.task.is_some();
         self.inline.requested = Some((version, position, kind));
         self.inline.requested_selection = selected.clone();
@@ -868,7 +939,13 @@ impl CodeEditor {
                 return;
             };
             let Some(tasks) = tasks.as_mut() else {
-                this.update(cx, |this, _| this.inline.task = None).ok();
+                this.update(cx, |this, cx| {
+                    this.inline.task = None;
+                    if notify_no_result {
+                        this.notify_if_no_inline_suggestion(cx);
+                    }
+                })
+                .ok();
                 return;
             };
             let mut results: Vec<Option<Rc<ListRef>>> = vec![None; providers.len()];
@@ -903,18 +980,20 @@ impl CodeEditor {
             }
             this.update(cx, |this, cx| {
                 this.inline.task = None;
-                if this.model().read(cx).buffer().version() != version {
-                    return;
+                if this.model().read(cx).buffer().version() == version {
+                    this.set_inline_completions(
+                        lists,
+                        version,
+                        position,
+                        options,
+                        request,
+                        for_suggest,
+                        cx,
+                    );
                 }
-                this.set_inline_completions(
-                    lists,
-                    version,
-                    position,
-                    options,
-                    request,
-                    for_suggest,
-                    cx,
-                );
+                if notify_no_result {
+                    this.notify_if_no_inline_suggestion(cx);
+                }
             })
             .ok();
         }));
