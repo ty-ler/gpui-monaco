@@ -668,6 +668,9 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         let selection = initial_selection(&location, &self.cursors.selections()[0]);
+        // Monaco `RenameWidget._show`: the symbol's line is revealed first,
+        // so the box shows instead of being cancelled as out of view.
+        self.reveal_line_in_center_if_outside_viewport(location.range.start.row, cx);
         let mut theme = (*self.theme).clone();
         theme.colors.background = theme.colors.input_background;
         theme.colors.gutter_background = theme.colors.input_background;

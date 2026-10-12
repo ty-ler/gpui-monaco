@@ -245,12 +245,13 @@ It returns `CodeAction`s:
 
 As in Monaco:
 
-- **Lightbulb:** 250ms after the cursor rests on code (`options.lightbulb`, default `OnCode`), the editor asks for actions (`Auto`). A lightbulb then shows in the indentation, on a neighboring line, or in the glyph margin. It's blue (`editorLightBulbAutoFix.foreground`) when a preferred quick fix exists. Clicking it opens the menu.
+- **Lightbulb:** 250ms after the cursor rests on code (`options.lightbulb`, default `OnCode`), the editor asks for actions (`Auto`). A lightbulb then shows in the indentation, on a neighboring line, or in the glyph margin. It's blue (`editorLightBulbAutoFix.foreground`) when a preferred quick fix exists. Clicking it opens the menu at the click, below the bulb. With `lightbulb: Off` it never shows, even after Cmd/Ctrl+.
 - **Menu:**
-  - Actions are grouped under headers: Quick Fix, Extract, Inline, Rewrite, Move, Surround With, Source Action and More Actions.
-  - Fixes for diagnostics come first, then preferred actions.
-  - Up/Down, Enter and Escape work, and hovering focuses. Cmd/Ctrl+Enter (`CodeActionMenuPreview`, Monaco `previewSelectedCodeAction`) applies through the [preview handler](#previewing-edits); if it cancels, the action's command doesn't run either. Rows' tooltips say "Enter to Apply" (and "Cmd/Ctrl+Enter to Preview" for refactorings, source actions and actions with edits), or why the action is disabled.
-  - The focused action's diagnostics are highlighted.
+  - It opens at the cursor, scrolling it into view first.
+  - Actions are grouped under headers: Quick Fix, Extract, Inline, Rewrite, Move, Surround With, Source Action and More Actions. With `options.code_action_widget.show_headers` off (Monaco `editor.codeActionWidget.showHeaders`), they're listed in order without headers, group icons or keybindings, and a disabled action shows why instead of its title.
+  - Fixes for diagnostics come first, then preferred actions, and AI actions (`is_ai`) last.
+  - Up/Down (and Cmd/Ctrl+Up/Down), Enter (and Cmd/Ctrl+., so pressing it twice applies the first action) and Escape work, and hovering focuses. Cmd/Ctrl+Enter (`CodeActionMenuPreview`, Monaco `previewSelectedCodeAction`) applies through the [preview handler](#previewing-edits); if it cancels, the action's command doesn't run either. Rows' tooltips say "Enter to Apply" (and "Cmd/Ctrl+Enter to Preview" for refactorings, source actions and actions with edits), or why the action is disabled.
+  - The focused action's `ranges` are highlighted (its diagnostics when it fixes several), or else its diagnostics, with the first one announced ("Context: {word} at line {line} and column {column}.").
   - **Action bar:** below the list, the providers' documentation links and, for commands asking for a kind (Refactor, Source Action, …) when some actions are disabled, **Show Disabled** / **Hide Disabled**. Disabled actions are listed greyed out and can't be applied; the choice is kept for the next menu. The lightbulb's menu has no action bar. `code_action_menu_bar_actions` and `run_code_action_menu_bar_action` read and click it.
 - **Commands:**
 

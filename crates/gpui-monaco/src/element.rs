@@ -1877,8 +1877,8 @@ pub(crate) struct EditorLayout {
     /// Whether the wheel over each of `widget_bounds` leaves the editor
     /// alone (overlay and overflowing widgets, zone widgets).
     pub widget_captures_wheel: Vec<bool>,
-    /// The code action lightbulb, for clicks.
-    pub lightbulb: Option<Bounds<Pixels>>,
+    /// The code action lightbulb and the row it's drawn on, for clicks.
+    pub lightbulb: Option<(Bounds<Pixels>, u32)>,
     pub minimap: Option<MinimapLayout>,
     /// What the minimap draws.
     pub minimap_paint: Option<std::sync::Arc<crate::minimap::MinimapPaint>>,
@@ -4362,7 +4362,10 @@ fn prepaint_editor(
     // The code action lightbulb (Monaco `LightBulbWidget`).
     let mut lightbulb = None;
     let mut lightbulb_title = None;
-    if let Some(bulb) = editor.code_actions.lightbulb.clone() {
+    let mut placement_row = None;
+    if let Some(bulb) = editor.code_actions.lightbulb.clone()
+        && editor.options.lightbulb != crate::options::LightbulbMode::Off
+    {
         let model = editor.model().read(cx);
         let line_count = snapshot.max_point().row + 1;
         let lines = |row: u32| model.line_content(row);
@@ -4380,6 +4383,10 @@ fn prepaint_editor(
             f32::from(metrics.em_width),
             glyph_rows.contains(&bulb.position.row),
         );
+        placement_row = placement.map(|placement| match placement {
+            crate::code_action::LightbulbPlacement::Gutter(row)
+            | crate::code_action::LightbulbPlacement::Content(row, _) => row,
+        });
         let side = line_height.min(px(16.)).max(line_height * 0.8);
         let at = |row: u32| {
             layout
@@ -4444,7 +4451,9 @@ fn prepaint_editor(
             )));
         }
     }
-    layout.lightbulb = lightbulb.map(|(bounds, _, _)| bounds);
+    layout.lightbulb = lightbulb
+        .zip(placement_row)
+        .map(|((bounds, _, _), row)| (bounds, row));
 
     // Monaco `DecorationsOverviewRuler`: a canvas under the vertical
     // scrollbar, between its arrows (`layoutInfo.overviewRuler`), mapping

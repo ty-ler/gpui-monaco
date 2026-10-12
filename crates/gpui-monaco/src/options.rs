@@ -1318,6 +1318,21 @@ impl Default for ParameterHintsOptions {
     }
 }
 
+/// Monaco's `editor.codeActionWidget` settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CodeActionWidgetOptions {
+    /// `showHeaders`: group the code action menu's actions under headers
+    /// ("Quick Fix", "Extract", …) (on). Off, they're listed in order
+    /// without headers, group icons or keybindings.
+    pub show_headers: bool,
+}
+
+impl Default for CodeActionWidgetOptions {
+    fn default() -> Self {
+        Self { show_headers: true }
+    }
+}
+
 /// When the lightbulb asks for code actions (Monaco
 /// `ShowLightbulbIconMode`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1948,6 +1963,8 @@ pub struct EditorOptions {
     pub definition_link_opens_in_peek: bool,
     /// Monaco `lightbulb.enabled`.
     pub lightbulb: LightbulbMode,
+    /// Monaco's `editor.codeActionWidget` settings.
+    pub code_action_widget: CodeActionWidgetOptions,
     /// Monaco `inlayHints`.
     pub inlay_hints: InlayHintsOptions,
     /// Monaco `parameterHints`.
@@ -2237,6 +2254,7 @@ impl Default for EditorOptions {
             peek_widget_default_focus: PeekWidgetDefaultFocus::Tree,
             definition_link_opens_in_peek: false,
             lightbulb: LightbulbMode::OnCode,
+            code_action_widget: CodeActionWidgetOptions::default(),
             inlay_hints: InlayHintsOptions::default(),
             parameter_hints: ParameterHintsOptions::default(),
             smart_select: Default::default(),

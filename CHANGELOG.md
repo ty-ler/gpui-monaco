@@ -5,6 +5,21 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Rename and code actions off screen, lightbulb and menu gaps (#325):** rename and the code action menu reveal an off-screen symbol or cursor before showing, and the lightbulb and the menu follow Monaco's `RenameWidget`, `CodeActionController`, `LightBulbWidget`, `codeAction.ts` and `codeActionMenu.ts` more closely.
+  - **F2 off screen:** the symbol's line is revealed (`revealLineInCenterIfOutsideViewport`) before the rename box shows. Before, the box was cancelled at once as out of view, so F2 on a symbol scrolled out of view did nothing.
+  - **Cmd/Ctrl+. off screen:** the code action menu reveals its position (`toCoords`'s `revealPosition(…, Immediate)`) before anchoring there. Before, it opened invisible but focused, and Enter applied a fix you couldn't see.
+  - **Lightbulb placement:** on the last line after code, the bulb goes in the gutter, as Monaco's `endLine` has no next line to block. Before, it was drawn over the previous line's code. The check that keeps an inline bulb off the cursor uses Monaco's 1-based column, so it no longer hides the bulb one column early.
+  - **`lightbulb: Off`:** the bulb never shows, even after Cmd/Ctrl+. or another command asked for actions. Before, it showed until the cursor moved.
+  - **Focused action:** the highlight covers the action's `ranges` (its diagnostics when it fixes several, as for "fix all"), or else its diagnostics, as Monaco's `onFocus`; the first action is highlighted as the menu opens. Focusing an action with diagnostics announces "Context: {word} at line {line} and column {column}." Before, `ranges` was ignored.
+  - **Order:** AI actions (`is_ai`) come after the others, so `apply: "first"` no longer picks one a provider listed first. The module doc no longer says AI actions aren't ported.
+  - **`showHeaders`:** `EditorOptions::code_action_widget` (`CodeActionWidgetOptions`, Monaco `editor.codeActionWidget.showHeaders`). With `show_headers` off, the menu lists the actions in order without headers, group icons or keybindings, and a disabled action shows why instead of its title. `code_action_menu_rows` returns the rows as shown.
+  - **Keys:** in the menu, Cmd/Ctrl+. accepts and Cmd/Ctrl+Up/Down move, as Monaco's secondary keys, so Cmd/Ctrl+. twice applies the first action.
+  - **Menu from the lightbulb:** opens at the click's x, a third of a line below the bulb, and a line further when the bulb is on the line above the cursor's (`LightBulbWidget`'s mouse down), so it covers neither. Before, it went below the cursor's line at column 0 and could cover the bulb.
+  - **Docs:** the book's code action, options and keymap pages and the parity doc.
+  - **Playground:** `PLAYGROUND_KEYS` takes `click:x,y`, a left click at window pixels `x, y`.
+  - **Tests:** GPUI tests for F2 and Cmd+. off screen, the last-line bulb, `lightbulb: Off` after Cmd+., the focused action's ranges, diagnostics and announcement, AI actions last with `apply: "first"`, `show_headers` off, the secondary keys and the menu from the lightbulb (both pads); unit tests for the placement rules and the sort.
+  - **Not as in Monaco:** with no room below, the menu from the lightbulb goes above the bulb rather than ending at the point under it.
+  - **Breaking:** `EditorOptions` has a new public field, `code_action_widget`; struct literals need `..Default::default()`.
 - **Injected text in view columns (#298):** inlay hints, `before`/`after` decoration text and ghost text are part of the view lines' columns, as Monaco's `ModelLineProjectionData` makes them, instead of only the shaped line.
   - **Selections:** drawn and hit-tested in view columns (Monaco's view selections). A selection across injected text covers it; one ending at its column (a model position) stops before it; one whose head moved past it (Shift+Right, a Shift+click on its right side) covers it.
   - **Wrapping:** `Simple` and `Advanced` wrapping count injected text (Monaco `createLineBreaks` with injected text), and a long one wraps mid-text. The view lines follow decorations with injected text as they're added, removed or moved by edits.
