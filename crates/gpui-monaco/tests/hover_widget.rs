@@ -620,7 +620,8 @@ fn screen_readers_read_the_hover_when_it_takes_focus(cx: &mut TestAppContext) {
     );
 }
 
-/// Monaco `HoverCopyButton`: copying a row tells screen readers, politely.
+/// Monaco `HoverCopyButton`: copying a row (on click, a `SimpleButton`'s
+/// trigger) tells screen readers, politely.
 #[gpui::test]
 fn the_copy_button_announces_the_copy(cx: &mut TestAppContext) {
     let (editor, cx) = setup("let x = 1;\n", |_| {}, cx);
@@ -635,7 +636,7 @@ fn the_copy_button_announces_the_copy(cx: &mut TestAppContext) {
     let bounds = cx
         .debug_bounds("hover-copy-marker-row-0")
         .expect("copy button");
-    cx.simulate_mouse_down(bounds.center(), gpui::MouseButton::Left, Modifiers::none());
+    cx.simulate_click(bounds.center(), Modifiers::none());
     editor.read_with(cx, |e, _| {
         assert_eq!(
             e.last_announcement_for_tests().as_deref(),
@@ -923,7 +924,8 @@ fn quick_fix_opens_the_menu_at_the_clicked_link(cx: &mut TestAppContext) {
 }
 
 /// Monaco's rows each take the focus (`tabIndex` 0): Tab walks from the
-/// card through its parts and status bar and on out to the editor, and
+/// card through its parts, their copy buttons, the status bar and its
+/// actions and on out to the editor, and
 /// screen readers read each row.
 #[gpui::test]
 fn tab_walks_the_hover_rows_and_reads_each(cx: &mut TestAppContext) {
@@ -967,11 +969,16 @@ fn tab_walks_the_hover_rows_and_reads_each(cx: &mut TestAppContext) {
     assert_eq!(focused(cx), Some(0));
     assert_eq!(announced(cx), "Error here");
     assert!(hover_focused(cx));
+    // Each row's copy button follows it; the focus stays in the row.
+    cx.simulate_keystrokes("tab");
+    rest(cx, 0);
+    assert_eq!(focused(cx), Some(0));
+    assert_eq!(announced(cx), "Copy");
     cx.simulate_keystrokes("tab");
     rest(cx, 0);
     assert_eq!(focused(cx), Some(1));
     assert_eq!(announced(cx), "docs");
-    cx.simulate_keystrokes("tab");
+    cx.simulate_keystrokes("tab tab");
     rest(cx, 0);
     assert_eq!(focused(cx), Some(2));
     let status = announced(cx);
@@ -983,13 +990,16 @@ fn tab_walks_the_hover_rows_and_reads_each(cx: &mut TestAppContext) {
         editor.read_with(cx, |e, cx| e.hover_part_accessible_content(2, cx)),
         Some(status)
     );
-    // Shift+Tab goes back; neither indents the text.
+    // Shift+Tab goes back (to the docs' copy button); neither indents the
+    // text.
     cx.simulate_keystrokes("shift-tab");
     rest(cx, 0);
     assert_eq!(focused(cx), Some(1));
+    assert_eq!(announced(cx), "Copy");
     assert_eq!(text(cx), "let x = 1;\n");
-    // Past the last row: the editor, with the hover still showing.
-    cx.simulate_keystrokes("tab tab");
+    // Past the status bar and its "View Problem": the editor, with the
+    // hover still showing.
+    cx.simulate_keystrokes("tab tab tab");
     rest(cx, 0);
     assert!(editor_focused(cx));
     assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));

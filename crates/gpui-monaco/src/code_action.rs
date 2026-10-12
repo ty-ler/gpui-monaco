@@ -471,9 +471,6 @@ pub(crate) struct CodeActionMenu {
     focused: Option<usize>,
     colors: EditorColors,
     focus: FocusHandle,
-    /// The editor's focus, where the code action commands' keys are
-    /// looked up.
-    editor_focus: Option<FocusHandle>,
     /// The list's scrolling (Monaco's `List` reveals the focused row).
     scroll: gpui::ScrollHandle,
     /// The list's size as last rendered.
@@ -619,19 +616,26 @@ impl CodeActionMenu {
 
     /// The keybinding of the row's action (Monaco
     /// `CodeActionKeybindingResolver`), looked up in the editor.
-    fn row_keybinding(&self, ix: usize, window: &Window) -> Option<KeyLabel> {
+    fn row_keybinding(&self, ix: usize, window: &Window, cx: &gpui::App) -> Option<KeyLabel> {
         // Monaco's rows without headers have no keybinding.
         if !self.show_headers {
             return None;
         }
         let kind = self.items[ix].action.kind.as_ref()?;
-        let editor_focus = self.editor_focus.as_ref()?;
+        let editor = self.editor.upgrade()?;
+        let editor = editor.read(cx);
         let organize = CodeActionKind::from(CodeActionKind::SOURCE_ORGANIZE_IMPORTS);
         let fix_all = CodeActionKind::from(CodeActionKind::SOURCE_FIX_ALL);
         let binding = if organize.contains(kind) {
-            crate::keybinding_label::command_binding(&OrganizeImports, None, editor_focus, window)
+            crate::keybinding_label::editor_command_binding(
+                &OrganizeImports,
+                None,
+                editor,
+                window,
+                cx,
+            )
         } else if fix_all.contains(kind) {
-            crate::keybinding_label::command_binding(&FixAll, None, editor_focus, window)
+            crate::keybinding_label::editor_command_binding(&FixAll, None, editor, window, cx)
         } else {
             None
         }?;
@@ -695,7 +699,7 @@ impl Render for CodeActionMenu {
             .rows
             .iter()
             .map(|row| match row {
-                Row::Action(ix) => self.row_keybinding(*ix, window),
+                Row::Action(ix) => self.row_keybinding(*ix, window, cx),
                 Row::Header(_) => None,
             })
             .collect();
@@ -1415,7 +1419,6 @@ impl CodeEditor {
         self.refocus = false;
         let editor = cx.entity().downgrade();
         let colors = self.theme.colors.clone();
-        let editor_focus = self.focus_handle.clone();
         let menu = cx.new(|cx| {
             let mut menu = CodeActionMenu {
                 editor,
@@ -1428,7 +1431,6 @@ impl CodeEditor {
                 bar,
                 focused: None,
                 colors,
-                editor_focus: Some(editor_focus),
                 scroll: gpui::ScrollHandle::new(),
                 list_height: px(0.),
                 list_width: px(0.),

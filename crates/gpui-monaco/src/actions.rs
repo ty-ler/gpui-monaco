@@ -3,7 +3,10 @@
 //! Every binding lives in the [`KEY_CONTEXT`] key context, so hosts can
 //! override any of them by binding the same keystroke in that context after
 //! [`crate::init`], or skip [`default_key_bindings`] entirely and bind their
-//! own.
+//! own. As in Monaco, the text's own keys (typing, deleting, moving the
+//! cursor, …) also need `editorTextFocus`, so they don't act while one of
+//! the editor's widgets (a hover, the find widget's buttons, a menu, the
+//! peek list, …) has the focus.
 
 use gpui::{Action, App, KeyBinding, actions};
 
@@ -11,14 +14,14 @@ use gpui::{Action, App, KeyBinding, actions};
 pub const KEY_CONTEXT: &str = "CodeEditor";
 
 /// The editor while the suggest widget is open (Monaco's
-/// `suggestWidgetVisible`).
-const SUGGEST: Option<&str> = Some("CodeEditor && suggest_widget_visible");
+/// `suggestWidgetVisible`; its keys need `textInputFocus`).
+const SUGGEST: Option<&str> = Some("CodeEditor && editorTextFocus && suggest_widget_visible");
 /// While the suggest list's keys move in it (Monaco's `selectNextSuggestion`
 /// precondition: `suggestWidgetMultipleSuggestions ||
 /// !suggestWidgetHasFocusedSuggestion`); with a single focused suggestion
 /// they move the cursor instead.
 const SUGGEST_NAVIGABLE: Option<&str> = Some(
-    "CodeEditor && suggest_widget_visible && (suggest_widget_multiple_suggestions || !suggest_widget_has_focused_suggestion)",
+    "CodeEditor && editorTextFocus && suggest_widget_visible && (suggest_widget_multiple_suggestions || !suggest_widget_has_focused_suggestion)",
 );
 /// While the suggest widget's details panel has the focus (Monaco's
 /// `suggestWidgetDetailsFocused`).
@@ -36,9 +39,11 @@ const POST_EDIT_WIDGET: Option<&str> = Some("CodeEditor && post_edit_widget");
 /// Where Monaco's `tab` and `outdent` don't apply, so Tab falls through to
 /// the browser, which moves the focus: they need `tabDoesNotMoveFocus` and,
 /// as their precondition, `writable`. (Single-line inputs leave Tab to
-/// their widget.)
+/// their widget.) Like Monaco's `tab` and `outdent`, they need
+/// `editorTextFocus`: in a widget, Tab moves among its own controls
+/// ([`FocusNextElement`]).
 const TAB_MOVES_FOCUS: Option<&str> =
-    Some("CodeEditor && !single_line && (tab_moves_focus || editorReadonly)");
+    Some("CodeEditor && editorTextFocus && !single_line && (tab_moves_focus || editorReadonly)");
 /// The Tab rules that outweigh [`TAB_MOVES_FOCUS`], as they don't test
 /// `tabMovesFocus` or `writable`: `acceptSelectedSuggestion`,
 /// `jumpToNextSnippetPlaceholder`, and the tab completion's
@@ -46,14 +51,14 @@ const TAB_MOVES_FOCUS: Option<&str> =
 /// `inlineSuggest.commit` and `inlineSuggest.jump` require
 /// `!tabMovesFocus`.) [`Tab`]'s handler picks among them.
 const TAB_OUTWEIGHS_FOCUS: Option<&str> = Some(
-    "CodeEditor && (suggest_widget_has_focused_suggestion || hasNextTabstop || ((hasOtherSuggestions || atEndOfWord) && !suggest_widget_visible && !inSnippetMode))",
+    "CodeEditor && editorTextFocus && (suggest_widget_has_focused_suggestion || hasNextTabstop || ((hasOtherSuggestions || atEndOfWord) && !suggest_widget_visible && !inSnippetMode))",
 );
 /// The Shift+Tab rules that outweigh [`TAB_MOVES_FOCUS`]:
 /// `jumpToPrevSnippetPlaceholder`, `insertPrevSuggestion` and
 /// `inlineSuggest.commitAlternativeAction`. [`Outdent`]'s handler picks
 /// among them.
 const SHIFT_TAB_OUTWEIGHS_FOCUS: Option<&str> = Some(
-    "CodeEditor && (hasPrevTabstop || inline_suggestion_alternative_action_visible || (hasOtherSuggestions && !suggest_widget_visible && !inSnippetMode))",
+    "CodeEditor && editorTextFocus && (hasPrevTabstop || inline_suggestion_alternative_action_visible || (hasOtherSuggestions && !suggest_widget_visible && !inSnippetMode))",
 );
 /// The context menu.
 const CONTEXT_MENU: Option<&str> = Some("EditorContextMenu");
@@ -474,11 +479,12 @@ actions!(
         /// Turns tab focus mode on or off for every editor (Monaco
         /// `editor.action.toggleTabFocusMode`, Ctrl+M, Ctrl+Shift+M on macOS).
         ToggleTabFocusMode,
-        /// Moves focus to the next element (Tab in tab focus mode and in
-        /// read-only editors).
+        /// Moves focus to the next element (Tab in tab focus mode, in
+        /// read-only editors and in the editor's widgets: the browser's Tab
+        /// in Monaco).
         FocusNextElement,
-        /// Moves focus to the previous element (Shift+Tab in tab focus mode
-        /// and in read-only editors).
+        /// Moves focus to the previous element (Shift+Tab in tab focus mode,
+        /// in read-only editors and in the editor's widgets).
         FocusPreviousElement,
         /// Pastes the clipboard as plain text (Monaco
         /// `editor.action.pasteAsText`).
@@ -1735,6 +1741,11 @@ actions!(
 pub fn default_key_bindings() -> Vec<KeyBinding> {
     let ctx = Some(KEY_CONTEXT);
     let mut bindings = vec![
+        // The browser's Tab and Shift+Tab, where the editor's own (which
+        // need `editorTextFocus`) don't apply: in its widgets, they move
+        // among the widget's controls and on out.
+        KeyBinding::new("tab", FocusNextElement, ctx),
+        KeyBinding::new("shift-tab", FocusPreviousElement, ctx),
         KeyBinding::new("left", CursorLeft, ctx),
         KeyBinding::new("shift-left", CursorLeftSelect, ctx),
         KeyBinding::new("right", CursorRight, ctx),
@@ -1798,7 +1809,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new(
             "secondary-f2",
             SelectAllOccurrences,
-            Some("CodeEditor && !editorReadonly"),
+            Some("CodeEditor && editorTextFocus && !editorReadonly"),
         ),
         KeyBinding::new("secondary-shift-\\", JumpToBracket, ctx),
         KeyBinding::new("f3", NextMatch, ctx),
@@ -1937,7 +1948,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new(
             "shift-tab",
             JumpToPrevSnippetPlaceholder,
-            Some("CodeEditor && hasPrevTabstop && inSnippetChoice"),
+            Some("CodeEditor && editorTextFocus && hasPrevTabstop && inSnippetChoice"),
         ),
         KeyBinding::new("shift-alt-f8", GoToPreviousMarker, ctx),
         KeyBinding::new("shift-f8", GoToPreviousMarkerInFiles, ctx),
@@ -2374,7 +2385,102 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         ]);
     }
     // Monaco folds an action's precondition into its keybindings' `when`.
-    crate::editor_actions::with_preconditions(by_precedence(bindings))
+    crate::editor_actions::with_preconditions(with_text_focus(by_precedence(bindings)))
+}
+
+/// Whether Monaco's keybinding for `action` also works while one of the
+/// editor's widgets has the focus: its `kbExpr` is `editorFocus` (the find,
+/// multi-cursor, marker navigation and quick access commands) or none
+/// (`undo`, `redo`, `editor.action.selectAll`, the find widget's openers,
+/// `editor.gotoNextSymbolFromResult`, `togglePeekWidgetFocus`, Toggle Tab
+/// Key Moves Focus). Escape's and Shift+Escape's chains start with such
+/// rules (`closeFindWidget`, `closeMarkersNavigation`, …), and the plain
+/// Tab and Shift+Tab move the focus as the browser's do.
+fn works_from_widgets(action: &dyn Action) -> bool {
+    macro_rules! any_of {
+        ($($action:ty),* $(,)?) => {
+            $(action.as_any().is::<$action>())||*
+        };
+    }
+    any_of!(
+        StartFind,
+        StartFindReplace,
+        StartFindWithSelection,
+        NextMatch,
+        PreviousMatch,
+        NextSelectionMatch,
+        PreviousSelectionMatch,
+        ToggleCaseSensitive,
+        ToggleWholeWord,
+        ToggleRegex,
+        ToggleFindInSelection,
+        TogglePreserveCase,
+        ReplaceOne,
+        ReplaceAll,
+        SelectAllMatches,
+        AddSelectionToNextFindMatch,
+        MoveSelectionToNextFindMatch,
+        SelectAllOccurrences,
+        GoToNextMarker,
+        GoToPreviousMarker,
+        GoToNextMarkerInFiles,
+        GoToPreviousMarkerInFiles,
+        GotoLine,
+        QuickOutline,
+        QuickCommand,
+        GoToNextSymbolFromResult,
+        TogglePeekWidgetFocus,
+        Undo,
+        Redo,
+        SelectAll,
+        ToggleTabFocusMode,
+        RemoveSecondaryCursors,
+        SecondaryEscape,
+        FocusNextElement,
+        FocusPreviousElement,
+    )
+}
+
+/// `bindings` with Monaco's `editorTextFocus` (or `textInputFocus`, the
+/// same here) required by the plain [`KEY_CONTEXT`] ones whose Monaco
+/// keybindings need it: all but [`works_from_widgets`]'s.
+///
+/// GPUI matches a binding at any depth of the focused element's context
+/// stack, and the editor's widgets draw inside its key context, so without
+/// it Enter in a focused hover ran `Newline` on the document. A widget's
+/// input (the find, rename and quick input boxes) is an editor of its own,
+/// with the text focus, so the keys still apply in it.
+fn with_text_focus(bindings: Vec<KeyBinding>) -> Vec<KeyBinding> {
+    use gpui::KeyBindingContextPredicate as P;
+    let plain = P::Identifier(KEY_CONTEXT.into());
+    let text_focus = P::And(
+        Box::new(plain.clone()),
+        Box::new(P::Identifier("editorTextFocus".into())),
+    );
+    bindings
+        .into_iter()
+        .map(|binding| {
+            if !binding.predicate().is_some_and(|p| *p == plain)
+                || works_from_widgets(binding.action())
+            {
+                return binding;
+            }
+            let keystrokes: Vec<String> = binding
+                .keystrokes()
+                .iter()
+                .map(|keystroke| keystroke.inner().unparse())
+                .collect();
+            KeyBinding::load(
+                &keystrokes.join(" "),
+                binding.action().boxed_clone(),
+                Some(std::rc::Rc::new(text_focus.clone())),
+                false,
+                None,
+                &gpui::DummyKeyboardMapper,
+            )
+            .unwrap_or(binding)
+        })
+        .collect()
 }
 
 /// `bindings` in the order that gives Monaco's precedence.
