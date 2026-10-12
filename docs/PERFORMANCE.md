@@ -53,7 +53,7 @@ cargo test --release -p gpui-monaco --test perf_budget -- --ignored --nocapture
 PLAYGROUND_PERF=1 PLAYGROUND_FILE=big.rs cargo run --release -p playground
 ```
 
-- **Playground perf mode:** `PLAYGROUND_PERF=type` or `PLAYGROUND_PERF=scroll` runs only one part. Each sample dispatches the input and then draws a frame synchronously, so the numbers are main-thread CPU time; GPU presentation is excluded.
+- **Playground perf mode:** `PLAYGROUND_PERF=type` or `PLAYGROUND_PERF=scroll` runs only one part. Typing happens 120 lines above the end of the file, with the cursor placed directly rather than by paging there, so paging changes don't move it. Each sample dispatches the input and then draws a frame synchronously, so the numbers are main-thread CPU time; GPU presentation is excluded.
 - **CI:** runs the budget test with `PERF_BUDGET_SCALE=2` to allow for shared runners, and runs the benchmarks with `--quick`.
 - **Profiling on macOS:** build with `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`, run `dsymutil target/release/playground`, then use `sample <pid> 5` while the perf mode runs.
 

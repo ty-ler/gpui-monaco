@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext as _, Keystroke, WindowHandle};
 use gpui_monaco::TextModel;
+use gpui_monaco::text::PointUtf16;
 
 use crate::Playground;
 
@@ -71,11 +72,22 @@ pub fn run_if_requested(started: Instant, window: WindowHandle<Playground>, cx: 
             start.elapsed()
         };
 
-        // Type in the middle of the file.
-        measure(cx, &["cmd-down"]);
-        for _ in 0..3 {
-            measure(cx, &["pageup"]);
-        }
+        // Type near the end of the file, 120 lines up. The cursor is placed
+        // directly (not with Cmd+Down and Page Up), so changes to paging
+        // don't move where the typing happens.
+        cx.update_window(window.into(), |root, window, cx| {
+            let playground = root.downcast::<Playground>().unwrap();
+            let editor = playground.read(cx).editor.clone();
+            editor.update(cx, |editor, cx| {
+                let max_row = editor.model().read(cx).buffer().max_point().row;
+                let row = max_row.saturating_sub(120);
+                editor.set_position(PointUtf16::new(row, 0), cx);
+                editor.reveal_line_in_center(row, cx);
+            });
+            window.refresh();
+            window.draw(cx).clear(cx);
+        })
+        .ok();
         let mut typing = Vec::new();
         for i in 0..if typing_enabled { 200 } else { 0 } {
             let key = if i % 20 == 19 { "enter" } else { "x" };
