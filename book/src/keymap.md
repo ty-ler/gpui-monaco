@@ -24,8 +24,9 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **Enter / Cmd+Enter** in the code action menu: apply, apply with a preview
 - **Ctrl+Space (or Alt+Esc, Cmd+I):** trigger completion
 - **F1 / Ctrl+G / Cmd+Shift+O:** command palette, go to line, go to symbol
-- **Shift+F10:** context menu
-- **Tab / Cmd+Right / Alt+] / Alt+[** with ghost text: accept, accept a word, next, previous (asking explicitly, `editor.action.inlineSuggest.trigger`, has no key, as in Monaco)
+- **Shift+F10 (or the Menu key on Windows and Linux):** context menu
+- **Up / Down, PageUp / PageDown, Ctrl+Home / Ctrl+End (also with Alt, or Cmd), Ctrl+Up / Ctrl+Down, Ctrl+N / Ctrl+P (macOS only)** in the command palette and the other quick inputs: move in the list (VS Code's `quickInput.*` keys; Cmd+Home / Cmd+End stay in the input)
+- **Tab / Cmd+Right / Alt+] / Alt+[** with ghost text: accept, accept a word, next, previous (asking explicitly, `editor.action.inlineSuggest.trigger`, has no key, as in Monaco). With a screen reader, Cmd+Right moves the cursor instead
 - **Tab / Escape** with an inline edit: jump to it while the cursor is away from it (or open its file, for a cross-file edit), then accept it; reject it
 - **Shift+Tab** with an inline edit that has an alternative action: run it instead of the edit (`editor.action.inlineSuggest.commitAlternativeAction`)
 - **Tab / Shift+Tab / Escape** in a snippet: next and previous tab stop, leave the snippet
@@ -73,9 +74,15 @@ in_review.reset(cx);
 
 The editor also keeps its older snake_case keys (`single_line`, `suggest_widget_visible`, `parameter_hints_visible`, `inline_suggestion_visible`, …), which the default bindings use.
 
+## Precedence
+
+Monaco gives each keybinding rule a weight, and of the rules whose `when` holds it runs the heaviest; a widget's or a state's keys (the suggest widget, ghost text, the quick input, a peek view) outweigh the editor's own. GPUI runs, of the bindings that match at the same depth of key contexts, the one added last. So `default_key_bindings()` lists the plain `CodeEditor` bindings first, the platform's included, and the ones with a more specific context after them: Cmd/Ctrl+Right accepts a word of ghost text rather than moving the cursor, and Ctrl+End in the command palette goes to the last item. The one rule Monaco weighs below the editor's own keys, F12 for the next reference while a peek view is open, comes before them all, so F12 still goes to the definition when there is one.
+
+Escape runs one of Monaco's rules, the heaviest that applies: close the reference peek, end linked editing, close the suggest widget or ghost text, the parameter hints, the problem zone, leave the snippet (or close the hover or message), close the find widget, end F12 navigation, cancel a pending request or the selection anchor, then remove the other cursors and the selection.
+
 ## Rebinding
 
-GPUI uses the binding added last, so to override a key, bind it in the same context after `init`:
+GPUI uses the binding added last, so to override a key, bind it in the same context after `init`. A binding of yours in plain `CodeEditor` beats the default ones in narrower contexts too, so Cmd+Right bound there no longer accepts ghost text; add the context (`CodeEditor && !inlineSuggestionVisible`) to keep them:
 
 ```rust,ignore
 use gpui::KeyBinding;
