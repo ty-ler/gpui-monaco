@@ -11,7 +11,7 @@ Every feature here works out of the box. Each follows Monaco's behavior, which t
 - **Multiple cursors:**
   - Alt+Click adds a cursor.
   - Cmd+Alt+Up/Down adds a cursor on the line above or below (Shift+Alt+Up/Down on Linux).
-  - Cmd+D adds the next match to the selection, Cmd+K Cmd+D moves the last selection to the next match, and Cmd+Shift+L selects all occurrences. Selected text matches with the find state's match case and whole word, both off unless set in the find widget (`selected_text_match_mode`); starting from an empty cursor matches whole words, case-sensitively.
+  - Cmd+D adds the next match to the selection, Cmd+K Cmd+D moves the last selection to the next match, and Cmd+Shift+L selects all occurrences. Selected text matches with the find state's match case and whole word, both off unless set in the find widget (`selected_text_match_mode`); starting from an empty cursor matches whole words, case-sensitively. When a session uses the find options and find is closed, each step flashes the match case, whole word and regex toggles at the top right for 2 seconds.
   - Adding cursors and column selection are undo stops: undo after typing with the new cursors removes only that typing.
   - Escape returns to one cursor.
 - **Column (box) selection:** Shift+Alt+drag or Shift+Alt+click (Shift+Cmd/Ctrl, or an Alt drag, with `multi_cursor_modifier: CtrlCmd`), a middle-button drag, or any drag with `column_selection`. It goes by lines as shown: a fold counts as one line, and each segment of a wrapped line gets a cursor.
@@ -60,7 +60,7 @@ Undo is operation-based and per model.
 
 ## Find and replace
 
-Cmd+F opens the find widget, and Cmd+Alt+F (Ctrl+H elsewhere) opens it with replace. The query starts as the selection or the word at the cursor (`options.find.seed_search_string_from_selection`), escaped as Monaco does when regex is on (`a.b` becomes `a\.b`, `a-b` stays). Selections can turn on find in selection (`auto_find_in_selection`). When the widget would cover the selection it was seeded from (one spanning lines, or reaching under the widget on the first lines), the text moves down below it instead of staying put. The widget slides down from above the editor as it opens, unless `App::reduce_motion` is set.
+Cmd+F opens the find widget, and Cmd+Alt+F (Ctrl+H elsewhere) opens it with replace. The query starts as the selection or the word at the cursor (`options.find.seed_search_string_from_selection`), escaped as Monaco does when regex is on (`a.b` becomes `a\.b`, `a-b` stays). Selections can turn on find in selection (`auto_find_in_selection`). When the widget would cover the selection it was seeded from (one spanning lines, or reaching under the widget on the first lines), the text moves down below it instead of staying put. The widget slides down from above the editor as it opens and back up as it closes, unless `App::reduce_motion` is set; a width set by dragging its left edge is kept when it closes. With `close_on_result`, Enter, Shift+Enter and F3 from the find input close it on landing on a match.
 
 - **Search modes:**
   - case sensitive
